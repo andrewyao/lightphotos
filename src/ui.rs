@@ -197,6 +197,10 @@ fn grid_cell(
 fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let thumb_px = app.thumb_px();
     let sel = app.sel();
+    // Only auto-scroll the strip to the selection when it actually changed.
+    // Doing it every frame fights the user's clicks: the strip shifts between
+    // press and release, so egui never registers the click.
+    let follow = app.take_filmstrip_follow();
 
     if app.filter_bar_open() {
         egui::Panel::top("loupe_filter").show_inside(ui, |ui| {
@@ -216,7 +220,7 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
                         let len = app.visible_len();
                         for pos in 0..len {
                             let resp = filmstrip_cell(ui, app, pos, cell, sel, out);
-                            if pos == sel {
+                            if follow && pos == sel {
                                 resp.scroll_to_me(Some(egui::Align::Center));
                             }
                         }
@@ -224,59 +228,62 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
                 });
         });
 
-    // Central region: transparent so the wgpu image shows through. We only
-    // paint the (clickable) star overlay and report the rect back for the
-    // image viewport.
-    let central = egui::CentralPanel::default()
-        .frame(egui::Frame::NONE)
-        .show_inside(ui, |ui| {
-            loupe_star_overlay(ui, app, out);
-        });
+    // Central region: deliberately NOT a CentralPanel. Leaving it as the root
+    // UI's unused rect is what makes egui report the pointer there as "not over
+    // egui" (`is_pointer_over_egui` checks `!root_ui_available_rect.contains`),
+    // so scroll (zoom), clicks, and Space+drag (pan) reach the app. A
+    // CentralPanel would consume the rect and egui would claim all pointer input
+    // over the image, killing zoom/pan. The wgpu image is drawn into this rect.
+    let central = ui.available_rect_before_wrap();
+    out.loupe_rect = Some(central);
 
-    out.loupe_rect = Some(central.response.rect);
+    // Star overlay in its own foreground Area, so egui owns clicks on the stars
+    // (only there) without claiming the rest of the image area.
+    loupe_star_overlay(ui, app, central, out);
 }
 
 /// Clickable 0–5 star rating overlay near the top of the loupe image.
 /// Clicking the Nth star sets rating N; clicking the current rating clears it.
-fn loupe_star_overlay(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+fn loupe_star_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
     let current = app.selected_rating();
     let star_w = 26.0;
     let total_w = star_w * 5.0;
-    let center_x = ui.max_rect().center().x;
-    let y = ui.max_rect().top() + 22.0;
-    let left = center_x - total_w / 2.0;
+    let left = central.center().x - total_w / 2.0;
+    let top = central.top() + 10.0;
 
-    for i in 0..5u8 {
-        let star_rect = egui::Rect::from_min_size(
-            egui::pos2(left + star_w * i as f32, y - star_w / 2.0),
-            egui::vec2(star_w, star_w),
-        );
-        let resp = ui.interact(
-            star_rect,
-            ui.id().with(("loupe_star", i)),
-            egui::Sense::click(),
-        );
-        let filled = (i + 1) <= current;
-        let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
-        let color = if filled {
-            egui::Color32::from_rgb(255, 210, 80)
-        } else {
-            egui::Color32::from_gray(160)
-        };
-        ui.painter().text(
-            star_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            glyph,
-            egui::FontId::proportional(22.0),
-            color,
-        );
-        if resp.clicked() {
-            let n = i + 1;
-            // Clicking the current rating clears it (Lightroom behavior).
-            let stars = if n == current { 0 } else { n };
-            out.actions.push(UiAction::SetRating(stars));
-        }
-    }
+    // A foreground Area: egui claims pointer input over the stars (so a click
+    // rates instead of starting a pan) but nowhere else in the image.
+    egui::Area::new(egui::Id::new("loupe_stars"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(left, top))
+        .show(ui.ctx(), |ui| {
+            ui.horizontal(|ui| {
+                for i in 0..5u8 {
+                    let (rect, resp) = ui
+                        .allocate_exact_size(egui::vec2(star_w, star_w), egui::Sense::click());
+                    let filled = (i + 1) <= current;
+                    let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
+                    let color = if filled {
+                        egui::Color32::from_rgb(255, 210, 80)
+                    } else {
+                        egui::Color32::from_gray(160)
+                    };
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        glyph,
+                        egui::FontId::proportional(22.0),
+                        color,
+                    );
+                    if resp.clicked() {
+                        let n = i + 1;
+                        // Clicking the current rating clears it (Lightroom behavior).
+                        let stars = if n == current { 0 } else { n };
+                        out.actions.push(UiAction::SetRating(stars));
+                    }
+                }
+            });
+        });
 }
 
 /// One filmstrip cell. Returns the response so the caller can auto-scroll.

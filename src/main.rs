@@ -65,6 +65,9 @@ struct App {
     want: Option<PathBuf>,
     /// Path currently uploaded to the GPU.
     shown: Option<PathBuf>,
+    /// Whether `shown` is the full-resolution image (vs. a thumbnail placeholder
+    /// shown instantly while the full decode is still in flight).
+    shown_is_full: bool,
     /// A file/dir requested before the window/renderer existed.
     pending_initial: Option<PathBuf>,
 
@@ -82,6 +85,9 @@ struct App {
     visible: Vec<usize>,
     /// Position *within `visible`* of the current selection.
     sel: usize,
+    /// Last `sel` the filmstrip auto-scrolled to (so we only scroll on change,
+    /// not every frame — which would fight clicks). `usize::MAX` = never.
+    last_strip_sel: usize,
     /// Thumbnail longest-side pixels for the grid + filmstrip.
     thumb_px: u32,
     /// Columns the grid actually laid out last frame (for Up/Down row moves).
@@ -123,6 +129,7 @@ impl App {
             playlist: None,
             want: None,
             shown: None,
+            shown_is_full: false,
             pending_initial: initial,
             mode: ViewMode::Grid,
             catalog,
@@ -131,6 +138,7 @@ impl App {
             filter_bar: false,
             visible: Vec::new(),
             sel: 0,
+            last_strip_sel: usize::MAX,
             thumb_px: THUMB_DEFAULT,
             grid_cols: 1,
             thumb_tex: HashMap::new(),
@@ -220,10 +228,15 @@ impl App {
     }
 
     /// In Loupe mode, make the selection the wanted image and request decode.
+    /// Requests both the full image and (as an instant placeholder) the
+    /// thumbnail, so the shown image updates immediately even before the full
+    /// decode finishes.
     fn load_selected(&mut self) {
         let Some(path) = self.selected_path() else { return };
+        let px = self.thumb_px;
         if let Some(loader) = &mut self.loader {
             loader.request(path.clone());
+            loader.request_thumb(path.clone(), px);
         }
         self.want = Some(path);
         self.try_show();
@@ -349,22 +362,36 @@ impl App {
         }
     }
 
-    /// If the wanted image is decoded, upload it and reset the view to "fit".
+    /// Show the wanted image: prefer the full-resolution decode, but fall back
+    /// to the cached thumbnail as an instant placeholder while the full image is
+    /// still decoding. Swaps thumbnail → full once the full image arrives.
     fn try_show(&mut self) {
         let Some(want) = self.want.clone() else { return };
-        if self.shown.as_ref() == Some(&want) {
+
+        // Full image ready → show it (unless it's already the shown full image).
+        if let Some(img) = self.loader.as_ref().and_then(|l| l.get(&want)) {
+            if self.shown.as_ref() != Some(&want) || !self.shown_is_full {
+                self.upload_shown(&want, &img, true);
+            }
             return;
         }
-        let img = match self.loader.as_ref().and_then(|l| l.get(&want)) {
-            Some(img) => img,
-            None => return,
-        };
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_image(&img);
-        } else {
-            return;
+
+        // Full not ready: show the thumbnail placeholder if we aren't already
+        // showing this image in some form.
+        if self.shown.as_ref() != Some(&want) {
+            if let Some(thumb) = self.loader.as_ref().and_then(|l| l.get_thumb(&want, self.thumb_px))
+            {
+                self.upload_shown(&want, &thumb, false);
+            }
         }
-        self.shown = Some(want);
+    }
+
+    /// Upload an image to the renderer as the currently-shown image and re-fit.
+    fn upload_shown(&mut self, path: &Path, img: &image_decode::DecodedImage, is_full: bool) {
+        let Some(renderer) = self.renderer.as_mut() else { return };
+        renderer.set_image(img);
+        self.shown = Some(path.to_path_buf());
+        self.shown_is_full = is_full;
         self.fit_to_window();
         self.update_window_title();
         self.request_redraw();
@@ -721,6 +748,15 @@ impl App {
         self.grid_cols = cols.max(1);
     }
 
+    /// Whether the filmstrip should scroll the selection into view this frame.
+    /// Returns true only when the selection changed since the last call, so the
+    /// strip doesn't re-center every frame (which fights clicks).
+    pub(crate) fn take_filmstrip_follow(&mut self) -> bool {
+        let changed = self.sel != self.last_strip_sel;
+        self.last_strip_sel = self.sel;
+        changed
+    }
+
     /// Rating of the visible cell at `pos` (0 when unset/out of range).
     pub(crate) fn rating_at(&self, pos: usize) -> u8 {
         self.visible
@@ -895,10 +931,11 @@ impl ApplicationHandler<UserEvent> for App {
         // Drain both loader tiers once per frame.
         if let Some(loader) = &mut self.loader {
             let (full, thumbs) = loader.poll_all();
-            if !full.is_empty() {
+            // Any arrival may be the wanted image (full) or its placeholder
+            // (thumb), so try to (re)show on either; redraw to paint new thumbs.
+            let any = !full.is_empty() || !thumbs.is_empty();
+            if any {
                 self.try_show();
-            }
-            if !thumbs.is_empty() {
                 self.request_redraw();
             }
         }
