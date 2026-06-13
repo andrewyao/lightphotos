@@ -15,6 +15,7 @@ mod loader;
 mod macos_delegate;
 mod navigation;
 mod renderer;
+mod thumbnail;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
