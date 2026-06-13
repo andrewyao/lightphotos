@@ -140,12 +140,15 @@ impl Loader {
         let _ = self.req_tx.send(Job::Full(path));
     }
 
-    /// Drain finished decodes into the caches. Returns full-image paths that
-    /// just arrived. Thumbnail arrivals are routed into the thumb tier here too
-    /// (see `poll_thumbs` to learn which thumbs arrived).
+    /// Drain finished decodes into the caches and return full-image arrivals.
+    ///
+    /// Thin wrapper over [`poll_all`](Self::poll_all): the single drain still
+    /// routes thumbnail arrivals into the thumb tier, but their arrival list is
+    /// discarded here. Calling both `poll` and `poll_thumbs` in the same frame
+    /// starves one tier (the second call finds the queue already drained), so
+    /// frame loops should prefer `poll_all`.
     pub fn poll(&mut self) -> Vec<PathBuf> {
-        let (full, _thumbs) = self.drain();
-        full
+        self.poll_all().0
     }
 
     pub fn get(&self, path: &PathBuf) -> Option<Arc<DecodedImage>> {
@@ -174,16 +177,32 @@ impl Loader {
         self.thumb_cache.get(&(path.to_path_buf(), max_px)).cloned()
     }
 
-    /// Drain finished jobs into the caches. Returns thumbnail `(path, max_px)`
-    /// pairs that just arrived. Full-image arrivals are routed into the full
-    /// tier here too (see `poll`).
+    /// Drain finished jobs into the caches and return thumbnail `(path, max_px)`
+    /// arrivals.
+    ///
+    /// Thin wrapper over [`poll_all`](Self::poll_all): the single drain still
+    /// routes full-image arrivals into the full tier, but their arrival list is
+    /// discarded here. Calling both `poll` and `poll_thumbs` in the same frame
+    /// starves one tier (the second call finds the queue already drained), so
+    /// frame loops should prefer `poll_all`.
     #[allow(dead_code)]
     pub fn poll_thumbs(&mut self) -> Vec<(PathBuf, u32)> {
-        let (_full, thumbs) = self.drain();
-        thumbs
+        self.poll_all().1
     }
 
     // ---- Shared internals ----
+
+    /// Drain every pending result exactly once, routing each into its tier
+    /// (`Full` → full cache/LRU, `Thumb` → thumb cache/LRU), and return the
+    /// arrivals for *both* tiers as `(full_arrivals, thumb_arrivals)`.
+    ///
+    /// Prefer this in frame loops: it avoids the footgun where calling `poll`
+    /// and `poll_thumbs` separately makes the first call drain results destined
+    /// for the other tier, starving it.
+    #[allow(dead_code)]
+    pub fn poll_all(&mut self) -> (Vec<PathBuf>, Vec<(PathBuf, u32)>) {
+        self.drain()
+    }
 
     /// Drain every pending result, routing each into its tier. Returns the
     /// arrivals for both tiers; callers keep only the tier they care about.
