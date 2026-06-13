@@ -186,6 +186,16 @@ fn grid_cell(
         egui::Color32::from_rgb(255, 210, 80),
     );
 
+    // Prominent selection outline on top of the thumbnail.
+    if selected {
+        ui.painter().rect_stroke(
+            rect,
+            4.0,
+            egui::Stroke::new(3.0, egui::Color32::from_rgb(90, 160, 255)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
     if response.clicked() {
         out.actions.push(UiAction::Select(pos));
     }
@@ -323,6 +333,17 @@ fn filmstrip_cell(
             star_string(stars),
             egui::FontId::proportional(10.0),
             egui::Color32::from_rgb(255, 210, 80),
+        );
+    }
+
+    // Prominent selection outline on top of the thumbnail (the thin background
+    // border alone is easy to miss).
+    if selected {
+        ui.painter().rect_stroke(
+            rect,
+            3.0,
+            egui::Stroke::new(3.0, egui::Color32::from_rgb(90, 160, 255)),
+            egui::StrokeKind::Inside,
         );
     }
 
