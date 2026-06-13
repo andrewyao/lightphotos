@@ -85,6 +85,37 @@ fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
     entries
 }
 
+/// List the immediate subdirectories of `dir`, sorted case-insensitively by
+/// name (matching the `from_dir` image sort). Skips hidden entries (names
+/// starting with `.`) and macOS bundles (`.app`/`.photoslibrary`). On a read
+/// error returns an empty vec.
+pub fn list_subdirs(dir: &Path) -> Vec<PathBuf> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_dir())
+                .filter(|p| {
+                    let name = match p.file_name().and_then(|s| s.to_str()) {
+                        Some(n) => n,
+                        None => return false,
+                    };
+                    if name.starts_with('.') {
+                        return false;
+                    }
+                    let ext = p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+                    !matches!(ext.as_deref(), Some("app") | Some("photoslibrary"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort_by(|a, b| {
+        let an = a.file_name().map(|s| s.to_string_lossy().to_lowercase());
+        let bn = b.file_name().map(|s| s.to_string_lossy().to_lowercase());
+        an.cmp(&bn)
+    });
+    entries
+}
+
 /// Arrow-key movement within the grid, operating on *positions in the visible
 /// list* (0..len). `dx` is the horizontal step (-1/+1), `dy` the vertical step
 /// in rows (-1/+1); `cols` is the current column count. Returns the clamped new
@@ -222,6 +253,32 @@ mod tests {
         // Sorted case-insensitively by file name.
         assert_eq!(pl.entry(0).unwrap().file_name().unwrap(), "a.png");
         assert_eq!(pl.entry(2).unwrap().file_name().unwrap(), "c.tiff");
+    }
+
+    #[test]
+    fn list_subdirs_returns_sorted_visible_dirs() {
+        // Unique temp dir so parallel test runs don't collide.
+        let root = std::env::temp_dir().join(format!(
+            "iv-subdirs-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(root.join("b")).unwrap();
+        std::fs::create_dir_all(root.join("a")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join("file.txt"), b"x").unwrap();
+
+        let got = list_subdirs(&root);
+        let names: Vec<String> = got
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["a", "b"]);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

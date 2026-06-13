@@ -22,7 +22,7 @@ mod renderer;
 mod thumbnail;
 mod ui;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -114,6 +114,16 @@ struct App {
     /// another window). We pause redraw retries while occluded.
     occluded: bool,
 
+    // ---- Folder-tree sidebar state ----
+    /// Top of the tree (the opened folder, or an opened file's parent).
+    folder_root: Option<PathBuf>,
+    /// The folder whose images are shown in the grid (highlighted in the tree).
+    folder_sel: Option<PathBuf>,
+    /// Folders currently expanded in the tree.
+    expanded: HashSet<PathBuf>,
+    /// Lazily-cached immediate subdirectories, one `list_subdirs` per folder.
+    subdirs: HashMap<PathBuf, Vec<PathBuf>>,
+
     // ---- Input state ----
     cursor: (f64, f64),
     modifiers: ModifiersState,
@@ -157,6 +167,10 @@ impl App {
             rotations: HashMap::new(),
             loupe_viewport: None,
             occluded: false,
+            folder_root: None,
+            folder_sel: None,
+            expanded: HashSet::new(),
+            subdirs: HashMap::new(),
             cursor: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
             space_down: false,
@@ -178,34 +192,68 @@ impl App {
             path.display()
         );
 
-        let playlist = if is_dir {
-            Playlist::from_dir(&path)
+        if is_dir {
+            // Grid: the opened dir is the tree root, expanded with its children.
+            self.folder_root = Some(path.clone());
+            self.expanded = HashSet::from([path.clone()]);
+            self.ensure_subdirs(&path);
+            self.load_folder(path);
+            self.mode = ViewMode::Grid;
+            self.request_redraw();
         } else {
-            Playlist::from_file(&path)
-        };
+            // File → Loupe (unchanged flow), but populate the tree from the
+            // parent so switching to the grid shows a sidebar.
+            if let Some(parent) = path.parent() {
+                let parent = parent.to_path_buf();
+                self.folder_root = Some(parent.clone());
+                self.folder_sel = Some(parent.clone());
+                self.expanded = HashSet::from([parent.clone()]);
+                self.ensure_subdirs(&parent);
+            }
 
+            let playlist = Playlist::from_file(&path);
+            // Seed the in-memory ratings mirror for everything in the folder.
+            for p in playlist.entries() {
+                if let Some(stars) = self.catalog.get(p) {
+                    self.ratings.insert(p.clone(), stars);
+                }
+            }
+            let start_index = playlist.position();
+            self.playlist = Some(playlist);
+            self.recompute_visible();
+            self.sel = self.visible.iter().position(|&i| i == start_index).unwrap_or(0);
+            self.mode = ViewMode::Loupe;
+            self.sel_active = true;
+            self.load_selected();
+            self.request_neighbors();
+            self.request_redraw();
+        }
+    }
+
+    /// Populate `subdirs[dir]` (the folder's immediate children) if not cached.
+    fn ensure_subdirs(&mut self, dir: &Path) {
+        if !self.subdirs.contains_key(dir) {
+            self.subdirs.insert(dir.to_path_buf(), navigation::list_subdirs(dir));
+        }
+    }
+
+    /// Load `dir`'s images into the grid (browse-first): rebuild the playlist,
+    /// seed ratings, recompute the visible view, reset selection to nothing
+    /// selected, mark `dir` as the selected folder, and request thumbnails.
+    fn load_folder(&mut self, dir: PathBuf) {
+        let playlist = Playlist::from_dir(&dir);
         // Seed the in-memory ratings mirror for everything in the folder.
         for p in playlist.entries() {
             if let Some(stars) = self.catalog.get(p) {
                 self.ratings.insert(p.clone(), stars);
             }
         }
-
-        let start_index = playlist.position();
         self.playlist = Some(playlist);
         self.recompute_visible();
-
-        // Place the selection on the opened file (Loupe) or index 0 (Grid).
-        self.sel = self.visible.iter().position(|&i| i == start_index).unwrap_or(0);
-
-        self.mode = if is_dir { ViewMode::Grid } else { ViewMode::Loupe };
-        // A directory opens as a browser with nothing selected; a single file
-        // opens in the loupe with that file selected.
-        self.sel_active = !is_dir;
-        if self.mode == ViewMode::Loupe {
-            self.load_selected();
-        }
-        self.request_neighbors();
+        self.sel = 0;
+        self.sel_active = false;
+        self.folder_sel = Some(dir);
+        self.request_working_thumbs();
         self.request_redraw();
     }
 
@@ -753,6 +801,20 @@ impl App {
                 }
                 ui::UiAction::SetFilter(f) => self.set_filter(f),
                 ui::UiAction::SetRating(stars) => self.set_rating(stars),
+                ui::UiAction::SelectFolder(p) => {
+                    // Show this folder's images in the grid (browse-first).
+                    self.ensure_subdirs(&p);
+                    self.load_folder(p);
+                }
+                ui::UiAction::ToggleFolder(p) => {
+                    if self.expanded.contains(&p) {
+                        self.expanded.remove(&p);
+                    } else {
+                        self.expanded.insert(p.clone());
+                        self.ensure_subdirs(&p);
+                    }
+                    self.request_redraw();
+                }
             }
         }
     }
@@ -762,6 +824,26 @@ impl App {
 impl App {
     pub(crate) fn mode(&self) -> ViewMode {
         self.mode
+    }
+
+    /// The root of the folder tree (the opened folder, or a file's parent).
+    pub(crate) fn folder_root(&self) -> Option<PathBuf> {
+        self.folder_root.clone()
+    }
+
+    /// The folder whose images are currently in the grid (highlighted in tree).
+    pub(crate) fn folder_sel(&self) -> Option<PathBuf> {
+        self.folder_sel.clone()
+    }
+
+    /// Whether a tree folder is expanded.
+    pub(crate) fn is_expanded(&self, dir: &Path) -> bool {
+        self.expanded.contains(dir)
+    }
+
+    /// The cached immediate subdirectories of `dir` (empty slice if uncached).
+    pub(crate) fn subdirs(&self, dir: &Path) -> &[PathBuf] {
+        self.subdirs.get(dir).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     pub(crate) fn filter(&self) -> Option<(Cmp, u8)> {
