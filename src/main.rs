@@ -17,6 +17,7 @@ mod macos_delegate;
 mod navigation;
 mod renderer;
 mod thumbnail;
+mod ui;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -32,7 +33,7 @@ use winit::window::{Window, WindowId};
 use loader::Loader;
 use macos_delegate::UserEvent;
 use navigation::Playlist;
-use renderer::Renderer;
+use renderer::{EguiPaint, Renderer};
 
 const MIN_ZOOM: f32 = 0.02;
 const MAX_ZOOM: f32 = 64.0;
@@ -66,6 +67,12 @@ struct App {
     space_down: bool,
     dragging: bool,
     last_drag: (f64, f64),
+
+    // egui chrome. The Context is persistent (immediate-mode state lives here);
+    // State translates winit events into egui input + applies platform output.
+    // The egui_wgpu::Renderer lives on `Renderer` (it needs the device/format).
+    egui_ctx: egui::Context,
+    egui_state: Option<egui_winit::State>,
 }
 
 impl App {
@@ -88,6 +95,8 @@ impl App {
             space_down: false,
             dragging: false,
             last_drag: (0.0, 0.0),
+            egui_ctx: egui::Context::default(),
+            egui_state: None,
         }
     }
 
@@ -249,6 +258,49 @@ impl App {
             w.request_redraw();
         }
     }
+
+    /// Paint one frame: run egui to build the chrome, then hand the image pass
+    /// + egui paint jobs to the renderer for a single wgpu submission.
+    fn redraw(&mut self) {
+        let (Some(window), Some(state)) = (self.window.clone(), self.egui_state.as_mut()) else {
+            // No egui yet — fall back to a bare image render.
+            if let Some(r) = &mut self.renderer {
+                r.render(None, None);
+            }
+            return;
+        };
+
+        // (a) Gather input, (b) run the UI closure to build this frame.
+        let raw_input = state.take_egui_input(&*window);
+        let full_output = self.egui_ctx.run_ui(raw_input, |ui| {
+            ui::debug_panel(ui.ctx());
+        });
+
+        // (c) Apply platform output (cursor icon, clipboard, IME, …).
+        state.handle_platform_output(&*window, full_output.platform_output);
+
+        // (d) Tessellate to paint jobs at egui's current pixels_per_point.
+        let pixels_per_point = self.egui_ctx.pixels_per_point();
+        let paint_jobs = self
+            .egui_ctx
+            .tessellate(full_output.shapes, pixels_per_point);
+
+        let Some(renderer) = self.renderer.as_mut() else { return };
+
+        // (e) One encoder: image pass (full-surface for T4) then egui pass.
+        // T6 will pass Some(rect) here to confine the loupe above the filmstrip.
+        let size = window.inner_size();
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [size.width.max(1), size.height.max(1)],
+            pixels_per_point,
+        };
+        let egui_paint = EguiPaint {
+            textures_delta: full_output.textures_delta,
+            paint_jobs,
+            screen_descriptor,
+        };
+        renderer.render(None, Some(egui_paint));
+    }
 }
 
 impl ApplicationHandler<UserEvent> for App {
@@ -264,11 +316,23 @@ impl ApplicationHandler<UserEvent> for App {
         let renderer = Renderer::new(window.clone());
         let loader = Loader::new(renderer.max_dim);
 
+        // egui input plumbing. ViewportId::ROOT for the single window; let egui
+        // adopt the window's scale factor for its pixels_per_point.
+        let egui_state = egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &*window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+
         let size = window.inner_size();
         self.win_size = (size.width.max(1) as f32, size.height.max(1) as f32);
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.loader = Some(loader);
+        self.egui_state = Some(egui_state);
 
         if let Some(path) = self.pending_initial.take() {
             self.open(path);
@@ -288,6 +352,20 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Give egui first crack at the event. If it consumes the event (e.g. a
+        // click or key inside an egui widget), skip the app's own handling so
+        // the two UIs don't both react. Everything else falls through to the
+        // existing zoom/pan/rotate/nav handlers untouched.
+        if let (Some(window), Some(state)) = (self.window.clone(), self.egui_state.as_mut()) {
+            let response = state.on_window_event(&*window, &event);
+            if response.repaint {
+                window.request_redraw();
+            }
+            if response.consumed {
+                return;
+            }
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
@@ -306,9 +384,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             WindowEvent::RedrawRequested => {
-                if let Some(r) = &mut self.renderer {
-                    r.render();
-                }
+                self.redraw();
             }
 
             WindowEvent::ModifiersChanged(m) => {
