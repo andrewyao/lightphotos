@@ -469,8 +469,10 @@ impl App {
 
     /// Cursor position relative to the loupe viewport's top-left, in physical px.
     fn cursor_in_loupe(&self) -> (f32, f32) {
-        let ppp = self.egui_ctx.pixels_per_point().max(0.01);
-        let (px, py) = (self.cursor.0 as f32 * ppp, self.cursor.1 as f32 * ppp);
+        // `self.cursor` is already physical pixels (winit `CursorMoved` reports a
+        // `PhysicalPosition`), and `loupe_viewport` is physical too — so we just
+        // subtract the viewport origin; no scale-factor conversion.
+        let (px, py) = (self.cursor.0 as f32, self.cursor.1 as f32);
         match self.loupe_viewport {
             Some((x, y, _, _)) => (px - x as f32, py - y as f32),
             None => (px, py),
@@ -827,11 +829,12 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 if self.dragging && self.mode == ViewMode::Loupe {
+                    // `position` is physical pixels, the same units as `pan` — add
+                    // the delta directly (no scale-factor multiply).
                     let dx = position.x - self.last_drag.0;
                     let dy = position.y - self.last_drag.1;
-                    let ppp = self.egui_ctx.pixels_per_point() as f64;
-                    self.pan.0 += (dx * ppp) as f32;
-                    self.pan.1 += (dy * ppp) as f32;
+                    self.pan.0 += dx as f32;
+                    self.pan.1 += dy as f32;
                     self.fitted = false;
                     self.push_transform();
                 }
