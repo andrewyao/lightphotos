@@ -1,0 +1,5 @@
+# egui 0.34 (the only egui line compatible with wgpu 29) requires rustc >= 1.92.
+# Pin this repo to the stable toolchain so `cargo build` works without changing
+# the user's global rustup default.
+[toolchain]
+channel = "stable"
