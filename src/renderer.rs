@@ -17,6 +17,14 @@ struct Transform {
     rot: [f32; 4],
 }
 
+/// Everything egui needs to paint a frame, produced by the app each redraw.
+/// Coordinates are in physical pixels via `screen_descriptor`.
+pub struct EguiPaint {
+    pub textures_delta: egui::TexturesDelta,
+    pub paint_jobs: Vec<egui::ClippedPrimitive>,
+    pub screen_descriptor: egui_wgpu::ScreenDescriptor,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -36,6 +44,9 @@ pub struct Renderer {
     pub image_size: (u32, u32),
 
     pub max_dim: u32,
+
+    /// egui paint backend; shares this Renderer's device/queue + surface format.
+    egui_renderer: egui_wgpu::Renderer,
 }
 
 impl Renderer {
@@ -187,6 +198,12 @@ impl Renderer {
             }],
         });
 
+        // egui's wgpu paint backend, built against the same device + surface
+        // format so its textures/buffers interoperate with ours. No depth
+        // buffer (we render none), single-sampled, one frame in flight.
+        let egui_renderer =
+            egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
+
         Self {
             surface,
             device,
@@ -200,7 +217,16 @@ impl Renderer {
             image_bind: None,
             image_size: (0, 0),
             max_dim,
+            egui_renderer,
         }
+    }
+
+    /// Surface format egui must target. The egui paint backend is built from
+    /// this format inside `new`, so the app doesn't need it for T4.
+    // TODO: T6 — may be needed if egui textures are registered app-side.
+    #[allow(dead_code)]
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.config.format
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
@@ -278,7 +304,14 @@ impl Renderer {
         );
     }
 
-    pub fn render(&mut self) {
+    /// Render one frame: the image pass (optionally confined to `image_viewport`)
+    /// followed by the egui pass (if `egui` is `Some`), all in one submission.
+    ///
+    /// `image_viewport` is `(x, y, w, h)` in **physical pixels** with the origin
+    /// at the surface's top-left. When `None`, the image draws across the whole
+    /// surface as before. The image quad is clipped to this rect via
+    /// `set_scissor_rect` so the loupe image can sit above a future filmstrip.
+    pub fn render(&mut self, image_viewport: Option<(u32, u32, u32, u32)>, egui: Option<EguiPaint>) {
         use wgpu::CurrentSurfaceTexture as C;
         let frame = match self.surface.get_current_texture() {
             C::Success(f) | C::Suboptimal(f) => f,
@@ -292,9 +325,26 @@ impl Renderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
+
+        // Upload any egui texture changes before the passes (must precede use).
+        if let Some(paint) = &egui {
+            for (id, delta) in &paint.textures_delta.set {
+                self.egui_renderer
+                    .update_texture(&self.device, &self.queue, *id, delta);
+            }
+            self.egui_renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &paint.paint_jobs,
+                &paint.screen_descriptor,
+            );
+        }
+
+        // Pass 1: the image (clear the surface, draw the quad scissored to the rect).
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("pass"),
+                label: Some("image_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -310,14 +360,66 @@ impl Renderer {
                 multiview_mask: None,
             });
             if let Some(image_bind) = &self.image_bind {
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, image_bind, &[]);
-                pass.set_bind_group(1, &self.xform_bind, &[]);
-                pass.draw(0..6, 0..1);
+                // Confine the image to its viewport rect (clamped to the surface).
+                if let Some((x, y, w, h)) = image_viewport {
+                    let sw = self.config.width;
+                    let sh = self.config.height;
+                    let x = x.min(sw);
+                    let y = y.min(sh);
+                    let w = w.min(sw - x);
+                    let h = h.min(sh - y);
+                    if w == 0 || h == 0 {
+                        // Degenerate rect: draw nothing this frame.
+                    } else {
+                        pass.set_scissor_rect(x, y, w, h);
+                        pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+                        pass.set_pipeline(&self.pipeline);
+                        pass.set_bind_group(0, image_bind, &[]);
+                        pass.set_bind_group(1, &self.xform_bind, &[]);
+                        pass.draw(0..6, 0..1);
+                    }
+                } else {
+                    pass.set_pipeline(&self.pipeline);
+                    pass.set_bind_group(0, image_bind, &[]);
+                    pass.set_bind_group(1, &self.xform_bind, &[]);
+                    pass.draw(0..6, 0..1);
+                }
             }
         }
+
+        // Pass 2: egui, loaded (not cleared) on top of the image.
+        if let Some(paint) = &egui {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // egui_wgpu needs a 'static-lifetime pass for its render call.
+            let mut pass = pass.forget_lifetime();
+            self.egui_renderer
+                .render(&mut pass, &paint.paint_jobs, &paint.screen_descriptor);
+        }
+
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+
+        // Free egui textures dropped this frame (after submit, per egui docs).
+        if let Some(paint) = &egui {
+            for id in &paint.textures_delta.free {
+                self.egui_renderer.free_texture(id);
+            }
+        }
     }
 }
 

@@ -17,6 +17,88 @@ pub fn is_image(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Star-rating filter comparator. The active filter is `Option<(Cmp, u8)>` on
+/// `App`; `None` shows everything.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Cmp {
+    /// rating >= value
+    Gte,
+    /// rating == value
+    Eq,
+    /// rating <= value
+    Lte,
+}
+
+impl Cmp {
+    /// Does `rating` (0 when unset) satisfy this comparator against `value`?
+    pub fn matches(self, rating: u8, value: u8) -> bool {
+        match self {
+            Cmp::Gte => rating >= value,
+            Cmp::Eq => rating == value,
+            Cmp::Lte => rating <= value,
+        }
+    }
+
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Cmp::Gte => "\u{2265}", // ≥
+            Cmp::Eq => "=",
+            Cmp::Lte => "\u{2264}", // ≤
+        }
+    }
+}
+
+/// Compute the visible indices over `entries` given a `rating_of` lookup
+/// (returns the 0..=5 rating, 0 when unset) and an optional filter.
+///
+/// Pure and total: `None` filter yields every index in order; a `Some(cmp, v)`
+/// filter keeps only entries whose rating satisfies `cmp` against `v`. Unset
+/// ratings count as 0, so they match `Lte`/no-filter but never `Gte`/`Eq` with
+/// a positive value.
+pub fn visible_indices(
+    entries: &[PathBuf],
+    filter: Option<(Cmp, u8)>,
+    rating_of: impl Fn(&Path) -> u8,
+) -> Vec<usize> {
+    match filter {
+        None => (0..entries.len()).collect(),
+        Some((cmp, value)) => (0..entries.len())
+            .filter(|&i| cmp.matches(rating_of(&entries[i]), value))
+            .collect(),
+    }
+}
+
+/// List the image files directly in `dir`, sorted case-insensitively by name.
+fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_file() && is_image(p))
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort_by(|a, b| {
+        let an = a.file_name().map(|s| s.to_string_lossy().to_lowercase());
+        let bn = b.file_name().map(|s| s.to_string_lossy().to_lowercase());
+        an.cmp(&bn)
+    });
+    entries
+}
+
+/// Arrow-key movement within the grid, operating on *positions in the visible
+/// list* (0..len). `dx` is the horizontal step (-1/+1), `dy` the vertical step
+/// in rows (-1/+1); `cols` is the current column count. Returns the clamped new
+/// position. Pure so it can be unit-tested independent of egui layout.
+pub fn grid_move(pos: usize, len: usize, cols: usize, dx: isize, dy: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let cols = cols.max(1) as isize;
+    let delta = dx + dy * cols;
+    let p = pos as isize + delta;
+    p.clamp(0, len as isize - 1) as usize
+}
+
 /// The set of images in a folder plus the index of the current one.
 pub struct Playlist {
     entries: Vec<PathBuf>,
@@ -24,23 +106,18 @@ pub struct Playlist {
 }
 
 impl Playlist {
+    /// Build a playlist from the images *inside* `dir` (a directory), sorted
+    /// case-insensitively, positioned at index 0. Used when a folder is opened
+    /// directly (→ Grid mode). Unlike `from_file`, it does NOT walk a parent.
+    pub fn from_dir(dir: &Path) -> Self {
+        let entries = sorted_images_in(dir);
+        Self { entries, index: 0 }
+    }
+
     /// Build a playlist from the folder containing `current`, positioned on it.
     pub fn from_file(current: &Path) -> Self {
         let dir = current.parent().unwrap_or_else(|| Path::new("."));
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok().map(|e| e.path()))
-                    .filter(|p| p.is_file() && is_image(p))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        // Natural-ish sort: case-insensitive by file name.
-        entries.sort_by(|a, b| {
-            let an = a.file_name().map(|s| s.to_string_lossy().to_lowercase());
-            let bn = b.file_name().map(|s| s.to_string_lossy().to_lowercase());
-            an.cmp(&bn)
-        });
+        let mut entries = sorted_images_in(dir);
 
         let canon = std::fs::canonicalize(current).ok();
         let index = entries
@@ -57,43 +134,20 @@ impl Playlist {
         Self { entries, index }
     }
 
-    pub fn current(&self) -> &Path {
-        &self.entries[self.index]
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
+    /// Index of the entry the playlist was positioned on at construction
+    /// (the opened file for `from_file`, or 0 for `from_dir`).
     pub fn position(&self) -> usize {
         self.index
     }
 
-    /// Move to next image (wraps). Returns the new current path.
-    pub fn next(&mut self) -> &Path {
-        self.index = (self.index + 1) % self.entries.len();
-        self.current()
+    /// The full sorted image list (the filtered view is derived over this).
+    pub fn entries(&self) -> &[PathBuf] {
+        &self.entries
     }
 
-    /// Move to previous image (wraps). Returns the new current path.
-    pub fn prev(&mut self) -> &Path {
-        self.index = (self.index + self.entries.len() - 1) % self.entries.len();
-        self.current()
-    }
-
-    /// Paths of the neighbors to preload (prev and next), if distinct.
-    pub fn neighbors(&self) -> Vec<PathBuf> {
-        let n = self.entries.len();
-        if n <= 1 {
-            return vec![];
-        }
-        let next = (self.index + 1) % n;
-        let prev = (self.index + n - 1) % n;
-        let mut out = vec![self.entries[next].clone()];
-        if prev != next {
-            out.push(self.entries[prev].clone());
-        }
-        out
+    /// The path at `index` in the full list, if in range.
+    pub fn entry(&self, index: usize) -> Option<&Path> {
+        self.entries.get(index).map(|p| p.as_path())
     }
 }
 
@@ -101,22 +155,85 @@ impl Playlist {
 mod tests {
     use super::*;
 
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
     #[test]
-    fn lists_sorted_siblings_and_navigates_with_wrap() {
+    fn visible_indices_no_filter_is_identity() {
+        let e = paths(&["a", "b", "c"]);
+        assert_eq!(visible_indices(&e, None, |_| 0), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn visible_indices_filters_per_cmp() {
+        // ratings: a=0, b=3, c=5, d=1
+        let e = paths(&["a", "b", "c", "d"]);
+        let rating = |p: &Path| match p.to_str().unwrap() {
+            "b" => 3,
+            "c" => 5,
+            "d" => 1,
+            _ => 0,
+        };
+
+        // Gte: unset(0) never matches a positive threshold.
+        assert_eq!(visible_indices(&e, Some((Cmp::Gte, 3)), rating), vec![1, 2]);
+        assert_eq!(visible_indices(&e, Some((Cmp::Gte, 1)), rating), vec![1, 2, 3]);
+        assert_eq!(visible_indices(&e, Some((Cmp::Gte, 6)), rating), Vec::<usize>::new());
+
+        // Eq.
+        assert_eq!(visible_indices(&e, Some((Cmp::Eq, 5)), rating), vec![2]);
+        assert_eq!(visible_indices(&e, Some((Cmp::Eq, 0)), rating), vec![0]);
+
+        // Lte: unset(0) always matches; 0 matches Lte but not Gte>=1/Eq>=1.
+        assert_eq!(visible_indices(&e, Some((Cmp::Lte, 1)), rating), vec![0, 3]);
+        assert_eq!(visible_indices(&e, Some((Cmp::Lte, 5)), rating), vec![0, 1, 2, 3]);
+        assert_eq!(visible_indices(&e, Some((Cmp::Lte, 0)), rating), vec![0]);
+    }
+
+    #[test]
+    fn grid_move_math() {
+        // 3 columns, 7 items (positions 0..=6).
+        assert_eq!(grid_move(0, 7, 3, 1, 0), 1); // right
+        assert_eq!(grid_move(0, 7, 3, -1, 0), 0); // left clamps at start
+        assert_eq!(grid_move(0, 7, 3, 0, 1), 3); // down a row
+        assert_eq!(grid_move(3, 7, 3, 0, -1), 0); // up a row
+        assert_eq!(grid_move(6, 7, 3, 1, 0), 6); // right clamps at end
+        assert_eq!(grid_move(5, 7, 3, 0, 1), 6); // down clamps to last item
+        assert_eq!(grid_move(0, 0, 3, 1, 0), 0); // empty list
+        assert_eq!(grid_move(2, 7, 0, 1, 0), 3); // cols=0 treated as 1
+    }
+
+    #[test]
+    fn lists_sorted_siblings_positioned_on_opened_file() {
         let dir = Path::new("/tmp/iv-test");
         let start = dir.join("b.jpg");
         if !start.exists() {
             eprintln!("skipping: {} not present", start.display());
             return;
         }
-        let mut pl = Playlist::from_file(&start);
-        // a.png, b.jpg, c.tiff sorted by name; we opened b -> index 1.
-        assert!(pl.len() >= 3);
-        assert_eq!(pl.current().file_name().unwrap(), "b.jpg");
+        let pl = Playlist::from_file(&start);
+        // a.png, b.jpg, c.tiff sorted by name; opening b positions on index 1.
+        assert!(pl.entries().len() >= 3);
+        assert_eq!(
+            pl.entry(pl.position()).unwrap().file_name().unwrap(),
+            "b.jpg"
+        );
+        // Sorted case-insensitively by file name.
+        assert_eq!(pl.entry(0).unwrap().file_name().unwrap(), "a.png");
+        assert_eq!(pl.entry(2).unwrap().file_name().unwrap(), "c.tiff");
+    }
 
-        assert_eq!(pl.next().file_name().unwrap(), "c.tiff");
-        // next from last wraps back to the first entry.
-        assert_eq!(pl.next().file_name().unwrap(), "a.png");
-        assert_eq!(pl.prev().file_name().unwrap(), "c.tiff");
+    #[test]
+    fn from_dir_enumerates_images_at_index_zero() {
+        let dir = Path::new("/tmp/iv-test");
+        if !dir.join("a.png").exists() {
+            eprintln!("skipping: {} not present", dir.display());
+            return;
+        }
+        let pl = Playlist::from_dir(dir);
+        assert_eq!(pl.position(), 0);
+        assert!(pl.entries().len() >= 3);
+        assert_eq!(pl.entry(0).unwrap().file_name().unwrap(), "a.png");
     }
 }

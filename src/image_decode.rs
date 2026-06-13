@@ -67,8 +67,26 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     // Downscale to fit max_dim while preserving aspect ratio.
     let (w, h) = fit_within(src_w, src_h, max_dim);
 
-    let bytes_per_row = (w as usize) * 4;
-    let mut buffer = vec![0u8; bytes_per_row * (h as usize)];
+    cgimage_to_rgba(&image, w, h)
+}
+
+/// Draw a `CGImage` into a freshly-allocated sRGB bitmap context sized
+/// `(target_w, target_h)` and read back the result as tightly-packed,
+/// premultiplied RGBA8 (byte order R,G,B,A — matches `Rgba8UnormSrgb`).
+///
+/// Scales the image into the target rect, so callers can use this both for a
+/// full-size decode and for a thumbnail (passing the thumbnail's own size).
+pub fn cgimage_to_rgba(
+    image: &CGImage,
+    target_w: u32,
+    target_h: u32,
+) -> Result<DecodedImage, String> {
+    if target_w == 0 || target_h == 0 {
+        return Err("target dimensions must be non-zero".into());
+    }
+
+    let bytes_per_row = (target_w as usize) * 4;
+    let mut buffer = vec![0u8; bytes_per_row * (target_h as usize)];
 
     let color_space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
         .ok_or("could not create sRGB color space")?;
@@ -77,12 +95,12 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let bitmap_info: u32 =
         CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
 
-    // SAFETY: buffer is large enough (w*h*4); color_space is valid for its scope.
+    // SAFETY: buffer is large enough (target_w*target_h*4); color_space is valid for its scope.
     let ctx_ptr = unsafe {
         CGBitmapContextCreate(
             buffer.as_mut_ptr() as *mut c_void,
-            w as usize,
-            h as usize,
+            target_w as usize,
+            target_h as usize,
             8,
             bytes_per_row,
             &*color_space as *const CGColorSpace,
@@ -93,17 +111,18 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
         return Err("CGBitmapContextCreate failed".into());
     }
     // Take ownership so the context is released on drop.
+    // SAFETY: ctx_ptr is non-null (checked above) and is a +1 retained context.
     let ctx: CFRetained<CGContext> =
         unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(ctx_ptr)) };
 
-    // Draw the (full-res) image scaled into our (possibly smaller) context rect.
+    // Draw the image scaled into our (possibly smaller) context rect.
     let rect = CGRect {
         origin: CGPoint { x: 0.0, y: 0.0 },
-        size: CGSize { width: w as f64, height: h as f64 },
+        size: CGSize { width: target_w as f64, height: target_h as f64 },
     };
-    CGContext::draw_image(Some(&ctx), rect, Some(&image));
+    CGContext::draw_image(Some(&ctx), rect, Some(image));
 
-    Ok(DecodedImage { width: w, height: h, rgba: buffer })
+    Ok(DecodedImage { width: target_w, height: target_h, rgba: buffer })
 }
 
 fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
