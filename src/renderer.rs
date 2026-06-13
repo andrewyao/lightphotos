@@ -311,15 +311,23 @@ impl Renderer {
     /// at the surface's top-left. When `None`, the image draws across the whole
     /// surface as before. The image quad is clipped to this rect via
     /// `set_scissor_rect` so the loupe image can sit above a future filmstrip.
-    pub fn render(&mut self, image_viewport: Option<(u32, u32, u32, u32)>, egui: Option<EguiPaint>) {
+    /// Render one frame. Returns `true` if a frame was presented, `false` if the
+    /// surface wasn't presentable this call (occluded/timeout/outdated) so the
+    /// caller can schedule a retry — otherwise a window that opens occluded would
+    /// stay blank forever (we'd skip every frame and never draw once revealed).
+    pub fn render(
+        &mut self,
+        image_viewport: Option<(u32, u32, u32, u32)>,
+        egui: Option<EguiPaint>,
+    ) -> bool {
         use wgpu::CurrentSurfaceTexture as C;
         let frame = match self.surface.get_current_texture() {
             C::Success(f) | C::Suboptimal(f) => f,
             C::Outdated | C::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return false;
             }
-            C::Timeout | C::Occluded | C::Validation => return,
+            C::Timeout | C::Occluded | C::Validation => return false,
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
@@ -420,6 +428,7 @@ impl Renderer {
                 self.egui_renderer.free_texture(id);
             }
         }
+        true
     }
 }
 
