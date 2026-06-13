@@ -8,6 +8,8 @@
 //! it. The Loupe leaves its central region frameless/transparent so the wgpu
 //! image shows through.
 
+use std::path::Path;
+
 use crate::navigation::Cmp;
 use crate::{App, ViewMode};
 
@@ -24,6 +26,10 @@ pub enum UiAction {
     SetFilter(Option<(Cmp, u8)>),
     /// Rate the current selection/shown image (0 clears).
     SetRating(u8),
+    /// Show this folder's images in the grid (browse-first).
+    SelectFolder(std::path::PathBuf),
+    /// Expand/collapse this folder in the tree.
+    ToggleFolder(std::path::PathBuf),
 }
 
 /// What `draw` returns to `main.rs` each frame.
@@ -96,6 +102,18 @@ fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let thumb_px = app.thumb_px();
     let sel = app.sel();
 
+    // Left folder-tree sidebar, rooted at the opened folder.
+    egui::Panel::left("folders")
+        .resizable(true)
+        .default_size(220.0)
+        .show_inside(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                if let Some(root) = app.folder_root() {
+                    folder_node(ui, app, &root, 0, out);
+                }
+            });
+        });
+
     egui::Panel::top("toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label("Size");
@@ -138,6 +156,37 @@ fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
                     });
             });
     });
+}
+
+/// One folder row in the tree: an indent, a clickable disclosure glyph, and a
+/// selectable folder name. Recurses into expanded folders' cached children.
+fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mut FrameOutput) {
+    ui.horizontal(|ui| {
+        ui.add_space(depth as f32 * 14.0);
+        let glyph = if app.is_expanded(path) { "\u{25bc}" } else { "\u{25b6}" }; // ▼ / ▶
+        if ui
+            .add(egui::Label::new(glyph).sense(egui::Sense::click()))
+            .clicked()
+        {
+            out.actions.push(UiAction::ToggleFolder(path.to_path_buf()));
+        }
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let selected = app.folder_sel().as_deref() == Some(path);
+        if ui.selectable_label(selected, name).clicked() {
+            out.actions.push(UiAction::SelectFolder(path.to_path_buf()));
+        }
+    });
+
+    if app.is_expanded(path) {
+        // Clone children out to drop the borrow on `app` before recursing.
+        let children: Vec<std::path::PathBuf> = app.subdirs(path).to_vec();
+        for child in &children {
+            folder_node(ui, app, child, depth + 1, out);
+        }
+    }
 }
 
 /// One grid cell: a thumbnail image-button with selection highlight + stars.
