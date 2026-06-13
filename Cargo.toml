@@ -1,0 +1,26 @@
+[package]
+name = "image-viewer"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "image-viewer"
+path = "src/main.rs"
+
+[dependencies]
+winit = "0.30.13"
+wgpu = "29.0.3"
+pollster = "0.4"
+bytemuck = { version = "1.25", features = ["derive"] }
+
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSObject", "NSThread"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSResponder"] }
+objc2-core-graphics = "0.3.2"
+objc2-core-foundation = { version = "0.3.2", features = ["CFURL", "CFString", "CFBase", "CFData", "CFDictionary", "CFArray"] }
+objc2-image-io = { version = "0.3.2", features = ["CGImageSource"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
