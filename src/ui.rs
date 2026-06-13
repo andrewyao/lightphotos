@@ -133,27 +133,35 @@ fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     });
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
+        let cell = thumb_px as f32;
+        let spacing = ui.spacing().item_spacing.x;
+        // Leave room for the scrollbar so the last column isn't clipped (cols is
+        // fixed before we enter the scroll area, where the inner width shrinks).
+        let avail = (ui.available_width() - 16.0).max(cell);
+        let cols = ((avail + spacing) / (cell + spacing)).floor().max(1.0) as usize;
+        app.set_grid_cols(cols);
+
+        let len = app.visible_len();
+        let rows = len.div_ceil(cols);
+        // Virtualized: build only the rows scrolled into view. A folder with
+        // thousands of images must not allocate every cell or load every
+        // thumbnail (that exhausts memory and crashes).
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let cell = thumb_px as f32;
-                let spacing = ui.spacing().item_spacing.x;
-                let avail = ui.available_width();
-                let cols = ((avail + spacing) / (cell + spacing)).floor().max(1.0) as usize;
-                app.set_grid_cols(cols);
-
-                let len = app.visible_len();
-                egui::Grid::new("thumb_grid")
-                    .num_columns(cols)
-                    .spacing([spacing, spacing])
-                    .show(ui, |ui| {
-                        for pos in 0..len {
-                            grid_cell(ui, app, pos, cell, sel, out);
-                            if (pos + 1) % cols == 0 {
-                                ui.end_row();
+            .show_rows(ui, cell, rows, |ui, row_range| {
+                let start = row_range.start * cols;
+                let end = (row_range.end * cols).min(len);
+                app.set_visible_grid_range(start, end);
+                for row in row_range {
+                    ui.horizontal(|ui| {
+                        for col in 0..cols {
+                            let pos = row * cols + col;
+                            if pos < len {
+                                grid_cell(ui, app, pos, cell, sel, out);
                             }
                         }
                     });
+                }
             });
     });
 }

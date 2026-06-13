@@ -95,6 +95,9 @@ struct App {
     thumb_px: u32,
     /// Columns the grid actually laid out last frame (for Up/Down row moves).
     grid_cols: usize,
+    /// Visible cell range `[start, end)` the grid scrolled into view last frame.
+    /// Drives thumbnail virtualization so huge folders don't load every image.
+    grid_range: (usize, usize),
     /// egui textures for thumbnails, keyed by (path, thumb_px). Rebuilt as
     /// thumbnails arrive; pruned to the current working set each frame.
     thumb_tex: HashMap<(PathBuf, u32), egui::TextureHandle>,
@@ -159,6 +162,7 @@ impl App {
             last_strip_sel: usize::MAX,
             thumb_px: THUMB_DEFAULT,
             grid_cols: 1,
+            grid_range: (0, 0),
             thumb_tex: HashMap::new(),
             zoom: 1.0,
             pan: (0.0, 0.0),
@@ -598,27 +602,47 @@ impl App {
         self.request_redraw();
     }
 
-    /// Request thumbnails for the working set (visible grid range + filmstrip
-    /// neighbors of the selection). Returns true if any requested thumb is still
-    /// missing (so the caller can keep redrawing until they arrive).
-    fn request_working_thumbs(&mut self) -> bool {
-        let Some(pl) = &self.playlist else { return false };
-        let px = self.thumb_px;
-        // Working set: in Grid request all visible (bounded by playlist size);
-        // in Loupe just the filmstrip neighbors around the selection.
-        let want_positions: Vec<usize> = match self.mode {
-            ViewMode::Grid => (0..self.visible.len()).collect(),
-            ViewMode::Loupe => {
-                let lo = self.sel.saturating_sub(12);
-                let hi = (self.sel + 12).min(self.visible.len().saturating_sub(1));
-                if self.visible.is_empty() { Vec::new() } else { (lo..=hi).collect() }
+    /// The range of visible positions whose thumbnails we keep loaded — the
+    /// *working set*. Bounded so huge folders never load every image:
+    /// - Grid: only the cells scrolled into view (`grid_range`) plus a few rows
+    ///   of prefetch margin.
+    /// - Loupe: the filmstrip neighbors around the selection.
+    fn working_positions(&self) -> std::ops::Range<usize> {
+        let len = self.visible.len();
+        if len == 0 {
+            return 0..0;
+        }
+        match self.mode {
+            ViewMode::Grid => {
+                let margin = self.grid_cols.saturating_mul(3).max(1);
+                let start = self.grid_range.0.saturating_sub(margin);
+                let end = (self.grid_range.1 + margin).min(len);
+                start..end.max(start)
             }
-        };
-        let paths: Vec<PathBuf> = want_positions
-            .iter()
-            .filter_map(|&pos| self.visible.get(pos).copied())
-            .filter_map(|i| pl.entry(i).map(|p| p.to_path_buf()))
-            .collect();
+            ViewMode::Loupe => {
+                let lo = self.sel.saturating_sub(16);
+                let hi = (self.sel + 17).min(len);
+                lo..hi
+            }
+        }
+    }
+
+    /// Paths (with thumb size) for the current working set.
+    fn working_thumb_keys(&self) -> Vec<(PathBuf, u32)> {
+        let px = self.thumb_px;
+        let Some(pl) = &self.playlist else { return Vec::new() };
+        self.working_positions()
+            .filter_map(|pos| self.visible.get(pos).copied())
+            .filter_map(|i| pl.entry(i).map(|p| (p.to_path_buf(), px)))
+            .collect()
+    }
+
+    /// Request thumbnails for the working set. Returns true if any requested
+    /// thumb is still missing (so the caller can keep redrawing until they
+    /// arrive).
+    fn request_working_thumbs(&mut self) -> bool {
+        let px = self.thumb_px;
+        let paths: Vec<PathBuf> = self.working_thumb_keys().into_iter().map(|(p, _)| p).collect();
 
         let mut any_missing = false;
         if let Some(loader) = &mut self.loader {
@@ -637,27 +661,12 @@ impl App {
     /// Sync `thumb_tex` with the loader's available thumbnails for the working
     /// set, uploading new ones as egui textures and dropping stale handles.
     fn sync_thumb_textures(&mut self) {
-        let Some(pl) = &self.playlist else { return };
-        let px = self.thumb_px;
-
-        // Build the set of keys we want this frame.
-        let positions: Vec<usize> = match self.mode {
-            ViewMode::Grid => (0..self.visible.len()).collect(),
-            ViewMode::Loupe => {
-                if self.visible.is_empty() {
-                    Vec::new()
-                } else {
-                    let lo = self.sel.saturating_sub(16);
-                    let hi = (self.sel + 16).min(self.visible.len() - 1);
-                    (lo..=hi).collect()
-                }
-            }
-        };
-        let wanted: Vec<(PathBuf, u32)> = positions
-            .iter()
-            .filter_map(|&pos| self.visible.get(pos).copied())
-            .filter_map(|i| pl.entry(i).map(|p| (p.to_path_buf(), px)))
-            .collect();
+        if self.playlist.is_none() {
+            return;
+        }
+        // Only the working set — bounds GPU textures to what's on screen so a
+        // folder with thousands of images can't exhaust memory.
+        let wanted = self.working_thumb_keys();
 
         // Upload any wanted thumbnail that's decoded but not yet a texture.
         if let Some(loader) = &self.loader {
@@ -874,6 +883,12 @@ impl App {
 
     pub(crate) fn set_grid_cols(&mut self, cols: usize) {
         self.grid_cols = cols.max(1);
+    }
+
+    /// The grid reports which cell range `[start, end)` is scrolled into view so
+    /// thumbnail loading can be virtualized to just those cells.
+    pub(crate) fn set_visible_grid_range(&mut self, start: usize, end: usize) {
+        self.grid_range = (start, end);
     }
 
     /// Whether the filmstrip should scroll the selection into view this frame.
