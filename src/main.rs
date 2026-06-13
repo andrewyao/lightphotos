@@ -10,6 +10,7 @@
 //! Speed: images decode on a background thread (Apple ImageIO) and live as a
 //! GPU texture; zoom/pan only update a tiny transform uniform, never re-decode.
 
+mod catalog;
 mod image_decode;
 mod loader;
 mod macos_delegate;
