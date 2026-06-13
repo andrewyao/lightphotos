@@ -524,7 +524,9 @@ impl App {
         let mut any_missing = false;
         if let Some(loader) = &mut self.loader {
             for p in &paths {
-                if loader.get_thumb(p, px).is_none() {
+                // Skip thumbs whose decode permanently failed (deleted/corrupt) —
+                // otherwise we'd re-request every frame and spin the redraw loop.
+                if loader.get_thumb(p, px).is_none() && !loader.thumb_failed(p, px) {
                     loader.request_thumb(p.clone(), px);
                     any_missing = true;
                 }
