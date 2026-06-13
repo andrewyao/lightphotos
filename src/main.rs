@@ -698,6 +698,13 @@ impl App {
                 ui::UiAction::Select(pos) => {
                     if pos < self.visible.len() {
                         self.sel = pos;
+                        // In the loupe, selecting a filmstrip cell must also show
+                        // it (selection == shown). In the grid, selecting is just
+                        // focus — Enter/double-click opens the loupe.
+                        if self.mode == ViewMode::Loupe {
+                            self.load_selected();
+                            self.request_neighbors();
+                        }
                         self.request_redraw();
                     }
                 }
