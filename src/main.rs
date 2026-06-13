@@ -110,6 +110,10 @@ struct App {
     /// The image viewport rect (physical px) the loupe drew into last frame, if any.
     loupe_viewport: Option<(u32, u32, u32, u32)>,
 
+    /// True while winit reports the window as occluded (hidden/minimized/behind
+    /// another window). We pause redraw retries while occluded.
+    occluded: bool,
+
     // ---- Input state ----
     cursor: (f64, f64),
     modifiers: ModifiersState,
@@ -152,6 +156,7 @@ impl App {
             fitted: false,
             rotations: HashMap::new(),
             loupe_viewport: None,
+            occluded: false,
             cursor: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
             space_down: false,
@@ -707,7 +712,14 @@ impl App {
             paint_jobs,
             screen_descriptor,
         };
-        renderer.render(image_viewport, Some(egui_paint));
+        let presented = renderer.render(image_viewport, Some(egui_paint));
+        // If the surface wasn't presentable (e.g. the window opened occluded /
+        // behind another window), keep retrying so we draw as soon as it's
+        // revealed — unless winit has told us it's genuinely occluded, in which
+        // case we wait for the Occluded(false) event instead of busy-looping.
+        if !presented && !self.occluded {
+            self.request_redraw();
+        }
     }
 
     /// Apply the actions egui emitted this frame.
@@ -893,6 +905,15 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::RedrawRequested => {
                 self.redraw();
+            }
+
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                // Becoming visible again: redraw (we skip frames while occluded,
+                // so the surface needs a fresh draw to stop showing blank).
+                if !occluded {
+                    self.request_redraw();
+                }
             }
 
             WindowEvent::ModifiersChanged(m) => {
