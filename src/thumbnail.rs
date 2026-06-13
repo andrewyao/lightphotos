@@ -222,7 +222,11 @@ fn write_tw(path: &Path, img: &DecodedImage) -> Result<(), String> {
         let mut f = fs::File::create(&tmp).map_err(|e| format!("create temp: {e}"))?;
         f.write_all(&buf).map_err(|e| format!("write temp: {e}"))?;
     }
-    fs::rename(&tmp, path).map_err(|e| format!("rename: {e}"))?;
+    if let Err(e) = fs::rename(&tmp, path) {
+        // Don't leave the orphaned temp file behind on failure.
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("rename: {e}"));
+    }
     Ok(())
 }
 
