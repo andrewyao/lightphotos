@@ -147,6 +147,8 @@ impl Loader {
     /// discarded here. Calling both `poll` and `poll_thumbs` in the same frame
     /// starves one tier (the second call finds the queue already drained), so
     /// frame loops should prefer `poll_all`.
+    // The frame loop uses `poll_all`; kept for API symmetry with the thumb tier.
+    #[allow(dead_code)]
     pub fn poll(&mut self) -> Vec<PathBuf> {
         self.poll_all().0
     }
