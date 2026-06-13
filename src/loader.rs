@@ -58,6 +58,9 @@ pub struct Loader {
     thumb_cache: HashMap<(PathBuf, u32), Arc<DecodedImage>>,
     thumb_order: VecDeque<(PathBuf, u32)>,
     thumb_inflight: HashSet<(PathBuf, u32)>,
+    /// Keys whose thumbnail decode failed (e.g. file deleted). Negative cache so
+    /// we don't re-request them every frame and spin the UI redraw loop.
+    thumb_failed: HashSet<(PathBuf, u32)>,
     thumb_capacity: usize,
 }
 
@@ -125,6 +128,7 @@ impl Loader {
             thumb_cache: HashMap::new(),
             thumb_order: VecDeque::new(),
             thumb_inflight: HashSet::new(),
+            thumb_failed: HashSet::new(),
             thumb_capacity: THUMB_CAPACITY,
         }
     }
@@ -166,7 +170,10 @@ impl Loader {
     #[allow(dead_code)]
     pub fn request_thumb(&mut self, path: PathBuf, max_px: u32) {
         let key = (path.clone(), max_px);
-        if self.thumb_cache.contains_key(&key) || self.thumb_inflight.contains(&key) {
+        if self.thumb_cache.contains_key(&key)
+            || self.thumb_inflight.contains(&key)
+            || self.thumb_failed.contains(&key)
+        {
             return;
         }
         self.thumb_inflight.insert(key);
@@ -177,6 +184,13 @@ impl Loader {
     #[allow(dead_code)]
     pub fn get_thumb(&self, path: &Path, max_px: u32) -> Option<Arc<DecodedImage>> {
         self.thumb_cache.get(&(path.to_path_buf(), max_px)).cloned()
+    }
+
+    /// True if this thumbnail's decode permanently failed (negative cache), so
+    /// callers can stop treating it as "still loading".
+    #[allow(dead_code)]
+    pub fn thumb_failed(&self, path: &Path, max_px: u32) -> bool {
+        self.thumb_failed.contains(&(path.to_path_buf(), max_px))
     }
 
     /// Drain finished jobs into the caches and return thumbnail `(path, max_px)`
@@ -232,7 +246,8 @@ impl Loader {
                             thumbs.push(key);
                         }
                         Err(e) => {
-                            eprintln!("thumbnail failed for {} @ {max_px}: {e}", path.display())
+                            eprintln!("thumbnail failed for {} @ {max_px}: {e}", path.display());
+                            self.thumb_failed.insert(key);
                         }
                     }
                 }
