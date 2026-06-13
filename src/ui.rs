@@ -152,7 +152,8 @@ fn grid_cell(
     let size = egui::vec2(cell, cell);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
-    let selected = pos == sel;
+    // No outline in the grid's browse-first state (nothing selected yet).
+    let selected = app.sel_active() && pos == sel;
     let bg = if selected {
         egui::Color32::from_rgb(40, 80, 140)
     } else {

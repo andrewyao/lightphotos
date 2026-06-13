@@ -85,6 +85,9 @@ struct App {
     visible: Vec<usize>,
     /// Position *within `visible`* of the current selection.
     sel: usize,
+    /// Whether `sel` is an active selection. The Grid opens with no selection
+    /// (browse-first) until the user clicks or arrows; the Loupe always has one.
+    sel_active: bool,
     /// Last `sel` the filmstrip auto-scrolled to (so we only scroll on change,
     /// not every frame — which would fight clicks). `usize::MAX` = never.
     last_strip_sel: usize,
@@ -138,6 +141,7 @@ impl App {
             filter_bar: false,
             visible: Vec::new(),
             sel: 0,
+            sel_active: false,
             last_strip_sel: usize::MAX,
             thumb_px: THUMB_DEFAULT,
             grid_cols: 1,
@@ -190,6 +194,9 @@ impl App {
         self.sel = self.visible.iter().position(|&i| i == start_index).unwrap_or(0);
 
         self.mode = if is_dir { ViewMode::Grid } else { ViewMode::Loupe };
+        // A directory opens as a browser with nothing selected; a single file
+        // opens in the loupe with that file selected.
+        self.sel_active = !is_dir;
         if self.mode == ViewMode::Loupe {
             self.load_selected();
         }
@@ -215,8 +222,12 @@ impl App {
         }
     }
 
-    /// The playlist index of the current selection, if any.
+    /// The playlist index of the current selection, if any. `None` when the
+    /// grid has no active selection (browse-first state).
     fn selected_index(&self) -> Option<usize> {
+        if !self.sel_active {
+            return None;
+        }
         self.visible.get(self.sel).copied()
     }
 
@@ -279,20 +290,28 @@ impl App {
         self.request_redraw();
     }
 
-    /// Move the grid selection by (dx, dy) cells (clamped, row-aware).
+    /// Move the grid selection by (dx, dy) cells (clamped, row-aware). The first
+    /// arrow press with no active selection lands on the first cell.
     fn move_grid(&mut self, dx: isize, dy: isize) {
         if self.visible.is_empty() {
             return;
         }
-        self.sel = navigation::grid_move(self.sel, self.visible.len(), self.grid_cols, dx, dy);
+        if !self.sel_active {
+            self.sel = 0;
+            self.sel_active = true;
+        } else {
+            self.sel = navigation::grid_move(self.sel, self.visible.len(), self.grid_cols, dx, dy);
+        }
         self.request_redraw();
     }
 
-    /// Enter Loupe on the current selection.
+    /// Enter Loupe on the current selection. A no-op in the grid when nothing is
+    /// selected (the `selected_path` guard below).
     fn enter_loupe(&mut self) {
         if self.selected_path().is_none() {
             return;
         }
+        self.sel_active = true;
         self.mode = ViewMode::Loupe;
         self.load_selected();
         self.request_neighbors();
@@ -698,6 +717,7 @@ impl App {
                 ui::UiAction::Select(pos) => {
                     if pos < self.visible.len() {
                         self.sel = pos;
+                        self.sel_active = true;
                         // In the loupe, selecting a filmstrip cell must also show
                         // it (selection == shown). In the grid, selecting is just
                         // focus — Enter/double-click opens the loupe.
@@ -711,6 +731,7 @@ impl App {
                 ui::UiAction::OpenLoupe(pos) => {
                     if pos < self.visible.len() {
                         self.sel = pos;
+                        self.sel_active = true;
                         self.enter_loupe();
                     }
                 }
@@ -745,6 +766,12 @@ impl App {
 
     pub(crate) fn sel(&self) -> usize {
         self.sel
+    }
+
+    /// Whether there is an active selection to highlight (false in the grid's
+    /// browse-first state before any click/arrow).
+    pub(crate) fn sel_active(&self) -> bool {
+        self.sel_active
     }
 
     pub(crate) fn visible_len(&self) -> usize {
