@@ -14,6 +14,7 @@
 //! hand-rolled wgpu renderer draws the loupe image, confined to a viewport rect.
 
 mod catalog;
+mod develop;
 mod image_decode;
 mod loader;
 mod macos_delegate;
@@ -34,6 +35,7 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use catalog::Catalog;
+use develop::{Adjustments, GpuAdjust};
 use loader::Loader;
 use macos_delegate::UserEvent;
 use navigation::{visible_indices, Cmp, Playlist};
@@ -77,6 +79,22 @@ struct App {
     /// Ratings catalog (persistent) + an in-memory mirror for fast lookups.
     catalog: Catalog,
     ratings: HashMap<PathBuf, u8>,
+    /// Per-image non-destructive develop edits (persistent, mirrored in-memory).
+    /// Only non-identity edits are stored to keep the map small.
+    edits: HashMap<PathBuf, Adjustments>,
+    /// Whether the loupe's right-hand Develop panel is open.
+    develop_open: bool,
+    /// A small downsampled LINEAR-light RGB sample of the shown image, used to
+    /// recompute the live histogram cheaply when adjustments change. Rebuilt
+    /// whenever a new full image is uploaded.
+    hist_sample: Vec<[f32; 3]>,
+    /// Cached per-channel (R/G/B) display-space histogram bins for the panel.
+    /// Float bins: samples are splatted fractionally across neighbouring buckets
+    /// so a tone-curve stretch doesn't re-quantize into a comb of empty bins.
+    /// `None` when no image is shown.
+    histogram: Option<[[f32; 256]; 3]>,
+    /// Set when `histogram` needs recomputing (new image, or an edit changed).
+    hist_dirty: bool,
     /// Active star filter (`None` = show all).
     filter: Option<(Cmp, u8)>,
     /// Whether the filter bar is shown.
@@ -98,6 +116,9 @@ struct App {
     /// Visible cell range `[start, end)` the grid scrolled into view last frame.
     /// Drives thumbnail virtualization so huge folders don't load every image.
     grid_range: (usize, usize),
+    /// Visible cell range `[start, end)` the loupe filmstrip scrolled into view
+    /// last frame. The horizontal equivalent of `grid_range`.
+    strip_range: (usize, usize),
     /// egui textures for thumbnails, keyed by (path, thumb_px). Rebuilt as
     /// thumbnails arrive; pruned to the current working set each frame.
     thumb_tex: HashMap<(PathBuf, u32), egui::TextureHandle>,
@@ -154,6 +175,11 @@ impl App {
             mode: ViewMode::Grid,
             catalog,
             ratings: HashMap::new(),
+            edits: HashMap::new(),
+            develop_open: true,
+            hist_sample: Vec::new(),
+            histogram: None,
+            hist_dirty: false,
             filter: None,
             filter_bar: false,
             visible: Vec::new(),
@@ -163,6 +189,7 @@ impl App {
             thumb_px: THUMB_DEFAULT,
             grid_cols: 1,
             grid_range: (0, 0),
+            strip_range: (0, 0),
             thumb_tex: HashMap::new(),
             zoom: 1.0,
             pan: (0.0, 0.0),
@@ -216,10 +243,14 @@ impl App {
             }
 
             let playlist = Playlist::from_file(&path);
-            // Seed the in-memory ratings mirror for everything in the folder.
+            // Seed the in-memory ratings + edits mirrors for everything in the folder.
             for p in playlist.entries() {
                 if let Some(stars) = self.catalog.get(p) {
                     self.ratings.insert(p.clone(), stars);
+                }
+                let adj = self.catalog.adjustments(p);
+                if !adj.is_identity() {
+                    self.edits.insert(p.clone(), adj);
                 }
             }
             let start_index = playlist.position();
@@ -246,10 +277,14 @@ impl App {
     /// selected, mark `dir` as the selected folder, and request thumbnails.
     fn load_folder(&mut self, dir: PathBuf) {
         let playlist = Playlist::from_dir(&dir);
-        // Seed the in-memory ratings mirror for everything in the folder.
+        // Seed the in-memory ratings + edits mirrors for everything in the folder.
         for p in playlist.entries() {
             if let Some(stars) = self.catalog.get(p) {
                 self.ratings.insert(p.clone(), stars);
+            }
+            let adj = self.catalog.adjustments(p);
+            if !adj.is_identity() {
+                self.edits.insert(p.clone(), adj);
             }
         }
         self.playlist = Some(playlist);
@@ -468,6 +503,11 @@ impl App {
         renderer.set_image(img);
         self.shown = Some(path.to_path_buf());
         self.shown_is_full = is_full;
+        // Rebuild the histogram sample from the newly-shown image, then mark the
+        // histogram dirty so it's recomputed before the next draw.
+        self.build_hist_sample(img);
+        // Load this image's stored edits into the shader (or identity if none).
+        self.push_adjustments();
         self.fit_to_window();
         self.update_window_title();
         self.request_redraw();
@@ -503,6 +543,112 @@ impl App {
     /// Rotation (in 90° CW steps) of the image currently shown.
     fn current_rotation(&self) -> u8 {
         self.shown.as_ref().and_then(|p| self.rotations.get(p)).copied().unwrap_or(0)
+    }
+
+    /// Develop adjustments of the image currently shown (identity if unset).
+    pub(crate) fn current_adjustments(&self) -> Adjustments {
+        self.shown
+            .as_ref()
+            .and_then(|p| self.edits.get(p))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Push the current image's adjustments into the renderer uniform. Mirrors
+    /// `push_transform`; call it whenever the shown image or its edits change.
+    fn push_adjustments(&mut self) {
+        let gpu = GpuAdjust::from(&self.current_adjustments());
+        if let Some(r) = &mut self.renderer {
+            r.set_adjustments(gpu);
+        }
+        self.request_redraw();
+    }
+
+    /// Build the histogram sample from a freshly-shown image: a strided
+    /// downsample (~256 px on the longest side) of LINEAR-light RGB, stored so
+    /// `recompute_histogram` can re-bin it cheaply as adjustments change.
+    ///
+    /// The decode is premultiplied sRGB RGBA8; we un-premultiply (guarding a==0)
+    /// and convert sRGB → linear with the 2.2 gamma `apply_linear` assumes, so
+    /// the histogram domain matches the develop pipeline's input.
+    fn build_hist_sample(&mut self, img: &image_decode::DecodedImage) {
+        let (w, h) = (img.width as usize, img.height as usize);
+        if w == 0 || h == 0 || img.rgba.len() < w * h * 4 {
+            self.hist_sample.clear();
+            self.hist_dirty = true;
+            return;
+        }
+        // Stride so the longest side maps to ~256 samples.
+        const TARGET: usize = 256;
+        let step = (w.max(h) / TARGET).max(1);
+        let mut sample = Vec::with_capacity((w / step + 1) * (h / step + 1));
+        let srgb_to_linear = |c: u8| (c as f32 / 255.0).powf(2.2);
+        let mut y = 0;
+        while y < h {
+            let mut x = 0;
+            while x < w {
+                let i = (y * w + x) * 4;
+                let (r, g, b, a) = (img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3]);
+                // Un-premultiply (the decode is premultiplied alpha).
+                let (r, g, b) = if a == 0 {
+                    (0.0, 0.0, 0.0)
+                } else if a == 255 {
+                    (r as f32, g as f32, b as f32)
+                } else {
+                    let inv = 255.0 / a as f32;
+                    ((r as f32 * inv).min(255.0), (g as f32 * inv).min(255.0), (b as f32 * inv).min(255.0))
+                };
+                sample.push([
+                    srgb_to_linear(r as u8),
+                    srgb_to_linear(g as u8),
+                    srgb_to_linear(b as u8),
+                ]);
+                x += step;
+            }
+            y += step;
+        }
+        self.hist_sample = sample;
+        self.hist_dirty = true;
+    }
+
+    /// Recompute the cached histogram from `hist_sample` under the current
+    /// image's adjustments: run `apply_linear` per sample, gamma-encode the
+    /// linear output to display space (matching what the shader puts on screen),
+    /// and bin each channel into 256 buckets.
+    fn recompute_histogram(&mut self) {
+        if self.hist_sample.is_empty() {
+            self.histogram = None;
+            self.hist_dirty = false;
+            return;
+        }
+        let adj = self.current_adjustments();
+        let mut bins = [[0f32; 256]; 3];
+        for &px in &self.hist_sample {
+            let out = develop::apply_linear(&adj, px);
+            for ch in 0..3 {
+                // Linear → display gamma (the same encoding the shader output gets).
+                let v = out[ch].max(0.0).powf(1.0 / 2.2).clamp(0.0, 1.0);
+                // Fractional ("float") binning: splat the sample across its two
+                // neighbouring buckets by sub-bin position instead of rounding to
+                // one. Spreading the energy continuously is what keeps the curve
+                // smooth after a tone stretch, rather than re-quantizing to a comb.
+                let pos = v * 255.0;
+                let lo = pos.floor();
+                let frac = pos - lo;
+                let lo = lo as usize;
+                bins[ch][lo] += 1.0 - frac;
+                if lo < 255 {
+                    bins[ch][lo + 1] += frac;
+                }
+            }
+        }
+        self.histogram = Some(bins);
+        self.hist_dirty = false;
+    }
+
+    /// The cached histogram bins for the panel (`None` when no image is shown).
+    pub(crate) fn histogram(&self) -> Option<&[[f32; 256]; 3]> {
+        self.histogram.as_ref()
     }
 
     /// On-screen footprint after rotation (w/h swapped for 90°/270°).
@@ -620,9 +766,16 @@ impl App {
                 start..end.max(start)
             }
             ViewMode::Loupe => {
-                let lo = self.sel.saturating_sub(16);
-                let hi = (self.sel + 17).min(len);
-                lo..hi
+                // The filmstrip reports its scrolled-into-view range; load that
+                // window plus a prefetch margin (the horizontal analogue of the
+                // grid). Union with the selection so the current image's own
+                // thumbnail always loads even before the strip reports a range.
+                let margin = 8;
+                let mut start = self.strip_range.0.saturating_sub(margin);
+                let mut end = (self.strip_range.1 + margin).min(len);
+                start = start.min(self.sel);
+                end = end.max((self.sel + 1).min(len));
+                start..end.max(start)
             }
         }
     }
@@ -702,6 +855,13 @@ impl App {
         // Make sure thumbnails for the working set are uploaded before egui
         // references them.
         self.sync_thumb_textures();
+
+        // Refresh the histogram if an image loaded or an adjustment changed. The
+        // sample is tiny so this is sub-millisecond; only do it when the panel is
+        // open and actually showing.
+        if self.hist_dirty && self.develop_open {
+            self.recompute_histogram();
+        }
 
         let (Some(window), Some(mut state)) =
             (self.window.clone(), self.egui_state.take())
@@ -811,9 +971,13 @@ impl App {
                 ui::UiAction::SetFilter(f) => self.set_filter(f),
                 ui::UiAction::SetRating(stars) => self.set_rating(stars),
                 ui::UiAction::SelectFolder(p) => {
-                    // Show this folder's images in the grid (browse-first).
+                    // Show this folder's images in the grid (browse-first). Switch
+                    // to the grid so picking a folder from the loupe sidebar lands
+                    // on its contents rather than a stale loupe image.
                     self.ensure_subdirs(&p);
                     self.load_folder(p);
+                    self.mode = ViewMode::Grid;
+                    self.update_window_title();
                 }
                 ui::UiAction::ToggleFolder(p) => {
                     if self.expanded.contains(&p) {
@@ -822,6 +986,26 @@ impl App {
                         self.expanded.insert(p.clone());
                         self.ensure_subdirs(&p);
                     }
+                    self.request_redraw();
+                }
+                ui::UiAction::SetAdjustments(adj) => {
+                    let Some(path) = self.shown.clone() else { continue };
+                    if adj.is_identity() {
+                        self.edits.remove(&path);
+                    } else {
+                        self.edits.insert(path.clone(), adj);
+                    }
+                    self.catalog.set_adjustments(&path, &adj);
+                    self.push_adjustments();
+                    self.hist_dirty = true;
+                    self.request_redraw();
+                }
+                ui::UiAction::ResetAdjustments => {
+                    let Some(path) = self.shown.clone() else { continue };
+                    self.edits.remove(&path);
+                    self.catalog.set_adjustments(&path, &Adjustments::default());
+                    self.push_adjustments();
+                    self.hist_dirty = true;
                     self.request_redraw();
                 }
             }
@@ -867,6 +1051,11 @@ impl App {
         self.thumb_px
     }
 
+    /// Whether the loupe Develop panel is open.
+    pub(crate) fn develop_open(&self) -> bool {
+        self.develop_open
+    }
+
     pub(crate) fn sel(&self) -> usize {
         self.sel
     }
@@ -889,6 +1078,13 @@ impl App {
     /// thumbnail loading can be virtualized to just those cells.
     pub(crate) fn set_visible_grid_range(&mut self, start: usize, end: usize) {
         self.grid_range = (start, end);
+    }
+
+    /// The filmstrip reports which cell range `[start, end)` is scrolled into view
+    /// so thumbnail loading is virtualized to just those cells (horizontal
+    /// equivalent of `set_visible_grid_range`).
+    pub(crate) fn set_visible_strip_range(&mut self, start: usize, end: usize) {
+        self.strip_range = (start, end);
     }
 
     /// Whether the filmstrip should scroll the selection into view this frame.
@@ -1140,6 +1336,11 @@ impl App {
                 if self.mode == ViewMode::Grid {
                     self.enter_loupe();
                 }
+            }
+            // `D` toggles the Develop panel (Loupe only).
+            KeyCode::KeyD if self.mode == ViewMode::Loupe => {
+                self.develop_open = !self.develop_open;
+                self.request_redraw();
             }
             KeyCode::Escape => match self.mode {
                 ViewMode::Loupe => {

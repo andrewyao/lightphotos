@@ -10,6 +10,7 @@
 
 use std::path::Path;
 
+use crate::develop::Adjustments;
 use crate::navigation::Cmp;
 use crate::{App, ViewMode};
 
@@ -30,6 +31,10 @@ pub enum UiAction {
     SelectFolder(std::path::PathBuf),
     /// Expand/collapse this folder in the tree.
     ToggleFolder(std::path::PathBuf),
+    /// Set the develop adjustments for the current loupe image.
+    SetAdjustments(Adjustments),
+    /// Reset the current loupe image's develop adjustments to identity.
+    ResetAdjustments,
 }
 
 /// What `draw` returns to `main.rs` each frame.
@@ -98,11 +103,9 @@ fn filter_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     });
 }
 
-fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
-    let thumb_px = app.thumb_px();
-    let sel = app.sel();
-
-    // Left folder-tree sidebar, rooted at the opened folder.
+/// Left folder-tree sidebar, rooted at the opened folder. Shown in both the grid
+/// and the loupe so the folder structure is always visible.
+fn draw_folders_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::Panel::left("folders")
         .resizable(true)
         .default_size(220.0)
@@ -113,6 +116,14 @@ fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
                 }
             });
         });
+}
+
+fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
+    let thumb_px = app.thumb_px();
+    let sel = app.sel();
+
+    // Left folder-tree sidebar, rooted at the opened folder.
+    draw_folders_panel(ui, app, out);
 
     egui::Panel::top("toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
@@ -276,25 +287,51 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
         });
     }
 
+    // Left folder-tree sidebar (same as the grid) so structure stays visible.
+    draw_folders_panel(ui, app, out);
+
     let strip_h = (thumb_px as f32 * 0.55).clamp(72.0, 200.0) + 8.0;
     egui::Panel::bottom("filmstrip")
         .exact_size(strip_h)
         .show_inside(ui, |ui| {
             let cell = strip_h - 16.0;
-            egui::ScrollArea::horizontal()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let len = app.visible_len();
-                        for pos in 0..len {
-                            let resp = filmstrip_cell(ui, app, pos, cell, sel, out);
-                            if follow && pos == sel {
-                                resp.scroll_to_me(Some(egui::Align::Center));
-                            }
-                        }
-                    });
+            let cell_full = cell + ui.spacing().item_spacing.x;
+            let len = app.visible_len();
+
+            // Virtualized horizontal strip (egui has no `show_columns`, so do the
+            // grid's `show_rows` trick by hand): build only the cells in view and
+            // report the range so thumbnail loading tracks the scroll position.
+            let mut area = egui::ScrollArea::horizontal().auto_shrink([false, false]);
+            // On a selection change, center the selection for this frame only so we
+            // don't fight the user's scrolling on other frames.
+            if follow {
+                let target =
+                    (sel as f32 * cell_full + cell_full * 0.5 - ui.available_width() * 0.5).max(0.0);
+                area = area.scroll_offset(egui::vec2(target, 0.0));
+            }
+            area.show_viewport(ui, |ui, viewport| {
+                let first = (viewport.min.x / cell_full).floor().max(0.0) as usize;
+                let last = ((viewport.max.x / cell_full).ceil() as usize).min(len);
+                app.set_visible_strip_range(first, last);
+
+                ui.horizontal(|ui| {
+                    // Leading + trailing spacers preserve the full content width so
+                    // the scrollbar extent stays correct.
+                    ui.add_space(first as f32 * cell_full);
+                    for pos in first..last {
+                        filmstrip_cell(ui, app, pos, cell, sel, out);
+                    }
+                    ui.add_space(len.saturating_sub(last) as f32 * cell_full);
                 });
+            });
         });
+
+    // Right-hand develop panel (Temp/Tint/Exposure/… sliders + histogram). Drawn
+    // before the central rect is read so it reserves its width first — otherwise
+    // the wgpu image viewport would overlap the panel.
+    if app.develop_open() {
+        draw_develop_panel(ui, app, out);
+    }
 
     // Central region: deliberately NOT a CentralPanel. Leaving it as the root
     // UI's unused rect is what makes egui report the pointer there as "not over
@@ -308,6 +345,190 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     // Star overlay in its own foreground Area, so egui owns clicks on the stars
     // (only there) without claiming the rest of the image area.
     loupe_star_overlay(ui, app, central, out);
+}
+
+/// The right-hand Develop panel: the Basic tone sliders, matching Lightroom's
+/// order (WB → Tone → Highlights/Shadows/Whites/Blacks). Reads the current
+/// image's adjustments from the app, and pushes `SetAdjustments` whenever a
+/// slider actually changes (never every frame). A double-click on any slider
+/// resets that one field to 0.
+fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let mut adj = app.current_adjustments();
+
+    egui::Panel::right("develop")
+        .resizable(true)
+        .default_size(340.0)
+        .show_inside(ui, |ui| {
+            draw_histogram(ui, app);
+            ui.add_space(6.0);
+
+            ui.horizontal(|ui| {
+                ui.heading("Develop");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Reset").clicked() {
+                        out.actions.push(UiAction::ResetAdjustments);
+                    }
+                });
+            });
+            ui.separator();
+
+            // True once any slider in this frame changed, so we push exactly one
+            // SetAdjustments after rendering the whole group.
+            let mut changed = false;
+
+            // One labeled slider over `field`. Returns whether the value changed
+            // (slider drag or a double-click reset).
+            fn slider(
+                ui: &mut egui::Ui,
+                label: &str,
+                field: &mut f32,
+                range: std::ops::RangeInclusive<f32>,
+                decimals: usize,
+            ) -> bool {
+                ui.label(label);
+                // Let the slider track fill the panel width, leaving room only
+                // for the value box egui draws to its right.
+                ui.spacing_mut().slider_width = (ui.available_width() - 56.0).max(80.0);
+                let resp = ui.add(
+                    egui::Slider::new(field, range)
+                        .max_decimals(decimals)
+                        .show_value(true),
+                );
+                let mut changed = resp.changed();
+                // Double-click the slider to reset this field to its default.
+                if resp.double_clicked() {
+                    *field = 0.0;
+                    changed = true;
+                }
+                changed
+            }
+
+            ui.label(egui::RichText::new("White Balance").strong());
+            changed |= slider(ui, "Temp", &mut adj.temp, crate::develop::TONE_RANGE, 0);
+            changed |= slider(ui, "Tint", &mut adj.tint, crate::develop::TONE_RANGE, 0);
+            ui.add_space(6.0);
+
+            ui.label(egui::RichText::new("Tone").strong());
+            changed |= slider(
+                ui,
+                "Exposure",
+                &mut adj.exposure,
+                crate::develop::EXPOSURE_RANGE,
+                2,
+            );
+            changed |= slider(ui, "Contrast", &mut adj.contrast, crate::develop::TONE_RANGE, 0);
+            changed |= slider(
+                ui,
+                "Highlights",
+                &mut adj.highlights,
+                crate::develop::TONE_RANGE,
+                0,
+            );
+            changed |= slider(ui, "Shadows", &mut adj.shadows, crate::develop::TONE_RANGE, 0);
+            changed |= slider(ui, "Whites", &mut adj.whites, crate::develop::TONE_RANGE, 0);
+            changed |= slider(ui, "Blacks", &mut adj.blacks, crate::develop::TONE_RANGE, 0);
+
+            if changed {
+                out.actions.push(UiAction::SetAdjustments(adj));
+            }
+        });
+}
+
+/// The live post-adjustment histogram at the top of the Develop panel. Draws a
+/// dark frame, then the R/G/B channels as translucent filled curves (additive
+/// overlap brightens) over a fixed-height rect. Reflects the current image's
+/// adjustments because `App` re-bins `apply_linear`'d samples on every change.
+fn draw_histogram(ui: &mut egui::Ui, app: &App) {
+    let height = 120.0;
+    let width = ui.available_width();
+    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+
+    // Dark background frame.
+    painter.rect_filled(rect, 3.0, egui::Color32::from_gray(16));
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0, egui::Color32::from_gray(48)),
+        egui::StrokeKind::Inside,
+    );
+
+    let Some(bins) = app.histogram() else { return };
+
+    // Bins arrive float (fractional splat in recompute_histogram), so the comb
+    // from re-quantizing a tone stretch is already gone. A single light box blur
+    // tidies any residual gaps from strong stretches without flattening peaks —
+    // giving Lightroom's smooth-but-detailed curve.
+    let smooth = |ch: &[f32; 256]| -> [f32; 256] {
+        let mut a = *ch;
+        const R: usize = 1; // box radius
+        let src = a;
+        for i in 0..256usize {
+            let lo = i.saturating_sub(R);
+            let hi = (i + R).min(255);
+            let mut sum = 0.0;
+            for j in lo..=hi {
+                sum += src[j];
+            }
+            a[i] = sum / (hi - lo + 1) as f32;
+        }
+        a
+    };
+    let smoothed: [[f32; 256]; 3] = [smooth(&bins[0]), smooth(&bins[1]), smooth(&bins[2])];
+
+    // Shared max across all channels so relative channel heights stay honest.
+    // Skip the extreme end bins (0 and 255) when scaling: pure black/white
+    // clipping spikes would otherwise flatten everything else.
+    let mut max = 1f32;
+    for ch in &smoothed {
+        for (i, &c) in ch.iter().enumerate() {
+            if i == 0 || i == 255 {
+                continue;
+            }
+            max = max.max(c);
+        }
+    }
+
+    let colors = [
+        egui::Color32::from_rgba_unmultiplied(255, 70, 70, 120),
+        egui::Color32::from_rgba_unmultiplied(70, 255, 70, 120),
+        egui::Color32::from_rgba_unmultiplied(90, 120, 255, 120),
+    ];
+
+    let x_at = |i: usize| rect.left() + (i as f32 / 255.0) * rect.width();
+    let y_at = |count: f32| {
+        let n = (count / max).min(1.0);
+        rect.bottom() - n * rect.height()
+    };
+
+    for (ch, &color) in smoothed.iter().zip(colors.iter()) {
+        // Each channel is a filled area curve: a triangle strip between the
+        // baseline and the curve top. Translucent fills overlap to brighten,
+        // giving the Lightroom additive look. A brighter polyline traces the top.
+        let mut mesh = egui::Mesh::default();
+        let base = rect.bottom();
+        let mut top_line: Vec<egui::Pos2> = Vec::with_capacity(256);
+        for (i, &count) in ch.iter().enumerate() {
+            let x = x_at(i);
+            let top = y_at(count);
+            top_line.push(egui::pos2(x, top));
+            let idx = mesh.vertices.len() as u32;
+            mesh.colored_vertex(egui::pos2(x, base), color);
+            mesh.colored_vertex(egui::pos2(x, top), color);
+            if i > 0 {
+                let p = idx - 2; // previous (base, top) pair
+                mesh.add_triangle(p, p + 1, idx + 1);
+                mesh.add_triangle(p, idx + 1, idx);
+            }
+        }
+        painter.add(egui::Shape::mesh(mesh));
+        // Crisper top edge.
+        let line_color = color.to_opaque();
+        painter.add(egui::Shape::line(
+            top_line,
+            egui::Stroke::new(1.0, line_color),
+        ));
+    }
 }
 
 /// Clickable 0–5 star rating overlay near the top of the loupe image.
