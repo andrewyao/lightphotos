@@ -6,6 +6,7 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use crate::develop::GpuAdjust;
 use crate::image_decode::DecodedImage;
 
 #[repr(C)]
@@ -37,6 +38,9 @@ pub struct Renderer {
 
     xform_buf: wgpu::Buffer,
     xform_bind: wgpu::BindGroup,
+
+    adj_buf: wgpu::Buffer,
+    adj_bind: wgpu::BindGroup,
 
     /// Bind group for the current image texture (None until first image loads).
     image_bind: Option<wgpu::BindGroup>,
@@ -137,9 +141,27 @@ impl Renderer {
             }],
         });
 
+        let adj_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("adj_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pl"),
-            bind_group_layouts: &[Some(&tex_bind_layout), Some(&xform_bind_layout)],
+            bind_group_layouts: &[
+                Some(&tex_bind_layout),
+                Some(&xform_bind_layout),
+                Some(&adj_bind_layout),
+            ],
             immediate_size: 0,
         });
 
@@ -198,6 +220,20 @@ impl Renderer {
             }],
         });
 
+        let adj_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("adj"),
+            contents: bytemuck::bytes_of(&GpuAdjust::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let adj_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("adj_bg"),
+            layout: &adj_bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: adj_buf.as_entire_binding(),
+            }],
+        });
+
         // egui's wgpu paint backend, built against the same device + surface
         // format so its textures/buffers interoperate with ours. No depth
         // buffer (we render none), single-sampled, one frame in flight.
@@ -214,6 +250,8 @@ impl Renderer {
             tex_bind_layout,
             xform_buf,
             xform_bind,
+            adj_buf,
+            adj_bind,
             image_bind: None,
             image_size: (0, 0),
             max_dim,
@@ -304,6 +342,12 @@ impl Renderer {
         );
     }
 
+    /// Update the non-destructive adjustments uniform.
+    pub fn set_adjustments(&mut self, a: GpuAdjust) {
+        self.queue
+            .write_buffer(&self.adj_buf, 0, bytemuck::bytes_of(&a));
+    }
+
     /// Render one frame: the image pass (optionally confined to `image_viewport`)
     /// followed by the egui pass (if `egui` is `Some`), all in one submission.
     ///
@@ -321,25 +365,41 @@ impl Renderer {
         egui: Option<EguiPaint>,
     ) -> bool {
         use wgpu::CurrentSurfaceTexture as C;
+
+        // Apply egui texture uploads FIRST, before testing surface presentability.
+        // `update_texture` only needs the device/queue (not the surface frame), and
+        // egui's Context emits each allocation delta exactly once. If we dropped it
+        // on an occluded/timeout frame (common while the window is appearing), the
+        // font atlas would never be allocated, and the next frame's incremental
+        // partial update would panic ("texture not allocated yet"). Keeping egui's
+        // texture state in sync every frame — even non-presented ones — avoids that.
+        if let Some(paint) = &egui {
+            for (id, delta) in &paint.textures_delta.set {
+                self.egui_renderer
+                    .update_texture(&self.device, &self.queue, *id, delta);
+            }
+        }
+
         let frame = match self.surface.get_current_texture() {
             C::Success(f) | C::Suboptimal(f) => f,
             C::Outdated | C::Lost => {
                 self.surface.configure(&self.device, &self.config);
+                self.free_egui_textures(&egui);
                 return false;
             }
-            C::Timeout | C::Occluded | C::Validation => return false,
+            C::Timeout | C::Occluded | C::Validation => {
+                self.free_egui_textures(&egui);
+                return false;
+            }
         };
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
 
-        // Upload any egui texture changes before the passes (must precede use).
+        // egui vertex/index buffers for this frame's paint jobs (textures already
+        // uploaded above).
         if let Some(paint) = &egui {
-            for (id, delta) in &paint.textures_delta.set {
-                self.egui_renderer
-                    .update_texture(&self.device, &self.queue, *id, delta);
-            }
             self.egui_renderer.update_buffers(
                 &self.device,
                 &self.queue,
@@ -384,12 +444,14 @@ impl Renderer {
                         pass.set_pipeline(&self.pipeline);
                         pass.set_bind_group(0, image_bind, &[]);
                         pass.set_bind_group(1, &self.xform_bind, &[]);
+                        pass.set_bind_group(2, &self.adj_bind, &[]);
                         pass.draw(0..6, 0..1);
                     }
                 } else {
                     pass.set_pipeline(&self.pipeline);
                     pass.set_bind_group(0, image_bind, &[]);
                     pass.set_bind_group(1, &self.xform_bind, &[]);
+                    pass.set_bind_group(2, &self.adj_bind, &[]);
                     pass.draw(0..6, 0..1);
                 }
             }
@@ -423,12 +485,19 @@ impl Renderer {
         frame.present();
 
         // Free egui textures dropped this frame (after submit, per egui docs).
-        if let Some(paint) = &egui {
+        self.free_egui_textures(&egui);
+        true
+    }
+
+    /// Free any egui textures dropped this frame. Called on both the presented
+    /// path (after submit) and the early-return paths, so egui's texture state
+    /// stays in sync even when the surface wasn't presentable.
+    fn free_egui_textures(&mut self, egui: &Option<EguiPaint>) {
+        if let Some(paint) = egui {
             for id in &paint.textures_delta.free {
                 self.egui_renderer.free_texture(id);
             }
         }
-        true
     }
 }
 

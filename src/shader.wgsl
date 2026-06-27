@@ -11,9 +11,26 @@ struct Transform {
     rot: vec4<f32>,
 };
 
+// Packed tone/crop uniform. Field order MUST match GpuAdjust in develop.rs.
+struct Adjust {
+    exposure: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    temp: f32,
+    tint: f32,
+    crop_l: f32,
+    crop_t: f32,
+    crop_r: f32,
+    crop_b: f32,
+};
+
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(1) @binding(0) var<uniform> xform: Transform;
+@group(2) @binding(0) var<uniform> adj: Adjust;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -45,11 +62,87 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     return out;
 }
 
+// One gamma-space tone op, applied per channel. MUST stay in sync with the
+// `tone` closure in apply_linear in develop.rs.
+fn tone(v: f32) -> f32 {
+    var x = v;
+
+    // Blacks/whites: shift the endpoints. ±100 → ±0.2 endpoint move.
+    let blacks = adj.blacks / 100.0 * 0.2;
+    let whites = adj.whites / 100.0 * 0.2;
+    x = (x - (-blacks)) / ((1.0 + whites) - (-blacks));
+
+    // Contrast: S-curve pivoting at mid-gray. ±100 → ±0.5 strength.
+    let c = adj.contrast / 100.0 * 0.5;
+    if (c != 0.0) {
+        let d = x - 0.5;
+        x = 0.5 + d + c * d * (1.0 - 4.0 * d * d);
+    }
+
+    // Shadows: luminance-masked lift/compress near black.
+    let s = adj.shadows / 100.0 * 0.3;
+    if (s != 0.0) {
+        let mask = pow(1.0 - clamp(x, 0.0, 1.0), 2.0);
+        x = x + s * mask;
+    }
+
+    // Highlights: luminance-masked lift/compress near white.
+    let h = adj.highlights / 100.0 * 0.3;
+    if (h != 0.0) {
+        let mask = pow(clamp(x, 0.0, 1.0), 2.0);
+        x = x + h * mask;
+    }
+
+    return x;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Outside the image (UV beyond 0..1): draw the neutral background.
     if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
         return vec4<f32>(0.12, 0.12, 0.13, 1.0);
     }
-    return textureSample(tex, samp, in.uv);
+    // Outside the crop rectangle: same neutral background (identity crop
+    // 0,0,1,1 never triggers this).
+    if (in.uv.x < adj.crop_l || in.uv.x > adj.crop_r || in.uv.y < adj.crop_t || in.uv.y > adj.crop_b) {
+        return vec4<f32>(0.12, 0.12, 0.13, 1.0);
+    }
+
+    // Sampling an Rgba8UnormSrgb texture returns LINEAR-light RGB.
+    // MUST stay in sync with apply_linear in develop.rs.
+    let texel = textureSample(tex, samp, in.uv);
+    var r = texel.r;
+    var g = texel.g;
+    var b = texel.b;
+
+    // 1. White balance: temp/tint (−100..100) → gentle per-channel gains.
+    let t = adj.temp / 100.0;
+    let ti = adj.tint / 100.0;
+    r = r * (1.0 + t * 0.3);
+    g = g * (1.0 - ti * 0.15);
+    b = b * (1.0 - t * 0.3);
+
+    // 2. Exposure: a stop is a doubling of linear light.
+    let e = exp2(adj.exposure);
+    r = r * e;
+    g = g * e;
+    b = b * e;
+
+    // 3. Linear → working gamma (clamp negatives first).
+    r = pow(max(r, 0.0), 1.0 / 2.2);
+    g = pow(max(g, 0.0), 1.0 / 2.2);
+    b = pow(max(b, 0.0), 1.0 / 2.2);
+
+    // 4. Perceptual tone ops in gamma space.
+    r = tone(r);
+    g = tone(g);
+    b = tone(b);
+
+    // 5. Working → linear.
+    r = pow(max(r, 0.0), 2.2);
+    g = pow(max(g, 0.0), 2.2);
+    b = pow(max(b, 0.0), 2.2);
+
+    // 6. Clamp final to 0..1, preserve sampled alpha.
+    return vec4<f32>(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), texel.a);
 }

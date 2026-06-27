@@ -1,12 +1,15 @@
 #![allow(dead_code)] // TODO: remove once wired into App (T5)
 
-//! Global ratings catalog — the persistence layer for 1–5 star ratings.
+//! Global edits catalog — the persistence layer for ratings + develop edits.
 //!
-//! Ratings live in ONE app-managed JSON file at
+//! Everything lives in ONE app-managed JSON file at
 //! `~/Library/Application Support/com.imageviewer/catalog.json`. Originals are
 //! never touched and nothing is ever written into photo folders.
 //!
-//! Schema: `{ "version": 1, "ratings": { "<abs canonical path>": 1..=5 } }`.
+//! Schema v2: `{ "version": 2, "images": { "<abs canonical path>": ImageRecord } }`
+//! where `ImageRecord` carries an optional rating and (when non-identity) the
+//! develop `Adjustments`. v1 files (`{ "version": 1, "ratings": {...} }`) are
+//! migrated on load.
 //!
 //! Path keys are normalized via `canonicalize()` when it succeeds, else the
 //! path is used as-given (so nonexistent / moved files don't panic).
@@ -16,19 +19,47 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const CATALOG_VERSION: u32 = 1;
+use crate::develop::Adjustments;
+
+const CATALOG_VERSION: u32 = 2;
 const CATALOG_FILE: &str = "catalog.json";
 
-/// On-disk JSON shape. Kept private; `Catalog` is the public API.
+/// Per-image persisted state: an optional rating plus develop edits. Identity
+/// adjustments are skipped on write so unedited (but rated) images stay compact.
+#[derive(Serialize, Deserialize, Default, Clone)]
+pub struct ImageRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rating: Option<u8>,
+    #[serde(default, skip_serializing_if = "Adjustments::is_identity")]
+    pub adjustments: Adjustments,
+}
+
+impl ImageRecord {
+    /// True when this record carries nothing worth persisting (no rating and an
+    /// identity edit) — such entries are dropped to keep the file small.
+    fn is_empty(&self) -> bool {
+        self.rating.is_none() && self.adjustments.is_identity()
+    }
+}
+
+/// On-disk JSON shape for schema v2. Kept private; `Catalog` is the public API.
 #[derive(Serialize, Deserialize)]
 struct CatalogFile {
+    version: u32,
+    images: HashMap<PathBuf, ImageRecord>,
+}
+
+/// On-disk JSON shape for schema v1 (ratings only). Read only for migration.
+#[derive(Deserialize)]
+struct CatalogFileV1 {
+    #[allow(dead_code)]
     version: u32,
     ratings: HashMap<PathBuf, u8>,
 }
 
-/// In-memory ratings catalog, backed by a single JSON file.
+/// In-memory catalog of per-image records, backed by a single JSON file.
 pub struct Catalog {
-    ratings: HashMap<PathBuf, u8>,
+    images: HashMap<PathBuf, ImageRecord>,
     /// Directory holding `catalog.json` (created lazily on first write).
     dir: PathBuf,
     /// Full path to `catalog.json`.
@@ -46,41 +77,62 @@ impl Catalog {
     /// Load the catalog rooted at an explicit directory.
     ///
     /// Same semantics as [`Catalog::load`] but lets tests point at a temp dir
-    /// so they never touch the real catalog.
+    /// so they never touch the real catalog. Handles absent, v1, and v2 files;
+    /// anything malformed degrades to an empty catalog.
     pub fn with_dir(dir: PathBuf) -> Catalog {
         let file = dir.join(CATALOG_FILE);
-        let ratings = match std::fs::read(&file) {
-            Ok(bytes) => match serde_json::from_slice::<CatalogFile>(&bytes) {
-                Ok(parsed) => parsed.ratings,
-                Err(e) => {
-                    eprintln!(
-                        "[catalog] ignoring corrupt catalog at {}: {e}",
-                        file.display()
-                    );
-                    HashMap::new()
-                }
-            },
+        let images = match std::fs::read(&file) {
+            Ok(bytes) => parse_catalog(&bytes).unwrap_or_else(|e| {
+                eprintln!(
+                    "[catalog] ignoring corrupt catalog at {}: {e}",
+                    file.display()
+                );
+                HashMap::new()
+            }),
             // Missing file (or any read error) → start empty.
             Err(_) => HashMap::new(),
         };
-        Catalog { ratings, dir, file }
+        Catalog { images, dir, file }
     }
 
     /// Rating for `path`, if any. Path is normalized the same way as `set`.
     pub fn get(&self, path: &Path) -> Option<u8> {
-        self.ratings.get(&normalize(path)).copied()
+        self.images.get(&normalize(path)).and_then(|r| r.rating)
     }
 
     /// Set the rating for `path`, clamped to `0..=5`. A rating of `0` removes
-    /// the entry. The whole catalog is then persisted atomically (temp file in
-    /// the same dir + `fs::rename`). IO errors are logged, never panic.
+    /// the rating. If the record ends up empty (no rating + identity edit) the
+    /// whole entry is dropped. The catalog is then persisted atomically.
     pub fn set(&mut self, path: &Path, stars: u8) {
         let key = normalize(path);
         let stars = stars.min(5);
-        if stars == 0 {
-            self.ratings.remove(&key);
-        } else {
-            self.ratings.insert(key, stars);
+        let rating = if stars == 0 { None } else { Some(stars) };
+        self.update(key, |rec| rec.rating = rating);
+    }
+
+    /// Develop adjustments for `path` (identity when unset).
+    pub fn adjustments(&self, path: &Path) -> Adjustments {
+        self.images
+            .get(&normalize(path))
+            .map(|r| r.adjustments)
+            .unwrap_or_default()
+    }
+
+    /// Store develop adjustments for `path`. If the record ends up empty (no
+    /// rating + identity edit) the entry is dropped. Persisted atomically.
+    pub fn set_adjustments(&mut self, path: &Path, adj: &Adjustments) {
+        let key = normalize(path);
+        let adj = *adj;
+        self.update(key, |rec| rec.adjustments = adj);
+    }
+
+    /// Apply `mutate` to the record for `key` (creating it if needed), drop the
+    /// entry if it became empty, then persist.
+    fn update(&mut self, key: PathBuf, mutate: impl FnOnce(&mut ImageRecord)) {
+        let mut rec = self.images.remove(&key).unwrap_or_default();
+        mutate(&mut rec);
+        if !rec.is_empty() {
+            self.images.insert(key, rec);
         }
         if let Err(e) = self.persist() {
             eprintln!(
@@ -96,7 +148,7 @@ impl Catalog {
 
         let snapshot = CatalogFile {
             version: CATALOG_VERSION,
-            ratings: self.ratings.clone(),
+            images: self.images.clone(),
         };
         let json = serde_json::to_vec_pretty(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
@@ -109,6 +161,36 @@ impl Catalog {
         std::fs::write(&tmp, &json)?;
         std::fs::rename(&tmp, &self.file)?;
         Ok(())
+    }
+}
+
+/// Parse catalog bytes, migrating v1 → v2 as needed. Returns the in-memory
+/// `images` map, or an error if the bytes are not valid catalog JSON.
+fn parse_catalog(bytes: &[u8]) -> serde_json::Result<HashMap<PathBuf, ImageRecord>> {
+    // Peek at `version` to decide how to interpret the rest.
+    let value: serde_json::Value = serde_json::from_slice(bytes)?;
+    let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    if version >= 2 {
+        let parsed: CatalogFile = serde_json::from_value(value)?;
+        Ok(parsed.images)
+    } else {
+        // v1 (or version-less with a `ratings` map) → migrate ratings into records.
+        let parsed: CatalogFileV1 = serde_json::from_value(value)?;
+        let images = parsed
+            .ratings
+            .into_iter()
+            .map(|(path, stars)| {
+                (
+                    path,
+                    ImageRecord {
+                        rating: Some(stars),
+                        adjustments: Adjustments::default(),
+                    },
+                )
+            })
+            .collect();
+        Ok(images)
     }
 }
 
@@ -193,6 +275,118 @@ mod tests {
 
         let reloaded = Catalog::with_dir(dir.clone());
         assert_eq!(reloaded.get(&p), Some(5));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn migrates_v1_ratings_to_v2() {
+        let dir = unique_tmp_dir();
+        let file = dir.join(CATALOG_FILE);
+        let p = dir.join("photo.jpg");
+        let key = normalize(&p);
+
+        // Hand-write a v1 file.
+        let v1 = serde_json::json!({
+            "version": 1,
+            "ratings": { key.to_str().unwrap(): 4u8 },
+        });
+        std::fs::write(&file, serde_json::to_vec_pretty(&v1).unwrap()).unwrap();
+
+        // Load migrates the rating; a mutation rewrites the file as v2.
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            assert_eq!(cat.get(&p), Some(4));
+            cat.set(&p, 4); // trigger a save in v2 shape
+        }
+
+        let on_disk = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            on_disk.contains("\"version\": 2"),
+            "expected version 2 after save, got: {on_disk}"
+        );
+        let reloaded = Catalog::with_dir(dir.clone());
+        assert_eq!(reloaded.get(&p), Some(4));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn adjustments_persist_across_reload() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+
+        let mut adj = Adjustments::default();
+        adj.exposure = 1.5;
+        adj.contrast = 25.0;
+
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            cat.set_adjustments(&p, &adj);
+            assert_eq!(cat.adjustments(&p), adj);
+        }
+
+        let reloaded = Catalog::with_dir(dir.clone());
+        assert_eq!(reloaded.adjustments(&p), adj);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn identity_adjustments_not_serialized() {
+        let dir = unique_tmp_dir();
+        let file = dir.join(CATALOG_FILE);
+        let p = dir.join("photo.jpg");
+
+        // A rated image with identity edits: must serialize the rating but no
+        // `adjustments` key.
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            cat.set(&p, 2);
+        }
+        let on_disk = std::fs::read_to_string(&file).unwrap();
+        assert!(on_disk.contains("\"rating\""), "rating should serialize");
+        assert!(
+            !on_disk.contains("adjustments"),
+            "identity adjustments must not serialize, got: {on_disk}"
+        );
+
+        // Now give it a non-identity edit: `adjustments` should appear.
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            let mut adj = Adjustments::default();
+            adj.shadows = 40.0;
+            cat.set_adjustments(&p, &adj);
+        }
+        let on_disk = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            on_disk.contains("adjustments"),
+            "non-identity adjustments must serialize, got: {on_disk}"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rating_and_adjustments_coexist() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+
+        let mut adj = Adjustments::default();
+        adj.temp = -30.0;
+        adj.whites = 15.0;
+
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            cat.set(&p, 5);
+            cat.set_adjustments(&p, &adj);
+            assert_eq!(cat.get(&p), Some(5));
+            assert_eq!(cat.adjustments(&p), adj);
+        }
+
+        let reloaded = Catalog::with_dir(dir.clone());
+        assert_eq!(reloaded.get(&p), Some(5));
+        assert_eq!(reloaded.adjustments(&p), adj);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
