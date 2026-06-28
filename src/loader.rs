@@ -99,13 +99,27 @@ impl Loader {
                         }
                     };
 
+                    // Decode on a background thread can panic (e.g. an
+                    // unexpected state across the ImageIO FFI boundary). Catch it
+                    // so the worker survives and, crucially, so the path still
+                    // gets a result and is cleared from the caller's in-flight set
+                    // instead of spinning forever. AssertUnwindSafe: a panic here
+                    // leaves no shared state in an observably broken condition.
                     let result = match job {
                         Job::Full(path) => {
-                            let r = image_decode::decode(&path, max_dim);
+                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                image_decode::decode(&path, max_dim)
+                            }))
+                            .unwrap_or_else(|_| Err(format!("decode panicked: {}", path.display())));
                             JobResult::Full(path, r)
                         }
                         Job::Thumb(path, max_px) => {
-                            let r = thumbs.get_or_make(&path, max_px);
+                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                thumbs.get_or_make(&path, max_px)
+                            }))
+                            .unwrap_or_else(|_| {
+                                Err(format!("thumbnail panicked: {}", path.display()))
+                            });
                             JobResult::Thumb(path, max_px, r)
                         }
                     };
