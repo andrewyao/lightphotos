@@ -36,7 +36,7 @@ pub struct Crop {
 ///
 /// Every f32 field is `skip_serializing_if` zero so an identity image serializes
 /// to an empty object; combined with `is_identity()` the catalog omits it entirely.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 pub struct Adjustments {
     /// White-balance temperature, −100 (cool) ..=100 (warm).
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -67,35 +67,13 @@ pub struct Adjustments {
     pub crop: Option<Crop>,
 }
 
-impl Default for Adjustments {
-    fn default() -> Self {
-        Self {
-            temp: 0.0,
-            tint: 0.0,
-            exposure: 0.0,
-            contrast: 0.0,
-            highlights: 0.0,
-            shadows: 0.0,
-            whites: 0.0,
-            blacks: 0.0,
-            crop: None,
-        }
-    }
-}
-
 impl Adjustments {
     /// True when this edit is the identity (all tone fields zero, no crop). Used
-    /// by the catalog's `skip_serializing_if` to keep identity images out of the file.
+    /// by the catalog's `skip_serializing_if` to keep identity images out of the
+    /// file. Compares against the derived default so new fields can never be
+    /// forgotten here.
     pub fn is_identity(&self) -> bool {
-        self.temp == 0.0
-            && self.tint == 0.0
-            && self.exposure == 0.0
-            && self.contrast == 0.0
-            && self.highlights == 0.0
-            && self.shadows == 0.0
-            && self.whites == 0.0
-            && self.blacks == 0.0
-            && self.crop.is_none()
+        *self == Self::default()
     }
 }
 
