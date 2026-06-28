@@ -133,6 +133,35 @@ pub fn grid_move(pos: usize, len: usize, cols: usize, dx: isize, dy: isize) -> u
     p.clamp(0, len as isize - 1) as usize
 }
 
+/// The folder tree as a flat, top-to-bottom list of the rows currently visible
+/// in the sidebar: `root` first, then a DFS pre-order walk that descends only
+/// into expanded folders. This is the order arrow-key navigation moves through.
+/// `is_expanded` reports whether a folder is open; `children` returns its
+/// immediate subdirectories (already sorted). Pure so it can be unit-tested
+/// independent of the filesystem and egui layout.
+pub fn flatten_visible_tree(
+    root: &Path,
+    is_expanded: &impl Fn(&Path) -> bool,
+    children: &impl Fn(&Path) -> Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    fn walk(
+        node: &Path,
+        is_expanded: &impl Fn(&Path) -> bool,
+        children: &impl Fn(&Path) -> Vec<PathBuf>,
+        out: &mut Vec<PathBuf>,
+    ) {
+        out.push(node.to_path_buf());
+        if is_expanded(node) {
+            for child in children(node) {
+                walk(&child, is_expanded, children, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, is_expanded, children, &mut out);
+    out
+}
+
 /// The set of images in a folder plus the index of the current one.
 pub struct Playlist {
     entries: Vec<PathBuf>,
@@ -239,6 +268,38 @@ mod tests {
         assert_eq!(grid_move(5, 7, 3, 0, 1), 6); // down clamps to last item
         assert_eq!(grid_move(0, 0, 3, 1, 0), 0); // empty list
         assert_eq!(grid_move(2, 7, 0, 1, 0), 3); // cols=0 treated as 1
+    }
+
+    #[test]
+    fn flatten_visible_tree_walks_expanded_dfs() {
+        // Tree:  root -> [a -> [a1, a2], b]
+        let kids = |p: &Path| match p.to_str().unwrap() {
+            "root" => paths(&["root/a", "root/b"]),
+            "root/a" => paths(&["root/a/a1", "root/a/a2"]),
+            _ => vec![],
+        };
+
+        // Collapsed root: just the root row.
+        let none = |_: &Path| false;
+        assert_eq!(
+            flatten_visible_tree(Path::new("root"), &none, &kids),
+            paths(&["root"])
+        );
+
+        // Root expanded, children collapsed: root + its two immediate children.
+        let only_root = |p: &Path| p == Path::new("root");
+        assert_eq!(
+            flatten_visible_tree(Path::new("root"), &only_root, &kids),
+            paths(&["root", "root/a", "root/b"])
+        );
+
+        // root and `a` expanded: a's subtree appears before sibling b (pre-order).
+        let root_and_a =
+            |p: &Path| p == Path::new("root") || p == Path::new("root/a");
+        assert_eq!(
+            flatten_visible_tree(Path::new("root"), &root_and_a, &kids),
+            paths(&["root", "root/a", "root/a/a1", "root/a/a2", "root/b"])
+        );
     }
 
     #[test]

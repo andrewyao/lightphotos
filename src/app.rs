@@ -20,7 +20,7 @@ use winit::window::Window;
 use crate::catalog::Catalog;
 use crate::develop::{self, Adjustments, GpuAdjust};
 use crate::loader::Loader;
-use crate::navigation::{self, visible_indices, Cmp, Playlist};
+use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp, Playlist};
 use crate::renderer::{EguiPaint, Renderer};
 use crate::{image_decode, ui};
 
@@ -33,11 +33,28 @@ const THUMB_MAX: u32 = 512;
 const THUMB_DEFAULT: u32 = 192;
 const THUMB_STEP: u32 = 32;
 
+/// Number of Develop sliders the keyboard cycles through (panel order: temp,
+/// tint, exposure, contrast, highlights, shadows, whites, blacks).
+const DEVELOP_SLIDERS: usize = 8;
+
 /// Two top-level views: a thumbnail Grid and a single-image Loupe.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ViewMode {
     Grid,
     Loupe,
+}
+
+/// The UI region that currently receives arrow/Enter keys. Following
+/// Lightroom, this is *not* moved by Tab (Tab hides/shows panels); it's driven
+/// by the mouse (clicking into a panel) and by the module (Grid vs Loupe). The
+/// content region of each mode — `Grid` / `Filmstrip` — is always available and
+/// is the fallback when focus lands on a region that isn't currently shown.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Region {
+    Folders,
+    Grid,
+    Filmstrip,
+    Develop,
 }
 
 /// What the loupe currently has uploaded to the GPU. The decode *target* is
@@ -157,6 +174,21 @@ pub(crate) struct App {
     /// Lazily-cached immediate subdirectories, one `list_subdirs` per folder.
     subdirs: HashMap<PathBuf, Vec<PathBuf>>,
 
+    // ---- Keyboard focus state ----
+    /// Which UI region currently receives arrow/Enter keys. Set by clicks and
+    /// module changes (Lightroom-style), never by Tab.
+    focus: Region,
+    /// Tab hides the side panels (folders left, develop right).
+    side_panels_hidden: bool,
+    /// Shift+Tab hides all panels (side panels + filmstrip).
+    all_panels_hidden: bool,
+    /// Keyboard cursor in the folder tree (the highlighted-for-navigation row),
+    /// distinct from `folder_sel` (the folder whose images are loaded). A
+    /// `PathBuf` so it survives the tree re-flattening on expand/collapse.
+    folder_cursor: Option<PathBuf>,
+    /// Index of the keyboard-focused Develop slider (0..=7, panel order).
+    develop_focus: usize,
+
     // ---- Input state ----
     pub(crate) cursor: (f64, f64),
     pub(crate) modifiers: ModifiersState,
@@ -209,6 +241,11 @@ impl App {
             folder_sel: None,
             expanded: HashSet::new(),
             subdirs: HashMap::new(),
+            focus: Region::Grid,
+            side_panels_hidden: false,
+            all_panels_hidden: false,
+            folder_cursor: None,
+            develop_focus: 0,
             cursor: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
             space_down: false,
@@ -413,7 +450,254 @@ impl App {
         self.mode = ViewMode::Loupe;
         self.load_selected();
         self.request_neighbors();
+        self.normalize_focus();
         self.request_redraw();
+    }
+
+    // ---- Keyboard focus & panel visibility ----
+
+    /// Whether the left folder-tree panel is currently shown.
+    pub(crate) fn folders_visible(&self) -> bool {
+        !self.side_panels_hidden && !self.all_panels_hidden
+    }
+
+    /// Whether the right Develop panel is currently shown (Loupe only).
+    pub(crate) fn develop_visible(&self) -> bool {
+        self.develop_open && !self.side_panels_hidden && !self.all_panels_hidden
+    }
+
+    /// Whether the bottom filmstrip is currently shown (Loupe only).
+    pub(crate) fn filmstrip_visible(&self) -> bool {
+        !self.all_panels_hidden
+    }
+
+    /// Whether a region can receive keyboard focus right now. The content regions
+    /// (`Grid` in the grid, `Filmstrip` in the loupe) are always available — their
+    /// arrows act on the images even when the strip panel is hidden. Side regions
+    /// are available only while their panel is shown.
+    fn region_available(&self, r: Region) -> bool {
+        match r {
+            Region::Grid => self.mode == ViewMode::Grid,
+            Region::Filmstrip => self.mode == ViewMode::Loupe,
+            Region::Folders => self.folders_visible(),
+            Region::Develop => self.mode == ViewMode::Loupe && self.develop_visible(),
+        }
+    }
+
+    /// Snap focus to a valid region when the current one isn't available (after a
+    /// mode switch, or when its panel was hidden). Defaults to the mode's content
+    /// region — Grid or Filmstrip — so focus lands on the images, not a sidebar.
+    fn normalize_focus(&mut self) {
+        if self.region_available(self.focus) {
+            return;
+        }
+        self.focus = match self.mode {
+            ViewMode::Grid => Region::Grid,
+            ViewMode::Loupe => Region::Filmstrip,
+        };
+        self.on_focus_changed();
+    }
+
+    /// Tab: hide/show the side panels (folders + develop), Lightroom-style.
+    fn toggle_side_panels(&mut self) {
+        self.side_panels_hidden = !self.side_panels_hidden;
+        self.normalize_focus();
+        self.request_redraw();
+    }
+
+    /// Shift+Tab: hide/show all panels (side panels + filmstrip).
+    fn toggle_all_panels(&mut self) {
+        self.all_panels_hidden = !self.all_panels_hidden;
+        self.normalize_focus();
+        self.request_redraw();
+    }
+
+    /// Hook run whenever focus changes region. Seeds the folder cursor when focus
+    /// lands on the tree, and resets the Develop cursor to the first slider.
+    fn on_focus_changed(&mut self) {
+        match self.focus {
+            Region::Folders => self.seed_folder_cursor(),
+            Region::Develop => self.develop_focus = 0,
+            _ => {}
+        }
+    }
+
+    /// The folder tree flattened to its currently-visible rows (DFS over expanded
+    /// folders), top to bottom — the order folder arrow-nav moves through.
+    fn visible_tree(&self) -> Vec<PathBuf> {
+        let Some(root) = self.folder_root.clone() else {
+            return Vec::new();
+        };
+        let is_expanded = |p: &Path| self.expanded.contains(p);
+        let children = |p: &Path| self.subdirs.get(p).cloned().unwrap_or_default();
+        flatten_visible_tree(&root, &is_expanded, &children)
+    }
+
+    /// Ensure the folder cursor points at a currently-visible row, preferring the
+    /// loaded folder and falling back to the tree root.
+    fn seed_folder_cursor(&mut self) {
+        let tree = self.visible_tree();
+        let valid = self
+            .folder_cursor
+            .as_ref()
+            .map(|c| tree.iter().any(|p| p == c))
+            .unwrap_or(false);
+        if valid {
+            return;
+        }
+        self.folder_cursor = self
+            .folder_sel
+            .clone()
+            .filter(|s| tree.iter().any(|p| p == s))
+            .or_else(|| self.folder_root.clone());
+    }
+
+    /// Move the folder cursor by `delta` rows within the visible tree (clamped).
+    fn folder_move(&mut self, delta: isize) {
+        let tree = self.visible_tree();
+        if tree.is_empty() {
+            return;
+        }
+        let cur = self
+            .folder_cursor
+            .as_ref()
+            .and_then(|c| tree.iter().position(|p| p == c))
+            .unwrap_or(0);
+        let next = (cur as isize + delta).clamp(0, tree.len() as isize - 1) as usize;
+        self.folder_cursor = Some(tree[next].clone());
+        self.request_redraw();
+    }
+
+    /// Right-arrow in the tree: expand the cursor folder, or descend into its
+    /// first child if already expanded. A no-op on a childless folder.
+    fn folder_expand(&mut self) {
+        let Some(cursor) = self.folder_cursor.clone() else {
+            return;
+        };
+        self.ensure_subdirs(&cursor);
+        if self.subdirs(&cursor).is_empty() {
+            return; // leaf
+        }
+        if self.expanded.contains(&cursor) {
+            if let Some(first) = self.subdirs(&cursor).first().cloned() {
+                self.folder_cursor = Some(first);
+            }
+        } else {
+            self.expanded.insert(cursor);
+        }
+        self.request_redraw();
+    }
+
+    /// Left-arrow in the tree: collapse the cursor folder if open, else move the
+    /// cursor up to its parent (stopping at the root).
+    fn folder_collapse(&mut self) {
+        let Some(cursor) = self.folder_cursor.clone() else {
+            return;
+        };
+        if self.expanded.contains(&cursor) {
+            self.expanded.remove(&cursor);
+        } else if Some(cursor.as_path()) != self.folder_root.as_deref() {
+            if let Some(parent) = cursor.parent() {
+                self.folder_cursor = Some(parent.to_path_buf());
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Enter in the tree: toggle the cursor folder's expansion (when it has
+    /// children) and load its images into the grid.
+    fn folder_enter(&mut self) {
+        let Some(cursor) = self.folder_cursor.clone() else {
+            return;
+        };
+        self.ensure_subdirs(&cursor);
+        if !self.subdirs(&cursor).is_empty() {
+            if self.expanded.contains(&cursor) {
+                self.expanded.remove(&cursor);
+            } else {
+                self.expanded.insert(cursor.clone());
+            }
+        }
+        self.load_folder(cursor);
+        self.mode = ViewMode::Grid;
+        self.update_window_title();
+        self.normalize_focus();
+        self.request_redraw();
+    }
+
+    // ---- Focus-routed arrow / Enter dispatchers ----
+
+    fn nav_left(&mut self) {
+        match self.focus {
+            Region::Folders => self.folder_collapse(),
+            Region::Grid => self.move_grid(-1, 0),
+            Region::Filmstrip => self.step_loupe(false),
+            Region::Develop => self.develop_adjust(-1),
+        }
+    }
+
+    fn nav_right(&mut self) {
+        match self.focus {
+            Region::Folders => self.folder_expand(),
+            Region::Grid => self.move_grid(1, 0),
+            Region::Filmstrip => self.step_loupe(true),
+            Region::Develop => self.develop_adjust(1),
+        }
+    }
+
+    fn nav_up(&mut self) {
+        match self.focus {
+            Region::Folders => self.folder_move(-1),
+            Region::Grid => self.move_grid(0, -1),
+            Region::Filmstrip => self.step_loupe(false),
+            Region::Develop => self.develop_move(-1),
+        }
+    }
+
+    fn nav_down(&mut self) {
+        match self.focus {
+            Region::Folders => self.folder_move(1),
+            Region::Grid => self.move_grid(0, 1),
+            Region::Filmstrip => self.step_loupe(true),
+            Region::Develop => self.develop_move(1),
+        }
+    }
+
+    fn nav_enter(&mut self) {
+        match self.focus {
+            Region::Folders => self.folder_enter(),
+            Region::Grid => self.enter_loupe(),
+            // Filmstrip / Develop: Enter has no distinct action.
+            _ => {}
+        }
+    }
+
+    /// Move the Develop slider cursor by `delta` (clamped to 0..=7).
+    fn develop_move(&mut self, delta: isize) {
+        let max = DEVELOP_SLIDERS as isize - 1;
+        self.develop_focus = (self.develop_focus as isize + delta).clamp(0, max) as usize;
+        self.request_redraw();
+    }
+
+    /// Nudge the focused Develop slider's value (`dir` = -1/+1) by one step and
+    /// apply it. Tone fields step ±1 (200-unit span, integer display); exposure
+    /// steps ±0.05 (10-stop span, two-decimal display).
+    fn develop_adjust(&mut self, dir: isize) {
+        let mut adj = self.current_adjustments();
+        let sign = dir as f32;
+        let (field, range, step): (&mut f32, std::ops::RangeInclusive<f32>, f32) =
+            match self.develop_focus {
+                0 => (&mut adj.temp, develop::TONE_RANGE, 1.0),
+                1 => (&mut adj.tint, develop::TONE_RANGE, 1.0),
+                2 => (&mut adj.exposure, develop::EXPOSURE_RANGE, 0.05),
+                3 => (&mut adj.contrast, develop::TONE_RANGE, 1.0),
+                4 => (&mut adj.highlights, develop::TONE_RANGE, 1.0),
+                5 => (&mut adj.shadows, develop::TONE_RANGE, 1.0),
+                6 => (&mut adj.whites, develop::TONE_RANGE, 1.0),
+                _ => (&mut adj.blacks, develop::TONE_RANGE, 1.0),
+            };
+        *field = (*field + sign * step).clamp(*range.start(), *range.end());
+        self.apply_adjustments(adj);
     }
 
     /// Set the rating of the selected/shown image; recompute the view if the
@@ -561,6 +845,25 @@ impl App {
             .and_then(|p| self.edits.get(p))
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Persist and apply `adj` to the currently-shown image: update the in-memory
+    /// edits map (dropping identity edits), write the catalog, push to the GPU
+    /// uniform, and mark the histogram dirty. Shared by the Develop sliders
+    /// (`SetAdjustments`) and the keyboard slider nudges (`develop_adjust`).
+    fn apply_adjustments(&mut self, adj: Adjustments) {
+        let Some(path) = self.shown.path().map(Path::to_path_buf) else {
+            return;
+        };
+        if adj.is_identity() {
+            self.edits.remove(&path);
+        } else {
+            self.edits.insert(path.clone(), adj);
+        }
+        self.catalog.set_adjustments(&path, &adj);
+        self.push_adjustments();
+        self.hist_dirty = true;
+        self.request_redraw();
     }
 
     /// Push the current image's adjustments into the renderer uniform. Mirrors
@@ -717,6 +1020,18 @@ impl App {
         self.pan.0 = cx - ipx * new_zoom;
         self.pan.1 = cy - ipy * new_zoom;
         self.zoom = new_zoom;
+
+        // Once an axis fully fits in the viewport, keep the image centered on that
+        // axis so the surrounding gap stays even (matches `center()`).
+        let (iw, ih) = self.display_size();
+        let (ww, wh) = self.loupe_area();
+        if iw * new_zoom <= ww {
+            self.pan.0 = (ww - iw * new_zoom) / 2.0;
+        }
+        if ih * new_zoom <= wh {
+            self.pan.1 = (wh - ih * new_zoom) / 2.0;
+        }
+
         self.fitted = false;
         self.push_transform();
     }
@@ -980,9 +1295,17 @@ impl App {
                     // to the grid so picking a folder from the loupe sidebar lands
                     // on its contents rather than a stale loupe image.
                     self.ensure_subdirs(&p);
+                    self.folder_cursor = Some(p.clone());
                     self.load_folder(p);
                     self.mode = ViewMode::Grid;
                     self.update_window_title();
+                    self.normalize_focus();
+                }
+                ui::UiAction::Focus(region) => {
+                    self.focus = region;
+                    self.normalize_focus();
+                    self.on_focus_changed();
+                    self.request_redraw();
                 }
                 ui::UiAction::ToggleFolder(p) => {
                     if self.expanded.contains(&p) {
@@ -991,20 +1314,12 @@ impl App {
                         self.expanded.insert(p.clone());
                         self.ensure_subdirs(&p);
                     }
+                    // Place the keyboard cursor on the toggled row so it follows
+                    // the click (the paired Focus(Folders) seeds only if unset).
+                    self.folder_cursor = Some(p);
                     self.request_redraw();
                 }
-                ui::UiAction::SetAdjustments(adj) => {
-                    let Some(path) = self.shown.path().map(Path::to_path_buf) else { continue };
-                    if adj.is_identity() {
-                        self.edits.remove(&path);
-                    } else {
-                        self.edits.insert(path.clone(), adj);
-                    }
-                    self.catalog.set_adjustments(&path, &adj);
-                    self.push_adjustments();
-                    self.hist_dirty = true;
-                    self.request_redraw();
-                }
+                ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
                 ui::UiAction::ResetAdjustments => {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else { continue };
                     self.edits.remove(&path);
@@ -1022,6 +1337,22 @@ impl App {
 impl App {
     pub(crate) fn mode(&self) -> ViewMode {
         self.mode
+    }
+
+    /// The keyboard-focused region (lit panel, arrow-key target).
+    pub(crate) fn focus(&self) -> Region {
+        self.focus
+    }
+
+    /// The folder-tree keyboard cursor (the row navigation highlights), distinct
+    /// from `folder_sel` (the loaded folder).
+    pub(crate) fn folder_cursor(&self) -> Option<PathBuf> {
+        self.folder_cursor.clone()
+    }
+
+    /// The index of the keyboard-focused Develop slider (0..=7).
+    pub(crate) fn develop_focus(&self) -> usize {
+        self.develop_focus
     }
 
     /// The root of the folder tree (the opened folder, or a file's parent).
@@ -1056,10 +1387,6 @@ impl App {
         self.thumb_px
     }
 
-    /// Whether the loupe Develop panel is open.
-    pub(crate) fn develop_open(&self) -> bool {
-        self.develop_open
-    }
 
     /// Position of the current selection within `visible`, or `None` in the
     /// grid's browse-first state (before any click/arrow).
@@ -1157,48 +1484,52 @@ impl App {
             KeyCode::BracketLeft if cmd && self.mode == ViewMode::Loupe => self.rotate(false),
             KeyCode::BracketRight if cmd && self.mode == ViewMode::Loupe => self.rotate(true),
 
+            // Tab hides/shows the side panels; Shift+Tab hides/shows all panels
+            // (Lightroom-style). Focus is never moved by Tab.
+            KeyCode::Tab => {
+                if shift {
+                    self.toggle_all_panels();
+                } else {
+                    self.toggle_side_panels();
+                }
+            }
+
             KeyCode::KeyG => {
                 if self.mode != ViewMode::Grid {
                     self.mode = ViewMode::Grid;
                     self.update_window_title();
+                    self.normalize_focus();
                     self.request_redraw();
                 }
             }
-            KeyCode::KeyE | KeyCode::Enter | KeyCode::NumpadEnter => {
+            // `E` is the focus-independent "enter loupe" edit key (Lightroom).
+            KeyCode::KeyE => {
                 if self.mode == ViewMode::Grid {
                     self.enter_loupe();
                 }
             }
+            // Enter is focus-dependent (open image / expand folder / …).
+            KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
             // `D` toggles the Develop panel (Loupe only).
             KeyCode::KeyD if self.mode == ViewMode::Loupe => {
                 self.develop_open = !self.develop_open;
+                self.normalize_focus();
                 self.request_redraw();
             }
             KeyCode::Escape => match self.mode {
                 ViewMode::Loupe => {
                     self.mode = ViewMode::Grid;
                     self.update_window_title();
+                    self.normalize_focus();
                     self.request_redraw();
                 }
                 ViewMode::Grid => event_loop.exit(),
             },
 
-            KeyCode::ArrowLeft => match self.mode {
-                ViewMode::Grid => self.move_grid(-1, 0),
-                ViewMode::Loupe => self.step_loupe(false),
-            },
-            KeyCode::ArrowRight => match self.mode {
-                ViewMode::Grid => self.move_grid(1, 0),
-                ViewMode::Loupe => self.step_loupe(true),
-            },
-            KeyCode::ArrowUp => match self.mode {
-                ViewMode::Grid => self.move_grid(0, -1),
-                ViewMode::Loupe => self.step_loupe(false),
-            },
-            KeyCode::ArrowDown => match self.mode {
-                ViewMode::Grid => self.move_grid(0, 1),
-                ViewMode::Loupe => self.step_loupe(true),
-            },
+            KeyCode::ArrowLeft => self.nav_left(),
+            KeyCode::ArrowRight => self.nav_right(),
+            KeyCode::ArrowUp => self.nav_up(),
+            KeyCode::ArrowDown => self.nav_down(),
 
             // `\` toggles the filter bar.
             KeyCode::Backslash => {
@@ -1236,3 +1567,4 @@ fn digit_of(code: KeyCode) -> Option<u8> {
         _ => return None,
     })
 }
+

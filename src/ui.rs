@@ -12,7 +12,7 @@ use std::path::Path;
 
 use crate::develop::Adjustments;
 use crate::navigation::Cmp;
-use crate::app::{App, ViewMode};
+use crate::app::{App, Region, ViewMode};
 
 /// Shared palette. Several of these colors were previously duplicated as inline
 /// `from_rgb(...)` literals across the grid and filmstrip cells; naming them
@@ -25,6 +25,9 @@ mod theme {
     pub const SELECTION_BLUE: Color32 = Color32::from_rgb(90, 160, 255);
     /// Background tint behind the selected/active cell.
     pub const SELECTION_BG: Color32 = Color32::from_rgb(40, 80, 140);
+    /// Keyboard-cursor outline (amber) — distinct from the blue mouse selection,
+    /// used for the folder-tree cursor and the focused Develop slider.
+    pub const CURSOR_AMBER: Color32 = Color32::from_rgb(255, 190, 90);
 }
 
 /// An action the UI wants `App` to perform after the frame is built. Positions
@@ -48,6 +51,8 @@ pub enum UiAction {
     SetAdjustments(Adjustments),
     /// Reset the current loupe image's develop adjustments to identity.
     ResetAdjustments,
+    /// Give keyboard focus to this region (e.g. the user clicked into its panel).
+    Focus(Region),
 }
 
 /// What `draw` returns to `main.rs` each frame.
@@ -119,6 +124,9 @@ fn filter_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// Left folder-tree sidebar, rooted at the opened folder. Shown in both the grid
 /// and the loupe so the folder structure is always visible.
 fn draw_folders_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    if !app.folders_visible() {
+        return;
+    }
     egui::Panel::left("folders")
         .resizable(true)
         .default_size(220.0)
@@ -193,7 +201,7 @@ fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
 /// One folder row in the tree: an indent, a clickable disclosure glyph, and a
 /// selectable folder name. Recurses into expanded folders' cached children.
 fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mut FrameOutput) {
-    ui.horizontal(|ui| {
+    let row = ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 14.0);
         let glyph = if app.is_expanded(path) { "\u{25bc}" } else { "\u{25b6}" }; // ▼ / ▶
         if ui
@@ -201,6 +209,7 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
             .clicked()
         {
             out.actions.push(UiAction::ToggleFolder(path.to_path_buf()));
+            out.actions.push(UiAction::Focus(Region::Folders));
         }
         let name = path
             .file_name()
@@ -209,8 +218,20 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
         let selected = app.folder_sel().as_deref() == Some(path);
         if ui.selectable_label(selected, name).clicked() {
             out.actions.push(UiAction::SelectFolder(path.to_path_buf()));
+            out.actions.push(UiAction::Focus(Region::Folders));
         }
     });
+
+    // Keyboard cursor: an amber outline around the row, distinct from the blue
+    // mouse selection. Only shown while the folder tree holds keyboard focus.
+    if app.focus() == Region::Folders && app.folder_cursor().as_deref() == Some(path) {
+        ui.painter().rect_stroke(
+            row.response.rect,
+            2.0,
+            egui::Stroke::new(2.0, theme::CURSOR_AMBER),
+            egui::StrokeKind::Inside,
+        );
+    }
 
     if app.is_expanded(path) {
         // `app` is a shared (&App) borrow, so the recursive call can read the
@@ -338,6 +359,9 @@ fn grid_cell(
     // No outline in the grid's browse-first state (sel is None).
     let selected = sel == Some(pos);
     let response = thumbnail_cell(ui, app, pos, cell, selected, &GRID_CELL_STYLE, out);
+    if response.clicked() {
+        out.actions.push(UiAction::Focus(Region::Grid));
+    }
     if response.double_clicked() {
         out.actions.push(UiAction::OpenLoupe(pos));
     }
@@ -360,47 +384,51 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     // Left folder-tree sidebar (same as the grid) so structure stays visible.
     draw_folders_panel(ui, app, out);
 
-    let strip_h = (thumb_px as f32 * 0.55).clamp(72.0, 200.0) + 8.0;
-    egui::Panel::bottom("filmstrip")
-        .exact_size(strip_h)
-        .show_inside(ui, |ui| {
-            let cell = strip_h - 16.0;
-            let cell_full = cell + ui.spacing().item_spacing.x;
-            let len = app.visible_len();
+    // The bottom filmstrip, unless hidden (Shift+Tab). When hidden, arrow keys
+    // still step the photo — the strip is just the visual.
+    if app.filmstrip_visible() {
+        let strip_h = (thumb_px as f32 * 0.55).clamp(72.0, 200.0) + 8.0;
+        egui::Panel::bottom("filmstrip")
+            .exact_size(strip_h)
+            .show_inside(ui, |ui| {
+                let cell = strip_h - 16.0;
+                let cell_full = cell + ui.spacing().item_spacing.x;
+                let len = app.visible_len();
 
-            // Virtualized horizontal strip (egui has no `show_columns`, so do the
-            // grid's `show_rows` trick by hand): build only the cells in view and
-            // report the range so thumbnail loading tracks the scroll position.
-            let mut area = egui::ScrollArea::horizontal().auto_shrink([false, false]);
-            // On a selection change, center the selection for this frame only so we
-            // don't fight the user's scrolling on other frames.
-            if follow {
-                let sel = sel.unwrap_or(0) as f32;
-                let target =
-                    (sel * cell_full + cell_full * 0.5 - ui.available_width() * 0.5).max(0.0);
-                area = area.scroll_offset(egui::vec2(target, 0.0));
-            }
-            area.show_viewport(ui, |ui, viewport| {
-                let first = (viewport.min.x / cell_full).floor().max(0.0) as usize;
-                let last = ((viewport.max.x / cell_full).ceil() as usize).min(len);
-                app.set_visible_strip_range(first, last);
+                // Virtualized horizontal strip (egui has no `show_columns`, so do
+                // the grid's `show_rows` trick by hand): build only the cells in
+                // view and report the range so loading tracks the scroll position.
+                let mut area = egui::ScrollArea::horizontal().auto_shrink([false, false]);
+                // On a selection change, center the selection for this frame only so
+                // we don't fight the user's scrolling on other frames.
+                if follow {
+                    let sel = sel.unwrap_or(0) as f32;
+                    let target =
+                        (sel * cell_full + cell_full * 0.5 - ui.available_width() * 0.5).max(0.0);
+                    area = area.scroll_offset(egui::vec2(target, 0.0));
+                }
+                area.show_viewport(ui, |ui, viewport| {
+                    let first = (viewport.min.x / cell_full).floor().max(0.0) as usize;
+                    let last = ((viewport.max.x / cell_full).ceil() as usize).min(len);
+                    app.set_visible_strip_range(first, last);
 
-                ui.horizontal(|ui| {
-                    // Leading + trailing spacers preserve the full content width so
-                    // the scrollbar extent stays correct.
-                    ui.add_space(first as f32 * cell_full);
-                    for pos in first..last {
-                        filmstrip_cell(ui, app, pos, cell, sel, out);
-                    }
-                    ui.add_space(len.saturating_sub(last) as f32 * cell_full);
+                    ui.horizontal(|ui| {
+                        // Leading + trailing spacers preserve the full content width
+                        // so the scrollbar extent stays correct.
+                        ui.add_space(first as f32 * cell_full);
+                        for pos in first..last {
+                            filmstrip_cell(ui, app, pos, cell, sel, out);
+                        }
+                        ui.add_space(len.saturating_sub(last) as f32 * cell_full);
+                    });
                 });
             });
-        });
+    }
 
     // Right-hand develop panel (Temp/Tint/Exposure/… sliders + histogram). Drawn
     // before the central rect is read so it reserves its width first — otherwise
     // the wgpu image viewport would overlap the panel.
-    if app.develop_open() {
+    if app.develop_visible() {
         draw_develop_panel(ui, app, out);
     }
 
@@ -438,24 +466,36 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Reset").clicked() {
                         out.actions.push(UiAction::ResetAdjustments);
+                        out.actions.push(UiAction::Focus(Region::Develop));
                     }
                 });
             });
             ui.separator();
 
             // True once any slider in this frame changed, so we push exactly one
-            // SetAdjustments after rendering the whole group.
+            // SetAdjustments after rendering the whole group. `interacted` tracks
+            // mouse clicks/drags so we can move keyboard focus to the panel.
             let mut changed = false;
+            let mut interacted = false;
+            // Index of the slider being drawn, matched against `develop_focus` to
+            // draw the keyboard-cursor outline. Advanced by every `slider(...)`.
+            let mut idx = 0usize;
+            let focus_idx = if app.focus() == Region::Develop {
+                Some(app.develop_focus())
+            } else {
+                None
+            };
 
-            // One labeled slider over `field`. Returns whether the value changed
-            // (slider drag or a double-click reset).
+            // One labeled slider over `field`. `focused` draws the amber keyboard
+            // cursor. Returns (value changed, mouse-interacted).
             fn slider(
                 ui: &mut egui::Ui,
                 label: &str,
                 field: &mut f32,
                 range: std::ops::RangeInclusive<f32>,
                 decimals: usize,
-            ) -> bool {
+                focused: bool,
+            ) -> (bool, bool) {
                 ui.label(label);
                 // Let the slider track fill the panel width, leaving room only
                 // for the value box egui draws to its right. spacing is persistent
@@ -475,36 +515,47 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     *field = 0.0;
                     changed = true;
                 }
-                changed
+                if focused {
+                    ui.painter().rect_stroke(
+                        resp.rect.expand(1.0),
+                        2.0,
+                        egui::Stroke::new(2.0, theme::CURSOR_AMBER),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                let interacted = resp.clicked() || resp.dragged() || resp.double_clicked();
+                (changed, interacted)
+            }
+
+            // Render one slider: accumulate changed/interacted and bump `idx`.
+            macro_rules! row {
+                ($label:expr, $field:expr, $range:expr, $dec:expr) => {{
+                    let (c, i) = slider(ui, $label, $field, $range, $dec, focus_idx == Some(idx));
+                    changed |= c;
+                    interacted |= i;
+                    idx += 1;
+                }};
             }
 
             ui.label(egui::RichText::new("White Balance").strong());
-            changed |= slider(ui, "Temp", &mut adj.temp, crate::develop::TONE_RANGE, 0);
-            changed |= slider(ui, "Tint", &mut adj.tint, crate::develop::TONE_RANGE, 0);
+            row!("Temp", &mut adj.temp, crate::develop::TONE_RANGE, 0);
+            row!("Tint", &mut adj.tint, crate::develop::TONE_RANGE, 0);
             ui.add_space(6.0);
 
             ui.label(egui::RichText::new("Tone").strong());
-            changed |= slider(
-                ui,
-                "Exposure",
-                &mut adj.exposure,
-                crate::develop::EXPOSURE_RANGE,
-                2,
-            );
-            changed |= slider(ui, "Contrast", &mut adj.contrast, crate::develop::TONE_RANGE, 0);
-            changed |= slider(
-                ui,
-                "Highlights",
-                &mut adj.highlights,
-                crate::develop::TONE_RANGE,
-                0,
-            );
-            changed |= slider(ui, "Shadows", &mut adj.shadows, crate::develop::TONE_RANGE, 0);
-            changed |= slider(ui, "Whites", &mut adj.whites, crate::develop::TONE_RANGE, 0);
-            changed |= slider(ui, "Blacks", &mut adj.blacks, crate::develop::TONE_RANGE, 0);
+            row!("Exposure", &mut adj.exposure, crate::develop::EXPOSURE_RANGE, 2);
+            row!("Contrast", &mut adj.contrast, crate::develop::TONE_RANGE, 0);
+            row!("Highlights", &mut adj.highlights, crate::develop::TONE_RANGE, 0);
+            row!("Shadows", &mut adj.shadows, crate::develop::TONE_RANGE, 0);
+            row!("Whites", &mut adj.whites, crate::develop::TONE_RANGE, 0);
+            row!("Blacks", &mut adj.blacks, crate::develop::TONE_RANGE, 0);
+            let _ = idx; // final bump isn't read; silence unused-assignment
 
             if changed {
                 out.actions.push(UiAction::SetAdjustments(adj));
+            }
+            if interacted {
+                out.actions.push(UiAction::Focus(Region::Develop));
             }
         });
 }
@@ -659,5 +710,9 @@ fn filmstrip_cell(
     sel: Option<usize>,
     out: &mut FrameOutput,
 ) -> egui::Response {
-    thumbnail_cell(ui, app, pos, cell, sel == Some(pos), &STRIP_CELL_STYLE, out)
+    let response = thumbnail_cell(ui, app, pos, cell, sel == Some(pos), &STRIP_CELL_STYLE, out);
+    if response.clicked() {
+        out.actions.push(UiAction::Focus(Region::Filmstrip));
+    }
+    response
 }
