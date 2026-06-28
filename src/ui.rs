@@ -43,10 +43,8 @@ pub enum UiAction {
     SetFilter(Option<(Cmp, u8)>),
     /// Rate the current selection/shown image (0 clears).
     SetRating(u8),
-    /// Show this folder's images in the grid (browse-first).
-    SelectFolder(std::path::PathBuf),
-    /// Expand/collapse this folder in the tree.
-    ToggleFolder(std::path::PathBuf),
+    /// Open this folder as one unit: load its images and toggle its expansion.
+    OpenFolder(std::path::PathBuf),
     /// Set the develop adjustments for the current loupe image.
     SetAdjustments(Adjustments),
     /// Reset the current loupe image's develop adjustments to identity.
@@ -203,22 +201,19 @@ fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
 fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mut FrameOutput) {
     let row = ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 14.0);
+        // The disclosure glyph and name are a single selectable unit: one click
+        // anywhere on the row opens the folder (load + toggle expansion).
         let glyph = if app.is_expanded(path) { "\u{25bc}" } else { "\u{25b6}" }; // ▼ / ▶
-        if ui
-            .add(egui::Label::new(glyph).sense(egui::Sense::click()))
-            .clicked()
-        {
-            out.actions.push(UiAction::ToggleFolder(path.to_path_buf()));
-            out.actions.push(UiAction::Focus(Region::Folders));
-        }
         let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
         let selected = app.folder_sel().as_deref() == Some(path);
-        if ui.selectable_label(selected, name).clicked() {
-            out.actions.push(UiAction::SelectFolder(path.to_path_buf()));
-            out.actions.push(UiAction::Focus(Region::Folders));
+        if ui
+            .selectable_label(selected, format!("{glyph}  {name}"))
+            .clicked()
+        {
+            out.actions.push(UiAction::OpenFolder(path.to_path_buf()));
         }
     });
 
