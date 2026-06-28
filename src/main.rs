@@ -582,7 +582,7 @@ impl App {
         const TARGET: usize = 256;
         let step = (w.max(h) / TARGET).max(1);
         let mut sample = Vec::with_capacity((w / step + 1) * (h / step + 1));
-        let srgb_to_linear = |c: u8| (c as f32 / 255.0).powf(2.2);
+        let srgb_to_linear = |c: f32| (c / 255.0).powf(2.2);
         let mut y = 0;
         while y < h {
             let mut x = 0;
@@ -598,11 +598,7 @@ impl App {
                     let inv = 255.0 / a as f32;
                     ((r as f32 * inv).min(255.0), (g as f32 * inv).min(255.0), (b as f32 * inv).min(255.0))
                 };
-                sample.push([
-                    srgb_to_linear(r as u8),
-                    srgb_to_linear(g as u8),
-                    srgb_to_linear(b as u8),
-                ]);
+                sample.push([srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b)]);
                 x += step;
             }
             y += step;
