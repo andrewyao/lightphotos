@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO: remove once wired into App (T5)
-
 //! Global edits catalog — the persistence layer for ratings + develop edits.
 //!
 //! Everything lives in ONE app-managed JSON file at
