@@ -16,11 +16,11 @@ use std::sync::Arc;
 
 use objc2_core_foundation::{
     kCFBooleanTrue, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionary,
-    CFNumber, CFNumberType, CFRetained, CFString, CFURL, CFURLPathStyle,
+    CFNumber, CFNumberType, CFRetained, CFString,
 };
 use objc2_image_io::{
     kCGImageSourceCreateThumbnailFromImageIfAbsent, kCGImageSourceCreateThumbnailWithTransform,
-    kCGImageSourceThumbnailMaxPixelSize, CGImageSource,
+    kCGImageSourceThumbnailMaxPixelSize,
 };
 
 use crate::image_decode::{cgimage_to_rgba, DecodedImage};
@@ -31,19 +31,7 @@ use crate::image_decode::{cgimage_to_rgba, DecodedImage};
 /// when present, falls back to decoding-at-size from the full image, and applies
 /// the file's EXIF orientation.
 pub fn thumbnail(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
-    let path_str = path.to_string_lossy();
-    let cf_path = CFString::from_str(&path_str);
-    let url = CFURL::with_file_system_path(
-        None,
-        Some(&cf_path),
-        CFURLPathStyle::CFURLPOSIXPathStyle,
-        false,
-    )
-    .ok_or("could not build CFURL")?;
-
-    // SAFETY: url is a valid CFURL; no decode options for opening the source.
-    let source = unsafe { CGImageSource::with_url(&url, None) }
-        .ok_or("ImageIO could not open file")?;
+    let source = crate::image_decode::open_image_source(path)?;
 
     let options = build_thumbnail_options(max_px)?;
 
