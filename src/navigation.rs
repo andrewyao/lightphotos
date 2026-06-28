@@ -68,20 +68,30 @@ pub fn visible_indices(
     }
 }
 
-/// List the image files directly in `dir`, sorted case-insensitively by name.
-fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.is_file() && is_image(p))
-                .collect()
-        })
-        .unwrap_or_default();
+/// Immediate entries of `dir` as paths, ignoring individual entry errors.
+/// Returns an empty vec when the directory can't be read at all.
+fn read_dir_paths(dir: &Path) -> Vec<PathBuf> {
+    std::fs::read_dir(dir)
+        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+        .unwrap_or_default()
+}
+
+/// Sort paths in place, case-insensitively by file name.
+fn sort_by_name(entries: &mut [PathBuf]) {
     entries.sort_by(|a, b| {
         let an = a.file_name().map(|s| s.to_string_lossy().to_lowercase());
         let bn = b.file_name().map(|s| s.to_string_lossy().to_lowercase());
         an.cmp(&bn)
     });
+}
+
+/// List the image files directly in `dir`, sorted case-insensitively by name.
+fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
+    let mut entries: Vec<PathBuf> = read_dir_paths(dir)
+        .into_iter()
+        .filter(|p| p.is_file() && is_image(p))
+        .collect();
+    sort_by_name(&mut entries);
     entries
 }
 
@@ -90,29 +100,22 @@ fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
 /// starting with `.`) and macOS bundles (`.app`/`.photoslibrary`). On a read
 /// error returns an empty vec.
 pub fn list_subdirs(dir: &Path) -> Vec<PathBuf> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.is_dir())
-                .filter(|p| {
-                    let name = match p.file_name().and_then(|s| s.to_str()) {
-                        Some(n) => n,
-                        None => return false,
-                    };
-                    if name.starts_with('.') {
-                        return false;
-                    }
-                    let ext = p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
-                    !matches!(ext.as_deref(), Some("app") | Some("photoslibrary"))
-                })
-                .collect()
+    let mut entries: Vec<PathBuf> = read_dir_paths(dir)
+        .into_iter()
+        .filter(|p| p.is_dir())
+        .filter(|p| {
+            let name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n,
+                None => return false,
+            };
+            if name.starts_with('.') {
+                return false;
+            }
+            let ext = p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+            !matches!(ext.as_deref(), Some("app") | Some("photoslibrary"))
         })
-        .unwrap_or_default();
-    entries.sort_by(|a, b| {
-        let an = a.file_name().map(|s| s.to_string_lossy().to_lowercase());
-        let bn = b.file_name().map(|s| s.to_string_lossy().to_lowercase());
-        an.cmp(&bn)
-    });
+        .collect();
+    sort_by_name(&mut entries);
     entries
 }
 
