@@ -387,13 +387,17 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             ) -> bool {
                 ui.label(label);
                 // Let the slider track fill the panel width, leaving room only
-                // for the value box egui draws to its right.
+                // for the value box egui draws to its right. spacing is persistent
+                // for the rest of the frame, so snapshot and restore it — otherwise
+                // every widget drawn after the last slider inherits this width.
+                let prev_width = ui.spacing().slider_width;
                 ui.spacing_mut().slider_width = (ui.available_width() - 56.0).max(80.0);
                 let resp = ui.add(
                     egui::Slider::new(field, range)
                         .max_decimals(decimals)
                         .show_value(true),
                 );
+                ui.spacing_mut().slider_width = prev_width;
                 let mut changed = resp.changed();
                 // Double-click the slider to reset this field to its default.
                 if resp.double_clicked() {
