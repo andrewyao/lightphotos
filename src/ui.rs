@@ -200,9 +200,9 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
     });
 
     if app.is_expanded(path) {
-        // Clone children out to drop the borrow on `app` before recursing.
-        let children: Vec<std::path::PathBuf> = app.subdirs(path).to_vec();
-        for child in &children {
+        // `app` is a shared (&App) borrow, so the recursive call can read the
+        // same slice concurrently — no clone needed.
+        for child in app.subdirs(path) {
             folder_node(ui, app, child, depth + 1, out);
         }
     }
