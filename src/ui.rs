@@ -221,35 +221,75 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
     }
 }
 
-/// One grid cell: a thumbnail image-button with selection highlight + stars.
-fn grid_cell(
+/// The few visual/behavioral knobs that differ between a grid cell and a
+/// filmstrip cell. Everything else about drawing a thumbnail cell is shared.
+struct CellStyle {
+    /// Corner radius, also used as the thumbnail inset.
+    corner: f32,
+    /// Background gray level for an unselected cell.
+    bg_gray: u8,
+    /// Star label offset from the cell's bottom-left corner.
+    star_dx: f32,
+    star_dy: f32,
+    /// Star label font size.
+    star_size: f32,
+    /// Draw a "…" placeholder while the thumbnail decodes (grid only).
+    show_placeholder: bool,
+    /// Omit the star label entirely when the rating is 0 (filmstrip only).
+    hide_zero_stars: bool,
+}
+
+const GRID_CELL_STYLE: CellStyle = CellStyle {
+    corner: 4.0,
+    bg_gray: 28,
+    star_dx: 6.0,
+    star_dy: -14.0,
+    star_size: 13.0,
+    show_placeholder: true,
+    hide_zero_stars: false,
+};
+
+const STRIP_CELL_STYLE: CellStyle = CellStyle {
+    corner: 3.0,
+    bg_gray: 24,
+    star_dx: 4.0,
+    star_dy: -8.0,
+    star_size: 10.0,
+    show_placeholder: false,
+    hide_zero_stars: true,
+};
+
+/// Shared thumbnail cell for the grid and the filmstrip: paints background,
+/// fitted thumbnail (or placeholder), star rating, and selection outline, then
+/// reports a click as a Select action. Returns the response so callers can add
+/// view-specific behavior (grid double-click to open, filmstrip auto-scroll).
+fn thumbnail_cell(
     ui: &mut egui::Ui,
     app: &App,
     pos: usize,
     cell: f32,
-    sel: usize,
+    selected: bool,
+    style: &CellStyle,
     out: &mut FrameOutput,
-) {
+) -> egui::Response {
     let size = egui::vec2(cell, cell);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
-    // No outline in the grid's browse-first state (nothing selected yet).
-    let selected = app.sel_active() && pos == sel;
     let bg = if selected {
         theme::SELECTION_BG
     } else {
-        egui::Color32::from_gray(28)
+        egui::Color32::from_gray(style.bg_gray)
     };
-    ui.painter().rect_filled(rect, 4.0, bg);
+    ui.painter().rect_filled(rect, style.corner, bg);
 
     if let Some((tex, tw, th)) = app.thumb_texture_for(pos) {
-        let inner = rect.shrink(4.0);
+        let inner = rect.shrink(style.corner);
         let scale = (inner.width() / tw as f32).min(inner.height() / th as f32);
         let dw = tw as f32 * scale;
         let dh = th as f32 * scale;
         let img_rect = egui::Rect::from_center_size(inner.center(), egui::vec2(dw, dh));
         egui::Image::from_texture((tex.id(), egui::vec2(dw, dh))).paint_at(ui, img_rect);
-    } else {
+    } else if style.show_placeholder {
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -260,19 +300,21 @@ fn grid_cell(
     }
 
     let stars = app.rating_at(pos);
-    ui.painter().text(
-        egui::pos2(rect.left() + 6.0, rect.bottom() - 14.0),
-        egui::Align2::LEFT_CENTER,
-        star_string(stars),
-        egui::FontId::proportional(13.0),
-        theme::STAR_GOLD,
-    );
+    if !(style.hide_zero_stars && stars == 0) {
+        ui.painter().text(
+            egui::pos2(rect.left() + style.star_dx, rect.bottom() + style.star_dy),
+            egui::Align2::LEFT_CENTER,
+            star_string(stars),
+            egui::FontId::proportional(style.star_size),
+            theme::STAR_GOLD,
+        );
+    }
 
     // Prominent selection outline on top of the thumbnail.
     if selected {
         ui.painter().rect_stroke(
             rect,
-            4.0,
+            style.corner,
             egui::Stroke::new(3.0, theme::SELECTION_BLUE),
             egui::StrokeKind::Inside,
         );
@@ -281,6 +323,21 @@ fn grid_cell(
     if response.clicked() {
         out.actions.push(UiAction::Select(pos));
     }
+    response
+}
+
+/// One grid cell: a thumbnail image-button with selection highlight + stars.
+fn grid_cell(
+    ui: &mut egui::Ui,
+    app: &App,
+    pos: usize,
+    cell: f32,
+    sel: usize,
+    out: &mut FrameOutput,
+) {
+    // No outline in the grid's browse-first state (nothing selected yet).
+    let selected = app.sel_active() && pos == sel;
+    let response = thumbnail_cell(ui, app, pos, cell, selected, &GRID_CELL_STYLE, out);
     if response.double_clicked() {
         out.actions.push(UiAction::OpenLoupe(pos));
     }
@@ -601,50 +658,5 @@ fn filmstrip_cell(
     sel: usize,
     out: &mut FrameOutput,
 ) -> egui::Response {
-    let size = egui::vec2(cell, cell);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-
-    let selected = pos == sel;
-    let bg = if selected {
-        theme::SELECTION_BG
-    } else {
-        egui::Color32::from_gray(24)
-    };
-    ui.painter().rect_filled(rect, 3.0, bg);
-
-    if let Some((tex, tw, th)) = app.thumb_texture_for(pos) {
-        let inner = rect.shrink(3.0);
-        let scale = (inner.width() / tw as f32).min(inner.height() / th as f32);
-        let dw = tw as f32 * scale;
-        let dh = th as f32 * scale;
-        let img_rect = egui::Rect::from_center_size(inner.center(), egui::vec2(dw, dh));
-        egui::Image::from_texture((tex.id(), egui::vec2(dw, dh))).paint_at(ui, img_rect);
-    }
-
-    let stars = app.rating_at(pos);
-    if stars > 0 {
-        ui.painter().text(
-            egui::pos2(rect.left() + 4.0, rect.bottom() - 8.0),
-            egui::Align2::LEFT_CENTER,
-            star_string(stars),
-            egui::FontId::proportional(10.0),
-            theme::STAR_GOLD,
-        );
-    }
-
-    // Prominent selection outline on top of the thumbnail (the thin background
-    // border alone is easy to miss).
-    if selected {
-        ui.painter().rect_stroke(
-            rect,
-            3.0,
-            egui::Stroke::new(3.0, theme::SELECTION_BLUE),
-            egui::StrokeKind::Inside,
-        );
-    }
-
-    if response.clicked() {
-        out.actions.push(UiAction::Select(pos));
-    }
-    response
+    thumbnail_cell(ui, app, pos, cell, pos == sel, &STRIP_CELL_STYLE, out)
 }
