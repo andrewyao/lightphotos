@@ -40,7 +40,9 @@ extern "C" {
 
 /// Decode `path`, optionally downscaling so neither side exceeds `max_dim`
 /// (so images larger than the GPU's max texture size still display).
-pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+/// Open `path` as a `CGImageSource` (the shared CFURL + ImageIO open path used
+/// by both full-resolution decode and thumbnail generation).
+pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, String> {
     let path_str = path.to_string_lossy();
     let cf_path = CFString::from_str(&path_str);
     let url = CFURL::with_file_system_path(
@@ -51,9 +53,13 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     )
     .ok_or("could not build CFURL")?;
 
-    // SAFETY: url is a valid CFURL; passing no decode options.
-    let source = unsafe { CGImageSource::with_url(&url, None) }
-        .ok_or("ImageIO could not open file")?;
+    // SAFETY: url is a valid CFURL; passing no decode options. The returned
+    // CGImageSource is +1 retained and wrapped in CFRetained, released on drop.
+    unsafe { CGImageSource::with_url(&url, None) }.ok_or_else(|| "ImageIO could not open file".into())
+}
+
+pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+    let source = open_image_source(path)?;
 
     let image: CFRetained<CGImage> = unsafe { source.image_at_index(0, None) }
         .ok_or("ImageIO could not decode image")?;
