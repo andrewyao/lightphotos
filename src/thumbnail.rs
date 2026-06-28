@@ -146,7 +146,9 @@ impl ThumbCache {
     /// Hand-rolled so the key is stable across process runs (unlike
     /// `std::collections::hash_map::DefaultHasher`).
     fn cache_key(&self, path: &Path, max_px: u32) -> Result<u64, String> {
-        let canon = fs::canonicalize(path).map_err(|e| format!("canonicalize: {e}"))?;
+        // normalize() yields the canonical path when the file exists; if it
+        // doesn't, the metadata() call below fails and we return Err anyway.
+        let canon = crate::paths::normalize(path);
         let meta = fs::metadata(&canon).map_err(|e| format!("metadata: {e}"))?;
         let mtime_ns = meta
             .modified()
