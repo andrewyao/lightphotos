@@ -19,6 +19,7 @@ mod image_decode;
 mod loader;
 mod macos_delegate;
 mod navigation;
+mod paths;
 mod renderer;
 mod thumbnail;
 mod ui;

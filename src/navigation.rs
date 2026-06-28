@@ -153,11 +153,14 @@ impl Playlist {
         let dir = current.parent().unwrap_or_else(|| Path::new("."));
         let mut entries = sorted_images_in(dir);
 
-        let canon = std::fs::canonicalize(current).ok();
+        // Match by normalized identity so the position is correct even when the
+        // entry and `current` differ in canonical form. normalize() falls back
+        // to the raw path on failure, so two missing files compare by raw path
+        // rather than spuriously matching as None == None.
+        let target = crate::paths::normalize(current);
         let index = entries
             .iter()
-            .position(|p| std::fs::canonicalize(p).ok() == canon)
-            .or_else(|| entries.iter().position(|p| p == current))
+            .position(|p| crate::paths::normalize(p) == target)
             .unwrap_or(0);
 
         // If the folder somehow yielded nothing, fall back to the single file.

@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::develop::Adjustments;
+use crate::paths::normalize;
 
 const CATALOG_VERSION: u32 = 2;
 const CATALOG_FILE: &str = "catalog.json";
@@ -198,13 +199,6 @@ fn default_dir() -> PathBuf {
     home.join("Library")
         .join("Application Support")
         .join("com.imageviewer")
-}
-
-/// Normalize a path for use as a catalog key: prefer the canonical absolute
-/// path, but fall back to the path as-given when canonicalization fails (e.g.
-/// the file doesn't exist or was moved). Never panics.
-fn normalize(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 #[cfg(test)]
