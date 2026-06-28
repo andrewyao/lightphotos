@@ -332,11 +332,11 @@ fn grid_cell(
     app: &App,
     pos: usize,
     cell: f32,
-    sel: usize,
+    sel: Option<usize>,
     out: &mut FrameOutput,
 ) {
-    // No outline in the grid's browse-first state (nothing selected yet).
-    let selected = app.sel_active() && pos == sel;
+    // No outline in the grid's browse-first state (sel is None).
+    let selected = sel == Some(pos);
     let response = thumbnail_cell(ui, app, pos, cell, selected, &GRID_CELL_STYLE, out);
     if response.double_clicked() {
         out.actions.push(UiAction::OpenLoupe(pos));
@@ -375,8 +375,9 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
             // On a selection change, center the selection for this frame only so we
             // don't fight the user's scrolling on other frames.
             if follow {
+                let sel = sel.unwrap_or(0) as f32;
                 let target =
-                    (sel as f32 * cell_full + cell_full * 0.5 - ui.available_width() * 0.5).max(0.0);
+                    (sel * cell_full + cell_full * 0.5 - ui.available_width() * 0.5).max(0.0);
                 area = area.scroll_offset(egui::vec2(target, 0.0));
             }
             area.show_viewport(ui, |ui, viewport| {
@@ -655,8 +656,8 @@ fn filmstrip_cell(
     app: &App,
     pos: usize,
     cell: f32,
-    sel: usize,
+    sel: Option<usize>,
     out: &mut FrameOutput,
 ) -> egui::Response {
-    thumbnail_cell(ui, app, pos, cell, pos == sel, &STRIP_CELL_STYLE, out)
+    thumbnail_cell(ui, app, pos, cell, sel == Some(pos), &STRIP_CELL_STYLE, out)
 }

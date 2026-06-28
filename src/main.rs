@@ -102,14 +102,14 @@ struct App {
     filter_bar: bool,
     /// Indices into `playlist.entries()` that pass the current filter.
     visible: Vec<usize>,
-    /// Position *within `visible`* of the current selection.
-    sel: usize,
-    /// Whether `sel` is an active selection. The Grid opens with no selection
-    /// (browse-first) until the user clicks or arrows; the Loupe always has one.
-    sel_active: bool,
+    /// Position *within `visible`* of the current selection, or `None` in the
+    /// Grid's browse-first state (no selection until the user clicks or arrows).
+    /// The Loupe always has a selection. `None` makes the "no selection" state
+    /// unrepresentable as a stray index — there is no separate active flag.
+    sel: Option<usize>,
     /// Last `sel` the filmstrip auto-scrolled to (so we only scroll on change,
-    /// not every frame — which would fight clicks). `usize::MAX` = never.
-    last_strip_sel: usize,
+    /// not every frame — which would fight clicks). `None` = never.
+    last_strip_sel: Option<usize>,
     /// Thumbnail longest-side pixels for the grid + filmstrip.
     thumb_px: u32,
     /// Columns the grid actually laid out last frame (for Up/Down row moves).
@@ -184,9 +184,8 @@ impl App {
             filter: None,
             filter_bar: false,
             visible: Vec::new(),
-            sel: 0,
-            sel_active: false,
-            last_strip_sel: usize::MAX,
+            sel: None,
+            last_strip_sel: None,
             thumb_px: THUMB_DEFAULT,
             grid_cols: 1,
             grid_range: (0, 0),
@@ -257,9 +256,8 @@ impl App {
             let start_index = playlist.position();
             self.playlist = Some(playlist);
             self.recompute_visible();
-            self.sel = self.visible.iter().position(|&i| i == start_index).unwrap_or(0);
+            self.sel = Some(self.visible.iter().position(|&i| i == start_index).unwrap_or(0));
             self.mode = ViewMode::Loupe;
-            self.sel_active = true;
             self.load_selected();
             self.request_neighbors();
             self.request_redraw();
@@ -290,8 +288,7 @@ impl App {
         }
         self.playlist = Some(playlist);
         self.recompute_visible();
-        self.sel = 0;
-        self.sel_active = false;
+        self.sel = None;
         self.folder_sel = Some(dir);
         self.request_working_thumbs();
         self.request_redraw();
@@ -301,27 +298,27 @@ impl App {
     fn recompute_visible(&mut self) {
         let Some(pl) = &self.playlist else {
             self.visible.clear();
-            self.sel = 0;
+            self.sel = None;
             return;
         };
         let ratings = &self.ratings;
         self.visible = visible_indices(pl.entries(), self.filter, |p| {
             ratings.get(p).copied().unwrap_or(0)
         });
+        // Clamp the cursor to the new bounds; clear it if nothing is visible.
         if self.visible.is_empty() {
-            self.sel = 0;
-        } else if self.sel >= self.visible.len() {
-            self.sel = self.visible.len() - 1;
+            self.sel = None;
+        } else if let Some(s) = self.sel {
+            if s >= self.visible.len() {
+                self.sel = Some(self.visible.len() - 1);
+            }
         }
     }
 
     /// The playlist index of the current selection, if any. `None` when the
     /// grid has no active selection (browse-first state).
     fn selected_index(&self) -> Option<usize> {
-        if !self.sel_active {
-            return None;
-        }
-        self.visible.get(self.sel).copied()
+        self.visible.get(self.sel?).copied()
     }
 
     /// The path of the current selection, if any.
@@ -352,8 +349,9 @@ impl App {
         if self.visible.len() <= 1 {
             return;
         }
-        let prev = (self.sel + self.visible.len() - 1) % self.visible.len();
-        let next = (self.sel + 1) % self.visible.len();
+        let Some(cur) = self.sel else { return };
+        let prev = (cur + self.visible.len() - 1) % self.visible.len();
+        let next = (cur + 1) % self.visible.len();
         let paths: Vec<PathBuf> = [prev, next]
             .iter()
             .filter_map(|&p| self.visible.get(p).copied())
@@ -373,11 +371,12 @@ impl App {
             return;
         }
         let n = self.visible.len();
-        self.sel = if forward {
-            (self.sel + 1) % n
+        let cur = self.sel.unwrap_or(0);
+        self.sel = Some(if forward {
+            (cur + 1) % n
         } else {
-            (self.sel + n - 1) % n
-        };
+            (cur + n - 1) % n
+        });
         self.load_selected();
         self.request_neighbors();
         self.request_redraw();
@@ -389,22 +388,21 @@ impl App {
         if self.visible.is_empty() {
             return;
         }
-        if !self.sel_active {
-            self.sel = 0;
-            self.sel_active = true;
-        } else {
-            self.sel = navigation::grid_move(self.sel, self.visible.len(), self.grid_cols, dx, dy);
-        }
+        // First arrow press with no selection lands on the first cell.
+        self.sel = Some(match self.sel {
+            None => 0,
+            Some(s) => navigation::grid_move(s, self.visible.len(), self.grid_cols, dx, dy),
+        });
         self.request_redraw();
     }
 
     /// Enter Loupe on the current selection. A no-op in the grid when nothing is
     /// selected (the `selected_path` guard below).
     fn enter_loupe(&mut self) {
+        // No-op when nothing is selected; the guard also guarantees sel is Some.
         if self.selected_path().is_none() {
             return;
         }
-        self.sel_active = true;
         self.mode = ViewMode::Loupe;
         self.load_selected();
         self.request_neighbors();
@@ -428,7 +426,7 @@ impl App {
             // Keep selection on the same playlist entry if still visible.
             if let Some(idx) = want_idx {
                 if let Some(pos) = self.visible.iter().position(|&i| i == idx) {
-                    self.sel = pos;
+                    self.sel = Some(pos);
                 }
             }
         }
@@ -443,7 +441,7 @@ impl App {
         self.recompute_visible();
         if let Some(idx) = want_idx {
             if let Some(pos) = self.visible.iter().position(|&i| i == idx) {
-                self.sel = pos;
+                self.sel = Some(pos);
             }
         }
         // In Loupe, the shown image may have been filtered out; snap to selection.
@@ -523,7 +521,7 @@ impl App {
                         .file_name()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_default();
-                    let pos = self.sel + 1;
+                    let pos = self.sel.unwrap_or(0) + 1;
                     w.set_title(&format!("{}  ({}/{})", name, pos, self.visible.len()));
                 }
             }
@@ -770,8 +768,10 @@ impl App {
                 let margin = 8;
                 let mut start = self.strip_range.0.saturating_sub(margin);
                 let mut end = (self.strip_range.1 + margin).min(len);
-                start = start.min(self.sel);
-                end = end.max((self.sel + 1).min(len));
+                if let Some(s) = self.sel {
+                    start = start.min(s);
+                    end = end.max((s + 1).min(len));
+                }
                 start..end.max(start)
             }
         }
@@ -942,8 +942,7 @@ impl App {
             match action {
                 ui::UiAction::Select(pos) => {
                     if pos < self.visible.len() {
-                        self.sel = pos;
-                        self.sel_active = true;
+                        self.sel = Some(pos);
                         // In the loupe, selecting a filmstrip cell must also show
                         // it (selection == shown). In the grid, selecting is just
                         // focus — Enter/double-click opens the loupe.
@@ -956,8 +955,7 @@ impl App {
                 }
                 ui::UiAction::OpenLoupe(pos) => {
                     if pos < self.visible.len() {
-                        self.sel = pos;
-                        self.sel_active = true;
+                        self.sel = Some(pos);
                         self.enter_loupe();
                     }
                 }
@@ -1053,14 +1051,10 @@ impl App {
         self.develop_open
     }
 
-    pub(crate) fn sel(&self) -> usize {
+    /// Position of the current selection within `visible`, or `None` in the
+    /// grid's browse-first state (before any click/arrow).
+    pub(crate) fn sel(&self) -> Option<usize> {
         self.sel
-    }
-
-    /// Whether there is an active selection to highlight (false in the grid's
-    /// browse-first state before any click/arrow).
-    pub(crate) fn sel_active(&self) -> bool {
-        self.sel_active
     }
 
     pub(crate) fn visible_len(&self) -> usize {
@@ -1090,7 +1084,7 @@ impl App {
     pub(crate) fn take_filmstrip_follow(&mut self) -> bool {
         let changed = self.sel != self.last_strip_sel;
         self.last_strip_sel = self.sel;
-        changed
+        changed && self.sel.is_some()
     }
 
     /// Rating of the visible cell at `pos` (0 when unset/out of range).
