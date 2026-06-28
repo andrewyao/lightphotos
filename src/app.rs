@@ -610,15 +610,24 @@ impl App {
         let Some(cursor) = self.folder_cursor.clone() else {
             return;
         };
-        self.ensure_subdirs(&cursor);
-        if !self.subdirs(&cursor).is_empty() {
-            if self.expanded.contains(&cursor) {
-                self.expanded.remove(&cursor);
+        self.open_folder(cursor);
+    }
+
+    /// Open a folder as one unit: toggle its expansion (when it has children),
+    /// load its images into the grid, and move the keyboard cursor onto it.
+    /// Shared by the folder-row click and the Enter key so mouse and keyboard
+    /// behave identically.
+    fn open_folder(&mut self, path: PathBuf) {
+        self.ensure_subdirs(&path);
+        if !self.subdirs(&path).is_empty() {
+            if self.expanded.contains(&path) {
+                self.expanded.remove(&path);
             } else {
-                self.expanded.insert(cursor.clone());
+                self.expanded.insert(path.clone());
             }
         }
-        self.load_folder(cursor);
+        self.folder_cursor = Some(path.clone());
+        self.load_folder(path);
         self.mode = ViewMode::Grid;
         self.update_window_title();
         self.normalize_focus();
@@ -1290,33 +1299,16 @@ impl App {
                 }
                 ui::UiAction::SetFilter(f) => self.set_filter(f),
                 ui::UiAction::SetRating(stars) => self.set_rating(stars),
-                ui::UiAction::SelectFolder(p) => {
-                    // Show this folder's images in the grid (browse-first). Switch
-                    // to the grid so picking a folder from the loupe sidebar lands
-                    // on its contents rather than a stale loupe image.
-                    self.ensure_subdirs(&p);
-                    self.folder_cursor = Some(p.clone());
-                    self.load_folder(p);
-                    self.mode = ViewMode::Grid;
-                    self.update_window_title();
-                    self.normalize_focus();
+                ui::UiAction::OpenFolder(p) => {
+                    // The folder row is one unit: clicking it focuses the tree,
+                    // loads the folder, and toggles its expansion — same as Enter.
+                    self.focus = Region::Folders;
+                    self.open_folder(p);
                 }
                 ui::UiAction::Focus(region) => {
                     self.focus = region;
                     self.normalize_focus();
                     self.on_focus_changed();
-                    self.request_redraw();
-                }
-                ui::UiAction::ToggleFolder(p) => {
-                    if self.expanded.contains(&p) {
-                        self.expanded.remove(&p);
-                    } else {
-                        self.expanded.insert(p.clone());
-                        self.ensure_subdirs(&p);
-                    }
-                    // Place the keyboard cursor on the toggled row so it follows
-                    // the click (the paired Focus(Folders) seeds only if unset).
-                    self.folder_cursor = Some(p);
                     self.request_redraw();
                 }
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
