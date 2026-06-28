@@ -14,6 +14,19 @@ use crate::develop::Adjustments;
 use crate::navigation::Cmp;
 use crate::{App, ViewMode};
 
+/// Shared palette. Several of these colors were previously duplicated as inline
+/// `from_rgb(...)` literals across the grid and filmstrip cells; naming them
+/// keeps the two views in sync.
+mod theme {
+    use egui::Color32;
+    /// Star rating overlay (gold).
+    pub const STAR_GOLD: Color32 = Color32::from_rgb(255, 210, 80);
+    /// Selection outline on a thumbnail cell (blue).
+    pub const SELECTION_BLUE: Color32 = Color32::from_rgb(90, 160, 255);
+    /// Background tint behind the selected/active cell.
+    pub const SELECTION_BG: Color32 = Color32::from_rgb(40, 80, 140);
+}
+
 /// An action the UI wants `App` to perform after the frame is built. Positions
 /// are indices into the *visible* list (same space as `App::sel`).
 pub enum UiAction {
@@ -223,7 +236,7 @@ fn grid_cell(
     // No outline in the grid's browse-first state (nothing selected yet).
     let selected = app.sel_active() && pos == sel;
     let bg = if selected {
-        egui::Color32::from_rgb(40, 80, 140)
+        theme::SELECTION_BG
     } else {
         egui::Color32::from_gray(28)
     };
@@ -252,7 +265,7 @@ fn grid_cell(
         egui::Align2::LEFT_CENTER,
         star_string(stars),
         egui::FontId::proportional(13.0),
-        egui::Color32::from_rgb(255, 210, 80),
+        theme::STAR_GOLD,
     );
 
     // Prominent selection outline on top of the thumbnail.
@@ -260,7 +273,7 @@ fn grid_cell(
         ui.painter().rect_stroke(
             rect,
             4.0,
-            egui::Stroke::new(3.0, egui::Color32::from_rgb(90, 160, 255)),
+            egui::Stroke::new(3.0, theme::SELECTION_BLUE),
             egui::StrokeKind::Inside,
         );
     }
@@ -557,7 +570,7 @@ fn loupe_star_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut F
                     let filled = (i + 1) <= current;
                     let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
                     let color = if filled {
-                        egui::Color32::from_rgb(255, 210, 80)
+                        theme::STAR_GOLD
                     } else {
                         egui::Color32::from_gray(160)
                     };
@@ -593,7 +606,7 @@ fn filmstrip_cell(
 
     let selected = pos == sel;
     let bg = if selected {
-        egui::Color32::from_rgb(40, 80, 140)
+        theme::SELECTION_BG
     } else {
         egui::Color32::from_gray(24)
     };
@@ -615,7 +628,7 @@ fn filmstrip_cell(
             egui::Align2::LEFT_CENTER,
             star_string(stars),
             egui::FontId::proportional(10.0),
-            egui::Color32::from_rgb(255, 210, 80),
+            theme::STAR_GOLD,
         );
     }
 
@@ -625,7 +638,7 @@ fn filmstrip_cell(
         ui.painter().rect_stroke(
             rect,
             3.0,
-            egui::Stroke::new(3.0, egui::Color32::from_rgb(90, 160, 255)),
+            egui::Stroke::new(3.0, theme::SELECTION_BLUE),
             egui::StrokeKind::Inside,
         );
     }
