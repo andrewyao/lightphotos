@@ -58,6 +58,35 @@ pub enum ViewMode {
     Loupe,
 }
 
+/// What the loupe currently has uploaded to the GPU. The decode *target* is
+/// tracked separately in `App::want`; `try_show` reconciles `want` into `shown`.
+/// Folding the old `shown: Option<PathBuf>` + `shown_is_full: bool` pair into one
+/// enum makes the "thumbnail vs full" tier part of the path's identity, so a
+/// stray `shown_is_full` can't disagree with which path is shown.
+enum Shown {
+    /// Nothing uploaded yet.
+    Nothing,
+    /// A thumbnail placeholder, shown instantly while the full image decodes.
+    Thumb(PathBuf),
+    /// The full-resolution image.
+    Full(PathBuf),
+}
+
+impl Shown {
+    /// The path shown in any tier, or `None` when nothing is shown.
+    fn path(&self) -> Option<&Path> {
+        match self {
+            Shown::Nothing => None,
+            Shown::Thumb(p) | Shown::Full(p) => Some(p),
+        }
+    }
+
+    /// True when `path` is shown at full resolution.
+    fn is_full_of(&self, path: &Path) -> bool {
+        matches!(self, Shown::Full(p) if p == path)
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -66,11 +95,8 @@ struct App {
 
     /// Path we want shown in the loupe (may still be decoding).
     want: Option<PathBuf>,
-    /// Path currently uploaded to the GPU.
-    shown: Option<PathBuf>,
-    /// Whether `shown` is the full-resolution image (vs. a thumbnail placeholder
-    /// shown instantly while the full decode is still in flight).
-    shown_is_full: bool,
+    /// What's currently uploaded to the GPU (nothing / thumbnail / full).
+    shown: Shown,
     /// A file/dir requested before the window/renderer existed.
     pending_initial: Option<PathBuf>,
 
@@ -170,8 +196,7 @@ impl App {
             loader: None,
             playlist: None,
             want: None,
-            shown: None,
-            shown_is_full: false,
+            shown: Shown::Nothing,
             pending_initial: initial,
             mode: ViewMode::Grid,
             catalog,
@@ -480,7 +505,7 @@ impl App {
 
         // Full image ready → show it (unless it's already the shown full image).
         if let Some(img) = self.loader.as_ref().and_then(|l| l.get(&want)) {
-            if self.shown.as_ref() != Some(&want) || !self.shown_is_full {
+            if !self.shown.is_full_of(&want) {
                 self.upload_shown(&want, &img, true);
             }
             return;
@@ -488,7 +513,7 @@ impl App {
 
         // Full not ready: show the thumbnail placeholder if we aren't already
         // showing this image in some form.
-        if self.shown.as_ref() != Some(&want) {
+        if self.shown.path() != Some(want.as_path()) {
             if let Some(thumb) = self.loader.as_ref().and_then(|l| l.get_thumb(&want, self.thumb_px))
             {
                 self.upload_shown(&want, &thumb, false);
@@ -500,8 +525,11 @@ impl App {
     fn upload_shown(&mut self, path: &Path, img: &image_decode::DecodedImage, is_full: bool) {
         let Some(renderer) = self.renderer.as_mut() else { return };
         renderer.set_image(img);
-        self.shown = Some(path.to_path_buf());
-        self.shown_is_full = is_full;
+        self.shown = if is_full {
+            Shown::Full(path.to_path_buf())
+        } else {
+            Shown::Thumb(path.to_path_buf())
+        };
         // Rebuild the histogram sample from the newly-shown image, then mark the
         // histogram dirty so it's recomputed before the next draw.
         self.build_hist_sample(img);
@@ -516,7 +544,7 @@ impl App {
         let Some(w) = &self.window else { return };
         match self.mode {
             ViewMode::Loupe => {
-                if let (Some(p), Some(_pl)) = (&self.shown, &self.playlist) {
+                if let (Some(p), Some(_pl)) = (self.shown.path(), &self.playlist) {
                     let name = p
                         .file_name()
                         .map(|s| s.to_string_lossy().into_owned())
@@ -541,13 +569,13 @@ impl App {
 
     /// Rotation (in 90° CW steps) of the image currently shown.
     fn current_rotation(&self) -> u8 {
-        self.shown.as_ref().and_then(|p| self.rotations.get(p)).copied().unwrap_or(0)
+        self.shown.path().and_then(|p| self.rotations.get(p)).copied().unwrap_or(0)
     }
 
     /// Develop adjustments of the image currently shown (identity if unset).
     pub(crate) fn current_adjustments(&self) -> Adjustments {
         self.shown
-            .as_ref()
+            .path()
             .and_then(|p| self.edits.get(p))
             .copied()
             .unwrap_or_default()
@@ -681,7 +709,7 @@ impl App {
 
     /// Rotate the current image 90° (clockwise if `cw`), remembering it per-image.
     fn rotate(&mut self, cw: bool) {
-        let Some(path) = self.shown.clone() else { return };
+        let Some(path) = self.shown.path().map(Path::to_path_buf) else { return };
         let step = (self.current_rotation() + if cw { 1 } else { 3 }) % 4;
         self.rotations.insert(path, step);
         if self.fitted {
@@ -984,7 +1012,7 @@ impl App {
                     self.request_redraw();
                 }
                 ui::UiAction::SetAdjustments(adj) => {
-                    let Some(path) = self.shown.clone() else { continue };
+                    let Some(path) = self.shown.path().map(Path::to_path_buf) else { continue };
                     if adj.is_identity() {
                         self.edits.remove(&path);
                     } else {
@@ -996,7 +1024,7 @@ impl App {
                     self.request_redraw();
                 }
                 ui::UiAction::ResetAdjustments => {
-                    let Some(path) = self.shown.clone() else { continue };
+                    let Some(path) = self.shown.path().map(Path::to_path_buf) else { continue };
                     self.edits.remove(&path);
                     self.catalog.set_adjustments(&path, &Adjustments::default());
                     self.push_adjustments();
