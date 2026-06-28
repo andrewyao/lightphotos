@@ -12,7 +12,7 @@ use std::path::Path;
 
 use crate::develop::Adjustments;
 use crate::navigation::Cmp;
-use crate::{App, ViewMode};
+use crate::app::{App, ViewMode};
 
 /// Shared palette. Several of these colors were previously duplicated as inline
 /// `from_rgb(...)` literals across the grid and filmstrip cells; naming them
