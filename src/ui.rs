@@ -33,8 +33,14 @@ mod theme {
 /// An action the UI wants `App` to perform after the frame is built. Positions
 /// are indices into the *visible* list (same space as `App::sel`).
 pub enum UiAction {
-    /// Select the cell at this visible position.
+    /// Select the cell at this visible position (plain click / single select).
     Select(usize),
+    /// Cmd-click: toggle this cell in the multi-selection.
+    SelectToggle(usize),
+    /// Shift-click: extend the range selection to this cell.
+    SelectRange(usize),
+    /// Select every visible cell (Cmd+A).
+    SelectAll,
     /// Open the loupe on this visible position.
     OpenLoupe(usize),
     /// Set the thumbnail size (longest-side px).
@@ -326,22 +332,23 @@ const STRIP_CELL_STYLE: CellStyle = CellStyle {
 };
 
 /// Shared thumbnail cell for the grid and the filmstrip: paints background,
-/// fitted thumbnail (or placeholder), star rating, and selection outline, then
-/// reports a click as a Select action. Returns the response so callers can add
-/// view-specific behavior (grid double-click to open, filmstrip auto-scroll).
+/// fitted thumbnail (or placeholder), star rating, and selection outline.
+/// `selected` marks membership in the multi-selection; `primary` marks the
+/// active cell (drawn with a brighter outline). Returns the response so callers
+/// can add view-specific behavior (click routing, double-click, auto-scroll).
 fn thumbnail_cell(
     ui: &mut egui::Ui,
     app: &App,
     pos: usize,
     cell: f32,
     selected: bool,
+    primary: bool,
     style: &CellStyle,
-    out: &mut FrameOutput,
 ) -> egui::Response {
     let size = egui::vec2(cell, cell);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
-    let bg = if selected {
+    let bg = if selected || primary {
         theme::SELECTION_BG
     } else {
         egui::Color32::from_gray(style.bg_gray)
@@ -376,19 +383,18 @@ fn thumbnail_cell(
         );
     }
 
-    // Prominent selection outline on top of the thumbnail.
-    if selected {
+    // Selection outline on top of the thumbnail: a brighter 3px stroke for the
+    // primary/active cell, a thinner 2px stroke for other selected members.
+    if selected || primary {
+        let width = if primary { 3.0 } else { 2.0 };
         ui.painter().rect_stroke(
             rect,
             style.corner,
-            egui::Stroke::new(3.0, theme::SELECTION_BLUE),
+            egui::Stroke::new(width, theme::SELECTION_BLUE),
             egui::StrokeKind::Inside,
         );
     }
 
-    if response.clicked() {
-        out.actions.push(UiAction::Select(pos));
-    }
     response
 }
 
@@ -402,9 +408,20 @@ fn grid_cell(
     out: &mut FrameOutput,
 ) {
     // No outline in the grid's browse-first state (sel is None).
-    let selected = sel == Some(pos);
-    let response = thumbnail_cell(ui, app, pos, cell, selected, &GRID_CELL_STYLE, out);
+    let primary = sel == Some(pos);
+    let selected = app.is_selected(pos);
+    let response = thumbnail_cell(ui, app, pos, cell, selected, primary, &GRID_CELL_STYLE);
     if response.clicked() {
+        // Cmd toggles a cell, Shift extends the range, plain click selects one.
+        let mods = ui.input(|i| i.modifiers);
+        let action = if mods.shift {
+            UiAction::SelectRange(pos)
+        } else if mods.command {
+            UiAction::SelectToggle(pos)
+        } else {
+            UiAction::Select(pos)
+        };
+        out.actions.push(action);
         out.actions.push(UiAction::Focus(Region::Grid));
     }
     if response.double_clicked() {
@@ -893,8 +910,10 @@ fn filmstrip_cell(
     sel: Option<usize>,
     out: &mut FrameOutput,
 ) -> egui::Response {
-    let response = thumbnail_cell(ui, app, pos, cell, sel == Some(pos), &STRIP_CELL_STYLE, out);
+    let primary = sel == Some(pos);
+    let response = thumbnail_cell(ui, app, pos, cell, primary, primary, &STRIP_CELL_STYLE);
     if response.clicked() {
+        out.actions.push(UiAction::Select(pos));
         out.actions.push(UiAction::Focus(Region::Filmstrip));
     }
     response
