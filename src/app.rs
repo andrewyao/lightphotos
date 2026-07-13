@@ -1049,8 +1049,12 @@ impl App {
     }
 
     /// Copy the primary photo's develop settings (tone only, no crop) to the
-    /// in-app clipboard for pasting onto other photos.
+    /// in-app clipboard for pasting onto other photos. Copy is from a single
+    /// photo, so it's a no-op unless exactly one is selected.
     fn copy_settings(&mut self) {
+        if self.selection_count() != 1 {
+            return;
+        }
         let Some(path) = self.selected_path() else {
             return;
         };
