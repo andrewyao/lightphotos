@@ -49,6 +49,10 @@ pub enum UiAction {
     EnterLoupe,
     /// Switch to the Grid (thumbnail) view.
     EnterGrid,
+    /// Confirm quitting the app (from the Esc quit-confirmation modal).
+    ConfirmQuit,
+    /// Dismiss the quit-confirmation modal without quitting.
+    CancelQuit,
     /// Ask to run a bulk action on the current selection (opens a confirm modal).
     RequestBulk(BulkKind),
     /// Confirm the pending bulk action.
@@ -116,6 +120,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     }
     status_toast(ui, app);
     confirm_modal(ui, app, &mut out);
+    quit_modal(ui, app, &mut out);
     help_modal(ui, app, &mut out);
     out
 }
@@ -351,6 +356,31 @@ fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     // Backdrop click / Escape → treat as cancel.
     if resp.should_close() {
         out.actions.push(UiAction::CancelBulk);
+    }
+}
+
+/// A modal confirming quit (Esc in the grid). Quit exits the app; Cancel / Esc /
+/// clicking the backdrop keeps it running.
+fn quit_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    if !app.pending_quit() {
+        return;
+    }
+    let resp = egui::Modal::new(egui::Id::new("quit_confirm")).show(ui.ctx(), |ui| {
+        ui.set_width(300.0);
+        ui.heading("Quit Image Viewer?");
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() {
+                out.actions.push(UiAction::CancelQuit);
+            }
+            if ui.button("Quit").clicked() {
+                out.actions.push(UiAction::ConfirmQuit);
+            }
+        });
+    });
+    // Backdrop click / Escape → keep running.
+    if resp.should_close() {
+        out.actions.push(UiAction::CancelQuit);
     }
 }
 

@@ -242,6 +242,11 @@ pub(crate) struct App {
     /// Whether the keyboard-shortcut help overlay is showing (toggled by `?`).
     show_help: bool,
 
+    /// Whether the quit-confirmation modal is showing (Esc in the grid).
+    pending_quit: bool,
+    /// Set once the user confirms quit; `main.rs` exits the event loop on it.
+    pub(crate) quit_requested: bool,
+
     /// A short-lived status message (e.g. an export result), with the time it was
     /// set; shown as a toast for a few seconds, then ignored.
     status: Option<(String, Instant)>,
@@ -331,6 +336,8 @@ impl App {
             pending_bulk: None,
             copied_settings: None,
             show_help: false,
+            pending_quit: false,
+            quit_requested: false,
             status: None,
             occluded: false,
             folder_root: None,
@@ -2182,6 +2189,11 @@ impl App {
                 }
                 ui::UiAction::EnterLoupe => self.enter_loupe(),
                 ui::UiAction::EnterGrid => self.enter_grid(),
+                ui::UiAction::ConfirmQuit => self.quit_requested = true,
+                ui::UiAction::CancelQuit => {
+                    self.pending_quit = false;
+                    self.request_redraw();
+                }
                 ui::UiAction::RequestBulk(kind) => self.request_bulk(kind),
                 ui::UiAction::ConfirmBulk => {
                     if let Some(kind) = self.pending_bulk.take() {
@@ -2305,6 +2317,10 @@ impl App {
         self.show_help
     }
 
+    pub(crate) fn pending_quit(&self) -> bool {
+        self.pending_quit
+    }
+
     pub(crate) fn thumb_px(&self) -> u32 {
         self.thumb_px
     }
@@ -2387,7 +2403,7 @@ impl App {
     }
 
     /// Handle a key press per the Lightroom key-binding table.
-    pub(crate) fn handle_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
+    pub(crate) fn handle_key(&mut self, code: KeyCode, _event_loop: &ActiveEventLoop) {
         let shift = self.modifiers.shift_key();
         let cmd = self.modifiers.super_key();
         let alt = self.modifiers.alt_key();
@@ -2414,6 +2430,16 @@ impl App {
         if self.show_help && code == KeyCode::Escape {
             self.show_help = false;
             self.request_redraw();
+            return;
+        }
+
+        // While the quit-confirmation modal is up the app is inert; Esc cancels
+        // it (the modal's Quit button is the only way to actually exit).
+        if self.pending_quit {
+            if code == KeyCode::Escape {
+                self.pending_quit = false;
+                self.request_redraw();
+            }
             return;
         }
 
@@ -2484,7 +2510,11 @@ impl App {
                     self.normalize_focus();
                     self.request_redraw();
                 }
-                ViewMode::Grid => event_loop.exit(),
+                // Grid: don't quit outright — ask for confirmation first.
+                ViewMode::Grid => {
+                    self.pending_quit = true;
+                    self.request_redraw();
+                }
             },
 
             // Cmd+A selects every visible cell in the grid.
