@@ -42,6 +42,11 @@ pub struct Renderer {
     adj_buf: wgpu::Buffer,
     adj_bind: wgpu::BindGroup,
 
+    /// Second adjustments uniform, used only for the "after" half of the
+    /// before/after compare view (the primary `adj_*` holds the "before").
+    adj_buf_b: wgpu::Buffer,
+    adj_bind_b: wgpu::BindGroup,
+
     /// Bind group for the current image texture (None until first image loads).
     image_bind: Option<wgpu::BindGroup>,
     /// Current image dimensions in pixels.
@@ -234,6 +239,20 @@ impl Renderer {
             }],
         });
 
+        let adj_buf_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("adj_b"),
+            contents: bytemuck::bytes_of(&GpuAdjust::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let adj_bind_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("adj_bg_b"),
+            layout: &adj_bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: adj_buf_b.as_entire_binding(),
+            }],
+        });
+
         // egui's wgpu paint backend, built against the same device + surface
         // format so its textures/buffers interoperate with ours. No depth
         // buffer (we render none), single-sampled, one frame in flight.
@@ -252,6 +271,8 @@ impl Renderer {
             xform_bind,
             adj_buf,
             adj_bind,
+            adj_buf_b,
+            adj_bind_b,
             image_bind: None,
             image_size: (0, 0),
             max_dim,
@@ -348,6 +369,12 @@ impl Renderer {
             .write_buffer(&self.adj_buf, 0, bytemuck::bytes_of(&a));
     }
 
+    /// Update the second ("after") adjustments uniform for the compare view.
+    pub fn set_adjustments_b(&mut self, a: GpuAdjust) {
+        self.queue
+            .write_buffer(&self.adj_buf_b, 0, bytemuck::bytes_of(&a));
+    }
+
     /// Render one frame: the image pass (optionally confined to `image_viewport`)
     /// followed by the egui pass (if `egui` is `Some`), all in one submission.
     ///
@@ -362,6 +389,7 @@ impl Renderer {
     pub fn render(
         &mut self,
         image_viewport: Option<(u32, u32, u32, u32)>,
+        compare_viewport: Option<(u32, u32, u32, u32)>,
         egui: Option<EguiPaint>,
     ) -> bool {
         use wgpu::CurrentSurfaceTexture as C;
@@ -428,31 +456,47 @@ impl Renderer {
                 multiview_mask: None,
             });
             if let Some(image_bind) = &self.image_bind {
-                // Confine the image to its viewport rect (clamped to the surface).
-                if let Some((x, y, w, h)) = image_viewport {
-                    let sw = self.config.width;
-                    let sh = self.config.height;
-                    let x = x.min(sw);
-                    let y = y.min(sh);
-                    let w = w.min(sw - x);
-                    let h = h.min(sh - y);
-                    if w == 0 || h == 0 {
-                        // Degenerate rect: draw nothing this frame.
-                    } else {
+                let (sw, sh) = (self.config.width, self.config.height);
+                let pipeline = &self.pipeline;
+                let xform_bind = &self.xform_bind;
+                // Draw the quad into a viewport rect (clamped to the surface) with
+                // the given adjustments bind group. Shared by the single-image and
+                // both compare halves.
+                let draw_into =
+                    |pass: &mut wgpu::RenderPass, vp: (u32, u32, u32, u32), adj: &wgpu::BindGroup| {
+                        let (x, y, w, h) = vp;
+                        let x = x.min(sw);
+                        let y = y.min(sh);
+                        let w = w.min(sw - x);
+                        let h = h.min(sh - y);
+                        if w == 0 || h == 0 {
+                            return;
+                        }
                         pass.set_scissor_rect(x, y, w, h);
                         pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
-                        pass.set_pipeline(&self.pipeline);
+                        pass.set_pipeline(pipeline);
                         pass.set_bind_group(0, image_bind, &[]);
-                        pass.set_bind_group(1, &self.xform_bind, &[]);
+                        pass.set_bind_group(1, xform_bind, &[]);
+                        pass.set_bind_group(2, adj, &[]);
+                        pass.draw(0..6, 0..1);
+                    };
+                match image_viewport {
+                    Some(vp) => {
+                        // Left half (or full image): the primary adjustments.
+                        draw_into(&mut pass, vp, &self.adj_bind);
+                        // Right half in compare mode: the "after" adjustments.
+                        if let Some(vp2) = compare_viewport {
+                            draw_into(&mut pass, vp2, &self.adj_bind_b);
+                        }
+                    }
+                    None => {
+                        // Full-surface draw (no scissor), primary adjustments.
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, image_bind, &[]);
+                        pass.set_bind_group(1, xform_bind, &[]);
                         pass.set_bind_group(2, &self.adj_bind, &[]);
                         pass.draw(0..6, 0..1);
                     }
-                } else {
-                    pass.set_pipeline(&self.pipeline);
-                    pass.set_bind_group(0, image_bind, &[]);
-                    pass.set_bind_group(1, &self.xform_bind, &[]);
-                    pass.set_bind_group(2, &self.adj_bind, &[]);
-                    pass.draw(0..6, 0..1);
                 }
             }
         }

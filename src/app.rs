@@ -213,6 +213,10 @@ pub(crate) struct App {
     loupe_viewport: Option<(u32, u32, u32, u32)>,
     /// Transient crop-mode state; `Some` while the user is editing a crop.
     crop_edit: Option<CropDraft>,
+    /// Before/after compare mode (Loupe only): the image is drawn twice, the
+    /// left half with identity tone (but crop + rotation), the right with the
+    /// full develop edits.
+    compare: bool,
 
     /// A bulk action awaiting confirmation. `Some` while the confirm modal is up.
     pending_bulk: Option<ui::BulkKind>,
@@ -304,6 +308,7 @@ impl App {
             rotations: HashMap::new(),
             loupe_viewport: None,
             crop_edit: None,
+            compare: false,
             pending_bulk: None,
             copied_settings: None,
             status: None,
@@ -646,6 +651,7 @@ impl App {
             return;
         }
         self.mode = ViewMode::Loupe;
+        self.compare = false;
         self.load_selected();
         self.request_neighbors();
         self.normalize_focus();
@@ -1741,13 +1747,65 @@ impl App {
         let denom_y = self.zoom * ih;
         let scale = [ww / denom_x, wh / denom_y];
         let offset = [-self.pan.0 / denom_x, -self.pan.1 / denom_y];
-        let rot = match self.current_rotation() {
+        (scale, offset, self.rot_matrix())
+    }
+
+    /// The display-UV → texture-UV rotation matrix for the current 90° step.
+    fn rot_matrix(&self) -> [f32; 4] {
+        match self.current_rotation() {
             1 => [0.0, 1.0, -1.0, 0.0],
             2 => [-1.0, 0.0, 0.0, -1.0],
             3 => [0.0, -1.0, 1.0, 0.0],
             _ => [1.0, 0.0, 0.0, 1.0],
-        };
-        (scale, offset, rot)
+        }
+    }
+
+    /// A centered "contain" fit transform for an area `(aw, ah)` physical px,
+    /// independent of the current zoom/pan. Used for the before/after halves.
+    fn fit_transform_for(&self, aw: f32, ah: f32) -> ([f32; 2], [f32; 2], [f32; 4]) {
+        let (iw, ih) = self.display_size();
+        let zoom = (aw / iw).min(ah / ih).clamp(MIN_ZOOM, MAX_ZOOM);
+        let denom_x = zoom * iw;
+        let denom_y = zoom * ih;
+        let pan_x = (aw - iw * zoom) / 2.0;
+        let pan_y = (ah - ih * zoom) / 2.0;
+        let scale = [aw / denom_x, ah / denom_y];
+        let offset = [-pan_x / denom_x, -pan_y / denom_y];
+        (scale, offset, self.rot_matrix())
+    }
+
+    /// Configure the renderer for the before/after compare view: a shared
+    /// half-size fit transform, the primary adjustments = "before" (identity
+    /// tone but the same crop), the secondary = "after" (the full edits).
+    /// `(half_w, half_h)` is each side's size in physical px.
+    fn push_compare(&mut self, half_w: f32, half_h: f32) {
+        let after = self.current_adjustments();
+        let before = Adjustments { crop: after.crop, ..Adjustments::default() };
+        let (scale, offset, rot) = self.fit_transform_for(half_w, half_h);
+        if let Some(r) = &mut self.renderer {
+            r.set_transform(scale, offset, rot);
+            r.set_adjustments(GpuAdjust::from(&before));
+            r.set_adjustments_b(GpuAdjust::from(&after));
+        }
+    }
+
+    /// Toggle the before/after compare view (Loupe only). Turning it off
+    /// restores the normal single-image transform + adjustments.
+    fn toggle_compare(&mut self) {
+        if self.mode != ViewMode::Loupe {
+            return;
+        }
+        self.compare = !self.compare;
+        if !self.compare {
+            self.push_transform();
+            self.push_adjustments();
+        }
+        self.request_redraw();
+    }
+
+    /// Whether the before/after compare view is active.
+    pub(crate) fn compare(&self) -> bool {
+        self.compare
     }
 
     /// Recompute the shader transform from the current view state.
@@ -1937,7 +1995,7 @@ impl App {
             (self.window.clone(), self.egui_state.take())
         else {
             if let Some(r) = &mut self.renderer {
-                r.render(None, None);
+                r.render(None, None, None);
             }
             return;
         };
@@ -1998,13 +2056,28 @@ impl App {
             }
         }
 
+        // Before/after compare (Loupe): split the central rect into two halves,
+        // set up the two-uniform draw, and render the image twice.
+        let mut primary_vp = image_viewport;
+        let mut compare_vp = None;
+        if self.compare && self.mode == ViewMode::Loupe {
+            if let Some((x, y, w, h)) = image_viewport {
+                if w >= 2 && h > 0 {
+                    let half = w / 2;
+                    self.push_compare(half as f32, h as f32);
+                    primary_vp = Some((x, y, half, h));
+                    compare_vp = Some((x + half, y, w - half, h));
+                }
+            }
+        }
+
         let Some(renderer) = self.renderer.as_mut() else { return };
         let egui_paint = EguiPaint {
             textures_delta: full_output.textures_delta,
             paint_jobs,
             screen_descriptor,
         };
-        let presented = renderer.render(image_viewport, Some(egui_paint));
+        let presented = renderer.render(primary_vp, compare_vp, Some(egui_paint));
         // If the surface wasn't presentable (e.g. the window opened occluded /
         // behind another window), keep retrying so we draw as soon as it's
         // revealed — unless winit has told us it's genuinely occluded, in which
@@ -2298,6 +2371,8 @@ impl App {
             KeyCode::KeyX if !cmd && !alt => self.export_selected(),
             // Enter is focus-dependent (open image / expand folder / …).
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
+            // `Y` toggles the before/after compare view (Loupe only).
+            KeyCode::KeyY if self.mode == ViewMode::Loupe => self.toggle_compare(),
             // `D` toggles the Develop panel (Loupe only).
             KeyCode::KeyD if self.mode == ViewMode::Loupe => {
                 self.develop_open = !self.develop_open;
