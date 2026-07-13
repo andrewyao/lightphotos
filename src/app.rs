@@ -225,6 +225,9 @@ pub(crate) struct App {
     /// for pasting onto other selected photos. `None` until the user copies.
     copied_settings: Option<(PathBuf, Adjustments)>,
 
+    /// Whether the keyboard-shortcut help overlay is showing (toggled by `?`).
+    show_help: bool,
+
     /// A short-lived status message (e.g. an export result), with the time it was
     /// set; shown as a toast for a few seconds, then ignored.
     status: Option<(String, Instant)>,
@@ -311,6 +314,7 @@ impl App {
             compare: false,
             pending_bulk: None,
             copied_settings: None,
+            show_help: false,
             status: None,
             occluded: false,
             folder_root: None,
@@ -2117,6 +2121,10 @@ impl App {
                     }
                 }
                 ui::UiAction::CopySettings => self.copy_settings(),
+                ui::UiAction::ToggleHelp => {
+                    self.show_help = !self.show_help;
+                    self.request_redraw();
+                }
                 ui::UiAction::RequestBulk(kind) => self.request_bulk(kind),
                 ui::UiAction::ConfirmBulk => {
                     if let Some(kind) = self.pending_bulk.take() {
@@ -2222,6 +2230,24 @@ impl App {
         self.filter_cmp
     }
 
+    /// Count of photos in the current folder at each rating 0..=5 (index =
+    /// stars). Computed over the whole playlist, ignoring the active filter, so
+    /// the toolbar histogram shows the folder's true distribution.
+    pub(crate) fn rating_counts(&self) -> [usize; 6] {
+        let mut counts = [0usize; 6];
+        if let Some(pl) = &self.playlist {
+            for p in pl.entries() {
+                counts[self.rating_of(p).min(5) as usize] += 1;
+            }
+        }
+        counts
+    }
+
+    /// Whether the shortcut-help overlay is showing.
+    pub(crate) fn show_help(&self) -> bool {
+        self.show_help
+    }
+
     pub(crate) fn thumb_px(&self) -> u32 {
         self.thumb_px
     }
@@ -2309,6 +2335,18 @@ impl App {
                 KeyCode::KeyX if !cmd && !alt => self.export_selected(),
                 _ => {}
             }
+            return;
+        }
+
+        // `?` (Shift+/) toggles the shortcut-help overlay; Esc closes it if open.
+        if shift && code == KeyCode::Slash {
+            self.show_help = !self.show_help;
+            self.request_redraw();
+            return;
+        }
+        if self.show_help && code == KeyCode::Escape {
+            self.show_help = false;
+            self.request_redraw();
             return;
         }
 

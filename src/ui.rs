@@ -43,6 +43,8 @@ pub enum UiAction {
     OpenLoupe(usize),
     /// Copy the primary photo's develop settings to the in-app clipboard.
     CopySettings,
+    /// Show/hide the keyboard-shortcut help overlay.
+    ToggleHelp,
     /// Ask to run a bulk action on the current selection (opens a confirm modal).
     RequestBulk(BulkKind),
     /// Confirm the pending bulk action.
@@ -110,6 +112,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     }
     status_toast(ui, app);
     confirm_modal(ui, app, &mut out);
+    help_modal(ui, app, &mut out);
     out
 }
 
@@ -223,6 +226,20 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 out.actions.push(UiAction::SetFilter(next));
             }
 
+            // Rating-distribution histogram (folder-wide), clickable to filter.
+            ui.separator();
+            rating_histogram(ui, app, out);
+
+            // `?` opens the keyboard-shortcut help.
+            ui.separator();
+            if ui
+                .button("?")
+                .on_hover_text("Keyboard shortcuts (?)")
+                .clicked()
+            {
+                out.actions.push(UiAction::ToggleHelp);
+            }
+
             // Show which photo's develop settings are on the clipboard, if any.
             if let Some(name) = app.copied_settings_name() {
                 ui.separator();
@@ -310,6 +327,101 @@ fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     // Backdrop click / Escape → treat as cancel.
     if resp.should_close() {
         out.actions.push(UiAction::CancelBulk);
+    }
+}
+
+/// A compact per-rating histogram (0..=5 stars) of the current folder. Each bar
+/// is clickable to filter to exactly that rating (click the active bar to clear).
+fn rating_histogram(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let counts = app.rating_counts();
+    if counts.iter().all(|&c| c == 0) {
+        return; // no folder loaded
+    }
+    let max = counts.iter().copied().max().unwrap_or(1).max(1) as f32;
+    let bar_w = 12.0;
+    let gap = 3.0;
+    let h = 24.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(6.0 * (bar_w + gap), h),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    for k in 0u8..6 {
+        let x = rect.min.x + k as f32 * (bar_w + gap);
+        let col = egui::Rect::from_min_size(egui::pos2(x, rect.min.y), egui::vec2(bar_w, h));
+        let frac = counts[k as usize] as f32 / max;
+        let bh = if counts[k as usize] == 0 { 0.0 } else { (frac * (h - 1.0)).max(2.0) };
+        let bar = egui::Rect::from_min_max(egui::pos2(x, rect.max.y - bh), col.max);
+        let active = matches!(app.filter(), Some((Cmp::Eq, v)) if v == k);
+        let color = if active {
+            theme::SELECTION_BLUE
+        } else if k == 0 {
+            egui::Color32::from_gray(120)
+        } else {
+            theme::STAR_GOLD
+        };
+        painter.rect_filled(bar, 1.0, color);
+        let resp = ui
+            .interact(col, ui.id().with(("rating_hist", k)), egui::Sense::click())
+            .on_hover_text(format!("{} photo(s) rated {}\u{2605}", counts[k as usize], k));
+        if resp.clicked() {
+            // Toggle: clicking the active bar clears the filter.
+            let next = if active { None } else { Some((Cmp::Eq, k)) };
+            out.actions.push(UiAction::SetFilter(next));
+        }
+    }
+}
+
+/// The keyboard-shortcut help overlay (toggled by `?`). A modal listing the
+/// key bindings; Close / Esc / backdrop dismisses it.
+fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    if !app.show_help() {
+        return;
+    }
+    const SHORTCUTS: &[(&str, &str)] = &[
+        ("\u{2190}\u{2191}\u{2192}\u{2193}", "Navigate photos"),
+        ("Shift + \u{2190}\u{2192}", "Extend selection (grid)"),
+        ("Cmd + A", "Select all"),
+        ("Click / Cmd-click / Shift-click", "Select / toggle / range"),
+        ("Enter", "Open photo / expand folder"),
+        ("E / G", "Loupe / Grid"),
+        ("Esc", "Back to grid / quit"),
+        ("1 – 5 / 0", "Rate / clear rating"),
+        ("Shift + 1 – 5", "Filter \u{2265} N stars"),
+        ("C", "Crop"),
+        ("Cmd + [ / ]", "Rotate 90\u{b0}"),
+        ("D", "Develop panel"),
+        ("Y", "Before / after compare"),
+        ("Cmd + Shift + C", "Copy develop settings"),
+        ("X", "Export selected as JPG"),
+        ("Delete / Backspace", "Move to Trash"),
+        ("Tab / Shift + Tab", "Hide side panels / all panels"),
+        ("+ / \u{2212}", "Thumbnail size (grid)"),
+        ("Alt + 0", "Reset zoom (100%)"),
+        ("?", "This help"),
+    ];
+    let resp = egui::Modal::new(egui::Id::new("help_overlay")).show(ui.ctx(), |ui| {
+        ui.set_width(420.0);
+        ui.heading("Keyboard shortcuts");
+        ui.add_space(6.0);
+        egui::Grid::new("help_grid")
+            .num_columns(2)
+            .spacing([18.0, 6.0])
+            .striped(true)
+            .show(ui, |ui| {
+                for (key, desc) in SHORTCUTS {
+                    ui.label(egui::RichText::new(*key).strong());
+                    ui.label(*desc);
+                    ui.end_row();
+                }
+            });
+        ui.add_space(10.0);
+        if ui.button("Close").clicked() {
+            out.actions.push(UiAction::ToggleHelp);
+        }
+    });
+    if resp.should_close() {
+        out.actions.push(UiAction::ToggleHelp);
     }
 }
 
