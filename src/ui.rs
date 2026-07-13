@@ -244,9 +244,14 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 {
                     out.actions.push(UiAction::RequestBulk(BulkKind::Export));
                 }
-                // Delete arrives in a later phase; shown disabled for now.
-                ui.add_enabled(false, egui::Button::new("Delete"))
-                    .on_disabled_hover_text("Delete-to-Trash lands in a later step");
+                // Move the selection to the Trash (confirmed).
+                if ui
+                    .button("Delete")
+                    .on_hover_text("Move selected photos to the Trash (Delete)")
+                    .clicked()
+                {
+                    out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
+                }
             }
         });
     });
