@@ -31,13 +31,22 @@ pub struct ImageRecord {
     pub rating: Option<u8>,
     #[serde(default, skip_serializing_if = "Adjustments::is_identity")]
     pub adjustments: Adjustments,
+    /// Manual rotation in 90° clockwise steps (0..=3). Kept separate from the
+    /// develop adjustments (it's not a tone/crop edit).
+    #[serde(default, skip_serializing_if = "is_zero_rot")]
+    pub rotation: u8,
+}
+
+fn is_zero_rot(v: &u8) -> bool {
+    *v == 0
 }
 
 impl ImageRecord {
-    /// True when this record carries nothing worth persisting (no rating and an
-    /// identity edit) — such entries are dropped to keep the file small.
+    /// True when this record carries nothing worth persisting (no rating,
+    /// identity edit, no rotation) — such entries are dropped to keep the file
+    /// small.
     fn is_empty(&self) -> bool {
-        self.rating.is_none() && self.adjustments.is_identity()
+        self.rating.is_none() && self.adjustments.is_identity() && self.rotation == 0
     }
 }
 
@@ -125,6 +134,21 @@ impl Catalog {
         self.update(key, |rec| rec.adjustments = adj);
     }
 
+    /// Manual rotation (90° CW steps, 0..=3) for `path`.
+    pub fn rotation(&self, path: &Path) -> u8 {
+        self.images
+            .get(&normalize(path))
+            .map(|r| r.rotation)
+            .unwrap_or(0)
+    }
+
+    /// Store the manual rotation for `path` (0..=3). Persisted atomically.
+    pub fn set_rotation(&mut self, path: &Path, rotation: u8) {
+        let key = normalize(path);
+        let rotation = rotation % 4;
+        self.update(key, |rec| rec.rotation = rotation);
+    }
+
     /// Forget any record for `path` (rating + adjustments). Used when a photo is
     /// deleted from disk. Persisted atomically; a no-op when nothing was stored.
     pub fn remove(&mut self, path: &Path) {
@@ -198,6 +222,7 @@ fn parse_catalog(bytes: &[u8]) -> serde_json::Result<HashMap<PathBuf, ImageRecor
                     ImageRecord {
                         rating: Some(stars),
                         adjustments: Adjustments::default(),
+                        rotation: 0,
                     },
                 )
             })
@@ -333,6 +358,26 @@ mod tests {
 
         let reloaded = Catalog::with_dir(dir.clone());
         assert_eq!(reloaded.adjustments(&p), adj);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn rotation_persists_across_reload() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            cat.set_rotation(&p, 3);
+            assert_eq!(cat.rotation(&p), 3);
+            // Wraps mod 4.
+            cat.set_rotation(&p, 5);
+            assert_eq!(cat.rotation(&p), 1);
+        }
+
+        let reloaded = Catalog::with_dir(dir.clone());
+        assert_eq!(reloaded.rotation(&p), 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
