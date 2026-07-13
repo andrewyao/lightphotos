@@ -12,7 +12,7 @@ use std::path::Path;
 
 use crate::develop::Adjustments;
 use crate::navigation::Cmp;
-use crate::app::{App, Region, ViewMode};
+use crate::app::{App, CropEdge, Region, ViewMode};
 
 /// Shared palette. Several of these colors were previously duplicated as inline
 /// `from_rgb(...)` literals across the grid and filmstrip cells; naming them
@@ -45,6 +45,14 @@ pub enum UiAction {
     SetRating(u8),
     /// Open this folder as one unit: load its images and toggle its expansion.
     OpenFolder(std::path::PathBuf),
+    /// Begin dragging this crop edge (pointer pressed near it).
+    CropGrab(CropEdge),
+    /// Begin moving the whole crop rectangle, anchored at this texture coordinate.
+    CropGrabMove(f32, f32),
+    /// Move the active crop drag to this normalized texture coordinate.
+    CropDragTo(f32, f32),
+    /// Release the active crop drag (drag ended).
+    CropRelease,
     /// Set the develop adjustments for the current loupe image.
     SetAdjustments(Adjustments),
     /// Reset the current loupe image's develop adjustments to identity.
@@ -65,11 +73,35 @@ pub struct FrameOutput {
 /// Build the egui UI for one frame and return the loupe rect + actions.
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     let mut out = FrameOutput::default();
+    // Global toolbar first, so it reserves height above both modes (and, in the
+    // loupe, before the frameless central rect is read).
+    global_toolbar(ui, app, &mut out);
     match app.mode() {
         ViewMode::Grid => draw_grid(ui, app, &mut out),
         ViewMode::Loupe => draw_loupe(ui, app, &mut out),
     }
+    status_toast(ui, app);
     out
+}
+
+/// A transient status message (e.g. an export result), shown bottom-center for a
+/// few seconds. Requests a repaint so it disappears without further input.
+fn status_toast(ui: &egui::Ui, app: &App) {
+    let Some(text) = app.status_text() else { return };
+    let screen = ui.ctx().content_rect();
+    egui::Area::new(egui::Id::new("status_toast"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(screen.center().x, screen.max.y - 48.0))
+        .pivot(egui::Align2::CENTER_CENTER)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(egui::Color32::from_black_alpha(210))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(text).color(egui::Color32::WHITE));
+                });
+        });
+    // Keep repainting until the toast expires so it clears on its own.
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
 }
 
 /// Stars as a compact string, e.g. 3 → "★★★☆☆".
@@ -85,37 +117,58 @@ fn star_string(stars: u8) -> String {
     out
 }
 
-/// The shared filter bar (comparator buttons + value 0..5 + clear).
-fn filter_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    ui.horizontal(|ui| {
-        ui.label("Filter:");
-        let (cur_cmp, cur_val) = match app.filter() {
-            Some((c, v)) => (Some(c), v),
-            None => (None, 0),
-        };
-        for cmp in [Cmp::Gte, Cmp::Eq, Cmp::Lte] {
-            let selected = cur_cmp == Some(cmp);
-            if ui.selectable_label(selected, cmp.symbol()).clicked() {
-                if selected {
-                    out.actions.push(UiAction::SetFilter(None));
+/// The always-visible global toolbar, drawn once above both modes. Currently
+/// hosts the rating filter (`All` + 5 stars → show photos rated ≥ N).
+fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    egui::Panel::top("global_toolbar").show_inside(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Filter:");
+            // The active `≥ N` threshold: `Some((Gte, v))` → v; anything else
+            // (None, or the Unrated filter) lights no stars.
+            let active = match app.filter() {
+                Some((Cmp::Gte, v)) => v,
+                _ => 0,
+            };
+            // `All` clears the filter; selected only when no filter is set.
+            if ui.selectable_label(app.filter().is_none(), "All").clicked() {
+                out.actions.push(UiAction::SetFilter(None));
+            }
+            ui.separator();
+            // Five clickable stars: click star N → show ≥ N. Matches the
+            // loupe rating overlay's glyphs/colors.
+            for n in 1u8..=5 {
+                let filled = n <= active;
+                let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
+                let color = if filled {
+                    theme::STAR_GOLD
                 } else {
-                    let v = if cur_val == 0 { 1 } else { cur_val };
-                    out.actions.push(UiAction::SetFilter(Some((cmp, v))));
+                    egui::Color32::from_gray(160)
+                };
+                let star = egui::Label::new(
+                    egui::RichText::new(glyph).size(20.0).color(color),
+                )
+                .sense(egui::Sense::click());
+                if ui
+                    .add(star)
+                    .on_hover_text(format!("Show photos rated \u{2265} {n}"))
+                    .clicked()
+                {
+                    out.actions.push(UiAction::SetFilter(Some((Cmp::Gte, n))));
                 }
             }
-        }
-        ui.separator();
-        for v in 0u8..=5 {
-            let selected = cur_cmp.is_some() && cur_val == v;
-            if ui.selectable_label(selected, format!("{v}")).clicked() {
-                let cmp = cur_cmp.unwrap_or(Cmp::Gte);
-                out.actions.push(UiAction::SetFilter(Some((cmp, v))));
+            ui.separator();
+            // Show only unstarred photos (rating == 0), mutually exclusive with ≥N.
+            let unrated = matches!(app.filter(), Some((Cmp::Eq, 0)));
+            if ui
+                .selectable_label(unrated, "Unrated")
+                .on_hover_text("Show only photos with no rating")
+                .clicked()
+            {
+                // Toggle off back to All when it's already active.
+                let next = if unrated { None } else { Some((Cmp::Eq, 0)) };
+                out.actions.push(UiAction::SetFilter(next));
             }
-        }
-        ui.separator();
-        if ui.button("Clear").clicked() {
-            out.actions.push(UiAction::SetFilter(None));
-        }
+        });
     });
 }
 
@@ -157,9 +210,6 @@ fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
             ui.separator();
             ui.label(format!("{} photos", app.visible_len()));
         });
-        if app.filter_bar_open() {
-            filter_bar(ui, app, out);
-        }
     });
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -370,12 +420,6 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     // press and release, so egui never registers the click.
     let follow = app.take_filmstrip_follow();
 
-    if app.filter_bar_open() {
-        egui::Panel::top("loupe_filter").show_inside(ui, |ui| {
-            filter_bar(ui, app, out);
-        });
-    }
-
     // Left folder-tree sidebar (same as the grid) so structure stays visible.
     draw_folders_panel(ui, app, out);
 
@@ -436,9 +480,153 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let central = ui.available_rect_before_wrap();
     out.loupe_rect = Some(central);
 
-    // Star overlay in its own foreground Area, so egui owns clicks on the stars
-    // (only there) without claiming the rest of the image area.
-    loupe_star_overlay(ui, app, central, out);
+    if app.crop_rect().is_some() {
+        // Crop mode: the crop overlay owns the whole central area (mask + edges).
+        loupe_crop_overlay(ui, app, central, out);
+    } else {
+        // Star overlay in its own foreground Area, so egui owns clicks on the stars
+        // (only there) without claiming the rest of the image area.
+        loupe_star_overlay(ui, app, central, out);
+    }
+}
+
+/// The crop-mode overlay: a dimmed mask outside the crop rectangle, a bright
+/// outline with edge handles, and drag handling that moves whichever edge the
+/// user grabs. The rectangle is stored in the app in texture space; here we map
+/// it to screen via `App::loupe_tex_to_screen` (which accounts for zoom, pan and
+/// rotation), so a grabbed screen edge maps back to the correct texture edge.
+fn loupe_crop_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
+    let Some(rect) = app.crop_rect() else { return };
+
+    // The four texture-space edges as screen segments (endpoint pairs).
+    let corner = |u, v| app.loupe_tex_to_screen(central, u, v);
+    let tl = corner(rect.left, rect.top);
+    let tr = corner(rect.right, rect.top);
+    let bl = corner(rect.left, rect.bottom);
+    let br = corner(rect.right, rect.bottom);
+    let edges = [
+        (CropEdge::Left, tl, bl),
+        (CropEdge::Right, tr, br),
+        (CropEdge::Top, tl, tr),
+        (CropEdge::Bottom, bl, br),
+    ];
+    // Screen bounds of the crop (min/max copes with rotation flipping corners).
+    let crop_screen = egui::Rect::from_points(&[tl, tr, bl, br]).intersect(central);
+
+    egui::Area::new(egui::Id::new("loupe_crop"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(central.min)
+        .show(ui.ctx(), |ui| {
+            let (_id, resp) = ui.allocate_exact_size(central.size(), egui::Sense::drag());
+            let painter = ui.painter_at(central);
+
+            // Dim the four bands around the crop rectangle.
+            let dim = egui::Color32::from_black_alpha(150);
+            let r = crop_screen;
+            let full = central;
+            let bands = [
+                egui::Rect::from_min_max(full.min, egui::pos2(full.max.x, r.min.y)), // top
+                egui::Rect::from_min_max(egui::pos2(full.min.x, r.max.y), full.max), // bottom
+                egui::Rect::from_min_max(egui::pos2(full.min.x, r.min.y), egui::pos2(r.min.x, r.max.y)), // left
+                egui::Rect::from_min_max(egui::pos2(r.max.x, r.min.y), egui::pos2(full.max.x, r.max.y)), // right
+            ];
+            for b in bands {
+                if b.is_positive() {
+                    painter.rect_filled(b, 0.0, dim);
+                }
+            }
+
+            // Crop outline + rule-of-thirds guides.
+            let line = egui::Color32::from_gray(235);
+            painter.rect_stroke(r, 0.0, egui::Stroke::new(1.5, line), egui::StrokeKind::Inside);
+            for i in 1..3 {
+                let fx = r.min.x + r.width() * i as f32 / 3.0;
+                let fy = r.min.y + r.height() * i as f32 / 3.0;
+                let faint = egui::Color32::from_white_alpha(70);
+                painter.line_segment([egui::pos2(fx, r.min.y), egui::pos2(fx, r.max.y)], egui::Stroke::new(1.0, faint));
+                painter.line_segment([egui::pos2(r.min.x, fy), egui::pos2(r.max.x, fy)], egui::Stroke::new(1.0, faint));
+            }
+            // Edge handles: a short bright bar at each edge midpoint.
+            for (_, a, b) in edges {
+                let mid = egui::pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+                painter.circle_filled(mid, 5.0, line);
+            }
+
+            // Classify a pointer position: an edge (within grab threshold) takes
+            // priority; otherwise inside the rectangle means "move the whole crop".
+            const EDGE_GRAB_PX: f32 = 24.0;
+            let inside_rect = |p: egui::Pos2| {
+                let (u, v) = app.loupe_screen_to_tex(central, p);
+                u >= rect.left && u <= rect.right && v >= rect.top && v <= rect.bottom
+            };
+
+            // Hover cursor hints: resize arrows on the edges, move icon inside.
+            if let Some(p) = resp.hover_pos() {
+                let icon = if let Some(edge) = nearest_edge(&edges, p, EDGE_GRAB_PX) {
+                    match edge {
+                        CropEdge::Left | CropEdge::Right => egui::CursorIcon::ResizeHorizontal,
+                        CropEdge::Top | CropEdge::Bottom => egui::CursorIcon::ResizeVertical,
+                    }
+                } else if inside_rect(p) {
+                    egui::CursorIcon::Move
+                } else {
+                    egui::CursorIcon::Default
+                };
+                ui.ctx().set_cursor_icon(icon);
+            }
+
+            // Drag handling: on press, grab the nearest edge (resize) or, if the
+            // press is inside the rectangle, grab the whole rect (move). While
+            // dragging, feed the pointer's texture coordinate to the active grab.
+            if resp.drag_started() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    if let Some(edge) = nearest_edge(&edges, p, EDGE_GRAB_PX) {
+                        out.actions.push(UiAction::CropGrab(edge));
+                    } else if inside_rect(p) {
+                        let (u, v) = app.loupe_screen_to_tex(central, p);
+                        out.actions.push(UiAction::CropGrabMove(u, v));
+                    }
+                }
+            }
+            if resp.dragged() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let (u, v) = app.loupe_screen_to_tex(central, p);
+                    out.actions.push(UiAction::CropDragTo(u, v));
+                }
+            }
+            if resp.drag_stopped() {
+                out.actions.push(UiAction::CropRelease);
+            }
+        });
+}
+
+/// The crop edge whose screen segment is nearest to `p`, if within `threshold`
+/// px. Segments are `(edge, endpoint_a, endpoint_b)`.
+fn nearest_edge(
+    edges: &[(CropEdge, egui::Pos2, egui::Pos2)],
+    p: egui::Pos2,
+    threshold: f32,
+) -> Option<CropEdge> {
+    let mut best: Option<(CropEdge, f32)> = None;
+    for &(edge, a, b) in edges {
+        let d = dist_to_segment(p, a, b);
+        if best.map_or(true, |(_, bd)| d < bd) {
+            best = Some((edge, d));
+        }
+    }
+    best.filter(|&(_, d)| d <= threshold).map(|(e, _)| e)
+}
+
+/// Euclidean distance from point `p` to segment `a`–`b`.
+fn dist_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+    let ab = b - a;
+    let len2 = ab.length_sq();
+    if len2 <= f32::EPSILON {
+        return (p - a).length();
+    }
+    let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+    let proj = a + ab * t;
+    (p - proj).length()
 }
 
 /// The right-hand Develop panel: the Basic tone sliders, matching Lightroom's

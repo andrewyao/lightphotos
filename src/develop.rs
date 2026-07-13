@@ -77,6 +77,46 @@ impl Adjustments {
     }
 }
 
+/// A stable 64-bit signature of an image's rendered edits (tone + crop + manual
+/// 90° rotation). Used as part of the thumbnail-texture cache key so a thumbnail
+/// is invalidated and re-baked whenever any edit changes. Floats are quantized so
+/// sub-threshold jitter doesn't churn the cache, and an identity edit (no tone, no
+/// crop, `rot == 0`) always yields the same value so unedited photos share one key.
+pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
+    use crate::thumbnail::Fnv1a;
+
+    let mut h = Fnv1a::new();
+
+    // Tone: eight −100..=100 (or −5..=5) sliders, quantized to 1e-3.
+    let tone = [
+        adj.temp, adj.tint, adj.exposure, adj.contrast, adj.highlights, adj.shadows,
+        adj.whites, adj.blacks,
+    ];
+    for v in tone {
+        h.write(&((v * 1000.0).round() as i32).to_le_bytes());
+    }
+
+    // Crop: normalize a full-frame `Some` to `None` so it hashes like no crop,
+    // then quantize the four normalized coords to 1e-5.
+    let q = |v: f32| ((v.clamp(0.0, 1.0) * 100_000.0).round()) as u32;
+    match adj.crop {
+        Some(c)
+            if c.left > 0.0 || c.top > 0.0 || c.right < 1.0 || c.bottom < 1.0 =>
+        {
+            h.write(&[1]); // crop present
+            for v in [c.left, c.top, c.right, c.bottom] {
+                h.write(&q(v).to_le_bytes());
+            }
+        }
+        _ => h.write(&[0]), // no crop / full-frame
+    }
+
+    // Manual rotation in 90° steps.
+    h.write(&[rot % 4]);
+
+    h.finish()
+}
+
 /// Packed uniform mirror of [`Adjustments`], uploaded to the fragment shader.
 ///
 /// 12 × f32 = 48 bytes, already a multiple of 16 so no trailing pad is needed —
@@ -228,4 +268,58 @@ pub fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
 
     // 6. Clamp final to 0..1.
     [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn crop(l: f32, t: f32, r: f32, b: f32) -> Crop {
+        Crop { left: l, top: t, right: r, bottom: b }
+    }
+
+    #[test]
+    fn edit_signature_stable() {
+        let mut a = Adjustments::default();
+        a.exposure = 1.5;
+        a.crop = Some(crop(0.1, 0.2, 0.8, 0.9));
+        assert_eq!(edit_signature(&a, 1), edit_signature(&a, 1));
+    }
+
+    #[test]
+    fn edit_signature_identity_is_fixed() {
+        // Identity adjustments + no crop + rot 0 must always hash the same, and a
+        // full-frame `Some` crop must hash identically to `None`.
+        let base = edit_signature(&Adjustments::default(), 0);
+        let full = Adjustments { crop: Some(crop(0.0, 0.0, 1.0, 1.0)), ..Default::default() };
+        assert_eq!(edit_signature(&full, 0), base);
+    }
+
+    #[test]
+    fn edit_signature_differs_on_crop() {
+        let a = Adjustments::default();
+        let b = Adjustments { crop: Some(crop(0.1, 0.1, 0.9, 0.9)), ..Default::default() };
+        assert_ne!(edit_signature(&a, 0), edit_signature(&b, 0));
+    }
+
+    #[test]
+    fn edit_signature_differs_on_tone() {
+        let a = Adjustments::default();
+        let b = Adjustments { exposure: 0.5, ..Default::default() };
+        assert_ne!(edit_signature(&a, 0), edit_signature(&b, 0));
+    }
+
+    #[test]
+    fn edit_signature_differs_on_rotation() {
+        let a = Adjustments::default();
+        assert_ne!(edit_signature(&a, 0), edit_signature(&a, 1));
+    }
+
+    #[test]
+    fn edit_signature_quantizes() {
+        // Sub-quantum jitter (< 1e-3 tone, < 1e-5 crop) hashes identically.
+        let a = Adjustments { exposure: 1.0, ..Default::default() };
+        let b = Adjustments { exposure: 1.0 + 1e-5, ..Default::default() };
+        assert_eq!(edit_signature(&a, 0), edit_signature(&b, 0));
+    }
 }
