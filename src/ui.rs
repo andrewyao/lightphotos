@@ -53,6 +53,8 @@ pub enum UiAction {
     SetThumbPx(u32),
     /// Set (or clear) the star filter.
     SetFilter(Option<(Cmp, u8)>),
+    /// Change the toolbar comparator applied to star-level clicks (≥ / = / ≤).
+    SetFilterCmp(Cmp),
     /// Rate the current selection/shown image (0 clears).
     SetRating(u8),
     /// Open this folder as one unit: load its images and toggle its expansion.
@@ -150,21 +152,46 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::Panel::top("global_toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label("Filter:");
-            // The active `≥ N` threshold: `Some((Gte, v))` → v; anything else
-            // (None, or the Unrated filter) lights no stars.
-            let active = match app.filter() {
-                Some((Cmp::Gte, v)) => v,
-                _ => 0,
-            };
             // `All` clears the filter; selected only when no filter is set.
             if ui.selectable_label(app.filter().is_none(), "All").clicked() {
                 out.actions.push(UiAction::SetFilter(None));
             }
             ui.separator();
-            // Five clickable stars: click star N → show ≥ N. Matches the
-            // loupe rating overlay's glyphs/colors.
+            // Comparator selector: the mode (≥ / = / ≤) applied to the star
+            // clicked next. Sticky, so it's highlighted even with no filter set.
+            let sel_cmp = app.filter_cmp();
+            for (cmp, glyph, tip) in [
+                (Cmp::Gte, "\u{2265}", "At least N stars"),
+                (Cmp::Eq, "=", "Exactly N stars"),
+                (Cmp::Lte, "\u{2264}", "At most N stars"),
+            ] {
+                if ui
+                    .selectable_label(sel_cmp == cmp, glyph)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    out.actions.push(UiAction::SetFilterCmp(cmp));
+                }
+            }
+            ui.separator();
+            // The active star-level filter (a 1..=5 threshold), if any. Drives
+            // which stars light up; `Eq` lights only star N, `Gte`/`Lte` cascade.
+            let (active_cmp, active_n) = match app.filter() {
+                Some((c, v)) if (1..=5).contains(&v) => (Some(c), v),
+                _ => (None, 0),
+            };
+            let cmp_sym = match sel_cmp {
+                Cmp::Gte => "\u{2265}",
+                Cmp::Eq => "=",
+                Cmp::Lte => "\u{2264}",
+            };
+            // Five clickable stars: click star N → filter (current comparator, N).
             for n in 1u8..=5 {
-                let filled = n <= active;
+                let filled = match active_cmp {
+                    Some(Cmp::Eq) => n == active_n,
+                    Some(_) => n <= active_n,
+                    None => false,
+                };
                 let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
                 let color = if filled {
                     theme::STAR_GOLD
@@ -177,10 +204,10 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 .sense(egui::Sense::click());
                 if ui
                     .add(star)
-                    .on_hover_text(format!("Show photos rated \u{2265} {n}"))
+                    .on_hover_text(format!("Show photos rated {cmp_sym} {n}"))
                     .clicked()
                 {
-                    out.actions.push(UiAction::SetFilter(Some((Cmp::Gte, n))));
+                    out.actions.push(UiAction::SetFilter(Some((sel_cmp, n))));
                 }
             }
             ui.separator();
