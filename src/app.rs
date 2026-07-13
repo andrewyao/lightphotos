@@ -678,6 +678,16 @@ impl App {
         self.request_redraw();
     }
 
+    /// Switch to the Grid (thumbnail) view. No-op if already there.
+    fn enter_grid(&mut self) {
+        if self.mode != ViewMode::Grid {
+            self.mode = ViewMode::Grid;
+            self.update_window_title();
+            self.normalize_focus();
+            self.request_redraw();
+        }
+    }
+
     // ---- Keyboard focus & panel visibility ----
 
     /// Whether the left folder-tree panel is currently shown.
@@ -2170,6 +2180,8 @@ impl App {
                     self.show_help = !self.show_help;
                     self.request_redraw();
                 }
+                ui::UiAction::EnterLoupe => self.enter_loupe(),
+                ui::UiAction::EnterGrid => self.enter_grid(),
                 ui::UiAction::RequestBulk(kind) => self.request_bulk(kind),
                 ui::UiAction::ConfirmBulk => {
                     if let Some(kind) = self.pending_bulk.take() {
@@ -2444,14 +2456,7 @@ impl App {
                 }
             }
 
-            KeyCode::KeyG => {
-                if self.mode != ViewMode::Grid {
-                    self.mode = ViewMode::Grid;
-                    self.update_window_title();
-                    self.normalize_focus();
-                    self.request_redraw();
-                }
-            }
+            KeyCode::KeyG => self.enter_grid(),
             // `E` is the focus-independent "enter loupe" edit key (Lightroom).
             KeyCode::KeyE => {
                 if self.mode == ViewMode::Grid {
