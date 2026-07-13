@@ -75,6 +75,16 @@ impl Adjustments {
     pub fn is_identity(&self) -> bool {
         *self == Self::default()
     }
+
+    /// A copy carrying only the tone sliders — crop is dropped. Used to copy
+    /// develop settings from one photo onto others without touching their crops
+    /// (the roadmap: "not cropping adjustment, only the sliders").
+    pub fn tone_only(&self) -> Adjustments {
+        Adjustments {
+            crop: None,
+            ..*self
+        }
+    }
 }
 
 /// A stable 64-bit signature of an image's rendered edits (tone + crop + manual
@@ -321,5 +331,19 @@ mod tests {
         let a = Adjustments { exposure: 1.0, ..Default::default() };
         let b = Adjustments { exposure: 1.0 + 1e-5, ..Default::default() };
         assert_eq!(edit_signature(&a, 0), edit_signature(&b, 0));
+    }
+
+    #[test]
+    fn tone_only_drops_crop_keeps_sliders() {
+        let a = Adjustments {
+            exposure: 1.5,
+            contrast: 20.0,
+            crop: Some(crop(0.1, 0.1, 0.9, 0.9)),
+            ..Default::default()
+        };
+        let t = a.tone_only();
+        assert_eq!(t.crop, None);
+        assert_eq!(t.exposure, 1.5);
+        assert_eq!(t.contrast, 20.0);
     }
 }

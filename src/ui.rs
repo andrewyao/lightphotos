@@ -41,6 +41,8 @@ pub enum UiAction {
     SelectRange(usize),
     /// Open the loupe on this visible position.
     OpenLoupe(usize),
+    /// Copy the primary photo's develop settings to the in-app clipboard.
+    CopySettings,
     /// Ask to run a bulk action on the current selection (opens a confirm modal).
     RequestBulk(BulkKind),
     /// Confirm the pending bulk action.
@@ -194,6 +196,12 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 out.actions.push(UiAction::SetFilter(next));
             }
 
+            // Show which photo's develop settings are on the clipboard, if any.
+            if let Some(name) = app.copied_settings_name() {
+                ui.separator();
+                ui.label(format!("Settings from: {name}"));
+            }
+
             // Bulk actions on the current selection, shown only when something is
             // selected. Every bulk op is confirmed via a modal before it runs.
             let n = app.selection_count();
@@ -213,12 +221,25 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                             out.actions.push(UiAction::RequestBulk(BulkKind::Rate(0)));
                         }
                     });
-                // Export / Apply Settings / Delete arrive in later phases; shown
-                // disabled so the intended layout is visible.
+                // Copy the primary photo's settings; paste onto the whole selection.
+                if ui
+                    .button("Copy Settings")
+                    .on_hover_text("Copy this photo's develop settings (Cmd+Shift+C)")
+                    .clicked()
+                {
+                    out.actions.push(UiAction::CopySettings);
+                }
+                if ui
+                    .add_enabled(app.has_copied_settings(), egui::Button::new("Apply Settings"))
+                    .on_disabled_hover_text("Copy settings from a photo first")
+                    .clicked()
+                {
+                    out.actions.push(UiAction::RequestBulk(BulkKind::ApplySettings));
+                }
+                // Export / Delete arrive in later phases; shown disabled so the
+                // intended layout is visible.
                 ui.add_enabled(false, egui::Button::new("Export JPG"))
                     .on_disabled_hover_text("Batch export lands in a later step");
-                ui.add_enabled(false, egui::Button::new("Apply Settings"))
-                    .on_disabled_hover_text("Copy develop settings first (later step)");
                 ui.add_enabled(false, egui::Button::new("Delete"))
                     .on_disabled_hover_text("Delete-to-Trash lands in a later step");
             }

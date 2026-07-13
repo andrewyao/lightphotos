@@ -214,6 +214,10 @@ pub(crate) struct App {
     /// A bulk action awaiting confirmation. `Some` while the confirm modal is up.
     pending_bulk: Option<ui::BulkKind>,
 
+    /// Copied develop settings (tone only, no crop) plus the source file's path,
+    /// for pasting onto other selected photos. `None` until the user copies.
+    copied_settings: Option<(PathBuf, Adjustments)>,
+
     /// A short-lived status message (e.g. an export result), with the time it was
     /// set; shown as a toast for a few seconds, then ignored.
     status: Option<(String, Instant)>,
@@ -297,6 +301,7 @@ impl App {
             loupe_viewport: None,
             crop_edit: None,
             pending_bulk: None,
+            copied_settings: None,
             status: None,
             occluded: false,
             folder_root: None,
@@ -972,10 +977,70 @@ impl App {
     fn run_bulk(&mut self, kind: ui::BulkKind) {
         match kind {
             ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
-            // Export / ApplySettings / Delete are wired in later phases; their
-            // toolbar buttons are disabled until then, so these are unreachable.
-            ui::BulkKind::Export | ui::BulkKind::ApplySettings | ui::BulkKind::Delete => {}
+            ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
+            // Export / Delete are wired in later phases; their toolbar buttons
+            // are disabled until then, so these are unreachable.
+            ui::BulkKind::Export | ui::BulkKind::Delete => {}
         }
+    }
+
+    /// Copy the primary photo's develop settings (tone only, no crop) to the
+    /// in-app clipboard for pasting onto other photos.
+    fn copy_settings(&mut self) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        let tone = self.edits.get(&path).copied().unwrap_or_default().tone_only();
+        let name = file_label(&path);
+        self.copied_settings = Some((path, tone));
+        self.set_status(format!("Copied settings from {name}"));
+        self.request_redraw();
+    }
+
+    /// Apply the copied tone settings to every selected photo, preserving each
+    /// photo's own crop (and rotation). Thumbnails re-bake automatically because
+    /// their cache key includes the edit signature.
+    fn apply_settings_to_selection(&mut self) {
+        let Some((_, tone)) = self.copied_settings.clone() else {
+            return;
+        };
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return;
+        }
+        for path in &paths {
+            // Overwrite the tone fields; keep this photo's existing crop.
+            let existing = self.edits.get(path).copied().unwrap_or_default();
+            let merged = Adjustments {
+                crop: existing.crop,
+                ..tone
+            };
+            if merged.is_identity() {
+                self.edits.remove(path);
+            } else {
+                self.edits.insert(path.clone(), merged);
+            }
+            self.catalog.set_adjustments(path, &merged);
+        }
+        // If the shown image was among them, push its new look to the GPU live.
+        if let Some(shown) = self.shown.path().map(Path::to_path_buf) {
+            if paths.contains(&shown) {
+                self.push_adjustments();
+                self.hist_dirty = true;
+            }
+        }
+        self.set_status(format!("Applied settings to {} photo(s)", paths.len()));
+        self.request_redraw();
+    }
+
+    /// Name of the file the copied settings came from, if any (for the toolbar).
+    pub(crate) fn copied_settings_name(&self) -> Option<String> {
+        self.copied_settings.as_ref().map(|(p, _)| file_label(p))
+    }
+
+    /// Whether develop settings are on the clipboard (enables bulk Apply Settings).
+    pub(crate) fn has_copied_settings(&self) -> bool {
+        self.copied_settings.is_some()
     }
 
     /// Apply `stars` (0 clears) to every photo in the multi-selection.
@@ -1853,6 +1918,7 @@ impl App {
                         self.request_redraw();
                     }
                 }
+                ui::UiAction::CopySettings => self.copy_settings(),
                 ui::UiAction::RequestBulk(kind) => {
                     if self.selection_count() > 0 {
                         self.pending_bulk = Some(kind);
@@ -2124,6 +2190,8 @@ impl App {
 
             // Cmd+A selects every visible cell in the grid.
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
+            // Cmd+Shift+C copies the primary photo's develop settings.
+            KeyCode::KeyC if cmd && shift => self.copy_settings(),
 
             KeyCode::ArrowLeft => self.nav_arrow(-1, 0, shift),
             KeyCode::ArrowRight => self.nav_arrow(1, 0, shift),
@@ -2159,6 +2227,13 @@ fn digit_of(code: KeyCode) -> Option<u8> {
         Digit9 | Numpad9 => 9,
         _ => return None,
     })
+}
+
+/// A file's display name (final path component), for toolbars/status messages.
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
 /// The inclusive set of positions between `anchor` and `pos` (order-agnostic).
