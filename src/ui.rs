@@ -45,6 +45,10 @@ pub enum UiAction {
     CopySettings,
     /// Show/hide the keyboard-shortcut help overlay.
     ToggleHelp,
+    /// Switch to the Loupe (single-image / edit) view.
+    EnterLoupe,
+    /// Switch to the Grid (thumbnail) view.
+    EnterGrid,
     /// Ask to run a bulk action on the current selection (opens a confirm modal).
     RequestBulk(BulkKind),
     /// Confirm the pending bulk action.
@@ -299,6 +303,26 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
                 }
             }
+
+            // Loupe / Grid mode toggle, pinned to the far right. In a
+            // right-to-left layout the first widget is the rightmost, so add
+            // `G` first to read "E  G" left-to-right.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .selectable_label(app.mode() == ViewMode::Grid, "G")
+                    .on_hover_text("Grid (G)")
+                    .clicked()
+                {
+                    out.actions.push(UiAction::EnterGrid);
+                }
+                if ui
+                    .selectable_label(app.mode() == ViewMode::Loupe, "E")
+                    .on_hover_text("Loupe / edit (E)")
+                    .clicked()
+                {
+                    out.actions.push(UiAction::EnterLoupe);
+                }
+            });
         });
     });
 }
