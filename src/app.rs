@@ -166,6 +166,9 @@ pub(crate) struct App {
     hist_dirty: bool,
     /// Active star filter (`None` = show all).
     filter: Option<(Cmp, u8)>,
+    /// Comparator the toolbar applies when a star level is clicked (≥ / = / ≤).
+    /// Remembered across "All" so the mode is sticky.
+    filter_cmp: Cmp,
     /// Indices into `playlist.entries()` that pass the current filter.
     visible: Vec<usize>,
     /// Position *within `visible`* of the current selection, or `None` in the
@@ -283,6 +286,7 @@ impl App {
             histogram: None,
             hist_dirty: false,
             filter: None,
+            filter_cmp: Cmp::Gte,
             visible: Vec::new(),
             sel: None,
             selected: BTreeSet::new(),
@@ -1153,6 +1157,19 @@ impl App {
         // In Loupe, the shown image may have been filtered out; snap to selection.
         if self.mode == ViewMode::Loupe {
             self.load_selected();
+        }
+        self.request_redraw();
+    }
+
+    /// Change the toolbar comparator (≥ / = / ≤). If a star-level filter is
+    /// already active, re-apply it with the new comparator so the view updates
+    /// immediately.
+    fn set_filter_cmp(&mut self, cmp: Cmp) {
+        self.filter_cmp = cmp;
+        if let Some((_, n)) = self.filter {
+            if (1..=5).contains(&n) {
+                self.set_filter(Some((cmp, n)));
+            }
         }
         self.request_redraw();
     }
@@ -2040,6 +2057,7 @@ impl App {
                     self.request_redraw();
                 }
                 ui::UiAction::SetFilter(f) => self.set_filter(f),
+                ui::UiAction::SetFilterCmp(cmp) => self.set_filter_cmp(cmp),
                 ui::UiAction::SetRating(stars) => self.set_rating(stars),
                 ui::UiAction::OpenFolder(p) => {
                     // The folder row is one unit: clicking it focuses the tree,
@@ -2115,6 +2133,11 @@ impl App {
 
     pub(crate) fn filter(&self) -> Option<(Cmp, u8)> {
         self.filter
+    }
+
+    /// The comparator the toolbar will apply to the next star-level click.
+    pub(crate) fn filter_cmp(&self) -> Cmp {
+        self.filter_cmp
     }
 
     pub(crate) fn thumb_px(&self) -> u32 {
