@@ -229,7 +229,14 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // The user confirmed quit in the Esc modal — exit the event loop (lets
+        // Drop run for the loader/exporter, unlike a hard process::exit).
+        if self.quit_requested {
+            event_loop.exit();
+            return;
+        }
+
         // Drain both loader tiers once per frame.
         if let Some(loader) = &mut self.loader {
             let (full, thumbs) = loader.poll_all();
