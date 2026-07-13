@@ -3,10 +3,14 @@
 //! - Open a folder from Finder / "Open With" → thumbnail Grid; open a file → Loupe.
 //! - `G` Grid, `E`/Enter Loupe (open selected), `Esc` backs out (Loupe→Grid, Grid→quit).
 //! - Arrows move the grid selection / step the loupe; `1`–`5` rate, `0` clears.
-//! - `Shift`+`1`–`5` set a "≥ N" star filter; `\` toggles the filter bar.
+//! - The always-visible top toolbar hosts the rating filter (All + 5 stars);
+//!   `Shift`+`1`–`5` set a "≥ N" star filter and `Shift`+`0` clears it.
 //! - `+`/`-` adjust thumbnail size (Grid).
 //! - Loupe keeps the GPU pan/zoom path: scroll to zoom, Space+drag pan,
 //!   Cmd+[ / Cmd+] rotate, grow-only fit. Alt+0 resets to 100%.
+//! - `C` enters crop mode (Loupe): drag the 4 edges (hold `Shift` to keep the
+//!   ratio), `C`/Enter commits, `Esc` cancels. `X` exports the selected image as
+//!   a `.jpg` in the same folder (edits baked in), never overwriting.
 //!
 //! Speed: images decode on background threads (Apple ImageIO) and live as a GPU
 //! texture; zoom/pan only update a tiny transform uniform, never re-decode.
@@ -21,6 +25,7 @@ mod app;
 mod catalog;
 mod develop;
 mod image_decode;
+mod image_encode;
 mod loader;
 mod macos_delegate;
 mod navigation;

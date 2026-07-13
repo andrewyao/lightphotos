@@ -15,8 +15,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use crate::image_decode::{self, DecodedImage};
@@ -38,13 +38,33 @@ enum JobResult {
     Thumb(PathBuf, u32, Result<Arc<DecodedImage>, String>),
 }
 
+/// A priority work queue: full-image (loupe) jobs are always served before
+/// thumbnail (grid/filmstrip) jobs. The loupe image is latency-critical and there
+/// is usually just one, whereas thumbnails arrive in floods; without this
+/// priority a freshly-opened image waits behind the entire thumbnail backlog
+/// (seconds), leaving the magnified low-res placeholder on screen.
+#[derive(Default)]
+struct Queue {
+    full: VecDeque<Job>,
+    thumbs: VecDeque<Job>,
+    /// Set when the `Loader` is dropped so idle workers wake and exit.
+    shutdown: bool,
+}
+
+/// Shared between the `Loader` and its worker threads.
+struct Shared {
+    queue: Mutex<Queue>,
+    /// Signalled whenever a job is enqueued or on shutdown.
+    ready: Condvar,
+}
+
 /// Full-image LRU capacity (loupe tier).
 const FULL_CAPACITY: usize = 16;
 /// In-memory thumbnail LRU capacity (grid/filmstrip tier).
 const THUMB_CAPACITY: usize = 512;
 
 pub struct Loader {
-    req_tx: Sender<Job>,
+    shared: Arc<Shared>,
     res_rx: Receiver<JobResult>,
 
     // Full-image tier.
@@ -66,12 +86,15 @@ pub struct Loader {
 
 impl Loader {
     pub fn new(max_dim: u32) -> Self {
-        let (req_tx, req_rx) = std::sync::mpsc::channel::<Job>();
         let (res_tx, res_rx) = std::sync::mpsc::channel::<JobResult>();
 
-        // Shared work queue: each worker locks, recvs one job, unlocks, then
-        // processes it (so a slow decode doesn't hold the queue).
-        let req_rx = Arc::new(Mutex::new(req_rx));
+        // Shared priority work queue: each worker locks, pops one job
+        // (full-image first), unlocks, then processes it (so a slow decode never
+        // holds the queue).
+        let shared = Arc::new(Shared {
+            queue: Mutex::new(Queue::default()),
+            ready: Condvar::new(),
+        });
         let thumbs = Arc::new(ThumbCache::new());
 
         let cores = thread::available_parallelism()
@@ -80,22 +103,30 @@ impl Loader {
         let workers = cores.saturating_sub(2).max(1);
 
         for i in 0..workers {
-            let req_rx = Arc::clone(&req_rx);
+            let shared = Arc::clone(&shared);
             let res_tx = res_tx.clone();
             let thumbs = Arc::clone(&thumbs);
             thread::Builder::new()
                 .name(format!("decode-worker-{i}"))
                 .spawn(move || loop {
-                    // Lock only long enough to take one job.
+                    // Lock only long enough to take one job, preferring full-image
+                    // work over thumbnails. Wait on the condvar while idle.
                     let job = {
-                        let rx = match req_rx.lock() {
-                            Ok(rx) => rx,
-                            Err(_) => break,
+                        let mut q = match shared.queue.lock() {
+                            Ok(q) => q,
+                            Err(_) => return,
                         };
-                        match rx.recv() {
-                            Ok(job) => job,
-                            // Sender dropped: the Loader is gone.
-                            Err(_) => break,
+                        loop {
+                            if q.shutdown {
+                                return;
+                            }
+                            if let Some(j) = q.full.pop_front().or_else(|| q.thumbs.pop_front()) {
+                                break j;
+                            }
+                            q = match shared.ready.wait(q) {
+                                Ok(q) => q,
+                                Err(_) => return,
+                            };
                         }
                     };
 
@@ -133,7 +164,7 @@ impl Loader {
         }
 
         Self {
-            req_tx,
+            shared,
             res_rx,
             cache: HashMap::new(),
             order: VecDeque::new(),
@@ -150,12 +181,16 @@ impl Loader {
     // ---- Full-image tier (backward-compatible API) ----
 
     /// Ask a worker to decode `path` unless it's already cached or in flight.
+    /// Full-image jobs jump ahead of any pending thumbnails.
     pub fn request(&mut self, path: PathBuf) {
         if self.cache.contains_key(&path) || self.inflight.contains(&path) {
             return;
         }
         self.inflight.insert(path.clone());
-        let _ = self.req_tx.send(Job::Full(path));
+        if let Ok(mut q) = self.shared.queue.lock() {
+            q.full.push_back(Job::Full(path));
+        }
+        self.shared.ready.notify_one();
     }
 
     /// Drain finished decodes into the caches and return full-image arrivals.
@@ -191,7 +226,10 @@ impl Loader {
             return;
         }
         self.thumb_inflight.insert(key);
-        let _ = self.req_tx.send(Job::Thumb(path, max_px));
+        if let Ok(mut q) = self.shared.queue.lock() {
+            q.thumbs.push_back(Job::Thumb(path, max_px));
+        }
+        self.shared.ready.notify_one();
     }
 
     /// In-memory thumbnail lookup keyed by `(path, max_px)`.
@@ -292,5 +330,15 @@ impl Loader {
                 self.thumb_cache.remove(&old);
             }
         }
+    }
+}
+
+impl Drop for Loader {
+    /// Signal idle workers (blocked on the condvar) to wake and exit.
+    fn drop(&mut self) {
+        if let Ok(mut q) = self.shared.queue.lock() {
+            q.shutdown = true;
+        }
+        self.shared.ready.notify_all();
     }
 }

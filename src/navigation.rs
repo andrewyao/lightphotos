@@ -18,7 +18,9 @@ pub fn is_image(path: &Path) -> bool {
 }
 
 /// Star-rating filter comparator. The active filter is `Option<(Cmp, u8)>` on
-/// `App`; `None` shows everything.
+/// `App`; `None` shows everything. The UI surfaces `Gte` (the toolbar's
+/// "≥ N stars") and `Eq` with 0 (the "Unrated" button); `Lte` is reserved — the
+/// engine + tests stay general.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Cmp {
     /// rating >= value
@@ -26,6 +28,7 @@ pub enum Cmp {
     /// rating == value
     Eq,
     /// rating <= value
+    #[allow(dead_code)]
     Lte,
 }
 
@@ -36,14 +39,6 @@ impl Cmp {
             Cmp::Gte => rating >= value,
             Cmp::Eq => rating == value,
             Cmp::Lte => rating <= value,
-        }
-    }
-
-    pub fn symbol(self) -> &'static str {
-        match self {
-            Cmp::Gte => "\u{2265}", // ≥
-            Cmp::Eq => "=",
-            Cmp::Lte => "\u{2264}", // ≤
         }
     }
 }

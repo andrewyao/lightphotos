@@ -12,17 +12,18 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::Window;
 
 use crate::catalog::Catalog;
-use crate::develop::{self, Adjustments, GpuAdjust};
+use crate::develop::{self, Adjustments, Crop, GpuAdjust};
 use crate::loader::Loader;
 use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp, Playlist};
 use crate::renderer::{EguiPaint, Renderer};
-use crate::{image_decode, ui};
+use crate::{image_decode, image_encode, paths, ui};
 
 const MIN_ZOOM: f32 = 0.02;
 const MAX_ZOOM: f32 = 64.0;
@@ -43,6 +44,48 @@ pub enum ViewMode {
     Grid,
     Loupe,
 }
+
+/// One edge of the crop rectangle, in the image's own (texture) space — `Left`
+/// is the low-x edge of the *unrotated* image, etc. Grab/hit-testing maps these
+/// to on-screen edges through the loupe transform, so they behave correctly even
+/// when the image is rotated.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CropEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// What a crop drag is currently manipulating.
+#[derive(Copy, Clone)]
+enum CropGrab {
+    /// Resizing by moving one edge.
+    Edge(CropEdge),
+    /// Moving the whole rectangle (size fixed): the pointer's texture-uv at grab
+    /// and the rectangle as it was then, so the drag is anchor-relative (no drift).
+    Move { anchor: (f32, f32), rect0: Crop },
+}
+
+/// Transient crop-mode state (Loupe sub-mode). Present ⇔ crop mode is active.
+/// `rect` is the rectangle being edited in normalized texture space (matching
+/// [`develop::Crop`]); it is committed into the image's `Adjustments.crop` on
+/// exit. While cropping, the GPU shows the full frame (identity crop) and the
+/// egui overlay draws the mask, so the whole image stays visible for framing.
+pub struct CropDraft {
+    /// The crop rectangle under edit (normalized 0..1, texture space).
+    rect: Crop,
+    /// What the current drag owns (edge resize or whole-rect move); `None` when
+    /// no drag is in progress.
+    grab: Option<CropGrab>,
+    /// Pixel aspect ratio (w/h) captured at grab time, used for Shift-lock.
+    aspect: f32,
+}
+
+/// A full-frame crop rectangle (the identity crop).
+const FULL_CROP: Crop = Crop { left: 0.0, top: 0.0, right: 1.0, bottom: 1.0 };
+/// Smallest crop edge separation, in normalized units, so the rect never collapses.
+const MIN_CROP: f32 = 0.02;
 
 /// The UI region that currently receives arrow/Enter keys. Following
 /// Lightroom, this is *not* moved by Tab (Tab hides/shows panels); it's driven
@@ -123,8 +166,6 @@ pub(crate) struct App {
     hist_dirty: bool,
     /// Active star filter (`None` = show all).
     filter: Option<(Cmp, u8)>,
-    /// Whether the filter bar is shown.
-    filter_bar: bool,
     /// Indices into `playlist.entries()` that pass the current filter.
     visible: Vec<usize>,
     /// Position *within `visible`* of the current selection, or `None` in the
@@ -145,9 +186,11 @@ pub(crate) struct App {
     /// Visible cell range `[start, end)` the loupe filmstrip scrolled into view
     /// last frame. The horizontal equivalent of `grid_range`.
     strip_range: (usize, usize),
-    /// egui textures for thumbnails, keyed by (path, thumb_px). Rebuilt as
+    /// egui textures for thumbnails, keyed by (path, thumb_px, edit_signature).
+    /// The edit signature makes an edit change (crop/tone/rotation) mint a new key,
+    /// so `sync_thumb_textures` drops the stale texture and re-bakes. Rebuilt as
     /// thumbnails arrive; pruned to the current working set each frame.
-    thumb_tex: HashMap<(PathBuf, u32), egui::TextureHandle>,
+    thumb_tex: HashMap<(PathBuf, u32, u64), egui::TextureHandle>,
 
     // ---- Loupe view state ----
     zoom: f32,
@@ -159,6 +202,12 @@ pub(crate) struct App {
     rotations: HashMap<PathBuf, u8>,
     /// The image viewport rect (physical px) the loupe drew into last frame, if any.
     loupe_viewport: Option<(u32, u32, u32, u32)>,
+    /// Transient crop-mode state; `Some` while the user is editing a crop.
+    crop_edit: Option<CropDraft>,
+
+    /// A short-lived status message (e.g. an export result), with the time it was
+    /// set; shown as a toast for a few seconds, then ignored.
+    status: Option<(String, Instant)>,
 
     /// True while winit reports the window as occluded (hidden/minimized/behind
     /// another window). We pause redraw retries while occluded.
@@ -221,7 +270,6 @@ impl App {
             histogram: None,
             hist_dirty: false,
             filter: None,
-            filter_bar: false,
             visible: Vec::new(),
             sel: None,
             last_strip_sel: None,
@@ -236,6 +284,8 @@ impl App {
             fitted: false,
             rotations: HashMap::new(),
             loupe_viewport: None,
+            crop_edit: None,
+            status: None,
             occluded: false,
             folder_root: None,
             folder_sel: None,
@@ -366,7 +416,7 @@ impl App {
     }
 
     /// The path of the current selection, if any.
-    fn selected_path(&self) -> Option<PathBuf> {
+    pub(crate) fn selected_path(&self) -> Option<PathBuf> {
         let pl = self.playlist.as_ref()?;
         let idx = self.selected_index()?;
         pl.entry(idx).map(|p| p.to_path_buf())
@@ -885,6 +935,200 @@ impl App {
         self.request_redraw();
     }
 
+    // ---- Crop mode ----
+
+    /// The crop rectangle currently being edited, if crop mode is active.
+    pub(crate) fn crop_rect(&self) -> Option<Crop> {
+        self.crop_edit.as_ref().map(|d| d.rect)
+    }
+
+    /// Enter crop mode on the current image. Crop is a Loupe sub-mode: from the
+    /// Grid this first opens the loupe. Seeds the draft from any existing crop,
+    /// drops the mask on the GPU so the whole frame is visible, and fits it.
+    fn enter_crop(&mut self) {
+        if self.mode != ViewMode::Loupe {
+            self.enter_loupe();
+            if self.mode != ViewMode::Loupe {
+                return; // nothing was selected
+            }
+        }
+        if self.shown.path().is_none() {
+            return;
+        }
+        let rect = self.current_adjustments().crop.unwrap_or(FULL_CROP);
+        self.crop_edit = Some(CropDraft { rect, grab: None, aspect: 1.0 });
+        // Show the full frame (identity crop) while framing; the overlay masks.
+        self.push_crop_preview();
+        self.fit_for_crop();
+        self.request_redraw();
+    }
+
+    /// Push the current image's tone edits with the crop forced to full-frame,
+    /// so the whole image is visible while the crop overlay is being edited.
+    fn push_crop_preview(&mut self) {
+        let mut adj = self.current_adjustments();
+        adj.crop = None;
+        let gpu = GpuAdjust::from(&adj);
+        if let Some(r) = &mut self.renderer {
+            r.set_adjustments(gpu);
+        }
+        self.request_redraw();
+    }
+
+    /// Commit the crop draft into the image's persisted adjustments (full-frame
+    /// crops store as `None`), then leave crop mode.
+    fn commit_crop(&mut self) {
+        let Some(draft) = self.crop_edit.take() else { return };
+        let r = draft.rect;
+        let is_full = r.left <= MIN_CROP
+            && r.top <= MIN_CROP
+            && r.right >= 1.0 - MIN_CROP
+            && r.bottom >= 1.0 - MIN_CROP;
+        let mut adj = self.current_adjustments();
+        adj.crop = if is_full { None } else { Some(r) };
+        self.apply_adjustments(adj); // persists to catalog + pushes real crop to GPU
+        self.request_redraw();
+    }
+
+    /// Leave crop mode without committing, restoring the previously-committed crop.
+    fn cancel_crop(&mut self) {
+        if self.crop_edit.take().is_some() {
+            self.push_adjustments(); // restore the committed crop on the GPU
+            self.request_redraw();
+        }
+    }
+
+    /// Begin resizing by `edge`: record it and capture the current pixel aspect
+    /// ratio (for Shift-lock while dragging).
+    fn crop_grab(&mut self, edge: CropEdge) {
+        let (w, h) = self.image_size();
+        if let Some(d) = self.crop_edit.as_mut() {
+            let cw = (d.rect.right - d.rect.left) * w;
+            let ch = (d.rect.bottom - d.rect.top) * h;
+            d.aspect = if ch > 0.0 { cw / ch } else { 1.0 };
+            d.grab = Some(CropGrab::Edge(edge));
+        }
+    }
+
+    /// Begin moving the whole crop rectangle: anchor the drag at texture
+    /// coordinate `(u, v)` and remember the rectangle as it is now.
+    fn crop_grab_move(&mut self, u: f32, v: f32) {
+        if let Some(d) = self.crop_edit.as_mut() {
+            d.grab = Some(CropGrab::Move { anchor: (u, v), rect0: d.rect });
+        }
+    }
+
+    /// Apply the active crop drag at texture coordinate `(u, v)`:
+    /// - `Move`: translate the whole rectangle (size fixed), clamped to the frame.
+    /// - `Edge`: move that edge; with Shift, the perpendicular edges co-move about
+    ///   their center to preserve the pixel aspect ratio captured at grab.
+    fn crop_drag_to(&mut self, u: f32, v: f32) {
+        let shift = self.modifiers.shift_key();
+        let (w, h) = self.image_size();
+        let Some(d) = self.crop_edit.as_mut() else { return };
+        let Some(grab) = d.grab else { return };
+        let mut r = d.rect;
+        match grab {
+            CropGrab::Move { anchor, rect0 } => {
+                // Keep the size; translate by the pointer delta, clamped so the
+                // rectangle stays inside the frame.
+                let cw = rect0.right - rect0.left;
+                let ch = rect0.bottom - rect0.top;
+                let nl = (rect0.left + (u - anchor.0)).clamp(0.0, 1.0 - cw);
+                let nt = (rect0.top + (v - anchor.1)).clamp(0.0, 1.0 - ch);
+                r.left = nl;
+                r.right = nl + cw;
+                r.top = nt;
+                r.bottom = nt + ch;
+            }
+            CropGrab::Edge(edge) => {
+                match edge {
+                    CropEdge::Left => r.left = u.clamp(0.0, r.right - MIN_CROP),
+                    CropEdge::Right => r.right = u.clamp(r.left + MIN_CROP, 1.0),
+                    CropEdge::Top => r.top = v.clamp(0.0, r.bottom - MIN_CROP),
+                    CropEdge::Bottom => r.bottom = v.clamp(r.top + MIN_CROP, 1.0),
+                }
+                if shift && d.aspect > 0.0 && w > 0.0 && h > 0.0 {
+                    match edge {
+                        CropEdge::Left | CropEdge::Right => {
+                            // Width just changed; set height from the locked ratio,
+                            // centered on the current vertical center.
+                            let ch_norm = (((r.right - r.left) * w) / d.aspect / h).clamp(MIN_CROP, 1.0);
+                            let cy = (r.top + r.bottom) / 2.0;
+                            r.top = (cy - ch_norm / 2.0).clamp(0.0, 1.0 - MIN_CROP);
+                            r.bottom = (r.top + ch_norm).min(1.0);
+                        }
+                        CropEdge::Top | CropEdge::Bottom => {
+                            let cw_norm = (((r.bottom - r.top) * h) * d.aspect / w).clamp(MIN_CROP, 1.0);
+                            let cx = (r.left + r.right) / 2.0;
+                            r.left = (cx - cw_norm / 2.0).clamp(0.0, 1.0 - MIN_CROP);
+                            r.right = (r.left + cw_norm).min(1.0);
+                        }
+                    }
+                }
+            }
+        }
+        d.rect = r;
+        self.request_redraw();
+    }
+
+    /// Clear the active crop drag (released).
+    fn crop_release(&mut self) {
+        if let Some(d) = self.crop_edit.as_mut() {
+            d.grab = None;
+        }
+    }
+
+    // ---- Export ----
+
+    /// Export the selected image to a JPG in the same folder, with the central
+    /// crop/rotation/develop edits baked in. Never overwrites an existing file.
+    fn export_selected(&mut self) {
+        let Some(path) = self.selected_path() else {
+            self.set_status("Export: no image selected".into());
+            self.request_redraw();
+            return;
+        };
+        match self.export_image(&path) {
+            Ok(out) => {
+                let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                eprintln!("[image-viewer] exported {}", out.display());
+                self.set_status(format!("Exported {name}"));
+            }
+            Err(e) => {
+                eprintln!("[image-viewer] export failed: {e}");
+                self.set_status(format!("Export failed: {e}"));
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Decode `path` at full resolution, bake in its edits, and write the JPG.
+    /// Returns the path written. Runs synchronously (one image; brief).
+    fn export_image(&self, path: &Path) -> Result<PathBuf, String> {
+        // Full resolution: u32::MAX means `fit_within` never downscales.
+        let img = image_decode::decode(path, u32::MAX)?;
+        let adj = self.catalog.adjustments(path);
+        let rot = self.rotations.get(path).copied().unwrap_or(0);
+        let (w, h, rgba) = bake_edited(&img, &adj, rot);
+        let out = paths::jpg_export_target(path);
+        image_encode::encode_jpeg(&out, w, h, &rgba)?;
+        Ok(out)
+    }
+
+    // ---- Status toast ----
+
+    fn set_status(&mut self, msg: String) {
+        self.status = Some((msg, Instant::now()));
+    }
+
+    /// The current status message, if one was set within the last few seconds.
+    pub(crate) fn status_text(&self) -> Option<&str> {
+        self.status.as_ref().and_then(|(s, t)| {
+            (t.elapsed().as_secs_f32() < 3.0).then_some(s.as_str())
+        })
+    }
+
     /// Build the histogram sample from a freshly-shown image: a strided
     /// downsample (~256 px on the longest side) of LINEAR-light RGB, stored so
     /// `recompute_histogram` can re-bin it cheaply as adjustments change.
@@ -983,11 +1227,27 @@ impl App {
         }
     }
 
-    /// Fit to the loupe area, centered, *grow-only*.
+    /// Fit to the loupe area, centered: scales the image up or down so the whole
+    /// image is as large as possible while staying fully on-screen ("contain").
     fn fit_to_window(&mut self) {
         let (iw, ih) = self.display_size();
         let (ww, wh) = self.loupe_area();
-        self.zoom = (ww / iw).min(wh / ih).max(1.0).min(MAX_ZOOM);
+        self.zoom = (ww / iw).min(wh / ih).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.fitted = true;
+        self.center();
+        self.push_transform();
+    }
+
+    /// Fit the *whole* image into the loupe area for crop mode: unlike
+    /// `fit_to_window` this shrinks images larger than the viewport (no grow-only
+    /// floor) and leaves a small margin, so the entire image — and thus all four
+    /// crop edges and their handles — stay on-screen and grabbable.
+    fn fit_for_crop(&mut self) {
+        let (iw, ih) = self.display_size();
+        let (ww, wh) = self.loupe_area();
+        // ~5% border each side so edge handles aren't flush against the viewport.
+        const MARGIN: f32 = 0.9;
+        self.zoom = ((ww / iw).min(wh / ih) * MARGIN).clamp(MIN_ZOOM, MAX_ZOOM);
         self.fitted = true;
         self.center();
         self.push_transform();
@@ -1057,8 +1317,11 @@ impl App {
         }
     }
 
-    /// Recompute the shader transform from the current view state.
-    pub(crate) fn push_transform(&mut self) {
+    /// The `(scale, offset, rot)` the shader transform is currently built from —
+    /// the values `push_transform` uploads. Shared so the crop overlay can map
+    /// between screen points and texture UVs using the exact same geometry.
+    /// `rot` is the row-major 2×2 `[m00, m01, m10, m11]` used by the shader.
+    fn loupe_transform(&self) -> ([f32; 2], [f32; 2], [f32; 4]) {
         let (iw, ih) = self.display_size();
         let (ww, wh) = self.loupe_area();
         let denom_x = self.zoom * iw;
@@ -1071,10 +1334,49 @@ impl App {
             3 => [0.0, -1.0, 1.0, 0.0],
             _ => [1.0, 0.0, 0.0, 1.0],
         };
+        (scale, offset, rot)
+    }
+
+    /// Recompute the shader transform from the current view state.
+    pub(crate) fn push_transform(&mut self) {
+        let (scale, offset, rot) = self.loupe_transform();
         if let Some(r) = &mut self.renderer {
             r.set_transform(scale, offset, rot);
         }
         self.request_redraw();
+    }
+
+    /// Map a normalized texture UV (crop space, 0..1) to a screen point inside
+    /// the loupe rect `central` (egui logical px). Inverse of
+    /// `loupe_screen_to_tex`; used to draw the crop rectangle/handles/mask.
+    pub(crate) fn loupe_tex_to_screen(&self, central: egui::Rect, u: f32, v: f32) -> egui::Pos2 {
+        let (scale, offset, rot) = self.loupe_transform();
+        // Invert uv = R·(d − 0.5) + 0.5. R is a rotation, so R⁻¹ = Rᵀ.
+        let (du, dv) = (u - 0.5, v - 0.5);
+        let dx = rot[0] * du + rot[2] * dv + 0.5;
+        let dy = rot[1] * du + rot[3] * dv + 0.5;
+        // Invert d = base_uv · scale + offset.
+        let bx = (dx - offset[0]) / scale[0];
+        let by = (dy - offset[1]) / scale[1];
+        egui::pos2(
+            central.min.x + bx * central.width(),
+            central.min.y + by * central.height(),
+        )
+    }
+
+    /// Map a screen point inside the loupe rect `central` to a normalized texture
+    /// UV (crop space, 0..1). Inverse of `loupe_tex_to_screen`; used to turn a
+    /// crop-edge drag into a crop coordinate.
+    pub(crate) fn loupe_screen_to_tex(&self, central: egui::Rect, p: egui::Pos2) -> (f32, f32) {
+        let (scale, offset, rot) = self.loupe_transform();
+        let bx = if central.width() > 0.0 { (p.x - central.min.x) / central.width() } else { 0.0 };
+        let by = if central.height() > 0.0 { (p.y - central.min.y) / central.height() } else { 0.0 };
+        let dx = bx * scale[0] + offset[0];
+        let dy = by * scale[1] + offset[1];
+        // uv = R·(d − 0.5) + 0.5, R row-major [m00, m01, m10, m11].
+        let u = rot[0] * (dx - 0.5) + rot[1] * (dy - 0.5) + 0.5;
+        let v = rot[2] * (dx - 0.5) + rot[3] * (dy - 0.5) + 0.5;
+        (u, v)
     }
 
     /// The range of visible positions whose thumbnails we keep loaded — the
@@ -1112,12 +1414,25 @@ impl App {
     }
 
     /// Paths (with thumb size) for the current working set.
-    fn working_thumb_keys(&self) -> Vec<(PathBuf, u32)> {
+    /// Signature of the persisted edits (tone + crop + manual rotation) for
+    /// `path`. Folded into thumbnail-texture keys so an edit change re-bakes the
+    /// thumbnail. `edits`/`rotations` are in-memory maps seeded at folder load.
+    fn edit_sig_for(&self, path: &Path) -> u64 {
+        let adj = self.edits.get(path).copied().unwrap_or_default();
+        let rot = self.rotations.get(path).copied().unwrap_or(0);
+        develop::edit_signature(&adj, rot)
+    }
+
+    fn working_thumb_keys(&self) -> Vec<(PathBuf, u32, u64)> {
         let px = self.thumb_px;
         let Some(pl) = &self.playlist else { return Vec::new() };
         self.working_positions()
             .filter_map(|pos| self.visible.get(pos).copied())
-            .filter_map(|i| pl.entry(i).map(|p| (p.to_path_buf(), px)))
+            .filter_map(|i| pl.entry(i))
+            .map(|p| {
+                let sig = self.edit_sig_for(p);
+                (p.to_path_buf(), px, sig)
+            })
             .collect()
     }
 
@@ -1126,7 +1441,7 @@ impl App {
     /// arrive).
     pub(crate) fn request_working_thumbs(&mut self) -> bool {
         let px = self.thumb_px;
-        let paths: Vec<PathBuf> = self.working_thumb_keys().into_iter().map(|(p, _)| p).collect();
+        let paths: Vec<PathBuf> = self.working_thumb_keys().into_iter().map(|(p, _, _)| p).collect();
 
         let mut any_missing = false;
         if let Some(loader) = &mut self.loader {
@@ -1152,30 +1467,41 @@ impl App {
         // folder with thousands of images can't exhaust memory.
         let wanted = self.working_thumb_keys();
 
-        // Upload any wanted thumbnail that's decoded but not yet a texture.
-        if let Some(loader) = &self.loader {
-            for key in &wanted {
-                if self.thumb_tex.contains_key(key) {
-                    continue;
-                }
-                if let Some(img) = loader.get_thumb(&key.0, key.1) {
-                    let color = egui::ColorImage::from_rgba_premultiplied(
-                        [img.width as usize, img.height as usize],
-                        &img.rgba,
-                    );
-                    let name = format!("thumb:{}:{}", key.0.display(), key.1);
-                    let handle = self.egui_ctx.load_texture(
-                        name,
-                        color,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    self.thumb_tex.insert(key.clone(), handle);
-                }
+        // Upload any wanted thumbnail that's decoded but not yet a texture, baking
+        // the image's edits (crop + tone + rotation) into it first so the grid
+        // matches the loupe. The loader/disk thumbnail stays RAW (so the loupe's
+        // placeholder isn't double-edited); the bake happens only here.
+        for key in &wanted {
+            if self.thumb_tex.contains_key(key) {
+                continue;
             }
+            let Some(img) = self.loader.as_ref().and_then(|l| l.get_thumb(&key.0, key.1)) else {
+                continue;
+            };
+            let adj = self.edits.get(&key.0).copied().unwrap_or_default();
+            let rot = self.rotations.get(&key.0).copied().unwrap_or(0);
+            let color = if adj.is_identity() && rot % 4 == 0 {
+                // Fast path: no edits, so upload the raw thumbnail verbatim (also
+                // avoids a needless sRGB round-trip through the tone pipeline).
+                egui::ColorImage::from_rgba_premultiplied(
+                    [img.width as usize, img.height as usize],
+                    &img.rgba,
+                )
+            } else {
+                let (w, h, rgba) = bake_edited(&img, &adj, rot);
+                // bake_edited yields opaque (alpha=255) pixels, so premultiplied
+                // == straight; from_rgba_premultiplied is correct.
+                egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], &rgba)
+            };
+            let name = format!("thumb:{}:{}:{:016x}", key.0.display(), key.1, key.2);
+            let handle = self.egui_ctx.load_texture(name, color, egui::TextureOptions::LINEAR);
+            self.thumb_tex.insert(key.clone(), handle);
         }
 
         // Drop handles outside the working set (frees GPU memory; egui-managed).
-        let keep: std::collections::HashSet<(PathBuf, u32)> = wanted.into_iter().collect();
+        // A stale edit signature isn't in `wanted`, so this also evicts the old
+        // texture after an edit change.
+        let keep: std::collections::HashSet<(PathBuf, u32, u64)> = wanted.into_iter().collect();
         self.thumb_tex.retain(|k, _| keep.contains(k));
     }
 
@@ -1247,7 +1573,12 @@ impl App {
             if image_viewport != self.loupe_viewport {
                 self.loupe_viewport = image_viewport;
                 if self.fitted {
-                    self.fit_to_window();
+                    // While cropping, keep the whole image (all 4 edges) visible.
+                    if self.crop_edit.is_some() {
+                        self.fit_for_crop();
+                    } else {
+                        self.fit_to_window();
+                    }
                 } else {
                     self.push_transform();
                 }
@@ -1311,6 +1642,10 @@ impl App {
                     self.on_focus_changed();
                     self.request_redraw();
                 }
+                ui::UiAction::CropGrab(edge) => self.crop_grab(edge),
+                ui::UiAction::CropGrabMove(u, v) => self.crop_grab_move(u, v),
+                ui::UiAction::CropDragTo(u, v) => self.crop_drag_to(u, v),
+                ui::UiAction::CropRelease => self.crop_release(),
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
                 ui::UiAction::ResetAdjustments => {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else { continue };
@@ -1369,10 +1704,6 @@ impl App {
 
     pub(crate) fn filter(&self) -> Option<(Cmp, u8)> {
         self.filter
-    }
-
-    pub(crate) fn filter_bar_open(&self) -> bool {
-        self.filter_bar
     }
 
     pub(crate) fn thumb_px(&self) -> u32 {
@@ -1438,7 +1769,7 @@ impl App {
     ) -> Option<(&egui::TextureHandle, u32, u32)> {
         let idx = *self.visible.get(pos)?;
         let path = self.playlist.as_ref()?.entry(idx)?;
-        let key = (path.to_path_buf(), self.thumb_px);
+        let key = (path.to_path_buf(), self.thumb_px, self.edit_sig_for(path));
         let handle = self.thumb_tex.get(&key)?;
         let [w, h] = handle.size();
         Some((handle, w as u32, h as u32))
@@ -1452,11 +1783,29 @@ impl App {
         let cmd = self.modifiers.super_key();
         let alt = self.modifiers.alt_key();
 
-        // Shift+1..5 → filter ≥ N (works in both modes), checked before plain digits.
+        // While cropping, the keyboard is limited to the crop sub-mode: `C`/Enter
+        // commit, `Esc` cancels, `X` still exports. Everything else is inert so a
+        // stray arrow/digit can't move the selection out from under the crop.
+        if self.crop_edit.is_some() {
+            match code {
+                KeyCode::KeyC | KeyCode::Enter | KeyCode::NumpadEnter => self.commit_crop(),
+                KeyCode::Escape => self.cancel_crop(),
+                KeyCode::KeyX if !cmd && !alt => self.export_selected(),
+                _ => {}
+            }
+            return;
+        }
+
+        // Shift+1..5 → filter ≥ N; Shift+0 → clear (both modes). Checked before
+        // plain digits.
         if shift {
             if let Some(n) = digit_of(code) {
                 if (1..=5).contains(&n) {
                     self.set_filter(Some((Cmp::Gte, n)));
+                    return;
+                }
+                if n == 0 {
+                    self.set_filter(None);
                     return;
                 }
             }
@@ -1500,6 +1849,10 @@ impl App {
                     self.enter_loupe();
                 }
             }
+            // `C` enters crop mode (opening the loupe first from the grid).
+            KeyCode::KeyC if !cmd && !alt => self.enter_crop(),
+            // `X` exports the selected image as a baked JPG, in either mode.
+            KeyCode::KeyX if !cmd && !alt => self.export_selected(),
             // Enter is focus-dependent (open image / expand folder / …).
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
             // `D` toggles the Develop panel (Loupe only).
@@ -1522,12 +1875,6 @@ impl App {
             KeyCode::ArrowRight => self.nav_right(),
             KeyCode::ArrowUp => self.nav_up(),
             KeyCode::ArrowDown => self.nav_down(),
-
-            // `\` toggles the filter bar.
-            KeyCode::Backslash => {
-                self.filter_bar = !self.filter_bar;
-                self.request_redraw();
-            }
 
             // +/- thumbnail size (Grid). Equal/Plus share a physical key.
             KeyCode::Equal | KeyCode::NumpadAdd if self.mode == ViewMode::Grid => {
@@ -1558,5 +1905,148 @@ fn digit_of(code: KeyCode) -> Option<u8> {
         Digit9 | Numpad9 => 9,
         _ => return None,
     })
+}
+
+/// Bake `adj` (crop + tone) and `rot` (90° CW steps) into a fresh, straight
+/// (opaque) sRGB8 RGBA buffer. Order: crop in texture space → apply the tone
+/// pipeline per pixel → rotate. Returns `(w, h, rgba)`. Used both for JPEG export
+/// (full-res) and to render edited grid/filmstrip thumbnails (on the cached raw
+/// thumbnail RGBA), so the two always agree.
+///
+/// The decode is premultiplied sRGB8; the un-premultiply + sRGB→linear here
+/// matches `build_hist_sample`, and `develop::apply_linear` is the same tone
+/// pipeline the shader runs, so the result matches what's on screen.
+fn bake_edited(
+    img: &image_decode::DecodedImage,
+    adj: &Adjustments,
+    rot: u8,
+) -> (u32, u32, Vec<u8>) {
+    let (w, h) = (img.width, img.height);
+    if w == 0 || h == 0 || img.rgba.len() < (w * h * 4) as usize {
+        return (0, 0, Vec::new());
+    }
+
+    // Crop rectangle → integer pixel bounds in texture space.
+    let (cl, ct, cr, cb) = match adj.crop {
+        Some(c) => (c.left, c.top, c.right, c.bottom),
+        None => (0.0, 0.0, 1.0, 1.0),
+    };
+    let x0 = ((cl * w as f32).round() as i64).clamp(0, w as i64 - 1) as u32;
+    let y0 = ((ct * h as f32).round() as i64).clamp(0, h as i64 - 1) as u32;
+    let x1 = ((cr * w as f32).round() as i64).clamp(x0 as i64 + 1, w as i64) as u32;
+    let y1 = ((cb * h as f32).round() as i64).clamp(y0 as i64 + 1, h as i64) as u32;
+    let (cw, ch) = (x1 - x0, y1 - y0);
+
+    let srgb_to_linear = |c: f32| (c / 255.0).powf(2.2);
+    let encode = |v: f32| (v.max(0.0).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
+
+    // Cropped + tone-applied buffer, still in texture orientation.
+    let mut cropped = vec![0u8; (cw * ch * 4) as usize];
+    for y in 0..ch {
+        for x in 0..cw {
+            let si = (((y0 + y) * w + (x0 + x)) * 4) as usize;
+            let (r, g, b, a) = (
+                img.rgba[si],
+                img.rgba[si + 1],
+                img.rgba[si + 2],
+                img.rgba[si + 3],
+            );
+            // Un-premultiply (the decode is premultiplied alpha).
+            let (r, g, b) = if a == 0 {
+                (0.0, 0.0, 0.0)
+            } else if a == 255 {
+                (r as f32, g as f32, b as f32)
+            } else {
+                let inv = 255.0 / a as f32;
+                ((r as f32 * inv).min(255.0), (g as f32 * inv).min(255.0), (b as f32 * inv).min(255.0))
+            };
+            let lin = [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b)];
+            let out = develop::apply_linear(adj, lin);
+            let di = ((y * cw + x) * 4) as usize;
+            cropped[di] = encode(out[0]);
+            cropped[di + 1] = encode(out[1]);
+            cropped[di + 2] = encode(out[2]);
+            cropped[di + 3] = 255;
+        }
+    }
+
+    rotate_rgba(&cropped, cw, ch, rot)
+}
+
+/// Rotate a tightly-packed RGBA8 buffer by `steps` × 90° clockwise. Returns the
+/// (possibly swapped) `(width, height, rgba)`.
+fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, Vec<u8>) {
+    let steps = steps % 4;
+    if steps == 0 {
+        return (w, h, src.to_vec());
+    }
+    let (nw, nh) = if steps == 2 { (w, h) } else { (h, w) };
+    let mut dst = vec![0u8; (nw * nh * 4) as usize];
+    let px = |x: u32, y: u32| ((y * w + x) * 4) as usize;
+    for yo in 0..nh {
+        for xo in 0..nw {
+            // Source pixel that lands at output (xo, yo).
+            let (xs, ys) = match steps {
+                1 => (yo, h - 1 - xo),         // 90° CW
+                2 => (w - 1 - xo, h - 1 - yo), // 180°
+                _ => (w - 1 - yo, xo),         // 270° CW (90° CCW)
+            };
+            let s = px(xs, ys);
+            let d = ((yo * nw + xo) * 4) as usize;
+            dst[d..d + 4].copy_from_slice(&src[s..s + 4]);
+        }
+    }
+    (nw, nh, dst)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn px(v: u8) -> [u8; 4] {
+        [v, v, v, 255]
+    }
+
+    #[test]
+    fn rotate_90cw_swaps_dims_and_moves_pixels() {
+        // Two horizontal pixels A,B (w=2,h=1). 90° CW → a 1×2 column A over B.
+        let src = [px(10), px(20)].concat();
+        let (w, h, out) = rotate_rgba(&src, 2, 1, 1);
+        assert_eq!((w, h), (1, 2));
+        assert_eq!(&out[0..4], &px(10)); // top
+        assert_eq!(&out[4..8], &px(20)); // bottom
+    }
+
+    #[test]
+    fn rotate_360_is_identity() {
+        let src = [px(1), px(2), px(3), px(4)].concat(); // 2×2
+        let (w, h, out) = rotate_rgba(&src, 2, 2, 4);
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn identity_bake_preserves_opaque_pixels() {
+        // No crop, no rotation, identity adjustments → pixels survive the
+        // premultiply/sRGB↔linear round-trip unchanged (alpha becomes opaque).
+        let src = [px(0), px(64), px(128), px(255)].concat(); // 2×2
+        let img = image_decode::DecodedImage { width: 2, height: 2, rgba: src.clone() };
+        let (w, h, out) = bake_edited(&img, &Adjustments::default(), 0);
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn bake_crop_slices_to_the_crop_rect() {
+        // 4×1 image; crop the right half → 2×1 keeping the last two pixels.
+        let src = [px(1), px(2), px(3), px(4)].concat();
+        let img = image_decode::DecodedImage { width: 4, height: 1, rgba: src };
+        let mut adj = Adjustments::default();
+        adj.crop = Some(Crop { left: 0.5, top: 0.0, right: 1.0, bottom: 1.0 });
+        let (w, h, out) = bake_edited(&img, &adj, 0);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(&out[0..4], &px(3));
+        assert_eq!(&out[4..8], &px(4));
+    }
 }
 
