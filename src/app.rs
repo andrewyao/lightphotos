@@ -978,9 +978,10 @@ impl App {
         match kind {
             ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
-            // Export / Delete are wired in later phases; their toolbar buttons
-            // are disabled until then, so these are unreachable.
-            ui::BulkKind::Export | ui::BulkKind::Delete => {}
+            ui::BulkKind::Export => self.export_selection(),
+            // Delete is wired in a later phase; its toolbar button is disabled
+            // until then, so this is unreachable.
+            ui::BulkKind::Delete => {}
         }
     }
 
@@ -1388,6 +1389,37 @@ impl App {
                 self.set_status(format!("Export failed: {e}"));
             }
         }
+        self.request_redraw();
+    }
+
+    /// Export every selected photo to a baked JPG in its own folder. Runs
+    /// synchronously (may briefly block on large selections); reports a count.
+    fn export_selection(&mut self) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            self.set_status("Export: nothing selected".into());
+            self.request_redraw();
+            return;
+        }
+        let total = paths.len();
+        let mut ok = 0usize;
+        let mut last_err: Option<String> = None;
+        for path in &paths {
+            match self.export_image(path) {
+                Ok(out) => {
+                    eprintln!("[image-viewer] exported {}", out.display());
+                    ok += 1;
+                }
+                Err(e) => {
+                    eprintln!("[image-viewer] export failed for {}: {e}", path.display());
+                    last_err = Some(e);
+                }
+            }
+        }
+        self.set_status(match last_err {
+            None => format!("Exported {ok} photo(s)"),
+            Some(e) => format!("Exported {ok}/{total} \u{2014} last error: {e}"),
+        });
         self.request_redraw();
     }
 

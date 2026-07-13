@@ -236,10 +236,15 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 {
                     out.actions.push(UiAction::RequestBulk(BulkKind::ApplySettings));
                 }
-                // Export / Delete arrive in later phases; shown disabled so the
-                // intended layout is visible.
-                ui.add_enabled(false, egui::Button::new("Export JPG"))
-                    .on_disabled_hover_text("Batch export lands in a later step");
+                // Export every selected photo as a baked JPG.
+                if ui
+                    .button("Export JPG")
+                    .on_hover_text("Export each selected photo as a baked JPG")
+                    .clicked()
+                {
+                    out.actions.push(UiAction::RequestBulk(BulkKind::Export));
+                }
+                // Delete arrives in a later phase; shown disabled for now.
                 ui.add_enabled(false, egui::Button::new("Delete"))
                     .on_disabled_hover_text("Delete-to-Trash lands in a later step");
             }
