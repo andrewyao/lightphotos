@@ -221,10 +221,12 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                             out.actions.push(UiAction::RequestBulk(BulkKind::Rate(0)));
                         }
                     });
-                // Copy the primary photo's settings; paste onto the whole selection.
+                // Copy settings comes from a single photo, so it's only enabled
+                // when exactly one is selected; paste onto the whole selection.
                 if ui
-                    .button("Copy Settings")
+                    .add_enabled(n == 1, egui::Button::new("Copy Settings"))
                     .on_hover_text("Copy this photo's develop settings (Cmd+Shift+C)")
+                    .on_disabled_hover_text("Select a single photo to copy its settings")
                     .clicked()
                 {
                     out.actions.push(UiAction::CopySettings);
