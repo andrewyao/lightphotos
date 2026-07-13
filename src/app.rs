@@ -2497,12 +2497,6 @@ impl App {
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
             // `Y` toggles the before/after compare view (Loupe only).
             KeyCode::KeyY if self.mode == ViewMode::Loupe => self.toggle_compare(),
-            // `D` toggles the Develop panel (Loupe only).
-            KeyCode::KeyD if self.mode == ViewMode::Loupe => {
-                self.develop_open = !self.develop_open;
-                self.normalize_focus();
-                self.request_redraw();
-            }
             KeyCode::Escape => match self.mode {
                 ViewMode::Loupe => {
                     self.mode = ViewMode::Grid;
