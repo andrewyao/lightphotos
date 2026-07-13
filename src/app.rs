@@ -401,6 +401,10 @@ impl App {
             if !adj.is_identity() {
                 self.edits.insert(p.clone(), adj);
             }
+            let rot = self.catalog.rotation(p);
+            if rot != 0 {
+                self.rotations.insert(p.clone(), rot);
+            }
         }
         self.playlist = Some(playlist);
         self.recompute_visible();
@@ -1669,7 +1673,12 @@ impl App {
     fn rotate(&mut self, cw: bool) {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else { return };
         let step = (self.current_rotation() + if cw { 1 } else { 3 }) % 4;
-        self.rotations.insert(path, step);
+        if step == 0 {
+            self.rotations.remove(&path);
+        } else {
+            self.rotations.insert(path.clone(), step);
+        }
+        self.catalog.set_rotation(&path, step);
         if self.fitted {
             self.fit_to_window();
         } else {
