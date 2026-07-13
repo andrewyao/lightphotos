@@ -98,13 +98,40 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // Give egui first crack at the event. Consumed events (clicks/keys in an
-        // egui widget) skip the app's own handling.
-        if let (Some(window), Some(state)) = (self.window.clone(), self.egui_state.as_mut()) {
+        // egui widget) normally skip the app's own handling.
+        let consumed = if let (Some(window), Some(state)) =
+            (self.window.clone(), self.egui_state.as_mut())
+        {
             let response = state.on_window_event(&*window, &event);
             if response.repaint {
                 window.request_redraw();
             }
-            if response.consumed {
+            response.consumed
+        } else {
+            false
+        };
+        if consumed {
+            // Exception: arrow keys keep driving navigation even when a develop
+            // slider still holds egui's keyboard focus (egui reports the key as
+            // consumed for as long as the slider stays focused). Let them fall
+            // through unless a slider is actively being dragged or we're cropping.
+            let arrow_nav = matches!(
+                event,
+                WindowEvent::KeyboardInput {
+                    event: winit::event::KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(
+                            KeyCode::ArrowLeft
+                                | KeyCode::ArrowRight
+                                | KeyCode::ArrowUp
+                                | KeyCode::ArrowDown
+                        ),
+                        ..
+                    },
+                    ..
+                }
+            ) && self.arrow_should_fall_through();
+            if !arrow_nav {
                 return;
             }
         }

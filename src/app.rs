@@ -2319,6 +2319,16 @@ impl App {
 }
 
 impl App {
+    /// Whether an arrow key that egui reported as "consumed" should still reach
+    /// the app's own navigation. egui keeps keyboard focus on a develop `Slider`
+    /// after the user drags it, and then flags every subsequent arrow key as
+    /// consumed — which silently kills image navigation until the slider loses
+    /// focus. We let arrows fall through unless a slider is being *actively*
+    /// dragged right now (`is_using_pointer`) or a crop is in progress.
+    pub(crate) fn arrow_should_fall_through(&self) -> bool {
+        self.crop_edit.is_none() && !self.egui_ctx.egui_is_using_pointer()
+    }
+
     /// Handle a key press per the Lightroom key-binding table.
     pub(crate) fn handle_key(&mut self, code: KeyCode, event_loop: &ActiveEventLoop) {
         let shift = self.modifiers.shift_key();
