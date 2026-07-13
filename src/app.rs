@@ -211,6 +211,9 @@ pub(crate) struct App {
     /// Transient crop-mode state; `Some` while the user is editing a crop.
     crop_edit: Option<CropDraft>,
 
+    /// A bulk action awaiting confirmation. `Some` while the confirm modal is up.
+    pending_bulk: Option<ui::BulkKind>,
+
     /// A short-lived status message (e.g. an export result), with the time it was
     /// set; shown as a toast for a few seconds, then ignored.
     status: Option<(String, Instant)>,
@@ -293,6 +296,7 @@ impl App {
             rotations: HashMap::new(),
             loupe_viewport: None,
             crop_edit: None,
+            pending_bulk: None,
             status: None,
             occluded: false,
             folder_root: None,
@@ -926,7 +930,79 @@ impl App {
                     self.sel = Some(pos);
                 }
             }
+            // If the rated photo dropped out of the filtered view, the cursor
+            // has moved to a neighbor — resync the loupe's main image to it.
+            self.resync_loupe_selection();
         }
+        self.request_redraw();
+    }
+
+    /// After a filtered-view recompute, keep the loupe's shown image in sync with
+    /// the selection: if the previously shown photo was filtered out, the cursor
+    /// moved to a neighbor and the main image must follow it.
+    fn resync_loupe_selection(&mut self) {
+        if self.mode != ViewMode::Loupe {
+            return;
+        }
+        if self.want != self.selected_path() {
+            self.load_selected();
+            self.request_neighbors();
+        }
+    }
+
+    /// Human-readable prompt for the pending bulk action, or `None` when no
+    /// confirmation is open. Drives the confirm modal.
+    pub(crate) fn pending_bulk_prompt(&self) -> Option<String> {
+        let kind = self.pending_bulk?;
+        let n = self.selection_count();
+        Some(match kind {
+            ui::BulkKind::Rate(0) => format!("Clear the rating on {n} photo(s)?"),
+            ui::BulkKind::Rate(s) => {
+                format!("Apply {} to {n} photo(s)?", "\u{2605}".repeat(s as usize))
+            }
+            ui::BulkKind::Export => format!("Export {n} photo(s) as JPG?"),
+            ui::BulkKind::ApplySettings => {
+                format!("Apply the copied settings to {n} photo(s)?")
+            }
+            ui::BulkKind::Delete => format!("Move {n} photo(s) to the Trash?"),
+        })
+    }
+
+    /// Run a confirmed bulk action against the current selection.
+    fn run_bulk(&mut self, kind: ui::BulkKind) {
+        match kind {
+            ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
+            // Export / ApplySettings / Delete are wired in later phases; their
+            // toolbar buttons are disabled until then, so these are unreachable.
+            ui::BulkKind::Export | ui::BulkKind::ApplySettings | ui::BulkKind::Delete => {}
+        }
+    }
+
+    /// Apply `stars` (0 clears) to every photo in the multi-selection.
+    fn apply_rating_to_selection(&mut self, stars: u8) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return;
+        }
+        for path in &paths {
+            if stars == 0 {
+                self.ratings.remove(path);
+            } else {
+                self.ratings.insert(path.clone(), stars);
+            }
+            self.catalog.set(path, stars);
+        }
+        // Rated photos may move in/out of a filtered view; recompute + resync.
+        if self.filter.is_some() {
+            self.recompute_visible();
+            self.resync_loupe_selection();
+        }
+        let n = paths.len();
+        self.set_status(if stars == 0 {
+            format!("Cleared rating on {n} photo(s)")
+        } else {
+            format!("Rated {n} photo(s) \u{2605}{stars}")
+        });
         self.request_redraw();
     }
 
@@ -1777,8 +1853,20 @@ impl App {
                         self.request_redraw();
                     }
                 }
-                ui::UiAction::SelectAll => {
-                    self.select_all();
+                ui::UiAction::RequestBulk(kind) => {
+                    if self.selection_count() > 0 {
+                        self.pending_bulk = Some(kind);
+                        self.request_redraw();
+                    }
+                }
+                ui::UiAction::ConfirmBulk => {
+                    if let Some(kind) = self.pending_bulk.take() {
+                        self.run_bulk(kind);
+                    }
+                    self.request_redraw();
+                }
+                ui::UiAction::CancelBulk => {
+                    self.pending_bulk = None;
                     self.request_redraw();
                 }
                 ui::UiAction::OpenLoupe(pos) => {

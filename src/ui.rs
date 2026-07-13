@@ -39,10 +39,14 @@ pub enum UiAction {
     SelectToggle(usize),
     /// Shift-click: extend the range selection to this cell.
     SelectRange(usize),
-    /// Select every visible cell (Cmd+A).
-    SelectAll,
     /// Open the loupe on this visible position.
     OpenLoupe(usize),
+    /// Ask to run a bulk action on the current selection (opens a confirm modal).
+    RequestBulk(BulkKind),
+    /// Confirm the pending bulk action.
+    ConfirmBulk,
+    /// Dismiss the pending bulk action without running it.
+    CancelBulk,
     /// Set the thumbnail size (longest-side px).
     SetThumbPx(u32),
     /// Set (or clear) the star filter.
@@ -67,6 +71,20 @@ pub enum UiAction {
     Focus(Region),
 }
 
+/// A bulk action requested from the toolbar, run against the current
+/// multi-selection after confirmation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BulkKind {
+    /// Set every selected photo's rating (0 clears it).
+    Rate(u8),
+    /// Export every selected photo as a baked JPG.
+    Export,
+    /// Apply the copied develop settings to every selected photo.
+    ApplySettings,
+    /// Move every selected photo to the Trash.
+    Delete,
+}
+
 /// What `draw` returns to `main.rs` each frame.
 #[derive(Default)]
 pub struct FrameOutput {
@@ -87,6 +105,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
         ViewMode::Loupe => draw_loupe(ui, app, &mut out),
     }
     status_toast(ui, app);
+    confirm_modal(ui, app, &mut out);
     out
 }
 
@@ -174,8 +193,64 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 let next = if unrated { None } else { Some((Cmp::Eq, 0)) };
                 out.actions.push(UiAction::SetFilter(next));
             }
+
+            // Bulk actions on the current selection, shown only when something is
+            // selected. Every bulk op is confirmed via a modal before it runs.
+            let n = app.selection_count();
+            if n > 0 {
+                ui.separator();
+                ui.label(format!("{n} selected"));
+                // Apply Star: a 1–5 dropdown plus a clear-rating entry.
+                egui::ComboBox::from_id_salt("bulk_star")
+                    .selected_text("Apply \u{2605}")
+                    .show_ui(ui, |ui| {
+                        for s in (1u8..=5).rev() {
+                            if ui.button(star_string(s)).clicked() {
+                                out.actions.push(UiAction::RequestBulk(BulkKind::Rate(s)));
+                            }
+                        }
+                        if ui.button("Clear rating").clicked() {
+                            out.actions.push(UiAction::RequestBulk(BulkKind::Rate(0)));
+                        }
+                    });
+                // Export / Apply Settings / Delete arrive in later phases; shown
+                // disabled so the intended layout is visible.
+                ui.add_enabled(false, egui::Button::new("Export JPG"))
+                    .on_disabled_hover_text("Batch export lands in a later step");
+                ui.add_enabled(false, egui::Button::new("Apply Settings"))
+                    .on_disabled_hover_text("Copy develop settings first (later step)");
+                ui.add_enabled(false, egui::Button::new("Delete"))
+                    .on_disabled_hover_text("Delete-to-Trash lands in a later step");
+            }
         });
     });
+}
+
+/// A modal confirming a pending bulk action. Confirm runs it; Cancel / Esc /
+/// clicking the backdrop dismisses it.
+fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    let Some(prompt) = app.pending_bulk_prompt() else {
+        return;
+    };
+    let resp = egui::Modal::new(egui::Id::new("bulk_confirm")).show(ui.ctx(), |ui| {
+        ui.set_width(300.0);
+        ui.heading("Confirm");
+        ui.add_space(6.0);
+        ui.label(prompt);
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button("Cancel").clicked() {
+                out.actions.push(UiAction::CancelBulk);
+            }
+            if ui.button("Confirm").clicked() {
+                out.actions.push(UiAction::ConfirmBulk);
+            }
+        });
+    });
+    // Backdrop click / Escape → treat as cancel.
+    if resp.should_close() {
+        out.actions.push(UiAction::CancelBulk);
+    }
 }
 
 /// Left folder-tree sidebar, rooted at the opened folder. Shown in both the grid
