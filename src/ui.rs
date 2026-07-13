@@ -446,6 +446,7 @@ fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         ("Cmd + [ / ]", "Rotate 90\u{b0}"),
         ("Y", "Before / after compare"),
         ("Cmd + Shift + C", "Copy develop settings"),
+        ("Cmd + Shift + Y", "Apply settings to selection"),
         ("X", "Export selected as JPG"),
         ("Delete / Backspace", "Move to Trash"),
         ("Tab / Shift + Tab", "Hide side panels / all panels"),
