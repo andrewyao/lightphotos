@@ -444,7 +444,6 @@ fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         ("Shift + 1 – 5", "Filter \u{2265} N stars"),
         ("C", "Crop"),
         ("Cmd + [ / ]", "Rotate 90\u{b0}"),
-        ("D", "Develop panel"),
         ("Y", "Before / after compare"),
         ("Cmd + Shift + C", "Copy develop settings"),
         ("X", "Export selected as JPG"),
