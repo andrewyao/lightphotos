@@ -635,11 +635,39 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     if app.crop_rect().is_some() {
         // Crop mode: the crop overlay owns the whole central area (mask + edges).
         loupe_crop_overlay(ui, app, central, out);
+    } else if app.compare() {
+        // Before/after: a center divider and corner labels over the split image.
+        loupe_compare_overlay(ui, central);
     } else {
         // Star overlay in its own foreground Area, so egui owns clicks on the stars
         // (only there) without claiming the rest of the image area.
         loupe_star_overlay(ui, app, central, out);
     }
+}
+
+/// The before/after overlay: a vertical divider down the middle of the central
+/// rect and a "Before"/"After" label in each top corner. The two image halves
+/// themselves are drawn by the wgpu renderer.
+fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
+    let painter = ui.painter_at(central);
+    let mid_x = central.center().x;
+    painter.line_segment(
+        [egui::pos2(mid_x, central.min.y), egui::pos2(mid_x, central.max.y)],
+        egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+    );
+    // Shadowed text so labels read over any image.
+    let label = |p: egui::Pos2, align: egui::Align2, text: &str| {
+        let font = egui::FontId::proportional(13.0);
+        painter.text(p + egui::vec2(1.0, 1.0), align, text, font.clone(), egui::Color32::BLACK);
+        painter.text(p, align, text, font, egui::Color32::WHITE);
+    };
+    let pad = 8.0;
+    label(central.min + egui::vec2(pad, pad), egui::Align2::LEFT_TOP, "Before");
+    label(
+        egui::pos2(central.max.x - pad, central.min.y + pad),
+        egui::Align2::RIGHT_TOP,
+        "After",
+    );
 }
 
 /// The crop-mode overlay: a dimmed mask outside the crop rectangle, a bright
