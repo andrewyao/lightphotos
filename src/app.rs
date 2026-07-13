@@ -9,7 +9,7 @@
 //! folder tree, histogram, thumbnail working set) is slated to move into its own
 //! module in later steps.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -173,6 +173,12 @@ pub(crate) struct App {
     /// The Loupe always has a selection. `None` makes the "no selection" state
     /// unrepresentable as a stray index — there is no separate active flag.
     sel: Option<usize>,
+    /// The multi-selection: positions *within `visible`*. Empty in the
+    /// browse-first state. When non-empty it always contains `sel` (the
+    /// primary/active cell). Bulk operations act on this set.
+    selected: BTreeSet<usize>,
+    /// Anchor position (within `visible`) for Shift range-selection.
+    anchor: Option<usize>,
     /// Last `sel` the filmstrip auto-scrolled to (so we only scroll on change,
     /// not every frame — which would fight clicks). `None` = never.
     last_strip_sel: Option<usize>,
@@ -272,6 +278,8 @@ impl App {
             filter: None,
             visible: Vec::new(),
             sel: None,
+            selected: BTreeSet::new(),
+            anchor: None,
             last_strip_sel: None,
             thumb_px: THUMB_DEFAULT,
             grid_cols: 1,
@@ -351,6 +359,7 @@ impl App {
             self.playlist = Some(playlist);
             self.recompute_visible();
             self.sel = Some(self.visible.iter().position(|&i| i == start_index).unwrap_or(0));
+            self.collapse_selection();
             self.mode = ViewMode::Loupe;
             self.load_selected();
             self.request_neighbors();
@@ -383,16 +392,31 @@ impl App {
         self.playlist = Some(playlist);
         self.recompute_visible();
         self.sel = None;
+        self.selected.clear();
+        self.anchor = None;
         self.folder_sel = Some(dir);
         self.request_working_thumbs();
         self.request_redraw();
     }
 
-    /// Recompute `visible` from the current filter + ratings, clamping `sel`.
+    /// Recompute `visible` from the current filter + ratings, clamping `sel` and
+    /// remapping the multi-selection so it survives re-filtering.
     fn recompute_visible(&mut self) {
+        // Snapshot the multi-selection + anchor as *playlist* indices before the
+        // rebuild: positions within `visible` shift when the filter changes, but
+        // playlist indices are stable, so we can restore the same photos after.
+        let sel_pl: Vec<usize> = self
+            .selected
+            .iter()
+            .filter_map(|&p| self.visible.get(p).copied())
+            .collect();
+        let anchor_pl = self.anchor.and_then(|p| self.visible.get(p).copied());
+
         let Some(pl) = &self.playlist else {
             self.visible.clear();
             self.sel = None;
+            self.selected.clear();
+            self.anchor = None;
             return;
         };
         let ratings = &self.ratings;
@@ -407,6 +431,10 @@ impl App {
                 self.sel = Some(self.visible.len() - 1);
             }
         }
+        // Remap the multi-selection + anchor from playlist indices to their new
+        // positions, dropping any photo the filter removed.
+        self.selected = remap_positions(&sel_pl, &self.visible);
+        self.anchor = anchor_pl.and_then(|i| self.visible.iter().position(|&v| v == i));
     }
 
     /// The playlist index of the current selection, if any. `None` when the
@@ -420,6 +448,107 @@ impl App {
         let pl = self.playlist.as_ref()?;
         let idx = self.selected_index()?;
         pl.entry(idx).map(|p| p.to_path_buf())
+    }
+
+    /// Paths of every photo in the multi-selection, in `visible` order. Falls
+    /// back to the primary cell when the set is empty but a cell is active, so
+    /// bulk operations always have at least the current photo to work on.
+    pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
+        let Some(pl) = self.playlist.as_ref() else {
+            return Vec::new();
+        };
+        let positions: Vec<usize> = if self.selected.is_empty() {
+            self.sel.into_iter().collect()
+        } else {
+            self.selected.iter().copied().collect()
+        };
+        positions
+            .iter()
+            .filter_map(|&p| self.visible.get(p).copied())
+            .filter_map(|i| pl.entry(i).map(|p| p.to_path_buf()))
+            .collect()
+    }
+
+    /// Number of photos a bulk action would affect (the multi-selection, or the
+    /// single primary cell when the set is empty).
+    pub(crate) fn selection_count(&self) -> usize {
+        if self.selected.is_empty() {
+            usize::from(self.sel.is_some())
+        } else {
+            self.selected.len()
+        }
+    }
+
+    /// Collapse the multi-selection down to just the primary cell (or empty when
+    /// nothing is active). Called after a plain arrow move / single click.
+    fn collapse_selection(&mut self) {
+        self.selected = self.sel.into_iter().collect();
+        self.anchor = self.sel;
+    }
+
+    /// Plain select: primary = `pos`, selection = `{pos}`.
+    fn select_single(&mut self, pos: usize) {
+        self.sel = Some(pos);
+        self.anchor = Some(pos);
+        self.selected = BTreeSet::from([pos]);
+    }
+
+    /// Cmd-click: toggle `pos` in the multi-selection; the primary follows the
+    /// clicked cell (or an adjacent survivor when the primary is deselected).
+    fn select_toggle(&mut self, pos: usize) {
+        if self.selected.remove(&pos) {
+            // Deselected the clicked cell: move the primary to another member.
+            self.sel = self.selected.iter().next_back().copied();
+        } else {
+            self.selected.insert(pos);
+            self.sel = Some(pos);
+        }
+        self.anchor = self.sel;
+    }
+
+    /// Shift-click / Shift-arrow: select the inclusive range from the anchor
+    /// (or the primary, seeded on first use) to `pos`. The anchor stays put so
+    /// the range can be re-dragged from the same origin.
+    fn select_range(&mut self, pos: usize) {
+        if self.anchor.is_none() {
+            self.anchor = self.sel.or(Some(pos));
+        }
+        let a = self.anchor.unwrap_or(pos);
+        self.selected = range_set(a, pos);
+        self.sel = Some(pos);
+    }
+
+    /// Cmd+A: select every visible cell.
+    fn select_all(&mut self) {
+        let n = self.visible.len();
+        if n == 0 {
+            return;
+        }
+        self.selected = (0..n).collect();
+        if self.sel.is_none() {
+            self.sel = Some(0);
+        }
+        self.anchor = self.sel;
+    }
+
+    /// Shift+arrow in the grid: extend the range selection to the cell the
+    /// arrow lands on, keeping the anchor fixed.
+    fn extend_grid(&mut self, dx: isize, dy: isize) {
+        if self.visible.is_empty() {
+            return;
+        }
+        let from = self.sel.unwrap_or(0);
+        if self.anchor.is_none() {
+            self.anchor = Some(from);
+        }
+        let pos = navigation::grid_move(from, self.visible.len(), self.grid_cols, dx, dy);
+        self.select_range(pos);
+        self.request_redraw();
+    }
+
+    /// True when the visible cell at `pos` is part of the multi-selection.
+    pub(crate) fn is_selected(&self, pos: usize) -> bool {
+        self.selected.contains(&pos)
     }
 
     /// In Loupe mode, make the selection the wanted image and request decode.
@@ -471,6 +600,7 @@ impl App {
         } else {
             (cur + n - 1) % n
         });
+        self.collapse_selection();
         self.load_selected();
         self.request_neighbors();
         self.request_redraw();
@@ -487,6 +617,7 @@ impl App {
             None => 0,
             Some(s) => navigation::grid_move(s, self.visible.len(), self.grid_cols, dx, dy),
         });
+        self.collapse_selection();
         self.request_redraw();
     }
 
@@ -728,6 +859,22 @@ impl App {
             Region::Grid => self.enter_loupe(),
             // Filmstrip / Develop: Enter has no distinct action.
             _ => {}
+        }
+    }
+
+    /// Route an arrow key. With Shift held in the grid it extends the range
+    /// selection; otherwise it's the normal focus-routed move. `(dx, dy)` maps to
+    /// left/right/up/down.
+    fn nav_arrow(&mut self, dx: isize, dy: isize, shift: bool) {
+        if shift && self.focus == Region::Grid {
+            self.extend_grid(dx, dy);
+            return;
+        }
+        match (dx, dy) {
+            (-1, 0) => self.nav_left(),
+            (1, 0) => self.nav_right(),
+            (0, -1) => self.nav_up(),
+            _ => self.nav_down(),
         }
     }
 
@@ -1607,7 +1754,7 @@ impl App {
             match action {
                 ui::UiAction::Select(pos) => {
                     if pos < self.visible.len() {
-                        self.sel = Some(pos);
+                        self.select_single(pos);
                         // In the loupe, selecting a filmstrip cell must also show
                         // it (selection == shown). In the grid, selecting is just
                         // focus — Enter/double-click opens the loupe.
@@ -1618,9 +1765,25 @@ impl App {
                         self.request_redraw();
                     }
                 }
+                ui::UiAction::SelectToggle(pos) => {
+                    if pos < self.visible.len() {
+                        self.select_toggle(pos);
+                        self.request_redraw();
+                    }
+                }
+                ui::UiAction::SelectRange(pos) => {
+                    if pos < self.visible.len() {
+                        self.select_range(pos);
+                        self.request_redraw();
+                    }
+                }
+                ui::UiAction::SelectAll => {
+                    self.select_all();
+                    self.request_redraw();
+                }
                 ui::UiAction::OpenLoupe(pos) => {
                     if pos < self.visible.len() {
-                        self.sel = Some(pos);
+                        self.select_single(pos);
                         self.enter_loupe();
                     }
                 }
@@ -1871,10 +2034,13 @@ impl App {
                 ViewMode::Grid => event_loop.exit(),
             },
 
-            KeyCode::ArrowLeft => self.nav_left(),
-            KeyCode::ArrowRight => self.nav_right(),
-            KeyCode::ArrowUp => self.nav_up(),
-            KeyCode::ArrowDown => self.nav_down(),
+            // Cmd+A selects every visible cell in the grid.
+            KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
+
+            KeyCode::ArrowLeft => self.nav_arrow(-1, 0, shift),
+            KeyCode::ArrowRight => self.nav_arrow(1, 0, shift),
+            KeyCode::ArrowUp => self.nav_arrow(0, -1, shift),
+            KeyCode::ArrowDown => self.nav_arrow(0, 1, shift),
 
             // +/- thumbnail size (Grid). Equal/Plus share a physical key.
             KeyCode::Equal | KeyCode::NumpadAdd if self.mode == ViewMode::Grid => {
@@ -1905,6 +2071,23 @@ fn digit_of(code: KeyCode) -> Option<u8> {
         Digit9 | Numpad9 => 9,
         _ => return None,
     })
+}
+
+/// The inclusive set of positions between `anchor` and `pos` (order-agnostic).
+/// Used for Shift range-selection.
+fn range_set(anchor: usize, pos: usize) -> BTreeSet<usize> {
+    let (lo, hi) = if anchor <= pos { (anchor, pos) } else { (pos, anchor) };
+    (lo..=hi).collect()
+}
+
+/// Remap a multi-selection (given as *playlist* indices) onto positions in a new
+/// `visible` list, dropping any index the filter removed. Keeps the selection
+/// pinned to the same photos across a re-filter.
+fn remap_positions(selected_pl: &[usize], new_visible: &[usize]) -> BTreeSet<usize> {
+    selected_pl
+        .iter()
+        .filter_map(|&i| new_visible.iter().position(|&v| v == i))
+        .collect()
 }
 
 /// Bake `adj` (crop + tone) and `rot` (90° CW steps) into a fresh, straight
@@ -2047,6 +2230,34 @@ mod tests {
         assert_eq!((w, h), (2, 1));
         assert_eq!(&out[0..4], &px(3));
         assert_eq!(&out[4..8], &px(4));
+    }
+
+    fn set(items: &[usize]) -> BTreeSet<usize> {
+        items.iter().copied().collect()
+    }
+
+    #[test]
+    fn range_set_is_inclusive_and_order_agnostic() {
+        assert_eq!(range_set(2, 5), set(&[2, 3, 4, 5]));
+        assert_eq!(range_set(5, 2), set(&[2, 3, 4, 5])); // same range, anchor after
+        assert_eq!(range_set(3, 3), set(&[3])); // single cell
+    }
+
+    #[test]
+    fn remap_keeps_surviving_photos_and_drops_filtered() {
+        // Old visible = playlist indices [10, 11, 12, 13]; selection was positions
+        // {1, 3} → playlist indices [11, 13]. After a re-filter the new visible is
+        // [11, 20, 13] (11 → pos 0, 13 → pos 2; 12 dropped).
+        let selected_pl = [11usize, 13];
+        let new_visible = [11usize, 20, 13];
+        assert_eq!(remap_positions(&selected_pl, &new_visible), set(&[0, 2]));
+    }
+
+    #[test]
+    fn remap_drops_everything_when_all_filtered_out() {
+        let selected_pl = [11usize, 13];
+        let new_visible = [20usize, 21]; // none of the selected survive
+        assert_eq!(remap_positions(&selected_pl, &new_visible), set(&[]));
     }
 }
 
