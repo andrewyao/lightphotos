@@ -2495,8 +2495,14 @@ impl App {
             KeyCode::KeyX if !cmd && !alt => self.export_selected(),
             // Enter is focus-dependent (open image / expand folder / …).
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
+            // Cmd+Shift+Y applies the copied develop settings to the whole
+            // selection (only when something has been copied; checked before
+            // plain `Y` so the compare arm can't eat the Cmd+Shift chord).
+            KeyCode::KeyY if cmd && shift && self.has_copied_settings() => {
+                self.request_bulk(ui::BulkKind::ApplySettings)
+            }
             // `Y` toggles the before/after compare view (Loupe only).
-            KeyCode::KeyY if self.mode == ViewMode::Loupe => self.toggle_compare(),
+            KeyCode::KeyY if self.mode == ViewMode::Loupe && !cmd => self.toggle_compare(),
             KeyCode::Escape => match self.mode {
                 ViewMode::Loupe => {
                     self.mode = ViewMode::Grid;
