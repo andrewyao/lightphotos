@@ -2521,8 +2521,8 @@ impl App {
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
             // Cmd+Shift+C copies the primary photo's develop settings.
             KeyCode::KeyC if cmd && shift => self.copy_settings(),
-            // Delete / Backspace move the selection to the Trash (after confirm).
-            KeyCode::Delete | KeyCode::Backspace => self.request_bulk(ui::BulkKind::Delete),
+            // Delete moves the selection to the Trash (after confirm).
+            KeyCode::Delete => self.request_bulk(ui::BulkKind::Delete),
 
             KeyCode::ArrowLeft => self.nav_arrow(-1, 0, shift),
             KeyCode::ArrowRight => self.nav_arrow(1, 0, shift),
