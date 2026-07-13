@@ -23,7 +23,7 @@ use crate::develop::{self, Adjustments, Crop, GpuAdjust};
 use crate::loader::Loader;
 use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp, Playlist};
 use crate::renderer::{EguiPaint, Renderer};
-use crate::{image_decode, image_encode, paths, ui};
+use crate::{image_decode, image_encode, paths, trash, ui};
 
 const MIN_ZOOM: f32 = 0.02;
 const MAX_ZOOM: f32 = 64.0;
@@ -973,16 +973,79 @@ impl App {
         })
     }
 
+    /// Open the confirm modal for `kind` (no-op when nothing is selected). Shared
+    /// by the toolbar buttons and the Delete/Backspace key.
+    fn request_bulk(&mut self, kind: ui::BulkKind) {
+        if self.selection_count() > 0 {
+            self.pending_bulk = Some(kind);
+            self.request_redraw();
+        }
+    }
+
     /// Run a confirmed bulk action against the current selection.
     fn run_bulk(&mut self, kind: ui::BulkKind) {
         match kind {
             ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
             ui::BulkKind::Export => self.export_selection(),
-            // Delete is wired in a later phase; its toolbar button is disabled
-            // until then, so this is unreachable.
-            ui::BulkKind::Delete => {}
+            ui::BulkKind::Delete => self.delete_selection(),
         }
+    }
+
+    /// Move every selected photo to the Trash, then drop it from the playlist,
+    /// the in-memory maps, and the catalog, repairing the cursor + loupe.
+    fn delete_selection(&mut self) {
+        let paths = self.selected_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let total = paths.len();
+        let mut trashed: Vec<PathBuf> = Vec::new();
+        let mut last_err: Option<String> = None;
+        for path in &paths {
+            match trash::move_to_trash(path) {
+                Ok(()) => trashed.push(path.clone()),
+                Err(e) => {
+                    eprintln!("[image-viewer] trash failed for {}: {e}", path.display());
+                    last_err = Some(e);
+                }
+            }
+        }
+        if !trashed.is_empty() {
+            let gone: HashSet<PathBuf> = trashed.iter().cloned().collect();
+            if let Some(pl) = self.playlist.as_mut() {
+                pl.remove_matching(|p| gone.contains(p));
+            }
+            for p in &trashed {
+                self.ratings.remove(p);
+                self.edits.remove(p);
+                self.rotations.remove(p);
+                self.catalog.remove(p);
+            }
+            // Every index is now invalidated; rebuild the view. The cursor keeps
+            // its position (clamped), landing on a neighbor of the deleted photos.
+            self.selected.clear();
+            self.anchor = None;
+            self.recompute_visible();
+            self.collapse_selection();
+            if self.mode == ViewMode::Loupe {
+                if self.visible.is_empty() {
+                    // Nothing left to show — fall back to the grid.
+                    self.mode = ViewMode::Grid;
+                    self.normalize_focus();
+                    self.update_window_title();
+                } else {
+                    self.load_selected();
+                    self.request_neighbors();
+                }
+            }
+        }
+        let n = trashed.len();
+        self.set_status(match last_err {
+            None => format!("Moved {n} photo(s) to Trash"),
+            Some(e) => format!("Trashed {n}/{total} \u{2014} last error: {e}"),
+        });
+        self.request_redraw();
     }
 
     /// Copy the primary photo's develop settings (tone only, no crop) to the
@@ -1951,12 +2014,7 @@ impl App {
                     }
                 }
                 ui::UiAction::CopySettings => self.copy_settings(),
-                ui::UiAction::RequestBulk(kind) => {
-                    if self.selection_count() > 0 {
-                        self.pending_bulk = Some(kind);
-                        self.request_redraw();
-                    }
-                }
+                ui::UiAction::RequestBulk(kind) => self.request_bulk(kind),
                 ui::UiAction::ConfirmBulk => {
                     if let Some(kind) = self.pending_bulk.take() {
                         self.run_bulk(kind);
@@ -2224,6 +2282,8 @@ impl App {
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
             // Cmd+Shift+C copies the primary photo's develop settings.
             KeyCode::KeyC if cmd && shift => self.copy_settings(),
+            // Delete / Backspace move the selection to the Trash (after confirm).
+            KeyCode::Delete | KeyCode::Backspace => self.request_bulk(ui::BulkKind::Delete),
 
             KeyCode::ArrowLeft => self.nav_arrow(-1, 0, shift),
             KeyCode::ArrowRight => self.nav_arrow(1, 0, shift),

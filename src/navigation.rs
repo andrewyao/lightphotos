@@ -210,6 +210,16 @@ impl Playlist {
     pub fn entry(&self, index: usize) -> Option<&Path> {
         self.entries.get(index).map(|p| p.as_path())
     }
+
+    /// Drop every entry for which `remove` returns true (e.g. files sent to the
+    /// Trash). All indices are invalidated afterwards — the caller must rebuild
+    /// any derived view (e.g. `recompute_visible`). `index` is clamped.
+    pub fn remove_matching(&mut self, remove: impl Fn(&Path) -> bool) {
+        self.entries.retain(|p| !remove(p.as_path()));
+        if self.index >= self.entries.len() {
+            self.index = self.entries.len().saturating_sub(1);
+        }
+    }
 }
 
 #[cfg(test)]

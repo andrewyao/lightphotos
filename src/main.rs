@@ -32,6 +32,7 @@ mod navigation;
 mod paths;
 mod renderer;
 mod thumbnail;
+mod trash;
 mod ui;
 
 use std::path::PathBuf;

@@ -21,7 +21,7 @@ egui-winit = "0.34"
 egui-wgpu = "0.34"
 
 objc2 = "0.6.4"
-objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSObject", "NSThread"] }
+objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSObject", "NSThread", "NSFileManager", "NSError"] }
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSResponder"] }
 objc2-core-graphics = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", features = ["CFURL", "CFString", "CFBase", "CFData", "CFDictionary", "CFArray"] }

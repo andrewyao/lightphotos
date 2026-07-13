@@ -125,6 +125,19 @@ impl Catalog {
         self.update(key, |rec| rec.adjustments = adj);
     }
 
+    /// Forget any record for `path` (rating + adjustments). Used when a photo is
+    /// deleted from disk. Persisted atomically; a no-op when nothing was stored.
+    pub fn remove(&mut self, path: &Path) {
+        if self.images.remove(&normalize(path)).is_some() {
+            if let Err(e) = self.persist() {
+                eprintln!(
+                    "[catalog] failed to persist catalog at {}: {e}",
+                    self.file.display()
+                );
+            }
+        }
+    }
+
     /// Apply `mutate` to the record for `key` (creating it if needed), drop the
     /// entry if it became empty, then persist.
     fn update(&mut self, key: PathBuf, mutate: impl FnOnce(&mut ImageRecord)) {
