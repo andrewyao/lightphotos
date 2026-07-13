@@ -20,10 +20,11 @@ use winit::window::Window;
 
 use crate::catalog::Catalog;
 use crate::develop::{self, Adjustments, Crop, GpuAdjust};
+use crate::export::{ExportJob, ExportOutcome, Exporter};
 use crate::loader::Loader;
 use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp, Playlist};
 use crate::renderer::{EguiPaint, Renderer};
-use crate::{image_decode, image_encode, paths, trash, ui};
+use crate::{image_decode, paths, trash, ui};
 
 const MIN_ZOOM: f32 = 0.02;
 const MAX_ZOOM: f32 = 64.0;
@@ -129,10 +130,23 @@ impl Shown {
     }
 }
 
+/// Progress of an in-flight background export batch. `Some` from the moment
+/// jobs are submitted until the last outcome is drained.
+pub(crate) struct ExportProgress {
+    done: usize,
+    total: usize,
+    errors: usize,
+    last_err: Option<String>,
+}
+
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
     pub(crate) loader: Option<Loader>,
+    /// Background JPEG export worker pool; `None` until the window is created.
+    pub(crate) exporter: Option<Exporter>,
+    /// In-flight export batch progress, driving the persistent progress toast.
+    pub(crate) export_progress: Option<ExportProgress>,
     playlist: Option<Playlist>,
 
     /// Path we want shown in the loupe (may still be decoding).
@@ -280,6 +294,8 @@ impl App {
             window: None,
             renderer: None,
             loader: None,
+            exporter: None,
+            export_progress: None,
             playlist: None,
             want: None,
             shown: Shown::Nothing,
@@ -1468,70 +1484,94 @@ impl App {
 
     // ---- Export ----
 
-    /// Export the selected image to a JPG in the same folder, with the central
-    /// crop/rotation/develop edits baked in. Never overwrites an existing file.
+    /// Export the selected image to a baked JPG (crop/rotation/develop applied)
+    /// in the folder's `Exports/` subfolder. Runs in the background.
     fn export_selected(&mut self) {
-        let Some(path) = self.selected_path() else {
-            self.set_status("Export: no image selected".into());
-            self.request_redraw();
-            return;
-        };
-        match self.export_image(&path) {
-            Ok(out) => {
-                let name = out.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                eprintln!("[image-viewer] exported {}", out.display());
-                self.set_status(format!("Exported {name}"));
-            }
-            Err(e) => {
-                eprintln!("[image-viewer] export failed: {e}");
-                self.set_status(format!("Export failed: {e}"));
+        match self.selected_path() {
+            Some(path) => self.start_export(vec![path]),
+            None => {
+                self.set_status("Export: no image selected".into());
+                self.request_redraw();
             }
         }
-        self.request_redraw();
     }
 
-    /// Export every selected photo to a baked JPG in its own folder. Runs
-    /// synchronously (may briefly block on large selections); reports a count.
+    /// Export every selected photo to a baked JPG in the folder's `Exports/`
+    /// subfolder, in the background.
     fn export_selection(&mut self) {
-        let paths = self.selected_paths();
+        self.start_export(self.selected_paths());
+    }
+
+    /// Queue `paths` for background export into `<current folder>/Exports/`.
+    /// Returns immediately: the heavy decode/bake/encode runs on the exporter's
+    /// worker pool, and `on_export_outcomes` reports progress as jobs finish.
+    fn start_export(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             self.set_status("Export: nothing selected".into());
             self.request_redraw();
             return;
         }
-        let total = paths.len();
-        let mut ok = 0usize;
-        let mut last_err: Option<String> = None;
-        for path in &paths {
-            match self.export_image(path) {
-                Ok(out) => {
-                    eprintln!("[image-viewer] exported {}", out.display());
-                    ok += 1;
-                }
-                Err(e) => {
-                    eprintln!("[image-viewer] export failed for {}: {e}", path.display());
-                    last_err = Some(e);
-                }
-            }
+        let Some(exporter) = self.exporter.as_ref() else { return };
+
+        // Exports live under the current folder (the one whose images are
+        // shown), so they stay together and never clutter the RAW folder.
+        let base = self
+            .folder_sel
+            .clone()
+            .or_else(|| paths[0].parent().map(Path::to_path_buf))
+            .unwrap_or_else(|| PathBuf::from("."));
+        let exports_dir = base.join("Exports");
+        if let Err(e) = std::fs::create_dir_all(&exports_dir) {
+            self.set_status(format!("Export failed: could not create Exports folder: {e}"));
+            self.request_redraw();
+            return;
         }
-        self.set_status(match last_err {
-            None => format!("Exported {ok} photo(s)"),
-            Some(e) => format!("Exported {ok}/{total} \u{2014} last error: {e}"),
-        });
+
+        // Resolve every destination up front (sequential, so the `taken` set
+        // dedupes same-stem sources), gather each photo's edits, and hand off a
+        // self-contained job. No decode happens here — only cheap bookkeeping.
+        let total = paths.len();
+        let mut taken: HashSet<PathBuf> = HashSet::new();
+        for src in paths {
+            let dest = paths::jpg_export_target(&src, &exports_dir, &taken);
+            taken.insert(dest.clone());
+            let adj = self.catalog.adjustments(&src);
+            let rot = self.rotations.get(&src).copied().unwrap_or(0);
+            exporter.submit(ExportJob { src, dest, adj, rot });
+        }
+
+        self.export_progress = Some(ExportProgress { done: 0, total, errors: 0, last_err: None });
+        self.set_status(format!("Exporting 0/{total}\u{2026}"));
         self.request_redraw();
     }
 
-    /// Decode `path` at full resolution, bake in its edits, and write the JPG.
-    /// Returns the path written. Runs synchronously (one image; brief).
-    fn export_image(&self, path: &Path) -> Result<PathBuf, String> {
-        // Full resolution: u32::MAX means `fit_within` never downscales.
-        let img = image_decode::decode(path, u32::MAX)?;
-        let adj = self.catalog.adjustments(path);
-        let rot = self.rotations.get(path).copied().unwrap_or(0);
-        let (w, h, rgba) = bake_edited(&img, &adj, rot);
-        let out = paths::jpg_export_target(path);
-        image_encode::encode_jpeg(&out, w, h, &rgba)?;
-        Ok(out)
+    /// Fold a batch of finished exports into the progress toast. When the last
+    /// job lands, replace the live counter with a final summary and clear the
+    /// in-flight state (which stops the keep-awake redraw loop in `main.rs`).
+    pub(crate) fn on_export_outcomes(&mut self, outcomes: Vec<ExportOutcome>) {
+        let Some(mut prog) = self.export_progress.take() else { return };
+        for ExportOutcome { src, result } in outcomes {
+            prog.done += 1;
+            match result {
+                Ok(out) => eprintln!("[image-viewer] exported {}", out.display()),
+                Err(e) => {
+                    eprintln!("[image-viewer] export failed for {}: {e}", src.display());
+                    prog.errors += 1;
+                    prog.last_err = Some(e);
+                }
+            }
+        }
+        if prog.done >= prog.total {
+            let ok = prog.total - prog.errors;
+            self.set_status(match prog.last_err {
+                None => format!("Exported {ok} photo(s)"),
+                Some(e) => format!("Exported {ok}/{} \u{2014} last error: {e}", prog.total),
+            });
+            // export_progress stays None (taken above) → toast expires normally.
+        } else {
+            self.set_status(format!("Exporting {}/{}\u{2026}", prog.done, prog.total));
+            self.export_progress = Some(prog);
+        }
     }
 
     // ---- Status toast ----
@@ -1540,8 +1580,13 @@ impl App {
         self.status = Some((msg, Instant::now()));
     }
 
-    /// The current status message, if one was set within the last few seconds.
+    /// The current status message. While an export is in flight the message is
+    /// held without expiry (a slow single decode must not blank the progress
+    /// toast mid-run); otherwise it fades after a few seconds.
     pub(crate) fn status_text(&self) -> Option<&str> {
+        if self.export_progress.is_some() {
+            return self.status.as_ref().map(|(s, _)| s.as_str());
+        }
         self.status.as_ref().and_then(|(s, t)| {
             (t.elapsed().as_secs_f32() < 3.0).then_some(s.as_str())
         })
@@ -2513,7 +2558,7 @@ fn remap_positions(selected_pl: &[usize], new_visible: &[usize]) -> BTreeSet<usi
 /// The decode is premultiplied sRGB8; the un-premultiply + sRGB→linear here
 /// matches `build_hist_sample`, and `develop::apply_linear` is the same tone
 /// pipeline the shader runs, so the result matches what's on screen.
-fn bake_edited(
+pub(crate) fn bake_edited(
     img: &image_decode::DecodedImage,
     adj: &Adjustments,
     rot: u8,

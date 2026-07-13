@@ -24,6 +24,7 @@
 mod app;
 mod catalog;
 mod develop;
+mod export;
 mod image_decode;
 mod image_encode;
 mod loader;
@@ -77,6 +78,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.loader = Some(loader);
+        self.exporter = Some(export::Exporter::new());
         self.egui_state = Some(egui_state);
 
         if let Some(path) = self.pending_initial.take() {
@@ -239,6 +241,18 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
         }
+        // Drain finished background exports and fold them into the progress toast.
+        let outcomes = self.exporter.as_ref().map(|e| e.poll()).unwrap_or_default();
+        if !outcomes.is_empty() {
+            self.on_export_outcomes(outcomes);
+            self.request_redraw();
+        }
+        // While an export is in flight, keep the (Wait-mode) loop awake so the
+        // results channel is drained promptly — same trick as thumbnails below.
+        if self.export_progress.is_some() {
+            self.request_redraw();
+        }
+
         // Keep redrawing while working-set thumbnails are still loading.
         if self.request_working_thumbs() {
             self.request_redraw();
