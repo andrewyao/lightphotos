@@ -8,28 +8,10 @@
 use std::ffi::c_void;
 use std::path::Path;
 
-use objc2_core_foundation::{CFRetained, CFString, CFURL, CFURLPathStyle};
-use objc2_core_graphics::kCGColorSpaceSRGB;
-use objc2_core_graphics::{CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
+use objc2_core_foundation::CFString;
 use objc2_image_io::CGImageDestination;
 
-// CGBitmapContextCreate / …CreateImage are the classic (non-block) CoreGraphics
-// symbols not surfaced by objc2-core-graphics 0.3. They are stable and the
-// framework is already linked, so we declare them — same pattern as
-// `image_decode::CGBitmapContextCreate`.
-#[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
-    fn CGBitmapContextCreate(
-        data: *mut c_void,
-        width: usize,
-        height: usize,
-        bits_per_component: usize,
-        bytes_per_row: usize,
-        space: *const CGColorSpace,
-        bitmap_info: u32,
-    ) -> *mut CGContext;
-    fn CGBitmapContextCreateImage(ctx: *const CGContext) -> *mut CGImage;
-}
+use crate::coregraphics;
 
 /// Encode `rgba` (tightly packed RGBA8, row-major, sRGB; alpha may be opaque or
 /// premultiplied — export produces opaque) to a JPEG at `out`.
@@ -42,53 +24,22 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
         return Err("pixel buffer too small for the given dimensions".into());
     }
 
-    let color_space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
-        .ok_or("could not create sRGB color space")?;
-    // Byte order R,G,B,A, matching the decode path.
-    let bitmap_info: u32 =
-        CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
-
     // The context reads from `buffer` while it lives; CreateImage snapshots the
     // pixels into an independent CGImage, so `buffer` can drop afterwards.
     let mut buffer = rgba.to_vec();
-    // SAFETY: buffer is width*height*4 bytes; color_space is valid for the call.
-    let ctx_ptr = unsafe {
-        CGBitmapContextCreate(
+    // SAFETY: buffer is width*height*4 bytes and outlives `ctx`.
+    let ctx = unsafe {
+        coregraphics::srgb_bitmap_context(
             buffer.as_mut_ptr() as *mut c_void,
-            width as usize,
-            height as usize,
-            8,
+            width,
+            height,
             bytes_per_row,
-            &*color_space as *const CGColorSpace,
-            bitmap_info,
-        )
+        )?
     };
-    if ctx_ptr.is_null() {
-        return Err("CGBitmapContextCreate failed".into());
-    }
-    // SAFETY: non-null (checked), +1 retained → released on drop.
-    let ctx: CFRetained<CGContext> =
-        unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(ctx_ptr)) };
 
-    // SAFETY: ctx is a valid bitmap context.
-    let img_ptr = unsafe { CGBitmapContextCreateImage(&*ctx as *const CGContext) };
-    if img_ptr.is_null() {
-        return Err("CGBitmapContextCreateImage failed".into());
-    }
-    // SAFETY: non-null (checked), +1 retained → released on drop.
-    let image: CFRetained<CGImage> =
-        unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(img_ptr)) };
+    let image = coregraphics::bitmap_context_image(&ctx)?;
 
-    // Output CFURL (same construction as image_decode::open_image_source).
-    let path_str = out.to_string_lossy();
-    let cf_path = CFString::from_str(&path_str);
-    let url = CFURL::with_file_system_path(
-        None,
-        Some(&cf_path),
-        CFURLPathStyle::CFURLPOSIXPathStyle,
-        false,
-    )
-    .ok_or("could not build output CFURL")?;
+    let url = coregraphics::file_url(out)?;
 
     let jpeg_uti = CFString::from_str("public.jpeg");
     // SAFETY: url/type are valid; count 1; default options (ImageIO's default

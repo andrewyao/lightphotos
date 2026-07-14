@@ -93,7 +93,7 @@ impl Adjustments {
 /// sub-threshold jitter doesn't churn the cache, and an identity edit (no tone, no
 /// crop, `rot == 0`) always yields the same value so unedited photos share one key.
 pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
-    use crate::thumbnail::Fnv1a;
+    use crate::hash::Fnv1a;
 
     let mut h = Fnv1a::new();
 

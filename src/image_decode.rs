@@ -9,13 +9,12 @@ use std::ffi::c_void;
 use std::path::Path;
 
 use objc2_core_foundation::{
-    CFNumber, CFNumberType, CFRetained, CFString, CFURL, CFURLPathStyle, CGPoint, CGRect, CGSize,
+    CFNumber, CFNumberType, CFRetained, CFString, CGPoint, CGRect, CGSize,
 };
-use objc2_core_graphics::{
-    CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
-};
-use objc2_core_graphics::kCGColorSpaceSRGB;
+use objc2_core_graphics::{CGContext, CGImage};
 use objc2_image_io::{kCGImagePropertyOrientation, CGImageSource};
+
+use crate::coregraphics;
 
 pub struct DecodedImage {
     pub width: u32,
@@ -24,20 +23,12 @@ pub struct DecodedImage {
     pub rgba: Vec<u8>,
 }
 
-// The classic CGBitmapContextCreate is not exposed by objc2-core-graphics 0.3
-// (only a block-based "Adaptive" variant). It is a stable CoreGraphics symbol,
-// and the framework is already linked by objc2-core-graphics, so we declare it.
-#[link(name = "CoreGraphics", kind = "framework")]
+// CoreFoundation runtime type introspection, used to verify a value's concrete
+// type before reinterpreting it. CoreFoundation is already linked transitively.
+#[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    fn CGBitmapContextCreate(
-        data: *mut c_void,
-        width: usize,
-        height: usize,
-        bits_per_component: usize,
-        bytes_per_row: usize,
-        space: *const CGColorSpace,
-        bitmap_info: u32,
-    ) -> *mut CGContext;
+    fn CFGetTypeID(cf: *const c_void) -> core::ffi::c_ulong;
+    fn CFNumberGetTypeID() -> core::ffi::c_ulong;
 }
 
 /// Decode `path`, optionally downscaling so neither side exceeds `max_dim`
@@ -45,15 +36,7 @@ extern "C" {
 /// Open `path` as a `CGImageSource` (the shared CFURL + ImageIO open path used
 /// by both full-resolution decode and thumbnail generation).
 pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, String> {
-    let path_str = path.to_string_lossy();
-    let cf_path = CFString::from_str(&path_str);
-    let url = CFURL::with_file_system_path(
-        None,
-        Some(&cf_path),
-        CFURLPathStyle::CFURLPOSIXPathStyle,
-        false,
-    )
-    .ok_or("could not build CFURL")?;
+    let url = coregraphics::file_url(path)?;
 
     // SAFETY: url is a valid CFURL; passing no decode options. The returned
     // CGImageSource is +1 retained and wrapped in CFRetained, released on drop.
@@ -97,7 +80,13 @@ fn read_orientation(source: &CGImageSource) -> u8 {
     if ptr.is_null() {
         return 1;
     }
-    // SAFETY: for the orientation key the value is a CFNumber; read it as SInt32.
+    // A well-formed file stores a CFNumber here, but a crafted/broken file could
+    // store some other CFType. Verify the concrete type before reinterpreting —
+    // casting an arbitrary CF object to CFNumber and calling `value` on it is UB.
+    if unsafe { CFGetTypeID(ptr) } != unsafe { CFNumberGetTypeID() } {
+        return 1;
+    }
+    // SAFETY: confirmed above that the value is a CFNumber; read it as SInt32.
     let number = unsafe { &*(ptr as *const CFNumber) };
     let mut out: i32 = 0;
     let ok = unsafe {
@@ -162,32 +151,15 @@ pub fn cgimage_to_rgba(
     let bytes_per_row = (target_w as usize) * 4;
     let mut buffer = vec![0u8; bytes_per_row * (target_h as usize)];
 
-    let color_space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
-        .ok_or("could not create sRGB color space")?;
-
-    // premultiplied RGBA, big-endian => byte order R,G,B,A (matches Rgba8UnormSrgb).
-    let bitmap_info: u32 =
-        CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
-
-    // SAFETY: buffer is large enough (target_w*target_h*4); color_space is valid for its scope.
-    let ctx_ptr = unsafe {
-        CGBitmapContextCreate(
+    // SAFETY: buffer is large enough (target_w*target_h*4) and outlives `ctx`.
+    let ctx = unsafe {
+        coregraphics::srgb_bitmap_context(
             buffer.as_mut_ptr() as *mut c_void,
-            target_w as usize,
-            target_h as usize,
-            8,
+            target_w,
+            target_h,
             bytes_per_row,
-            &*color_space as *const CGColorSpace,
-            bitmap_info,
-        )
+        )?
     };
-    if ctx_ptr.is_null() {
-        return Err("CGBitmapContextCreate failed".into());
-    }
-    // Take ownership so the context is released on drop.
-    // SAFETY: ctx_ptr is non-null (checked above) and is a +1 retained context.
-    let ctx: CFRetained<CGContext> =
-        unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(ctx_ptr)) };
 
     // Draw the image scaled into our (possibly smaller) context rect.
     let rect = CGRect {
