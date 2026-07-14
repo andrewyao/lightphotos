@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! wgpu rendering. The decoded image is uploaded once as a texture (with a
 //! CPU-generated mip chain for smooth zoom-out). Zoom/pan are applied purely
 //! through a small transform uniform — no per-frame re-upload.

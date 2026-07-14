@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Global edits catalog — the persistence layer for ratings + develop edits.
 //!
 //! Everything lives in ONE app-managed JSON file at

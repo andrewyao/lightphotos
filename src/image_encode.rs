@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Encode RGBA8 pixels to a JPEG file using Apple's ImageIO + CoreGraphics —
 //! the encode counterpart to `image_decode`. No third-party codecs.
 //!

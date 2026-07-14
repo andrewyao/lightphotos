@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Folder navigation: given an opened image, list its sibling images in the
 //! same directory (sorted), and support prev/next.
 

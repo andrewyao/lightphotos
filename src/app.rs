@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The `App`: all viewer state plus the coordinator logic that ties the GPU
 //! renderer, the background loader, the ratings/edits catalog, and the egui
 //! chrome together — and the keyboard bindings.

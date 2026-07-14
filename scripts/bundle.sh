@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
 # Build a release binary and assemble LightPhotos.app, then register it with
 # Launch Services so Finder double-click / "Open With" route image files to us.
 set -euo pipefail

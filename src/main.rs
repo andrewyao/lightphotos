@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! LightPhotos — a fast macOS Lightroom-lite photo culling & develop tool.
 //!
 //! - Open a folder from Finder / "Open With" → thumbnail Grid; open a file → Loupe.

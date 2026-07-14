@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 // Full-screen quad. The vertex shader maps each corner to a UV that is
 // scaled and offset by the zoom/pan transform, so panning and zooming are
 // pure GPU transforms — the texture is never re-uploaded.

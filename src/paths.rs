@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Small path helpers shared across the catalog, navigation, and thumbnail
 //! layers so path identity is computed the same way everywhere.
 

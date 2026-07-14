@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Pure pixel operations shared by export, thumbnail baking, and the histogram.
 //!
 //! These have no `App` dependency, so the exporter's worker pool and the

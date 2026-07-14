@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Background image decoding. A pool of worker threads decodes off the UI thread
 //! so the window never blocks; decoded images are cached by path so revisiting
 //! prev/next is instant. We preload neighbors to make arrow-key nav feel
