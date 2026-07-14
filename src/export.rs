@@ -103,7 +103,14 @@ impl Exporter {
 fn do_export(job: ExportJob) -> Result<PathBuf, String> {
     // Full resolution: u32::MAX means `fit_within` never downscales.
     let img = image_decode::decode(&job.src, u32::MAX)?;
-    let (w, h, rgba) = crate::app::bake_edited(&img, &job.adj, job.rot);
-    image_encode::encode_jpeg(&job.dest, w, h, &rgba)?;
+    let (w, h, rgba) = crate::image_ops::bake_edited(&img, &job.adj, job.rot);
+    // Encode to a temp sibling then rename, so a crash mid-encode can't leave a
+    // truncated `.jpg` at the final path (the rename is atomic on one volume).
+    let tmp = job.dest.with_extension("jpg.tmp");
+    image_encode::encode_jpeg(&tmp, w, h, &rgba)?;
+    if let Err(e) = std::fs::rename(&tmp, &job.dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("rename: {e}"));
+    }
     Ok(job.dest)
 }

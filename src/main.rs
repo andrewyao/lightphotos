@@ -23,10 +23,13 @@
 
 mod app;
 mod catalog;
+mod coregraphics;
 mod develop;
 mod export;
+mod hash;
 mod image_decode;
 mod image_encode;
+mod image_ops;
 mod loader;
 mod macos_delegate;
 mod navigation;
@@ -254,10 +257,16 @@ impl ApplicationHandler<UserEvent> for App {
             self.on_export_outcomes(outcomes);
             self.request_redraw();
         }
-        // While an export is in flight, keep the (Wait-mode) loop awake so the
-        // results channel is drained promptly — same trick as thumbnails below.
+        // While an export is in flight, poll the results channel a few times a
+        // second instead of forcing a full egui re-tessellation + GPU submit
+        // every vsync. WaitUntil wakes `about_to_wait` on a timer without a
+        // redraw; the actual redraw only happens above when outcomes arrive.
         if self.export_progress.is_some() {
-            self.request_redraw();
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(100),
+            ));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
         }
 
         // Keep redrawing while working-set thumbnails are still loading.

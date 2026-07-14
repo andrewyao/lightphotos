@@ -113,6 +113,12 @@ pub struct ThumbCache {
 }
 
 impl ThumbCache {
+    /// Soft cap on the total size of the on-disk `.tw` cache. The cache keys on
+    /// (path, mtime, len, max_px), so edits/resizes/new folders accumulate stale
+    /// entries indefinitely; a startup sweep evicts the least-recently-modified
+    /// files back under this budget.
+    const BUDGET_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+
     /// Create the cache, ensuring the root directory exists. If `$HOME` is
     /// unavailable, falls back to a relative `./.imageviewer-thumbnails`.
     pub fn new() -> ThumbCache {
@@ -123,6 +129,12 @@ impl ThumbCache {
         };
         // Best-effort: errors here surface later on read/write.
         let _ = fs::create_dir_all(&root);
+
+        // Prune stale entries off the main path so startup never blocks on a
+        // large cache directory. Best-effort — any failure just leaves the cache.
+        let prune_root = root.clone();
+        std::thread::spawn(move || prune_dir(&prune_root, ThumbCache::BUDGET_BYTES));
+
         ThumbCache { root }
     }
 
@@ -158,7 +170,7 @@ impl ThumbCache {
             .unwrap_or(0);
         let len = meta.len();
 
-        let mut h = Fnv1a::new();
+        let mut h = crate::hash::Fnv1a::new();
         h.write(canon.as_os_str().as_encoded_bytes());
         h.write(&mtime_ns.to_le_bytes());
         h.write(&len.to_le_bytes());
@@ -173,28 +185,37 @@ impl Default for ThumbCache {
     }
 }
 
-/// Minimal FNV-1a 64-bit hasher. Stable, deterministic, dependency-free.
-pub(crate) struct Fnv1a {
-    state: u64,
-}
-
-impl Fnv1a {
-    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    pub(crate) fn new() -> Self {
-        Fnv1a { state: Self::OFFSET_BASIS }
-    }
-
-    pub(crate) fn write(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.state ^= b as u64;
-            self.state = self.state.wrapping_mul(Self::PRIME);
+/// Evict the least-recently-modified `.tw` files in `root` until the total size
+/// of remaining cache files is at or below `budget`. Best-effort: metadata and
+/// remove errors are ignored, and a cache already under budget does no work.
+fn prune_dir(root: &Path, budget: u64) {
+    let Ok(entries) = fs::read_dir(root) else { return };
+    // (path, size, mtime) for every cache file.
+    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("tw") {
+            continue;
         }
+        let Ok(meta) = entry.metadata() else { continue };
+        let len = meta.len();
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        total += len;
+        files.push((path, len, mtime));
     }
-
-    pub(crate) fn finish(&self) -> u64 {
-        self.state
+    if total <= budget {
+        return;
+    }
+    // Oldest first, delete until under budget.
+    files.sort_by_key(|(_, _, mtime)| *mtime);
+    for (path, len, _) in files {
+        if total <= budget {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
+        }
     }
 }
 
@@ -246,39 +267,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fnv1a_key_is_stable_and_deterministic() {
-        let mut a = Fnv1a::new();
-        a.write(b"/abs/IMG_001.jpg");
-        a.write(&123u64.to_le_bytes());
-        a.write(&456u64.to_le_bytes());
-        a.write(&256u32.to_le_bytes());
-
-        let mut b = Fnv1a::new();
-        b.write(b"/abs/IMG_001.jpg");
-        b.write(&123u64.to_le_bytes());
-        b.write(&456u64.to_le_bytes());
-        b.write(&256u32.to_le_bytes());
-
-        assert_eq!(a.finish(), b.finish(), "identical inputs -> identical key");
-
-        // Known FNV-1a-64 anchor: empty input hashes to the offset basis.
-        assert_eq!(Fnv1a::new().finish(), 0xcbf2_9ce4_8422_2325);
-    }
-
-    #[test]
-    fn fnv1a_key_differs_when_max_px_differs() {
-        let mk = |max_px: u32| {
-            let mut h = Fnv1a::new();
-            h.write(b"/abs/IMG_001.jpg");
-            h.write(&123u64.to_le_bytes());
-            h.write(&456u64.to_le_bytes());
-            h.write(&max_px.to_le_bytes());
-            h.finish()
-        };
-        assert_ne!(mk(256), mk(512), "different max_px -> different key");
-    }
-
-    #[test]
     fn tw_round_trip_is_identical() {
         // A known small (w, h, RGBA) blob; no real image fixture needed.
         let img = DecodedImage {
@@ -303,5 +291,31 @@ mod tests {
 
         let _ = fs::remove_file(&file);
         let _ = fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn prune_evicts_until_under_budget() {
+        let dir = std::env::temp_dir().join(format!("iv-prune-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        // Ten 1 KiB .tw files (10 KiB total) plus a non-.tw file that must survive.
+        for i in 0..10 {
+            fs::write(dir.join(format!("f{i}.tw")), vec![0u8; 1024]).unwrap();
+        }
+        fs::write(dir.join("keep.txt"), vec![0u8; 4096]).unwrap();
+
+        // Budget of 4 KiB → at most 4 of the .tw files may remain.
+        prune_dir(&dir, 4096);
+
+        let remaining_tw: u64 = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tw"))
+            .map(|e| e.metadata().unwrap().len())
+            .sum();
+        assert!(remaining_tw <= 4096, "cache should be pruned under budget, got {remaining_tw}");
+        assert!(dir.join("keep.txt").exists(), "non-cache files must be left alone");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

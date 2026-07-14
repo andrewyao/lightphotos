@@ -72,6 +72,10 @@ pub struct Catalog {
     dir: PathBuf,
     /// Full path to `catalog.json`.
     file: PathBuf,
+    /// The most recent persist failure, if any, awaiting delivery to the user.
+    /// Set whenever a write fails; drained by [`Catalog::take_error`] so the UI
+    /// can surface a toast instead of the change being silently lost.
+    last_error: Option<String>,
 }
 
 impl Catalog {
@@ -100,7 +104,21 @@ impl Catalog {
             // Missing file (or any read error) → start empty.
             Err(_) => HashMap::new(),
         };
-        Catalog { images, dir, file }
+        Catalog { images, dir, file, last_error: None }
+    }
+
+    /// Take the pending persist error, if any. Returns `Some(message)` exactly
+    /// once per failure so callers can show a single toast; subsequent calls
+    /// return `None` until the next failed write.
+    pub fn take_error(&mut self) -> Option<String> {
+        self.last_error.take()
+    }
+
+    /// Record a persist failure: log it and stash it for the UI to surface.
+    fn note_persist_error(&mut self, e: std::io::Error) {
+        let msg = format!("Failed to save catalog to {}: {e}", self.file.display());
+        eprintln!("[catalog] {msg}");
+        self.last_error = Some(msg);
     }
 
     /// Rating for `path`, if any. Path is normalized the same way as `set`.
@@ -154,10 +172,7 @@ impl Catalog {
     pub fn remove(&mut self, path: &Path) {
         if self.images.remove(&normalize(path)).is_some() {
             if let Err(e) = self.persist() {
-                eprintln!(
-                    "[catalog] failed to persist catalog at {}: {e}",
-                    self.file.display()
-                );
+                self.note_persist_error(e);
             }
         }
     }
@@ -171,10 +186,7 @@ impl Catalog {
             self.images.insert(key, rec);
         }
         if let Err(e) = self.persist() {
-            eprintln!(
-                "[catalog] failed to persist catalog at {}: {e}",
-                self.file.display()
-            );
+            self.note_persist_error(e);
         }
     }
 
@@ -380,6 +392,28 @@ mod tests {
         assert_eq!(reloaded.rotation(&p), 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn failed_persist_is_reported_once_via_take_error() {
+        // Point the catalog at a directory that can't be created because a
+        // *file* sits where a parent dir would need to be, so `create_dir_all`
+        // (and thus persist) fails deterministically.
+        let base = unique_tmp_dir();
+        let blocker = base.join("blocker");
+        std::fs::write(&blocker, b"not a dir").unwrap();
+        let bad_dir = blocker.join("catalog"); // parent is a file → mkdir fails
+
+        let mut cat = Catalog::with_dir(bad_dir);
+        assert!(cat.take_error().is_none(), "no error before any write");
+
+        cat.set(&base.join("photo.jpg"), 3);
+        // The write failed, so the error is available exactly once...
+        assert!(cat.take_error().is_some(), "failed save should report an error");
+        // ...and is drained (not re-delivered) on the next check.
+        assert!(cat.take_error().is_none(), "error should be taken only once");
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

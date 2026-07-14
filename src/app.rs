@@ -24,7 +24,7 @@ use crate::export::{ExportJob, ExportOutcome, Exporter};
 use crate::loader::Loader;
 use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp, Playlist};
 use crate::renderer::{EguiPaint, Renderer};
-use crate::{image_decode, paths, trash, ui};
+use crate::{image_decode, image_ops, paths, trash, ui};
 
 const MIN_ZOOM: f32 = 0.02;
 const MAX_ZOOM: f32 = 64.0;
@@ -170,7 +170,10 @@ pub(crate) struct App {
     /// A small downsampled LINEAR-light RGB sample of the shown image, used to
     /// recompute the live histogram cheaply when adjustments change. Rebuilt
     /// whenever a new full image is uploaded.
-    hist_sample: Vec<[f32; 3]>,
+    // Each sample is `[lin_r, lin_g, lin_b, u, v]`: linear-light RGB plus the
+    // pixel's normalized position (0..1), so `recompute_histogram` can drop
+    // samples outside the active crop rect.
+    hist_sample: Vec<[f32; 5]>,
     /// Cached per-channel (R/G/B) display-space histogram bins for the panel.
     /// Float bins: samples are splatted fractionally across neighbouring buckets
     /// so a tone-curve stretch doesn't re-quantize into a comb of empty bins.
@@ -390,16 +393,7 @@ impl App {
             }
 
             let playlist = Playlist::from_file(&path);
-            // Seed the in-memory ratings + edits mirrors for everything in the folder.
-            for p in playlist.entries() {
-                if let Some(stars) = self.catalog.get(p) {
-                    self.ratings.insert(p.clone(), stars);
-                }
-                let adj = self.catalog.adjustments(p);
-                if !adj.is_identity() {
-                    self.edits.insert(p.clone(), adj);
-                }
-            }
+            self.seed_mirrors(&playlist);
             let start_index = playlist.position();
             self.playlist = Some(playlist);
             self.recompute_visible();
@@ -419,12 +413,11 @@ impl App {
         }
     }
 
-    /// Load `dir`'s images into the grid (browse-first): rebuild the playlist,
-    /// seed ratings, recompute the visible view, reset selection to nothing
-    /// selected, mark `dir` as the selected folder, and request thumbnails.
-    fn load_folder(&mut self, dir: PathBuf) {
-        let playlist = Playlist::from_dir(&dir);
-        // Seed the in-memory ratings + edits mirrors for everything in the folder.
+    /// Seed the in-memory ratings + edits + rotations mirrors from the catalog
+    /// for every image in `playlist`. Shared by `open` (single file → Loupe) and
+    /// `load_folder` (grid) so both entry points restore the same persisted state
+    /// — notably rotations, which `open` previously skipped.
+    fn seed_mirrors(&mut self, playlist: &Playlist) {
         for p in playlist.entries() {
             if let Some(stars) = self.catalog.get(p) {
                 self.ratings.insert(p.clone(), stars);
@@ -438,6 +431,14 @@ impl App {
                 self.rotations.insert(p.clone(), rot);
             }
         }
+    }
+
+    /// Load `dir`'s images into the grid (browse-first): rebuild the playlist,
+    /// seed ratings, recompute the visible view, reset selection to nothing
+    /// selected, mark `dir` as the selected folder, and request thumbnails.
+    fn load_folder(&mut self, dir: PathBuf) {
+        let playlist = Playlist::from_dir(&dir);
+        self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
         self.recompute_visible();
         self.sel = None;
@@ -1528,6 +1529,16 @@ impl App {
             self.request_redraw();
             return;
         }
+        // One export batch at a time. A second batch launched before the first's
+        // files land on disk would re-resolve the same `Exports/stem.jpg` targets
+        // (both `.exists()` and the per-call `taken` set see nothing yet) and two
+        // workers would race to write the same file — and it would clobber the
+        // in-flight progress. Reject the overlap instead.
+        if self.export_progress.is_some() {
+            self.set_status("Export already in progress\u{2026}".into());
+            self.request_redraw();
+            return;
+        }
         let Some(exporter) = self.exporter.as_ref() else { return };
 
         // Exports live under the current folder (the one whose images are
@@ -1627,23 +1638,20 @@ impl App {
         const TARGET: usize = 256;
         let step = (w.max(h) / TARGET).max(1);
         let mut sample = Vec::with_capacity((w / step + 1) * (h / step + 1));
-        let srgb_to_linear = |c: f32| (c / 255.0).powf(2.2);
         let mut y = 0;
         while y < h {
             let mut x = 0;
             while x < w {
                 let i = (y * w + x) * 4;
-                let (r, g, b, a) = (img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3]);
-                // Un-premultiply (the decode is premultiplied alpha).
-                let (r, g, b) = if a == 0 {
-                    (0.0, 0.0, 0.0)
-                } else if a == 255 {
-                    (r as f32, g as f32, b as f32)
-                } else {
-                    let inv = 255.0 / a as f32;
-                    ((r as f32 * inv).min(255.0), (g as f32 * inv).min(255.0), (b as f32 * inv).min(255.0))
-                };
-                sample.push([srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b)]);
+                let lin = image_ops::unpremul_to_linear([
+                    img.rgba[i],
+                    img.rgba[i + 1],
+                    img.rgba[i + 2],
+                    img.rgba[i + 3],
+                ]);
+                let u = (x as f32 + 0.5) / w as f32;
+                let v = (y as f32 + 0.5) / h as f32;
+                sample.push([lin[0], lin[1], lin[2], u, v]);
                 x += step;
             }
             y += step;
@@ -1663,8 +1671,20 @@ impl App {
             return;
         }
         let adj = self.current_adjustments();
+        // Restrict to the active crop rect so the histogram reflects what the
+        // loupe/export actually show. A full-frame (or absent) crop keeps every
+        // sample.
+        let crop = adj.crop.filter(|c| {
+            c.left > 0.0 || c.top > 0.0 || c.right < 1.0 || c.bottom < 1.0
+        });
         let mut bins = [[0f32; 256]; 3];
-        for &px in &self.hist_sample {
+        for &s in &self.hist_sample {
+            let (px, u, v) = ([s[0], s[1], s[2]], s[3], s[4]);
+            if let Some(c) = crop {
+                if u < c.left || u >= c.right || v < c.top || v >= c.bottom {
+                    continue;
+                }
+            }
             let out = develop::apply_linear(&adj, px);
             for ch in 0..3 {
                 // Linear → display gamma (the same encoding the shader output gets).
@@ -2025,7 +2045,7 @@ impl App {
                     &img.rgba,
                 )
             } else {
-                let (w, h, rgba) = bake_edited(&img, &adj, rot);
+                let (w, h, rgba) = image_ops::bake_edited(&img, &adj, rot);
                 // bake_edited yields opaque (alpha=255) pixels, so premultiplied
                 // == straight; from_rgba_premultiplied is correct.
                 egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], &rgba)
@@ -2079,6 +2099,13 @@ impl App {
 
         // Apply actions the UI produced (clicks, double-clicks, slider, filter).
         self.apply_ui_actions(out.actions);
+
+        // Surface any catalog write failure from this frame's mutations (rating,
+        // develop edit, rotation, delete) as a toast — otherwise the change is
+        // silently lost on quit.
+        if let Some(msg) = self.catalog.take_error() {
+            self.set_status(msg);
+        }
 
         let pixels_per_point = self.egui_ctx.pixels_per_point();
         let paint_jobs = self
@@ -2584,147 +2611,9 @@ fn remap_positions(selected_pl: &[usize], new_visible: &[usize]) -> BTreeSet<usi
         .collect()
 }
 
-/// Bake `adj` (crop + tone) and `rot` (90° CW steps) into a fresh, straight
-/// (opaque) sRGB8 RGBA buffer. Order: crop in texture space → apply the tone
-/// pipeline per pixel → rotate. Returns `(w, h, rgba)`. Used both for JPEG export
-/// (full-res) and to render edited grid/filmstrip thumbnails (on the cached raw
-/// thumbnail RGBA), so the two always agree.
-///
-/// The decode is premultiplied sRGB8; the un-premultiply + sRGB→linear here
-/// matches `build_hist_sample`, and `develop::apply_linear` is the same tone
-/// pipeline the shader runs, so the result matches what's on screen.
-pub(crate) fn bake_edited(
-    img: &image_decode::DecodedImage,
-    adj: &Adjustments,
-    rot: u8,
-) -> (u32, u32, Vec<u8>) {
-    let (w, h) = (img.width, img.height);
-    if w == 0 || h == 0 || img.rgba.len() < (w * h * 4) as usize {
-        return (0, 0, Vec::new());
-    }
-
-    // Crop rectangle → integer pixel bounds in texture space.
-    let (cl, ct, cr, cb) = match adj.crop {
-        Some(c) => (c.left, c.top, c.right, c.bottom),
-        None => (0.0, 0.0, 1.0, 1.0),
-    };
-    let x0 = ((cl * w as f32).round() as i64).clamp(0, w as i64 - 1) as u32;
-    let y0 = ((ct * h as f32).round() as i64).clamp(0, h as i64 - 1) as u32;
-    let x1 = ((cr * w as f32).round() as i64).clamp(x0 as i64 + 1, w as i64) as u32;
-    let y1 = ((cb * h as f32).round() as i64).clamp(y0 as i64 + 1, h as i64) as u32;
-    let (cw, ch) = (x1 - x0, y1 - y0);
-
-    let srgb_to_linear = |c: f32| (c / 255.0).powf(2.2);
-    let encode = |v: f32| (v.max(0.0).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
-
-    // Cropped + tone-applied buffer, still in texture orientation.
-    let mut cropped = vec![0u8; (cw * ch * 4) as usize];
-    for y in 0..ch {
-        for x in 0..cw {
-            let si = (((y0 + y) * w + (x0 + x)) * 4) as usize;
-            let (r, g, b, a) = (
-                img.rgba[si],
-                img.rgba[si + 1],
-                img.rgba[si + 2],
-                img.rgba[si + 3],
-            );
-            // Un-premultiply (the decode is premultiplied alpha).
-            let (r, g, b) = if a == 0 {
-                (0.0, 0.0, 0.0)
-            } else if a == 255 {
-                (r as f32, g as f32, b as f32)
-            } else {
-                let inv = 255.0 / a as f32;
-                ((r as f32 * inv).min(255.0), (g as f32 * inv).min(255.0), (b as f32 * inv).min(255.0))
-            };
-            let lin = [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b)];
-            let out = develop::apply_linear(adj, lin);
-            let di = ((y * cw + x) * 4) as usize;
-            cropped[di] = encode(out[0]);
-            cropped[di + 1] = encode(out[1]);
-            cropped[di + 2] = encode(out[2]);
-            cropped[di + 3] = 255;
-        }
-    }
-
-    rotate_rgba(&cropped, cw, ch, rot)
-}
-
-/// Rotate a tightly-packed RGBA8 buffer by `steps` × 90° clockwise. Returns the
-/// (possibly swapped) `(width, height, rgba)`.
-fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, Vec<u8>) {
-    let steps = steps % 4;
-    if steps == 0 {
-        return (w, h, src.to_vec());
-    }
-    let (nw, nh) = if steps == 2 { (w, h) } else { (h, w) };
-    let mut dst = vec![0u8; (nw * nh * 4) as usize];
-    let px = |x: u32, y: u32| ((y * w + x) * 4) as usize;
-    for yo in 0..nh {
-        for xo in 0..nw {
-            // Source pixel that lands at output (xo, yo).
-            let (xs, ys) = match steps {
-                1 => (yo, h - 1 - xo),         // 90° CW
-                2 => (w - 1 - xo, h - 1 - yo), // 180°
-                _ => (w - 1 - yo, xo),         // 270° CW (90° CCW)
-            };
-            let s = px(xs, ys);
-            let d = ((yo * nw + xo) * 4) as usize;
-            dst[d..d + 4].copy_from_slice(&src[s..s + 4]);
-        }
-    }
-    (nw, nh, dst)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn px(v: u8) -> [u8; 4] {
-        [v, v, v, 255]
-    }
-
-    #[test]
-    fn rotate_90cw_swaps_dims_and_moves_pixels() {
-        // Two horizontal pixels A,B (w=2,h=1). 90° CW → a 1×2 column A over B.
-        let src = [px(10), px(20)].concat();
-        let (w, h, out) = rotate_rgba(&src, 2, 1, 1);
-        assert_eq!((w, h), (1, 2));
-        assert_eq!(&out[0..4], &px(10)); // top
-        assert_eq!(&out[4..8], &px(20)); // bottom
-    }
-
-    #[test]
-    fn rotate_360_is_identity() {
-        let src = [px(1), px(2), px(3), px(4)].concat(); // 2×2
-        let (w, h, out) = rotate_rgba(&src, 2, 2, 4);
-        assert_eq!((w, h), (2, 2));
-        assert_eq!(out, src);
-    }
-
-    #[test]
-    fn identity_bake_preserves_opaque_pixels() {
-        // No crop, no rotation, identity adjustments → pixels survive the
-        // premultiply/sRGB↔linear round-trip unchanged (alpha becomes opaque).
-        let src = [px(0), px(64), px(128), px(255)].concat(); // 2×2
-        let img = image_decode::DecodedImage { width: 2, height: 2, rgba: src.clone() };
-        let (w, h, out) = bake_edited(&img, &Adjustments::default(), 0);
-        assert_eq!((w, h), (2, 2));
-        assert_eq!(out, src);
-    }
-
-    #[test]
-    fn bake_crop_slices_to_the_crop_rect() {
-        // 4×1 image; crop the right half → 2×1 keeping the last two pixels.
-        let src = [px(1), px(2), px(3), px(4)].concat();
-        let img = image_decode::DecodedImage { width: 4, height: 1, rgba: src };
-        let mut adj = Adjustments::default();
-        adj.crop = Some(Crop { left: 0.5, top: 0.0, right: 1.0, bottom: 1.0 });
-        let (w, h, out) = bake_edited(&img, &adj, 0);
-        assert_eq!((w, h), (2, 1));
-        assert_eq!(&out[0..4], &px(3));
-        assert_eq!(&out[4..8], &px(4));
-    }
 
     fn set(items: &[usize]) -> BTreeSet<usize> {
         items.iter().copied().collect()

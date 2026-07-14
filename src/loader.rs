@@ -186,11 +186,15 @@ impl Loader {
         if self.cache.contains_key(&path) || self.inflight.contains(&path) {
             return;
         }
-        self.inflight.insert(path.clone());
+        // Only record the job as in-flight once it's actually enqueued. If the
+        // queue mutex is poisoned (a worker panicked), enqueuing early plus a
+        // permanent `inflight` marker would strand this path as "loading forever";
+        // instead we skip it and let a later `request` retry.
         if let Ok(mut q) = self.shared.queue.lock() {
-            q.full.push_back(Job::Full(path));
+            q.full.push_back(Job::Full(path.clone()));
+            self.inflight.insert(path);
+            self.shared.ready.notify_one();
         }
-        self.shared.ready.notify_one();
     }
 
     /// Drain finished decodes into the caches and return full-image arrivals.
@@ -225,11 +229,13 @@ impl Loader {
         {
             return;
         }
-        self.thumb_inflight.insert(key);
+        // Mark in-flight only after a successful enqueue (see `request`): a
+        // poisoned queue mutex must not strand this key as permanently loading.
         if let Ok(mut q) = self.shared.queue.lock() {
             q.thumbs.push_back(Job::Thumb(path, max_px));
+            self.thumb_inflight.insert(key);
+            self.shared.ready.notify_one();
         }
-        self.shared.ready.notify_one();
     }
 
     /// In-memory thumbnail lookup keyed by `(path, max_px)`.
