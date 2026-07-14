@@ -1,12 +1,12 @@
 [package]
-name = "image-viewer"
+name = "lightphotos"
 version = "0.1.0"
 edition = "2021"
 # egui 0.34 (the egui line that targets wgpu 29) requires rustc >= 1.92.
 rust-version = "1.92"
 
 [[bin]]
-name = "image-viewer"
+name = "lightphotos"
 path = "src/main.rs"
 
 [dependencies]

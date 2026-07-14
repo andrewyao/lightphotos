@@ -1,4 +1,4 @@
-//! A fast macOS image viewer / Lightroom-lite photo browser.
+//! LightPhotos — a fast macOS Lightroom-lite photo culling & develop tool.
 //!
 //! - Open a folder from Finder / "Open With" → thumbnail Grid; open a file → Loupe.
 //! - `G` Grid, `E`/Enter Loupe (open selected), `Esc` backs out (Loupe→Grid, Grid→quit).
@@ -60,7 +60,7 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("Image Viewer")
+            .with_title("LightPhotos")
             .with_inner_size(LogicalSize::new(1100.0, 800.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
@@ -287,7 +287,7 @@ fn main() {
 
     macos_delegate::set_proxy(event_loop.create_proxy());
     if !macos_delegate::install_open_handler() {
-        eprintln!("[image-viewer] warning: could not install Finder open handler");
+        eprintln!("[lightphotos] warning: could not install Finder open handler");
     }
 
     let mut app = App::new(initial);

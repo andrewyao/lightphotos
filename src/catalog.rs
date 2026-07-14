@@ -1,7 +1,7 @@
 //! Global edits catalog — the persistence layer for ratings + develop edits.
 //!
 //! Everything lives in ONE app-managed JSON file at
-//! `~/Library/Application Support/com.imageviewer/catalog.json`. Originals are
+//! `~/Library/Application Support/com.lightphotos/catalog.json`. Originals are
 //! never touched and nothing is ever written into photo folders.
 //!
 //! Schema v2: `{ "version": 2, "images": { "<abs canonical path>": ImageRecord } }`
@@ -81,9 +81,13 @@ pub struct Catalog {
 impl Catalog {
     /// Load the catalog from the default app-support location.
     ///
-    /// Missing or corrupt files yield an empty catalog (never panics).
+    /// Missing or corrupt files yield an empty catalog (never panics). First
+    /// migrates the pre-rename `com.imageviewer` directory if present, so ratings
+    /// and edits made under the old name are preserved.
     pub fn load() -> Catalog {
-        Catalog::with_dir(default_dir())
+        let dir = default_dir();
+        crate::paths::migrate_legacy_dir(&dir, &legacy_dir());
+        Catalog::with_dir(dir)
     }
 
     /// Load the catalog rooted at an explicit directory.
@@ -243,12 +247,19 @@ fn parse_catalog(bytes: &[u8]) -> serde_json::Result<HashMap<PathBuf, ImageRecor
     }
 }
 
-/// Default catalog directory: `$HOME/Library/Application Support/com.imageviewer/`.
+/// Default catalog directory: `$HOME/Library/Application Support/com.lightphotos/`.
 fn default_dir() -> PathBuf {
+    app_support().join("com.lightphotos")
+}
+
+/// The pre-rename catalog directory (`com.imageviewer`), migrated on first load.
+fn legacy_dir() -> PathBuf {
+    app_support().join("com.imageviewer")
+}
+
+fn app_support() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    home.join("Library")
-        .join("Application Support")
-        .join("com.imageviewer")
+    home.join("Library").join("Application Support")
 }
 
 #[cfg(test)]

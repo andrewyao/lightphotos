@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Image Viewer</string>
+    <string>LightPhotos</string>
     <key>CFBundleDisplayName</key>
-    <string>Image Viewer</string>
+    <string>LightPhotos</string>
     <key>CFBundleExecutable</key>
-    <string>image-viewer</string>
+    <string>lightphotos</string>
     <key>CFBundleIdentifier</key>
-    <string>com.lancedb.image-viewer</string>
+    <string>com.lancedb.lightphotos</string>
     <key>CFBundleVersion</key>
     <string>0.1.0</string>
     <key>CFBundleShortVersionString</key>
