@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Background JPEG export. Exporting a photo means a full-resolution decode, a
 //! per-pixel bake of the develop/crop/rotation edits, and an ImageIO JPEG write
 //! — hundreds of milliseconds per image. Running that on the UI thread freezes

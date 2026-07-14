@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! A minimal, dependency-free FNV-1a 64-bit hasher.
 //!
 //! Stable and deterministic across process runs (unlike

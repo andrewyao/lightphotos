@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Move files to the macOS Trash via `NSFileManager` — native, matching the
 //! project's objc2/ImageIO approach (no third-party crate).
 

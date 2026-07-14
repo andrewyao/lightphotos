@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Decode any image macOS understands (JPEG/PNG/GIF/TIFF/BMP/HEIC/RAW) to
 //! RGBA8 bytes using Apple's ImageIO + CoreGraphics. No third-party codecs.
 //!

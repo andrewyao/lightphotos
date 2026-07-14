@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Finder "open document" handling.
 //!
 //! winit 0.30 registers its OWN `NSApplicationDelegate` (class

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! Thin shared wrappers over the classic (non-block) CoreGraphics symbols that
 //! `objc2-core-graphics` 0.3 doesn't surface, plus the CFURL/bitmap-context
 //! setup common to `image_decode` and `image_encode`. Both symbols are stable

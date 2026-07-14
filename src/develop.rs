@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
 //! The develop model — the single source of truth for non-destructive edits.
 //!
 //! [`Adjustments`] is the persisted/edited value (serde, stored in the catalog).
