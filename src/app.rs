@@ -368,7 +368,7 @@ impl App {
     pub(crate) fn open(&mut self, path: PathBuf) {
         let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
         eprintln!(
-            "[image-viewer] open {}: {}",
+            "[lightphotos] open {}: {}",
             if is_dir { "dir" } else { "file" },
             path.display()
         );
@@ -1058,7 +1058,7 @@ impl App {
             match trash::move_to_trash(path) {
                 Ok(()) => trashed.push(path.clone()),
                 Err(e) => {
-                    eprintln!("[image-viewer] trash failed for {}: {e}", path.display());
+                    eprintln!("[lightphotos] trash failed for {}: {e}", path.display());
                     last_err = Some(e);
                 }
             }
@@ -1581,9 +1581,9 @@ impl App {
         for ExportOutcome { src, result } in outcomes {
             prog.done += 1;
             match result {
-                Ok(out) => eprintln!("[image-viewer] exported {}", out.display()),
+                Ok(out) => eprintln!("[lightphotos] exported {}", out.display()),
                 Err(e) => {
-                    eprintln!("[image-viewer] export failed for {}: {e}", src.display());
+                    eprintln!("[lightphotos] export failed for {}: {e}", src.display());
                     prog.errors += 1;
                     prog.last_err = Some(e);
                 }

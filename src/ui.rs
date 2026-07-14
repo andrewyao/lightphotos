@@ -367,7 +367,7 @@ fn quit_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     }
     let resp = egui::Modal::new(egui::Id::new("quit_confirm")).show(ui.ctx(), |ui| {
         ui.set_width(300.0);
-        ui.heading("Quit Image Viewer?");
+        ui.heading("Quit LightPhotos?");
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui.button("Cancel").clicked() {

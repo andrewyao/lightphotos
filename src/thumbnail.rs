@@ -103,7 +103,7 @@ fn build_thumbnail_options(max_px: u32) -> Result<CFRetained<CFDictionary>, Stri
 }
 
 /// On-disk thumbnail cache rooted at
-/// `~/Library/Caches/com.imageviewer/thumbnails/`.
+/// `~/Library/Caches/com.lightphotos/thumbnails/`.
 ///
 /// Cache files are named `<hex fnv1a-64 key>.tw`. The key hashes the
 /// canonicalized source path, its mtime (ns), its length, and `max_px`, so any
@@ -120,12 +120,20 @@ impl ThumbCache {
     const BUDGET_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 
     /// Create the cache, ensuring the root directory exists. If `$HOME` is
-    /// unavailable, falls back to a relative `./.imageviewer-thumbnails`.
+    /// unavailable, falls back to a relative `./.lightphotos-thumbnails`.
     pub fn new() -> ThumbCache {
         let root = match std::env::var("HOME") {
-            Ok(home) => PathBuf::from(home)
-                .join("Library/Caches/com.imageviewer/thumbnails"),
-            Err(_) => PathBuf::from(".imageviewer-thumbnails"),
+            Ok(home) => {
+                let base = PathBuf::from(home).join("Library/Caches");
+                let root = base.join("com.lightphotos/thumbnails");
+                // Preserve the cache built under the pre-rename name.
+                crate::paths::migrate_legacy_dir(
+                    &root,
+                    &base.join("com.imageviewer/thumbnails"),
+                );
+                root
+            }
+            Err(_) => PathBuf::from(".lightphotos-thumbnails"),
         };
         // Best-effort: errors here surface later on read/write.
         let _ = fs::create_dir_all(&root);

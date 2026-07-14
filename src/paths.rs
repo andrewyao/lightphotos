@@ -15,6 +15,21 @@ pub fn normalize(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// One-time migration of a renamed app-support/cache directory: if `new` does
+/// not yet exist but `legacy` does, move `legacy` → `new` so data written under
+/// the old name (e.g. `com.imageviewer` → `com.lightphotos`) survives a rename.
+/// Best-effort — any error just leaves both paths untouched.
+pub fn migrate_legacy_dir(new: &Path, legacy: &Path) {
+    if new.exists() || !legacy.exists() {
+        return;
+    }
+    // Ensure the parent exists, then rename the whole directory in one move.
+    if let Some(parent) = new.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::rename(legacy, new);
+}
+
 /// The JPEG export target for `src`, placed in `dest_dir` (the `Exports/`
 /// subfolder), keeping `src`'s file stem with a `.jpg` extension. Chooses the
 /// first name that neither already exists on disk nor appears in `taken` — the

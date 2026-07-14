@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Build a release binary and assemble ImageViewer.app, then register it with
+# Build a release binary and assemble LightPhotos.app, then register it with
 # Launch Services so Finder double-click / "Open With" route image files to us.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP="$ROOT/ImageViewer.app"
-BIN_NAME="image-viewer"
+APP="$ROOT/LightPhotos.app"
+BIN_NAME="lightphotos"
 
 echo "==> Building release binary"
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
@@ -25,4 +25,4 @@ LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Framewo
 
 echo "==> Done: $APP"
 echo "    Open a file:  open -a \"$APP\" /path/to/photo.jpg"
-echo "    Or in Finder: right-click an image -> Open With -> Image Viewer"
+echo "    Or in Finder: right-click an image -> Open With -> LightPhotos"
