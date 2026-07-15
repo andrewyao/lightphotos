@@ -1214,8 +1214,49 @@ impl App {
         self.request_redraw();
     }
 
+    /// Flip best-of-burst mode. Ignored while a star filter is active (bursts run
+    /// only over the unfiltered folder). Turning on kicks off the background
+    /// capture-time scan and rebuilds marks; turning off clears the badges but
+    /// keeps the caches so re-enabling is instant.
+    fn toggle_bursts(&mut self) {
+        if self.filter.is_some() {
+            return; // mutually exclusive with the filter
+        }
+        self.bursts_on = !self.bursts_on;
+        if self.bursts_on {
+            self.request_capture_times();
+            self.recompute_burst_marks();
+        } else {
+            self.burst_marks.clear();
+        }
+        self.request_redraw();
+    }
+
+    /// Enqueue background capture-time reads for every entry not yet cached.
+    fn request_capture_times(&mut self) {
+        let Some(pl) = &self.playlist else { return };
+        let paths: Vec<PathBuf> = pl
+            .entries()
+            .iter()
+            .filter(|p| !self.capture_times.contains_key(*p))
+            .cloned()
+            .collect();
+        if let Some(loader) = &mut self.loader {
+            for p in paths {
+                loader.request_meta(p);
+            }
+        }
+    }
+
     /// Apply a new filter (or clear it) and recompute the visible view.
     fn set_filter(&mut self, filter: Option<(Cmp, u8)>) {
+        // Bursts run only over the unfiltered folder; applying a filter ends
+        // burst mode. Clearing the filter (`None`) leaves bursts off — the user
+        // re-enables with the toggle / `B`.
+        if filter.is_some() && self.bursts_on {
+            self.bursts_on = false;
+            self.burst_marks.clear();
+        }
         // Keep the selected entry across the recompute when possible.
         let want_idx = self.selected_index();
         self.filter = filter;
@@ -2268,6 +2309,7 @@ impl App {
                 ui::UiAction::SetFilter(f) => self.set_filter(f),
                 ui::UiAction::SetFilterCmp(cmp) => self.set_filter_cmp(cmp),
                 ui::UiAction::SetRating(stars) => self.set_rating(stars),
+                ui::UiAction::ToggleBursts => self.toggle_bursts(),
                 ui::UiAction::OpenFolder(p) => {
                     // The folder row is one unit: clicking it focuses the tree,
                     // loads the folder, and toggles its expansion — same as Enter.
@@ -2576,6 +2618,9 @@ impl App {
             }
 
             KeyCode::KeyG => self.enter_grid(),
+            // `B` toggles best-of-burst badges (grid). No-op while a filter is
+            // active — `toggle_bursts` guards it.
+            KeyCode::KeyB if !cmd && !alt => self.toggle_bursts(),
             // `E` is the focus-independent "enter loupe" edit key (Lightroom).
             KeyCode::KeyE => {
                 if self.mode == ViewMode::Grid {

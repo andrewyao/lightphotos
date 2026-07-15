@@ -69,6 +69,9 @@ pub enum UiAction {
     SetFilterCmp(Cmp),
     /// Rate the current selection/shown image (0 clears).
     SetRating(u8),
+    /// Toggle best-of-burst detection (badges + dimming). Ignored while a star
+    /// filter is active.
+    ToggleBursts,
     /// Open this folder as one unit: load its images and toggle its expansion.
     OpenFolder(std::path::PathBuf),
     /// Begin dragging this crop edge (pointer pressed near it).
@@ -236,6 +239,23 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 let next = if unrated { None } else { Some((Cmp::Eq, 0)) };
                 out.actions.push(UiAction::SetFilter(next));
             }
+
+            // Best-of-burst toggle. Disabled while a filter is active (bursts
+            // need the whole, unfiltered folder to be meaningful).
+            ui.separator();
+            let filter_active = app.filter().is_some();
+            let resp = ui.add_enabled(
+                !filter_active,
+                egui::SelectableLabel::new(app.bursts_on(), "Bursts"),
+            );
+            if resp.clicked() {
+                out.actions.push(UiAction::ToggleBursts);
+            }
+            resp.on_hover_text(if filter_active {
+                "Clear the filter to use Bursts"
+            } else {
+                "Group bursts and badge the sharpest frame (B)"
+            });
 
             // Rating-distribution histogram (folder-wide), clickable to filter.
             ui.separator();
@@ -445,6 +465,7 @@ fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         ("1 \u{2013} 5 / 0", "Rate / clear rating"),
         ("Shift + 1 \u{2013} 5", "Filter \u{2265} N stars"),
         ("C", "Crop"),
+        ("B", "Best-of-burst badges (grid)"),
         ("Cmd + [ or ]", "Rotate 90\u{b0} clockwise or anti-clockwise"),
         ("Y", "Before / after compare"),
         ("Cmd + Shift + C", "Copy develop settings"),
