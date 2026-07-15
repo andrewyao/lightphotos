@@ -244,9 +244,9 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
-        // Drain both loader tiers once per frame.
+        // Drain all loader tiers once per frame.
         if let Some(loader) = &mut self.loader {
-            let (full, thumbs) = loader.poll_all();
+            let (full, thumbs, _metas) = loader.poll_all();
             // Any arrival may be the wanted image (full) or its placeholder
             // (thumb), so try to (re)show on either; redraw to paint new thumbs.
             let any = !full.is_empty() || !thumbs.is_empty();
