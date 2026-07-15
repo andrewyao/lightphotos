@@ -24,6 +24,7 @@
 //! lives in [`app`]; the other modules are the supporting layers it coordinates.
 
 mod app;
+mod burst;
 mod catalog;
 mod coregraphics;
 mod develop;
