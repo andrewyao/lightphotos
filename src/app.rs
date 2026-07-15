@@ -2583,7 +2583,6 @@ impl App {
     /// Burst mark for the visible cell at `pos`. `None` when bursts are off, the
     /// cell is a singleton, or `pos` is out of range. `burst_marks` is indexed by
     /// playlist entry index, so we map the visible position through `visible`.
-    #[allow(dead_code)]
     pub(crate) fn burst_mark_at(&self, pos: usize) -> Option<BurstMark> {
         let idx = *self.visible.get(pos)?;
         self.burst_marks.get(idx).copied().flatten()

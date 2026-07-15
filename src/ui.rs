@@ -15,6 +15,7 @@ use std::path::Path;
 use crate::develop::Adjustments;
 use crate::navigation::Cmp;
 use crate::app::{App, CropEdge, Region, ViewMode};
+use crate::burst::BurstMark;
 
 /// Shared palette. Several of these colors were previously duplicated as inline
 /// `from_rgb(...)` literals across the grid and filmstrip cells; naming them
@@ -30,6 +31,9 @@ mod theme {
     /// Keyboard-cursor outline (amber) — distinct from the blue mouse selection,
     /// used for the folder-tree cursor and the focused Develop slider.
     pub const CURSOR_AMBER: Color32 = Color32::from_rgb(255, 190, 90);
+    /// Best-of-burst winner badge (mint green = "the keeper"), distinct from the
+    /// gold rating stars so the two overlays never read as the same mark.
+    pub const BURST_BADGE: Color32 = Color32::from_rgb(120, 230, 160);
 }
 
 /// An action the UI wants `App` to perform after the frame is built. Positions
@@ -693,6 +697,29 @@ fn thumbnail_cell(
             egui::FontId::proportional(18.0),
             egui::Color32::GRAY,
         );
+    }
+
+    // Best-of-burst overlay. Bursts imply no active filter, so every burst is
+    // whole in the grid: the sharpest frame gets a badge, the rest are dimmed.
+    match app.burst_mark_at(pos) {
+        Some(BurstMark::Sibling) => {
+            ui.painter()
+                .rect_filled(rect, style.corner, egui::Color32::from_black_alpha(140));
+        }
+        Some(BurstMark::Best) => {
+            // Top-left corner — rating stars live bottom-left, so no clash.
+            let c = rect.left_top() + egui::vec2(style.corner + 9.0, style.corner + 9.0);
+            ui.painter()
+                .circle_filled(c, 9.0, egui::Color32::from_black_alpha(170));
+            ui.painter().text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "\u{2605}",
+                egui::FontId::proportional(13.0),
+                theme::BURST_BADGE,
+            );
+        }
+        None => {}
     }
 
     let stars = app.rating_at(pos);
