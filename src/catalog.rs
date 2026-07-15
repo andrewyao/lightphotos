@@ -83,6 +83,10 @@ struct CatalogFileV1 {
 /// and every write records an error for the UI (rather than panicking).
 pub struct Catalog {
     images: HashMap<PathBuf, ImageRecord>,
+    /// Raw `adjustments` blobs that failed to deserialize on load, kept verbatim
+    /// so an unrelated write (rating/rotation) can't clobber a photo's edits with
+    /// NULL. Keyed like `images`; cleared once the user sets a valid adjustment.
+    raw_adjustments: HashMap<PathBuf, String>,
     /// Directory holding `catalog.db` (created on open).
     dir: PathBuf,
     /// Full path to `catalog.db`.
@@ -117,26 +121,50 @@ impl Catalog {
         let db_file = dir.join(CATALOG_DB);
         let mut cat = Catalog {
             images: HashMap::new(),
+            raw_adjustments: HashMap::new(),
             dir,
             db_file,
             conn: None,
             last_error: None,
         };
         let _ = std::fs::create_dir_all(&cat.dir);
-        match cat.open_and_init() {
-            Ok(conn) => {
-                cat.conn = Some(conn);
-                cat.migrate_legacy_json();
-                cat.load_into_cache();
-            }
+        cat.open_migrate_load();
+        cat
+    }
+
+    /// Open the DB, migrate any legacy JSON, and fill the read cache. If the DB
+    /// exists but can't be opened (e.g. a corrupt file), set it aside as
+    /// `catalog.db.corrupt` and retry once from a fresh database, so a bad file
+    /// can't leave the catalog permanently unusable.
+    fn open_migrate_load(&mut self) {
+        match self.open_and_init() {
+            Ok(conn) => self.conn = Some(conn),
             Err(e) => {
-                eprintln!(
-                    "[catalog] could not open {}: {e} (starting empty)",
-                    cat.db_file.display()
-                );
+                eprintln!("[catalog] could not open {}: {e}", self.db_file.display());
+                if self.db_file.exists() {
+                    let corrupt = self.db_file.with_extension("db.corrupt");
+                    if std::fs::rename(&self.db_file, &corrupt).is_ok() {
+                        match self.open_and_init() {
+                            Ok(conn) => {
+                                self.conn = Some(conn);
+                                self.last_error = Some(format!(
+                                    "Catalog database was unreadable and was reset; \
+                                     the previous file is saved as {}",
+                                    corrupt.display()
+                                ));
+                            }
+                            Err(e2) => {
+                                eprintln!("[catalog] recovery open failed: {e2} (starting empty)")
+                            }
+                        }
+                    }
+                }
             }
         }
-        cat
+        if self.conn.is_some() {
+            self.migrate_legacy_json();
+            self.load_into_cache();
+        }
     }
 
     /// Open the SQLite database and ensure the schema exists.
@@ -155,12 +183,37 @@ impl Catalog {
         Ok(conn)
     }
 
+    /// The open connection, or a descriptive error when the DB is unavailable.
+    fn conn(&self) -> Result<&Connection, String> {
+        self.conn
+            .as_ref()
+            .ok_or_else(|| "database unavailable".to_string())
+    }
+
+    /// True when the `images` table already holds at least one row.
+    fn db_has_rows(&self) -> bool {
+        let Some(conn) = self.conn.as_ref() else { return false };
+        conn.query_row("SELECT COUNT(*) FROM images", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0)
+            > 0
+    }
+
     /// One-time import of a legacy `catalog.json` (v1 or v2) into SQLite. On
     /// success the JSON is renamed to `catalog.json.bak`; corrupt JSON is left
     /// in place and ignored so the catalog simply starts empty.
     fn migrate_legacy_json(&mut self) {
         let json = self.dir.join(CATALOG_FILE);
         if !json.exists() {
+            return;
+        }
+        // Never import over an already-populated DB: a catalog.json that
+        // reappears (cloud sync, a restore, a downgrade→upgrade) would otherwise
+        // overwrite newer rows with stale values. Leave the JSON untouched.
+        if self.db_has_rows() {
+            eprintln!(
+                "[catalog] catalog.json present but the database is already \
+                 populated; leaving the JSON in place"
+            );
             return;
         }
         let Ok(bytes) = std::fs::read(&json) else { return };
@@ -171,7 +224,10 @@ impl Catalog {
                     return; // leave the JSON in place for a retry next launch
                 }
                 let bak = json.with_extension("json.bak");
-                if let Err(e) = std::fs::rename(&json, &bak) {
+                if bak.exists() {
+                    // Don't clobber an earlier backup; keep this JSON as-is.
+                    eprintln!("[catalog] {} already exists; leaving catalog.json in place", bak.display());
+                } else if let Err(e) = std::fs::rename(&json, &bak) {
                     eprintln!("[catalog] could not retire catalog.json: {e}");
                 }
             }
@@ -181,13 +237,13 @@ impl Catalog {
 
     /// Insert many records in a single transaction (used for migration).
     fn insert_all(&self, images: &HashMap<PathBuf, ImageRecord>) -> rusqlite::Result<()> {
-        let Some(conn) = self.conn.as_ref() else {
-            return Err(rusqlite::Error::InvalidQuery);
-        };
+        let Some(conn) = self.conn.as_ref() else { return Ok(()) };
         let tx = conn.unchecked_transaction()?;
         for (path, rec) in images {
             if !rec.is_empty() {
-                upsert_row(&tx, path, rec)?;
+                let adj = serialize_adjustments(&rec.adjustments)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                upsert_row(&tx, path, rec.rating, adj.as_deref(), rec.rotation)?;
             }
         }
         tx.commit()
@@ -195,31 +251,76 @@ impl Catalog {
 
     /// Populate the in-memory read cache from the DB.
     fn load_into_cache(&mut self) {
-        let Some(conn) = self.conn.as_ref() else { return };
-        let mut stmt = match conn.prepare("SELECT path, rating, adjustments, rotation FROM images") {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("[catalog] could not read rows: {e}");
-                return;
-            }
-        };
-        let rows = stmt.query_map([], |row| {
-            let path: String = row.get(0)?;
-            let rating: Option<u8> = row.get(1)?;
-            let adj_json: Option<String> = row.get(2)?;
-            let rotation: u8 = row.get(3)?;
-            let adjustments = adj_json
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .unwrap_or_default();
-            Ok((PathBuf::from(path), ImageRecord { rating, adjustments, rotation }))
-        });
-        match rows {
-            Ok(iter) => {
-                for r in iter.flatten() {
-                    self.images.insert(r.0, r.1);
+        // Read raw column tuples first, releasing the connection borrow before
+        // we mutate `self` (parsing + cache / preserved-blob updates).
+        let (rows, skipped) = {
+            let Some(conn) = self.conn.as_ref() else { return };
+            let mut stmt =
+                match conn.prepare("SELECT path, rating, adjustments, rotation FROM images") {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[catalog] could not read rows: {e}");
+                        return;
+                    }
+                };
+            let mapped = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<u8>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, u8>(3)?,
+                ))
+            });
+            let iter = match mapped {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("[catalog] could not map rows: {e}");
+                    return;
+                }
+            };
+            let mut rows = Vec::new();
+            let mut skipped = 0usize;
+            for row in iter {
+                match row {
+                    Ok(t) => rows.push(t),
+                    Err(e) => {
+                        eprintln!("[catalog] skipping unreadable row: {e}");
+                        skipped += 1;
+                    }
                 }
             }
-            Err(e) => eprintln!("[catalog] could not map rows: {e}"),
+            (rows, skipped)
+        };
+
+        if skipped > 0 {
+            self.last_error = Some(format!(
+                "{skipped} catalog entr{} could not be read and {} skipped.",
+                if skipped == 1 { "y" } else { "ies" },
+                if skipped == 1 { "was" } else { "were" },
+            ));
+        }
+
+        for (path, rating, adj_json, rotation) in rows {
+            let key = PathBuf::from(path);
+            let adjustments = match adj_json {
+                None => Adjustments::default(),
+                Some(s) => match serde_json::from_str::<Adjustments>(&s) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        // Preserve the raw blob so an unrelated write can't
+                        // overwrite the edit with NULL, and surface the problem.
+                        eprintln!("[catalog] unreadable adjustments for {}: {e}", key.display());
+                        self.raw_adjustments.insert(key.clone(), s);
+                        self.last_error = Some(format!(
+                            "Some develop edits for {} could not be read; \
+                             they are preserved unchanged.",
+                            key.display()
+                        ));
+                        Adjustments::default()
+                    }
+                },
+            };
+            self.images.insert(key, ImageRecord { rating, adjustments, rotation });
         }
     }
 
@@ -287,7 +388,9 @@ impl Catalog {
     /// deleted from disk. A no-op when nothing was stored.
     pub fn remove(&mut self, path: &Path) {
         let key = normalize(path);
-        if self.images.remove(&key).is_some() {
+        let had = self.images.remove(&key).is_some();
+        let had_raw = self.raw_adjustments.remove(&key).is_some();
+        if had || had_raw {
             if let Err(e) = self.delete_row(&key) {
                 self.note_persist_error(e);
             }
@@ -299,12 +402,19 @@ impl Catalog {
     fn update(&mut self, key: PathBuf, mutate: impl FnOnce(&mut ImageRecord)) {
         let mut rec = self.images.remove(&key).unwrap_or_default();
         mutate(&mut rec);
-        let result = if rec.is_empty() {
+        // A real (parseable) edit supersedes any preserved-but-unreadable blob.
+        if !rec.adjustments.is_identity() {
+            self.raw_adjustments.remove(&key);
+        }
+        // A record backed by a preserved raw blob is not "empty": deleting it
+        // would discard the very edit we're trying to keep.
+        let empty = rec.is_empty() && !self.raw_adjustments.contains_key(&key);
+        let result = if empty {
             self.delete_row(&key)
         } else {
             self.write_row(&key, &rec)
         };
-        if !rec.is_empty() {
+        if !empty {
             self.images.insert(key, rec);
         }
         if let Err(e) = result {
@@ -313,16 +423,29 @@ impl Catalog {
     }
 
     /// UPSERT a single record's row into the DB.
-    fn write_row(&self, key: &Path, rec: &ImageRecord) -> rusqlite::Result<()> {
-        let conn = self.conn.as_ref().ok_or(rusqlite::Error::InvalidQuery)?;
-        upsert_row(conn, key, rec)
+    fn write_row(&self, key: &Path, rec: &ImageRecord) -> Result<(), String> {
+        let conn = self.conn()?;
+        let adj = self.adj_column(key, rec)?;
+        upsert_row(conn, key, rec.rating, adj.as_deref(), rec.rotation).map_err(|e| e.to_string())
     }
 
     /// DELETE a single row (no-op if absent).
-    fn delete_row(&self, key: &Path) -> rusqlite::Result<()> {
-        let conn = self.conn.as_ref().ok_or(rusqlite::Error::InvalidQuery)?;
-        conn.execute("DELETE FROM images WHERE path = ?1", [path_key(key)])?;
+    fn delete_row(&self, key: &Path) -> Result<(), String> {
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM images WHERE path = ?1", [path_key(key)])
+            .map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    /// The value for the `adjustments` column: the serialized edit, or a
+    /// preserved unreadable blob when the in-memory edit is still identity,
+    /// else `None` (SQL NULL).
+    fn adj_column(&self, key: &Path, rec: &ImageRecord) -> Result<Option<String>, String> {
+        if rec.adjustments.is_identity() {
+            Ok(self.raw_adjustments.get(key).cloned())
+        } else {
+            serialize_adjustments(&rec.adjustments).map_err(|e| e.to_string())
+        }
     }
 }
 
@@ -331,21 +454,29 @@ fn path_key(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// UPSERT `rec` for `path` using any connection or transaction. Identity
-/// adjustments are stored as SQL NULL to keep rows compact.
-fn upsert_row(conn: &Connection, path: &Path, rec: &ImageRecord) -> rusqlite::Result<()> {
-    let adj_json = if rec.adjustments.is_identity() {
-        None
+/// Serialize adjustments for storage: `None` (SQL NULL) for identity edits so
+/// rows stay compact, else the compact JSON string.
+fn serialize_adjustments(adj: &Adjustments) -> serde_json::Result<Option<String>> {
+    if adj.is_identity() {
+        Ok(None)
     } else {
-        Some(
-            serde_json::to_string(&rec.adjustments)
-                .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-        )
-    };
+        serde_json::to_string(adj).map(Some)
+    }
+}
+
+/// UPSERT a single row from precomputed column values (works on a connection or
+/// a transaction).
+fn upsert_row(
+    conn: &Connection,
+    path: &Path,
+    rating: Option<u8>,
+    adjustments: Option<&str>,
+    rotation: u8,
+) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO images (path, rating, adjustments, rotation) VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(path) DO UPDATE SET rating = ?2, adjustments = ?3, rotation = ?4",
-        rusqlite::params![path_key(path), rec.rating, adj_json, rec.rotation],
+        rusqlite::params![path_key(path), rating, adjustments, rotation],
     )?;
     Ok(())
 }
@@ -587,7 +718,17 @@ mod tests {
 
         cat.set(&base.join("photo.jpg"), 3);
         // The write failed, so the error is available exactly once...
-        assert!(cat.take_error().is_some(), "failed save should report an error");
+        let msg = cat.take_error().expect("failed save should report an error");
+        // ...with a message that describes the real problem (not a borrowed,
+        // misleading rusqlite variant like "Query is not read-only").
+        assert!(
+            msg.contains("unavailable"),
+            "error should describe the DB being unavailable, got: {msg}"
+        );
+        assert!(
+            !msg.contains("read-only"),
+            "error must not surface a misleading SQL message, got: {msg}"
+        );
         // ...and is drained (not re-delivered) on the next check.
         assert!(cat.take_error().is_none(), "error should be taken only once");
 
@@ -658,6 +799,132 @@ mod tests {
         let reloaded = Catalog::with_dir(dir.clone());
         assert_eq!(reloaded.get(&p), Some(5));
         assert_eq!(reloaded.adjustments(&p), adj);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Read the raw `adjustments` column for `path` straight from the DB.
+    fn raw_adj(dir: &Path, path: &Path) -> Option<String> {
+        let key = normalize(path);
+        let conn = rusqlite::Connection::open(dir.join("catalog.db")).unwrap();
+        conn.query_row(
+            "SELECT adjustments FROM images WHERE path = ?1",
+            [key.to_str().unwrap()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn unparseable_adjustments_preserved_across_unrelated_write() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+        let key = normalize(&p);
+
+        // Create the schema, then seed a row whose adjustments blob is garbage
+        // (simulates a schema-incompatible or corrupted cell).
+        drop(Catalog::with_dir(dir.clone()));
+        {
+            let conn = rusqlite::Connection::open(dir.join("catalog.db")).unwrap();
+            conn.execute(
+                "INSERT INTO images (path, rating, adjustments, rotation) VALUES (?1, 3, '{bogus', 0)",
+                [key.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+
+        // Load surfaces the problem (does not silently vanish), and a later
+        // change to an UNRELATED field must not destroy the blob.
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            assert_eq!(cat.get(&p), Some(3));
+            assert!(cat.take_error().is_some(), "unreadable edits should be surfaced");
+            cat.set(&p, 5); // change rating only
+        }
+        assert_eq!(
+            raw_adj(&dir, &p).as_deref(),
+            Some("{bogus"),
+            "unparseable adjustments must be preserved across an unrelated write"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reappearing_json_does_not_clobber_db() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+        let key = normalize(&p);
+
+        // Establish newer state in the DB.
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            cat.set(&p, 5);
+        }
+        // A stale catalog.json reappears (e.g. cloud sync / restore) with an
+        // older rating for the same photo.
+        let stale = serde_json::json!({
+            "version": 2,
+            "images": { key.to_str().unwrap(): { "rating": 2u8 } },
+        });
+        std::fs::write(dir.join("catalog.json"), serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        // Reload must keep the newer DB value, not import the stale JSON.
+        let cat = Catalog::with_dir(dir.clone());
+        assert_eq!(
+            cat.get(&p),
+            Some(5),
+            "stale reappearing JSON must not overwrite newer DB rows"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_db_is_backed_up_and_recovered() {
+        let dir = unique_tmp_dir();
+        // A catalog.db that is not a valid SQLite file.
+        std::fs::write(dir.join("catalog.db"), b"this is not a sqlite database").unwrap();
+        let p = dir.join("photo.jpg");
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        // Recovered to a working (empty) catalog instead of being stuck.
+        cat.set(&p, 3);
+        assert_eq!(cat.get(&p), Some(3));
+        assert!(
+            dir.join("catalog.db.corrupt").exists(),
+            "the unreadable DB should be set aside as catalog.db.corrupt"
+        );
+
+        // And the recovery survives a reload.
+        let reloaded = Catalog::with_dir(dir.clone());
+        assert_eq!(reloaded.get(&p), Some(3));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unreadable_row_is_reported_not_silently_dropped() {
+        let dir = unique_tmp_dir();
+        drop(Catalog::with_dir(dir.clone())); // create schema
+        let bad = dir.join("bad.jpg");
+        let bk = normalize(&bad);
+        {
+            let conn = rusqlite::Connection::open(dir.join("catalog.db")).unwrap();
+            // rating far outside u8 range → the row fails to map on load.
+            conn.execute(
+                "INSERT INTO images (path, rating, adjustments, rotation) VALUES (?1, 99999, NULL, 0)",
+                [bk.to_str().unwrap()],
+            )
+            .unwrap();
+        }
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        assert_eq!(cat.get(&bad), None, "an unreadable row is not loaded");
+        assert!(
+            cat.take_error().is_some(),
+            "an unreadable row should be surfaced, not silently skipped"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
