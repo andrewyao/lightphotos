@@ -246,7 +246,7 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             let filter_active = app.filter().is_some();
             let resp = ui.add_enabled(
                 !filter_active,
-                egui::SelectableLabel::new(app.bursts_on(), "Bursts"),
+                egui::Button::selectable(app.bursts_on(), "Bursts"),
             );
             if resp.clicked() {
                 out.actions.push(UiAction::ToggleBursts);
