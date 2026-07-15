@@ -30,6 +30,7 @@ This design connects them; it does not modify their internals.
 | Burst gap | **Fixed 2 seconds** (no UI knob — YAGNI) |
 | Visual treatment | **Best badge + dim siblings** |
 | Invocation | Toolbar `Bursts` selectable-label + keyboard `B` |
+| Filter interaction | **Bursts available only when the filter is unset** (mutually exclusive) |
 
 ## Architecture
 
@@ -117,6 +118,20 @@ toggle flips or new times/scores arrive.
 Both flip `bursts_on` through `App::toggle_bursts()`. Turning off clears the
 visible badges/dimming immediately but keeps the caches.
 
+**Mutually exclusive with the star filter.** Burst is only meaningful over the
+whole folder (a filter would hide burst members and make the badge/dim visual
+misleading), so the two are never active at once:
+
+- While a filter is active (`filter.is_some()`), the `Bursts` toolbar label is
+  **disabled/greyed** with a tooltip ("Clear the filter to use Bursts"), and the
+  `B` key is a **no-op**. Pressing `B` under a filter does *not* clear the filter.
+- While `bursts_on`, applying any filter (`SetFilter(Some(..))`) **auto-turns-off
+  Bursts** — the filter wins. Caches are retained, so clearing the filter and
+  pressing `B` again re-shows badges instantly.
+- Net invariant: `bursts_on` implies `filter.is_none()`. Because burst always
+  runs over the unfiltered folder, every burst is whole and the winner is the
+  globally sharpest member.
+
 ### Grid rendering
 
 - New accessor `App::burst_mark_at(pos) -> Option<BurstMark>` (mirrors
@@ -140,9 +155,9 @@ visible badges/dimming immediately but keeps the caches.
 - **Toggle off mid-scan:** background jobs already queued may still complete;
   their results land in the caches but nothing is painted while `bursts_on` is
   false.
-- **Ratings/filter interaction:** burst marks are computed over `entries()` and
-  looked up by visible position, so they compose with the existing star filter
-  without special-casing.
+- **Filter interaction:** enforced mutually exclusive (see UI → Invocation).
+  `bursts_on` implies `filter.is_none()`, so burst marks are always computed and
+  displayed over the full folder — no partial/fragmented bursts in the view.
 
 ## Testing
 
