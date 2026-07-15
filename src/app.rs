@@ -2084,13 +2084,27 @@ impl App {
     /// (never singletons, never the whole folder) so each burst's winner is
     /// chosen from the full burst — not just the frames scrolled past. Once a path
     /// is scored it's never requested again (the score cache is the guard).
-    fn request_burst_thumbs(&mut self) {
+    /// Score/request thumbnails for unscored burst members, and report whether
+    /// any burst background work is still outstanding. Returns true when either
+    /// the capture-time scan is unfinished OR some burst member still lacks a
+    /// score (excluding permanently-failed thumbs, which will never score). The
+    /// event loop calls this each frame to keep polling until burst results
+    /// converge — worker-thread completions don't wake the loop on their own.
+    pub(crate) fn request_burst_thumbs(&mut self) -> bool {
         if !self.bursts_on {
-            return;
+            return false;
         }
         let px = self.thumb_px;
+
+        // Capture-time scan still running → grouping not final yet; stay awake.
+        let scan_pending = {
+            let Some(pl) = &self.playlist else { return false };
+            pl.entries().iter().any(|p| !self.capture_times.contains_key(p))
+        };
+
+        // Unscored burst members, identified by the current marks.
         let members: Vec<PathBuf> = {
-            let Some(pl) = &self.playlist else { return };
+            let Some(pl) = &self.playlist else { return false };
             pl.entries()
                 .iter()
                 .enumerate()
@@ -2101,19 +2115,21 @@ impl App {
                 .map(|(_, p)| p.clone())
                 .collect()
         };
-        if members.is_empty() {
-            return;
-        }
-        // Score already-decoded members now; request the rest.
+
+        // Score any member whose thumbnail is already decoded; (re-)request the
+        // rest. Thumbnails are premultiplied RGBA8; opaque photos make
+        // premultiplied == straight for the luma metric.
         let mut newly: Vec<(PathBuf, f64)> = Vec::new();
+        let mut still_unscored = false;
         if let Some(loader) = &mut self.loader {
             for p in &members {
                 if let Some(img) = loader.get_thumb(p, px) {
-                    // Thumbnails are premultiplied RGBA8; photos are opaque so
-                    // premultiplied == straight for the luma-based metric.
                     newly.push((p.clone(), sharpness::sharpness(&img.rgba, img.width, img.height)));
-                } else if !loader.thumb_failed(p, px) {
+                } else if loader.thumb_failed(p, px) {
+                    // Permanently failed — will never score; not counted as pending.
+                } else {
                     loader.request_thumb(p.clone(), px);
+                    still_unscored = true;
                 }
             }
         }
@@ -2123,6 +2139,7 @@ impl App {
             }
             self.recompute_burst_marks();
         }
+        scan_pending || still_unscored
     }
 
     /// Fold background capture-time reads into the cache, then refresh grouping +
@@ -2572,6 +2589,14 @@ impl App {
             return;
         }
         let entries = pl.entries();
+        // Grouping is only valid once every entry's capture time has been read.
+        // Until then, unread entries collapse into one giant "burst"
+        // (group_by_time treats a run of unknowns as one group), which would dim
+        // the whole folder to a single frame. Paint nothing until the scan is done.
+        if entries.iter().any(|p| !self.capture_times.contains_key(p)) {
+            self.burst_marks.clear();
+            return;
+        }
         let times: Vec<Option<SystemTime>> = entries
             .iter()
             .map(|p| self.capture_times.get(p).copied().flatten())

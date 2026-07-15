@@ -283,6 +283,14 @@ impl ApplicationHandler<UserEvent> for App {
         if self.request_working_thumbs() {
             self.request_redraw();
         }
+
+        // Keep the loop alive while burst background work (capture-time reads,
+        // off-screen member scoring) is outstanding. Worker-thread completions
+        // don't wake the loop, so without this a settled grid would freeze burst
+        // badges mid-computation until an unrelated event arrives.
+        if self.request_burst_thumbs() {
+            self.request_redraw();
+        }
     }
 }
 
