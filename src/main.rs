@@ -37,6 +37,7 @@ mod macos_delegate;
 mod navigation;
 mod paths;
 mod renderer;
+mod sharpness;
 mod thumbnail;
 mod trash;
 mod ui;

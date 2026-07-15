@@ -4,6 +4,7 @@
 //! same directory (sorted), and support prev/next.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Extensions we treat as images (matches the UTIs declared in Info.plist).
 const IMAGE_EXTS: &[&str] = &[
@@ -62,6 +63,34 @@ pub fn visible_indices(
             .filter(|&i| cmp.matches(rating_of(&entries[i]), value))
             .collect(),
     }
+}
+
+/// Group entries into contiguous "bursts" by capture-time gaps, returning a
+/// group id (0-based, increasing) per entry.
+///
+/// `times[i]` is entry `i`'s capture time (`None` when unknown). A new group
+/// starts when the absolute gap between an entry's time and the last *known*
+/// time exceeds `gap`. Entries with an unknown time inherit the current group
+/// and don't themselves split a burst (a missing timestamp shouldn't fragment
+/// consecutive shots). Pure and total; order follows the input.
+pub fn group_by_time(times: &[Option<SystemTime>], gap: Duration) -> Vec<u32> {
+    let mut ids = Vec::with_capacity(times.len());
+    let mut group = 0u32;
+    let mut last_known: Option<SystemTime> = None;
+    for t in times.iter() {
+        if let Some(t) = t {
+            if let Some(prev) = last_known {
+                // Absolute difference, tolerant of non-monotonic ordering.
+                let diff = t.duration_since(prev).or_else(|_| prev.duration_since(*t));
+                if diff.map(|d| d > gap).unwrap_or(false) {
+                    group += 1;
+                }
+            }
+            last_known = Some(*t);
+        }
+        ids.push(group);
+    }
+    ids
 }
 
 /// Immediate entries of `dir` as paths, ignoring individual entry errors.
@@ -261,6 +290,50 @@ mod tests {
         assert_eq!(visible_indices(&e, Some((Cmp::Lte, 1)), rating), vec![0, 3]);
         assert_eq!(visible_indices(&e, Some((Cmp::Lte, 5)), rating), vec![0, 1, 2, 3]);
         assert_eq!(visible_indices(&e, Some((Cmp::Lte, 0)), rating), vec![0]);
+    }
+
+    fn t(secs: u64) -> Option<SystemTime> {
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
+    #[test]
+    fn group_by_time_empty_and_single() {
+        assert_eq!(group_by_time(&[], Duration::from_secs(2)), Vec::<u32>::new());
+        assert_eq!(group_by_time(&[t(10)], Duration::from_secs(2)), vec![0]);
+    }
+
+    #[test]
+    fn group_by_time_splits_on_large_gap() {
+        // 0s,1s (close), then 10s,11s (close) with a 9s jump between → 2 bursts.
+        let times = [t(0), t(1), t(10), t(11)];
+        assert_eq!(group_by_time(&times, Duration::from_secs(3)), vec![0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn group_by_time_all_within_gap_is_one_group() {
+        let times = [t(0), t(1), t(2), t(3)];
+        assert_eq!(group_by_time(&times, Duration::from_secs(2)), vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn group_by_time_unknown_time_does_not_split() {
+        // A missing timestamp in the middle inherits the current group...
+        let times = [t(0), None, t(1)];
+        assert_eq!(group_by_time(&times, Duration::from_secs(3)), vec![0, 0, 0]);
+        // ...and is ignored as a reference: the gap is measured against the last
+        // KNOWN time, so 0 → 100 still splits despite the None between.
+        let times = [t(0), None, t(100)];
+        assert_eq!(group_by_time(&times, Duration::from_secs(3)), vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn group_by_time_leading_and_all_unknown() {
+        assert_eq!(group_by_time(&[None, None], Duration::from_secs(2)), vec![0, 0]);
+        // Leading None, then a normal split.
+        assert_eq!(
+            group_by_time(&[None, t(0), t(100)], Duration::from_secs(3)),
+            vec![0, 0, 1]
+        );
     }
 
     #[test]
