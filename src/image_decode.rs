@@ -9,12 +9,16 @@
 
 use std::ffi::c_void;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use objc2_core_foundation::{
-    CFNumber, CFNumberType, CFRetained, CFString, CGPoint, CGRect, CGSize,
+    CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{CGContext, CGImage};
-use objc2_image_io::{kCGImagePropertyOrientation, CGImageSource};
+use objc2_image_io::{
+    kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifDictionary,
+    kCGImagePropertyOrientation, kCGImagePropertyTIFFDateTime, CGImageSource,
+};
 
 use crate::coregraphics;
 
@@ -31,6 +35,8 @@ pub struct DecodedImage {
 extern "C" {
     fn CFGetTypeID(cf: *const c_void) -> core::ffi::c_ulong;
     fn CFNumberGetTypeID() -> core::ffi::c_ulong;
+    fn CFStringGetTypeID() -> core::ffi::c_ulong;
+    fn CFDictionaryGetTypeID() -> core::ffi::c_ulong;
 }
 
 /// Decode `path`, optionally downscaling so neither side exceeds `max_dim`
@@ -66,6 +72,86 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     // WithTransform). Loupe, crop, and export all consume `decode()`, so this
     // keeps every downstream view upright and consistent.
     Ok(apply_exif_orientation(decoded, read_orientation(&source)))
+}
+
+/// Parse an EXIF datetime string (`"YYYY:MM:DD HH:MM:SS"`) into a `SystemTime`,
+/// interpreting it as UTC (EXIF carries no timezone; only *consistency* matters
+/// for burst grouping, not absolute correctness). Returns `None` for empty,
+/// zeroed, or malformed values.
+fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
+    let (date, time) = s.trim().split_once(' ')?;
+    let mut d = date.split(':');
+    let y: i64 = d.next()?.trim().parse().ok()?;
+    let mo: u32 = d.next()?.parse().ok()?;
+    let da: u32 = d.next()?.parse().ok()?;
+    let mut t = time.split(':');
+    let h: u64 = t.next()?.parse().ok()?;
+    let mi: u64 = t.next()?.parse().ok()?;
+    let se: u64 = t.next()?.parse().ok()?;
+    if !(1..=12).contains(&mo) || !(1..=31).contains(&da) || h > 23 || mi > 59 || se > 60 {
+        return None;
+    }
+    let secs = days_from_civil(y, mo, da) * 86_400 + (h * 3600 + mi * 60 + se) as i64;
+    (secs >= 0).then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64))
+}
+
+/// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
+/// `days_from_civil`). Valid for any in-range `m` (1..=12), `d` (1..=31).
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let (m, d) = (m as i64, d as i64);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146097 + doe - 719468
+}
+
+/// Capture time for `path` from its EXIF/TIFF metadata, falling back to the
+/// file's modification time so grouping always has *something* to order by.
+/// Never panics; returns `None` only when even the mtime is unavailable.
+pub fn capture_time(path: &Path) -> Option<SystemTime> {
+    let source = open_image_source(path).ok()?;
+    read_capture_time(&source)
+        .or_else(|| std::fs::metadata(path).ok().and_then(|m| m.modified().ok()))
+}
+
+/// Read the capture timestamp from an open source: EXIF `DateTimeOriginal`
+/// first, then TIFF `DateTime`. `None` when neither is present/parseable.
+fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
+    // SAFETY: index 0 exists; no options. Dictionary is +1 retained, freed on drop.
+    let props = unsafe { source.properties_at_index(0, None) }?;
+
+    // EXIF sub-dictionary → DateTimeOriginal (preferred).
+    // SAFETY: reading extern static keys; `value` returns a borrowed pointer.
+    let exif_ptr =
+        unsafe { props.value(kCGImagePropertyExifDictionary as *const CFString as *const c_void) };
+    if !exif_ptr.is_null() && unsafe { CFGetTypeID(exif_ptr) } == unsafe { CFDictionaryGetTypeID() }
+    {
+        // SAFETY: confirmed the value is a CFDictionary above.
+        let exif = unsafe { &*(exif_ptr as *const CFDictionary) };
+        if let Some(t) = dict_string(exif, unsafe { kCGImagePropertyExifDateTimeOriginal })
+            .and_then(|s| parse_exif_datetime(&s))
+        {
+            return Some(t);
+        }
+    }
+
+    // TIFF DateTime (top-level) fallback.
+    dict_string(&props, unsafe { kCGImagePropertyTIFFDateTime }).and_then(|s| parse_exif_datetime(&s))
+}
+
+/// Read a CFString value from a CFDictionary for `key`, verifying the concrete
+/// type before reinterpreting (a crafted file could store another CFType).
+fn dict_string(dict: &CFDictionary, key: &CFString) -> Option<String> {
+    // SAFETY: `key` is a valid CFString option key; `value` returns a borrowed
+    // pointer to the stored value, or null when absent.
+    let ptr = unsafe { dict.value(key as *const CFString as *const c_void) };
+    if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFStringGetTypeID() } {
+        return None;
+    }
+    // SAFETY: confirmed the value is a CFString.
+    Some(unsafe { &*(ptr as *const CFString) }.to_string())
 }
 
 /// The image's EXIF orientation tag (`1..=8`), or `1` when absent/unreadable.
@@ -186,6 +272,46 @@ fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_exif_datetime_unix_epoch_anchor() {
+        assert_eq!(
+            parse_exif_datetime("1970:01:01 00:00:00"),
+            Some(SystemTime::UNIX_EPOCH)
+        );
+        assert_eq!(
+            parse_exif_datetime("1970:01:02 00:00:00"),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(86_400))
+        );
+    }
+
+    #[test]
+    fn parse_exif_datetime_relative_diffs() {
+        let a = parse_exif_datetime("2026:07:15 08:30:00").unwrap();
+        let b = parse_exif_datetime("2026:07:15 08:30:05").unwrap();
+        assert_eq!(b.duration_since(a).unwrap(), Duration::from_secs(5));
+
+        let d0 = parse_exif_datetime("2026:07:15 08:30:00").unwrap();
+        let d1 = parse_exif_datetime("2026:07:16 08:30:00").unwrap();
+        assert_eq!(d1.duration_since(d0).unwrap(), Duration::from_secs(86_400));
+    }
+
+    #[test]
+    fn parse_exif_datetime_handles_leap_year() {
+        // 2024 is a leap year, so Feb 28 -> Mar 1 is two days (Feb 29 exists).
+        let feb28 = parse_exif_datetime("2024:02:28 00:00:00").unwrap();
+        let mar01 = parse_exif_datetime("2024:03:01 00:00:00").unwrap();
+        assert_eq!(mar01.duration_since(feb28).unwrap(), Duration::from_secs(2 * 86_400));
+    }
+
+    #[test]
+    fn parse_exif_datetime_rejects_malformed() {
+        assert_eq!(parse_exif_datetime(""), None);
+        assert_eq!(parse_exif_datetime("0000:00:00 00:00:00"), None); // zeroed / unset
+        assert_eq!(parse_exif_datetime("2026:13:01 00:00:00"), None); // bad month
+        assert_eq!(parse_exif_datetime("garbage"), None);
+        assert_eq!(parse_exif_datetime("2026:07:15"), None); // no time part
+    }
 
     /// End-to-end decode through ImageIO + our CGBitmapContext path. Requires a
     /// test image at /tmp/iv-test/a.png (created by the dev workflow). Skipped
