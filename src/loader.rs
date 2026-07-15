@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
+use std::time::SystemTime;
 
 use crate::image_decode::{self, DecodedImage};
 use crate::thumbnail::ThumbCache;
@@ -32,12 +33,15 @@ enum Job {
     // Consumed by the grid/filmstrip in a later wave (T5/T6).
     #[allow(dead_code)]
     Thumb(PathBuf, u32),
+    /// Capture-time (EXIF/mtime) read for burst grouping. Lowest priority.
+    Meta(PathBuf),
 }
 
 /// A finished job, carrying its tier back to the poller.
 enum JobResult {
     Full(PathBuf, Result<DecodedImage, String>),
     Thumb(PathBuf, u32, Result<Arc<DecodedImage>, String>),
+    Meta(PathBuf, Option<SystemTime>),
 }
 
 /// A priority work queue: full-image (loupe) jobs are always served before
@@ -49,6 +53,9 @@ enum JobResult {
 struct Queue {
     full: VecDeque<Job>,
     thumbs: VecDeque<Job>,
+    /// Capture-time reads — served after full-image and thumbnail work, since
+    /// burst badges are not latency-critical.
+    meta: VecDeque<Job>,
     /// Set when the `Loader` is dropped so idle workers wake and exit.
     shutdown: bool,
 }
@@ -84,6 +91,9 @@ pub struct Loader {
     /// we don't re-request them every frame and spin the UI redraw loop.
     thumb_failed: HashSet<(PathBuf, u32)>,
     thumb_capacity: usize,
+
+    /// Paths with a capture-time read in flight, to avoid enqueuing duplicates.
+    meta_inflight: HashSet<PathBuf>,
 }
 
 impl Loader {
@@ -122,7 +132,12 @@ impl Loader {
                             if q.shutdown {
                                 return;
                             }
-                            if let Some(j) = q.full.pop_front().or_else(|| q.thumbs.pop_front()) {
+                            if let Some(j) = q
+                                .full
+                                .pop_front()
+                                .or_else(|| q.thumbs.pop_front())
+                                .or_else(|| q.meta.pop_front())
+                            {
                                 break j;
                             }
                             q = match shared.ready.wait(q) {
@@ -155,6 +170,15 @@ impl Loader {
                             });
                             JobResult::Thumb(path, max_px, r)
                         }
+                        Job::Meta(path) => {
+                            // capture_time never panics by contract, but the FFI
+                            // boundary is caught for parity with the other arms.
+                            let t = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                image_decode::capture_time(&path)
+                            }))
+                            .unwrap_or(None);
+                            JobResult::Meta(path, t)
+                        }
                     };
 
                     // If the UI side is gone, stop.
@@ -177,6 +201,7 @@ impl Loader {
             thumb_inflight: HashSet::new(),
             thumb_failed: HashSet::new(),
             thumb_capacity: THUMB_CAPACITY,
+            meta_inflight: HashSet::new(),
         }
     }
 
@@ -240,6 +265,20 @@ impl Loader {
         }
     }
 
+    /// Ask a worker to read `path`'s capture time unless already in flight.
+    /// Results arrive in the third bucket of [`poll_all`](Self::poll_all).
+    #[allow(dead_code)]
+    pub fn request_meta(&mut self, path: PathBuf) {
+        if self.meta_inflight.contains(&path) {
+            return;
+        }
+        if let Ok(mut q) = self.shared.queue.lock() {
+            q.meta.push_back(Job::Meta(path.clone()));
+            self.meta_inflight.insert(path);
+            self.shared.ready.notify_one();
+        }
+    }
+
     /// In-memory thumbnail lookup keyed by `(path, max_px)`.
     #[allow(dead_code)]
     pub fn get_thumb(&self, path: &Path, max_px: u32) -> Option<Arc<DecodedImage>> {
@@ -276,15 +315,28 @@ impl Loader {
     /// and `poll_thumbs` separately makes the first call drain results destined
     /// for the other tier, starving it.
     #[allow(dead_code)]
-    pub fn poll_all(&mut self) -> (Vec<PathBuf>, Vec<(PathBuf, u32)>) {
+    pub fn poll_all(
+        &mut self,
+    ) -> (
+        Vec<PathBuf>,
+        Vec<(PathBuf, u32)>,
+        Vec<(PathBuf, Option<SystemTime>)>,
+    ) {
         self.drain()
     }
 
     /// Drain every pending result, routing each into its tier. Returns the
     /// arrivals for both tiers; callers keep only the tier they care about.
-    fn drain(&mut self) -> (Vec<PathBuf>, Vec<(PathBuf, u32)>) {
+    fn drain(
+        &mut self,
+    ) -> (
+        Vec<PathBuf>,
+        Vec<(PathBuf, u32)>,
+        Vec<(PathBuf, Option<SystemTime>)>,
+    ) {
         let mut full = vec![];
         let mut thumbs = vec![];
+        let mut metas = vec![];
         while let Ok(result) = self.res_rx.try_recv() {
             match result {
                 JobResult::Full(path, r) => {
@@ -311,9 +363,13 @@ impl Loader {
                         }
                     }
                 }
+                JobResult::Meta(path, t) => {
+                    self.meta_inflight.remove(&path);
+                    metas.push((path, t));
+                }
             }
         }
-        (full, thumbs)
+        (full, thumbs, metas)
     }
 
     fn insert(&mut self, path: PathBuf, img: Arc<DecodedImage>) {
