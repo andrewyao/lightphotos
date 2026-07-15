@@ -14,18 +14,20 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::Window;
 
+use crate::burst::{self, BurstMark};
 use crate::catalog::Catalog;
 use crate::develop::{self, Adjustments, Crop, GpuAdjust};
 use crate::export::{ExportJob, ExportOutcome, Exporter};
 use crate::loader::Loader;
 use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp, Playlist};
 use crate::renderer::{EguiPaint, Renderer};
+use crate::sharpness;
 use crate::{image_decode, image_ops, paths, trash, ui};
 
 const MIN_ZOOM: f32 = 0.02;
@@ -220,6 +222,19 @@ pub(crate) struct App {
     /// thumbnails arrive; pruned to the current working set each frame.
     thumb_tex: HashMap<(PathBuf, u32, u64), egui::TextureHandle>,
 
+    // ---- Best-of-burst state ----
+    /// Whether burst detection is active (badges + dimming). Mutually exclusive
+    /// with the star filter; `bursts_on` implies `filter.is_none()`.
+    bursts_on: bool,
+    /// Cached capture times per path (EXIF/mtime). `Some(None)` records a read
+    /// that yielded no time, so we don't re-request it. Survives toggling off.
+    capture_times: HashMap<PathBuf, Option<SystemTime>>,
+    /// Cached sharpness scores per path. Survives toggling off.
+    sharpness: HashMap<PathBuf, f64>,
+    /// Derived burst marks, indexed by playlist entry index (not visible pos).
+    /// Empty when bursts are off. Rebuilt when caches or the toggle change.
+    burst_marks: Vec<Option<BurstMark>>,
+
     // ---- Loupe view state ----
     zoom: f32,
     pub(crate) pan: (f32, f32), // screen-space pixel coords of the image's top-left corner
@@ -330,6 +345,10 @@ impl App {
             grid_range: (0, 0),
             strip_range: (0, 0),
             thumb_tex: HashMap::new(),
+            bursts_on: false,
+            capture_times: HashMap::new(),
+            sharpness: HashMap::new(),
+            burst_marks: Vec::new(),
             zoom: 1.0,
             pan: (0.0, 0.0),
             win_size: (1.0, 1.0),
@@ -398,6 +417,7 @@ impl App {
             self.seed_mirrors(&playlist);
             let start_index = playlist.position();
             self.playlist = Some(playlist);
+            self.reset_burst_state();
             self.recompute_visible();
             self.sel = Some(self.visible.iter().position(|&i| i == start_index).unwrap_or(0));
             self.collapse_selection();
@@ -442,6 +462,7 @@ impl App {
         let playlist = Playlist::from_dir(&dir);
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
+        self.reset_burst_state();
         self.recompute_visible();
         self.sel = None;
         self.selected.clear();
@@ -2398,6 +2419,49 @@ impl App {
             .and_then(|&i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))
             .map(|p| self.rating_of(p))
             .unwrap_or(0)
+    }
+
+    /// Rebuild `burst_marks` from the cached capture times + sharpness over the
+    /// current playlist entries. Clears the marks when bursts are off or there
+    /// is no playlist. Cheap: O(entries).
+    fn recompute_burst_marks(&mut self) {
+        let Some(pl) = &self.playlist else {
+            self.burst_marks.clear();
+            return;
+        };
+        if !self.bursts_on {
+            self.burst_marks.clear();
+            return;
+        }
+        let entries = pl.entries();
+        let times: Vec<Option<SystemTime>> = entries
+            .iter()
+            .map(|p| self.capture_times.get(p).copied().flatten())
+            .collect();
+        let scores: Vec<Option<f64>> = entries.iter().map(|p| self.sharpness.get(p).copied()).collect();
+        self.burst_marks = burst::marks_for(&times, &scores, burst::BURST_GAP);
+    }
+
+    /// Burst mark for the visible cell at `pos`. `None` when bursts are off, the
+    /// cell is a singleton, or `pos` is out of range. `burst_marks` is indexed by
+    /// playlist entry index, so we map the visible position through `visible`.
+    #[allow(dead_code)]
+    pub(crate) fn burst_mark_at(&self, pos: usize) -> Option<BurstMark> {
+        let idx = *self.visible.get(pos)?;
+        self.burst_marks.get(idx).copied().flatten()
+    }
+
+    /// Whether burst mode is currently on (for the toolbar toggle state).
+    pub(crate) fn bursts_on(&self) -> bool {
+        self.bursts_on
+    }
+
+    /// Reset transient burst view state on a folder change. Keeps the path-keyed
+    /// caches (harmless across folders; helps on revisit) but drops the toggle
+    /// and derived marks so a new folder starts plain.
+    fn reset_burst_state(&mut self) {
+        self.bursts_on = false;
+        self.burst_marks.clear();
     }
 
     /// Rating of the current selection (0 when unset).
