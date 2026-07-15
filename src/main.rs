@@ -246,10 +246,16 @@ impl ApplicationHandler<UserEvent> for App {
 
         // Drain all loader tiers once per frame.
         if let Some(loader) = &mut self.loader {
-            let (full, thumbs, _metas) = loader.poll_all();
-            // Any arrival may be the wanted image (full) or its placeholder
-            // (thumb), so try to (re)show on either; redraw to paint new thumbs.
-            let any = !full.is_empty() || !thumbs.is_empty();
+            let (full, thumbs, metas) = loader.poll_all();
+            let any = !full.is_empty() || !thumbs.is_empty() || !metas.is_empty();
+            // Note: `loader`'s borrow ends at `poll_all` above (NLL), so these
+            // `&mut self` calls are allowed even though `loader` is still in scope.
+            if !metas.is_empty() {
+                self.on_capture_times(metas);
+            }
+            if !thumbs.is_empty() {
+                self.score_arrived_thumbs(&thumbs);
+            }
             if any {
                 self.try_show();
                 self.request_redraw();
