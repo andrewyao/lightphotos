@@ -1226,6 +1226,7 @@ impl App {
         if self.bursts_on {
             self.request_capture_times();
             self.recompute_burst_marks();
+            self.request_burst_thumbs();
         } else {
             self.burst_marks.clear();
         }
@@ -2076,6 +2077,101 @@ impl App {
             }
         }
         any_missing
+    }
+
+    /// For burst members (size >= 2) not yet scored: score any whose thumbnail is
+    /// already decoded, and request the rest. Bounds decode work to burst members
+    /// (never singletons, never the whole folder) so each burst's winner is
+    /// chosen from the full burst — not just the frames scrolled past. Once a path
+    /// is scored it's never requested again (the score cache is the guard).
+    fn request_burst_thumbs(&mut self) {
+        if !self.bursts_on {
+            return;
+        }
+        let px = self.thumb_px;
+        let members: Vec<PathBuf> = {
+            let Some(pl) = &self.playlist else { return };
+            pl.entries()
+                .iter()
+                .enumerate()
+                .filter(|(idx, p)| {
+                    matches!(self.burst_marks.get(*idx), Some(Some(_)))
+                        && !self.sharpness.contains_key(*p)
+                })
+                .map(|(_, p)| p.clone())
+                .collect()
+        };
+        if members.is_empty() {
+            return;
+        }
+        // Score already-decoded members now; request the rest.
+        let mut newly: Vec<(PathBuf, f64)> = Vec::new();
+        if let Some(loader) = &mut self.loader {
+            for p in &members {
+                if let Some(img) = loader.get_thumb(p, px) {
+                    // Thumbnails are premultiplied RGBA8; photos are opaque so
+                    // premultiplied == straight for the luma-based metric.
+                    newly.push((p.clone(), sharpness::sharpness(&img.rgba, img.width, img.height)));
+                } else if !loader.thumb_failed(p, px) {
+                    loader.request_thumb(p.clone(), px);
+                }
+            }
+        }
+        if !newly.is_empty() {
+            for (p, s) in newly {
+                self.sharpness.insert(p, s);
+            }
+            self.recompute_burst_marks();
+        }
+    }
+
+    /// Fold background capture-time reads into the cache, then refresh grouping +
+    /// request thumbnails for the newly-identified burst members.
+    pub(crate) fn on_capture_times(&mut self, times: Vec<(PathBuf, Option<SystemTime>)>) {
+        for (path, t) in times {
+            self.capture_times.insert(path, t);
+        }
+        if self.bursts_on {
+            self.recompute_burst_marks();
+            self.request_burst_thumbs();
+        }
+    }
+
+    /// When thumbnails arrive and bursts are on, compute + cache sharpness for any
+    /// unscored burst member among them, then refresh the winners and redraw.
+    pub(crate) fn score_arrived_thumbs(&mut self, arrivals: &[(PathBuf, u32)]) {
+        if !self.bursts_on {
+            return;
+        }
+        let px = self.thumb_px;
+        let mut newly: Vec<(PathBuf, f64)> = Vec::new();
+        if let Some(loader) = &self.loader {
+            for (path, mpx) in arrivals {
+                if *mpx != px || self.sharpness.contains_key(path) {
+                    continue;
+                }
+                // Only score burst members (their entry index maps to a mark).
+                let is_member = self
+                    .playlist
+                    .as_ref()
+                    .and_then(|pl| pl.entries().iter().position(|e| e == path))
+                    .map(|idx| matches!(self.burst_marks.get(idx), Some(Some(_))))
+                    .unwrap_or(false);
+                if !is_member {
+                    continue;
+                }
+                if let Some(img) = loader.get_thumb(path, px) {
+                    newly.push((path.clone(), sharpness::sharpness(&img.rgba, img.width, img.height)));
+                }
+            }
+        }
+        if !newly.is_empty() {
+            for (p, s) in newly {
+                self.sharpness.insert(p, s);
+            }
+            self.recompute_burst_marks();
+            self.request_redraw();
+        }
     }
 
     /// Sync `thumb_tex` with the loader's available thumbnails for the working
