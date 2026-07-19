@@ -606,7 +606,7 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
         ui.painter().rect_stroke(
             row.response.rect,
             2.0,
-            egui::Stroke::new(2.0, theme::CURSOR_AMBER),
+            egui::Stroke::new(2.0f32, theme::CURSOR_AMBER),
             egui::StrokeKind::Inside,
         );
     }
@@ -736,7 +736,7 @@ fn thumbnail_cell(
     // Selection outline on top of the thumbnail: a brighter 3px stroke for the
     // primary/active cell, a thinner 2px stroke for other selected members.
     if selected || primary {
-        let width = if primary { 3.0 } else { 2.0 };
+        let width = if primary { 3.0f32 } else { 2.0f32 };
         ui.painter().rect_stroke(
             rect,
             style.corner,
@@ -868,7 +868,7 @@ fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     let mid_x = central.center().x;
     painter.line_segment(
         [egui::pos2(mid_x, central.min.y), egui::pos2(mid_x, central.max.y)],
-        egui::Stroke::new(1.0, egui::Color32::from_gray(90)),
+        egui::Stroke::new(1.0f32, egui::Color32::from_gray(90)),
     );
     // Shadowed text so labels read over any image.
     let label = |p: egui::Pos2, align: egui::Align2, text: &str| {
@@ -933,13 +933,13 @@ fn loupe_crop_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut F
 
             // Crop outline + rule-of-thirds guides.
             let line = egui::Color32::from_gray(235);
-            painter.rect_stroke(r, 0.0, egui::Stroke::new(1.5, line), egui::StrokeKind::Inside);
+            painter.rect_stroke(r, 0.0, egui::Stroke::new(1.5f32, line), egui::StrokeKind::Inside);
             for i in 1..3 {
                 let fx = r.min.x + r.width() * i as f32 / 3.0;
                 let fy = r.min.y + r.height() * i as f32 / 3.0;
                 let faint = egui::Color32::from_white_alpha(70);
-                painter.line_segment([egui::pos2(fx, r.min.y), egui::pos2(fx, r.max.y)], egui::Stroke::new(1.0, faint));
-                painter.line_segment([egui::pos2(r.min.x, fy), egui::pos2(r.max.x, fy)], egui::Stroke::new(1.0, faint));
+                painter.line_segment([egui::pos2(fx, r.min.y), egui::pos2(fx, r.max.y)], egui::Stroke::new(1.0f32, faint));
+                painter.line_segment([egui::pos2(r.min.x, fy), egui::pos2(r.max.x, fy)], egui::Stroke::new(1.0f32, faint));
             }
             // Edge handles: a short bright bar at each edge midpoint.
             for (_, a, b) in edges {
@@ -1097,7 +1097,7 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     ui.painter().rect_stroke(
                         resp.rect.expand(1.0),
                         2.0,
-                        egui::Stroke::new(2.0, theme::CURSOR_AMBER),
+                        egui::Stroke::new(2.0f32, theme::CURSOR_AMBER),
                         egui::StrokeKind::Outside,
                     );
                 }
@@ -1153,7 +1153,7 @@ fn draw_histogram(ui: &mut egui::Ui, app: &App) {
     painter.rect_stroke(
         rect,
         3.0,
-        egui::Stroke::new(1.0, egui::Color32::from_gray(48)),
+        egui::Stroke::new(1.0f32, egui::Color32::from_gray(48)),
         egui::StrokeKind::Inside,
     );
 
@@ -1230,7 +1230,7 @@ fn draw_histogram(ui: &mut egui::Ui, app: &App) {
         let line_color = color.to_opaque();
         painter.add(egui::Shape::line(
             top_line,
-            egui::Stroke::new(1.0, line_color),
+            egui::Stroke::new(1.0f32, line_color),
         ));
     }
 }
