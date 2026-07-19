@@ -49,6 +49,12 @@ enum JobResult {
 /// is usually just one, whereas thumbnails arrive in floods; without this
 /// priority a freshly-opened image waits behind the entire thumbnail backlog
 /// (seconds), leaving the magnified low-res placeholder on screen.
+///
+/// Queue ordering alone isn't enough: a job already popped and *executing* on a
+/// worker doesn't respect this priority. When a folder is first opened, a whole
+/// wave of thumbnail jobs can be mid-decode across every worker just as a full
+/// image is requested, forcing it to wait for one of them to finish. See the
+/// dedicated-worker reservation in `Loader::new` for how that's handled.
 #[derive(Default)]
 struct Queue {
     full: VecDeque<Job>,
@@ -118,6 +124,12 @@ impl Loader {
             let shared = Arc::clone(&shared);
             let res_tx = res_tx.clone();
             let thumbs = Arc::clone(&thumbs);
+            // Worker 0 is reserved for full-image (loupe) and meta work only,
+            // never thumbnails — but only when there's at least one other
+            // worker left to service the thumbnail flood. With a single
+            // worker, dedicating it would starve thumbnails entirely, which is
+            // worse than the contention it's meant to fix.
+            let dedicated_full = i == 0 && workers > 1;
             thread::Builder::new()
                 .name(format!("decode-worker-{i}"))
                 .spawn(move || loop {
@@ -132,12 +144,15 @@ impl Loader {
                             if q.shutdown {
                                 return;
                             }
-                            if let Some(j) = q
-                                .full
-                                .pop_front()
-                                .or_else(|| q.thumbs.pop_front())
-                                .or_else(|| q.meta.pop_front())
-                            {
+                            let next = if dedicated_full {
+                                q.full.pop_front().or_else(|| q.meta.pop_front())
+                            } else {
+                                q.full
+                                    .pop_front()
+                                    .or_else(|| q.thumbs.pop_front())
+                                    .or_else(|| q.meta.pop_front())
+                            };
+                            if let Some(j) = next {
                                 break j;
                             }
                             q = match shared.ready.wait(q) {
@@ -220,7 +235,11 @@ impl Loader {
         if let Ok(mut q) = self.shared.queue.lock() {
             q.full.push_back(Job::Full(path.clone()));
             self.inflight.insert(path);
-            self.shared.ready.notify_one();
+            // notify_all, not notify_one: the dedicated full-image worker (see
+            // `Loader::new`) ignores thumbnail jobs, so a notify_one that happens
+            // to wake it while only thumbnails are queued would strand them
+            // asleep until some other enqueue wakes a general worker.
+            self.shared.ready.notify_all();
         }
     }
 
@@ -261,7 +280,9 @@ impl Loader {
         if let Ok(mut q) = self.shared.queue.lock() {
             q.thumbs.push_back(Job::Thumb(path, max_px));
             self.thumb_inflight.insert(key);
-            self.shared.ready.notify_one();
+            // See the comment in `request`: must be notify_all so a general
+            // (non-dedicated) worker is guaranteed to wake and pick this up.
+            self.shared.ready.notify_all();
         }
     }
 
@@ -275,7 +296,8 @@ impl Loader {
         if let Ok(mut q) = self.shared.queue.lock() {
             q.meta.push_back(Job::Meta(path.clone()));
             self.meta_inflight.insert(path);
-            self.shared.ready.notify_one();
+            // See the comment in `request` for why this must be notify_all.
+            self.shared.ready.notify_all();
         }
     }
 
