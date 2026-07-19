@@ -294,9 +294,37 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
+/// True when running from inside a `.app` bundle (i.e. launched by Finder,
+/// double-click, or "Open With"). Those launches never carry a CLI arg — a
+/// file path instead arrives later via an AppleEvent (see
+/// [`macos_delegate`]) — so the dev-CLI's "require an argument" rule doesn't
+/// apply to them.
+fn is_app_bundle() -> bool {
+    std::env::current_exe()
+        .ok()
+        .is_some_and(|exe| exe.components().any(|c| c.as_os_str().to_string_lossy().ends_with(".app")))
+}
+
+fn print_usage_and_exit() -> ! {
+    eprintln!("Usage: lightphotos <photo-or-folder>");
+    eprintln!();
+    eprintln!("  <photo-or-folder>  Path to a folder of photos (opens in Grid)");
+    eprintln!("                     or a single photo (opens in Loupe).");
+    std::process::exit(1);
+}
+
 fn main() {
-    // A file/dir path may be passed on the command line.
-    let initial = std::env::args().nth(1).map(PathBuf::from).filter(|p| p.exists());
+    // A file/dir path may be passed on the command line. The dev CLI binary
+    // requires one; the packaged .app doesn't (Finder "Open With" delivers
+    // the path via an AppleEvent after launch, with no argv).
+    let arg = std::env::args().nth(1).map(PathBuf::from);
+    let initial = match arg {
+        Some(p) if p.exists() => Some(p),
+        Some(_) if is_app_bundle() => None,
+        Some(_) => print_usage_and_exit(),
+        None if is_app_bundle() => None,
+        None => print_usage_and_exit(),
+    };
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
