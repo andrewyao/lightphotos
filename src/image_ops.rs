@@ -63,17 +63,44 @@ pub(crate) fn bake_edited(img: &DecodedImage, adj: &Adjustments, rot: u8) -> (u3
 
     let encode = |v: f32| (v.max(0.0).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
 
+    // When denoise is active, precompute the whole source image's linear-light
+    // buffer once so the 25-tap neighborhood lookup (`denoise_sample`) is a
+    // cheap indexed read instead of re-running unpremul_to_linear per tap.
+    // Taps read from the full source image (not just the crop), clamped to its
+    // bounds — matching the shader's clamp-to-edge sampling against the full
+    // uploaded texture — so pixels near the crop edge still see real
+    // neighbors instead of the crop boundary. When denoise == 0.0 this is
+    // skipped entirely, leaving the original single-conversion-per-pixel path
+    // (and its cost) unchanged.
+    let full_linear: Option<Vec<[f32; 3]>> = (adj.denoise > 0.0).then(|| {
+        (0..(w * h) as usize)
+            .map(|i| {
+                let si = i * 4;
+                unpremul_to_linear([img.rgba[si], img.rgba[si + 1], img.rgba[si + 2], img.rgba[si + 3]])
+            })
+            .collect()
+    });
+
     // Cropped + tone-applied buffer, still in texture orientation.
     let mut cropped = vec![0u8; (cw * ch * 4) as usize];
     for y in 0..ch {
         for x in 0..cw {
-            let si = (((y0 + y) * w + (x0 + x)) * 4) as usize;
-            let lin = unpremul_to_linear([
-                img.rgba[si],
-                img.rgba[si + 1],
-                img.rgba[si + 2],
-                img.rgba[si + 3],
-            ]);
+            let lin = match &full_linear {
+                Some(buf) => develop::denoise_sample(adj, |dx, dy| {
+                    let sx = (x0 as i64 + x as i64 + dx as i64).clamp(0, w as i64 - 1) as u32;
+                    let sy = (y0 as i64 + y as i64 + dy as i64).clamp(0, h as i64 - 1) as u32;
+                    buf[(sy * w + sx) as usize]
+                }),
+                None => {
+                    let si = (((y0 + y) * w + (x0 + x)) * 4) as usize;
+                    unpremul_to_linear([
+                        img.rgba[si],
+                        img.rgba[si + 1],
+                        img.rgba[si + 2],
+                        img.rgba[si + 3],
+                    ])
+                }
+            };
             let out = develop::apply_linear(adj, lin);
             let di = ((y * cw + x) * 4) as usize;
             cropped[di] = encode(out[0]);
@@ -161,6 +188,49 @@ mod tests {
         assert_eq!((w, h), (2, 1));
         assert_eq!(&out[0..4], &px(3));
         assert_eq!(&out[4..8], &px(4));
+    }
+
+    #[test]
+    fn bake_denoise_zero_matches_identity_bake() {
+        // Same fixture/assertion as identity_bake_preserves_opaque_pixels,
+        // just with an explicit denoise: 0.0 to confirm the new field doesn't
+        // change the fast path at all.
+        let src = [px(0), px(64), px(128), px(255)].concat();
+        let img = DecodedImage { width: 2, height: 2, rgba: src.clone() };
+        let adj = Adjustments { denoise: 0.0, ..Default::default() };
+        let (w, h, out) = bake_edited(&img, &adj, 0);
+        assert_eq!((w, h), (2, 2));
+        assert_eq!(out, src);
+    }
+
+    #[test]
+    fn bake_denoise_changes_output() {
+        // A noisy 3x3 image: a bright outlier pixel surrounded by dark ones.
+        // Denoising should visibly pull the center pixel away from raw white.
+        let mut src = vec![0u8; 3 * 3 * 4];
+        for i in 0..9 {
+            let v = if i == 4 { 255 } else { 0 };
+            src[i * 4..i * 4 + 4].copy_from_slice(&px(v));
+        }
+        let img = DecodedImage { width: 3, height: 3, rgba: src };
+        let (_, _, out0) = bake_edited(&img, &Adjustments::default(), 0);
+        let denoised = Adjustments { denoise: 100.0, ..Default::default() };
+        let (_, _, out100) = bake_edited(&img, &denoised, 0);
+        let center = 4 * 4; // pixel index 4, byte offset
+        assert_eq!(out0[center], 255);
+        assert!(out100[center] < 255, "expected denoise to darken the outlier center pixel");
+    }
+
+    #[test]
+    fn bake_denoise_clamps_at_edges() {
+        // Small 3x3 image; denoise must not panic or read out of bounds when
+        // taps for a corner pixel fall outside the image.
+        let src = [px(10), px(20), px(30), px(40), px(50), px(60), px(70), px(80), px(90)].concat();
+        let img = DecodedImage { width: 3, height: 3, rgba: src };
+        let adj = Adjustments { denoise: 50.0, ..Default::default() };
+        let (w, h, out) = bake_edited(&img, &adj, 0);
+        assert_eq!((w, h), (3, 3));
+        assert_eq!(out.len(), 3 * 3 * 4);
     }
 
     #[test]

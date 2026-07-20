@@ -41,7 +41,7 @@ const THUMB_STEP: u32 = 32;
 
 /// Number of Develop sliders the keyboard cycles through (panel order: temp,
 /// tint, exposure, contrast, highlights, shadows, whites, blacks).
-const DEVELOP_SLIDERS: usize = 8;
+const DEVELOP_SLIDERS: usize = 9;
 
 /// Two top-level views: a thumbnail Grid and a single-image Loupe.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -171,13 +171,17 @@ pub(crate) struct App {
     edits: HashMap<PathBuf, Adjustments>,
     /// Whether the loupe's right-hand Develop panel is open.
     develop_open: bool,
-    /// A small downsampled LINEAR-light RGB sample of the shown image, used to
+    /// A small downsampled LINEAR-light RGB grid of the shown image, used to
     /// recompute the live histogram cheaply when adjustments change. Rebuilt
     /// whenever a new full image is uploaded.
-    // Each sample is `[lin_r, lin_g, lin_b, u, v]`: linear-light RGB plus the
-    // pixel's normalized position (0..1), so `recompute_histogram` can drop
-    // samples outside the active crop rect.
-    hist_sample: Vec<[f32; 5]>,
+    // Row-major, `hist_dw` × `hist_dh` — a real 2D grid (not a flat list of
+    // isolated samples) so `recompute_histogram` can look up actual neighbor
+    // cells for denoise, and can derive each cell's normalized (u, v)
+    // position analytically to drop cells outside the active crop rect.
+    hist_sample: Vec<[f32; 3]>,
+    /// `hist_sample`'s grid dimensions (0×0 when no image is loaded).
+    hist_dw: usize,
+    hist_dh: usize,
     /// Cached per-channel (R/G/B) display-space histogram bins for the panel.
     /// Float bins: samples are splatted fractionally across neighbouring buckets
     /// so a tone-curve stretch doesn't re-quantize into a comb of empty bins.
@@ -338,6 +342,8 @@ impl App {
             edits: HashMap::new(),
             develop_open: true,
             hist_sample: Vec::new(),
+            hist_dw: 0,
+            hist_dh: 0,
             histogram: None,
             hist_dirty: false,
             filter: None,
@@ -1018,7 +1024,8 @@ impl App {
                 4 => (&mut adj.highlights, develop::TONE_RANGE, 1.0),
                 5 => (&mut adj.shadows, develop::TONE_RANGE, 1.0),
                 6 => (&mut adj.whites, develop::TONE_RANGE, 1.0),
-                _ => (&mut adj.blacks, develop::TONE_RANGE, 1.0),
+                7 => (&mut adj.blacks, develop::TONE_RANGE, 1.0),
+                _ => (&mut adj.denoise, develop::DENOISE_RANGE, 1.0),
             };
         *field = (*field + sign * step).clamp(*range.start(), *range.end());
         self.apply_adjustments(adj);
@@ -1448,11 +1455,23 @@ impl App {
     /// Push the current image's adjustments into the renderer uniform. Mirrors
     /// `push_transform`; call it whenever the shown image or its edits change.
     fn push_adjustments(&mut self) {
-        let gpu = GpuAdjust::from(&self.current_adjustments());
+        let gpu = self.gpu_adjust(&self.current_adjustments());
         if let Some(r) = &mut self.renderer {
             r.set_adjustments(gpu);
         }
         self.request_redraw();
+    }
+
+    /// Convert `adj` to its GPU uniform mirror, filling in `texel_w`/`texel_h`
+    /// from the shown image's pixel dimensions (`GpuAdjust::from` alone can't,
+    /// since it only sees `Adjustments`) — the denoise shader taps need these
+    /// to offset by whole texels.
+    fn gpu_adjust(&self, adj: &Adjustments) -> GpuAdjust {
+        let (w, h) = self.image_size();
+        let mut g = GpuAdjust::from(adj);
+        g.texel_w = 1.0 / w;
+        g.texel_h = 1.0 / h;
+        g
     }
 
     // ---- Crop mode ----
@@ -1488,7 +1507,7 @@ impl App {
     fn push_crop_preview(&mut self) {
         let mut adj = self.current_adjustments();
         adj.crop = None;
-        let gpu = GpuAdjust::from(&adj);
+        let gpu = self.gpu_adjust(&adj);
         if let Some(r) = &mut self.renderer {
             r.set_adjustments(gpu);
         }
@@ -1720,8 +1739,10 @@ impl App {
     }
 
     /// Build the histogram sample from a freshly-shown image: a strided
-    /// downsample (~256 px on the longest side) of LINEAR-light RGB, stored so
-    /// `recompute_histogram` can re-bin it cheaply as adjustments change.
+    /// downsample (~256 px on the longest side) of LINEAR-light RGB, kept as a
+    /// real 2D grid (row-major, `hist_dw` × `hist_dh`) so `recompute_histogram`
+    /// can look up actual neighbor cells (needed for denoise) as well as
+    /// re-bin cheaply as adjustments change.
     ///
     /// The decode is premultiplied sRGB RGBA8; we un-premultiply (guarding a==0)
     /// and convert sRGB → linear with the 2.2 gamma `apply_linear` assumes, so
@@ -1730,13 +1751,16 @@ impl App {
         let (w, h) = (img.width as usize, img.height as usize);
         if w == 0 || h == 0 || img.rgba.len() < w * h * 4 {
             self.hist_sample.clear();
+            self.hist_dw = 0;
+            self.hist_dh = 0;
             self.hist_dirty = true;
             return;
         }
         // Stride so the longest side maps to ~256 samples.
         const TARGET: usize = 256;
         let step = (w.max(h) / TARGET).max(1);
-        let mut sample = Vec::with_capacity((w / step + 1) * (h / step + 1));
+        let (dw, dh) = (w.div_ceil(step), h.div_ceil(step));
+        let mut sample = Vec::with_capacity(dw * dh);
         let mut y = 0;
         while y < h {
             let mut x = 0;
@@ -1748,21 +1772,23 @@ impl App {
                     img.rgba[i + 2],
                     img.rgba[i + 3],
                 ]);
-                let u = (x as f32 + 0.5) / w as f32;
-                let v = (y as f32 + 0.5) / h as f32;
-                sample.push([lin[0], lin[1], lin[2], u, v]);
+                sample.push(lin);
                 x += step;
             }
             y += step;
         }
         self.hist_sample = sample;
+        self.hist_dw = dw;
+        self.hist_dh = dh;
         self.hist_dirty = true;
     }
 
     /// Recompute the cached histogram from `hist_sample` under the current
-    /// image's adjustments: run `apply_linear` per sample, gamma-encode the
-    /// linear output to display space (matching what the shader puts on screen),
-    /// and bin each channel into 256 buckets.
+    /// image's adjustments: run the same denoise formula export/preview use
+    /// (on this grid's own resolution — see `denoise_sample`'s doc comment),
+    /// then `apply_linear` per cell, gamma-encode the linear output to display
+    /// space (matching what the shader puts on screen), and bin each channel
+    /// into 256 buckets.
     fn recompute_histogram(&mut self) {
         if self.hist_sample.is_empty() {
             self.histogram = None;
@@ -1772,33 +1798,46 @@ impl App {
         let adj = self.current_adjustments();
         // Restrict to the active crop rect so the histogram reflects what the
         // loupe/export actually show. A full-frame (or absent) crop keeps every
-        // sample.
+        // cell. (u, v) are derived analytically from the cell's grid position.
         let crop = adj.crop.filter(|c| {
             c.left > 0.0 || c.top > 0.0 || c.right < 1.0 || c.bottom < 1.0
         });
+        let (dw, dh) = (self.hist_dw, self.hist_dh);
+        let grid = &self.hist_sample;
         let mut bins = [[0f32; 256]; 3];
-        for &s in &self.hist_sample {
-            let (px, u, v) = ([s[0], s[1], s[2]], s[3], s[4]);
-            if let Some(c) = crop {
-                if u < c.left || u >= c.right || v < c.top || v >= c.bottom {
-                    continue;
+        for gy in 0..dh {
+            for gx in 0..dw {
+                let u = (gx as f32 + 0.5) / dw as f32;
+                let v = (gy as f32 + 0.5) / dh as f32;
+                if let Some(c) = crop {
+                    if u < c.left || u >= c.right || v < c.top || v >= c.bottom {
+                        continue;
+                    }
                 }
-            }
-            let out = develop::apply_linear(&adj, px);
-            for ch in 0..3 {
-                // Linear → display gamma (the same encoding the shader output gets).
-                let v = out[ch].max(0.0).powf(1.0 / 2.2).clamp(0.0, 1.0);
-                // Fractional ("float") binning: splat the sample across its two
-                // neighbouring buckets by sub-bin position instead of rounding to
-                // one. Spreading the energy continuously is what keeps the curve
-                // smooth after a tone stretch, rather than re-quantizing to a comb.
-                let pos = v * 255.0;
-                let lo = pos.floor();
-                let frac = pos - lo;
-                let lo = lo as usize;
-                bins[ch][lo] += 1.0 - frac;
-                if lo < 255 {
-                    bins[ch][lo + 1] += frac;
+                // Denoise reads neighbor cells clamped to this grid's own
+                // bounds — the grid is the histogram's whole "image", the same
+                // way the shader/export clamp to the full source texture.
+                let px = develop::denoise_sample(&adj, |dx, dy| {
+                    let sx = (gx as i64 + dx as i64).clamp(0, dw as i64 - 1) as usize;
+                    let sy = (gy as i64 + dy as i64).clamp(0, dh as i64 - 1) as usize;
+                    grid[sy * dw + sx]
+                });
+                let out = develop::apply_linear(&adj, px);
+                for ch in 0..3 {
+                    // Linear → display gamma (the same encoding the shader output gets).
+                    let v = out[ch].max(0.0).powf(1.0 / 2.2).clamp(0.0, 1.0);
+                    // Fractional ("float") binning: splat the sample across its two
+                    // neighbouring buckets by sub-bin position instead of rounding to
+                    // one. Spreading the energy continuously is what keeps the curve
+                    // smooth after a tone stretch, rather than re-quantizing to a comb.
+                    let pos = v * 255.0;
+                    let lo = pos.floor();
+                    let frac = pos - lo;
+                    let lo = lo as usize;
+                    bins[ch][lo] += 1.0 - frac;
+                    if lo < 255 {
+                        bins[ch][lo + 1] += frac;
+                    }
                 }
             }
         }
@@ -1974,10 +2013,11 @@ impl App {
         let after = self.current_adjustments();
         let before = Adjustments { crop: after.crop, ..Adjustments::default() };
         let (scale, offset, rot) = self.fit_transform_for(half_w, half_h);
+        let (gpu_before, gpu_after) = (self.gpu_adjust(&before), self.gpu_adjust(&after));
         if let Some(r) = &mut self.renderer {
             r.set_transform(scale, offset, rot);
-            r.set_adjustments(GpuAdjust::from(&before));
-            r.set_adjustments_b(GpuAdjust::from(&after));
+            r.set_adjustments(gpu_before);
+            r.set_adjustments_b(gpu_after);
         }
     }
 

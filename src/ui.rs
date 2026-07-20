@@ -1347,6 +1347,10 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             row!("Shadows", &mut adj.shadows, crate::develop::TONE_RANGE, 0);
             row!("Whites", &mut adj.whites, crate::develop::TONE_RANGE, 0);
             row!("Blacks", &mut adj.blacks, crate::develop::TONE_RANGE, 0);
+            ui.add_space(6.0);
+
+            ui.label(egui::RichText::new("Detail").strong());
+            row!("Denoise", &mut adj.denoise, crate::develop::DENOISE_RANGE, 0);
             let _ = idx; // final bump isn't read; silence unused-assignment
 
             if changed {

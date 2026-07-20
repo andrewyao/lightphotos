@@ -27,6 +27,10 @@ struct Adjust {
     crop_t: f32,
     crop_r: f32,
     crop_b: f32,
+    denoise: f32,
+    texel_w: f32,
+    texel_h: f32,
+    _pad0: f32,
 };
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
@@ -98,6 +102,19 @@ fn tone(v: f32) -> f32 {
     return x;
 }
 
+// Hand-baked σ=1.0 Gaussian spatial weight for the 5×5 denoise kernel,
+// indexed by squared tap distance. MUST stay in sync with `spatial_weight`
+// in develop.rs.
+fn spatialWeight(d2: i32) -> f32 {
+    if (d2 == 0) { return 1.0; }
+    if (d2 == 1) { return 0.606531; }
+    if (d2 == 2) { return 0.367879; }
+    if (d2 == 4) { return 0.135335; }
+    if (d2 == 5) { return 0.082085; }
+    if (d2 == 8) { return 0.018316; }
+    return 0.0;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Outside the image (UV beyond 0..1): draw the neutral background.
@@ -116,6 +133,39 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var r = texel.r;
     var g = texel.g;
     var b = texel.b;
+
+    // 0. Edge-aware (bilateral-style) denoise: a fixed 5x5 neighborhood, blended
+    // by spatial + color-similarity weight. Only taken when denoise is active —
+    // the identity path above (implicit-LOD textureSample) is left completely
+    // untouched, so denoise == 0 renders byte-identical to before this branch
+    // existed. Explicit textureSampleLevel (not textureSample) is used for every
+    // tap since the tap loop isn't uniform control flow that implicit-LOD
+    // derivatives can rely on; this also means minification antialiasing is
+    // bypassed while denoise is active (a known, accepted trade-off when
+    // zoomed far out). MUST stay in sync with `denoise_sample` in develop.rs.
+    if (adj.denoise > 0.0) {
+        let center = textureSampleLevel(tex, samp, in.uv, 0.0).rgb;
+        let sigmaR = 0.02 + adj.denoise / 100.0 * 0.30;
+        let sigmaR2 = sigmaR * sigmaR;
+        var sum = vec3<f32>(0.0, 0.0, 0.0);
+        var wsum = 0.0;
+        for (var dy = -2; dy <= 2; dy = dy + 1) {
+            for (var dx = -2; dx <= 2; dx = dx + 1) {
+                let tapUv = in.uv + vec2<f32>(f32(dx), f32(dy)) * vec2<f32>(adj.texel_w, adj.texel_h);
+                let tap = textureSampleLevel(tex, samp, tapUv, 0.0).rgb;
+                let diff = tap - center;
+                let diff2 = dot(diff, diff);
+                // wsum can't be 0: (dx,dy)=(0,0) always contributes weight 1.0.
+                let w = spatialWeight(dx * dx + dy * dy) / (1.0 + diff2 / sigmaR2);
+                sum = sum + w * tap;
+                wsum = wsum + w;
+            }
+        }
+        let denoised = sum / wsum;
+        r = denoised.x;
+        g = denoised.y;
+        b = denoised.z;
+    }
 
     // 1. White balance: temp/tint (−100..100) → gentle per-channel gains.
     let t = adj.temp / 100.0;

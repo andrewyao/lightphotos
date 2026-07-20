@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 pub const TONE_RANGE: std::ops::RangeInclusive<f32> = -100.0..=100.0;
 /// Inclusive range for exposure, in stops.
 pub const EXPOSURE_RANGE: std::ops::RangeInclusive<f32> = -5.0..=5.0;
+/// Inclusive range for denoise strength (one-directional: 0 = off).
+pub const DENOISE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=100.0;
 
 /// True when a serde-skippable f32 field is at its identity value.
 fn is_zero(v: &f32) -> bool {
@@ -64,6 +66,9 @@ pub struct Adjustments {
     /// Blacks endpoint, −100..=100.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub blacks: f32,
+    /// Edge-aware denoise strength, 0 (off) ..=100.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub denoise: f32,
     /// Reserved crop rectangle for a future phase; never set by current UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<Crop>,
@@ -99,10 +104,10 @@ pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
 
     let mut h = Fnv1a::new();
 
-    // Tone: eight −100..=100 (or −5..=5) sliders, quantized to 1e-3.
+    // Tone: nine sliders (−100..=100, −5..=5, or 0..=100), quantized to 1e-3.
     let tone = [
         adj.temp, adj.tint, adj.exposure, adj.contrast, adj.highlights, adj.shadows,
-        adj.whites, adj.blacks,
+        adj.whites, adj.blacks, adj.denoise,
     ];
     for v in tone {
         h.write(&((v * 1000.0).round() as i32).to_le_bytes());
@@ -131,9 +136,12 @@ pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
 
 /// Packed uniform mirror of [`Adjustments`], uploaded to the fragment shader.
 ///
-/// 12 × f32 = 48 bytes, already a multiple of 16 so no trailing pad is needed —
-/// but uniform buffers require 16-byte alignment, so keep the field count a
-/// multiple of 4 if you ever add fields.
+/// 16 × f32 = 64 bytes; uniform buffers require 16-byte alignment, so keep the
+/// field count a multiple of 4 if you ever add fields. `texel_w`/`texel_h` are
+/// not mirrored from any `Adjustments` field — they're the shown image's
+/// per-texel UV size (1/width, 1/height), filled in by `App::gpu_adjust` so
+/// the shader's denoise taps can offset by whole texels. `_pad0` is unused,
+/// just alignment filler.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuAdjust {
@@ -149,6 +157,10 @@ pub struct GpuAdjust {
     pub crop_t: f32,
     pub crop_r: f32,
     pub crop_b: f32,
+    pub denoise: f32,
+    pub texel_w: f32,
+    pub texel_h: f32,
+    pub _pad0: f32,
 }
 
 impl Default for GpuAdjust {
@@ -167,11 +179,18 @@ impl Default for GpuAdjust {
             crop_t: 0.0,
             crop_r: 1.0,
             crop_b: 1.0,
+            denoise: 0.0,
+            texel_w: 1.0,
+            texel_h: 1.0,
+            _pad0: 0.0,
         }
     }
 }
 
 impl From<&Adjustments> for GpuAdjust {
+    /// `texel_w`/`texel_h` are left at their `Default` placeholder here — the
+    /// real per-image value is filled in by `App::gpu_adjust`, since this impl
+    /// only sees `Adjustments`, not the shown image's pixel dimensions.
     fn from(a: &Adjustments) -> Self {
         let (crop_l, crop_t, crop_r, crop_b) = match a.crop {
             Some(c) => (c.left, c.top, c.right, c.bottom),
@@ -190,6 +209,8 @@ impl From<&Adjustments> for GpuAdjust {
             crop_t,
             crop_r,
             crop_b,
+            denoise: a.denoise,
+            ..Self::default()
         }
     }
 }
@@ -282,6 +303,62 @@ pub fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
     [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)]
 }
 
+/// Neighbor radius (in taps) for [`denoise_sample`]'s fixed 5×5 kernel. Does
+/// NOT scale with the denoise slider — only the range-weight sigma does — so
+/// cost stays bounded and predictable at any strength.
+pub(crate) const DENOISE_RADIUS: i32 = 2;
+
+/// Hand-baked σ=1.0 Gaussian spatial weight for the 5×5 denoise kernel,
+/// indexed by squared tap distance. A literal table avoids a runtime `exp()`
+/// call for a term that never depends on live pixel data or the slider.
+/// MUST stay in sync with `spatialWeight` in shader.wgsl.
+fn spatial_weight(dx: i32, dy: i32) -> f32 {
+    match dx * dx + dy * dy {
+        0 => 1.0,
+        1 => 0.606531,
+        2 => 0.367879,
+        4 => 0.135335,
+        5 => 0.082085,
+        8 => 0.018316,
+        _ => 0.0,
+    }
+}
+
+/// Edge-aware (bilateral-style) denoise of one linear-light RGB pixel.
+/// `sample(dx, dy)` fetches the neighbor at integer offset `(dx, dy)` from the
+/// center (both in `-DENOISE_RADIUS..=DENOISE_RADIUS`); the caller owns
+/// clamping/indexing into whatever buffer it has (e.g. clamp-to-edge against
+/// image bounds). At `adj.denoise <= 0.0` this is a hard identity — returns
+/// `sample(0, 0)` unchanged with no extra math — since every existing catalog
+/// entry has `denoise == 0` today and must render byte-identical to before
+/// this function existed.
+///
+/// MUST stay in sync with the `denoise > 0.0` branch of `fs_main` in
+/// shader.wgsl.
+pub(crate) fn denoise_sample(adj: &Adjustments, sample: impl Fn(i32, i32) -> [f32; 3]) -> [f32; 3] {
+    if adj.denoise <= 0.0 {
+        return sample(0, 0);
+    }
+    let center = sample(0, 0);
+    let sigma_r = 0.02 + adj.denoise / 100.0 * 0.30;
+    let sigma_r2 = sigma_r * sigma_r;
+    let (mut sum, mut wsum) = ([0f32; 3], 0f32);
+    for dy in -DENOISE_RADIUS..=DENOISE_RADIUS {
+        for dx in -DENOISE_RADIUS..=DENOISE_RADIUS {
+            let tap = sample(dx, dy);
+            let d = [tap[0] - center[0], tap[1] - center[1], tap[2] - center[2]];
+            let diff2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+            // wsum can't be 0: (dx,dy)=(0,0) always contributes weight 1.0.
+            let w = spatial_weight(dx, dy) / (1.0 + diff2 / sigma_r2);
+            for c in 0..3 {
+                sum[c] += w * tap[c];
+            }
+            wsum += w;
+        }
+    }
+    [sum[0] / wsum, sum[1] / wsum, sum[2] / wsum]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,6 +410,62 @@ mod tests {
         let a = Adjustments { exposure: 1.0, ..Default::default() };
         let b = Adjustments { exposure: 1.0 + 1e-5, ..Default::default() };
         assert_eq!(edit_signature(&a, 0), edit_signature(&b, 0));
+    }
+
+    #[test]
+    fn denoise_zero_is_passthrough() {
+        let adj = Adjustments::default();
+        // A closure that would clearly change the result if the neighborhood
+        // loop ran at all: every non-center tap is wildly different.
+        let out = denoise_sample(&adj, |dx, dy| {
+            if (dx, dy) == (0, 0) { [0.2, 0.3, 0.4] } else { [1.0, 0.0, 0.0] }
+        });
+        assert_eq!(out, [0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn denoise_smooths_flat_noise() {
+        // Center is an outlier against an otherwise-uniform neighborhood — a
+        // real blend should pull the result away from the raw center value.
+        let adj = Adjustments { denoise: 100.0, ..Default::default() };
+        let out = denoise_sample(&adj, |dx, dy| {
+            if (dx, dy) == (0, 0) { [1.0, 1.0, 1.0] } else { [0.0, 0.0, 0.0] }
+        });
+        assert!(out[0] < 1.0 && out[0] > 0.0, "expected a blend, got {out:?}");
+    }
+
+    #[test]
+    fn denoise_preserves_hard_edge() {
+        // A step edge: left half 0.0, right half 1.0 (dx >= 0 is "right").
+        // The denoised center (on the boundary, dx=0 counted as right/1.0)
+        // should stay closer to its own side than a plain unweighted average
+        // of all 25 taps would (which is exactly 0.5 minus the center column).
+        let adj = Adjustments { denoise: 100.0, ..Default::default() };
+        let step = |dx: i32, _dy: i32| -> [f32; 3] {
+            let v = if dx < 0 { 0.0 } else { 1.0 };
+            [v, v, v]
+        };
+        let out = denoise_sample(&adj, step);
+        // Plain average over the 5x5 (dx in -2..=2) step pattern: 3/5 columns
+        // are 1.0 (dx=0,1,2), 2/5 are 0.0 (dx=-1,-2) -> 0.6.
+        let plain_avg = 0.6;
+        assert!(
+            (out[0] - 1.0).abs() < (out[0] - plain_avg).abs(),
+            "expected range weighting to favor the pixel's own side, got {out:?}"
+        );
+    }
+
+    #[test]
+    fn edit_signature_changes_with_denoise() {
+        let a = Adjustments::default();
+        let b = Adjustments { denoise: 40.0, ..Default::default() };
+        assert_ne!(edit_signature(&a, 0), edit_signature(&b, 0));
+    }
+
+    #[test]
+    fn is_identity_false_when_denoise_set() {
+        let a = Adjustments { denoise: 1.0, ..Default::default() };
+        assert!(!a.is_identity());
     }
 
     #[test]

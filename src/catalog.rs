@@ -684,6 +684,26 @@ mod tests {
     }
 
     #[test]
+    fn denoise_persists_across_reload() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+
+        let mut adj = Adjustments::default();
+        adj.denoise = 40.0;
+
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            cat.set_adjustments(&p, &adj);
+            assert_eq!(cat.adjustments(&p), adj);
+        }
+
+        let reloaded = Catalog::with_dir(dir.clone());
+        assert_eq!(reloaded.adjustments(&p), adj);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn rotation_persists_across_reload() {
         let dir = unique_tmp_dir();
         let p = dir.join("photo.jpg");
