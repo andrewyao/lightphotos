@@ -22,7 +22,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::SystemTime;
 
-use crate::image_decode::{self, DecodedImage};
+use crate::image_decode::{self, DecodedImage, ImageMetadata};
 use crate::thumbnail::ThumbCache;
 
 /// A unit of work for a worker thread.
@@ -33,6 +33,10 @@ enum Job {
     // Consumed by the grid/filmstrip in a later wave (T5/T6).
     #[allow(dead_code)]
     Thumb(PathBuf, u32),
+    /// Camera/lens/exposure metadata read for the info panel. Only ever
+    /// requested for the single currently-viewed image, so it outranks
+    /// thumbnails but never the full-image decode itself.
+    Exif(PathBuf),
     /// Capture-time (EXIF/mtime) read for burst grouping. Lowest priority.
     Meta(PathBuf),
 }
@@ -41,6 +45,7 @@ enum Job {
 enum JobResult {
     Full(PathBuf, Result<DecodedImage, String>),
     Thumb(PathBuf, u32, Result<Arc<DecodedImage>, String>),
+    Exif(PathBuf, ImageMetadata),
     Meta(PathBuf, Option<SystemTime>),
 }
 
@@ -59,6 +64,10 @@ enum JobResult {
 struct Queue {
     full: VecDeque<Job>,
     thumbs: VecDeque<Job>,
+    /// Metadata reads for the currently-viewed image — served right after
+    /// full-image work, ahead of the thumbnail flood, since it's about the
+    /// one photo the user is actively looking at.
+    exif: VecDeque<Job>,
     /// Capture-time reads — served after full-image and thumbnail work, since
     /// burst badges are not latency-critical.
     meta: VecDeque<Job>,
@@ -100,6 +109,9 @@ pub struct Loader {
 
     /// Paths with a capture-time read in flight, to avoid enqueuing duplicates.
     meta_inflight: HashSet<PathBuf>,
+
+    /// Paths with an exif-metadata read in flight, to avoid enqueuing duplicates.
+    exif_inflight: HashSet<PathBuf>,
 }
 
 impl Loader {
@@ -124,8 +136,8 @@ impl Loader {
             let shared = Arc::clone(&shared);
             let res_tx = res_tx.clone();
             let thumbs = Arc::clone(&thumbs);
-            // Worker 0 is reserved for full-image (loupe) and meta work only,
-            // never thumbnails — but only when there's at least one other
+            // Worker 0 is reserved for full-image (loupe), exif, and meta work
+            // only, never thumbnails — but only when there's at least one other
             // worker left to service the thumbnail flood. With a single
             // worker, dedicating it would starve thumbnails entirely, which is
             // worse than the contention it's meant to fix.
@@ -145,10 +157,14 @@ impl Loader {
                                 return;
                             }
                             let next = if dedicated_full {
-                                q.full.pop_front().or_else(|| q.meta.pop_front())
+                                q.full
+                                    .pop_front()
+                                    .or_else(|| q.exif.pop_front())
+                                    .or_else(|| q.meta.pop_front())
                             } else {
                                 q.full
                                     .pop_front()
+                                    .or_else(|| q.exif.pop_front())
                                     .or_else(|| q.thumbs.pop_front())
                                     .or_else(|| q.meta.pop_front())
                             };
@@ -185,6 +201,13 @@ impl Loader {
                             });
                             JobResult::Thumb(path, max_px, r)
                         }
+                        Job::Exif(path) => {
+                            let m = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                image_decode::read_metadata(&path)
+                            }))
+                            .unwrap_or_default();
+                            JobResult::Exif(path, m)
+                        }
                         Job::Meta(path) => {
                             // capture_time never panics by contract, but the FFI
                             // boundary is caught for parity with the other arms.
@@ -217,6 +240,7 @@ impl Loader {
             thumb_failed: HashSet::new(),
             thumb_capacity: THUMB_CAPACITY,
             meta_inflight: HashSet::new(),
+            exif_inflight: HashSet::new(),
         }
     }
 
@@ -301,6 +325,22 @@ impl Loader {
         }
     }
 
+    /// Ask a worker to read `path`'s camera/lens/exposure metadata unless
+    /// already in flight. Results arrive in the fourth bucket of
+    /// [`poll_all`](Self::poll_all). Intended to be called only for the
+    /// single currently-viewed image, not swept over a whole folder.
+    pub fn request_exif(&mut self, path: PathBuf) {
+        if self.exif_inflight.contains(&path) {
+            return;
+        }
+        if let Ok(mut q) = self.shared.queue.lock() {
+            q.exif.push_back(Job::Exif(path.clone()));
+            self.exif_inflight.insert(path);
+            // See the comment in `request` for why this must be notify_all.
+            self.shared.ready.notify_all();
+        }
+    }
+
     /// In-memory thumbnail lookup keyed by `(path, max_px)`.
     #[allow(dead_code)]
     pub fn get_thumb(&self, path: &Path, max_px: u32) -> Option<Arc<DecodedImage>> {
@@ -343,6 +383,7 @@ impl Loader {
         Vec<PathBuf>,
         Vec<(PathBuf, u32)>,
         Vec<(PathBuf, Option<SystemTime>)>,
+        Vec<(PathBuf, ImageMetadata)>,
     ) {
         self.drain()
     }
@@ -355,10 +396,12 @@ impl Loader {
         Vec<PathBuf>,
         Vec<(PathBuf, u32)>,
         Vec<(PathBuf, Option<SystemTime>)>,
+        Vec<(PathBuf, ImageMetadata)>,
     ) {
         let mut full = vec![];
         let mut thumbs = vec![];
         let mut metas = vec![];
+        let mut exifs = vec![];
         while let Ok(result) = self.res_rx.try_recv() {
             match result {
                 JobResult::Full(path, r) => {
@@ -385,13 +428,17 @@ impl Loader {
                         }
                     }
                 }
+                JobResult::Exif(path, m) => {
+                    self.exif_inflight.remove(&path);
+                    exifs.push((path, m));
+                }
                 JobResult::Meta(path, t) => {
                     self.meta_inflight.remove(&path);
                     metas.push((path, t));
                 }
             }
         }
-        (full, thumbs, metas)
+        (full, thumbs, metas, exifs)
     }
 
     fn insert(&mut self, path: PathBuf, img: Arc<DecodedImage>) {

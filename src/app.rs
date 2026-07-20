@@ -206,6 +206,9 @@ pub(crate) struct App {
     /// Last `sel` the filmstrip auto-scrolled to (so we only scroll on change,
     /// not every frame — which would fight clicks). `None` = never.
     last_strip_sel: Option<usize>,
+    /// Accumulated mouse-wheel delta over the filmstrip, not yet enough to
+    /// cross the one-photo step threshold. See [`App::scroll_filmstrip`].
+    filmstrip_scroll_accum: f32,
     /// Thumbnail longest-side pixels for the grid + filmstrip.
     thumb_px: u32,
     /// Columns the grid actually laid out last frame (for Up/Down row moves).
@@ -251,6 +254,10 @@ pub(crate) struct App {
     /// left half with identity tone (but crop + rotation), the right with the
     /// full develop edits.
     compare: bool,
+    /// Cached camera/lens/exposure metadata per path, for the Loupe info
+    /// panel. In-memory only (never persisted, unlike `catalog.rs`'s ratings
+    /// and edits) — read live from the file on demand as each image is shown.
+    exif_cache: HashMap<PathBuf, image_decode::ImageMetadata>,
 
     /// A bulk action awaiting confirmation. `Some` while the confirm modal is up.
     pending_bulk: Option<ui::BulkKind>,
@@ -340,6 +347,7 @@ impl App {
             selected: BTreeSet::new(),
             anchor: None,
             last_strip_sel: None,
+            filmstrip_scroll_accum: 0.0,
             thumb_px: THUMB_DEFAULT,
             grid_cols: 1,
             grid_range: (0, 0),
@@ -357,6 +365,7 @@ impl App {
             loupe_viewport: None,
             crop_edit: None,
             compare: false,
+            exif_cache: HashMap::new(),
             pending_bulk: None,
             copied_settings: None,
             show_help: false,
@@ -662,6 +671,26 @@ impl App {
     }
 
     /// Move the loupe selection by ±1 within the visible list (wraps).
+    /// Mouse-wheel scroll over the filmstrip steps through photos (like the
+    /// Left/Right arrow keys) rather than just panning the strip: a plain
+    /// vertical wheel doesn't pan a horizontal-only `ScrollArea` in egui by
+    /// default, and stepping the selection is the more useful behavior for
+    /// "scroll to browse" anyway. `delta` is the raw wheel delta for this
+    /// frame (egui convention: positive = scroll up/left); it's accumulated
+    /// across frames so small trackpad increments still add up to a step.
+    fn scroll_filmstrip(&mut self, delta: f32) {
+        const STEP_PX: f32 = 30.0;
+        self.filmstrip_scroll_accum += delta;
+        while self.filmstrip_scroll_accum >= STEP_PX {
+            self.step_loupe(false);
+            self.filmstrip_scroll_accum -= STEP_PX;
+        }
+        while self.filmstrip_scroll_accum <= -STEP_PX {
+            self.step_loupe(true);
+            self.filmstrip_scroll_accum += STEP_PX;
+        }
+    }
+
     fn step_loupe(&mut self, forward: bool) {
         if self.visible.is_empty() {
             return;
@@ -733,6 +762,11 @@ impl App {
 
     /// Whether the bottom filmstrip is currently shown (Loupe only).
     pub(crate) fn filmstrip_visible(&self) -> bool {
+        !self.all_panels_hidden
+    }
+
+    /// Whether the Loupe metadata panel is currently shown.
+    pub(crate) fn metadata_panel_visible(&self) -> bool {
         !self.all_panels_hidden
     }
 
@@ -1777,6 +1811,13 @@ impl App {
         self.histogram.as_ref()
     }
 
+    /// The current image's cached camera/lens/exposure metadata, for the Loupe
+    /// info panel (`None` until the background read completes, or if there's
+    /// no image selected).
+    pub(crate) fn current_metadata(&self) -> Option<&image_decode::ImageMetadata> {
+        self.exif_cache.get(&self.selected_path()?)
+    }
+
     /// On-screen footprint after rotation (w/h swapped for 90°/270°).
     fn display_size(&self) -> (f32, f32) {
         let (w, h) = self.image_size();
@@ -2154,6 +2195,13 @@ impl App {
         }
     }
 
+    /// Fold background exif-metadata reads into the cache for the Loupe info panel.
+    pub(crate) fn on_exif_info(&mut self, results: Vec<(PathBuf, image_decode::ImageMetadata)>) {
+        for (path, meta) in results {
+            self.exif_cache.insert(path, meta);
+        }
+    }
+
     /// When thumbnails arrive and bursts are on, compute + cache sharpness for any
     /// unscored burst member among them, then refresh the winners and redraw.
     pub(crate) fn score_arrived_thumbs(&mut self, arrivals: &[(PathBuf, u32)]) {
@@ -2252,6 +2300,19 @@ impl App {
         // open and actually showing.
         if self.hist_dirty && self.develop_open {
             self.recompute_histogram();
+        }
+
+        // Kick off a background metadata read for the Loupe info panel when the
+        // current image isn't cached yet. The loader dedups in-flight requests,
+        // so this is cheap to call every frame until the result lands.
+        if self.mode == ViewMode::Loupe && !self.all_panels_hidden {
+            if let Some(path) = self.selected_path() {
+                if !self.exif_cache.contains_key(&path) {
+                    if let Some(loader) = &mut self.loader {
+                        loader.request_exif(path);
+                    }
+                }
+            }
         }
 
         let (Some(window), Some(mut state)) =
@@ -2422,6 +2483,7 @@ impl App {
                 ui::UiAction::SetFilter(f) => self.set_filter(f),
                 ui::UiAction::SetFilterCmp(cmp) => self.set_filter_cmp(cmp),
                 ui::UiAction::SetRating(stars) => self.set_rating(stars),
+                ui::UiAction::ScrollFilmstrip(delta) => self.scroll_filmstrip(delta),
                 ui::UiAction::ToggleBursts => self.toggle_bursts(),
                 ui::UiAction::OpenFolder(p) => {
                     // The folder row is one unit: clicking it focuses the tree,

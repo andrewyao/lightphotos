@@ -12,12 +12,15 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use objc2_core_foundation::{
-    CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CGPoint, CGRect, CGSize,
+    CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{CGContext, CGImage};
 use objc2_image_io::{
     kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifDictionary,
-    kCGImagePropertyOrientation, kCGImagePropertyTIFFDateTime, CGImageSource,
+    kCGImagePropertyExifExposureTime, kCGImagePropertyExifFNumber,
+    kCGImagePropertyExifFocalLength, kCGImagePropertyExifISOSpeedRatings,
+    kCGImagePropertyExifLensModel, kCGImagePropertyOrientation, kCGImagePropertyTIFFDateTime,
+    kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel, CGImageSource,
 };
 
 use crate::coregraphics;
@@ -37,6 +40,35 @@ extern "C" {
     fn CFNumberGetTypeID() -> core::ffi::c_ulong;
     fn CFStringGetTypeID() -> core::ffi::c_ulong;
     fn CFDictionaryGetTypeID() -> core::ffi::c_ulong;
+    fn CFArrayGetTypeID() -> core::ffi::c_ulong;
+}
+
+/// Camera/lens/exposure metadata plus capture date, read live from a file's
+/// EXIF/TIFF properties for display (never persisted — see `catalog.rs`).
+/// Any field absent from the source (screenshots, re-exports, stripped EXIF)
+/// is simply `None`.
+#[derive(Default)]
+pub struct ImageMetadata {
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub lens_model: Option<String>,
+    pub f_number: Option<f64>,
+    pub exposure_time: Option<f64>,
+    pub iso: Option<u32>,
+    pub focal_length: Option<f64>,
+    pub capture_date: Option<CaptureDate>,
+}
+
+/// A capture timestamp broken into calendar fields as the camera recorded them
+/// (EXIF carries no timezone, so these are displayed as-is — the camera's own
+/// wall-clock reading — rather than converted through `SystemTime`).
+#[derive(Clone, Copy)]
+pub struct CaptureDate {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
 }
 
 /// Decode `path`, optionally downscaling so neither side exceeds `max_dim`
@@ -74,11 +106,19 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     Ok(apply_exif_orientation(decoded, read_orientation(&source)))
 }
 
-/// Parse an EXIF datetime string (`"YYYY:MM:DD HH:MM:SS"`) into a `SystemTime`,
-/// interpreting it as UTC (EXIF carries no timezone; only *consistency* matters
-/// for burst grouping, not absolute correctness). Returns `None` for empty,
-/// zeroed, or malformed values.
-fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
+/// Validated calendar/time components parsed from an EXIF datetime string.
+struct DateTimeParts {
+    y: i64,
+    mo: u32,
+    da: u32,
+    h: u64,
+    mi: u64,
+    se: u64,
+}
+
+/// Parse an EXIF datetime string (`"YYYY:MM:DD HH:MM:SS"`) into validated
+/// components. Returns `None` for empty, zeroed, or malformed values.
+fn parse_exif_datetime_parts(s: &str) -> Option<DateTimeParts> {
     let (date, time) = s.trim().split_once(' ')?;
     let mut d = date.split(':');
     let y: i64 = d.next()?.trim().parse().ok()?;
@@ -91,8 +131,23 @@ fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
     if !(1..=12).contains(&mo) || !(1..=31).contains(&da) || h > 23 || mi > 59 || se > 60 {
         return None;
     }
-    let secs = days_from_civil(y, mo, da) * 86_400 + (h * 3600 + mi * 60 + se) as i64;
+    Some(DateTimeParts { y, mo, da, h, mi, se })
+}
+
+/// Parse an EXIF datetime string into a `SystemTime`, interpreting it as UTC
+/// (EXIF carries no timezone; only *consistency* matters for burst grouping,
+/// not absolute correctness).
+fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
+    let p = parse_exif_datetime_parts(s)?;
+    let secs = days_from_civil(p.y, p.mo, p.da) * 86_400 + (p.h * 3600 + p.mi * 60 + p.se) as i64;
     (secs >= 0).then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64))
+}
+
+/// Parse an EXIF datetime string into calendar fields for display, as the
+/// camera recorded them — no timezone conversion (see `CaptureDate`).
+fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
+    let p = parse_exif_datetime_parts(s)?;
+    Some(CaptureDate { year: p.y as i32, month: p.mo, day: p.da, hour: p.h as u32, minute: p.mi as u32 })
 }
 
 /// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
@@ -123,13 +178,7 @@ fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
     let props = unsafe { source.properties_at_index(0, None) }?;
 
     // EXIF sub-dictionary → DateTimeOriginal (preferred).
-    // SAFETY: reading extern static keys; `value` returns a borrowed pointer.
-    let exif_ptr =
-        unsafe { props.value(kCGImagePropertyExifDictionary as *const CFString as *const c_void) };
-    if !exif_ptr.is_null() && unsafe { CFGetTypeID(exif_ptr) } == unsafe { CFDictionaryGetTypeID() }
-    {
-        // SAFETY: confirmed the value is a CFDictionary above.
-        let exif = unsafe { &*(exif_ptr as *const CFDictionary) };
+    if let Some(exif) = dict_dictionary(&props, unsafe { kCGImagePropertyExifDictionary }) {
         if let Some(t) = dict_string(exif, unsafe { kCGImagePropertyExifDateTimeOriginal })
             .and_then(|s| parse_exif_datetime(&s))
         {
@@ -141,17 +190,117 @@ fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
     dict_string(&props, unsafe { kCGImagePropertyTIFFDateTime }).and_then(|s| parse_exif_datetime(&s))
 }
 
+/// Read the capture date for display: EXIF `DateTimeOriginal` first, then
+/// TIFF `DateTime`. `None` when neither is present/parseable — unlike
+/// `capture_time`, this has no filesystem-mtime fallback, since a
+/// modification time isn't a capture date and shouldn't be shown as one.
+fn read_capture_date(source: &CGImageSource) -> Option<CaptureDate> {
+    let props = unsafe { source.properties_at_index(0, None) }?;
+
+    if let Some(exif) = dict_dictionary(&props, unsafe { kCGImagePropertyExifDictionary }) {
+        if let Some(d) = dict_string(exif, unsafe { kCGImagePropertyExifDateTimeOriginal })
+            .and_then(|s| parse_exif_datetime_display(&s))
+        {
+            return Some(d);
+        }
+    }
+
+    dict_string(&props, unsafe { kCGImagePropertyTIFFDateTime })
+        .and_then(|s| parse_exif_datetime_display(&s))
+}
+
+/// Read camera/lens/exposure metadata plus capture date for `path`. Never
+/// panics; an unreadable file yields an all-`None` `ImageMetadata`.
+pub fn read_metadata(path: &Path) -> ImageMetadata {
+    let mut meta = ImageMetadata::default();
+    let Ok(source) = open_image_source(path) else { return meta };
+    meta.capture_date = read_capture_date(&source);
+
+    let Some(props) = (unsafe { source.properties_at_index(0, None) }) else { return meta };
+
+    meta.camera_make = dict_string(&props, unsafe { kCGImagePropertyTIFFMake });
+    meta.camera_model = dict_string(&props, unsafe { kCGImagePropertyTIFFModel });
+
+    if let Some(exif) = dict_dictionary(&props, unsafe { kCGImagePropertyExifDictionary }) {
+        meta.lens_model = dict_string(exif, unsafe { kCGImagePropertyExifLensModel });
+        meta.f_number = dict_f64(exif, unsafe { kCGImagePropertyExifFNumber });
+        meta.exposure_time = dict_f64(exif, unsafe { kCGImagePropertyExifExposureTime });
+        meta.focal_length = dict_f64(exif, unsafe { kCGImagePropertyExifFocalLength });
+        meta.iso = dict_first_u32(exif, unsafe { kCGImagePropertyExifISOSpeedRatings });
+    }
+
+    meta
+}
+
+/// Fetch a dictionary value by key with no type checking; null if absent.
+fn dict_raw(dict: &CFDictionary, key: &CFString) -> *const c_void {
+    // SAFETY: `key` is a valid CFString option key; `value` returns a borrowed
+    // pointer to the stored value, or null when absent.
+    unsafe { dict.value(key as *const CFString as *const c_void) }
+}
+
 /// Read a CFString value from a CFDictionary for `key`, verifying the concrete
 /// type before reinterpreting (a crafted file could store another CFType).
 fn dict_string(dict: &CFDictionary, key: &CFString) -> Option<String> {
-    // SAFETY: `key` is a valid CFString option key; `value` returns a borrowed
-    // pointer to the stored value, or null when absent.
-    let ptr = unsafe { dict.value(key as *const CFString as *const c_void) };
+    let ptr = dict_raw(dict, key);
     if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFStringGetTypeID() } {
         return None;
     }
     // SAFETY: confirmed the value is a CFString.
     Some(unsafe { &*(ptr as *const CFString) }.to_string())
+}
+
+/// Read a CFDictionary sub-value from a CFDictionary for `key`.
+fn dict_dictionary<'a>(dict: &'a CFDictionary, key: &CFString) -> Option<&'a CFDictionary> {
+    let ptr = dict_raw(dict, key);
+    if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFDictionaryGetTypeID() } {
+        return None;
+    }
+    // SAFETY: confirmed the value is a CFDictionary.
+    Some(unsafe { &*(ptr as *const CFDictionary) })
+}
+
+/// Read a `CFNumber` at a raw (already-fetched) pointer as `f64`, verifying
+/// the concrete type before reinterpreting.
+fn number_f64(ptr: *const c_void) -> Option<f64> {
+    if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFNumberGetTypeID() } {
+        return None;
+    }
+    // SAFETY: confirmed the value is a CFNumber.
+    let number = unsafe { &*(ptr as *const CFNumber) };
+    let mut out: f64 = 0.0;
+    let ok = unsafe { number.value(CFNumberType::Float64Type, &mut out as *mut f64 as *mut c_void) };
+    ok.then_some(out)
+}
+
+/// Read a CFNumber value from a CFDictionary for `key` as `f64`.
+fn dict_f64(dict: &CFDictionary, key: &CFString) -> Option<f64> {
+    number_f64(dict_raw(dict, key))
+}
+
+/// Read the first numeric value from a CFDictionary entry for `key`, which per
+/// the EXIF spec may be stored as a CFArray of CFNumbers (ISOSpeedRatings) —
+/// falls back to reading it as a bare CFNumber for lenient sources.
+fn dict_first_u32(dict: &CFDictionary, key: &CFString) -> Option<u32> {
+    let ptr = dict_raw(dict, key);
+    if ptr.is_null() {
+        return None;
+    }
+    let type_id = unsafe { CFGetTypeID(ptr) };
+    if type_id == unsafe { CFNumberGetTypeID() } {
+        return number_f64(ptr).map(|v| v as u32);
+    }
+    if type_id == unsafe { CFArrayGetTypeID() } {
+        // SAFETY: confirmed the value is a CFArray.
+        let array = unsafe { &*(ptr as *const CFArray) };
+        if array.count() == 0 {
+            return None;
+        }
+        // SAFETY: index 0 is in bounds (count checked above); borrowed pointer.
+        let first = unsafe { array.value_at_index(0) };
+        return number_f64(first).map(|v| v as u32);
+    }
+    None
 }
 
 /// The image's EXIF orientation tag (`1..=8`), or `1` when absent/unreadable.

@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use crate::develop::Adjustments;
+use crate::image_decode;
 use crate::navigation::Cmp;
 use crate::app::{App, CropEdge, Region, ViewMode};
 use crate::burst::BurstMark;
@@ -73,6 +74,10 @@ pub enum UiAction {
     SetFilterCmp(Cmp),
     /// Rate the current selection/shown image (0 clears).
     SetRating(u8),
+    /// Mouse-wheel scroll over the loupe filmstrip: step through photos.
+    /// Carries the raw per-frame wheel delta (egui convention: positive =
+    /// scroll up/left), accumulated in `App` across frames into whole steps.
+    ScrollFilmstrip(f32),
     /// Toggle best-of-burst detection (badges + dimming). Ignored while a star
     /// filter is active.
     ToggleBursts,
@@ -801,6 +806,22 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
                 let cell_full = cell + ui.spacing().item_spacing.x;
                 let len = app.visible_len();
 
+                // A horizontal-only ScrollArea doesn't respond to a plain
+                // vertical mouse wheel in egui (only to a trackpad's
+                // horizontal swipe, or an explicit shift+scroll) — so on a
+                // vanilla mouse, wheeling over the filmstrip would otherwise
+                // do nothing. Read the vertical delta here, before the
+                // ScrollArea below (it never touches the y axis, so this
+                // doesn't fight it), and step through photos instead —
+                // that's the more useful reading of "scroll over the
+                // filmstrip" anyway.
+                if ui.rect_contains_pointer(ui.max_rect()) {
+                    let dy = ui.input(|i| i.smooth_scroll_delta.y);
+                    if dy != 0.0 {
+                        out.actions.push(UiAction::ScrollFilmstrip(dy));
+                    }
+                }
+
                 // Virtualized horizontal strip (egui has no `show_columns`, so do
                 // the grid's `show_rows` trick by hand): build only the cells in
                 // view and report the range so loading tracks the scroll position.
@@ -831,6 +852,15 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
             });
     }
 
+    // Info bar: exposure/filename/date on the left+center, live star rating on
+    // the right. A docked panel like the filmstrip (reserved space, not drawn
+    // over the image), added right after the filmstrip so it sits directly
+    // above it — or at the very bottom of the window when the filmstrip is
+    // hidden, so it's always "below the image" either way.
+    if app.metadata_panel_visible() {
+        draw_loupe_info_bar(ui, app, out);
+    }
+
     // Right-hand develop panel (Temp/Tint/Exposure/… sliders + histogram). Drawn
     // before the central rect is read so it reserves its width first — otherwise
     // the wgpu image viewport would overlap the panel.
@@ -853,10 +883,6 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     } else if app.compare() {
         // Before/after: a center divider and corner labels over the split image.
         loupe_compare_overlay(ui, central);
-    } else {
-        // Star overlay in its own foreground Area, so egui owns clicks on the stars
-        // (only there) without claiming the rest of the image area.
-        loupe_star_overlay(ui, app, central, out);
     }
 }
 
@@ -883,6 +909,200 @@ fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
         egui::Align2::RIGHT_TOP,
         "After",
     );
+}
+
+/// The bar below the image (docked, reserved space — not an overlay): a
+/// two-row info readout plus the live star-rating control, Lightroom
+/// toolbar-style. Main row: exposure (left), filename + rating grouped and
+/// centered. Secondary row: camera+lens and capture date, right-aligned
+/// (less important than the filename/rating, so pushed out of the center).
+/// Fields absent from the file's EXIF (screenshots, re-exports) are simply
+/// omitted; the bar itself, filename, and rating control always render
+/// regardless.
+fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let bar_h = 54.0;
+    egui::Panel::bottom("loupe_info_bar")
+        .exact_size(bar_h)
+        .show_inside(ui, |ui| {
+            let rect = ui.max_rect();
+            let meta = app.current_metadata();
+
+            let exposure = meta.map(exposure_text).unwrap_or_default();
+            let secondary = meta.map(secondary_text).unwrap_or_default();
+            let filename = app
+                .selected_path()
+                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                .unwrap_or_default();
+
+            let painter = ui.painter();
+            let main_font = egui::FontId::proportional(13.0);
+            let sub_font = egui::FontId::proportional(11.0);
+            let text_color = egui::Color32::from_gray(220);
+            let dim_color = egui::Color32::from_gray(140);
+            let main_y = rect.top() + bar_h * 0.36;
+            let sub_y = rect.top() + bar_h * 0.72;
+            let pad = 14.0;
+
+            if !exposure.is_empty() {
+                painter.text(
+                    egui::pos2(rect.left() + pad, main_y),
+                    egui::Align2::LEFT_CENTER,
+                    &exposure,
+                    main_font.clone(),
+                    text_color,
+                );
+            }
+            if !secondary.is_empty() {
+                painter.text(
+                    egui::pos2(rect.right() - pad, sub_y),
+                    egui::Align2::RIGHT_CENTER,
+                    &secondary,
+                    sub_font,
+                    dim_color,
+                );
+            }
+
+            // Filename + star rating are grouped and centered together as a
+            // single unit — measure the filename first so the stars can sit
+            // immediately to its right while the pair as a whole stays centered.
+            let star_w = 20.0;
+            let stars_total_w = star_w * 5.0;
+            let group_gap = 10.0;
+            let filename_w = if filename.is_empty() {
+                0.0
+            } else {
+                painter
+                    .layout_no_wrap(filename.clone(), main_font.clone(), text_color)
+                    .size()
+                    .x
+            };
+            let group_w = filename_w
+                + if filename.is_empty() { 0.0 } else { group_gap }
+                + stars_total_w;
+            let group_left = rect.center().x - group_w / 2.0;
+
+            if !filename.is_empty() {
+                painter.text(
+                    egui::pos2(group_left, main_y),
+                    egui::Align2::LEFT_CENTER,
+                    &filename,
+                    main_font,
+                    text_color,
+                );
+            }
+
+            // Star rating: a plain child Ui pinned next to the filename. No
+            // Area/Foreground trick needed here (unlike the old floating
+            // overlay) — this bar is docked space, not drawn over the pannable
+            // image, so egui already owns clicks within it.
+            let stars_left = group_left
+                + filename_w
+                + if filename.is_empty() { 0.0 } else { group_gap };
+            let stars_rect = egui::Rect::from_center_size(
+                egui::pos2(stars_left + stars_total_w / 2.0, main_y),
+                egui::vec2(stars_total_w, star_w),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(stars_rect), |ui| {
+                ui.horizontal_centered(|ui| {
+                    let current = app.selected_rating();
+                    for i in 0..5u8 {
+                        let (r, resp) =
+                            ui.allocate_exact_size(egui::vec2(star_w, star_w), egui::Sense::click());
+                        let filled = (i + 1) <= current;
+                        let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
+                        let color = if filled { theme::STAR_GOLD } else { egui::Color32::from_gray(160) };
+                        ui.painter().text(
+                            r.center(),
+                            egui::Align2::CENTER_CENTER,
+                            glyph,
+                            egui::FontId::proportional(18.0),
+                            color,
+                        );
+                        if resp.clicked() {
+                            let n = i + 1;
+                            // Clicking the current rating clears it (Lightroom behavior).
+                            let stars = if n == current { 0 } else { n };
+                            out.actions.push(UiAction::SetRating(stars));
+                        }
+                    }
+                });
+            });
+        });
+}
+
+/// The exposure string for the info bar's left section: `f/2.8  ISO 200
+/// 1/125s  55mm` — aperture, ISO, shutter, focal length, in that order.
+/// Fields absent from the file's EXIF are simply omitted.
+fn exposure_text(meta: &image_decode::ImageMetadata) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(f) = meta.f_number {
+        parts.push(format!("f/{f:.1}"));
+    }
+    if let Some(iso) = meta.iso {
+        parts.push(format!("ISO {iso}"));
+    }
+    if let Some(t) = meta.exposure_time {
+        parts.push(format_shutter(t));
+    }
+    if let Some(fl) = meta.focal_length {
+        parts.push(format!("{}mm", fl.round() as i64));
+    }
+    parts.join("  ")
+}
+
+/// The secondary line for the info bar: camera + lens, then capture date.
+fn secondary_text(meta: &image_decode::ImageMetadata) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let camera = match (&meta.camera_make, &meta.camera_model) {
+        (Some(make), Some(model)) if model.starts_with(make.as_str()) => Some(model.clone()),
+        (Some(make), Some(model)) => Some(format!("{make} {model}")),
+        (None, Some(model)) => Some(model.clone()),
+        (Some(make), None) => Some(make.clone()),
+        (None, None) => None,
+    };
+    match (camera, &meta.lens_model) {
+        (Some(cam), Some(lens)) => parts.push(format!("{cam} \u{b7} {lens}")),
+        (Some(cam), None) => parts.push(cam),
+        (None, Some(lens)) => parts.push(lens.clone()),
+        (None, None) => {}
+    }
+    if let Some(d) = meta.capture_date {
+        parts.push(format_capture_date(d.year, d.month, d.day, d.hour, d.minute));
+    }
+    parts.join("   \u{b7}   ")
+}
+
+/// Format a shutter speed in seconds as EXIF conventionally displays it: a
+/// fraction for sub-second exposures, whole/one-decimal seconds otherwise.
+fn format_shutter(seconds: f64) -> String {
+    if seconds <= 0.0 {
+        return String::new();
+    }
+    if seconds < 1.0 {
+        format!("1/{:.0}s", (1.0 / seconds).round())
+    } else if (seconds - seconds.round()).abs() < 0.05 {
+        format!("{seconds:.0}s")
+    } else {
+        format!("{seconds:.1}s")
+    }
+}
+
+/// Format an EXIF capture date/time for display: `"Jul 14, 2026 3:42 PM"`.
+fn format_capture_date(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let mon = MONTHS
+        .get(month.wrapping_sub(1) as usize)
+        .copied()
+        .unwrap_or("");
+    let (h12, ampm) = match hour {
+        0 => (12, "AM"),
+        1..=11 => (hour, "AM"),
+        12 => (12, "PM"),
+        _ => (hour - 12, "PM"),
+    };
+    format!("{mon} {day}, {year} {h12}:{minute:02} {ampm}")
 }
 
 /// The crop-mode overlay: a dimmed mask outside the crop rectangle, a bright
@@ -1235,50 +1455,6 @@ fn draw_histogram(ui: &mut egui::Ui, app: &App) {
     }
 }
 
-/// Clickable 0–5 star rating overlay near the top of the loupe image.
-/// Clicking the Nth star sets rating N; clicking the current rating clears it.
-fn loupe_star_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
-    let current = app.selected_rating();
-    let star_w = 26.0;
-    let total_w = star_w * 5.0;
-    let left = central.center().x - total_w / 2.0;
-    let top = central.top() + 10.0;
-
-    // A foreground Area: egui claims pointer input over the stars (so a click
-    // rates instead of starting a pan) but nowhere else in the image.
-    egui::Area::new(egui::Id::new("loupe_stars"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(egui::pos2(left, top))
-        .show(ui.ctx(), |ui| {
-            ui.horizontal(|ui| {
-                for i in 0..5u8 {
-                    let (rect, resp) = ui
-                        .allocate_exact_size(egui::vec2(star_w, star_w), egui::Sense::click());
-                    let filled = (i + 1) <= current;
-                    let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
-                    let color = if filled {
-                        theme::STAR_GOLD
-                    } else {
-                        egui::Color32::from_gray(160)
-                    };
-                    ui.painter().text(
-                        rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        glyph,
-                        egui::FontId::proportional(22.0),
-                        color,
-                    );
-                    if resp.clicked() {
-                        let n = i + 1;
-                        // Clicking the current rating clears it (Lightroom behavior).
-                        let stars = if n == current { 0 } else { n };
-                        out.actions.push(UiAction::SetRating(stars));
-                    }
-                }
-            });
-        });
-}
-
 /// One filmstrip cell. Returns the response so the caller can auto-scroll.
 fn filmstrip_cell(
     ui: &mut egui::Ui,
@@ -1295,4 +1471,33 @@ fn filmstrip_cell(
         out.actions.push(UiAction::Focus(Region::Filmstrip));
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_shutter_sub_second_is_a_fraction() {
+        assert_eq!(format_shutter(1.0 / 250.0), "1/250s");
+        assert_eq!(format_shutter(1.0 / 60.0), "1/60s");
+    }
+
+    #[test]
+    fn format_shutter_whole_seconds_has_no_decimal() {
+        assert_eq!(format_shutter(2.0), "2s");
+        assert_eq!(format_shutter(10.0), "10s");
+    }
+
+    #[test]
+    fn format_shutter_fractional_seconds_keeps_one_decimal() {
+        assert_eq!(format_shutter(1.6), "1.6s");
+    }
+
+    #[test]
+    fn format_capture_date_formats_month_day_year_and_12h_clock() {
+        assert_eq!(format_capture_date(2026, 7, 14, 15, 42), "Jul 14, 2026 3:42 PM");
+        assert_eq!(format_capture_date(2026, 1, 1, 0, 5), "Jan 1, 2026 12:05 AM");
+        assert_eq!(format_capture_date(2026, 1, 1, 12, 0), "Jan 1, 2026 12:00 PM");
+    }
 }

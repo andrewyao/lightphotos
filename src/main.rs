@@ -246,12 +246,16 @@ impl ApplicationHandler<UserEvent> for App {
 
         // Drain all loader tiers once per frame.
         if let Some(loader) = &mut self.loader {
-            let (full, thumbs, metas) = loader.poll_all();
-            let any = !full.is_empty() || !thumbs.is_empty() || !metas.is_empty();
+            let (full, thumbs, metas, exifs) = loader.poll_all();
+            let any =
+                !full.is_empty() || !thumbs.is_empty() || !metas.is_empty() || !exifs.is_empty();
             // Note: `loader`'s borrow ends at `poll_all` above (NLL), so these
             // `&mut self` calls are allowed even though `loader` is still in scope.
             if !metas.is_empty() {
                 self.on_capture_times(metas);
+            }
+            if !exifs.is_empty() {
+                self.on_exif_info(exifs);
             }
             if !thumbs.is_empty() {
                 self.score_arrived_thumbs(&thumbs);
