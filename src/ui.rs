@@ -102,6 +102,12 @@ pub enum UiAction {
     ResetAdjustments,
     /// Give keyboard focus to this region (e.g. the user clicked into its panel).
     Focus(Region),
+    /// Clicked toolbar control at this index: give the Toolbar keyboard focus,
+    /// with the cursor on this control (see `toolbar_focus_sync`).
+    FocusToolbar(usize),
+    /// Clicked/dragged this Develop slider: give the Develop panel keyboard
+    /// focus, with the cursor on this slider.
+    FocusDevelop(usize),
 }
 
 /// A bulk action requested from the toolbar, run against the current
@@ -177,16 +183,43 @@ fn star_string(stars: u8) -> String {
     out
 }
 
+/// Draw the amber keyboard-cursor outline on `resp` if it's the Toolbar's
+/// `idx`-th keyboard-focusable control, and sync keyboard focus to it on
+/// click — mirrors the folder-tree cursor (`folder_node`) and Develop slider
+/// (`slider`) patterns. Index order here must match `App::activate_toolbar_focus`.
+fn toolbar_focus_sync(ui: &egui::Ui, app: &App, idx: usize, resp: &egui::Response, out: &mut FrameOutput) {
+    if app.focus() == Region::Toolbar && app.toolbar_focus() == idx {
+        ui.painter().rect_stroke(
+            resp.rect.expand(2.0),
+            2.0,
+            egui::Stroke::new(2.0f32, theme::CURSOR_AMBER),
+            egui::StrokeKind::Outside,
+        );
+    }
+    if resp.clicked() {
+        out.actions.push(UiAction::FocusToolbar(idx));
+    }
+}
+
 /// The always-visible global toolbar, drawn once above both modes. Currently
 /// hosts the rating filter (`All` + 5 stars → show photos rated ≥ N).
 fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::Panel::top("global_toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
+            // Index of the keyboard-focusable control being drawn, bumped after
+            // each one — the Phase-1 stable set only (see `activate_toolbar_focus`);
+            // the histogram bars and selection-dependent bulk actions below aren't
+            // in the keyboard cycle yet since their count varies frame to frame.
+            let mut idx = 0usize;
+
             ui.label("Filter:");
             // `All` clears the filter; selected only when no filter is set.
-            if ui.selectable_label(app.filter().is_none(), "All").clicked() {
+            let resp = ui.selectable_label(app.filter().is_none(), "All");
+            if resp.clicked() {
                 out.actions.push(UiAction::SetFilter(None));
             }
+            toolbar_focus_sync(ui, app, idx, &resp, out);
+            idx += 1;
             ui.separator();
             // Comparator selector: the mode (≥ / = / ≤) applied to the star
             // clicked next. Sticky, so it's highlighted even with no filter set.
@@ -196,13 +229,12 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 (Cmp::Eq, "=", "Exactly N stars"),
                 (Cmp::Lte, "\u{2264}", "At most N stars"),
             ] {
-                if ui
-                    .selectable_label(sel_cmp == cmp, glyph)
-                    .on_hover_text(tip)
-                    .clicked()
-                {
+                let resp = ui.selectable_label(sel_cmp == cmp, glyph).on_hover_text(tip);
+                if resp.clicked() {
                     out.actions.push(UiAction::SetFilterCmp(cmp));
                 }
+                toolbar_focus_sync(ui, app, idx, &resp, out);
+                idx += 1;
             }
             ui.separator();
             // The active star-level filter (a 1..=5 threshold), if any. Drives
@@ -233,43 +265,43 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     egui::RichText::new(glyph).size(20.0).color(color),
                 )
                 .sense(egui::Sense::click());
-                if ui
-                    .add(star)
-                    .on_hover_text(format!("Show photos rated {cmp_sym} {n}"))
-                    .clicked()
-                {
+                let resp = ui.add(star).on_hover_text(format!("Show photos rated {cmp_sym} {n}"));
+                if resp.clicked() {
                     out.actions.push(UiAction::SetFilter(Some((sel_cmp, n))));
                 }
+                toolbar_focus_sync(ui, app, idx, &resp, out);
+                idx += 1;
             }
             ui.separator();
             // Show only unstarred photos (rating == 0), mutually exclusive with ≥N.
             let unrated = matches!(app.filter(), Some((Cmp::Eq, 0)));
-            if ui
+            let resp = ui
                 .selectable_label(unrated, "Unrated")
-                .on_hover_text("Show only photos with no rating")
-                .clicked()
-            {
+                .on_hover_text("Show only photos with no rating");
+            if resp.clicked() {
                 // Toggle off back to All when it's already active.
                 let next = if unrated { None } else { Some((Cmp::Eq, 0)) };
                 out.actions.push(UiAction::SetFilter(next));
             }
+            toolbar_focus_sync(ui, app, idx, &resp, out);
+            idx += 1;
 
             // Best-of-burst toggle. Disabled while a filter is active (bursts
             // need the whole, unfiltered folder to be meaningful).
             ui.separator();
             let filter_active = app.filter().is_some();
-            let resp = ui.add_enabled(
-                !filter_active,
-                egui::Button::selectable(app.bursts_on(), "Bursts"),
-            );
+            let resp = ui
+                .add_enabled(!filter_active, egui::Button::selectable(app.bursts_on(), "Bursts"))
+                .on_hover_text(if filter_active {
+                    "Clear the filter to use Bursts"
+                } else {
+                    "Group bursts and badge the sharpest frame (B)"
+                });
             if resp.clicked() {
                 out.actions.push(UiAction::ToggleBursts);
             }
-            resp.on_hover_text(if filter_active {
-                "Clear the filter to use Bursts"
-            } else {
-                "Group bursts and badge the sharpest frame (B)"
-            });
+            toolbar_focus_sync(ui, app, idx, &resp, out);
+            idx += 1;
 
             // Rating-distribution histogram (folder-wide), clickable to filter.
             ui.separator();
@@ -277,13 +309,12 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 
             // `?` opens the keyboard-shortcut help.
             ui.separator();
-            if ui
-                .button("?")
-                .on_hover_text("Keyboard shortcuts (?)")
-                .clicked()
-            {
+            let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
+            if resp.clicked() {
                 out.actions.push(UiAction::ToggleHelp);
             }
+            toolbar_focus_sync(ui, app, idx, &resp, out);
+            idx += 1;
 
             // Show which photo's develop settings are on the clipboard, if any.
             if let Some(name) = app.copied_settings_name() {
@@ -347,22 +378,23 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 
             // Loupe / Grid mode toggle, pinned to the far right. In a
             // right-to-left layout the first widget is the rightmost, so add
-            // `G` first to read "E  G" left-to-right.
+            // `G` first to read "E  G" left-to-right. Added in this order, `G`
+            // naturally lands at `idx` (-> EnterGrid) and `E` at `idx + 1` (->
+            // EnterLoupe), matching `activate_toolbar_focus`.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .selectable_label(app.mode() == ViewMode::Grid, "G")
-                    .on_hover_text("Grid (G)")
-                    .clicked()
-                {
+                let resp = ui.selectable_label(app.mode() == ViewMode::Grid, "G").on_hover_text("Grid (G)");
+                if resp.clicked() {
                     out.actions.push(UiAction::EnterGrid);
                 }
-                if ui
+                toolbar_focus_sync(ui, app, idx, &resp, out);
+
+                let resp = ui
                     .selectable_label(app.mode() == ViewMode::Loupe, "E")
-                    .on_hover_text("Loupe / edit (E)")
-                    .clicked()
-                {
+                    .on_hover_text("Loupe / edit (E)");
+                if resp.clicked() {
                     out.actions.push(UiAction::EnterLoupe);
                 }
+                toolbar_focus_sync(ui, app, idx + 1, &resp, out);
             });
         });
     });
@@ -469,13 +501,21 @@ fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         return;
     }
     const SHORTCUTS: &[(&str, &str)] = &[
-        ("Arrow keys", "Navigate photos"),
+        ("F6 / Shift+F6", "Cycle keyboard focus between regions"),
+        (
+            "Tab / Shift+Tab",
+            "From the folder tree, jump to the grid's first image; in the grid, step to the next/previous image",
+        ),
+        ("Arrow keys", "Navigate/adjust the focused region's content"),
         ("Shift + arrows", "Extend selection (grid)"),
         ("Cmd + A", "Select all"),
         ("Click / Cmd-click / Shift-click", "Select / toggle / range"),
-        ("Enter", "Open photo / expand folder"),
+        ("Enter", "Enter the focused region / open photo / expand folder"),
         ("E / G", "Loupe / Grid"),
-        ("Esc", "Back to grid / quit"),
+        (
+            "Esc",
+            "Back out one focus level, then quit-confirm; in Loupe, back to Grid; from the grid, back to the folder tree",
+        ),
         ("1 \u{2013} 5 / 0", "Rate / clear rating"),
         ("Shift + 1 \u{2013} 5", "Filter \u{2265} N stars"),
         ("C", "Crop"),
@@ -592,6 +632,7 @@ fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
 /// One folder row in the tree: an indent, a clickable disclosure glyph, and a
 /// selectable folder name. Recurses into expanded folders' cached children.
 fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mut FrameOutput) {
+    let selected = app.folder_sel().as_deref() == Some(path);
     let row = ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 14.0);
         // The disclosure glyph and name are a single selectable unit: one click
@@ -601,7 +642,6 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
-        let selected = app.folder_sel().as_deref() == Some(path);
         if ui
             .selectable_label(selected, format!("{glyph}  {name}"))
             .clicked()
@@ -610,9 +650,10 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
         }
     });
 
-    // Keyboard cursor: an amber outline around the row, distinct from the blue
-    // mouse selection. Only shown while the folder tree holds keyboard focus.
-    if app.focus() == Region::Folders && app.folder_cursor().as_deref() == Some(path) {
+    // Keyboard-focus outline around the selected row (single-select tree, so
+    // this is the same folder as the blue selection above). Only shown while
+    // the folder tree holds keyboard focus.
+    if app.focus() == Region::Folders && selected {
         ui.painter().rect_stroke(
             row.response.rect,
             2.0,
@@ -1304,10 +1345,11 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             ui.separator();
 
             // True once any slider in this frame changed, so we push exactly one
-            // SetAdjustments after rendering the whole group. `interacted` tracks
-            // mouse clicks/drags so we can move keyboard focus to the panel.
+            // SetAdjustments after rendering the whole group. `interacted_idx`
+            // tracks which slider (if any) had a mouse click/drag this frame, so
+            // the keyboard cursor follows the mouse to that exact slider.
             let mut changed = false;
-            let mut interacted = false;
+            let mut interacted_idx: Option<usize> = None;
             // Index of the slider being drawn, matched against `develop_focus` to
             // draw the keyboard-cursor outline. Advanced by every `slider(...)`.
             let mut idx = 0usize;
@@ -1363,7 +1405,9 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 ($label:expr, $field:expr, $range:expr, $dec:expr) => {{
                     let (c, i) = slider(ui, $label, $field, $range, $dec, focus_idx == Some(idx));
                     changed |= c;
-                    interacted |= i;
+                    if i {
+                        interacted_idx = Some(idx);
+                    }
                     idx += 1;
                 }};
             }
@@ -1405,8 +1449,8 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             if changed {
                 out.actions.push(UiAction::SetAdjustments(adj));
             }
-            if interacted {
-                out.actions.push(UiAction::Focus(Region::Develop));
+            if let Some(idx) = interacted_idx {
+                out.actions.push(UiAction::FocusDevelop(idx));
             }
         });
 }

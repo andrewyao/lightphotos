@@ -131,9 +131,12 @@ impl ApplicationHandler<UserEvent> for App {
         if consumed {
             // Exception: arrow keys keep driving navigation even when a develop
             // slider still holds egui's keyboard focus (egui reports the key as
-            // consumed for as long as the slider stays focused). Let them fall
-            // through unless a slider is actively being dragged or we're cropping.
-            let arrow_nav = matches!(
+            // consumed for as long as the slider stays focused), and Tab is
+            // always reported as consumed by egui_winit regardless of focus (its
+            // own hardcoded widget-focus traversal — see the Tab-stripping
+            // comment in `App::redraw`). Let both fall through unless a slider is
+            // actively being dragged or we're cropping.
+            let nav_key = matches!(
                 event,
                 WindowEvent::KeyboardInput {
                     event: winit::event::KeyEvent {
@@ -143,13 +146,14 @@ impl ApplicationHandler<UserEvent> for App {
                                 | KeyCode::ArrowRight
                                 | KeyCode::ArrowUp
                                 | KeyCode::ArrowDown
+                                | KeyCode::Tab
                         ),
                         ..
                     },
                     ..
                 }
-            ) && self.arrow_should_fall_through();
-            if !arrow_nav {
+            ) && self.nav_key_should_fall_through();
+            if !nav_key {
                 return;
             }
         }

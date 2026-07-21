@@ -93,17 +93,37 @@ const FULL_CROP: Crop = Crop { left: 0.0, top: 0.0, right: 1.0, bottom: 1.0 };
 /// Smallest crop edge separation, in normalized units, so the rect never collapses.
 const MIN_CROP: f32 = 0.02;
 
-/// The UI region that currently receives arrow/Enter keys. Following
-/// Lightroom, this is *not* moved by Tab (Tab hides/shows panels); it's driven
-/// by the mouse (clicking into a panel) and by the module (Grid vs Loupe). The
+/// The UI region that currently receives arrow/Enter keys. `F6`/`Shift+F6`
+/// cycle through `REGION_ORDER`, wrapping and skipping regions that aren't
+/// currently available; clicking into a panel also moves focus there. The
 /// content region of each mode — `Grid` / `Filmstrip` — is always available and
 /// is the fallback when focus lands on a region that isn't currently shown.
+/// (Not `Tab`: egui_winit hardcodes every Tab press as always-consumed to run
+/// its own competing widget-focus traversal — see the Tab-stripping comment
+/// in `redraw` — so region-cycling deliberately lives on F6 instead.)
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Region {
+    Toolbar,
     Folders,
     Grid,
     Filmstrip,
     Develop,
+}
+
+/// F6's cycling order (wraps). Toolbar leads since it's reachable regardless
+/// of mode, mirroring its position as the topmost chrome on screen.
+const REGION_ORDER: [Region; 5] =
+    [Region::Toolbar, Region::Folders, Region::Grid, Region::Filmstrip, Region::Develop];
+
+/// A region's keyboard focus is either just "selected" (F6 landed here; F6
+/// again moves to the next region) or "entered" (a specific item/control has
+/// the cursor; F6, where meaningful, moves within it instead). Entering
+/// happens via `Enter` or, for regions with content, automatically on the
+/// first arrow press — Escape pops back to `Selected`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FocusLevel {
+    Selected,
+    Entered,
 }
 
 /// What the loupe currently has uploaded to the GPU. The decode *target* is
@@ -294,7 +314,11 @@ pub(crate) struct App {
     // ---- Folder-tree sidebar state ----
     /// Top of the tree (the opened folder, or an opened file's parent).
     folder_root: Option<PathBuf>,
-    /// The folder whose images are shown in the grid (highlighted in the tree).
+    /// The folder whose images are shown in the grid. Doubles as the folder
+    /// tree's keyboard cursor: like a standard single-select tree (Finder's
+    /// list view, VS Code's explorer), there's no separate "browse without
+    /// loading" state — arrow-key movement in the tree selects and loads a
+    /// folder in the same step.
     folder_sel: Option<PathBuf>,
     /// Folders currently expanded in the tree.
     expanded: HashSet<PathBuf>,
@@ -302,19 +326,16 @@ pub(crate) struct App {
     subdirs: HashMap<PathBuf, Vec<PathBuf>>,
 
     // ---- Keyboard focus state ----
-    /// Which UI region currently receives arrow/Enter keys. Set by clicks and
-    /// module changes (Lightroom-style), never by Tab.
+    /// Which UI region currently receives arrow/Enter keys. Set by clicks, F6
+    /// cycling, and module changes.
     focus: Region,
-    /// Tab hides the side panels (folders left, develop right).
-    side_panels_hidden: bool,
-    /// Shift+Tab hides all panels (side panels + filmstrip).
-    all_panels_hidden: bool,
-    /// Keyboard cursor in the folder tree (the highlighted-for-navigation row),
-    /// distinct from `folder_sel` (the folder whose images are loaded). A
-    /// `PathBuf` so it survives the tree re-flattening on expand/collapse.
-    folder_cursor: Option<PathBuf>,
+    /// Whether `focus` is just "selected" (F6 landed here) or "entered" (a
+    /// specific item/control has the cursor). See [`FocusLevel`].
+    focus_level: FocusLevel,
     /// Index of the keyboard-focused Develop slider (0..=7, panel order).
     develop_focus: usize,
+    /// Index of the keyboard-focused Toolbar control (panel order).
+    toolbar_focus: usize,
 
     // ---- Input state ----
     pub(crate) cursor: (f64, f64),
@@ -390,10 +411,9 @@ impl App {
             expanded: HashSet::new(),
             subdirs: HashMap::new(),
             focus: Region::Grid,
-            side_panels_hidden: false,
-            all_panels_hidden: false,
-            folder_cursor: None,
+            focus_level: FocusLevel::Selected,
             develop_focus: 0,
+            toolbar_focus: 0,
             cursor: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
             space_down: false,
@@ -735,6 +755,24 @@ impl App {
         self.request_redraw();
     }
 
+    /// Move keyboard focus into the Grid and put the cursor on its first image —
+    /// the Lightroom-style "jump into this folder's photos, starting at the
+    /// top". Used when Tab or Enter fires from the Folders region. Always
+    /// resets to the first image (not just when nothing was selected), so a
+    /// stale selection from a prior visit doesn't linger. Selection is skipped
+    /// on an empty grid, but focus still moves so Escape can jump back to
+    /// Folders.
+    fn focus_grid_first(&mut self) {
+        self.focus = Region::Grid;
+        self.focus_level = FocusLevel::Selected;
+        self.on_focus_changed();
+        if !self.visible.is_empty() {
+            self.sel = Some(0);
+            self.collapse_selection();
+        }
+        self.request_redraw();
+    }
+
     /// Enter Loupe on the current selection. A no-op in the grid when nothing is
     /// selected (the `selected_path` guard below).
     fn enter_loupe(&mut self) {
@@ -764,30 +802,31 @@ impl App {
 
     /// Whether the left folder-tree panel is currently shown.
     pub(crate) fn folders_visible(&self) -> bool {
-        !self.side_panels_hidden && !self.all_panels_hidden
+        true
     }
 
     /// Whether the right Develop panel is currently shown (Loupe only).
     pub(crate) fn develop_visible(&self) -> bool {
-        self.develop_open && !self.side_panels_hidden && !self.all_panels_hidden
+        self.develop_open
     }
 
     /// Whether the bottom filmstrip is currently shown (Loupe only).
     pub(crate) fn filmstrip_visible(&self) -> bool {
-        !self.all_panels_hidden
+        true
     }
 
     /// Whether the Loupe metadata panel is currently shown.
     pub(crate) fn metadata_panel_visible(&self) -> bool {
-        !self.all_panels_hidden
+        true
     }
 
     /// Whether a region can receive keyboard focus right now. The content regions
     /// (`Grid` in the grid, `Filmstrip` in the loupe) are always available — their
     /// arrows act on the images even when the strip panel is hidden. Side regions
-    /// are available only while their panel is shown.
+    /// are available only while their panel is shown. Toolbar is always available.
     fn region_available(&self, r: Region) -> bool {
         match r {
+            Region::Toolbar => true,
             Region::Grid => self.mode == ViewMode::Grid,
             Region::Filmstrip => self.mode == ViewMode::Loupe,
             Region::Folders => self.folders_visible(),
@@ -798,6 +837,7 @@ impl App {
     /// Snap focus to a valid region when the current one isn't available (after a
     /// mode switch, or when its panel was hidden). Defaults to the mode's content
     /// region — Grid or Filmstrip — so focus lands on the images, not a sidebar.
+    /// An unavailable region can't stay "entered", so this also resets the level.
     fn normalize_focus(&mut self) {
         if self.region_available(self.focus) {
             return;
@@ -806,29 +846,51 @@ impl App {
             ViewMode::Grid => Region::Grid,
             ViewMode::Loupe => Region::Filmstrip,
         };
+        self.focus_level = FocusLevel::Selected;
         self.on_focus_changed();
     }
 
-    /// Tab: hide/show the side panels (folders + develop), Lightroom-style.
-    fn toggle_side_panels(&mut self) {
-        self.side_panels_hidden = !self.side_panels_hidden;
-        self.normalize_focus();
-        self.request_redraw();
+    /// Move `focus` to the next (or, if `backward`, previous) region in
+    /// `REGION_ORDER`, wrapping and skipping unavailable regions. Always lands
+    /// at `Selected` — F6 backs out of whatever was entered in the old region.
+    fn cycle_region(&mut self, backward: bool) {
+        let n = REGION_ORDER.len();
+        let cur = REGION_ORDER.iter().position(|&r| r == self.focus).unwrap_or(0);
+        let mut i = cur;
+        for _ in 0..n {
+            i = if backward { (i + n - 1) % n } else { (i + 1) % n };
+            let r = REGION_ORDER[i];
+            if self.region_available(r) {
+                self.focus = r;
+                self.focus_level = FocusLevel::Selected;
+                self.on_focus_changed();
+                self.request_redraw();
+                return;
+            }
+        }
     }
 
-    /// Shift+Tab: hide/show all panels (side panels + filmstrip).
-    fn toggle_all_panels(&mut self) {
-        self.all_panels_hidden = !self.all_panels_hidden;
-        self.normalize_focus();
-        self.request_redraw();
+    /// F6 while a region is entered. Only Toolbar has a control cursor to
+    /// move at this level — other regions' content navigation is already
+    /// fully covered by arrows, so F6 there falls through to `cycle_region`
+    /// like it would from `Selected`, instead of being swallowed.
+    fn cycle_control(&mut self, backward: bool) {
+        if self.focus == Region::Toolbar {
+            self.toolbar_move(if backward { -1 } else { 1 });
+            return;
+        }
+        self.cycle_region(backward);
     }
 
-    /// Hook run whenever focus changes region. Seeds the folder cursor when focus
-    /// lands on the tree, and resets the Develop cursor to the first slider.
+    /// Hook run whenever focus changes region (or is re-entered at the same
+    /// region). Resets the Develop/Toolbar cursor to the first slider/control
+    /// (Folders needs no seeding — `folder_sel` doubles as its cursor and is
+    /// always valid, since only interactive navigation changes it and that
+    /// keeps ancestors expanded/visible as it goes).
     fn on_focus_changed(&mut self) {
         match self.focus {
-            Region::Folders => self.seed_folder_cursor(),
             Region::Develop => self.develop_focus = 0,
+            Region::Toolbar => self.toolbar_focus = 0,
             _ => {}
         }
     }
@@ -844,90 +906,74 @@ impl App {
         flatten_visible_tree(&root, &is_expanded, &children)
     }
 
-    /// Ensure the folder cursor points at a currently-visible row, preferring the
-    /// loaded folder and falling back to the tree root.
-    fn seed_folder_cursor(&mut self) {
-        let tree = self.visible_tree();
-        let valid = self
-            .folder_cursor
-            .as_ref()
-            .map(|c| tree.iter().any(|p| p == c))
-            .unwrap_or(false);
-        if valid {
-            return;
-        }
-        self.folder_cursor = self
-            .folder_sel
-            .clone()
-            .filter(|s| tree.iter().any(|p| p == s))
-            .or_else(|| self.folder_root.clone());
-    }
-
-    /// Move the folder cursor by `delta` rows within the visible tree (clamped).
+    /// Up/Down in the tree: move the selection by `delta` rows within the
+    /// visible tree (clamped) and load the newly-selected folder, matching a
+    /// standard single-select tree — there's no separate cursor to move
+    /// without also loading.
     fn folder_move(&mut self, delta: isize) {
         let tree = self.visible_tree();
         if tree.is_empty() {
             return;
         }
         let cur = self
-            .folder_cursor
+            .folder_sel
             .as_ref()
             .and_then(|c| tree.iter().position(|p| p == c))
             .unwrap_or(0);
         let next = (cur as isize + delta).clamp(0, tree.len() as isize - 1) as usize;
-        self.folder_cursor = Some(tree[next].clone());
-        self.request_redraw();
+        if self.folder_sel.as_deref() != Some(tree[next].as_path()) {
+            self.load_folder(tree[next].clone());
+        }
     }
 
-    /// Right-arrow in the tree: expand the cursor folder, or descend into its
+    /// Right-arrow in the tree: expand the selected folder, or select+load its
     /// first child if already expanded. A no-op on a childless folder.
     fn folder_expand(&mut self) {
-        let Some(cursor) = self.folder_cursor.clone() else {
+        let Some(cur) = self.folder_sel.clone() else {
             return;
         };
-        self.ensure_subdirs(&cursor);
-        if self.subdirs(&cursor).is_empty() {
+        self.ensure_subdirs(&cur);
+        if self.subdirs(&cur).is_empty() {
             return; // leaf
         }
-        if self.expanded.contains(&cursor) {
-            if let Some(first) = self.subdirs(&cursor).first().cloned() {
-                self.folder_cursor = Some(first);
+        if self.expanded.contains(&cur) {
+            if let Some(first) = self.subdirs(&cur).first().cloned() {
+                self.load_folder(first);
             }
         } else {
-            self.expanded.insert(cursor);
+            self.expanded.insert(cur);
+            self.request_redraw();
         }
-        self.request_redraw();
     }
 
-    /// Left-arrow in the tree: collapse the cursor folder if open, else move the
-    /// cursor up to its parent (stopping at the root).
+    /// Left-arrow in the tree: collapse the selected folder if open, else
+    /// select+load its parent (stopping at the root).
     fn folder_collapse(&mut self) {
-        let Some(cursor) = self.folder_cursor.clone() else {
+        let Some(cur) = self.folder_sel.clone() else {
             return;
         };
-        if self.expanded.contains(&cursor) {
-            self.expanded.remove(&cursor);
-        } else if Some(cursor.as_path()) != self.folder_root.as_deref() {
-            if let Some(parent) = cursor.parent() {
-                self.folder_cursor = Some(parent.to_path_buf());
+        if self.expanded.contains(&cur) {
+            self.expanded.remove(&cur);
+            self.request_redraw();
+        } else if Some(cur.as_path()) != self.folder_root.as_deref() {
+            if let Some(parent) = cur.parent() {
+                self.load_folder(parent.to_path_buf());
             }
         }
-        self.request_redraw();
     }
 
-    /// Enter in the tree: toggle the cursor folder's expansion (when it has
-    /// children) and load its images into the grid.
+    /// Enter in the tree: toggle the selected folder's expansion (when it has
+    /// children) and switch to the Grid.
     fn folder_enter(&mut self) {
-        let Some(cursor) = self.folder_cursor.clone() else {
+        let Some(sel) = self.folder_sel.clone() else {
             return;
         };
-        self.open_folder(cursor);
+        self.open_folder(sel);
     }
 
-    /// Open a folder as one unit: toggle its expansion (when it has children),
-    /// load its images into the grid, and move the keyboard cursor onto it.
-    /// Shared by the folder-row click and the Enter key so mouse and keyboard
-    /// behave identically.
+    /// Open a folder as one unit: toggle its expansion (when it has children)
+    /// and load its images into the grid. Shared by the folder-row click and
+    /// the Enter key so mouse and keyboard behave identically.
     fn open_folder(&mut self, path: PathBuf) {
         self.ensure_subdirs(&path);
         if !self.subdirs(&path).is_empty() {
@@ -937,7 +983,6 @@ impl App {
                 self.expanded.insert(path.clone());
             }
         }
-        self.folder_cursor = Some(path.clone());
         self.load_folder(path);
         self.mode = ViewMode::Grid;
         self.update_window_title();
@@ -953,6 +998,7 @@ impl App {
             Region::Grid => self.move_grid(-1, 0),
             Region::Filmstrip => self.step_loupe(false),
             Region::Develop => self.develop_adjust(-1),
+            Region::Toolbar => self.toolbar_move(-1),
         }
     }
 
@@ -962,6 +1008,7 @@ impl App {
             Region::Grid => self.move_grid(1, 0),
             Region::Filmstrip => self.step_loupe(true),
             Region::Develop => self.develop_adjust(1),
+            Region::Toolbar => self.toolbar_move(1),
         }
     }
 
@@ -971,6 +1018,7 @@ impl App {
             Region::Grid => self.move_grid(0, -1),
             Region::Filmstrip => self.step_loupe(false),
             Region::Develop => self.develop_move(-1),
+            Region::Toolbar => self.toolbar_move(-1),
         }
     }
 
@@ -980,22 +1028,58 @@ impl App {
             Region::Grid => self.move_grid(0, 1),
             Region::Filmstrip => self.step_loupe(true),
             Region::Develop => self.develop_move(1),
+            Region::Toolbar => self.toolbar_move(1),
         }
     }
 
+    /// Enter: perform the focused region's content-level action. For Toolbar
+    /// and Develop, which have no single always-right action besides "enter",
+    /// the first Enter at `Selected` just enters (cursor to the first control);
+    /// a second Enter on Toolbar activates the focused control (Develop has
+    /// nothing further to do there — arrows already adjust the slider).
     fn nav_enter(&mut self) {
         match self.focus {
-            Region::Folders => self.folder_enter(),
-            Region::Grid => self.enter_loupe(),
-            // Filmstrip / Develop: Enter has no distinct action.
-            _ => {}
+            Region::Folders => {
+                self.folder_enter();
+                if self.mode == ViewMode::Grid {
+                    self.focus_grid_first();
+                }
+            }
+            Region::Grid | Region::Filmstrip => {
+                self.enter_loupe();
+                if self.mode == ViewMode::Loupe {
+                    self.focus = Region::Develop;
+                    self.focus_level = FocusLevel::Entered;
+                    self.on_focus_changed(); // seeds develop_focus = 0
+                    self.request_redraw();
+                }
+            }
+            Region::Toolbar => {
+                if self.focus_level == FocusLevel::Selected {
+                    self.focus_level = FocusLevel::Entered;
+                    self.on_focus_changed(); // seeds toolbar_focus = 0
+                    self.request_redraw();
+                } else {
+                    self.activate_toolbar_focus();
+                }
+            }
+            Region::Develop => {
+                if self.focus_level == FocusLevel::Selected {
+                    self.focus_level = FocusLevel::Entered;
+                    self.on_focus_changed(); // seeds develop_focus = 0
+                    self.request_redraw();
+                }
+            }
         }
     }
 
     /// Route an arrow key. With Shift held in the grid it extends the range
     /// selection; otherwise it's the normal focus-routed move. `(dx, dy)` maps to
-    /// left/right/up/down.
+    /// left/right/up/down. Arrows always act on the region's content regardless
+    /// of focus level — a first press on a freshly F6-selected region both
+    /// enters it and performs the move in one step.
     fn nav_arrow(&mut self, dx: isize, dy: isize, shift: bool) {
+        self.focus_level = FocusLevel::Entered;
         if shift && self.focus == Region::Grid {
             self.extend_grid(dx, dy);
             return;
@@ -1013,6 +1097,53 @@ impl App {
         let max = DEVELOP_SLIDERS as isize - 1;
         self.develop_focus = (self.develop_focus as isize + delta).clamp(0, max) as usize;
         self.request_redraw();
+    }
+
+    /// Number of keyboard-focusable Toolbar controls (Phase 1: the stable set
+    /// that always renders — see `toolbar_focus_sync` in `ui.rs`, which must
+    /// stay in lockstep with this count and with `activate_toolbar_focus`'s
+    /// index mapping. Rating-histogram bars and the selection-dependent bulk
+    /// actions aren't included yet since their count varies frame to frame.
+    const TOOLBAR_CONTROLS: usize = 14;
+
+    fn toolbar_control_count(&self) -> usize {
+        Self::TOOLBAR_CONTROLS
+    }
+
+    /// Move the Toolbar control cursor by `delta`, wrapping.
+    fn toolbar_move(&mut self, delta: isize) {
+        let n = self.toolbar_control_count() as isize;
+        if n == 0 {
+            return;
+        }
+        self.toolbar_focus = (self.toolbar_focus as isize + delta).rem_euclid(n) as usize;
+        self.request_redraw();
+    }
+
+    /// Activate the keyboard-focused Toolbar control — the same action its
+    /// click handler would push, so keyboard and mouse converge on one path.
+    /// Index order must match `toolbar_focus_sync`'s call sites in `ui.rs`.
+    fn activate_toolbar_focus(&mut self) {
+        let action = match self.toolbar_focus {
+            0 => ui::UiAction::SetFilter(None),
+            1 => ui::UiAction::SetFilterCmp(Cmp::Gte),
+            2 => ui::UiAction::SetFilterCmp(Cmp::Eq),
+            3 => ui::UiAction::SetFilterCmp(Cmp::Lte),
+            n @ 4..=8 => {
+                let star = (n - 4 + 1) as u8;
+                ui::UiAction::SetFilter(Some((self.filter_cmp, star)))
+            }
+            9 => {
+                let unrated = matches!(self.filter, Some((Cmp::Eq, 0)));
+                ui::UiAction::SetFilter(if unrated { None } else { Some((Cmp::Eq, 0)) })
+            }
+            10 => ui::UiAction::ToggleBursts,
+            11 => ui::UiAction::ToggleHelp,
+            12 => ui::UiAction::EnterGrid,
+            13 => ui::UiAction::EnterLoupe,
+            _ => return,
+        };
+        self.apply_ui_actions(vec![action]);
     }
 
     /// Nudge the focused Develop slider's value (`dir` = -1/+1) by one step and
@@ -2394,7 +2525,7 @@ impl App {
         // Kick off a background metadata read for the Loupe info panel when the
         // current image isn't cached yet. The loader dedups in-flight requests,
         // so this is cheap to call every frame until the result lands.
-        if self.mode == ViewMode::Loupe && !self.all_panels_hidden {
+        if self.mode == ViewMode::Loupe {
             if let Some(path) = self.selected_path() {
                 if !self.exif_cache.contains_key(&path) {
                     if let Some(loader) = &mut self.loader {
@@ -2413,7 +2544,17 @@ impl App {
             return;
         };
 
-        let raw_input = state.take_egui_input(&*window);
+        let mut raw_input = state.take_egui_input(&*window);
+        // Tab is deliberately unbound in this app (region-cycling is on F6
+        // instead, precisely to avoid this) — but egui still has its own
+        // built-in Tab-driven widget-focus traversal, which would otherwise
+        // move its own internal focus and draw its own focus-ring outline on
+        // a stray Tab press for no reason. This app has no `TextEdit` or
+        // other widget that wants egui's own Tab handling, so just drop the
+        // event before egui ever sees it.
+        raw_input
+            .events
+            .retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Tab, .. }));
 
         // Run the UI, collecting the central image rect (Loupe) and any actions.
         let mut out = ui::FrameOutput::default();
@@ -2578,12 +2719,26 @@ impl App {
                     // The folder row is one unit: clicking it focuses the tree,
                     // loads the folder, and toggles its expansion — same as Enter.
                     self.focus = Region::Folders;
+                    self.focus_level = FocusLevel::Entered;
                     self.open_folder(p);
                 }
                 ui::UiAction::Focus(region) => {
                     self.focus = region;
+                    self.focus_level = FocusLevel::Entered;
                     self.normalize_focus();
                     self.on_focus_changed();
+                    self.request_redraw();
+                }
+                ui::UiAction::FocusToolbar(idx) => {
+                    self.focus = Region::Toolbar;
+                    self.focus_level = FocusLevel::Entered;
+                    self.toolbar_focus = idx;
+                    self.request_redraw();
+                }
+                ui::UiAction::FocusDevelop(idx) => {
+                    self.focus = Region::Develop;
+                    self.focus_level = FocusLevel::Entered;
+                    self.develop_focus = idx;
                     self.request_redraw();
                 }
                 ui::UiAction::CropGrab(edge) => self.crop_grab(edge),
@@ -2617,15 +2772,14 @@ impl App {
         self.focus
     }
 
-    /// The folder-tree keyboard cursor (the row navigation highlights), distinct
-    /// from `folder_sel` (the loaded folder).
-    pub(crate) fn folder_cursor(&self) -> Option<PathBuf> {
-        self.folder_cursor.clone()
-    }
-
     /// The index of the keyboard-focused Develop slider (0..=7).
     pub(crate) fn develop_focus(&self) -> usize {
         self.develop_focus
+    }
+
+    /// The index of the keyboard-focused Toolbar control.
+    pub(crate) fn toolbar_focus(&self) -> usize {
+        self.toolbar_focus
     }
 
     /// The root of the folder tree (the opened folder, or a file's parent).
@@ -2800,13 +2954,15 @@ impl App {
 }
 
 impl App {
-    /// Whether an arrow key that egui reported as "consumed" should still reach
-    /// the app's own navigation. egui keeps keyboard focus on a develop `Slider`
-    /// after the user drags it, and then flags every subsequent arrow key as
-    /// consumed — which silently kills image navigation until the slider loses
-    /// focus. We let arrows fall through unless a slider is being *actively*
-    /// dragged right now (`is_using_pointer`) or a crop is in progress.
-    pub(crate) fn arrow_should_fall_through(&self) -> bool {
+    /// Whether an arrow key or Tab that egui reported as "consumed" should still
+    /// reach the app's own navigation. egui keeps keyboard focus on a develop
+    /// `Slider` after the user drags it, and then flags every subsequent arrow
+    /// key as consumed — which silently kills image navigation until the slider
+    /// loses focus; egui_winit separately hardcodes every Tab press as consumed
+    /// regardless of focus (see the Tab-stripping comment in `redraw`). We let
+    /// both fall through unless a slider is being *actively* dragged right now
+    /// (`is_using_pointer`) or a crop is in progress.
+    pub(crate) fn nav_key_should_fall_through(&self) -> bool {
         self.crop_edit.is_none() && !self.egui_ctx.egui_is_using_pointer()
     }
 
@@ -2890,14 +3046,36 @@ impl App {
             KeyCode::BracketLeft if cmd && self.mode == ViewMode::Loupe => self.rotate(false),
             KeyCode::BracketRight if cmd && self.mode == ViewMode::Loupe => self.rotate(true),
 
-            // Tab hides/shows the side panels; Shift+Tab hides/shows all panels
-            // (Lightroom-style). Focus is never moved by Tab.
-            KeyCode::Tab => {
-                if shift {
-                    self.toggle_all_panels();
-                } else {
-                    self.toggle_side_panels();
-                }
+            // F6 cycles keyboard focus across regions (Toolbar, Folders, Grid,
+            // Filmstrip, Develop) when a region is merely "selected"; once a
+            // region is "entered", F6 instead moves within it (Toolbar's
+            // control cursor — other entered regions have nothing for F6 to
+            // do there, since arrows already cover their content). Deliberately
+            // not Tab for this general cycling: egui_winit hardcodes every Tab
+            // press as `consumed` to run its own competing Tab-driven
+            // widget-focus traversal (see the Tab-stripping comment in
+            // `redraw`), so Tab can't cleanly carry a general region-cycling
+            // gesture without fighting egui internally. Tab does have two
+            // narrow, explicit bindings below (Folders -> Grid, and stepping
+            // within an already-focused Grid), let through via
+            // `nav_key_should_fall_through` in `main.rs`.
+            KeyCode::F6 => match self.focus_level {
+                FocusLevel::Selected => self.cycle_region(shift),
+                FocusLevel::Entered => self.cycle_control(shift),
+            },
+            // Tab jumps from the folder tree straight into the grid, landing on
+            // the first image (Lightroom-style "get me to the photos"),
+            // mirrored by Escape below to jump back. Grid must actually be
+            // showing for this to make sense.
+            KeyCode::Tab if self.focus == Region::Folders && self.mode == ViewMode::Grid => {
+                self.focus_grid_first();
+            }
+            // Tab/Shift+Tab step through the grid one image at a time while
+            // it's already focused, mirroring Right/Left arrow (same clamped,
+            // non-wrapping step) rather than the folder-tree jump above.
+            KeyCode::Tab if self.focus == Region::Grid => {
+                self.focus_level = FocusLevel::Entered;
+                self.move_grid(if shift { -1 } else { 1 }, 0);
             }
 
             KeyCode::KeyG => self.enter_grid(),
@@ -2924,19 +3102,33 @@ impl App {
             }
             // `Y` toggles the before/after compare view (Loupe only).
             KeyCode::KeyY if self.mode == ViewMode::Loupe && !cmd => self.toggle_compare(),
-            KeyCode::Escape => match self.mode {
-                ViewMode::Loupe => {
+            // Escape: mode-level first (Loupe always drops back to Grid,
+            // regardless of region/level — this is the old Loupe->Grid
+            // shortcut, now taking priority over the focus-level rules below).
+            // Next, the Grid-specific rule mirroring the Tab binding above: with
+            // Grid focused and merely "selected" (nothing left for the generic
+            // pop-rule to do), Escape sends focus back to the folder tree.
+            // Otherwise it's the generic focus-level rule: pop an entered region
+            // back to merely selected, or — already just selected, nothing left
+            // to pop — ask to quit.
+            KeyCode::Escape => {
+                if self.mode == ViewMode::Loupe {
                     self.mode = ViewMode::Grid;
                     self.update_window_title();
                     self.normalize_focus();
-                    self.request_redraw();
-                }
-                // Grid: don't quit outright — ask for confirmation first.
-                ViewMode::Grid => {
+                } else if self.focus == Region::Grid
+                    && self.focus_level == FocusLevel::Selected
+                {
+                    self.focus = Region::Folders;
+                    self.focus_level = FocusLevel::Selected;
+                    self.on_focus_changed();
+                } else if self.focus_level == FocusLevel::Entered {
+                    self.focus_level = FocusLevel::Selected;
+                } else {
                     self.pending_quit = true;
-                    self.request_redraw();
                 }
-            },
+                self.request_redraw();
+            }
 
             // Cmd+A selects every visible cell in the grid.
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
