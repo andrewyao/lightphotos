@@ -112,7 +112,16 @@ impl ApplicationHandler<UserEvent> for App {
             (self.window.clone(), self.egui_state.as_mut())
         {
             let response = state.on_window_event(&*window, &event);
-            if response.repaint {
+            // egui_winit reports `repaint: true` for `RedrawRequested` itself
+            // (it's in its "things that may require repaint" bucket alongside
+            // Resized/Moved/etc.) — forwarding that into another
+            // `request_redraw()` would re-arm the very redraw we're about to
+            // perform in the `RedrawRequested` arm below, forever, regardless
+            // of whether anything actually changed. Every other event in that
+            // bucket legitimately means "something happened, please repaint";
+            // this one alone must be excluded or `ControlFlow::Wait` never
+            // actually gets to wait.
+            if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
                 window.request_redraw();
             }
             response.consumed
