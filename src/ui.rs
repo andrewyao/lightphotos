@@ -15,7 +15,7 @@ use std::path::Path;
 use crate::develop::Adjustments;
 use crate::image_decode;
 use crate::navigation::Cmp;
-use crate::app::{App, CropEdge, Region, ViewMode};
+use crate::app::{App, CropEdge, FocusLevel, Region, ViewMode};
 use crate::burst::BurstMark;
 
 /// Shared palette. Several of these colors were previously duplicated as inline
@@ -188,7 +188,10 @@ fn star_string(stars: u8) -> String {
 /// click — mirrors the folder-tree cursor (`folder_node`) and Develop slider
 /// (`slider`) patterns. Index order here must match `App::activate_toolbar_focus`.
 fn toolbar_focus_sync(ui: &egui::Ui, app: &App, idx: usize, resp: &egui::Response, out: &mut FrameOutput) {
-    if app.focus() == Region::Toolbar && app.toolbar_focus() == idx {
+    if app.focus() == Region::Toolbar
+        && app.focus_level() == FocusLevel::Entered
+        && app.toolbar_focus() == idx
+    {
         ui.painter().rect_stroke(
             resp.rect.expand(2.0),
             2.0,
@@ -198,6 +201,19 @@ fn toolbar_focus_sync(ui: &egui::Ui, app: &App, idx: usize, resp: &egui::Respons
     }
     if resp.clicked() {
         out.actions.push(UiAction::FocusToolbar(idx));
+    }
+}
+
+/// Draw the region-level focus marker used when F6 has selected a panel but no
+/// individual control within it has been entered yet.
+fn region_focus_marker(ui: &egui::Ui, app: &App, region: Region) {
+    if app.focus() == region && app.focus_level() == FocusLevel::Selected {
+        ui.painter().rect_stroke(
+            ui.min_rect().expand(1.0),
+            2.0,
+            egui::Stroke::new(1.0f32, theme::CURSOR_AMBER),
+            egui::StrokeKind::Outside,
+        );
     }
 }
 
@@ -396,6 +412,8 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 }
                 toolbar_focus_sync(ui, app, idx + 1, &resp, out);
             });
+
+            region_focus_marker(ui, app, Region::Toolbar);
         });
     });
 }
@@ -1353,7 +1371,9 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             // Index of the slider being drawn, matched against `develop_focus` to
             // draw the keyboard-cursor outline. Advanced by every `slider(...)`.
             let mut idx = 0usize;
-            let focus_idx = if app.focus() == Region::Develop {
+            let focus_idx = if app.focus() == Region::Develop
+                && app.focus_level() == FocusLevel::Entered
+            {
                 Some(app.develop_focus())
             } else {
                 None
@@ -1452,6 +1472,8 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             if let Some(idx) = interacted_idx {
                 out.actions.push(UiAction::FocusDevelop(idx));
             }
+
+            region_focus_marker(ui, app, Region::Develop);
         });
 }
 

@@ -442,6 +442,7 @@ impl App {
             self.ensure_subdirs(&path);
             self.load_folder(path);
             self.mode = ViewMode::Grid;
+            self.normalize_focus();
             self.request_redraw();
         } else {
             // File → Loupe (unchanged flow), but populate the tree from the
@@ -463,6 +464,7 @@ impl App {
             self.sel = Some(self.visible.iter().position(|&i| i == start_index).unwrap_or(0));
             self.collapse_selection();
             self.mode = ViewMode::Loupe;
+            self.normalize_focus();
             self.load_selected();
             self.request_neighbors();
             self.request_redraw();
@@ -2772,6 +2774,12 @@ impl App {
         self.focus
     }
 
+    /// The focus depth used by the UI to distinguish a selected region from an
+    /// entered control within that region.
+    pub(crate) fn focus_level(&self) -> FocusLevel {
+        self.focus_level
+    }
+
     /// The index of the keyboard-focused Develop slider (0..=7).
     pub(crate) fn develop_focus(&self) -> usize {
         self.develop_focus
@@ -3073,7 +3081,7 @@ impl App {
             // Tab/Shift+Tab step through the grid one image at a time while
             // it's already focused, mirroring Right/Left arrow (same clamped,
             // non-wrapping step) rather than the folder-tree jump above.
-            KeyCode::Tab if self.focus == Region::Grid => {
+            KeyCode::Tab if self.focus == Region::Grid && self.mode == ViewMode::Grid => {
                 self.focus_level = FocusLevel::Entered;
                 self.move_grid(if shift { -1 } else { 1 }, 0);
             }
@@ -3229,4 +3237,3 @@ mod tests {
         assert_eq!(remap_positions(&selected_pl, &new_visible), set(&[]));
     }
 }
-
