@@ -40,8 +40,9 @@ const THUMB_DEFAULT: u32 = 192;
 const THUMB_STEP: u32 = 32;
 
 /// Number of Develop sliders the keyboard cycles through (panel order: temp,
-/// tint, exposure, contrast, highlights, shadows, whites, blacks).
-const DEVELOP_SLIDERS: usize = 9;
+/// tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance,
+/// saturation, denoise).
+const DEVELOP_SLIDERS: usize = 11;
 
 /// Two top-level views: a thumbnail Grid and a single-image Loupe.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -254,6 +255,10 @@ pub(crate) struct App {
     loupe_viewport: Option<(u32, u32, u32, u32)>,
     /// Transient crop-mode state; `Some` while the user is editing a crop.
     crop_edit: Option<CropDraft>,
+    /// True while the White Balance gray-picker is armed: the next click on
+    /// the Loupe image samples that pixel and solves temp/tint to neutralize
+    /// it, then clears back to `false`.
+    wb_picker: bool,
     /// Before/after compare mode (Loupe only): the image is drawn twice, the
     /// left half with identity tone (but crop + rotation), the right with the
     /// full develop edits.
@@ -370,6 +375,7 @@ impl App {
             rotations: HashMap::new(),
             loupe_viewport: None,
             crop_edit: None,
+            wb_picker: false,
             compare: false,
             exif_cache: HashMap::new(),
             pending_bulk: None,
@@ -1025,6 +1031,8 @@ impl App {
                 5 => (&mut adj.shadows, develop::TONE_RANGE, 1.0),
                 6 => (&mut adj.whites, develop::TONE_RANGE, 1.0),
                 7 => (&mut adj.blacks, develop::TONE_RANGE, 1.0),
+                8 => (&mut adj.vibrance, develop::TONE_RANGE, 1.0),
+                9 => (&mut adj.saturation, develop::TONE_RANGE, 1.0),
                 _ => (&mut adj.denoise, develop::DENOISE_RANGE, 1.0),
             };
         *field = (*field + sign * step).clamp(*range.start(), *range.end());
@@ -1615,6 +1623,47 @@ impl App {
     fn crop_release(&mut self) {
         if let Some(d) = self.crop_edit.as_mut() {
             d.grab = None;
+        }
+    }
+
+    // ---- White Balance picker ----
+
+    /// True while the next Loupe click samples a pixel for white balance.
+    pub(crate) fn wb_picker_active(&self) -> bool {
+        self.wb_picker
+    }
+
+    /// Toggle the WB picker on/off. Clicking the "Pick Gray" button again
+    /// while it's armed cancels it without sampling anything.
+    fn toggle_wb_picker(&mut self) {
+        self.wb_picker = !self.wb_picker;
+        self.request_redraw();
+    }
+
+    /// Sample the shown image's histogram grid at texture UV `(u, v)` and, if
+    /// the pixel isn't too dark to solve reliably, set temp/tint so it
+    /// becomes neutral gray. Always exits picker mode, even on a failed pick,
+    /// so a stray click can't strand the user in picker mode.
+    fn pick_white_balance(&mut self, u: f32, v: f32) {
+        self.wb_picker = false;
+        self.request_redraw();
+        if self.hist_dw == 0 || self.hist_dh == 0 {
+            self.set_status("No image loaded to pick from".into());
+            return;
+        }
+        let gx = ((u * self.hist_dw as f32) as usize).min(self.hist_dw - 1);
+        let gy = ((v * self.hist_dh as f32) as usize).min(self.hist_dh - 1);
+        let px = self.hist_sample[gy * self.hist_dw + gx];
+        match develop::neutralize_gray(px) {
+            Some((temp, tint)) => {
+                let mut adj = self.current_adjustments();
+                adj.temp = temp;
+                adj.tint = tint;
+                self.apply_adjustments(adj);
+            }
+            None => {
+                self.set_status("Pick a brighter, less saturated pixel for white balance".into());
+            }
         }
     }
 
@@ -2541,6 +2590,8 @@ impl App {
                 ui::UiAction::CropGrabMove(u, v) => self.crop_grab_move(u, v),
                 ui::UiAction::CropDragTo(u, v) => self.crop_drag_to(u, v),
                 ui::UiAction::CropRelease => self.crop_release(),
+                ui::UiAction::ToggleWbPicker => self.toggle_wb_picker(),
+                ui::UiAction::PickWhiteBalance(u, v) => self.pick_white_balance(u, v),
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
                 ui::UiAction::ResetAdjustments => {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else { continue };
@@ -2774,6 +2825,16 @@ impl App {
                 KeyCode::Escape => self.cancel_crop(),
                 KeyCode::KeyX if !cmd && !alt => self.export_selected(),
                 _ => {}
+            }
+            return;
+        }
+
+        // While the WB picker is armed, only Escape does anything (cancels
+        // it); everything else is inert until a pixel is clicked.
+        if self.wb_picker {
+            if code == KeyCode::Escape {
+                self.wb_picker = false;
+                self.request_redraw();
             }
             return;
         }

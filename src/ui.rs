@@ -91,6 +91,11 @@ pub enum UiAction {
     CropDragTo(f32, f32),
     /// Release the active crop drag (drag ended).
     CropRelease,
+    /// Arm/disarm the White Balance gray-picker: while armed, the next Loupe
+    /// click samples that pixel and solves temp/tint to neutralize it.
+    ToggleWbPicker,
+    /// The WB picker's armed click landed at this normalized texture coordinate.
+    PickWhiteBalance(f32, f32),
     /// Set the develop adjustments for the current loupe image.
     SetAdjustments(Adjustments),
     /// Reset the current loupe image's develop adjustments to identity.
@@ -880,10 +885,38 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     if app.crop_rect().is_some() {
         // Crop mode: the crop overlay owns the whole central area (mask + edges).
         loupe_crop_overlay(ui, app, central, out);
+    } else if app.wb_picker_active() {
+        // WB picker: a click-catcher over the whole central area.
+        loupe_wb_picker_overlay(ui, app, central, out);
     } else if app.compare() {
         // Before/after: a center divider and corner labels over the split image.
         loupe_compare_overlay(ui, central);
     }
+}
+
+/// The White Balance gray-picker overlay: a transparent click-catcher over the
+/// whole central rect, shown only while `App::wb_picker_active()` is true. A
+/// click samples that pixel (via `UiAction::PickWhiteBalance`) and the app
+/// disarms picker mode in response, so this overlay stops being drawn.
+fn loupe_wb_picker_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
+    egui::Area::new(egui::Id::new("loupe_wb_picker"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(central.min)
+        .show(ui.ctx(), |ui| {
+            let (_id, resp) = ui.allocate_exact_size(central.size(), egui::Sense::click());
+            let painter = ui.painter_at(central);
+            // A faint tint over the whole frame makes "picker mode is on" obvious.
+            painter.rect_filled(central, 0.0, egui::Color32::from_white_alpha(10));
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+            if resp.clicked() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let (u, v) = app.loupe_screen_to_tex(central, p);
+                    out.actions.push(UiAction::PickWhiteBalance(u, v));
+                }
+            }
+        });
 }
 
 /// The before/after overlay: a vertical divider down the middle of the central
@@ -1335,7 +1368,18 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 }};
             }
 
-            ui.label(egui::RichText::new("White Balance").strong());
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("White Balance").strong());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .selectable_label(app.wb_picker_active(), "Pick Gray")
+                        .on_hover_text("Click a neutral-gray pixel in the image")
+                        .clicked()
+                    {
+                        out.actions.push(UiAction::ToggleWbPicker);
+                    }
+                });
+            });
             row!("Temp", &mut adj.temp, crate::develop::TONE_RANGE, 0);
             row!("Tint", &mut adj.tint, crate::develop::TONE_RANGE, 0);
             ui.add_space(6.0);
@@ -1347,6 +1391,11 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             row!("Shadows", &mut adj.shadows, crate::develop::TONE_RANGE, 0);
             row!("Whites", &mut adj.whites, crate::develop::TONE_RANGE, 0);
             row!("Blacks", &mut adj.blacks, crate::develop::TONE_RANGE, 0);
+            ui.add_space(6.0);
+
+            ui.label(egui::RichText::new("Presence").strong());
+            row!("Vibrance", &mut adj.vibrance, crate::develop::TONE_RANGE, 0);
+            row!("Saturation", &mut adj.saturation, crate::develop::TONE_RANGE, 0);
             ui.add_space(6.0);
 
             ui.label(egui::RichText::new("Detail").strong());

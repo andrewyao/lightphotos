@@ -28,9 +28,13 @@ struct Adjust {
     crop_r: f32,
     crop_b: f32,
     denoise: f32,
+    vibrance: f32,
+    saturation: f32,
     texel_w: f32,
     texel_h: f32,
     _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
 };
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
@@ -189,6 +193,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     r = tone(r);
     g = tone(g);
     b = tone(b);
+
+    // 4.5. Vibrance/saturation: a cross-channel chroma scale about luma, in
+    // gamma space. MUST stay in sync with the equivalent block in
+    // apply_linear in develop.rs.
+    let luma = 0.299 * r + 0.587 * g + 0.114 * b;
+    let satTotal = 1.0 + adj.saturation / 100.0;
+    let cmax = max(r, max(g, b));
+    let cmin = min(r, min(g, b));
+    var curSat = 0.0;
+    if (cmax > 0.0) {
+        curSat = (cmax - cmin) / cmax;
+    }
+    let vibFactor = 1.0 + adj.vibrance / 100.0 * (1.0 - curSat);
+    let total = satTotal * vibFactor;
+    r = luma + (r - luma) * total;
+    g = luma + (g - luma) * total;
+    b = luma + (b - luma) * total;
 
     // 5. Working → linear.
     r = pow(max(r, 0.0), 2.2);

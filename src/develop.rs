@@ -66,6 +66,13 @@ pub struct Adjustments {
     /// Blacks endpoint, −100..=100.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub blacks: f32,
+    /// Vibrance: adaptive saturation, weighted toward less-saturated pixels
+    /// (protects skin tones / already-vivid colors), −100..=100.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub vibrance: f32,
+    /// Saturation: uniform chroma scale, −100 (grayscale) ..=100 (max).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub saturation: f32,
     /// Edge-aware denoise strength, 0 (off) ..=100.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub denoise: f32,
@@ -104,10 +111,10 @@ pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
 
     let mut h = Fnv1a::new();
 
-    // Tone: nine sliders (−100..=100, −5..=5, or 0..=100), quantized to 1e-3.
+    // Tone: eleven sliders (−100..=100, −5..=5, or 0..=100), quantized to 1e-3.
     let tone = [
         adj.temp, adj.tint, adj.exposure, adj.contrast, adj.highlights, adj.shadows,
-        adj.whites, adj.blacks, adj.denoise,
+        adj.whites, adj.blacks, adj.vibrance, adj.saturation, adj.denoise,
     ];
     for v in tone {
         h.write(&((v * 1000.0).round() as i32).to_le_bytes());
@@ -136,12 +143,12 @@ pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
 
 /// Packed uniform mirror of [`Adjustments`], uploaded to the fragment shader.
 ///
-/// 16 × f32 = 64 bytes; uniform buffers require 16-byte alignment, so keep the
+/// 20 × f32 = 80 bytes; uniform buffers require 16-byte alignment, so keep the
 /// field count a multiple of 4 if you ever add fields. `texel_w`/`texel_h` are
 /// not mirrored from any `Adjustments` field — they're the shown image's
 /// per-texel UV size (1/width, 1/height), filled in by `App::gpu_adjust` so
-/// the shader's denoise taps can offset by whole texels. `_pad0` is unused,
-/// just alignment filler.
+/// the shader's denoise taps can offset by whole texels. `_pad0`/`_pad1` are
+/// unused, just alignment filler.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuAdjust {
@@ -158,9 +165,13 @@ pub struct GpuAdjust {
     pub crop_r: f32,
     pub crop_b: f32,
     pub denoise: f32,
+    pub vibrance: f32,
+    pub saturation: f32,
     pub texel_w: f32,
     pub texel_h: f32,
     pub _pad0: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
 }
 
 impl Default for GpuAdjust {
@@ -180,9 +191,13 @@ impl Default for GpuAdjust {
             crop_r: 1.0,
             crop_b: 1.0,
             denoise: 0.0,
+            vibrance: 0.0,
+            saturation: 0.0,
             texel_w: 1.0,
             texel_h: 1.0,
             _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
         }
     }
 }
@@ -210,6 +225,8 @@ impl From<&Adjustments> for GpuAdjust {
             crop_r,
             crop_b,
             denoise: a.denoise,
+            vibrance: a.vibrance,
+            saturation: a.saturation,
             ..Self::default()
         }
     }
@@ -293,6 +310,23 @@ pub fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
     gg = tone(gg);
     bg = tone(bg);
 
+    // 4.5. Vibrance/saturation: a cross-channel chroma scale about luma, in
+    // gamma (working) space. Saturation scales chroma uniformly; vibrance
+    // scales adaptively by the pixel's current saturation (mostly leaves
+    // already-vivid pixels alone, pushes near-gray ones harder), the usual
+    // "protect skin tones" behavior. MUST stay in sync with the equivalent
+    // block in fs_main in shader.wgsl.
+    let luma = 0.299 * rg + 0.587 * gg + 0.114 * bg;
+    let sat_total = 1.0 + adj.saturation / 100.0;
+    let cmax = rg.max(gg).max(bg);
+    let cmin = rg.min(gg).min(bg);
+    let cur_sat = if cmax > 0.0 { (cmax - cmin) / cmax } else { 0.0 };
+    let vib_factor = 1.0 + adj.vibrance / 100.0 * (1.0 - cur_sat);
+    let total = sat_total * vib_factor;
+    rg = luma + (rg - luma) * total;
+    gg = luma + (gg - luma) * total;
+    bg = luma + (bg - luma) * total;
+
     // 5. Convert working → linear.
     let to_linear = |x: f32| x.max(0.0).powf(2.2);
     r = to_linear(rg);
@@ -301,6 +335,34 @@ pub fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
 
     // 6. Clamp final to 0..1.
     [r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0)]
+}
+
+/// Given a linear-light RGB pixel (as sampled straight from a decode, before
+/// any adjustments) that the user says should be neutral gray, solve for the
+/// `temp`/`tint` values that neutralize it — inverting the white-balance
+/// gains at the top of [`apply_linear`] (`r_gain = 1+0.3t`,
+/// `g_gain = 1-0.15ti`, `b_gain = 1-0.3t`):
+///
+/// ```text
+/// r*(1+0.3t)  = b*(1-0.3t)        =>  t  = (b - r) / (0.3*(r + b))
+/// r*(1+0.3t)  = g*(1-0.15*ti)     =>  ti = (1 - r*(1+0.3t)/g) / 0.15
+/// ```
+///
+/// Every later pipeline stage (exposure, contrast, highlights/shadows,
+/// whites/blacks) treats equal-valued channels identically — a uniform scale
+/// or the same per-channel function — so a pixel neutralized this way stays
+/// neutral through the rest of the pipeline regardless of the image's other
+/// current adjustments. Returns `None` for pixels too dark to solve
+/// reliably (near-zero denominators would otherwise blow up `t`/`ti`).
+pub fn neutralize_gray(rgb: [f32; 3]) -> Option<(f32, f32)> {
+    let [r, g, b] = rgb;
+    const EPS: f32 = 0.02;
+    if r + b < EPS || g < EPS {
+        return None;
+    }
+    let t = ((b - r) / (0.3 * (r + b))).clamp(-1.0, 1.0);
+    let ti = ((1.0 - r * (1.0 + 0.3 * t) / g) / 0.15).clamp(-1.0, 1.0);
+    Some((t * 100.0, ti * 100.0))
 }
 
 /// Neighbor radius (in taps) for [`denoise_sample`]'s fixed 5×5 kernel. Does
@@ -480,5 +542,77 @@ mod tests {
         assert_eq!(t.crop, None);
         assert_eq!(t.exposure, 1.5);
         assert_eq!(t.contrast, 20.0);
+    }
+
+    #[test]
+    fn vibrance_saturation_zero_is_identity() {
+        // At the default (all-zero) adjustments, `sat_total` and `vib_factor`
+        // both evaluate to 1.0, so the new 4.5 step is a no-op — the whole
+        // pipeline should round-trip a non-gray pixel back to itself (modulo
+        // gamma round-trip float error).
+        let adj = Adjustments::default();
+        let px = [0.6, 0.3, 0.2];
+        let out = apply_linear(&adj, px);
+        for i in 0..3 {
+            assert!((out[i] - px[i]).abs() < 1e-5, "channel {i}: {} vs {}", out[i], px[i]);
+        }
+    }
+
+    #[test]
+    fn saturation_pushes_channels_from_luma() {
+        let base = Adjustments::default();
+        let saturated = Adjustments { saturation: 80.0, ..Default::default() };
+        let px = [0.6, 0.4, 0.4];
+        let out_base = apply_linear(&base, px);
+        let out_sat = apply_linear(&saturated, px);
+        let spread = |o: [f32; 3]| (o[0] - o[1]).abs() + (o[1] - o[2]).abs() + (o[0] - o[2]).abs();
+        assert!(
+            spread(out_sat) > spread(out_base),
+            "expected more saturation to widen channel spread: base={out_base:?} sat={out_sat:?}"
+        );
+    }
+
+    #[test]
+    fn edit_signature_differs_on_vibrance_and_saturation() {
+        let a = Adjustments::default();
+        let v = Adjustments { vibrance: 30.0, ..Default::default() };
+        let s = Adjustments { saturation: 30.0, ..Default::default() };
+        assert_ne!(edit_signature(&a, 0), edit_signature(&v, 0));
+        assert_ne!(edit_signature(&a, 0), edit_signature(&s, 0));
+        assert_ne!(edit_signature(&v, 0), edit_signature(&s, 0));
+    }
+
+    #[test]
+    fn is_identity_false_when_vibrance_or_saturation_set() {
+        assert!(!Adjustments { vibrance: 1.0, ..Default::default() }.is_identity());
+        assert!(!Adjustments { saturation: 1.0, ..Default::default() }.is_identity());
+    }
+
+    #[test]
+    fn neutralize_gray_recovers_neutral() {
+        let (t, ti) = neutralize_gray([0.5, 0.5, 0.5]).expect("should solve");
+        assert!(t.abs() < 1e-3, "expected ~0 temp, got {t}");
+        assert!(ti.abs() < 1e-3, "expected ~0 tint, got {ti}");
+    }
+
+    #[test]
+    fn neutralize_gray_recovers_warm_cast() {
+        // A warm-cast pixel (more red, less blue than a neutral gray): solve
+        // for temp/tint, then re-run the raw white-balance gain formula
+        // (mirroring apply_linear's step 1) and confirm it lands on gray.
+        let px = [0.6, 0.5, 0.4];
+        let (t, ti) = neutralize_gray(px).expect("should solve");
+        let tt = t / 100.0;
+        let tit = ti / 100.0;
+        let r = px[0] * (1.0 + tt * 0.3);
+        let g = px[1] * (1.0 - tit * 0.15);
+        let b = px[2] * (1.0 - tt * 0.3);
+        assert!((r - g).abs() < 1e-4, "r={r} g={g}");
+        assert!((g - b).abs() < 1e-4, "g={g} b={b}");
+    }
+
+    #[test]
+    fn neutralize_gray_none_when_too_dark() {
+        assert_eq!(neutralize_gray([0.0, 0.0, 0.0]), None);
     }
 }
