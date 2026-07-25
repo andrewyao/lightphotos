@@ -108,26 +108,25 @@ impl ApplicationHandler<UserEvent> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         // Give egui first crack at the event. Consumed events (clicks/keys in an
         // egui widget) normally skip the app's own handling.
-        let consumed = if let (Some(window), Some(state)) =
-            (self.window.clone(), self.egui_state.as_mut())
-        {
-            let response = state.on_window_event(&*window, &event);
-            // egui_winit reports `repaint: true` for `RedrawRequested` itself
-            // (it's in its "things that may require repaint" bucket alongside
-            // Resized/Moved/etc.) — forwarding that into another
-            // `request_redraw()` would re-arm the very redraw we're about to
-            // perform in the `RedrawRequested` arm below, forever, regardless
-            // of whether anything actually changed. Every other event in that
-            // bucket legitimately means "something happened, please repaint";
-            // this one alone must be excluded or `ControlFlow::Wait` never
-            // actually gets to wait.
-            if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
-                window.request_redraw();
-            }
-            response.consumed
-        } else {
-            false
-        };
+        let consumed =
+            if let (Some(window), Some(state)) = (self.window.clone(), self.egui_state.as_mut()) {
+                let response = state.on_window_event(&*window, &event);
+                // egui_winit reports `repaint: true` for `RedrawRequested` itself
+                // (it's in its "things that may require repaint" bucket alongside
+                // Resized/Moved/etc.) — forwarding that into another
+                // `request_redraw()` would re-arm the very redraw we're about to
+                // perform in the `RedrawRequested` arm below, forever, regardless
+                // of whether anything actually changed. Every other event in that
+                // bucket legitimately means "something happened, please repaint";
+                // this one alone must be excluded or `ControlFlow::Wait` never
+                // actually gets to wait.
+                if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
+                    window.request_redraw();
+                }
+                response.consumed
+            } else {
+                false
+            };
         if consumed {
             // Exception: arrow keys keep driving navigation even when a develop
             // slider still holds egui's keyboard focus (egui reports the key as
@@ -204,7 +203,11 @@ impl ApplicationHandler<UserEvent> for App {
                 self.cursor = (position.x, position.y);
             }
 
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => match state {
                 ElementState::Pressed if self.space_down && self.mode == ViewMode::Loupe => {
                     self.dragging = true;
                     self.last_drag = self.cursor;
@@ -319,9 +322,10 @@ impl ApplicationHandler<UserEvent> for App {
 /// [`macos_delegate`]) — so the dev-CLI's "require an argument" rule doesn't
 /// apply to them.
 fn is_app_bundle() -> bool {
-    std::env::current_exe()
-        .ok()
-        .is_some_and(|exe| exe.components().any(|c| c.as_os_str().to_string_lossy().ends_with(".app")))
+    std::env::current_exe().ok().is_some_and(|exe| {
+        exe.components()
+            .any(|c| c.as_os_str().to_string_lossy().ends_with(".app"))
+    })
 }
 
 fn print_usage_and_exit() -> ! {

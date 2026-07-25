@@ -189,7 +189,9 @@ impl Loader {
                             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 image_decode::decode(&path, max_dim)
                             }))
-                            .unwrap_or_else(|_| Err(format!("decode panicked: {}", path.display())));
+                            .unwrap_or_else(|_| {
+                                Err(format!("decode panicked: {}", path.display()))
+                            });
                             JobResult::Full(path, r)
                         }
                         Job::Thumb(path, max_px) => {

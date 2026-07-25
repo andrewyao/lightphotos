@@ -89,7 +89,12 @@ pub struct CropDraft {
 }
 
 /// A full-frame crop rectangle (the identity crop).
-const FULL_CROP: Crop = Crop { left: 0.0, top: 0.0, right: 1.0, bottom: 1.0 };
+const FULL_CROP: Crop = Crop {
+    left: 0.0,
+    top: 0.0,
+    right: 1.0,
+    bottom: 1.0,
+};
 /// Smallest crop edge separation, in normalized units, so the rect never collapses.
 const MIN_CROP: f32 = 0.02;
 
@@ -438,7 +443,9 @@ impl App {
     /// on that file). Builds the playlist, seeds ratings, computes the visible
     /// view, and kicks off thumbnail/full requests.
     pub(crate) fn open(&mut self, path: PathBuf) {
-        let is_dir = std::fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false);
+        let is_dir = std::fs::metadata(&path)
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
         eprintln!(
             "[lightphotos] open {}: {}",
             if is_dir { "dir" } else { "file" },
@@ -471,7 +478,12 @@ impl App {
             self.playlist = Some(playlist);
             self.reset_burst_state();
             self.recompute_visible();
-            self.sel = Some(self.visible.iter().position(|&i| i == start_index).unwrap_or(0));
+            self.sel = Some(
+                self.visible
+                    .iter()
+                    .position(|&i| i == start_index)
+                    .unwrap_or(0),
+            );
             self.collapse_selection();
             self.mode = ViewMode::Loupe;
             self.develop_open = true;
@@ -487,7 +499,8 @@ impl App {
     /// Populate `subdirs[dir]` (the folder's immediate children) if not cached.
     fn ensure_subdirs(&mut self, dir: &Path) {
         if !self.subdirs.contains_key(dir) {
-            self.subdirs.insert(dir.to_path_buf(), navigation::list_subdirs(dir));
+            self.subdirs
+                .insert(dir.to_path_buf(), navigation::list_subdirs(dir));
         }
     }
 
@@ -695,7 +708,9 @@ impl App {
     /// thumbnail, so the shown image updates immediately even before the full
     /// decode finishes.
     fn load_selected(&mut self) {
-        let Some(path) = self.selected_path() else { return };
+        let Some(path) = self.selected_path() else {
+            return;
+        };
         let px = self.thumb_px;
         if let Some(loader) = &mut self.loader {
             loader.request(path.clone());
@@ -908,7 +923,11 @@ impl App {
         let cur = ring.iter().position(|&r| r == self.focus).unwrap_or(0);
         let mut i = cur;
         for _ in 0..n {
-            i = if backward { (i + n - 1) % n } else { (i + 1) % n };
+            i = if backward {
+                (i + n - 1) % n
+            } else {
+                (i + 1) % n
+            };
             if i == 0 || self.region_available(ring[i]) {
                 self.focus = ring[i];
                 self.focus_level = FocusLevel::Selected;
@@ -1265,7 +1284,9 @@ impl App {
     /// Set the rating of the selected/shown image; recompute the view if the
     /// active filter drops it.
     fn set_rating(&mut self, stars: u8) {
-        let Some(path) = self.selected_path() else { return };
+        let Some(path) = self.selected_path() else {
+            return;
+        };
         if stars == 0 {
             self.ratings.remove(&path);
         } else {
@@ -1405,7 +1426,12 @@ impl App {
         let Some(path) = self.selected_path() else {
             return;
         };
-        let tone = self.edits.get(&path).copied().unwrap_or_default().tone_only();
+        let tone = self
+            .edits
+            .get(&path)
+            .copied()
+            .unwrap_or_default()
+            .tone_only();
         let name = file_label(&path);
         self.copied_settings = Some((path, tone));
         self.set_status(format!("Copied settings from {name}"));
@@ -1584,7 +1610,9 @@ impl App {
     /// to the cached thumbnail as an instant placeholder while the full image is
     /// still decoding. Swaps thumbnail → full once the full image arrives.
     pub(crate) fn try_show(&mut self) {
-        let Some(want) = self.want.clone() else { return };
+        let Some(want) = self.want.clone() else {
+            return;
+        };
 
         // Full image ready → show it (unless it's already the shown full image).
         if let Some(img) = self.loader.as_ref().and_then(|l| l.get(&want)) {
@@ -1597,7 +1625,10 @@ impl App {
         // Full not ready: show the thumbnail placeholder if we aren't already
         // showing this image in some form.
         if self.shown.path() != Some(want.as_path()) {
-            if let Some(thumb) = self.loader.as_ref().and_then(|l| l.get_thumb(&want, self.thumb_px))
+            if let Some(thumb) = self
+                .loader
+                .as_ref()
+                .and_then(|l| l.get_thumb(&want, self.thumb_px))
             {
                 self.upload_shown(&want, &thumb, false);
             }
@@ -1606,7 +1637,9 @@ impl App {
 
     /// Upload an image to the renderer as the currently-shown image and re-fit.
     fn upload_shown(&mut self, path: &Path, img: &image_decode::DecodedImage, is_full: bool) {
-        let Some(renderer) = self.renderer.as_mut() else { return };
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
         renderer.set_image(img);
         self.shown = if is_full {
             Shown::Full(path.to_path_buf())
@@ -1652,7 +1685,11 @@ impl App {
 
     /// Rotation (in 90° CW steps) of the image currently shown.
     fn current_rotation(&self) -> u8 {
-        self.shown.path().and_then(|p| self.rotations.get(p)).copied().unwrap_or(0)
+        self.shown
+            .path()
+            .and_then(|p| self.rotations.get(p))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Develop adjustments of the image currently shown (identity if unset).
@@ -1726,7 +1763,11 @@ impl App {
             return;
         }
         let rect = self.current_adjustments().crop.unwrap_or(FULL_CROP);
-        self.crop_edit = Some(CropDraft { rect, grab: None, aspect: 1.0 });
+        self.crop_edit = Some(CropDraft {
+            rect,
+            grab: None,
+            aspect: 1.0,
+        });
         // Show the full frame (identity crop) while framing; the overlay masks.
         self.push_crop_preview();
         self.fit_for_crop();
@@ -1748,7 +1789,9 @@ impl App {
     /// Commit the crop draft into the image's persisted adjustments (full-frame
     /// crops store as `None`), then leave crop mode.
     fn commit_crop(&mut self) {
-        let Some(draft) = self.crop_edit.take() else { return };
+        let Some(draft) = self.crop_edit.take() else {
+            return;
+        };
         let r = draft.rect;
         let is_full = r.left <= MIN_CROP
             && r.top <= MIN_CROP
@@ -1784,7 +1827,10 @@ impl App {
     /// coordinate `(u, v)` and remember the rectangle as it is now.
     fn crop_grab_move(&mut self, u: f32, v: f32) {
         if let Some(d) = self.crop_edit.as_mut() {
-            d.grab = Some(CropGrab::Move { anchor: (u, v), rect0: d.rect });
+            d.grab = Some(CropGrab::Move {
+                anchor: (u, v),
+                rect0: d.rect,
+            });
         }
     }
 
@@ -1795,7 +1841,9 @@ impl App {
     fn crop_drag_to(&mut self, u: f32, v: f32) {
         let shift = self.modifiers.shift_key();
         let (w, h) = self.image_size();
-        let Some(d) = self.crop_edit.as_mut() else { return };
+        let Some(d) = self.crop_edit.as_mut() else {
+            return;
+        };
         let Some(grab) = d.grab else { return };
         let mut r = d.rect;
         match grab {
@@ -1823,13 +1871,15 @@ impl App {
                         CropEdge::Left | CropEdge::Right => {
                             // Width just changed; set height from the locked ratio,
                             // centered on the current vertical center.
-                            let ch_norm = (((r.right - r.left) * w) / d.aspect / h).clamp(MIN_CROP, 1.0);
+                            let ch_norm =
+                                (((r.right - r.left) * w) / d.aspect / h).clamp(MIN_CROP, 1.0);
                             let cy = (r.top + r.bottom) / 2.0;
                             r.top = (cy - ch_norm / 2.0).clamp(0.0, 1.0 - MIN_CROP);
                             r.bottom = (r.top + ch_norm).min(1.0);
                         }
                         CropEdge::Top | CropEdge::Bottom => {
-                            let cw_norm = (((r.bottom - r.top) * h) * d.aspect / w).clamp(MIN_CROP, 1.0);
+                            let cw_norm =
+                                (((r.bottom - r.top) * h) * d.aspect / w).clamp(MIN_CROP, 1.0);
                             let cx = (r.left + r.right) / 2.0;
                             r.left = (cx - cw_norm / 2.0).clamp(0.0, 1.0 - MIN_CROP);
                             r.right = (r.left + cw_norm).min(1.0);
@@ -1929,7 +1979,9 @@ impl App {
             self.request_redraw();
             return;
         }
-        let Some(exporter) = self.exporter.as_ref() else { return };
+        let Some(exporter) = self.exporter.as_ref() else {
+            return;
+        };
 
         // Exports live under the current folder (the one whose images are
         // shown), so they stay together and never clutter the RAW folder.
@@ -1940,7 +1992,9 @@ impl App {
             .unwrap_or_else(|| PathBuf::from("."));
         let exports_dir = base.join("Exports");
         if let Err(e) = std::fs::create_dir_all(&exports_dir) {
-            self.set_status(format!("Export failed: could not create Exports folder: {e}"));
+            self.set_status(format!(
+                "Export failed: could not create Exports folder: {e}"
+            ));
             self.request_redraw();
             return;
         }
@@ -1955,10 +2009,20 @@ impl App {
             taken.insert(dest.clone());
             let adj = self.catalog.adjustments(&src);
             let rot = self.rotations.get(&src).copied().unwrap_or(0);
-            exporter.submit(ExportJob { src, dest, adj, rot });
+            exporter.submit(ExportJob {
+                src,
+                dest,
+                adj,
+                rot,
+            });
         }
 
-        self.export_progress = Some(ExportProgress { done: 0, total, errors: 0, last_err: None });
+        self.export_progress = Some(ExportProgress {
+            done: 0,
+            total,
+            errors: 0,
+            last_err: None,
+        });
         self.set_status(format!("Exporting 0/{total}\u{2026}"));
         self.request_redraw();
     }
@@ -1967,7 +2031,9 @@ impl App {
     /// job lands, replace the live counter with a final summary and clear the
     /// in-flight state (which stops the keep-awake redraw loop in `main.rs`).
     pub(crate) fn on_export_outcomes(&mut self, outcomes: Vec<ExportOutcome>) {
-        let Some(mut prog) = self.export_progress.take() else { return };
+        let Some(mut prog) = self.export_progress.take() else {
+            return;
+        };
         for ExportOutcome { src, result } in outcomes {
             prog.done += 1;
             match result {
@@ -2005,9 +2071,9 @@ impl App {
         if self.export_progress.is_some() {
             return self.status.as_ref().map(|(s, _)| s.as_str());
         }
-        self.status.as_ref().and_then(|(s, t)| {
-            (t.elapsed().as_secs_f32() < 3.0).then_some(s.as_str())
-        })
+        self.status
+            .as_ref()
+            .and_then(|(s, t)| (t.elapsed().as_secs_f32() < 3.0).then_some(s.as_str()))
     }
 
     /// Build the histogram sample from a freshly-shown image: a strided
@@ -2071,9 +2137,9 @@ impl App {
         // Restrict to the active crop rect so the histogram reflects what the
         // loupe/export actually show. A full-frame (or absent) crop keeps every
         // cell. (u, v) are derived analytically from the cell's grid position.
-        let crop = adj.crop.filter(|c| {
-            c.left > 0.0 || c.top > 0.0 || c.right < 1.0 || c.bottom < 1.0
-        });
+        let crop = adj
+            .crop
+            .filter(|c| c.left > 0.0 || c.top > 0.0 || c.right < 1.0 || c.bottom < 1.0);
         let (dw, dh) = (self.hist_dw, self.hist_dh);
         let grid = &self.hist_sample;
         let mut bins = [[0f32; 256]; 3];
@@ -2132,7 +2198,11 @@ impl App {
     /// On-screen footprint after rotation (w/h swapped for 90°/270°).
     fn display_size(&self) -> (f32, f32) {
         let (w, h) = self.image_size();
-        if self.current_rotation() % 2 == 1 { (h, w) } else { (w, h) }
+        if self.current_rotation() % 2 == 1 {
+            (h, w)
+        } else {
+            (w, h)
+        }
     }
 
     /// The loupe image area in physical pixels: the whole surface unless a
@@ -2180,7 +2250,9 @@ impl App {
 
     /// Rotate the current image 90° (clockwise if `cw`), remembering it per-image.
     fn rotate(&mut self, cw: bool) {
-        let Some(path) = self.shown.path().map(Path::to_path_buf) else { return };
+        let Some(path) = self.shown.path().map(Path::to_path_buf) else {
+            return;
+        };
         let step = (self.current_rotation() + if cw { 1 } else { 3 }) % 4;
         if step == 0 {
             self.rotations.remove(&path);
@@ -2283,7 +2355,10 @@ impl App {
     /// `(half_w, half_h)` is each side's size in physical px.
     fn push_compare(&mut self, half_w: f32, half_h: f32) {
         let after = self.current_adjustments();
-        let before = Adjustments { crop: after.crop, ..Adjustments::default() };
+        let before = Adjustments {
+            crop: after.crop,
+            ..Adjustments::default()
+        };
         let (scale, offset, rot) = self.fit_transform_for(half_w, half_h);
         let (gpu_before, gpu_after) = (self.gpu_adjust(&before), self.gpu_adjust(&after));
         if let Some(r) = &mut self.renderer {
@@ -2344,8 +2419,16 @@ impl App {
     /// crop-edge drag into a crop coordinate.
     pub(crate) fn loupe_screen_to_tex(&self, central: egui::Rect, p: egui::Pos2) -> (f32, f32) {
         let (scale, offset, rot) = self.loupe_transform();
-        let bx = if central.width() > 0.0 { (p.x - central.min.x) / central.width() } else { 0.0 };
-        let by = if central.height() > 0.0 { (p.y - central.min.y) / central.height() } else { 0.0 };
+        let bx = if central.width() > 0.0 {
+            (p.x - central.min.x) / central.width()
+        } else {
+            0.0
+        };
+        let by = if central.height() > 0.0 {
+            (p.y - central.min.y) / central.height()
+        } else {
+            0.0
+        };
         let dx = bx * scale[0] + offset[0];
         let dy = by * scale[1] + offset[1];
         // uv = R·(d − 0.5) + 0.5, R row-major [m00, m01, m10, m11].
@@ -2400,7 +2483,9 @@ impl App {
 
     fn working_thumb_keys(&self) -> Vec<(PathBuf, u32, u64)> {
         let px = self.thumb_px;
-        let Some(pl) = &self.playlist else { return Vec::new() };
+        let Some(pl) = &self.playlist else {
+            return Vec::new();
+        };
         self.working_positions()
             .filter_map(|pos| self.visible.get(pos).copied())
             .filter_map(|i| pl.entry(i))
@@ -2416,7 +2501,11 @@ impl App {
     /// arrive).
     pub(crate) fn request_working_thumbs(&mut self) -> bool {
         let px = self.thumb_px;
-        let paths: Vec<PathBuf> = self.working_thumb_keys().into_iter().map(|(p, _, _)| p).collect();
+        let paths: Vec<PathBuf> = self
+            .working_thumb_keys()
+            .into_iter()
+            .map(|(p, _, _)| p)
+            .collect();
 
         let mut any_missing = false;
         if let Some(loader) = &mut self.loader {
@@ -2451,13 +2540,19 @@ impl App {
 
         // Capture-time scan still running → grouping not final yet; stay awake.
         let scan_pending = {
-            let Some(pl) = &self.playlist else { return false };
-            pl.entries().iter().any(|p| !self.capture_times.contains_key(p))
+            let Some(pl) = &self.playlist else {
+                return false;
+            };
+            pl.entries()
+                .iter()
+                .any(|p| !self.capture_times.contains_key(p))
         };
 
         // Unscored burst members, identified by the current marks.
         let members: Vec<PathBuf> = {
-            let Some(pl) = &self.playlist else { return false };
+            let Some(pl) = &self.playlist else {
+                return false;
+            };
             pl.entries()
                 .iter()
                 .enumerate()
@@ -2477,7 +2572,10 @@ impl App {
         if let Some(loader) = &mut self.loader {
             for p in &members {
                 if let Some(img) = loader.get_thumb(p, px) {
-                    newly.push((p.clone(), sharpness::sharpness(&img.rgba, img.width, img.height)));
+                    newly.push((
+                        p.clone(),
+                        sharpness::sharpness(&img.rgba, img.width, img.height),
+                    ));
                 } else if loader.thumb_failed(p, px) {
                     // Permanently failed — will never score; not counted as pending.
                 } else {
@@ -2538,7 +2636,10 @@ impl App {
                     continue;
                 }
                 if let Some(img) = loader.get_thumb(path, px) {
-                    newly.push((path.clone(), sharpness::sharpness(&img.rgba, img.width, img.height)));
+                    newly.push((
+                        path.clone(),
+                        sharpness::sharpness(&img.rgba, img.width, img.height),
+                    ));
                 }
             }
         }
@@ -2569,7 +2670,11 @@ impl App {
             if self.thumb_tex.contains_key(key) {
                 continue;
             }
-            let Some(img) = self.loader.as_ref().and_then(|l| l.get_thumb(&key.0, key.1)) else {
+            let Some(img) = self
+                .loader
+                .as_ref()
+                .and_then(|l| l.get_thumb(&key.0, key.1))
+            else {
                 continue;
             };
             let adj = self.edits.get(&key.0).copied().unwrap_or_default();
@@ -2588,7 +2693,9 @@ impl App {
                 egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], &rgba)
             };
             let name = format!("thumb:{}:{}:{:016x}", key.0.display(), key.1, key.2);
-            let handle = self.egui_ctx.load_texture(name, color, egui::TextureOptions::LINEAR);
+            let handle = self
+                .egui_ctx
+                .load_texture(name, color, egui::TextureOptions::LINEAR);
             self.thumb_tex.insert(key.clone(), handle);
         }
 
@@ -2627,9 +2734,7 @@ impl App {
             }
         }
 
-        let (Some(window), Some(mut state)) =
-            (self.window.clone(), self.egui_state.take())
-        else {
+        let (Some(window), Some(mut state)) = (self.window.clone(), self.egui_state.take()) else {
             if let Some(r) = &mut self.renderer {
                 r.render(None, None, None);
             }
@@ -2644,9 +2749,15 @@ impl App {
         // a stray Tab press for no reason. This app has no `TextEdit` or
         // other widget that wants egui's own Tab handling, so just drop the
         // event before egui ever sees it.
-        raw_input
-            .events
-            .retain(|e| !matches!(e, egui::Event::Key { key: egui::Key::Tab, .. }));
+        raw_input.events.retain(|e| {
+            !matches!(
+                e,
+                egui::Event::Key {
+                    key: egui::Key::Tab,
+                    ..
+                }
+            )
+        });
 
         // Run the UI, collecting the central image rect (Loupe) and any actions.
         let mut out = ui::FrameOutput::default();
@@ -2724,7 +2835,9 @@ impl App {
             }
         }
 
-        let Some(renderer) = self.renderer.as_mut() else { return };
+        let Some(renderer) = self.renderer.as_mut() else {
+            return;
+        };
         let egui_paint = EguiPaint {
             textures_delta: full_output.textures_delta,
             paint_jobs,
@@ -2838,7 +2951,9 @@ impl App {
                 ui::UiAction::PickWhiteBalance(u, v) => self.pick_white_balance(u, v),
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
                 ui::UiAction::ResetAdjustments => {
-                    let Some(path) = self.shown.path().map(Path::to_path_buf) else { continue };
+                    let Some(path) = self.shown.path().map(Path::to_path_buf) else {
+                        continue;
+                    };
                     self.edits.remove(&path);
                     self.catalog.set_adjustments(&path, &Adjustments::default());
                     self.push_adjustments();
@@ -2932,7 +3047,6 @@ impl App {
         self.thumb_px
     }
 
-
     /// Position of the current selection within `visible`, or `None` in the
     /// grid's browse-first state (before any click/arrow).
     pub(crate) fn sel(&self) -> Option<usize> {
@@ -3005,7 +3119,10 @@ impl App {
             .iter()
             .map(|p| self.capture_times.get(p).copied().flatten())
             .collect();
-        let scores: Vec<Option<f64>> = entries.iter().map(|p| self.sharpness.get(p).copied()).collect();
+        let scores: Vec<Option<f64>> = entries
+            .iter()
+            .map(|p| self.sharpness.get(p).copied())
+            .collect();
         self.burst_marks = burst::marks_for(&times, &scores, burst::BURST_GAP);
     }
 
@@ -3032,15 +3149,14 @@ impl App {
 
     /// Rating of the current selection (0 when unset).
     pub(crate) fn selected_rating(&self) -> u8 {
-        self.selected_path().map(|p| self.rating_of(&p)).unwrap_or(0)
+        self.selected_path()
+            .map(|p| self.rating_of(&p))
+            .unwrap_or(0)
     }
 
     /// The egui texture + source dimensions for the visible cell at `pos`, if
     /// its thumbnail has been uploaded this frame.
-    pub(crate) fn thumb_texture_for(
-        &self,
-        pos: usize,
-    ) -> Option<(&egui::TextureHandle, u32, u32)> {
+    pub(crate) fn thumb_texture_for(&self, pos: usize) -> Option<(&egui::TextureHandle, u32, u32)> {
         let idx = *self.visible.get(pos)?;
         let path = self.playlist.as_ref()?.entry(idx)?;
         let key = (path.to_path_buf(), self.thumb_px, self.edit_sig_for(path));
@@ -3236,9 +3352,7 @@ impl App {
                     self.mode = ViewMode::Grid;
                     self.update_window_title();
                     self.normalize_focus();
-                } else if self.focus == Region::Grid
-                    && self.focus_level == FocusLevel::Selected
-                {
+                } else if self.focus == Region::Grid && self.focus_level == FocusLevel::Selected {
                     self.focus = Region::Folders;
                     self.focus_level = FocusLevel::Selected;
                     self.on_focus_changed();
@@ -3315,7 +3429,11 @@ fn file_label(path: &Path) -> String {
 /// The inclusive set of positions between `anchor` and `pos` (order-agnostic).
 /// Used for Shift range-selection.
 fn range_set(anchor: usize, pos: usize) -> BTreeSet<usize> {
-    let (lo, hi) = if anchor <= pos { (anchor, pos) } else { (pos, anchor) };
+    let (lo, hi) = if anchor <= pos {
+        (anchor, pos)
+    } else {
+        (pos, anchor)
+    };
     (lo..=hi).collect()
 }
 

@@ -16,7 +16,9 @@ impl Fnv1a {
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
     pub(crate) fn new() -> Self {
-        Fnv1a { state: Self::OFFSET_BASIS }
+        Fnv1a {
+            state: Self::OFFSET_BASIS,
+        }
     }
 
     pub(crate) fn write(&mut self, bytes: &[u8]) {

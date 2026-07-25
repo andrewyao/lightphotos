@@ -192,7 +192,9 @@ impl Catalog {
 
     /// True when the `images` table already holds at least one row.
     fn db_has_rows(&self) -> bool {
-        let Some(conn) = self.conn.as_ref() else { return false };
+        let Some(conn) = self.conn.as_ref() else {
+            return false;
+        };
         conn.query_row("SELECT COUNT(*) FROM images", [], |r| r.get::<_, i64>(0))
             .unwrap_or(0)
             > 0
@@ -216,7 +218,9 @@ impl Catalog {
             );
             return;
         }
-        let Ok(bytes) = std::fs::read(&json) else { return };
+        let Ok(bytes) = std::fs::read(&json) else {
+            return;
+        };
         match parse_catalog(&bytes) {
             Ok(images) => {
                 if let Err(e) = self.insert_all(&images) {
@@ -226,7 +230,10 @@ impl Catalog {
                 let bak = json.with_extension("json.bak");
                 if bak.exists() {
                     // Don't clobber an earlier backup; keep this JSON as-is.
-                    eprintln!("[catalog] {} already exists; leaving catalog.json in place", bak.display());
+                    eprintln!(
+                        "[catalog] {} already exists; leaving catalog.json in place",
+                        bak.display()
+                    );
                 } else if let Err(e) = std::fs::rename(&json, &bak) {
                     eprintln!("[catalog] could not retire catalog.json: {e}");
                 }
@@ -237,7 +244,9 @@ impl Catalog {
 
     /// Insert many records in a single transaction (used for migration).
     fn insert_all(&self, images: &HashMap<PathBuf, ImageRecord>) -> rusqlite::Result<()> {
-        let Some(conn) = self.conn.as_ref() else { return Ok(()) };
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(());
+        };
         let tx = conn.unchecked_transaction()?;
         for (path, rec) in images {
             if !rec.is_empty() {
@@ -254,7 +263,9 @@ impl Catalog {
         // Read raw column tuples first, releasing the connection borrow before
         // we mutate `self` (parsing + cache / preserved-blob updates).
         let (rows, skipped) = {
-            let Some(conn) = self.conn.as_ref() else { return };
+            let Some(conn) = self.conn.as_ref() else {
+                return;
+            };
             let mut stmt =
                 match conn.prepare("SELECT path, rating, adjustments, rotation FROM images") {
                     Ok(s) => s,
@@ -309,7 +320,10 @@ impl Catalog {
                     Err(e) => {
                         // Preserve the raw blob so an unrelated write can't
                         // overwrite the edit with NULL, and surface the problem.
-                        eprintln!("[catalog] unreadable adjustments for {}: {e}", key.display());
+                        eprintln!(
+                            "[catalog] unreadable adjustments for {}: {e}",
+                            key.display()
+                        );
                         self.raw_adjustments.insert(key.clone(), s);
                         self.last_error = Some(format!(
                             "Some develop edits for {} could not be read; \
@@ -320,7 +334,14 @@ impl Catalog {
                     }
                 },
             };
-            self.images.insert(key, ImageRecord { rating, adjustments, rotation });
+            self.images.insert(
+                key,
+                ImageRecord {
+                    rating,
+                    adjustments,
+                    rotation,
+                },
+            );
         }
     }
 
@@ -523,7 +544,9 @@ fn legacy_dir() -> PathBuf {
 }
 
 fn app_support() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_default();
     home.join("Library").join("Application Support")
 }
 
@@ -738,7 +761,9 @@ mod tests {
 
         cat.set(&base.join("photo.jpg"), 3);
         // The write failed, so the error is available exactly once...
-        let msg = cat.take_error().expect("failed save should report an error");
+        let msg = cat
+            .take_error()
+            .expect("failed save should report an error");
         // ...with a message that describes the real problem (not a borrowed,
         // misleading rusqlite variant like "Query is not read-only").
         assert!(
@@ -750,7 +775,10 @@ mod tests {
             "error must not surface a misleading SQL message, got: {msg}"
         );
         // ...and is drained (not re-delivered) on the next check.
-        assert!(cat.take_error().is_none(), "error should be taken only once");
+        assert!(
+            cat.take_error().is_none(),
+            "error should be taken only once"
+        );
 
         std::fs::remove_dir_all(&base).unwrap();
     }
@@ -858,7 +886,10 @@ mod tests {
         {
             let mut cat = Catalog::with_dir(dir.clone());
             assert_eq!(cat.get(&p), Some(3));
-            assert!(cat.take_error().is_some(), "unreadable edits should be surfaced");
+            assert!(
+                cat.take_error().is_some(),
+                "unreadable edits should be surfaced"
+            );
             cat.set(&p, 5); // change rating only
         }
         assert_eq!(
@@ -887,7 +918,11 @@ mod tests {
             "version": 2,
             "images": { key.to_str().unwrap(): { "rating": 2u8 } },
         });
-        std::fs::write(dir.join("catalog.json"), serde_json::to_vec(&stale).unwrap()).unwrap();
+        std::fs::write(
+            dir.join("catalog.json"),
+            serde_json::to_vec(&stale).unwrap(),
+        )
+        .unwrap();
 
         // Reload must keep the newer DB value, not import the stale JSON.
         let cat = Catalog::with_dir(dir.clone());

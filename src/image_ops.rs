@@ -61,7 +61,11 @@ pub(crate) fn bake_edited(img: &DecodedImage, adj: &Adjustments, rot: u8) -> (u3
     let y1 = ((cb * h as f32).round() as i64).clamp(y0 as i64 + 1, h as i64) as u32;
     let (cw, ch) = (x1 - x0, y1 - y0);
 
-    let encode = |v: f32| (v.max(0.0).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let encode = |v: f32| {
+        (v.max(0.0).powf(1.0 / 2.2) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
 
     // When denoise is active, precompute the whole source image's linear-light
     // buffer once so the 25-tap neighborhood lookup (`denoise_sample`) is a
@@ -76,7 +80,12 @@ pub(crate) fn bake_edited(img: &DecodedImage, adj: &Adjustments, rot: u8) -> (u3
         (0..(w * h) as usize)
             .map(|i| {
                 let si = i * 4;
-                unpremul_to_linear([img.rgba[si], img.rgba[si + 1], img.rgba[si + 2], img.rgba[si + 3]])
+                unpremul_to_linear([
+                    img.rgba[si],
+                    img.rgba[si + 1],
+                    img.rgba[si + 2],
+                    img.rgba[si + 3],
+                ])
             })
             .collect()
     });
@@ -171,7 +180,11 @@ mod tests {
         // No crop, no rotation, identity adjustments → pixels survive the
         // premultiply/sRGB↔linear round-trip unchanged (alpha becomes opaque).
         let src = [px(0), px(64), px(128), px(255)].concat(); // 2×2
-        let img = DecodedImage { width: 2, height: 2, rgba: src.clone() };
+        let img = DecodedImage {
+            width: 2,
+            height: 2,
+            rgba: src.clone(),
+        };
         let (w, h, out) = bake_edited(&img, &Adjustments::default(), 0);
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
@@ -181,9 +194,18 @@ mod tests {
     fn bake_crop_slices_to_the_crop_rect() {
         // 4×1 image; crop the right half → 2×1 keeping the last two pixels.
         let src = [px(1), px(2), px(3), px(4)].concat();
-        let img = DecodedImage { width: 4, height: 1, rgba: src };
+        let img = DecodedImage {
+            width: 4,
+            height: 1,
+            rgba: src,
+        };
         let mut adj = Adjustments::default();
-        adj.crop = Some(Crop { left: 0.5, top: 0.0, right: 1.0, bottom: 1.0 });
+        adj.crop = Some(Crop {
+            left: 0.5,
+            top: 0.0,
+            right: 1.0,
+            bottom: 1.0,
+        });
         let (w, h, out) = bake_edited(&img, &adj, 0);
         assert_eq!((w, h), (2, 1));
         assert_eq!(&out[0..4], &px(3));
@@ -196,8 +218,15 @@ mod tests {
         // just with an explicit denoise: 0.0 to confirm the new field doesn't
         // change the fast path at all.
         let src = [px(0), px(64), px(128), px(255)].concat();
-        let img = DecodedImage { width: 2, height: 2, rgba: src.clone() };
-        let adj = Adjustments { denoise: 0.0, ..Default::default() };
+        let img = DecodedImage {
+            width: 2,
+            height: 2,
+            rgba: src.clone(),
+        };
+        let adj = Adjustments {
+            denoise: 0.0,
+            ..Default::default()
+        };
         let (w, h, out) = bake_edited(&img, &adj, 0);
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
@@ -212,22 +241,50 @@ mod tests {
             let v = if i == 4 { 255 } else { 0 };
             src[i * 4..i * 4 + 4].copy_from_slice(&px(v));
         }
-        let img = DecodedImage { width: 3, height: 3, rgba: src };
+        let img = DecodedImage {
+            width: 3,
+            height: 3,
+            rgba: src,
+        };
         let (_, _, out0) = bake_edited(&img, &Adjustments::default(), 0);
-        let denoised = Adjustments { denoise: 100.0, ..Default::default() };
+        let denoised = Adjustments {
+            denoise: 100.0,
+            ..Default::default()
+        };
         let (_, _, out100) = bake_edited(&img, &denoised, 0);
         let center = 4 * 4; // pixel index 4, byte offset
         assert_eq!(out0[center], 255);
-        assert!(out100[center] < 255, "expected denoise to darken the outlier center pixel");
+        assert!(
+            out100[center] < 255,
+            "expected denoise to darken the outlier center pixel"
+        );
     }
 
     #[test]
     fn bake_denoise_clamps_at_edges() {
         // Small 3x3 image; denoise must not panic or read out of bounds when
         // taps for a corner pixel fall outside the image.
-        let src = [px(10), px(20), px(30), px(40), px(50), px(60), px(70), px(80), px(90)].concat();
-        let img = DecodedImage { width: 3, height: 3, rgba: src };
-        let adj = Adjustments { denoise: 50.0, ..Default::default() };
+        let src = [
+            px(10),
+            px(20),
+            px(30),
+            px(40),
+            px(50),
+            px(60),
+            px(70),
+            px(80),
+            px(90),
+        ]
+        .concat();
+        let img = DecodedImage {
+            width: 3,
+            height: 3,
+            rgba: src,
+        };
+        let adj = Adjustments {
+            denoise: 50.0,
+            ..Default::default()
+        };
         let (w, h, out) = bake_edited(&img, &adj, 0);
         assert_eq!((w, h), (3, 3));
         assert_eq!(out.len(), 3 * 3 * 4);

@@ -79,7 +79,10 @@ mod tests {
 
         // photo.jpg exists on disk → photo-1.jpg.
         std::fs::write(out.join("photo.jpg"), b"x").unwrap();
-        assert_eq!(jpg_export_target(&src, &out, &none), out.join("photo-1.jpg"));
+        assert_eq!(
+            jpg_export_target(&src, &out, &none),
+            out.join("photo-1.jpg")
+        );
 
         // `taken` reserves names not yet written: two same-stem sources handed
         // out in sequence resolve to distinct targets even before either exists.

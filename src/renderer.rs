@@ -306,7 +306,11 @@ impl Renderer {
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("image"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: mip_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -333,7 +337,11 @@ impl Renderer {
                     bytes_per_row: Some(4 * lw),
                     rows_per_image: Some(lh),
                 },
-                wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: lw,
+                    height: lh,
+                    depth_or_array_layers: 1,
+                },
             );
             if level + 1 < mip_count {
                 let (np, nw, nh) = downsample2x(&level_pixels, lw, lh);
@@ -348,8 +356,14 @@ impl Renderer {
             label: Some("image_bg"),
             layout: &self.tex_bind_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         });
         self.image_bind = Some(bind);
@@ -422,7 +436,9 @@ impl Renderer {
                 return false;
             }
         };
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
@@ -447,7 +463,12 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.07, g: 0.07, b: 0.08, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.07,
+                            g: 0.07,
+                            b: 0.08,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -464,24 +485,25 @@ impl Renderer {
                 // Draw the quad into a viewport rect (clamped to the surface) with
                 // the given adjustments bind group. Shared by the single-image and
                 // both compare halves.
-                let draw_into =
-                    |pass: &mut wgpu::RenderPass, vp: (u32, u32, u32, u32), adj: &wgpu::BindGroup| {
-                        let (x, y, w, h) = vp;
-                        let x = x.min(sw);
-                        let y = y.min(sh);
-                        let w = w.min(sw - x);
-                        let h = h.min(sh - y);
-                        if w == 0 || h == 0 {
-                            return;
-                        }
-                        pass.set_scissor_rect(x, y, w, h);
-                        pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
-                        pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, image_bind, &[]);
-                        pass.set_bind_group(1, xform_bind, &[]);
-                        pass.set_bind_group(2, adj, &[]);
-                        pass.draw(0..6, 0..1);
-                    };
+                let draw_into = |pass: &mut wgpu::RenderPass,
+                                 vp: (u32, u32, u32, u32),
+                                 adj: &wgpu::BindGroup| {
+                    let (x, y, w, h) = vp;
+                    let x = x.min(sw);
+                    let y = y.min(sh);
+                    let w = w.min(sw - x);
+                    let h = h.min(sh - y);
+                    if w == 0 || h == 0 {
+                        return;
+                    }
+                    pass.set_scissor_rect(x, y, w, h);
+                    pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, image_bind, &[]);
+                    pass.set_bind_group(1, xform_bind, &[]);
+                    pass.set_bind_group(2, adj, &[]);
+                    pass.draw(0..6, 0..1);
+                };
                 match image_viewport {
                     Some(vp) => {
                         // Left half (or full image): the primary adjustments.

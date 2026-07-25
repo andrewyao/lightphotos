@@ -9,9 +9,11 @@
 use std::ffi::c_void;
 use std::path::Path;
 
-use objc2_core_foundation::{CFRetained, CFString, CFURL, CFURLPathStyle};
+use objc2_core_foundation::{CFRetained, CFString, CFURLPathStyle, CFURL};
 use objc2_core_graphics::kCGColorSpaceSRGB;
-use objc2_core_graphics::{CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
+use objc2_core_graphics::{
+    CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
+};
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {

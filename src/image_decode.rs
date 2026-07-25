@@ -17,10 +17,10 @@ use objc2_core_foundation::{
 use objc2_core_graphics::{CGContext, CGImage};
 use objc2_image_io::{
     kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifDictionary,
-    kCGImagePropertyExifExposureTime, kCGImagePropertyExifFNumber,
-    kCGImagePropertyExifFocalLength, kCGImagePropertyExifISOSpeedRatings,
-    kCGImagePropertyExifLensModel, kCGImagePropertyOrientation, kCGImagePropertyTIFFDateTime,
-    kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel, CGImageSource,
+    kCGImagePropertyExifExposureTime, kCGImagePropertyExifFNumber, kCGImagePropertyExifFocalLength,
+    kCGImagePropertyExifISOSpeedRatings, kCGImagePropertyExifLensModel,
+    kCGImagePropertyOrientation, kCGImagePropertyTIFFDateTime, kCGImagePropertyTIFFMake,
+    kCGImagePropertyTIFFModel, CGImageSource,
 };
 
 use crate::coregraphics;
@@ -80,14 +80,15 @@ pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, Strin
 
     // SAFETY: url is a valid CFURL; passing no decode options. The returned
     // CGImageSource is +1 retained and wrapped in CFRetained, released on drop.
-    unsafe { CGImageSource::with_url(&url, None) }.ok_or_else(|| "ImageIO could not open file".into())
+    unsafe { CGImageSource::with_url(&url, None) }
+        .ok_or_else(|| "ImageIO could not open file".into())
 }
 
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let source = open_image_source(path)?;
 
-    let image: CFRetained<CGImage> = unsafe { source.image_at_index(0, None) }
-        .ok_or("ImageIO could not decode image")?;
+    let image: CFRetained<CGImage> =
+        unsafe { source.image_at_index(0, None) }.ok_or("ImageIO could not decode image")?;
 
     let src_w = CGImage::width(Some(&image)) as u32;
     let src_h = CGImage::height(Some(&image)) as u32;
@@ -131,7 +132,14 @@ fn parse_exif_datetime_parts(s: &str) -> Option<DateTimeParts> {
     if !(1..=12).contains(&mo) || !(1..=31).contains(&da) || h > 23 || mi > 59 || se > 60 {
         return None;
     }
-    Some(DateTimeParts { y, mo, da, h, mi, se })
+    Some(DateTimeParts {
+        y,
+        mo,
+        da,
+        h,
+        mi,
+        se,
+    })
 }
 
 /// Parse an EXIF datetime string into a `SystemTime`, interpreting it as UTC
@@ -147,7 +155,13 @@ fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
 /// camera recorded them — no timezone conversion (see `CaptureDate`).
 fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
     let p = parse_exif_datetime_parts(s)?;
-    Some(CaptureDate { year: p.y as i32, month: p.mo, day: p.da, hour: p.h as u32, minute: p.mi as u32 })
+    Some(CaptureDate {
+        year: p.y as i32,
+        month: p.mo,
+        day: p.da,
+        hour: p.h as u32,
+        minute: p.mi as u32,
+    })
 }
 
 /// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
@@ -187,7 +201,8 @@ fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
     }
 
     // TIFF DateTime (top-level) fallback.
-    dict_string(&props, unsafe { kCGImagePropertyTIFFDateTime }).and_then(|s| parse_exif_datetime(&s))
+    dict_string(&props, unsafe { kCGImagePropertyTIFFDateTime })
+        .and_then(|s| parse_exif_datetime(&s))
 }
 
 /// Read the capture date for display: EXIF `DateTimeOriginal` first, then
@@ -213,10 +228,14 @@ fn read_capture_date(source: &CGImageSource) -> Option<CaptureDate> {
 /// panics; an unreadable file yields an all-`None` `ImageMetadata`.
 pub fn read_metadata(path: &Path) -> ImageMetadata {
     let mut meta = ImageMetadata::default();
-    let Ok(source) = open_image_source(path) else { return meta };
+    let Ok(source) = open_image_source(path) else {
+        return meta;
+    };
     meta.capture_date = read_capture_date(&source);
 
-    let Some(props) = (unsafe { source.properties_at_index(0, None) }) else { return meta };
+    let Some(props) = (unsafe { source.properties_at_index(0, None) }) else {
+        return meta;
+    };
 
     meta.camera_make = dict_string(&props, unsafe { kCGImagePropertyTIFFMake });
     meta.camera_model = dict_string(&props, unsafe { kCGImagePropertyTIFFModel });
@@ -269,7 +288,12 @@ fn number_f64(ptr: *const c_void) -> Option<f64> {
     // SAFETY: confirmed the value is a CFNumber.
     let number = unsafe { &*(ptr as *const CFNumber) };
     let mut out: f64 = 0.0;
-    let ok = unsafe { number.value(CFNumberType::Float64Type, &mut out as *mut f64 as *mut c_void) };
+    let ok = unsafe {
+        number.value(
+            CFNumberType::Float64Type,
+            &mut out as *mut f64 as *mut c_void,
+        )
+    };
     ok.then_some(out)
 }
 
@@ -313,7 +337,8 @@ fn read_orientation(source: &CGImageSource) -> u8 {
     };
     // SAFETY: the orientation key is a valid CFString option key; `value` returns
     // a borrowed (non-owned) pointer to the CFNumber, or null if absent.
-    let ptr = unsafe { props.value(kCGImagePropertyOrientation as *const CFString as *const c_void) };
+    let ptr =
+        unsafe { props.value(kCGImagePropertyOrientation as *const CFString as *const c_void) };
     if ptr.is_null() {
         return 1;
     }
@@ -327,7 +352,10 @@ fn read_orientation(source: &CGImageSource) -> u8 {
     let number = unsafe { &*(ptr as *const CFNumber) };
     let mut out: i32 = 0;
     let ok = unsafe {
-        number.value(CFNumberType::SInt32Type, &mut out as *mut i32 as *mut c_void)
+        number.value(
+            CFNumberType::SInt32Type,
+            &mut out as *mut i32 as *mut c_void,
+        )
     };
     if ok && (1..=8).contains(&out) {
         out as u8
@@ -367,7 +395,11 @@ fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImage {
             dst[d..d + 4].copy_from_slice(&img.rgba[s..s + 4]);
         }
     }
-    DecodedImage { width: nw, height: nh, rgba: dst }
+    DecodedImage {
+        width: nw,
+        height: nh,
+        rgba: dst,
+    }
 }
 
 /// Draw a `CGImage` into a freshly-allocated sRGB bitmap context sized
@@ -401,11 +433,18 @@ pub fn cgimage_to_rgba(
     // Draw the image scaled into our (possibly smaller) context rect.
     let rect = CGRect {
         origin: CGPoint { x: 0.0, y: 0.0 },
-        size: CGSize { width: target_w as f64, height: target_h as f64 },
+        size: CGSize {
+            width: target_w as f64,
+            height: target_h as f64,
+        },
     };
     CGContext::draw_image(Some(&ctx), rect, Some(image));
 
-    Ok(DecodedImage { width: target_w, height: target_h, rgba: buffer })
+    Ok(DecodedImage {
+        width: target_w,
+        height: target_h,
+        rgba: buffer,
+    })
 }
 
 fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
@@ -450,7 +489,10 @@ mod tests {
         // 2024 is a leap year, so Feb 28 -> Mar 1 is two days (Feb 29 exists).
         let feb28 = parse_exif_datetime("2024:02:28 00:00:00").unwrap();
         let mar01 = parse_exif_datetime("2024:03:01 00:00:00").unwrap();
-        assert_eq!(mar01.duration_since(feb28).unwrap(), Duration::from_secs(2 * 86_400));
+        assert_eq!(
+            mar01.duration_since(feb28).unwrap(),
+            Duration::from_secs(2 * 86_400)
+        );
     }
 
     #[test]
@@ -489,7 +531,11 @@ mod tests {
 
     #[test]
     fn orientation_1_is_identity() {
-        let img = DecodedImage { width: 2, height: 1, rgba: [px(10), px(20)].concat() };
+        let img = DecodedImage {
+            width: 2,
+            height: 1,
+            rgba: [px(10), px(20)].concat(),
+        };
         let out = apply_exif_orientation(img, 1);
         assert_eq!((out.width, out.height), (2, 1));
         assert_eq!(&out.rgba[0..4], &px(10));
@@ -499,7 +545,11 @@ mod tests {
     #[test]
     fn orientation_6_rotates_90cw_and_swaps_dims() {
         // A,B side by side (w=2,h=1). Rotate 90° CW → 1×2 column A over B.
-        let img = DecodedImage { width: 2, height: 1, rgba: [px(10), px(20)].concat() };
+        let img = DecodedImage {
+            width: 2,
+            height: 1,
+            rgba: [px(10), px(20)].concat(),
+        };
         let out = apply_exif_orientation(img, 6);
         assert_eq!((out.width, out.height), (1, 2));
         assert_eq!(&out.rgba[0..4], &px(10)); // top
@@ -509,7 +559,11 @@ mod tests {
     #[test]
     fn orientation_8_rotates_270cw() {
         // 90° CW then 90° CCW must return to the original layout.
-        let img = DecodedImage { width: 2, height: 1, rgba: [px(10), px(20)].concat() };
+        let img = DecodedImage {
+            width: 2,
+            height: 1,
+            rgba: [px(10), px(20)].concat(),
+        };
         let cw = apply_exif_orientation(img, 6); // 1×2 [10; 20]
         let back = apply_exif_orientation(cw, 8); // rot270 CW → back to 2×1 [10,20]
         assert_eq!((back.width, back.height), (2, 1));
@@ -519,7 +573,11 @@ mod tests {
 
     #[test]
     fn orientation_2_mirrors_horizontally_keeping_dims() {
-        let img = DecodedImage { width: 2, height: 1, rgba: [px(10), px(20)].concat() };
+        let img = DecodedImage {
+            width: 2,
+            height: 1,
+            rgba: [px(10), px(20)].concat(),
+        };
         let out = apply_exif_orientation(img, 2);
         assert_eq!((out.width, out.height), (2, 1));
         assert_eq!(&out.rgba[0..4], &px(20)); // columns swapped

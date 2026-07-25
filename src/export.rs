@@ -50,7 +50,9 @@ impl Exporter {
         // next job.
         let job_rx = Arc::new(Mutex::new(job_rx));
 
-        let cores = thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let cores = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
         let workers = cores.saturating_sub(2).max(1);
 
         for i in 0..workers {

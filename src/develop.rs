@@ -113,8 +113,17 @@ pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
 
     // Tone: eleven sliders (−100..=100, −5..=5, or 0..=100), quantized to 1e-3.
     let tone = [
-        adj.temp, adj.tint, adj.exposure, adj.contrast, adj.highlights, adj.shadows,
-        adj.whites, adj.blacks, adj.vibrance, adj.saturation, adj.denoise,
+        adj.temp,
+        adj.tint,
+        adj.exposure,
+        adj.contrast,
+        adj.highlights,
+        adj.shadows,
+        adj.whites,
+        adj.blacks,
+        adj.vibrance,
+        adj.saturation,
+        adj.denoise,
     ];
     for v in tone {
         h.write(&((v * 1000.0).round() as i32).to_le_bytes());
@@ -124,9 +133,7 @@ pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
     // then quantize the four normalized coords to 1e-5.
     let q = |v: f32| ((v.clamp(0.0, 1.0) * 100_000.0).round()) as u32;
     match adj.crop {
-        Some(c)
-            if c.left > 0.0 || c.top > 0.0 || c.right < 1.0 || c.bottom < 1.0 =>
-        {
+        Some(c) if c.left > 0.0 || c.top > 0.0 || c.right < 1.0 || c.bottom < 1.0 => {
             h.write(&[1]); // crop present
             for v in [c.left, c.top, c.right, c.bottom] {
                 h.write(&q(v).to_le_bytes());
@@ -320,7 +327,11 @@ pub fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
     let sat_total = 1.0 + adj.saturation / 100.0;
     let cmax = rg.max(gg).max(bg);
     let cmin = rg.min(gg).min(bg);
-    let cur_sat = if cmax > 0.0 { (cmax - cmin) / cmax } else { 0.0 };
+    let cur_sat = if cmax > 0.0 {
+        (cmax - cmin) / cmax
+    } else {
+        0.0
+    };
     let vib_factor = 1.0 + adj.vibrance / 100.0 * (1.0 - cur_sat);
     let total = sat_total * vib_factor;
     rg = luma + (rg - luma) * total;
@@ -426,7 +437,12 @@ mod tests {
     use super::*;
 
     fn crop(l: f32, t: f32, r: f32, b: f32) -> Crop {
-        Crop { left: l, top: t, right: r, bottom: b }
+        Crop {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        }
     }
 
     #[test]
@@ -442,21 +458,30 @@ mod tests {
         // Identity adjustments + no crop + rot 0 must always hash the same, and a
         // full-frame `Some` crop must hash identically to `None`.
         let base = edit_signature(&Adjustments::default(), 0);
-        let full = Adjustments { crop: Some(crop(0.0, 0.0, 1.0, 1.0)), ..Default::default() };
+        let full = Adjustments {
+            crop: Some(crop(0.0, 0.0, 1.0, 1.0)),
+            ..Default::default()
+        };
         assert_eq!(edit_signature(&full, 0), base);
     }
 
     #[test]
     fn edit_signature_differs_on_crop() {
         let a = Adjustments::default();
-        let b = Adjustments { crop: Some(crop(0.1, 0.1, 0.9, 0.9)), ..Default::default() };
+        let b = Adjustments {
+            crop: Some(crop(0.1, 0.1, 0.9, 0.9)),
+            ..Default::default()
+        };
         assert_ne!(edit_signature(&a, 0), edit_signature(&b, 0));
     }
 
     #[test]
     fn edit_signature_differs_on_tone() {
         let a = Adjustments::default();
-        let b = Adjustments { exposure: 0.5, ..Default::default() };
+        let b = Adjustments {
+            exposure: 0.5,
+            ..Default::default()
+        };
         assert_ne!(edit_signature(&a, 0), edit_signature(&b, 0));
     }
 
@@ -469,8 +494,14 @@ mod tests {
     #[test]
     fn edit_signature_quantizes() {
         // Sub-quantum jitter (< 1e-3 tone, < 1e-5 crop) hashes identically.
-        let a = Adjustments { exposure: 1.0, ..Default::default() };
-        let b = Adjustments { exposure: 1.0 + 1e-5, ..Default::default() };
+        let a = Adjustments {
+            exposure: 1.0,
+            ..Default::default()
+        };
+        let b = Adjustments {
+            exposure: 1.0 + 1e-5,
+            ..Default::default()
+        };
         assert_eq!(edit_signature(&a, 0), edit_signature(&b, 0));
     }
 
@@ -480,7 +511,11 @@ mod tests {
         // A closure that would clearly change the result if the neighborhood
         // loop ran at all: every non-center tap is wildly different.
         let out = denoise_sample(&adj, |dx, dy| {
-            if (dx, dy) == (0, 0) { [0.2, 0.3, 0.4] } else { [1.0, 0.0, 0.0] }
+            if (dx, dy) == (0, 0) {
+                [0.2, 0.3, 0.4]
+            } else {
+                [1.0, 0.0, 0.0]
+            }
         });
         assert_eq!(out, [0.2, 0.3, 0.4]);
     }
@@ -489,11 +524,21 @@ mod tests {
     fn denoise_smooths_flat_noise() {
         // Center is an outlier against an otherwise-uniform neighborhood — a
         // real blend should pull the result away from the raw center value.
-        let adj = Adjustments { denoise: 100.0, ..Default::default() };
+        let adj = Adjustments {
+            denoise: 100.0,
+            ..Default::default()
+        };
         let out = denoise_sample(&adj, |dx, dy| {
-            if (dx, dy) == (0, 0) { [1.0, 1.0, 1.0] } else { [0.0, 0.0, 0.0] }
+            if (dx, dy) == (0, 0) {
+                [1.0, 1.0, 1.0]
+            } else {
+                [0.0, 0.0, 0.0]
+            }
         });
-        assert!(out[0] < 1.0 && out[0] > 0.0, "expected a blend, got {out:?}");
+        assert!(
+            out[0] < 1.0 && out[0] > 0.0,
+            "expected a blend, got {out:?}"
+        );
     }
 
     #[test]
@@ -502,7 +547,10 @@ mod tests {
         // The denoised center (on the boundary, dx=0 counted as right/1.0)
         // should stay closer to its own side than a plain unweighted average
         // of all 25 taps would (which is exactly 0.5 minus the center column).
-        let adj = Adjustments { denoise: 100.0, ..Default::default() };
+        let adj = Adjustments {
+            denoise: 100.0,
+            ..Default::default()
+        };
         let step = |dx: i32, _dy: i32| -> [f32; 3] {
             let v = if dx < 0 { 0.0 } else { 1.0 };
             [v, v, v]
@@ -520,13 +568,19 @@ mod tests {
     #[test]
     fn edit_signature_changes_with_denoise() {
         let a = Adjustments::default();
-        let b = Adjustments { denoise: 40.0, ..Default::default() };
+        let b = Adjustments {
+            denoise: 40.0,
+            ..Default::default()
+        };
         assert_ne!(edit_signature(&a, 0), edit_signature(&b, 0));
     }
 
     #[test]
     fn is_identity_false_when_denoise_set() {
-        let a = Adjustments { denoise: 1.0, ..Default::default() };
+        let a = Adjustments {
+            denoise: 1.0,
+            ..Default::default()
+        };
         assert!(!a.is_identity());
     }
 
@@ -554,14 +608,22 @@ mod tests {
         let px = [0.6, 0.3, 0.2];
         let out = apply_linear(&adj, px);
         for i in 0..3 {
-            assert!((out[i] - px[i]).abs() < 1e-5, "channel {i}: {} vs {}", out[i], px[i]);
+            assert!(
+                (out[i] - px[i]).abs() < 1e-5,
+                "channel {i}: {} vs {}",
+                out[i],
+                px[i]
+            );
         }
     }
 
     #[test]
     fn saturation_pushes_channels_from_luma() {
         let base = Adjustments::default();
-        let saturated = Adjustments { saturation: 80.0, ..Default::default() };
+        let saturated = Adjustments {
+            saturation: 80.0,
+            ..Default::default()
+        };
         let px = [0.6, 0.4, 0.4];
         let out_base = apply_linear(&base, px);
         let out_sat = apply_linear(&saturated, px);
@@ -575,8 +637,14 @@ mod tests {
     #[test]
     fn edit_signature_differs_on_vibrance_and_saturation() {
         let a = Adjustments::default();
-        let v = Adjustments { vibrance: 30.0, ..Default::default() };
-        let s = Adjustments { saturation: 30.0, ..Default::default() };
+        let v = Adjustments {
+            vibrance: 30.0,
+            ..Default::default()
+        };
+        let s = Adjustments {
+            saturation: 30.0,
+            ..Default::default()
+        };
         assert_ne!(edit_signature(&a, 0), edit_signature(&v, 0));
         assert_ne!(edit_signature(&a, 0), edit_signature(&s, 0));
         assert_ne!(edit_signature(&v, 0), edit_signature(&s, 0));
@@ -584,8 +652,16 @@ mod tests {
 
     #[test]
     fn is_identity_false_when_vibrance_or_saturation_set() {
-        assert!(!Adjustments { vibrance: 1.0, ..Default::default() }.is_identity());
-        assert!(!Adjustments { saturation: 1.0, ..Default::default() }.is_identity());
+        assert!(!Adjustments {
+            vibrance: 1.0,
+            ..Default::default()
+        }
+        .is_identity());
+        assert!(!Adjustments {
+            saturation: 1.0,
+            ..Default::default()
+        }
+        .is_identity());
     }
 
     #[test]

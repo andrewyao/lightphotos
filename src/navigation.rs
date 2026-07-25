@@ -136,7 +136,10 @@ pub fn list_subdirs(dir: &Path) -> Vec<PathBuf> {
             if name.starts_with('.') {
                 return false;
             }
-            let ext = p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_ascii_lowercase());
             !matches!(ext.as_deref(), Some("app") | Some("photoslibrary"))
         })
         .collect();
@@ -279,8 +282,14 @@ mod tests {
 
         // Gte: unset(0) never matches a positive threshold.
         assert_eq!(visible_indices(&e, Some((Cmp::Gte, 3)), rating), vec![1, 2]);
-        assert_eq!(visible_indices(&e, Some((Cmp::Gte, 1)), rating), vec![1, 2, 3]);
-        assert_eq!(visible_indices(&e, Some((Cmp::Gte, 6)), rating), Vec::<usize>::new());
+        assert_eq!(
+            visible_indices(&e, Some((Cmp::Gte, 1)), rating),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            visible_indices(&e, Some((Cmp::Gte, 6)), rating),
+            Vec::<usize>::new()
+        );
 
         // Eq.
         assert_eq!(visible_indices(&e, Some((Cmp::Eq, 5)), rating), vec![2]);
@@ -288,7 +297,10 @@ mod tests {
 
         // Lte: unset(0) always matches; 0 matches Lte but not Gte>=1/Eq>=1.
         assert_eq!(visible_indices(&e, Some((Cmp::Lte, 1)), rating), vec![0, 3]);
-        assert_eq!(visible_indices(&e, Some((Cmp::Lte, 5)), rating), vec![0, 1, 2, 3]);
+        assert_eq!(
+            visible_indices(&e, Some((Cmp::Lte, 5)), rating),
+            vec![0, 1, 2, 3]
+        );
         assert_eq!(visible_indices(&e, Some((Cmp::Lte, 0)), rating), vec![0]);
     }
 
@@ -298,7 +310,10 @@ mod tests {
 
     #[test]
     fn group_by_time_empty_and_single() {
-        assert_eq!(group_by_time(&[], Duration::from_secs(2)), Vec::<u32>::new());
+        assert_eq!(
+            group_by_time(&[], Duration::from_secs(2)),
+            Vec::<u32>::new()
+        );
         assert_eq!(group_by_time(&[t(10)], Duration::from_secs(2)), vec![0]);
     }
 
@@ -306,13 +321,19 @@ mod tests {
     fn group_by_time_splits_on_large_gap() {
         // 0s,1s (close), then 10s,11s (close) with a 9s jump between → 2 bursts.
         let times = [t(0), t(1), t(10), t(11)];
-        assert_eq!(group_by_time(&times, Duration::from_secs(3)), vec![0, 0, 1, 1]);
+        assert_eq!(
+            group_by_time(&times, Duration::from_secs(3)),
+            vec![0, 0, 1, 1]
+        );
     }
 
     #[test]
     fn group_by_time_all_within_gap_is_one_group() {
         let times = [t(0), t(1), t(2), t(3)];
-        assert_eq!(group_by_time(&times, Duration::from_secs(2)), vec![0, 0, 0, 0]);
+        assert_eq!(
+            group_by_time(&times, Duration::from_secs(2)),
+            vec![0, 0, 0, 0]
+        );
     }
 
     #[test]
@@ -328,7 +349,10 @@ mod tests {
 
     #[test]
     fn group_by_time_leading_and_all_unknown() {
-        assert_eq!(group_by_time(&[None, None], Duration::from_secs(2)), vec![0, 0]);
+        assert_eq!(
+            group_by_time(&[None, None], Duration::from_secs(2)),
+            vec![0, 0]
+        );
         // Leading None, then a normal split.
         assert_eq!(
             group_by_time(&[None, t(0), t(100)], Duration::from_secs(3)),
@@ -373,8 +397,7 @@ mod tests {
         );
 
         // root and `a` expanded: a's subtree appears before sibling b (pre-order).
-        let root_and_a =
-            |p: &Path| p == Path::new("root") || p == Path::new("root/a");
+        let root_and_a = |p: &Path| p == Path::new("root") || p == Path::new("root/a");
         assert_eq!(
             flatten_visible_tree(Path::new("root"), &root_and_a, &kids),
             paths(&["root", "root/a", "root/a/a1", "root/a/a2", "root/b"])

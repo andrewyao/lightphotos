@@ -83,7 +83,11 @@ fn variance_of_laplacian(gray: &[f32], w: usize, h: usize) -> f64 {
         return 0.0;
     }
     let mean = responses.iter().sum::<f64>() / n;
-    responses.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n
+    responses
+        .iter()
+        .map(|v| (v - mean) * (v - mean))
+        .sum::<f64>()
+        / n
 }
 
 #[cfg(test)]
@@ -108,7 +112,13 @@ mod tests {
     fn checkerboard_beats_gradient() {
         let (w, h) = (8usize, 8usize);
         let checker: Vec<f32> = (0..w * h)
-            .map(|i| if ((i % w) + (i / w)) % 2 == 0 { 0.0 } else { 255.0 })
+            .map(|i| {
+                if ((i % w) + (i / w)) % 2 == 0 {
+                    0.0
+                } else {
+                    255.0
+                }
+            })
             .collect();
         let gradient: Vec<f32> = (0..w * h).map(|i| (i % w) as f32 * 10.0).collect();
         assert!(

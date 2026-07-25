@@ -129,10 +129,7 @@ impl ThumbCache {
                 let base = PathBuf::from(home).join("Library/Caches");
                 let root = base.join("com.lightphotos/thumbnails");
                 // Preserve the cache built under the pre-rename name.
-                crate::paths::migrate_legacy_dir(
-                    &root,
-                    &base.join("com.imageviewer/thumbnails"),
-                );
+                crate::paths::migrate_legacy_dir(&root, &base.join("com.imageviewer/thumbnails"));
                 root
             }
             Err(_) => PathBuf::from(".lightphotos-thumbnails"),
@@ -199,7 +196,9 @@ impl Default for ThumbCache {
 /// of remaining cache files is at or below `budget`. Best-effort: metadata and
 /// remove errors are ignored, and a cache already under budget does no work.
 fn prune_dir(root: &Path, budget: u64) {
-    let Ok(entries) = fs::read_dir(root) else { return };
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
     // (path, size, mtime) for every cache file.
     let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
     let mut total: u64 = 0;
@@ -269,7 +268,11 @@ fn read_tw(path: &Path) -> Result<DecodedImage, String> {
             expected
         ));
     }
-    Ok(DecodedImage { width, height, rgba })
+    Ok(DecodedImage {
+        width,
+        height,
+        rgba,
+    })
 }
 
 #[cfg(test)]
@@ -323,8 +326,14 @@ mod tests {
             .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tw"))
             .map(|e| e.metadata().unwrap().len())
             .sum();
-        assert!(remaining_tw <= 4096, "cache should be pruned under budget, got {remaining_tw}");
-        assert!(dir.join("keep.txt").exists(), "non-cache files must be left alone");
+        assert!(
+            remaining_tw <= 4096,
+            "cache should be pruned under budget, got {remaining_tw}"
+        );
+        assert!(
+            dir.join("keep.txt").exists(),
+            "non-cache files must be left alone"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

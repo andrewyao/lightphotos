@@ -12,11 +12,11 @@
 
 use std::path::Path;
 
+use crate::app::{App, CropEdge, FocusLevel, Region, ViewMode};
+use crate::burst::BurstMark;
 use crate::develop::Adjustments;
 use crate::image_decode;
 use crate::navigation::Cmp;
-use crate::app::{App, CropEdge, FocusLevel, Region, ViewMode};
-use crate::burst::BurstMark;
 
 /// Shared palette. Several of these colors were previously duplicated as inline
 /// `from_rgb(...)` literals across the grid and filmstrip cells; naming them
@@ -153,7 +153,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 /// A transient status message (e.g. an export result), shown bottom-center for a
 /// few seconds. Requests a repaint so it disappears without further input.
 fn status_toast(ui: &egui::Ui, app: &App) {
-    let Some(text) = app.status_text() else { return };
+    let Some(text) = app.status_text() else {
+        return;
+    };
     let screen = ui.ctx().content_rect();
     egui::Area::new(egui::Id::new("status_toast"))
         .order(egui::Order::Foreground)
@@ -167,7 +169,8 @@ fn status_toast(ui: &egui::Ui, app: &App) {
                 });
         });
     // Keep repainting until the toast expires so it clears on its own.
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(250));
 }
 
 /// Stars as a compact string, e.g. 3 → "★★★☆☆".
@@ -187,7 +190,13 @@ fn star_string(stars: u8) -> String {
 /// `idx`-th keyboard-focusable control, and sync keyboard focus to it on
 /// click — mirrors the folder-tree cursor (`folder_node`) and Develop slider
 /// (`slider`) patterns. Index order here must match `App::activate_toolbar_focus`.
-fn toolbar_focus_sync(ui: &egui::Ui, app: &App, idx: usize, resp: &egui::Response, out: &mut FrameOutput) {
+fn toolbar_focus_sync(
+    ui: &egui::Ui,
+    app: &App,
+    idx: usize,
+    resp: &egui::Response,
+    out: &mut FrameOutput,
+) {
     if app.focus() == Region::Toolbar
         && app.focus_level() == FocusLevel::Entered
         && app.toolbar_focus() == idx
@@ -247,7 +256,9 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 (Cmp::Eq, "=", "Exactly N stars"),
                 (Cmp::Lte, "\u{2264}", "At most N stars"),
             ] {
-                let resp = ui.selectable_label(sel_cmp == cmp, glyph).on_hover_text(tip);
+                let resp = ui
+                    .selectable_label(sel_cmp == cmp, glyph)
+                    .on_hover_text(tip);
                 if resp.clicked() {
                     out.actions.push(UiAction::SetFilterCmp(cmp));
                 }
@@ -279,11 +290,11 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 } else {
                     egui::Color32::from_gray(160)
                 };
-                let star = egui::Label::new(
-                    egui::RichText::new(glyph).size(20.0).color(color),
-                )
-                .sense(egui::Sense::click());
-                let resp = ui.add(star).on_hover_text(format!("Show photos rated {cmp_sym} {n}"));
+                let star = egui::Label::new(egui::RichText::new(glyph).size(20.0).color(color))
+                    .sense(egui::Sense::click());
+                let resp = ui
+                    .add(star)
+                    .on_hover_text(format!("Show photos rated {cmp_sym} {n}"));
                 if resp.clicked() {
                     out.actions.push(UiAction::SetFilter(Some((sel_cmp, n))));
                 }
@@ -309,7 +320,10 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             ui.separator();
             let filter_active = app.filter().is_some();
             let resp = ui
-                .add_enabled(!filter_active, egui::Button::selectable(app.bursts_on(), "Bursts"))
+                .add_enabled(
+                    !filter_active,
+                    egui::Button::selectable(app.bursts_on(), "Bursts"),
+                )
                 .on_hover_text(if filter_active {
                     "Clear the filter to use Bursts"
                 } else {
@@ -370,11 +384,15 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     out.actions.push(UiAction::CopySettings);
                 }
                 if ui
-                    .add_enabled(app.has_copied_settings(), egui::Button::new("Apply Settings"))
+                    .add_enabled(
+                        app.has_copied_settings(),
+                        egui::Button::new("Apply Settings"),
+                    )
                     .on_disabled_hover_text("Copy settings from a photo first")
                     .clicked()
                 {
-                    out.actions.push(UiAction::RequestBulk(BulkKind::ApplySettings));
+                    out.actions
+                        .push(UiAction::RequestBulk(BulkKind::ApplySettings));
                 }
                 // Export every selected photo as a baked JPG.
                 if ui
@@ -400,7 +418,9 @@ fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             // naturally lands at `idx` (-> EnterGrid) and `E` at `idx + 1` (->
             // EnterLoupe), matching `activate_toolbar_focus`.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let resp = ui.selectable_label(app.mode() == ViewMode::Grid, "G").on_hover_text("Grid (G)");
+                let resp = ui
+                    .selectable_label(app.mode() == ViewMode::Grid, "G")
+                    .on_hover_text("Grid (G)");
                 if resp.clicked() {
                     out.actions.push(UiAction::EnterGrid);
                 }
@@ -487,16 +507,18 @@ fn rating_histogram(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let bar_w = 12.0;
     let gap = 3.0;
     let h = 24.0;
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(6.0 * (bar_w + gap), h),
-        egui::Sense::hover(),
-    );
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(6.0 * (bar_w + gap), h), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     for k in 0u8..6 {
         let x = rect.min.x + k as f32 * (bar_w + gap);
         let col = egui::Rect::from_min_size(egui::pos2(x, rect.min.y), egui::vec2(bar_w, h));
         let frac = counts[k as usize] as f32 / max;
-        let bh = if counts[k as usize] == 0 { 0.0 } else { (frac * (h - 1.0)).max(2.0) };
+        let bh = if counts[k as usize] == 0 {
+            0.0
+        } else {
+            (frac * (h - 1.0)).max(2.0)
+        };
         let bar = egui::Rect::from_min_max(egui::pos2(x, rect.max.y - bh), col.max);
         let active = matches!(app.filter(), Some((Cmp::Eq, v)) if v == k);
         let color = if active {
@@ -509,7 +531,10 @@ fn rating_histogram(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         painter.rect_filled(bar, 1.0, color);
         let resp = ui
             .interact(col, ui.id().with(("rating_hist", k)), egui::Sense::click())
-            .on_hover_text(format!("{} photo(s) rated {}\u{2605}", counts[k as usize], k));
+            .on_hover_text(format!(
+                "{} photo(s) rated {}\u{2605}",
+                counts[k as usize], k
+            ));
         if resp.clicked() {
             // Toggle: clicking the active bar clears the filter.
             let next = if active { None } else { Some((Cmp::Eq, k)) };
@@ -683,20 +708,20 @@ fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
             grid_scroll = grid_scroll.scroll_offset(egui::vec2(0.0, 0.0));
         }
         grid_scroll.show_rows(ui, cell, rows, |ui, row_range| {
-                let start = row_range.start * cols;
-                let end = (row_range.end * cols).min(len);
-                app.set_visible_grid_range(start, end);
-                for row in row_range {
-                    ui.horizontal(|ui| {
-                        for col in 0..cols {
-                            let pos = row * cols + col;
-                            if pos < len {
-                                grid_cell(ui, app, pos, cell, sel, out);
-                            }
+            let start = row_range.start * cols;
+            let end = (row_range.end * cols).min(len);
+            app.set_visible_grid_range(start, end);
+            for row in row_range {
+                ui.horizontal(|ui| {
+                    for col in 0..cols {
+                        let pos = row * cols + col;
+                        if pos < len {
+                            grid_cell(ui, app, pos, cell, sel, out);
                         }
-                    });
-                }
-            });
+                    }
+                });
+            }
+        });
     });
 }
 
@@ -708,7 +733,11 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
         ui.add_space(depth as f32 * 14.0);
         // The disclosure glyph and name are a single selectable unit: one click
         // anywhere on the row opens the folder (load + toggle expansion).
-        let glyph = if app.is_expanded(path) { "\u{25bc}" } else { "\u{25b6}" }; // ▼ / ▶
+        let glyph = if app.is_expanded(path) {
+            "\u{25bc}"
+        } else {
+            "\u{25b6}"
+        }; // ▼ / ▶
         let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -1089,17 +1118,30 @@ fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     let painter = ui.painter_at(central);
     let mid_x = central.center().x;
     painter.line_segment(
-        [egui::pos2(mid_x, central.min.y), egui::pos2(mid_x, central.max.y)],
+        [
+            egui::pos2(mid_x, central.min.y),
+            egui::pos2(mid_x, central.max.y),
+        ],
         egui::Stroke::new(1.0f32, egui::Color32::from_gray(90)),
     );
     // Shadowed text so labels read over any image.
     let label = |p: egui::Pos2, align: egui::Align2, text: &str| {
         let font = egui::FontId::proportional(13.0);
-        painter.text(p + egui::vec2(1.0, 1.0), align, text, font.clone(), egui::Color32::BLACK);
+        painter.text(
+            p + egui::vec2(1.0, 1.0),
+            align,
+            text,
+            font.clone(),
+            egui::Color32::BLACK,
+        );
         painter.text(p, align, text, font, egui::Color32::WHITE);
     };
     let pad = 8.0;
-    label(central.min + egui::vec2(pad, pad), egui::Align2::LEFT_TOP, "Before");
+    label(
+        central.min + egui::vec2(pad, pad),
+        egui::Align2::LEFT_TOP,
+        "Before",
+    );
     label(
         egui::pos2(central.max.x - pad, central.min.y + pad),
         egui::Align2::RIGHT_TOP,
@@ -1172,9 +1214,8 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     .size()
                     .x
             };
-            let group_w = filename_w
-                + if filename.is_empty() { 0.0 } else { group_gap }
-                + stars_total_w;
+            let group_w =
+                filename_w + if filename.is_empty() { 0.0 } else { group_gap } + stars_total_w;
             let group_left = rect.center().x - group_w / 2.0;
 
             if !filename.is_empty() {
@@ -1191,9 +1232,8 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             // Area/Foreground trick needed here (unlike the old floating
             // overlay) — this bar is docked space, not drawn over the pannable
             // image, so egui already owns clicks within it.
-            let stars_left = group_left
-                + filename_w
-                + if filename.is_empty() { 0.0 } else { group_gap };
+            let stars_left =
+                group_left + filename_w + if filename.is_empty() { 0.0 } else { group_gap };
             let stars_rect = egui::Rect::from_center_size(
                 egui::pos2(stars_left + stars_total_w / 2.0, main_y),
                 egui::vec2(stars_total_w, star_w),
@@ -1202,11 +1242,15 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 ui.horizontal_centered(|ui| {
                     let current = app.selected_rating();
                     for i in 0..5u8 {
-                        let (r, resp) =
-                            ui.allocate_exact_size(egui::vec2(star_w, star_w), egui::Sense::click());
+                        let (r, resp) = ui
+                            .allocate_exact_size(egui::vec2(star_w, star_w), egui::Sense::click());
                         let filled = (i + 1) <= current;
                         let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
-                        let color = if filled { theme::STAR_GOLD } else { egui::Color32::from_gray(160) };
+                        let color = if filled {
+                            theme::STAR_GOLD
+                        } else {
+                            egui::Color32::from_gray(160)
+                        };
                         ui.painter().text(
                             r.center(),
                             egui::Align2::CENTER_CENTER,
@@ -1263,7 +1307,9 @@ fn secondary_text(meta: &image_decode::ImageMetadata) -> String {
         (None, None) => {}
     }
     if let Some(d) = meta.capture_date {
-        parts.push(format_capture_date(d.year, d.month, d.day, d.hour, d.minute));
+        parts.push(format_capture_date(
+            d.year, d.month, d.day, d.hour, d.minute,
+        ));
     }
     parts.join("   \u{b7}   ")
 }
@@ -1338,8 +1384,14 @@ fn loupe_crop_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut F
             let bands = [
                 egui::Rect::from_min_max(full.min, egui::pos2(full.max.x, r.min.y)), // top
                 egui::Rect::from_min_max(egui::pos2(full.min.x, r.max.y), full.max), // bottom
-                egui::Rect::from_min_max(egui::pos2(full.min.x, r.min.y), egui::pos2(r.min.x, r.max.y)), // left
-                egui::Rect::from_min_max(egui::pos2(r.max.x, r.min.y), egui::pos2(full.max.x, r.max.y)), // right
+                egui::Rect::from_min_max(
+                    egui::pos2(full.min.x, r.min.y),
+                    egui::pos2(r.min.x, r.max.y),
+                ), // left
+                egui::Rect::from_min_max(
+                    egui::pos2(r.max.x, r.min.y),
+                    egui::pos2(full.max.x, r.max.y),
+                ), // right
             ];
             for b in bands {
                 if b.is_positive() {
@@ -1349,13 +1401,24 @@ fn loupe_crop_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut F
 
             // Crop outline + rule-of-thirds guides.
             let line = egui::Color32::from_gray(235);
-            painter.rect_stroke(r, 0.0, egui::Stroke::new(1.5f32, line), egui::StrokeKind::Inside);
+            painter.rect_stroke(
+                r,
+                0.0,
+                egui::Stroke::new(1.5f32, line),
+                egui::StrokeKind::Inside,
+            );
             for i in 1..3 {
                 let fx = r.min.x + r.width() * i as f32 / 3.0;
                 let fy = r.min.y + r.height() * i as f32 / 3.0;
                 let faint = egui::Color32::from_white_alpha(70);
-                painter.line_segment([egui::pos2(fx, r.min.y), egui::pos2(fx, r.max.y)], egui::Stroke::new(1.0f32, faint));
-                painter.line_segment([egui::pos2(r.min.x, fy), egui::pos2(r.max.x, fy)], egui::Stroke::new(1.0f32, faint));
+                painter.line_segment(
+                    [egui::pos2(fx, r.min.y), egui::pos2(fx, r.max.y)],
+                    egui::Stroke::new(1.0f32, faint),
+                );
+                painter.line_segment(
+                    [egui::pos2(r.min.x, fy), egui::pos2(r.max.x, fy)],
+                    egui::Stroke::new(1.0f32, faint),
+                );
             }
             // Edge handles: a short bright bar at each edge midpoint.
             for (_, a, b) in edges {
@@ -1475,13 +1538,12 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             // Index of the slider being drawn, matched against `develop_focus` to
             // draw the keyboard-cursor outline. Advanced by every `slider(...)`.
             let mut idx = 0usize;
-            let focus_idx = if app.focus() == Region::Develop
-                && app.focus_level() == FocusLevel::Entered
-            {
-                Some(app.develop_focus())
-            } else {
-                None
-            };
+            let focus_idx =
+                if app.focus() == Region::Develop && app.focus_level() == FocusLevel::Entered {
+                    Some(app.develop_focus())
+                } else {
+                    None
+                };
 
             // One labeled slider over `field`. `focused` draws the amber keyboard
             // cursor. Returns (value changed, mouse-interacted).
@@ -1553,9 +1615,19 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             ui.add_space(6.0);
 
             ui.label(egui::RichText::new("Tone").strong());
-            row!("Exposure", &mut adj.exposure, crate::develop::EXPOSURE_RANGE, 2);
+            row!(
+                "Exposure",
+                &mut adj.exposure,
+                crate::develop::EXPOSURE_RANGE,
+                2
+            );
             row!("Contrast", &mut adj.contrast, crate::develop::TONE_RANGE, 0);
-            row!("Highlights", &mut adj.highlights, crate::develop::TONE_RANGE, 0);
+            row!(
+                "Highlights",
+                &mut adj.highlights,
+                crate::develop::TONE_RANGE,
+                0
+            );
             row!("Shadows", &mut adj.shadows, crate::develop::TONE_RANGE, 0);
             row!("Whites", &mut adj.whites, crate::develop::TONE_RANGE, 0);
             row!("Blacks", &mut adj.blacks, crate::develop::TONE_RANGE, 0);
@@ -1563,11 +1635,21 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 
             ui.label(egui::RichText::new("Presence").strong());
             row!("Vibrance", &mut adj.vibrance, crate::develop::TONE_RANGE, 0);
-            row!("Saturation", &mut adj.saturation, crate::develop::TONE_RANGE, 0);
+            row!(
+                "Saturation",
+                &mut adj.saturation,
+                crate::develop::TONE_RANGE,
+                0
+            );
             ui.add_space(6.0);
 
             ui.label(egui::RichText::new("Detail").strong());
-            row!("Denoise", &mut adj.denoise, crate::develop::DENOISE_RANGE, 0);
+            row!(
+                "Denoise",
+                &mut adj.denoise,
+                crate::develop::DENOISE_RANGE,
+                0
+            );
             let _ = idx; // final bump isn't read; silence unused-assignment
 
             if changed {
@@ -1719,8 +1801,17 @@ mod tests {
 
     #[test]
     fn format_capture_date_formats_month_day_year_and_12h_clock() {
-        assert_eq!(format_capture_date(2026, 7, 14, 15, 42), "Jul 14, 2026 3:42 PM");
-        assert_eq!(format_capture_date(2026, 1, 1, 0, 5), "Jan 1, 2026 12:05 AM");
-        assert_eq!(format_capture_date(2026, 1, 1, 12, 0), "Jan 1, 2026 12:00 PM");
+        assert_eq!(
+            format_capture_date(2026, 7, 14, 15, 42),
+            "Jul 14, 2026 3:42 PM"
+        );
+        assert_eq!(
+            format_capture_date(2026, 1, 1, 0, 5),
+            "Jan 1, 2026 12:05 AM"
+        );
+        assert_eq!(
+            format_capture_date(2026, 1, 1, 12, 0),
+            "Jan 1, 2026 12:00 PM"
+        );
     }
 }
