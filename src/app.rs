@@ -118,8 +118,10 @@ const REGION_ORDER: [Region; 5] =
 /// A region's keyboard focus is either just "selected" (F6 landed here; F6
 /// again moves to the next region) or "entered" (a specific item/control has
 /// the cursor; F6, where meaningful, moves within it instead). Entering
-/// happens via `Enter` or, for regions with content, automatically on the
-/// first arrow press — Escape pops back to `Selected`.
+/// happens via `Enter` or, for control-oriented regions, automatically on the
+/// first arrow press — Escape pops back to `Selected`. Grid arrows move the
+/// image selection without adding a separate focus level, so Escape continues
+/// to leave the grid in one press after navigation.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FocusLevel {
     Selected,
@@ -1078,10 +1080,12 @@ impl App {
     /// Route an arrow key. With Shift held in the grid it extends the range
     /// selection; otherwise it's the normal focus-routed move. `(dx, dy)` maps to
     /// left/right/up/down. Arrows always act on the region's content regardless
-    /// of focus level — a first press on a freshly F6-selected region both
-    /// enters it and performs the move in one step.
+    /// of focus level. Grid selection is already the region's content, so grid
+    /// arrows do not add an extra focus level that would consume the next Escape.
     fn nav_arrow(&mut self, dx: isize, dy: isize, shift: bool) {
-        self.focus_level = FocusLevel::Entered;
+        if self.focus != Region::Grid {
+            self.focus_level = FocusLevel::Entered;
+        }
         if shift && self.focus == Region::Grid {
             self.extend_grid(dx, dy);
             return;
