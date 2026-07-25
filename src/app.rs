@@ -22,7 +22,7 @@ use winit::window::Window;
 
 use crate::burst::{self, BurstMark};
 use crate::catalog::Catalog;
-use crate::develop::{self, Adjustments, Crop, GpuAdjust};
+use crate::develop::{self, Adjustments, Crop, GpuAdjust, GpuTouchUp, TouchUp};
 use crate::export::{ExportJob, ExportOutcome, Exporter};
 use crate::loader::Loader;
 use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp, Playlist};
@@ -38,6 +38,11 @@ const THUMB_MIN: u32 = 96;
 const THUMB_MAX: u32 = 512;
 const THUMB_DEFAULT: u32 = 192;
 const THUMB_STEP: u32 = 32;
+/// Smallest touch-up radius in source-image pixels.
+pub(crate) const TOUCHUP_MIN_PIXELS: f32 = 3.0;
+pub(crate) const TOUCHUP_MAX_RADIUS: f32 = 0.15;
+/// Fraction of the patch radius used to blend the correction into its edges.
+const TOUCHUP_FEATHER: f32 = 1.0;
 
 /// Number of Develop sliders the keyboard cycles through (panel order: temp,
 /// tint, exposure, contrast, highlights, shadows, whites, blacks, vibrance,
@@ -248,6 +253,10 @@ pub(crate) struct App {
     /// Per-image non-destructive develop edits (persistent, mirrored in-memory).
     /// Only non-identity edits are stored to keep the map small.
     edits: HashMap<PathBuf, Adjustments>,
+    touchups: HashMap<PathBuf, Vec<TouchUp>>,
+    touchup_active: bool,
+    touchup_radius: f32,
+    touchup_selected: Option<usize>,
     /// Whether the loupe's right-hand Develop panel is open.
     develop_open: bool,
     /// A small downsampled LINEAR-light RGB grid of the shown image, used to
@@ -429,6 +438,12 @@ impl App {
             catalog,
             ratings: HashMap::new(),
             edits: HashMap::new(),
+            touchups: HashMap::new(),
+            touchup_active: false,
+            // Start with a small spot; the effective minimum is three source
+            // pixels once an image is loaded.
+            touchup_radius: 0.001,
+            touchup_selected: None,
             develop_open: true,
             hist_sample: Vec::new(),
             hist_dw: 0,
@@ -565,6 +580,10 @@ impl App {
             let adj = self.catalog.adjustments(p);
             if !adj.is_identity() {
                 self.edits.insert(p.clone(), adj);
+            }
+            let touchups = self.catalog.touchups(p);
+            if !touchups.is_empty() {
+                self.touchups.insert(p.clone(), touchups);
             }
             let rot = self.catalog.rotation(p);
             if rot != 0 {
@@ -1750,6 +1769,31 @@ impl App {
             .unwrap_or_default()
     }
 
+    pub(crate) fn current_touchups(&self) -> &[TouchUp] {
+        self.shown
+            .path()
+            .and_then(|p| self.touchups.get(p))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn touchup_active(&self) -> bool {
+        self.touchup_active
+    }
+    pub(crate) fn touchup_radius(&self) -> f32 {
+        self.touchup_radius.max(self.touchup_radius_min())
+    }
+    pub(crate) fn touchup_selected(&self) -> Option<usize> {
+        self.touchup_selected
+    }
+    pub(crate) fn set_touchup_radius(&mut self, radius: f32) {
+        self.touchup_radius = radius.clamp(self.touchup_radius_min(), TOUCHUP_MAX_RADIUS);
+    }
+    pub(crate) fn touchup_radius_min(&self) -> f32 {
+        let (w, h) = self.image_size();
+        (TOUCHUP_MIN_PIXELS / w.min(h)).min(TOUCHUP_MAX_RADIUS)
+    }
+
     /// Persist and apply `adj` to the currently-shown image: update the in-memory
     /// edits map (dropping identity edits), write the catalog, push to the GPU
     /// uniform, and mark the histogram dirty. Shared by the Develop sliders
@@ -1773,8 +1817,14 @@ impl App {
     /// `push_transform`; call it whenever the shown image or its edits change.
     fn push_adjustments(&mut self) {
         let gpu = self.gpu_adjust(&self.current_adjustments());
+        let gpu_touchups: Vec<GpuTouchUp> = self
+            .current_touchups()
+            .iter()
+            .map(GpuTouchUp::from)
+            .collect();
         if let Some(r) = &mut self.renderer {
             r.set_adjustments(gpu);
+            r.set_touchups(&gpu_touchups);
         }
         self.request_redraw();
     }
@@ -1788,7 +1838,116 @@ impl App {
         let mut g = GpuAdjust::from(adj);
         g.texel_w = 1.0 / w;
         g.texel_h = 1.0 / h;
+        g._pad0 = self.current_touchups().len() as f32;
         g
+    }
+
+    fn apply_touchups(&mut self, touchups: Vec<TouchUp>) {
+        let Some(path) = self.shown.path().map(Path::to_path_buf) else {
+            return;
+        };
+        if touchups.len() > 64 {
+            self.set_status("Touch Up supports up to 64 spots".into());
+            return;
+        }
+        if touchups.is_empty() {
+            self.touchups.remove(&path);
+        } else {
+            self.touchups.insert(path.clone(), touchups.clone());
+        }
+        self.catalog.set_touchups(&path, &touchups);
+        self.touchup_selected = None;
+        self.push_adjustments();
+        self.hist_dirty = true;
+        self.request_redraw();
+    }
+
+    fn choose_touchup(&self, u: f32, v: f32) -> Option<TouchUp> {
+        let path = self.shown.path()?;
+        let img = self.loader.as_ref()?.get(&path.to_path_buf())?;
+        let radius = self.touchup_radius();
+        let sample = |u: f32, v: f32| {
+            let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
+            let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;
+            let i = ((y * img.width + x) * 4) as usize;
+            image_ops::unpremul_to_linear([
+                img.rgba[i],
+                img.rgba[i + 1],
+                img.rgba[i + 2],
+                img.rgba[i + 3],
+            ])
+        };
+        // Match the source and target at the actual patch boundary. Using a
+        // ring outside the patch leaves a color discontinuity at the edge,
+        // which becomes visible as a halo after feathering.
+        let ring = |cx: f32, cy: f32| -> [f32; 3] {
+            let mut sum = [0.0; 3];
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::TAU / 8.0;
+                let p = sample(cx + a.cos() * radius, cy + a.sin() * radius);
+                for c in 0..3 {
+                    sum[c] += p[c];
+                }
+            }
+            for c in 0..3 {
+                sum[c] /= 8.0;
+            }
+            sum
+        };
+        let target_ring = ring(u, v);
+        let mut best: Option<(f32, f32, f32)> = None;
+        for i in 0..16 {
+            let a = i as f32 * std::f32::consts::TAU / 16.0;
+            let distance = radius * (3.0 + (i % 3) as f32);
+            let su = u + a.cos() * distance;
+            let sv = v + a.sin() * distance;
+            if su < radius || su > 1.0 - radius || sv < radius || sv > 1.0 - radius {
+                continue;
+            }
+            let sr = ring(su, sv);
+            let score = (0..3)
+                .map(|c| (sr[c] - target_ring[c]).powi(2))
+                .sum::<f32>()
+                + distance * 0.002;
+            if best.map_or(true, |(s, _, _)| score < s) {
+                best = Some((score, su, sv));
+            }
+        }
+        let (_, su, sv) = best?;
+        let source_ring = ring(su, sv);
+        Some(TouchUp {
+            center: [u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)],
+            radius,
+            source: [su, sv],
+            feather: TOUCHUP_FEATHER,
+            delta: [
+                target_ring[0] - source_ring[0],
+                target_ring[1] - source_ring[1],
+                target_ring[2] - source_ring[2],
+            ],
+        })
+    }
+
+    fn add_touchup(&mut self, u: f32, v: f32) {
+        let Some(t) = self.choose_touchup(u, v) else {
+            self.set_status("Touch Up needs a full-resolution image".into());
+            return;
+        };
+        let mut all = self.current_touchups().to_vec();
+        all.push(t);
+        self.touchup_selected = Some(all.len() - 1);
+        self.apply_touchups(all);
+    }
+
+    fn delete_selected_touchup(&mut self) {
+        let Some(i) = self.touchup_selected else {
+            return;
+        };
+        let mut all = self.current_touchups().to_vec();
+        if i < all.len() {
+            all.remove(i);
+        }
+        self.apply_touchups(all);
     }
 
     // ---- Crop mode ----
@@ -2057,11 +2216,13 @@ impl App {
             let dest = paths::jpg_export_target(&src, &exports_dir, &taken);
             taken.insert(dest.clone());
             let adj = self.catalog.adjustments(&src);
+            let touchups = self.catalog.touchups(&src);
             let rot = self.rotations.get(&src).copied().unwrap_or(0);
             exporter.submit(ExportJob {
                 src,
                 dest,
                 adj,
+                touchups,
                 rot,
             });
         }
@@ -2527,7 +2688,11 @@ impl App {
     fn edit_sig_for(&self, path: &Path) -> u64 {
         let adj = self.edits.get(path).copied().unwrap_or_default();
         let rot = self.rotations.get(path).copied().unwrap_or(0);
-        develop::edit_signature(&adj, rot)
+        develop::edit_signature_with_touchups(
+            &adj,
+            self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]),
+            rot,
+        )
     }
 
     fn working_thumb_keys(&self) -> Vec<(PathBuf, u32, u64)> {
@@ -2727,8 +2892,9 @@ impl App {
                 continue;
             };
             let adj = self.edits.get(&key.0).copied().unwrap_or_default();
+            let touchups = self.touchups.get(&key.0).map(Vec::as_slice).unwrap_or(&[]);
             let rot = self.rotations.get(&key.0).copied().unwrap_or(0);
-            let color = if adj.is_identity() && rot % 4 == 0 {
+            let color = if adj.is_identity() && touchups.is_empty() && rot % 4 == 0 {
                 // Fast path: no edits, so upload the raw thumbnail verbatim (also
                 // avoids a needless sRGB round-trip through the tone pipeline).
                 egui::ColorImage::from_rgba_premultiplied(
@@ -2736,7 +2902,7 @@ impl App {
                     &img.rgba,
                 )
             } else {
-                let (w, h, rgba) = image_ops::bake_edited(&img, &adj, rot);
+                let (w, h, rgba) = image_ops::bake_edited(&img, &adj, touchups, rot);
                 // bake_edited yields opaque (alpha=255) pixels, so premultiplied
                 // == straight; from_rgba_premultiplied is correct.
                 egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], &rgba)
@@ -2998,13 +3164,39 @@ impl App {
                 ui::UiAction::CropRelease => self.crop_release(),
                 ui::UiAction::ToggleWbPicker => self.toggle_wb_picker(),
                 ui::UiAction::PickWhiteBalance(u, v) => self.pick_white_balance(u, v),
+                ui::UiAction::ToggleTouchUp => {
+                    self.touchup_active = !self.touchup_active;
+                    self.wb_picker = false;
+                    self.request_redraw();
+                }
+                ui::UiAction::SetTouchUpRadius(r) => {
+                    self.set_touchup_radius(r);
+                    self.request_redraw();
+                }
+                ui::UiAction::TouchUpClick(u, v) => self.add_touchup(u, v),
+                ui::UiAction::SelectTouchUp(i) => {
+                    if i < self.current_touchups().len() {
+                        self.touchup_selected = Some(i);
+                    }
+                    self.request_redraw();
+                }
+                ui::UiAction::DeleteTouchUp => self.delete_selected_touchup(),
+                ui::UiAction::UndoTouchUp => {
+                    if self.touchup_selected.is_none() && !self.current_touchups().is_empty() {
+                        self.touchup_selected = Some(self.current_touchups().len() - 1);
+                    }
+                    self.delete_selected_touchup();
+                }
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
                 ui::UiAction::ResetAdjustments => {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else {
                         continue;
                     };
                     self.edits.remove(&path);
+                    self.touchups.remove(&path);
                     self.catalog.set_adjustments(&path, &Adjustments::default());
+                    self.catalog.set_touchups(&path, &[]);
+                    self.touchup_selected = None;
                     self.push_adjustments();
                     self.hist_dirty = true;
                     self.request_redraw();
@@ -3253,6 +3445,25 @@ impl App {
             if code == KeyCode::Escape {
                 self.wb_picker = false;
                 self.request_redraw();
+            }
+            return;
+        }
+
+        if self.touchup_active {
+            match code {
+                KeyCode::Escape => {
+                    self.touchup_active = false;
+                    self.touchup_selected = None;
+                    self.request_redraw();
+                }
+                KeyCode::Delete | KeyCode::Backspace => self.delete_selected_touchup(),
+                KeyCode::KeyZ if cmd => {
+                    if self.touchup_selected.is_none() && !self.current_touchups().is_empty() {
+                        self.touchup_selected = Some(self.current_touchups().len() - 1);
+                    }
+                    self.delete_selected_touchup();
+                }
+                _ => {}
             }
             return;
         }

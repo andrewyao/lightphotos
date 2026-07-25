@@ -6,7 +6,7 @@
 //! `~/Library/Application Support/com.lightphotos/catalog.db`. Originals are
 //! never touched and nothing is ever written into photo folders.
 //!
-//! The DB has a single `images(path, rating, adjustments, rotation)` table keyed
+//! The DB has a single `images(path, rating, adjustments, touchups, rotation)` table keyed
 //! by the normalized absolute path; `adjustments` holds the serde JSON of a
 //! non-identity [`Adjustments`] (NULL for identity edits). An in-memory
 //! `HashMap` mirrors the table so reads stay allocation-cheap; writes are
@@ -24,11 +24,11 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-use crate::develop::Adjustments;
+use crate::develop::{Adjustments, TouchUp};
 use crate::paths::normalize;
 
 /// SQLite `user_version` for the current schema (bumped when columns change).
-const SQLITE_SCHEMA_VERSION: i64 = 1;
+const SQLITE_SCHEMA_VERSION: i64 = 2;
 const CATALOG_DB: &str = "catalog.db";
 /// Legacy JSON catalog, migrated then renamed to `<CATALOG_FILE>.bak`.
 const CATALOG_FILE: &str = "catalog.json";
@@ -41,6 +41,8 @@ pub struct ImageRecord {
     pub rating: Option<u8>,
     #[serde(default, skip_serializing_if = "Adjustments::is_identity")]
     pub adjustments: Adjustments,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touchups: Vec<TouchUp>,
     /// Manual rotation in 90° clockwise steps (0..=3). Kept separate from the
     /// develop adjustments (it's not a tone/crop edit).
     #[serde(default, skip_serializing_if = "is_zero_rot")]
@@ -56,7 +58,10 @@ impl ImageRecord {
     /// identity edit, no rotation) — such entries are dropped to keep the file
     /// small.
     fn is_empty(&self) -> bool {
-        self.rating.is_none() && self.adjustments.is_identity() && self.rotation == 0
+        self.rating.is_none()
+            && self.adjustments.is_identity()
+            && self.touchups.is_empty()
+            && self.rotation == 0
     }
 }
 
@@ -176,10 +181,12 @@ impl Catalog {
                  path       TEXT PRIMARY KEY,
                  rating     INTEGER,
                  adjustments TEXT,
+                 touchups   TEXT,
                  rotation   INTEGER NOT NULL DEFAULT 0
              )",
             [],
         )?;
+        let _ = conn.execute("ALTER TABLE images ADD COLUMN touchups TEXT", []);
         Ok(conn)
     }
 
@@ -252,7 +259,16 @@ impl Catalog {
             if !rec.is_empty() {
                 let adj = serialize_adjustments(&rec.adjustments)
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                upsert_row(&tx, path, rec.rating, adj.as_deref(), rec.rotation)?;
+                let touchups = serialize_touchups(&rec.touchups)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                upsert_row(
+                    &tx,
+                    path,
+                    rec.rating,
+                    adj.as_deref(),
+                    touchups.as_deref(),
+                    rec.rotation,
+                )?;
             }
         }
         tx.commit()
@@ -266,20 +282,22 @@ impl Catalog {
             let Some(conn) = self.conn.as_ref() else {
                 return;
             };
-            let mut stmt =
-                match conn.prepare("SELECT path, rating, adjustments, rotation FROM images") {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("[catalog] could not read rows: {e}");
-                        return;
-                    }
-                };
+            let mut stmt = match conn
+                .prepare("SELECT path, rating, adjustments, touchups, rotation FROM images")
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[catalog] could not read rows: {e}");
+                    return;
+                }
+            };
             let mapped = stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<u8>>(1)?,
                     row.get::<_, Option<String>>(2)?,
-                    row.get::<_, u8>(3)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, u8>(4)?,
                 ))
             });
             let iter = match mapped {
@@ -311,7 +329,7 @@ impl Catalog {
             ));
         }
 
-        for (path, rating, adj_json, rotation) in rows {
+        for (path, rating, adj_json, touchups_json, rotation) in rows {
             let key = PathBuf::from(path);
             let adjustments = match adj_json {
                 None => Adjustments::default(),
@@ -334,11 +352,16 @@ impl Catalog {
                     }
                 },
             };
+            let touchups = touchups_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_default();
             self.images.insert(
                 key,
                 ImageRecord {
                     rating,
                     adjustments,
+                    touchups,
                     rotation,
                 },
             );
@@ -388,6 +411,19 @@ impl Catalog {
         let key = normalize(path);
         let adj = *adj;
         self.update(key, |rec| rec.adjustments = adj);
+    }
+
+    pub fn touchups(&self, path: &Path) -> Vec<TouchUp> {
+        self.images
+            .get(&normalize(path))
+            .map(|r| r.touchups.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_touchups(&mut self, path: &Path, touchups: &[TouchUp]) {
+        let key = normalize(path);
+        let touchups = touchups.to_vec();
+        self.update(key, |rec| rec.touchups = touchups);
     }
 
     /// Manual rotation (90° CW steps, 0..=3) for `path`.
@@ -447,7 +483,16 @@ impl Catalog {
     fn write_row(&self, key: &Path, rec: &ImageRecord) -> Result<(), String> {
         let conn = self.conn()?;
         let adj = self.adj_column(key, rec)?;
-        upsert_row(conn, key, rec.rating, adj.as_deref(), rec.rotation).map_err(|e| e.to_string())
+        let touchups = serialize_touchups(&rec.touchups).map_err(|e| e.to_string())?;
+        upsert_row(
+            conn,
+            key,
+            rec.rating,
+            adj.as_deref(),
+            touchups.as_deref(),
+            rec.rotation,
+        )
+        .map_err(|e| e.to_string())
     }
 
     /// DELETE a single row (no-op if absent).
@@ -485,6 +530,14 @@ fn serialize_adjustments(adj: &Adjustments) -> serde_json::Result<Option<String>
     }
 }
 
+fn serialize_touchups(touchups: &[TouchUp]) -> serde_json::Result<Option<String>> {
+    if touchups.is_empty() {
+        Ok(None)
+    } else {
+        serde_json::to_string(touchups).map(Some)
+    }
+}
+
 /// UPSERT a single row from precomputed column values (works on a connection or
 /// a transaction).
 fn upsert_row(
@@ -492,12 +545,13 @@ fn upsert_row(
     path: &Path,
     rating: Option<u8>,
     adjustments: Option<&str>,
+    touchups: Option<&str>,
     rotation: u8,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO images (path, rating, adjustments, rotation) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(path) DO UPDATE SET rating = ?2, adjustments = ?3, rotation = ?4",
-        rusqlite::params![path_key(path), rating, adjustments, rotation],
+        "INSERT INTO images (path, rating, adjustments, touchups, rotation) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(path) DO UPDATE SET rating = ?2, adjustments = ?3, touchups = ?4, rotation = ?5",
+        rusqlite::params![path_key(path), rating, adjustments, touchups, rotation],
     )?;
     Ok(())
 }
@@ -524,6 +578,7 @@ fn parse_catalog(bytes: &[u8]) -> serde_json::Result<HashMap<PathBuf, ImageRecor
                     ImageRecord {
                         rating: Some(stars),
                         adjustments: Adjustments::default(),
+                        touchups: Vec::new(),
                         rotation: 0,
                     },
                 )
@@ -743,6 +798,29 @@ mod tests {
         let reloaded = Catalog::with_dir(dir.clone());
         assert_eq!(reloaded.rotation(&p), 1);
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn touchups_persist_across_reload_and_can_be_removed() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+        let t = TouchUp {
+            center: [0.4, 0.5],
+            radius: 0.02,
+            source: [0.6, 0.5],
+            feather: 0.5,
+            delta: [0.01, -0.02, 0.0],
+        };
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            cat.set_touchups(&p, &[t]);
+            assert_eq!(cat.touchups(&p), vec![t]);
+        }
+        let mut reloaded = Catalog::with_dir(dir.clone());
+        assert_eq!(reloaded.touchups(&p), vec![t]);
+        reloaded.set_touchups(&p, &[]);
+        assert!(Catalog::with_dir(dir.clone()).touchups(&p).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -20,6 +20,18 @@ pub const EXPOSURE_RANGE: std::ops::RangeInclusive<f32> = -5.0..=5.0;
 /// Inclusive range for denoise strength (one-directional: 0 = off).
 pub const DENOISE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=100.0;
 
+/// One non-destructive content-aware spot-healing operation. Coordinates are
+/// normalized to the unrotated source image, so the edit survives zoom,
+/// rotation, thumbnail generation, and export at a different size.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
+pub struct TouchUp {
+    pub center: [f32; 2],
+    pub radius: f32,
+    pub source: [f32; 2],
+    pub feather: f32,
+    pub delta: [f32; 3],
+}
+
 /// True when a serde-skippable f32 field is at its identity value.
 fn is_zero(v: &f32) -> bool {
     *v == 0.0
@@ -106,7 +118,16 @@ impl Adjustments {
 /// is invalidated and re-baked whenever any edit changes. Floats are quantized so
 /// sub-threshold jitter doesn't churn the cache, and an identity edit (no tone, no
 /// crop, `rot == 0`) always yields the same value so unedited photos share one key.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
+    edit_signature_with_touchups(adj, &[], rot)
+}
+
+pub(crate) fn edit_signature_with_touchups(
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+) -> u64 {
     use crate::hash::Fnv1a;
 
     let mut h = Fnv1a::new();
@@ -129,6 +150,22 @@ pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
         h.write(&((v * 1000.0).round() as i32).to_le_bytes());
     }
 
+    for t in touchups {
+        for v in [
+            t.center[0],
+            t.center[1],
+            t.radius,
+            t.source[0],
+            t.source[1],
+            t.feather,
+        ] {
+            h.write(&((v * 100_000.0).round() as i32).to_le_bytes());
+        }
+        for v in t.delta {
+            h.write(&((v * 100_000.0).round() as i32).to_le_bytes());
+        }
+    }
+
     // Crop: normalize a full-frame `Some` to `None` so it hashes like no crop,
     // then quantize the four normalized coords to 1e-5.
     let q = |v: f32| ((v.clamp(0.0, 1.0) * 100_000.0).round()) as u32;
@@ -146,6 +183,29 @@ pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
     h.write(&[rot % 4]);
 
     h.finish()
+}
+
+/// Packed representation uploaded to the touch-up storage buffer. The source
+/// UV is the source center; the shader preserves the offset from target to
+/// source for every pixel in the patch.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuTouchUp {
+    pub center_radius_feather: [f32; 4],
+    pub source: [f32; 2],
+    pub _pad: [f32; 2],
+    pub delta: [f32; 4],
+}
+
+impl From<&TouchUp> for GpuTouchUp {
+    fn from(t: &TouchUp) -> Self {
+        Self {
+            center_radius_feather: [t.center[0], t.center[1], t.radius, t.feather],
+            source: t.source,
+            _pad: [0.0; 2],
+            delta: [t.delta[0], t.delta[1], t.delta[2], 0.0],
+        }
+    }
 }
 
 /// Packed uniform mirror of [`Adjustments`], uploaded to the fragment shader.

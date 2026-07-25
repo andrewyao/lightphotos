@@ -8,7 +8,7 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::develop::GpuAdjust;
+use crate::develop::{GpuAdjust, GpuTouchUp};
 use crate::image_decode::DecodedImage;
 
 #[repr(C)]
@@ -48,6 +48,8 @@ pub struct Renderer {
     /// before/after compare view (the primary `adj_*` holds the "before").
     adj_buf_b: wgpu::Buffer,
     adj_bind_b: wgpu::BindGroup,
+    touch_buf: wgpu::Buffer,
+    touch_bind: wgpu::BindGroup,
 
     /// Bind group for the current image texture (None until first image loads).
     image_bind: Option<wgpu::BindGroup>,
@@ -162,12 +164,27 @@ impl Renderer {
             }],
         });
 
+        let touch_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("touch_bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pl"),
             bind_group_layouts: &[
                 Some(&tex_bind_layout),
                 Some(&xform_bind_layout),
                 Some(&adj_bind_layout),
+                Some(&touch_bind_layout),
             ],
             immediate_size: 0,
         });
@@ -255,6 +272,22 @@ impl Renderer {
             }],
         });
 
+        const MAX_TOUCHUPS: u64 = 64;
+        let touch_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("touchups"),
+            size: MAX_TOUCHUPS * std::mem::size_of::<GpuTouchUp>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let touch_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("touch_bg"),
+            layout: &touch_bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: touch_buf.as_entire_binding(),
+            }],
+        });
+
         // egui's wgpu paint backend, built against the same device + surface
         // format so its textures/buffers interoperate with ours. No depth
         // buffer (we render none), single-sampled, one frame in flight.
@@ -275,6 +308,8 @@ impl Renderer {
             adj_bind,
             adj_buf_b,
             adj_bind_b,
+            touch_buf,
+            touch_bind,
             image_bind: None,
             image_size: (0, 0),
             max_dim,
@@ -391,6 +426,13 @@ impl Renderer {
             .write_buffer(&self.adj_buf_b, 0, bytemuck::bytes_of(&a));
     }
 
+    pub fn set_touchups(&mut self, touchups: &[GpuTouchUp]) {
+        if !touchups.is_empty() {
+            self.queue
+                .write_buffer(&self.touch_buf, 0, bytemuck::cast_slice(touchups));
+        }
+    }
+
     /// Render one frame: the image pass (optionally confined to `image_viewport`)
     /// followed by the egui pass (if `egui` is `Some`), all in one submission.
     ///
@@ -502,6 +544,7 @@ impl Renderer {
                     pass.set_bind_group(0, image_bind, &[]);
                     pass.set_bind_group(1, xform_bind, &[]);
                     pass.set_bind_group(2, adj, &[]);
+                    pass.set_bind_group(3, &self.touch_bind, &[]);
                     pass.draw(0..6, 0..1);
                 };
                 match image_viewport {
@@ -519,6 +562,7 @@ impl Renderer {
                         pass.set_bind_group(0, image_bind, &[]);
                         pass.set_bind_group(1, xform_bind, &[]);
                         pass.set_bind_group(2, &self.adj_bind, &[]);
+                        pass.set_bind_group(3, &self.touch_bind, &[]);
                         pass.draw(0..6, 0..1);
                     }
                 }

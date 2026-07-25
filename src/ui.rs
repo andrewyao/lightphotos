@@ -96,6 +96,12 @@ pub enum UiAction {
     ToggleWbPicker,
     /// The WB picker's armed click landed at this normalized texture coordinate.
     PickWhiteBalance(f32, f32),
+    ToggleTouchUp,
+    SetTouchUpRadius(f32),
+    TouchUpClick(f32, f32),
+    SelectTouchUp(usize),
+    DeleteTouchUp,
+    UndoTouchUp,
     /// Set the develop adjustments for the current loupe image.
     SetAdjustments(Adjustments),
     /// Reset the current loupe image's develop adjustments to identity.
@@ -1077,6 +1083,8 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     if app.crop_rect().is_some() {
         // Crop mode: the crop overlay owns the whole central area (mask + edges).
         loupe_crop_overlay(ui, app, central, out);
+    } else if app.touchup_active() {
+        loupe_touchup_overlay(ui, app, central, out);
     } else if app.wb_picker_active() {
         // WB picker: a click-catcher over the whole central area.
         loupe_wb_picker_overlay(ui, app, central, out);
@@ -1084,6 +1092,65 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
         // Before/after: a center divider and corner labels over the split image.
         loupe_compare_overlay(ui, central);
     }
+}
+
+fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
+    let painter = ui.painter_at(central);
+    for (i, t) in app.current_touchups().iter().enumerate() {
+        let c = app.loupe_tex_to_screen(central, t.center[0], t.center[1]);
+        let edge = app.loupe_tex_to_screen(central, t.center[0] + t.radius, t.center[1]);
+        let radius = (edge - c).length().max(3.0);
+        let selected = app.touchup_selected() == Some(i);
+        painter.circle_stroke(
+            c,
+            radius,
+            egui::Stroke::new(
+                if selected { 2.5_f32 } else { 1.2_f32 },
+                if selected {
+                    theme::CURSOR_AMBER
+                } else {
+                    egui::Color32::from_white_alpha(190)
+                },
+            ),
+        );
+        painter.circle_filled(
+            c,
+            3.0,
+            if selected {
+                theme::CURSOR_AMBER
+            } else {
+                egui::Color32::WHITE
+            },
+        );
+    }
+    egui::Area::new(egui::Id::new("loupe_touchup"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(central.min)
+        .show(ui.ctx(), |ui| {
+            let (_id, resp) = ui.allocate_exact_size(central.size(), egui::Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+            if resp.clicked() {
+                if let Some(p) = resp.interact_pointer_pos() {
+                    let (u, v) = app.loupe_screen_to_tex(central, p);
+                    let mut hit = None;
+                    for (i, t) in app.current_touchups().iter().enumerate() {
+                        let dx = (u - t.center[0]) / t.radius;
+                        let dy = (v - t.center[1]) / t.radius;
+                        if dx * dx + dy * dy <= 1.0 {
+                            hit = Some(i);
+                            break;
+                        }
+                    }
+                    if let Some(i) = hit {
+                        out.actions.push(UiAction::SelectTouchUp(i));
+                    } else if (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v) {
+                        out.actions.push(UiAction::TouchUpClick(u, v));
+                    }
+                }
+            }
+        });
 }
 
 /// The White Balance gray-picker overlay: a transparent click-catcher over the
@@ -1528,6 +1595,49 @@ fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             });
             ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .selectable_label(app.touchup_active(), "Touch Up")
+                    .clicked()
+                {
+                    out.actions.push(UiAction::ToggleTouchUp);
+                }
+                ui.label("Size");
+                let mut radius = app.touchup_radius();
+                if ui
+                    .add(
+                        egui::Slider::new(
+                            &mut radius,
+                            app.touchup_radius_min()..=crate::app::TOUCHUP_MAX_RADIUS,
+                        )
+                        .show_value(false),
+                    )
+                    .changed()
+                {
+                    out.actions.push(UiAction::SetTouchUpRadius(radius));
+                }
+                if ui.button("Undo").clicked() {
+                    out.actions.push(UiAction::UndoTouchUp);
+                }
+                if ui.button("Delete").clicked() {
+                    out.actions.push(UiAction::DeleteTouchUp);
+                }
+            });
+            if !app.current_touchups().is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Spots:");
+                    for i in 0..app.current_touchups().len() {
+                        let label = format!("{}", i + 1);
+                        if ui
+                            .selectable_label(app.touchup_selected() == Some(i), label)
+                            .clicked()
+                        {
+                            out.actions.push(UiAction::SelectTouchUp(i));
+                        }
+                    }
+                });
+            }
+            ui.add_space(4.0);
 
             // True once any slider in this frame changed, so we push exactly one
             // SetAdjustments after rendering the whole group. `interacted_idx`

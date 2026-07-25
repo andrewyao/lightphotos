@@ -7,7 +7,7 @@
 //! state module. Keeping the crop/tone/rotate math in one place is also what
 //! guarantees the exported JPEG and the on-screen edited thumbnail agree.
 
-use crate::develop::{self, Adjustments};
+use crate::develop::{self, Adjustments, TouchUp};
 use crate::image_decode::DecodedImage;
 
 /// Un-premultiply a premultiplied-sRGB8 RGBA pixel and convert it to
@@ -44,7 +44,12 @@ pub(crate) fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
 /// [`unpremul_to_linear`]) matches the histogram sampler, and
 /// `develop::apply_linear` is the same tone pipeline the shader runs, so the
 /// result matches what's on screen.
-pub(crate) fn bake_edited(img: &DecodedImage, adj: &Adjustments, rot: u8) -> (u32, u32, Vec<u8>) {
+pub(crate) fn bake_edited(
+    img: &DecodedImage,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+) -> (u32, u32, Vec<u8>) {
     let (w, h) = (img.width, img.height);
     if w == 0 || h == 0 || img.rgba.len() < (w * h * 4) as usize {
         return (0, 0, Vec::new());
@@ -110,7 +115,8 @@ pub(crate) fn bake_edited(img: &DecodedImage, adj: &Adjustments, rot: u8) -> (u3
                     ])
                 }
             };
-            let out = develop::apply_linear(adj, lin);
+            let retouched = apply_touchups(img, touchups, x0 + x, y0 + y, lin);
+            let out = develop::apply_linear(adj, retouched);
             let di = ((y * cw + x) * 4) as usize;
             cropped[di] = encode(out[0]);
             cropped[di + 1] = encode(out[1]);
@@ -120,6 +126,55 @@ pub(crate) fn bake_edited(img: &DecodedImage, adj: &Adjustments, rot: u8) -> (u3
     }
 
     rotate_rgba(&cropped, cw, ch, rot)
+}
+
+fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
+    let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
+    let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;
+    let i = ((y * img.width + x) * 4) as usize;
+    unpremul_to_linear([
+        img.rgba[i],
+        img.rgba[i + 1],
+        img.rgba[i + 2],
+        img.rgba[i + 3],
+    ])
+}
+
+fn apply_touchups(
+    img: &DecodedImage,
+    touchups: &[TouchUp],
+    x: u32,
+    y: u32,
+    base: [f32; 3],
+) -> [f32; 3] {
+    if touchups.is_empty() {
+        return base;
+    }
+    let u = x as f32 / img.width.max(1) as f32;
+    let v = y as f32 / img.height.max(1) as f32;
+    let mut out = base;
+    for t in touchups {
+        let dx = (u - t.center[0]) * img.width as f32;
+        let dy = (v - t.center[1]) * img.height as f32;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let radius = (t.radius * img.width.min(img.height) as f32).max(1.0);
+        if distance >= radius {
+            continue;
+        }
+        let feather = (radius * t.feather.clamp(0.02, 1.0)).max(1.0);
+        let mask = ((radius - distance) / feather).clamp(0.0, 1.0);
+        let mask = mask * mask * (3.0 - 2.0 * mask);
+        let source_u = t.source[0] + (u - t.center[0]);
+        let source_v = t.source[1] + (v - t.center[1]);
+        let mut src = sample_linear(img, source_u, source_v);
+        for c in 0..3 {
+            src[c] = (src[c] + t.delta[c]).clamp(0.0, 1.0);
+        }
+        for c in 0..3 {
+            out[c] = out[c] * (1.0 - mask) + src[c] * mask;
+        }
+    }
+    out
 }
 
 /// Rotate a tightly-packed RGBA8 buffer by `steps` × 90° clockwise. Returns the
@@ -185,7 +240,7 @@ mod tests {
             height: 2,
             rgba: src.clone(),
         };
-        let (w, h, out) = bake_edited(&img, &Adjustments::default(), 0);
+        let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], 0);
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
     }
@@ -206,7 +261,7 @@ mod tests {
             right: 1.0,
             bottom: 1.0,
         });
-        let (w, h, out) = bake_edited(&img, &adj, 0);
+        let (w, h, out) = bake_edited(&img, &adj, &[], 0);
         assert_eq!((w, h), (2, 1));
         assert_eq!(&out[0..4], &px(3));
         assert_eq!(&out[4..8], &px(4));
@@ -227,7 +282,7 @@ mod tests {
             denoise: 0.0,
             ..Default::default()
         };
-        let (w, h, out) = bake_edited(&img, &adj, 0);
+        let (w, h, out) = bake_edited(&img, &adj, &[], 0);
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
     }
@@ -246,18 +301,41 @@ mod tests {
             height: 3,
             rgba: src,
         };
-        let (_, _, out0) = bake_edited(&img, &Adjustments::default(), 0);
+        let (_, _, out0) = bake_edited(&img, &Adjustments::default(), &[], 0);
         let denoised = Adjustments {
             denoise: 100.0,
             ..Default::default()
         };
-        let (_, _, out100) = bake_edited(&img, &denoised, 0);
+        let (_, _, out100) = bake_edited(&img, &denoised, &[], 0);
         let center = 4 * 4; // pixel index 4, byte offset
         assert_eq!(out0[center], 255);
         assert!(
             out100[center] < 255,
             "expected denoise to darken the outlier center pixel"
         );
+    }
+
+    #[test]
+    fn bake_touchup_replaces_a_soft_spot_from_source_region() {
+        let mut src = vec![0u8; 5 * 1 * 4];
+        for x in 0..5 {
+            let value = if x == 2 { 255 } else { 0 };
+            src[x * 4..x * 4 + 4].copy_from_slice(&px(value));
+        }
+        let img = DecodedImage {
+            width: 5,
+            height: 1,
+            rgba: src,
+        };
+        let touchup = TouchUp {
+            center: [0.4, 0.0],
+            radius: 0.4,
+            source: [0.0, 0.0],
+            feather: 0.5,
+            delta: [0.0; 3],
+        };
+        let (_, _, out) = bake_edited(&img, &Adjustments::default(), &[touchup], 0);
+        assert!(out[2 * 4] < 255, "touch-up should reduce the bright spot");
     }
 
     #[test]
@@ -285,7 +363,7 @@ mod tests {
             denoise: 50.0,
             ..Default::default()
         };
-        let (w, h, out) = bake_edited(&img, &adj, 0);
+        let (w, h, out) = bake_edited(&img, &adj, &[], 0);
         assert_eq!((w, h), (3, 3));
         assert_eq!(out.len(), 3 * 3 * 4);
     }

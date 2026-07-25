@@ -37,10 +37,18 @@ struct Adjust {
     _pad2: f32,
 };
 
+struct TouchUp {
+    center_radius_feather: vec4<f32>,
+    source: vec2<f32>,
+    _pad: vec2<f32>,
+    delta: vec4<f32>,
+};
+
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(1) @binding(0) var<uniform> xform: Transform;
 @group(2) @binding(0) var<uniform> adj: Adjust;
+@group(3) @binding(0) var<storage, read> touchups: array<TouchUp>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -137,6 +145,29 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var r = texel.r;
     var g = texel.g;
     var b = texel.b;
+
+    // Content-aware spot healing. Source centers and local color corrections
+    // are selected on the CPU; the GPU only applies the feathered patches.
+    let touch_count = u32(adj._pad0);
+    for (var i = 0u; i < touch_count; i = i + 1u) {
+        let t = touchups[i];
+        let d = (in.uv - t.center_radius_feather.xy) /
+            vec2<f32>(adj.texel_w, adj.texel_h);
+        // Touch-up radii are normalized against the source image's shorter
+        // dimension, matching the CPU bake/export path.
+        let radius_px = t.center_radius_feather.z / max(adj.texel_w, adj.texel_h);
+        let distance_px = length(d);
+        if (distance_px < radius_px) {
+            let feather_px = max(radius_px * clamp(t.center_radius_feather.w, 0.02, 1.0), 1.0);
+            var mask = clamp((radius_px - distance_px) / feather_px, 0.0, 1.0);
+            mask = mask * mask * (3.0 - 2.0 * mask);
+            let source_uv = t.source + (in.uv - t.center_radius_feather.xy);
+            let source = textureSampleLevel(tex, samp, source_uv, 0.0).rgb + t.delta.xyz;
+            r = r * (1.0 - mask) + clamp(source.r, 0.0, 1.0) * mask;
+            g = g * (1.0 - mask) + clamp(source.g, 0.0, 1.0) * mask;
+            b = b * (1.0 - mask) + clamp(source.b, 0.0, 1.0) * mask;
+        }
+    }
 
     // 0. Edge-aware (bilateral-style) denoise: a fixed 5x5 neighborhood, blended
     // by spatial + color-similarity weight. Only taken when denoise is active —

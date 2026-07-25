@@ -17,7 +17,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::develop::Adjustments;
+use crate::develop::{Adjustments, TouchUp};
 use crate::{image_decode, image_encode};
 
 /// A self-contained unit of export work. `dest` is the exact, already
@@ -27,6 +27,7 @@ pub struct ExportJob {
     pub src: PathBuf,
     pub dest: PathBuf,
     pub adj: Adjustments,
+    pub touchups: Vec<TouchUp>,
     pub rot: u8,
 }
 
@@ -107,7 +108,7 @@ impl Exporter {
 fn do_export(job: ExportJob) -> Result<PathBuf, String> {
     // Full resolution: u32::MAX means `fit_within` never downscales.
     let img = image_decode::decode(&job.src, u32::MAX)?;
-    let (w, h, rgba) = crate::image_ops::bake_edited(&img, &job.adj, job.rot);
+    let (w, h, rgba) = crate::image_ops::bake_edited(&img, &job.adj, &job.touchups, job.rot);
     // Encode to a temp sibling then rename, so a crash mid-encode can't leave a
     // truncated `.jpg` at the final path (the rename is atomic on one volume).
     let tmp = job.dest.with_extension("jpg.tmp");
