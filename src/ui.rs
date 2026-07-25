@@ -204,10 +204,12 @@ fn toolbar_focus_sync(ui: &egui::Ui, app: &App, idx: usize, resp: &egui::Respons
     }
 }
 
-/// Draw the region-level focus marker used when F6 has selected a panel but no
-/// individual control within it has been entered yet.
+/// Draw the region-level focus marker used when F6 has selected a panel. The
+/// Develop panel keeps its border while an individual control is active too.
 fn region_focus_marker(ui: &egui::Ui, app: &App, region: Region) {
-    if app.focus() == region && app.focus_level() == FocusLevel::Selected {
+    let selected = app.focus() == region && app.focus_level() == FocusLevel::Selected;
+    let develop_active = region == Region::Develop && app.focus() == Region::Develop;
+    if selected || develop_active {
         ui.painter().rect_stroke(
             ui.min_rect().expand(1.0),
             2.0,
@@ -579,16 +581,58 @@ fn draw_folders_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.folders_visible() {
         return;
     }
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let content_width = app
+        .folder_root()
+        .map(|root| folder_content_width(ui, app, root.as_path(), 0, &font))
+        .unwrap_or(0.0);
+    let panel_width = (content_width + 24.0)
+        .max(220.0)
+        .min((ui.available_width() - 96.0).max(220.0));
     egui::Panel::left("folders")
-        .resizable(true)
-        .default_size(220.0)
+        .resizable(false)
+        .exact_size(panel_width)
         .show_inside(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                if let Some(root) = app.folder_root() {
-                    folder_node(ui, app, &root, 0, out);
-                }
-            });
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if let Some(root) = app.folder_root() {
+                        folder_node(ui, app, &root, 0, out);
+                    }
+                });
         });
+}
+
+/// Width needed by the currently visible folder rows, measured with the same
+/// body font used by `selectable_label`. The side panel follows this width
+/// automatically; it has no user resize affordance.
+fn folder_content_width(
+    ui: &egui::Ui,
+    app: &App,
+    path: &Path,
+    depth: usize,
+    font: &egui::FontId,
+) -> f32 {
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    let label = format!("{}  {name}", if app.is_expanded(path) { "▼" } else { "▶" });
+    let text_width = ui.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(label, font.clone(), egui::Color32::WHITE)
+            .size()
+            .x
+    });
+    let own_width = depth as f32 * 14.0 + text_width;
+    if app.is_expanded(path) {
+        app.subdirs(path)
+            .iter()
+            .map(|child| folder_content_width(ui, app, child, depth + 1, font))
+            .fold(own_width, f32::max)
+    } else {
+        own_width
+    }
 }
 
 fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
@@ -851,10 +895,6 @@ fn grid_cell(
 fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let thumb_px = app.thumb_px();
     let sel = app.sel();
-    // Only auto-scroll the strip to the selection when it actually changed.
-    // Doing it every frame fights the user's clicks: the strip shifts between
-    // press and release, so egui never registers the click.
-    let follow = app.take_filmstrip_follow();
 
     // Left folder-tree sidebar (same as the grid) so structure stays visible.
     draw_folders_panel(ui, app, out);
@@ -890,13 +930,49 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
                 // the grid's `show_rows` trick by hand): build only the cells in
                 // view and report the range so loading tracks the scroll position.
                 let mut area = egui::ScrollArea::horizontal().auto_shrink([false, false]);
-                // On a selection change, center the selection for this frame only so
-                // we don't fight the user's scrolling on other frames.
-                if follow {
-                    let sel = sel.unwrap_or(0) as f32;
-                    let target =
-                        (sel * cell_full + cell_full * 0.5 - ui.available_width() * 0.5).max(0.0);
-                    area = area.scroll_offset(egui::vec2(target, 0.0));
+                // The strip only scrolls when the selection is about to run off
+                // the currently-visible edge — stepping through its middle moves
+                // just the highlight, not the strip itself. `filmstrip_last_sel`
+                // (egui memory, not App state — purely a rendering concern) marks
+                // when the selection actually changed; only then do we check
+                // proximity to last frame's visible range (`strip_range`) and, if
+                // warranted, arm a new `filmstrip_scroll_target` to glide toward
+                // (clamped so it never scrolls past either end of the strip).
+                // Once armed, the target keeps being animated toward — smoothly,
+                // not teleported — every frame until it converges, at which point
+                // we stop touching `scroll_offset` entirely so manual drags/clicks
+                // on settled frames aren't fought.
+                if let Some(sel) = sel {
+                    let last_sel_id = egui::Id::new("filmstrip_last_sel");
+                    let target_id = egui::Id::new("filmstrip_scroll_target");
+                    let anim_id = egui::Id::new("filmstrip_scroll_anim");
+
+                    let prev_sel = ui.ctx().data(|d| d.get_temp::<usize>(last_sel_id));
+                    let sel_changed = prev_sel != Some(sel);
+                    ui.ctx().data_mut(|d| d.insert_temp(last_sel_id, sel));
+
+                    if sel_changed {
+                        let (first, last) = app.strip_range();
+                        const EDGE_MARGIN: usize = 1;
+                        let near_edge =
+                            sel < first.saturating_add(EDGE_MARGIN) || sel + EDGE_MARGIN >= last;
+                        if near_edge {
+                            let max_scroll =
+                                (len as f32 * cell_full - ui.available_width()).max(0.0);
+                            let target = (sel as f32 * cell_full + cell_full * 0.5
+                                - ui.available_width() * 0.5)
+                                .clamp(0.0, max_scroll);
+                            ui.ctx().data_mut(|d| d.insert_temp(target_id, target));
+                        }
+                    }
+
+                    if let Some(target) = ui.ctx().data(|d| d.get_temp::<f32>(target_id)) {
+                        let animated = ui.ctx().animate_value_with_time(anim_id, target, 0.15);
+                        if (animated - target).abs() > 0.5 {
+                            area = area.scroll_offset(egui::vec2(animated, 0.0));
+                            app.request_redraw();
+                        }
+                    }
                 }
                 area.show_viewport(ui, |ui, viewport| {
                     let first = (viewport.min.x / cell_full).floor().max(0.0) as usize;
@@ -913,6 +989,11 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
                         ui.add_space(len.saturating_sub(last) as f32 * cell_full);
                     });
                 });
+
+                // F6 can select the filmstrip as a region without entering an
+                // individual thumbnail; show the same amber region marker used
+                // by the other keyboard-focusable panels.
+                region_focus_marker(ui, app, Region::Filmstrip);
             });
     }
 
@@ -940,6 +1021,18 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     // over the image, killing zoom/pan. The wgpu image is drawn into this rect.
     let central = ui.available_rect_before_wrap();
     out.loupe_rect = Some(central);
+
+    // Detail focus indicator: the central rect is deliberately left unclaimed
+    // by egui (see the comment above) so `region_focus_marker`'s reliance on
+    // `ui.min_rect()` doesn't apply here — draw directly against `central`.
+    if app.focus() == Region::Detail && app.focus_level() == FocusLevel::Selected {
+        ui.painter_at(central).rect_stroke(
+            central.shrink(2.0),
+            2.0,
+            egui::Stroke::new(1.0f32, theme::CURSOR_AMBER),
+            egui::StrokeKind::Outside,
+        );
+    }
 
     if app.crop_rect().is_some() {
         // Crop mode: the crop overlay owns the whole central area (mask + edges).
