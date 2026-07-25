@@ -146,6 +146,8 @@ impl ApplicationHandler<UserEvent> for App {
                                 | KeyCode::ArrowRight
                                 | KeyCode::ArrowUp
                                 | KeyCode::ArrowDown
+                                | KeyCode::PageUp
+                                | KeyCode::PageDown
                                 | KeyCode::Tab
                         ),
                         ..

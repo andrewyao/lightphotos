@@ -244,6 +244,8 @@ pub(crate) struct App {
     /// Visible cell range `[start, end)` the grid scrolled into view last frame.
     /// Drives thumbnail virtualization so huge folders don't load every image.
     grid_range: (usize, usize),
+    /// Whether the egui Grid ScrollArea should return to its origin next frame.
+    grid_scroll_reset: bool,
     /// Visible cell range `[start, end)` the loupe filmstrip scrolled into view
     /// last frame. The horizontal equivalent of `grid_range`.
     strip_range: (usize, usize),
@@ -389,6 +391,7 @@ impl App {
             thumb_px: THUMB_DEFAULT,
             grid_cols: 1,
             grid_range: (0, 0),
+            grid_scroll_reset: true,
             strip_range: (0, 0),
             thumb_tex: HashMap::new(),
             bursts_on: false,
@@ -472,6 +475,8 @@ impl App {
             self.collapse_selection();
             self.mode = ViewMode::Loupe;
             self.develop_open = true;
+            self.focus = Region::Detail;
+            self.focus_level = FocusLevel::Selected;
             self.normalize_focus();
             self.load_selected();
             self.request_neighbors();
@@ -528,6 +533,7 @@ impl App {
         // actually on screen. Reset it so that stale read always assumes "top
         // of the new folder" instead.
         self.grid_range = (0, 0);
+        self.grid_scroll_reset = true;
         self.request_working_thumbs();
         self.request_redraw();
     }
@@ -864,6 +870,12 @@ impl App {
     /// Filmstrip chrome or the Develop slider list. An unavailable region can't
     /// stay "entered", so this also resets the level.
     fn normalize_focus(&mut self) {
+        if !self.region_available(self.main_focus) {
+            self.main_focus = match self.mode {
+                ViewMode::Grid => Region::Grid,
+                ViewMode::Loupe => Region::Detail,
+            };
+        }
         if self.region_available(self.focus) {
             return;
         }
@@ -883,7 +895,15 @@ impl App {
     /// lands at `Selected` — F6 backs out of whatever was entered in the old
     /// region.
     fn cycle_region(&mut self, backward: bool) {
-        let ring = [self.main_focus, Region::Toolbar, Region::Filmstrip];
+        let main = if self.region_available(self.main_focus) {
+            self.main_focus
+        } else {
+            match self.mode {
+                ViewMode::Grid => Region::Grid,
+                ViewMode::Loupe => Region::Detail,
+            }
+        };
+        let ring = [main, Region::Toolbar, Region::Filmstrip];
         let n = ring.len();
         let cur = ring.iter().position(|&r| r == self.focus).unwrap_or(0);
         let mut i = cur;
@@ -927,6 +947,12 @@ impl App {
             Region::Toolbar => self.toolbar_focus = 0,
             _ => {}
         }
+    }
+
+    fn set_focus(&mut self, focus: Region, level: FocusLevel) {
+        self.focus = focus;
+        self.focus_level = level;
+        self.on_focus_changed();
     }
 
     /// The folder tree flattened to its currently-visible rows (DFS over expanded
@@ -1011,9 +1037,12 @@ impl App {
     fn open_folder(&mut self, path: PathBuf) {
         self.ensure_subdirs(&path);
         let subdirs = self.subdirs(&path).to_vec();
+        let pure_container = !subdirs.is_empty() && Playlist::from_dir(&path).entries().is_empty();
         if !subdirs.is_empty() {
             if self.expanded.contains(&path) {
-                self.expanded.remove(&path);
+                if !pure_container {
+                    self.expanded.remove(&path);
+                }
             } else {
                 self.expanded.insert(path.clone());
             }
@@ -1023,7 +1052,7 @@ impl App {
         // it anyway flashes an empty grid for a frame before the user drills
         // further. Skip straight to its first child instead, same place a
         // second `folder_expand` press on it would land.
-        let target = if !subdirs.is_empty() && Playlist::from_dir(&path).entries().is_empty() {
+        let target = if pure_container {
             subdirs.into_iter().next().unwrap_or(path)
         } else {
             path
@@ -2781,8 +2810,7 @@ impl App {
                 ui::UiAction::OpenFolder(p) => {
                     // The folder row is one unit: clicking it focuses the tree,
                     // loads the folder, and toggles its expansion — same as Enter.
-                    self.focus = Region::Folders;
-                    self.focus_level = FocusLevel::Entered;
+                    self.set_focus(Region::Folders, FocusLevel::Entered);
                     self.open_folder(p);
                 }
                 ui::UiAction::Focus(region) => {
@@ -2793,14 +2821,12 @@ impl App {
                     self.request_redraw();
                 }
                 ui::UiAction::FocusToolbar(idx) => {
-                    self.focus = Region::Toolbar;
-                    self.focus_level = FocusLevel::Entered;
+                    self.set_focus(Region::Toolbar, FocusLevel::Entered);
                     self.toolbar_focus = idx;
                     self.request_redraw();
                 }
                 ui::UiAction::FocusDevelop(idx) => {
-                    self.focus = Region::Develop;
-                    self.focus_level = FocusLevel::Entered;
+                    self.set_focus(Region::Develop, FocusLevel::Entered);
                     self.develop_focus = idx;
                     self.request_redraw();
                 }
@@ -2925,6 +2951,10 @@ impl App {
     /// thumbnail loading can be virtualized to just those cells.
     pub(crate) fn set_visible_grid_range(&mut self, start: usize, end: usize) {
         self.grid_range = (start, end);
+    }
+
+    pub(crate) fn take_grid_scroll_reset(&mut self) -> bool {
+        std::mem::take(&mut self.grid_scroll_reset)
     }
 
     /// The filmstrip reports which cell range `[start, end)` is scrolled into view

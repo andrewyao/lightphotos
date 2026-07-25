@@ -466,9 +466,13 @@ fn quit_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
             }
         });
     });
-    // Backdrop click / Escape → keep running.
+    // Backdrop click cancels; Escape confirms, matching App::handle_key.
     if resp.should_close() {
-        out.actions.push(UiAction::CancelQuit);
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            out.actions.push(UiAction::ConfirmQuit);
+        } else {
+            out.actions.push(UiAction::CancelQuit);
+        }
     }
 }
 
@@ -671,9 +675,14 @@ fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
         // Virtualized: build only the rows scrolled into view. A folder with
         // thousands of images must not allocate every cell or load every
         // thumbnail (that exhausts memory and crashes).
-        egui::ScrollArea::vertical()
+        let reset_scroll = app.take_grid_scroll_reset();
+        let mut grid_scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
-            .show_rows(ui, cell, rows, |ui, row_range| {
+            .id_salt("grid_scroll");
+        if reset_scroll {
+            grid_scroll = grid_scroll.scroll_offset(egui::vec2(0.0, 0.0));
+        }
+        grid_scroll.show_rows(ui, cell, rows, |ui, row_range| {
                 let start = row_range.start * cols;
                 let end = (row_range.end * cols).min(len);
                 app.set_visible_grid_range(start, end);
@@ -968,9 +977,11 @@ fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
 
                     if let Some(target) = ui.ctx().data(|d| d.get_temp::<f32>(target_id)) {
                         let animated = ui.ctx().animate_value_with_time(anim_id, target, 0.15);
+                        area = area.scroll_offset(egui::vec2(animated, 0.0));
                         if (animated - target).abs() > 0.5 {
-                            area = area.scroll_offset(egui::vec2(animated, 0.0));
                             app.request_redraw();
+                        } else {
+                            ui.ctx().data_mut(|d| d.remove::<f32>(target_id));
                         }
                     }
                 }
