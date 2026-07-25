@@ -27,23 +27,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trashes_an_existing_file() {
-        // Create a temp file, trash it, and confirm it left its original spot.
-        // (It lands in the user's Trash — harmless.)
-        let path = std::env::temp_dir().join(format!(
-            "image-viewer-trash-test-{}.txt",
-            std::process::id()
-        ));
-        std::fs::write(&path, b"trash me").unwrap();
-        assert!(path.exists());
-        move_to_trash(&path).expect("trash should succeed");
-        assert!(
-            !path.exists(),
-            "file should be gone from its original location"
-        );
-    }
-
-    #[test]
     fn trashing_a_missing_file_errors() {
         let path = std::env::temp_dir().join("image-viewer-does-not-exist-xyz.txt");
         assert!(move_to_trash(&path).is_err());

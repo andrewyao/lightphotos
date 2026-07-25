@@ -44,6 +44,53 @@ const THUMB_STEP: u32 = 32;
 /// saturation, denoise).
 const DEVELOP_SLIDERS: usize = 11;
 
+/// Load macOS fonts at runtime so the binary does not need to embed a large
+/// Unicode font. The built-in egui fonts remain after these entries as a
+/// fallback for machines where a system font path differs or is unavailable.
+fn configure_system_fonts(ctx: &egui::Context) {
+    let mut definitions = egui::FontDefinitions::default();
+    let candidates = [
+        ("macos-ui", "/System/Library/Fonts/SFNS.ttf", 0),
+        // Covers CJK characters that are not present in SFNS. TTC files may
+        // contain multiple faces; index 0 is the regular face on macOS.
+        ("macos-cjk", "/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
+        (
+            "macos-cjk-fallback",
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+            0,
+        ),
+    ];
+
+    let mut loaded = Vec::new();
+    for (name, path, index) in candidates {
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        definitions.font_data.insert(
+            name.to_owned(),
+            Arc::new(egui::FontData {
+                font: std::borrow::Cow::Owned(bytes),
+                index,
+                tweak: Default::default(),
+            }),
+        );
+        loaded.push(name.to_owned());
+    }
+
+    if loaded.is_empty() {
+        return;
+    }
+
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        if let Some(fonts) = definitions.families.get_mut(&family) {
+            for name in loaded.iter().rev() {
+                fonts.insert(0, name.clone());
+            }
+        }
+    }
+    ctx.set_fonts(definitions);
+}
+
 /// Two top-level views: a thumbnail Grid and a single-image Loupe.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ViewMode {
@@ -366,6 +413,8 @@ pub(crate) struct App {
 impl App {
     pub(crate) fn new(initial: Option<PathBuf>) -> Self {
         let catalog = Catalog::load();
+        let egui_ctx = egui::Context::default();
+        configure_system_fonts(&egui_ctx);
         Self {
             window: None,
             renderer: None,
@@ -434,7 +483,7 @@ impl App {
             space_down: false,
             dragging: false,
             last_drag: (0.0, 0.0),
-            egui_ctx: egui::Context::default(),
+            egui_ctx,
             egui_state: None,
         }
     }
