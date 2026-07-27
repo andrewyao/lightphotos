@@ -1098,8 +1098,11 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
     let painter = ui.painter_at(central);
     for (i, t) in app.current_touchups().iter().enumerate() {
         let c = app.loupe_tex_to_screen(central, t.center[0], t.center[1]);
-        let edge = app.loupe_tex_to_screen(central, t.center[0] + t.radius, t.center[1]);
-        let radius = (edge - c).length().max(3.0);
+        let (radius_u, radius_v) = app.touchup_uv_radii(t.radius);
+        let edge_u = app.loupe_tex_to_screen(central, t.center[0] + radius_u, t.center[1]);
+        let edge_v = app.loupe_tex_to_screen(central, t.center[0], t.center[1] + radius_v);
+        let radius = ((edge_u - c).length() + (edge_v - c).length()) * 0.5;
+        let radius = radius.max(3.0);
         let selected = app.touchup_selected() == Some(i);
         painter.circle_stroke(
             c,
@@ -1136,8 +1139,9 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
                     let (u, v) = app.loupe_screen_to_tex(central, p);
                     let mut hit = None;
                     for (i, t) in app.current_touchups().iter().enumerate() {
-                        let dx = (u - t.center[0]) / t.radius;
-                        let dy = (v - t.center[1]) / t.radius;
+                        let (radius_u, radius_v) = app.touchup_uv_radii(t.radius);
+                        let dx = (u - t.center[0]) / radius_u;
+                        let dy = (v - t.center[1]) / radius_v;
                         if dx * dx + dy * dy <= 1.0 {
                             hit = Some(i);
                             break;

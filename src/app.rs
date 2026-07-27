@@ -1794,6 +1794,14 @@ impl App {
         (TOUCHUP_MIN_PIXELS / w.min(h)).min(TOUCHUP_MAX_RADIUS)
     }
 
+    /// Touch-up radius in normalized UV units for each image axis. The stored
+    /// radius is relative to the source image's shorter dimension.
+    pub(crate) fn touchup_uv_radii(&self, radius: f32) -> (f32, f32) {
+        let (w, h) = self.image_size();
+        let min_dim = w.min(h);
+        (radius * min_dim / w, radius * min_dim / h)
+    }
+
     /// Persist and apply `adj` to the currently-shown image: update the in-memory
     /// edits map (dropping identity edits), write the catalog, push to the GPU
     /// uniform, and mark the histogram dirty. Shared by the Develop sliders
@@ -1866,6 +1874,7 @@ impl App {
         let path = self.shown.path()?;
         let img = self.loader.as_ref()?.get(&path.to_path_buf())?;
         let radius = self.touchup_radius();
+        let (radius_u, radius_v) = self.touchup_uv_radii(radius);
         let sample = |u: f32, v: f32| {
             let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
             let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;
@@ -1884,7 +1893,7 @@ impl App {
             let mut sum = [0.0; 3];
             for i in 0..8 {
                 let a = i as f32 * std::f32::consts::TAU / 8.0;
-                let p = sample(cx + a.cos() * radius, cy + a.sin() * radius);
+                let p = sample(cx + a.cos() * radius_u, cy + a.sin() * radius_v);
                 for c in 0..3 {
                     sum[c] += p[c];
                 }
@@ -1895,13 +1904,14 @@ impl App {
             sum
         };
         let target_ring = ring(u, v);
+        let (unit_radius_u, unit_radius_v) = self.touchup_uv_radii(1.0);
         let mut best: Option<(f32, f32, f32)> = None;
         for i in 0..16 {
             let a = i as f32 * std::f32::consts::TAU / 16.0;
             let distance = radius * (3.0 + (i % 3) as f32);
-            let su = u + a.cos() * distance;
-            let sv = v + a.sin() * distance;
-            if su < radius || su > 1.0 - radius || sv < radius || sv > 1.0 - radius {
+            let su = u + a.cos() * distance * unit_radius_u;
+            let sv = v + a.sin() * distance * unit_radius_v;
+            if su < radius_u || su > 1.0 - radius_u || sv < radius_v || sv > 1.0 - radius_v {
                 continue;
             }
             let sr = ring(su, sv);
@@ -1935,8 +1945,9 @@ impl App {
         };
         let mut all = self.current_touchups().to_vec();
         all.push(t);
-        self.touchup_selected = Some(all.len() - 1);
+        let new_index = all.len() - 1;
         self.apply_touchups(all);
+        self.touchup_selected = Some(new_index);
     }
 
     fn delete_selected_touchup(&mut self) {
@@ -2118,6 +2129,10 @@ impl App {
     /// while it's armed cancels it without sampling anything.
     fn toggle_wb_picker(&mut self) {
         self.wb_picker = !self.wb_picker;
+        if self.wb_picker {
+            self.touchup_active = false;
+            self.touchup_selected = None;
+        }
         self.request_redraw();
     }
 
@@ -2582,7 +2597,9 @@ impl App {
             ..Adjustments::default()
         };
         let (scale, offset, rot) = self.loupe_transform();
-        let (gpu_before, gpu_after) = (self.gpu_adjust(&before), self.gpu_adjust(&after));
+        let mut gpu_before = self.gpu_adjust(&before);
+        gpu_before._pad0 = 0.0;
+        let gpu_after = self.gpu_adjust(&after);
         if let Some(r) = &mut self.renderer {
             r.set_transform(scale, offset, rot);
             r.set_adjustments(gpu_before);
