@@ -2416,10 +2416,20 @@ impl App {
     }
 
     /// The loupe image area in physical pixels: the whole surface unless a
-    /// viewport was carved out by egui panels last frame.
+    /// viewport was carved out by egui panels last frame. While comparing,
+    /// each side only occupies half the width, so zoom/pan/fit math must
+    /// target that half — this must match the `half = w / 2` split used to
+    /// carve the actual GPU viewports (see the compare render call site).
     fn loupe_area(&self) -> (f32, f32) {
         match self.loupe_viewport {
-            Some((_, _, w, h)) => (w.max(1) as f32, h.max(1) as f32),
+            Some((_, _, w, h)) => {
+                let h = h.max(1) as f32;
+                if self.compare && self.mode == ViewMode::Loupe && w >= 2 && h > 0.0 {
+                    ((w / 2).max(1) as f32, h)
+                } else {
+                    (w.max(1) as f32, h)
+                }
+            }
             None => self.win_size,
         }
     }
@@ -2510,13 +2520,26 @@ impl App {
     }
 
     /// Cursor position relative to the loupe viewport's top-left, in physical px.
+    /// While comparing, a cursor over the right half is folded back into the
+    /// same `0..half` local space as the left half, matching `loupe_area()`,
+    /// so zoom-at-cursor anchors correctly regardless of which side it's over.
     pub(crate) fn cursor_in_loupe(&self) -> (f32, f32) {
         // `self.cursor` is already physical pixels (winit `CursorMoved` reports a
         // `PhysicalPosition`), and `loupe_viewport` is physical too — so we just
         // subtract the viewport origin; no scale-factor conversion.
         let (px, py) = (self.cursor.0 as f32, self.cursor.1 as f32);
         match self.loupe_viewport {
-            Some((x, y, _, _)) => (px - x as f32, py - y as f32),
+            Some((x, y, w, h)) => {
+                let mut lx = px - x as f32;
+                let ly = py - y as f32;
+                if self.compare && self.mode == ViewMode::Loupe && w >= 2 && h > 0 {
+                    let half = (w / 2) as f32;
+                    if lx >= half {
+                        lx -= half;
+                    }
+                }
+                (lx, ly)
+            }
             None => (px, py),
         }
     }
@@ -2545,31 +2568,18 @@ impl App {
         }
     }
 
-    /// A centered "contain" fit transform for an area `(aw, ah)` physical px,
-    /// independent of the current zoom/pan. Used for the before/after halves.
-    fn fit_transform_for(&self, aw: f32, ah: f32) -> ([f32; 2], [f32; 2], [f32; 4]) {
-        let (iw, ih) = self.display_size();
-        let zoom = (aw / iw).min(ah / ih).clamp(MIN_ZOOM, MAX_ZOOM);
-        let denom_x = zoom * iw;
-        let denom_y = zoom * ih;
-        let pan_x = (aw - iw * zoom) / 2.0;
-        let pan_y = (ah - ih * zoom) / 2.0;
-        let scale = [aw / denom_x, ah / denom_y];
-        let offset = [-pan_x / denom_x, -pan_y / denom_y];
-        (scale, offset, self.rot_matrix())
-    }
-
-    /// Configure the renderer for the before/after compare view: a shared
-    /// half-size fit transform, the primary adjustments = "before" (identity
-    /// tone but the same crop), the secondary = "after" (the full edits).
-    /// `(half_w, half_h)` is each side's size in physical px.
-    fn push_compare(&mut self, half_w: f32, half_h: f32) {
+    /// Configure the renderer for the before/after compare view: the shared
+    /// live zoom/pan transform (compare-aware via `loupe_area()`, so it
+    /// targets the half-width area each side actually occupies), the primary
+    /// adjustments = "before" (identity tone but the same crop), the
+    /// secondary = "after" (the full edits).
+    fn push_compare(&mut self) {
         let after = self.current_adjustments();
         let before = Adjustments {
             crop: after.crop,
             ..Adjustments::default()
         };
-        let (scale, offset, rot) = self.fit_transform_for(half_w, half_h);
+        let (scale, offset, rot) = self.loupe_transform();
         let (gpu_before, gpu_after) = (self.gpu_adjust(&before), self.gpu_adjust(&after));
         if let Some(r) = &mut self.renderer {
             r.set_transform(scale, offset, rot);
@@ -2578,15 +2588,26 @@ impl App {
         }
     }
 
-    /// Toggle the before/after compare view (Loupe only). Turning it off
-    /// restores the normal single-image transform + adjustments.
+    /// Toggle the before/after compare view (Loupe only). Flipping it changes
+    /// what `loupe_area()` returns (full width <-> half width) with no
+    /// viewport-resize event to trigger the usual per-frame refit, so refit
+    /// (if fitted) or recenter at the current zoom (if not) explicitly here.
     fn toggle_compare(&mut self) {
         if self.mode != ViewMode::Loupe {
             return;
         }
         self.compare = !self.compare;
-        if !self.compare {
+        if self.fitted {
+            if self.crop_edit.is_some() {
+                self.fit_for_crop();
+            } else {
+                self.fit_to_window();
+            }
+        } else {
+            self.center();
             self.push_transform();
+        }
+        if !self.compare {
             self.push_adjustments();
         }
         self.request_redraw();
@@ -3043,7 +3064,7 @@ impl App {
             if let Some((x, y, w, h)) = image_viewport {
                 if w >= 2 && h > 0 {
                     let half = w / 2;
-                    self.push_compare(half as f32, h as f32);
+                    self.push_compare();
                     primary_vp = Some((x, y, half, h));
                     compare_vp = Some((x + half, y, w - half, h));
                 }
