@@ -2423,11 +2423,10 @@ impl App {
     fn loupe_area(&self) -> (f32, f32) {
         match self.loupe_viewport {
             Some((_, _, w, h)) => {
-                let h = h.max(1) as f32;
-                if self.compare && self.mode == ViewMode::Loupe && w >= 2 && h > 0.0 {
-                    ((w / 2).max(1) as f32, h)
+                if self.compare && self.mode == ViewMode::Loupe && w >= 2 && h > 0 {
+                    ((w / 2).max(1) as f32, h.max(1) as f32)
                 } else {
-                    (w.max(1) as f32, h)
+                    (w.max(1) as f32, h.max(1) as f32)
                 }
             }
             None => self.win_size,
