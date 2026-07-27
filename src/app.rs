@@ -2418,8 +2418,8 @@ impl App {
     /// The loupe image area in physical pixels: the whole surface unless a
     /// viewport was carved out by egui panels last frame. While comparing,
     /// each side only occupies half the width, so zoom/pan/fit math must
-    /// target that half — this must match the `half = w / 2` split used to
-    /// carve the actual GPU viewports (see the compare render call site).
+    /// target that half — this must match the equal-width split used to carve
+    /// the actual GPU viewports (see the compare render call site).
     fn loupe_area(&self) -> (f32, f32) {
         match self.loupe_viewport {
             Some((_, _, w, h)) => {
@@ -2533,8 +2533,11 @@ impl App {
                 let ly = py - y as f32;
                 if self.compare && self.mode == ViewMode::Loupe && w >= 2 && h > 0 {
                     let half = (w / 2) as f32;
-                    if lx >= half {
-                        lx -= half;
+                    // Equal-sized viewports leave an odd spare pixel as a
+                    // divider between the before and after images.
+                    let right_start = half + (w % 2) as f32;
+                    if lx >= right_start {
+                        lx -= right_start;
                     }
                 }
                 (lx, ly)
@@ -2589,12 +2592,14 @@ impl App {
 
     /// Toggle the before/after compare view (Loupe only). Flipping it changes
     /// what `loupe_area()` returns (full width <-> half width) with no
-    /// viewport-resize event to trigger the usual per-frame refit, so refit
-    /// (if fitted) or recenter at the current zoom (if not) explicitly here.
+    /// viewport-resize event to trigger the usual per-frame refit. Preserve
+    /// the image point at the viewport center when the view is manually
+    /// zoomed, so toggling compare does not discard the current pan.
     fn toggle_compare(&mut self) {
         if self.mode != ViewMode::Loupe {
             return;
         }
+        let old_width = self.loupe_area().0;
         self.compare = !self.compare;
         if self.fitted {
             if self.crop_edit.is_some() {
@@ -2603,7 +2608,8 @@ impl App {
                 self.fit_to_window();
             }
         } else {
-            self.center();
+            let new_width = self.loupe_area().0;
+            self.pan.0 += (new_width - old_width) / 2.0;
             self.push_transform();
         }
         if !self.compare {
@@ -3055,17 +3061,20 @@ impl App {
             }
         }
 
-        // Before/after compare (Loupe): split the central rect into two halves,
-        // set up the two-uniform draw, and render the image twice.
+        // Before/after compare (Loupe): split the central rect into two equal
+        // halves, set up the two-uniform draw, and render the image twice.
+        // An odd spare pixel becomes a one-pixel divider so both viewports use
+        // the same transform dimensions.
         let mut primary_vp = image_viewport;
         let mut compare_vp = None;
         if self.compare && self.mode == ViewMode::Loupe {
             if let Some((x, y, w, h)) = image_viewport {
                 if w >= 2 && h > 0 {
                     let half = w / 2;
+                    let gap = w % 2;
                     self.push_compare();
                     primary_vp = Some((x, y, half, h));
-                    compare_vp = Some((x + half, y, w - half, h));
+                    compare_vp = Some((x + half + gap, y, half, h));
                 }
             }
         }
