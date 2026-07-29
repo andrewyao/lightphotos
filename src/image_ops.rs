@@ -7,8 +7,23 @@
 //! state module. Keeping the crop/tone/rotate math in one place is also what
 //! guarantees the exported JPEG and the on-screen edited thumbnail agree.
 
-use crate::develop::{self, Adjustments, TouchUp};
+use crate::develop::{self, Adjustments, Crop, TouchUp};
 use crate::image_decode::DecodedImage;
+
+/// A crop rectangle (normalized 0..1, or `None` for the full frame) → integer
+/// pixel bounds `(x0, y0, x1, y1)` in texture space, clamped so the region is
+/// always at least 1×1. Used by `bake_edited` (crop + tone + rotate).
+fn crop_bounds(crop: Option<Crop>, w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let (cl, ct, cr, cb) = match crop {
+        Some(c) => (c.left, c.top, c.right, c.bottom),
+        None => (0.0, 0.0, 1.0, 1.0),
+    };
+    let x0 = ((cl * w as f32).round() as i64).clamp(0, w as i64 - 1) as u32;
+    let y0 = ((ct * h as f32).round() as i64).clamp(0, h as i64 - 1) as u32;
+    let x1 = ((cr * w as f32).round() as i64).clamp(x0 as i64 + 1, w as i64) as u32;
+    let y1 = ((cb * h as f32).round() as i64).clamp(y0 as i64 + 1, h as i64) as u32;
+    (x0, y0, x1, y1)
+}
 
 /// Un-premultiply a premultiplied-sRGB8 RGBA pixel and convert it to
 /// linear-light RGB with the 2.2 gamma that `develop::apply_linear` assumes.
@@ -56,14 +71,7 @@ pub(crate) fn bake_edited(
     }
 
     // Crop rectangle → integer pixel bounds in texture space.
-    let (cl, ct, cr, cb) = match adj.crop {
-        Some(c) => (c.left, c.top, c.right, c.bottom),
-        None => (0.0, 0.0, 1.0, 1.0),
-    };
-    let x0 = ((cl * w as f32).round() as i64).clamp(0, w as i64 - 1) as u32;
-    let y0 = ((ct * h as f32).round() as i64).clamp(0, h as i64 - 1) as u32;
-    let x1 = ((cr * w as f32).round() as i64).clamp(x0 as i64 + 1, w as i64) as u32;
-    let y1 = ((cb * h as f32).round() as i64).clamp(y0 as i64 + 1, h as i64) as u32;
+    let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
     let (cw, ch) = (x1 - x0, y1 - y0);
 
     let encode = |v: f32| {
@@ -381,4 +389,5 @@ mod tests {
     fn unpremul_zero_alpha_is_black() {
         assert_eq!(unpremul_to_linear([200, 100, 50, 0]), [0.0, 0.0, 0.0]);
     }
+
 }
