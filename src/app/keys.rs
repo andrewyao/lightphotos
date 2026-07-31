@@ -97,6 +97,33 @@ impl App {
             return;
         }
 
+        // Survey Mode is a modal-like screen entered from/exited to the Grid:
+        // Left/Right move which member the shared rating hotkeys apply to
+        // (via `selected_path`'s Survey branch), Escape closes it, Enter runs
+        // the one-click keep-best action. Digit ratings fall through to the
+        // shared block below unchanged.
+        if self.mode == ViewMode::Survey {
+            match code {
+                KeyCode::Escape => {
+                    self.close_survey();
+                    return;
+                }
+                KeyCode::ArrowLeft => {
+                    self.survey_move_focus(-1);
+                    return;
+                }
+                KeyCode::ArrowRight => {
+                    self.survey_move_focus(1);
+                    return;
+                }
+                KeyCode::Enter | KeyCode::NumpadEnter if !cmd => {
+                    self.keep_best_reject_rest();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // Shift+1..5 → filter ≥ N; Shift+0 → clear (both modes). Checked before
         // plain digits.
         if shift {
@@ -168,6 +195,8 @@ impl App {
             // `B` toggles best-of-burst badges (grid). No-op while a filter is
             // active — `toggle_bursts` guards it.
             KeyCode::KeyB if !cmd && !alt => self.toggle_bursts(),
+            // `D` toggles content-duplicate (dHash) grouping badges (grid).
+            KeyCode::KeyD if !cmd && !alt => self.toggle_dupes(),
             // `E` is the focus-independent "enter loupe" edit key (Lightroom).
             KeyCode::KeyE => {
                 if self.mode == ViewMode::Grid {

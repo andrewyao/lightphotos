@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 
 use crate::develop::Adjustments;
+use crate::duplicates::DuplicateMark;
 use crate::navigation::Cmp;
 use crate::{trash, ui};
 
@@ -66,32 +67,80 @@ impl App {
                 format!("Apply the copied settings to {n} photo(s)?")
             }
             ui::BulkKind::Delete => format!("Move {n} photo(s) to the Trash?"),
+            ui::BulkKind::DeleteRejects => {
+                format!(
+                    "Move {} reject(s) (\u{2605}1-2) to the Trash?",
+                    self.reject_count()
+                )
+            }
         })
     }
 
-    /// Open the confirm modal for `kind` (no-op when nothing is selected). Shared
-    /// by the toolbar buttons and the Delete/Backspace key.
+    /// Whether `kind` has anything to act on right now — the guard for
+    /// `request_bulk`. Most kinds act on the multi-selection; `DeleteRejects`
+    /// instead sweeps the whole folder's reject range, independent of
+    /// selection.
+    fn bulk_available(&self, kind: ui::BulkKind) -> bool {
+        match kind {
+            ui::BulkKind::DeleteRejects => self.reject_count() > 0,
+            _ => self.selection_count() > 0,
+        }
+    }
+
+    /// Open the confirm modal for `kind` (no-op when there's nothing to act
+    /// on). Shared by the toolbar buttons and the Delete/Backspace key.
     pub(super) fn request_bulk(&mut self, kind: ui::BulkKind) {
-        if self.selection_count() > 0 {
+        if self.bulk_available(kind) {
             self.pending_bulk = Some(kind);
             self.request_redraw();
         }
     }
 
-    /// Run a confirmed bulk action against the current selection.
+    /// Run a confirmed bulk action.
     pub(super) fn run_bulk(&mut self, kind: ui::BulkKind) {
         match kind {
             ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
             ui::BulkKind::Export => self.export_selection(),
             ui::BulkKind::Delete => self.delete_selection(),
+            ui::BulkKind::DeleteRejects => self.delete_rejects(),
         }
+    }
+
+    /// Every photo in the current folder rated 1-2 (reject range), independent
+    /// of the active filter — same folder-wide scope as `rating_counts`.
+    pub(crate) fn reject_paths(&self) -> Vec<PathBuf> {
+        let Some(pl) = &self.playlist else {
+            return Vec::new();
+        };
+        pl.entries()
+            .iter()
+            .filter(|p| (1..=2).contains(&self.rating_of(p)))
+            .cloned()
+            .collect()
+    }
+
+    /// Count of `reject_paths()`, for the toolbar button/guard.
+    pub(crate) fn reject_count(&self) -> usize {
+        self.reject_paths().len()
     }
 
     /// Move every selected photo to the Trash, then drop it from the playlist,
     /// the in-memory maps, and the catalog, repairing the cursor + loupe.
     pub(super) fn delete_selection(&mut self) {
-        let paths = self.selected_paths();
+        self.run_delete(self.selected_paths());
+    }
+
+    /// Move every photo currently rated 1-2 (reject range) to the Trash — the
+    /// general "sweep" action from Plan C, reusing `run_delete`'s trash +
+    /// cleanup logic but sourcing paths from the reject range instead of the
+    /// multi-selection.
+    pub(super) fn delete_rejects(&mut self) {
+        self.run_delete(self.reject_paths());
+    }
+
+    /// Shared trash + cleanup body for `delete_selection`/`delete_rejects`.
+    fn run_delete(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
         }
@@ -109,6 +158,10 @@ impl App {
         }
         if !trashed.is_empty() {
             let gone: HashSet<PathBuf> = trashed.iter().cloned().collect();
+            let survey_was_affected = self
+                .survey_members
+                .iter()
+                .any(|p| gone.contains(p));
             if let Some(pl) = self.playlist.as_mut() {
                 pl.remove_matching(|p| gone.contains(p));
             }
@@ -117,6 +170,32 @@ impl App {
                 self.edits.remove(p);
                 self.rotations.remove(p);
                 self.catalog.remove(p);
+            }
+            // Remove stale path- and pair-keyed duplicate state. Pending jobs
+            // for deleted files must not keep the redraw loop alive forever.
+            for p in &trashed {
+                self.phashes.remove(p);
+                self.sharpness.remove(p);
+                self.capture_times.remove(p);
+            }
+            self.feature_distances
+                .retain(|(anchor, member), _| {
+                    !gone.contains(anchor) && !gone.contains(member)
+                });
+            self.feature_failed
+                .retain(|(anchor, member)| {
+                    !gone.contains(anchor) && !gone.contains(member)
+                });
+            self.feature_pending
+                .retain(|(anchor, member)| {
+                    !gone.contains(anchor) && !gone.contains(member)
+                });
+
+            // Playlist indices changed, so all derived duplicate vectors need
+            // to be rebuilt against the new playlist.
+            self.recompute_dup_marks();
+            if survey_was_affected && self.mode == ViewMode::Survey {
+                self.close_survey();
             }
             // Every index is now invalidated; rebuild the view. The cursor keeps
             // its position (clamped), landing on a neighbor of the deleted photos.
@@ -256,6 +335,116 @@ impl App {
         } else {
             self.burst_marks.clear();
         }
+        self.request_redraw();
+    }
+
+    /// Flip content-duplicate grouping mode. Independent of `bursts_on`/the star
+    /// filter — dHash grouping is order-independent (union-find over the whole
+    /// folder), so filtering doesn't break its correctness the way it would for
+    /// time-adjacency bursts. Turning on kicks off the whole-folder background
+    /// dHash scoring pass and rebuilds marks; turning off clears the badges but
+    /// keeps the cache so re-enabling is instant.
+    pub(super) fn toggle_dupes(&mut self) {
+        self.dupes_on = !self.dupes_on;
+        if self.dupes_on {
+            self.recompute_dup_marks();
+            self.request_dup_thumbs();
+            self.request_feature_prints();
+        } else {
+            self.dup_groups.clear();
+            self.dup_marks.clear();
+        }
+        self.request_redraw();
+    }
+
+    /// Open Survey Mode on the duplicate group containing the visible cell at
+    /// `pos` (a duplicate-badge click in the grid). No-op if the cell isn't
+    /// currently in a duplicate group of 2+.
+    pub(super) fn open_survey(&mut self, pos: usize) {
+        let Some(pl) = &self.playlist else { return };
+        let Some(&idx) = self.visible.get(pos) else {
+            return;
+        };
+        let Some(&group) = self.dup_refined.get(idx) else {
+            return;
+        };
+        let mut members = Vec::new();
+        let mut best = None;
+        for (i, &g) in self.dup_refined.iter().enumerate() {
+            if g != group {
+                continue;
+            }
+            let Some(p) = pl.entry(i) else { continue };
+            if matches!(self.dup_marks.get(i), Some(Some(DuplicateMark::Best))) {
+                best = Some(p.to_path_buf());
+            }
+            members.push(p.to_path_buf());
+        }
+        if members.len() < 2 {
+            return;
+        }
+        self.survey_members = members;
+        self.survey_best = best;
+        self.survey_focus = 0;
+        self.mode = ViewMode::Survey;
+        self.normalize_focus();
+        self.request_redraw();
+    }
+
+    /// Close Survey Mode, back to the Grid.
+    pub(super) fn close_survey(&mut self) {
+        self.survey_members.clear();
+        self.survey_best = None;
+        self.survey_focus = 0;
+        self.mode = ViewMode::Grid;
+        self.normalize_focus();
+        self.request_redraw();
+    }
+
+    /// Set Survey Mode's focused member directly (a click on a member).
+    pub(super) fn set_survey_focus(&mut self, i: usize) {
+        if i < self.survey_members.len() {
+            self.survey_focus = i;
+            self.request_redraw();
+        }
+    }
+
+    /// Move Survey Mode's focused member left/right (wrapping). No-op outside
+    /// Survey Mode or with fewer than 2 members.
+    pub(super) fn survey_move_focus(&mut self, delta: i32) {
+        let n = self.survey_members.len();
+        if n < 2 {
+            return;
+        }
+        let cur = self.survey_focus as i32;
+        self.survey_focus = (cur + delta).rem_euclid(n as i32) as usize;
+        self.request_redraw();
+    }
+
+    /// One-click Survey Mode action (Aftershoot's "Spray Can" analog): rate
+    /// the group's best member (from `dup_marks`, so it matches the grid
+    /// badge) 5 stars, and every sibling 1 star — landing them in the
+    /// existing reject range so "Delete all Rejects" can sweep them later.
+    pub(super) fn keep_best_reject_rest(&mut self) {
+        if self.survey_members.len() < 2 {
+            return;
+        }
+        let Some(best) = self.survey_best.clone() else {
+            return;
+        };
+        for path in self.survey_members.clone() {
+            let stars = if path == best { 5 } else { 1 };
+            self.ratings.insert(path.clone(), stars);
+            self.catalog.set(&path, stars);
+        }
+        if self.filter.is_some() {
+            self.recompute_visible();
+        }
+        let n = self.survey_members.len();
+        self.set_status(format!(
+            "Kept best, rated {} sibling(s) \u{2605}1",
+            n.saturating_sub(1)
+        ));
         self.request_redraw();
     }
 

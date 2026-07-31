@@ -28,7 +28,9 @@ mod burst;
 mod catalog;
 mod coregraphics;
 mod develop;
+mod duplicates;
 mod export;
+mod featureprint;
 mod hash;
 mod image_decode;
 mod image_encode;
@@ -37,6 +39,7 @@ mod loader;
 mod macos_delegate;
 mod navigation;
 mod paths;
+mod phash;
 mod renderer;
 mod sharpness;
 mod thumbnail;
@@ -86,6 +89,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.renderer = Some(renderer);
         self.loader = Some(loader);
         self.exporter = Some(export::Exporter::new());
+        self.feature_pool = Some(featureprint::DistancePool::new());
         self.egui_state = Some(egui_state);
 
         if let Some(path) = self.pending_initial.take() {
@@ -277,6 +281,7 @@ impl ApplicationHandler<UserEvent> for App {
             }
             if !thumbs.is_empty() {
                 self.score_arrived_thumbs(&thumbs);
+                self.score_arrived_dup_thumbs(&thumbs);
             }
             if any {
                 self.try_show();
@@ -311,6 +316,18 @@ impl ApplicationHandler<UserEvent> for App {
         // don't wake the loop, so without this a settled grid would freeze burst
         // badges mid-computation until an unrelated event arrives.
         if self.request_burst_thumbs() {
+            self.request_redraw();
+        }
+
+        // Same rationale as above, for the content-duplicate dHash pass.
+        if self.request_dup_thumbs() {
+            self.request_redraw();
+        }
+
+        // Drain finished feature-print comparisons (the second, Vision-backed
+        // refinement tier), then keep polling while any are still in flight.
+        self.poll_feature_prints();
+        if self.request_feature_prints() {
             self.request_redraw();
         }
     }

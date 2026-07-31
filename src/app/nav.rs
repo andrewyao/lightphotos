@@ -53,8 +53,14 @@ impl App {
         self.visible.get(self.sel?).copied()
     }
 
-    /// The path of the current selection, if any.
+    /// The path of the current selection, if any. In Survey Mode this is the
+    /// focused member (`survey_focus`) instead of the Grid/Loupe `sel` — so
+    /// rating hotkeys "just work" against whichever screen is showing without
+    /// Survey needing its own parallel rating path.
     pub(crate) fn selected_path(&self) -> Option<PathBuf> {
+        if self.mode == ViewMode::Survey {
+            return self.survey_members.get(self.survey_focus).cloned();
+        }
         let pl = self.playlist.as_ref()?;
         let idx = self.selected_index()?;
         pl.entry(idx).map(|p| p.to_path_buf())
@@ -345,7 +351,7 @@ impl App {
     pub(super) fn normalize_focus(&mut self) {
         if !self.region_available(self.main_focus) {
             self.main_focus = match self.mode {
-                ViewMode::Grid => Region::Grid,
+                ViewMode::Grid | ViewMode::Survey => Region::Grid,
                 ViewMode::Loupe => Region::Detail,
             };
         }
@@ -353,7 +359,7 @@ impl App {
             return;
         }
         self.focus = match self.mode {
-            ViewMode::Grid => Region::Grid,
+            ViewMode::Grid | ViewMode::Survey => Region::Grid,
             ViewMode::Loupe => Region::Detail,
         };
         self.focus_level = FocusLevel::Selected;
@@ -372,7 +378,7 @@ impl App {
             self.main_focus
         } else {
             match self.mode {
-                ViewMode::Grid => Region::Grid,
+                ViewMode::Grid | ViewMode::Survey => Region::Grid,
                 ViewMode::Loupe => Region::Detail,
             }
         };

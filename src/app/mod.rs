@@ -22,6 +22,7 @@ use winit::window::Window;
 use crate::burst::BurstMark;
 use crate::catalog::Catalog;
 use crate::develop::{Adjustments, Crop, TouchUp};
+use crate::duplicates::DuplicateMark;
 use crate::export::Exporter;
 use crate::loader::Loader;
 use crate::navigation::{self, Cmp, Playlist};
@@ -99,6 +100,13 @@ fn configure_system_fonts(ctx: &egui::Context) {
 pub enum ViewMode {
     Grid,
     Loupe,
+    /// Side-by-side review of one duplicate group (`survey_members`), entered
+    /// from a duplicate-group badge click in the Grid. Reuses `Region::Grid`
+    /// for keyboard-focus bookkeeping (see `normalize_focus`) rather than
+    /// adding a new `Region` variant, since it's a modal-like screen entered
+    /// from and exited back to the Grid, not part of the F6 chrome-cycling
+    /// ring.
+    Survey,
 }
 
 /// One edge of the crop rectangle, in the image's own (texture) space — `Left`
@@ -231,6 +239,8 @@ pub(crate) struct App {
     pub(crate) loader: Option<Loader>,
     /// Background JPEG export worker pool; `None` until the window is created.
     pub(crate) exporter: Option<Exporter>,
+    /// Background worker pool for the feature-print refinement pass.
+    pub(crate) feature_pool: Option<crate::featureprint::DistancePool>,
     /// In-flight export batch progress, driving the persistent progress toast.
     pub(crate) export_progress: Option<ExportProgress>,
     playlist: Option<Playlist>,
@@ -326,6 +336,50 @@ pub(crate) struct App {
     /// Derived burst marks, indexed by playlist entry index (not visible pos).
     /// Empty when bursts are off. Rebuilt when caches or the toggle change.
     burst_marks: Vec<Option<BurstMark>>,
+
+    // ---- Content-duplicate grouping state (dHash) ----
+    /// Whether content-duplicate detection is active (badges). Independent of
+    /// `bursts_on`: a photo can be in both a time-burst and a content-duplicate
+    /// group at once — these are separate underlying computations, unified only
+    /// at the UI badge layer.
+    dupes_on: bool,
+    /// Cached dHash per path, computed off thumbnail arrival (whole folder, not
+    /// gated on any prior grouping). Survives toggling off.
+    phashes: HashMap<PathBuf, u64>,
+    /// Raw dHash grouping (pre feature-print refinement), indexed by playlist
+    /// entry index. Kept separately from `dup_marks` so `request_feature_prints`
+    /// can identify each group's anchor/candidates without recomputing it.
+    dup_groups: Vec<u32>,
+    /// Refined grouping (post feature-print split), indexed by playlist entry
+    /// index. `dup_marks` only keeps Best/Sibling per entry, discarding which
+    /// entries share a group — this is what Survey Mode needs to gather a
+    /// clicked badge's group members.
+    dup_refined: Vec<u32>,
+    /// Vision feature-print distances keyed by (dHash group anchor, member).
+    /// Survives toggling off. Anchor-relative (not all-pairs) — see
+    /// `duplicates::refine_by_feature_print`.
+    feature_distances: HashMap<(PathBuf, PathBuf), f32>,
+    /// Terminally failed comparisons, keyed by (anchor, member), so corrupt or
+    /// unsupported files do not get resubmitted every frame.
+    feature_failed: HashSet<(PathBuf, PathBuf)>,
+    /// Outstanding feature-print comparisons keyed by (anchor, member), so
+    /// `request_feature_prints` doesn't resubmit every frame.
+    feature_pending: HashSet<(PathBuf, PathBuf)>,
+    /// Derived duplicate marks (post feature-print refinement), indexed by
+    /// playlist entry index (not visible pos). Empty when dupes are off.
+    /// Rebuilt when caches or the toggle change.
+    dup_marks: Vec<Option<DuplicateMark>>,
+
+    // ---- Survey Mode state (one duplicate group at a time) ----
+    /// Paths of the duplicate group currently under review. Empty outside
+    /// `ViewMode::Survey`.
+    survey_members: Vec<PathBuf>,
+    /// The group's best member as of `open_survey` (from `dup_marks`), so
+    /// `keep_best_reject_rest` stays consistent with the grid badge instead of
+    /// re-deriving "best" independently.
+    survey_best: Option<PathBuf>,
+    /// Index into `survey_members` that rating hotkeys/arrow-keys apply to.
+    survey_focus: usize,
 
     // ---- Loupe view state ----
     zoom: f32,
@@ -439,6 +493,7 @@ impl App {
             renderer: None,
             loader: None,
             exporter: None,
+            feature_pool: None,
             export_progress: None,
             playlist: None,
             want: None,
@@ -477,6 +532,17 @@ impl App {
             capture_times: HashMap::new(),
             sharpness: HashMap::new(),
             burst_marks: Vec::new(),
+            dupes_on: false,
+            phashes: HashMap::new(),
+            dup_groups: Vec::new(),
+            dup_refined: Vec::new(),
+            feature_distances: HashMap::new(),
+            feature_failed: HashSet::new(),
+            feature_pending: HashSet::new(),
+            dup_marks: Vec::new(),
+            survey_members: Vec::new(),
+            survey_best: None,
+            survey_focus: 0,
             zoom: 1.0,
             pan: (0.0, 0.0),
             win_size: (1.0, 1.0),
@@ -551,6 +617,7 @@ impl App {
             let start_index = playlist.position();
             self.playlist = Some(playlist);
             self.reset_burst_state();
+            self.reset_dup_state();
             self.recompute_visible();
             self.sel = Some(
                 self.visible
@@ -610,6 +677,7 @@ impl App {
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
         self.reset_burst_state();
+        self.reset_dup_state();
         self.recompute_visible();
         self.sel = None;
         self.selected.clear();
@@ -723,7 +791,8 @@ impl App {
                 let h = (r.height() * pixels_per_point).round().max(0.0) as u32;
                 (x, y, w, h)
             }),
-            ViewMode::Grid => Some((0, 0, 0, 0)), // degenerate → renderer draws nothing
+            // Both are egui-only chrome (no GPU-rendered loupe image).
+            ViewMode::Grid | ViewMode::Survey => Some((0, 0, 0, 0)),
         };
 
         // If the loupe viewport changed, re-fit so the image stays centered in it.
@@ -846,6 +915,11 @@ impl App {
                 ui::UiAction::SetRating(stars) => self.set_rating(stars),
                 ui::UiAction::ScrollFilmstrip(delta) => self.scroll_filmstrip(delta),
                 ui::UiAction::ToggleBursts => self.toggle_bursts(),
+                ui::UiAction::ToggleDupes => self.toggle_dupes(),
+                ui::UiAction::OpenSurvey(pos) => self.open_survey(pos),
+                ui::UiAction::CloseSurvey => self.close_survey(),
+                ui::UiAction::KeepBestRejectRest => self.keep_best_reject_rest(),
+                ui::UiAction::FocusSurveyMember(i) => self.set_survey_focus(i),
                 ui::UiAction::OpenFolder(p) => {
                     // The folder row is one unit: clicking it focuses the tree,
                     // loads the folder, and toggles its expansion — same as Enter.

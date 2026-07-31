@@ -32,6 +32,11 @@ mod theme {
     /// Best-of-burst winner badge (mint green = "the keeper"), distinct from the
     /// gold rating stars so the two overlays never read as the same mark.
     pub const BURST_BADGE: Color32 = Color32::from_rgb(120, 230, 160);
+    /// Content-duplicate-group badge (amber-orange), distinct from the burst
+    /// badge (mint) and rating stars (gold) — a photo can carry both a burst
+    /// and a duplicate-group badge at once, so the colors must never be
+    /// confusable at a glance.
+    pub const DUP_BADGE: Color32 = Color32::from_rgb(255, 150, 90);
 }
 
 /// An action the UI wants `App` to perform after the frame is built. Positions
@@ -78,6 +83,18 @@ pub enum UiAction {
     /// Toggle best-of-burst detection (badges + dimming). Ignored while a star
     /// filter is active.
     ToggleBursts,
+    /// Toggle content-duplicate (dHash) grouping badges. Independent of the
+    /// star filter — unlike bursts, this grouping is order-independent.
+    ToggleDupes,
+    /// Open Survey Mode on the duplicate group containing this visible cell
+    /// (a duplicate-badge click in the grid).
+    OpenSurvey(usize),
+    /// Close Survey Mode, back to the Grid.
+    CloseSurvey,
+    /// Survey Mode's one-click "keep best, reject rest" action.
+    KeepBestRejectRest,
+    /// Click on a Survey Mode member: focus it (rating hotkeys then apply to it).
+    FocusSurveyMember(usize),
     /// Open this folder as one unit: load its images and toggle its expansion.
     OpenFolder(std::path::PathBuf),
     /// Begin dragging this crop edge (pointer pressed near it).
@@ -125,6 +142,10 @@ pub enum BulkKind {
     ApplySettings,
     /// Move every selected photo to the Trash.
     Delete,
+    /// Move every photo in the current folder rated 1-2 (reject range) to the
+    /// Trash — independent of the multi-selection, folder-wide like
+    /// `rating_counts`.
+    DeleteRejects,
 }
 
 /// What `draw` returns to `main.rs` each frame.
@@ -142,11 +163,13 @@ mod toolbar;
 mod modals;
 mod grid;
 mod loupe;
+mod survey;
 mod develop_panel;
 
 use toolbar::global_toolbar;
 use grid::draw_grid;
 use loupe::draw_loupe;
+use survey::draw_survey;
 use modals::{confirm_modal, help_modal, quit_modal};
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
@@ -157,6 +180,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     match app.mode() {
         ViewMode::Grid => draw_grid(ui, app, &mut out),
         ViewMode::Loupe => draw_loupe(ui, app, &mut out),
+        ViewMode::Survey => draw_survey(ui, app, &mut out),
     }
     status_toast(ui, app);
     confirm_modal(ui, app, &mut out);

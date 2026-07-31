@@ -112,6 +112,17 @@ pub(super) fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput
             toolbar_focus_sync(ui, app, idx, &resp, out);
             idx += 1;
 
+            // Content-duplicate (dHash) grouping toggle. Independent of the
+            // filter — unlike Bursts, this grouping is order-independent.
+            let resp = ui
+                .selectable_label(app.dupes_on(), "Duplicates")
+                .on_hover_text("Group visually-similar frames and badge them (D)");
+            if resp.clicked() {
+                out.actions.push(UiAction::ToggleDupes);
+            }
+            toolbar_focus_sync(ui, app, idx, &resp, out);
+            idx += 1;
+
             // Rating-distribution histogram (folder-wide), clickable to filter.
             ui.separator();
             rating_histogram(ui, app, out);
@@ -187,6 +198,23 @@ pub(super) fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput
                 {
                     out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
                 }
+            }
+
+            // Sweep every rated-1-2 photo in the folder to the Trash —
+            // independent of the multi-selection (unlike the buttons above).
+            ui.separator();
+            let rejects = app.reject_count();
+            if ui
+                .add_enabled(
+                    rejects > 0,
+                    egui::Button::new(format!("Delete Rejects ({rejects})")),
+                )
+                .on_hover_text("Move every photo rated \u{2605}1-2 in this folder to the Trash")
+                .on_disabled_hover_text("No photos rated \u{2605}1-2 in this folder")
+                .clicked()
+            {
+                out.actions
+                    .push(UiAction::RequestBulk(BulkKind::DeleteRejects));
             }
 
             // Loupe / Grid mode toggle, pinned to the far right. In a

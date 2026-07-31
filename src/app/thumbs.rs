@@ -4,6 +4,8 @@ use std::time::SystemTime;
 
 
 use crate::develop::{self};
+use crate::featureprint;
+use crate::phash;
 use crate::sharpness;
 use crate::{image_decode, image_ops};
 
@@ -81,6 +83,9 @@ impl App {
             ViewMode::Grid => {
                 w.set_title(&format!("Grid  ({} photos)", self.visible.len()));
             }
+            ViewMode::Survey => {
+                w.set_title(&format!("Survey  ({} photos)", self.survey_members.len()));
+            }
         }
     }
 
@@ -132,6 +137,11 @@ impl App {
                 }
                 start..end.max(start)
             }
+            // Survey's thumbnails are an arbitrary scattered set of paths
+            // (not a contiguous visible-position range), so they're handled
+            // separately in `working_thumb_keys` instead of through this
+            // range-based path.
+            ViewMode::Survey => 0..0,
         }
     }
 
@@ -154,14 +164,25 @@ impl App {
         let Some(pl) = &self.playlist else {
             return Vec::new();
         };
-        self.working_positions()
+        let mut keys: Vec<(PathBuf, u32, u64)> = self
+            .working_positions()
             .filter_map(|pos| self.visible.get(pos).copied())
             .filter_map(|i| pl.entry(i))
             .map(|p| {
                 let sig = self.edit_sig_for(p);
                 (p.to_path_buf(), px, sig)
             })
-            .collect()
+            .collect();
+        // Survey's members are an arbitrary scattered set, not covered by the
+        // position-range walk above — add them explicitly so their thumbnails
+        // stay loaded/uploaded while the screen is open.
+        if self.mode == ViewMode::Survey {
+            for p in &self.survey_members {
+                let sig = self.edit_sig_for(p);
+                keys.push((p.clone(), px, sig));
+            }
+        }
+        keys
     }
 
     /// Request thumbnails for the working set. Returns true if any requested
@@ -259,6 +280,207 @@ impl App {
             self.recompute_burst_marks();
         }
         scan_pending || still_unscored
+    }
+
+    /// For every playlist entry not yet hashed: hash it if its thumbnail is
+    /// already decoded, else request it. Unlike `request_burst_thumbs`, this
+    /// runs over the *whole* folder (not a pre-identified member set) since
+    /// dHash grouping needs every entry's hash to find candidates in the first
+    /// place — that's why it's gated behind `dupes_on` as an opt-in cost.
+    /// Returns whether any hash is still outstanding, so the caller keeps
+    /// polling until the pass converges.
+    pub(crate) fn request_dup_thumbs(&mut self) -> bool {
+        if !self.dupes_on {
+            return false;
+        }
+        let px = self.thumb_px;
+        let pending: Vec<PathBuf> = {
+            let Some(pl) = &self.playlist else {
+                return false;
+            };
+            pl.entries()
+                .iter()
+                .filter(|p| !self.phashes.contains_key(*p) || !self.sharpness.contains_key(*p))
+                .cloned()
+                .collect()
+        };
+
+        let mut newly: Vec<(PathBuf, u64, f64)> = Vec::new();
+        let mut still_unhashed = false;
+        if let Some(loader) = &mut self.loader {
+            for p in &pending {
+                if let Some(img) = loader.get_thumb(p, px) {
+                    newly.push((
+                        p.clone(),
+                        phash::dhash(&img.rgba, img.width, img.height),
+                        sharpness::sharpness(&img.rgba, img.width, img.height),
+                    ));
+                } else if loader.thumb_failed(p, px) {
+                    // Permanently failed — will never hash; not counted as pending.
+                } else {
+                    loader.request_thumb(p.clone(), px);
+                    still_unhashed = true;
+                }
+            }
+        }
+        if !newly.is_empty() {
+            for (p, h, s) in newly {
+                self.phashes.insert(p.clone(), h);
+                self.sharpness.insert(p, s);
+            }
+            self.recompute_dup_marks();
+        }
+        still_unhashed
+    }
+
+    /// When thumbnails arrive and dupes are on, hash any unhashed entry among
+    /// them, then refresh the groups and redraw. Unlike
+    /// `score_arrived_thumbs`'s burst-membership filter, every arrival is a
+    /// candidate here since there's no prior grouping to gate against.
+    pub(crate) fn score_arrived_dup_thumbs(&mut self, arrivals: &[(PathBuf, u32)]) {
+        if !self.dupes_on {
+            return;
+        }
+        let px = self.thumb_px;
+        let mut newly: Vec<(PathBuf, u64, f64)> = Vec::new();
+        if let Some(loader) = &self.loader {
+            for (path, mpx) in arrivals {
+                if *mpx != px
+                    || (self.phashes.contains_key(path) && self.sharpness.contains_key(path))
+                {
+                    continue;
+                }
+                if let Some(img) = loader.get_thumb(path, px) {
+                    newly.push((
+                        path.clone(),
+                        phash::dhash(&img.rgba, img.width, img.height),
+                        sharpness::sharpness(&img.rgba, img.width, img.height),
+                    ));
+                }
+            }
+        }
+        if !newly.is_empty() {
+            for (p, h, s) in newly {
+                self.phashes.insert(p.clone(), h);
+                self.sharpness.insert(p, s);
+            }
+            self.recompute_dup_marks();
+            self.request_redraw();
+        }
+    }
+
+    /// For every non-anchor member of a current dHash group (size 2+) not yet
+    /// compared and not already in flight, submit a feature-print comparison
+    /// job against its group's anchor. Returns whether any comparison is still
+    /// outstanding, so the caller keeps polling until the pass converges.
+    pub(crate) fn request_feature_prints(&mut self) -> bool {
+        if !self.dupes_on {
+            return false;
+        }
+        let Some(pl) = &self.playlist else {
+            return false;
+        };
+        let entries = pl.entries();
+        // `dup_groups` is rebuilt by `recompute_dup_marks` whenever the
+        // playlist changes; if it hasn't run yet for this playlist, there's
+        // nothing valid to submit against yet.
+        if entries.len() != self.dup_groups.len() {
+            return !self.feature_pending.is_empty();
+        }
+
+        let mut sizes: HashMap<u32, usize> = HashMap::new();
+        for &g in &self.dup_groups {
+            *sizes.entry(g).or_insert(0) += 1;
+        }
+        let mut anchor_of: HashMap<u32, PathBuf> = HashMap::new();
+        let mut to_submit: Vec<(PathBuf, PathBuf)> = Vec::new();
+        for (i, &g) in self.dup_groups.iter().enumerate() {
+            if sizes.get(&g).copied().unwrap_or(0) < 2 {
+                continue; // singleton, no anchor to compare against
+            }
+            let anchor = anchor_of
+                .entry(g)
+                .or_insert_with(|| entries[i].clone())
+                .clone();
+            let member = &entries[i];
+            if *member == anchor {
+                continue; // this member is the anchor itself
+            }
+            let key = (anchor.clone(), member.clone());
+            if self.feature_distances.contains_key(&key)
+                || self.feature_failed.contains(&key)
+                || self.feature_pending.contains(&key)
+            {
+                continue;
+            }
+            to_submit.push((member.clone(), anchor));
+        }
+
+        if let Some(pool) = &self.feature_pool {
+            for (member, anchor) in to_submit {
+                self.feature_pending.insert((anchor.clone(), member.clone()));
+                pool.submit(featureprint::DistanceJob { member, anchor });
+            }
+        }
+        !self.feature_pending.is_empty()
+    }
+
+    /// Fold finished feature-print comparisons into the cache, then refresh
+    /// duplicate marks (the refinement pass can now split off any newly-
+    /// confirmed false positive) and redraw.
+    pub(crate) fn poll_feature_prints(&mut self) {
+        let outcomes = self
+            .feature_pool
+            .as_ref()
+            .map(|p| p.poll())
+            .unwrap_or_default();
+        if outcomes.is_empty() {
+            return;
+        }
+        // Only accept a result for the exact anchor/member pairing currently
+        // represented by the raw dHash groups. A member can acquire a new
+        // anchor while Vision is still processing the old job.
+        let current_pairs: HashSet<(PathBuf, PathBuf)> = self
+            .playlist
+            .as_ref()
+            .map(|pl| {
+                let entries = pl.entries();
+                let mut anchors: HashMap<u32, PathBuf> = HashMap::new();
+                self.dup_groups
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, &group)| {
+                        let anchor = anchors
+                            .entry(group)
+                            .or_insert_with(|| entries[i].clone())
+                            .clone();
+                        let member = entries[i].clone();
+                        (member != anchor).then_some((anchor, member))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut changed = false;
+        for o in outcomes {
+            let key = (o.anchor.clone(), o.member.clone());
+            self.feature_pending.remove(&key);
+            if !current_pairs.contains(&key) {
+                continue;
+            }
+            match o.result {
+                Ok(d) => {
+                    self.feature_distances.insert(key, d);
+                    changed = true;
+                }
+                Err(_) => {
+                    self.feature_failed.insert(key);
+                }
+            }
+        }
+        if changed {
+            self.recompute_dup_marks();
+            self.request_redraw();
+        }
     }
 
     /// Fold background capture-time reads into the cache, then refresh grouping +

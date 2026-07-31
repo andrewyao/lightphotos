@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 
 use crate::burst::{self, BurstMark};
+use crate::duplicates::{self, DuplicateMark};
 use crate::navigation::Cmp;
 
 impl App {
@@ -189,6 +190,90 @@ impl App {
         self.burst_marks.clear();
     }
 
+    /// Rebuild `dup_marks` from the cached dHashes + sharpness over the current
+    /// playlist entries. Clears the marks when dupes are off or there is no
+    /// playlist. Unlike `recompute_burst_marks`, this doesn't need to wait for a
+    /// full scan first: `duplicates::group_by_hash` treats an unknown hash as
+    /// its own private singleton (never merged), so a partial scan just means
+    /// fewer groups are found yet, not a false single giant group.
+    pub(super) fn recompute_dup_marks(&mut self) {
+        let Some(pl) = &self.playlist else {
+            self.dup_groups.clear();
+            self.dup_marks.clear();
+            return;
+        };
+        if !self.dupes_on {
+            self.dup_groups.clear();
+            self.dup_marks.clear();
+            return;
+        }
+        let entries = pl.entries();
+        let hashes: Vec<Option<u64>> = entries.iter().map(|p| self.phashes.get(p).copied()).collect();
+        let scores: Vec<Option<f64>> = entries.iter().map(|p| self.sharpness.get(p).copied()).collect();
+        let groups = duplicates::group_by_hash(&hashes, duplicates::DEFAULT_MAX_DISTANCE);
+        // Second tier: split off any dHash false positive whose feature-print
+        // distance to its group's anchor exceeds the threshold. Members
+        // without a feature print yet stay in their dHash group unchanged.
+        let refined = duplicates::refine_by_feature_print(
+            &groups,
+            duplicates::DEFAULT_MAX_FEATURE_DISTANCE,
+            |anchor, i| {
+                self.feature_distances
+                    .get(&(entries[anchor].clone(), entries[i].clone()))
+                    .copied()
+            },
+        );
+        self.dup_marks = duplicates::compute_marks(&refined, &scores);
+        self.dup_groups = groups;
+        self.dup_refined = refined;
+    }
+
+    /// Duplicate mark for the visible cell at `pos`. `None` when dupes are off,
+    /// the cell is a singleton, or `pos` is out of range. `dup_marks` is indexed
+    /// by playlist entry index, so we map the visible position through `visible`.
+    pub(crate) fn dup_mark_at(&self, pos: usize) -> Option<DuplicateMark> {
+        let idx = *self.visible.get(pos)?;
+        self.dup_marks.get(idx).copied().flatten()
+    }
+
+    /// Whether duplicate-grouping mode is currently on (for the toolbar toggle state).
+    pub(crate) fn dupes_on(&self) -> bool {
+        self.dupes_on
+    }
+
+    /// Reset transient duplicate-grouping view state on a folder change. Keeps
+    /// the path-keyed `phashes` cache (harmless across folders) but drops the
+    /// toggle and derived marks so a new folder starts plain.
+    pub(super) fn reset_dup_state(&mut self) {
+        self.dupes_on = false;
+        self.dup_groups.clear();
+        self.dup_refined.clear();
+        self.dup_marks.clear();
+    }
+
+    /// Paths of the duplicate group currently under review in Survey Mode
+    /// (empty outside `ViewMode::Survey`).
+    pub(crate) fn survey_members(&self) -> &[PathBuf] {
+        &self.survey_members
+    }
+
+    /// The Survey group's best member, if any (see `open_survey`).
+    pub(crate) fn survey_best(&self) -> Option<&Path> {
+        self.survey_best.as_deref()
+    }
+
+    /// Index into `survey_members()` that rating hotkeys/arrow-keys apply to.
+    pub(crate) fn survey_focus(&self) -> usize {
+        self.survey_focus
+    }
+
+    /// Rating of `path` (0 when unset). Path-keyed counterpart to
+    /// `rating_at(pos)`, for Survey Mode's arbitrary (non-visible-position)
+    /// member list.
+    pub(crate) fn rating_of_path(&self, path: &Path) -> u8 {
+        self.rating_of(path)
+    }
+
     /// Rating of the current selection (0 when unset).
     pub(crate) fn selected_rating(&self) -> u8 {
         self.selected_path()
@@ -201,6 +286,12 @@ impl App {
     pub(crate) fn thumb_texture_for(&self, pos: usize) -> Option<(&egui::TextureHandle, u32, u32)> {
         let idx = *self.visible.get(pos)?;
         let path = self.playlist.as_ref()?.entry(idx)?;
+        self.thumb_texture_for_path(path)
+    }
+
+    /// Path-keyed counterpart to `thumb_texture_for(pos)`, for Survey Mode's
+    /// arbitrary (non-visible-position) member list.
+    pub(crate) fn thumb_texture_for_path(&self, path: &Path) -> Option<(&egui::TextureHandle, u32, u32)> {
         let key = (path.to_path_buf(), self.thumb_px, self.edit_sig_for(path));
         let handle = self.thumb_tex.get(&key)?;
         let [w, h] = handle.size();

@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::app::{App, Region};
 use crate::burst::BurstMark;
+use crate::duplicates::DuplicateMark;
 
 
 /// Left folder-tree sidebar, rooted at the opened folder. Shown in both the grid
@@ -274,6 +275,31 @@ pub(super) fn thumbnail_cell(
         None => {}
     }
 
+    // Content-duplicate-group overlay. A photo can be in both a time-burst and
+    // a content-duplicate group at once — these are separate underlying
+    // computations, unified only here at the badge layer. Anchored at the
+    // top-right corner so it never collides with the burst badge (top-left) or
+    // the rating stars (bottom-left).
+    match app.dup_mark_at(pos) {
+        Some(DuplicateMark::Sibling) => {
+            ui.painter()
+                .rect_filled(rect, style.corner, egui::Color32::from_black_alpha(90));
+        }
+        Some(DuplicateMark::Best) => {
+            let c = rect.right_top() + egui::vec2(-(style.corner + 9.0), style.corner + 9.0);
+            ui.painter()
+                .circle_filled(c, 9.0, egui::Color32::from_black_alpha(170));
+            ui.painter().text(
+                c,
+                egui::Align2::CENTER_CENTER,
+                "D",
+                egui::FontId::proportional(12.0),
+                theme::DUP_BADGE,
+            );
+        }
+        None => {}
+    }
+
     let stars = app.rating_at(pos);
     if !(style.hide_zero_stars && stars == 0) {
         ui.painter().text(
@@ -314,6 +340,20 @@ pub(super) fn grid_cell(
     let selected = app.is_selected(pos);
     let response = thumbnail_cell(ui, app, pos, cell, selected, primary, &GRID_CELL_STYLE);
     if response.clicked() {
+        // A click landing on the duplicate-group badge (top-right corner)
+        // opens Survey Mode on that group instead of the normal select
+        // behavior — same badge rect math as the one `thumbnail_cell` draws.
+        if app.dup_mark_at(pos).is_some() {
+            if let Some(click_pos) = response.interact_pointer_pos() {
+                let badge_center = response.rect.right_top()
+                    + egui::vec2(-(GRID_CELL_STYLE.corner + 9.0), GRID_CELL_STYLE.corner + 9.0);
+                if click_pos.distance(badge_center) <= 10.0 {
+                    out.actions.push(UiAction::OpenSurvey(pos));
+                    out.actions.push(UiAction::Focus(Region::Grid));
+                    return;
+                }
+            }
+        }
         // Cmd toggles a cell, Shift extends the range, plain click selects one.
         let mods = ui.input(|i| i.modifiers);
         let action = if mods.shift {

@@ -133,6 +133,11 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         ("Shift + 1 \u{2013} 5", "Filter \u{2265} N stars"),
         ("C", "Crop"),
         ("B", "Best-of-burst badges (grid)"),
+        ("D", "Duplicate-group badges (grid)"),
+        (
+            "Click badge",
+            "Open Survey Mode on that duplicate group; Left/Right focus a member, Enter keeps best/rejects rest, Esc closes",
+        ),
         ("Cmd + [ or ]", "Rotate 90\u{b0} clockwise or anti-clockwise"),
         ("Y", "Before / after compare"),
         ("Cmd + Shift + C", "Copy develop settings"),

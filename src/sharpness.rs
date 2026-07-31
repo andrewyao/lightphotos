@@ -21,42 +21,11 @@ pub fn sharpness(rgba: &[u8], width: u32, height: u32) -> f64 {
     if width == 0 || height == 0 || rgba.len() < (width as usize * height as usize * 4) {
         return 0.0;
     }
-    let (gray, w, h) = luma_downscaled(rgba, width, height);
-    variance_of_laplacian(&gray, w, h)
-}
-
-/// Reduce RGBA8 to grayscale (Rec.601 luma, 0..255) while block-averaging down
-/// so the long side is ≤ [`TARGET_LONG`]. Returns `(luma, out_w, out_h)`.
-fn luma_downscaled(rgba: &[u8], width: u32, height: u32) -> (Vec<f32>, usize, usize) {
-    let (w, h) = (width as usize, height as usize);
     let block = ((width.max(height) as f32 / TARGET_LONG as f32).ceil() as usize).max(1);
-    let ow = w.div_ceil(block);
-    let oh = h.div_ceil(block);
-    let mut out = vec![0f32; ow * oh];
-    for oy in 0..oh {
-        for ox in 0..ow {
-            let mut sum = 0f32;
-            let mut n = 0u32;
-            for by in 0..block {
-                let y = oy * block + by;
-                if y >= h {
-                    break;
-                }
-                for bx in 0..block {
-                    let x = ox * block + bx;
-                    if x >= w {
-                        break;
-                    }
-                    let i = (y * w + x) * 4;
-                    let (r, g, b) = (rgba[i] as f32, rgba[i + 1] as f32, rgba[i + 2] as f32);
-                    sum += 0.299 * r + 0.587 * g + 0.114 * b;
-                    n += 1;
-                }
-            }
-            out[oy * ow + ox] = if n > 0 { sum / n as f32 } else { 0.0 };
-        }
-    }
-    (out, ow, oh)
+    let ow = (width as usize).div_ceil(block);
+    let oh = (height as usize).div_ceil(block);
+    let gray = crate::image_ops::resize_luma(rgba, width, height, ow, oh);
+    variance_of_laplacian(&gray, ow, oh)
 }
 
 /// Variance of the 3×3 Laplacian response over a grayscale image. `0.0` when the
