@@ -30,6 +30,7 @@ mod coregraphics;
 mod develop;
 mod duplicates;
 mod export;
+mod facequality;
 mod featureprint;
 mod hash;
 mod image_decode;

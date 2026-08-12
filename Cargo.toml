@@ -10,6 +10,16 @@ rust-version = "1.92"
 name = "lightphotos"
 path = "src/main.rs"
 
+# Manual validation harness for `facequality.rs` (see its module docs). It pulls
+# `facequality.rs` in by `#[path]` because the crate has no lib target, which
+# would otherwise make `cargo test` compile that module's `#[cfg(test)]` block a
+# second time in a crate root where its `crate::image_encode` fixtures don't
+# exist — `test = false` keeps those tests owned solely by the main binary.
+[[bin]]
+name = "face_probe"
+path = "src/bin/face_probe.rs"
+test = false
+
 [dependencies]
 winit = "0.30.13"
 wgpu = "29.0.3"
@@ -35,8 +45,15 @@ objc2-vision = { version = "0.3.2", default-features = false, features = [
     "VNRequest",
     "VNRequestHandler",
     "VNGenerateImageFeaturePrintRequest",
+    "VNDetectFaceLandmarksRequest",
+    "VNDetectFaceRectanglesRequest",
+    "VNFaceLandmarks",
     "VNObservation",
+    # VNObservation::confidence is gated on VNTypes (VNConfidence lives there).
+    "VNTypes",
     "objc2-core-graphics",
+    # VNFaceLandmarkRegion2D's normalizedPoints (CGPoint) is gated on this.
+    "objc2-core-foundation",
 ] }
 
 [profile.release]
