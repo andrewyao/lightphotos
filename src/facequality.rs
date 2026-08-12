@@ -16,7 +16,10 @@
 //! points), not a trained model — consistent with the roadmap's
 //! heuristic-first, on-device constraint.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 use objc2::ClassType;
 use objc2_vision::{
@@ -283,6 +286,83 @@ pub fn analyze(path: &Path) -> Result<FaceQuality, String> {
         .map(|(w, h)| w as f32 / h as f32)
         .unwrap_or(1.0);
     Ok(face_quality(&faces, aspect_wh))
+}
+
+/// A finished analysis, carrying its path back so the caller can match it up.
+pub struct FaceOutcome {
+    pub path: PathBuf,
+    pub result: Result<FaceQuality, String>,
+}
+
+/// Background worker pool for face analysis, mirroring
+/// [`crate::featureprint::DistancePool`]: small pool, self-contained jobs,
+/// drained once per frame.
+///
+/// A pool rather than inline work because [`analyze`] makes Vision decode the
+/// file at full resolution — far heavier than the thumbnail-based blur and
+/// dHash scoring that run straight on the UI thread. Unlike feature prints,
+/// though, the result is a plain `Copy` struct, so there's no "compute both
+/// halves on one thread" constraint here: [`FaceQuality`] crosses the channel
+/// on its own.
+pub struct FacePool {
+    job_tx: Sender<PathBuf>,
+    res_rx: Receiver<FaceOutcome>,
+}
+
+impl FacePool {
+    pub fn new() -> Self {
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (res_tx, res_rx) = std::sync::mpsc::channel::<FaceOutcome>();
+        let job_rx = Arc::new(Mutex::new(job_rx));
+
+        // Same sizing rationale as the feature-print pool: this only ever runs
+        // over burst/duplicate-group members, so a couple of workers is plenty
+        // and keeps Vision/ANE contention low.
+        let cores = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let workers = cores.saturating_sub(2).clamp(1, 2);
+
+        for i in 0..workers {
+            let job_rx = Arc::clone(&job_rx);
+            let res_tx = res_tx.clone();
+            thread::Builder::new()
+                .name(format!("facequality-worker-{i}"))
+                .spawn(move || loop {
+                    let path = {
+                        let rx = match job_rx.lock() {
+                            Ok(rx) => rx,
+                            Err(_) => return,
+                        };
+                        match rx.recv() {
+                            Ok(p) => p,
+                            Err(_) => return, // all senders dropped → shut down
+                        }
+                    };
+                    let result = analyze(&path);
+                    if res_tx.send(FaceOutcome { path, result }).is_err() {
+                        break; // UI side gone
+                    }
+                })
+                .expect("spawn facequality worker");
+        }
+
+        Self { job_tx, res_rx }
+    }
+
+    /// Queue an analysis. Ignored if the workers are gone (shutdown).
+    pub fn submit(&self, path: PathBuf) {
+        let _ = self.job_tx.send(path);
+    }
+
+    /// Drain all finished analyses (non-blocking).
+    pub fn poll(&self) -> Vec<FaceOutcome> {
+        let mut out = Vec::new();
+        while let Ok(o) = self.res_rx.try_recv() {
+            out.push(o);
+        }
+        out
+    }
 }
 
 #[cfg(test)]

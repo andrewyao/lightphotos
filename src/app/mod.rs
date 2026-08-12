@@ -241,6 +241,8 @@ pub(crate) struct App {
     pub(crate) exporter: Option<Exporter>,
     /// Background worker pool for the feature-print refinement pass.
     pub(crate) feature_pool: Option<crate::featureprint::DistancePool>,
+    /// Background worker pool for face/eye-openness analysis.
+    pub(crate) face_pool: Option<crate::facequality::FacePool>,
     /// In-flight export batch progress, driving the persistent progress toast.
     pub(crate) export_progress: Option<ExportProgress>,
     playlist: Option<Playlist>,
@@ -370,6 +372,20 @@ pub(crate) struct App {
     /// Rebuilt when caches or the toggle change.
     dup_marks: Vec<Option<DuplicateMark>>,
 
+    // ---- Face / eyes-closed state ----
+    /// Cached per-path face signals (face count + worst eye openness). Survives
+    /// toggling off, like `sharpness` and `phashes`. Filled only for photos that
+    /// are already in a burst or a duplicate group — Vision decodes the file at
+    /// full resolution to find faces, far heavier than the thumbnail-based blur
+    /// and dHash passes, so it is not worth spending on a whole folder.
+    face_quality: HashMap<PathBuf, crate::facequality::FaceQuality>,
+    /// Outstanding analyses, so `request_face_quality` doesn't resubmit a path
+    /// every frame while its worker is still running.
+    face_pending: HashSet<PathBuf>,
+    /// Terminally failed analyses (corrupt or unsupported files), so they are
+    /// not retried forever.
+    face_failed: HashSet<PathBuf>,
+
     // ---- Survey Mode state (one duplicate group at a time) ----
     /// Paths of the duplicate group currently under review. Empty outside
     /// `ViewMode::Survey`.
@@ -494,6 +510,7 @@ impl App {
             loader: None,
             exporter: None,
             feature_pool: None,
+            face_pool: None,
             export_progress: None,
             playlist: None,
             want: None,
@@ -540,6 +557,9 @@ impl App {
             feature_failed: HashSet::new(),
             feature_pending: HashSet::new(),
             dup_marks: Vec::new(),
+            face_quality: HashMap::new(),
+            face_pending: HashSet::new(),
+            face_failed: HashSet::new(),
             survey_members: Vec::new(),
             survey_best: None,
             survey_focus: 0,

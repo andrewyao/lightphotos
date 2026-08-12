@@ -4,6 +4,7 @@ use std::time::SystemTime;
 
 
 use crate::develop::{self};
+use crate::facequality;
 use crate::featureprint;
 use crate::phash;
 use crate::sharpness;
@@ -479,6 +480,101 @@ impl App {
         }
         if changed {
             self.recompute_dup_marks();
+            self.request_redraw();
+        }
+    }
+
+    /// Submit face analysis for every burst member and every multi-photo
+    /// duplicate group member not already analyzed, in flight, or failed.
+    /// Returns whether any analysis is still outstanding, so the caller keeps
+    /// polling until the pass converges.
+    ///
+    /// Deliberately gated to grouped photos rather than the whole folder: a
+    /// blink only matters when there's a sibling frame to prefer instead, and
+    /// Vision decodes the file at full resolution to find faces — much heavier
+    /// than the thumbnail-based blur and dHash passes that do run folder-wide.
+    pub(crate) fn request_face_quality(&mut self) -> bool {
+        if !self.bursts_on && !self.dupes_on {
+            return false;
+        }
+        let Some(pl) = &self.playlist else {
+            return false;
+        };
+        let entries = pl.entries();
+
+        // Group sizes over the refined duplicate grouping, so singletons (which
+        // have no sibling to be preferred over) don't get analyzed. Both mark
+        // vectors are indexed by playlist entry index and are only valid when
+        // they've been rebuilt for the current playlist.
+        let dups_valid = self.dupes_on && self.dup_refined.len() == entries.len();
+        let mut sizes: HashMap<u32, usize> = HashMap::new();
+        if dups_valid {
+            for &g in &self.dup_refined {
+                *sizes.entry(g).or_insert(0) += 1;
+            }
+        }
+
+        let mut to_submit: Vec<PathBuf> = Vec::new();
+        for (i, p) in entries.iter().enumerate() {
+            let in_burst = self.bursts_on && matches!(self.burst_marks.get(i), Some(Some(_)));
+            let in_dup_group = dups_valid
+                && sizes
+                    .get(&self.dup_refined[i])
+                    .copied()
+                    .unwrap_or(0)
+                    >= 2;
+            if !(in_burst || in_dup_group) {
+                continue;
+            }
+            if self.face_quality.contains_key(p)
+                || self.face_pending.contains(p)
+                || self.face_failed.contains(p)
+            {
+                continue;
+            }
+            to_submit.push(p.clone());
+        }
+
+        if let Some(pool) = &self.face_pool {
+            for p in to_submit {
+                self.face_pending.insert(p.clone());
+                pool.submit(p);
+            }
+        }
+        !self.face_pending.is_empty()
+    }
+
+    /// Fold finished face analyses into the cache, then refresh whichever marks
+    /// are live (a newly-known blink can change which frame is Best) and redraw.
+    pub(crate) fn poll_face_quality(&mut self) {
+        let outcomes = self
+            .face_pool
+            .as_ref()
+            .map(|p| p.poll())
+            .unwrap_or_default();
+        if outcomes.is_empty() {
+            return;
+        }
+        let mut changed = false;
+        for o in outcomes {
+            self.face_pending.remove(&o.path);
+            match o.result {
+                Ok(q) => {
+                    self.face_quality.insert(o.path, q);
+                    changed = true;
+                }
+                Err(_) => {
+                    self.face_failed.insert(o.path);
+                }
+            }
+        }
+        if changed {
+            if self.bursts_on {
+                self.recompute_burst_marks();
+            }
+            if self.dupes_on {
+                self.recompute_dup_marks();
+            }
             self.request_redraw();
         }
     }

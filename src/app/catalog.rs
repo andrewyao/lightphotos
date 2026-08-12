@@ -332,6 +332,7 @@ impl App {
             self.request_capture_times();
             self.recompute_burst_marks();
             self.request_burst_thumbs();
+            self.request_face_quality();
         } else {
             self.burst_marks.clear();
         }
@@ -350,6 +351,7 @@ impl App {
             self.recompute_dup_marks();
             self.request_dup_thumbs();
             self.request_feature_prints();
+            self.request_face_quality();
         } else {
             self.dup_groups.clear();
             self.dup_marks.clear();

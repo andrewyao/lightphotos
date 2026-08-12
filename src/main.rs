@@ -92,6 +92,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.loader = Some(loader);
         self.exporter = Some(export::Exporter::new());
         self.feature_pool = Some(featureprint::DistancePool::new());
+        self.face_pool = Some(facequality::FacePool::new());
         self.egui_state = Some(egui_state);
 
         if let Some(path) = self.pending_initial.take() {
@@ -330,6 +331,13 @@ impl ApplicationHandler<UserEvent> for App {
         // refinement tier), then keep polling while any are still in flight.
         self.poll_feature_prints();
         if self.request_feature_prints() {
+            self.request_redraw();
+        }
+
+        // Same again for the face/eyes-closed pass, which runs over whatever
+        // the two grouping passes above have already identified.
+        self.poll_face_quality();
+        if self.request_face_quality() {
             self.request_redraw();
         }
     }
