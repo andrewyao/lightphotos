@@ -12,13 +12,23 @@
 //! cargo run --bin face_probe -- ~/Pictures/burst/*.jpg
 //! ```
 //!
-//! `facequality.rs` (and the `vision.rs` plumbing under it) is pulled in by
-//! path rather than through the crate, because lightphotos has no lib target —
-//! `src/main.rs` is the crate root. That's also why both modules have to stay
-//! free of the rest of the crate.
+//! The modules are pulled in by `#[path]` rather than through the crate,
+//! because lightphotos has no lib target — `src/main.rs` is the crate root, so
+//! there is nothing for a second binary to `use`. Re-declaring them here makes
+//! `crate::` resolve the same way it does in the main binary; the list is
+//! `facequality.rs` plus its transitive dependencies, and it needs extending
+//! whenever those grow.
 
+// Those modules carry plenty the probe itself never calls (the whole decode
+// path, for one) — that's expected of a re-include, not a code smell.
+#![allow(dead_code)]
+
+#[path = "../coregraphics.rs"]
+mod coregraphics;
 #[path = "../facequality.rs"]
 mod facequality;
+#[path = "../image_decode.rs"]
+mod image_decode;
 #[path = "../vision.rs"]
 mod vision;
 
@@ -43,15 +53,34 @@ fn main() -> ExitCode {
             }
             Ok(faces) if faces.is_empty() => println!("  no faces detected"),
             Ok(faces) => {
+                let aspect_wh = match image_decode::pixel_size(path) {
+                    Some((w, h)) => {
+                        println!("  {w}x{h} stored pixels");
+                        w as f32 / h as f32
+                    }
+                    None => {
+                        println!("  WARNING: could not read pixel size, assuming square");
+                        1.0
+                    }
+                };
                 for (i, f) in faces.iter().enumerate() {
                     let (x, y, w, h) = f.bounding_box;
                     println!(
                         "  face {i}: confidence {:.3}  box [{x:.3} {y:.3} {w:.3} {h:.3}]",
                         f.confidence
                     );
-                    print_region("left eye ", &f.left_eye);
-                    print_region("right eye", &f.right_eye);
+                    print_region("left eye ", &f.left_eye, aspect_wh);
+                    print_region("right eye", &f.right_eye, aspect_wh);
                 }
+                let q = facequality::face_quality(&faces, aspect_wh);
+                println!(
+                    "  => faces {}, worst eye {}, verdict {:?} (threshold {})",
+                    q.faces,
+                    q.min_eye_openness
+                        .map_or("n/a".to_string(), |o| format!("{o:.4}")),
+                    q.eye_state(),
+                    facequality::CLOSED_EYE_RATIO,
+                );
             }
         }
     }
@@ -63,12 +92,17 @@ fn main() -> ExitCode {
     }
 }
 
-fn print_region(label: &str, points: &facequality::Points) {
+fn print_region(label: &str, points: &facequality::Points, aspect_wh: f32) {
     if points.is_empty() {
         println!("    {label}: (not resolved)");
         return;
     }
-    println!("    {label}: {} points", points.len());
+    let openness = facequality::eye_openness(points, aspect_wh)
+        .map_or("n/a".to_string(), |o| format!("{o:.4}"));
+    println!(
+        "    {label}: {} points, openness {openness}",
+        points.len()
+    );
     // Full point dump — the whole reason this harness exists is to eyeball
     // whether the contour is plausible, so truncating would defeat it.
     for (i, (x, y)) in points.iter().enumerate() {

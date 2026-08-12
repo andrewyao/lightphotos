@@ -19,7 +19,8 @@ use objc2_image_io::{
     kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifDictionary,
     kCGImagePropertyExifExposureTime, kCGImagePropertyExifFNumber, kCGImagePropertyExifFocalLength,
     kCGImagePropertyExifISOSpeedRatings, kCGImagePropertyExifLensModel,
-    kCGImagePropertyOrientation, kCGImagePropertyTIFFDateTime, kCGImagePropertyTIFFMake,
+    kCGImagePropertyOrientation, kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
+    kCGImagePropertyTIFFDateTime, kCGImagePropertyTIFFMake,
     kCGImagePropertyTIFFModel, CGImageSource,
 };
 
@@ -325,6 +326,26 @@ fn dict_first_u32(dict: &CFDictionary, key: &CFString) -> Option<u32> {
         return number_f64(first).map(|v| v as u32);
     }
     None
+}
+
+/// The image's stored pixel dimensions, read from ImageIO's properties without
+/// decoding a single pixel.
+///
+/// These are the dimensions *as stored*, before EXIF orientation is applied —
+/// which is exactly what a caller comparing against another framework's
+/// upright-assuming coordinate space wants (see `facequality.rs`). Callers who
+/// want display dimensions should swap the axes themselves for orientations
+/// `5..=8`, the way [`apply_exif_orientation`] does.
+pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
+    let source = open_image_source(path).ok()?;
+    // SAFETY: index 0 exists for any image the source opened; no options passed.
+    let props = unsafe { source.properties_at_index(0, None) }?;
+    let w = dict_f64(&props, unsafe { kCGImagePropertyPixelWidth })?;
+    let h = dict_f64(&props, unsafe { kCGImagePropertyPixelHeight })?;
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
+    Some((w as u32, h as u32))
 }
 
 /// The image's EXIF orientation tag (`1..=8`), or `1` when absent/unreadable.
