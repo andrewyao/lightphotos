@@ -12,12 +12,15 @@
 //! cargo run --bin face_probe -- ~/Pictures/burst/*.jpg
 //! ```
 //!
-//! `facequality.rs` is pulled in by path rather than through the crate,
-//! because lightphotos has no lib target — `src/main.rs` is the crate root.
-//! That's also why this module has to stay free of other crate modules.
+//! `facequality.rs` (and the `vision.rs` plumbing under it) is pulled in by
+//! path rather than through the crate, because lightphotos has no lib target —
+//! `src/main.rs` is the crate root. That's also why both modules have to stay
+//! free of the rest of the crate.
 
 #[path = "../facequality.rs"]
 mod facequality;
+#[path = "../vision.rs"]
+mod vision;
 
 use std::path::PathBuf;
 use std::process::ExitCode;

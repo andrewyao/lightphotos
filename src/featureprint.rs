@@ -9,10 +9,11 @@
 //! pose/expression, similar framing). Only run on the small subset of photos
 //! dHash already flagged as candidates, so its cost stays bounded.
 //!
-//! Vision decodes the file itself (via `initWithURL:options:`, its own
-//! ImageIO-backed path), independent of lightphotos' own decode/thumbnail
-//! pipeline — so this module needs nothing from `image_decode.rs` beyond a
-//! file path.
+//! Vision decodes the file itself (its own ImageIO-backed path), independent
+//! of lightphotos' own decode/thumbnail pipeline — so this module needs
+//! nothing from `image_decode.rs` beyond a file path. The handler setup that
+//! gets it there lives in `vision.rs`, shared with the other Vision-backed
+//! features.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -20,9 +21,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use objc2::rc::Retained;
-use objc2::{AnyThread, ClassType};
-use objc2_foundation::{NSArray, NSDictionary, NSString, NSURL};
-use objc2_vision::{VNGenerateImageFeaturePrintRequest, VNImageRequestHandler, VNRequest};
+use objc2::ClassType;
+use objc2_vision::VNGenerateImageFeaturePrintRequest;
+
+use crate::vision;
 
 /// A computed feature print for one photo. Opaque; compare two with
 /// [`feature_distance`].
@@ -31,23 +33,9 @@ pub struct FeaturePrint(Retained<objc2_vision::VNFeaturePrintObservation>);
 /// Compute the feature print of the image at `path`. Vision decodes the file
 /// itself, so this doesn't touch lightphotos' own decode/thumbnail cache.
 pub fn compute(path: &Path) -> Result<FeaturePrint, String> {
-    let path_str = path.to_str().ok_or("path is not valid UTF-8")?;
-    let ns_path = NSString::from_str(path_str);
-    let url = NSURL::fileURLWithPath(&ns_path);
-    let options: Retained<NSDictionary<NSString, objc2::runtime::AnyObject>> = NSDictionary::new();
-
     unsafe {
-        let handler = VNImageRequestHandler::initWithURL_options(
-            VNImageRequestHandler::alloc(),
-            &url,
-            &options,
-        );
         let request = VNGenerateImageFeaturePrintRequest::new();
-        let requests: Retained<NSArray<VNRequest>> =
-            NSArray::from_slice(&[request.as_super().as_super()]);
-        handler
-            .performRequests_error(&requests)
-            .map_err(|e| e.localizedDescription().to_string())?;
+        vision::perform_request(path, request.as_super().as_super())?;
         let results = request
             .results()
             .ok_or("Vision returned no feature-print results")?;

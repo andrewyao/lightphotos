@@ -46,6 +46,7 @@ mod sharpness;
 mod thumbnail;
 mod trash;
 mod ui;
+mod vision;
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -18,12 +18,10 @@
 
 use std::path::Path;
 
-use objc2::rc::Retained;
-use objc2::{AnyThread, ClassType};
-use objc2_foundation::{NSArray, NSDictionary, NSString, NSURL};
-use objc2_vision::{
-    VNDetectFaceLandmarksRequest, VNFaceLandmarkRegion2D, VNImageRequestHandler, VNRequest,
-};
+use objc2::ClassType;
+use objc2_vision::{VNDetectFaceLandmarksRequest, VNFaceLandmarkRegion2D};
+
+use crate::vision;
 
 /// A landmark region's points in Vision's normalized image space: origin
 /// bottom-left, both axes 0..1, relative to the *whole image* (not the face
@@ -51,23 +49,9 @@ pub struct RawFace {
 /// An image with no faces is `Ok(vec![])` — only an actual framework failure
 /// (unreadable file, Vision error) is an `Err`.
 pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
-    let path_str = path.to_str().ok_or("path is not valid UTF-8")?;
-    let ns_path = NSString::from_str(path_str);
-    let url = NSURL::fileURLWithPath(&ns_path);
-    let options: Retained<NSDictionary<NSString, objc2::runtime::AnyObject>> = NSDictionary::new();
-
     unsafe {
-        let handler = VNImageRequestHandler::initWithURL_options(
-            VNImageRequestHandler::alloc(),
-            &url,
-            &options,
-        );
         let request = VNDetectFaceLandmarksRequest::new();
-        let requests: Retained<NSArray<VNRequest>> =
-            NSArray::from_slice(&[request.as_super().as_super()]);
-        handler
-            .performRequests_error(&requests)
-            .map_err(|e| e.localizedDescription().to_string())?;
+        vision::perform_request(path, request.as_super().as_super())?;
 
         // No results at all is a legitimate "no faces here", not an error —
         // Vision leaves `results` nil rather than empty in some revisions.
