@@ -20,6 +20,12 @@ name = "face_probe"
 path = "src/bin/face_probe.rs"
 test = false
 
+# Same arrangement for the segmentation harness (see `segmentation.rs`).
+[[bin]]
+name = "seg_probe"
+path = "src/bin/seg_probe.rs"
+test = false
+
 [dependencies]
 winit = "0.30.13"
 wgpu = "29.0.3"

@@ -93,8 +93,24 @@ impl Mask {
         }
     }
 
-    /// Fraction of the mask covered, 0.0..=1.0. Cheap way to spot a mask that
-    /// came back empty (nothing found) or saturated (everything "foreground").
+    /// This mask reoriented per an EXIF orientation (`1..=8`), so it lines up
+    /// with the decoded image. See [`crate::image_ops::orient_mask`].
+    pub fn oriented(self, orientation: u8) -> Mask {
+        if orientation <= 1 {
+            return self;
+        }
+        let (width, height, alpha) =
+            crate::image_ops::orient_mask(&self.alpha, self.width, self.height, orientation);
+        Mask {
+            width,
+            height,
+            alpha,
+            source: self.source,
+        }
+    }
+
+    /// Mean coverage, 0.0..=1.0. Cheap way to spot a mask that came back empty
+    /// (nothing found) or saturated (everything "foreground").
     pub fn coverage(&self) -> f32 {
         if self.alpha.is_empty() {
             return 0.0;
@@ -102,28 +118,59 @@ impl Mask {
         let total: u64 = self.alpha.iter().map(|&a| a as u64).sum();
         total as f32 / (self.alpha.len() as f32 * 255.0)
     }
+
+    /// Fraction of the mask that is *confidently* foreground (over half
+    /// coverage), as opposed to [`coverage`](Self::coverage)'s mean.
+    ///
+    /// The emptiness test reads this rather than the mean, because a mask can
+    /// carry a respectable mean while committing to nothing. It is a test for
+    /// *nothing found*, and nothing more — it does not detect a wrong answer.
+    /// Measured on Apple's abstract `iMac Blue` wallpaper, which contains no
+    /// person anywhere, person segmentation returns 13.2% mean / 13.4% solid:
+    /// a confident, well-formed, completely imaginary subject. No coverage
+    /// statistic separates that from a real one, so nothing here tries to.
+    pub fn solid_coverage(&self) -> f32 {
+        if self.alpha.is_empty() {
+            return 0.0;
+        }
+        let solid = self.alpha.iter().filter(|&&a| a > 128).count();
+        solid as f32 / self.alpha.len() as f32
+    }
 }
 
-/// A mask covering less than this counts as "nothing found", triggering the
-/// fallback. Person segmentation on a person-free photo doesn't error — it
-/// returns a mask that's all-but-empty, so the emptiness *is* the signal.
-const EMPTY_COVERAGE: f32 = 0.005;
+/// Solid coverage below this counts as "no person found", triggering the
+/// fallback. Person segmentation on a person-free photo doesn't error, so an
+/// empty result is the only in-band way it can say no.
+///
+/// Deliberately low: it catches the *nothing* case, and a small-but-real
+/// subject (someone a few metres back) must stay on the person path. It cannot
+/// catch a confident wrong answer — see [`Mask::solid_coverage`] for a measured
+/// example of one — so a photo with no person in it may still come back with a
+/// person mask rather than falling through to the general request. Whether that
+/// matters in practice is one of the questions this exploratory plan exists to
+/// answer on real photographs.
+const EMPTY_COVERAGE: f32 = 0.01;
 
-/// Segment the subject of the photo at `path`.
+/// Segment the subject of the photo at `path`, in *display* orientation.
 ///
 /// Tries person segmentation first and falls back to the general
-/// foreground-instance request when no person is found. `Err` only when both
-/// fail; a photo with no discernible subject at all comes back as
-/// `Ok(None)`-shaped emptiness via the fallback's own error, so callers should
-/// treat an error as "no selection available", not as a bug.
+/// foreground-instance request when no person is found. Callers should treat an
+/// error as "no selection available for this photo" rather than as a bug —
+/// plenty of photographs simply have no subject to isolate.
+///
+/// The result is reoriented to match [`crate::image_decode::decode`]'s output.
+/// Vision reads the file in its stored orientation and knows nothing about the
+/// EXIF tag, so without this a portrait shot from a camera that records
+/// rotation in metadata would come back with its mask lying on its side.
 pub fn segment(path: &Path) -> Result<Mask, String> {
-    match segment_person(path) {
-        Ok(mask) if mask.coverage() >= EMPTY_COVERAGE => Ok(mask),
+    let mask = match segment_person(path) {
+        Ok(mask) if mask.solid_coverage() >= EMPTY_COVERAGE => mask,
         // Either no person, or the request itself failed — both mean "ask the
         // general-purpose request instead". Its error is the one worth
         // reporting, since it's the last word.
-        _ => segment_foreground(path),
-    }
+        _ => segment_foreground(path)?,
+    };
+    Ok(mask.oriented(crate::image_decode::orientation_of(path)))
 }
 
 /// `VNGeneratePersonSegmentationRequest` at accurate quality.
@@ -268,7 +315,41 @@ mod tests {
             ..half.clone()
         };
         assert_eq!(empty.coverage(), 0.0);
-        assert!(empty.coverage() < EMPTY_COVERAGE, "an empty mask must trip the fallback");
+        assert!(
+            empty.solid_coverage() < EMPTY_COVERAGE,
+            "an empty mask must trip the fallback"
+        );
+    }
+
+    // Why the emptiness test reads the solid fraction and not the mean: a mask
+    // can carry a respectable mean while committing to nothing, and a small
+    // crisp subject can carry a lower mean than that smear while being exactly
+    // what we want to keep.
+    #[test]
+    fn a_low_confidence_smear_is_not_mistaken_for_a_subject() {
+        let smear = Mask {
+            width: 10,
+            height: 10,
+            alpha: vec![70; 100], // 27% mean coverage, nothing committed
+            source: MaskSource::Person,
+        };
+        assert!(smear.coverage() > EMPTY_COVERAGE, "mean alone would be fooled");
+        assert_eq!(smear.solid_coverage(), 0.0);
+
+        let mut small_subject = vec![0u8; 100];
+        small_subject[..8].fill(250); // 8% of the frame, fully committed
+        let subject = Mask {
+            alpha: small_subject,
+            ..smear.clone()
+        };
+        assert!(
+            subject.solid_coverage() >= EMPTY_COVERAGE,
+            "a small but confident subject must stay on the person path"
+        );
+        assert!(
+            subject.coverage() < smear.coverage(),
+            "and it does so despite a *lower* mean than the smear"
+        );
     }
 
     #[test]

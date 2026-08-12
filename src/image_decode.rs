@@ -348,6 +348,17 @@ pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
     Some((w as u32, h as u32))
 }
 
+/// The EXIF orientation of the image at `path` (`1..=8`, `1` when absent).
+///
+/// [`decode`] already applies this, so callers only need it to line something
+/// up with a decoded image that was produced *outside* this pipeline — Vision's
+/// segmentation masks, which are computed in the file's stored orientation.
+pub fn orientation_of(path: &Path) -> u8 {
+    open_image_source(path)
+        .map(|source| read_orientation(&source))
+        .unwrap_or(1)
+}
+
 /// The image's EXIF orientation tag (`1..=8`), or `1` when absent/unreadable.
 /// Never panics — any missing property yields the identity orientation.
 fn read_orientation(source: &CGImageSource) -> u8 {

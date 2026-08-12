@@ -289,6 +289,38 @@ pub(crate) fn resample_bilinear_u8(
     out
 }
 
+/// Reorient a tightly-packed single-channel buffer per an EXIF orientation
+/// (`1..=8`), returning `(width, height, buffer)` — the one-channel counterpart
+/// of `image_decode`'s `apply_exif_orientation`, sharing its mapping table.
+///
+/// Needed because Vision reads a file in its *stored* orientation while
+/// everything downstream of `image_decode` works in display orientation. A mask
+/// that skipped this step would sit sideways on any portrait shot from a camera
+/// that records rotation in EXIF rather than in the pixels.
+pub(crate) fn orient_mask(src: &[u8], w: u32, h: u32, orientation: u8) -> (u32, u32, Vec<u8>) {
+    if orientation <= 1 || src.len() < (w * h) as usize {
+        return (w, h, src.to_vec());
+    }
+    let swaps = matches!(orientation, 5 | 6 | 7 | 8);
+    let (nw, nh) = if swaps { (h, w) } else { (w, h) };
+    let mut dst = vec![0u8; (nw * nh) as usize];
+    for yo in 0..nh {
+        for xo in 0..nw {
+            let (xs, ys) = match orientation {
+                2 => (w - 1 - xo, yo),         // mirror horizontal
+                3 => (w - 1 - xo, h - 1 - yo), // rotate 180
+                4 => (xo, h - 1 - yo),         // mirror vertical
+                5 => (yo, xo),                 // transpose
+                6 => (yo, h - 1 - xo),         // rotate 90° CW
+                7 => (w - 1 - yo, h - 1 - xo), // transverse
+                _ => (w - 1 - yo, xo),         // 8: rotate 270° CW
+            };
+            dst[(yo * nw + xo) as usize] = src[(ys * w + xs) as usize];
+        }
+    }
+    (nw, nh, dst)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,6 +577,40 @@ mod tests {
             (center as i32 - 139).abs() <= 1,
             "center of the field should sit near the mean of the four corners, got {center}"
         );
+    }
+
+    #[test]
+    fn orienting_a_mask_matches_the_exif_table() {
+        // 2 wide × 3 tall, distinct values so every mapping is distinguishable.
+        let src = vec![1, 2, 3, 4, 5, 6];
+
+        assert_eq!(orient_mask(&src, 2, 3, 1), (2, 3, src.clone()));
+        assert_eq!(
+            orient_mask(&src, 2, 3, 3),
+            (2, 3, vec![6, 5, 4, 3, 2, 1]),
+            "180° rotation reverses the buffer"
+        );
+        assert_eq!(
+            orient_mask(&src, 2, 3, 2),
+            (2, 3, vec![2, 1, 4, 3, 6, 5]),
+            "horizontal mirror reverses each row"
+        );
+
+        // 90° CW: the axes swap, and the left column becomes the top row
+        // bottom-to-top.
+        let (w, h, rot) = orient_mask(&src, 2, 3, 6);
+        assert_eq!((w, h), (3, 2));
+        assert_eq!(rot, vec![5, 3, 1, 6, 4, 2]);
+    }
+
+    #[test]
+    fn orienting_a_mask_is_reversible_through_its_inverse() {
+        let src: Vec<u8> = (0..12).collect();
+        // 6 (90° CW) and 8 (270° CW) undo each other.
+        let (w, h, once) = orient_mask(&src, 4, 3, 6);
+        let (w2, h2, back) = orient_mask(&once, w, h, 8);
+        assert_eq!((w2, h2), (4, 3));
+        assert_eq!(back, src);
     }
 
     #[test]
