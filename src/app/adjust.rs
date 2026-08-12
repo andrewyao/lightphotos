@@ -119,7 +119,8 @@ impl App {
 
     pub(super) fn choose_touchup(&self, u: f32, v: f32) -> Option<TouchUp> {
         let path = self.shown.path()?;
-        let img = self.loader.as_ref()?.get(&path.to_path_buf())?;
+        // Samples by UV, so whichever loupe tier has landed will do.
+        let img = self.loader.as_ref()?.get_best(path, self.preview_px())?;
         let radius = self.touchup_radius();
         let (radius_u, radius_v) = self.touchup_uv_radii(radius);
         let sample = |u: f32, v: f32| {

@@ -72,9 +72,12 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("LightPhotos")
             .with_inner_size(LogicalSize::new(1100.0, 800.0));
+        loader::mark("resumed: creating window");
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
+        loader::mark("window created; initializing wgpu");
         let renderer = Renderer::new(window.clone());
+        loader::mark("wgpu ready");
         let loader = Loader::new(renderer.max_dim);
 
         let egui_state = egui_winit::State::new(
@@ -97,7 +100,9 @@ impl ApplicationHandler<UserEvent> for App {
         self.egui_state = Some(egui_state);
 
         if let Some(path) = self.pending_initial.take() {
+            loader::mark("opening initial path");
             self.open(path);
+            loader::mark("initial open() returned");
         }
     }
 
@@ -175,6 +180,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                 }
+                // The preview decode is sized from the window, so a resize can
+                // mean the loupe now wants a sharper one than it is showing.
+                self.try_show();
                 // The loupe viewport is recomputed from egui panels next frame.
                 self.request_redraw();
             }
@@ -289,6 +297,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             if any {
                 self.try_show();
+                // Now that something landed, the current photo may be on screen
+                // — which is the condition `request_neighbors` waits for before
+                // it will spend workers on prefetch.
+                self.request_neighbors();
                 self.request_redraw();
             }
         }
@@ -298,16 +310,33 @@ impl ApplicationHandler<UserEvent> for App {
             self.on_export_outcomes(outcomes);
             self.request_redraw();
         }
-        // While an export is in flight, poll the results channel a few times a
-        // second instead of forcing a full egui re-tessellation + GPU submit
-        // every vsync. WaitUntil wakes `about_to_wait` on a timer without a
-        // redraw; the actual redraw only happens above when outcomes arrive.
-        if self.export_progress.is_some() {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(
-                std::time::Instant::now() + std::time::Duration::from_millis(100),
-            ));
+        // Worker threads finishing a job do not wake winit, so anything whose
+        // result arrives over a channel needs the loop kept alive or it sits
+        // undrained until some unrelated event happens to arrive — which for a
+        // loupe decode means the blurry placeholder stays on screen long after
+        // the sharp image is ready. WaitUntil wakes `about_to_wait` on a timer
+        // to re-poll *without* forcing a full egui re-tessellation + GPU submit
+        // every vsync; the actual redraw only happens above, when results land.
+        //
+        // A loupe decode is what the user is staring at, so it gets a tight
+        // cadence; an export only feeds a progress toast, so it gets a lazy one.
+        let image_pending = self
+            .loader
+            .as_ref()
+            .is_some_and(|l| l.has_pending_image())
+            || self.selection_pending();
+        let poll_delay = if image_pending {
+            Some(16)
+        } else if self.export_progress.is_some() {
+            Some(100)
         } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            None
+        };
+        match poll_delay {
+            Some(ms) => event_loop.set_control_flow(ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(ms),
+            )),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
 
         // Keep redrawing while working-set thumbnails are still loading.
@@ -370,6 +399,7 @@ fn print_usage_and_exit() -> ! {
 }
 
 fn main() {
+    loader::start_clock();
     // A file/dir path may be passed on the command line. The dev CLI binary
     // requires one; the packaged .app doesn't (Finder "Open With" delivers
     // the path via an AppleEvent after launch, with no argv).
@@ -392,6 +422,8 @@ fn main() {
         eprintln!("[lightphotos] warning: could not install Finder open handler");
     }
 
+    loader::mark("event loop built; constructing App");
     let mut app = App::new(initial);
+    loader::mark("App constructed; entering event loop");
     event_loop.run_app(&mut app).expect("run app");
 }

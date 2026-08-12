@@ -38,6 +38,17 @@ const THUMB_MIN: u32 = 96;
 const THUMB_MAX: u32 = 512;
 const THUMB_DEFAULT: u32 = 192;
 const THUMB_STEP: u32 = 32;
+
+/// Bounds for the loupe's screen-fit preview decode (longest-side pixels). The
+/// lower bound keeps the preview meaningfully sharper than the largest possible
+/// thumbnail; the upper bound stops a 5K display from asking for a decode so
+/// large it defeats the point of having a preview tier at all.
+const PREVIEW_MIN: u32 = 1024;
+const PREVIEW_MAX: u32 = 4096;
+/// The preview target is rounded up to a multiple of this so that dragging a
+/// window edge doesn't request a new decode (and evict the old one) on every
+/// single pixel of resize.
+const PREVIEW_QUANTUM: u32 = 512;
 /// Smallest touch-up radius in source-image pixels.
 pub(crate) const TOUCHUP_MIN_PIXELS: f32 = 3.0;
 pub(crate) const TOUCHUP_MAX_RADIUS: f32 = 0.15;
@@ -204,9 +215,16 @@ pub enum FocusLevel {
 enum Shown {
     /// Nothing uploaded yet.
     Nothing,
-    /// A thumbnail placeholder, shown instantly while the full image decodes.
+    /// A thumbnail placeholder, shown instantly while the preview decodes.
     Thumb(PathBuf),
-    /// The full-resolution image.
+    /// The screen-fit preview — what the loupe shows for all normal viewing.
+    /// Carries the target it was decoded for *and* the longest side actually
+    /// uploaded. Both are needed: the target catches a window resize asking for
+    /// a different size, and the actual size catches the quick pass being
+    /// superseded by the forced decode behind it (same path, same target, more
+    /// pixels) — which is the entire RAW fast path.
+    Preview(PathBuf, u32, u32),
+    /// The full-resolution image, fetched only once the user zooms in.
     Full(PathBuf),
 }
 
@@ -215,13 +233,20 @@ impl Shown {
     fn path(&self) -> Option<&Path> {
         match self {
             Shown::Nothing => None,
-            Shown::Thumb(p) | Shown::Full(p) => Some(p),
+            Shown::Thumb(p) | Shown::Preview(p, _, _) | Shown::Full(p) => Some(p),
         }
     }
 
     /// True when `path` is shown at full resolution.
     fn is_full_of(&self, path: &Path) -> bool {
         matches!(self, Shown::Full(p) if p == path)
+    }
+
+    /// True when `path` is already shown as a preview decoded for `target` and
+    /// carrying exactly `actual` pixels on its longest side — i.e. re-uploading
+    /// would be a no-op.
+    fn is_preview_of(&self, path: &Path, target: u32, actual: u32) -> bool {
+        matches!(self, Shown::Preview(p, t, a) if p == path && *t == target && *a == actual)
     }
 }
 
@@ -452,6 +477,15 @@ pub(crate) struct App {
     /// and edits) — read live from the file on demand as each image is shown.
     exif_cache: HashMap<PathBuf, image_decode::ImageMetadata>,
 
+    /// True pixel dimensions (display orientation) of the photo in `want`, when
+    /// known. All loupe zoom/pan/crop math is expressed against *this*, not the
+    /// size of whatever texture happens to be uploaded — the loupe deliberately
+    /// shows a thumbnail, then a downscaled preview, then (only if the user
+    /// zooms in) the full-resolution decode, and "100% zoom" or a crop rectangle
+    /// must mean the same thing throughout. Filled from the image properties by
+    /// `on_exif_info` without decoding anything; `None` until that lands.
+    source_size: Option<(u32, u32)>,
+
     /// A bulk action awaiting confirmation. `Some` while the confirm modal is up.
     pending_bulk: Option<ui::BulkKind>,
 
@@ -611,6 +645,7 @@ impl App {
             wb_picker: false,
             compare: false,
             exif_cache: HashMap::new(),
+            source_size: None,
             pending_bulk: None,
             copied_settings: None,
             show_help: false,

@@ -17,52 +17,93 @@ impl App {
         }
     }
 
-    /// Show the wanted image: prefer the full-resolution decode, but fall back
-    /// to the cached thumbnail as an instant placeholder while the full image is
-    /// still decoding. Swaps thumbnail → full once the full image arrives.
+    /// Show the wanted image at the best tier available, in descending order:
+    /// full resolution (only fetched once the user zooms in), then the screen-fit
+    /// preview (the normal case), then the cached thumbnail as an instant
+    /// placeholder. Each tier that lands replaces the coarser one below it.
     pub(crate) fn try_show(&mut self) {
         let Some(want) = self.want.clone() else {
             return;
         };
+        let target = self.preview_px();
 
-        // Full image ready → show it (unless it's already the shown full image).
-        if let Some(img) = self.loader.as_ref().and_then(|l| l.get(&want)) {
+        // Full resolution ready → show it, unless it's already what's shown.
+        if let Some(img) = self.loader.as_ref().and_then(|l| l.get_full(&want)) {
             if !self.shown.is_full_of(&want) {
-                self.upload_shown(&want, &img, true);
+                self.upload_shown(&want, &img, Shown::Full(want.clone()));
             }
             return;
         }
 
-        // Full not ready: show the thumbnail placeholder if we aren't already
-        // showing this image in some form.
+        // Preview ready → show it, unless that exact image is already up. The
+        // size check is what lets the forced decode replace the quick pass
+        // behind it. Never downgrade a full-resolution image already on screen.
+        if let Some(img) = self
+            .loader
+            .as_ref()
+            .and_then(|l| l.get_preview(&want, target))
+        {
+            let actual = img.width.max(img.height);
+            if !self.shown.is_preview_of(&want, target, actual) && !self.shown.is_full_of(&want) {
+                self.upload_shown(&want, &img, Shown::Preview(want.clone(), target, actual));
+            }
+            return;
+        }
+
+        // No preview at this target. Re-request it rather than assuming
+        // `load_selected` already did: the target moves with the window size, so
+        // a resize past a quantum boundary invalidates the one in flight, and an
+        // LRU eviction can drop one that did land. `request_preview` de-dupes,
+        // so this is free in the common case where it's simply still decoding.
+        if let Some(loader) = &mut self.loader {
+            loader.request_preview(want.clone(), target);
+        }
+
+        // Nothing decoded yet: show the thumbnail placeholder if we aren't
+        // already showing this image in some form.
         if self.shown.path() != Some(want.as_path()) {
             if let Some(thumb) = self
                 .loader
                 .as_ref()
                 .and_then(|l| l.get_thumb(&want, self.thumb_px))
             {
-                self.upload_shown(&want, &thumb, false);
+                self.upload_shown(&want, &thumb, Shown::Thumb(want.clone()));
             }
         }
     }
 
     /// Upload an image to the renderer as the currently-shown image and re-fit.
-    pub(super) fn upload_shown(&mut self, path: &Path, img: &image_decode::DecodedImage, is_full: bool) {
+    /// `tier` records which of the three resolutions this pixel data came from.
+    pub(super) fn upload_shown(
+        &mut self,
+        path: &Path,
+        img: &image_decode::DecodedImage,
+        tier: Shown,
+    ) {
+        // Whether this upload swaps in a sharper tier of the picture already on
+        // screen, rather than moving to a different picture. Must be read before
+        // `self.shown` is reassigned below.
+        let same_photo = self.shown.path() == Some(path);
+
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
         renderer.set_image(img);
-        self.shown = if is_full {
-            Shown::Full(path.to_path_buf())
-        } else {
-            Shown::Thumb(path.to_path_buf())
-        };
+        self.shown = tier;
         // Rebuild the histogram sample from the newly-shown image, then mark the
         // histogram dirty so it's recomputed before the next draw.
         self.build_hist_sample(img);
         // Load this image's stored edits into the shader (or identity if none).
         self.push_adjustments();
-        self.fit_to_window();
+        // A new picture always starts fitted. A sharper tier of the *same*
+        // picture must not disturb the view — the full-resolution decode is
+        // triggered precisely by zooming in, so re-fitting here would yank the
+        // user back out to fit the instant their zoom paid off.
+        if same_photo {
+            self.push_transform();
+        } else {
+            self.fit_to_window();
+        }
         self.update_window_title();
         self.request_redraw();
     }
@@ -89,10 +130,20 @@ impl App {
         }
     }
 
+    /// The image's size for all view math, in source pixels — *not* the size of
+    /// the uploaded texture, which may be a thumbnail or a downscaled preview
+    /// (see `App::source_size`). Falls back to the texture's own size until the
+    /// metadata read lands; every tier shares the source's aspect ratio, so a
+    /// fit computed from the fallback is already correct, and only absolute
+    /// scales (100% zoom, touch-up radii in pixels) need the real value.
     pub(super) fn image_size(&self) -> (f32, f32) {
-        self.renderer
-            .as_ref()
-            .map(|r| (r.image_size.0 as f32, r.image_size.1 as f32))
+        self.source_size
+            .map(|(w, h)| (w as f32, h as f32))
+            .or_else(|| {
+                self.renderer
+                    .as_ref()
+                    .map(|r| (r.image_size.0 as f32, r.image_size.1 as f32))
+            })
             .filter(|(w, h)| *w > 0.0 && *h > 0.0)
             .unwrap_or((1.0, 1.0))
     }
@@ -597,6 +648,17 @@ impl App {
     /// Fold background exif-metadata reads into the cache for the Loupe info panel.
     pub(crate) fn on_exif_info(&mut self, results: Vec<(PathBuf, image_decode::ImageMetadata)>) {
         for (path, meta) in results {
+            // The metadata read doubles as how the loupe learns the original's
+            // true resolution while it is still showing a downscaled tier.
+            // Re-fit once it lands: any fit computed before this used the
+            // uploaded texture's size as a stand-in.
+            if self.want.as_deref() == Some(path.as_path()) && meta.source_size.is_some() {
+                let changed = self.source_size != meta.source_size;
+                self.source_size = meta.source_size;
+                if changed && self.fitted {
+                    self.fit_to_window();
+                }
+            }
             self.exif_cache.insert(path, meta);
         }
     }

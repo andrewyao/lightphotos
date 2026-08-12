@@ -66,6 +66,26 @@ impl App {
         self.fitted = false;
         self.center();
         self.push_transform();
+        self.ensure_full_for_zoom();
+    }
+
+    /// Fetch the full-resolution decode once the current zoom would magnify the
+    /// screen-fit preview past its own pixels — i.e. the moment the preview
+    /// stops being enough and softness would actually be visible. Below that
+    /// threshold this does nothing, which is what keeps normal browsing off the
+    /// expensive decode path entirely. `Loader::request_full` de-duplicates, so
+    /// calling this on every zoom step is cheap.
+    pub(super) fn ensure_full_for_zoom(&mut self) {
+        let Some(path) = self.want.clone() else {
+            return;
+        };
+        let (iw, ih) = self.image_size();
+        if !zoom_outruns_preview(iw.max(ih), self.zoom, self.preview_px()) {
+            return;
+        }
+        if let Some(loader) = &mut self.loader {
+            loader.request_full(path);
+        }
     }
 
     /// Rotate the current image 90° (clockwise if `cw`), remembering it per-image.
@@ -117,6 +137,7 @@ impl App {
 
         self.fitted = false;
         self.push_transform();
+        self.ensure_full_for_zoom();
     }
 
     /// Cursor position relative to the loupe viewport's top-left, in physical px.
@@ -409,5 +430,57 @@ impl App {
         let u = rot[0] * (dx - 0.5) + rot[1] * (dy - 0.5) + 0.5;
         let v = rot[2] * (dx - 0.5) + rot[3] * (dy - 0.5) + 0.5;
         (u, v)
+    }
+}
+
+/// Whether the current zoom magnifies the screen-fit preview past its own
+/// pixels, i.e. whether softness would now be visible and the full-resolution
+/// decode is worth its cost.
+///
+/// `source_longest` is the original's longest side in pixels and `zoom` is
+/// source-pixels-to-screen-pixels, so their product is how many screen pixels
+/// the image spans — compare that against how many pixels the preview actually
+/// has.
+fn zoom_outruns_preview(source_longest: f32, zoom: f32, preview_px: u32) -> bool {
+    source_longest * zoom > preview_px as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A 24MP photo (6000x4000) in a 2560px preview.
+    const SOURCE: f32 = 6000.0;
+    const PREVIEW: u32 = 2560;
+
+    #[test]
+    fn browsing_at_fit_never_asks_for_the_expensive_decode() {
+        // Fit in a 2560px-wide window is zoom ~0.43: the preview has more pixels
+        // than the screen can show, so full resolution would be invisible.
+        assert!(!zoom_outruns_preview(SOURCE, 2560.0 / SOURCE, PREVIEW));
+        // Zoomed out further, even more so.
+        assert!(!zoom_outruns_preview(SOURCE, 0.1, PREVIEW));
+    }
+
+    #[test]
+    fn the_preview_is_ridden_right_up_to_its_own_resolution() {
+        // Exactly at the preview's pixel count is still not worth a full decode.
+        assert!(!zoom_outruns_preview(SOURCE, PREVIEW as f32 / SOURCE, PREVIEW));
+        // A hair past it is.
+        assert!(zoom_outruns_preview(SOURCE, (PREVIEW as f32 + 1.0) / SOURCE, PREVIEW));
+    }
+
+    #[test]
+    fn hitting_one_to_one_on_a_big_photo_fetches_full_resolution() {
+        // Alt+0 sets zoom to 1.0 — every source pixel on screen, which no
+        // preview can satisfy for a photo larger than the preview target.
+        assert!(zoom_outruns_preview(SOURCE, 1.0, PREVIEW));
+    }
+
+    #[test]
+    fn a_photo_smaller_than_the_preview_never_needs_a_second_decode() {
+        // The preview *is* the full image here (decode-at-size can't upscale),
+        // so even 1:1 must not trigger a redundant full decode.
+        assert!(!zoom_outruns_preview(1600.0, 1.0, PREVIEW));
     }
 }

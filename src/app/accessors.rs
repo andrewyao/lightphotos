@@ -90,6 +90,18 @@ impl App {
         self.thumb_px
     }
 
+    /// Longest-side pixel target for the loupe's screen-fit preview decode:
+    /// the window's longest side, quantized and clamped. Also the cache key for
+    /// the preview tier, so it must be stable — see [`preview_target_px`].
+    ///
+    /// `win_size` is already in physical pixels (winit hands us a
+    /// `PhysicalSize`), so it must *not* be scaled by the DPI factor again —
+    /// doing so asks for a 4096px preview on a window that only needs 2560,
+    /// which is most of the cost this tier exists to avoid.
+    pub(crate) fn preview_px(&self) -> u32 {
+        preview_target_px(self.win_size.0.max(self.win_size.1))
+    }
+
     /// Position of the current selection within `visible`, or `None` in the
     /// grid's browse-first state (before any click/arrow).
     pub(crate) fn sel(&self) -> Option<usize> {
@@ -343,5 +355,64 @@ impl App {
         let handle = self.thumb_tex.get(&key)?;
         let [w, h] = handle.size();
         Some((handle, w as u32, h as u32))
+    }
+}
+
+/// Round a window's longest side (in physical pixels) up to the preview decode
+/// target, clamped to the tier's bounds.
+///
+/// The rounding is the point: this value is part of the preview cache key, so
+/// returning the raw window size would make every pixel of a window drag miss
+/// the cache, queue another full decode, and evict the one already on screen.
+pub(crate) fn preview_target_px(longest_physical: f32) -> u32 {
+    let longest = longest_physical.max(1.0) as u32;
+    let quantized = longest.div_ceil(PREVIEW_QUANTUM) * PREVIEW_QUANTUM;
+    quantized.clamp(PREVIEW_MIN, PREVIEW_MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_windows_still_get_a_preview_worth_having() {
+        // Below the floor the thumbnail placeholder would be nearly as good,
+        // and the decode is cheap anyway, so don't go under PREVIEW_MIN.
+        assert_eq!(preview_target_px(1.0), PREVIEW_MIN);
+        assert_eq!(preview_target_px(640.0), PREVIEW_MIN);
+    }
+
+    #[test]
+    fn huge_displays_are_capped() {
+        // A 6K display must not turn the "cheap" tier into a full decode.
+        assert_eq!(preview_target_px(6016.0), PREVIEW_MAX);
+        assert_eq!(preview_target_px(100_000.0), PREVIEW_MAX);
+    }
+
+    #[test]
+    fn the_target_always_covers_the_window() {
+        // Rounding is *up*: a preview must never be smaller than the window it
+        // is about to fill, or fit-zoom would magnify it.
+        for longest in [1100, 1400, 2048, 2049, 3000, 3584] {
+            assert!(preview_target_px(longest as f32) >= longest.min(PREVIEW_MAX));
+        }
+    }
+
+    #[test]
+    fn dragging_a_window_edge_does_not_thrash_the_cache() {
+        // Every size within one quantum maps to the same target, so a resize
+        // drag re-decodes at most once per 512px crossed.
+        for longest in 1537..=2048 {
+            assert_eq!(preview_target_px(longest as f32), 2048, "at {longest}");
+        }
+        // ...and crossing the boundary does step up, exactly once.
+        assert_eq!(preview_target_px(2049.0), 2560);
+    }
+
+    #[test]
+    fn a_preview_is_always_sharper_than_the_largest_thumbnail() {
+        // The tiers must not overlap: if a preview could come back at or below
+        // THUMB_MAX, the "sharper tier arrived" swap would be a no-op.
+        assert!(PREVIEW_MIN > THUMB_MAX);
     }
 }

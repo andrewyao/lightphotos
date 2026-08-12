@@ -181,17 +181,29 @@ impl App {
     }
 
     /// In Loupe mode, make the selection the wanted image and request decode.
-    /// Requests both the full image and (as an instant placeholder) the
-    /// thumbnail, so the shown image updates immediately even before the full
-    /// decode finishes.
+    /// Requests the screen-fit preview and (as an instant placeholder) the
+    /// thumbnail, so the shown image updates immediately even before the preview
+    /// decode finishes. Full resolution is deliberately *not* requested here —
+    /// it costs seconds and hundreds of megabytes, and is only needed once the
+    /// user zooms past what the preview holds (see `ensure_full_for_zoom`).
     pub(super) fn load_selected(&mut self) {
         let Some(path) = self.selected_path() else {
             return;
         };
         let px = self.thumb_px;
+        let preview_px = self.preview_px();
         if let Some(loader) = &mut self.loader {
-            loader.request(path.clone());
+            loader.request_preview(path.clone(), preview_px);
             loader.request_thumb(path.clone(), px);
+        }
+        // A different photo means the cached source dimensions no longer apply;
+        // `on_exif_info` refills them (and re-fits) when the metadata read for
+        // the new photo lands.
+        if self.want.as_deref() != Some(path.as_path()) {
+            self.source_size = self
+                .exif_cache
+                .get(&path)
+                .and_then(|m| m.source_size);
         }
         self.want = Some(path);
         // The selection overlay belongs to one photo; stepping to the next
@@ -201,10 +213,32 @@ impl App {
         self.try_show();
     }
 
-    /// Request full-image decodes of the loupe neighbors (prev/next in the
-    /// visible list) so stepping feels instant.
-    pub(super) fn request_neighbors(&mut self) {
-        if self.visible.len() <= 1 {
+    /// Request screen-fit preview decodes of the loupe neighbors (prev/next in
+    /// the visible list) so stepping feels instant. Previews only: prefetching
+    /// full resolution for images the user hasn't even reached would swamp the
+    /// decode pool and the memory budget for no benefit.
+    ///
+    /// Deliberately does nothing until the photo actually on screen has its own
+    /// preview. Queue priority can't help here — the neighbors are the same tier
+    /// as the current photo, so idle workers pick them up immediately and all
+    /// three decode at once, competing for the same cores and memory bandwidth.
+    /// Measured on 24MP RAW, that turned a ~300ms open into ~970ms, with the
+    /// photo the user was *looking at* finishing last of the three. Prefetch is
+    /// only worth anything once there's nothing more urgent to do.
+    pub(crate) fn request_neighbors(&mut self) {
+        // Guarded here rather than at each call site so the frame loop can call
+        // this whenever a decode lands without caring what mode we're in — in
+        // the grid, `sel` indexes grid cells while `want` is whatever the loupe
+        // last showed, so "neighbors" would mean nothing.
+        if self.mode != ViewMode::Loupe || self.visible.len() <= 1 {
+            return;
+        }
+        let target = self.preview_px();
+        let current_ready = match (&self.want, self.loader.as_ref()) {
+            (Some(want), Some(loader)) => loader.get_preview(want, target).is_some(),
+            _ => false,
+        };
+        if !current_ready {
             return;
         }
         let Some(cur) = self.sel else { return };
@@ -218,7 +252,7 @@ impl App {
             .collect();
         if let Some(loader) = &mut self.loader {
             for p in paths {
-                loader.request(p);
+                loader.prefetch_preview(p, target);
             }
         }
     }

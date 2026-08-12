@@ -58,6 +58,12 @@ pub struct ImageMetadata {
     pub iso: Option<u32>,
     pub focal_length: Option<f64>,
     pub capture_date: Option<CaptureDate>,
+    /// The original's pixel dimensions in *display* orientation (i.e. with the
+    /// EXIF rotation already applied, matching what [`decode`] produces). Read
+    /// from the image properties, so it costs no decode — which is the point:
+    /// it lets the loupe know the true source resolution while it is still
+    /// showing a thumbnail or a downscaled preview.
+    pub source_size: Option<(u32, u32)>,
 }
 
 /// A capture timestamp broken into calendar fields as the camera recorded them
@@ -240,6 +246,22 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
 
     meta.camera_make = dict_string(&props, unsafe { kCGImagePropertyTIFFMake });
     meta.camera_model = dict_string(&props, unsafe { kCGImagePropertyTIFFModel });
+
+    // Stored pixel dimensions, swapped into display orientation for the
+    // quarter-turn EXIF orientations so they line up with `decode`'s output.
+    if let (Some(w), Some(h)) = (
+        dict_f64(&props, unsafe { kCGImagePropertyPixelWidth }),
+        dict_f64(&props, unsafe { kCGImagePropertyPixelHeight }),
+    ) {
+        if w > 0.0 && h > 0.0 {
+            let (w, h) = (w as u32, h as u32);
+            meta.source_size = Some(if matches!(read_orientation(&source), 5..=8) {
+                (h, w)
+            } else {
+                (w, h)
+            });
+        }
+    }
 
     if let Some(exif) = dict_dictionary(&props, unsafe { kCGImagePropertyExifDictionary }) {
         meta.lens_model = dict_string(exif, unsafe { kCGImagePropertyExifLensModel });

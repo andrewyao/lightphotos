@@ -21,8 +21,8 @@ use objc2_core_foundation::{
     CFNumber, CFNumberType, CFRetained, CFString,
 };
 use objc2_image_io::{
-    kCGImageSourceCreateThumbnailFromImageIfAbsent, kCGImageSourceCreateThumbnailWithTransform,
-    kCGImageSourceThumbnailMaxPixelSize,
+    kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailFromImageIfAbsent,
+    kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceThumbnailMaxPixelSize,
 };
 
 use crate::image_decode::{cgimage_to_rgba, DecodedImage};
@@ -33,9 +33,37 @@ use crate::image_decode::{cgimage_to_rgba, DecodedImage};
 /// when present, falls back to decoding-at-size from the full image, and applies
 /// the file's EXIF orientation.
 pub fn thumbnail(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
+    decode_at_size(path, max_px, EmbeddedPreview::UseIfPresent)
+}
+
+/// Whether ImageIO may substitute the file's embedded preview for a real
+/// decode-at-size.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddedPreview {
+    /// Take the embedded preview when the file has one. Right for grid
+    /// thumbnails: they're small, so a camera's embedded JPEG is already more
+    /// than enough detail, and skipping the decode is most of the speed.
+    UseIfPresent,
+    /// Always decode from the full image. Right for the loupe's screen-fit
+    /// preview: embedded previews are typically ~1600px, which would show as
+    /// visible softness at the size the loupe displays.
+    Never,
+}
+
+/// Decode `path` at a reduced size, longest side at most `max_px`.
+///
+/// This is the fast path that makes the loupe's preview tier worth having:
+/// ImageIO scales *during* decode, unlike `image_decode::decode`, which decodes
+/// the full image and only then draws it down — strictly more work than not
+/// downscaling at all.
+pub fn decode_at_size(
+    path: &Path,
+    max_px: u32,
+    embedded: EmbeddedPreview,
+) -> Result<DecodedImage, String> {
     let source = crate::image_decode::open_image_source(path)?;
 
-    let options = build_thumbnail_options(max_px)?;
+    let options = build_thumbnail_options(max_px, embedded)?;
 
     // SAFETY: `source` is valid; `options` is a CFDictionary whose keys are the
     // documented thumbnail option keys and whose values are the correct CF types
@@ -55,7 +83,10 @@ pub fn thumbnail(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
 }
 
 /// Build the options `CFDictionary` for `CGImageSourceCreateThumbnailAtIndex`.
-fn build_thumbnail_options(max_px: u32) -> Result<CFRetained<CFDictionary>, String> {
+fn build_thumbnail_options(
+    max_px: u32,
+    embedded: EmbeddedPreview,
+) -> Result<CFRetained<CFDictionary>, String> {
     // kCGImageSourceThumbnailMaxPixelSize wants an integer CFNumber.
     let max_px_i: i32 = max_px as i32;
     // SAFETY: value_ptr points at a valid i32 matching SInt32Type.
@@ -75,7 +106,14 @@ fn build_thumbnail_options(max_px: u32) -> Result<CFRetained<CFDictionary>, Stri
     // SAFETY: these statics are valid CFString option keys at runtime.
     let mut keys: [*const c_void; 3] = unsafe {
         [
-            kCGImageSourceCreateThumbnailFromImageIfAbsent as *const CFString as *const c_void,
+            match embedded {
+                EmbeddedPreview::UseIfPresent => {
+                    kCGImageSourceCreateThumbnailFromImageIfAbsent as *const CFString
+                }
+                EmbeddedPreview::Never => {
+                    kCGImageSourceCreateThumbnailFromImageAlways as *const CFString
+                }
+            } as *const c_void,
             kCGImageSourceThumbnailMaxPixelSize as *const CFString as *const c_void,
             kCGImageSourceCreateThumbnailWithTransform as *const CFString as *const c_void,
         ]
