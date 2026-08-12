@@ -574,6 +574,10 @@ impl App {
             if self.dupes_on {
                 self.recompute_dup_marks();
             }
+            // Newly-found blinks change what the filter should be showing.
+            if self.eyes_filter_on() {
+                self.recompute_visible();
+            }
             self.request_redraw();
         }
     }

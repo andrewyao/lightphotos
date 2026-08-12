@@ -385,6 +385,11 @@ pub(crate) struct App {
     /// Terminally failed analyses (corrupt or unsupported files), so they are
     /// not retried forever.
     face_failed: HashSet<PathBuf>,
+    /// Whether the grid is narrowed to photos with a detected blink. Stacks on
+    /// top of the star filter rather than replacing it (they're different
+    /// questions), and reads only the cache — a photo the face pass hasn't
+    /// reached is not "eyes open", it's unjudged, and stays hidden.
+    eyes_filter: bool,
 
     // ---- Survey Mode state (one duplicate group at a time) ----
     /// Paths of the duplicate group currently under review. Empty outside
@@ -560,6 +565,7 @@ impl App {
             face_quality: HashMap::new(),
             face_pending: HashSet::new(),
             face_failed: HashSet::new(),
+            eyes_filter: false,
             survey_members: Vec::new(),
             survey_best: None,
             survey_focus: 0,
@@ -936,6 +942,7 @@ impl App {
                 ui::UiAction::ScrollFilmstrip(delta) => self.scroll_filmstrip(delta),
                 ui::UiAction::ToggleBursts => self.toggle_bursts(),
                 ui::UiAction::ToggleDupes => self.toggle_dupes(),
+                ui::UiAction::ToggleEyesClosed => self.toggle_eyes_filter(),
                 ui::UiAction::OpenSurvey(pos) => self.open_survey(pos),
                 ui::UiAction::CloseSurvey => self.close_survey(),
                 ui::UiAction::KeepBestRejectRest => self.keep_best_reject_rest(),

@@ -155,6 +155,34 @@ impl App {
         self.face_quality.get(path).copied()
     }
 
+    /// Whether the face pass found a blink in this path's photo.
+    pub(super) fn eyes_closed(&self, path: &Path) -> bool {
+        self.face_quality_of(path)
+            .and_then(|q| q.eye_state())
+            .is_some_and(|s| s == crate::facequality::EyeState::Closed)
+    }
+
+    /// Whether the visible cell at `pos` has a detected blink (drives the grid
+    /// badge). `false` when out of range or not yet analyzed.
+    pub(crate) fn eyes_closed_at(&self, pos: usize) -> bool {
+        self.visible
+            .get(pos)
+            .and_then(|&i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))
+            .is_some_and(|p| self.eyes_closed(p))
+    }
+
+    /// Whether the "eyes closed" filter is on (for the toolbar toggle state).
+    pub(crate) fn eyes_filter_on(&self) -> bool {
+        self.eyes_filter
+    }
+
+    /// Flip the "eyes closed" filter and re-narrow the grid.
+    pub(super) fn toggle_eyes_filter(&mut self) {
+        self.eyes_filter = !self.eyes_filter;
+        self.recompute_visible();
+        self.request_redraw();
+    }
+
     /// Rebuild `burst_marks` from the cached capture times + sharpness over the
     /// current playlist entries. Clears the marks when bursts are off or there
     /// is no playlist. Cheap: O(entries).
@@ -264,6 +292,10 @@ impl App {
         self.dup_groups.clear();
         self.dup_refined.clear();
         self.dup_marks.clear();
+        // Same rationale for the blink filter: the `face_quality` cache is
+        // path-keyed and worth keeping, but a new folder starts unfiltered
+        // rather than silently showing an empty grid.
+        self.eyes_filter = false;
     }
 
     /// Paths of the duplicate group currently under review in Survey Mode

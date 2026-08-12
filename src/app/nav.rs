@@ -30,9 +30,22 @@ impl App {
             return;
         };
         let ratings = &self.ratings;
-        self.visible = visible_indices(pl.entries(), self.filter, |p| {
+        let entries = pl.entries();
+        self.visible = visible_indices(entries, self.filter, |p| {
             ratings.get(p).copied().unwrap_or(0)
         });
+        // The blink filter narrows whatever the star filter left, rather than
+        // replacing it — they answer different questions, so stacking them is
+        // what a photographer would expect from two independent chips.
+        if self.eyes_filter {
+            let keep: Vec<usize> = self
+                .visible
+                .iter()
+                .copied()
+                .filter(|&i| entries.get(i).is_some_and(|p| self.eyes_closed(p)))
+                .collect();
+            self.visible = keep;
+        }
         // Clamp the cursor to the new bounds; clear it if nothing is visible.
         if self.visible.is_empty() {
             self.sel = None;
@@ -679,7 +692,7 @@ impl App {
     /// stay in lockstep with this count and with `activate_toolbar_focus`'s
     /// index mapping. Rating-histogram bars and the selection-dependent bulk
     /// actions aren't included yet since their count varies frame to frame.
-    const TOOLBAR_CONTROLS: usize = 14;
+    const TOOLBAR_CONTROLS: usize = 16;
 
     pub(super) fn toolbar_control_count(&self) -> usize {
         Self::TOOLBAR_CONTROLS
@@ -713,9 +726,11 @@ impl App {
                 ui::UiAction::SetFilter(if unrated { None } else { Some((Cmp::Eq, 0)) })
             }
             10 => ui::UiAction::ToggleBursts,
-            11 => ui::UiAction::ToggleHelp,
-            12 => ui::UiAction::EnterGrid,
-            13 => ui::UiAction::EnterLoupe,
+            11 => ui::UiAction::ToggleDupes,
+            12 => ui::UiAction::ToggleEyesClosed,
+            13 => ui::UiAction::ToggleHelp,
+            14 => ui::UiAction::EnterGrid,
+            15 => ui::UiAction::EnterLoupe,
             _ => return,
         };
         self.apply_ui_actions(vec![action]);

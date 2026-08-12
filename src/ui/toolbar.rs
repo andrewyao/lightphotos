@@ -123,6 +123,28 @@ pub(super) fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput
             toolbar_focus_sync(ui, app, idx, &resp, out);
             idx += 1;
 
+            // "Eyes closed" filter. Enabled only alongside one of the grouping
+            // toggles, because the face pass those drive is the only thing that
+            // fills the cache this reads — Vision decodes at full resolution to
+            // find faces, too heavy to run folder-wide unasked. Turn one of them
+            // on and this narrows to whatever blinks the pass has found.
+            let grouped = app.bursts_on() || app.dupes_on();
+            let resp = ui
+                .add_enabled(
+                    grouped || app.eyes_filter_on(),
+                    egui::Button::selectable(app.eyes_filter_on(), "Eyes closed"),
+                )
+                .on_hover_text(if grouped || app.eyes_filter_on() {
+                    "Show only photos where someone blinked"
+                } else {
+                    "Turn on Bursts or Duplicates to detect blinks"
+                });
+            if resp.clicked() {
+                out.actions.push(UiAction::ToggleEyesClosed);
+            }
+            toolbar_focus_sync(ui, app, idx, &resp, out);
+            idx += 1;
+
             // Rating-distribution histogram (folder-wide), clickable to filter.
             ui.separator();
             rating_histogram(ui, app, out);

@@ -127,6 +127,10 @@ fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
 /// Useful when landmarks prove too heavy for a background pass, or when a
 /// photo's landmarks come back garbage (profiles, small/distant faces) but the
 /// face count itself is still worth having.
+// Kept unwired on purpose: it exists so that swapping the heavy request out is
+// a one-line change in `analyze` if real-photo testing says the landmark pass
+// is too slow or too noisy.
+#[allow(dead_code)]
 pub fn detect_face_rects(path: &Path) -> Result<Vec<RawFace>, String> {
     unsafe {
         let request = VNDetectFaceRectanglesRequest::new();

@@ -300,6 +300,23 @@ pub(super) fn thumbnail_cell(
         None => {}
     }
 
+    // Eyes-closed warning. Bottom-right is the last free corner (burst badge
+    // top-left, duplicate badge top-right, rating stars bottom-left) — a frame
+    // can legitimately carry all four at once.
+    if app.eyes_closed_at(pos) {
+        let c = rect.right_bottom() + egui::vec2(-(style.corner + 9.0), -(style.corner + 9.0));
+        ui.painter()
+            .circle_filled(c, 9.0, egui::Color32::from_black_alpha(170));
+        ui.painter().text(
+            c,
+            egui::Align2::CENTER_CENTER,
+            // A closed eye: the lid arc, without the open eye's iris.
+            "\u{2312}",
+            egui::FontId::proportional(13.0),
+            theme::EYES_BADGE,
+        );
+    }
+
     let stars = app.rating_at(pos);
     if !(style.hide_zero_stars && stars == 0) {
         ui.painter().text(

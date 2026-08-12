@@ -37,6 +37,10 @@ mod theme {
     /// and a duplicate-group badge at once, so the colors must never be
     /// confusable at a glance.
     pub const DUP_BADGE: Color32 = Color32::from_rgb(255, 150, 90);
+    /// Eyes-closed warning badge. Deliberately the one *cool* badge colour: the
+    /// other two mark a frame worth keeping, this one marks a defect, so it
+    /// should not read as another kind of award at a glance.
+    pub const EYES_BADGE: Color32 = Color32::from_rgb(150, 190, 255);
 }
 
 /// An action the UI wants `App` to perform after the frame is built. Positions
@@ -86,6 +90,10 @@ pub enum UiAction {
     /// Toggle content-duplicate (dHash) grouping badges. Independent of the
     /// star filter — unlike bursts, this grouping is order-independent.
     ToggleDupes,
+    /// Toggle the "eyes closed" filter: narrow the grid to photos where the
+    /// face pass found a blink. Reads the same cache the badge does, so it only
+    /// covers photos that pass has actually reached.
+    ToggleEyesClosed,
     /// Open Survey Mode on the duplicate group containing this visible cell
     /// (a duplicate-badge click in the grid).
     OpenSurvey(usize),
