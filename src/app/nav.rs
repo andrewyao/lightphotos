@@ -194,6 +194,10 @@ impl App {
             loader.request_thumb(path.clone(), px);
         }
         self.want = Some(path);
+        // The selection overlay belongs to one photo; stepping to the next
+        // drops the old mask and (if the overlay is on) starts the new one.
+        self.invalidate_selection();
+        self.request_selection_mask();
         self.try_show();
     }
 

@@ -13,6 +13,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
@@ -233,6 +234,10 @@ pub(crate) struct ExportProgress {
     last_err: Option<String>,
 }
 
+/// A finished subject-segmentation run: the path it was computed for, and the
+/// mask or the reason there isn't one.
+pub(crate) type SelectionOutcome = (PathBuf, Result<crate::segmentation::Mask, String>);
+
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
@@ -385,6 +390,26 @@ pub(crate) struct App {
     /// Terminally failed analyses (corrupt or unsupported files), so they are
     /// not retried forever.
     face_failed: HashSet<PathBuf>,
+    // ---- Subject-selection overlay state (Loupe only, transient) ----
+    /// Whether the Loupe is drawing the subject-selection overlay.
+    selection_on: bool,
+    /// Whether the overlay highlights the background instead of the subject.
+    selection_invert: bool,
+    /// The mask for the photo currently in the Loupe, tagged with the path it
+    /// was computed from so a stale result can be recognized and dropped.
+    ///
+    /// Deliberately transient — derived data, not a user edit, so it is never
+    /// written to the catalog — and deliberately one photo deep: there is no
+    /// per-folder pass, because segmentation is far too heavy to run over
+    /// anything but the picture actually on screen.
+    current_selection: Option<(PathBuf, crate::segmentation::Mask)>,
+    /// The path whose mask is being computed right now, if any, so the request
+    /// isn't fired again every frame while its thread runs.
+    selection_pending: Option<PathBuf>,
+    /// Result channel for those one-shot worker threads.
+    selection_tx: Sender<SelectionOutcome>,
+    selection_rx: Receiver<SelectionOutcome>,
+
     /// Whether the grid is narrowed to photos with a detected blink. Stacks on
     /// top of the star filter rather than replacing it (they're different
     /// questions), and reads only the cache — a photo the face pass hasn't
@@ -509,6 +534,7 @@ impl App {
         let catalog = Catalog::load();
         let egui_ctx = egui::Context::default();
         configure_system_fonts(&egui_ctx);
+        let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         Self {
             window: None,
             renderer: None,
@@ -566,6 +592,12 @@ impl App {
             face_pending: HashSet::new(),
             face_failed: HashSet::new(),
             eyes_filter: false,
+            selection_on: false,
+            selection_invert: false,
+            current_selection: None,
+            selection_pending: None,
+            selection_tx,
+            selection_rx,
             survey_members: Vec::new(),
             survey_best: None,
             survey_focus: 0,

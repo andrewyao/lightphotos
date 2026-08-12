@@ -226,6 +226,115 @@ impl App {
         self.compare
     }
 
+    // ---- Subject-selection overlay ------------------------------------------
+
+    /// Whether the subject-selection overlay is switched on.
+    pub(crate) fn selection_on(&self) -> bool {
+        self.selection_on
+    }
+
+    /// Whether the overlay highlights the background rather than the subject.
+    pub(crate) fn selection_inverted(&self) -> bool {
+        self.selection_invert
+    }
+
+    /// The mask for the photo currently on screen, if one has been computed.
+    pub(crate) fn current_selection(&self) -> Option<&crate::segmentation::Mask> {
+        let want = self.want.as_ref()?;
+        self.current_selection
+            .as_ref()
+            .filter(|(path, _)| path == want)
+            .map(|(_, mask)| mask)
+    }
+
+    /// Whether a mask is being computed for the photo on screen right now
+    /// (so the UI can say "working" rather than "no subject found").
+    pub(crate) fn selection_pending(&self) -> bool {
+        self.selection_pending.is_some()
+    }
+
+    /// Flip the overlay on/off, kicking off the mask computation on the way on.
+    pub(super) fn toggle_selection(&mut self) {
+        self.selection_on = !self.selection_on;
+        if self.selection_on {
+            self.request_selection_mask();
+        }
+        self.request_redraw();
+    }
+
+    /// Flip the overlay between highlighting the subject and the background.
+    /// Purely a display change — the same mask, read the other way round.
+    pub(super) fn toggle_selection_invert(&mut self) {
+        self.selection_invert = !self.selection_invert;
+        self.request_redraw();
+    }
+
+    /// Drop a mask that no longer belongs to the photo on screen. Called when
+    /// the Loupe moves to a different picture.
+    pub(super) fn invalidate_selection(&mut self) {
+        let stale = match (&self.current_selection, &self.want) {
+            (Some((path, _)), Some(want)) => path != want,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if stale {
+            self.current_selection = None;
+        }
+    }
+
+    /// Start segmenting the photo on screen, unless it's already done or
+    /// already running.
+    ///
+    /// One detached thread per request rather than a worker pool: this fires
+    /// on a deliberate user action, for exactly one photo at a time, so there
+    /// is no queue to schedule and nothing to keep warm between uses.
+    pub(super) fn request_selection_mask(&mut self) {
+        if !self.selection_on || self.selection_pending.is_some() {
+            return;
+        }
+        let Some(want) = self.want.clone() else {
+            return;
+        };
+        if self.current_selection().is_some() {
+            return;
+        }
+
+        self.selection_pending = Some(want.clone());
+        let tx = self.selection_tx.clone();
+        // If the spawn fails, clear the pending marker so the next frame can
+        // retry rather than the overlay hanging on "working" forever.
+        if std::thread::Builder::new()
+            .name("segmentation-worker".to_string())
+            .spawn(move || {
+                let result = crate::segmentation::segment(&want);
+                let _ = tx.send((want, result));
+            })
+            .is_err()
+        {
+            self.selection_pending = None;
+        }
+    }
+
+    /// Fold a finished segmentation into `current_selection`, discarding it if
+    /// the Loupe has moved on to a different photo meanwhile.
+    pub(crate) fn poll_selection_mask(&mut self) {
+        while let Ok((path, result)) = self.selection_rx.try_recv() {
+            if self.selection_pending.as_ref() == Some(&path) {
+                self.selection_pending = None;
+            }
+            if self.want.as_ref() != Some(&path) {
+                continue; // moved on; this mask is for a photo nobody is looking at
+            }
+            match result {
+                Ok(mask) => self.current_selection = Some((path, mask)),
+                // No subject found is a legitimate answer, not an error worth a
+                // toast — the overlay simply has nothing to draw.
+                Err(_) => self.current_selection = None,
+            }
+            self.request_redraw();
+        }
+    }
+
     /// Recompute the shader transform from the current view state.
     pub(crate) fn push_transform(&mut self) {
         let (scale, offset, rot) = self.loupe_transform();

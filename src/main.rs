@@ -341,6 +341,11 @@ impl ApplicationHandler<UserEvent> for App {
         if self.request_face_quality() {
             self.request_redraw();
         }
+
+        // Pick up a finished subject-segmentation run. No matching "request"
+        // call here: unlike the passes above, that one is driven by the user
+        // switching the overlay on or stepping to another photo.
+        self.poll_selection_mask();
     }
 }
 
