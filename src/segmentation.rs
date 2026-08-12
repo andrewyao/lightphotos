@@ -70,6 +70,29 @@ impl Mask {
         self.alpha[(y * self.width + x) as usize]
     }
 
+    /// This mask resampled to `width × height`, for overlaying at display size.
+    ///
+    /// Bilinear, so the model's soft matte edge survives the stretch — see
+    /// [`crate::image_ops::resample_bilinear_u8`]. Returns `self` unchanged when
+    /// the size already matches.
+    pub fn resized(&self, width: u32, height: u32) -> Mask {
+        if (width, height) == (self.width, self.height) {
+            return self.clone();
+        }
+        Mask {
+            width,
+            height,
+            alpha: crate::image_ops::resample_bilinear_u8(
+                &self.alpha,
+                self.width,
+                self.height,
+                width,
+                height,
+            ),
+            source: self.source,
+        }
+    }
+
     /// Fraction of the mask covered, 0.0..=1.0. Cheap way to spot a mask that
     /// came back empty (nothing found) or saturated (everything "foreground").
     pub fn coverage(&self) -> f32 {
@@ -246,6 +269,31 @@ mod tests {
         };
         assert_eq!(empty.coverage(), 0.0);
         assert!(empty.coverage() < EMPTY_COVERAGE, "an empty mask must trip the fallback");
+    }
+
+    #[test]
+    fn resizing_stretches_the_mask_to_display_size() {
+        let small = Mask {
+            width: 2,
+            height: 2,
+            alpha: vec![0, 255, 255, 0],
+            source: MaskSource::ForegroundInstance,
+        };
+
+        let same = small.resized(2, 2);
+        assert_eq!(same, small, "a no-op resize must not disturb the mask");
+
+        let big = small.resized(8, 8);
+        assert_eq!(big.width, 8);
+        assert_eq!(big.height, 8);
+        assert_eq!(big.alpha.len(), 64);
+        assert_eq!(big.source, small.source, "resizing must not relabel the source");
+        // Corners keep their original values; the soft interior is what
+        // bilinear buys over nearest-neighbour.
+        assert_eq!(big.at(0, 0), 0);
+        assert_eq!(big.at(7, 0), 255);
+        let mid = big.at(3, 3);
+        assert!(mid > 0 && mid < 255, "expected a soft edge, got {mid}");
     }
 
     #[test]

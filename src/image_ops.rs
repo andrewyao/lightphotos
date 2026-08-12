@@ -240,6 +240,55 @@ pub(crate) fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, V
     (nw, nh, dst)
 }
 
+/// Bilinearly resample a tightly-packed single-channel buffer to `dw × dh`.
+///
+/// Written for Vision's segmentation masks, which come back at whatever
+/// resolution the model chose (typically much smaller than the photo) and have
+/// to be stretched to display size before they can be overlaid. Nearest-
+/// neighbour would turn the model's soft matte edge into visible stair-steps,
+/// which is exactly the part of the mask worth looking at.
+///
+/// Uses pixel-*center* mapping (the `+ 0.5 … - 0.5` shuffle) rather than naive
+/// `x * sw / dw`, so the resampled image stays centered instead of drifting
+/// half a source pixel toward the origin. Edge samples clamp rather than wrap.
+pub(crate) fn resample_bilinear_u8(
+    src: &[u8],
+    sw: u32,
+    sh: u32,
+    dw: u32,
+    dh: u32,
+) -> Vec<u8> {
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < (sw * sh) as usize {
+        return Vec::new();
+    }
+    if (sw, sh) == (dw, dh) {
+        return src[..(sw * sh) as usize].to_vec();
+    }
+
+    let at = |x: u32, y: u32| src[(y * sw + x) as usize] as f32;
+    let (x_scale, y_scale) = (sw as f32 / dw as f32, sh as f32 / dh as f32);
+    let mut out = Vec::with_capacity((dw * dh) as usize);
+
+    for yo in 0..dh {
+        let fy = ((yo as f32 + 0.5) * y_scale - 0.5).clamp(0.0, (sh - 1) as f32);
+        let y0 = fy.floor() as u32;
+        let y1 = (y0 + 1).min(sh - 1);
+        let ty = fy - y0 as f32;
+
+        for xo in 0..dw {
+            let fx = ((xo as f32 + 0.5) * x_scale - 0.5).clamp(0.0, (sw - 1) as f32);
+            let x0 = fx.floor() as u32;
+            let x1 = (x0 + 1).min(sw - 1);
+            let tx = fx - x0 as f32;
+
+            let top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * tx;
+            let bottom = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * tx;
+            out.push((top + (bottom - top) * ty + 0.5) as u8);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +497,62 @@ mod tests {
         }
         let out = resize_luma(&src, 4, 4, 2, 2);
         assert_eq!(out, vec![0.0, 100.0, 200.0, 255.0]);
+    }
+
+    #[test]
+    fn resampling_to_the_same_size_is_the_identity() {
+        let src = vec![0u8, 40, 90, 255];
+        assert_eq!(resample_bilinear_u8(&src, 2, 2, 2, 2), src);
+    }
+
+    #[test]
+    fn resampling_a_ramp_interpolates_between_the_two_ends() {
+        // 2 source pixels stretched to 4. Pixel-center mapping puts the two
+        // outer destination samples outside the source centers, so they clamp
+        // to the endpoints, and the two inner ones land a quarter and three
+        // quarters of the way along.
+        let out = resample_bilinear_u8(&[0, 255], 2, 1, 4, 1);
+        assert_eq!(out, vec![0, 64, 191, 255]);
+    }
+
+    #[test]
+    fn resampling_stays_centered_rather_than_drifting_to_the_origin() {
+        // A symmetric source must resample to a symmetric result — the check
+        // that catches a naive `x * sw / dw` mapping, which shifts everything
+        // half a source pixel toward the origin.
+        let out = resample_bilinear_u8(&[0, 255, 255, 0], 4, 1, 8, 1);
+        let reversed: Vec<u8> = out.iter().rev().copied().collect();
+        assert_eq!(out, reversed, "resampled {out:?} is not symmetric");
+    }
+
+    #[test]
+    fn resampling_a_single_pixel_fills_the_whole_output() {
+        assert_eq!(resample_bilinear_u8(&[200], 1, 1, 3, 2), vec![200; 6]);
+    }
+
+    #[test]
+    fn resampling_a_2x2_block_gives_a_smooth_bilinear_field() {
+        // Corners keep their values; the middle of the upscaled field averages
+        // all four, both of which fail under nearest-neighbour.
+        let out = resample_bilinear_u8(&[0, 100, 200, 255], 2, 2, 4, 4);
+        assert_eq!(out.len(), 16);
+        assert_eq!(out[0], 0, "top-left corner");
+        assert_eq!(out[3], 100, "top-right corner");
+        assert_eq!(out[12], 200, "bottom-left corner");
+        assert_eq!(out[15], 255, "bottom-right corner");
+        let center = (out[5] as u16 + out[6] as u16 + out[9] as u16 + out[10] as u16) / 4;
+        assert!(
+            (center as i32 - 139).abs() <= 1,
+            "center of the field should sit near the mean of the four corners, got {center}"
+        );
+    }
+
+    #[test]
+    fn degenerate_resample_requests_produce_nothing() {
+        assert!(resample_bilinear_u8(&[1, 2, 3, 4], 2, 2, 0, 4).is_empty());
+        assert!(resample_bilinear_u8(&[1, 2, 3, 4], 0, 2, 4, 4).is_empty());
+        // Source buffer smaller than its declared dimensions: refuse rather
+        // than index out of bounds.
+        assert!(resample_bilinear_u8(&[1, 2], 4, 4, 8, 8).is_empty());
     }
 }
