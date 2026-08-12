@@ -137,6 +137,24 @@ impl App {
             .unwrap_or(0)
     }
 
+    /// The single "which frame is better" number, shared by burst and duplicate
+    /// picking: sharpness with a blink penalty folded in (see
+    /// [`burst::combined_score`]). Both groupings answer the same question, so
+    /// neither should have its own idea of what makes a frame the keeper.
+    pub(super) fn culling_score(&self, path: &Path) -> Option<f64> {
+        burst::combined_score(
+            self.sharpness.get(path).copied(),
+            self.face_quality.get(path).and_then(|q| q.eye_state()),
+        )
+    }
+
+    /// The face signal for a path, once analyzed. `None` while the analysis is
+    /// still pending, failed, or was never requested (the pass only covers
+    /// grouped photos).
+    pub(crate) fn face_quality_of(&self, path: &Path) -> Option<crate::facequality::FaceQuality> {
+        self.face_quality.get(path).copied()
+    }
+
     /// Rebuild `burst_marks` from the cached capture times + sharpness over the
     /// current playlist entries. Clears the marks when bursts are off or there
     /// is no playlist. Cheap: O(entries).
@@ -162,10 +180,7 @@ impl App {
             .iter()
             .map(|p| self.capture_times.get(p).copied().flatten())
             .collect();
-        let scores: Vec<Option<f64>> = entries
-            .iter()
-            .map(|p| self.sharpness.get(p).copied())
-            .collect();
+        let scores: Vec<Option<f64>> = entries.iter().map(|p| self.culling_score(p)).collect();
         self.burst_marks = burst::marks_for(&times, &scores, burst::BURST_GAP);
     }
 
@@ -209,7 +224,7 @@ impl App {
         }
         let entries = pl.entries();
         let hashes: Vec<Option<u64>> = entries.iter().map(|p| self.phashes.get(p).copied()).collect();
-        let scores: Vec<Option<f64>> = entries.iter().map(|p| self.sharpness.get(p).copied()).collect();
+        let scores: Vec<Option<f64>> = entries.iter().map(|p| self.culling_score(p)).collect();
         let groups = duplicates::group_by_hash(&hashes, duplicates::DEFAULT_MAX_DISTANCE);
         // Second tier: split off any dHash false positive whose feature-print
         // distance to its group's anchor exceeds the threshold. Members

@@ -80,6 +80,32 @@ pub fn compute_marks(group_ids: &[u32], scores: &[Option<f64>]) -> Vec<Option<Bu
         .collect()
 }
 
+/// Fold a frame's eye state into its sharpness score, *before* marking.
+///
+/// [`compute_marks`] only knows how to pick the highest score, and keeping it
+/// that way is deliberate — every new culling signal folds in here instead of
+/// growing another parameter on the marking logic.
+///
+/// A blink is a hard demotion, not a tiebreak: sharpness is a variance, so it
+/// is never negative, which means mapping a closed-eyed frame into `(-1, 0)`
+/// puts it strictly below every open-eyed or unjudged frame no matter how much
+/// sharper it is. Within that band the mapping stays monotonic in sharpness, so
+/// a burst where *everyone* blinked still promotes its sharpest frame rather
+/// than falling back on shot order.
+///
+/// Unknown eyes (no face found, profile shot, analysis still running) leave the
+/// score untouched — never treated as closed. One asymmetry to know about: a
+/// frame with a *known* blink still outranks a frame with no sharpness score at
+/// all, because [`compute_marks`] ranks any score above none. That only shows up
+/// mid-scan, and resolves as soon as the missing score lands.
+pub fn combined_score(sharpness: Option<f64>, eyes: Option<crate::facequality::EyeState>) -> Option<f64> {
+    let s = sharpness?;
+    match eyes {
+        Some(crate::facequality::EyeState::Closed) => Some(-1.0 / (1.0 + s.max(0.0))),
+        _ => Some(s),
+    }
+}
+
 /// Convenience: group `times` by `gap` (via `group_by_time`) then mark. This is
 /// the entry point the app uses each time capture times or scores change.
 pub fn marks_for(
@@ -94,6 +120,64 @@ pub fn marks_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::facequality::EyeState;
+
+    #[test]
+    fn a_blink_loses_to_a_blurrier_open_eyed_sibling() {
+        // The blinking frame is four times sharper and must still lose.
+        let scores = vec![
+            combined_score(Some(400.0), Some(EyeState::Closed)),
+            combined_score(Some(100.0), Some(EyeState::Open)),
+        ];
+        assert_eq!(
+            compute_marks(&[0, 0], &scores),
+            vec![Some(BurstMark::Sibling), Some(BurstMark::Best)]
+        );
+    }
+
+    #[test]
+    fn an_all_blinking_burst_still_prefers_its_sharpest_frame() {
+        let scores = vec![
+            combined_score(Some(10.0), Some(EyeState::Closed)),
+            combined_score(Some(90.0), Some(EyeState::Closed)),
+        ];
+        assert_eq!(
+            compute_marks(&[0, 0], &scores),
+            vec![Some(BurstMark::Sibling), Some(BurstMark::Best)]
+        );
+    }
+
+    #[test]
+    fn unknown_eyes_leave_the_score_untouched() {
+        assert_eq!(combined_score(Some(12.5), None), Some(12.5));
+        assert_eq!(combined_score(Some(12.5), Some(EyeState::Open)), Some(12.5));
+        assert_eq!(combined_score(None, Some(EyeState::Open)), None);
+        assert_eq!(combined_score(None, None), None);
+        // A frame nobody could judge must not be demoted below one that blinked.
+        let scores = vec![
+            combined_score(Some(1.0), None),
+            combined_score(Some(500.0), Some(EyeState::Closed)),
+        ];
+        assert_eq!(
+            compute_marks(&[0, 0], &scores),
+            vec![Some(BurstMark::Best), Some(BurstMark::Sibling)]
+        );
+    }
+
+    #[test]
+    fn a_blink_stays_below_zero_even_at_zero_sharpness() {
+        // The demotion relies on sharpness never being negative; a flat frame
+        // scoring exactly 0.0 is the boundary case.
+        let blink = combined_score(Some(0.0), Some(EyeState::Closed)).unwrap();
+        let open = combined_score(Some(0.0), Some(EyeState::Open)).unwrap();
+        assert!(blink < 0.0 && blink < open, "blink={blink} open={open}");
+    }
+
+    #[test]
+    fn combined_scores_are_None_for_unscored_frames_regardless_of_eyes() {
+        assert_eq!(combined_score(None, Some(EyeState::Closed)), None);
+    }
 
     #[test]
     fn singleton_group_is_unmarked() {
