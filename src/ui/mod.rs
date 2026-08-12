@@ -94,6 +94,11 @@ pub enum UiAction {
     /// face pass found a blink. Reads the same cache the badge does, so it only
     /// covers photos that pass has actually reached.
     ToggleEyesClosed,
+    /// Toggle the Loupe's subject-selection overlay, computing the mask for the
+    /// photo on screen the first time it's switched on.
+    ToggleSelection,
+    /// Swap the overlay between highlighting the subject and the background.
+    ToggleSelectionInvert,
     /// Open Survey Mode on the duplicate group containing this visible cell
     /// (a duplicate-badge click in the grid).
     OpenSurvey(usize),

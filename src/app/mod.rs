@@ -975,6 +975,8 @@ impl App {
                 ui::UiAction::ToggleBursts => self.toggle_bursts(),
                 ui::UiAction::ToggleDupes => self.toggle_dupes(),
                 ui::UiAction::ToggleEyesClosed => self.toggle_eyes_filter(),
+                ui::UiAction::ToggleSelection => self.toggle_selection(),
+                ui::UiAction::ToggleSelectionInvert => self.toggle_selection_invert(),
                 ui::UiAction::OpenSurvey(pos) => self.open_survey(pos),
                 ui::UiAction::CloseSurvey => self.close_survey(),
                 ui::UiAction::KeepBestRejectRest => self.keep_best_reject_rest(),

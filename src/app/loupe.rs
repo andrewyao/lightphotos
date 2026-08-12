@@ -259,6 +259,7 @@ impl App {
         if self.selection_on {
             self.request_selection_mask();
         }
+        self.sync_selection_overlay();
         self.request_redraw();
     }
 
@@ -266,7 +267,30 @@ impl App {
     /// Purely a display change — the same mask, read the other way round.
     pub(super) fn toggle_selection_invert(&mut self) {
         self.selection_invert = !self.selection_invert;
+        self.sync_selection_overlay();
         self.request_redraw();
+    }
+
+    /// Push the current mask (or its absence) to the renderer.
+    ///
+    /// The mask goes up at Vision's own resolution: the shader samples it with
+    /// the image's normalized UVs, so the GPU's bilinear filter does the
+    /// stretching and there's nothing to keep in step with zoom or pan.
+    pub(super) fn sync_selection_overlay(&mut self) {
+        let want = self.want.clone();
+        let mask = if self.selection_on {
+            self.current_selection
+                .as_ref()
+                .filter(|(path, _)| Some(path) == want.as_ref())
+                .map(|(_, mask)| mask)
+        } else {
+            None
+        };
+        let inverted = self.selection_invert;
+        if let Some(r) = &mut self.renderer {
+            r.set_selection_inverted(inverted);
+            r.set_selection_mask(mask.map(|m| (m.alpha.as_slice(), m.width, m.height)));
+        }
     }
 
     /// Drop a mask that no longer belongs to the photo on screen. Called when
@@ -279,6 +303,7 @@ impl App {
         };
         if stale {
             self.current_selection = None;
+            self.sync_selection_overlay();
         }
     }
 
@@ -331,6 +356,7 @@ impl App {
                 // toast — the overlay simply has nothing to draw.
                 Err(_) => self.current_selection = None,
             }
+            self.sync_selection_overlay();
             self.request_redraw();
         }
     }

@@ -44,11 +44,31 @@ struct TouchUp {
     delta: vec4<f32>,
 };
 
+// Subject-selection overlay parameters. Visualization only — nothing here
+// feeds the tone pipeline.
+struct Overlay {
+    // Colour laid over the selected region.
+    tint: vec4<f32>,
+    // 1.0 = highlight the background instead of the subject.
+    invert: f32,
+    // Peak opacity of the tint, 0..1.
+    strength: f32,
+    _pad0: f32,
+    _pad1: f32,
+};
+
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(1) @binding(0) var<uniform> xform: Transform;
 @group(2) @binding(0) var<uniform> adj: Adjust;
 @group(3) @binding(0) var<storage, read> touchups: array<TouchUp>;
+// The overlay's own resources share group 3 with the touch-ups because wgpu
+// guarantees only four bind groups. They never collide: each pipeline declares
+// a layout covering exactly the bindings its own entry point reads, and no
+// entry point reads both.
+@group(3) @binding(1) var<uniform> overlay: Overlay;
+@group(3) @binding(2) var mask_tex: texture_2d<f32>;
+@group(3) @binding(3) var mask_samp: sampler;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -250,4 +270,29 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // 6. Clamp final to 0..1, preserve sampled alpha.
     return vec4<f32>(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), texel.a);
+}
+
+// Subject-selection overlay: a second draw of the same quad, alpha-blended over
+// the already-rendered image. Deliberately separate from `fs_main` — the
+// selection is a thing you look at, never a thing that changes the picture, so
+// it cannot touch the tone pipeline even by accident.
+@fragment
+fn fs_overlay(in: VsOut) -> @location(0) vec4<f32> {
+    // Outside the image, or outside the crop: draw nothing, so the overlay
+    // never spills onto the neutral surround.
+    if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
+        discard;
+    }
+    if (in.uv.x < adj.crop_l || in.uv.x > adj.crop_r || in.uv.y < adj.crop_t || in.uv.y > adj.crop_b) {
+        discard;
+    }
+
+    // The mask is single-channel coverage: 0 background, 1 subject, soft rim
+    // between. Inverting is a read of the same mask from the other side.
+    var coverage = textureSample(mask_tex, mask_samp, in.uv).r;
+    if (overlay.invert > 0.5) {
+        coverage = 1.0 - coverage;
+    }
+
+    return vec4<f32>(overlay.tint.rgb, coverage * overlay.strength);
 }

@@ -408,6 +408,56 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                     }
                 });
             });
+
+            // Subject-selection controls, right-hand end of the main row (the
+            // secondary row's camera/date text sits below, so nothing collides).
+            // They live here rather than in the Develop panel on purpose: this
+            // is a way of *looking* at the photo, not an edit to it.
+            let sel_w = 190.0;
+            let sel_rect = egui::Rect::from_min_size(
+                egui::pos2(rect.right() - pad - sel_w, main_y - 11.0),
+                egui::vec2(sel_w, 22.0),
+            );
+            ui.scope_builder(egui::UiBuilder::new().max_rect(sel_rect), |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Invert is meaningless with the overlay off, and says
+                        // so by being disabled rather than by vanishing.
+                        let inverted = app.selection_inverted();
+                        if ui
+                            .add_enabled(
+                                app.selection_on(),
+                                egui::Button::selectable(inverted, "Invert"),
+                            )
+                            .on_hover_text("Highlight the background instead of the subject")
+                            .clicked()
+                        {
+                            out.actions.push(UiAction::ToggleSelectionInvert);
+                        }
+
+                        // The label carries the state the user can't otherwise
+                        // see: segmentation takes a moment, and "no subject
+                        // found" is a real answer that would otherwise look
+                        // identical to a broken button.
+                        let label = if !app.selection_on() {
+                            "Show Selection"
+                        } else if app.selection_pending() {
+                            "Selection…"
+                        } else if app.current_selection().is_some() {
+                            "Show Selection"
+                        } else {
+                            "No subject"
+                        };
+                        if ui
+                            .add(egui::Button::selectable(app.selection_on(), label))
+                            .on_hover_text("Outline the subject Vision finds in this photo")
+                            .clicked()
+                        {
+                            out.actions.push(UiAction::ToggleSelection);
+                        }
+                    });
+                });
+            });
         });
 }
 

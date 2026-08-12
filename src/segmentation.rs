@@ -63,6 +63,9 @@ pub struct Mask {
 
 impl Mask {
     /// Coverage at `(x, y)`, or 0 outside the mask.
+    // Used by the tests and by `seg_probe`, not by the app: the Loupe overlay
+    // hands the whole mask to the GPU rather than sampling it pixel by pixel.
+    #[allow(dead_code)]
     pub fn at(&self, x: u32, y: u32) -> u8 {
         if x >= self.width || y >= self.height {
             return 0;
@@ -75,6 +78,10 @@ impl Mask {
     /// Bilinear, so the model's soft matte edge survives the stretch — see
     /// [`crate::image_ops::resample_bilinear_u8`]. Returns `self` unchanged when
     /// the size already matches.
+    // For CPU-side consumers (`seg_probe`'s composite, and anything that later
+    // bakes a mask into pixels). The Loupe overlay doesn't call it — it uploads
+    // the mask at Vision's own resolution and lets the sampler do the stretch.
+    #[allow(dead_code)]
     pub fn resized(&self, width: u32, height: u32) -> Mask {
         if (width, height) == (self.width, self.height) {
             return self.clone();
@@ -111,6 +118,9 @@ impl Mask {
 
     /// Mean coverage, 0.0..=1.0. Cheap way to spot a mask that came back empty
     /// (nothing found) or saturated (everything "foreground").
+    // Reported by `seg_probe` alongside `solid_coverage`; the app only needs
+    // the latter.
+    #[allow(dead_code)]
     pub fn coverage(&self) -> f32 {
         if self.alpha.is_empty() {
             return 0.0;

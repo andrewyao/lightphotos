@@ -21,7 +21,7 @@ mark it `BLOCKED: <reason>` — its sub-checklist keeps the partial progress.
 - [x] Task 1: ~~Auto-tone, single photo + bulk selection~~ — **WON'T DO** (user decision, 2026-08-11). Dropped from the roadmap; no plan file, no implementation. Box checked only so plan-runner skips it (files: —)
 - [x] Task 2: Duplicate grouping + Survey Mode — done, commit `87a8101` (files: plans/plan-c-duplicate-grouping-survey-mode.md)
 - [ ] Task 3: Face + eyes-closed detection (requires Task 2) (files: plans/plan-d-face-eyes-closed-detection.md) — **BLOCKED: needs human visual check.** Tasks 1-7 of that plan are done and merged (`plan-d-face-quality` → `main`); its Task 8 needs a real burst with a blink. See that file for the two-step recipe.
-- [ ] Task 4: Subject/foreground segmentation as a selection, exploratory (requires Task 3 — shares its Vision setup) (files: plans/plan-d2-subject-segmentation-selection.md)
+- [ ] Task 4: Subject/foreground segmentation as a selection, exploratory (requires Task 3 — shares its Vision setup) (files: plans/plan-d2-subject-segmentation-selection.md) — **BLOCKED: needs human visual check.** Tasks 1, 2, 4, 5, 6 of that plan are done and merged (`plan-d2-segmentation` → `main`); Tasks 3 and 7 need real photographs with subjects in them. See that file.
 - [ ] Task 5: Clarity slider (requires Task 4; parallelizable with Tasks 6-7) (files: plans/plan-e-clarity.md)
 - [ ] Task 6: Dehaze slider (requires Task 4; parallelizable with Tasks 5, 7) (files: plans/plan-f-dehaze.md)
 - [ ] Task 7: HSL panel, 8-band hue/saturation/luminance (requires Task 4; parallelizable with Tasks 5-6) (files: plans/plan-g-hsl-panel.md)

@@ -7,6 +7,9 @@ restarting. Overview tasks are logged as `Plan <file> / Task N`.
 Verification gate for every task: `cargo test && cargo build --release`.
 
 - [2026-08-11 21:35] plan-d / Task 1 done: `facequality.rs` Vision FFI (`VNDetectFaceLandmarksRequest` → `RawFace` with normalized eye-contour points) + `face_probe` validation binary. 113 tests pass, release builds. Real-photo landmark validation left to a human (no face fixtures available locally).
+- [2026-08-12 07:55] plan-d2 / Task 7 BLOCKED: needs human visual check — release build green, app launches into the Loupe, overlay pipeline passes wgpu/naga validation at runtime. Whether the tint lands on the subject needs eyes. Tasks 1/2/4/5/6 merged to `main`.
+- [2026-08-12 07:50] plan-d2 / Tasks 5-6 done: overlay render pipeline (second entry point, shared vertex shader, alpha-blended in the image pass) + `Show Selection`/`Invert` in the Loupe info bar. 140 tests pass, release builds, no warnings.
+- [2026-08-12 07:35] plan-d2 / Task 4 done: transient `current_selection` keyed by path, one detached worker thread per request, polled per frame; invalidated when the Loupe steps to another photo.
 - [2026-08-12 00:05] plan-d2 / Task 3 BLOCKED: needs human visual check — `seg_probe` harness built and exercised against a real image (mask + tinted overlay written, pipeline proven), but no photo with a real subject is available here. Recorded finding: person segmentation returns a confident imaginary subject on abstract imagery, and no coverage statistic catches it.
 - [2026-08-12 00:00] plan-d2 / Task 2 done: `image_ops::resample_bilinear_u8` (pixel-center mapping, 6 tests) + `orient_mask` (EXIF table, 2 tests) + `Mask::resized`/`oriented`. 140 tests pass, release builds.
 - [2026-08-11 23:50] plan-d2 / Task 1 done: `src/segmentation.rs` — person segmentation with a foreground-instance fallback, `CVPixelBuffer` → packed `Mask` handling both single-channel formats and row padding. 130 tests pass, release builds.

@@ -11,6 +11,34 @@ use winit::window::Window;
 use crate::develop::{GpuAdjust, GpuTouchUp};
 use crate::image_decode::DecodedImage;
 
+/// Subject-selection overlay uniform. Field order MUST match `Overlay` in
+/// `shader.wgsl`.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct OverlayParams {
+    tint: [f32; 4],
+    invert: f32,
+    strength: f32,
+    _pad0: f32,
+    _pad1: f32,
+}
+
+impl Default for OverlayParams {
+    fn default() -> Self {
+        Self {
+            // Green: the one hue that reads as "this region is chosen" without
+            // colliding with the red of the touch-up markers.
+            tint: [0.25, 1.0, 0.45, 1.0],
+            invert: 0.0,
+            // Strong enough to read at a glance, light enough to still see the
+            // photo underneath — the point is judging where the edge falls.
+            strength: 0.45,
+            _pad0: 0.0,
+            _pad1: 0.0,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct Transform {
@@ -50,6 +78,17 @@ pub struct Renderer {
     adj_bind_b: wgpu::BindGroup,
     touch_buf: wgpu::Buffer,
     touch_bind: wgpu::BindGroup,
+
+    /// Second pipeline drawing the subject-selection tint over the image. Kept
+    /// entirely separate from the main pipeline so the selection can never
+    /// affect rendered tone — it is a thing you look at, not an edit.
+    overlay_pipeline: wgpu::RenderPipeline,
+    overlay_bind_layout: wgpu::BindGroupLayout,
+    overlay_buf: wgpu::Buffer,
+    /// Bind group holding the overlay uniform *and* the current mask texture.
+    /// `None` whenever there is no mask, which is also how the render pass
+    /// knows to skip the overlay draw entirely.
+    overlay_bind: Option<wgpu::BindGroup>,
 
     /// Bind group for the current image texture (None until first image loads).
     image_bind: Option<wgpu::BindGroup>,
@@ -178,6 +217,40 @@ impl Renderer {
             }],
         });
 
+        // Overlay resources sit in group 3 alongside (never overlapping) the
+        // touch-up storage buffer at binding 0 — see the note in shader.wgsl.
+        let overlay_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("overlay_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pl"),
             bind_group_layouts: &[
@@ -201,6 +274,47 @@ impl Renderer {
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
                 entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Same vertex shader as the image, so the tint lands on exactly the
+        // same quad under the same zoom/pan/rotation. Group 0 (the image
+        // texture) goes unused: the overlay reads the mask, not the photo.
+        let overlay_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("overlay_pl"),
+                bind_group_layouts: &[
+                    None,
+                    Some(&xform_bind_layout),
+                    Some(&adj_bind_layout),
+                    Some(&overlay_bind_layout),
+                ],
+                immediate_size: 0,
+            });
+
+        let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("overlay_pipeline"),
+            layout: Some(&overlay_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_overlay"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -288,6 +402,12 @@ impl Renderer {
             }],
         });
 
+        let overlay_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("overlay"),
+            contents: bytemuck::bytes_of(&OverlayParams::default()),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         // egui's wgpu paint backend, built against the same device + surface
         // format so its textures/buffers interoperate with ours. No depth
         // buffer (we render none), single-sampled, one frame in flight.
@@ -310,6 +430,10 @@ impl Renderer {
             adj_bind_b,
             touch_buf,
             touch_bind,
+            overlay_pipeline,
+            overlay_bind_layout,
+            overlay_buf,
+            overlay_bind: None,
             image_bind: None,
             image_size: (0, 0),
             max_dim,
@@ -426,6 +550,102 @@ impl Renderer {
             .write_buffer(&self.adj_buf_b, 0, bytemuck::bytes_of(&a));
     }
 
+    /// Upload a single-channel selection mask, or clear it with `None`.
+    ///
+    /// `alpha` is `width * height` tightly-packed coverage bytes in the same
+    /// texture space as the image (see `segmentation::Mask`), so the shader can
+    /// sample it with the image's own UVs — no separate transform to keep in
+    /// step. Clearing is what stops the overlay from drawing at all.
+    pub fn set_selection_mask(&mut self, mask: Option<(&[u8], u32, u32)>) {
+        let Some((alpha, w, h)) = mask else {
+            self.overlay_bind = None;
+            return;
+        };
+        if w == 0 || h == 0 || alpha.len() < (w as usize * h as usize) {
+            self.overlay_bind = None;
+            return;
+        }
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("selection_mask"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // write_texture needs rows aligned to COPY_BYTES_PER_ROW_ALIGNMENT. At
+        // one byte per texel that bites almost every time, unlike the RGBA8
+        // image path where a multiple-of-64 width is enough — so pad here.
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+        let row = w as usize;
+        let padded_row = row.div_ceil(align) * align;
+        let mut padded = vec![0u8; padded_row * h as usize];
+        for y in 0..h as usize {
+            let src = y * row;
+            padded[y * padded_row..y * padded_row + row].copy_from_slice(&alpha[src..src + row]);
+        }
+
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &padded,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_row as u32),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.overlay_bind = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("overlay_bg"),
+            layout: &self.overlay_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.overlay_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        }));
+    }
+
+    /// Flip the overlay between tinting the subject and tinting the background.
+    pub fn set_selection_inverted(&mut self, inverted: bool) {
+        self.queue.write_buffer(
+            &self.overlay_buf,
+            0,
+            bytemuck::bytes_of(&OverlayParams {
+                invert: if inverted { 1.0 } else { 0.0 },
+                ..OverlayParams::default()
+            }),
+        );
+    }
+
     pub fn set_touchups(&mut self, touchups: &[GpuTouchUp]) {
         if !touchups.is_empty() {
             self.queue
@@ -527,6 +747,8 @@ impl Renderer {
                 // Draw the quad into a viewport rect (clamped to the surface) with
                 // the given adjustments bind group. Shared by the single-image and
                 // both compare halves.
+                let overlay_pipeline = &self.overlay_pipeline;
+                let overlay_bind = self.overlay_bind.as_ref();
                 let draw_into = |pass: &mut wgpu::RenderPass,
                                  vp: (u32, u32, u32, u32),
                                  adj: &wgpu::BindGroup| {
@@ -546,6 +768,17 @@ impl Renderer {
                     pass.set_bind_group(2, adj, &[]);
                     pass.set_bind_group(3, &self.touch_bind, &[]);
                     pass.draw(0..6, 0..1);
+
+                    // Selection tint, alpha-blended straight over the pixels
+                    // just drawn — same quad, same viewport, same transform, so
+                    // it tracks zoom and pan for free.
+                    if let Some(overlay) = overlay_bind {
+                        pass.set_pipeline(overlay_pipeline);
+                        pass.set_bind_group(1, xform_bind, &[]);
+                        pass.set_bind_group(2, adj, &[]);
+                        pass.set_bind_group(3, overlay, &[]);
+                        pass.draw(0..6, 0..1);
+                    }
                 };
                 match image_viewport {
                     Some(vp) => {
@@ -564,6 +797,13 @@ impl Renderer {
                         pass.set_bind_group(2, &self.adj_bind, &[]);
                         pass.set_bind_group(3, &self.touch_bind, &[]);
                         pass.draw(0..6, 0..1);
+                        if let Some(overlay) = overlay_bind {
+                            pass.set_pipeline(overlay_pipeline);
+                            pass.set_bind_group(1, xform_bind, &[]);
+                            pass.set_bind_group(2, &self.adj_bind, &[]);
+                            pass.set_bind_group(3, overlay, &[]);
+                            pass.draw(0..6, 0..1);
+                        }
                     }
                 }
             }

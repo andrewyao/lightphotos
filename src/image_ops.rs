@@ -251,6 +251,10 @@ pub(crate) fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, V
 /// Uses pixel-*center* mapping (the `+ 0.5 … - 0.5` shuffle) rather than naive
 /// `x * sw / dw`, so the resampled image stays centered instead of drifting
 /// half a source pixel toward the origin. Edge samples clamp rather than wrap.
+// The Loupe overlay doesn't need this — it uploads the mask at Vision's own
+// resolution and lets the GPU sampler stretch it. This is the CPU path, for
+// `seg_probe`'s composite and for anything that later bakes a mask into pixels.
+#[allow(dead_code)]
 pub(crate) fn resample_bilinear_u8(
     src: &[u8],
     sw: u32,
