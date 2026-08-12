@@ -1,18 +1,46 @@
-# Zoom/pan support in compare mode (Y)
+# Plan — Zoom/pan support in compare mode (Y)
 
-## Context
+Work through these top to bottom (or by worktree assignment, if parallel).
+Check a box only after verification passes.
+
+**Status: COMPLETE** — shipped in commit `2cdbf19`. All boxes checked; kept for reference.
+
+- [x] Task 1: `loupe_area()` returns half-width while comparing, with a `w >= 2` guard mirroring the render-split guard so zoom math and the GPU viewport split never disagree (files: src/app.rs)
+- [x] Task 2: `cursor_in_loupe()` folds right-half cursor coords into the same `0..half` local space as the left half, so `zoom_at`'s cursor anchoring is correct on either side (requires Task 1) (files: src/app.rs)
+- [x] Task 3: `push_compare()` stops re-fitting every frame — uses the live shared `loupe_transform()`, drops the `(half_w, half_h)` params, keeps crop-sharing (requires Tasks 1, 2) (files: src/app.rs)
+- [x] Task 4: Update the per-frame call site to drop the now-unused args (requires Task 3) (files: src/app.rs)
+- [x] Task 5: Delete `fit_transform_for` — dead once `push_compare` no longer calls it; confirm no other references (requires Task 3) (files: src/app.rs)
+- [x] Task 6: `toggle_compare()` refits (if fitted) or recenters at the current zoom (if manually zoomed), since flipping `compare` silently changes what `loupe_area()` returns with no resize event to trigger the usual refit (requires Task 1) (files: src/app.rs)
+- [x] Task 7: `cargo build --release` clean with no leftover `fit_transform_for` references, and `cargo test` still passing (files: —)
+- [x] Task 8: Manual verification pass — scroll-zoom over each half anchors at the cursor with both halves in lockstep and no jump when crossing sides; drag-pan moves both; exiting compare re-fits sanely; toggling while zoomed recenters at the same zoom with no half-blank pane; window resize keeps both halves in sync (files: —)
+
+<!--
+Tips:
+- Make each task independently verifiable (a test, a build, a specific output).
+- Note "files:" per task if you plan to parallelize across worktrees —
+  plan-runner uses this to avoid assigning conflicting tasks to different tracks.
+- Keep tasks small; one failure shouldn't cascade into the next.
+- Note dependencies explicitly ("requires Task 2") if order matters.
+-->
+
+---
+
+## Reference
+
+Line numbers below refer to the pre-refactor single-file `src/app.rs` (this work predates commit `6a917e3`, which split it into `src/app/`).
+
+### Context
 
 Compare mode (Y key) shows the current image twice, side by side: left half = "before" (identity tone, same crop), right half = "after" (current edits). It's not two different photos — same crop, same geometry, only tone differs.
 
-Today compare mode has no working zoom. `push_compare()` recomputes a fresh "contain fit" transform (`fit_transform_for`) every single frame from scratch, ignoring `self.zoom`/`self.pan` entirely. Mouse wheel/pinch/drag handlers do mutate `self.zoom`/`self.pan` even while comparing (they're not gated on `self.compare`), but that gets clobbered on the very next frame — so zooming during compare currently has no lasting visual effect.
+Before this change, compare mode had no working zoom. `push_compare()` recomputed a fresh "contain fit" transform (`fit_transform_for`) every single frame from scratch, ignoring `self.zoom`/`self.pan` entirely. Mouse wheel/pinch/drag handlers did mutate `self.zoom`/`self.pan` even while comparing (they're not gated on `self.compare`), but that got clobbered on the very next frame — so zooming during compare had no lasting visual effect.
 
-Root cause: `self.zoom`/`self.pan`/`loupe_area()`/`cursor_in_loupe()` are all keyed to the *full* loupe rect, but while comparing, each half only occupies half that width. Fix: make the shared geometry state compare-aware so both halves render from one live `zoom`/`pan`, correctly anchored regardless of which half the mouse is over — satisfying "always show the same portion of the image" (single shared crop/zoom/pan) and "zoom anchored at whichever half the mouse is on."
+Root cause: `self.zoom`/`self.pan`/`loupe_area()`/`cursor_in_loupe()` are all keyed to the *full* loupe rect, but while comparing, each half only occupies half that width. Fix: make the shared geometry state compare-aware so both halves render from one live `zoom`/`pan`, correctly anchored regardless of which half the mouse is over.
 
-All changes are in `src/app.rs`. No changes needed in `src/main.rs` (verified: wheel/pinch/drag handlers already route through `cursor_in_loupe()` / `self.pan` deltas and need no gating changes once the primitives below are fixed).
+All changes were in `src/app.rs`. No changes needed in `src/main.rs` (verified: wheel/pinch/drag handlers already route through `cursor_in_loupe()` / `self.pan` deltas).
 
-## Changes
+### Task 1 — `loupe_area()` (app.rs:2418-2425)
 
-**1. `loupe_area()` (app.rs:2418-2425)** — return half-width when comparing:
 ```rust
 fn loupe_area(&self) -> (f32, f32) {
     match self.loupe_viewport {
@@ -28,9 +56,10 @@ fn loupe_area(&self) -> (f32, f32) {
     }
 }
 ```
-`w >= 2` guard mirrors the existing render-split guard at the call site (step 5) so zoom math and actual GPU viewport split never disagree. `w / 2` integer division must match the split's `let half = w / 2;` exactly (avoids off-by-one between the two halves).
+`w / 2` integer division must match the split's `let half = w / 2;` exactly (avoids off-by-one between the two halves).
 
-**2. `cursor_in_loupe()` (app.rs:2512-2522)** — map right-half cursor into the same local space as the left half:
+### Task 2 — `cursor_in_loupe()` (app.rs:2512-2522)
+
 ```rust
 pub(crate) fn cursor_in_loupe(&self) -> (f32, f32) {
     let (px, py) = (self.cursor.0 as f32, self.cursor.1 as f32);
@@ -50,9 +79,10 @@ pub(crate) fn cursor_in_loupe(&self) -> (f32, f32) {
     }
 }
 ```
-Left half: unchanged (`0..half`). Right half: `half` subtracted so it lands in the same `0..half` local space `loupe_area()` now uses. This is what makes `zoom_at`'s cursor-anchored zoom correct no matter which half the mouse is over — `zoom_at`, `fit_to_window`, `center`, `loupe_transform` need zero changes, they already consume `loupe_area()`/`cursor_in_loupe()` output generically.
+Left half unchanged (`0..half`); right half has `half` subtracted so it lands in the same local space. `zoom_at`, `fit_to_window`, `center`, `loupe_transform` need zero changes — they already consume `loupe_area()`/`cursor_in_loupe()` output generically.
 
-**3. `push_compare()` (app.rs:2566-2579)** — stop re-fitting every frame, use the live shared transform:
+### Task 3 — `push_compare()` (app.rs:2566-2579)
+
 ```rust
 fn push_compare(&mut self) {
     let after = self.current_adjustments();
@@ -69,9 +99,9 @@ fn push_compare(&mut self) {
     }
 }
 ```
-Drops the `(half_w, half_h)` params. `loupe_transform()` already reads `self.zoom`/`self.pan`/`loupe_area()` — now correctly half-width via step 1. Crop-sharing (`before.crop = after.crop`) untouched.
 
-**4. Call site (app.rs:3038-3051)** — drop now-unused args:
+### Task 4 — call site (app.rs:3038-3051)
+
 ```rust
 if self.compare && self.mode == ViewMode::Loupe {
     if let Some((x, y, w, h)) = image_viewport {
@@ -85,9 +115,8 @@ if self.compare && self.mode == ViewMode::Loupe {
 }
 ```
 
-**5. Delete `fit_transform_for` (app.rs:2548-2560)** — dead code after step 3 (only caller was `push_compare`; confirmed no other references).
+### Task 6 — `toggle_compare()` (app.rs:2581-2593)
 
-**6. `toggle_compare()` (app.rs:2581-2593)** — refit/recenter on toggle, since flipping `self.compare` silently changes what `loupe_area()` returns (full width ↔ half width) with no viewport-resize event to trigger the usual per-frame refit path:
 ```rust
 fn toggle_compare(&mut self) {
     if self.mode != ViewMode::Loupe {
@@ -110,17 +139,4 @@ fn toggle_compare(&mut self) {
     self.request_redraw();
 }
 ```
-If the view was "fitted", refit to the new area (mirrors the existing per-frame resize-refit branch). If the user had manually zoomed (not fitted), `center()` at the current zoom level rather than reusing stale `pan` (which was computed against the old area width and would leave the image shoved off-center or half-blank). Known minor trade-off: if the user was zoomed into a specific detail off-center, toggling Y recenters rather than preserving that exact focal point — zoom level itself is preserved, only pan resets to centered. Acceptable for this change; a focal-point-preserving version can be added later if it bothers the user in practice.
-
-## Verification
-
-- `cargo build --release` (or debug) to confirm it compiles clean, no leftover `fit_transform_for` references.
-- `cargo test` — no existing unit tests should be affected (this logic isn't in `#[cfg(test)]`-covered pure modules).
-- Manual test via `./target/release/lightphotos /path/to/photo.jpg`:
-  - Open an image with visible edits (adjust exposure/tone so before/after differ), press Y to enter compare.
-  - Scroll-zoom with mouse over the left half — confirm zoom anchors at the cursor and both halves zoom in lockstep (same crop region, before/after tone only differs).
-  - Move mouse to the right half, scroll-zoom again — confirm it anchors correctly there too (no jump/offset when crossing from left to right).
-  - Drag-pan while comparing — confirm both halves pan together.
-  - Press Y again to exit compare — confirm the single loupe view re-fits/recenters sanely, not corrupted pan.
-  - Toggle Y while already zoomed in (not fitted) — confirm recentered view at the same zoom level, no half-blank pane.
-  - Resize the window while in compare mode — confirm both halves stay in sync and correctly split.
+Known minor trade-off: if the user was zoomed into a specific detail off-center, toggling Y recenters rather than preserving that exact focal point — zoom level itself is preserved, only pan resets to centered. A focal-point-preserving version can be added later if it bothers the user in practice.
