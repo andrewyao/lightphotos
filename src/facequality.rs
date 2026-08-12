@@ -19,7 +19,9 @@
 use std::path::Path;
 
 use objc2::ClassType;
-use objc2_vision::{VNDetectFaceLandmarksRequest, VNFaceLandmarkRegion2D};
+use objc2_vision::{
+    VNDetectFaceLandmarksRequest, VNDetectFaceRectanglesRequest, VNFaceLandmarkRegion2D,
+};
 
 use crate::vision;
 
@@ -107,6 +109,46 @@ fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
             .iter()
             .map(|p| (p.x as f32, p.y as f32))
             .collect()
+    }
+}
+
+/// Face detection only — `VNDetectFaceRectanglesRequest`, no landmarks.
+///
+/// The cheap fallback for [`detect_faces`]: it answers "is there a face here,
+/// and where" without paying for the landmark constellation, which is the
+/// expensive and less reliable half of the request. Returns [`RawFace`]s with
+/// empty eye contours so it drops straight into [`face_quality`] — a photo
+/// scored this way simply reports `min_eye_openness: None`, i.e. "faces yes,
+/// blink unknown", which every consumer already has to handle.
+///
+/// Useful when landmarks prove too heavy for a background pass, or when a
+/// photo's landmarks come back garbage (profiles, small/distant faces) but the
+/// face count itself is still worth having.
+pub fn detect_face_rects(path: &Path) -> Result<Vec<RawFace>, String> {
+    unsafe {
+        let request = VNDetectFaceRectanglesRequest::new();
+        vision::perform_request(path, request.as_super().as_super())?;
+
+        let Some(results) = request.results() else {
+            return Ok(Vec::new());
+        };
+        Ok(results
+            .iter()
+            .map(|obs| {
+                let bb = obs.boundingBox();
+                RawFace {
+                    bounding_box: (
+                        bb.origin.x as f32,
+                        bb.origin.y as f32,
+                        bb.size.width as f32,
+                        bb.size.height as f32,
+                    ),
+                    confidence: obs.confidence(),
+                    left_eye: Vec::new(),
+                    right_eye: Vec::new(),
+                }
+            })
+            .collect())
     }
 }
 
@@ -421,5 +463,25 @@ mod tests {
         let path = std::env::temp_dir().join("facequality_does_not_exist.jpg");
         let _ = std::fs::remove_file(&path);
         assert!(detect_faces(&path).is_err());
+        assert!(detect_face_rects(&path).is_err());
+    }
+
+    // Same plumbing check as the landmarks request, for the cheap fallback —
+    // and it must feed `face_quality` cleanly, reporting "faces unknown-eyed"
+    // rather than tripping over its empty eye contours.
+    #[test]
+    fn rectangles_only_detection_runs_and_composes_with_scoring() {
+        let (w, h) = (64, 64);
+        let flat = vec![90u8; (w * h * 4) as usize];
+        let path = write_jpeg("facequality_test_rects.jpg", w, h, &flat);
+
+        let faces = detect_face_rects(&path).expect("Vision face-rect request should run");
+        assert!(faces.is_empty(), "expected no faces, got {}", faces.len());
+
+        let q = face_quality(&[face_with_eyes(Vec::new(), Vec::new())], 1.0);
+        assert_eq!(q.faces, 1);
+        assert_eq!(q.eye_state(), None);
+
+        let _ = std::fs::remove_file(&path);
     }
 }
