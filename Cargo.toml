@@ -48,12 +48,26 @@ objc2-vision = { version = "0.3.2", default-features = false, features = [
     "VNDetectFaceLandmarksRequest",
     "VNDetectFaceRectanglesRequest",
     "VNFaceLandmarks",
+    "VNGeneratePersonSegmentationRequest",
+    "VNGenerateForegroundInstanceMaskRequest",
+    "VNStatefulRequest",
+    "objc2-core-video",
     "VNObservation",
     # VNObservation::confidence is gated on VNTypes (VNConfidence lives there).
     "VNTypes",
     "objc2-core-graphics",
     # VNFaceLandmarkRegion2D's normalizedPoints (CGPoint) is gated on this.
     "objc2-core-foundation",
+] }
+# Vision hands segmentation masks back as CVPixelBuffers; this is what reads
+# their bytes (see `segmentation.rs`).
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CVBase",
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVReturn",
 ] }
 
 [profile.release]

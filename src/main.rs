@@ -42,6 +42,7 @@ mod navigation;
 mod paths;
 mod phash;
 mod renderer;
+mod segmentation;
 mod sharpness;
 mod thumbnail;
 mod trash;

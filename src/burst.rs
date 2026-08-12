@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn combined_scores_are_None_for_unscored_frames_regardless_of_eyes() {
+    fn a_blink_with_no_sharpness_score_stays_unscored() {
         assert_eq!(combined_score(None, Some(EyeState::Closed)), None);
     }
 
