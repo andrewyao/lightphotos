@@ -34,6 +34,13 @@ Standalone plans in this folder, not part of the roadmap sequence:
 - [x] Task 11: Split app.rs and ui.rs into submodules — done, commit `6a917e3` (files: plans/refactor-split-app-ui-modules.md)
 - [ ] Task 12: Fix saved adjustments not applied until compare toggle (files: plans/fix-adjustments-not-applied-on-open.md)
 
+Research notes in this folder — **not executable. No task numbers, no checkboxes,
+nothing here for plan-runner to do. Skip this section.**
+
+- Web/WASM port feasibility — can a Rust+WASM browser build match the native app's
+  speed? Go/no-go assessment, open question, not a decision
+  (files: plans/web-wasm-port-feasibility.md)
+
 <!--
 Tips:
 - Make each task independently verifiable (a test, a build, a specific output).
