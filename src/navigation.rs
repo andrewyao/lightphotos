@@ -194,6 +194,7 @@ pub fn flatten_visible_tree(
 pub struct Playlist {
     entries: Vec<PathBuf>,
     index: usize,
+    dir: PathBuf,
 }
 
 impl Playlist {
@@ -202,7 +203,11 @@ impl Playlist {
     /// directly (→ Grid mode). Unlike `from_file`, it does NOT walk a parent.
     pub fn from_dir(dir: &Path) -> Self {
         let entries = sorted_images_in(dir);
-        Self { entries, index: 0 }
+        Self {
+            entries,
+            index: 0,
+            dir: dir.to_path_buf(),
+        }
     }
 
     /// Build a playlist from the folder containing `current`, positioned on it.
@@ -225,13 +230,23 @@ impl Playlist {
             entries.push(current.to_path_buf());
         }
 
-        Self { entries, index }
+        Self {
+            entries,
+            index,
+            dir: dir.to_path_buf(),
+        }
     }
 
     /// Index of the entry the playlist was positioned on at construction
     /// (the opened file for `from_file`, or 0 for `from_dir`).
     pub fn position(&self) -> usize {
         self.index
+    }
+
+    /// The directory this playlist was built from — the catalog's sidecar
+    /// directory for every entry in it.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// The full sorted image list (the filtered view is derived over this).

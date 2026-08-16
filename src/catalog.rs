@@ -1,36 +1,48 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Global edits catalog — the persistence layer for ratings + develop edits.
+//! Per-photo sidecar catalog — the persistence layer for ratings + develop edits.
 //!
-//! Everything lives in ONE app-managed SQLite database at
-//! `~/Library/Application Support/com.lightphotos/catalog.db`. Originals are
-//! never touched and nothing is ever written into photo folders.
+//! Each photo's rating/adjustments/touchups/rotation lives in its own file,
+//! `<photo's directory>/.lightphotos/<photo filename>.xmp`. **The `.xmp`
+//! extension here is cosmetic only** — the body is our own compact JSON
+//! serialization of [`ImageRecord`], NOT real Adobe XMP/RDF. Do not "fix"
+//! this into real XML; the extension was picked because it reads as a
+//! familiar sidecar-file convention, nothing more.
 //!
-//! The DB has a single `images(path, rating, adjustments, touchups, rotation)` table keyed
-//! by the normalized absolute path; `adjustments` holds the serde JSON of a
-//! non-identity [`Adjustments`] (NULL for identity edits). An in-memory
-//! `HashMap` mirrors the table so reads stay allocation-cheap; writes are
-//! single-row UPSERT/DELETE (no whole-file rewrite).
+//! Sidecars travel with the photos: moving, copying, or sharing a folder
+//! carries its `.lightphotos/` subfolder — and thus every rating/edit —
+//! along with it, unlike the old single global SQLite catalog, which
+//! orphaned everything the moment a folder moved. Originals are never
+//! touched, and `.lightphotos` is created lazily (only on the first write
+//! for that directory), so browsing a folder read-only never litters it.
 //!
-//! Legacy JSON catalogs (`catalog.json`, schema v1 `{ratings}` or v2 `{images}`)
-//! are migrated into SQLite on first load and retired to `catalog.json.bak`.
+//! [`Catalog`] is scoped to one directory at a time (the "active"
+//! directory) — there is no cross-folder cache or index. Opening a
+//! different folder calls [`Catalog::open_dir`], which reloads the
+//! in-memory read cache from that directory's `.lightphotos/*.xmp` files.
+//! Individual reads/writes locate their sidecar directly from the photo's
+//! own path (not from the active directory), so they stay correct even if
+//! called for a path outside it.
 //!
-//! Path keys are normalized via `canonicalize()` when it succeeds, else the
-//! path is used as-given (so nonexistent / moved files don't panic).
+//! Legacy state (the old `catalog.db` SQLite file, or an older
+//! `catalog.json`) is migrated once via [`migrate_legacy_catalog`], fanning
+//! rows out to the per-directory sidecars they belong to.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::develop::{Adjustments, TouchUp};
-use crate::paths::normalize;
 
-/// SQLite `user_version` for the current schema (bumped when columns change).
-const SQLITE_SCHEMA_VERSION: i64 = 2;
+/// Hidden per-directory subfolder holding that directory's sidecar files.
+const SIDECAR_DIR: &str = ".lightphotos";
+/// Sidecar file extension (cosmetic only — see module docs).
+const SIDECAR_EXT: &str = "xmp";
+/// Legacy global SQLite catalog, migrated then retired to `<name>.bak`.
 const CATALOG_DB: &str = "catalog.db";
-/// Legacy JSON catalog, migrated then renamed to `<CATALOG_FILE>.bak`.
+/// Legacy JSON catalog (pre-dates SQLite), migrated then retired to `<name>.bak`.
 const CATALOG_FILE: &str = "catalog.json";
 
 /// Per-image persisted state: an optional rating plus develop edits. Identity
@@ -55,8 +67,8 @@ fn is_zero_rot(v: &u8) -> bool {
 
 impl ImageRecord {
     /// True when this record carries nothing worth persisting (no rating,
-    /// identity edit, no rotation) — such entries are dropped to keep the file
-    /// small.
+    /// identity edit, no rotation) — such a record's sidecar is deleted
+    /// rather than written, keeping unrated/unedited folders sidecar-free.
     fn is_empty(&self) -> bool {
         self.rating.is_none()
             && self.adjustments.is_identity()
@@ -81,245 +93,101 @@ struct CatalogFileV1 {
     ratings: HashMap<PathBuf, u8>,
 }
 
-/// In-memory catalog of per-image records, backed by a single SQLite database.
+/// In-memory catalog of per-image records, backed by per-photo sidecar files
+/// under the active directory's `.lightphotos/` subfolder.
 ///
-/// The `images` map is a read cache mirroring the DB; `conn` is `None` only when
-/// the database could not be opened, in which case the catalog behaves as empty
-/// and every write records an error for the UI (rather than panicking).
+/// `images` is a read cache mirroring the active directory's sidecars, keyed
+/// by filename (the catalog is scoped to one directory at a time — see the
+/// module docs). Reads/writes for a path outside the active directory still
+/// resolve correctly (they derive their sidecar location from the path
+/// itself), they just won't be reflected in this particular cache until
+/// [`Catalog::open_dir`] is called for their directory.
 pub struct Catalog {
-    images: HashMap<PathBuf, ImageRecord>,
-    /// Raw `adjustments` blobs that failed to deserialize on load, kept verbatim
-    /// so an unrelated write (rating/rotation) can't clobber a photo's edits with
-    /// NULL. Keyed like `images`; cleared once the user sets a valid adjustment.
-    raw_adjustments: HashMap<PathBuf, String>,
-    /// Directory holding `catalog.db` (created on open).
-    dir: PathBuf,
-    /// Full path to `catalog.db`.
-    db_file: PathBuf,
-    /// Open connection, or `None` if the database is unavailable.
-    conn: Option<Connection>,
-    /// The most recent persist failure, if any, awaiting delivery to the user.
-    /// Set whenever a write fails; drained by [`Catalog::take_error`] so the UI
-    /// can surface a toast instead of the change being silently lost.
+    images: HashMap<OsString, ImageRecord>,
+    /// The directory currently active, or `None` before the first
+    /// [`Catalog::open_dir`] call — degrades to an empty catalog rather than
+    /// panicking.
+    dir: Option<PathBuf>,
+    /// The most recent persist failure, if any, awaiting delivery to the
+    /// user. Set whenever a write fails; drained by [`Catalog::take_error`]
+    /// so the UI can surface a toast instead of the change being silently
+    /// lost.
     last_error: Option<String>,
 }
 
 impl Catalog {
-    /// Load the catalog from the default app-support location.
-    ///
-    /// A missing database yields an empty catalog (never panics). First migrates
-    /// the pre-rename `com.imageviewer` directory if present, so ratings and
-    /// edits made under the old name are preserved.
-    pub fn load() -> Catalog {
-        let dir = default_dir();
-        crate::paths::migrate_legacy_dir(&dir, &legacy_dir());
-        Catalog::with_dir(dir)
+    /// A directory-less catalog with nothing loaded yet. Used at startup,
+    /// before any folder/file has been opened.
+    pub fn new() -> Catalog {
+        Catalog {
+            images: HashMap::new(),
+            dir: None,
+            last_error: None,
+        }
     }
 
-    /// Load the catalog rooted at an explicit directory.
-    ///
-    /// Same semantics as [`Catalog::load`] but lets tests point at a temp dir so
-    /// they never touch the real catalog. Opens (creating if needed) the SQLite
-    /// DB, migrates any legacy `catalog.json`, then loads all rows into the read
-    /// cache. A DB that cannot be opened degrades to an empty catalog.
+    /// `new()` + `open_dir(&dir)` in one step — a convenience mainly used by
+    /// tests, which always know their directory up front.
+    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn with_dir(dir: PathBuf) -> Catalog {
-        let db_file = dir.join(CATALOG_DB);
-        let mut cat = Catalog {
-            images: HashMap::new(),
-            raw_adjustments: HashMap::new(),
-            dir,
-            db_file,
-            conn: None,
-            last_error: None,
-        };
-        let _ = std::fs::create_dir_all(&cat.dir);
-        cat.open_migrate_load();
+        let mut cat = Catalog::new();
+        cat.open_dir(&dir);
         cat
     }
 
-    /// Open the DB, migrate any legacy JSON, and fill the read cache. If the DB
-    /// exists but can't be opened (e.g. a corrupt file), set it aside as
-    /// `catalog.db.corrupt` and retry once from a fresh database, so a bad file
-    /// can't leave the catalog permanently unusable.
-    fn open_migrate_load(&mut self) {
-        match self.open_and_init() {
-            Ok(conn) => self.conn = Some(conn),
-            Err(e) => {
-                eprintln!("[catalog] could not open {}: {e}", self.db_file.display());
-                if self.db_file.exists() {
-                    let corrupt = self.db_file.with_extension("db.corrupt");
-                    if std::fs::rename(&self.db_file, &corrupt).is_ok() {
-                        match self.open_and_init() {
-                            Ok(conn) => {
-                                self.conn = Some(conn);
-                                self.last_error = Some(format!(
-                                    "Catalog database was unreadable and was reset; \
-                                     the previous file is saved as {}",
-                                    corrupt.display()
-                                ));
-                            }
-                            Err(e2) => {
-                                eprintln!("[catalog] recovery open failed: {e2} (starting empty)")
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        if self.conn.is_some() {
-            self.migrate_legacy_json();
-            self.load_into_cache();
-        }
+    /// (Re)point the catalog at `dir` as the active directory and rebuild the
+    /// read cache from `dir/.lightphotos/*.xmp`. Always reloads from disk,
+    /// even if `dir` equals the previously-active directory, so an external
+    /// change (another process, a hand-fixed sidecar) is picked up. A
+    /// missing `.lightphotos` directory is not an error — it's just an empty
+    /// catalog; the directory itself is never eagerly created here.
+    pub fn open_dir(&mut self, dir: &Path) {
+        self.dir = Some(dir.to_path_buf());
+        self.images.clear();
+        self.load_into_cache();
     }
 
-    /// Open the SQLite database and ensure the schema exists.
-    fn open_and_init(&self) -> rusqlite::Result<Connection> {
-        let conn = Connection::open(&self.db_file)?;
-        conn.pragma_update(None, "user_version", SQLITE_SCHEMA_VERSION)?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS images (
-                 path       TEXT PRIMARY KEY,
-                 rating     INTEGER,
-                 adjustments TEXT,
-                 touchups   TEXT,
-                 rotation   INTEGER NOT NULL DEFAULT 0
-             )",
-            [],
-        )?;
-        let _ = conn.execute("ALTER TABLE images ADD COLUMN touchups TEXT", []);
-        Ok(conn)
-    }
-
-    /// The open connection, or a descriptive error when the DB is unavailable.
-    fn conn(&self) -> Result<&Connection, String> {
-        self.conn
-            .as_ref()
-            .ok_or_else(|| "database unavailable".to_string())
-    }
-
-    /// True when the `images` table already holds at least one row.
-    fn db_has_rows(&self) -> bool {
-        let Some(conn) = self.conn.as_ref() else {
-            return false;
-        };
-        conn.query_row("SELECT COUNT(*) FROM images", [], |r| r.get::<_, i64>(0))
-            .unwrap_or(0)
-            > 0
-    }
-
-    /// One-time import of a legacy `catalog.json` (v1 or v2) into SQLite. On
-    /// success the JSON is renamed to `catalog.json.bak`; corrupt JSON is left
-    /// in place and ignored so the catalog simply starts empty.
-    fn migrate_legacy_json(&mut self) {
-        let json = self.dir.join(CATALOG_FILE);
-        if !json.exists() {
-            return;
-        }
-        // Never import over an already-populated DB: a catalog.json that
-        // reappears (cloud sync, a restore, a downgrade→upgrade) would otherwise
-        // overwrite newer rows with stale values. Leave the JSON untouched.
-        if self.db_has_rows() {
-            eprintln!(
-                "[catalog] catalog.json present but the database is already \
-                 populated; leaving the JSON in place"
-            );
-            return;
-        }
-        let Ok(bytes) = std::fs::read(&json) else {
-            return;
-        };
-        match parse_catalog(&bytes) {
-            Ok(images) => {
-                if let Err(e) = self.insert_all(&images) {
-                    eprintln!("[catalog] JSON migration failed: {e}");
-                    return; // leave the JSON in place for a retry next launch
-                }
-                let bak = json.with_extension("json.bak");
-                if bak.exists() {
-                    // Don't clobber an earlier backup; keep this JSON as-is.
-                    eprintln!(
-                        "[catalog] {} already exists; leaving catalog.json in place",
-                        bak.display()
-                    );
-                } else if let Err(e) = std::fs::rename(&json, &bak) {
-                    eprintln!("[catalog] could not retire catalog.json: {e}");
-                }
-            }
-            Err(e) => eprintln!("[catalog] ignoring corrupt catalog.json: {e}"),
-        }
-    }
-
-    /// Insert many records in a single transaction (used for migration).
-    fn insert_all(&self, images: &HashMap<PathBuf, ImageRecord>) -> rusqlite::Result<()> {
-        let Some(conn) = self.conn.as_ref() else {
-            return Ok(());
-        };
-        let tx = conn.unchecked_transaction()?;
-        for (path, rec) in images {
-            if !rec.is_empty() {
-                let adj = serialize_adjustments(&rec.adjustments)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                let touchups = serialize_touchups(&rec.touchups)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                upsert_row(
-                    &tx,
-                    path,
-                    rec.rating,
-                    adj.as_deref(),
-                    touchups.as_deref(),
-                    rec.rotation,
-                )?;
-            }
-        }
-        tx.commit()
-    }
-
-    /// Populate the in-memory read cache from the DB.
+    /// Populate the in-memory read cache from the active directory's sidecars.
     fn load_into_cache(&mut self) {
-        // Read raw column tuples first, releasing the connection borrow before
-        // we mutate `self` (parsing + cache / preserved-blob updates).
-        let (rows, skipped) = {
-            let Some(conn) = self.conn.as_ref() else {
-                return;
+        let Some(dir) = self.dir.clone() else {
+            return;
+        };
+        let entries = match std::fs::read_dir(dir.join(SIDECAR_DIR)) {
+            Ok(rd) => rd,
+            Err(_) => return, // no .lightphotos yet: empty catalog, not an error
+        };
+
+        let mut skipped = 0usize;
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some(SIDECAR_EXT) {
+                continue;
+            }
+            // file_stem() strips exactly the trailing ".xmp", correctly
+            // preserving a name like "PHOTO1.ARW" which itself contains a dot.
+            let Some(stem) = path.file_stem() else {
+                continue;
             };
-            let mut stmt = match conn
-                .prepare("SELECT path, rating, adjustments, touchups, rotation FROM images")
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[catalog] could not read rows: {e}");
-                    return;
-                }
-            };
-            let mapped = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<u8>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, u8>(4)?,
-                ))
-            });
-            let iter = match mapped {
-                Ok(i) => i,
-                Err(e) => {
-                    eprintln!("[catalog] could not map rows: {e}");
-                    return;
-                }
-            };
-            let mut rows = Vec::new();
-            let mut skipped = 0usize;
-            for row in iter {
-                match row {
-                    Ok(t) => rows.push(t),
+            match std::fs::read(&path) {
+                Ok(bytes) => match serde_json::from_slice::<ImageRecord>(&bytes) {
+                    Ok(rec) if !rec.is_empty() => {
+                        self.images.insert(stem.to_os_string(), rec);
+                    }
+                    Ok(_) => {} // an empty record on disk: nothing to cache
                     Err(e) => {
-                        eprintln!("[catalog] skipping unreadable row: {e}");
+                        eprintln!("[catalog] unreadable sidecar {}: {e}", path.display());
                         skipped += 1;
                     }
+                },
+                Err(e) => {
+                    eprintln!("[catalog] could not read {}: {e}", path.display());
+                    skipped += 1;
                 }
             }
-            (rows, skipped)
-        };
+        }
 
         if skipped > 0 {
             self.last_error = Some(format!(
@@ -327,44 +195,6 @@ impl Catalog {
                 if skipped == 1 { "y" } else { "ies" },
                 if skipped == 1 { "was" } else { "were" },
             ));
-        }
-
-        for (path, rating, adj_json, touchups_json, rotation) in rows {
-            let key = PathBuf::from(path);
-            let adjustments = match adj_json {
-                None => Adjustments::default(),
-                Some(s) => match serde_json::from_str::<Adjustments>(&s) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        // Preserve the raw blob so an unrelated write can't
-                        // overwrite the edit with NULL, and surface the problem.
-                        eprintln!(
-                            "[catalog] unreadable adjustments for {}: {e}",
-                            key.display()
-                        );
-                        self.raw_adjustments.insert(key.clone(), s);
-                        self.last_error = Some(format!(
-                            "Some develop edits for {} could not be read; \
-                             they are preserved unchanged.",
-                            key.display()
-                        ));
-                        Adjustments::default()
-                    }
-                },
-            };
-            let touchups = touchups_json
-                .as_deref()
-                .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_default();
-            self.images.insert(
-                key,
-                ImageRecord {
-                    rating,
-                    adjustments,
-                    touchups,
-                    rotation,
-                },
-            );
         }
     }
 
@@ -377,183 +207,351 @@ impl Catalog {
 
     /// Record a persist failure: log it and stash it for the UI to surface.
     fn note_persist_error(&mut self, e: impl std::fmt::Display) {
-        let msg = format!("Failed to save catalog to {}: {e}", self.db_file.display());
+        let msg = format!("Failed to save catalog entry: {e}");
         eprintln!("[catalog] {msg}");
         self.last_error = Some(msg);
     }
 
-    /// Rating for `path`, if any. Path is normalized the same way as `set`.
+    /// Rating for `path`, if any.
     pub fn get(&self, path: &Path) -> Option<u8> {
-        self.images.get(&normalize(path)).and_then(|r| r.rating)
+        path.file_name()
+            .and_then(|n| self.images.get(n))
+            .and_then(|r| r.rating)
     }
 
     /// Set the rating for `path`, clamped to `0..=5`. A rating of `0` removes
-    /// the rating. If the record ends up empty (no rating + identity edit) the
-    /// whole entry is dropped. The catalog is then persisted atomically.
+    /// the rating. If the record ends up empty (no rating + identity edit)
+    /// its sidecar is deleted. Persisted atomically.
     pub fn set(&mut self, path: &Path, stars: u8) {
-        let key = normalize(path);
         let stars = stars.min(5);
         let rating = if stars == 0 { None } else { Some(stars) };
-        self.update(key, |rec| rec.rating = rating);
+        self.update(path, |rec| rec.rating = rating);
     }
 
     /// Develop adjustments for `path` (identity when unset).
     pub fn adjustments(&self, path: &Path) -> Adjustments {
-        self.images
-            .get(&normalize(path))
+        path.file_name()
+            .and_then(|n| self.images.get(n))
             .map(|r| r.adjustments)
             .unwrap_or_default()
     }
 
     /// Store develop adjustments for `path`. If the record ends up empty (no
-    /// rating + identity edit) the entry is dropped. Persisted atomically.
+    /// rating + identity edit) its sidecar is deleted. Persisted atomically.
     pub fn set_adjustments(&mut self, path: &Path, adj: &Adjustments) {
-        let key = normalize(path);
         let adj = *adj;
-        self.update(key, |rec| rec.adjustments = adj);
+        self.update(path, |rec| rec.adjustments = adj);
     }
 
     pub fn touchups(&self, path: &Path) -> Vec<TouchUp> {
-        self.images
-            .get(&normalize(path))
+        path.file_name()
+            .and_then(|n| self.images.get(n))
             .map(|r| r.touchups.clone())
             .unwrap_or_default()
     }
 
     pub fn set_touchups(&mut self, path: &Path, touchups: &[TouchUp]) {
-        let key = normalize(path);
         let touchups = touchups.to_vec();
-        self.update(key, |rec| rec.touchups = touchups);
+        self.update(path, |rec| rec.touchups = touchups);
     }
 
     /// Manual rotation (90° CW steps, 0..=3) for `path`.
     pub fn rotation(&self, path: &Path) -> u8 {
-        self.images
-            .get(&normalize(path))
+        path.file_name()
+            .and_then(|n| self.images.get(n))
             .map(|r| r.rotation)
             .unwrap_or(0)
     }
 
     /// Store the manual rotation for `path` (0..=3). Persisted atomically.
     pub fn set_rotation(&mut self, path: &Path, rotation: u8) {
-        let key = normalize(path);
         let rotation = rotation % 4;
-        self.update(key, |rec| rec.rotation = rotation);
+        self.update(path, |rec| rec.rotation = rotation);
     }
 
-    /// Forget any record for `path` (rating + adjustments). Used when a photo is
-    /// deleted from disk. A no-op when nothing was stored.
+    /// Forget any record for `path` (rating + adjustments + touchups +
+    /// rotation) by deleting its sidecar. Used when a photo is deleted from
+    /// disk. A no-op when nothing was stored. The sidecar is deleted outright
+    /// (not moved to Trash) — it has no meaningful pairing to its photo once
+    /// separated from `.lightphotos/`, and this matches the old catalog's
+    /// unconditional delete-on-remove behavior.
     pub fn remove(&mut self, path: &Path) {
-        let key = normalize(path);
-        let had = self.images.remove(&key).is_some();
-        let had_raw = self.raw_adjustments.remove(&key).is_some();
-        if had || had_raw {
-            if let Err(e) = self.delete_row(&key) {
-                self.note_persist_error(e);
-            }
+        if let Some(name) = path.file_name() {
+            self.images.remove(name);
+        }
+        if let Err(e) = self.delete_sidecar(path) {
+            self.note_persist_error(e);
         }
     }
 
-    /// Apply `mutate` to the record for `key` (creating it if needed), drop the
-    /// entry if it became empty, then persist just that row.
-    fn update(&mut self, key: PathBuf, mutate: impl FnOnce(&mut ImageRecord)) {
-        let mut rec = self.images.remove(&key).unwrap_or_default();
+    /// Apply `mutate` to the record for `path` (creating it if needed), drop
+    /// its sidecar if it became empty, then persist just that one file.
+    fn update(&mut self, path: &Path, mutate: impl FnOnce(&mut ImageRecord)) {
+        let Some(name) = path.file_name().map(|n| n.to_os_string()) else {
+            return;
+        };
+        let mut rec = self.images.remove(&name).unwrap_or_default();
         mutate(&mut rec);
-        // A real (parseable) edit supersedes any preserved-but-unreadable blob.
-        if !rec.adjustments.is_identity() {
-            self.raw_adjustments.remove(&key);
-        }
-        // A record backed by a preserved raw blob is not "empty": deleting it
-        // would discard the very edit we're trying to keep.
-        let empty = rec.is_empty() && !self.raw_adjustments.contains_key(&key);
+        let empty = rec.is_empty();
         let result = if empty {
-            self.delete_row(&key)
+            self.delete_sidecar(path)
         } else {
-            self.write_row(&key, &rec)
+            self.write_sidecar(path, &rec)
         };
         if !empty {
-            self.images.insert(key, rec);
+            self.images.insert(name, rec);
         }
         if let Err(e) = result {
             self.note_persist_error(e);
         }
     }
 
-    /// UPSERT a single record's row into the DB.
-    fn write_row(&self, key: &Path, rec: &ImageRecord) -> Result<(), String> {
-        let conn = self.conn()?;
-        let adj = self.adj_column(key, rec)?;
-        let touchups = serialize_touchups(&rec.touchups).map_err(|e| e.to_string())?;
-        upsert_row(
-            conn,
-            key,
-            rec.rating,
-            adj.as_deref(),
-            touchups.as_deref(),
-            rec.rotation,
-        )
-        .map_err(|e| e.to_string())
+    fn write_sidecar(&self, path: &Path, rec: &ImageRecord) -> Result<(), String> {
+        let sidecar =
+            sidecar_path(path).ok_or_else(|| "cannot determine sidecar path".to_string())?;
+        write_sidecar_file(&sidecar, rec)
     }
 
-    /// DELETE a single row (no-op if absent).
-    fn delete_row(&self, key: &Path) -> Result<(), String> {
-        let conn = self.conn()?;
-        conn.execute("DELETE FROM images WHERE path = ?1", [path_key(key)])
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    /// The value for the `adjustments` column: the serialized edit, or a
-    /// preserved unreadable blob when the in-memory edit is still identity,
-    /// else `None` (SQL NULL).
-    fn adj_column(&self, key: &Path, rec: &ImageRecord) -> Result<Option<String>, String> {
-        if rec.adjustments.is_identity() {
-            Ok(self.raw_adjustments.get(key).cloned())
-        } else {
-            serialize_adjustments(&rec.adjustments).map_err(|e| e.to_string())
+    fn delete_sidecar(&self, path: &Path) -> Result<(), String> {
+        let Some(sidecar) = sidecar_path(path) else {
+            return Ok(());
+        };
+        match std::fs::remove_file(&sidecar) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
         }
     }
 }
 
-/// The TEXT primary-key form of a (normalized) path.
-fn path_key(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
-/// Serialize adjustments for storage: `None` (SQL NULL) for identity edits so
-/// rows stay compact, else the compact JSON string.
-fn serialize_adjustments(adj: &Adjustments) -> serde_json::Result<Option<String>> {
-    if adj.is_identity() {
-        Ok(None)
-    } else {
-        serde_json::to_string(adj).map(Some)
+impl Default for Catalog {
+    fn default() -> Catalog {
+        Catalog::new()
     }
 }
 
-fn serialize_touchups(touchups: &[TouchUp]) -> serde_json::Result<Option<String>> {
-    if touchups.is_empty() {
-        Ok(None)
-    } else {
-        serde_json::to_string(touchups).map(Some)
-    }
+/// The sidecar path for `path`: `<path's directory>/.lightphotos/<filename>.xmp`.
+/// `None` when `path` has no parent or no filename (e.g. `/` or `..`).
+/// Built via `OsString` concatenation (not a lossy `to_string_lossy` round
+/// trip) so non-UTF8 filenames stay exact.
+fn sidecar_path(path: &Path) -> Option<PathBuf> {
+    let dir = path.parent()?;
+    let name = path.file_name()?;
+    let mut sidecar_name = name.to_os_string();
+    sidecar_name.push(".");
+    sidecar_name.push(SIDECAR_EXT);
+    Some(dir.join(SIDECAR_DIR).join(sidecar_name))
 }
 
-/// UPSERT a single row from precomputed column values (works on a connection or
-/// a transaction).
-fn upsert_row(
-    conn: &Connection,
-    path: &Path,
-    rating: Option<u8>,
-    adjustments: Option<&str>,
-    touchups: Option<&str>,
-    rotation: u8,
-) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO images (path, rating, adjustments, touchups, rotation) VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(path) DO UPDATE SET rating = ?2, adjustments = ?3, touchups = ?4, rotation = ?5",
-        rusqlite::params![path_key(path), rating, adjustments, touchups, rotation],
-    )?;
+/// Write `rec` as pretty-printed JSON to `sidecar`, creating its parent
+/// `.lightphotos` directory as needed. Atomic: writes to a `.tmp` sibling
+/// then renames over the target, matching the existing convention in
+/// `export.rs`/`thumbnail.rs`.
+fn write_sidecar_file(sidecar: &Path, rec: &ImageRecord) -> Result<(), String> {
+    let parent = sidecar
+        .parent()
+        .ok_or_else(|| "sidecar path has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec_pretty(rec).map_err(|e| e.to_string())?;
+    let tmp = sidecar.with_extension(format!("{SIDECAR_EXT}.tmp"));
+    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+    if let Err(e) = std::fs::rename(&tmp, sidecar) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
     Ok(())
+}
+
+/// Outcome of a [`migrate_legacy_catalog`] pass, mainly useful for tests and
+/// diagnostics; `App::new()` currently discards it (failures are non-fatal
+/// and retried on the next launch).
+#[allow(dead_code)] // fields read from #[cfg(test)] today; App::new() discards the value
+pub struct MigrationSummary {
+    /// Rows successfully written as sidecars (or already empty/migrated).
+    pub migrated: usize,
+    /// Rows that could not be migrated this pass (missing/unwritable target
+    /// directory) — retried on the next call since the source is left intact.
+    pub skipped: usize,
+    /// True when there was nothing to migrate (no legacy file found).
+    pub already_done: bool,
+}
+
+/// One-time, directory-independent migration of the old global catalog
+/// (`catalog.db` SQLite, or a pre-SQLite `catalog.json`) into per-photo
+/// sidecars. Safe to call on every launch: a fast `Path::exists()` check
+/// makes it a no-op once fully migrated, and a partial pass (some rows'
+/// target directories missing/unwritable) is safely retriable — the legacy
+/// file is only retired once every row in it resolved with zero skips.
+pub fn migrate_legacy_catalog() -> MigrationSummary {
+    let dir = default_dir();
+    crate::paths::migrate_legacy_dir(&dir, &legacy_dir());
+
+    let db_file = dir.join(CATALOG_DB);
+    if db_file.exists() {
+        return migrate_sqlite(&db_file);
+    }
+    let json_file = dir.join(CATALOG_FILE);
+    if json_file.exists() {
+        return migrate_json(&json_file);
+    }
+    MigrationSummary {
+        migrated: 0,
+        skipped: 0,
+        already_done: true,
+    }
+}
+
+/// Fan `images` out to sidecar files, one per row. Returns `(migrated,
+/// skipped)`. A row is "migrated" if it's empty (nothing to write), its
+/// sidecar already exists (idempotent re-run), or the write succeeds.
+/// "Skipped" covers a missing/unwritable target directory or a write
+/// failure — always retriable on a later pass.
+fn fan_out(images: &HashMap<PathBuf, ImageRecord>) -> (usize, usize) {
+    let mut migrated = 0usize;
+    let mut skipped = 0usize;
+    for (path, rec) in images {
+        if rec.is_empty() {
+            migrated += 1;
+            continue;
+        }
+        let Some(sidecar) = sidecar_path(path) else {
+            skipped += 1;
+            continue;
+        };
+        if sidecar.exists() {
+            migrated += 1;
+            continue;
+        }
+        match path.parent() {
+            Some(parent) if parent.exists() => match write_sidecar_file(&sidecar, rec) {
+                Ok(()) => migrated += 1,
+                Err(e) => {
+                    eprintln!("[catalog] migration: could not write {}: {e}", sidecar.display());
+                    skipped += 1;
+                }
+            },
+            _ => skipped += 1, // parent directory missing/unmounted: retry later
+        }
+    }
+    (migrated, skipped)
+}
+
+fn migrate_sqlite(db_file: &Path) -> MigrationSummary {
+    let images = match read_legacy_sqlite_rows(db_file) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[catalog] migration: could not read {}: {e}", db_file.display());
+            return MigrationSummary {
+                migrated: 0,
+                skipped: 0,
+                already_done: false,
+            };
+        }
+    };
+    let (migrated, skipped) = fan_out(&images);
+    if skipped == 0 {
+        retire(db_file, "db.bak");
+    }
+    eprintln!("[catalog] migration (sqlite): {migrated} migrated, {skipped} skipped");
+    MigrationSummary {
+        migrated,
+        skipped,
+        already_done: false,
+    }
+}
+
+fn migrate_json(json_file: &Path) -> MigrationSummary {
+    let images = match std::fs::read(json_file).map(|b| parse_catalog(&b)) {
+        Ok(Ok(m)) => m,
+        Ok(Err(e)) => {
+            eprintln!("[catalog] ignoring corrupt {}: {e}", json_file.display());
+            return MigrationSummary {
+                migrated: 0,
+                skipped: 0,
+                already_done: false,
+            };
+        }
+        Err(e) => {
+            eprintln!("[catalog] migration: could not read {}: {e}", json_file.display());
+            return MigrationSummary {
+                migrated: 0,
+                skipped: 0,
+                already_done: false,
+            };
+        }
+    };
+    let (migrated, skipped) = fan_out(&images);
+    if skipped == 0 {
+        retire(json_file, "json.bak");
+    }
+    eprintln!("[catalog] migration (json): {migrated} migrated, {skipped} skipped");
+    MigrationSummary {
+        migrated,
+        skipped,
+        already_done: false,
+    }
+}
+
+/// Rename `file` to `<file>.<new_ext>` (e.g. `catalog.db` → `catalog.db.bak`),
+/// leaving it in place if a backup already exists there (don't clobber an
+/// earlier one) or the rename fails.
+fn retire(file: &Path, new_ext: &str) {
+    let bak = file.with_extension(new_ext);
+    if bak.exists() {
+        eprintln!(
+            "[catalog] {} already exists; leaving {} in place",
+            bak.display(),
+            file.display()
+        );
+        return;
+    }
+    if let Err(e) = std::fs::rename(file, &bak) {
+        eprintln!("[catalog] could not retire {}: {e}", file.display());
+    }
+}
+
+/// Read every row of the legacy SQLite `images` table. Unreadable
+/// adjustments/touchups blobs degrade to identity/empty rather than failing
+/// the whole read — the source DB is being retired regardless, so best-effort
+/// recovery beats losing an entire row over one bad column.
+fn read_legacy_sqlite_rows(db_file: &Path) -> rusqlite::Result<HashMap<PathBuf, ImageRecord>> {
+    let conn = rusqlite::Connection::open(db_file)?;
+    let mut stmt =
+        conn.prepare("SELECT path, rating, adjustments, touchups, rotation FROM images")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<u8>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, u8>(4)?,
+        ))
+    })?;
+
+    let mut out = HashMap::new();
+    for row in rows {
+        let Ok((path, rating, adj_json, touchups_json, rotation)) = row else {
+            continue;
+        };
+        let adjustments = adj_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        let touchups = touchups_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        out.insert(
+            PathBuf::from(path),
+            ImageRecord {
+                rating,
+                adjustments,
+                touchups,
+                rotation,
+            },
+        );
+    }
+    Ok(out)
 }
 
 /// Parse catalog bytes, migrating v1 → v2 as needed. Returns the in-memory
@@ -616,12 +614,16 @@ mod tests {
     fn unique_tmp_dir() -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "imageviewer-catalog-test-{}-{}",
+            "lightphotos-catalog-test-{}-{}",
             std::process::id(),
             n
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn sidecar_for(dir: &Path, filename: &str) -> PathBuf {
+        dir.join(SIDECAR_DIR).join(format!("{filename}.xmp"))
     }
 
     #[test]
@@ -633,7 +635,7 @@ mod tests {
             let mut cat = Catalog::with_dir(dir.clone());
             cat.set(&p, 3);
             assert_eq!(cat.get(&p), Some(3));
-        } // drop
+        }
 
         let reloaded = Catalog::with_dir(dir.clone());
         assert_eq!(reloaded.get(&p), Some(3));
@@ -671,71 +673,6 @@ mod tests {
 
         let reloaded = Catalog::with_dir(dir.clone());
         assert_eq!(reloaded.get(&p), Some(5));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn migrates_v1_json_to_sqlite() {
-        let dir = unique_tmp_dir();
-        let json = dir.join("catalog.json");
-        let p = dir.join("photo.jpg");
-        let key = normalize(&p);
-
-        // Hand-write a v1 JSON file.
-        let v1 = serde_json::json!({
-            "version": 1,
-            "ratings": { key.to_str().unwrap(): 4u8 },
-        });
-        std::fs::write(&json, serde_json::to_vec_pretty(&v1).unwrap()).unwrap();
-
-        // Loading migrates the rating into SQLite and retires the JSON file.
-        {
-            let cat = Catalog::with_dir(dir.clone());
-            assert_eq!(cat.get(&p), Some(4));
-        }
-        assert!(
-            !json.exists(),
-            "catalog.json should be retired after migration"
-        );
-        assert!(
-            dir.join("catalog.json.bak").exists(),
-            "migrated JSON should be preserved as catalog.json.bak"
-        );
-        assert!(dir.join("catalog.db").exists(), "SQLite DB should exist");
-
-        // Reload reads purely from SQLite (JSON is gone).
-        let reloaded = Catalog::with_dir(dir.clone());
-        assert_eq!(reloaded.get(&p), Some(4));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn migrates_v2_json_to_sqlite() {
-        let dir = unique_tmp_dir();
-        let json = dir.join("catalog.json");
-        let p = dir.join("photo.jpg");
-        let key = normalize(&p);
-
-        let mut adj = Adjustments::default();
-        adj.exposure = 1.25;
-
-        // Hand-write a v2 JSON file with a rating + non-identity adjustments.
-        let v2 = serde_json::json!({
-            "version": 2,
-            "images": { key.to_str().unwrap(): {
-                "rating": 5u8,
-                "adjustments": adj,
-            }},
-        });
-        std::fs::write(&json, serde_json::to_vec_pretty(&v2).unwrap()).unwrap();
-
-        let reloaded = Catalog::with_dir(dir.clone());
-        assert_eq!(reloaded.get(&p), Some(5));
-        assert_eq!(reloaded.adjustments(&p), adj);
-        assert!(!json.exists());
-        assert!(dir.join("catalog.json.bak").exists());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -825,87 +762,6 @@ mod tests {
     }
 
     #[test]
-    fn failed_persist_is_reported_once_via_take_error() {
-        // Point the catalog at a directory that can't be created because a
-        // *file* sits where a parent dir would need to be, so `create_dir_all`
-        // (and thus persist) fails deterministically.
-        let base = unique_tmp_dir();
-        let blocker = base.join("blocker");
-        std::fs::write(&blocker, b"not a dir").unwrap();
-        let bad_dir = blocker.join("catalog"); // parent is a file → mkdir fails
-
-        let mut cat = Catalog::with_dir(bad_dir);
-        assert!(cat.take_error().is_none(), "no error before any write");
-
-        cat.set(&base.join("photo.jpg"), 3);
-        // The write failed, so the error is available exactly once...
-        let msg = cat
-            .take_error()
-            .expect("failed save should report an error");
-        // ...with a message that describes the real problem (not a borrowed,
-        // misleading rusqlite variant like "Query is not read-only").
-        assert!(
-            msg.contains("unavailable"),
-            "error should describe the DB being unavailable, got: {msg}"
-        );
-        assert!(
-            !msg.contains("read-only"),
-            "error must not surface a misleading SQL message, got: {msg}"
-        );
-        // ...and is drained (not re-delivered) on the next check.
-        assert!(
-            cat.take_error().is_none(),
-            "error should be taken only once"
-        );
-
-        std::fs::remove_dir_all(&base).unwrap();
-    }
-
-    /// Read the raw `adjustments` column for `path` straight from the DB, so we
-    /// can assert identity edits are stored as SQL NULL (not a wasteful blob).
-    fn raw_adjustments_column(dir: &Path, path: &Path) -> Option<String> {
-        let key = normalize(path);
-        let conn = rusqlite::Connection::open(dir.join("catalog.db")).unwrap();
-        conn.query_row(
-            "SELECT adjustments FROM images WHERE path = ?1",
-            [key.to_str().unwrap()],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn identity_adjustments_stored_as_null() {
-        let dir = unique_tmp_dir();
-        let p = dir.join("photo.jpg");
-
-        // A rated image with identity edits: rating row present, adjustments NULL.
-        {
-            let mut cat = Catalog::with_dir(dir.clone());
-            cat.set(&p, 2);
-        }
-        assert_eq!(
-            raw_adjustments_column(&dir, &p),
-            None,
-            "identity adjustments must be stored as NULL"
-        );
-
-        // A non-identity edit stores a JSON blob in the column.
-        {
-            let mut cat = Catalog::with_dir(dir.clone());
-            let mut adj = Adjustments::default();
-            adj.shadows = 40.0;
-            cat.set_adjustments(&p, &adj);
-        }
-        assert!(
-            raw_adjustments_column(&dir, &p).is_some(),
-            "non-identity adjustments must be stored"
-        );
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn rating_and_adjustments_coexist() {
         let dir = unique_tmp_dir();
         let p = dir.join("photo.jpg");
@@ -929,136 +785,329 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Read the raw `adjustments` column for `path` straight from the DB.
-    fn raw_adj(dir: &Path, path: &Path) -> Option<String> {
-        let key = normalize(path);
-        let conn = rusqlite::Connection::open(dir.join("catalog.db")).unwrap();
-        conn.query_row(
-            "SELECT adjustments FROM images WHERE path = ?1",
-            [key.to_str().unwrap()],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .unwrap()
-    }
-
     #[test]
-    fn unparseable_adjustments_preserved_across_unrelated_write() {
+    fn identity_adjustments_omitted_from_sidecar_json() {
         let dir = unique_tmp_dir();
         let p = dir.join("photo.jpg");
-        let key = normalize(&p);
 
-        // Create the schema, then seed a row whose adjustments blob is garbage
-        // (simulates a schema-incompatible or corrupted cell).
-        drop(Catalog::with_dir(dir.clone()));
-        {
-            let conn = rusqlite::Connection::open(dir.join("catalog.db")).unwrap();
-            conn.execute(
-                "INSERT INTO images (path, rating, adjustments, rotation) VALUES (?1, 3, '{bogus', 0)",
-                [key.to_str().unwrap()],
-            )
-            .unwrap();
-        }
-
-        // Load surfaces the problem (does not silently vanish), and a later
-        // change to an UNRELATED field must not destroy the blob.
+        // A rated image with identity edits: sidecar has no "adjustments" key.
         {
             let mut cat = Catalog::with_dir(dir.clone());
-            assert_eq!(cat.get(&p), Some(3));
-            assert!(
-                cat.take_error().is_some(),
-                "unreadable edits should be surfaced"
-            );
-            cat.set(&p, 5); // change rating only
+            cat.set(&p, 2);
         }
-        assert_eq!(
-            raw_adj(&dir, &p).as_deref(),
-            Some("{bogus"),
-            "unparseable adjustments must be preserved across an unrelated write"
+        let bytes = std::fs::read(sidecar_for(&dir, "photo.jpg")).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value.get("adjustments").is_none(),
+            "identity adjustments must be omitted, not stored as an empty object"
+        );
+
+        // A non-identity edit stores an "adjustments" object.
+        {
+            let mut cat = Catalog::with_dir(dir.clone());
+            let mut adj = Adjustments::default();
+            adj.shadows = 40.0;
+            cat.set_adjustments(&p, &adj);
+        }
+        let bytes = std::fs::read(sidecar_for(&dir, "photo.jpg")).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            value.get("adjustments").is_some(),
+            "non-identity adjustments must be stored"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn reappearing_json_does_not_clobber_db() {
+    fn failed_persist_is_reported_once_via_take_error() {
+        // Point the catalog at a directory whose .lightphotos can't be
+        // created because a *file* sits where it would need to go, so
+        // create_dir_all (and thus persist) fails deterministically.
+        let dir = unique_tmp_dir();
+        std::fs::write(dir.join(SIDECAR_DIR), b"not a dir").unwrap();
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        assert!(cat.take_error().is_none(), "no error before any write");
+
+        cat.set(&dir.join("photo.jpg"), 3);
+        let msg = cat
+            .take_error()
+            .expect("failed save should report an error");
+        assert!(
+            msg.contains("Failed to save"),
+            "error should describe the failed save, got: {msg}"
+        );
+        assert!(
+            cat.take_error().is_none(),
+            "error should be taken only once"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unreadable_sidecar_is_reported_not_silently_dropped() {
+        let dir = unique_tmp_dir();
+        std::fs::create_dir_all(dir.join(SIDECAR_DIR)).unwrap();
+        std::fs::write(sidecar_for(&dir, "bad.jpg"), b"{not valid json").unwrap();
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        assert_eq!(
+            cat.get(&dir.join("bad.jpg")),
+            None,
+            "an unreadable sidecar is not loaded"
+        );
+        assert!(
+            cat.take_error().is_some(),
+            "an unreadable sidecar should be surfaced, not silently skipped"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn corrupt_sidecar_does_not_block_other_photos_in_same_directory() {
+        let dir = unique_tmp_dir();
+        std::fs::create_dir_all(dir.join(SIDECAR_DIR)).unwrap();
+        std::fs::write(sidecar_for(&dir, "bad.jpg"), b"{not valid json").unwrap();
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        let _ = cat.take_error();
+        cat.set(&dir.join("good.jpg"), 4);
+        assert_eq!(cat.get(&dir.join("good.jpg")), Some(4));
+
+        // Bad sidecar is untouched by the unrelated write, and only replaced
+        // once the user makes an edit for that exact photo.
+        assert_eq!(
+            std::fs::read(sidecar_for(&dir, "bad.jpg")).unwrap(),
+            b"{not valid json"
+        );
+        cat.set(&dir.join("bad.jpg"), 5);
+        assert_eq!(cat.get(&dir.join("bad.jpg")), Some(5));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn same_stem_raw_and_jpeg_get_independent_sidecars() {
+        let dir = unique_tmp_dir();
+        let raw = dir.join("PHOTO1.ARW");
+        let jpg = dir.join("PHOTO1.JPG");
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        cat.set(&raw, 5);
+        cat.set(&jpg, 2);
+        assert_eq!(cat.get(&raw), Some(5));
+        assert_eq!(cat.get(&jpg), Some(2));
+        assert!(sidecar_for(&dir, "PHOTO1.ARW").exists());
+        assert!(sidecar_for(&dir, "PHOTO1.JPG").exists());
+
+        let reloaded = Catalog::with_dir(dir.clone());
+        assert_eq!(reloaded.get(&raw), Some(5));
+        assert_eq!(reloaded.get(&jpg), Some(2));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn lightphotos_dir_created_lazily_only_on_first_write() {
+        let dir = unique_tmp_dir();
+        let mut cat = Catalog::with_dir(dir.clone());
+        assert!(
+            !dir.join(SIDECAR_DIR).exists(),
+            "opening/reading a directory must not create .lightphotos"
+        );
+        cat.set(&dir.join("photo.jpg"), 3);
+        assert!(
+            dir.join(SIDECAR_DIR).exists(),
+            ".lightphotos should appear after the first write"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn empty_record_deletes_the_sidecar_file() {
         let dir = unique_tmp_dir();
         let p = dir.join("photo.jpg");
-        let key = normalize(&p);
+        let mut cat = Catalog::with_dir(dir.clone());
+        cat.set(&p, 3);
+        assert!(sidecar_for(&dir, "photo.jpg").exists());
+        cat.set(&p, 0);
+        assert!(
+            !sidecar_for(&dir, "photo.jpg").exists(),
+            "clearing the rating on an otherwise-identity record should delete the sidecar"
+        );
 
-        // Establish newer state in the DB.
-        {
-            let mut cat = Catalog::with_dir(dir.clone());
-            cat.set(&p, 5);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn remove_deletes_sidecar_file() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+        let mut cat = Catalog::with_dir(dir.clone());
+        cat.set(&p, 4);
+        assert!(sidecar_for(&dir, "photo.jpg").exists());
+        cat.remove(&p);
+        assert_eq!(cat.get(&p), None);
+        assert!(!sidecar_for(&dir, "photo.jpg").exists());
+        // Removing again (already gone) is a harmless no-op.
+        cat.remove(&p);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn open_dir_switches_active_directory_without_cross_directory_leakage() {
+        let a = unique_tmp_dir();
+        let b = unique_tmp_dir();
+        let pa = a.join("photo.jpg");
+        let pb = b.join("photo.jpg"); // same filename, different directory
+
+        let mut cat = Catalog::with_dir(a.clone());
+        cat.set(&pa, 5);
+
+        cat.open_dir(&b);
+        assert_eq!(
+            cat.get(&pb),
+            None,
+            "directory b's same-named photo must not see directory a's rating"
+        );
+        cat.set(&pb, 2);
+        assert_eq!(cat.get(&pb), Some(2));
+
+        cat.open_dir(&a);
+        assert_eq!(
+            cat.get(&pa),
+            Some(5),
+            "switching back to a must restore a's persisted rating"
+        );
+
+        std::fs::remove_dir_all(&a).unwrap();
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    // --- migration ---------------------------------------------------
+
+    fn write_legacy_db(dir: &Path, rows: &[(&Path, Option<u8>, Option<&Adjustments>)]) {
+        let conn = rusqlite::Connection::open(dir.join(CATALOG_DB)).unwrap();
+        conn.execute(
+            "CREATE TABLE images (
+                 path TEXT PRIMARY KEY, rating INTEGER, adjustments TEXT,
+                 touchups TEXT, rotation INTEGER NOT NULL DEFAULT 0
+             )",
+            [],
+        )
+        .unwrap();
+        for (path, rating, adj) in rows {
+            let adj_json = adj.map(|a| serde_json::to_string(a).unwrap());
+            conn.execute(
+                "INSERT INTO images (path, rating, adjustments, rotation) VALUES (?1, ?2, ?3, 0)",
+                rusqlite::params![path.to_str().unwrap(), rating, adj_json],
+            )
+            .unwrap();
         }
-        // A stale catalog.json reappears (e.g. cloud sync / restore) with an
-        // older rating for the same photo.
-        let stale = serde_json::json!({
-            "version": 2,
-            "images": { key.to_str().unwrap(): { "rating": 2u8 } },
-        });
-        std::fs::write(
-            dir.join("catalog.json"),
-            serde_json::to_vec(&stale).unwrap(),
+    }
+
+    #[test]
+    fn migrate_no_op_when_nothing_legacy_present() {
+        // migrate_legacy_catalog() always targets the real app-support dir,
+        // so this just checks the reported shape holds for the "nothing to
+        // do" case using the fan_out/migrate_sqlite building blocks directly.
+        let dir = unique_tmp_dir();
+        let images: HashMap<PathBuf, ImageRecord> = HashMap::new();
+        let (migrated, skipped) = fan_out(&images);
+        assert_eq!((migrated, skipped), (0, 0));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn migrate_fans_rows_out_to_correct_directories_and_retires_db() {
+        let app_dir = unique_tmp_dir();
+        let photo_dir_1 = unique_tmp_dir();
+        let photo_dir_2 = unique_tmp_dir();
+
+        let p1 = photo_dir_1.join("a.jpg");
+        let p2 = photo_dir_2.join("b.jpg");
+        write_legacy_db(&app_dir, &[(&p1, Some(4), None), (&p2, Some(2), None)]);
+
+        let summary = migrate_sqlite(&app_dir.join(CATALOG_DB));
+        assert_eq!(summary.migrated, 2);
+        assert_eq!(summary.skipped, 0);
+        assert!(!summary.already_done);
+
+        assert!(sidecar_for(&photo_dir_1, "a.jpg").exists());
+        assert!(sidecar_for(&photo_dir_2, "b.jpg").exists());
+        assert!(
+            app_dir.join("catalog.db.bak").exists(),
+            "fully-resolved migration should retire catalog.db"
+        );
+        assert!(!app_dir.join(CATALOG_DB).exists());
+
+        std::fs::remove_dir_all(&app_dir).unwrap();
+        std::fs::remove_dir_all(&photo_dir_1).unwrap();
+        std::fs::remove_dir_all(&photo_dir_2).unwrap();
+    }
+
+    #[test]
+    fn migrate_skips_missing_directory_and_retries_next_pass() {
+        let app_dir = unique_tmp_dir();
+        let missing = app_dir.join("does-not-exist-anywhere");
+        let p = missing.join("a.jpg");
+        write_legacy_db(&app_dir, &[(&p, Some(4), None)]);
+
+        let summary = migrate_sqlite(&app_dir.join(CATALOG_DB));
+        assert_eq!(summary.migrated, 0);
+        assert_eq!(summary.skipped, 1);
+        assert!(
+            app_dir.join(CATALOG_DB).exists(),
+            "a partial migration must NOT retire catalog.db"
+        );
+
+        // Now the target becomes available and a re-run resolves it,
+        // demonstrating idempotent retry.
+        std::fs::create_dir_all(&missing).unwrap();
+        let summary2 = migrate_sqlite(&app_dir.join(CATALOG_DB));
+        assert_eq!(summary2.migrated, 1);
+        assert_eq!(summary2.skipped, 0);
+        assert!(app_dir.join("catalog.db.bak").exists());
+
+        // `missing` is nested under `app_dir` — removing app_dir takes it too.
+        std::fs::remove_dir_all(&app_dir).unwrap();
+    }
+
+    #[test]
+    fn migrate_is_idempotent_on_already_written_sidecar() {
+        let app_dir = unique_tmp_dir();
+        let photo_dir = unique_tmp_dir();
+        let p = photo_dir.join("a.jpg");
+        write_legacy_db(&app_dir, &[(&p, Some(3), None)]);
+
+        // Pre-seed the sidecar as if a previous partial pass (or the live
+        // app) already wrote it, with a DIFFERENT rating.
+        write_sidecar_file(
+            &sidecar_for(&photo_dir, "a.jpg"),
+            &ImageRecord {
+                rating: Some(1),
+                ..Default::default()
+            },
         )
         .unwrap();
 
-        // Reload must keep the newer DB value, not import the stale JSON.
-        let cat = Catalog::with_dir(dir.clone());
+        let summary = migrate_sqlite(&app_dir.join(CATALOG_DB));
+        assert_eq!(summary.migrated, 1);
+        assert_eq!(summary.skipped, 0);
+
+        let cat = Catalog::with_dir(photo_dir.clone());
         assert_eq!(
             cat.get(&p),
-            Some(5),
-            "stale reappearing JSON must not overwrite newer DB rows"
+            Some(1),
+            "an already-existing sidecar must not be clobbered by migration"
         );
 
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn corrupt_db_is_backed_up_and_recovered() {
-        let dir = unique_tmp_dir();
-        // A catalog.db that is not a valid SQLite file.
-        std::fs::write(dir.join("catalog.db"), b"this is not a sqlite database").unwrap();
-        let p = dir.join("photo.jpg");
-
-        let mut cat = Catalog::with_dir(dir.clone());
-        // Recovered to a working (empty) catalog instead of being stuck.
-        cat.set(&p, 3);
-        assert_eq!(cat.get(&p), Some(3));
-        assert!(
-            dir.join("catalog.db.corrupt").exists(),
-            "the unreadable DB should be set aside as catalog.db.corrupt"
-        );
-
-        // And the recovery survives a reload.
-        let reloaded = Catalog::with_dir(dir.clone());
-        assert_eq!(reloaded.get(&p), Some(3));
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn unreadable_row_is_reported_not_silently_dropped() {
-        let dir = unique_tmp_dir();
-        drop(Catalog::with_dir(dir.clone())); // create schema
-        let bad = dir.join("bad.jpg");
-        let bk = normalize(&bad);
-        {
-            let conn = rusqlite::Connection::open(dir.join("catalog.db")).unwrap();
-            // rating far outside u8 range → the row fails to map on load.
-            conn.execute(
-                "INSERT INTO images (path, rating, adjustments, rotation) VALUES (?1, 99999, NULL, 0)",
-                [bk.to_str().unwrap()],
-            )
-            .unwrap();
-        }
-
-        let mut cat = Catalog::with_dir(dir.clone());
-        assert_eq!(cat.get(&bad), None, "an unreadable row is not loaded");
-        assert!(
-            cat.take_error().is_some(),
-            "an unreadable row should be surfaced, not silently skipped"
-        );
-
-        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&app_dir).unwrap();
+        std::fs::remove_dir_all(&photo_dir).unwrap();
     }
 }
