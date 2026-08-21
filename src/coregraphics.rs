@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Thin shared wrappers over the classic (non-block) CoreGraphics symbols that
 //! `objc2-core-graphics` 0.3 doesn't surface, plus the CFURL/bitmap-context

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Small path helpers shared across the navigation and thumbnail layers so
 //! path identity is computed the same way everywhere. `catalog.rs` no longer

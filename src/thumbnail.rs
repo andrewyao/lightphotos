@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Thumbnail generation via Apple's ImageIO (decode-at-size, uses embedded
 //! previews, applies EXIF orientation) plus a small on-disk thumbnail cache.

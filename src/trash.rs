@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Move files to the macOS Trash via `NSFileManager` — native, matching the
 //! project's objc2/ImageIO approach (no third-party crate).

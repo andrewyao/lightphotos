@@ -2,7 +2,7 @@
 name = "lightphotos"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-or-later"
 # egui 0.34 (the egui line that targets wgpu 29) requires rustc >= 1.92.
 rust-version = "1.92"
 

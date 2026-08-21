@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Subject/foreground segmentation via Apple's Vision framework — the mask
 //! behind the Loupe's "Show Selection" overlay.
