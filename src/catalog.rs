@@ -24,9 +24,11 @@
 //! own path (not from the active directory), so they stay correct even if
 //! called for a path outside it.
 //!
-//! Legacy state (the old `catalog.db` SQLite file, or an older
-//! `catalog.json`) is migrated once via [`migrate_legacy_catalog`], fanning
-//! rows out to the per-directory sidecars they belong to.
+//! Legacy state (an older `catalog.json`) is migrated once via
+//! [`migrate_legacy_catalog`], fanning rows out to the per-directory
+//! sidecars they belong to. A leftover global `catalog.db` SQLite file from
+//! an even older install is no longer read — lightphotos has no SQLite
+//! dependency — and is left on disk untouched, with a one-time notice.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -40,7 +42,10 @@ use crate::develop::{Adjustments, TouchUp};
 const SIDECAR_DIR: &str = ".lightphotos";
 /// Sidecar file extension (cosmetic only — see module docs).
 const SIDECAR_EXT: &str = "xmp";
-/// Legacy global SQLite catalog, migrated then retired to `<name>.bak`.
+/// Legacy global SQLite catalog from an install old enough to predate the
+/// sidecar rewrite. No longer read (lightphotos has no SQLite dependency) —
+/// its only remaining use is to name it in the one-time "found but not
+/// migrated" notice in [`migrate_legacy_catalog`].
 const CATALOG_DB: &str = "catalog.db";
 /// Legacy JSON catalog (pre-dates SQLite), migrated then retired to `<name>.bak`.
 const CATALOG_FILE: &str = "catalog.json";
@@ -376,23 +381,30 @@ pub struct MigrationSummary {
     pub already_done: bool,
 }
 
-/// One-time, directory-independent migration of the old global catalog
-/// (`catalog.db` SQLite, or a pre-SQLite `catalog.json`) into per-photo
-/// sidecars. Safe to call on every launch: a fast `Path::exists()` check
-/// makes it a no-op once fully migrated, and a partial pass (some rows'
-/// target directories missing/unwritable) is safely retriable — the legacy
-/// file is only retired once every row in it resolved with zero skips.
+/// One-time, directory-independent migration of the old global `catalog.json`
+/// into per-photo sidecars. Safe to call on every launch: a fast
+/// `Path::exists()` check makes it a no-op once fully migrated, and a partial
+/// pass (some rows' target directories missing/unwritable) is safely
+/// retriable — the legacy file is only retired once every row in it resolved
+/// with zero skips.
+///
+/// A leftover `catalog.db` (the pre-sidecar global SQLite catalog) is no
+/// longer readable — lightphotos dropped its SQLite dependency — so one is
+/// only ever logged, never migrated; it stays on disk untouched.
 pub fn migrate_legacy_catalog() -> MigrationSummary {
     let dir = default_dir();
     crate::paths::migrate_legacy_dir(&dir, &legacy_dir());
 
-    let db_file = dir.join(CATALOG_DB);
-    if db_file.exists() {
-        return migrate_sqlite(&db_file);
-    }
     let json_file = dir.join(CATALOG_FILE);
     if json_file.exists() {
         return migrate_json(&json_file);
+    }
+    if dir.join(CATALOG_DB).exists() {
+        eprintln!(
+            "[catalog] found a legacy {} but lightphotos no longer reads SQLite catalogs; \
+             leaving it in place, unmigrated",
+            CATALOG_DB
+        );
     }
     MigrationSummary {
         migrated: 0,
@@ -434,30 +446,6 @@ fn fan_out(images: &HashMap<PathBuf, ImageRecord>) -> (usize, usize) {
         }
     }
     (migrated, skipped)
-}
-
-fn migrate_sqlite(db_file: &Path) -> MigrationSummary {
-    let images = match read_legacy_sqlite_rows(db_file) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("[catalog] migration: could not read {}: {e}", db_file.display());
-            return MigrationSummary {
-                migrated: 0,
-                skipped: 0,
-                already_done: false,
-            };
-        }
-    };
-    let (migrated, skipped) = fan_out(&images);
-    if skipped == 0 {
-        retire(db_file, "db.bak");
-    }
-    eprintln!("[catalog] migration (sqlite): {migrated} migrated, {skipped} skipped");
-    MigrationSummary {
-        migrated,
-        skipped,
-        already_done: false,
-    }
 }
 
 fn migrate_json(json_file: &Path) -> MigrationSummary {
@@ -508,50 +496,6 @@ fn retire(file: &Path, new_ext: &str) {
     if let Err(e) = std::fs::rename(file, &bak) {
         eprintln!("[catalog] could not retire {}: {e}", file.display());
     }
-}
-
-/// Read every row of the legacy SQLite `images` table. Unreadable
-/// adjustments/touchups blobs degrade to identity/empty rather than failing
-/// the whole read — the source DB is being retired regardless, so best-effort
-/// recovery beats losing an entire row over one bad column.
-fn read_legacy_sqlite_rows(db_file: &Path) -> rusqlite::Result<HashMap<PathBuf, ImageRecord>> {
-    let conn = rusqlite::Connection::open(db_file)?;
-    let mut stmt =
-        conn.prepare("SELECT path, rating, adjustments, touchups, rotation FROM images")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, Option<u8>>(1)?,
-            row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, u8>(4)?,
-        ))
-    })?;
-
-    let mut out = HashMap::new();
-    for row in rows {
-        let Ok((path, rating, adj_json, touchups_json, rotation)) = row else {
-            continue;
-        };
-        let adjustments = adj_json
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        let touchups = touchups_json
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        out.insert(
-            PathBuf::from(path),
-            ImageRecord {
-                rating,
-                adjustments,
-                touchups,
-                rotation,
-            },
-        );
-    }
-    Ok(out)
 }
 
 /// Parse catalog bytes, migrating v1 → v2 as needed. Returns the in-memory
@@ -991,24 +935,29 @@ mod tests {
 
     // --- migration ---------------------------------------------------
 
-    fn write_legacy_db(dir: &Path, rows: &[(&Path, Option<u8>, Option<&Adjustments>)]) {
-        let conn = rusqlite::Connection::open(dir.join(CATALOG_DB)).unwrap();
-        conn.execute(
-            "CREATE TABLE images (
-                 path TEXT PRIMARY KEY, rating INTEGER, adjustments TEXT,
-                 touchups TEXT, rotation INTEGER NOT NULL DEFAULT 0
-             )",
-            [],
+    /// Write a legacy v2 `catalog.json` fixture — the same on-disk shape
+    /// `migrate_json` reads, standing in for the old SQLite fixture now that
+    /// lightphotos has no SQLite dependency to build one with.
+    fn write_legacy_json(dir: &Path, rows: &[(&Path, Option<u8>, Option<&Adjustments>)]) {
+        let mut images = serde_json::Map::new();
+        for (path, rating, adj) in rows {
+            let rec = ImageRecord {
+                rating: *rating,
+                adjustments: adj.cloned().unwrap_or_default(),
+                touchups: Vec::new(),
+                rotation: 0,
+            };
+            images.insert(
+                path.to_str().unwrap().to_string(),
+                serde_json::to_value(&rec).unwrap(),
+            );
+        }
+        let doc = serde_json::json!({ "version": 2, "images": images });
+        std::fs::write(
+            dir.join(CATALOG_FILE),
+            serde_json::to_vec(&doc).unwrap(),
         )
         .unwrap();
-        for (path, rating, adj) in rows {
-            let adj_json = adj.map(|a| serde_json::to_string(a).unwrap());
-            conn.execute(
-                "INSERT INTO images (path, rating, adjustments, rotation) VALUES (?1, ?2, ?3, 0)",
-                rusqlite::params![path.to_str().unwrap(), rating, adj_json],
-            )
-            .unwrap();
-        }
     }
 
     #[test]
@@ -1024,16 +973,16 @@ mod tests {
     }
 
     #[test]
-    fn migrate_fans_rows_out_to_correct_directories_and_retires_db() {
+    fn migrate_fans_rows_out_to_correct_directories_and_retires_json() {
         let app_dir = unique_tmp_dir();
         let photo_dir_1 = unique_tmp_dir();
         let photo_dir_2 = unique_tmp_dir();
 
         let p1 = photo_dir_1.join("a.jpg");
         let p2 = photo_dir_2.join("b.jpg");
-        write_legacy_db(&app_dir, &[(&p1, Some(4), None), (&p2, Some(2), None)]);
+        write_legacy_json(&app_dir, &[(&p1, Some(4), None), (&p2, Some(2), None)]);
 
-        let summary = migrate_sqlite(&app_dir.join(CATALOG_DB));
+        let summary = migrate_json(&app_dir.join(CATALOG_FILE));
         assert_eq!(summary.migrated, 2);
         assert_eq!(summary.skipped, 0);
         assert!(!summary.already_done);
@@ -1041,10 +990,10 @@ mod tests {
         assert!(sidecar_for(&photo_dir_1, "a.jpg").exists());
         assert!(sidecar_for(&photo_dir_2, "b.jpg").exists());
         assert!(
-            app_dir.join("catalog.db.bak").exists(),
-            "fully-resolved migration should retire catalog.db"
+            app_dir.join("catalog.json.bak").exists(),
+            "fully-resolved migration should retire catalog.json"
         );
-        assert!(!app_dir.join(CATALOG_DB).exists());
+        assert!(!app_dir.join(CATALOG_FILE).exists());
 
         std::fs::remove_dir_all(&app_dir).unwrap();
         std::fs::remove_dir_all(&photo_dir_1).unwrap();
@@ -1056,23 +1005,23 @@ mod tests {
         let app_dir = unique_tmp_dir();
         let missing = app_dir.join("does-not-exist-anywhere");
         let p = missing.join("a.jpg");
-        write_legacy_db(&app_dir, &[(&p, Some(4), None)]);
+        write_legacy_json(&app_dir, &[(&p, Some(4), None)]);
 
-        let summary = migrate_sqlite(&app_dir.join(CATALOG_DB));
+        let summary = migrate_json(&app_dir.join(CATALOG_FILE));
         assert_eq!(summary.migrated, 0);
         assert_eq!(summary.skipped, 1);
         assert!(
-            app_dir.join(CATALOG_DB).exists(),
-            "a partial migration must NOT retire catalog.db"
+            app_dir.join(CATALOG_FILE).exists(),
+            "a partial migration must NOT retire catalog.json"
         );
 
         // Now the target becomes available and a re-run resolves it,
         // demonstrating idempotent retry.
         std::fs::create_dir_all(&missing).unwrap();
-        let summary2 = migrate_sqlite(&app_dir.join(CATALOG_DB));
+        let summary2 = migrate_json(&app_dir.join(CATALOG_FILE));
         assert_eq!(summary2.migrated, 1);
         assert_eq!(summary2.skipped, 0);
-        assert!(app_dir.join("catalog.db.bak").exists());
+        assert!(app_dir.join("catalog.json.bak").exists());
 
         // `missing` is nested under `app_dir` — removing app_dir takes it too.
         std::fs::remove_dir_all(&app_dir).unwrap();
@@ -1083,7 +1032,7 @@ mod tests {
         let app_dir = unique_tmp_dir();
         let photo_dir = unique_tmp_dir();
         let p = photo_dir.join("a.jpg");
-        write_legacy_db(&app_dir, &[(&p, Some(3), None)]);
+        write_legacy_json(&app_dir, &[(&p, Some(3), None)]);
 
         // Pre-seed the sidecar as if a previous partial pass (or the live
         // app) already wrote it, with a DIFFERENT rating.
@@ -1096,7 +1045,7 @@ mod tests {
         )
         .unwrap();
 
-        let summary = migrate_sqlite(&app_dir.join(CATALOG_DB));
+        let summary = migrate_json(&app_dir.join(CATALOG_FILE));
         assert_eq!(summary.migrated, 1);
         assert_eq!(summary.skipped, 0);
 
