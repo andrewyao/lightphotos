@@ -40,7 +40,12 @@ use crate::coregraphics;
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
-    /// Tightly packed RGBA8, row-major, premultiplied alpha.
+    /// Tightly packed RGBA8, row-major. Premultiplied alpha on the mac arm
+    /// (drawn through a CGBitmapContext); straight (non-premultiplied) alpha
+    /// on the non-mac arm (produced by the `image` crate). The renderer's
+    /// blend mode is straight-alpha, so this divergence is currently
+    /// harmless, but it is a real difference between platforms worth knowing
+    /// about before relying on alpha values off mac.
     pub rgba: Vec<u8>,
 }
 
@@ -368,12 +373,21 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
 
 /// Read camera/lens/exposure metadata plus capture date for `path`. Non-mac
 /// has no EXIF reader wired up yet, so every field is `None` except
-/// `source_size`, which comes from [`pixel_size`] (a real, portable read, not
-/// a stub) so the loupe still knows the true source resolution.
+/// `source_size`, which comes from [`pixel_size`] (the stored, pre-orientation
+/// dimensions) swapped into display orientation for the quarter-turn EXIF
+/// orientations via [`orientation_of`] — mirroring the mac arm's logic exactly
+/// so the result lines up with what [`decode`] actually produces.
 #[cfg(not(target_os = "macos"))]
 pub fn read_metadata(path: &Path) -> ImageMetadata {
+    let source_size = pixel_size(path).map(|(w, h)| {
+        if matches!(orientation_of(path), 5..=8) {
+            (h, w)
+        } else {
+            (w, h)
+        }
+    });
     ImageMetadata {
-        source_size: pixel_size(path),
+        source_size,
         ..ImageMetadata::default()
     }
 }
@@ -501,12 +515,28 @@ pub fn orientation_of(path: &Path) -> u8 {
         .unwrap_or(1)
 }
 
-/// The EXIF orientation of the image at `path`. Non-mac: subject segmentation
-/// (the only caller) is itself macOS-only (Vision), so this is unreachable in
-/// practice on this platform — returns the identity orientation for safety.
+/// The EXIF orientation of the image at `path`. Non-mac: reads it via the
+/// `image` crate's own decoder-level orientation support (the same mechanism
+/// [`decode`]'s non-mac arm already uses), converted back to the raw EXIF
+/// code (`1..=8`) via [`image::metadata::Orientation::to_exif`]. Returns the
+/// identity orientation (`1`) for RAW files (no `image`-crate decoder), PNGs
+/// (no orientation tag), or any unreadable/unrecognized file.
 #[cfg(not(target_os = "macos"))]
-pub fn orientation_of(_path: &Path) -> u8 {
-    1
+pub fn orientation_of(path: &Path) -> u8 {
+    let Ok(reader) = image::ImageReader::open(path) else {
+        return 1;
+    };
+    let Ok(reader) = reader.with_guessed_format() else {
+        return 1;
+    };
+    let Ok(mut decoder) = reader.into_decoder() else {
+        return 1;
+    };
+    use image::ImageDecoder;
+    decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms)
+        .to_exif()
 }
 
 /// The image's EXIF orientation tag (`1..=8`), or `1` when absent/unreadable.

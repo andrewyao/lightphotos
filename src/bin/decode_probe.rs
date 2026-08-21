@@ -36,6 +36,7 @@
 
 #![allow(dead_code)]
 
+#[cfg(target_os = "macos")]
 #[path = "../coregraphics.rs"]
 mod coregraphics;
 #[path = "../image_decode.rs"]
