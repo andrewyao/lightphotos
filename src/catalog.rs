@@ -24,12 +24,11 @@
 //! own path (not from the active directory), so they stay correct even if
 //! called for a path outside it.
 //!
-//! Legacy state (an older global `catalog.json`) is migrated once via
+//! Legacy state (an older `catalog.json`) is migrated once via
 //! [`migrate_legacy_catalog`], fanning rows out to the per-directory
-//! sidecars they belong to. (An even older global SQLite `catalog.db` was
-//! also migrated this way for one release; that code — and the `rusqlite`
-//! dependency — has since been removed, so a leftover `catalog.db` is no
-//! longer picked up.)
+//! sidecars they belong to. A leftover global `catalog.db` SQLite file from
+//! an even older install is no longer read — lightphotos has no SQLite
+//! dependency — and is left on disk untouched, with a one-time notice.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -43,7 +42,12 @@ use crate::develop::{Adjustments, TouchUp};
 const SIDECAR_DIR: &str = ".lightphotos";
 /// Sidecar file extension (cosmetic only — see module docs).
 const SIDECAR_EXT: &str = "xmp";
-/// Legacy global JSON catalog, migrated then retired to `<name>.bak`.
+/// Legacy global SQLite catalog from an install old enough to predate the
+/// sidecar rewrite. No longer read (lightphotos has no SQLite dependency) —
+/// its only remaining use is to name it in the one-time "found but not
+/// migrated" notice in [`migrate_legacy_catalog`].
+const CATALOG_DB: &str = "catalog.db";
+/// Legacy JSON catalog (pre-dates SQLite), migrated then retired to `<name>.bak`.
 const CATALOG_FILE: &str = "catalog.json";
 
 /// Per-image persisted state: an optional rating plus develop edits. Identity
@@ -377,12 +381,16 @@ pub struct MigrationSummary {
     pub already_done: bool,
 }
 
-/// One-time, directory-independent migration of the old global
-/// `catalog.json` into per-photo sidecars. Safe to call on every launch: a
-/// fast `Path::exists()` check makes it a no-op once fully migrated, and a
-/// partial pass (some rows' target directories missing/unwritable) is
-/// safely retriable — the legacy file is only retired once every row in it
-/// resolved with zero skips.
+/// One-time, directory-independent migration of the old global `catalog.json`
+/// into per-photo sidecars. Safe to call on every launch: a fast
+/// `Path::exists()` check makes it a no-op once fully migrated, and a partial
+/// pass (some rows' target directories missing/unwritable) is safely
+/// retriable — the legacy file is only retired once every row in it resolved
+/// with zero skips.
+///
+/// A leftover `catalog.db` (the pre-sidecar global SQLite catalog) is no
+/// longer readable — lightphotos dropped its SQLite dependency — so one is
+/// only ever logged, never migrated; it stays on disk untouched.
 pub fn migrate_legacy_catalog() -> MigrationSummary {
     let dir = default_dir();
     crate::paths::migrate_legacy_dir(&dir, &legacy_dir());
@@ -390,6 +398,13 @@ pub fn migrate_legacy_catalog() -> MigrationSummary {
     let json_file = dir.join(CATALOG_FILE);
     if json_file.exists() {
         return migrate_json(&json_file);
+    }
+    if dir.join(CATALOG_DB).exists() {
+        eprintln!(
+            "[catalog] found a legacy {} but lightphotos no longer reads SQLite catalogs; \
+             leaving it in place, unmigrated",
+            CATALOG_DB
+        );
     }
     MigrationSummary {
         migrated: 0,
@@ -920,25 +935,27 @@ mod tests {
 
     // --- migration ---------------------------------------------------
 
+    /// Write a legacy v2 `catalog.json` fixture — the same on-disk shape
+    /// `migrate_json` reads, standing in for the old SQLite fixture now that
+    /// lightphotos has no SQLite dependency to build one with.
     fn write_legacy_json(dir: &Path, rows: &[(&Path, Option<u8>, Option<&Adjustments>)]) {
-        let images: HashMap<PathBuf, ImageRecord> = rows
-            .iter()
-            .map(|(path, rating, adj)| {
-                (
-                    path.to_path_buf(),
-                    ImageRecord {
-                        rating: *rating,
-                        adjustments: adj.copied().unwrap_or_default(),
-                        touchups: Vec::new(),
-                        rotation: 0,
-                    },
-                )
-            })
-            .collect();
-        let contents = serde_json::json!({ "version": 2, "images": images });
+        let mut images = serde_json::Map::new();
+        for (path, rating, adj) in rows {
+            let rec = ImageRecord {
+                rating: *rating,
+                adjustments: adj.cloned().unwrap_or_default(),
+                touchups: Vec::new(),
+                rotation: 0,
+            };
+            images.insert(
+                path.to_str().unwrap().to_string(),
+                serde_json::to_value(&rec).unwrap(),
+            );
+        }
+        let doc = serde_json::json!({ "version": 2, "images": images });
         std::fs::write(
             dir.join(CATALOG_FILE),
-            serde_json::to_vec(&contents).unwrap(),
+            serde_json::to_vec(&doc).unwrap(),
         )
         .unwrap();
     }

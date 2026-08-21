@@ -23,19 +23,33 @@
 // path, for one) — that's expected of a re-include, not a code smell.
 #![allow(dead_code)]
 
+#[cfg(target_os = "macos")]
 #[path = "../coregraphics.rs"]
 mod coregraphics;
 #[path = "../facequality.rs"]
 mod facequality;
 #[path = "../image_decode.rs"]
 mod image_decode;
+#[cfg(target_os = "macos")]
 #[path = "../vision.rs"]
 mod vision;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-fn main() -> ExitCode {
+fn main() {
+    #[cfg(target_os = "macos")]
+    {
+        real_main();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("face_probe is macOS-only (uses Apple Vision).");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn real_main() -> ExitCode {
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     if paths.is_empty() {
         eprintln!("usage: face_probe <image> [image ...]");

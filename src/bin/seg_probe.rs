@@ -24,6 +24,7 @@
 // Re-including whole modules pulls in plenty this probe never calls.
 #![allow(dead_code)]
 
+#[cfg(target_os = "macos")]
 #[path = "../coregraphics.rs"]
 mod coregraphics;
 #[path = "../develop.rs"]
@@ -38,6 +39,7 @@ mod image_encode;
 mod image_ops;
 #[path = "../segmentation.rs"]
 mod segmentation;
+#[cfg(target_os = "macos")]
 #[path = "../vision.rs"]
 mod vision;
 
@@ -48,7 +50,19 @@ use std::process::ExitCode;
 /// mask edge, small enough to write quickly.
 const PREVIEW_MAX_DIM: u32 = 1600;
 
-fn main() -> ExitCode {
+fn main() {
+    #[cfg(target_os = "macos")]
+    {
+        real_main();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("seg_probe is macOS-only (uses Apple Vision).");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn real_main() -> ExitCode {
     let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
     if paths.is_empty() {
         eprintln!("usage: seg_probe <image> [image ...]");

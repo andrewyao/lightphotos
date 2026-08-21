@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-LightPhotos: a fast macOS Lightroom-lite photo culling & develop tool, written in Rust. Open a folder to browse thumbnails in a Grid; open a single image to jump straight into the Loupe. Decoding runs on background threads (Apple ImageIO) and images live as GPU textures, so zoom/pan only update a small transform uniform, never a re-decode. egui draws all the chrome (grid, filmstrip, filter bar, rating overlays); a hand-rolled wgpu renderer draws the loupe image.
+LightPhotos: a fast macOS Lightroom-lite photo culling & develop tool, written in Rust. The codebase builds on macOS, Linux, and Windows. Open a folder to browse thumbnails in a Grid; open a single image to jump straight into the Loupe. Decoding runs on background threads (Apple ImageIO on macOS; `image`/`rawler`/`mozjpeg-rs`/`kamadak-exif` crates on non-macOS platforms) and images live as GPU textures, so zoom/pan only update a small transform uniform, never a re-decode. egui draws all the chrome (grid, filmstrip, filter bar, rating overlays); a hand-rolled wgpu renderer draws the loupe image. HEIC and Vision-backed features (duplicate refinement, face/blink scoring, subject-selection overlay) are macOS-only.
 
 ## Commands
 

@@ -13,13 +13,19 @@
 //! winit event loop via an `EventLoopProxy`. We do not touch the delegate
 //! object, so winit's identity assertion still holds.
 
-use std::ffi::c_char;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+#[cfg(target_os = "macos")]
+use std::ffi::c_char;
+
+#[cfg(target_os = "macos")]
 use objc2::ffi;
+#[cfg(target_os = "macos")]
 use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSURL};
+
 use winit::event_loop::EventLoopProxy;
 
 /// Events delivered from the OS into the winit event loop.
@@ -38,6 +44,7 @@ pub fn set_proxy(proxy: EventLoopProxy<UserEvent>) {
 
 /// The implementation for `-[WinitApplicationDelegate application:openURLs:]`.
 /// Objective-C calls this with (self, _cmd, NSApplication*, NSArray<NSURL>*).
+#[cfg(target_os = "macos")]
 extern "C-unwind" fn application_open_urls(
     _this: *mut AnyObject,
     _cmd: Sel,
@@ -61,6 +68,7 @@ extern "C-unwind" fn application_open_urls(
 /// delegate class is registered (i.e. from `ApplicationHandler::resumed`,
 /// which runs inside `applicationDidFinishLaunching:`, before the launch-time
 /// open event is dispatched). Returns true if the method was installed.
+#[cfg(target_os = "macos")]
 pub fn install_open_handler() -> bool {
     let class = match AnyClass::get(c"WinitApplicationDelegate") {
         Some(c) => c,
@@ -79,4 +87,14 @@ pub fn install_open_handler() -> bool {
         let cls = class as *const AnyClass as *mut AnyClass;
         ffi::class_addMethod(cls, sel, imp, types).as_bool()
     }
+}
+
+/// Non-mac "open with" already works via the CLI path argument
+/// (`lightphotos /path/to/photo.jpg`) — no Finder-equivalent hook exists to
+/// install, so this is a no-op that reports "not installed" so main.rs's
+/// existing warning still prints (harmless — there's nothing to warn about
+/// on this platform, but the warning is not incorrect either).
+#[cfg(not(target_os = "macos"))]
+pub fn install_open_handler() -> bool {
+    false
 }

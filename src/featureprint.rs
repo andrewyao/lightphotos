@@ -20,18 +20,30 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[cfg(target_os = "macos")]
 use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
 use objc2::ClassType;
+#[cfg(target_os = "macos")]
 use objc2_vision::VNGenerateImageFeaturePrintRequest;
 
+#[cfg(target_os = "macos")]
 use crate::vision;
 
 /// A computed feature print for one photo. Opaque; compare two with
 /// [`feature_distance`].
+#[cfg(target_os = "macos")]
 pub struct FeaturePrint(Retained<objc2_vision::VNFeaturePrintObservation>);
+
+/// A computed feature print for one photo. Opaque; compare two with
+/// [`feature_distance`]. Unsupported on this platform — Vision is
+/// macOS-only, so there is nothing to wrap here.
+#[cfg(not(target_os = "macos"))]
+pub struct FeaturePrint;
 
 /// Compute the feature print of the image at `path`. Vision decodes the file
 /// itself, so this doesn't touch lightphotos' own decode/thumbnail cache.
+#[cfg(target_os = "macos")]
 pub fn compute(path: &Path) -> Result<FeaturePrint, String> {
     unsafe {
         let request = VNGenerateImageFeaturePrintRequest::new();
@@ -46,9 +58,17 @@ pub fn compute(path: &Path) -> Result<FeaturePrint, String> {
     }
 }
 
+/// Compute the feature print of the image at `path`. Unsupported on this
+/// platform — Vision is macOS-only.
+#[cfg(not(target_os = "macos"))]
+pub fn compute(_path: &Path) -> Result<FeaturePrint, String> {
+    Err("feature-print computation is unsupported on this platform".into())
+}
+
 /// Vision-native distance between two feature prints (lower = more similar;
 /// Vision doesn't document a fixed scale, so this is only meaningful as a
 /// relative ordering / threshold, not an absolute similarity percentage).
+#[cfg(target_os = "macos")]
 pub fn feature_distance(a: &FeaturePrint, b: &FeaturePrint) -> Result<f32, String> {
     let mut distance: f32 = 0.0;
     unsafe {
@@ -56,6 +76,13 @@ pub fn feature_distance(a: &FeaturePrint, b: &FeaturePrint) -> Result<f32, Strin
             .map_err(|e| e.localizedDescription().to_string())?;
     }
     Ok(distance)
+}
+
+/// Vision-native distance between two feature prints. Unsupported on this
+/// platform — Vision is macOS-only.
+#[cfg(not(target_os = "macos"))]
+pub fn feature_distance(_a: &FeaturePrint, _b: &FeaturePrint) -> Result<f32, String> {
+    Err("feature-print distance is unsupported on this platform".into())
 }
 
 /// One feature-print comparison job: compute the feature prints of `member`

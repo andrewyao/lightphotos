@@ -26,6 +26,7 @@
 mod app;
 mod burst;
 mod catalog;
+#[cfg(target_os = "macos")]
 mod coregraphics;
 mod develop;
 mod duplicates;
@@ -47,6 +48,7 @@ mod sharpness;
 mod thumbnail;
 mod trash;
 mod ui;
+#[cfg(target_os = "macos")]
 mod vision;
 
 use std::path::PathBuf;

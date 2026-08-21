@@ -1,39 +1,70 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Thumbnail generation via Apple's ImageIO (decode-at-size, uses embedded
-//! previews, applies EXIF orientation) plus a small on-disk thumbnail cache.
+//! Thumbnail generation plus a small on-disk thumbnail cache.
 //!
-//! Mirrors `image_decode.rs`: open a `CGImageSource` from the file, ask ImageIO
-//! for a thumbnail `CGImage`, then reuse `image_decode::cgimage_to_rgba` to read
-//! it back as tightly-packed RGBA8.
+//! macOS: via Apple's ImageIO (decode-at-size, uses embedded previews, applies
+//! EXIF orientation). Mirrors `image_decode.rs`: open a `CGImageSource` from
+//! the file, ask ImageIO for a thumbnail `CGImage`, then reuse
+//! `image_decode::cgimage_to_rgba` to read it back as tightly-packed RGBA8.
+//!
+//! Non-mac: tries to extract a file's embedded EXIF/TIFF preview
+//! (`try_extract_embedded_preview`, via `kamadak-exif`) first, falling back to
+//! a full decode-at-size through `image_decode::decode` — see each function's
+//! non-mac doc comment for exactly what is and isn't handled.
+//!
+//! `ThumbCache`, `EmbeddedPreview`, and the on-disk `.tw` cache format below
+//! are platform-independent (no objc2 dependency) and unconditional.
 
 // TODO: remove once wired into loader (T3)
 #![allow(dead_code)]
 
+#[cfg(target_os = "macos")]
 use std::ffi::c_void;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::{
     kCFBooleanTrue, kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionary,
     CFNumber, CFNumberType, CFRetained, CFString,
 };
+#[cfg(target_os = "macos")]
 use objc2_image_io::{
     kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailFromImageIfAbsent,
     kCGImageSourceCreateThumbnailWithTransform, kCGImageSourceThumbnailMaxPixelSize,
 };
 
-use crate::image_decode::{cgimage_to_rgba, DecodedImage};
+#[cfg(target_os = "macos")]
+use crate::image_decode::cgimage_to_rgba;
+use crate::image_decode::DecodedImage;
 
 /// Decode a thumbnail of `path` whose longest side is at most `max_px` pixels.
 ///
 /// Uses `CGImageSourceCreateThumbnailAtIndex`, which prefers an embedded preview
 /// when present, falls back to decoding-at-size from the full image, and applies
 /// the file's EXIF orientation.
+#[cfg(target_os = "macos")]
 pub fn thumbnail(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
     decode_at_size(path, max_px, EmbeddedPreview::UseIfPresent)
+}
+
+/// Decode a thumbnail of `path` whose longest side is at most `max_px` pixels.
+///
+/// Tries [`try_extract_embedded_preview`] first (cheap when it works — no full
+/// decode needed); falls back to a real full decode-at-size via
+/// `image_decode::decode` on `None` (missing preview, decode failure,
+/// unsupported format — see that function's doc comment for exactly which
+/// failures it treats as "no preview"). The fallback is what makes the
+/// extractor above safe to keep best-effort: nothing it can get wrong actually
+/// fails a thumbnail request.
+#[cfg(not(target_os = "macos"))]
+pub fn thumbnail(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
+    if let Some(preview) = try_extract_embedded_preview(path, max_px) {
+        return Ok(preview);
+    }
+    crate::image_decode::decode(path, max_px)
 }
 
 /// Whether ImageIO may substitute the file's embedded preview for a real
@@ -56,6 +87,7 @@ pub enum EmbeddedPreview {
 /// ImageIO scales *during* decode, unlike `image_decode::decode`, which decodes
 /// the full image and only then draws it down — strictly more work than not
 /// downscaling at all.
+#[cfg(target_os = "macos")]
 pub fn decode_at_size(
     path: &Path,
     max_px: u32,
@@ -82,7 +114,115 @@ pub fn decode_at_size(
     cgimage_to_rgba(&image, w, h)
 }
 
+/// Decode `path` at a reduced size, longest side at most `max_px`.
+///
+/// `EmbeddedPreview::Never` (the loupe's screen-fit preview) skips the
+/// preview-extraction branch entirely and always does a real full decode —
+/// there's no cross-platform equivalent of ImageIO's decode-at-size, so this
+/// is a full decode followed by a resize, same shape as
+/// `image_decode::decode`'s non-mac arm (which this calls directly).
+/// `EmbeddedPreview::UseIfPresent` (grid/filmstrip thumbnails) is exactly
+/// [`thumbnail`]'s body: try the embedded preview, fall back to full decode.
+#[cfg(not(target_os = "macos"))]
+pub fn decode_at_size(
+    path: &Path,
+    max_px: u32,
+    embedded: EmbeddedPreview,
+) -> Result<DecodedImage, String> {
+    match embedded {
+        EmbeddedPreview::Never => crate::image_decode::decode(path, max_px),
+        EmbeddedPreview::UseIfPresent => thumbnail(path, max_px),
+    }
+}
+
+/// Best-effort extraction of a RAW/TIFF-based file's embedded EXIF thumbnail:
+/// the standard baseline JPEG thumbnail stored in IFD1 via the
+/// `JPEGInterchangeFormat`/`JPEGInterchangeFormatLength` tags (TIFF 6.0 / EXIF
+/// 2.3 §4.6.4), decoded and resized to fit `max_px`.
+///
+/// **What this does and doesn't handle**: camera RAW containers (CR2, NEF,
+/// ARW, DNG, ...) are TIFF-based, so `kamadak-exif`'s generic TIFF/EXIF reader
+/// (`Reader::read_from_container`, which detects the TIFF magic and reads the
+/// whole file) can open them directly, and this reads the same baseline
+/// thumbnail tag every EXIF-aware JPEG/TIFF viewer already relies on. That
+/// baseline thumbnail is typically small — cameras commonly store around
+/// 160x120 — not a full-size preview. Several formats additionally carry a
+/// much larger preview via a manufacturer-specific mechanism (CR2's second
+/// IFD, a DNG sub-image with `NewSubfileType=1`, MakerNote `PreviewImageStart`
+/// tags, ...); none of that is parsed here — a genuinely complete marker
+/// parser was explicitly out of scope for this first pass. Never upscales: if
+/// the extracted preview is already smaller than `max_px`, it's returned as-is
+/// (still satisfies "longest side at most `max_px`").
+///
+/// Returns `None` on any failure — unreadable file, no TIFF/EXIF structure, no
+/// IFD1 thumbnail tags, an out-of-bounds offset/length, or a blob that
+/// doesn't actually decode as JPEG — so [`thumbnail`]'s full-decode fallback
+/// is always safe to take; this must never be what makes a thumbnail request
+/// fail outright.
+#[cfg(not(target_os = "macos"))]
+fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
+    let file = fs::File::open(path).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let source = exif::Reader::new().read_from_container(&mut reader).ok()?;
+
+    let offset = source
+        .get_field(exif::Tag::JPEGInterchangeFormat, exif::In::THUMBNAIL)?
+        .value
+        .get_uint(0)? as usize;
+    let length = source
+        .get_field(exif::Tag::JPEGInterchangeFormatLength, exif::In::THUMBNAIL)?
+        .value
+        .get_uint(0)? as usize;
+    if length == 0 {
+        return None;
+    }
+
+    let buf = source.buf();
+    let end = offset.checked_add(length)?;
+    if end > buf.len() {
+        return None;
+    }
+    let jpeg_bytes = &buf[offset..end];
+
+    let img = image::load_from_memory_with_format(jpeg_bytes, image::ImageFormat::Jpeg)
+        .ok()?
+        .into_rgba8();
+    let (w, h) = (img.width(), img.height());
+    if w == 0 || h == 0 {
+        return None;
+    }
+
+    // The orientation tag describes the *main* image, not the embedded
+    // thumbnail — read it from the primary IFD, matching
+    // `image_decode.rs`'s non-mac `orientation_of`. Defaults to identity (1)
+    // when absent, same as every other orientation read path in this crate.
+    let orientation = source
+        .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0))
+        .unwrap_or(1) as u8;
+
+    let (nw, nh) = crate::image_decode::fit_within(w, h, max_px);
+    let rgba = if (nw, nh) == (w, h) {
+        img.into_raw()
+    } else {
+        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
+    };
+    // Resize before orienting (same order `decode_raw_nonmac` uses) so the
+    // fit-within math runs against the pre-rotation aspect ratio consistently
+    // with the rest of this crate; orientation swaps width/height for the
+    // 5..=8 cases, which would otherwise fit the wrong ratio.
+    Some(crate::image_decode::apply_exif_orientation(
+        DecodedImage {
+            width: nw,
+            height: nh,
+            rgba,
+        },
+        orientation,
+    ))
+}
+
 /// Build the options `CFDictionary` for `CGImageSourceCreateThumbnailAtIndex`.
+#[cfg(target_os = "macos")]
 fn build_thumbnail_options(
     max_px: u32,
     embedded: EmbeddedPreview,
