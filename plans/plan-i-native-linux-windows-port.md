@@ -46,32 +46,47 @@ first).
 
 ---
 
-- [ ] Task 1: Cargo.toml — move the objc2 dependency cluster to
+- [x] Task 1: Cargo.toml — move the objc2 dependency cluster to
       `[target.'cfg(target_os = "macos")'.dependencies]` (files: Cargo.toml)
-- [ ] Task 2: `trash.rs` — cross-platform trash via the `trash` crate
-      (requires Task 1) (files: src/trash.rs, Cargo.toml)
-- [ ] Task 3: `macos_delegate.rs` — surgical cfg-split, no mod-level gating
-      needed (files: src/macos_delegate.rs)
-- [ ] Task 4: Vision cluster — function-level cfg-split with `Err` stubs
+      — done, commit `274cc56`
+- [x] Task 2: `trash.rs` — cross-platform trash via the `trash` crate
+      (requires Task 1) (files: src/trash.rs, Cargo.toml) — done, commit `83db3e1`
+- [x] Task 3: `macos_delegate.rs` — surgical cfg-split, no mod-level gating
+      needed (files: src/macos_delegate.rs) — done, commit `3393113`
+- [x] Task 4: Vision cluster — function-level cfg-split with `Err` stubs
       (requires Task 1) (files: src/vision.rs, src/featureprint.rs,
-      src/facequality.rs, src/segmentation.rs, Cargo.toml)
-- [ ] Task 5: Probe binaries + Phase 1 clean-build gate (requires Tasks 1-4)
-      (files: src/bin/face_probe.rs, src/bin/seg_probe.rs, main.rs)
-- [ ] Task 6: `raw-probe` Cargo feature — optional cross-platform codec deps
-      (files: Cargo.toml)
-- [ ] Task 7: Synthetic Linear DNG fixture generator (requires Task 6)
-      (files: src/bin/decode_probe.rs or a shared test-fixture module)
-- [ ] Task 8: `decode_probe` binary — rawler decode vs ImageIO baseline
-      (requires Tasks 6-7) (files: src/bin/decode_probe.rs, Cargo.toml)
-- [ ] Task 9: JPEG/PNG/TIFF non-mac decode/encode (requires Task 1) (files:
-      src/image_decode.rs, src/image_encode.rs, Cargo.toml)
-- [ ] Task 10: RAW decode + embedded-preview extraction, non-mac (requires
+      src/facequality.rs, src/segmentation.rs, Cargo.toml) — done, commit `5c34054`
+- [x] Task 5: Probe binaries + Phase 1 clean-build gate (requires Tasks 1-4)
+      (files: src/bin/face_probe.rs, src/bin/seg_probe.rs, main.rs) —
+      done, commit `6bed940` (mid-plan, rusqlite was also dropped entirely —
+      see the ledger — resolving an environmental cross-compile blocker
+      this task first surfaced)
+- [x] Task 6: `raw-probe` Cargo feature — optional cross-platform codec deps
+      (files: Cargo.toml) — done, commit `372f370`
+- [x] Task 7: Synthetic Linear DNG fixture generator (requires Task 6)
+      (files: src/bin/decode_probe.rs or a shared test-fixture module) —
+      done, commit `368fc9d`. Major finding: macOS ImageIO cannot decode any
+      Linear DNG at all (confirmed platform limitation) — see Task 12.
+- [x] Task 8: `decode_probe` binary — rawler decode vs known ground truth
+      (requires Tasks 6-7) (files: src/bin/decode_probe.rs, Cargo.toml) —
+      done, commit `e3dea8b`. Comparison target changed from "ImageIO
+      baseline" to "the fixture's own analytic ground truth" per Task 7's
+      finding — byte-exact match (0/147456 mismatches).
+- [x] Task 9: JPEG/PNG/TIFF non-mac decode/encode (requires Task 1) (files:
+      src/image_decode.rs, src/image_encode.rs, Cargo.toml) — done, commits
+      `7eddcce`..`d5b0899` (1 fix round: non-mac source_size axis-swap bug
+      for rotated photos)
+- [x] Task 10: RAW decode + embedded-preview extraction, non-mac (requires
       Tasks 8-9) (files: src/image_decode.rs, src/thumbnail.rs, Cargo.toml)
-- [ ] Task 11: Cross-compile check — `cargo check --target
+      — done, commits `957bd89`..`25193d3` (1 fix round: non-mac RAW
+      thumbnail previews missing EXIF orientation)
+- [x] Task 11: Cross-compile check — `cargo check --target
       x86_64-unknown-linux-gnu` for the whole crate (requires Tasks 1-10)
-      (files: —)
-- [ ] Task 12: RAW fidelity pass on the synthetic DNG (requires Tasks 7-10)
+      (files: —) — done: 0 errors on Linux (plain and `--features
+      raw-probe`) and Windows (`x86_64-pc-windows-gnu`, optional, ran clean).
+- [x] Task 12: RAW fidelity pass on the synthetic DNG (requires Tasks 7-10)
       (files: —) — labeled a smoke test, not a coverage claim; see Task 14.
+      Done: byte-exact pass, see detail below.
 - [ ] Task 13: Docs — README.md/CLAUDE.md non-mac build notes, `00-overview.md`
       Task 3 pointer (files: README.md, CLAUDE.md, plans/00-overview.md)
 - [ ] Task 14: End-to-end gate: `cargo test && cargo build --release` (mac,
@@ -644,19 +659,40 @@ branch entirely); for `UseIfPresent` it's the `thumbnail()` body above.
 
 ### Task 12: RAW fidelity pass — record the result
 
-This is Task 8's `decode_probe` run, formalized as a checkpoint:
+This is Task 8's `decode_probe` run, formalized as a checkpoint. Note the
+comparison target changed from the plan's original design during Task 7/8
+(a controller ruling, see the plan's execution ledger): macOS ImageIO turned
+out unable to decode any Linear DNG at all (a confirmed platform limitation,
+independent of fixture correctness), so the check compares `rawler`'s
+decode against the fixture's own known analytic ground truth instead of an
+ImageIO baseline — a stronger check (ground truth vs. one decoder) than the
+original two-decoders-agree design.
 
-- [ ] Run `cargo run --bin decode_probe --features raw-probe` on mac.
-- [ ] Paste its output (dimensions + mean-abs-diff) into this plan file
-      under this task, replacing this bullet.
-- [ ] If it passed (mad < 8.0, matching dimensions): Phase 2's JPEG/PNG/TIFF
-      and RAW-container-parsing path is verified as far as a synthetic
-      fixture can verify it. State that explicitly, and flag the still-open
-      gap: **no real-camera Bayer-CFA RAW (CR2/NEF/ARW) has been tested.**
-- [ ] If it failed: do not loosen the threshold to make it pass. Record the
-      actual diff/error, and downgrade Task 14's overall verdict — Phase 2's
-      RAW path is not verified even at the synthetic-fixture level, and
-      scope should shrink to JPEG/PNG/TIFF-only until this is revisited.
+- [x] Run `cargo run --release --bin decode_probe --features raw-probe` on mac.
+- [x] Output (256×192 fixture, real run):
+  ```
+  --- Synthetic Linear DNG: rawler decode vs analytic gradient ground truth ---
+  rawler decoded 256x192 cpp=3 bps=16: 147456 samples compared, 0 mismatched, max abs diff 0, mean abs diff 0.000000
+  PASS: rawler's Linear DNG decode matches the analytic gradient ground truth exactly.
+  --- Synthetic Linear DNG: rawler's RawDevelop pipeline (Task 10's decode_raw_nonmac path) ---
+  PASS: RawDevelop::develop_intermediate -> to_dynamic_image ran end-to-end and produced a 256x192 image, same shape decode_raw_nonmac's non-mac RAW path builds on.
+  ```
+- [x] **Passed — byte-exact (0/147456 mismatches, zero tolerance).** `rawler`'s
+      DNG container parsing and pixel decode are verified correct against a
+      hand-built, hex-verified-correct fixture, and Task 10's actual
+      production `decode_raw_nonmac` code path (`RawDevelop::develop_intermediate`
+      → `to_dynamic_image`) was independently exercised end-to-end on the same
+      fixture. Still-open gap, unaffected by this result: **no real-camera
+      Bayer-CFA RAW (CR2/NEF/ARW) has been tested** — this fixture is
+      non-mosaiced (`PhotometricInterpretation=34892`/LinearRaw, cpp=3), so
+      rawler's CFA/Bayer demosaic branch (`ProcessingStep::Demosaic`, PPG/
+      Bilinear4Channel dispatch on `photometric`/`cpp`) was never exercised,
+      only its non-CFA `develop_intermediate` path. Code-review in Task 10
+      found the CFA dispatch logic itself plausible/correct by inspection
+      (branches on `cpp`/`photometric` generically, no RGB-only assumption)
+      but it remains genuinely untested — real fidelity/coverage across
+      camera makes is exactly the gap Task 14 leaves BLOCKED for the user's
+      own follow-up with real files on real Linux hardware.
 
 ### Task 13: Docs
 
