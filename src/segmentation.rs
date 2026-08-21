@@ -18,24 +18,30 @@
 
 use std::path::Path;
 
+#[cfg(target_os = "macos")]
 use objc2::ClassType;
+#[cfg(target_os = "macos")]
 use objc2_core_video::{
     CVPixelBuffer, CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow,
     CVPixelBufferGetHeight, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidth,
     CVPixelBufferLockBaseAddress, CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
 };
+#[cfg(target_os = "macos")]
 use objc2_vision::{
     VNGenerateForegroundInstanceMaskRequest, VNGeneratePersonSegmentationRequest,
     VNGeneratePersonSegmentationRequestQualityLevel,
 };
 
+#[cfg(target_os = "macos")]
 use crate::vision;
 
 /// `kCVPixelFormatType_OneComponent8` — one 8-bit channel, the format person
 /// segmentation produces.
+#[cfg(target_os = "macos")]
 const ONE_COMPONENT_8: u32 = u32::from_be_bytes(*b"L008");
 /// `kCVPixelFormatType_OneComponent32Float` — one 32-bit float channel, which
 /// the instance-mask request can produce instead.
+#[cfg(target_os = "macos")]
 const ONE_COMPONENT_32F: u32 = u32::from_be_bytes(*b"L00f");
 
 /// Which request produced a mask. Worth surfacing: the two behave differently
@@ -172,6 +178,7 @@ const EMPTY_COVERAGE: f32 = 0.01;
 /// Vision reads the file in its stored orientation and knows nothing about the
 /// EXIF tag, so without this a portrait shot from a camera that records
 /// rotation in metadata would come back with its mask lying on its side.
+#[cfg(target_os = "macos")]
 pub fn segment(path: &Path) -> Result<Mask, String> {
     let mask = match segment_person(path) {
         Ok(mask) if mask.solid_coverage() >= EMPTY_COVERAGE => mask,
@@ -183,12 +190,20 @@ pub fn segment(path: &Path) -> Result<Mask, String> {
     Ok(mask.oriented(crate::image_decode::orientation_of(path)))
 }
 
+/// Segment the subject of the photo at `path`. Unsupported on this platform
+/// — Vision is macOS-only.
+#[cfg(not(target_os = "macos"))]
+pub fn segment(_path: &Path) -> Result<Mask, String> {
+    Err("subject segmentation is unsupported on this platform".into())
+}
+
 /// `VNGeneratePersonSegmentationRequest` at accurate quality.
 ///
 /// Accurate rather than balanced/fast because this runs once, on demand, for
 /// the single photo the user is looking at — there's no folder-wide pass to
 /// keep cheap, and a ragged matte would undermine the whole point of looking
 /// at the selection.
+#[cfg(target_os = "macos")]
 pub fn segment_person(path: &Path) -> Result<Mask, String> {
     unsafe {
         let request = VNGeneratePersonSegmentationRequest::new();
@@ -205,12 +220,20 @@ pub fn segment_person(path: &Path) -> Result<Mask, String> {
     }
 }
 
+/// `VNGeneratePersonSegmentationRequest`. Unsupported on this platform —
+/// Vision is macOS-only.
+#[cfg(not(target_os = "macos"))]
+pub fn segment_person(_path: &Path) -> Result<Mask, String> {
+    Err("subject segmentation is unsupported on this platform".into())
+}
+
 /// `VNGenerateForegroundInstanceMaskRequest`, merging every instance it found
 /// into one mask.
 ///
 /// Merged rather than per-instance because this plan's selection is a single
 /// foreground/background split — per-instance selection would be a different
 /// (and much larger) feature.
+#[cfg(target_os = "macos")]
 pub fn segment_foreground(path: &Path) -> Result<Mask, String> {
     unsafe {
         let request = VNGenerateForegroundInstanceMaskRequest::new();
@@ -227,10 +250,18 @@ pub fn segment_foreground(path: &Path) -> Result<Mask, String> {
     }
 }
 
+/// `VNGenerateForegroundInstanceMaskRequest`. Unsupported on this platform —
+/// Vision is macOS-only.
+#[cfg(not(target_os = "macos"))]
+pub fn segment_foreground(_path: &Path) -> Result<Mask, String> {
+    Err("subject segmentation is unsupported on this platform".into())
+}
+
 /// Copy a Vision mask buffer into a tightly-packed `Vec<u8>`.
 ///
 /// Handles both single-channel formats Vision uses, and strips the row padding
 /// (`bytes_per_row` is generally wider than `width`, aligned for the GPU).
+#[cfg(target_os = "macos")]
 fn pixel_buffer_to_mask(buffer: &CVPixelBuffer, source: MaskSource) -> Result<Mask, String> {
     let width = CVPixelBufferGetWidth(buffer);
     let height = CVPixelBufferGetHeight(buffer);
@@ -276,6 +307,7 @@ fn pixel_buffer_to_mask(buffer: &CVPixelBuffer, source: MaskSource) -> Result<Ma
 ///
 /// `base` must point at `height` rows of at least `width` bytes, each row
 /// `stride` bytes apart.
+#[cfg(target_os = "macos")]
 unsafe fn copy_u8_rows(base: *const u8, width: usize, height: usize, stride: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(width * height);
     for y in 0..height {
@@ -289,6 +321,7 @@ unsafe fn copy_u8_rows(base: *const u8, width: usize, height: usize, stride: usi
 ///
 /// Same contract as [`copy_u8_rows`], with rows of `width` `f32`s. `stride` is
 /// still in *bytes*, hence the division.
+#[cfg(target_os = "macos")]
 unsafe fn copy_f32_rows(base: *const f32, width: usize, height: usize, stride: usize) -> Vec<u8> {
     let stride_f32 = stride / std::mem::size_of::<f32>();
     let mut out = Vec::with_capacity(width * height);

@@ -21,11 +21,14 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+#[cfg(target_os = "macos")]
 use objc2::ClassType;
+#[cfg(target_os = "macos")]
 use objc2_vision::{
     VNDetectFaceLandmarksRequest, VNDetectFaceRectanglesRequest, VNFaceLandmarkRegion2D,
 };
 
+#[cfg(target_os = "macos")]
 use crate::vision;
 
 /// A landmark region's points in Vision's normalized image space: origin
@@ -53,6 +56,7 @@ pub struct RawFace {
 /// Returns one [`RawFace`] per detected face, in Vision's own result order.
 /// An image with no faces is `Ok(vec![])` — only an actual framework failure
 /// (unreadable file, Vision error) is an `Err`.
+#[cfg(target_os = "macos")]
 pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
     unsafe {
         let request = VNDetectFaceLandmarksRequest::new();
@@ -93,6 +97,13 @@ pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
     }
 }
 
+/// Run `VNDetectFaceLandmarksRequest` over the image at `path`. Unsupported
+/// on this platform — Vision is macOS-only.
+#[cfg(not(target_os = "macos"))]
+pub fn detect_faces(_path: &Path) -> Result<Vec<RawFace>, String> {
+    Err("face detection is unsupported on this platform".into())
+}
+
 /// Copy a landmark region's normalized points out of Vision's own buffer.
 ///
 /// # Safety
@@ -100,6 +111,7 @@ pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
 /// `normalizedPoints` hands back a buffer owned by `region` and valid only for
 /// as long as `region` lives, holding exactly `pointCount` `CGPoint`s. We copy
 /// eagerly here so no caller ever holds that borrow.
+#[cfg(target_os = "macos")]
 fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
     unsafe {
         let count = region.pointCount();
@@ -131,6 +143,7 @@ fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
 // a one-line change in `analyze` if real-photo testing says the landmark pass
 // is too slow or too noisy.
 #[allow(dead_code)]
+#[cfg(target_os = "macos")]
 pub fn detect_face_rects(path: &Path) -> Result<Vec<RawFace>, String> {
     unsafe {
         let request = VNDetectFaceRectanglesRequest::new();
@@ -157,6 +170,14 @@ pub fn detect_face_rects(path: &Path) -> Result<Vec<RawFace>, String> {
             })
             .collect())
     }
+}
+
+/// Face detection only, no landmarks. Unsupported on this platform — Vision
+/// is macOS-only.
+#[allow(dead_code)]
+#[cfg(not(target_os = "macos"))]
+pub fn detect_face_rects(_path: &Path) -> Result<Vec<RawFace>, String> {
+    Err("face detection is unsupported on this platform".into())
 }
 
 // ---------------------------------------------------------------------------

@@ -47,6 +47,7 @@ mod sharpness;
 mod thumbnail;
 mod trash;
 mod ui;
+#[cfg(target_os = "macos")]
 mod vision;
 
 use std::path::PathBuf;
