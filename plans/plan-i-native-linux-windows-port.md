@@ -87,8 +87,9 @@ first).
 - [x] Task 12: RAW fidelity pass on the synthetic DNG (requires Tasks 7-10)
       (files: —) — labeled a smoke test, not a coverage claim; see Task 14.
       Done: byte-exact pass, see detail below.
-- [ ] Task 13: Docs — README.md/CLAUDE.md non-mac build notes, `00-overview.md`
-      Task 3 pointer (files: README.md, CLAUDE.md, plans/00-overview.md)
+- [x] Task 13: Docs — README.md/CLAUDE.md non-mac build notes, `00-overview.md`
+      Task 3 pointer (files: README.md, CLAUDE.md, plans/00-overview.md) —
+      done, commit `84b05aa`
 - [ ] Task 14: End-to-end gate: `cargo test && cargo build --release` (mac,
       full regression) (requires all above) (files: —) — **real Linux
       runtime and real-camera RAW fidelity stay BLOCKED: needs the user's
@@ -715,19 +716,57 @@ original two-decoders-agree design.
 
 ### Task 14: End-to-end gate
 
-- [ ] `cargo test && cargo build --release` on mac — full regression, must
-      be clean (this is the standing bar from `00-overview.md`'s
-      verification gate).
-- [ ] `cargo check --target x86_64-unknown-linux-gnu` — clean (Task 11).
-- [ ] Summarize in this task's box: what's verified (mac regression,
-      non-mac compile, synthetic-DNG fidelity) vs what's still open (real
-      Linux/Windows runtime, real-camera RAW fidelity across makes, Phase 3
-      Vision-cluster replacement).
-- [ ] Leave this box **unchecked, marked `BLOCKED: needs Linux hardware +
-      real camera RAW files`** per `00-overview.md`'s "Manual verification
-      steps" convention — the user has said they'll run the real Linux
-      smoke test themselves after merge. Don't self-certify a result this
-      pass can't see.
+- [x] `cargo test && cargo build --release` on mac — 171/171 tests pass,
+      release build clean. Full regression, mac behavior unchanged
+      end to end across all 13 prior tasks.
+- [x] `cargo check --target x86_64-unknown-linux-gnu` — 0 errors (plain and
+      `--features raw-probe`). `cargo check --target x86_64-pc-windows-gnu`
+      also 0 errors (optional per the plan, ran clean anyway).
+
+**Summary — what's verified:**
+- Mac regression: full, byte-for-byte — every `#[cfg(target_os = "macos")]`
+  arm across `trash.rs`, `macos_delegate.rs`, the Vision cluster
+  (`vision.rs`/`featureprint.rs`/`facequality.rs`/`segmentation.rs`),
+  `image_decode.rs`, `image_encode.rs`, `coregraphics.rs`, `thumbnail.rs` is
+  the pre-existing code, moved, never rewritten — checked independently by
+  every task reviewer via diff-level line accounting (removed vs. added
+  lines), not just self-report.
+- Non-mac compile: the whole crate type-checks clean on Linux and Windows,
+  including the `raw-probe`-gated `decode_probe` binary. This is the
+  concrete, current answer to the original ask ("make the Mac-specific part
+  optional to compile") plus the harder goal (a real, if untested, non-mac
+  decode/encode/RAW backend).
+- Synthetic-DNG fidelity: byte-exact (Task 12) — `rawler`'s DNG decode and
+  Task 10's actual `decode_raw_nonmac` production path both verified
+  end-to-end against a hand-built, hex-verified-correct fixture.
+- Along the way: dropped the `rusqlite` dependency entirely (a user request
+  mid-plan, unrelated to the original 14 tasks but resolved a real
+  cross-compile blocker this plan's own Task 5 first surfaced) and merged in
+  the sidecar-file catalog rewrite (`feat/compare-mode-zoom`) that had
+  landed on the user's local branch but not yet this one.
+- Every task went through implementer → reviewer, with two real Important
+  findings caught and fixed in review (not self-certified): a rotated-photo
+  zoom/aspect bug in non-mac `source_size` (Task 9), and sideways/cached-wrong
+  RAW thumbnail previews from a missing EXIF-orientation step (Task 10).
+
+**What's still open (unchanged from the plan's Global Constraints — nothing
+in this pass closes these):**
+- Real Linux/Windows runtime — the app has never actually run outside
+  `cargo check`'s type-checking. No GPU/windowing/event-loop behavior,
+  no actual file I/O behavior, nothing UI-level has been exercised.
+- Real-camera RAW fidelity across makes (CR2/NEF/ARW/...) — the synthetic
+  fixture is a non-mosaiced Linear DNG; `rawler`'s actual Bayer-CFA
+  demosaic path was never exercised against real sensor data, only judged
+  plausible by code inspection (Task 10's review).
+- Phase 3 (Vision-cluster ONNX replacement) — out of scope for this plan
+  by design; the Vision cluster stays a mac-only stub returning `Err` on
+  non-mac, exactly as scoped from Task 4 onward.
+
+- [ ] **BLOCKED: needs Linux hardware + real camera RAW files.** Left
+      unchecked per `00-overview.md`'s "Manual verification steps"
+      convention — the user has said they'll run the real Linux smoke test
+      themselves, on their own machine, with their own RAW files, after
+      merge. This pass does not and cannot self-certify that result.
 
 ---
 
