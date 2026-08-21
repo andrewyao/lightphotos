@@ -5,10 +5,19 @@
 A fast macOS Lightroom-lite photo culling & develop tool, written in Rust.
 
 Open a folder to browse thumbnails in a Grid; open a single image to jump
-straight into the Loupe. Decoding runs on background threads (Apple ImageIO)
-and images live as GPU textures, so zoom and pan only update a small transform
-uniform — never a re-decode. egui draws all the chrome (grid, filmstrip, filter
-bar, rating overlays); a hand-rolled wgpu renderer draws the loupe image.
+straight into the Loupe. Decoding runs on background threads (Apple ImageIO
+on macOS; `image`/`rawler` crates on Linux/Windows) and images live as GPU
+textures, so zoom and pan only update a small transform uniform — never a
+re-decode. egui draws all the chrome (grid, filmstrip, filter bar, rating
+overlays); a hand-rolled wgpu renderer draws the loupe image.
+
+**Linux/Windows (experimental):** The codebase builds successfully via
+`cargo build --release` on Linux and Windows targets (verified via `cargo check`).
+However, real runtime testing has not yet been performed on those platforms.
+HEIC support and Vision-backed features (duplicate refinement, face/blink
+scoring, subject-selection overlay) are macOS-only. See
+[`plans/plan-i-native-linux-windows-port.md`](plans/plan-i-native-linux-windows-port.md)
+for full implementation status.
 
 ## Requirements
 
