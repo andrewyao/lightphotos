@@ -1,7 +1,10 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Small path helpers shared across the catalog, navigation, and thumbnail
-//! layers so path identity is computed the same way everywhere.
+//! Small path helpers shared across the navigation and thumbnail layers so
+//! path identity is computed the same way everywhere. `catalog.rs` no longer
+//! uses `normalize()` — sidecar identity is filename-within-directory, not a
+//! canonicalized absolute path — but `migrate_legacy_dir` below still backs
+//! its one-time app-support directory rename.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The `App`: all viewer state plus the coordinator logic that ties the GPU
 //! renderer, the background loader, the ratings/edits catalog, and the egui
@@ -565,7 +565,8 @@ mod thumbs;
 
 impl App {
     pub(crate) fn new(initial: Option<PathBuf>) -> Self {
-        let catalog = Catalog::load();
+        let _ = crate::catalog::migrate_legacy_catalog();
+        let catalog = Catalog::new();
         let egui_ctx = egui::Context::default();
         configure_system_fonts(&egui_ctx);
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
@@ -743,6 +744,7 @@ impl App {
     /// `load_folder` (grid) so both entry points restore the same persisted state
     /// — notably rotations, which `open` previously skipped.
     fn seed_mirrors(&mut self, playlist: &Playlist) {
+        self.catalog.open_dir(playlist.dir());
         for p in playlist.entries() {
             if let Some(stars) = self.catalog.get(p) {
                 self.ratings.insert(p.clone(), stars);

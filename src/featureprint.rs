@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Feature-print (learned image-similarity) refinement for duplicate
 //! grouping, via Apple's Vision framework (`VNGenerateImageFeaturePrintRequest`).

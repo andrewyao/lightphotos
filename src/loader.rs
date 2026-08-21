@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Background image decoding. A pool of worker threads decodes off the UI thread
 //! so the window never blocks; decoded images are cached by path so revisiting

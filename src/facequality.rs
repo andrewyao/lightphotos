@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Face detection + eye-openness ("did they blink?") scoring, via Apple's
 //! Vision framework (`VNDetectFaceLandmarksRequest`).

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Survey Mode: side-by-side review of one duplicate group (entered from a
 //! duplicate-group badge click in the Grid — see `grid.rs`'s `grid_cell`).

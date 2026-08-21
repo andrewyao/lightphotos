@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 // Mip-chain generation. Each level is produced by drawing a fullscreen triangle
 // into it while sampling the level above with a linear filter: because the

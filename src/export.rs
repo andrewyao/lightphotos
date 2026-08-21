@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Background JPEG export. Exporting a photo means a full-resolution decode, a
 //! per-pixel bake of the develop/crop/rotation edits, and an ImageIO JPEG write
