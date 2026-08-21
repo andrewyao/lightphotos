@@ -20,26 +20,21 @@ mark it `BLOCKED: <reason>` — its sub-checklist keeps the partial progress.
 
 - [x] Task 1: ~~Auto-tone, single photo + bulk selection~~ — **WON'T DO** (user decision, 2026-08-11). Dropped from the roadmap; no plan file, no implementation. Box checked only so plan-runner skips it (files: —)
 - [x] Task 2: Duplicate grouping + Survey Mode — done, commit `87a8101` (files: plans/plan-c-duplicate-grouping-survey-mode.md)
-- [ ] Task 3: Face + eyes-closed detection (requires Task 2) (files: plans/plan-d-face-eyes-closed-detection.md) — **BLOCKED: needs human visual check.** Tasks 1-7 of that plan are done and merged (`plan-d-face-quality` → `main`); its Task 8 needs a real burst with a blink. See that file for the two-step recipe.
-- [ ] Task 4: Subject/foreground segmentation as a selection, exploratory (requires Task 3 — shares its Vision setup) (files: plans/plan-d2-subject-segmentation-selection.md) — **BLOCKED: needs human visual check.** Tasks 1, 2, 4, 5, 6 of that plan are done and merged (`plan-d2-segmentation` → `main`); Tasks 3 and 7 need real photographs with subjects in them. See that file.
-- [ ] Task 5: Clarity slider (requires Task 4; parallelizable with Tasks 6-7) (files: plans/plan-e-clarity.md)
-- [ ] Task 6: Dehaze slider (requires Task 4; parallelizable with Tasks 5, 7) (files: plans/plan-f-dehaze.md)
-- [ ] Task 7: HSL panel, 8-band hue/saturation/luminance (requires Task 4; parallelizable with Tasks 5-6) (files: plans/plan-g-hsl-panel.md)
-- [ ] Task 8: Presets with Lightroom `.xmp` import — runs last, its field coverage depends on Tasks 5-7 (files: plans/plan-a-presets.md)
-- [ ] Task 9: DEFERRED — Tone Curve (full point-based spline); parked, no fixed slot, pick up separately (files: plans/plan-h-tone-curve.md)
+- [ ] Task 3: Native Linux/Windows port — Phase 1 (cfg-gate peripheral cluster) + Phase 2 (cross-platform decode/encode backend), verified on macOS only this pass; real Linux/Windows runtime and real-camera RAW fidelity left BLOCKED for the user's own follow-up on real Linux hardware. HEIC stays out of scope for non-mac (files: plans/plan-i-native-linux-windows-port.md)
+- [ ] Task 4: Web/WASM port feasibility gate — memo only, no checklist yet. Run the decode-harness verification described in the memo (sustained decode throughput for HEIC/RAW in-browser) before treating this as a go (files: plans/web-wasm-port-feasibility.md)
+- [ ] Task 5: Face + eyes-closed detection (requires Task 2) (files: plans/plan-d-face-eyes-closed-detection.md) — **BLOCKED: needs human visual check.** Tasks 1-7 of that plan are done and merged (`plan-d-face-quality` → `main`); its Task 8 needs a real burst with a blink. See that file for the two-step recipe.
+- [ ] Task 6: Subject/foreground segmentation as a selection, exploratory (requires Task 5 — shares its Vision setup) (files: plans/plan-d2-subject-segmentation-selection.md) — **BLOCKED: needs human visual check.** Tasks 1, 2, 4, 5, 6 of that plan are done and merged (`plan-d2-segmentation` → `main`); Tasks 3 and 7 need real photographs with subjects in them. See that file.
+- [ ] Task 7: Clarity slider (requires Task 6; parallelizable with Tasks 8-9) (files: plans/plan-e-clarity.md)
+- [ ] Task 8: Dehaze slider (requires Task 6; parallelizable with Tasks 7, 9) (files: plans/plan-f-dehaze.md)
+- [ ] Task 9: HSL panel, 8-band hue/saturation/luminance (requires Task 6; parallelizable with Tasks 7-8) (files: plans/plan-g-hsl-panel.md)
+- [ ] Task 10: Presets with Lightroom `.xmp` import — runs last, its field coverage depends on Tasks 7-9 (files: plans/plan-a-presets.md)
+- [ ] Task 11: DEFERRED — Tone Curve (full point-based spline); parked, no fixed slot, pick up separately (files: plans/plan-h-tone-curve.md)
 
 Standalone plans in this folder, not part of the roadmap sequence:
 
-- [x] Task 10: Zoom/pan support in compare mode — done, commit `2cdbf19` (files: plans/compare-mode-zoom.md)
-- [x] Task 11: Split app.rs and ui.rs into submodules — done, commit `6a917e3` (files: plans/refactor-split-app-ui-modules.md)
-- [ ] Task 12: Fix saved adjustments not applied until compare toggle (files: plans/fix-adjustments-not-applied-on-open.md)
-
-Research notes in this folder — **not executable. No task numbers, no checkboxes,
-nothing here for plan-runner to do. Skip this section.**
-
-- Web/WASM port feasibility — can a Rust+WASM browser build match the native app's
-  speed? Go/no-go assessment, open question, not a decision
-  (files: plans/web-wasm-port-feasibility.md)
+- [x] Task 12: Zoom/pan support in compare mode — done, commit `2cdbf19` (files: plans/compare-mode-zoom.md)
+- [x] Task 13: Split app.rs and ui.rs into submodules — done, commit `6a917e3` (files: plans/refactor-split-app-ui-modules.md)
+- [ ] Task 14: Fix saved adjustments not applied until compare toggle (files: plans/fix-adjustments-not-applied-on-open.md)
 
 <!--
 Tips:
@@ -68,7 +63,7 @@ cargo test && cargo build --release
 Each plan is built, committed, and reviewed as its own unit before the next
 starts — not one big batch. Branch per plan (`plan-d-face-quality`, etc.), run
 its checklist there, merge to `main` once the gate above passes, then check the
-box here. Tasks 5-7 (Clarity / Dehaze / HSL) are the only mutually independent
+box here. Tasks 7-9 (Clarity / Dehaze / HSL) are the only mutually independent
 set — they can run as parallel worktrees, but note they *all* touch
 `src/develop.rs`, `src/shader.wgsl`, and `src/ui/develop_panel.rs`, so under the
 plan-runner worktree rules they must either be sequenced or merged one at a time
@@ -84,7 +79,12 @@ everything up to that point, leave the final box unchecked and marked
 `BLOCKED: needs human visual check`, and move on. Don't let the loop self-certify
 a visual result it can't see.
 
-Plan `fix-adjustments-not-applied-on-open.md` (Task 12) is the strongest case of
+Tasks 3-4 (Linux/Windows and WASM port feasibility) are gates, not plans yet:
+each memo is "not executable, no checklist" until its open verification
+question is run and answered. An unattended run should read the memo, do
+nothing else, and leave the box unchecked — the decision needs a human.
+
+Plan `fix-adjustments-not-applied-on-open.md` (Task 14) is the strongest case of
 this — its whole approach is "instrument, run, observe, then decide the fix," so
 Tasks 4-5 there need a human at the terminal reading the log output.
 
