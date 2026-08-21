@@ -1604,6 +1604,7 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "image",
  "img-parts",
  "mozjpeg-rs",
  "objc2 0.6.4",

@@ -24,6 +24,7 @@
 // Re-including whole modules pulls in plenty this probe never calls.
 #![allow(dead_code)]
 
+#[cfg(target_os = "macos")]
 #[path = "../coregraphics.rs"]
 mod coregraphics;
 #[path = "../develop.rs"]
@@ -38,6 +39,7 @@ mod image_encode;
 mod image_ops;
 #[path = "../segmentation.rs"]
 mod segmentation;
+#[cfg(target_os = "macos")]
 #[path = "../vision.rs"]
 mod vision;
 

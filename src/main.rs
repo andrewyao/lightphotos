@@ -26,6 +26,7 @@
 mod app;
 mod burst;
 mod catalog;
+#[cfg(target_os = "macos")]
 mod coregraphics;
 mod develop;
 mod duplicates;

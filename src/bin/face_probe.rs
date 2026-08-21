@@ -23,12 +23,14 @@
 // path, for one) — that's expected of a re-include, not a code smell.
 #![allow(dead_code)]
 
+#[cfg(target_os = "macos")]
 #[path = "../coregraphics.rs"]
 mod coregraphics;
 #[path = "../facequality.rs"]
 mod facequality;
 #[path = "../image_decode.rs"]
 mod image_decode;
+#[cfg(target_os = "macos")]
 #[path = "../vision.rs"]
 mod vision;
 

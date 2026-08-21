@@ -91,6 +91,8 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = [
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 trash = "5"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
+mozjpeg-rs = "0.9.2"
 
 [profile.release]
 opt-level = 3

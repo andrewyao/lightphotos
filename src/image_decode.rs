@@ -1,20 +1,30 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Decode any image macOS understands (JPEG/PNG/GIF/TIFF/BMP/HEIC/RAW) to
-//! RGBA8 bytes using Apple's ImageIO + CoreGraphics. No third-party codecs.
+//! Decode an image to RGBA8 bytes.
 //!
-//! Pipeline: CFURL -> CGImageSource -> CGImage -> draw into a CGBitmapContext
-//! backed by our own buffer (sRGB, premultiplied RGBA, big-endian byte order),
-//! then read the buffer back.
+//! macOS: any format macOS understands (JPEG/PNG/GIF/TIFF/BMP/HEIC/RAW) via
+//! Apple's ImageIO + CoreGraphics, no third-party codecs. Pipeline: CFURL ->
+//! CGImageSource -> CGImage -> draw into a CGBitmapContext backed by our own
+//! buffer (sRGB, premultiplied RGBA, big-endian byte order), then read the
+//! buffer back.
+//!
+//! Non-mac: JPEG/PNG/TIFF via the `image` crate; camera RAW via `rawler`
+//! (`decode_raw_nonmac`, Task 10). Metadata reading (EXIF camera/lens fields,
+//! capture time beyond mtime) isn't wired up yet on this platform — see each
+//! function's non-mac doc comment for its exact fallback behavior.
 
+#[cfg(target_os = "macos")]
 use std::ffi::c_void;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::{
     CFArray, CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CGPoint, CGRect, CGSize,
 };
+#[cfg(target_os = "macos")]
 use objc2_core_graphics::{CGContext, CGImage};
+#[cfg(target_os = "macos")]
 use objc2_image_io::{
     kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifDictionary,
     kCGImagePropertyExifExposureTime, kCGImagePropertyExifFNumber, kCGImagePropertyExifFocalLength,
@@ -24,6 +34,7 @@ use objc2_image_io::{
     kCGImagePropertyTIFFModel, CGImageSource,
 };
 
+#[cfg(target_os = "macos")]
 use crate::coregraphics;
 
 pub struct DecodedImage {
@@ -35,6 +46,7 @@ pub struct DecodedImage {
 
 // CoreFoundation runtime type introspection, used to verify a value's concrete
 // type before reinterpreting it. CoreFoundation is already linked transitively.
+#[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
     fn CFGetTypeID(cf: *const c_void) -> core::ffi::c_ulong;
@@ -82,6 +94,7 @@ pub struct CaptureDate {
 /// (so images larger than the GPU's max texture size still display).
 /// Open `path` as a `CGImageSource` (the shared CFURL + ImageIO open path used
 /// by both full-resolution decode and thumbnail generation).
+#[cfg(target_os = "macos")]
 pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, String> {
     let url = coregraphics::file_url(path)?;
 
@@ -91,6 +104,7 @@ pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, Strin
         .ok_or_else(|| "ImageIO could not open file".into())
 }
 
+#[cfg(target_os = "macos")]
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let source = open_image_source(path)?;
 
@@ -112,6 +126,72 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     // WithTransform). Loupe, crop, and export all consume `decode()`, so this
     // keeps every downstream view upright and consistent.
     Ok(apply_exif_orientation(decoded, read_orientation(&source)))
+}
+
+/// Extensions we treat as camera RAW on the non-mac decode path — these route
+/// to `decode_raw_nonmac` instead of the `image` crate (which doesn't parse
+/// RAW containers). Mirrors the RAW subset of `navigation.rs`'s `IMAGE_EXTS`.
+#[cfg(not(target_os = "macos"))]
+fn is_raw_extension(path: &Path) -> bool {
+    const RAW_EXTS: &[&str] = &[
+        "cr2", "cr3", "nef", "arw", "dng", "raf", "rw2", "orf", "pef", "srw",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| RAW_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+/// Decode a camera RAW file on non-mac platforms via `rawler`. Stubbed for
+/// now — Task 10 implements this, sharing the rawler call site with
+/// `decode_probe.rs`'s `decode_via_rawler` (Task 8).
+#[cfg(not(target_os = "macos"))]
+fn decode_raw_nonmac(_path: &Path, _max_dim: u32) -> Result<DecodedImage, String> {
+    todo!("Task 10: RAW decode via rawler for non-mac")
+}
+
+/// Decode `path`, optionally downscaling so neither side exceeds `max_dim`.
+/// JPEG/PNG/TIFF go through the `image` crate; RAW extensions are routed to
+/// `decode_raw_nonmac` (Task 10). Applies EXIF orientation via the decoder's
+/// own `orientation()` (JPEG/TIFF support it; PNG has none and defaults to
+/// identity), matching the mac arm's behavior so callers never see a
+/// sideways/mirrored image regardless of platform.
+#[cfg(not(target_os = "macos"))]
+pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+    if is_raw_extension(path) {
+        return decode_raw_nonmac(path, max_dim);
+    }
+
+    let reader = image::ImageReader::open(path)
+        .map_err(|e| e.to_string())?
+        .with_guessed_format()
+        .map_err(|e| e.to_string())?;
+    let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;
+
+    use image::ImageDecoder;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+
+    let mut img = image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
+    img.apply_orientation(orientation);
+    let img = img.into_rgba8();
+
+    let (src_w, src_h) = (img.width(), img.height());
+    if src_w == 0 || src_h == 0 {
+        return Err("decoded image has zero dimension".into());
+    }
+    let (w, h) = fit_within(src_w, src_h, max_dim);
+    let rgba = if (w, h) == (src_w, src_h) {
+        img.into_raw()
+    } else {
+        image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3).into_raw()
+    };
+    Ok(DecodedImage {
+        width: w,
+        height: h,
+        rgba,
+    })
 }
 
 /// Validated calendar/time components parsed from an EXIF datetime string.
@@ -186,14 +266,24 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 /// Capture time for `path` from its EXIF/TIFF metadata, falling back to the
 /// file's modification time so grouping always has *something* to order by.
 /// Never panics; returns `None` only when even the mtime is unavailable.
+#[cfg(target_os = "macos")]
 pub fn capture_time(path: &Path) -> Option<SystemTime> {
     let source = open_image_source(path).ok()?;
     read_capture_time(&source)
         .or_else(|| std::fs::metadata(path).ok().and_then(|m| m.modified().ok()))
 }
 
+/// Capture time for `path`. Non-mac has no EXIF reader wired up yet, so this
+/// always takes the mtime fallback described above (the same path the mac
+/// arm takes for any file whose EXIF is absent/unparseable).
+#[cfg(not(target_os = "macos"))]
+pub fn capture_time(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
 /// Read the capture timestamp from an open source: EXIF `DateTimeOriginal`
 /// first, then TIFF `DateTime`. `None` when neither is present/parseable.
+#[cfg(target_os = "macos")]
 fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
     // SAFETY: index 0 exists; no options. Dictionary is +1 retained, freed on drop.
     let props = unsafe { source.properties_at_index(0, None) }?;
@@ -216,6 +306,7 @@ fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
 /// TIFF `DateTime`. `None` when neither is present/parseable — unlike
 /// `capture_time`, this has no filesystem-mtime fallback, since a
 /// modification time isn't a capture date and shouldn't be shown as one.
+#[cfg(target_os = "macos")]
 fn read_capture_date(source: &CGImageSource) -> Option<CaptureDate> {
     let props = unsafe { source.properties_at_index(0, None) }?;
 
@@ -233,6 +324,7 @@ fn read_capture_date(source: &CGImageSource) -> Option<CaptureDate> {
 
 /// Read camera/lens/exposure metadata plus capture date for `path`. Never
 /// panics; an unreadable file yields an all-`None` `ImageMetadata`.
+#[cfg(target_os = "macos")]
 pub fn read_metadata(path: &Path) -> ImageMetadata {
     let mut meta = ImageMetadata::default();
     let Ok(source) = open_image_source(path) else {
@@ -274,7 +366,20 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
     meta
 }
 
+/// Read camera/lens/exposure metadata plus capture date for `path`. Non-mac
+/// has no EXIF reader wired up yet, so every field is `None` except
+/// `source_size`, which comes from [`pixel_size`] (a real, portable read, not
+/// a stub) so the loupe still knows the true source resolution.
+#[cfg(not(target_os = "macos"))]
+pub fn read_metadata(path: &Path) -> ImageMetadata {
+    ImageMetadata {
+        source_size: pixel_size(path),
+        ..ImageMetadata::default()
+    }
+}
+
 /// Fetch a dictionary value by key with no type checking; null if absent.
+#[cfg(target_os = "macos")]
 fn dict_raw(dict: &CFDictionary, key: &CFString) -> *const c_void {
     // SAFETY: `key` is a valid CFString option key; `value` returns a borrowed
     // pointer to the stored value, or null when absent.
@@ -283,6 +388,7 @@ fn dict_raw(dict: &CFDictionary, key: &CFString) -> *const c_void {
 
 /// Read a CFString value from a CFDictionary for `key`, verifying the concrete
 /// type before reinterpreting (a crafted file could store another CFType).
+#[cfg(target_os = "macos")]
 fn dict_string(dict: &CFDictionary, key: &CFString) -> Option<String> {
     let ptr = dict_raw(dict, key);
     if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFStringGetTypeID() } {
@@ -293,6 +399,7 @@ fn dict_string(dict: &CFDictionary, key: &CFString) -> Option<String> {
 }
 
 /// Read a CFDictionary sub-value from a CFDictionary for `key`.
+#[cfg(target_os = "macos")]
 fn dict_dictionary<'a>(dict: &'a CFDictionary, key: &CFString) -> Option<&'a CFDictionary> {
     let ptr = dict_raw(dict, key);
     if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFDictionaryGetTypeID() } {
@@ -304,6 +411,7 @@ fn dict_dictionary<'a>(dict: &'a CFDictionary, key: &CFString) -> Option<&'a CFD
 
 /// Read a `CFNumber` at a raw (already-fetched) pointer as `f64`, verifying
 /// the concrete type before reinterpreting.
+#[cfg(target_os = "macos")]
 fn number_f64(ptr: *const c_void) -> Option<f64> {
     if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFNumberGetTypeID() } {
         return None;
@@ -321,6 +429,7 @@ fn number_f64(ptr: *const c_void) -> Option<f64> {
 }
 
 /// Read a CFNumber value from a CFDictionary for `key` as `f64`.
+#[cfg(target_os = "macos")]
 fn dict_f64(dict: &CFDictionary, key: &CFString) -> Option<f64> {
     number_f64(dict_raw(dict, key))
 }
@@ -328,6 +437,7 @@ fn dict_f64(dict: &CFDictionary, key: &CFString) -> Option<f64> {
 /// Read the first numeric value from a CFDictionary entry for `key`, which per
 /// the EXIF spec may be stored as a CFArray of CFNumbers (ISOSpeedRatings) —
 /// falls back to reading it as a bare CFNumber for lenient sources.
+#[cfg(target_os = "macos")]
 fn dict_first_u32(dict: &CFDictionary, key: &CFString) -> Option<u32> {
     let ptr = dict_raw(dict, key);
     if ptr.is_null() {
@@ -358,6 +468,7 @@ fn dict_first_u32(dict: &CFDictionary, key: &CFString) -> Option<u32> {
 /// upright-assuming coordinate space wants (see `facequality.rs`). Callers who
 /// want display dimensions should swap the axes themselves for orientations
 /// `5..=8`, the way [`apply_exif_orientation`] does.
+#[cfg(target_os = "macos")]
 pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
     let source = open_image_source(path).ok()?;
     // SAFETY: index 0 exists for any image the source opened; no options passed.
@@ -370,19 +481,37 @@ pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
     Some((w as u32, h as u32))
 }
 
+/// The image's stored pixel dimensions, before EXIF orientation is applied —
+/// same semantics as the mac arm (see above). Reads just the header via the
+/// `image` crate's decoder, no full decode.
+#[cfg(not(target_os = "macos"))]
+pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
+    image::image_dimensions(path).ok()
+}
+
 /// The EXIF orientation of the image at `path` (`1..=8`, `1` when absent).
 ///
 /// [`decode`] already applies this, so callers only need it to line something
 /// up with a decoded image that was produced *outside* this pipeline — Vision's
 /// segmentation masks, which are computed in the file's stored orientation.
+#[cfg(target_os = "macos")]
 pub fn orientation_of(path: &Path) -> u8 {
     open_image_source(path)
         .map(|source| read_orientation(&source))
         .unwrap_or(1)
 }
 
+/// The EXIF orientation of the image at `path`. Non-mac: subject segmentation
+/// (the only caller) is itself macOS-only (Vision), so this is unreachable in
+/// practice on this platform — returns the identity orientation for safety.
+#[cfg(not(target_os = "macos"))]
+pub fn orientation_of(_path: &Path) -> u8 {
+    1
+}
+
 /// The image's EXIF orientation tag (`1..=8`), or `1` when absent/unreadable.
 /// Never panics — any missing property yields the identity orientation.
+#[cfg(target_os = "macos")]
 fn read_orientation(source: &CGImageSource) -> u8 {
     // SAFETY: index 0 exists (we already decoded it); no options passed. The
     // returned dictionary is +1 retained and released on drop.
@@ -462,6 +591,7 @@ fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImage {
 ///
 /// Scales the image into the target rect, so callers can use this both for a
 /// full-size decode and for a thumbnail (passing the thumbnail's own size).
+#[cfg(target_os = "macos")]
 pub fn cgimage_to_rgba(
     image: &CGImage,
     target_w: u32,

@@ -1,22 +1,33 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Encode RGBA8 pixels to a JPEG file using Apple's ImageIO + CoreGraphics —
-//! the encode counterpart to `image_decode`. No third-party codecs.
+//! Encode RGBA8 pixels to a JPEG file — the encode counterpart to
+//! `image_decode`.
 //!
-//! Pipeline: build a CGBitmapContext over the pixels (sRGB, byte order R,G,B,A),
-//! snapshot a CGImage from it, then hand that to a CGImageDestination pointed at
-//! the output file and finalize.
+//! macOS: Apple's ImageIO + CoreGraphics, no third-party codecs. Pipeline:
+//! build a CGBitmapContext over the pixels (sRGB, byte order R,G,B,A),
+//! snapshot a CGImage from it, then hand that to a CGImageDestination pointed
+//! at the output file and finalize.
+//!
+//! Non-mac: `mozjpeg-rs`'s pure-Rust encoder, via its `encode_rgba` entry
+//! point (reads RGBA directly, ignores alpha — no separate RGB conversion
+//! buffer needed).
 
-use std::ffi::c_void;
 use std::path::Path;
 
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
+
+#[cfg(target_os = "macos")]
 use objc2_core_foundation::CFString;
+#[cfg(target_os = "macos")]
 use objc2_image_io::CGImageDestination;
 
+#[cfg(target_os = "macos")]
 use crate::coregraphics;
 
 /// Encode `rgba` (tightly packed RGBA8, row-major, sRGB; alpha may be opaque or
 /// premultiplied — export produces opaque) to a JPEG at `out`.
+#[cfg(target_os = "macos")]
 pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     if width == 0 || height == 0 {
         return Err("cannot encode a zero-sized image".into());
@@ -57,6 +68,32 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
         return Err("CGImageDestinationFinalize failed (could not write file)".into());
     }
     Ok(())
+}
+
+/// Encode `rgba` (tightly packed RGBA8, row-major, sRGB; alpha may be opaque or
+/// premultiplied — export produces opaque) to a JPEG at `out`, via
+/// `mozjpeg-rs`.
+///
+/// Quality 90 (mozjpeg-rs's own default preset quality is 75, tuned for
+/// general-purpose web images) — chosen to sit closer to the mac arm's
+/// ImageIO default, which favors fidelity for a photo-editing tool's export
+/// path over file size.
+#[cfg(not(target_os = "macos"))]
+pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("cannot encode a zero-sized image".into());
+    }
+    let bytes_per_row = width as usize * 4;
+    if rgba.len() < bytes_per_row * height as usize {
+        return Err("pixel buffer too small for the given dimensions".into());
+    }
+
+    let jpeg_data = mozjpeg_rs::Encoder::new(mozjpeg_rs::Preset::default())
+        .quality(90)
+        .encode_rgba(rgba, width, height)
+        .map_err(|e| e.to_string())?;
+
+    std::fs::write(out, jpeg_data).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
