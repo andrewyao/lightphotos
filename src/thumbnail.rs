@@ -192,17 +192,33 @@ fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage
         return None;
     }
 
+    // The orientation tag describes the *main* image, not the embedded
+    // thumbnail — read it from the primary IFD, matching
+    // `image_decode.rs`'s non-mac `orientation_of`. Defaults to identity (1)
+    // when absent, same as every other orientation read path in this crate.
+    let orientation = source
+        .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+        .and_then(|f| f.value.get_uint(0))
+        .unwrap_or(1) as u8;
+
     let (nw, nh) = crate::image_decode::fit_within(w, h, max_px);
     let rgba = if (nw, nh) == (w, h) {
         img.into_raw()
     } else {
         image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
     };
-    Some(DecodedImage {
-        width: nw,
-        height: nh,
-        rgba,
-    })
+    // Resize before orienting (same order `decode_raw_nonmac` uses) so the
+    // fit-within math runs against the pre-rotation aspect ratio consistently
+    // with the rest of this crate; orientation swaps width/height for the
+    // 5..=8 cases, which would otherwise fit the wrong ratio.
+    Some(crate::image_decode::apply_exif_orientation(
+        DecodedImage {
+            width: nw,
+            height: nh,
+            rgba,
+        },
+        orientation,
+    ))
 }
 
 /// Build the options `CFDictionary` for `CGImageSourceCreateThumbnailAtIndex`.

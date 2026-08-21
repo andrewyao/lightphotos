@@ -673,7 +673,7 @@ fn read_orientation(source: &CGImageSource) -> u8 {
 ///
 /// Mapping is `out(xo, yo) = in(xs, ys)`; see the EXIF orientation table. Shares
 /// its shape with `app::rotate_rgba`, extended to cover the mirrored cases.
-fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImage {
+pub(crate) fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImage {
     if orientation <= 1 {
         return img;
     }
