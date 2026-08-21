@@ -1,4 +1,4 @@
-<!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
 # LightPhotos
 
@@ -106,5 +106,4 @@ without hijacking your default image handler.
 
 ## License
 
-Dual-licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE),
-at your option.
+Licensed under the [GNU GPL v3.0 (or later)](LICENSE).

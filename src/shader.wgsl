@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 // Full-screen quad. The vertex shader maps each corner to a UV that is
 // scaled and offset by the zoom/pan transform, so panning and zooming are

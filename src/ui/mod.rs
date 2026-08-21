@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! egui chrome: the thumbnail Grid, the Loupe filmstrip, the filter bar, and
 //! rating overlays. The GPU renderer draws the loupe image itself; this module

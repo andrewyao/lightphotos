@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Content-similarity duplicate grouping. Unlike `burst.rs` (which groups
 //! strictly consecutive shots within a short time gap), this groups any

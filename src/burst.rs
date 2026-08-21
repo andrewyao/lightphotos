@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT OR Apache-2.0
+// SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Best-of-burst derivation. Given a per-entry burst grouping and per-entry
 //! sharpness scores, decide which frame of each burst is the "best" (sharpest)
