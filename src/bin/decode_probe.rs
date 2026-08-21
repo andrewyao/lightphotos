@@ -71,6 +71,19 @@ fn main() {
         }
     }
 
+    println!("--- Synthetic Linear DNG: rawler's RawDevelop pipeline (Task 10's decode_raw_nonmac path) ---");
+    match develop_smoke_check(&dng_path, width, height) {
+        Ok(()) => println!(
+            "PASS: RawDevelop::develop_intermediate -> to_dynamic_image ran end-to-end and \
+             produced a {width}x{height} image, same shape decode_raw_nonmac's non-mac RAW \
+             path builds on."
+        ),
+        Err(e) => {
+            eprintln!("FAIL: RawDevelop pipeline did not complete on the synthetic fixture: {e}");
+            std::process::exit(1);
+        }
+    }
+
     // Extra files passed on the CLI: decode each with rawler and report
     // shape/timing. These are the user's own real RAW files — there's no
     // analytic ground truth to compare against, so this is a decode-succeeds
@@ -122,8 +135,65 @@ fn main() {
 /// directly against rawler's raw 16-bit interleaved samples, which is a more
 /// direct (and more exacting) check than routing through an 8-bit RGBA
 /// intermediate would be.
+///
+/// Task 10: delegates to `image_decode::decode_raw_via_rawler` (the exact
+/// same `rawler::decode_file` call site `decode_raw_nonmac` uses) instead of
+/// calling `rawler::decode_file` a second time here — see that function's doc
+/// comment for why it's gated to also compile under `feature = "raw-probe"`
+/// on mac, which is what makes this delegation possible in this dev build.
 fn decode_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
-    rawler::decode_file(path).map_err(|e| e.to_string())
+    image_decode::decode_raw_via_rawler(path)
+}
+
+/// Runs the exact rawler API calls `image_decode::decode_raw_nonmac` (Task
+/// 10) uses after `decode_raw_via_rawler` — `RawDevelop::default()
+/// .develop_intermediate(&raw)` then `.to_dynamic_image()` — against the
+/// synthetic Linear DNG fixture and checks the result isn't degenerate.
+///
+/// This is deliberately a *different*, weaker check than
+/// `compare_against_gradient_ground_truth` above: the develop pipeline
+/// rescales, calibrates against `ColorMatrix1`, and applies sRGB gamma, so the
+/// output pixel values no longer equal the analytic gradient formula
+/// (correctly — that transform is the point of developing a RAW file). What
+/// this *does* prove, for real, on this machine: the develop call chain
+/// `decode_raw_nonmac` depends on does not panic or error on real
+/// rawler-decoded `RawImage` data, and produces an image of the expected
+/// dimensions. `decode_raw_nonmac` itself is `#[cfg(not(target_os =
+/// "macos"))]` and so cannot be called directly from this mac binary — this
+/// is the closest real exercise of its logic available here (see the Task 10
+/// report for why: it also applies EXIF-orientation swapping and a resize
+/// that this fixture's identity orientation and small size don't exercise).
+fn develop_smoke_check(path: &Path, width: u32, height: u32) -> Result<(), String> {
+    let raw = decode_via_rawler(path)?;
+    let developed = rawler::imgop::develop::RawDevelop::default()
+        .develop_intermediate(&raw)
+        .map_err(|e| e.to_string())?;
+    let dynamic = developed
+        .to_dynamic_image()
+        .ok_or("RawDevelop produced an empty image")?;
+
+    if dynamic.width() != width || dynamic.height() != height {
+        return Err(format!(
+            "dimension mismatch: fixture is {width}x{height}, developed image is {}x{}",
+            dynamic.width(),
+            dynamic.height()
+        ));
+    }
+
+    // Sanity: a real image, not a degenerate all-zero/uniform buffer (which
+    // would indicate the pipeline silently produced garbage rather than
+    // actually processing the gradient).
+    let rgba = dynamic.into_rgba8();
+    let first = rgba.get_pixel(0, 0);
+    let last = rgba.get_pixel(width - 1, 0);
+    if first == last {
+        return Err(format!(
+            "developed image looks uniform (first pixel {:?} == last pixel {:?}) \
+             for a fixture that is a left-to-right gradient",
+            first, last
+        ));
+    }
+    Ok(())
 }
 
 /// Compares a `rawler`-decoded `RawImage` against the exact analytic formula
@@ -374,7 +444,14 @@ mod tests {
     /// `linear_dng_pixel_decode_is_blocked_on_this_machine` below for why
     /// that specific check doesn't currently pass on macOS, and why that's a
     /// platform-API finding rather than a fixture bug.
+    ///
+    /// mac-only: `image_decode::open_image_source` (Task 9's cfg-split) only
+    /// exists under `#[cfg(target_os = "macos")]` — non-mac has no
+    /// `CGImageSource` equivalent to open a container without decoding it, so
+    /// this specific check has no non-mac counterpart to gate it into instead
+    /// (deferred fix from Task 9's review, folded into Task 10).
     #[test]
+    #[cfg(target_os = "macos")]
     fn linear_dng_fixture_writes_and_reopens_as_image_source() {
         let path = std::env::temp_dir().join(format!(
             "lightphotos_linear_dng_fixture_test_{}.dng",
@@ -465,6 +542,27 @@ mod tests {
         let raw = decode_result.expect("rawler failed to decode the synthetic Linear DNG fixture");
         let report = compare_against_gradient_ground_truth(&raw, width, height);
         report.expect("rawler's decoded pixels diverged from the analytic gradient ground truth");
+    }
+
+    /// Task 10: `RawDevelop::default().develop_intermediate(&raw)
+    /// .to_dynamic_image()` — the exact call chain `image_decode::
+    /// decode_raw_nonmac` runs after `decode_raw_via_rawler` — completes
+    /// without error/panic on the synthetic fixture and produces a
+    /// same-dimensions, non-degenerate image. See `develop_smoke_check`'s doc
+    /// comment for what this does and doesn't prove.
+    #[test]
+    fn develop_pipeline_runs_end_to_end_on_linear_dng() {
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_linear_dng_develop_test_{}.dng",
+            std::process::id()
+        ));
+        let (width, height) = (48u32, 32u32);
+
+        write_linear_dng(&path, width, height).expect("write_linear_dng failed");
+        let result = develop_smoke_check(&path, width, height);
+        let _ = std::fs::remove_file(&path);
+
+        result.expect("RawDevelop pipeline failed on the synthetic Linear DNG fixture");
     }
 
     /// A malformed/unsupported input (not a DNG at all) should come back as

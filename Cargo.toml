@@ -93,6 +93,19 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = [
 trash = "5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
 mozjpeg-rs = "0.9.2"
+# Camera RAW decode (Task 10). Declared unconditionally (non-optional) here so
+# the plain non-mac build always has it, alongside the optional top-level
+# `rawler` entry above that `raw-probe` uses to also make it available for
+# `decode_probe.rs`'s validation harness when building/running on mac.
+rawler = "0.7.2"
+# Embedded-preview extraction (Task 10): RAW containers (CR2/NEF/ARW/DNG/...)
+# are TIFF-based, so a generic TIFF/EXIF reader can open them directly and
+# read the baseline IFD1 thumbnail tags every EXIF-aware viewer relies on.
+# `img-parts` (above) only understands JPEG/PNG/WebP containers, not TIFF, so
+# it can't do this; `kamadak-exif` explicitly supports "TIFF and some RAW
+# image formats based on it" per its own docs, so that's what thumbnail.rs's
+# non-mac `try_extract_embedded_preview` uses instead.
+kamadak-exif = "0.6.1"
 
 [profile.release]
 opt-level = 3

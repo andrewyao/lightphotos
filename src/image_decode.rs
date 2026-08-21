@@ -9,9 +9,11 @@
 //! buffer back.
 //!
 //! Non-mac: JPEG/PNG/TIFF via the `image` crate; camera RAW via `rawler`
-//! (`decode_raw_nonmac`, Task 10). Metadata reading (EXIF camera/lens fields,
-//! capture time beyond mtime) isn't wired up yet on this platform — see each
-//! function's non-mac doc comment for its exact fallback behavior.
+//! (`decode_raw_nonmac`) — decode the sensor samples, then run rawler's own
+//! demosaic/white-balance/color-calibration/gamma pipeline to get a viewable
+//! image. Metadata reading (EXIF camera/lens fields, capture time beyond
+//! mtime) isn't wired up yet on this platform — see each function's non-mac
+//! doc comment for its exact fallback behavior.
 
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
@@ -147,12 +149,100 @@ fn is_raw_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Decode a camera RAW file on non-mac platforms via `rawler`. Stubbed for
-/// now — Task 10 implements this, sharing the rawler call site with
-/// `decode_probe.rs`'s `decode_via_rawler` (Task 8).
+/// Decode a RAW/DNG file into rawler's native `RawImage`: undeveloped sensor
+/// samples (still mosaiced for a typical Bayer/X-Trans camera file, cpp=1;
+/// already-demosaiced for Linear DNG, cpp=3/4) — no white balance, color
+/// matrix, or gamma applied yet.
+///
+/// Gated on `feature = "raw-probe"` as well as `not(target_os = "macos")` so
+/// `decode_probe.rs`'s ground-truth harness (Task 8) can call this same
+/// function — including from a mac dev build via `cargo run --bin
+/// decode_probe --features raw-probe`, where `rawler` is available as the
+/// optional top-level dependency — instead of duplicating the
+/// `rawler::decode_file` call site. That harness compares these raw,
+/// undeveloped samples directly against an analytic fixture, so it must NOT
+/// be routed through [`decode_raw_nonmac`]'s develop/demosaic pipeline below.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+// On mac+raw-probe this compiles into the *main* `lightphotos` binary too
+// (the feature has no way to scope itself to just `decode_probe.rs`'s
+// build), where nothing calls it — only `decode_probe.rs`'s own copy of this
+// module does. Genuinely used on non-mac (by `decode_raw_nonmac` below) and
+// via `cargo run/test --bin decode_probe --features raw-probe`.
+#[allow(dead_code)]
+pub(crate) fn decode_raw_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
+    rawler::decode_file(path).map_err(|e| e.to_string())
+}
+
+/// Map rawler's own `Orientation` enum (read from the file's EXIF/TIFF
+/// orientation tag during decode) to the raw EXIF orientation code (`1..=8`)
+/// that [`apply_exif_orientation`] expects. This is a direct rename, not a
+/// reinterpretation — rawler's variants are the same 8 EXIF cases in the same
+/// order (see `rawler::Orientation::from_u16`).
 #[cfg(not(target_os = "macos"))]
-fn decode_raw_nonmac(_path: &Path, _max_dim: u32) -> Result<DecodedImage, String> {
-    todo!("Task 10: RAW decode via rawler for non-mac")
+fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
+    use rawler::Orientation::*;
+    match o {
+        Normal => 1,
+        HorizontalFlip => 2,
+        Rotate180 => 3,
+        VerticalFlip => 4,
+        Transpose => 5,
+        Rotate90 => 6,
+        Transverse => 7,
+        Rotate270 => 8,
+        Unknown => 1,
+    }
+}
+
+/// Decode a camera RAW file on non-mac platforms via `rawler`: decode the raw
+/// sensor samples ([`decode_raw_via_rawler`]), then run rawler's own
+/// `RawDevelop` pipeline (rescale -> demosaic -> active-area crop -> white
+/// balance -> color-matrix calibration -> default crop -> sRGB gamma) to turn
+/// them into a viewable image — a raw sensor mosaic isn't displayable pixel
+/// data on its own. Finally applies the file's EXIF/TIFF orientation the same
+/// way the mac arm and the non-mac JPEG/PNG/TIFF arm do, so callers never see
+/// a sideways/mirrored RAW regardless of platform.
+///
+/// Known gap (tracked in the plan, Task 12/14): this pipeline has only been
+/// exercised end-to-end against the synthetic Linear DNG fixture (cpp=3, so
+/// the demosaic branch below is never taken) via `decode_probe.rs` — no
+/// real-camera Bayer-CFA RAW (CR2/NEF/ARW) has been run through it. Note also
+/// that rawler's own demosaic dispatch (`RawDevelop::develop_intermediate`)
+/// panics via `todo!()` for a couple of CFA layouts it doesn't recognize;
+/// ordinary Bayer/X-Trans cameras don't hit those arms, but it's a real,
+/// narrow panic surface inherited from the dependency, not something this
+/// function can guard against from the outside.
+#[cfg(not(target_os = "macos"))]
+fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+    let raw = decode_raw_via_rawler(path)?;
+    let orientation = exif_code_from_rawler_orientation(raw.orientation);
+
+    let developed = rawler::imgop::develop::RawDevelop::default()
+        .develop_intermediate(&raw)
+        .map_err(|e| e.to_string())?;
+    let dynamic = developed
+        .to_dynamic_image()
+        .ok_or("rawler produced an empty developed image")?;
+    let img = dynamic.into_rgba8();
+
+    let (src_w, src_h) = (img.width(), img.height());
+    if src_w == 0 || src_h == 0 {
+        return Err("decoded RAW image has zero dimension".into());
+    }
+    let (w, h) = fit_within(src_w, src_h, max_dim);
+    let rgba = if (w, h) == (src_w, src_h) {
+        img.into_raw()
+    } else {
+        image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3).into_raw()
+    };
+    Ok(apply_exif_orientation(
+        DecodedImage {
+            width: w,
+            height: h,
+            rgba,
+        },
+        orientation,
+    ))
 }
 
 /// Decode `path`, optionally downscaling so neither side exceeds `max_dim`.
@@ -661,7 +751,7 @@ pub fn cgimage_to_rgba(
     })
 }
 
-fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
+pub(crate) fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
     if w <= max_dim && h <= max_dim {
         return (w, h);
     }
