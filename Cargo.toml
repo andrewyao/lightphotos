@@ -37,16 +37,17 @@ egui = "0.34"
 egui-winit = "0.34"
 egui-wgpu = "0.34"
 
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSObject", "NSThread", "NSFileManager", "NSError"] }
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSResponder"] }
 objc2-core-graphics = "0.3.2"
 objc2-core-foundation = { version = "0.3.2", features = ["CFURL", "CFString", "CFBase", "CFData", "CFDictionary", "CFArray"] }
 objc2-image-io = { version = "0.3.2", features = ["CGImageSource", "CGImageDestination"] }
-
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
 objc2-vision = { version = "0.3.2", default-features = false, features = [
     "VNRequest",
     "VNRequestHandler",
