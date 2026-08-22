@@ -48,6 +48,18 @@ impl App {
             self.request_redraw();
             return;
         }
+        // The catalog's sidecar scan for the active directory runs on a
+        // background thread (`app/catalog.rs::request_catalog_load`) and can
+        // still be in flight right after opening it. `adj`/`touchups` below
+        // read the `self.edits`/`self.touchups` mirrors, which only get
+        // populated once that load reconciles — starting an export before
+        // then would silently bake with missing edits rather than fail
+        // loudly, so refuse instead.
+        if self.catalog_load_pending.is_some() {
+            self.set_status("Export: catalog still loading, try again in a moment\u{2026}".into());
+            self.request_redraw();
+            return;
+        }
         let Some(exporter) = self.exporter.as_ref() else {
             return;
         };
@@ -76,8 +88,14 @@ impl App {
         for src in paths {
             let dest = paths::jpg_export_target(&src, &exports_dir, &taken);
             taken.insert(dest.clone());
-            let adj = self.catalog.adjustments(&src);
-            let touchups = self.catalog.touchups(&src);
+            // Read from the in-memory mirrors, same as `rot` below, rather
+            // than `Catalog` directly — consistent with how rotation was
+            // already sourced. The `catalog_load_pending` check above is
+            // what actually guarantees these are populated by the time we
+            // get here; reading the mirrors alone would not (they're filled
+            // by the same background reconciliation `Catalog` itself is).
+            let adj = self.edits.get(&src).copied().unwrap_or_default();
+            let touchups = self.touchups.get(&src).cloned().unwrap_or_default();
             let rot = self.rotations.get(&src).copied().unwrap_or(0);
             exporter.submit(ExportJob {
                 src,

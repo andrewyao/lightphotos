@@ -306,6 +306,12 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
         }
+        // Drain finished background catalog (sidecar) loads. Redraws itself
+        // when a load actually reconciles into the ratings/edits/touchups/
+        // rotations mirrors; its return value only feeds `image_pending`
+        // below so the loop keeps polling at the tight cadence until it lands.
+        let catalog_load_pending = self.poll_catalog_load();
+
         // Drain finished background exports and fold them into the progress toast.
         let outcomes = self.exporter.as_ref().map(|e| e.poll()).unwrap_or_default();
         if !outcomes.is_empty() {
@@ -326,7 +332,8 @@ impl ApplicationHandler<UserEvent> for App {
             .loader
             .as_ref()
             .is_some_and(|l| l.has_pending_image())
-            || self.selection_pending();
+            || self.selection_pending()
+            || catalog_load_pending;
         let poll_delay = if image_pending {
             Some(16)
         } else if self.export_progress.is_some() {

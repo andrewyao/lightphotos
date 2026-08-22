@@ -10,6 +10,102 @@ use crate::{trash, ui};
 
 impl App {
 
+    /// Point the catalog at `dir` and kick off its sidecar scan on a
+    /// one-shot background thread — same idiom as subject segmentation's
+    /// `request_selection_mask` (`app/loupe.rs`), not `loader.rs`'s
+    /// persistent pool: a directory switch is a single job, not a stream of
+    /// same-shaped ones. `Catalog::switch_dir` runs synchronously first (it's
+    /// just a clear, no I/O) so no stale cross-directory data is visible in
+    /// the meantime; the slow part (`load_sidecars`, one read per sidecar
+    /// file) happens on the spawned thread and is folded in later by
+    /// `poll_catalog_load`.
+    pub(super) fn request_catalog_load(&mut self, dir: &Path) {
+        self.catalog.switch_dir(dir);
+        self.catalog_load_token += 1;
+        let token = self.catalog_load_token;
+        let dir = dir.to_path_buf();
+        let tx = self.catalog_load_tx.clone();
+        let for_thread = dir.clone();
+        let spawned = std::thread::Builder::new()
+            .name("catalog-load".into())
+            .spawn(move || {
+                let loaded = crate::catalog::load_sidecars(&for_thread);
+                let _ = tx.send((for_thread, token, loaded));
+            });
+        match spawned {
+            Ok(_) => self.catalog_load_pending = Some((dir, token)),
+            Err(e) => {
+                // No thread means `load_sidecars` never runs for `dir` —
+                // `switch_dir` above already cleared the cache, so without
+                // this it would silently stay empty (all ratings/edits
+                // appearing lost) with no signal to the user. Report it
+                // through the same toast mechanism as a failed sidecar
+                // write, and leave `catalog_load_pending` at whatever it
+                // already was (there is nothing new in flight to wait for).
+                self.catalog
+                    .note_persist_error(format!("could not load {}: {e}", dir.display()));
+            }
+        }
+    }
+
+    /// Drain finished catalog loads. For each: fold it into `Catalog` (which
+    /// itself discards anything for a directory since switched away from —
+    /// see `Catalog::apply_loaded`), and if it's for the *currently active*
+    /// playlist's directory, re-run the ratings/edits/touchups/rotations
+    /// mirror seed (the loop `seed_mirrors` also runs eagerly, empty, at
+    /// request time) now that real data exists, and redraw. Returns whether
+    /// a load is still outstanding, same convention as
+    /// `request_working_thumbs`/`selection_pending`.
+    pub(crate) fn poll_catalog_load(&mut self) -> bool {
+        while let Ok((dir, token, loaded)) = self.catalog_load_rx.try_recv() {
+            self.catalog.apply_loaded(&dir, loaded);
+            // Compare the token, not just `dir`: a second load for the same
+            // directory can be in flight (e.g. rapid A→B→A navigation) —
+            // only the result matching the *latest* request for the
+            // currently-pending directory should clear "still waiting". See
+            // `catalog_load_pending`'s doc comment on `App`.
+            if self.catalog_load_pending.as_ref() == Some(&(dir.clone(), token)) {
+                self.catalog_load_pending = None;
+            }
+            // Taken and put back rather than borrowed: `reconcile_catalog_mirrors`
+            // needs `&mut self` at the same time as the playlist it reads,
+            // and `Playlist` isn't `Clone`.
+            if let Some(playlist) = self.playlist.take() {
+                if playlist.dir() == dir.as_path() {
+                    self.reconcile_catalog_mirrors(&playlist);
+                    self.request_redraw();
+                }
+                self.playlist = Some(playlist);
+            }
+        }
+        self.catalog_load_pending.is_some()
+    }
+
+    /// Populate `self.ratings`/`edits`/`touchups`/`rotations` for every image
+    /// in `playlist` from whatever the catalog currently has cached. Called
+    /// once (against an as-yet-empty cache) from `seed_mirrors` at directory-
+    /// switch time, and again from `poll_catalog_load` once the background
+    /// scan actually lands.
+    pub(super) fn reconcile_catalog_mirrors(&mut self, playlist: &Playlist) {
+        for p in playlist.entries() {
+            if let Some(stars) = self.catalog.get(p) {
+                self.ratings.insert(p.clone(), stars);
+            }
+            let adj = self.catalog.adjustments(p);
+            if !adj.is_identity() {
+                self.edits.insert(p.clone(), adj);
+            }
+            let touchups = self.catalog.touchups(p);
+            if !touchups.is_empty() {
+                self.touchups.insert(p.clone(), touchups);
+            }
+            let rot = self.catalog.rotation(p);
+            if rot != 0 {
+                self.rotations.insert(p.clone(), rot);
+            }
+        }
+    }
+
     /// Set the rating of the selected/shown image; recompute the view if the
     /// active filter drops it.
     pub(super) fn set_rating(&mut self, stars: u8) {

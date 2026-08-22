@@ -30,7 +30,7 @@
 //! an even older install is no longer read — lightphotos has no SQLite
 //! dependency — and is left on disk untouched, with a one-time notice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -109,6 +109,14 @@ struct CatalogFileV1 {
 /// [`Catalog::open_dir`] is called for their directory.
 pub struct Catalog {
     images: HashMap<OsString, ImageRecord>,
+    /// Filenames written or removed (via `update`/`remove`) since the last
+    /// [`Catalog::switch_dir`], so [`Catalog::apply_loaded`] knows which keys
+    /// a background load's snapshot must not touch — including a key the
+    /// local write *deleted*, which `images` alone can't distinguish from
+    /// "never loaded yet" (both are simply absent). Cleared on every
+    /// `switch_dir`, since it's scoped to "since the active directory
+    /// became active", same as `images` itself.
+    dirty: HashSet<OsString>,
     /// The directory currently active, or `None` before the first
     /// [`Catalog::open_dir`] call — degrades to an empty catalog rather than
     /// panicking.
@@ -126,6 +134,7 @@ impl Catalog {
     pub fn new() -> Catalog {
         Catalog {
             images: HashMap::new(),
+            dirty: HashSet::new(),
             dir: None,
             last_error: None,
         }
@@ -141,65 +150,70 @@ impl Catalog {
     }
 
     /// (Re)point the catalog at `dir` as the active directory and rebuild the
-    /// read cache from `dir/.lightphotos/*.xmp`. Always reloads from disk,
-    /// even if `dir` equals the previously-active directory, so an external
-    /// change (another process, a hand-fixed sidecar) is picked up. A
-    /// missing `.lightphotos` directory is not an error — it's just an empty
-    /// catalog; the directory itself is never eagerly created here.
+    /// read cache from `dir/.lightphotos/*.xmp`, synchronously. Always
+    /// reloads from disk, even if `dir` equals the previously-active
+    /// directory, so an external change (another process, a hand-fixed
+    /// sidecar) is picked up. A missing `.lightphotos` directory is not an
+    /// error — it's just an empty catalog; the directory itself is never
+    /// eagerly created here.
+    ///
+    /// This blocks on disk I/O proportional to `dir`'s sidecar count — for
+    /// the async equivalent used by the live app (so opening a heavily
+    /// rated/edited directory never stalls first paint), see
+    /// [`Catalog::switch_dir`] + [`Catalog::apply_loaded`], composed exactly
+    /// as this function does but with `load_sidecars` run on a background
+    /// thread in between.
     pub fn open_dir(&mut self, dir: &Path) {
-        self.dir = Some(dir.to_path_buf());
-        self.images.clear();
-        self.load_into_cache();
+        self.switch_dir(dir);
+        let loaded = load_sidecars(dir);
+        self.apply_loaded(dir, loaded);
     }
 
-    /// Populate the in-memory read cache from the active directory's sidecars.
-    fn load_into_cache(&mut self) {
-        let Some(dir) = self.dir.clone() else {
-            return;
-        };
-        let entries = match std::fs::read_dir(dir.join(SIDECAR_DIR)) {
-            Ok(rd) => rd,
-            Err(_) => return, // no .lightphotos yet: empty catalog, not an error
-        };
+    /// Point the catalog at `dir` and clear the read cache immediately —
+    /// no disk I/O. This alone is what prevents cross-directory leakage
+    /// (see `open_dir_switches_active_directory_without_cross_directory_leakage`):
+    /// a lookup for the new directory's photos returns nothing (correctly
+    /// "not yet known") rather than a stale entry from whatever directory
+    /// was active before, until [`Catalog::apply_loaded`] populates it.
+    pub(crate) fn switch_dir(&mut self, dir: &Path) {
+        self.dir = Some(dir.to_path_buf());
+        self.images.clear();
+        self.dirty.clear();
+    }
 
-        let mut skipped = 0usize;
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-            if path.extension().and_then(|e| e.to_str()) != Some(SIDECAR_EXT) {
-                continue;
-            }
-            // file_stem() strips exactly the trailing ".xmp", correctly
-            // preserving a name like "PHOTO1.ARW" which itself contains a dot.
-            let Some(stem) = path.file_stem() else {
-                continue;
-            };
-            match std::fs::read(&path) {
-                Ok(bytes) => match serde_json::from_slice::<ImageRecord>(&bytes) {
-                    Ok(rec) if !rec.is_empty() => {
-                        self.images.insert(stem.to_os_string(), rec);
-                    }
-                    Ok(_) => {} // an empty record on disk: nothing to cache
-                    Err(e) => {
-                        eprintln!("[catalog] unreadable sidecar {}: {e}", path.display());
-                        skipped += 1;
-                    }
-                },
-                Err(e) => {
-                    eprintln!("[catalog] could not read {}: {e}", path.display());
-                    skipped += 1;
-                }
-            }
+    /// Merge a [`SidecarLoad`] (typically produced by `load_sidecars` on a
+    /// background thread) into the cache, if `dir` is still the active
+    /// directory — a load whose directory was since switched away from is
+    /// silently discarded, same as `poll_selection_mask`'s stale-result
+    /// handling.
+    ///
+    /// Skips any key in `dirty` rather than replacing `images` outright:
+    /// `switch_dir` clears the cache immediately, so a `set`/
+    /// `set_adjustments`/`remove`/etc. call arriving after switch but before
+    /// this load lands mutates the (now-empty) cache directly — a full
+    /// replace would clobber that local write (or, for `remove`, resurrect a
+    /// record the user just deleted, since an absent key can't otherwise be
+    /// told apart from "not loaded yet") with `loaded`'s necessarily-older
+    /// disk snapshot. The sidecar on disk is unaffected either way; this
+    /// only protects the in-memory read cache from momentarily
+    /// reverting/resurrecting.
+    ///
+    /// `skipped` (corrupt/unreadable sidecars found during the scan) is
+    /// folded into `last_error` unconditionally, even for a directory the
+    /// user has since navigated away from — the old synchronous `open_dir`
+    /// always surfaced this, and a real read failure on disk doesn't stop
+    /// being true just because it's no longer the active directory.
+    pub(crate) fn apply_loaded(&mut self, dir: &Path, loaded: SidecarLoad) {
+        if loaded.skipped > 0 {
+            self.last_error = Some(skipped_message(loaded.skipped));
         }
-
-        if skipped > 0 {
-            self.last_error = Some(format!(
-                "{skipped} catalog entr{} could not be read and {} skipped.",
-                if skipped == 1 { "y" } else { "ies" },
-                if skipped == 1 { "was" } else { "were" },
-            ));
+        if self.dir.as_deref() != Some(dir) {
+            return; // stale: the active directory has since changed
+        }
+        for (name, rec) in loaded.images {
+            if !self.dirty.contains(&name) {
+                self.images.insert(name, rec);
+            }
         }
     }
 
@@ -211,7 +225,11 @@ impl Catalog {
     }
 
     /// Record a persist failure: log it and stash it for the UI to surface.
-    fn note_persist_error(&mut self, e: impl std::fmt::Display) {
+    /// `pub(crate)` so callers outside this module (e.g. `App` failing to
+    /// even spawn a background load thread) can report through the same
+    /// toast mechanism as an on-disk write failure, rather than that
+    /// failure going silently unreported.
+    pub(crate) fn note_persist_error(&mut self, e: impl std::fmt::Display) {
         let msg = format!("Failed to save catalog entry: {e}");
         eprintln!("[catalog] {msg}");
         self.last_error = Some(msg);
@@ -283,6 +301,7 @@ impl Catalog {
     pub fn remove(&mut self, path: &Path) {
         if let Some(name) = path.file_name() {
             self.images.remove(name);
+            self.dirty.insert(name.to_os_string());
         }
         if let Err(e) = self.delete_sidecar(path) {
             self.note_persist_error(e);
@@ -295,6 +314,7 @@ impl Catalog {
         let Some(name) = path.file_name().map(|n| n.to_os_string()) else {
             return;
         };
+        self.dirty.insert(name.clone());
         let mut rec = self.images.remove(&name).unwrap_or_default();
         mutate(&mut rec);
         let empty = rec.is_empty();
@@ -333,6 +353,72 @@ impl Default for Catalog {
     fn default() -> Catalog {
         Catalog::new()
     }
+}
+
+/// Result of scanning one directory's `.lightphotos/*.xmp` sidecars —
+/// [`load_sidecars`]'s return type. Free-standing (no `&Catalog` needed) so
+/// it can run on a background thread; `Catalog::apply_loaded` folds it in.
+pub(crate) struct SidecarLoad {
+    pub images: HashMap<OsString, ImageRecord>,
+    pub skipped: usize,
+}
+
+/// Scan `dir/.lightphotos/*.xmp` and parse every sidecar into a
+/// [`SidecarLoad`]. Pure disk I/O, independent of any `Catalog` instance —
+/// the same scan `Catalog::open_dir` used to do inline against `&mut self`,
+/// extracted so it can run on a background thread (see `Catalog::switch_dir`
+/// / `Catalog::apply_loaded`) as well as synchronously (`Catalog::open_dir`).
+/// A missing `.lightphotos` directory is not an error — just an empty result.
+pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
+    let mut images = HashMap::new();
+    let mut skipped = 0usize;
+
+    let entries = match std::fs::read_dir(dir.join(SIDECAR_DIR)) {
+        Ok(rd) => rd,
+        Err(_) => return SidecarLoad { images, skipped },
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some(SIDECAR_EXT) {
+            continue;
+        }
+        // file_stem() strips exactly the trailing ".xmp", correctly
+        // preserving a name like "PHOTO1.ARW" which itself contains a dot.
+        let Some(stem) = path.file_stem() else {
+            continue;
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice::<ImageRecord>(&bytes) {
+                Ok(rec) if !rec.is_empty() => {
+                    images.insert(stem.to_os_string(), rec);
+                }
+                Ok(_) => {} // an empty record on disk: nothing to cache
+                Err(e) => {
+                    eprintln!("[catalog] unreadable sidecar {}: {e}", path.display());
+                    skipped += 1;
+                }
+            },
+            Err(e) => {
+                eprintln!("[catalog] could not read {}: {e}", path.display());
+                skipped += 1;
+            }
+        }
+    }
+
+    SidecarLoad { images, skipped }
+}
+
+/// Human-readable "N entries could not be read" message for `last_error`.
+fn skipped_message(skipped: usize) -> String {
+    format!(
+        "{skipped} catalog entr{} could not be read and {} skipped.",
+        if skipped == 1 { "y" } else { "ies" },
+        if skipped == 1 { "was" } else { "were" },
+    )
 }
 
 /// The sidecar path for `path`: `<path's directory>/.lightphotos/<filename>.xmp`.
@@ -931,6 +1017,131 @@ mod tests {
 
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    // --- async load (switch_dir / apply_loaded / load_sidecars) ------
+
+    #[test]
+    fn apply_loaded_is_discarded_for_a_directory_no_longer_active() {
+        let a = unique_tmp_dir();
+        let b = unique_tmp_dir();
+        let pa = a.join("photo.jpg");
+
+        let mut cat = Catalog::with_dir(a.clone());
+        cat.set(&pa, 5);
+        // A background load for `a` was started, but before it lands the
+        // active directory switches to `b`.
+        cat.switch_dir(&b);
+        assert_eq!(cat.get(&pa), None, "switching clears the cache immediately");
+
+        // The stale `a` load now lands — it must be ignored, not merged in.
+        let stale = load_sidecars(&a);
+        cat.apply_loaded(&a, stale);
+        assert_eq!(
+            cat.get(&pa),
+            None,
+            "a load for a directory that's no longer active must be discarded"
+        );
+
+        std::fs::remove_dir_all(&a).unwrap();
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    #[test]
+    fn apply_loaded_does_not_clobber_a_local_write_made_after_switch() {
+        let dir = unique_tmp_dir();
+        let written = dir.join("written.jpg");
+        let other = dir.join("other.jpg");
+
+        // `other.jpg` already has a rating on disk from a previous session.
+        let mut seed = Catalog::with_dir(dir.clone());
+        seed.set(&other, 3);
+        drop(seed);
+
+        let mut cat = Catalog::new();
+        cat.switch_dir(&dir);
+        // A write lands after switch_dir but before the background load
+        // (spawned at switch time, snapshotting the pre-write disk state)
+        // has returned.
+        cat.set(&written, 5);
+        let loaded = load_sidecars(&dir); // snapshot predates `written`'s sidecar...
+        cat.apply_loaded(&dir, loaded);
+
+        assert_eq!(
+            cat.get(&written),
+            Some(5),
+            "a local write made while a load was in flight must survive apply_loaded"
+        );
+        assert_eq!(
+            cat.get(&other),
+            Some(3),
+            "entries only present in the loaded snapshot must still be merged in"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn apply_loaded_does_not_resurrect_a_locally_removed_record() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+
+        // A rating exists on disk from a previous session.
+        Catalog::with_dir(dir.clone()).set(&p, 4);
+
+        let mut cat = Catalog::new();
+        cat.switch_dir(&dir);
+        let loaded = load_sidecars(&dir); // snapshot still carries the rating
+        cat.remove(&p); // the user clears it before the load lands
+        cat.apply_loaded(&dir, loaded);
+
+        assert_eq!(
+            cat.get(&p),
+            None,
+            "a local removal made while a load was in flight must not be \
+             resurrected by a stale snapshot taken before it"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn apply_loaded_still_surfaces_skipped_count_for_a_stale_directory() {
+        let a = unique_tmp_dir();
+        let b = unique_tmp_dir();
+        std::fs::create_dir_all(a.join(SIDECAR_DIR)).unwrap();
+        std::fs::write(sidecar_for(&a, "bad.jpg"), b"{not valid json").unwrap();
+
+        let mut cat = Catalog::new();
+        cat.switch_dir(&a);
+        let loaded = load_sidecars(&a); // has skipped == 1
+        cat.switch_dir(&b); // the user already left `a` before the load lands
+        cat.apply_loaded(&a, loaded);
+
+        assert!(
+            cat.take_error().is_some(),
+            "a corrupt sidecar found by a stale (directory-since-changed) load \
+             must still be surfaced, not silently dropped"
+        );
+
+        std::fs::remove_dir_all(&a).unwrap();
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    #[test]
+    fn load_sidecars_reads_a_directory_without_mutating_a_catalog() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+        Catalog::with_dir(dir.clone()).set(&p, 4);
+
+        let loaded = load_sidecars(&dir);
+        assert_eq!(loaded.skipped, 0);
+        assert_eq!(
+            loaded.images.get(std::ffi::OsStr::new("photo.jpg")).and_then(|r| r.rating),
+            Some(4)
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // --- migration ---------------------------------------------------

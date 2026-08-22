@@ -289,6 +289,26 @@ pub(crate) struct App {
     pub(crate) mode: ViewMode,
     /// Ratings catalog (persistent) + an in-memory mirror for fast lookups.
     catalog: Catalog,
+    /// The directory + request token of the sidecar scan currently running
+    /// on a background thread, if any — set by `request_catalog_load`,
+    /// cleared once a result carrying the matching token lands (see
+    /// `poll_catalog_load`). One-shot-thread-per-request, same shape as
+    /// `selection_pending`/`selection_tx`/`selection_rx` below, not a
+    /// persistent pool: a directory switch is a single job, not a stream.
+    ///
+    /// Keyed on a token, not just the directory: revisiting a directory
+    /// before its first load lands (e.g. rapid A→B→A folder navigation)
+    /// starts a second background load for `A` while the first is still in
+    /// flight. Without a token, whichever of the two lands first would clear
+    /// `catalog_load_pending` by directory-equality alone, stopping the
+    /// tight poll cadence before the second (real, still-in-flight) load for
+    /// the now-active directory has actually reconciled.
+    catalog_load_pending: Option<(PathBuf, u64)>,
+    /// Monotonic counter minted by `request_catalog_load`, one per call —
+    /// see `catalog_load_pending`.
+    catalog_load_token: u64,
+    catalog_load_tx: Sender<(PathBuf, u64, crate::catalog::SidecarLoad)>,
+    catalog_load_rx: Receiver<(PathBuf, u64, crate::catalog::SidecarLoad)>,
     ratings: HashMap<PathBuf, u8>,
     /// Per-image non-destructive develop edits (persistent, mirrored in-memory).
     /// Only non-identity edits are stored to keep the map small.
@@ -570,6 +590,7 @@ impl App {
         let egui_ctx = egui::Context::default();
         configure_system_fonts(&egui_ctx);
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
+        let (catalog_load_tx, catalog_load_rx) = std::sync::mpsc::channel();
         Self {
             window: None,
             renderer: None,
@@ -584,6 +605,10 @@ impl App {
             pending_initial: initial,
             mode: ViewMode::Grid,
             catalog,
+            catalog_load_pending: None,
+            catalog_load_token: 0,
+            catalog_load_tx,
+            catalog_load_rx,
             ratings: HashMap::new(),
             edits: HashMap::new(),
             touchups: HashMap::new(),
@@ -743,25 +768,15 @@ impl App {
     /// for every image in `playlist`. Shared by `open` (single file → Loupe) and
     /// `load_folder` (grid) so both entry points restore the same persisted state
     /// — notably rotations, which `open` previously skipped.
+    ///
+    /// `Catalog`'s sidecar scan runs on a background thread
+    /// (`request_catalog_load`, in `app/catalog.rs`), so the reconcile loop
+    /// below runs once here against the (just-cleared, still-empty) cache —
+    /// safely inserting nothing — and again from `poll_catalog_load` once the
+    /// real data lands, so first paint is never blocked on sidecar count.
     fn seed_mirrors(&mut self, playlist: &Playlist) {
-        self.catalog.open_dir(playlist.dir());
-        for p in playlist.entries() {
-            if let Some(stars) = self.catalog.get(p) {
-                self.ratings.insert(p.clone(), stars);
-            }
-            let adj = self.catalog.adjustments(p);
-            if !adj.is_identity() {
-                self.edits.insert(p.clone(), adj);
-            }
-            let touchups = self.catalog.touchups(p);
-            if !touchups.is_empty() {
-                self.touchups.insert(p.clone(), touchups);
-            }
-            let rot = self.catalog.rotation(p);
-            if rot != 0 {
-                self.rotations.insert(p.clone(), rot);
-            }
-        }
+        self.request_catalog_load(playlist.dir());
+        self.reconcile_catalog_mirrors(playlist);
     }
 
     /// Load `dir`'s images into the grid (browse-first): rebuild the playlist,
