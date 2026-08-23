@@ -149,6 +149,24 @@ fn spatialWeight(d2: i32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Sampled unconditionally, before any branching: WebGPU's WGSL validator
+    // requires textureSample's implicit-LOD/derivative computation to happen
+    // under *uniform* control flow, and an early return keyed on a
+    // per-fragment value like `in.uv` (as this used to do, sampling only
+    // after the bounds checks) makes everything past it non-uniform in the
+    // validator's eyes — even though every fragment reaching this line took
+    // the same path. Native Metal/Vulkan tolerated the old shape silently;
+    // WebGPU rejects the whole shader module at CreateShaderModule time.
+    // Sampling first and discarding the result below for out-of-bounds
+    // fragments costs one wasted texture fetch at the edges, not a
+    // correctness or quality tradeoff — unlike swapping to
+    // textureSampleLevel(0.0), which would also "fix" this but forces mip 0
+    // always, breaking minification antialiasing when zoomed out.
+    //
+    // Sampling an Rgba8UnormSrgb texture returns LINEAR-light RGB.
+    // MUST stay in sync with apply_linear in develop.rs.
+    let texel = textureSample(tex, samp, in.uv);
+
     // Outside the image (UV beyond 0..1): draw the neutral background.
     if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
         return vec4<f32>(0.12, 0.12, 0.13, 1.0);
@@ -159,9 +177,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         return vec4<f32>(0.12, 0.12, 0.13, 1.0);
     }
 
-    // Sampling an Rgba8UnormSrgb texture returns LINEAR-light RGB.
-    // MUST stay in sync with apply_linear in develop.rs.
-    let texel = textureSample(tex, samp, in.uv);
     var r = texel.r;
     var g = texel.g;
     var b = texel.b;
@@ -278,6 +293,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 // it cannot touch the tone pipeline even by accident.
 @fragment
 fn fs_overlay(in: VsOut) -> @location(0) vec4<f32> {
+    // Sampled before the discards, same reasoning as fs_main's identity
+    // sample above — WebGPU's uniformity validator rejects an implicit-LOD
+    // textureSample reachable only after a per-fragment `discard`/`return`,
+    // even though native Metal/Vulkan tolerated it.
+    //
+    // The mask is single-channel coverage: 0 background, 1 subject, soft rim
+    // between. Inverting is a read of the same mask from the other side.
+    var coverage = textureSample(mask_tex, mask_samp, in.uv).r;
+
     // Outside the image, or outside the crop: draw nothing, so the overlay
     // never spills onto the neutral surround.
     if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
@@ -287,9 +311,6 @@ fn fs_overlay(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    // The mask is single-channel coverage: 0 background, 1 subject, soft rim
-    // between. Inverting is a read of the same mask from the other side.
-    var coverage = textureSample(mask_tex, mask_samp, in.uv).r;
     if (overlay.invert > 0.5) {
         coverage = 1.0 - coverage;
     }

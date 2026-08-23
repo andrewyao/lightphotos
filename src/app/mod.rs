@@ -278,6 +278,20 @@ pub(crate) struct App {
     pub(crate) face_pool: Option<crate::facequality::FacePool>,
     /// In-flight export batch progress, driving the persistent progress toast.
     pub(crate) export_progress: Option<ExportProgress>,
+
+    /// `Renderer::new` is `async` (wgpu's adapter/device acquisition is a
+    /// browser Promise under WebGPU) — native wraps it in `pollster::block_on`
+    /// inside `resumed()` and never touches this; wasm32 can't block the main
+    /// thread at all, so `resumed()` instead spawns the future via
+    /// `wasm_bindgen_futures::spawn_local` and this channel carries the
+    /// finished `Renderer` back to be polled in `about_to_wait`, same
+    /// one-shot-background-job shape as `selection_tx`/`rx` below (subject
+    /// segmentation's own one-shot-thread-plus-channel pattern).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) renderer_init_tx: Sender<(Renderer, winit::dpi::PhysicalSize<u32>)>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) renderer_init_rx: Receiver<(Renderer, winit::dpi::PhysicalSize<u32>)>,
+
     playlist: Option<Playlist>,
 
     /// Path we want shown in the loupe (may still be decoding).
@@ -594,6 +608,8 @@ impl App {
         configure_system_fonts(&egui_ctx);
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         let (catalog_load_tx, catalog_load_rx) = std::sync::mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
+        let (renderer_init_tx, renderer_init_rx) = std::sync::mpsc::channel();
         Self {
             window: None,
             renderer: None,
@@ -661,6 +677,10 @@ impl App {
             selection_pending: None,
             selection_tx,
             selection_rx,
+            #[cfg(target_arch = "wasm32")]
+            renderer_init_tx,
+            #[cfg(target_arch = "wasm32")]
+            renderer_init_rx,
             survey_members: Vec::new(),
             survey_best: None,
             survey_focus: 0,

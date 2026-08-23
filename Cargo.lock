@@ -1626,6 +1626,7 @@ dependencies = [
  "egui-winit",
  "image",
  "img-parts",
+ "js-sys",
  "kamadak-exif",
  "mozjpeg-rs",
  "objc2 0.6.4",

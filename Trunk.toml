@@ -1,0 +1,14 @@
+[build]
+target = "index.html"
+# wgpu's WebGPU web-sys bindings are still gated behind this unstable-apis
+# flag (see the wasm port plan's Architecture section).
+rustflags = ["--cfg=web_sys_unstable_apis"]
+
+[serve]
+# Cross-origin isolation (COOP/COEP) is required for SharedArrayBuffer, which
+# the wasm port plan's M4 (Web Worker decode pool) depends on. Not used by
+# anything yet at M0, but set up now so M4 doesn't need a separate serve-config
+# change later.
+[serve.headers]
+"Cross-Origin-Opener-Policy" = "same-origin"
+"Cross-Origin-Embedder-Policy" = "require-corp"

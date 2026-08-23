@@ -26,6 +26,8 @@
 mod app;
 mod burst;
 mod catalog;
+#[cfg(target_arch = "wasm32")]
+mod web_canvas;
 #[cfg(target_os = "macos")]
 mod coregraphics;
 mod develop;
@@ -51,6 +53,7 @@ mod ui;
 #[cfg(target_os = "macos")]
 mod vision;
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -66,6 +69,46 @@ use loader::Loader;
 use macos_delegate::UserEvent;
 use renderer::Renderer;
 
+/// The rest of window setup, once a `Renderer` exists — shared by native's
+/// `resumed()` (called directly, straight after the blocking
+/// `pollster::block_on`) and wasm32's `about_to_wait` poll (called once the
+/// async renderer-init task's result arrives over `renderer_init_rx`; see
+/// `resumed()`'s doc comment). Everything here is itself synchronous and
+/// platform-independent — only *how the Renderer got here* differs.
+///
+/// `size` is passed in rather than read via `window.inner_size()` here too —
+/// same reason as `Renderer::new`'s identical parameter (see its doc
+/// comment): winit's wasm32 `inner_size()` is a stale cache at this point,
+/// not a live query, and `app.win_size` below drives egui's own layout
+/// sizing, so getting this wrong doesn't just affect wgpu.
+fn finish_window_setup(app: &mut App, window: Arc<Window>, renderer: Renderer, size: winit::dpi::PhysicalSize<u32>) {
+    let loader = Loader::new(renderer.max_dim);
+
+    let egui_state = egui_winit::State::new(
+        app.egui_ctx.clone(),
+        egui::ViewportId::ROOT,
+        &*window,
+        Some(window.scale_factor() as f32),
+        None,
+        None,
+    );
+
+    app.win_size = (size.width.max(1) as f32, size.height.max(1) as f32);
+    app.window = Some(window);
+    app.renderer = Some(renderer);
+    app.loader = Some(loader);
+    app.exporter = Some(export::Exporter::new());
+    app.feature_pool = Some(featureprint::DistancePool::new());
+    app.face_pool = Some(facequality::FacePool::new());
+    app.egui_state = Some(egui_state);
+
+    if let Some(path) = app.pending_initial.take() {
+        loader::mark("opening initial path");
+        app.open(path);
+        loader::mark("initial open() returned");
+    }
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -76,35 +119,34 @@ impl ApplicationHandler<UserEvent> for App {
             .with_inner_size(LogicalSize::new(1100.0, 800.0));
         loader::mark("resumed: creating window");
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-
         loader::mark("window created; initializing wgpu");
-        let renderer = Renderer::new(window.clone());
-        loader::mark("wgpu ready");
-        let loader = Loader::new(renderer.max_dim);
 
-        let egui_state = egui_winit::State::new(
-            self.egui_ctx.clone(),
-            egui::ViewportId::ROOT,
-            &*window,
-            Some(window.scale_factor() as f32),
-            None,
-            None,
-        );
-
-        let size = window.inner_size();
-        self.win_size = (size.width.max(1) as f32, size.height.max(1) as f32);
-        self.window = Some(window);
-        self.renderer = Some(renderer);
-        self.loader = Some(loader);
-        self.exporter = Some(export::Exporter::new());
-        self.feature_pool = Some(featureprint::DistancePool::new());
-        self.face_pool = Some(facequality::FacePool::new());
-        self.egui_state = Some(egui_state);
-
-        if let Some(path) = self.pending_initial.take() {
-            loader::mark("opening initial path");
-            self.open(path);
-            loader::mark("initial open() returned");
+        // `Renderer::new` is async (see its doc comment) — wgpu's
+        // adapter/device acquisition is a real browser Promise under WebGPU,
+        // and the browser main thread can never block waiting on one.
+        // `pollster::block_on` (native only — it has no wasm32 support at
+        // all) is the one native/wasm fork in this function; everything
+        // finish_window_setup does afterward is shared, unchanged code.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let size = window.inner_size();
+            let renderer = pollster::block_on(Renderer::new(window.clone(), size));
+            loader::mark("wgpu ready");
+            finish_window_setup(self, window, renderer, size);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // winit creates its own <canvas> on wasm32 but doesn't insert it
+            // into the page for you — do that now, before anything tries to
+            // draw. Also hands back the real viewport size: window.inner_size()
+            // can't be used here (see Renderer::new's doc comment).
+            let size = web_canvas::attach(&window);
+            self.window = Some(window.clone());
+            let tx = self.renderer_init_tx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let renderer = Renderer::new(window, size).await;
+                let _ = tx.send((renderer, size));
+            });
         }
     }
 
@@ -280,6 +322,20 @@ impl ApplicationHandler<UserEvent> for App {
             return;
         }
 
+        // Pick up the async-initialized Renderer once it lands — see
+        // resumed()'s doc comment. `window` is already set (resumed() does
+        // that synchronously before spawning); everything else (loader,
+        // exporter, worker pools, egui_state, the initial open()) is only
+        // constructed now, once there's a real device to hand them.
+        #[cfg(target_arch = "wasm32")]
+        if let Ok((renderer, size)) = self.renderer_init_rx.try_recv() {
+            loader::mark("wgpu ready (async)");
+            if let Some(window) = self.window.clone() {
+                finish_window_setup(self, window, renderer, size);
+            }
+            self.request_redraw();
+        }
+
         // Drain all loader tiers once per frame.
         if let Some(loader) = &mut self.loader {
             let (full, thumbs, metas, exifs) = loader.poll_all();
@@ -391,7 +447,9 @@ impl ApplicationHandler<UserEvent> for App {
 /// double-click, or "Open With"). Those launches never carry a CLI arg — a
 /// file path instead arrives later via an AppleEvent (see
 /// [`macos_delegate`]) — so the dev-CLI's "require an argument" rule doesn't
-/// apply to them.
+/// apply to them. Native only — `std::env::current_exe()` has no wasm32
+/// meaning (no filesystem, no bundle concept).
+#[cfg(not(target_arch = "wasm32"))]
 fn is_app_bundle() -> bool {
     std::env::current_exe().ok().is_some_and(|exe| {
         exe.components()
@@ -399,6 +457,7 @@ fn is_app_bundle() -> bool {
     })
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn print_usage_and_exit() -> ! {
     eprintln!("Usage: lightphotos <photo-or-folder>");
     eprintln!();
@@ -407,6 +466,7 @@ fn print_usage_and_exit() -> ! {
     std::process::exit(1);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     loader::start_clock();
     // A file/dir path may be passed on the command line. The dev CLI binary
@@ -435,4 +495,32 @@ fn main() {
     let mut app = App::new(initial);
     loader::mark("App constructed; entering event loop");
     event_loop.run_app(&mut app).expect("run app");
+}
+
+/// wasm32 entry point. No CLI args (no argv on the web) — nothing to open
+/// yet; picking a folder is File System Access's `showDirectoryPicker`,
+/// wired up in a later milestone (see the wasm port plan's M1), not
+/// something available at process-start the way a CLI arg is.
+///
+/// `EventLoopExtWebSys::spawn_app`, not `run_app`: winit's web backend can't
+/// use the blocking native entry point at all — the browser main thread must
+/// return control to the browser's own event loop rather than looping
+/// forever inside Rust, so winit instead schedules the app's callbacks via
+/// the browser's normal animation-frame/event machinery under the hood.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    console_error_panic_hook::set_once();
+    loader::start_clock();
+
+    let event_loop = EventLoop::<UserEvent>::with_user_event()
+        .build()
+        .expect("build event loop");
+    event_loop.set_control_flow(ControlFlow::Wait);
+
+    loader::mark("event loop built; constructing App");
+    let app = App::new(None);
+    loader::mark("App constructed; entering event loop");
+
+    use winit::platform::web::EventLoopExtWebSys;
+    event_loop.spawn_app(app);
 }

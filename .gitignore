@@ -1,5 +1,7 @@
 /target
 /LightPhotos.app
+# trunk's wasm build output (index.html/Trunk.toml are the real source)
+/dist
 # roborev snapshots
 /.roborev/
 /.claude/

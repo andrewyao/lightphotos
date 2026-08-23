@@ -113,31 +113,53 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>) -> Self {
-        let size = window.inner_size();
+    /// `async` rather than `pollster::block_on`-ing internally, so this one
+    /// body serves both targets: native's `resumed()` wraps the call in
+    /// `pollster::block_on` (unchanged blocking behavior — `pollster` itself
+    /// has no wasm32 support, since the browser main thread cannot block, so
+    /// this split is required, not stylistic — see the wasm port plan's M0),
+    /// wasm's `resumed()` awaits it inside a `wasm_bindgen_futures::spawn_local`
+    /// task instead (see `main.rs`).
+    /// `size` is passed in rather than read via `window.inner_size()`
+    /// internally: on wasm32, winit's `inner_size()` isn't a live DOM query —
+    /// it's a cached field that starts at `(0, 0)` and only updates once the
+    /// browser's `ResizeObserver` fires, which hasn't happened yet the first
+    /// time this runs (confirmed by reading winit 0.30's own web platform
+    /// source, not guessed at). Configuring the surface at a stale `(0, 0)`
+    /// (clamped to `(1, 1)` below) produced a real bug: every render pass
+    /// failed WebGPU's scissor-rect validation against a 1×1 render area.
+    /// Callers pass the size they actually know is correct — native still
+    /// gets it from `window.inner_size()` (reliable there, no async lag);
+    /// wasm's caller uses the same real browser-viewport size it already set
+    /// the canvas's backing-store resolution to (see `web_canvas::attach`).
+    pub async fn new(window: Arc<Window>, size: winit::dpi::PhysicalSize<u32>) -> Self {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window).expect("create surface");
 
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .expect("no adapter");
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .expect("no adapter");
 
         // Request the adapter's real limits so large images aren't capped at 8192.
         let limits = adapter.limits();
         let max_dim = limits.max_texture_dimension_2d;
 
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("device"),
-            required_features: wgpu::Features::empty(),
-            required_limits: limits,
-            experimental_features: wgpu::ExperimentalFeatures::default(),
-            memory_hints: wgpu::MemoryHints::Performance,
-            trace: wgpu::Trace::Off,
-        }))
-        .expect("request device");
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: limits,
+                experimental_features: wgpu::ExperimentalFeatures::default(),
+                memory_hints: wgpu::MemoryHints::Performance,
+                trace: wgpu::Trace::Off,
+            })
+            .await
+            .expect("request device");
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
