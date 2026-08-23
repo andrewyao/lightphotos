@@ -261,9 +261,24 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     if is_raw_extension(path) {
         return decode_raw_nonmac(path, max_dim);
     }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    decode_jpeg_png_tiff_from_bytes(&bytes, max_dim)
+}
 
-    let reader = image::ImageReader::open(path)
-        .map_err(|e| e.to_string())?
+/// The non-RAW half of [`decode`] above, minus the file read — bytes-based
+/// so wasm32's own decode path (`app/web.rs`, reading via
+/// `FileSystemFileHandle` instead of `std::fs::read`) can share this exact
+/// logic (full decode + EXIF-orientation-correct + `Lanczos3` resize)
+/// rather than a second, easy-to-drift-from-correct reimplementation —
+/// which is exactly what happened once already: an earlier wasm32 version
+/// used `DynamicImage::thumbnail()` (a fast/low-quality filter, not
+/// `Lanczos3`) and applied no orientation at all.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn decode_jpeg_png_tiff_from_bytes(
+    bytes: &[u8],
+    max_dim: u32,
+) -> Result<DecodedImage, String> {
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
     let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;

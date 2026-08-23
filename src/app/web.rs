@@ -138,11 +138,18 @@ impl App {
 }
 
 /// Read `handle`'s bytes and decode a thumbnail at (approximately, longest
-/// side) `max_px`. Naive full-decode-then-downscale (`image::load_from_memory`
-/// has no decode-at-size — that's what WebCodecs'/embedded-preview extraction
-/// exists to avoid, per the original feasibility memo; not wired up yet here,
-/// see this module's doc comment) — correct, not fast. Runs synchronously
-/// once bytes are in hand; the `.await` is only the file read itself.
+/// side) `max_px`. Tries the embedded EXIF preview first
+/// (`thumbnail::embedded_preview_from_bytes` — cheap, no full decode), then
+/// falls back to a full decode + `Lanczos3` resize
+/// (`image_decode::decode_jpeg_png_tiff_from_bytes`) — both are the exact
+/// same shared functions native's own non-mac `thumbnail()`/`decode()` use,
+/// bytes-based instead of path-based. Deliberately *not* reimplemented here:
+/// an earlier version of this function called `image::load_from_memory` +
+/// `.thumbnail()` directly, which both skipped the embedded-preview
+/// fast path entirely (confirmed slow against a real folder) and used a
+/// fast/low-quality resize filter instead of `Lanczos3` (confirmed
+/// visibly worse resolution) — two real, separate bugs from not reusing
+/// native's already-correct logic.
 async fn decode_thumbnail(
     path: &Path,
     handle: &web_sys::FileSystemFileHandle,
@@ -153,29 +160,13 @@ async fn decode_thumbnail(
     // reading any bytes at all: RAW files run tens to hundreds of MB (per
     // the earlier wasm decode spike's own numbers), so skipping the read
     // entirely for a file we already know we can't decode matters, not
-    // just skipping the doomed `image::load_from_memory` call. Without
-    // this, `image` correctly fails trying to parse RAW sensor data as a
-    // baseline TIFF image (confirmed: "required tag `ImageWidth` not
-    // found" — RAW's TIFF-based container has a fundamentally different
-    // structure, not a bug in `image`) — same failure, just a clearer
-    // message and no wasted bandwidth.
+    // just skipping a doomed decode call.
     if crate::image_decode::is_raw_extension(path) {
         return Err("RAW decode not implemented yet (wasm port plan M3)".to_string());
     }
     let bytes = web_fs::read_bytes(handle).await?;
-    // Temporary, generous logging while bringing this path up for the first
-    // time (see poll_web_thumbs's doc comment on why eprintln! alone isn't
-    // enough here) — narrows down which step an empty/failed thumbnail is
-    // actually failing at, rather than guessing.
-    web_sys::console::log_1(&format!("[web] read {} bytes for decode", bytes.len()).into());
-    let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
-    let img = img.thumbnail(max_px, max_px);
-    let rgba = img.to_rgba8();
-    let (width, height) = rgba.dimensions();
-    web_sys::console::log_1(&format!("[web] decoded {width}x{height}").into());
-    Ok(DecodedImage {
-        width,
-        height,
-        rgba: rgba.into_raw(),
-    })
+    if let Some(preview) = crate::thumbnail::embedded_preview_from_bytes(&bytes, max_px) {
+        return Ok(preview);
+    }
+    crate::image_decode::decode_jpeg_png_tiff_from_bytes(&bytes, max_px)
 }

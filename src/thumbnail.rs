@@ -161,8 +161,20 @@ pub fn decode_at_size(
 /// fail outright.
 #[cfg(not(target_os = "macos"))]
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
-    let file = fs::File::open(path).ok()?;
-    let mut reader = std::io::BufReader::new(file);
+    let bytes = fs::read(path).ok()?;
+    embedded_preview_from_bytes(&bytes, max_px)
+}
+
+/// The bytes-based core of [`try_extract_embedded_preview`] above — same
+/// logic, minus the file read, so wasm32's own thumbnail decode
+/// (`app/web.rs`, reading via `FileSystemFileHandle` instead of
+/// `std::fs::read`) can share it exactly rather than re-implementing EXIF
+/// thumbnail extraction a second time. `kamadak-exif`'s
+/// `read_from_container` only needs `Read + Seek`, which `io::Cursor` gives
+/// a byte slice for free — no real file involved at all.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<DecodedImage> {
+    let mut reader = std::io::Cursor::new(bytes);
     let source = exif::Reader::new().read_from_container(&mut reader).ok()?;
 
     let offset = source
