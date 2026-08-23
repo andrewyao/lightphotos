@@ -55,6 +55,19 @@ impl App {
         // a resize past a quantum boundary invalidates the one in flight, and an
         // LRU eviction can drop one that did land. `request_preview` de-dupes,
         // so this is free in the common case where it's simply still decoding.
+        //
+        // Native only: `loader.rs`'s own worker queue has zero live workers on
+        // wasm32 (thread spawn always fails there), so nothing ever calls
+        // `Loader::drain()` to clear the `preview_inflight`/`quick_inflight`
+        // entry this call would create — `has_pending_image()` would then
+        // read as permanently true the moment any photo is opened in the
+        // Loupe, locking `main.rs`'s frame loop into an indefinite busy-poll
+        // even after wasm32's own (separate, working) preview pipeline
+        // — `request_web_preview`/`poll_web_preview`, app/web.rs — has
+        // already landed the image. That pipeline is what actually services
+        // the Loupe on wasm32, so this call is both redundant and the real
+        // source of the stuck state there.
+        #[cfg(not(target_arch = "wasm32"))]
         if let Some(loader) = &mut self.loader {
             loader.request_preview(want.clone(), target);
         }

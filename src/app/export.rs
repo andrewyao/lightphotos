@@ -30,9 +30,26 @@ impl App {
         self.start_export(self.selected_paths());
     }
 
+    /// wasm32: `Exporter`'s worker pool degrades to zero live workers there
+    /// (thread spawn always fails, same as `Loader`'s), and its `submit()`
+    /// silently drops the resulting channel-send error — queuing a job on
+    /// this target would otherwise hang forever with no error and
+    /// permanently block every later export attempt too, via the
+    /// in-progress guard the native body below uses. Matches `trash.rs`'s
+    /// existing "not supported in the browser yet" pattern for the same
+    /// situation. File System Access could support a real wasm32 export
+    /// (writable streams) — genuinely out of scope for this fix, not a
+    /// permanent decision to never do it.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn start_export(&mut self, _paths: Vec<PathBuf>) {
+        self.set_status("Export isn't supported in the browser yet".into());
+        self.request_redraw();
+    }
+
     /// Queue `paths` for background export into `<current folder>/Exports/`.
     /// Returns immediately: the heavy decode/bake/encode runs on the exporter's
     /// worker pool, and `on_export_outcomes` reports progress as jobs finish.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             self.set_status("Export: nothing selected".into());

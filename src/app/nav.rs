@@ -221,11 +221,19 @@ impl App {
         let Some(path) = self.selected_path() else {
             return;
         };
-        let px = self.thumb_px;
-        let preview_px = self.preview_px();
-        if let Some(loader) = &mut self.loader {
-            loader.request_preview(path.clone(), preview_px);
-            loader.request_thumb(path.clone(), px);
+        // Native only — see the matching comment in `app/thumbs.rs::try_show`:
+        // `loader.rs`'s own worker queue is never serviced on wasm32, so
+        // calling into it here only leaves a permanent (never-cleared)
+        // in-flight marker behind; wasm32's Loupe/thumbnail needs are already
+        // covered by `app/web.rs`'s `request_web_preview`/`request_web_thumbs`.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let px = self.thumb_px;
+            let preview_px = self.preview_px();
+            if let Some(loader) = &mut self.loader {
+                loader.request_preview(path.clone(), preview_px);
+                loader.request_thumb(path.clone(), px);
+            }
         }
         // A different photo means the cached source dimensions no longer apply;
         // `on_exif_info` refills them (and re-fits) when the metadata read for
