@@ -30,6 +30,8 @@ mod catalog;
 mod web_canvas;
 #[cfg(target_arch = "wasm32")]
 mod web_fs;
+#[cfg(target_arch = "wasm32")]
+mod web_worker_pool;
 #[cfg(target_os = "macos")]
 mod coregraphics;
 mod develop;
@@ -46,8 +48,6 @@ mod macos_delegate;
 mod navigation;
 mod paths;
 mod phash;
-#[cfg(not(target_os = "macos"))]
-mod raw_fast_preview;
 mod renderer;
 mod segmentation;
 mod sharpness;

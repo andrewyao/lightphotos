@@ -323,28 +323,40 @@ pub(crate) struct App {
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_file_handles: HashMap<PathBuf, web_sys::FileSystemFileHandle>,
     /// Thumbnail decodes currently in flight — `loader.rs`'s own
-    /// `thumb_inflight` isn't reused here since nothing on wasm32 goes
-    /// through its worker queue at all yet (see `Loader::insert_thumb_external`).
+    /// `thumb_inflight` isn't reused here since decode results arrive via
+    /// the Web Worker pool (`web_worker_pool.rs`), not `loader.rs`'s own
+    /// (unserviced-on-wasm32) worker queue.
     #[cfg(target_arch = "wasm32")]
     web_thumb_inflight: HashSet<(PathBuf, u32)>,
-    #[cfg(target_arch = "wasm32")]
-    web_thumb_tx: Sender<(PathBuf, u32, Result<crate::image_decode::DecodedImage, String>)>,
-    #[cfg(target_arch = "wasm32")]
-    web_thumb_rx: Receiver<(PathBuf, u32, Result<crate::image_decode::DecodedImage, String>)>,
-    /// Loupe preview decode — same shape as the thumbnail trio above, at
+    /// Loupe preview decode — same shape as `web_thumb_inflight`, at
     /// `preview_px()` instead of `thumb_px`. `web_preview_failed` exists
     /// here (and has no thumbnail counterpart) because `try_show` re-calls
     /// `request_preview` every single frame until something lands; without
-    /// a negative cache a RAW file open in the Loupe (decode not
-    /// implemented — see `app/web.rs`) would retry a doomed decode forever.
+    /// a negative cache a RAW file open in the Loupe would retry a doomed
+    /// decode forever.
     #[cfg(target_arch = "wasm32")]
     web_preview_inflight: HashSet<(PathBuf, u32)>,
     #[cfg(target_arch = "wasm32")]
     web_preview_failed: HashSet<(PathBuf, u32)>,
+
+    /// Real parallel decode (wasm port plan's M4) — a hand-rolled
+    /// `web_sys::Worker` pool, chosen over `wasm-bindgen-rayon` because that
+    /// crate's JS-orchestrated init flow doesn't fit this app's binary-crate
+    /// entry point and stays off the nightly toolchain. `request_web_thumbs`/
+    /// `request_web_preview` still read file bytes on the main thread (an
+    /// unavoidable async I/O step against a `FileSystemFileHandle`), then
+    /// hand the bytes to a worker via `web_worker_pool::WorkerPoolHandle`;
+    /// `poll_web_worker_pool` drains finished decodes into the same
+    /// `loader.rs` external-insert methods the old inline-decode path used.
     #[cfg(target_arch = "wasm32")]
-    web_preview_tx: Sender<(PathBuf, u32, Result<crate::image_decode::DecodedImage, String>)>,
+    pub(crate) web_worker_pool: crate::web_worker_pool::WorkerPool,
+    /// Preview-tier results the pool handed back while `poll_web_thumbs`
+    /// (which runs first each frame — see `main.rs`'s `about_to_wait`) was
+    /// draining the pool's single shared result channel; `poll_web_preview`
+    /// consumes these the same frame instead of polling the pool itself, so
+    /// a shared channel can't split one frame's results across two draws.
     #[cfg(target_arch = "wasm32")]
-    web_preview_rx: Receiver<(PathBuf, u32, Result<crate::image_decode::DecodedImage, String>)>,
+    web_preview_pending: Vec<crate::web_worker_pool::PoolResult>,
 
     // ---- Browser state ----
     /// Grid vs. Loupe.
@@ -660,9 +672,8 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let (web_folder_tx, web_folder_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
-        let (web_thumb_tx, web_thumb_rx) = std::sync::mpsc::channel();
-        #[cfg(target_arch = "wasm32")]
-        let (web_preview_tx, web_preview_rx) = std::sync::mpsc::channel();
+        let web_worker_pool =
+            crate::web_worker_pool::WorkerPool::new(crate::web_worker_pool::worker_count());
         Self {
             window: None,
             renderer: None,
@@ -686,17 +697,13 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             web_thumb_inflight: HashSet::new(),
             #[cfg(target_arch = "wasm32")]
-            web_thumb_tx,
-            #[cfg(target_arch = "wasm32")]
-            web_thumb_rx,
-            #[cfg(target_arch = "wasm32")]
             web_preview_inflight: HashSet::new(),
             #[cfg(target_arch = "wasm32")]
             web_preview_failed: HashSet::new(),
             #[cfg(target_arch = "wasm32")]
-            web_preview_tx,
+            web_worker_pool,
             #[cfg(target_arch = "wasm32")]
-            web_preview_rx,
+            web_preview_pending: Vec::new(),
             mode: ViewMode::Grid,
             catalog,
             catalog_load_pending: None,

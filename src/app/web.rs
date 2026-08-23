@@ -9,9 +9,9 @@
 //! filesystem calls that merely happen to be slow.
 
 use super::*;
-use crate::image_decode::DecodedImage;
 use crate::navigation::Playlist;
 use crate::web_fs;
+use crate::web_worker_pool::JobKind;
 
 impl App {
     /// Fire the browser's folder picker, unless one's already in flight.
@@ -60,14 +60,12 @@ impl App {
     }
 
     /// The wasm32 counterpart of `request_working_thumbs` (`app/thumbs.rs`):
-    /// same working-set computation (`working_thumb_keys`), but spawns an
-    /// async decode task per missing thumbnail instead of enqueueing to
-    /// `loader.rs`'s worker queue, since nothing services that queue here
-    /// yet (see `Loader::insert_thumb_external`'s doc comment). Runs
-    /// synchronously on the main thread inside each spawned task — a real,
-    /// known cost (no Web Worker pool until the wasm port plan's M4), not
-    /// hidden: this is a correctness-first pass, not the performance-tuned
-    /// path the app's actual goal calls for.
+    /// same working-set computation (`working_thumb_keys`), but reads each
+    /// missing thumbnail's bytes on the main thread (unavoidable — only the
+    /// main thread holds the `FileSystemFileHandle`) and hands them to the
+    /// Web Worker pool (`web_worker_pool.rs`, wasm port plan's M4) instead of
+    /// decoding inline via `spawn_local` — multiple decodes now genuinely run
+    /// in parallel, off the main thread, across the pool's workers.
     pub(crate) fn request_web_thumbs(&mut self) -> bool {
         let px = self.thumb_px;
         let keys: Vec<PathBuf> = self
@@ -91,17 +89,34 @@ impl App {
             };
             self.web_thumb_inflight.insert(key);
             any_missing = true;
-            let tx = self.web_thumb_tx.clone();
+            let pool = self.web_worker_pool.handle();
             wasm_bindgen_futures::spawn_local(async move {
-                let result = decode_thumbnail(&path, &handle, px).await;
-                let _ = tx.send((path, px, result));
+                let is_raw = crate::image_decode::is_raw_extension(&path);
+                match web_fs::read_bytes(&handle).await {
+                    Ok(bytes) => pool.submit(path, px, bytes, is_raw, JobKind::Thumb),
+                    Err(e) => {
+                        web_sys::console::error_1(
+                            &format!("[web] reading bytes failed for {}: {e}", path.display())
+                                .into(),
+                        );
+                        // No worker job was submitted, so nothing will ever
+                        // land in `poll_web_thumbs` for this key — that
+                        // would leave it "in flight" forever, permanently
+                        // masking the thumbnail as pending. Route straight
+                        // to the same negative-cache path a decode failure
+                        // uses.
+                        pool.fail(path, px, JobKind::Thumb, e);
+                    }
+                }
             });
         }
         any_missing
     }
 
-    /// Drain finished thumbnail decodes into `loader.rs`'s cache (via
-    /// `insert_thumb_external`/`mark_thumb_failed_external`), same
+    /// Drain finished thumbnail decodes (from the shared Worker pool result
+    /// channel — see `web_preview_pending`'s doc comment for why preview-tier
+    /// results are set aside here rather than processed) into `loader.rs`'s
+    /// cache (via `insert_thumb_external`/`mark_thumb_failed_external`), same
     /// convention as every other one-shot poll in this codebase. Returns the
     /// arrived `(path, max_px)` keys — `main.rs` folds them into the same
     /// `score_arrived_thumbs`/redraw handling native's thumbnail arrivals
@@ -109,11 +124,16 @@ impl App {
     /// of which path decoded the thumbnail.
     pub(crate) fn poll_web_thumbs(&mut self) -> Vec<(PathBuf, u32)> {
         let mut arrived = Vec::new();
-        while let Ok((path, px, result)) = self.web_thumb_rx.try_recv() {
-            self.web_thumb_inflight.remove(&(path.clone(), px));
+        for r in self.web_worker_pool.poll() {
+            if r.kind != JobKind::Thumb {
+                self.web_preview_pending.push(r);
+                continue;
+            }
+            let crate::web_worker_pool::PoolResult { path, target, result, .. } = r;
+            self.web_thumb_inflight.remove(&(path.clone(), target));
             if let Some(loader) = &mut self.loader {
                 match result {
-                    Ok(img) => loader.insert_thumb_external(path.clone(), px, std::sync::Arc::new(img)),
+                    Ok(img) => loader.insert_thumb_external(path.clone(), target, std::sync::Arc::new(img)),
                     Err(e) => {
                         // eprintln! goes nowhere on bare wasm32 — no console
                         // is attached to Rust's stdio there by default, only
@@ -124,11 +144,11 @@ impl App {
                             &format!("[web] thumbnail decode failed for {}: {e}", path.display())
                                 .into(),
                         );
-                        loader.mark_thumb_failed_external(path.clone(), px);
+                        loader.mark_thumb_failed_external(path.clone(), target);
                     }
                 }
             }
-            arrived.push((path, px));
+            arrived.push((path, target));
         }
         if !arrived.is_empty() {
             self.request_redraw();
@@ -162,22 +182,32 @@ impl App {
             return false;
         };
         self.web_preview_inflight.insert(key);
-        let tx = self.web_preview_tx.clone();
+        let pool = self.web_worker_pool.handle();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = decode_thumbnail(&path, &handle, target).await;
-            let _ = tx.send((path, target, result));
+            let is_raw = crate::image_decode::is_raw_extension(&path);
+            match web_fs::read_bytes(&handle).await {
+                Ok(bytes) => pool.submit(path, target, bytes, is_raw, JobKind::Preview),
+                Err(e) => {
+                    web_sys::console::error_1(
+                        &format!("[web] reading bytes failed for {}: {e}", path.display()).into(),
+                    );
+                    pool.fail(path, target, JobKind::Preview, e);
+                }
+            }
         });
         true
     }
 
-    /// Drain finished Loupe decodes — same shape as `poll_web_thumbs`, into
-    /// the preview tier instead of the thumbnail tier. Negative-caches a
+    /// Process this frame's preview-tier results, already set aside by
+    /// `poll_web_thumbs` (see `web_preview_pending`'s doc comment — both
+    /// tiers share one Worker pool result channel). Negative-caches a
     /// failure locally (`web_preview_failed`) rather than via `loader.rs`
     /// (whose failure tracking is thumbnail-specific) so `try_show`'s
     /// every-frame re-request doesn't retry a doomed RAW decode forever.
     pub(crate) fn poll_web_preview(&mut self) -> bool {
         let mut landed = false;
-        while let Ok((path, target, result)) = self.web_preview_rx.try_recv() {
+        let pending = std::mem::take(&mut self.web_preview_pending);
+        for crate::web_worker_pool::PoolResult { path, target, result, .. } in pending {
             let key = (path.clone(), target);
             self.web_preview_inflight.remove(&key);
             match result {
@@ -217,36 +247,3 @@ impl App {
     }
 }
 
-/// Read `handle`'s bytes and decode a thumbnail at (approximately, longest
-/// side) `max_px`. Tries the embedded EXIF preview first
-/// (`thumbnail::embedded_preview_from_bytes` — cheap, no full decode), then
-/// falls back to a full decode + `Lanczos3` resize
-/// (`image_decode::decode_jpeg_png_tiff_from_bytes`) — both are the exact
-/// same shared functions native's own non-mac `thumbnail()`/`decode()` use,
-/// bytes-based instead of path-based. Deliberately *not* reimplemented here:
-/// an earlier version of this function called `image::load_from_memory` +
-/// `.thumbnail()` directly, which both skipped the embedded-preview
-/// fast path entirely (confirmed slow against a real folder) and used a
-/// fast/low-quality resize filter instead of `Lanczos3` (confirmed
-/// visibly worse resolution) — two real, separate bugs from not reusing
-/// native's already-correct logic.
-async fn decode_thumbnail(
-    path: &Path,
-    handle: &web_sys::FileSystemFileHandle,
-    max_px: u32,
-) -> Result<DecodedImage, String> {
-    let bytes = web_fs::read_bytes(handle).await?;
-    // RAW (ARW/CR2/NEF/DNG/...): the fast quarter-res preview path
-    // (raw_fast_preview.rs), ported from the earlier wasm decode spike —
-    // the wasm port plan's M3 chose this over full PPG demosaic
-    // (image_decode::decode's RAW branch) specifically because PPG measured
-    // 4-5x *slower* than native, failing the port's whole performance goal;
-    // the fast path measured ~6.3x faster than PPG in that same spike.
-    if crate::image_decode::is_raw_extension(path) {
-        return crate::raw_fast_preview::decode_raw_fast_from_bytes(&bytes, max_px);
-    }
-    if let Some(preview) = crate::thumbnail::embedded_preview_from_bytes(&bytes, max_px) {
-        return Ok(preview);
-    }
-    crate::image_decode::decode_jpeg_png_tiff_from_bytes(&bytes, max_px)
-}

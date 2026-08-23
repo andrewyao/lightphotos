@@ -7,10 +7,18 @@
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #1e1e1e; }
   </style>
-  <!-- data-bin picks the "lightphotos" bin target out of this crate's four
-       (lightphotos, face_probe, seg_probe, decode_probe) — trunk can't infer
-       which one to build for web on its own. -->
+  <!-- data-bin picks the "lightphotos" bin target out of this crate's five
+       (lightphotos, face_probe, seg_probe, decode_probe, wasm_worker) —
+       trunk can't infer which one to build for web on its own. -->
   <link data-trunk rel="rust" data-bin="lightphotos" data-type="main" />
+  <!-- The Web Worker pool's decode entry point (wasm port plan's M4,
+       web_worker_pool.rs). data-type="worker" builds this as a *separate*
+       wasm-bindgen target with a stable, non-content-hashed output filename
+       (wasm_worker.js / wasm_worker_bg.wasm) — web_worker_pool.rs's
+       spawn_worker() constructs that URL directly, no build-hash lookup
+       needed. This tag doesn't render anything itself; trunk just needs it
+       present to know to build and emit the worker bundle. -->
+  <link data-trunk rel="rust" data-bin="wasm_worker" data-type="worker" />
 </head>
 <body>
 </body>

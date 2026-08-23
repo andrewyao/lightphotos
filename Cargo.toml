@@ -32,6 +32,16 @@ path = "src/bin/decode_probe.rs"
 test = false
 required-features = ["raw-probe"]
 
+# The wasm32 Web Worker pool's decode entry point (M4 of the wasm port plan).
+# Loaded by trunk as `data-type="worker"` — its own doc comment explains why
+# this must be a *separate binary* rather than a branch inside `main.rs`. On
+# every other target this bin compiles to an empty stub (see the file's own
+# `#[cfg]` gating) so `cargo build`/`cargo test` are unaffected.
+[[bin]]
+name = "wasm_worker"
+path = "src/bin/wasm_worker.rs"
+test = false
+
 [dependencies]
 winit = "0.30.13"
 wgpu = "29.0.3"
@@ -150,6 +160,13 @@ web-sys = { version = "0.3", features = [
     "FileSystemHandleKind",
     "File",
     "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "Location",
+    "Worker",
+    "DedicatedWorkerGlobalScope",
+    "MessageEvent",
+    "Navigator",
 ] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
