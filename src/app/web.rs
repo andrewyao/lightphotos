@@ -93,7 +93,7 @@ impl App {
             any_missing = true;
             let tx = self.web_thumb_tx.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let result = decode_thumbnail(&handle, px).await;
+                let result = decode_thumbnail(&path, &handle, px).await;
                 let _ = tx.send((path, px, result));
             });
         }
@@ -115,7 +115,15 @@ impl App {
                 match result {
                     Ok(img) => loader.insert_thumb_external(path.clone(), px, std::sync::Arc::new(img)),
                     Err(e) => {
-                        eprintln!("[web] thumbnail decode failed for {}: {e}", path.display());
+                        // eprintln! goes nowhere on bare wasm32 — no console
+                        // is attached to Rust's stdio there by default, only
+                        // real panics get surfaced (via
+                        // console_error_panic_hook). web_sys::console::error_1
+                        // is the actual way to reach DevTools.
+                        web_sys::console::error_1(
+                            &format!("[web] thumbnail decode failed for {}: {e}", path.display())
+                                .into(),
+                        );
                         loader.mark_thumb_failed_external(path.clone(), px);
                     }
                 }
@@ -136,14 +144,35 @@ impl App {
 /// see this module's doc comment) — correct, not fast. Runs synchronously
 /// once bytes are in hand; the `.await` is only the file read itself.
 async fn decode_thumbnail(
+    path: &Path,
     handle: &web_sys::FileSystemFileHandle,
     max_px: u32,
 ) -> Result<DecodedImage, String> {
+    // RAW (ARW/CR2/NEF/DNG/...) isn't wired up yet — M1's scope is JPEG
+    // only (RAW gets its own decode path via rawler in M3). Checked before
+    // reading any bytes at all: RAW files run tens to hundreds of MB (per
+    // the earlier wasm decode spike's own numbers), so skipping the read
+    // entirely for a file we already know we can't decode matters, not
+    // just skipping the doomed `image::load_from_memory` call. Without
+    // this, `image` correctly fails trying to parse RAW sensor data as a
+    // baseline TIFF image (confirmed: "required tag `ImageWidth` not
+    // found" — RAW's TIFF-based container has a fundamentally different
+    // structure, not a bug in `image`) — same failure, just a clearer
+    // message and no wasted bandwidth.
+    if crate::image_decode::is_raw_extension(path) {
+        return Err("RAW decode not implemented yet (wasm port plan M3)".to_string());
+    }
     let bytes = web_fs::read_bytes(handle).await?;
+    // Temporary, generous logging while bringing this path up for the first
+    // time (see poll_web_thumbs's doc comment on why eprintln! alone isn't
+    // enough here) — narrows down which step an empty/failed thumbnail is
+    // actually failing at, rather than guessing.
+    web_sys::console::log_1(&format!("[web] read {} bytes for decode", bytes.len()).into());
     let img = image::load_from_memory(&bytes).map_err(|e| e.to_string())?;
     let img = img.thumbnail(max_px, max_px);
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
+    web_sys::console::log_1(&format!("[web] decoded {width}x{height}").into());
     Ok(DecodedImage {
         width,
         height,

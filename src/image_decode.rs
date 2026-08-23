@@ -138,8 +138,13 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
 /// Extensions we treat as camera RAW on the non-mac decode path — these route
 /// to `decode_raw_nonmac` instead of the `image` crate (which doesn't parse
 /// RAW containers). Mirrors the RAW subset of `navigation.rs`'s `IMAGE_EXTS`.
+/// `pub(crate)`, not just private: `app/web.rs`'s wasm32 thumbnail decode
+/// reuses this same list to skip RAW files for now (M1's scope is JPEG
+/// only, per the wasm port plan — RAW gets its own decode path in M3,
+/// `image::load_from_memory` can't read RAW sensor data at all, it's not a
+/// baseline-TIFF image despite the TIFF-based container).
 #[cfg(not(target_os = "macos"))]
-fn is_raw_extension(path: &Path) -> bool {
+pub(crate) fn is_raw_extension(path: &Path) -> bool {
     const RAW_EXTS: &[&str] = &[
         "cr2", "cr3", "nef", "arw", "dng", "raf", "rw2", "orf", "pef", "srw",
     ];
