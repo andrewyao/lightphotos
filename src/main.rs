@@ -46,6 +46,8 @@ mod macos_delegate;
 mod navigation;
 mod paths;
 mod phash;
+#[cfg(not(target_os = "macos"))]
+mod raw_fast_preview;
 mod renderer;
 mod segmentation;
 mod sharpness;

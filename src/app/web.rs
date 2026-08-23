@@ -235,16 +235,16 @@ async fn decode_thumbnail(
     handle: &web_sys::FileSystemFileHandle,
     max_px: u32,
 ) -> Result<DecodedImage, String> {
-    // RAW (ARW/CR2/NEF/DNG/...) isn't wired up yet — M1's scope is JPEG
-    // only (RAW gets its own decode path via rawler in M3). Checked before
-    // reading any bytes at all: RAW files run tens to hundreds of MB (per
-    // the earlier wasm decode spike's own numbers), so skipping the read
-    // entirely for a file we already know we can't decode matters, not
-    // just skipping a doomed decode call.
-    if crate::image_decode::is_raw_extension(path) {
-        return Err("RAW decode not implemented yet (wasm port plan M3)".to_string());
-    }
     let bytes = web_fs::read_bytes(handle).await?;
+    // RAW (ARW/CR2/NEF/DNG/...): the fast quarter-res preview path
+    // (raw_fast_preview.rs), ported from the earlier wasm decode spike —
+    // the wasm port plan's M3 chose this over full PPG demosaic
+    // (image_decode::decode's RAW branch) specifically because PPG measured
+    // 4-5x *slower* than native, failing the port's whole performance goal;
+    // the fast path measured ~6.3x faster than PPG in that same spike.
+    if crate::image_decode::is_raw_extension(path) {
+        return crate::raw_fast_preview::decode_raw_fast_from_bytes(&bytes, max_px);
+    }
     if let Some(preview) = crate::thumbnail::embedded_preview_from_bytes(&bytes, max_px) {
         return Ok(preview);
     }
