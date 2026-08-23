@@ -690,6 +690,16 @@ impl Loader {
         self.thumb_failed.insert((path, max_px));
     }
 
+    /// The preview-tier counterpart of `insert_thumb_external` — wasm32's
+    /// Loupe decode (`app/web.rs`) feeds results in here directly rather
+    /// than through the quick/forced two-pass split `request_preview`'s
+    /// worker jobs use (`Job::Quick`/`Job::Preview`): there's no embedded-
+    /// preview-vs-full-decode distinction to make twice when the caller
+    /// already decoded once at the real target size.
+    pub fn insert_preview_external(&mut self, path: PathBuf, target_px: u32, img: Arc<DecodedImage>) {
+        self.insert_preview((path, target_px), img);
+    }
+
     /// Drain finished jobs into the caches and return thumbnail `(path, max_px)`
     /// arrivals.
     ///

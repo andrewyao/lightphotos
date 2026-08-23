@@ -331,6 +331,20 @@ pub(crate) struct App {
     web_thumb_tx: Sender<(PathBuf, u32, Result<crate::image_decode::DecodedImage, String>)>,
     #[cfg(target_arch = "wasm32")]
     web_thumb_rx: Receiver<(PathBuf, u32, Result<crate::image_decode::DecodedImage, String>)>,
+    /// Loupe preview decode — same shape as the thumbnail trio above, at
+    /// `preview_px()` instead of `thumb_px`. `web_preview_failed` exists
+    /// here (and has no thumbnail counterpart) because `try_show` re-calls
+    /// `request_preview` every single frame until something lands; without
+    /// a negative cache a RAW file open in the Loupe (decode not
+    /// implemented — see `app/web.rs`) would retry a doomed decode forever.
+    #[cfg(target_arch = "wasm32")]
+    web_preview_inflight: HashSet<(PathBuf, u32)>,
+    #[cfg(target_arch = "wasm32")]
+    web_preview_failed: HashSet<(PathBuf, u32)>,
+    #[cfg(target_arch = "wasm32")]
+    web_preview_tx: Sender<(PathBuf, u32, Result<crate::image_decode::DecodedImage, String>)>,
+    #[cfg(target_arch = "wasm32")]
+    web_preview_rx: Receiver<(PathBuf, u32, Result<crate::image_decode::DecodedImage, String>)>,
 
     // ---- Browser state ----
     /// Grid vs. Loupe.
@@ -647,6 +661,8 @@ impl App {
         let (web_folder_tx, web_folder_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
         let (web_thumb_tx, web_thumb_rx) = std::sync::mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
+        let (web_preview_tx, web_preview_rx) = std::sync::mpsc::channel();
         Self {
             window: None,
             renderer: None,
@@ -673,6 +689,14 @@ impl App {
             web_thumb_tx,
             #[cfg(target_arch = "wasm32")]
             web_thumb_rx,
+            #[cfg(target_arch = "wasm32")]
+            web_preview_inflight: HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_preview_failed: HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_preview_tx,
+            #[cfg(target_arch = "wasm32")]
+            web_preview_rx,
             mode: ViewMode::Grid,
             catalog,
             catalog_load_pending: None,

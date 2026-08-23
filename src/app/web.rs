@@ -135,6 +135,72 @@ impl App {
         }
         arrived
     }
+
+    /// The wasm32 counterpart of `try_show`'s `loader.request_preview(...)`
+    /// call: `try_show` already re-requests every frame until something
+    /// lands (see `want`'s doc comment — no change needed there), but that
+    /// request goes into the same unserviced worker queue thumbnails did
+    /// before `request_web_thumbs` existed. This is that same fix for the
+    /// Loupe tier — decode at `preview_px()` instead of `thumb_px`, feed
+    /// into `insert_preview_external` instead of `insert_thumb_external`.
+    pub(crate) fn request_web_preview(&mut self) -> bool {
+        let Some(path) = self.want.clone() else {
+            return false;
+        };
+        let target = self.preview_px();
+        let key = (path.clone(), target);
+        let already_have = self.loader.as_ref().is_some_and(|l| {
+            l.get_full(&path).is_some() || l.get_preview(&path, target).is_some()
+        });
+        if already_have
+            || self.web_preview_inflight.contains(&key)
+            || self.web_preview_failed.contains(&key)
+        {
+            return false;
+        }
+        let Some(handle) = self.web_file_handles.get(&path).cloned() else {
+            return false;
+        };
+        self.web_preview_inflight.insert(key);
+        let tx = self.web_preview_tx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = decode_thumbnail(&path, &handle, target).await;
+            let _ = tx.send((path, target, result));
+        });
+        true
+    }
+
+    /// Drain finished Loupe decodes — same shape as `poll_web_thumbs`, into
+    /// the preview tier instead of the thumbnail tier. Negative-caches a
+    /// failure locally (`web_preview_failed`) rather than via `loader.rs`
+    /// (whose failure tracking is thumbnail-specific) so `try_show`'s
+    /// every-frame re-request doesn't retry a doomed RAW decode forever.
+    pub(crate) fn poll_web_preview(&mut self) -> bool {
+        let mut landed = false;
+        while let Ok((path, target, result)) = self.web_preview_rx.try_recv() {
+            let key = (path.clone(), target);
+            self.web_preview_inflight.remove(&key);
+            match result {
+                Ok(img) => {
+                    if let Some(loader) = &mut self.loader {
+                        loader.insert_preview_external(path.clone(), target, std::sync::Arc::new(img));
+                    }
+                    landed = true;
+                }
+                Err(e) => {
+                    web_sys::console::error_1(
+                        &format!("[web] preview decode failed for {}: {e}", path.display()).into(),
+                    );
+                    self.web_preview_failed.insert(key);
+                }
+            }
+        }
+        if landed {
+            self.try_show();
+            self.request_redraw();
+        }
+        landed
+    }
 }
 
 /// Read `handle`'s bytes and decode a thumbnail at (approximately, longest

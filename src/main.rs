@@ -433,6 +433,13 @@ impl ApplicationHandler<UserEvent> for App {
             if self.request_web_thumbs() {
                 self.request_redraw();
             }
+            // Loupe tier — poll_web_preview calls try_show() itself once
+            // something lands, same as the native loader-arrival branch
+            // above does for its own tier.
+            self.poll_web_preview();
+            if self.request_web_preview() {
+                self.request_redraw();
+            }
         }
 
         // Keep the loop alive while burst background work (capture-time reads,
