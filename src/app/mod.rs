@@ -301,6 +301,37 @@ pub(crate) struct App {
     /// A file/dir requested before the window/renderer existed.
     pub(crate) pending_initial: Option<PathBuf>,
 
+    /// True while `showDirectoryPicker` + listing is in flight — drives the
+    /// landing page's "Choose Folder" button (disabled/shows a status while
+    /// pending, matches `catalog_load_pending`'s role for that other async
+    /// one-shot job) and guards against firing a second picker before the
+    /// first resolves. wasm32 only: this whole landing-page flow doesn't
+    /// exist natively (`main()` requires a CLI arg or delivers one via
+    /// AppleEvent, so `self.playlist` is never meaningfully "still empty and
+    /// waiting on the user" there the way it legitimately is here — see
+    /// `ui::draw`'s landing-page branch).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_folder_pending: bool,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_folder_tx: Sender<Result<crate::web_fs::PickedFolder, String>>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_folder_rx: Receiver<Result<crate::web_fs::PickedFolder, String>>,
+    /// File handles for the currently-open folder's images, keyed the same
+    /// way `self.playlist`'s entries are — a picked folder has no real OS
+    /// path, only these, so a later decode step (not wired up yet) will need
+    /// to look a path back up to its handle before it can read any bytes.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_file_handles: HashMap<PathBuf, web_sys::FileSystemFileHandle>,
+    /// Thumbnail decodes currently in flight — `loader.rs`'s own
+    /// `thumb_inflight` isn't reused here since nothing on wasm32 goes
+    /// through its worker queue at all yet (see `Loader::insert_thumb_external`).
+    #[cfg(target_arch = "wasm32")]
+    web_thumb_inflight: HashSet<(PathBuf, u32)>,
+    #[cfg(target_arch = "wasm32")]
+    web_thumb_tx: Sender<(PathBuf, u32, Result<crate::image_decode::DecodedImage, String>)>,
+    #[cfg(target_arch = "wasm32")]
+    web_thumb_rx: Receiver<(PathBuf, u32, Result<crate::image_decode::DecodedImage, String>)>,
+
     // ---- Browser state ----
     /// Grid vs. Loupe.
     pub(crate) mode: ViewMode,
@@ -599,6 +630,8 @@ mod export;
 mod histogram;
 mod loupe;
 mod thumbs;
+#[cfg(target_arch = "wasm32")]
+mod web;
 
 impl App {
     pub(crate) fn new(initial: Option<PathBuf>) -> Self {
@@ -610,6 +643,10 @@ impl App {
         let (catalog_load_tx, catalog_load_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
         let (renderer_init_tx, renderer_init_rx) = std::sync::mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
+        let (web_folder_tx, web_folder_rx) = std::sync::mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
+        let (web_thumb_tx, web_thumb_rx) = std::sync::mpsc::channel();
         Self {
             window: None,
             renderer: None,
@@ -622,6 +659,20 @@ impl App {
             want: None,
             shown: Shown::Nothing,
             pending_initial: initial,
+            #[cfg(target_arch = "wasm32")]
+            web_folder_pending: false,
+            #[cfg(target_arch = "wasm32")]
+            web_folder_tx,
+            #[cfg(target_arch = "wasm32")]
+            web_folder_rx,
+            #[cfg(target_arch = "wasm32")]
+            web_file_handles: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_thumb_inflight: HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_thumb_tx,
+            #[cfg(target_arch = "wasm32")]
+            web_thumb_rx,
             mode: ViewMode::Grid,
             catalog,
             catalog_load_pending: None,
@@ -806,7 +857,14 @@ impl App {
     /// seed ratings, recompute the visible view, reset selection to nothing
     /// selected, mark `dir` as the selected folder, and request thumbnails.
     fn load_folder(&mut self, dir: PathBuf) {
-        let playlist = Playlist::from_dir(&dir);
+        self.load_playlist(Playlist::from_dir(&dir), dir);
+    }
+
+    /// `load_folder`'s body, minus building the `Playlist` itself — shared
+    /// with wasm32's File System Access folder picker (`app/web.rs`), which
+    /// builds one via `Playlist::from_entries` instead of `from_dir` (no
+    /// `std::fs::read_dir` on a browser-picked folder; see that module).
+    fn load_playlist(&mut self, playlist: Playlist, dir: PathBuf) {
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
         self.reset_burst_state();
@@ -1062,6 +1120,10 @@ impl App {
                     self.set_focus(Region::Folders, FocusLevel::Entered);
                     self.open_folder(p);
                 }
+                #[cfg(target_arch = "wasm32")]
+                ui::UiAction::PickFolder => self.request_folder_pick(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::PickFolder => {}
                 ui::UiAction::Focus(region) => {
                     self.focus = region;
                     self.focus_level = FocusLevel::Entered;

@@ -673,6 +673,23 @@ impl Loader {
         self.thumb_failed.contains(&(path.to_path_buf(), max_px))
     }
 
+    /// Feed an externally-decoded thumbnail into the same cache/LRU a normal
+    /// worker result would land in — wasm32's own decode path (`app/web.rs`)
+    /// uses this, since this struct's worker queue assumes real OS threads
+    /// it doesn't have there yet (see the wasm port plan's M4). Does not
+    /// touch `thumb_inflight`; callers own their own in-flight tracking for
+    /// whatever they're driving this from (mirroring but not sharing
+    /// `request_thumb`'s, since nothing here ever went through that queue).
+    pub fn insert_thumb_external(&mut self, path: PathBuf, max_px: u32, img: Arc<DecodedImage>) {
+        self.insert_thumb((path, max_px), img);
+    }
+
+    /// Negative-cache an externally-decoded thumbnail that failed — same
+    /// role as a worker's own failure path, for wasm32's decode path.
+    pub fn mark_thumb_failed_external(&mut self, path: PathBuf, max_px: u32) {
+        self.thumb_failed.insert((path, max_px));
+    }
+
     /// Drain finished jobs into the caches and return thumbnail `(path, max_px)`
     /// arrivals.
     ///

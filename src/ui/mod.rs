@@ -110,6 +110,12 @@ pub enum UiAction {
     FocusSurveyMember(usize),
     /// Open this folder as one unit: load its images and toggle its expansion.
     OpenFolder(std::path::PathBuf),
+    /// wasm32 only: the landing page's "Choose Folder" button — fires the
+    /// browser's File System Access folder picker. A no-op action type on
+    /// native (nothing ever pushes it there — there's no landing page), kept
+    /// unconditional rather than `#[cfg]`-gated so `ui.rs`'s own code
+    /// doesn't need target-specific branches just to build this enum.
+    PickFolder,
     /// Begin dragging this crop edge (pointer pressed near it).
     CropGrab(CropEdge),
     /// Begin moving the whole crop rectangle, anchored at this texture coordinate.
@@ -184,6 +190,19 @@ use modals::{confirm_modal, help_modal, quit_modal};
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     let mut out = FrameOutput::default();
+
+    // wasm32 landing page: shown until a folder is picked (there's no CLI
+    // arg / AppleEvent-delivered path on the web the way native gets one, so
+    // `self.playlist` being empty is a real, expected, waited-on state here
+    // — not just "nothing opened yet" the way it briefly is natively before
+    // resumed() finishes). Every other draw path below assumes a playlist
+    // exists, so this returns early rather than falling through.
+    #[cfg(target_arch = "wasm32")]
+    if !app.has_playlist() {
+        draw_landing_page(ui, app, &mut out);
+        return out;
+    }
+
     let mode = app.mode();
 
     // Left folder sidebar and right Develop panel are drawn first, outside
@@ -220,6 +239,35 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     quit_modal(ui, app, &mut out);
     help_modal(ui, app, &mut out);
     out
+}
+
+/// wasm32-only: the "pick a folder to get started" screen — see `draw`'s
+/// landing-page branch. Deliberately minimal (title + one button, no styling
+/// investment) — this is an early wasm-port milestone, not a polish pass;
+/// see the wasm port plan's M1.
+#[cfg(target_arch = "wasm32")]
+fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    egui::CentralPanel::default().show_inside(ui, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.4);
+            ui.heading("LightPhotos");
+            ui.add_space(12.0);
+            let pending = app.web_folder_pending();
+            let resp = ui.add_enabled(
+                !pending,
+                egui::Button::new(if pending {
+                    "Opening…"
+                } else {
+                    "Choose Folder"
+                })
+                .min_size(egui::vec2(160.0, 32.0)),
+            );
+            if resp.clicked() {
+                out.actions.push(UiAction::PickFolder);
+            }
+        });
+    });
+    status_toast(ui, app);
 }
 
 /// A transient status message (e.g. an export result), shown bottom-center for a

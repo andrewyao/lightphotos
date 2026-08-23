@@ -1,7 +1,12 @@
 [build]
 target = "index.html"
-# wgpu's WebGPU web-sys bindings are still gated behind this unstable-apis
-# flag (see the wasm port plan's Architecture section).
+# wgpu's WebGPU web-sys bindings, and the File System Access bindings
+# (window.showDirectoryPicker et al.), are still gated behind this
+# unstable-apis flag (see the wasm port plan's Architecture section).
+# NOTE: this `rustflags` key does not seem to reach cargo in trunk 0.21.14 —
+# confirmed by a build that still failed without it applied. Until that's
+# root-caused, set RUSTFLAGS=--cfg=web_sys_unstable_apis in the environment
+# when invoking `trunk build`/`trunk serve` instead of relying on this file.
 rustflags = ["--cfg=web_sys_unstable_apis"]
 
 [serve]

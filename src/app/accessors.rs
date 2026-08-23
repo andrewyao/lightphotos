@@ -14,6 +14,21 @@ impl App {
         self.mode
     }
 
+    /// Whether a folder/file has been opened yet. Always true on native
+    /// shortly after startup (a CLI arg or AppleEvent path is required — see
+    /// `main.rs`); on wasm32 this is what `ui::draw`'s landing page checks,
+    /// since there's no such requirement there.
+    pub(crate) fn has_playlist(&self) -> bool {
+        self.playlist.is_some()
+    }
+
+    /// wasm32 only: whether the File System Access folder picker is
+    /// currently in flight — drives the landing page's button state.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn web_folder_pending(&self) -> bool {
+        self.web_folder_pending
+    }
+
     /// The keyboard-focused region (lit panel, arrow-key target).
     pub(crate) fn focus(&self) -> Region {
         self.focus

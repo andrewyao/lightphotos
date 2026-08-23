@@ -101,8 +101,11 @@ fn read_dir_paths(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default()
 }
 
-/// Sort paths in place, case-insensitively by file name.
-fn sort_by_name(entries: &mut [PathBuf]) {
+/// Sort paths in place, case-insensitively by file name. `pub(crate)` so
+/// wasm32's `web_fs.rs` can match `from_dir`'s ordering when building a
+/// `Playlist` from an async directory-handle listing instead of
+/// `std::fs::read_dir`.
+pub(crate) fn sort_by_name(entries: &mut [PathBuf]) {
     entries.sort_by(|a, b| {
         let an = a.file_name().map(|s| s.to_string_lossy().to_lowercase());
         let bn = b.file_name().map(|s| s.to_string_lossy().to_lowercase());
@@ -207,6 +210,24 @@ impl Playlist {
             entries,
             index: 0,
             dir: dir.to_path_buf(),
+        }
+    }
+
+    /// Build a playlist directly from an already-known `dir` + `entries`, no
+    /// filesystem access — `from_dir`'s counterpart for platforms where
+    /// listing a folder isn't a synchronous `std::fs::read_dir` call.
+    /// wasm32's File System Access folder picker (`web_fs.rs`) is the
+    /// current user: browser directory handles give back an async iterator
+    /// of entries, not a real OS path, so the listing has to happen before
+    /// a `Playlist` can exist at all, unlike `from_dir`'s single sync call.
+    /// `entries` should already be sorted the same way `sorted_images_in`
+    /// sorts (case-insensitive by name) for consistent behavior with the
+    /// native path; this doesn't re-sort or filter, it just wraps.
+    pub fn from_entries(dir: PathBuf, entries: Vec<PathBuf>) -> Self {
+        Self {
+            entries,
+            index: 0,
+            dir,
         }
     }
 

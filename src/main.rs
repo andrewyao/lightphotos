@@ -28,6 +28,8 @@ mod burst;
 mod catalog;
 #[cfg(target_arch = "wasm32")]
 mod web_canvas;
+#[cfg(target_arch = "wasm32")]
+mod web_fs;
 #[cfg(target_os = "macos")]
 mod coregraphics;
 mod develop;
@@ -336,6 +338,12 @@ impl ApplicationHandler<UserEvent> for App {
             self.request_redraw();
         }
 
+        // Landing page's folder picker (see ui::draw's landing-page branch
+        // and app/web.rs) — its own bool return feeds the poll-cadence
+        // calculation below, same convention as request_working_thumbs.
+        #[cfg(target_arch = "wasm32")]
+        let web_folder_pending = self.poll_folder_pick();
+
         // Drain all loader tiers once per frame.
         if let Some(loader) = &mut self.loader {
             let (full, thumbs, metas, exifs) = loader.poll_all();
@@ -390,6 +398,8 @@ impl ApplicationHandler<UserEvent> for App {
             .is_some_and(|l| l.has_pending_image())
             || self.selection_pending()
             || catalog_load_pending;
+        #[cfg(target_arch = "wasm32")]
+        let image_pending = image_pending || web_folder_pending;
         let poll_delay = if image_pending {
             Some(16)
         } else if self.export_progress.is_some() {
@@ -407,6 +417,22 @@ impl ApplicationHandler<UserEvent> for App {
         // Keep redrawing while working-set thumbnails are still loading.
         if self.request_working_thumbs() {
             self.request_redraw();
+        }
+        // wasm32's own thumbnail path — loader.rs's worker queue above has
+        // no workers to service it yet (see app/web.rs). Drain first (a
+        // decode that finished this frame should count toward "did
+        // anything arrive" the same way loader results do), then keep
+        // requesting/redrawing while any are still outstanding.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let web_thumbs = self.poll_web_thumbs();
+            if !web_thumbs.is_empty() {
+                self.score_arrived_thumbs(&web_thumbs);
+                self.score_arrived_dup_thumbs(&web_thumbs);
+            }
+            if self.request_web_thumbs() {
+                self.request_redraw();
+            }
         }
 
         // Keep the loop alive while burst background work (capture-time reads,
