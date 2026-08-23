@@ -191,6 +191,13 @@ use modals::{confirm_modal, help_modal, quit_modal};
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     let mut out = FrameOutput::default();
 
+    // The lightphotos.app marketing site's own nav, redrawn in egui —
+    // persistent across every screen (landing page, Grid, Loupe), not just
+    // the landing page, per direct request. Drawn first so it stacks above
+    // everything else `draw` shows this frame.
+    #[cfg(target_arch = "wasm32")]
+    site_nav(ui);
+
     // wasm32 landing page: shown until a folder is picked (there's no CLI
     // arg / AppleEvent-delivered path on the web the way native gets one, so
     // `self.playlist` being empty is a real, expected, waited-on state here
@@ -268,6 +275,35 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         });
     });
     status_toast(ui, app);
+}
+
+/// The lightphotos.app marketing site's own nav, redrawn in egui so it's
+/// consistent even though this page lives inside the wasm canvas rather than
+/// the site's plain-HTML chrome (the canvas wants the full viewport —
+/// `overflow: hidden` — so wrapping it in the site's HTML header wasn't an
+/// option). Persistent across every screen (landing page, Grid, Loupe), per
+/// direct request — called once from `draw`'s own top, before the
+/// landing-page early return. Hrefs match `index.html`'s own nav exactly
+/// (relative, since `app.html` — this page — lives at the same site root);
+/// no "Web" link since that's this page. `hyperlink_to` opens in a new tab
+/// on web by default (`webbrowser`'s wasm32 target hint, which egui-winit's
+/// `handle_platform_output` — already called every frame, `app/mod.rs` —
+/// routes clicks through via the `links` Cargo feature already enabled for
+/// this target), so the app's own state/session is never navigated away
+/// from.
+fn site_nav(ui: &mut egui::Ui) {
+    egui::TopBottomPanel::top("lp_site_nav").show_inside(ui, |ui| {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            ui.hyperlink_to(egui::RichText::new("LightPhotos").heading(), "./");
+            ui.add_space(16.0);
+            ui.hyperlink_to("Downloads", "./downloads.html");
+            ui.hyperlink_to("Blogs", "./blogs.html");
+            ui.hyperlink_to("Help", "./docs.html");
+        });
+        ui.add_space(4.0);
+    });
 }
 
 /// A transient status message (e.g. an export result), shown bottom-center for a
