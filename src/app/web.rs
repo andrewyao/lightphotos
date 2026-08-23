@@ -13,6 +13,56 @@ use crate::navigation::Playlist;
 use crate::web_fs;
 use crate::web_worker_pool::JobKind;
 
+/// Cap on concurrent `FileSystemFileHandle::get_file()` reads against the
+/// picked folder — see `App::web_read_inflight`'s doc comment for why this
+/// exists at all (a real Chrome `NotReadableError` hit once decode got fast
+/// enough, via M4, to fire a whole grid page's worth of reads in one frame).
+/// Picked to stay comfortably under whatever that limit actually is while
+/// still keeping several reads genuinely concurrent; not derived from
+/// `web_worker_pool::worker_count()` — the two caps address different
+/// resources (open file reads vs. decode workers) and don't need to match.
+/// Confirmed working (whole folder loads clean) at 2, but that was measured
+/// *before* `wasm_worker.rs` started preferring RAW files' embedded JPEG
+/// preview over the full `rawler` Bayer-demosaic decode for grid
+/// thumbnails — each read+decode round trip is now much shorter, so the
+/// window in which concurrent reads actually contend is smaller too, which
+/// is the reasoning for trying a higher value again rather than assuming
+/// the old ceiling still holds. Matches `web_worker_pool::worker_count()`'s
+/// own cap for a tidy correspondence, not because the two caps need to be
+/// equal. Drop back toward 2 if a full-folder load gets stuck again — the
+/// jittered retry/backoff safety net stays either way, so a wrong guess
+/// here costs speed, not correctness.
+const MAX_CONCURRENT_READS: u32 = 4;
+
+/// How many consecutive read/decode failures a key tolerates before
+/// `poll_web_thumbs`/`poll_web_preview` give up on it permanently — see
+/// `App::web_thumb_retries`'s doc comment for why a failure isn't treated as
+/// permanent on the first attempt at all. Confirmed empirically that a
+/// short linear backoff (5 retries, ~6s total window) still wasn't enough
+/// headroom for every case — a different, still-small set of files failed
+/// on each fresh reload of the same folder, meaning genuinely transient
+/// resource pressure that just sometimes takes longer than a few seconds to
+/// clear, not a specific "always these files" issue.
+const MAX_READ_RETRIES: u8 = 10;
+
+/// Backoff before retry number `attempt` (1-indexed) — "full jitter"
+/// (AWS's own term for this exact pattern): a duration sampled *uniformly
+/// at random* from `[0, cap]`, where `cap` grows exponentially per attempt
+/// (500ms, 1s, 2s, 4s, 8s, 10s, 10s, ... capped at 10s). Confirmed via a
+/// real console log: several keys that failed in the same frame (same
+/// `MAX_CONCURRENT_READS` batch) retried at *identical* attempt counts and
+/// visibly collided again on every subsequent retry — a livelock, not just
+/// a resource limit. A non-jittered backoff (even a real, several-seconds-
+/// long one — tried first, still got stuck) can't fix that: same input
+/// (attempt number) always produces the same delay, so a synchronized batch
+/// stays synchronized forever. Sampling the *whole* window uniformly (not
+/// "base plus a little jitter") is what actually breaks the lockstep.
+fn retry_backoff(attempt: u8) -> std::time::Duration {
+    let cap_ms = 500u64.saturating_mul(1u64 << attempt.saturating_sub(1).min(20)).min(10_000);
+    let jittered_ms = (js_sys::Math::random() * cap_ms as f64).max(50.0);
+    std::time::Duration::from_millis(jittered_ms as u64)
+}
+
 impl App {
     /// Fire the browser's folder picker, unless one's already in flight.
     /// Called from the landing page's "Choose Folder" button
@@ -42,6 +92,11 @@ impl App {
             match result {
                 Ok(picked) => {
                     self.web_file_handles = picked.handles;
+                    // Before `load_playlist` (below) triggers
+                    // `seed_mirrors`/`request_catalog_load` — its wasm32 arm
+                    // needs this handle to actually read `.lightphotos/*.xmp`
+                    // back.
+                    self.catalog.set_wasm_dir_handle(picked.dir_handle);
                     let playlist = Playlist::from_entries(picked.dir.clone(), picked.entries);
                     self.load_playlist(playlist, picked.dir);
                     self.mode = ViewMode::Grid;
@@ -84,15 +139,36 @@ impl App {
             if already_have || self.web_thumb_inflight.contains(&key) {
                 continue;
             }
+            any_missing = true;
+            // Backing off after a prior failure (see `retry_backoff`'s doc
+            // comment) — not yet time to try again.
+            if self
+                .web_thumb_retries
+                .get(&key)
+                .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
+            {
+                continue;
+            }
+            // Something is genuinely missing (counted above) even if the
+            // read budget is exhausted this frame — leaving the key off
+            // `web_thumb_inflight` means the same `working_thumb_keys()`
+            // recomputation next frame naturally retries it once a slot
+            // frees up (see `MAX_CONCURRENT_READS`'s doc comment).
+            if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
+                continue;
+            }
             let Some(handle) = self.web_file_handles.get(&path).cloned() else {
                 continue; // shouldn't happen — every playlist entry came from a handle
             };
             self.web_thumb_inflight.insert(key);
-            any_missing = true;
+            self.web_read_inflight.set(self.web_read_inflight.get() + 1);
+            let read_inflight = self.web_read_inflight.clone();
             let pool = self.web_worker_pool.handle();
             wasm_bindgen_futures::spawn_local(async move {
                 let is_raw = crate::image_decode::is_raw_extension(&path);
-                match web_fs::read_bytes(&handle).await {
+                let result = web_fs::read_array_buffer(&handle).await;
+                read_inflight.set(read_inflight.get().saturating_sub(1));
+                match result {
                     Ok(bytes) => pool.submit(path, px, bytes, is_raw, JobKind::Thumb),
                     Err(e) => {
                         web_sys::console::error_1(
@@ -130,25 +206,59 @@ impl App {
                 continue;
             }
             let crate::web_worker_pool::PoolResult { path, target, result, .. } = r;
-            self.web_thumb_inflight.remove(&(path.clone(), target));
-            if let Some(loader) = &mut self.loader {
-                match result {
-                    Ok(img) => loader.insert_thumb_external(path.clone(), target, std::sync::Arc::new(img)),
-                    Err(e) => {
-                        // eprintln! goes nowhere on bare wasm32 — no console
-                        // is attached to Rust's stdio there by default, only
-                        // real panics get surfaced (via
-                        // console_error_panic_hook). web_sys::console::error_1
-                        // is the actual way to reach DevTools.
-                        web_sys::console::error_1(
-                            &format!("[web] thumbnail decode failed for {}: {e}", path.display())
-                                .into(),
+            let key = (path.clone(), target);
+            self.web_thumb_inflight.remove(&key);
+            match result {
+                Ok(img) => {
+                    self.web_thumb_retries.remove(&key);
+                    if let Some(loader) = &mut self.loader {
+                        loader.insert_thumb_external(path.clone(), target, std::sync::Arc::new(img));
+                    }
+                    arrived.push((path, target));
+                }
+                Err(e) => {
+                    // eprintln! goes nowhere on bare wasm32 — no console is
+                    // attached to Rust's stdio there by default, only real
+                    // panics get surfaced (via console_error_panic_hook).
+                    // web_sys::console::error_1/warn_1 is the actual way to
+                    // reach DevTools.
+                    let entry = self.web_thumb_retries.entry(key).or_insert((0, Instant::now()));
+                    entry.0 += 1;
+                    let retries = entry.0; // u8: Copy, avoids borrowing `entry` across the `entry.1 = ...` below
+                    if retries <= MAX_READ_RETRIES {
+                        // Left off `web_thumb_inflight` (already removed
+                        // above) — `request_web_thumbs` will try it again
+                        // once `retry_backoff`'s deadline (just set below)
+                        // passes. Most read/decode failures seen in practice
+                        // are a transient Chrome `NotReadableError`, not a
+                        // genuinely bad file — see `web_thumb_retries`'s doc
+                        // comment on why real backoff (not just a frame's
+                        // worth of delay) turned out to matter.
+                        entry.1 = Instant::now() + retry_backoff(retries);
+                        web_sys::console::warn_1(
+                            &format!(
+                                "[web] thumbnail decode failed for {} (retry {}/{MAX_READ_RETRIES}): {e}",
+                                path.display(),
+                                retries
+                            )
+                            .into(),
                         );
-                        loader.mark_thumb_failed_external(path.clone(), target);
+                    } else {
+                        web_sys::console::error_1(
+                            &format!(
+                                "[web] thumbnail decode failed permanently for {}: {e}",
+                                path.display()
+                            )
+                            .into(),
+                        );
+                        self.web_thumb_retries.remove(&(path.clone(), target));
+                        if let Some(loader) = &mut self.loader {
+                            loader.mark_thumb_failed_external(path.clone(), target);
+                        }
+                        arrived.push((path, target));
                     }
                 }
             }
-            arrived.push((path, target));
         }
         if !arrived.is_empty() {
             self.request_redraw();
@@ -178,14 +288,37 @@ impl App {
         {
             return false;
         }
+        // Backing off after a prior failure — see `retry_backoff`'s doc
+        // comment.
+        if self
+            .web_preview_retries
+            .get(&key)
+            .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
+        {
+            return false;
+        }
+        // Same shared read-concurrency budget `request_web_thumbs` respects
+        // (see `MAX_CONCURRENT_READS`'s doc comment) — the Loupe's own
+        // preview read competes with the Grid's thumbnail reads against the
+        // same folder, so they share one counter, not independent caps.
+        // `try_show` already re-requests every frame, so returning `false`
+        // (nothing started) here just defers to a later frame, same as a
+        // throttled thumbnail key.
+        if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
+            return false;
+        }
         let Some(handle) = self.web_file_handles.get(&path).cloned() else {
             return false;
         };
         self.web_preview_inflight.insert(key);
+        self.web_read_inflight.set(self.web_read_inflight.get() + 1);
+        let read_inflight = self.web_read_inflight.clone();
         let pool = self.web_worker_pool.handle();
         wasm_bindgen_futures::spawn_local(async move {
             let is_raw = crate::image_decode::is_raw_extension(&path);
-            match web_fs::read_bytes(&handle).await {
+            let result = web_fs::read_array_buffer(&handle).await;
+            read_inflight.set(read_inflight.get().saturating_sub(1));
+            match result {
                 Ok(bytes) => pool.submit(path, target, bytes, is_raw, JobKind::Preview),
                 Err(e) => {
                     web_sys::console::error_1(
@@ -229,13 +362,42 @@ impl App {
                     if let Some(loader) = &mut self.loader {
                         loader.insert_preview_external(path.clone(), target, std::sync::Arc::new(img));
                     }
+                    self.web_preview_retries.remove(&key);
                     landed = true;
                 }
                 Err(e) => {
-                    web_sys::console::error_1(
-                        &format!("[web] preview decode failed for {}: {e}", path.display()).into(),
-                    );
-                    self.web_preview_failed.insert(key);
+                    // Same bounded-retry-with-backoff treatment as
+                    // `poll_web_thumbs` — see `App::web_thumb_retries`'s doc
+                    // comment for why a failure here isn't immediately
+                    // permanent, and why a real delay (not just "next
+                    // frame") between attempts turned out to matter.
+                    let entry = self
+                        .web_preview_retries
+                        .entry(key.clone())
+                        .or_insert((0, Instant::now()));
+                    entry.0 += 1;
+                    let retries = entry.0;
+                    if retries <= MAX_READ_RETRIES {
+                        entry.1 = Instant::now() + retry_backoff(retries);
+                        web_sys::console::warn_1(
+                            &format!(
+                                "[web] preview decode failed for {} (retry {}/{MAX_READ_RETRIES}): {e}",
+                                path.display(),
+                                retries
+                            )
+                            .into(),
+                        );
+                    } else {
+                        web_sys::console::error_1(
+                            &format!(
+                                "[web] preview decode failed permanently for {}: {e}",
+                                path.display()
+                            )
+                            .into(),
+                        );
+                        self.web_preview_retries.remove(&key);
+                        self.web_preview_failed.insert(key);
+                    }
                 }
             }
         }

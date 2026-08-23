@@ -328,6 +328,40 @@ pub(crate) struct App {
     /// (unserviced-on-wasm32) worker queue.
     #[cfg(target_arch = "wasm32")]
     web_thumb_inflight: HashSet<(PathBuf, u32)>,
+    /// How many `FileSystemFileHandle::get_file()` reads are in flight right
+    /// now, shared between `request_web_thumbs` and `request_web_preview`
+    /// (both read from the same picked folder). Chrome throws a
+    /// `NotReadableError` ("could not be read, typically due to permission
+    /// problems...") once too many concurrent reads are open against one
+    /// folder — confirmed the hard way: it surfaced only after the Worker
+    /// pool (M4) made decode fast enough for a whole grid page's worth of
+    /// reads to fire in the same frame. `MAX_CONCURRENT_READS`
+    /// (`app/web.rs`) caps this; a key that can't start this frame is simply
+    /// left off `web_thumb_inflight`/`web_preview_inflight` so the same
+    /// per-frame recomputation that already drives those naturally retries
+    /// it once the budget frees up — no separate retry/backoff bookkeeping
+    /// needed. `Rc<Cell<_>>` (not a plain `u32`) so the `spawn_local` task
+    /// that decrements it on completion doesn't need `&mut App`.
+    #[cfg(target_arch = "wasm32")]
+    web_read_inflight: std::rc::Rc<std::cell::Cell<u32>>,
+    /// Consecutive read/decode failure counts plus the earliest time the
+    /// next retry may fire, keyed the same as
+    /// `web_thumb_inflight`/`web_preview_inflight`. A `NotReadableError`
+    /// from Chrome (confirmed real, hit even after capping concurrent
+    /// reads) is very likely transient, so a failure isn't treated as
+    /// permanent until it's failed `MAX_READ_RETRIES` times in a row
+    /// (`app/web.rs`) — but a *zero-delay* retry (the first version of this)
+    /// still failed every single time: 5 retries a frame apart (~16ms each)
+    /// all land within the same ~80ms window, no real time for whatever's
+    /// transiently exhausted to clear. The `Instant` is a real backoff
+    /// deadline (`retry_backoff`, growing per attempt) — `request_web_thumbs`
+    /// /`request_web_preview` check it before resubmitting, not just
+    /// "is the key currently marked in-flight". Cleared on success or on
+    /// giving up permanently.
+    #[cfg(target_arch = "wasm32")]
+    web_thumb_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
+    #[cfg(target_arch = "wasm32")]
+    web_preview_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
     /// Loupe preview decode — same shape as `web_thumb_inflight`, at
     /// `preview_px()` instead of `thumb_px`. `web_preview_failed` exists
     /// here (and has no thumbnail counterpart) because `try_show` re-calls
@@ -661,6 +695,10 @@ mod web;
 
 impl App {
     pub(crate) fn new(initial: Option<PathBuf>) -> Self {
+        // Nothing to migrate on wasm32 — File System Access has no legacy
+        // global catalog.json/catalog.db to have inherited (catalog.rs
+        // gates the function out on this target for the same reason).
+        #[cfg(not(target_arch = "wasm32"))]
         let _ = crate::catalog::migrate_legacy_catalog();
         let catalog = Catalog::new();
         let egui_ctx = egui::Context::default();
@@ -696,6 +734,12 @@ impl App {
             web_file_handles: HashMap::new(),
             #[cfg(target_arch = "wasm32")]
             web_thumb_inflight: HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_read_inflight: std::rc::Rc::new(std::cell::Cell::new(0)),
+            #[cfg(target_arch = "wasm32")]
+            web_thumb_retries: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_preview_retries: HashMap::new(),
             #[cfg(target_arch = "wasm32")]
             web_preview_inflight: HashSet::new(),
             #[cfg(target_arch = "wasm32")]

@@ -25,36 +25,65 @@ impl App {
         let token = self.catalog_load_token;
         let dir = dir.to_path_buf();
         let tx = self.catalog_load_tx.clone();
-        let for_thread = dir.clone();
-        let spawned = std::thread::Builder::new()
-            .name("catalog-load".into())
-            .spawn(move || {
-                let loaded = crate::catalog::load_sidecars(&for_thread);
-                let _ = tx.send((for_thread, token, loaded));
-            });
-        match spawned {
-            Ok(_) => self.catalog_load_pending = Some((dir, token)),
-            Err(e) => {
-                // No thread means `load_sidecars` never runs for `dir` —
-                // `switch_dir` above already cleared the cache, so it would
-                // otherwise silently stay empty (all ratings/edits appearing
-                // lost) with no signal to the user. Report it through the
-                // same toast mechanism as a failed sidecar write, AND leave
-                // `catalog_load_pending` set to this (unrunnable) request —
-                // not cleared/unchanged. `export.rs`'s `catalog_load_pending
-                // .is_some()` guard exists specifically to refuse exporting
-                // against an unloaded catalog; if this left pending at
-                // whatever it was before (typically `None`, since directory
-                // switches aren't usually mid-load), that guard would see
-                // nothing pending and wave an export for `dir` straight
-                // through against a cache that will now never populate —
-                // worse than the toast alone. No result will ever arrive on
-                // `catalog_load_rx` for this token, so this state persists
-                // until the user switches directories again (a fresh
-                // `request_catalog_load` call, which may succeed).
-                self.catalog
-                    .note_persist_error(format!("could not load {}: {e}", dir.display()));
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let for_thread = dir.clone();
+            let spawned = std::thread::Builder::new()
+                .name("catalog-load".into())
+                .spawn(move || {
+                    let loaded = crate::catalog::load_sidecars(&for_thread);
+                    let _ = tx.send((for_thread, token, loaded));
+                });
+            match spawned {
+                Ok(_) => self.catalog_load_pending = Some((dir, token)),
+                Err(e) => {
+                    // No thread means `load_sidecars` never runs for `dir` —
+                    // `switch_dir` above already cleared the cache, so it would
+                    // otherwise silently stay empty (all ratings/edits appearing
+                    // lost) with no signal to the user. Report it through the
+                    // same toast mechanism as a failed sidecar write, AND leave
+                    // `catalog_load_pending` set to this (unrunnable) request —
+                    // not cleared/unchanged. `export.rs`'s `catalog_load_pending
+                    // .is_some()` guard exists specifically to refuse exporting
+                    // against an unloaded catalog; if this left pending at
+                    // whatever it was before (typically `None`, since directory
+                    // switches aren't usually mid-load), that guard would see
+                    // nothing pending and wave an export for `dir` straight
+                    // through against a cache that will now never populate —
+                    // worse than the toast alone. No result will ever arrive on
+                    // `catalog_load_rx` for this token, so this state persists
+                    // until the user switches directories again (a fresh
+                    // `request_catalog_load` call, which may succeed).
+                    self.catalog
+                        .note_persist_error(format!("could not load {}: {e}", dir.display()));
+                    self.catalog_load_pending = Some((dir, token));
+                }
+            }
+        }
+
+        // wasm32: no real OS threads and no synchronous File System Access
+        // read at all — `web_catalog_fs::load_sidecars` is async, dispatched
+        // via `spawn_local` instead of a background thread, landing on the
+        // exact same `catalog_load_tx`/`token` protocol so `poll_catalog_load`
+        // needs no platform branch of its own. The folder-pick handle
+        // (`Catalog::set_wasm_dir_handle`, called just before `load_playlist`
+        // triggers this) should always be set by the time this runs; if it
+        // somehow isn't, there's nothing to scan — leave the (already-
+        // cleared-by-`switch_dir`) cache empty rather than wait forever for
+        // a result that will never arrive.
+        #[cfg(target_arch = "wasm32")]
+        match self.catalog.wasm_dir_handle() {
+            Some(handle) => {
+                let for_task = dir.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    let loaded = crate::web_catalog_fs::load_sidecars(&handle).await;
+                    let _ = tx.send((for_task, token, loaded));
+                });
                 self.catalog_load_pending = Some((dir, token));
+            }
+            None => {
+                self.catalog_load_pending = None;
             }
         }
     }
@@ -90,6 +119,17 @@ impl App {
             }
         }
         self.catalog_load_pending.is_some()
+    }
+
+    /// Drain sidecar persist failures that landed asynchronously since the
+    /// last poll (`catalog.rs`'s wasm32 `write_sidecar`/`delete_sidecar` are
+    /// fire-and-forget `spawn_local` tasks — this is how a failure reaches
+    /// `last_error`/the status toast at all). `main.rs`'s `about_to_wait`
+    /// calls this every frame; a thin wrapper because `App::catalog` is
+    /// private to this module.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn poll_catalog_persist_errors(&mut self) {
+        self.catalog.poll_persist_errors();
     }
 
     /// Populate `self.ratings`/`edits`/`touchups`/`rotations` for every image

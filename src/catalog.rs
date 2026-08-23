@@ -39,9 +39,12 @@ use serde::{Deserialize, Serialize};
 use crate::develop::{Adjustments, TouchUp};
 
 /// Hidden per-directory subfolder holding that directory's sidecar files.
-const SIDECAR_DIR: &str = ".lightphotos";
+/// `pub(crate)` so `web_catalog_fs.rs` (wasm32's File System Access
+/// counterpart to this module's std::fs calls) names the exact same
+/// subfolder rather than duplicating the literal.
+pub(crate) const SIDECAR_DIR: &str = ".lightphotos";
 /// Sidecar file extension (cosmetic only — see module docs).
-const SIDECAR_EXT: &str = "xmp";
+pub(crate) const SIDECAR_EXT: &str = "xmp";
 /// Legacy global SQLite catalog from an install old enough to predate the
 /// sidecar rewrite. No longer read (lightphotos has no SQLite dependency) —
 /// its only remaining use is to name it in the one-time "found but not
@@ -74,7 +77,9 @@ impl ImageRecord {
     /// True when this record carries nothing worth persisting (no rating,
     /// identity edit, no rotation) — such a record's sidecar is deleted
     /// rather than written, keeping unrated/unedited folders sidecar-free.
-    fn is_empty(&self) -> bool {
+    /// `pub(crate)` so `web_catalog_fs.rs`'s load path can apply the same
+    /// "don't cache an empty record" rule `load_sidecars` uses below.
+    pub(crate) fn is_empty(&self) -> bool {
         self.rating.is_none()
             && self.adjustments.is_identity()
             && self.touchups.is_empty()
@@ -126,23 +131,81 @@ pub struct Catalog {
     /// so the UI can surface a toast instead of the change being silently
     /// lost.
     last_error: Option<String>,
+
+    /// The active directory's root folder handle — File System Access has
+    /// no real OS path for `std::fs` to use, so wasm32's sidecar I/O
+    /// (`web_catalog_fs.rs`) needs this instead. Set via
+    /// [`Catalog::set_wasm_dir_handle`] (`app/web.rs`'s `poll_folder_pick`)
+    /// right after a folder is picked, before `open_dir`'s wasm32
+    /// counterpart (`app/catalog.rs`'s `request_catalog_load`) needs it to
+    /// read `.lightphotos/*.xmp` back.
+    #[cfg(target_arch = "wasm32")]
+    wasm_dir_handle: Option<web_sys::FileSystemDirectoryHandle>,
+    /// Sidecar writes/deletes are fire-and-forget `spawn_local` tasks (see
+    /// the wasm32 arms of `write_sidecar`/`delete_sidecar` below) — this is
+    /// how a failure gets back to `last_error` despite not being on the call
+    /// stack that triggered the write. Drained each frame by
+    /// [`Catalog::poll_persist_errors`] (`main.rs`'s `about_to_wait`).
+    #[cfg(target_arch = "wasm32")]
+    persist_err_tx: std::sync::mpsc::Sender<String>,
+    #[cfg(target_arch = "wasm32")]
+    persist_err_rx: std::sync::mpsc::Receiver<String>,
 }
 
 impl Catalog {
     /// A directory-less catalog with nothing loaded yet. Used at startup,
     /// before any folder/file has been opened.
     pub fn new() -> Catalog {
+        #[cfg(target_arch = "wasm32")]
+        let (persist_err_tx, persist_err_rx) = std::sync::mpsc::channel();
         Catalog {
             images: HashMap::new(),
             dirty: HashSet::new(),
             dir: None,
             last_error: None,
+            #[cfg(target_arch = "wasm32")]
+            wasm_dir_handle: None,
+            #[cfg(target_arch = "wasm32")]
+            persist_err_tx,
+            #[cfg(target_arch = "wasm32")]
+            persist_err_rx,
+        }
+    }
+
+    /// Point wasm32's sidecar I/O at `handle` (the picked folder's root) —
+    /// called once per folder pick, before the catalog load it also
+    /// triggers needs it. See `wasm_dir_handle`'s doc comment.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn set_wasm_dir_handle(&mut self, handle: web_sys::FileSystemDirectoryHandle) {
+        self.wasm_dir_handle = Some(handle);
+    }
+
+    /// The active directory's root handle, if a folder has been picked yet —
+    /// `request_catalog_load`'s wasm32 arm (`app/catalog.rs`) reads this to
+    /// know what to scan.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn wasm_dir_handle(&self) -> Option<web_sys::FileSystemDirectoryHandle> {
+        self.wasm_dir_handle.clone()
+    }
+
+    /// Drain persist failures that landed asynchronously since the last
+    /// poll (writes/deletes are fire-and-forget on wasm32 — see
+    /// `write_sidecar`/`delete_sidecar`'s wasm32 arms) into `last_error`,
+    /// same one-shot-per-frame convention as every other `poll_*` in this
+    /// codebase.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn poll_persist_errors(&mut self) {
+        while let Ok(e) = self.persist_err_rx.try_recv() {
+            self.note_persist_error(e);
         }
     }
 
     /// `new()` + `open_dir(&dir)` in one step — a convenience mainly used by
-    /// tests, which always know their directory up front.
+    /// tests, which always know their directory up front. Native/test-only —
+    /// see `open_dir`'s doc comment on why wasm32 has no synchronous
+    /// counterpart at all.
     #[allow(dead_code)] // only called from #[cfg(test)] today
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_dir(dir: PathBuf) -> Catalog {
         let mut cat = Catalog::new();
         cat.open_dir(&dir);
@@ -162,7 +225,11 @@ impl Catalog {
     /// rated/edited directory never stalls first paint), see
     /// [`Catalog::switch_dir`] + [`Catalog::apply_loaded`], composed exactly
     /// as this function does but with `load_sidecars` run on a background
-    /// thread in between.
+    /// thread in between. Native-only: File System Access has no
+    /// synchronous read at all (everything is a Promise), so wasm32 has no
+    /// equivalent of this function — `app/catalog.rs`'s `request_catalog_load`
+    /// is the only path there, always async.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn open_dir(&mut self, dir: &Path) {
         self.switch_dir(dir);
         let loaded = load_sidecars(dir);
@@ -331,12 +398,14 @@ impl Catalog {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn write_sidecar(&self, path: &Path, rec: &ImageRecord) -> Result<(), String> {
         let sidecar =
             sidecar_path(path).ok_or_else(|| "cannot determine sidecar path".to_string())?;
         write_sidecar_file(&sidecar, rec)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn delete_sidecar(&self, path: &Path) -> Result<(), String> {
         let Some(sidecar) = sidecar_path(path) else {
             return Ok(());
@@ -346,6 +415,55 @@ impl Catalog {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// File System Access has no synchronous write — this fires the actual
+    /// disk write as a background `spawn_local` task and returns
+    /// immediately (always `Ok(())`, since there's no synchronous result to
+    /// report). `update`'s caller already applied the change to the
+    /// in-memory `images` cache regardless of persist outcome, same as
+    /// native; a failure here surfaces later, asynchronously, via
+    /// `persist_err_tx` → [`Catalog::poll_persist_errors`] → `last_error`,
+    /// instead of being available on this call's return value.
+    #[cfg(target_arch = "wasm32")]
+    fn write_sidecar(&self, path: &Path, rec: &ImageRecord) -> Result<(), String> {
+        let Some(name) = path.file_name() else {
+            return Ok(());
+        };
+        let Some(dir_handle) = self.wasm_dir_handle.clone() else {
+            return Err("no folder handle for this photo's directory".to_string());
+        };
+        let bytes = serde_json::to_vec_pretty(rec).map_err(|e| e.to_string())?;
+        let name = name.to_os_string();
+        let tx = self.persist_err_tx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = crate::web_catalog_fs::write_sidecar(&dir_handle, &name, &bytes).await
+            {
+                let _ = tx.send(format!("could not save {}: {e}", name.to_string_lossy()));
+            }
+        });
+        Ok(())
+    }
+
+    /// Same fire-and-forget shape as the wasm32 `write_sidecar` above.
+    #[cfg(target_arch = "wasm32")]
+    fn delete_sidecar(&self, path: &Path) -> Result<(), String> {
+        let Some(name) = path.file_name() else {
+            return Ok(());
+        };
+        // No handle means nothing was ever written for this directory
+        // either — matches native's "missing sidecar is fine" NotFound arm.
+        let Some(dir_handle) = self.wasm_dir_handle.clone() else {
+            return Ok(());
+        };
+        let name = name.to_os_string();
+        let tx = self.persist_err_tx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = crate::web_catalog_fs::delete_sidecar(&dir_handle, &name).await {
+                let _ = tx.send(format!("could not delete {}: {e}", name.to_string_lossy()));
+            }
+        });
+        Ok(())
     }
 }
 
@@ -369,6 +487,7 @@ pub(crate) struct SidecarLoad {
 /// extracted so it can run on a background thread (see `Catalog::switch_dir`
 /// / `Catalog::apply_loaded`) as well as synchronously (`Catalog::open_dir`).
 /// A missing `.lightphotos` directory is not an error — just an empty result.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
     let mut images = HashMap::new();
     let mut skipped = 0usize;
@@ -425,6 +544,7 @@ fn skipped_message(skipped: usize) -> String {
 /// `None` when `path` has no parent or no filename (e.g. `/` or `..`).
 /// Built via `OsString` concatenation (not a lossy `to_string_lossy` round
 /// trip) so non-UTF8 filenames stay exact.
+#[cfg(not(target_arch = "wasm32"))]
 fn sidecar_path(path: &Path) -> Option<PathBuf> {
     let dir = path.parent()?;
     let name = path.file_name()?;
@@ -438,6 +558,7 @@ fn sidecar_path(path: &Path) -> Option<PathBuf> {
 /// `.lightphotos` directory as needed. Atomic: writes to a `.tmp` sibling
 /// then renames over the target, matching the existing convention in
 /// `export.rs`/`thumbnail.rs`.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_sidecar_file(sidecar: &Path, rec: &ImageRecord) -> Result<(), String> {
     let parent = sidecar
         .parent()
@@ -477,6 +598,7 @@ pub struct MigrationSummary {
 /// A leftover `catalog.db` (the pre-sidecar global SQLite catalog) is no
 /// longer readable — lightphotos dropped its SQLite dependency — so one is
 /// only ever logged, never migrated; it stays on disk untouched.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn migrate_legacy_catalog() -> MigrationSummary {
     let dir = default_dir();
     crate::paths::migrate_legacy_dir(&dir, &legacy_dir());
@@ -504,6 +626,7 @@ pub fn migrate_legacy_catalog() -> MigrationSummary {
 /// sidecar already exists (idempotent re-run), or the write succeeds.
 /// "Skipped" covers a missing/unwritable target directory or a write
 /// failure — always retriable on a later pass.
+#[cfg(not(target_arch = "wasm32"))]
 fn fan_out(images: &HashMap<PathBuf, ImageRecord>) -> (usize, usize) {
     let mut migrated = 0usize;
     let mut skipped = 0usize;
@@ -534,6 +657,7 @@ fn fan_out(images: &HashMap<PathBuf, ImageRecord>) -> (usize, usize) {
     (migrated, skipped)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn migrate_json(json_file: &Path) -> MigrationSummary {
     let images = match std::fs::read(json_file).map(|b| parse_catalog(&b)) {
         Ok(Ok(m)) => m,
@@ -617,11 +741,13 @@ fn parse_catalog(bytes: &[u8]) -> serde_json::Result<HashMap<PathBuf, ImageRecor
 }
 
 /// Default catalog directory: `$HOME/Library/Application Support/com.lightphotos/`.
+#[cfg(not(target_arch = "wasm32"))]
 fn default_dir() -> PathBuf {
     app_support().join("com.lightphotos")
 }
 
 /// The pre-rename catalog directory (`com.imageviewer`), migrated on first load.
+#[cfg(not(target_arch = "wasm32"))]
 fn legacy_dir() -> PathBuf {
     app_support().join("com.imageviewer")
 }

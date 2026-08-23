@@ -32,6 +32,8 @@ mod web_canvas;
 mod web_fs;
 #[cfg(target_arch = "wasm32")]
 mod web_worker_pool;
+#[cfg(target_arch = "wasm32")]
+mod web_catalog_fs;
 #[cfg(target_os = "macos")]
 mod coregraphics;
 mod develop;
@@ -344,7 +346,14 @@ impl ApplicationHandler<UserEvent> for App {
         // and app/web.rs) — its own bool return feeds the poll-cadence
         // calculation below, same convention as request_working_thumbs.
         #[cfg(target_arch = "wasm32")]
-        let web_folder_pending = self.poll_folder_pick();
+        let web_folder_pending = {
+            // Fire-and-forget sidecar writes/deletes (catalog.rs's wasm32
+            // `write_sidecar`/`delete_sidecar`) report failures
+            // asynchronously — drain those into `last_error` every frame,
+            // same convention as every other wasm32 poll here.
+            self.poll_catalog_persist_errors();
+            self.poll_folder_pick()
+        };
 
         // Drain all loader tiers once per frame.
         if let Some(loader) = &mut self.loader {

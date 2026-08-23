@@ -51,7 +51,12 @@ struct PendingMeta {
 
 struct QueuedJob {
     id: u32,
-    bytes: Vec<u8>,
+    /// The file's raw bytes as a JS `ArrayBuffer`, not a Rust `Vec<u8>` —
+    /// deliberately never copied into the main thread's own wasm memory
+    /// (see `WorkerPoolHandle::submit`'s doc comment): it's read directly as
+    /// an `ArrayBuffer` and transferred here as-is, so a large RAW file's
+    /// bytes exist on the main thread only as this one JS-side buffer.
+    bytes: js_sys::ArrayBuffer,
     max_px: u32,
     is_raw: bool,
 }
@@ -125,10 +130,14 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
             &JsValue::from_str("isRaw"),
             &JsValue::from_bool(job.is_raw),
         );
-        let bytes = Uint8Array::from(job.bytes.as_slice());
-        let _ = Reflect::set(&msg, &JsValue::from_str("bytes"), &bytes.buffer());
+        // No `Uint8Array::from(...)` copy here — `job.bytes` is already the
+        // JS ArrayBuffer read straight off the file (see
+        // `WorkerPoolHandle::submit`'s doc comment); it goes into the
+        // transfer list as-is, so this dispatch never touches the main
+        // thread's own wasm memory at all.
+        let _ = Reflect::set(&msg, &JsValue::from_str("bytes"), &job.bytes);
         let transfer = Array::new();
-        transfer.push(&bytes.buffer());
+        transfer.push(&job.bytes);
         if let Err(e) = worker.post_message_with_transfer(&msg, &transfer.into()) {
             web_sys::console::error_1(&format!("[web_worker_pool] post_message failed: {e:?}").into());
         }
@@ -148,7 +157,7 @@ fn spawn_worker(origin: &str) -> Result<Worker, String> {
         )
         .into(),
     );
-    let mut opts = BlobPropertyBag::new();
+    let opts = BlobPropertyBag::new();
     opts.set_type("text/javascript");
     let blob = Blob::new_with_str_sequence_and_options(&script, &opts)
         .map_err(|e| format!("blob creation failed: {e:?}"))?;
@@ -299,12 +308,21 @@ fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: Messa
 }
 
 impl WorkerPoolHandle {
-    /// Submit a decode job. `bytes` should already be the file's raw bytes
-    /// (read on the main thread via `web_fs::read_bytes` — that part stays
-    /// where it was, this only offloads the CPU-heavy decode itself);
+    /// Submit a decode job. `bytes` should be the file's raw contents read
+    /// via `web_fs::read_array_buffer` (NOT `read_bytes`) — deliberately a
+    /// JS `ArrayBuffer`, not a Rust `Vec<u8>`: it goes straight into a
+    /// `postMessage` transfer list (see `pump`) with no copy into the main
+    /// thread's own wasm memory, which matters for a RAW file's tens of MB.
     /// `is_raw` should be `image_decode::is_raw_extension(path)`, decided by
     /// the caller since the job carries no `Path`, only the bytes.
-    pub fn submit(&self, path: PathBuf, target: u32, bytes: Vec<u8>, is_raw: bool, kind: JobKind) {
+    pub fn submit(
+        &self,
+        path: PathBuf,
+        target: u32,
+        bytes: js_sys::ArrayBuffer,
+        is_raw: bool,
+        kind: JobKind,
+    ) {
         let id = {
             let mut inner_mut = self.0.borrow_mut();
             let id = inner_mut.next_id;

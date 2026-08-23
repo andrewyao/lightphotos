@@ -72,13 +72,39 @@ mod wasm {
     use wasm_bindgen::JsCast;
     use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 
-    /// Decode one job's bytes to RGBA — same branching
-    /// `app/web.rs::decode_thumbnail` uses (RAW fast-preview vs. embedded-
-    /// preview-then-full-decode), `is_raw` decided on the main thread
-    /// (`image_decode::is_raw_extension`) instead of re-derived here, since
-    /// the job carries bytes, not a `Path`.
+    /// Decode one job's bytes to RGBA. For RAW, tries the file's own
+    /// embedded EXIF baseline thumbnail first (`thumbnail::
+    /// embedded_preview_from_bytes` — already-decoded by the camera, just a
+    /// small JPEG decode, same trick Photopea and every fast RAW browser
+    /// uses for quick previews), falling back to the quarter-res Bayer-
+    /// demosaic path (`raw_fast_preview`) only when that's missing or too
+    /// small for what was asked. This isn't only about speed: `raw_fast_
+    /// preview`'s `catch_unwind` guards around `rawler`'s parser are almost
+    /// certainly *ineffective* on wasm32-unknown-unknown (no real stack
+    /// unwinding without nightly + explicit exception-handling support,
+    /// which this build doesn't use) — a panic there traps the whole wasm
+    /// instance, permanently killing this worker with no console output at
+    /// all. That matched an observed symptom exactly: grid population
+    /// getting stuck after a small, fixed number of thumbnails (workers
+    /// dying off one at a time as each hit some RAW file that panicked
+    /// rawler's parser), independent of the separate `NotReadableError`
+    /// read-concurrency issue `app/web.rs` handles. Routing the common case
+    /// (a grid thumbnail) through the JPEG decoder instead — far less
+    /// panic-prone code — should make that far rarer, though a genuine
+    /// fix still wants real exception-handling support or an audited
+    /// panic-free `rawler` call path.
     fn decode(bytes: &[u8], max_px: u32, is_raw: bool) -> Result<DecodedImage, String> {
         if is_raw {
+            if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
+                // "Too small for what was asked" — the embedded baseline
+                // thumbnail is typically ~160x120 (see its own doc
+                // comment), fine for a grid cell but not the Loupe. Half
+                // the requested size is a rough-but-workable cutoff, not a
+                // precise one.
+                if preview.width.max(preview.height) * 2 >= max_px {
+                    return Ok(preview);
+                }
+            }
             return raw_fast_preview::decode_raw_fast_from_bytes(bytes, max_px);
         }
         if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
