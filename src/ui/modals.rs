@@ -1,7 +1,6 @@
 use super::*;
 
 use crate::app::App;
-use crate::navigation::Cmp;
 
 
 /// A modal confirming a pending bulk action. Confirm runs it; Cancel / Esc /
@@ -56,53 +55,6 @@ pub(super) fn quit_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
             out.actions.push(UiAction::ConfirmQuit);
         } else {
             out.actions.push(UiAction::CancelQuit);
-        }
-    }
-}
-
-/// A compact per-rating histogram (0..=5 stars) of the current folder. Each bar
-/// is clickable to filter to exactly that rating (click the active bar to clear).
-pub(super) fn rating_histogram(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let counts = app.rating_counts();
-    if counts.iter().all(|&c| c == 0) {
-        return; // no folder loaded
-    }
-    let max = counts.iter().copied().max().unwrap_or(1).max(1) as f32;
-    let bar_w = 12.0;
-    let gap = 3.0;
-    let h = 24.0;
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(6.0 * (bar_w + gap), h), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-    for k in 0u8..6 {
-        let x = rect.min.x + k as f32 * (bar_w + gap);
-        let col = egui::Rect::from_min_size(egui::pos2(x, rect.min.y), egui::vec2(bar_w, h));
-        let frac = counts[k as usize] as f32 / max;
-        let bh = if counts[k as usize] == 0 {
-            0.0
-        } else {
-            (frac * (h - 1.0)).max(2.0)
-        };
-        let bar = egui::Rect::from_min_max(egui::pos2(x, rect.max.y - bh), col.max);
-        let active = matches!(app.filter(), Some((Cmp::Eq, v)) if v == k);
-        let color = if active {
-            theme::SELECTION_BLUE
-        } else if k == 0 {
-            egui::Color32::from_gray(120)
-        } else {
-            theme::STAR_GOLD
-        };
-        painter.rect_filled(bar, 1.0, color);
-        let resp = ui
-            .interact(col, ui.id().with(("rating_hist", k)), egui::Sense::click())
-            .on_hover_text(format!(
-                "{} photo(s) rated {}\u{2605}",
-                counts[k as usize], k
-            ));
-        if resp.clicked() {
-            // Toggle: clicking the active bar clears the filter.
-            let next = if active { None } else { Some((Cmp::Eq, k)) };
-            out.actions.push(UiAction::SetFilter(next));
         }
     }
 }

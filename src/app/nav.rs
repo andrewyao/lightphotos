@@ -70,9 +70,25 @@ impl App {
     /// focused member (`survey_focus`) instead of the Grid/Loupe `sel` — so
     /// rating hotkeys "just work" against whichever screen is showing without
     /// Survey needing its own parallel rating path.
+    ///
+    /// In Loupe mode, falls back to `want` (the photo actually on screen)
+    /// when `sel` is `None` — which happens whenever the active star filter
+    /// matches nothing in the folder, including the photo currently open.
+    /// Without this, a filter that knocks the open photo out of the Grid's
+    /// filtered `visible` list orphans `sel` at `None` indefinitely (nothing
+    /// in Loupe mode ever re-clicks a grid cell to reset it), silently
+    /// breaking rating/export/etc. for the photo the user is actually
+    /// looking at, even though it's still right there on screen. Doesn't
+    /// touch the case where `sel` lands on a *different* (still-visible)
+    /// photo after a filter/rating change — that's the intentional
+    /// "advance to the next matching neighbor" behavior (see
+    /// `resync_loupe_selection`), left alone.
     pub(crate) fn selected_path(&self) -> Option<PathBuf> {
         if self.mode == ViewMode::Survey {
             return self.survey_members.get(self.survey_focus).cloned();
+        }
+        if self.mode == ViewMode::Loupe && self.sel.is_none() {
+            return self.want.clone();
         }
         let pl = self.playlist.as_ref()?;
         let idx = self.selected_index()?;
@@ -82,7 +98,17 @@ impl App {
     /// Paths of every photo in the multi-selection, in `visible` order. Falls
     /// back to the primary cell when the set is empty but a cell is active, so
     /// bulk operations always have at least the current photo to work on.
+    ///
+    /// In Loupe mode, further falls back to `want` (the photo actually on
+    /// screen) when both the multi-selection and `sel` are empty — same
+    /// reasoning as `selected_path`'s own fallback: `sel` can go stale while
+    /// a photo is genuinely open, and bulk actions (Delete, Apply Settings,
+    /// Export) should still act on it rather than silently seeing "nothing
+    /// selected".
     pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
+        if self.mode == ViewMode::Loupe && self.selected.is_empty() && self.sel.is_none() {
+            return self.want.clone().into_iter().collect();
+        }
         let Some(pl) = self.playlist.as_ref() else {
             return Vec::new();
         };
@@ -99,10 +125,15 @@ impl App {
     }
 
     /// Number of photos a bulk action would affect (the multi-selection, or the
-    /// single primary cell when the set is empty).
+    /// single primary cell when the set is empty). See `selected_paths`' doc
+    /// comment for the Loupe/`want` fallback this mirrors.
     pub(crate) fn selection_count(&self) -> usize {
         if self.selected.is_empty() {
-            usize::from(self.sel.is_some())
+            if self.sel.is_some() {
+                1
+            } else {
+                usize::from(self.mode == ViewMode::Loupe && self.want.is_some())
+            }
         } else {
             self.selected.len()
         }
@@ -725,15 +756,29 @@ impl App {
         self.request_redraw();
     }
 
-    /// Number of keyboard-focusable Toolbar controls (Phase 1: the stable set
-    /// that always renders — see `toolbar_focus_sync` in `ui.rs`, which must
-    /// stay in lockstep with this count and with `activate_toolbar_focus`'s
-    /// index mapping. Rating-histogram bars and the selection-dependent bulk
-    /// actions aren't included yet since their count varies frame to frame.
+    /// Number of keyboard-focusable controls in the Grid/Survey toolbar
+    /// (`toolbar::grid_toolbar`; Phase 1: the stable set that always renders
+    /// — see `toolbar_focus_sync` in `ui.rs`, which must stay in lockstep
+    /// with this count and with `activate_toolbar_focus`'s index mapping.
+    /// Rating-histogram bars and the selection-dependent bulk actions aren't
+    /// included yet since their count varies frame to frame.
     const TOOLBAR_CONTROLS: usize = 16;
+    /// Number of keyboard-focusable controls in the Loupe toolbar
+    /// (`toolbar::loupe_toolbar`): Help + Grid + Loupe toggle, nothing else
+    /// — everything Grid-only was deliberately dropped for Loupe, not
+    /// merely disabled, so it isn't shown here either.
+    const LOUPE_TOOLBAR_CONTROLS: usize = 3;
 
+    /// The current mode's toolbar control count — a different, much smaller
+    /// toolbar renders in Loupe than in Grid/Survey (see `toolbar.rs`), so
+    /// the F6 keyboard-focus cycle must track whichever one is actually on
+    /// screen.
     pub(super) fn toolbar_control_count(&self) -> usize {
-        Self::TOOLBAR_CONTROLS
+        if self.mode == ViewMode::Loupe {
+            Self::LOUPE_TOOLBAR_CONTROLS
+        } else {
+            Self::TOOLBAR_CONTROLS
+        }
     }
 
     /// Move the Toolbar control cursor by `delta`, wrapping.
@@ -748,8 +793,20 @@ impl App {
 
     /// Activate the keyboard-focused Toolbar control — the same action its
     /// click handler would push, so keyboard and mouse converge on one path.
-    /// Index order must match `toolbar_focus_sync`'s call sites in `ui.rs`.
+    /// Index order must match `toolbar_focus_sync`'s call sites in `ui.rs`,
+    /// separately for whichever toolbar (`grid_toolbar`/`loupe_toolbar`) is
+    /// actually rendering — see `toolbar_control_count`.
     pub(super) fn activate_toolbar_focus(&mut self) {
+        if self.mode == ViewMode::Loupe {
+            let action = match self.toolbar_focus {
+                0 => ui::UiAction::ToggleHelp,
+                1 => ui::UiAction::EnterGrid,
+                2 => ui::UiAction::EnterLoupe,
+                _ => return,
+            };
+            self.apply_ui_actions(vec![action]);
+            return;
+        }
         let action = match self.toolbar_focus {
             0 => ui::UiAction::SetFilter(None),
             1 => ui::UiAction::SetFilterCmp(Cmp::Gte),
@@ -796,5 +853,74 @@ impl App {
             };
         *field = (*field + sign * step).clamp(*range.start(), *range.end());
         self.apply_adjustments(adj);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toolbar_control_count_is_smaller_in_loupe_than_grid() {
+        let mut app = App::new(None);
+        app.mode = ViewMode::Grid;
+        assert_eq!(app.toolbar_control_count(), 16);
+        app.mode = ViewMode::Loupe;
+        assert_eq!(
+            app.toolbar_control_count(),
+            3,
+            "the Loupe toolbar only has Help + Grid + Loupe toggle"
+        );
+    }
+
+    #[test]
+    fn loupe_toolbar_focus_zero_toggles_help() {
+        let mut app = App::new(None);
+        app.mode = ViewMode::Loupe;
+        app.toolbar_focus = 0;
+        assert!(!app.show_help());
+        app.activate_toolbar_focus();
+        assert!(
+            app.show_help(),
+            "index 0 in the Loupe toolbar must toggle help, matching the '?' button"
+        );
+    }
+
+    #[test]
+    fn loupe_toolbar_focus_one_enters_grid() {
+        let mut app = App::new(None);
+        app.mode = ViewMode::Loupe;
+        app.toolbar_focus = 1;
+        app.activate_toolbar_focus();
+        assert_eq!(
+            app.mode(),
+            ViewMode::Grid,
+            "index 1 in the Loupe toolbar must switch to Grid, matching the 'G' button"
+        );
+    }
+
+    /// `selected_path()` falls back to `want` when `sel` has gone stale
+    /// (`None`) in Loupe mode (see its doc comment) — `selection_count`/
+    /// `selected_paths` must agree, or bulk actions (Delete, Apply Settings,
+    /// Export) silently see "nothing selected" for the photo actually open,
+    /// even though rating/single-photo actions work fine.
+    #[test]
+    fn selection_count_and_paths_fall_back_to_want_when_sel_is_stale_in_loupe() {
+        let mut app = App::new(None);
+        app.mode = ViewMode::Loupe;
+        app.sel = None;
+        app.selected.clear();
+        app.want = Some(std::path::PathBuf::from("/tmp/does-not-need-to-exist.jpg"));
+
+        assert_eq!(
+            app.selection_count(),
+            1,
+            "the open photo counts as one, even with `sel` stale"
+        );
+        assert_eq!(
+            app.selected_paths(),
+            vec![app.want.clone().unwrap()],
+            "the open photo must be the one bulk actions act on"
+        );
     }
 }

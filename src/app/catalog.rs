@@ -36,14 +36,25 @@ impl App {
             Ok(_) => self.catalog_load_pending = Some((dir, token)),
             Err(e) => {
                 // No thread means `load_sidecars` never runs for `dir` —
-                // `switch_dir` above already cleared the cache, so without
-                // this it would silently stay empty (all ratings/edits
-                // appearing lost) with no signal to the user. Report it
-                // through the same toast mechanism as a failed sidecar
-                // write, and leave `catalog_load_pending` at whatever it
-                // already was (there is nothing new in flight to wait for).
+                // `switch_dir` above already cleared the cache, so it would
+                // otherwise silently stay empty (all ratings/edits appearing
+                // lost) with no signal to the user. Report it through the
+                // same toast mechanism as a failed sidecar write, AND leave
+                // `catalog_load_pending` set to this (unrunnable) request —
+                // not cleared/unchanged. `export.rs`'s `catalog_load_pending
+                // .is_some()` guard exists specifically to refuse exporting
+                // against an unloaded catalog; if this left pending at
+                // whatever it was before (typically `None`, since directory
+                // switches aren't usually mid-load), that guard would see
+                // nothing pending and wave an export for `dir` straight
+                // through against a cache that will now never populate —
+                // worse than the toast alone. No result will ever arrive on
+                // `catalog_load_rx` for this token, so this state persists
+                // until the user switches directories again (a fresh
+                // `request_catalog_load` call, which may succeed).
                 self.catalog
                     .note_persist_error(format!("could not load {}: {e}", dir.display()));
+                self.catalog_load_pending = Some((dir, token));
             }
         }
     }
@@ -163,30 +174,19 @@ impl App {
                 format!("Apply the copied settings to {n} photo(s)?")
             }
             ui::BulkKind::Delete => format!("Move {n} photo(s) to the Trash?"),
-            ui::BulkKind::DeleteRejects => {
-                format!(
-                    "Move {} reject(s) (\u{2605}1-2) to the Trash?",
-                    self.reject_count()
-                )
-            }
         })
     }
 
-    /// Whether `kind` has anything to act on right now — the guard for
-    /// `request_bulk`. Most kinds act on the multi-selection; `DeleteRejects`
-    /// instead sweeps the whole folder's reject range, independent of
-    /// selection.
-    fn bulk_available(&self, kind: ui::BulkKind) -> bool {
-        match kind {
-            ui::BulkKind::DeleteRejects => self.reject_count() > 0,
-            _ => self.selection_count() > 0,
-        }
+    /// Whether there's anything for a bulk action to act on right now — the
+    /// guard for `request_bulk`. Every `BulkKind` acts on the multi-selection.
+    fn bulk_available(&self) -> bool {
+        self.selection_count() > 0
     }
 
     /// Open the confirm modal for `kind` (no-op when there's nothing to act
     /// on). Shared by the toolbar buttons and the Delete/Backspace key.
     pub(super) fn request_bulk(&mut self, kind: ui::BulkKind) {
-        if self.bulk_available(kind) {
+        if self.bulk_available() {
             self.pending_bulk = Some(kind);
             self.request_redraw();
         }
@@ -199,26 +199,7 @@ impl App {
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
             ui::BulkKind::Export => self.export_selection(),
             ui::BulkKind::Delete => self.delete_selection(),
-            ui::BulkKind::DeleteRejects => self.delete_rejects(),
         }
-    }
-
-    /// Every photo in the current folder rated 1-2 (reject range), independent
-    /// of the active filter — same folder-wide scope as `rating_counts`.
-    pub(crate) fn reject_paths(&self) -> Vec<PathBuf> {
-        let Some(pl) = &self.playlist else {
-            return Vec::new();
-        };
-        pl.entries()
-            .iter()
-            .filter(|p| (1..=2).contains(&self.rating_of(p)))
-            .cloned()
-            .collect()
-    }
-
-    /// Count of `reject_paths()`, for the toolbar button/guard.
-    pub(crate) fn reject_count(&self) -> usize {
-        self.reject_paths().len()
     }
 
     /// Move every selected photo to the Trash, then drop it from the playlist,
@@ -227,15 +208,7 @@ impl App {
         self.run_delete(self.selected_paths());
     }
 
-    /// Move every photo currently rated 1-2 (reject range) to the Trash — the
-    /// general "sweep" action from Plan C, reusing `run_delete`'s trash +
-    /// cleanup logic but sourcing paths from the reject range instead of the
-    /// multi-selection.
-    pub(super) fn delete_rejects(&mut self) {
-        self.run_delete(self.reject_paths());
-    }
-
-    /// Shared trash + cleanup body for `delete_selection`/`delete_rejects`.
+    /// Shared trash + cleanup body for `delete_selection`.
     fn run_delete(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
@@ -563,7 +536,18 @@ impl App {
     }
 
     /// Apply a new filter (or clear it) and recompute the visible view.
+    /// No-op in Loupe mode: filtering is a Grid concept (which cells are
+    /// visible) and letting it change while a specific photo is open used to
+    /// be able to silently knock that photo out of the Grid's filtered
+    /// selection cursor, breaking rating for the photo actually on screen.
+    /// Both entry points (the Grid toolbar, hidden entirely in Loupe — see
+    /// `ui::toolbar::loupe_toolbar` — and the `Shift+1-5`/`Shift+0` keyboard
+    /// shortcut, which has no mode check of its own) go through here, so
+    /// gating it in one place covers both.
     pub(super) fn set_filter(&mut self, filter: Option<(Cmp, u8)>) {
+        if self.mode == ViewMode::Loupe {
+            return;
+        }
         // Bursts run only over the unfiltered folder; applying a filter ends
         // burst mode. Clearing the filter (`None`) leaves bursts off — the user
         // re-enables with the toggle / `B`.
@@ -580,17 +564,17 @@ impl App {
                 self.sel = Some(pos);
             }
         }
-        // In Loupe, the shown image may have been filtered out; snap to selection.
-        if self.mode == ViewMode::Loupe {
-            self.load_selected();
-        }
         self.request_redraw();
     }
 
     /// Change the toolbar comparator (≥ / = / ≤). If a star-level filter is
     /// already active, re-apply it with the new comparator so the view updates
-    /// immediately.
+    /// immediately. No-op in Loupe mode — same reasoning as `set_filter`,
+    /// which this can also indirectly trigger.
     pub(super) fn set_filter_cmp(&mut self, cmp: Cmp) {
+        if self.mode == ViewMode::Loupe {
+            return;
+        }
         self.filter_cmp = cmp;
         if let Some((_, n)) = self.filter {
             if (1..=5).contains(&n) {
@@ -613,5 +597,83 @@ impl App {
     /// Rating of a given path (0 when unset).
     pub(super) fn rating_of(&self, path: &Path) -> u8 {
         self.ratings.get(path).copied().unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::navigation::Playlist;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_tmp_dir() -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "lightphotos-app-catalog-test-{}-{}",
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Reproduces the reported bug. `set_filter` itself is now a no-op in
+    /// Loupe (see its doc comment), so the filter can no longer change while
+    /// a photo is open — but a filter set *before* entering Loupe (from the
+    /// Grid) can still knock the open photo out of `visible` via
+    /// `set_rating`'s own `recompute_visible()` call, e.g. rating a photo
+    /// below an already-active "≥N stars" threshold. `sel` goes stale
+    /// (`None`) either way, and nothing in Loupe mode ever resets it. This
+    /// constructs that end state directly (rather than via a specific
+    /// trigger, which could change) and checks a *subsequent* rating still
+    /// applies — `self.want` is what's really being looked at, independent
+    /// of the Grid's filtered cursor.
+    #[test]
+    fn rating_a_loupe_photo_applies_even_when_sel_has_gone_stale() {
+        let dir = unique_tmp_dir();
+        let photo = dir.join("a.jpg");
+        std::fs::write(&photo, b"").unwrap();
+
+        let mut app = App::new(None);
+        app.playlist = Some(Playlist::from_dir(&dir));
+        app.mode = ViewMode::Loupe;
+        app.recompute_visible();
+        app.want = Some(photo.clone());
+        app.sel = None;
+
+        app.set_rating(3);
+        assert_eq!(
+            app.ratings.get(&photo),
+            Some(&3),
+            "rating the photo the user is looking at must apply even when \
+             `sel` has gone stale (None) while in Loupe"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn set_filter_is_a_no_op_in_loupe_mode() {
+        let mut app = App::new(None);
+        app.mode = ViewMode::Loupe;
+        app.set_filter(Some((Cmp::Gte, 5)));
+        assert_eq!(
+            app.filter, None,
+            "the filter must not change while a photo is open in the Loupe"
+        );
+    }
+
+    #[test]
+    fn set_filter_cmp_is_a_no_op_in_loupe_mode() {
+        let mut app = App::new(None);
+        app.mode = ViewMode::Loupe;
+        let before = app.filter_cmp;
+        app.set_filter_cmp(Cmp::Lte);
+        assert_eq!(
+            app.filter_cmp, before,
+            "the filter comparator must not change while a photo is open in the Loupe"
+        );
     }
 }

@@ -6,8 +6,9 @@ use crate::burst::BurstMark;
 use crate::duplicates::DuplicateMark;
 
 
-/// Left folder-tree sidebar, rooted at the opened folder. Shown in both the grid
-/// and the loupe so the folder structure is always visible.
+/// Left folder-tree sidebar, rooted at the opened folder. Called once from
+/// `ui::draw`, before the toolbar, so it spans the full window height (Grid
+/// and Loupe both use it; Survey mode does not call this).
 pub(super) fn draw_folders_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.folders_visible() {
         return;
@@ -69,9 +70,6 @@ pub(super) fn folder_content_width(
 pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let thumb_px = app.thumb_px();
     let sel = app.sel();
-
-    // Left folder-tree sidebar, rooted at the opened folder.
-    draw_folders_panel(ui, app, out);
 
     egui::Panel::top("toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {

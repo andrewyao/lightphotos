@@ -155,10 +155,6 @@ pub enum BulkKind {
     ApplySettings,
     /// Move every selected photo to the Trash.
     Delete,
-    /// Move every photo in the current folder rated 1-2 (reject range) to the
-    /// Trash — independent of the multi-selection, folder-wide like
-    /// `rating_counts`.
-    DeleteRejects,
 }
 
 /// What `draw` returns to `main.rs` each frame.
@@ -179,18 +175,42 @@ mod loupe;
 mod survey;
 mod develop_panel;
 
-use toolbar::global_toolbar;
-use grid::draw_grid;
+use toolbar::{grid_toolbar, loupe_toolbar};
+use grid::{draw_folders_panel, draw_grid};
 use loupe::draw_loupe;
 use survey::draw_survey;
+use develop_panel::draw_develop_panel;
 use modals::{confirm_modal, help_modal, quit_modal};
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     let mut out = FrameOutput::default();
-    // Global toolbar first, so it reserves height above both modes (and, in the
-    // loupe, before the frameless central rect is read).
-    global_toolbar(ui, app, &mut out);
-    match app.mode() {
+    let mode = app.mode();
+
+    // Left folder sidebar and right Develop panel are drawn first, outside
+    // (before) the toolbar, so egui's panel system — which claims space in
+    // call order against the same shrinking `Ui` rect — gives them the full
+    // window height, with the toolbar (and, in the loupe, the filmstrip/info
+    // bar/central rect below it) confined to the middle column between them.
+    // Grid + Loupe only; Survey mode has no sidebar and stays full-width.
+    if mode == ViewMode::Grid || mode == ViewMode::Loupe {
+        draw_folders_panel(ui, app, &mut out);
+    }
+    if mode == ViewMode::Loupe && app.develop_visible() {
+        draw_develop_panel(ui, app, &mut out);
+    }
+
+    // Loupe gets its own, much smaller toolbar (see `toolbar::loupe_toolbar`)
+    // instead of the Grid one shown-but-disabled — filter/grouping/bulk
+    // actions are Grid concepts that don't apply to one open photo, and
+    // letting the filter stay live while a photo was open was the root
+    // cause of a real bug: it could silently drop out of the Grid's
+    // filtered selection cursor, breaking rating for it.
+    if mode == ViewMode::Loupe {
+        loupe_toolbar(ui, app, &mut out);
+    } else {
+        grid_toolbar(ui, app, &mut out);
+    }
+    match mode {
         ViewMode::Grid => draw_grid(ui, app, &mut out),
         ViewMode::Loupe => draw_loupe(ui, app, &mut out),
         ViewMode::Survey => draw_survey(ui, app, &mut out),
@@ -282,7 +302,6 @@ fn region_focus_marker(ui: &egui::Ui, app: &App, region: Region) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::loupe::{format_capture_date, format_shutter};
 
     #[test]

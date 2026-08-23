@@ -124,8 +124,10 @@ impl App {
             }
         }
 
-        // Shift+1..5 → filter ≥ N; Shift+0 → clear (both modes). Checked before
-        // plain digits.
+        // Shift+1..5 → filter ≥ N; Shift+0 → clear. Grid/Survey only —
+        // `set_filter` itself no-ops in Loupe (see its doc comment), so this
+        // is dispatched unconditionally rather than mode-checked here too.
+        // Checked before plain digits.
         if shift {
             if let Some(n) = digit_of(code) {
                 if (1..=5).contains(&n) {

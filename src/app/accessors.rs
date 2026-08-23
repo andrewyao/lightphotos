@@ -64,19 +64,6 @@ impl App {
         self.filter_cmp
     }
 
-    /// Count of photos in the current folder at each rating 0..=5 (index =
-    /// stars). Computed over the whole playlist, ignoring the active filter, so
-    /// the toolbar histogram shows the folder's true distribution.
-    pub(crate) fn rating_counts(&self) -> [usize; 6] {
-        let mut counts = [0usize; 6];
-        if let Some(pl) = &self.playlist {
-            for p in pl.entries() {
-                counts[self.rating_of(p).min(5) as usize] += 1;
-            }
-        }
-        counts
-    }
-
     /// Whether the shortcut-help overlay is showing.
     pub(crate) fn show_help(&self) -> bool {
         self.show_help

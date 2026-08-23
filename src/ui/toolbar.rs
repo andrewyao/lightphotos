@@ -1,19 +1,26 @@
 use super::*;
-use super::modals::rating_histogram;
 
 use crate::app::{App, Region, ViewMode};
 use crate::navigation::Cmp;
 
 
-/// The always-visible global toolbar, drawn once above both modes. Currently
-/// hosts the rating filter (`All` + 5 stars → show photos rated ≥ N).
-pub(super) fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    egui::Panel::top("global_toolbar").show_inside(ui, |ui| {
+/// The Grid/Survey toolbar, drawn once from `ui::draw` above the middle
+/// column. Hosts the rating filter (`All` + 5 stars → show photos rated ≥
+/// N), Bursts/Duplicates/Eyes-closed grouping, and selection-dependent bulk
+/// actions — all Grid concepts, which is why Loupe gets a separate, much
+/// smaller toolbar (`loupe_toolbar` below) instead of this one merely
+/// disabled: filtering/grouping/bulk-selecting don't apply to "one photo,
+/// open for editing", and letting the filter stay live while a photo was
+/// open was the root cause of a real bug (see git history) — a Loupe photo
+/// could get silently knocked out of the Grid's filtered selection cursor,
+/// breaking rating for it.
+pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    egui::Panel::top("grid_toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
             // Index of the keyboard-focusable control being drawn, bumped after
             // each one — the Phase-1 stable set only (see `activate_toolbar_focus`);
-            // the histogram bars and selection-dependent bulk actions below aren't
-            // in the keyboard cycle yet since their count varies frame to frame.
+            // the selection-dependent bulk actions below aren't in the keyboard
+            // cycle yet since their count varies frame to frame.
             let mut idx = 0usize;
 
             ui.label("Filter:");
@@ -145,10 +152,6 @@ pub(super) fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput
             toolbar_focus_sync(ui, app, idx, &resp, out);
             idx += 1;
 
-            // Rating-distribution histogram (folder-wide), clickable to filter.
-            ui.separator();
-            rating_histogram(ui, app, out);
-
             // `?` opens the keyboard-shortcut help.
             ui.separator();
             let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
@@ -222,23 +225,6 @@ pub(super) fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput
                 }
             }
 
-            // Sweep every rated-1-2 photo in the folder to the Trash —
-            // independent of the multi-selection (unlike the buttons above).
-            ui.separator();
-            let rejects = app.reject_count();
-            if ui
-                .add_enabled(
-                    rejects > 0,
-                    egui::Button::new(format!("Delete Rejects ({rejects})")),
-                )
-                .on_hover_text("Move every photo rated \u{2605}1-2 in this folder to the Trash")
-                .on_disabled_hover_text("No photos rated \u{2605}1-2 in this folder")
-                .clicked()
-            {
-                out.actions
-                    .push(UiAction::RequestBulk(BulkKind::DeleteRejects));
-            }
-
             // Loupe / Grid mode toggle, pinned to the far right. In a
             // right-to-left layout the first widget is the rightmost, so add
             // `G` first to read "E  G" left-to-right. Added in this order, `G`
@@ -260,6 +246,52 @@ pub(super) fn global_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput
                     out.actions.push(UiAction::EnterLoupe);
                 }
                 toolbar_focus_sync(ui, app, idx + 1, &resp, out);
+            });
+
+            region_focus_marker(ui, app, Region::Toolbar);
+        });
+    });
+}
+
+/// The Loupe toolbar: deliberately minimal, unlike `grid_toolbar` above.
+/// Every Grid-only control (filter, grouping, bulk actions) is dropped
+/// rather than shown-disabled — the photo currently open has its own
+/// keyboard shortcuts (rate with 1-5, copy settings Cmd+Shift+C, delete via
+/// Delete) and the Develop panel/info bar for everything else, so there's
+/// nothing Grid-toolbar-shaped left to offer here. Index order (0/1/2) must
+/// match `App::activate_toolbar_focus`'s Loupe-mode arm and
+/// `toolbar_control_count`'s `LOUPE_TOOLBAR_CONTROLS`.
+pub(super) fn loupe_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    egui::Panel::top("loupe_toolbar").show_inside(ui, |ui| {
+        ui.horizontal(|ui| {
+            let idx = 0usize;
+
+            // `?` opens the keyboard-shortcut help.
+            let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
+            if resp.clicked() {
+                out.actions.push(UiAction::ToggleHelp);
+            }
+            toolbar_focus_sync(ui, app, idx, &resp, out);
+
+            // Loupe / Grid mode toggle, pinned to the far right — same
+            // right-to-left ordering as `grid_toolbar`'s, so `G`/`E` land in
+            // the same visual spot in both toolbars.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let resp = ui
+                    .selectable_label(app.mode() == ViewMode::Grid, "G")
+                    .on_hover_text("Grid (G)");
+                if resp.clicked() {
+                    out.actions.push(UiAction::EnterGrid);
+                }
+                toolbar_focus_sync(ui, app, idx + 1, &resp, out);
+
+                let resp = ui
+                    .selectable_label(app.mode() == ViewMode::Loupe, "E")
+                    .on_hover_text("Loupe / edit (E)");
+                if resp.clicked() {
+                    out.actions.push(UiAction::EnterLoupe);
+                }
+                toolbar_focus_sync(ui, app, idx + 2, &resp, out);
             });
 
             region_focus_marker(ui, app, Region::Toolbar);

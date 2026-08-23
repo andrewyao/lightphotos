@@ -1,6 +1,5 @@
 use super::*;
-use super::develop_panel::draw_develop_panel;
-use super::grid::{draw_folders_panel, thumbnail_cell, STRIP_CELL_STYLE};
+use super::grid::{thumbnail_cell, STRIP_CELL_STYLE};
 
 use crate::app::{App, CropEdge, FocusLevel, Region};
 use crate::image_decode;
@@ -9,9 +8,6 @@ use crate::image_decode;
 pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let thumb_px = app.thumb_px();
     let sel = app.sel();
-
-    // Left folder-tree sidebar (same as the grid) so structure stays visible.
-    draw_folders_panel(ui, app, out);
 
     // The bottom filmstrip, unless hidden (Shift+Tab). When hidden, arrow keys
     // still step the photo — the strip is just the visual.
@@ -122,12 +118,12 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
         draw_loupe_info_bar(ui, app, out);
     }
 
-    // Right-hand develop panel (Temp/Tint/Exposure/… sliders + histogram). Drawn
-    // before the central rect is read so it reserves its width first — otherwise
-    // the wgpu image viewport would overlap the panel.
-    if app.develop_visible() {
-        draw_develop_panel(ui, app, out);
-    }
+    // Right-hand Develop panel is now drawn from `ui::draw`, before the
+    // toolbar, so it spans the full window height rather than just this
+    // mode's leftover space — see that function's comment. By this point
+    // its width is already carved out of `ui`'s available rect, so the
+    // filmstrip/info-bar above and the central rect below are automatically
+    // confined to the middle column with no further change needed here.
 
     // Central region: deliberately NOT a CentralPanel. Leaving it as the root
     // UI's unused rect is what makes egui report the pointer there as "not over
