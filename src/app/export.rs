@@ -1,7 +1,8 @@
 use super::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+// Instant comes from `super::*` (app/mod.rs re-exports web_time::Instant,
+// not std::time::Instant — see loader.rs's launched_at() doc comment).
 
 
 use crate::export::{ExportJob, ExportOutcome};

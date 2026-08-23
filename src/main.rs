@@ -343,7 +343,7 @@ impl ApplicationHandler<UserEvent> for App {
         };
         match poll_delay {
             Some(ms) => event_loop.set_control_flow(ControlFlow::WaitUntil(
-                std::time::Instant::now() + std::time::Duration::from_millis(ms),
+                web_time::Instant::now() + std::time::Duration::from_millis(ms),
             )),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }

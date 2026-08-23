@@ -40,11 +40,21 @@ bytemuck = { version = "1.25", features = ["derive"] }
 
 # egui chrome (grid/filmstrip/overlays); reuses the project's wgpu 29 + winit 0.30.
 egui = "0.34"
-egui-winit = "0.34"
 egui-wgpu = "0.34"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Bare wasm32/64-unknown-unknown has no OS clock source — std::time::Instant
+# panics on ::now() there (same root cause found and fixed once already, in
+# rawler's own code, during the earlier wasm decode spike — see
+# rawler-web-time.patch on the wasm-decode-probe-spike branch). web_time is
+# the standard fix: API-compatible with std::time::Instant, backed by
+# performance.now() on wasm, and a real passthrough (same type) to
+# std::time::Instant on every other target, so using it unconditionally here
+# is a no-op change on native. winit 0.30 itself already expects this type
+# for ControlFlow::WaitUntil on wasm.
+web-time = "1.1"
 
 rawler = { version = "0.7.2", optional = true }
 mozjpeg-rs = { version = "0.9.2", optional = true }
@@ -52,6 +62,14 @@ img-parts = { version = "0.4.0", optional = true }
 
 [features]
 raw-probe = ["dep:rawler", "dep:mozjpeg-rs", "dep:img-parts"]
+
+# `egui-winit`'s default features include "clipboard" (pulls in `arboard`),
+# which has no working wasm32 backend at this version — see the wasm port
+# plan's M0 notes. Split per-target rather than disabling clipboard for every
+# platform: native keeps the full default feature set unchanged, wasm32 drops
+# "clipboard" (and the Linux-only "wayland"/"x11", inert there anyway).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+egui-winit = "0.34"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
@@ -90,7 +108,6 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = [
 ] }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-trash = "5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
 mozjpeg-rs = "0.9.2"
 # Camera RAW decode (Task 10). Declared unconditionally (non-optional) here so
@@ -106,6 +123,34 @@ rawler = "0.7.2"
 # image formats based on it" per its own docs, so that's what thumbnail.rs's
 # non-mac `try_extract_embedded_preview` uses instead.
 kamadak-exif = "0.6.1"
+
+# `trash` (native OS trash/recycle-bin shell-out) has no wasm32 support and no
+# browser equivalent (File System Access has no trash primitive — see
+# plans/web-wasm-port-feasibility.md and the wasm port plan's scope notes).
+# Split out of the `not(macos)` block above so it only applies to real non-mac
+# desktop targets, not wasm32 too.
+[target.'cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
+trash = "5"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+egui-winit = { version = "0.34", default-features = false, features = ["links"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "HtmlCanvasElement",
+    "console",
+] }
+console_error_panic_hook = "0.1"
+# `uuid` (pulled in transitively by both egui/accesskit and rawler) needs an
+# explicit randomness source on wasm32 — same fix already proven in the
+# tools/wasm-decode-probe spike (see plans/wasm-decode-verification-results.md
+# on the wasm-decode-probe-spike branch): the "js" feature wires it to the
+# browser's crypto API. Declared at the top level so Cargo's feature
+# unification turns it on for every crate in the graph that pulls uuid in,
+# not just a direct dependency of this crate.
+uuid = { version = "1", features = ["js"] }
 
 [profile.release]
 opt-level = 3

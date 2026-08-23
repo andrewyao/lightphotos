@@ -533,7 +533,9 @@ impl Renderer {
     /// box-filtered every level in a scalar loop, which froze the window for
     /// roughly as long as the decode itself had taken.
     pub fn set_image(&mut self, img: &DecodedImage) {
-        let t0 = std::time::Instant::now();
+        // web_time::Instant, not std::time::Instant — see loader.rs's
+        // launched_at() doc comment for why (no OS clock on bare wasm32/64).
+        let t0 = web_time::Instant::now();
         let (w, h) = (img.width, img.height);
         let mip_count = (32 - (w.max(h)).leading_zeros()).max(1); // floor(log2(max))+1
 

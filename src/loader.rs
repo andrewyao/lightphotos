@@ -48,9 +48,17 @@ pub fn timing_enabled() -> bool {
 /// Span durations alone hide the thing that actually matters — *when* the span
 /// began. A 60 ms decode that starts 900 ms after launch still reads as a
 /// second of blur.
-fn launched_at() -> std::time::Instant {
-    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    *T0.get_or_init(std::time::Instant::now)
+///
+/// `web_time::Instant`, not `std::time::Instant`: called unconditionally at
+/// startup (`start_clock`, from `main()`), and bare wasm32/64-unknown-unknown
+/// has no OS clock source — `std::time::Instant::now()` panics there. Same
+/// fix already proven once this session, in `rawler`'s own code (see
+/// `rawler-web-time.patch` on the `wasm-decode-probe-spike` branch); a real
+/// passthrough to `std::time::Instant` on every other target, so this is a
+/// no-op change on native.
+fn launched_at() -> web_time::Instant {
+    static T0: std::sync::OnceLock<web_time::Instant> = std::sync::OnceLock::new();
+    *T0.get_or_init(web_time::Instant::now)
 }
 
 /// Stamp a timing event with milliseconds since launch.
@@ -171,7 +179,7 @@ fn report_decode(
     tier: &str,
     path: &Path,
     target: u32,
-    started: std::time::Instant,
+    started: web_time::Instant,
     result: &Result<DecodedImage, String>,
 ) {
     if !timing_enabled() {
@@ -289,7 +297,7 @@ impl Loader {
             // worker, dedicating it would starve thumbnails entirely, which is
             // worse than the contention it's meant to fix.
             let dedicated_full = i == 0 && workers > 1;
-            thread::Builder::new()
+            let spawned = thread::Builder::new()
                 .name(format!("decode-worker-{i}"))
                 .spawn(move || loop {
                     // Lock only long enough to take one job, preferring full-image
@@ -321,7 +329,7 @@ impl Loader {
                     // leaves no shared state in an observably broken condition.
                     let result = match job {
                         Job::Quick(path, target) => {
-                            let t0 = std::time::Instant::now();
+                            let t0 = web_time::Instant::now();
                             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 crate::thumbnail::decode_at_size(
                                     &path,
@@ -336,7 +344,7 @@ impl Loader {
                             JobResult::Quick(path, target, r)
                         }
                         Job::Preview(path, target) => {
-                            let t0 = std::time::Instant::now();
+                            let t0 = web_time::Instant::now();
                             // Decode-at-size, not decode-then-shrink:
                             // `image_decode::decode` would expand the full image
                             // first and only then draw it down, which costs
@@ -356,7 +364,7 @@ impl Loader {
                             JobResult::Preview(path, target, r)
                         }
                         Job::Full(path, target) => {
-                            let t0 = std::time::Instant::now();
+                            let t0 = web_time::Instant::now();
                             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 image_decode::decode(&path, target)
                             }))
@@ -397,8 +405,15 @@ impl Loader {
                     if res_tx.send(result).is_err() {
                         break;
                     }
-                })
-                .expect("spawn decode worker");
+                });
+            // Real OS threads aren't available on every target (e.g. plain
+            // wasm32-unknown-unknown before the Web Worker pool lands — see
+            // the wasm port plan's M4) — degrade to fewer/zero working
+            // workers rather than crashing the whole app at startup. Queued
+            // requests simply go unserviced until a real worker exists.
+            if let Err(e) = spawned {
+                eprintln!("[loader] could not spawn decode worker {i}: {e}");
+            }
         }
 
         Self {

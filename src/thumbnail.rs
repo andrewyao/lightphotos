@@ -318,7 +318,16 @@ impl ThumbCache {
         // Prune stale entries off the main path so startup never blocks on a
         // large cache directory. Best-effort — any failure just leaves the cache.
         let prune_root = root.clone();
-        std::thread::spawn(move || prune_dir(&prune_root, ThumbCache::BUDGET_BYTES));
+        // Builder::spawn (Result-returning), not the bare free `thread::spawn`
+        // (which panics on failure): not every target has real threads yet
+        // (e.g. wasm32 pre-Web-Worker-pool — see the wasm port plan's M4),
+        // and startup must degrade (no pruning happens) rather than crash.
+        if let Err(e) = std::thread::Builder::new()
+            .name("thumb-cache-prune".into())
+            .spawn(move || prune_dir(&prune_root, ThumbCache::BUDGET_BYTES))
+        {
+            eprintln!("[thumbnail] could not spawn cache-prune thread: {e}");
+        }
 
         ThumbCache { root }
     }

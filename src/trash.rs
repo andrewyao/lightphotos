@@ -22,9 +22,21 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
         .map_err(|e| e.localizedDescription().to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
 pub fn move_to_trash(path: &Path) -> Result<(), String> {
     trash::delete(path).map_err(|e| e.to_string())
+}
+
+/// No web equivalent: File System Access has no trash/recycle-bin primitive
+/// (only permanent `remove()`), and Phase 1 of the wasm port deliberately
+/// doesn't implement a "move to a subfolder" workaround yet — see
+/// plans/web-wasm-port-feasibility.md and the current wasm port plan's scope
+/// notes. Always errors, same shape as a real failure so callers (already
+/// written to handle `move_to_trash` failing) degrade gracefully rather than
+/// silently deleting or silently doing nothing.
+#[cfg(target_arch = "wasm32")]
+pub fn move_to_trash(_path: &Path) -> Result<(), String> {
+    Err("Trash is not supported in the browser yet".to_string())
 }
 
 #[cfg(test)]

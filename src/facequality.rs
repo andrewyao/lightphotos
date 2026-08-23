@@ -351,7 +351,7 @@ impl FacePool {
         for i in 0..workers {
             let job_rx = Arc::clone(&job_rx);
             let res_tx = res_tx.clone();
-            thread::Builder::new()
+            let spawned = thread::Builder::new()
                 .name(format!("facequality-worker-{i}"))
                 .spawn(move || loop {
                     let path = {
@@ -368,8 +368,13 @@ impl FacePool {
                     if res_tx.send(FaceOutcome { path, result }).is_err() {
                         break; // UI side gone
                     }
-                })
-                .expect("spawn facequality worker");
+                });
+            // See loader.rs's identical fallback: not every target has real
+            // threads yet (e.g. wasm32 pre-Web-Worker-pool) — degrade
+            // instead of crashing the app at startup.
+            if let Err(e) = spawned {
+                eprintln!("[facequality] could not spawn worker {i}: {e}");
+            }
         }
 
         Self { job_tx, res_rx }

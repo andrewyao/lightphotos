@@ -15,7 +15,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
+// web_time::Instant, not std::time::Instant — see loader.rs's launched_at()
+// doc comment for why (no OS clock on bare wasm32/64).
+use web_time::Instant;
 
 use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::Window;
