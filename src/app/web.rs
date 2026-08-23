@@ -182,6 +182,20 @@ impl App {
             self.web_preview_inflight.remove(&key);
             match result {
                 Ok(img) => {
+                    // Same re-fit `on_exif_info` (app/thumbs.rs) does when a
+                    // real EXIF metadata read lands: "any fit computed before
+                    // this used the uploaded texture's size as a stand-in."
+                    // EXIF reads never land on wasm32 (same unserviced
+                    // loader.rs queue) — but the decoded image itself already
+                    // carries the real dimensions, no separate metadata read
+                    // needed to know them here.
+                    let real_size = Some((img.width, img.height));
+                    if self.want.as_deref() == Some(path.as_path()) && self.source_size != real_size {
+                        self.source_size = real_size;
+                        if self.fitted {
+                            self.fit_to_window();
+                        }
+                    }
                     if let Some(loader) = &mut self.loader {
                         loader.insert_preview_external(path.clone(), target, std::sync::Arc::new(img));
                     }
