@@ -144,16 +144,42 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
     }
 }
 
+/// Directory the main app's own JS/wasm was loaded from — origin alone
+/// isn't enough, since a deploy can nest the trunk output under a subpath
+/// (e.g. lightphotos.app serves it from `/app/`, not site root; trunk's own
+/// dev server serves it from `/`). Read off the `<link rel="modulepreload">`
+/// href trunk always emits alongside the main bundle (see index.html /
+/// dist/index.html and the site's public/app.html), since that's the one
+/// place the actual deployed path is known at runtime — falls back to bare
+/// origin if that tag is missing for some reason.
+fn asset_base_url() -> String {
+    let window = match web_sys::window() {
+        Some(w) => w,
+        None => return String::new(),
+    };
+    let origin = window.location().origin().unwrap_or_default();
+    let dir = window
+        .document()
+        .and_then(|d| d.query_selector("link[rel=modulepreload]").ok().flatten())
+        .and_then(|el| el.get_attribute("href"))
+        .and_then(|href| href.rfind('/').map(|i| href[..i].to_string()));
+    match dir {
+        Some(dir) => format!("{origin}{dir}"),
+        None => origin,
+    }
+}
+
 /// Build one `Worker`, its script loaded via the same Blob+`importScripts`
 /// trick trunk's own webworker example uses — `wasm_worker`'s output
 /// filenames are stable (not content-hashed, unlike the main app's own
 /// trunk output), per `data-type="worker"`'s documented behavior, so this
-/// URL needs no build-hash knowledge.
-fn spawn_worker(origin: &str) -> Result<Worker, String> {
+/// URL needs no build-hash knowledge beyond the base directory (see
+/// `asset_base_url`).
+fn spawn_worker(base: &str) -> Result<Worker, String> {
     let script = Array::new();
     script.push(
         &format!(
-            r#"importScripts("{origin}/wasm_worker.js");wasm_bindgen("{origin}/wasm_worker_bg.wasm");"#
+            r#"importScripts("{base}/wasm_worker.js");wasm_bindgen("{base}/wasm_worker_bg.wasm");"#
         )
         .into(),
     );
@@ -206,12 +232,10 @@ impl WorkerPool {
             result_tx,
         }));
 
-        let origin = web_sys::window()
-            .and_then(|w| w.location().origin().ok())
-            .unwrap_or_default();
+        let base = asset_base_url();
 
         for _ in 0..worker_count.max(1) {
-            match spawn_worker(&origin) {
+            match spawn_worker(&base) {
                 Ok(worker) => {
                     let slot_idx = {
                         let mut inner_mut = inner.borrow_mut();
