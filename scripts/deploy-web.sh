@@ -2,18 +2,21 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Build the wasm app via trunk and sync the output into the lightphotos.app
-# site repo's app.html, automating the manual steps documented in that
-# repo's app.html comment: build, copy the four asset files (deleting stale
-# hashed ones), update the two hashed URLs in app.html. Does NOT commit or
-# push in the site repo — review the diff there and do that yourself.
+# site repo's public/ (its Astro build copies public/ straight into dist/),
+# automating the manual steps documented in that repo's public/app.html
+# comment: build, copy the four asset files into public/app/ (deleting
+# stale hashed ones), update the two hashed URLs in public/app.html. Does
+# NOT commit or push in the site repo — review the diff there and do that
+# yourself.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SITE_DIR="${LIGHTPHOTOS_SITE_DIR:-$ROOT/../lightphotos.app}"
+SITE_PUBLIC="$SITE_DIR/public"
 
-if [[ ! -f "$SITE_DIR/app.html" ]]; then
-  echo "error: no app.html found in $SITE_DIR" >&2
+if [[ ! -f "$SITE_PUBLIC/app.html" ]]; then
+  echo "error: no public/app.html found in $SITE_DIR" >&2
   echo "       set LIGHTPHOTOS_SITE_DIR to the lightphotos.app checkout if it's elsewhere" >&2
   exit 1
 fi
@@ -31,20 +34,22 @@ NEW_HASH="$(basename "$NEW_JS" .js | sed 's/^lightphotos-//')"
 NEW_WASM="$DIST/lightphotos-${NEW_HASH}_bg.wasm"
 [[ -f "$NEW_WASM" ]] || { echo "error: expected $NEW_WASM, not found" >&2; exit 1; }
 
-OLD_HASH="$(grep -o 'lightphotos-[0-9a-f]*' "$SITE_DIR/app.html" | head -1 | sed 's/^lightphotos-//')"
+OLD_HASH="$(grep -o 'lightphotos-[0-9a-f]*' "$SITE_PUBLIC/app.html" | head -1 | sed 's/^lightphotos-//')"
 echo "==> Old hash: $OLD_HASH"
 echo "==> New hash: $NEW_HASH"
 
-echo "==> Removing stale hashed files from $SITE_DIR"
-rm -f "$SITE_DIR"/lightphotos-*.js "$SITE_DIR"/lightphotos-*_bg.wasm
+mkdir -p "$SITE_PUBLIC/app"
 
-echo "==> Copying build output into $SITE_DIR"
-cp "$NEW_JS" "$NEW_WASM" "$SITE_DIR/"
-cp "$DIST/wasm_worker.js" "$DIST/wasm_worker_bg.wasm" "$SITE_DIR/"
+echo "==> Removing stale hashed files from $SITE_PUBLIC/app"
+rm -f "$SITE_PUBLIC"/app/lightphotos-*.js "$SITE_PUBLIC"/app/lightphotos-*_bg.wasm
+
+echo "==> Copying build output into $SITE_PUBLIC/app"
+cp "$NEW_JS" "$NEW_WASM" "$SITE_PUBLIC/app/"
+cp "$DIST/wasm_worker.js" "$DIST/wasm_worker_bg.wasm" "$SITE_PUBLIC/app/"
 
 if [[ -n "$OLD_HASH" && "$OLD_HASH" != "$NEW_HASH" ]]; then
-  echo "==> Updating hashed URLs in app.html"
-  sed -i '' "s/lightphotos-${OLD_HASH}/lightphotos-${NEW_HASH}/g" "$SITE_DIR/app.html"
+  echo "==> Updating hashed URLs in public/app.html"
+  sed -i '' "s/lightphotos-${OLD_HASH}/lightphotos-${NEW_HASH}/g" "$SITE_PUBLIC/app.html"
 fi
 
 echo "==> Done. Review the diff in $SITE_DIR and commit/push there yourself:"
