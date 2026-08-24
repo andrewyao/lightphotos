@@ -41,6 +41,13 @@ mod theme {
     /// other two mark a frame worth keeping, this one marks a defect, so it
     /// should not read as another kind of award at a glance.
     pub const EYES_BADGE: Color32 = Color32::from_rgb(150, 190, 255);
+    /// The site wordmark's "Photos" run (italic, blue) — matches
+    /// lightphotos.app's `--lp-accent` custom property, dark-theme value
+    /// (`lp.css:11`). The site paints that text with a CSS gradient
+    /// (`background-clip: text`) that egui has no equivalent for, so this
+    /// is a flat stand-in for the gradient's dominant color; keep it in
+    /// sync with `lp.css` if that value ever changes.
+    pub const BRAND_BLUE: Color32 = Color32::from_rgb(79, 140, 255);
 }
 
 /// An action the UI wants `App` to perform after the frame is built. Positions
@@ -283,24 +290,46 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// `overflow: hidden` — so wrapping it in the site's HTML header wasn't an
 /// option). Persistent across every screen (landing page, Grid, Loupe), per
 /// direct request — called once from `draw`'s own top, before the
-/// landing-page early return. Hrefs match `index.html`'s own nav exactly
-/// (relative, since `app.html` — this page — lives at the same site root);
-/// no "Web" link since that's this page. `hyperlink_to` opens in a new tab
-/// on web by default (`webbrowser`'s wasm32 target hint, which egui-winit's
-/// `handle_platform_output` — already called every frame, `app/mod.rs` —
-/// routes clicks through via the `links` Cargo feature already enabled for
-/// this target), so the app's own state/session is never navigated away
-/// from.
+/// landing-page early return. Just the "LightPhotos" wordmark, styled to
+/// match the real site's own CSS treatment (`lp.css`'s `.lp-wordmark`/
+/// `.lp-brand` rules: "Light" in the default ink color, "Photos" italic in
+/// the brand blue, abutting with no gap) via a two-section `LayoutJob`; no
+/// Downloads/Blogs/Help. Plain, non-interactive text, not a link — an
+/// earlier version linked back to lightphotos.app via `hyperlink_to`, but
+/// the click never actually opened a tab on web and wasn't worth chasing
+/// further, so the link was dropped.
 fn site_nav(ui: &mut egui::Ui) {
     egui::TopBottomPanel::top("lp_site_nav").show_inside(ui, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
-            ui.hyperlink_to(egui::RichText::new("LightPhotos").heading(), "./");
-            ui.add_space(16.0);
-            ui.hyperlink_to("Downloads", "./downloads.html");
-            ui.hyperlink_to("Blogs", "./blogs.html");
-            ui.hyperlink_to("Help", "./docs.html");
+            let font_id = egui::TextStyle::Heading.resolve(ui.style());
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                "Light",
+                0.0,
+                egui::TextFormat {
+                    font_id: font_id.clone(),
+                    // PLACEHOLDER = "not explicitly colored"; egui's
+                    // text-shape painter substitutes the widget's normal
+                    // text color for any PLACEHOLDER glyph at paint time
+                    // — exactly "inherit the default ink color" with no
+                    // color logic of our own to keep in sync.
+                    color: egui::Color32::PLACEHOLDER,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                "Photos",
+                0.0,
+                egui::TextFormat {
+                    font_id,
+                    color: theme::BRAND_BLUE,
+                    italics: true,
+                    ..Default::default()
+                },
+            );
+            ui.label(job);
         });
         ui.add_space(4.0);
     });
