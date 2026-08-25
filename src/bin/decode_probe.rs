@@ -107,7 +107,68 @@ fn main() {
             ),
             Err(e) => println!("{}: FAILED: {e}", path.display()),
         }
+
+        // Brightness comparison: ImageIO's own decode (what the mac app
+        // actually shows for this file) vs. `raw_fast_preview`'s decode
+        // (what the wasm/non-mac path shows for the same file) — real
+        // evidence for the "still way too dark" report, not another guess
+        // at a formula. `raw-probe`'s dual cfg gate on both `image_decode`'s
+        // `decode_raw_via_rawler`/mac `decode` and `raw_fast_preview`'s
+        // `decode_raw_fast_from_bytes` is exactly what makes this
+        // side-by-side possible from one mac dev binary.
+        #[cfg(target_os = "macos")]
+        match (image_decode::decode(&path, 1600), std::fs::read(&path)) {
+            (Ok(imageio), Ok(bytes)) => match raw_fast_preview::decode_raw_fast_from_bytes(&bytes, 1600) {
+                Ok(fast) => {
+                    let a = avg_luma(&imageio);
+                    let b = avg_luma(&fast);
+                    let (ar, ag, ab) = avg_rgb(&imageio);
+                    let (br, bg, bb) = avg_rgb(&fast);
+                    println!(
+                        "  brightness: ImageIO avg={a:.1}/255  raw_fast_preview avg={b:.1}/255  ratio={:.2}x",
+                        a / b.max(0.01)
+                    );
+                    println!(
+                        "  per-channel: ImageIO R={ar:.1} G={ag:.1} B={ab:.1}  raw_fast_preview R={br:.1} G={bg:.1} B={bb:.1}"
+                    );
+                }
+                Err(e) => println!("  raw_fast_preview FAILED: {e}"),
+            },
+            (Err(e), _) => println!("  ImageIO baseline FAILED: {e}"),
+            (_, Err(e)) => println!("  read FAILED: {e}"),
+        }
     }
+}
+
+/// Mean of R+G+B (not alpha) across every pixel, 0..=255 — a single scalar
+/// "how bright overall" number, coarse but enough to quantify "way too
+/// dark" against the ImageIO baseline.
+#[cfg(target_os = "macos")]
+fn avg_luma(img: &image_decode::DecodedImage) -> f64 {
+    let mut sum: u64 = 0;
+    let mut n: u64 = 0;
+    for px in img.rgba.chunks_exact(4) {
+        sum += px[0] as u64 + px[1] as u64 + px[2] as u64;
+        n += 3;
+    }
+    sum as f64 / n.max(1) as f64
+}
+
+/// Per-channel average — `avg_luma` alone is blind to a color cast (a
+/// boosted red / crushed blue can average out to a similar overall number
+/// as neutral).
+#[cfg(target_os = "macos")]
+fn avg_rgb(img: &image_decode::DecodedImage) -> (f64, f64, f64) {
+    let (mut r, mut g, mut b) = (0u64, 0u64, 0u64);
+    let mut n: u64 = 0;
+    for px in img.rgba.chunks_exact(4) {
+        r += px[0] as u64;
+        g += px[1] as u64;
+        b += px[2] as u64;
+        n += 1;
+    }
+    let n = n.max(1) as f64;
+    (r as f64 / n, g as f64 / n, b as f64 / n)
 }
 
 /// Decode a RAW/DNG file via `rawler`'s top-level convenience entry point.
@@ -805,7 +866,7 @@ mod tests {
             decoded.rgba.len()
         );
         assert_eq!(
-            golden, 0x43ad_e440_61b1_f4b5,
+            golden, 0x8ab2_4258_89d5_396d,
             "Fast-tier Bayer decode output changed from the captured golden hash \
              (see this test's println! output above for the actual value) - if this \
              change is intentional, update the literal; if not, a task's supposedly \
@@ -860,7 +921,7 @@ mod tests {
              below would then discriminate nothing but the output dimensions"
         );
         assert_eq!(
-            golden, 0x3c3d_4904_3a8d_0cd3,
+            golden, 0x93fe_4a41_cf59_9b3b,
             "Fast-tier Linear decode output changed from the captured golden hash \
              (see this test's println! output above for the actual value)"
         );

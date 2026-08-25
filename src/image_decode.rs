@@ -220,6 +220,39 @@ const RAW_PREVIEW_BRIGHTNESS_GAMMA: f32 = 1.1;
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 const RAW_PREVIEW_CONTRAST_MIX: f32 = 0.75;
 
+/// Linear-space exposure gain applied to every WB-corrected camera-RGB
+/// sample before the color matrix, in both non-mac RAW decode paths
+/// (`decode_raw_nonmac` below, `raw_fast_preview.rs`'s `render_rgb_sample`).
+/// Not a curve-shape/gamma fix — a real camera sensor is captured with
+/// headroom below clipping that the raw samples alone don't carry (a
+/// well-known reason naive linear-matrix RAW conversion looks flat/dark;
+/// dcraw's own default output has the same property), and a camera's own
+/// JPEG engine applies a matching gain during its own processing that we
+/// have no equivalent metadata for.
+///
+/// Value derived empirically, not guessed: measured via `decode_probe`'s
+/// live ImageIO-vs-`raw_fast_preview` brightness comparison against a real
+/// Sony ARW file with no gain applied at all — average display-space
+/// brightness ratio was 1.32x (ImageIO/ours), fairly uniform across R/G/B
+/// (1.37/1.34/1.23x — not a color-cast/WB problem). Since sRGB gamma is
+/// roughly `x^(1/2.4)`, a missing *linear*-space gain `g` only shows up in
+/// display space as `g^(1/2.4)` — solving `g^(1/2.4) = 1.32` gives
+/// `g ≈ 1.95`. An earlier, since-discarded attempt at this file
+/// independently landed on `2.4` for the same symptom (tuned across 13
+/// files via this same harness) — close enough to this single-file
+/// derivation to corroborate it, not identical since it's a different,
+/// smaller sample.
+///
+/// Applied to `decode_raw_nonmac` by analogy — confirmed to compile and
+/// type-check cleanly against the real `x86_64-unknown-linux-gnu` target
+/// (`cargo check --target x86_64-unknown-linux-gnu --bin lightphotos`),
+/// but not run against a real RAW file on that platform (no Linux/Windows
+/// machine available to decode one and measure). The root cause (sensor
+/// headroom) is platform-independent; the exact constant was tuned
+/// against one wasm-shaped measurement.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+pub(crate) const LINEAR_EXPOSURE_GAIN: f32 = 1.95;
+
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 pub(crate) fn apply_raw_preview_boost(srgb: f32) -> f32 {
     let brightened = srgb.powf(1.0 / RAW_PREVIEW_BRIGHTNESS_GAMMA);
@@ -255,8 +288,19 @@ pub(crate) fn apply_raw_preview_boost(srgb: f32) -> f32 {
 /// (DNG-embedded calibration) directly, matching RapidRaw's own design.
 #[cfg(not(target_os = "macos"))]
 fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
-    let raw = decode_raw_via_rawler(path)?;
+    let mut raw = decode_raw_via_rawler(path)?;
     let orientation = exif_code_from_rawler_orientation(raw.orientation);
+
+    // `LINEAR_EXPOSURE_GAIN` (see its own doc comment for the empirical
+    // derivation) — `RawDevelop`'s own `WhiteBalance`+`Calibrate` step
+    // already applies `wb_coeffs` as a per-channel linear multiply, so
+    // scaling it here achieves an equivalent gain without touching that
+    // pipeline's steps.
+    for c in raw.wb_coeffs.iter_mut() {
+        if !c.is_nan() {
+            *c *= LINEAR_EXPOSURE_GAIN;
+        }
+    }
 
     let developed = rawler::imgop::develop::RawDevelop::default()
         .develop_intermediate(&raw)

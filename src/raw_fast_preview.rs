@@ -377,10 +377,17 @@ fn apply_cam2rgb(cam2rgb: &[[f32; 4]; 3], rgb: [f32; 3]) -> [f32; 3] {
 }
 
 /// Renders one linear camera-RGB sample (already white-balanced) to
-/// display RGBA8: color matrix (if the camera has calibration data) ->
-/// gamma, alpha fixed opaque. Shared by both `bin_bayer_quarter_res` and
-/// `decimate_linear_rgb` — was duplicated inline in both before this.
+/// display RGBA8: exposure gain -> color matrix (if the camera has
+/// calibration data) -> gamma, alpha fixed opaque. Shared by both
+/// `bin_bayer_quarter_res` and `decimate_linear_rgb` — was duplicated
+/// inline in both before this. The gain constant (`image_decode::
+/// LINEAR_EXPOSURE_GAIN`) lives in `image_decode.rs`, not here, so
+/// `decode_raw_nonmac` (native non-mac) can share it too — `raw_fast_preview`
+/// isn't a module `main.rs` declares on non-mac (only `wasm_worker.rs`/
+/// `decode_probe.rs` pull it in via `#[path]`), so a dependency the other
+/// direction wouldn't compile there.
 fn render_rgb_sample(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [u8; 4] {
+    let rgb = rgb.map(|v| v * crate::image_decode::LINEAR_EXPOSURE_GAIN);
     let srgb = match cam2rgb {
         Some(m) => apply_cam2rgb(m, rgb),
         None => rgb,
