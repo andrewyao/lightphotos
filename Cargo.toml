@@ -69,6 +69,11 @@ web-time = "1.1"
 rawler = { version = "0.7.2", optional = true }
 mozjpeg-rs = { version = "0.9.2", optional = true }
 img-parts = { version = "0.4.0", optional = true }
+# Same dual-declaration reasoning as `rawler` above (see the non-mac
+# `image` entry below): `raw_fast_preview.rs` resizes its decoded preview
+# with `image::imageops`, and `decode_probe.rs` compiles that module on mac
+# under `raw-probe` for its golden-hash tests, so `image` has to be
+# reachable there too — not just in the plain non-mac build.
 image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png", "tiff"] }
 
 [features]

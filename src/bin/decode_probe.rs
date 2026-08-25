@@ -301,21 +301,42 @@ fn compare_against_gradient_ground_truth(raw: &rawler::RawImage, width: u32, hei
 ///   0xC613 DNGBackwardVersion = [1,1,0,0]
 ///   0xC621 ColorMatrix1 = identity 3x3 (SRATIONAL) — readers need *a* matrix
 ///     present even though this fixture doesn't care about color accuracy.
+///   0xC628 AsShotNeutral = 3 RATIONALs — *only* via
+///     `write_linear_dng_with_wb` below. Omitted by this entry point so the
+///     long-standing fixture stays byte-identical for the tests built around
+///     it; supplied by the `Fast`-tier linear golden-hash test, which needs
+///     real (non-NaN) `wb_coeffs` to exercise any pixel math at all.
 ///
-/// Byte layout: 8-byte header, then the IFD, then the two out-of-line value
-/// blocks the IFD entries can't inline (`BitsPerSample`'s 3 SHORTs and
-/// `ColorMatrix1`'s 9 SRATIONALs), then the pixel data. Every out-of-line
-/// offset in this fixed tag set happens to land on an even byte already, but
-/// the code still checks/pads defensively rather than assuming that.
+/// Byte layout: 8-byte header, then the IFD, then the out-of-line value
+/// blocks the IFD entries can't inline (`BitsPerSample`'s 3 SHORTs,
+/// `ColorMatrix1`'s 9 SRATIONALs, and `AsShotNeutral`'s 3 RATIONALs when
+/// present), then the pixel data. Every out-of-line offset in this fixed tag
+/// set happens to land on an even byte already, but the code still
+/// checks/pads defensively rather than assuming that.
 fn write_linear_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()> {
+    write_linear_dng_with_wb(path, width, height, None)
+}
+
+/// `write_linear_dng`, plus an optional `AsShotNeutral` tag written as 3
+/// RATIONALs (`(numerator, denominator)` per channel, the same encoding
+/// `write_bayer_dng` uses). rawler's `DngDecoder::get_wb` turns that into
+/// `wb_coeffs = [1/n0, 1/n1, 1/n2, NaN]`; with the tag absent it returns
+/// `[NaN; 4]` instead.
+fn write_linear_dng_with_wb(
+    path: &Path,
+    width: u32,
+    height: u32,
+    as_shot_neutral: Option<[(u32, u32); 3]>,
+) -> std::io::Result<()> {
     use std::io::Write;
 
     const T_BYTE: u16 = 1;
     const T_SHORT: u16 = 3;
     const T_LONG: u16 = 4;
+    const T_RATIONAL: u16 = 5;
     const T_SRATIONAL: u16 = 10;
 
-    const ENTRY_COUNT: u16 = 14;
+    let entry_count: u16 = if as_shot_neutral.is_some() { 15 } else { 14 };
     const IFD_OFFSET: u32 = 8;
 
     fn inline_u16(v: u16) -> [u8; 4] {
@@ -344,7 +365,7 @@ fn write_linear_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()>
     // inline in its own 12-byte IFD entry). Compute the out-of-line offsets
     // up front so the IFD entries that reference them can be written in one
     // pass, in ascending tag-ID order.
-    let ifd_size = 2 + (ENTRY_COUNT as usize) * 12 + 4;
+    let ifd_size = 2 + (entry_count as usize) * 12 + 4;
     let after_ifd = IFD_OFFSET as usize + ifd_size;
 
     let bits_per_sample_offset = after_ifd as u32; // 3 x SHORT = 6 bytes
@@ -356,6 +377,13 @@ fn write_linear_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()>
     off += 72;
     if off % 2 != 0 {
         off += 1;
+    }
+    let as_shot_neutral_offset = off as u32; // 3 x RATIONAL = 24 bytes
+    if as_shot_neutral.is_some() {
+        off += 24;
+        if off % 2 != 0 {
+            off += 1;
+        }
     }
     let pixel_offset = off as u32;
 
@@ -373,7 +401,7 @@ fn write_linear_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()>
     buf.extend_from_slice(&IFD_OFFSET.to_le_bytes());
 
     // --- IFD ---
-    buf.extend_from_slice(&ENTRY_COUNT.to_le_bytes());
+    buf.extend_from_slice(&entry_count.to_le_bytes());
     push_entry(&mut buf, 254, T_LONG, 1, inline_u32(0)); // NewSubfileType = 0 (primary image)
     push_entry(&mut buf, 256, T_LONG, 1, inline_u32(width)); // ImageWidth
     push_entry(&mut buf, 257, T_LONG, 1, inline_u32(height)); // ImageLength
@@ -388,6 +416,9 @@ fn write_linear_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()>
     push_entry(&mut buf, 50706, T_BYTE, 4, [1, 4, 0, 0]); // DNGVersion
     push_entry(&mut buf, 50707, T_BYTE, 4, [1, 1, 0, 0]); // DNGBackwardVersion
     push_entry(&mut buf, 50721, T_SRATIONAL, 9, inline_u32(color_matrix_offset)); // ColorMatrix1
+    if as_shot_neutral.is_some() {
+        push_entry(&mut buf, 50728, T_RATIONAL, 3, inline_u32(as_shot_neutral_offset)); // AsShotNeutral
+    }
     buf.extend_from_slice(&0u32.to_le_bytes()); // next IFD offset = none
 
     debug_assert_eq!(buf.len(), after_ifd, "IFD size drifted from the computed layout");
@@ -416,6 +447,16 @@ fn write_linear_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()>
         buf.extend_from_slice(&den.to_le_bytes());
     }
     pad_to_even(&mut buf);
+
+    // --- Out-of-line: AsShotNeutral, 3 RATIONAL (num, denom) — optional ---
+    if let Some(neutral) = as_shot_neutral {
+        debug_assert_eq!(buf.len() as u32, as_shot_neutral_offset);
+        for (num, den) in neutral {
+            buf.extend_from_slice(&num.to_le_bytes());
+            buf.extend_from_slice(&den.to_le_bytes());
+        }
+        pad_to_even(&mut buf);
+    }
     debug_assert_eq!(buf.len() as u32, pixel_offset);
 
     // --- Pixel data: horizontal gradient test pattern, R=G=B per pixel ---
@@ -450,6 +491,14 @@ fn write_linear_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()>
 /// so it's omitted here. `CFAColor` numeric codes (`src/cfa.rs`) are
 /// RED=0, GREEN=1, BLUE=2 — `CFAPattern = [0,1,1,2]` is RGGB.
 fn write_bayer_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()> {
+    write_bayer_dng_with_cfa(path, width, height, [0, 1, 1, 2])
+}
+
+/// `write_bayer_dng` with an explicit 4-byte `CFAPattern` (color codes, see
+/// that function's doc comment), so a test can build a fixture whose CFA is
+/// *not* one of the four RGGB-family patterns rawler's `Superpixel3Channel`
+/// can demosaic.
+fn write_bayer_dng_with_cfa(path: &Path, width: u32, height: u32, cfa_pattern: [u8; 4]) -> std::io::Result<()> {
     use std::io::Write;
 
     const T_BYTE: u16 = 1;
@@ -523,7 +572,7 @@ fn write_bayer_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()> 
     push_entry(&mut buf, 278, T_LONG, 1, inline_u32(height)); // RowsPerStrip
     push_entry(&mut buf, 279, T_LONG, 1, inline_u32(strip_byte_count)); // StripByteCounts
     push_entry(&mut buf, 284, T_SHORT, 1, inline_u16(1)); // PlanarConfiguration
-    push_entry(&mut buf, 33422, T_BYTE, 4, [0, 1, 1, 2]); // CFAPattern = RGGB
+    push_entry(&mut buf, 33422, T_BYTE, 4, cfa_pattern); // CFAPattern (default [0,1,1,2] = RGGB)
     push_entry(&mut buf, 50706, T_BYTE, 4, [1, 4, 0, 0]); // DNGVersion
     push_entry(&mut buf, 50707, T_BYTE, 4, [1, 1, 0, 0]); // DNGBackwardVersion
     push_entry(&mut buf, 50713, T_SHORT, 2, inline_u32(0x0002_0002)); // BlackLevelRepeatDim = [2,2]
@@ -765,23 +814,30 @@ mod tests {
     }
 
     /// Same idea, for the already-linear (`cpp == 3`, `decimate_linear_rgb`)
-    /// path — reuses the existing `write_linear_dng` fixture (this file's
-    /// synthetic Linear DNG, above) as-is rather than adding a second new
-    /// fixture. That fixture has no `AsShotNeutral` tag, so `wb_coeffs` comes
-    /// back `[NaN; 4]` (`DngDecoder::get_wb`'s no-tag branch) — today's actual
-    /// behavior on it, NaN-poisoned output included, is exactly what this
-    /// golden hash locks in; this refactor doesn't change that (fixing it is
-    /// out of scope, see the spec's "Explicitly out of scope" section).
+    /// path.
+    ///
+    /// Uses `write_linear_dng_with_wb` with a deliberately *non*-neutral
+    /// `AsShotNeutral` (`[1/2, 1/1, 2/1]` → `wb_coeffs = [2.0, 1.0, 0.5]`)
+    /// rather than the plain `write_linear_dng` fixture. That plain fixture
+    /// writes no `AsShotNeutral` at all, so `DngDecoder::get_wb` returns
+    /// `[NaN; 4]`, every sample gets multiplied to NaN, `to_srgb_u8`
+    /// saturates it to 0, and the resulting "golden" image is uniformly
+    /// black — a hash that discriminates output *dimensions* and nothing
+    /// else, on the exact function this plan rewrote. With real coefficients
+    /// this exercises the per-channel WB multiply, the color matrix, the
+    /// highlight rolloff and the gamma LUT on real gradient values, and the
+    /// asymmetric coefficients mean a channel-order mistake changes the hash.
     #[test]
     fn raw_fast_preview_linear_fast_tier_matches_golden_hash() {
         let path = std::env::temp_dir().join(format!("lightphotos_linear_wb_dng_test_{}.dng", std::process::id()));
         let (width, height) = (16u32, 12u32);
-        write_linear_dng(&path, width, height).expect("write_linear_dng failed");
+        write_linear_dng_with_wb(&path, width, height, Some([(1, 2), (1, 1), (2, 1)]))
+            .expect("write_linear_dng_with_wb failed");
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
         let decoded = raw_fast_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
-            .expect("decode_raw_fast_from_bytes failed on synthetic Linear DNG fixture");
+            .expect("decode_raw_fast_from_bytes failed on the white-balanced Linear DNG fixture");
 
         let mut hasher = hash::Fnv1a::new();
         hasher.write(&decoded.width.to_le_bytes());
@@ -795,8 +851,16 @@ mod tests {
             decoded.height,
             decoded.rgba.len()
         );
+        // Guards the property the fixture change above exists to establish:
+        // if this ever goes all-black again, the hash below stops testing any
+        // pixel math and silently degrades into a dimensions check.
+        assert!(
+            decoded.rgba.chunks_exact(4).any(|p| p[0] != 0 || p[1] != 0 || p[2] != 0),
+            "decoded image has no non-zero color channel anywhere - the golden hash \
+             below would then discriminate nothing but the output dimensions"
+        );
         assert_eq!(
-            golden, 0x0e3e_5b4d_851b_3f2b,
+            golden, 0xfc55_ec6a_fa4c_56db,
             "Fast-tier Linear decode output changed from the captured golden hash \
              (see this test's println! output above for the actual value)"
         );
@@ -828,6 +892,56 @@ mod tests {
         let (w, h, rgba) = result.expect("PPGDemosaic panicked").expect("bin_bayer_quarter_res returned None");
 
         assert!(w > 0 && h > 0, "degenerate output dimensions");
-        assert!(rgba.iter().any(|&b| b != 0), "output looks all-zero/degenerate");
+        // Color channels only: `render_rgb_sample` hardcodes alpha to 255, so
+        // a plain `rgba.iter().any(|&b| b != 0)` is satisfied by the alpha
+        // byte alone and would pass on a fully-black image — the exact
+        // degenerate case this is meant to rule out.
+        assert!(
+            rgba.chunks_exact(4).any(|p| p[0] != 0 || p[1] != 0 || p[2] != 0),
+            "output looks all-zero/degenerate"
+        );
+    }
+
+    /// The panic guard: rawler's `Superpixel3Channel::demosaic` matches the
+    /// (ROI-shifted) CFA name against exactly `RGGB`/`BGGR`/`GBRG`/`GRBG` and
+    /// falls through to `_ => unreachable!()` for anything else that still
+    /// clears its `is_rgb()` check — Fuji X-Trans being the real-world case
+    /// (its 36-char name is all R/G/B). `wasm32-unknown-unknown`, the only
+    /// production target for this code, is `panic=abort`, so that would take
+    /// down the whole decode worker rather than surfacing an error.
+    ///
+    /// `CFAPattern = [0,1,2,1]` ("RGBG") is the cheapest fixture that
+    /// reproduces it: a 2x2 pattern, so rawler decodes it happily, `is_rgb()`
+    /// is true (only R/G/B characters, one of each present), and the name is
+    /// none of the four — the same `unreachable!()` an X-Trans file reaches,
+    /// without hand-building a 6x6 X-Trans DNG. The `catch_unwind` here is
+    /// what makes the pre-fix failure legible as a test failure on native
+    /// rather than aborting the test binary.
+    #[test]
+    fn raw_fast_preview_rejects_unsupported_cfa_pattern_without_panicking() {
+        let path = std::env::temp_dir().join(format!("lightphotos_bayer_rgbg_dng_test_{}.dng", std::process::id()));
+        let (width, height) = (8u32, 6u32);
+        write_bayer_dng_with_cfa(&path, width, height, [0, 1, 2, 1]).expect("write_bayer_dng_with_cfa failed");
+        let bytes = std::fs::read(&path).expect("read fixture bytes");
+        let _ = std::fs::remove_file(&path);
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            raw_fast_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
+        }))
+        .expect("decode_raw_fast_from_bytes panicked on an unsupported CFA pattern (fatal on wasm32)");
+
+        // `DecodedImage` isn't `Debug`, so unwrap the error by hand rather
+        // than via `expect_err`.
+        let err = match outcome {
+            Ok(decoded) => panic!(
+                "expected an Err for a CFA pattern rawler's demosaic can't handle, got a {}x{} image",
+                decoded.width, decoded.height
+            ),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("unsupported RAW layout"),
+            "expected an 'unsupported RAW layout' error, got: {err}"
+        );
     }
 }
