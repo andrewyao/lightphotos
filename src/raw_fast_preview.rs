@@ -20,6 +20,19 @@
 
 use crate::image_decode::{fit_within, DecodedImage};
 
+/// `Fast` = rawler's `Superpixel3Channel` (quarter-res 2x2 bin, matches
+/// this file's pre-Task-4 hand-rolled output). `Quality` = rawler's
+/// `PPGDemosaic` (full-res, real edge-directed interpolation — the same
+/// algorithm `decode_raw_nonmac`, the native non-mac path, already uses
+/// via `RawDevelop`). `Quality` isn't wired into any call site yet — see
+/// `plans/raw-decode-rapidraw-parity-design.md`'s explicit scope note.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DemosaicMode {
+    Fast,
+    #[allow(dead_code)]
+    Quality,
+}
+
 /// Precomputed 1/2.2-gamma lookup table, built once on first use — the
 /// spike's own finding: both algorithms below landed at the same
 /// ~300-320ms/megapixel regardless of approach, and replacing three
@@ -120,7 +133,7 @@ fn fast_preview(
     orientation: rawler::decoders::Orientation,
 ) -> Option<(u32, u32, Vec<u8>)> {
     let (w, h, rgba) = match raw.cpp {
-        1 => bin_bayer_quarter_res(raw),
+        1 => bin_bayer_quarter_res(raw, DemosaicMode::Fast),
         3 => decimate_linear_rgb(raw),
         _ => None,
     }?;
@@ -250,22 +263,24 @@ fn render_rgb_sample(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [u8; 4] 
     [to_srgb_u8(srgb[0]), to_srgb_u8(srgb[1]), to_srgb_u8(srgb[2]), 255]
 }
 
-/// Bayer-CFA quarter-res preview: bin each 2x2 Bayer block into one output
-/// pixel, no interpolation. See `fast_preview`'s doc comment for when this
-/// applies.
-fn bin_bayer_quarter_res(raw: &mut rawler::RawImage) -> Option<(u32, u32, Vec<u8>)> {
+/// Bayer-CFA preview via rawler's own `Demosaic` trait: `Fast` uses
+/// `Superpixel3Channel` (quarter-res 2x2 bin, no interpolation — matches this
+/// file's pre-Task-4 hand-rolled output byte-for-byte), `Quality` uses
+/// `PPGDemosaic` (full-res, edge-directed interpolation). See `fast_preview`'s
+/// doc comment for when this applies.
+pub(crate) fn bin_bayer_quarter_res(raw: &mut rawler::RawImage, mode: DemosaicMode) -> Option<(u32, u32, Vec<u8>)> {
+    use rawler::imgop::sensor::bayer::{ppg::PPGDemosaic, superpixel::Superpixel3Channel, Demosaic};
+    use rawler::pixarray::Pix2D;
+    use rawler::rawimage::RawPhotometricInterpretation;
     use rawler::RawImageData;
 
-    let cfa = raw.camera.cfa.clone();
+    let RawPhotometricInterpretation::Cfa(config) = &raw.photometric else {
+        return None;
+    };
+    let cfa = config.cfa.clone();
+    let colors = config.colors.clone();
     let wb = raw.wb_coeffs;
     let width = raw.width;
-
-    // Computed before the mutable borrow of `raw.data` below: `build_cam2rgb`
-    // takes `&RawImage` (the whole struct), which the borrow checker can't
-    // see as disjoint from a live `&mut raw.data` — it only depends on
-    // `raw.color_matrix`, untouched by the white-balance pass, so computing
-    // it here first is a borrow-order fix only, not a behavior change.
-    let cam2rgb = build_cam2rgb(raw);
 
     let RawImageData::Float(data) = &mut raw.data else {
         return None; // apply_scaling always leaves Float data
@@ -275,46 +290,25 @@ fn bin_bayer_quarter_res(raw: &mut rawler::RawImage) -> Option<(u32, u32, Vec<u8
     }
     apply_white_balance_in_place(data, width, &cfa, wb);
 
-    let sample_at = |row: usize, col: usize| -> f32 { data[row * width + col] };
-
+    let pixels = Pix2D::new_with(data.clone(), width, raw.height);
     let area = raw.active_area.unwrap_or(rawler::imgop::Rect::new(
         rawler::imgop::Point::new(0, 0),
         rawler::imgop::Dim2::new(width, raw.height),
     ));
-    let (x0, y0) = (area.p.x - (area.p.x % 2), area.p.y - (area.p.y % 2));
-    let (aw, ah) = (area.d.w - (area.d.w % 2), area.d.h - (area.d.h % 2));
 
-    let out_w = aw / 2;
-    let out_h = ah / 2;
-    let mut rgba = vec![0u8; out_w * out_h * 4];
+    let demosaiced = match mode {
+        DemosaicMode::Fast => Superpixel3Channel::new().demosaic(&pixels, &cfa, &colors, area),
+        DemosaicMode::Quality => PPGDemosaic::new().demosaic(&pixels, &cfa, &colors, area),
+    };
 
-    for oy in 0..out_h {
-        for ox in 0..out_w {
-            let (row, col) = (y0 + oy * 2, x0 + ox * 2);
-            let mut rgb = [0f32; 3];
-            let mut g_count = 0f32;
-            for (dr, dc) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                let ch = cfa.color_at(row + dr, col + dc);
-                let v = sample_at(row + dr, col + dc);
-                match ch {
-                    0 => rgb[0] = v,
-                    2 => rgb[2] = v,
-                    _ => {
-                        rgb[1] += v;
-                        g_count += 1.0;
-                    }
-                }
-            }
-            if g_count > 0.0 {
-                rgb[1] /= g_count;
-            }
-            let px = render_rgb_sample(rgb, &cam2rgb);
-            let idx = (oy * out_w + ox) * 4;
-            rgba[idx..idx + 4].copy_from_slice(&px);
-        }
+    let cam2rgb = build_cam2rgb(raw);
+    let (w, h) = (demosaiced.width, demosaiced.height);
+    let mut rgba = vec![0u8; w * h * 4];
+    for (i, &rgb) in demosaiced.pixels().iter().enumerate() {
+        let px = render_rgb_sample(rgb, &cam2rgb);
+        rgba[i * 4..i * 4 + 4].copy_from_slice(&px);
     }
-
-    Some((out_w as u32, out_h as u32, rgba))
+    Some((w as u32, h as u32, rgba))
 }
 
 /// Already-demosaiced/linear RGB preview (cpp == 3 — no CFA, no

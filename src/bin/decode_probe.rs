@@ -801,4 +801,33 @@ mod tests {
              (see this test's println! output above for the actual value)"
         );
     }
+
+    /// `DemosaicMode::Quality` (`PPGDemosaic`) has no golden hash to match
+    /// (this plan doesn't wire it into any call site) — this just confirms it
+    /// decodes without panicking and produces a plausible, non-degenerate
+    /// image on the same fixture Task 1 uses.
+    #[test]
+    fn raw_fast_preview_bayer_quality_tier_runs_without_panicking() {
+        let path = std::env::temp_dir().join(format!("lightphotos_bayer_quality_dng_test_{}.dng", std::process::id()));
+        let (width, height) = (8u32, 6u32);
+        write_bayer_dng(&path, width, height).expect("write_bayer_dng failed");
+        let bytes = std::fs::read(&path).expect("read fixture bytes");
+        let _ = std::fs::remove_file(&path);
+
+        // decode_raw_fast_from_bytes always uses DemosaicMode::Fast internally
+        // (Step 3) - exercise Quality directly via rawler::decode + the same
+        // apply_scaling/bin_bayer_quarter_res call chain that function makes.
+        let source = rawler::rawsource::RawSource::new_from_slice(&bytes);
+        let params = rawler::decoders::RawDecodeParams::default();
+        let mut raw = rawler::decode(&source, &params).expect("rawler::decode failed on fixture");
+        raw.apply_scaling().expect("apply_scaling failed");
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            raw_fast_preview::bin_bayer_quarter_res(&mut raw, raw_fast_preview::DemosaicMode::Quality)
+        }));
+        let (w, h, rgba) = result.expect("PPGDemosaic panicked").expect("bin_bayer_quarter_res returned None");
+
+        assert!(w > 0 && h > 0, "degenerate output dimensions");
+        assert!(rgba.iter().any(|&b| b != 0), "output looks all-zero/degenerate");
+    }
 }
