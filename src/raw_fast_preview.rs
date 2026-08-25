@@ -238,6 +238,15 @@ fn build_cam2rgb(raw: &rawler::RawImage) -> Option<[[f32; 4]; 3]> {
     Some(pseudo_inverse(rgb2cam))
 }
 
+/// Pipeline stage note: the `clip_euclidean_norm_avg` call below is this
+/// file's counterpart to RapidRaw's standalone `highlight_compression`
+/// stage — a soft highlight rolloff applied right after the color-matrix
+/// multiply, same position RapidRaw's version occupies. Folded into this
+/// one function rather than split into its own, since there's no separate
+/// exposure/gain step in this codebase to share a boundary with (unlike
+/// an earlier, discarded attempt at this file that had one — see
+/// `plans/raw-decode-rapidraw-parity-design.md`'s reset note).
+///
 /// Applies `build_cam2rgb`'s matrix to one WB-corrected camera-RGB sample,
 /// including the soft highlight-rolloff clip (`clip_euclidean_norm_avg`)
 /// rather than a hard `.clamp` — better behavior near white.
