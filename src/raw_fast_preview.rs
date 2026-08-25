@@ -66,11 +66,12 @@ pub(crate) fn decode_raw_fast_from_bytes(bytes: &[u8], max_px: u32) -> Result<De
     let params = rawler::decoders::RawDecodeParams::default();
     let orientation = real_orientation(&source, &params);
 
-    let raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rawler::decode(&source, &params)))
+    let mut raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rawler::decode(&source, &params)))
         .map_err(|_| "panicked during RAW decode".to_string())?
         .map_err(|e| e.to_string())?;
+    raw.apply_scaling().map_err(|e| e.to_string())?;
 
-    let (w, h, rgba) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fast_preview(&raw, orientation)))
+    let (w, h, rgba) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fast_preview(&mut raw, orientation)))
         .map_err(|_| "panicked during fast preview".to_string())?
         .ok_or_else(|| format!("unsupported RAW layout (cpp={})", raw.cpp))?;
 
@@ -115,7 +116,7 @@ fn real_orientation(
 /// Bayer interpolation entirely). `None` for anything else (e.g. monochrome,
 /// cpp == 4) rather than guessing at a wrong image.
 fn fast_preview(
-    raw: &rawler::RawImage,
+    raw: &mut rawler::RawImage,
     orientation: rawler::decoders::Orientation,
 ) -> Option<(u32, u32, Vec<u8>)> {
     let (w, h, rgba) = match raw.cpp {
@@ -172,6 +173,27 @@ fn apply_orientation(
     }
 
     (w as u32, h as u32, rgba)
+}
+
+/// Multiplies each raw sample by its CFA-position's white-balance
+/// coefficient, in place. Pre-demosaic — matches this file's pre-refactor
+/// behavior exactly (today's hand-rolled `normalize` closure applied WB
+/// at this same point, fused with black/white-normalize; this factors it
+/// out as its own pass now that black/white-normalize is
+/// `apply_scaling()`'s job instead).
+fn apply_white_balance_in_place(samples: &mut [f32], width: usize, cfa: &rawler::CFA, wb: [f32; 4]) {
+    for (idx, v) in samples.iter_mut().enumerate() {
+        let (row, col) = (idx / width, idx % width);
+        *v *= wb[cfa.color_at(row, col)];
+    }
+}
+
+/// Same idea for already-demosaiced linear data (`cpp == 3`, no CFA — each
+/// sample's channel is just `idx % cpp`, cycling R,G,B).
+fn apply_white_balance_linear_in_place(samples: &mut [f32], cpp: usize, wb: [f32; 4]) {
+    for (idx, v) in samples.iter_mut().enumerate() {
+        *v *= wb[idx % cpp];
+    }
 }
 
 /// Camera-RGB → sRGB matrix, built once per image. Same algorithm `rawler`'s
@@ -231,32 +253,33 @@ fn render_rgb_sample(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [u8; 4] 
 /// Bayer-CFA quarter-res preview: bin each 2x2 Bayer block into one output
 /// pixel, no interpolation. See `fast_preview`'s doc comment for when this
 /// applies.
-fn bin_bayer_quarter_res(raw: &rawler::RawImage) -> Option<(u32, u32, Vec<u8>)> {
+fn bin_bayer_quarter_res(raw: &mut rawler::RawImage) -> Option<(u32, u32, Vec<u8>)> {
     use rawler::RawImageData;
 
-    let sample_at = |idx: usize| -> f32 {
-        match &raw.data {
-            RawImageData::Integer(v) => v[idx] as f32,
-            RawImageData::Float(v) => v[idx],
-        }
+    let cfa = raw.camera.cfa.clone();
+    let wb = raw.wb_coeffs;
+    let width = raw.width;
+
+    // Computed before the mutable borrow of `raw.data` below: `build_cam2rgb`
+    // takes `&RawImage` (the whole struct), which the borrow checker can't
+    // see as disjoint from a live `&mut raw.data` — it only depends on
+    // `raw.color_matrix`, untouched by the white-balance pass, so computing
+    // it here first is a borrow-order fix only, not a behavior change.
+    let cam2rgb = build_cam2rgb(raw);
+
+    let RawImageData::Float(data) = &mut raw.data else {
+        return None; // apply_scaling always leaves Float data
     };
-    let expected_len = raw.width * raw.height;
-    let actual_len = match &raw.data {
-        RawImageData::Integer(v) => v.len(),
-        RawImageData::Float(v) => v.len(),
-    };
-    if actual_len != expected_len {
+    if data.len() != width * raw.height {
         return None;
     }
+    apply_white_balance_in_place(data, width, &cfa, wb);
 
-    let black = raw.blacklevel.as_bayer_array();
-    let white = raw.whitelevel.as_bayer_array();
-    let wb = raw.wb_coeffs;
-    let cfa = &raw.camera.cfa;
+    let sample_at = |row: usize, col: usize| -> f32 { data[row * width + col] };
 
     let area = raw.active_area.unwrap_or(rawler::imgop::Rect::new(
         rawler::imgop::Point::new(0, 0),
-        rawler::imgop::Dim2::new(raw.width, raw.height),
+        rawler::imgop::Dim2::new(width, raw.height),
     ));
     let (x0, y0) = (area.p.x - (area.p.x % 2), area.p.y - (area.p.y % 2));
     let (aw, ah) = (area.d.w - (area.d.w % 2), area.d.h - (area.d.h % 2));
@@ -264,15 +287,6 @@ fn bin_bayer_quarter_res(raw: &rawler::RawImage) -> Option<(u32, u32, Vec<u8>)> 
     let out_w = aw / 2;
     let out_h = ah / 2;
     let mut rgba = vec![0u8; out_w * out_h * 4];
-    let cam2rgb = build_cam2rgb(raw);
-
-    let normalize = |row: usize, col: usize| -> (usize, f32) {
-        let ch = cfa.color_at(row, col);
-        let v = sample_at(row * raw.width + col);
-        let denom = (white[ch] - black[ch]).max(1.0);
-        let n = ((v - black[ch]) / denom).clamp(0.0, 1.0) * wb[ch];
-        (ch, n.clamp(0.0, 1.0))
-    };
 
     for oy in 0..out_h {
         for ox in 0..out_w {
@@ -280,12 +294,13 @@ fn bin_bayer_quarter_res(raw: &rawler::RawImage) -> Option<(u32, u32, Vec<u8>)> 
             let mut rgb = [0f32; 3];
             let mut g_count = 0f32;
             for (dr, dc) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                let (ch, n) = normalize(row + dr, col + dc);
+                let ch = cfa.color_at(row + dr, col + dc);
+                let v = sample_at(row + dr, col + dc);
                 match ch {
-                    0 => rgb[0] = n,
-                    2 => rgb[2] = n,
+                    0 => rgb[0] = v,
+                    2 => rgb[2] = v,
                     _ => {
-                        rgb[1] += n;
+                        rgb[1] += v;
                         g_count += 1.0;
                     }
                 }
@@ -307,47 +322,44 @@ fn bin_bayer_quarter_res(raw: &rawler::RawImage) -> Option<(u32, u32, Vec<u8>)> 
 /// normalize and gamma, plus simple 2x2 nearest-neighbor decimation rather
 /// than an averaging box filter — this data has no CFA-driven reason to
 /// average 4 samples together.
-fn decimate_linear_rgb(raw: &rawler::RawImage) -> Option<(u32, u32, Vec<u8>)> {
+fn decimate_linear_rgb(raw: &mut rawler::RawImage) -> Option<(u32, u32, Vec<u8>)> {
     use rawler::RawImageData;
 
-    let sample_at = |idx: usize| -> f32 {
-        match &raw.data {
-            RawImageData::Integer(v) => v[idx] as f32,
-            RawImageData::Float(v) => v[idx],
-        }
+    let cpp = raw.cpp;
+    let wb = raw.wb_coeffs;
+    let width = raw.width;
+
+    // See the matching comment in `bin_bayer_quarter_res`: computed before
+    // the mutable borrow of `raw.data` below for borrow-checker reasons
+    // only — `build_cam2rgb` only reads `raw.color_matrix`.
+    let cam2rgb = build_cam2rgb(raw);
+
+    let RawImageData::Float(data) = &mut raw.data else {
+        return None; // apply_scaling always leaves Float data
     };
-    let expected_len = raw.width * raw.height * raw.cpp;
-    let actual_len = match &raw.data {
-        RawImageData::Integer(v) => v.len(),
-        RawImageData::Float(v) => v.len(),
-    };
-    if actual_len != expected_len {
+    if data.len() != width * raw.height * cpp {
         return None;
     }
+    apply_white_balance_linear_in_place(data, cpp, wb);
 
-    let black = raw.blacklevel.as_bayer_array();
-    let white = raw.whitelevel.as_bayer_array();
-    let wb = raw.wb_coeffs;
+    let sample_at = |idx: usize| -> f32 { data[idx] };
 
     let area = raw.active_area.unwrap_or(rawler::imgop::Rect::new(
         rawler::imgop::Point::new(0, 0),
-        rawler::imgop::Dim2::new(raw.width, raw.height),
+        rawler::imgop::Dim2::new(width, raw.height),
     ));
     let (x0, y0) = (area.p.x, area.p.y);
     let (out_w, out_h) = (area.d.w / 2, area.d.h / 2);
     let mut rgba = vec![0u8; out_w * out_h * 4];
-    let cam2rgb = build_cam2rgb(raw);
 
     for oy in 0..out_h {
         for ox in 0..out_w {
             let (row, col) = (y0 + oy * 2, x0 + ox * 2);
-            let base = (row * raw.width + col) * raw.cpp;
+            let base = (row * width + col) * cpp;
             let idx = (oy * out_w + ox) * 4;
             let mut rgb = [0f32; 3];
             for (ch, slot) in rgb.iter_mut().enumerate() {
-                let v = sample_at(base + ch);
-                let denom = (white[ch] - black[ch]).max(1.0);
-                *slot = ((v - black[ch]) / denom).clamp(0.0, 1.0) * wb[ch];
+                *slot = sample_at(base + ch);
             }
             let px = render_rgb_sample(rgb, &cam2rgb);
             rgba[idx..idx + 4].copy_from_slice(&px);
