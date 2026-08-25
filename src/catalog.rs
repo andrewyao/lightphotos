@@ -11,10 +11,9 @@
 //!
 //! Sidecars travel with the photos: moving, copying, or sharing a folder
 //! carries its `.lightphotos/` subfolder — and thus every rating/edit —
-//! along with it, unlike the old single global SQLite catalog, which
-//! orphaned everything the moment a folder moved. Originals are never
-//! touched, and `.lightphotos` is created lazily (only on the first write
-//! for that directory), so browsing a folder read-only never litters it.
+//! along with it. Originals are never touched, and `.lightphotos` is
+//! created lazily (only on the first write for that directory), so
+//! browsing a folder read-only never litters it.
 //!
 //! [`Catalog`] is scoped to one directory at a time (the "active"
 //! directory) — there is no cross-folder cache or index. Opening a
@@ -24,11 +23,10 @@
 //! own path (not from the active directory), so they stay correct even if
 //! called for a path outside it.
 //!
-//! Legacy state (an older `catalog.json`) is migrated once via
-//! [`migrate_legacy_catalog`], fanning rows out to the per-directory
-//! sidecars they belong to. A leftover global `catalog.db` SQLite file from
-//! an even older install is no longer read — lightphotos has no SQLite
-//! dependency — and is left on disk untouched, with a one-time notice.
+//! (An older global `catalog.json`, and before that a global SQLite
+//! `catalog.db`, both predate this per-directory sidecar design. Neither
+//! is auto-migrated anymore — that one-time migration path was removed
+//! once it was no longer needed.)
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -45,13 +43,6 @@ use crate::develop::{Adjustments, TouchUp};
 pub(crate) const SIDECAR_DIR: &str = ".lightphotos";
 /// Sidecar file extension (cosmetic only — see module docs).
 pub(crate) const SIDECAR_EXT: &str = "xmp";
-/// Legacy global SQLite catalog from an install old enough to predate the
-/// sidecar rewrite. No longer read (lightphotos has no SQLite dependency) —
-/// its only remaining use is to name it in the one-time "found but not
-/// migrated" notice in [`migrate_legacy_catalog`].
-const CATALOG_DB: &str = "catalog.db";
-/// Legacy JSON catalog (pre-dates SQLite), migrated then retired to `<name>.bak`.
-const CATALOG_FILE: &str = "catalog.json";
 
 /// Per-image persisted state: an optional rating plus develop edits. Identity
 /// adjustments are skipped on write so unedited (but rated) images stay compact.
@@ -85,22 +76,6 @@ impl ImageRecord {
             && self.touchups.is_empty()
             && self.rotation == 0
     }
-}
-
-/// Legacy JSON shape for schema v2, read only for one-time migration.
-#[derive(Deserialize)]
-struct CatalogFile {
-    #[allow(dead_code)]
-    version: u32,
-    images: HashMap<PathBuf, ImageRecord>,
-}
-
-/// On-disk JSON shape for schema v1 (ratings only). Read only for migration.
-#[derive(Deserialize)]
-struct CatalogFileV1 {
-    #[allow(dead_code)]
-    version: u32,
-    ratings: HashMap<PathBuf, u8>,
 }
 
 /// In-memory catalog of per-image records, backed by per-photo sidecar files
@@ -572,191 +547,6 @@ fn write_sidecar_file(sidecar: &Path, rec: &ImageRecord) -> Result<(), String> {
         return Err(e.to_string());
     }
     Ok(())
-}
-
-/// Outcome of a [`migrate_legacy_catalog`] pass, mainly useful for tests and
-/// diagnostics; `App::new()` currently discards it (failures are non-fatal
-/// and retried on the next launch).
-#[allow(dead_code)] // fields read from #[cfg(test)] today; App::new() discards the value
-pub struct MigrationSummary {
-    /// Rows successfully written as sidecars (or already empty/migrated).
-    pub migrated: usize,
-    /// Rows that could not be migrated this pass (missing/unwritable target
-    /// directory) — retried on the next call since the source is left intact.
-    pub skipped: usize,
-    /// True when there was nothing to migrate (no legacy file found).
-    pub already_done: bool,
-}
-
-/// One-time, directory-independent migration of the old global `catalog.json`
-/// into per-photo sidecars. Safe to call on every launch: a fast
-/// `Path::exists()` check makes it a no-op once fully migrated, and a partial
-/// pass (some rows' target directories missing/unwritable) is safely
-/// retriable — the legacy file is only retired once every row in it resolved
-/// with zero skips.
-///
-/// A leftover `catalog.db` (the pre-sidecar global SQLite catalog) is no
-/// longer readable — lightphotos dropped its SQLite dependency — so one is
-/// only ever logged, never migrated; it stays on disk untouched.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn migrate_legacy_catalog() -> MigrationSummary {
-    let dir = default_dir();
-    crate::paths::migrate_legacy_dir(&dir, &legacy_dir());
-
-    let json_file = dir.join(CATALOG_FILE);
-    if json_file.exists() {
-        return migrate_json(&json_file);
-    }
-    if dir.join(CATALOG_DB).exists() {
-        eprintln!(
-            "[catalog] found a legacy {} but lightphotos no longer reads SQLite catalogs; \
-             leaving it in place, unmigrated",
-            CATALOG_DB
-        );
-    }
-    MigrationSummary {
-        migrated: 0,
-        skipped: 0,
-        already_done: true,
-    }
-}
-
-/// Fan `images` out to sidecar files, one per row. Returns `(migrated,
-/// skipped)`. A row is "migrated" if it's empty (nothing to write), its
-/// sidecar already exists (idempotent re-run), or the write succeeds.
-/// "Skipped" covers a missing/unwritable target directory or a write
-/// failure — always retriable on a later pass.
-#[cfg(not(target_arch = "wasm32"))]
-fn fan_out(images: &HashMap<PathBuf, ImageRecord>) -> (usize, usize) {
-    let mut migrated = 0usize;
-    let mut skipped = 0usize;
-    for (path, rec) in images {
-        if rec.is_empty() {
-            migrated += 1;
-            continue;
-        }
-        let Some(sidecar) = sidecar_path(path) else {
-            skipped += 1;
-            continue;
-        };
-        if sidecar.exists() {
-            migrated += 1;
-            continue;
-        }
-        match path.parent() {
-            Some(parent) if parent.exists() => match write_sidecar_file(&sidecar, rec) {
-                Ok(()) => migrated += 1,
-                Err(e) => {
-                    eprintln!("[catalog] migration: could not write {}: {e}", sidecar.display());
-                    skipped += 1;
-                }
-            },
-            _ => skipped += 1, // parent directory missing/unmounted: retry later
-        }
-    }
-    (migrated, skipped)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn migrate_json(json_file: &Path) -> MigrationSummary {
-    let images = match std::fs::read(json_file).map(|b| parse_catalog(&b)) {
-        Ok(Ok(m)) => m,
-        Ok(Err(e)) => {
-            eprintln!("[catalog] ignoring corrupt {}: {e}", json_file.display());
-            return MigrationSummary {
-                migrated: 0,
-                skipped: 0,
-                already_done: false,
-            };
-        }
-        Err(e) => {
-            eprintln!("[catalog] migration: could not read {}: {e}", json_file.display());
-            return MigrationSummary {
-                migrated: 0,
-                skipped: 0,
-                already_done: false,
-            };
-        }
-    };
-    let (migrated, skipped) = fan_out(&images);
-    if skipped == 0 {
-        retire(json_file, "json.bak");
-    }
-    eprintln!("[catalog] migration (json): {migrated} migrated, {skipped} skipped");
-    MigrationSummary {
-        migrated,
-        skipped,
-        already_done: false,
-    }
-}
-
-/// Rename `file` to `<file>.<new_ext>` (e.g. `catalog.json` → `catalog.json.bak`),
-/// leaving it in place if a backup already exists there (don't clobber an
-/// earlier one) or the rename fails.
-fn retire(file: &Path, new_ext: &str) {
-    let bak = file.with_extension(new_ext);
-    if bak.exists() {
-        eprintln!(
-            "[catalog] {} already exists; leaving {} in place",
-            bak.display(),
-            file.display()
-        );
-        return;
-    }
-    if let Err(e) = std::fs::rename(file, &bak) {
-        eprintln!("[catalog] could not retire {}: {e}", file.display());
-    }
-}
-
-/// Parse catalog bytes, migrating v1 → v2 as needed. Returns the in-memory
-/// `images` map, or an error if the bytes are not valid catalog JSON.
-fn parse_catalog(bytes: &[u8]) -> serde_json::Result<HashMap<PathBuf, ImageRecord>> {
-    // Peek at `version` to decide how to interpret the rest.
-    let value: serde_json::Value = serde_json::from_slice(bytes)?;
-    let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
-
-    if version >= 2 {
-        let parsed: CatalogFile = serde_json::from_value(value)?;
-        Ok(parsed.images)
-    } else {
-        // v1 (or version-less with a `ratings` map) → migrate ratings into records.
-        let parsed: CatalogFileV1 = serde_json::from_value(value)?;
-        let images = parsed
-            .ratings
-            .into_iter()
-            .map(|(path, stars)| {
-                (
-                    path,
-                    ImageRecord {
-                        rating: Some(stars),
-                        adjustments: Adjustments::default(),
-                        touchups: Vec::new(),
-                        rotation: 0,
-                    },
-                )
-            })
-            .collect();
-        Ok(images)
-    }
-}
-
-/// Default catalog directory: `$HOME/Library/Application Support/com.lightphotos/`.
-#[cfg(not(target_arch = "wasm32"))]
-fn default_dir() -> PathBuf {
-    app_support().join("com.lightphotos")
-}
-
-/// The pre-rename catalog directory (`com.imageviewer`), migrated on first load.
-#[cfg(not(target_arch = "wasm32"))]
-fn legacy_dir() -> PathBuf {
-    app_support().join("com.imageviewer")
-}
-
-fn app_support() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
-    home.join("Library").join("Application Support")
 }
 
 #[cfg(test)]
@@ -1268,132 +1058,5 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    // --- migration ---------------------------------------------------
-
-    /// Write a legacy v2 `catalog.json` fixture — the same on-disk shape
-    /// `migrate_json` reads, standing in for the old SQLite fixture now that
-    /// lightphotos has no SQLite dependency to build one with.
-    fn write_legacy_json(dir: &Path, rows: &[(&Path, Option<u8>, Option<&Adjustments>)]) {
-        let mut images = serde_json::Map::new();
-        for (path, rating, adj) in rows {
-            let rec = ImageRecord {
-                rating: *rating,
-                adjustments: adj.cloned().unwrap_or_default(),
-                touchups: Vec::new(),
-                rotation: 0,
-            };
-            images.insert(
-                path.to_str().unwrap().to_string(),
-                serde_json::to_value(&rec).unwrap(),
-            );
-        }
-        let doc = serde_json::json!({ "version": 2, "images": images });
-        std::fs::write(
-            dir.join(CATALOG_FILE),
-            serde_json::to_vec(&doc).unwrap(),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn migrate_no_op_when_nothing_legacy_present() {
-        // migrate_legacy_catalog() always targets the real app-support dir,
-        // so this just checks the reported shape holds for the "nothing to
-        // do" case using the fan_out/migrate_sqlite building blocks directly.
-        let dir = unique_tmp_dir();
-        let images: HashMap<PathBuf, ImageRecord> = HashMap::new();
-        let (migrated, skipped) = fan_out(&images);
-        assert_eq!((migrated, skipped), (0, 0));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn migrate_fans_rows_out_to_correct_directories_and_retires_json() {
-        let app_dir = unique_tmp_dir();
-        let photo_dir_1 = unique_tmp_dir();
-        let photo_dir_2 = unique_tmp_dir();
-
-        let p1 = photo_dir_1.join("a.jpg");
-        let p2 = photo_dir_2.join("b.jpg");
-        write_legacy_json(&app_dir, &[(&p1, Some(4), None), (&p2, Some(2), None)]);
-
-        let summary = migrate_json(&app_dir.join(CATALOG_FILE));
-        assert_eq!(summary.migrated, 2);
-        assert_eq!(summary.skipped, 0);
-        assert!(!summary.already_done);
-
-        assert!(sidecar_for(&photo_dir_1, "a.jpg").exists());
-        assert!(sidecar_for(&photo_dir_2, "b.jpg").exists());
-        assert!(
-            app_dir.join("catalog.json.bak").exists(),
-            "fully-resolved migration should retire catalog.json"
-        );
-        assert!(!app_dir.join(CATALOG_FILE).exists());
-
-        std::fs::remove_dir_all(&app_dir).unwrap();
-        std::fs::remove_dir_all(&photo_dir_1).unwrap();
-        std::fs::remove_dir_all(&photo_dir_2).unwrap();
-    }
-
-    #[test]
-    fn migrate_skips_missing_directory_and_retries_next_pass() {
-        let app_dir = unique_tmp_dir();
-        let missing = app_dir.join("does-not-exist-anywhere");
-        let p = missing.join("a.jpg");
-        write_legacy_json(&app_dir, &[(&p, Some(4), None)]);
-
-        let summary = migrate_json(&app_dir.join(CATALOG_FILE));
-        assert_eq!(summary.migrated, 0);
-        assert_eq!(summary.skipped, 1);
-        assert!(
-            app_dir.join(CATALOG_FILE).exists(),
-            "a partial migration must NOT retire catalog.json"
-        );
-
-        // Now the target becomes available and a re-run resolves it,
-        // demonstrating idempotent retry.
-        std::fs::create_dir_all(&missing).unwrap();
-        let summary2 = migrate_json(&app_dir.join(CATALOG_FILE));
-        assert_eq!(summary2.migrated, 1);
-        assert_eq!(summary2.skipped, 0);
-        assert!(app_dir.join("catalog.json.bak").exists());
-
-        // `missing` is nested under `app_dir` — removing app_dir takes it too.
-        std::fs::remove_dir_all(&app_dir).unwrap();
-    }
-
-    #[test]
-    fn migrate_is_idempotent_on_already_written_sidecar() {
-        let app_dir = unique_tmp_dir();
-        let photo_dir = unique_tmp_dir();
-        let p = photo_dir.join("a.jpg");
-        write_legacy_json(&app_dir, &[(&p, Some(3), None)]);
-
-        // Pre-seed the sidecar as if a previous partial pass (or the live
-        // app) already wrote it, with a DIFFERENT rating.
-        write_sidecar_file(
-            &sidecar_for(&photo_dir, "a.jpg"),
-            &ImageRecord {
-                rating: Some(1),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let summary = migrate_json(&app_dir.join(CATALOG_FILE));
-        assert_eq!(summary.migrated, 1);
-        assert_eq!(summary.skipped, 0);
-
-        let cat = Catalog::with_dir(photo_dir.clone());
-        assert_eq!(
-            cat.get(&p),
-            Some(1),
-            "an already-existing sidecar must not be clobbered by migration"
-        );
-
-        std::fs::remove_dir_all(&app_dir).unwrap();
-        std::fs::remove_dir_all(&photo_dir).unwrap();
     }
 }

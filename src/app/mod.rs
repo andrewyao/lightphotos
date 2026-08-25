@@ -695,11 +695,6 @@ mod web;
 
 impl App {
     pub(crate) fn new(initial: Option<PathBuf>) -> Self {
-        // Nothing to migrate on wasm32 — File System Access has no legacy
-        // global catalog.json/catalog.db to have inherited (catalog.rs
-        // gates the function out on this target for the same reason).
-        #[cfg(not(target_arch = "wasm32"))]
-        let _ = crate::catalog::migrate_legacy_catalog();
         let catalog = Catalog::new();
         let egui_ctx = egui::Context::default();
         configure_system_fonts(&egui_ctx);
