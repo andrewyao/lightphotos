@@ -217,6 +217,14 @@ fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
 /// ordinary Bayer/X-Trans cameras don't hit those arms, but it's a real,
 /// narrow panic surface inherited from the dependency, not something this
 /// function can guard against from the outside.
+///
+/// Stage vocabulary note: this delegates black/white-normalize, white
+/// balance, and demosaic to `RawDevelop`'s own `ProcessingStep`s (this is
+/// literally the `PPGDemosaic`/`apply_scaling`-equivalent machinery
+/// `raw_fast_preview.rs`'s `Fast`/`Quality` `DemosaicMode` now also calls
+/// directly — see `plans/raw-decode-rapidraw-parity-design.md`). Neither
+/// path applies any per-camera profile — both use `raw.color_matrix`
+/// (DNG-embedded calibration) directly, matching RapidRaw's own design.
 #[cfg(not(target_os = "macos"))]
 fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let raw = decode_raw_via_rawler(path)?;
