@@ -216,6 +216,18 @@ fn apply_cam2rgb(cam2rgb: &[[f32; 4]; 3], rgb: [f32; 3]) -> [f32; 3] {
     rawler::imgop::raw::clip_euclidean_norm_avg(&srgb)
 }
 
+/// Renders one linear camera-RGB sample (already white-balanced) to
+/// display RGBA8: color matrix (if the camera has calibration data) ->
+/// gamma, alpha fixed opaque. Shared by both `bin_bayer_quarter_res` and
+/// `decimate_linear_rgb` — was duplicated inline in both before this.
+fn render_rgb_sample(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [u8; 4] {
+    let srgb = match cam2rgb {
+        Some(m) => apply_cam2rgb(m, rgb),
+        None => rgb,
+    };
+    [to_srgb_u8(srgb[0]), to_srgb_u8(srgb[1]), to_srgb_u8(srgb[2]), 255]
+}
+
 /// Bayer-CFA quarter-res preview: bin each 2x2 Bayer block into one output
 /// pixel, no interpolation. See `fast_preview`'s doc comment for when this
 /// applies.
@@ -281,15 +293,9 @@ fn bin_bayer_quarter_res(raw: &rawler::RawImage) -> Option<(u32, u32, Vec<u8>)> 
             if g_count > 0.0 {
                 rgb[1] /= g_count;
             }
-            let srgb = match &cam2rgb {
-                Some(m) => apply_cam2rgb(m, rgb),
-                None => rgb,
-            };
+            let px = render_rgb_sample(rgb, &cam2rgb);
             let idx = (oy * out_w + ox) * 4;
-            rgba[idx] = to_srgb_u8(srgb[0]);
-            rgba[idx + 1] = to_srgb_u8(srgb[1]);
-            rgba[idx + 2] = to_srgb_u8(srgb[2]);
-            rgba[idx + 3] = 255;
+            rgba[idx..idx + 4].copy_from_slice(&px);
         }
     }
 
@@ -343,14 +349,8 @@ fn decimate_linear_rgb(raw: &rawler::RawImage) -> Option<(u32, u32, Vec<u8>)> {
                 let denom = (white[ch] - black[ch]).max(1.0);
                 *slot = ((v - black[ch]) / denom).clamp(0.0, 1.0) * wb[ch];
             }
-            let srgb = match &cam2rgb {
-                Some(m) => apply_cam2rgb(m, rgb),
-                None => rgb,
-            };
-            rgba[idx] = to_srgb_u8(srgb[0]);
-            rgba[idx + 1] = to_srgb_u8(srgb[1]);
-            rgba[idx + 2] = to_srgb_u8(srgb[2]);
-            rgba[idx + 3] = 255;
+            let px = render_rgb_sample(rgb, &cam2rgb);
+            rgba[idx..idx + 4].copy_from_slice(&px);
         }
     }
 
