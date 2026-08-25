@@ -37,12 +37,17 @@ pub(crate) enum DemosaicMode {
     Quality,
 }
 
-/// Precomputed 1/2.2-gamma lookup table, built once on first use — the
+/// Precomputed sRGB-gamma lookup table, built once on first use — the
 /// spike's own finding: both algorithms below landed at the same
 /// ~300-320ms/megapixel regardless of approach, and replacing three
-/// per-pixel `powf()` calls with an array index was what actually mattered
-/// (a real, measured 6.3x speedup came almost entirely from this LUT, not
-/// either algorithm's own work).
+/// per-pixel gamma-function calls with an array index was what actually
+/// mattered (a real, measured 6.3x speedup came almost entirely from this
+/// LUT, not either algorithm's own work). The LUT bakes in `rawler`'s own
+/// `srgb_apply_gamma` — the real piecewise sRGB transfer function (linear
+/// segment below a crossover point, then a power curve with sRGB's actual
+/// gain/offset constants) rather than a flat `1/2.2` approximation, which
+/// this file used before — the LUT-as-perf-trick and the curve-it-encodes
+/// are independent choices; only the latter changed here.
 const GAMMA_LUT_SIZE: usize = 4097;
 static GAMMA_LUT: std::sync::OnceLock<[u8; GAMMA_LUT_SIZE]> = std::sync::OnceLock::new();
 
@@ -51,7 +56,7 @@ fn to_srgb_u8(v: f32) -> u8 {
         let mut table = [0u8; GAMMA_LUT_SIZE];
         for (i, entry) in table.iter_mut().enumerate() {
             let linear = i as f32 / (GAMMA_LUT_SIZE - 1) as f32;
-            *entry = (linear.powf(1.0 / 2.2) * 255.0).round() as u8;
+            *entry = (rawler::imgop::srgb::srgb_apply_gamma(linear) * 255.0).round() as u8;
         }
         table
     });

@@ -805,7 +805,7 @@ mod tests {
             decoded.rgba.len()
         );
         assert_eq!(
-            golden, 0x5da9_3a19_268e_ca49,
+            golden, 0xd5f9_409b_4c85_7923,
             "Fast-tier Bayer decode output changed from the captured golden hash \
              (see this test's println! output above for the actual value) - if this \
              change is intentional, update the literal; if not, a task's supposedly \
@@ -860,7 +860,7 @@ mod tests {
              below would then discriminate nothing but the output dimensions"
         );
         assert_eq!(
-            golden, 0xfc55_ec6a_fa4c_56db,
+            golden, 0x96c1_c068_2b25_de8f,
             "Fast-tier Linear decode output changed from the captured golden hash \
              (see this test's println! output above for the actual value)"
         );
