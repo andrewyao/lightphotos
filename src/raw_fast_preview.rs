@@ -37,17 +37,21 @@ pub(crate) enum DemosaicMode {
     Quality,
 }
 
-/// Precomputed sRGB-gamma lookup table, built once on first use — the
-/// spike's own finding: both algorithms below landed at the same
+/// Precomputed sRGB-gamma+display-boost lookup table, built once on first
+/// use — the spike's own finding: both algorithms below landed at the same
 /// ~300-320ms/megapixel regardless of approach, and replacing three
 /// per-pixel gamma-function calls with an array index was what actually
 /// mattered (a real, measured 6.3x speedup came almost entirely from this
-/// LUT, not either algorithm's own work). The LUT bakes in `rawler`'s own
-/// `srgb_apply_gamma` — the real piecewise sRGB transfer function (linear
-/// segment below a crossover point, then a power curve with sRGB's actual
-/// gain/offset constants) rather than a flat `1/2.2` approximation, which
-/// this file used before — the LUT-as-perf-trick and the curve-it-encodes
-/// are independent choices; only the latter changed here.
+/// LUT, not either algorithm's own work). The LUT bakes in two independent
+/// curves, chained: `rawler`'s own `srgb_apply_gamma` (the real piecewise
+/// sRGB transfer function, replacing a flat `1/2.2` approximation this file
+/// used before) then `image_decode::apply_raw_preview_boost` (RapidRaw's
+/// brightness/contrast display transform, without which a linear-matrix RAW
+/// conversion looks flatter/darker than a camera JPEG by design) —
+/// the LUT-as-perf-trick and the curves it encodes are independent choices;
+/// `decode_raw_nonmac` (native non-mac) applies the exact same two curves
+/// via its own LUT, since it can't share this `OnceLock`'d one (different
+/// cfg gate, different call shape).
 const GAMMA_LUT_SIZE: usize = 4097;
 static GAMMA_LUT: std::sync::OnceLock<[u8; GAMMA_LUT_SIZE]> = std::sync::OnceLock::new();
 
@@ -56,7 +60,8 @@ fn to_srgb_u8(v: f32) -> u8 {
         let mut table = [0u8; GAMMA_LUT_SIZE];
         for (i, entry) in table.iter_mut().enumerate() {
             let linear = i as f32 / (GAMMA_LUT_SIZE - 1) as f32;
-            *entry = (rawler::imgop::srgb::srgb_apply_gamma(linear) * 255.0).round() as u8;
+            let srgb = rawler::imgop::srgb::srgb_apply_gamma(linear);
+            *entry = (crate::image_decode::apply_raw_preview_boost(srgb) * 255.0).round() as u8;
         }
         table
     });

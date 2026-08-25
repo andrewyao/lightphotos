@@ -199,6 +199,34 @@ fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
     }
 }
 
+/// Brightness+contrast boost RapidRaw applies unconditionally to every RAW
+/// photo's display rendering — ported verbatim, constants included, from
+/// its shader (`shader.wgsl:1823-1835` in the `CyberTimon/RapidRAW-DngLab`
+/// tree), gated there on `is_raw==1` since that shader also serves non-RAW
+/// photos. Both callers here (`decode_raw_nonmac` below,
+/// `raw_fast_preview.rs`'s `to_srgb_u8`) are RAW-only by construction, so
+/// the gate is implicit — no flag needed.
+///
+/// A naive linear-matrix -> sRGB-gamma RAW conversion is flatter/darker
+/// than a camera's own JPEG or a tool like Lightroom by design — those
+/// apply an additional, deliberately-tuned rendering transform on top of
+/// the "correct" linear conversion. This is that transform, not a fix to
+/// the conversion itself.
+///
+/// Takes an already sRGB-gamma-encoded value, not linear — RapidRaw's own
+/// ordering is real sRGB gamma, then this boost.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+const RAW_PREVIEW_BRIGHTNESS_GAMMA: f32 = 1.1;
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+const RAW_PREVIEW_CONTRAST_MIX: f32 = 0.75;
+
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+pub(crate) fn apply_raw_preview_boost(srgb: f32) -> f32 {
+    let brightened = srgb.powf(1.0 / RAW_PREVIEW_BRIGHTNESS_GAMMA);
+    let contrast_curve = brightened * brightened * (3.0 - 2.0 * brightened);
+    (brightened + (contrast_curve - brightened) * RAW_PREVIEW_CONTRAST_MIX).clamp(0.0, 1.0)
+}
+
 /// Decode a camera RAW file on non-mac platforms via `rawler`: decode the raw
 /// sensor samples ([`decode_raw_via_rawler`]), then run rawler's own
 /// `RawDevelop` pipeline (rescale -> demosaic -> active-area crop -> white
@@ -236,7 +264,20 @@ fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> 
     let dynamic = developed
         .to_dynamic_image()
         .ok_or("rawler produced an empty developed image")?;
-    let img = dynamic.into_rgba8();
+    let mut img = dynamic.into_rgba8();
+
+    // `RawDevelop::default()`'s `SRgb` step already gamma-encoded these
+    // bytes — apply the same brightness/contrast boost
+    // `raw_fast_preview.rs`'s LUT applies, via a small local u8->u8 LUT
+    // (256 entries, built once per call — this path isn't hot-looped the
+    // way the wasm decode path is, so no need for a static/`OnceLock`).
+    let boost_lut: [u8; 256] =
+        std::array::from_fn(|i| (apply_raw_preview_boost(i as f32 / 255.0) * 255.0).round() as u8);
+    for px in img.pixels_mut() {
+        px[0] = boost_lut[px[0] as usize];
+        px[1] = boost_lut[px[1] as usize];
+        px[2] = boost_lut[px[2] as usize];
+    }
 
     let (src_w, src_h) = (img.width(), img.height());
     if src_w == 0 || src_h == 0 {
@@ -792,6 +833,24 @@ pub(crate) fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ported verbatim from RapidRaw's `shader.wgsl:1823-1835` — checks the
+    /// two properties that matter for "why this fixes darkness": identity
+    /// at both ends of the range (0 stays 0, 1 stays 1 — this is a display
+    /// boost, not a levels shift that clips or crushes), and genuine
+    /// brightening in between (a mid-gray input comes out brighter, not
+    /// darker or unchanged) — confirmed by hand: `0.5f32.powf(1.0/1.1)`
+    /// ≈ 0.533, and the contrast curve/mix only pull further toward that
+    /// same direction for a value already above its own midpoint.
+    #[test]
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    fn raw_preview_boost_is_identity_at_endpoints_and_brightens_midtones() {
+        assert_eq!(apply_raw_preview_boost(0.0), 0.0);
+        assert!((apply_raw_preview_boost(1.0) - 1.0).abs() < 1e-6);
+
+        let mid = apply_raw_preview_boost(0.5);
+        assert!(mid > 0.5, "expected midtone brightening, got {mid}");
+    }
 
     #[test]
     fn parse_exif_datetime_unix_epoch_anchor() {
