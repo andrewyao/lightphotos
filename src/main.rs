@@ -26,13 +26,22 @@
 mod app;
 mod burst;
 mod catalog;
+// All four live under src/web/ (physically separated from native-only
+// code), but keep their existing flat module names via #[path] — every
+// `crate::web_fs::`/etc. call site elsewhere in the codebase resolves by
+// module path, not file location, so this move needed no other file's
+// `use` statements touched.
 #[cfg(target_arch = "wasm32")]
+#[path = "web/web_canvas.rs"]
 mod web_canvas;
 #[cfg(target_arch = "wasm32")]
+#[path = "web/web_fs.rs"]
 mod web_fs;
 #[cfg(target_arch = "wasm32")]
+#[path = "web/web_worker_pool.rs"]
 mod web_worker_pool;
 #[cfg(target_arch = "wasm32")]
+#[path = "web/web_catalog_fs.rs"]
 mod web_catalog_fs;
 #[cfg(target_os = "macos")]
 mod coregraphics;
@@ -410,7 +419,7 @@ impl ApplicationHandler<UserEvent> for App {
             || self.selection_pending()
             || catalog_load_pending;
         #[cfg(target_arch = "wasm32")]
-        let image_pending = image_pending || web_folder_pending;
+        let image_pending = image_pending || web_folder_pending || self.web_decode_pending();
         let poll_delay = if image_pending {
             Some(16)
         } else if self.export_progress.is_some() {
@@ -449,6 +458,12 @@ impl ApplicationHandler<UserEvent> for App {
             // above does for its own tier.
             self.poll_web_preview();
             if self.request_web_preview() {
+                self.request_redraw();
+            }
+            // Zoom-triggered full-resolution tier — see
+            // `ensure_full_for_zoom`'s wasm32 branch for what enqueues this.
+            self.poll_web_full();
+            if self.request_web_full() {
                 self.request_redraw();
             }
         }

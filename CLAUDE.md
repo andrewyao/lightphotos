@@ -8,6 +8,8 @@ LightPhotos: a fast macOS Lightroom-lite photo culling & develop tool, written i
 
 ## Commands
 
+One-time setup, before any `cargo` command below: `./scripts/setup-vendor-rawler.sh`. `[patch.crates-io]` in `Cargo.toml` redirects the `rawler` crate (camera RAW decode) to a local vendored+patched copy for every target, not just wasm32 (Cargo has no way to scope a patch to one target) — see that entry's own comment for why. The script fetches plain rawler 0.7.2 from crates.io and applies `patches/rawler-web-time.patch`; `vendor/` isn't committed (see `.gitignore`).
+
 ```sh
 cargo build --release   # release binary at target/release/lightphotos (opt-level 3, thin LTO — matters for decode/render throughput)
 cargo build              # debug build; works but noticeably slower at runtime

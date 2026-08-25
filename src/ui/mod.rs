@@ -46,7 +46,10 @@ mod theme {
     /// (`lp.css:11`). The site paints that text with a CSS gradient
     /// (`background-clip: text`) that egui has no equivalent for, so this
     /// is a flat stand-in for the gradient's dominant color; keep it in
-    /// sync with `lp.css` if that value ever changes.
+    /// sync with `lp.css` if that value ever changes. `site_nav`-only
+    /// (wasm32's persistent marketing-site nav bar), hence the cfg gate
+    /// unlike every other color in this module.
+    #[cfg(target_arch = "wasm32")]
     pub const BRAND_BLUE: Color32 = Color32::from_rgb(79, 140, 255);
 }
 
@@ -298,8 +301,9 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// earlier version linked back to lightphotos.app via `hyperlink_to`, but
 /// the click never actually opened a tab on web and wasn't worth chasing
 /// further, so the link was dropped.
+#[cfg(target_arch = "wasm32")]
 fn site_nav(ui: &mut egui::Ui) {
-    egui::TopBottomPanel::top("lp_site_nav").show_inside(ui, |ui| {
+    egui::Panel::top("lp_site_nav").show_inside(ui, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);

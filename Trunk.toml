@@ -1,5 +1,13 @@
 [build]
 target = "index.html"
+# Plain `trunk build`/`trunk serve` builds the **dev** cargo profile
+# (opt-level=0, no LTO) — this project's `[profile.release]` (opt-level=3,
+# thin LTO, codegen-units=1) only applies with `--release`. For anything
+# CPU-heavy (RAW decode/demosaic, in particular) debug-vs-release wasm is
+# routinely 10-30x apart — confirmed live: a debug build's PPG-demosaic RAW
+# Loupe load felt "too slow" and a release build's bg.wasm alone dropped
+# from 76MB to 8MB. Always use `trunk build --release` / `trunk serve
+# --release` when judging real performance, not plain `trunk build`/`serve`.
 # wgpu's WebGPU web-sys bindings, and the File System Access bindings
 # (window.showDirectoryPicker et al.), are still gated behind this
 # unstable-apis flag (see the wasm port plan's Architecture section).

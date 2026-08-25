@@ -8,12 +8,26 @@
 //! `image_decode::cgimage_to_rgba` to read it back as tightly-packed RGBA8.
 //!
 //! Non-mac: tries to extract a file's embedded EXIF/TIFF preview
-//! (`try_extract_embedded_preview`, via `kamadak-exif`) first, falling back to
-//! a full decode-at-size through `image_decode::decode` — see each function's
-//! non-mac doc comment for exactly what is and isn't handled.
+//! (`try_extract_embedded_preview`, via `kamadak-exif`) first, then rawler's
+//! own per-format `Decoder::full_image()` for containers the former can't
+//! even open (CR3, RAF), falling back to a full decode-at-size through
+//! `image_decode::decode` — see each function's non-mac doc comment for
+//! exactly what is and isn't handled.
 //!
 //! `ThumbCache`, `EmbeddedPreview`, and the on-disk `.tw` cache format below
 //! are platform-independent (no objc2 dependency) and unconditional.
+//!
+//! ## Pipeline position
+//! - `loader.rs`'s `Job::Quick`/`Job::Preview` (Pipeline 1, opening a photo)
+//!   call `decode_at_size` directly — `UseIfPresent` for the cheap first
+//!   pass, `Never` for the forced screen-fit decode once that pass comes
+//!   back short.
+//! - `loader.rs`'s `Job::Thumb` (Pipeline 2, Grid/filmstrip) calls
+//!   `ThumbCache::get_or_make`, which checks the on-disk `.tw` cache before
+//!   falling back to `thumbnail()`.
+//! - wasm32 doesn't reach `ThumbCache` at all — `wasm_worker.rs` calls the
+//!   bytes-based `embedded_preview_from_bytes`/`rawler_full_image_from_bytes`
+//!   helpers directly, in-memory only. See `ARCHITECTURE.md`.
 
 // TODO: remove once wired into loader (T3)
 #![allow(dead_code)]
@@ -38,7 +52,7 @@ use objc2_image_io::{
 
 #[cfg(target_os = "macos")]
 use crate::image_decode::cgimage_to_rgba;
-use crate::image_decode::DecodedImage;
+use crate::image_decode::{DecodedImage, PixelFormat};
 
 /// Decode a thumbnail of `path` whose longest side is at most `max_px` pixels.
 ///
@@ -162,7 +176,7 @@ pub fn decode_at_size(
 #[cfg(not(target_os = "macos"))]
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
     let bytes = fs::read(path).ok()?;
-    embedded_preview_from_bytes(&bytes, max_px)
+    embedded_preview_from_bytes(&bytes, max_px).or_else(|| rawler_full_image_from_bytes(&bytes, max_px))
 }
 
 /// The bytes-based core of [`try_extract_embedded_preview`] above — same
@@ -228,9 +242,100 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
             width: nw,
             height: nh,
             rgba,
+            pixel_format: PixelFormat::Srgb8,
         },
         orientation,
     ))
+}
+
+/// Fallback for when [`embedded_preview_from_bytes`] above can't even open
+/// the container — CR3's ISO-BMFF (`ftyp`/`crx`) wrapper and RAF's
+/// proprietary `"FUJIFILM..."` header both fail `kamadak-exif`'s TIFF/JPEG
+/// magic sniff outright, so that function always returns `None` for them,
+/// regardless of file content.
+///
+/// Asks `rawler`'s own `Decoder::full_image()` instead — a per-format trait
+/// method (default `Ok(None)`) that formats overriding it use to hand back
+/// whatever embedded JPEG/preview their container carries, without touching
+/// the CFA/sensor block or running any demosaic.
+///
+/// **Gated to `FormatHint::RAF`/`CR3` on purpose** — those are the only two
+/// formats [`embedded_preview_from_bytes`] can't open at all, which is this
+/// function's actual job. `full_image()` is *also* overridden by several
+/// TIFF-based decoders this crate treats as RAW (CR2, NEF, ARW, DNG, RW2,
+/// PEF — confirmed against `vendor/rawler-0.7.2/src/decoders/*.rs`), whose
+/// containers `embedded_preview_from_bytes` opens fine already; an earlier,
+/// ungated version of this function asked `full_image()` unconditionally for
+/// any format, and for those it would win over the caller's real RAW-quality
+/// decode whenever the baseline IFD1 thumbnail was "too small" — which is
+/// nearly always. That silently substituted the camera's own embedded JPEG
+/// (its own in-camera tone/color rendering, often a very different image)
+/// for the Loupe's actual linear-RAW develop, on every ARW/CR2/NEF/DNG/RW2/
+/// PEF file, confirmed via a real Sony ARW: embedded JPEG mean sRGB ~0.27 vs
+/// the real demosaic's ~0.18 — a completely different picture, not a subtle
+/// tonemap bug. Scoped back to its original purpose.
+///
+/// Wrapped in `catch_unwind` for defense-in-depth, matching
+/// `raw_fast_preview.rs`'s own convention around `rawler` calls — largely a
+/// no-op on `wasm32-unknown-unknown` (`panic = "abort"`, no real unwinding),
+/// but `full_image()`'s implementations read their embedded-image
+/// offset/length fields through `RawSource::subview`, which is
+/// bounds-checked and `Result`-returning rather than raw slice indexing, so
+/// this call path isn't the panic-prone kind to begin with.
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<DecodedImage> {
+    let run = std::panic::AssertUnwindSafe(|| -> Option<DecodedImage> {
+        let source = rawler::rawsource::RawSource::new_from_slice(bytes);
+        let params = rawler::decoders::RawDecodeParams::default();
+        let decoder = rawler::get_decoder(&source).ok()?;
+        if !matches!(
+            decoder.format_hint(),
+            rawler::decoders::FormatHint::RAF | rawler::decoders::FormatHint::CR3
+        ) {
+            return None;
+        }
+
+        let dynamic = decoder.full_image(&source, &params).ok().flatten()?;
+        let img = dynamic.into_rgba8();
+        let (w, h) = (img.width(), img.height());
+        if w == 0 || h == 0 {
+            return None;
+        }
+
+        // Orientation from `raw_metadata()`, not the embedded image's own
+        // EXIF (may be absent, or describe only the sub-image rather than
+        // the shot) — same source and the same `Option<u16>` ->
+        // `rawler::Orientation` -> EXIF-code conversion `decode_raw_nonmac`
+        // already uses for the full-decode path.
+        let orientation = decoder
+            .raw_metadata(&source, &params)
+            .ok()
+            .and_then(|meta| meta.exif.orientation)
+            .map(|code| {
+                crate::image_decode::exif_code_from_rawler_orientation(rawler::Orientation::from_u16(code))
+            })
+            .unwrap_or(1);
+
+        let (nw, nh) = crate::image_decode::fit_within(w, h, max_px);
+        let rgba = if (nw, nh) == (w, h) {
+            img.into_raw()
+        } else {
+            image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
+        };
+        // Resize before orienting — same order `embedded_preview_from_bytes`
+        // uses, for the same reason (orientation swaps w/h for cases 5..=8,
+        // which would otherwise fit the wrong aspect ratio).
+        Some(crate::image_decode::apply_exif_orientation(
+            DecodedImage {
+                width: nw,
+                height: nh,
+                rgba,
+                pixel_format: PixelFormat::Srgb8,
+            },
+            orientation,
+        ))
+    });
+    std::panic::catch_unwind(run).ok().flatten()
 }
 
 /// Build the options `CFDictionary` for `CGImageSourceCreateThumbnailAtIndex`.
@@ -471,6 +576,7 @@ fn read_tw(path: &Path) -> Result<DecodedImage, String> {
         width,
         height,
         rgba,
+        pixel_format: PixelFormat::Srgb8,
     })
 }
 
@@ -488,6 +594,7 @@ mod tests {
                 1, 2, 3, 255, 4, 5, 6, 255, // row 0
                 7, 8, 9, 255, 10, 11, 12, 255, // row 1
             ],
+            pixel_format: PixelFormat::Srgb8,
         };
 
         let dir = std::env::temp_dir().join(format!("iv-tw-test-{}", std::process::id()));

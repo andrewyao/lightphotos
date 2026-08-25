@@ -158,6 +158,11 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
         // Before/after: a center divider and corner labels over the split image.
         loupe_compare_overlay(ui, central);
     }
+    // wasm32 RAW loading (see `App::loupe_is_loading`): no overlay drawn
+    // here at all — `app/mod.rs` just blanks the wgpu image draw
+    // (`primary_vp` forced to zero-size) while it's in flight, so the Loupe
+    // goes blank rather than showing the previous photo. A percentage
+    // progress bar was tried here and reverted.
 }
 
 pub(super) fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {

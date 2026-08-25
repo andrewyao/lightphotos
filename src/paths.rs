@@ -6,6 +6,7 @@
 //! canonicalized absolute path — but `migrate_legacy_dir` below still backs
 //! its one-time app-support directory rename.
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -42,6 +43,7 @@ pub fn migrate_legacy_dir(new: &Path, legacy: &Path) {
 /// existing file is never overwritten and two same-stem sources exported
 /// together (e.g. `photo.raw` + `photo.jpg`) don't collide. Tries `stem.jpg`,
 /// then `stem-1.jpg`, `stem-2.jpg`, …
+#[cfg(not(target_arch = "wasm32"))]
 pub fn jpg_export_target(src: &Path, dest_dir: &Path, taken: &HashSet<PathBuf>) -> PathBuf {
     let stem = src
         .file_stem()

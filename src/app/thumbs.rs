@@ -1,3 +1,25 @@
+//! Tier selection for the Loupe (`try_show`), thumbnail texture sync for the
+//! Grid/filmstrip (`sync_thumb_textures`), and the background scoring hooks
+//! (burst/duplicate/face-quality) that ride along on decoded thumbnails.
+//!
+//! ## Pipeline position
+//! - `try_show` runs every frame and is Pipeline 1's "what does the user see
+//!   right now" decision: it reads whatever `loader.rs`'s caches
+//!   (`get_full`/`get_preview`/`get_thumb`) already have and calls
+//!   `upload_shown` for the best tier available, falling coarsest-first.
+//! - `upload_shown` is the actual hand-off into Pipeline 1's shared final
+//!   stage: it calls `Renderer::set_image` (`renderer.rs`).
+//! - `request_working_thumbs`/`sync_thumb_textures` are Pipeline 2's
+//!   UI-thread half: the first asks `loader.rs` to decode thumbnails for the
+//!   visible range, the second uploads whatever has landed as egui
+//!   textures — baking edits in via `image_ops::bake_edited` first when the
+//!   photo has any.
+//! - `request_burst_thumbs`/`request_dup_thumbs`/`request_face_quality` and
+//!   their `poll_*`/`score_*` counterparts aren't part of the three
+//!   decode/render pipelines — they're background analysis that consumes
+//!   thumbnails Pipeline 2 already decoded, rather than driving decode
+//!   itself.
+
 use super::*;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -8,6 +30,15 @@ use crate::featureprint;
 use crate::phash;
 use crate::sharpness;
 use crate::{image_decode, image_ops};
+
+// TEMPORARY DEBUG colors — see `Renderer::tier_debug_color`'s doc comment.
+// Remove alongside `set_tier_debug_color` once the Loupe zoom-refit fix is
+// verified.
+pub(super) const TIER_DEBUG_WHITE: wgpu::Color = wgpu::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+// Only referenced from `app/web.rs` (the `Speed` tier is wasm32-only).
+#[cfg(target_arch = "wasm32")]
+pub(super) const TIER_DEBUG_GRAY_18: wgpu::Color = wgpu::Color { r: 0.18, g: 0.18, b: 0.18, a: 1.0 };
+pub(super) const TIER_DEBUG_BLACK: wgpu::Color = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
 
 impl App {
 
@@ -31,6 +62,7 @@ impl App {
         if let Some(img) = self.loader.as_ref().and_then(|l| l.get_full(&want)) {
             if !self.shown.is_full_of(&want) {
                 self.upload_shown(&want, &img, Shown::Full(want.clone()));
+                self.set_tier_debug(TIER_DEBUG_BLACK, "FULL"); // TEMPORARY DEBUG
             }
             return;
         }
@@ -46,6 +78,12 @@ impl App {
             let actual = img.width.max(img.height);
             if !self.shown.is_preview_of(&want, target, actual) && !self.shown.is_full_of(&want) {
                 self.upload_shown(&want, &img, Shown::Preview(want.clone(), target, actual));
+                // Reached only via `loader.rs`'s preview cache — the
+                // wasm32 `Speed` tier bypasses this entirely (see
+                // `poll_web_preview`), so anything landing here is always
+                // the real quality decode (native's forced `Preview`, or
+                // wasm32's `JobKind::Preview`). TEMPORARY DEBUG.
+                self.set_tier_debug(TIER_DEBUG_BLACK, "QUALITY");
             }
             return;
         }
@@ -74,6 +112,19 @@ impl App {
 
         // Nothing decoded yet: show the thumbnail placeholder if we aren't
         // already showing this image in some form.
+        //
+        // wasm32 RAW used to skip this (its thumb-tier cache entry — the
+        // file's own tiny embedded EXIF preview, or our quarter-res `Fast`
+        // demosaic — reads as visibly wrong blown up to fill the Loupe, not
+        // just coarse) and wait for the real `Quality` decode instead. That
+        // was a workaround for `upload_shown`'s missing `fitted` gate (a
+        // same-photo tier swap always landed mis-zoomed, so fewer tiers
+        // meant fewer chances to hit it) rather than an actual quality
+        // concern with showing this stage — `upload_shown` re-fits
+        // correctly now, and the `Speed` tier (`request_web_preview`)
+        // replaces this placeholder within moments anyway, so it's now just
+        // the instant "something's happening" first frame it already is on
+        // native.
         if self.shown.path() != Some(want.as_path()) {
             if let Some(thumb) = self
                 .loader
@@ -81,8 +132,32 @@ impl App {
                 .and_then(|l| l.get_thumb(&want, self.thumb_px))
             {
                 self.upload_shown(&want, &thumb, Shown::Thumb(want.clone()));
+                self.set_tier_debug(TIER_DEBUG_WHITE, "THUMB"); // TEMPORARY DEBUG
             }
         }
+    }
+
+    // TEMPORARY DEBUG — see `Renderer::tier_debug_color`'s and
+    // `App::debug_tier_label`'s doc comments. Remove both call sites and
+    // this method once the Loupe zoom-refit fix is verified.
+    pub(super) fn set_tier_debug(&mut self, color: wgpu::Color, label: &'static str) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.tier_debug_color = color;
+        }
+        self.debug_tier_label = label;
+        self.update_window_title();
+        // Window/tab title can be invisible depending on how the page is
+        // displayed (installed/app-mode window, no tab strip, ...) — the
+        // DevTools console always exists regardless, so log there too.
+        #[cfg(target_arch = "wasm32")]
+        web_sys::console::log_1(
+            &format!(
+                "[debug] tier -> {label} ({}x{})",
+                self.renderer.as_ref().map(|r| r.image_size.0).unwrap_or(0),
+                self.renderer.as_ref().map(|r| r.image_size.1).unwrap_or(0),
+            )
+            .into(),
+        );
     }
 
     /// Upload an image to the renderer as the currently-shown image and re-fit.
@@ -109,11 +184,27 @@ impl App {
         // Load this image's stored edits into the shader (or identity if none).
         self.push_adjustments();
         // A new picture always starts fitted. A sharper tier of the *same*
-        // picture must not disturb the view — the full-resolution decode is
-        // triggered precisely by zooming in, so re-fitting here would yank the
-        // user back out to fit the instant their zoom paid off.
+        // picture must not disturb a view the user has already zoomed away
+        // from fit — the full-resolution decode is triggered precisely by
+        // zooming in, so re-fitting here would yank the user back out to fit
+        // the instant their zoom paid off. But while `self.fitted` is still
+        // true (no manual zoom yet — the common case for a tier swap that
+        // lands moments after opening), the view is supposed to be tracking
+        // the image's own size, and `image_size()` falls back to the
+        // just-uploaded texture's raw pixel dimensions until real
+        // `source_size` metadata lands — so a same-photo tier swap in that
+        // window must re-fit too, or the old zoom/pan (computed against the
+        // previous, differently-sized tier) gets reapplied against the new
+        // one's dimensions: shrunk scale, near-zero offset, stuck zoomed
+        // into the top-left corner. This is what `on_exif_info` already
+        // does when `source_size` itself changes; this covers the same
+        // hazard for every other tier landing, not just that one.
         if same_photo {
-            self.push_transform();
+            if self.fitted {
+                self.fit_to_window();
+            } else {
+                self.push_transform();
+            }
         } else {
             self.fit_to_window();
         }
@@ -131,7 +222,10 @@ impl App {
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     let pos = self.sel.unwrap_or(0) + 1;
-                    w.set_title(&format!("{}  ({}/{})", name, pos, self.visible.len()));
+                    // TEMPORARY DEBUG prefix — see `App::debug_tier_label`.
+                    let tag =
+                        if self.debug_tier_label.is_empty() { String::new() } else { format!("[{}] ", self.debug_tier_label) };
+                    w.set_title(&format!("{tag}{}  ({}/{})", name, pos, self.visible.len()));
                 }
             }
             ViewMode::Grid => {

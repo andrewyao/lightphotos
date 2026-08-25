@@ -1,3 +1,18 @@
+//! Loupe view-state math: zoom/pan/fit, the crop/UV coordinate transforms,
+//! and the subject-selection overlay.
+//!
+//! ## Pipeline position
+//! - This is Pipeline 1's UI-thread half — it decides *what to ask for* and
+//!   *how to show what comes back*, never decodes a pixel itself.
+//! - `ensure_full_for_zoom` is the trigger for Pipeline 1's most expensive
+//!   step: it's called after every zoom change and only then decides
+//!   whether to call `Loader::request_full` (native) or
+//!   `request_web_full` (`app/web.rs`, wasm32) — normal browsing at
+//!   "fit to window" never reaches it.
+//! - `fit_to_window`/`fit_for_crop`/`center`/`zoom_at` all end by calling
+//!   `push_transform`, which uploads the new transform to `renderer.rs` —
+//!   the same shared final stage every pipeline path converges on.
+
 use super::*;
 use std::path::Path;
 
@@ -76,15 +91,28 @@ impl App {
     /// expensive decode path entirely. `Loader::request_full` de-duplicates, so
     /// calling this on every zoom step is cheap.
     pub(super) fn ensure_full_for_zoom(&mut self) {
-        let Some(path) = self.want.clone() else {
+        if self.want.is_none() {
             return;
-        };
+        }
         let (iw, ih) = self.image_size();
         if !zoom_outruns_preview(iw.max(ih), self.zoom, self.preview_px()) {
             return;
         }
-        if let Some(loader) = &mut self.loader {
-            loader.request_full(path);
+        // wasm32: `loader.rs`'s own worker queue has no live workers there
+        // (same reason `try_show`'s `request_preview` call is native-only —
+        // see its own comment), so `loader.request_full` would silently do
+        // nothing. `request_web_full` (`app/web.rs`) is the wasm-effective
+        // equivalent, polled every frame from `main.rs` the same way
+        // `request_web_preview` is.
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.request_web_full();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = self.want.clone() {
+            if let Some(loader) = &mut self.loader {
+                loader.request_full(path);
+            }
         }
     }
 

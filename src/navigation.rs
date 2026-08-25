@@ -223,6 +223,7 @@ impl Playlist {
     /// `entries` should already be sorted the same way `sorted_images_in`
     /// sorts (case-insensitive by name) for consistent behavior with the
     /// native path; this doesn't re-sort or filter, it just wraps.
+    #[cfg(target_arch = "wasm32")]
     pub fn from_entries(dir: PathBuf, entries: Vec<PathBuf>) -> Self {
         Self {
             entries,

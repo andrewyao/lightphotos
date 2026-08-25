@@ -17,7 +17,9 @@ impl App {
     /// Whether a folder/file has been opened yet. Always true on native
     /// shortly after startup (a CLI arg or AppleEvent path is required — see
     /// `main.rs`); on wasm32 this is what `ui::draw`'s landing page checks,
-    /// since there's no such requirement there.
+    /// since there's no such requirement there — the only caller, hence the
+    /// cfg gate.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn has_playlist(&self) -> bool {
         self.playlist.is_some()
     }

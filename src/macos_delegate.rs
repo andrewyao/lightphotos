@@ -14,6 +14,7 @@
 //! object, so winit's identity assertion still holds.
 
 use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
 
 #[cfg(target_os = "macos")]
@@ -26,6 +27,7 @@ use objc2::runtime::{AnyClass, AnyObject, Imp, Sel};
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSURL};
 
+#[cfg(not(target_arch = "wasm32"))]
 use winit::event_loop::EventLoopProxy;
 
 /// Events delivered from the OS into the winit event loop.
@@ -35,9 +37,15 @@ pub enum UserEvent {
     OpenFile(PathBuf),
 }
 
-/// Set once in `main`; read by the injected Objective-C method.
+/// Set once in `main`; read by the injected Objective-C method. Only
+/// `main.rs`'s native `fn main()` ever calls `set_proxy`/
+/// `install_open_handler` — wasm32's own `fn main()` has no Finder
+/// equivalent to wire up at all — so both are `not(wasm32)`-gated here too,
+/// on top of `install_open_handler`'s own mac/non-mac split below.
+#[cfg(not(target_arch = "wasm32"))]
 static PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
 
+#[cfg(not(target_arch = "wasm32"))]
 pub fn set_proxy(proxy: EventLoopProxy<UserEvent>) {
     let _ = PROXY.set(proxy);
 }
@@ -89,12 +97,14 @@ pub fn install_open_handler() -> bool {
     }
 }
 
-/// Non-mac "open with" already works via the CLI path argument
+/// Non-mac native "open with" already works via the CLI path argument
 /// (`lightphotos /path/to/photo.jpg`) — no Finder-equivalent hook exists to
 /// install, so this is a no-op that reports "not installed" so main.rs's
 /// existing warning still prints (harmless — there's nothing to warn about
-/// on this platform, but the warning is not incorrect either).
-#[cfg(not(target_os = "macos"))]
+/// on this platform, but the warning is not incorrect either). wasm32 has no
+/// caller for this at all (see `PROXY`'s doc comment), hence the extra
+/// `not(wasm32)` on top of the mac/non-mac split every version here has.
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
 pub fn install_open_handler() -> bool {
     false
 }

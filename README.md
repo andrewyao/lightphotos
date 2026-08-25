@@ -43,6 +43,9 @@ cd lightphotos
 cargo build --release
 ```
 
+The patched `rawler` dependency is included in the repository, so a fresh
+clone does not require a platform-specific setup step before running Cargo.
+
 The binary lands at `target/release/lightphotos`. You can run it directly:
 
 ```sh

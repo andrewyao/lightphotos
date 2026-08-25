@@ -201,6 +201,10 @@ impl App {
     pub(crate) fn poll_web_thumbs(&mut self) -> Vec<(PathBuf, u32)> {
         let mut arrived = Vec::new();
         for r in self.web_worker_pool.poll() {
+            if r.kind == JobKind::Full {
+                self.web_full_pending.push(r);
+                continue;
+            }
             if r.kind != JobKind::Thumb {
                 self.web_preview_pending.push(r);
                 continue;
@@ -273,28 +277,46 @@ impl App {
     /// before `request_web_thumbs` existed. This is that same fix for the
     /// Loupe tier — decode at `preview_px()` instead of `thumb_px`, feed
     /// into `insert_preview_external` instead of `insert_thumb_external`.
+    ///
+    /// For RAW files, also fires a `Speed` request alongside the real
+    /// `Preview` (quality) one — same target, same file bytes (one read,
+    /// `ArrayBuffer::slice(0)`'d for the second `submit` since a transferred
+    /// buffer can't be sent twice), decoded via `decode()`'s fast branch.
+    /// Whichever lands first paints; the other supersedes it through the
+    /// same `upload_shown` (see its own doc comment for why that's now safe
+    /// across a same-photo tier swap — this reinstates the two-pass split
+    /// that was reverted before that fix existed). `speed_needed` stops
+    /// firing once *something* is already shown for this photo — no point
+    /// racing a fast pass behind whatever's already on screen.
     pub(crate) fn request_web_preview(&mut self) -> bool {
         let Some(path) = self.want.clone() else {
             return false;
         };
         let target = self.preview_px();
         let key = (path.clone(), target);
+        let is_raw = crate::image_decode::is_raw_extension(&path);
+
         let already_have = self.loader.as_ref().is_some_and(|l| {
             l.get_full(&path).is_some() || l.get_preview(&path, target).is_some()
         });
-        if already_have
-            || self.web_preview_inflight.contains(&key)
-            || self.web_preview_failed.contains(&key)
-        {
-            return false;
-        }
-        // Backing off after a prior failure — see `retry_backoff`'s doc
-        // comment.
-        if self
-            .web_preview_retries
-            .get(&key)
-            .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
-        {
+        let quality_needed = !already_have
+            && !self.web_preview_inflight.contains(&key)
+            && !self.web_preview_failed.contains(&key)
+            && !self
+                .web_preview_retries
+                .get(&key)
+                .is_some_and(|(_, retry_at)| Instant::now() < *retry_at);
+
+        let speed_needed = is_raw
+            && self.shown.path() != Some(path.as_path())
+            && !self.web_speed_inflight.contains(&key)
+            && !self.web_speed_failed.contains(&key)
+            && !self
+                .web_speed_retries
+                .get(&key)
+                .is_some_and(|(_, retry_at)| Instant::now() < *retry_at);
+
+        if !quality_needed && !speed_needed {
             return false;
         }
         // Same shared read-concurrency budget `request_web_thumbs` respects
@@ -310,21 +332,45 @@ impl App {
         let Some(handle) = self.web_file_handles.get(&path).cloned() else {
             return false;
         };
-        self.web_preview_inflight.insert(key);
+        if quality_needed {
+            self.web_preview_inflight.insert(key.clone());
+        }
+        if speed_needed {
+            self.web_speed_inflight.insert(key.clone());
+        }
         self.web_read_inflight.set(self.web_read_inflight.get() + 1);
         let read_inflight = self.web_read_inflight.clone();
         let pool = self.web_worker_pool.handle();
         wasm_bindgen_futures::spawn_local(async move {
-            let is_raw = crate::image_decode::is_raw_extension(&path);
             let result = web_fs::read_array_buffer(&handle).await;
             read_inflight.set(read_inflight.get().saturating_sub(1));
             match result {
-                Ok(bytes) => pool.submit(path, target, bytes, is_raw, JobKind::Preview),
+                Ok(bytes) => {
+                    if quality_needed && speed_needed {
+                        // `.slice(0)` is a real byte copy, taken before
+                        // either `submit` transfers the original out via
+                        // `postMessage` — a transferred `ArrayBuffer` is
+                        // detached, so the same object can't be handed to
+                        // two workers.
+                        let speed_bytes = bytes.slice(0);
+                        pool.submit(path.clone(), target, speed_bytes, is_raw, JobKind::Speed);
+                        pool.submit(path, target, bytes, is_raw, JobKind::Preview);
+                    } else if quality_needed {
+                        pool.submit(path, target, bytes, is_raw, JobKind::Preview);
+                    } else {
+                        pool.submit(path, target, bytes, is_raw, JobKind::Speed);
+                    }
+                }
                 Err(e) => {
                     web_sys::console::error_1(
                         &format!("[web] reading bytes failed for {}: {e}", path.display()).into(),
                     );
-                    pool.fail(path, target, JobKind::Preview, e);
+                    if quality_needed {
+                        pool.fail(path.clone(), target, JobKind::Preview, e.clone());
+                    }
+                    if speed_needed {
+                        pool.fail(path, target, JobKind::Speed, e);
+                    }
                 }
             }
         });
@@ -332,16 +378,76 @@ impl App {
     }
 
     /// Process this frame's preview-tier results, already set aside by
-    /// `poll_web_thumbs` (see `web_preview_pending`'s doc comment — both
-    /// tiers share one Worker pool result channel). Negative-caches a
-    /// failure locally (`web_preview_failed`) rather than via `loader.rs`
-    /// (whose failure tracking is thumbnail-specific) so `try_show`'s
-    /// every-frame re-request doesn't retry a doomed RAW decode forever.
+    /// `poll_web_thumbs` (see `web_preview_pending`'s doc comment — every
+    /// non-`Thumb` kind shares one Worker pool result channel, so this
+    /// drains `Preview` *and* `Speed` results). Negative-caches a failure
+    /// locally (`web_preview_failed`/`web_speed_failed`) rather than via
+    /// `loader.rs` (whose failure tracking is thumbnail-specific) so
+    /// `try_show`'s every-frame re-request doesn't retry a doomed RAW decode
+    /// forever.
+    ///
+    /// `Speed` results bypass `loader.rs`'s cache entirely (see
+    /// `App::web_speed_inflight`'s doc comment for why) and instead go
+    /// straight to `upload_shown` — but only if nothing has been shown for
+    /// this photo yet: a `Speed` result can land *after* the real `Preview`
+    /// already painted (worker scheduling isn't ordered), and applying it
+    /// then would downgrade a good frame back to a worse one.
     pub(crate) fn poll_web_preview(&mut self) -> bool {
         let mut landed = false;
         let pending = std::mem::take(&mut self.web_preview_pending);
-        for crate::web_worker_pool::PoolResult { path, target, result, .. } in pending {
+        for crate::web_worker_pool::PoolResult { kind, path, target, result } in pending {
             let key = (path.clone(), target);
+            match kind {
+                JobKind::Speed => {
+                    self.web_speed_inflight.remove(&key);
+                    match result {
+                        Ok(img) => {
+                            self.web_speed_retries.remove(&key);
+                            if self.want.as_deref() == Some(path.as_path())
+                                && self.shown.path() != Some(path.as_path())
+                            {
+                                self.upload_shown(&path, &img, Shown::Preview(path.clone(), target, img.width.max(img.height)));
+                                self.set_tier_debug(super::thumbs::TIER_DEBUG_GRAY_18, "SPEED"); // TEMPORARY DEBUG
+                                landed = true;
+                            }
+                        }
+                        Err(e) => {
+                            // Same bounded-retry-with-backoff treatment as
+                            // the `Preview`/`Thumb` arms below — a `Speed`
+                            // failure isn't fatal (the real `Preview`
+                            // request is still independently in flight), so
+                            // this is silent (no `set_status`) beyond a
+                            // console warning.
+                            let entry = self.web_speed_retries.entry(key.clone()).or_insert((0, Instant::now()));
+                            entry.0 += 1;
+                            let retries = entry.0;
+                            if retries <= MAX_READ_RETRIES {
+                                entry.1 = Instant::now() + retry_backoff(retries);
+                                web_sys::console::warn_1(
+                                    &format!(
+                                        "[web] speed decode failed for {} (retry {}/{MAX_READ_RETRIES}): {e}",
+                                        path.display(),
+                                        retries
+                                    )
+                                    .into(),
+                                );
+                            } else {
+                                web_sys::console::warn_1(
+                                    &format!("[web] speed decode failed permanently for {}: {e}", path.display()).into(),
+                                );
+                                self.web_speed_retries.remove(&key);
+                                self.web_speed_failed.insert(key);
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // `poll_web_thumbs` routes `Full` results straight to
+                // `web_full_pending` before they ever reach here (see its
+                // own routing) — `poll_web_full` is what drains those.
+                JobKind::Full => continue,
+                JobKind::Preview | JobKind::Thumb => {}
+            }
             self.web_preview_inflight.remove(&key);
             match result {
                 Ok(img) => {
@@ -397,6 +503,7 @@ impl App {
                         );
                         self.web_preview_retries.remove(&key);
                         self.web_preview_failed.insert(key);
+                        self.set_status(format!("Unable to load Loupe preview for {}", path.display()));
                     }
                 }
             }
@@ -407,5 +514,164 @@ impl App {
         }
         landed
     }
-}
 
+    /// wasm32 counterpart of `app/loupe.rs::ensure_full_for_zoom`'s
+    /// `loader.request_full(path)` call — that enqueues into `loader.rs`'s
+    /// own worker queue, which has no live workers on wasm32, so it's a
+    /// silent no-op there. Same shape as `request_web_preview`, at
+    /// `renderer.max_dim` (the GPU's max texture size — "don't downscale",
+    /// matching native's own `full_target`) instead of `preview_px()`, and
+    /// always requesting quality (`JobKind::Full`, real PPG demosaic) since
+    /// the whole point of this tier is "the user zoomed in far enough that
+    /// the screen-fit preview isn't enough detail anymore."
+    pub(crate) fn request_web_full(&mut self) -> bool {
+        let Some(path) = self.want.clone() else {
+            return false;
+        };
+        let Some(target) = self.renderer.as_ref().map(|r| r.max_dim) else {
+            return false;
+        };
+        let key = (path.clone(), target);
+        let already_have = self.loader.as_ref().is_some_and(|l| l.get_full(&path).is_some());
+        if already_have
+            || self.web_full_inflight.contains(&key)
+            || self.web_full_failed.contains(&key)
+            || self
+                .web_full_retries
+                .get(&key)
+                .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
+        {
+            return false;
+        }
+        if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
+            return false;
+        }
+        let Some(handle) = self.web_file_handles.get(&path).cloned() else {
+            return false;
+        };
+        self.web_full_inflight.insert(key);
+        self.web_read_inflight.set(self.web_read_inflight.get() + 1);
+        let read_inflight = self.web_read_inflight.clone();
+        let pool = self.web_worker_pool.handle();
+        wasm_bindgen_futures::spawn_local(async move {
+            let is_raw = crate::image_decode::is_raw_extension(&path);
+            let result = web_fs::read_array_buffer(&handle).await;
+            read_inflight.set(read_inflight.get().saturating_sub(1));
+            match result {
+                Ok(bytes) => pool.submit(path, target, bytes, is_raw, JobKind::Full),
+                Err(e) => {
+                    web_sys::console::error_1(
+                        &format!("[web] reading bytes failed for {}: {e}", path.display()).into(),
+                    );
+                    pool.fail(path, target, JobKind::Full, e);
+                }
+            }
+        });
+        true
+    }
+
+    /// Drains `Full`-tier results `poll_web_thumbs` set aside. Lands via
+    /// `loader.insert_full_external`, so `try_show`'s existing `get_full`
+    /// branch (already the first thing it checks) picks it up unchanged —
+    /// `upload_shown`'s `fitted` gate then does the right thing on its own:
+    /// the user just zoomed to trigger this (`fitted == false`), so it's
+    /// applied at the current zoom/pan, not re-fit.
+    pub(crate) fn poll_web_full(&mut self) -> bool {
+        let mut landed = false;
+        let pending = std::mem::take(&mut self.web_full_pending);
+        for crate::web_worker_pool::PoolResult { path, target, result, .. } in pending {
+            let key = (path.clone(), target);
+            self.web_full_inflight.remove(&key);
+            match result {
+                Ok(img) => {
+                    self.web_full_retries.remove(&key);
+                    if let Some(loader) = &mut self.loader {
+                        loader.insert_full_external(path, std::sync::Arc::new(img));
+                    }
+                    landed = true;
+                }
+                Err(e) => {
+                    let entry = self.web_full_retries.entry(key.clone()).or_insert((0, Instant::now()));
+                    entry.0 += 1;
+                    let retries = entry.0;
+                    if retries <= MAX_READ_RETRIES {
+                        entry.1 = Instant::now() + retry_backoff(retries);
+                        web_sys::console::warn_1(
+                            &format!(
+                                "[web] full-resolution decode failed for {} (retry {}/{MAX_READ_RETRIES}): {e}",
+                                path.display(),
+                                retries
+                            )
+                            .into(),
+                        );
+                    } else {
+                        web_sys::console::error_1(
+                            &format!("[web] full-resolution decode failed permanently for {}: {e}", path.display())
+                                .into(),
+                        );
+                        self.web_full_retries.remove(&key);
+                        self.web_full_failed.insert(key);
+                    }
+                }
+            }
+        }
+        if landed {
+            self.try_show();
+            self.request_redraw();
+        }
+        landed
+    }
+
+    /// Whether any wasm32 Web Worker decode job (Grid thumbnail, or Loupe
+    /// Speed/Preview/Full) is still outstanding.
+    ///
+    /// `main.rs`'s `about_to_wait` uses this to decide whether to keep the
+    /// winit event loop polling (`ControlFlow::WaitUntil`) or let it go
+    /// idle (`ControlFlow::Wait`) — mirroring `catalog_load_pending`/
+    /// `web_folder_pending`, which exist for the exact same reason: async
+    /// wasm work whose completion doesn't wake winit on its own.
+    ///
+    /// Without this, `image_pending` only reads `loader.rs`'s own
+    /// `has_pending_image()`, whose in-flight sets are never populated on
+    /// wasm32 (`request_preview`/`request_full` are native-only — see
+    /// `ensure_full_for_zoom`'s wasm32 branch, which calls
+    /// `request_web_full` instead). The loop would then go idle the instant
+    /// a zoom submits a `request_web_full` job and nothing else happens to
+    /// be in flight, and the finished decode — posted back via
+    /// `web_worker_pool.rs`'s `postMessage` handler, which never nudges
+    /// winit — would sit undrained until an unrelated event (mouse move,
+    /// resize) happened to wake the loop again.
+    pub(crate) fn web_decode_pending(&self) -> bool {
+        !self.web_thumb_inflight.is_empty()
+            || !self.web_preview_inflight.is_empty()
+            || !self.web_speed_inflight.is_empty()
+            || !self.web_full_inflight.is_empty()
+    }
+
+    /// Whether the wanted RAW has no usable preview at the current target.
+    /// This remains true during throttling/backoff and after permanent
+    /// failure, preventing the previous photo from reappearing underneath.
+    pub(crate) fn loupe_is_loading(&self) -> bool {
+        let Some(path) = self.want.clone() else {
+            return false;
+        };
+        if !crate::image_decode::is_raw_extension(&path) {
+            return false;
+        }
+        let target = self.preview_px();
+        let key = (path.clone(), target);
+        // `self.shown.path() == Some(&path)` covers a landed `Speed` result:
+        // it bypasses `loader.rs`'s cache entirely (see
+        // `App::web_speed_inflight`'s doc comment), so `get_preview` alone
+        // wouldn't see it.
+        let has_preview = self.shown.path() == Some(path.as_path())
+            || self.loader.as_ref().is_some_and(|loader| {
+                loader.get_full(&path).is_some() || loader.get_preview(&path, target).is_some()
+            });
+        !has_preview
+            && (self.web_preview_inflight.contains(&key)
+                || self.web_preview_retries.contains_key(&key)
+                || self.web_preview_failed.contains(&key)
+                || self.web_file_handles.contains_key(&path))
+    }
+}

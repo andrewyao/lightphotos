@@ -28,7 +28,7 @@ test = false
 
 [[bin]]
 name = "decode_probe"
-path = "src/bin/decode_probe.rs"
+path = "src/raw/probe.rs"
 test = false
 required-features = ["raw-probe"]
 
@@ -39,7 +39,7 @@ required-features = ["raw-probe"]
 # `#[cfg]` gating) so `cargo build`/`cargo test` are unaffected.
 [[bin]]
 name = "wasm_worker"
-path = "src/bin/wasm_worker.rs"
+path = "src/web/wasm_worker.rs"
 test = false
 
 [dependencies]
@@ -69,9 +69,26 @@ web-time = "1.1"
 rawler = { version = "0.7.2", optional = true }
 mozjpeg-rs = { version = "0.9.2", optional = true }
 img-parts = { version = "0.4.0", optional = true }
+# Same dual-declaration reasoning as `rawler` above (see the non-mac
+# `image` entry below): `raw_fast_preview.rs` resizes its decoded preview
+# with `image::imageops`, and `decode_probe.rs` compiles that module on mac
+# under `raw-probe` for its golden-hash tests, so `image` has to be
+# reachable there too — not just in the plain non-mac build.
+image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png", "tiff"] }
+# Same dual-declaration reasoning as `rawler`/`image` above: `raw_fast_preview.rs`'s
+# `Quality`-tier output is linear half-float (`raw_shader.wgsl` does the
+# tonemap on the GPU instead of a CPU LUT), and `decode_probe.rs` compiles
+# that module on mac under `raw-probe` too, so `half` has to be reachable
+# there as well, not just in the plain non-mac build.
+half = "2"
+# Same dual-declaration reasoning again: `decode_probe.rs` reads a RAW file's
+# embedded EXIF thumbnail directly (a standalone diagnostic, not shared with
+# `thumbnail.rs`'s own copy) to compare its brightness against ImageIO —
+# needs `kamadak-exif` reachable on mac under `raw-probe` too.
+kamadak-exif = { version = "0.6.1", optional = true }
 
 [features]
-raw-probe = ["dep:rawler", "dep:mozjpeg-rs", "dep:img-parts"]
+raw-probe = ["dep:rawler", "dep:mozjpeg-rs", "dep:img-parts", "dep:image", "dep:kamadak-exif"]
 
 # `egui-winit`'s default features include "clipboard" (pulls in `arboard`),
 # which has no working wasm32 backend at this version — see the wasm port
@@ -124,6 +141,9 @@ mozjpeg-rs = "0.9.2"
 # the plain non-mac build always has it, alongside the optional top-level
 # `rawler` entry above that `raw-probe` uses to also make it available for
 # `decode_probe.rs`'s validation harness when building/running on mac.
+# Redirected to a patched local vendor copy for every target via
+# `[patch.crates-io]` near the bottom of this file — see that entry's own
+# comment for why (a wasm32-only bug, harmless everywhere else).
 rawler = "0.7.2"
 # Embedded-preview extraction (Task 10): RAW containers (CR2/NEF/ARW/DNG/...)
 # are TIFF-based, so a generic TIFF/EXIF reader can open them directly and
@@ -133,6 +153,11 @@ rawler = "0.7.2"
 # image formats based on it" per its own docs, so that's what thumbnail.rs's
 # non-mac `try_extract_embedded_preview` uses instead.
 kamadak-exif = "0.6.1"
+# `raw_fast_preview.rs`'s `Quality` tier converts linear camera-RGB to
+# `half::f16` bytes for the renderer's `Rgba16Float` texture (`raw_shader.wgsl`
+# does the sRGB gamma + RapidRaw brightness/contrast boost on the GPU instead
+# of a CPU LUT). Small, `no_std`-friendly, wasm32-compatible.
+half = "2"
 
 # `trash` (native OS trash/recycle-bin shell-out) has no wasm32 support and no
 # browser equivalent (File System Access has no trash primitive — see
@@ -183,6 +208,28 @@ console_error_panic_hook = "0.1"
 # unification turns it on for every crate in the graph that pulls uuid in,
 # not just a direct dependency of this crate.
 uuid = { version = "1", features = ["js"] }
+
+# Local patch, standard rawler 0.7.2 only (no third-party fork): `rawler`
+# unconditionally calls `std::time::Instant::now()` in a few places (PPG
+# demosaic's `imgop/sensor/bayer/ppg.rs`, notably — the code path
+# `raw_fast_preview.rs`'s `DemosaicMode::Quality` runs) purely for a debug!
+# timing log, which panics unconditionally on bare wasm32-unknown-unknown
+# ("time not implemented on this platform" — no clock source there, hit live
+# in a real Web Worker once `Quality` actually ran there, not guessed at).
+# `patches/rawler-web-time.patch` swaps those 4 call sites to
+# `web_time::Instant` — API-compatible, `performance.now()`-backed on wasm, a
+# **real passthrough to `std::time::Instant` everywhere else** (same crate
+# this repo already depends on at the top level for the identical class of
+# bug — see its own Cargo.toml comment), so this has zero functional effect
+# on macOS/Linux/Windows builds: timing/logging stays live on every target,
+# this only changes which clock it reads.
+#
+# `[patch.crates-io]` applies globally (Cargo has no way to scope a patch to
+# one target), so the patched crate is checked into `vendor/rawler-0.7.2` and
+# is available to every platform and every Cargo entry point from a fresh
+# clone.
+[patch.crates-io]
+rawler = { path = "vendor/rawler-0.7.2" }
 
 [profile.release]
 opt-level = 3

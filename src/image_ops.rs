@@ -6,9 +6,20 @@
 //! thumbnail-upload path can both call them without reaching back into the UI
 //! state module. Keeping the crop/tone/rotate math in one place is also what
 //! guarantees the exported JPEG and the on-screen edited thumbnail agree.
+//!
+//! ## Pipeline position
+//! - `bake_edited` is called from `export.rs`'s `do_export` (Pipeline 3, a
+//!   background worker, full resolution).
+//! - It's also called from `app/thumbs.rs`'s `sync_thumb_textures`
+//!   (Pipeline 2, the UI thread, thumbnail resolution) — only when the photo
+//!   actually has edits; an unedited photo's raw thumbnail uploads unbaked.
+//! - Never called from Pipeline 1 — the Loupe applies edits live in the GPU
+//!   shader (`develop.rs`'s `apply_linear`, mirrored in `shader.wgsl`)
+//!   instead of baking them into pixels.
+//! - Same platform on every target — no `cfg` split in this file.
 
 use crate::develop::{self, Adjustments, Crop, TouchUp};
-use crate::image_decode::DecodedImage;
+use crate::image_decode::{DecodedImage, PixelFormat};
 
 /// A crop rectangle (normalized 0..1, or `None` for the full frame) → integer
 /// pixel bounds `(x0, y0, x1, y1)` in texture space, clamped so the region is
@@ -165,16 +176,23 @@ pub(crate) fn bake_edited(
     rotate_rgba(&cropped, cw, ch, rot)
 }
 
-fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
+/// Sample a decoded image at texture UV coordinates and return linear RGB.
+/// This is format-aware because the wasm RAW Loupe uses tightly packed
+/// linear-light RGBA16F rather than sRGB RGBA8.
+pub(crate) fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
     let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
     let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;
     let i = ((y * img.width + x) * 4) as usize;
-    unpremul_to_linear([
-        img.rgba[i],
-        img.rgba[i + 1],
-        img.rgba[i + 2],
-        img.rgba[i + 3],
-    ])
+    match img.pixel_format {
+        PixelFormat::Srgb8 => unpremul_to_linear([
+            img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3],
+        ]),
+        PixelFormat::LinearF16 => [
+            half::f16::from_le_bytes([img.rgba[i * 2], img.rgba[i * 2 + 1]]).to_f32(),
+            half::f16::from_le_bytes([img.rgba[i * 2 + 2], img.rgba[i * 2 + 3]]).to_f32(),
+            half::f16::from_le_bytes([img.rgba[i * 2 + 4], img.rgba[i * 2 + 5]]).to_f32(),
+        ],
+    }
 }
 
 fn apply_touchups(
@@ -301,6 +319,9 @@ pub(crate) fn resample_bilinear_u8(
 /// everything downstream of `image_decode` works in display orientation. A mask
 /// that skipped this step would sit sideways on any portrait shot from a camera
 /// that records rotation in EXIF rather than in the pixels.
+// Only `Mask::oriented` (macOS-only, Vision) calls this outside of its own
+// unit tests below, hence the `any(macos, test)` gate.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn orient_mask(src: &[u8], w: u32, h: u32, orientation: u8) -> (u32, u32, Vec<u8>) {
     if orientation <= 1 || src.len() < (w * h) as usize {
         return (w, h, src.to_vec());
@@ -361,6 +382,7 @@ mod tests {
             width: 2,
             height: 2,
             rgba: src.clone(),
+            pixel_format: PixelFormat::Srgb8,
         };
         let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], 0);
         assert_eq!((w, h), (2, 2));
@@ -375,6 +397,7 @@ mod tests {
             width: 4,
             height: 1,
             rgba: src,
+            pixel_format: PixelFormat::Srgb8,
         };
         let mut adj = Adjustments::default();
         adj.crop = Some(Crop {
@@ -399,6 +422,7 @@ mod tests {
             width: 2,
             height: 2,
             rgba: src.clone(),
+            pixel_format: PixelFormat::Srgb8,
         };
         let adj = Adjustments {
             denoise: 0.0,
@@ -422,6 +446,7 @@ mod tests {
             width: 3,
             height: 3,
             rgba: src,
+            pixel_format: PixelFormat::Srgb8,
         };
         let (_, _, out0) = bake_edited(&img, &Adjustments::default(), &[], 0);
         let denoised = Adjustments {
@@ -448,6 +473,7 @@ mod tests {
             width: 5,
             height: 1,
             rgba: src,
+            pixel_format: PixelFormat::Srgb8,
         };
         let touchup = TouchUp {
             center: [0.4, 0.0],
@@ -480,6 +506,7 @@ mod tests {
             width: 3,
             height: 3,
             rgba: src,
+            pixel_format: PixelFormat::Srgb8,
         };
         let adj = Adjustments {
             denoise: 50.0,

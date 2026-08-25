@@ -5,6 +5,17 @@
 //! setup common to `image_decode` and `image_encode`. Both symbols are stable
 //! and the framework is already linked, so we declare them here once instead of
 //! in each codec module.
+//!
+//! ## Pipeline position
+//! Plumbing only, macOS-only, called on every decode and every encode:
+//! - `image_decode.rs` calls `file_url` to open a photo (Pipeline 1's full
+//!   decode, and the metadata reads).
+//! - `image_decode.rs`/`thumbnail.rs` call `srgb_bitmap_context` inside
+//!   `cgimage_to_rgba` (Pipeline 1's decode, and Pipeline 2's thumbnails).
+//! - `image_encode.rs` calls all three functions here to write a JPEG
+//!   (Pipeline 3, export).
+//! - Nothing here decides *when* to run — it's called from whichever of
+//!   those three pipelines is already running.
 
 use std::ffi::c_void;
 use std::path::Path;

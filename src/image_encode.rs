@@ -11,6 +11,14 @@
 //! Non-mac: `mozjpeg-rs`'s pure-Rust encoder, via its `encode_rgba` entry
 //! point (reads RGBA directly, ignores alpha — no separate RGB conversion
 //! buffer needed).
+//!
+//! ## Pipeline position
+//! - Last stage of Pipeline 3 (export) only.
+//! - `export.rs`'s `do_export` calls `encode_jpeg` once the full-resolution
+//!   decode has been baked (`image_ops::bake_edited`) into final pixels.
+//! - Never called from Pipeline 1 or 2 — the Loupe and Grid only ever
+//!   *decode*, they don't write files.
+//! - Not reachable on wasm32 — export is a stub there (see `export.rs`).
 
 use std::path::Path;
 
