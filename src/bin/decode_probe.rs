@@ -41,6 +41,10 @@
 mod coregraphics;
 #[path = "../image_decode.rs"]
 mod image_decode;
+#[path = "../raw_fast_preview.rs"]
+mod raw_fast_preview;
+#[path = "../hash.rs"]
+mod hash;
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -432,6 +436,143 @@ fn write_linear_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()>
     Ok(())
 }
 
+/// Writes a minimal, valid Bayer-CFA DNG: an RGGB mosaic, single 16-bit
+/// sample per pixel, with the DNG tags a real Bayer decode path reads
+/// (`CFAPattern`, black/white levels, `AsShotNeutral` for white balance).
+/// Test pattern: `v = 100 + ((x * 53 + y * 197) % 800)`, deterministic and
+/// non-uniform (unlike a flat value, gives 2x2-bin/PPG demosaic something
+/// real to interpolate/average). `width`/`height` must be even (Bayer 2x2
+/// tiling).
+///
+/// Confirmed against the real `rawler` 0.7.2 source: `DngDecoder::get_cfa`
+/// (`src/decoders/dng.rs`) reads only `TiffCommonTag::CFAPattern`
+/// (0x828E) — `CFARepeatPatternDim` isn't consulted for the `CFA` object,
+/// so it's omitted here. `CFAColor` numeric codes (`src/cfa.rs`) are
+/// RED=0, GREEN=1, BLUE=2 — `CFAPattern = [0,1,1,2]` is RGGB.
+fn write_bayer_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()> {
+    use std::io::Write;
+
+    const T_BYTE: u16 = 1;
+    const T_SHORT: u16 = 3;
+    const T_LONG: u16 = 4;
+    const T_RATIONAL: u16 = 5;
+    const T_SRATIONAL: u16 = 10;
+
+    const ENTRY_COUNT: u16 = 19;
+    const IFD_OFFSET: u32 = 8;
+
+    fn inline_u16(v: u16) -> [u8; 4] {
+        let b = v.to_le_bytes();
+        [b[0], b[1], 0, 0]
+    }
+    fn inline_u32(v: u32) -> [u8; 4] {
+        v.to_le_bytes()
+    }
+    fn push_entry(buf: &mut Vec<u8>, tag: u16, typ: u16, count: u32, value: [u8; 4]) {
+        buf.extend_from_slice(&tag.to_le_bytes());
+        buf.extend_from_slice(&typ.to_le_bytes());
+        buf.extend_from_slice(&count.to_le_bytes());
+        buf.extend_from_slice(&value);
+    }
+    fn pad_to_even(buf: &mut Vec<u8>) {
+        if buf.len() % 2 != 0 {
+            buf.push(0);
+        }
+    }
+
+    assert!(width % 2 == 0 && height % 2 == 0, "Bayer fixture needs even dimensions");
+
+    let ifd_size = 2 + (ENTRY_COUNT as usize) * 12 + 4;
+    let after_ifd = IFD_OFFSET as usize + ifd_size;
+
+    // Out-of-line blocks, in ascending-tag order: BlackLevels (4x SHORT),
+    // ColorMatrix1 (9x SRATIONAL), AsShotNeutral (3x RATIONAL).
+    let blacklevels_offset = after_ifd as u32; // 4 x SHORT = 8 bytes
+    let mut off = after_ifd + 8;
+    if off % 2 != 0 {
+        off += 1;
+    }
+    let colormatrix_offset = off as u32; // 9 x SRATIONAL = 72 bytes
+    off += 72;
+    if off % 2 != 0 {
+        off += 1;
+    }
+    let asshotneutral_offset = off as u32; // 3 x RATIONAL = 24 bytes
+    off += 24;
+    if off % 2 != 0 {
+        off += 1;
+    }
+    let pixel_offset = off as u32;
+
+    let strip_byte_count = width * height * 2; // 1 sample/pixel, 16-bit
+
+    let mut buf: Vec<u8> = Vec::with_capacity(pixel_offset as usize + strip_byte_count as usize);
+
+    buf.extend_from_slice(&[0x49, 0x49, 0x2A, 0x00]);
+    buf.extend_from_slice(&IFD_OFFSET.to_le_bytes());
+
+    buf.extend_from_slice(&ENTRY_COUNT.to_le_bytes());
+    push_entry(&mut buf, 254, T_LONG, 1, inline_u32(0)); // NewSubfileType
+    push_entry(&mut buf, 256, T_LONG, 1, inline_u32(width)); // ImageWidth
+    push_entry(&mut buf, 257, T_LONG, 1, inline_u32(height)); // ImageLength
+    push_entry(&mut buf, 258, T_SHORT, 1, inline_u16(16)); // BitsPerSample
+    push_entry(&mut buf, 259, T_SHORT, 1, inline_u16(1)); // Compression = none
+    push_entry(&mut buf, 262, T_SHORT, 1, inline_u16(32803)); // PhotometricInterpretation = CFA
+    push_entry(&mut buf, 273, T_LONG, 1, inline_u32(pixel_offset)); // StripOffsets
+    push_entry(&mut buf, 277, T_SHORT, 1, inline_u16(1)); // SamplesPerPixel
+    push_entry(&mut buf, 278, T_LONG, 1, inline_u32(height)); // RowsPerStrip
+    push_entry(&mut buf, 279, T_LONG, 1, inline_u32(strip_byte_count)); // StripByteCounts
+    push_entry(&mut buf, 284, T_SHORT, 1, inline_u16(1)); // PlanarConfiguration
+    push_entry(&mut buf, 33422, T_BYTE, 4, [0, 1, 1, 2]); // CFAPattern = RGGB
+    push_entry(&mut buf, 50706, T_BYTE, 4, [1, 4, 0, 0]); // DNGVersion
+    push_entry(&mut buf, 50707, T_BYTE, 4, [1, 1, 0, 0]); // DNGBackwardVersion
+    push_entry(&mut buf, 50713, T_SHORT, 2, inline_u32(0x0002_0002)); // BlackLevelRepeatDim = [2,2]
+    push_entry(&mut buf, 50714, T_SHORT, 4, inline_u32(blacklevels_offset)); // BlackLevels
+    push_entry(&mut buf, 50717, T_LONG, 1, inline_u32(1024)); // WhiteLevel
+    push_entry(&mut buf, 50721, T_SRATIONAL, 9, inline_u32(colormatrix_offset)); // ColorMatrix1
+    push_entry(&mut buf, 50728, T_RATIONAL, 3, inline_u32(asshotneutral_offset)); // AsShotNeutral
+    buf.extend_from_slice(&0u32.to_le_bytes()); // next IFD = none
+
+    debug_assert_eq!(buf.len(), after_ifd);
+
+    // BlackLevels = [0, 0, 0, 0]
+    for _ in 0..4 {
+        buf.extend_from_slice(&0u16.to_le_bytes());
+    }
+    pad_to_even(&mut buf);
+    debug_assert_eq!(buf.len() as u32, colormatrix_offset);
+
+    // ColorMatrix1 = identity 3x3 SRATIONAL
+    const IDENTITY_3X3: [(i32, i32); 9] = [(1, 1), (0, 1), (0, 1), (0, 1), (1, 1), (0, 1), (0, 1), (0, 1), (1, 1)];
+    for (num, den) in IDENTITY_3X3 {
+        buf.extend_from_slice(&num.to_le_bytes());
+        buf.extend_from_slice(&den.to_le_bytes());
+    }
+    pad_to_even(&mut buf);
+    debug_assert_eq!(buf.len() as u32, asshotneutral_offset);
+
+    // AsShotNeutral = [1/1, 1/1, 1/1] (neutral -> wb_coeffs = [1,1,1,NaN])
+    for _ in 0..3 {
+        buf.extend_from_slice(&1i32.to_le_bytes());
+        buf.extend_from_slice(&1i32.to_le_bytes());
+    }
+    pad_to_even(&mut buf);
+    debug_assert_eq!(buf.len() as u32, pixel_offset);
+
+    // Pixel data: deterministic non-uniform single-channel mosaic.
+    for y in 0..height {
+        for x in 0..width {
+            let v = 100u16 + (((x * 53 + y * 197) % 800) as u16);
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    debug_assert_eq!(buf.len() as u64, pixel_offset as u64 + strip_byte_count as u64);
+
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(&buf)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,5 +718,87 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert!(result.is_err(), "expected rawler to reject a non-RAW file, got Ok");
+    }
+
+    /// Locks in `raw_fast_preview::decode_raw_fast_from_bytes`'s current
+    /// (pre-refactor) output on a synthetic Bayer fixture, via `hash::Fnv1a`
+    /// over width+height+rgba bytes (see `src/hash.rs` — chosen because it's
+    /// stable/deterministic across process runs, unlike `DefaultHasher`).
+    /// Every task in `plans/raw-decode-rapidraw-parity-plan.md` that touches
+    /// `bin_bayer_quarter_res` must keep this passing — the plan is
+    /// structure-only for the `Fast` tier, so output must not change.
+    ///
+    /// The captured hash below was observed by running this test once with a
+    /// dummy value and reading the actual value off the `println!` output —
+    /// standard golden-snapshot practice, not hand-computed (a multi-stage
+    /// float pipeline's output isn't something to derive by hand).
+    #[test]
+    fn raw_fast_preview_bayer_fast_tier_matches_golden_hash() {
+        let path = std::env::temp_dir().join(format!("lightphotos_bayer_dng_test_{}.dng", std::process::id()));
+        let (width, height) = (8u32, 6u32);
+        write_bayer_dng(&path, width, height).expect("write_bayer_dng failed");
+        let bytes = std::fs::read(&path).expect("read fixture bytes");
+        let _ = std::fs::remove_file(&path);
+
+        let decoded = raw_fast_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
+            .expect("decode_raw_fast_from_bytes failed on synthetic Bayer DNG fixture");
+
+        let mut hasher = hash::Fnv1a::new();
+        hasher.write(&decoded.width.to_le_bytes());
+        hasher.write(&decoded.height.to_le_bytes());
+        hasher.write(&decoded.rgba);
+        let golden = hasher.finish();
+
+        println!(
+            "bayer golden hash: {golden:#x} ({}x{}, {} rgba bytes)",
+            decoded.width,
+            decoded.height,
+            decoded.rgba.len()
+        );
+        assert_eq!(
+            golden, 0x5da9_3a19_268e_ca49,
+            "Fast-tier Bayer decode output changed from the captured golden hash \
+             (see this test's println! output above for the actual value) - if this \
+             change is intentional, update the literal; if not, a task's supposedly \
+             structure-only refactor changed real output"
+        );
+    }
+
+    /// Same idea, for the already-linear (`cpp == 3`, `decimate_linear_rgb`)
+    /// path — reuses the existing `write_linear_dng` fixture (this file's
+    /// synthetic Linear DNG, above) as-is rather than adding a second new
+    /// fixture. That fixture has no `AsShotNeutral` tag, so `wb_coeffs` comes
+    /// back `[NaN; 4]` (`DngDecoder::get_wb`'s no-tag branch) — today's actual
+    /// behavior on it, NaN-poisoned output included, is exactly what this
+    /// golden hash locks in; this refactor doesn't change that (fixing it is
+    /// out of scope, see the spec's "Explicitly out of scope" section).
+    #[test]
+    fn raw_fast_preview_linear_fast_tier_matches_golden_hash() {
+        let path = std::env::temp_dir().join(format!("lightphotos_linear_wb_dng_test_{}.dng", std::process::id()));
+        let (width, height) = (16u32, 12u32);
+        write_linear_dng(&path, width, height).expect("write_linear_dng failed");
+        let bytes = std::fs::read(&path).expect("read fixture bytes");
+        let _ = std::fs::remove_file(&path);
+
+        let decoded = raw_fast_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
+            .expect("decode_raw_fast_from_bytes failed on synthetic Linear DNG fixture");
+
+        let mut hasher = hash::Fnv1a::new();
+        hasher.write(&decoded.width.to_le_bytes());
+        hasher.write(&decoded.height.to_le_bytes());
+        hasher.write(&decoded.rgba);
+        let golden = hasher.finish();
+
+        println!(
+            "linear golden hash: {golden:#x} ({}x{}, {} rgba bytes)",
+            decoded.width,
+            decoded.height,
+            decoded.rgba.len()
+        );
+        assert_eq!(
+            golden, 0x0e3e_5b4d_851b_3f2b,
+            "Fast-tier Linear decode output changed from the captured golden hash \
+             (see this test's println! output above for the actual value)"
+        );
     }
 }

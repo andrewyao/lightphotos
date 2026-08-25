@@ -14,7 +14,9 @@
 //! `#[cfg(not(target_os = "macos"))]`, like the rest of the non-mac RAW
 //! decode: not wasm32-specific code, just currently only wired into the app
 //! via wasm32's decode path (`app/web.rs`) — nothing stops a future native
-//! non-mac caller from using this too.
+//! non-mac caller from using this too. Exception: `decode_raw_fast_from_bytes`
+//! is also gated on `feature = "raw-probe"` to allow `decode_probe.rs` to call it
+//! from a mac dev build (see that function's own comment for the rationale).
 
 use crate::image_decode::{fit_within, DecodedImage};
 
@@ -48,7 +50,17 @@ fn to_srgb_u8(v: f32) -> u8 {
 /// resized down if still larger, rather than having two separate
 /// resolution-tiered fast paths — simpler, and the quarter-res generation
 /// itself is already the fast part.
-#[cfg(not(target_os = "macos"))]
+//
+// Gated on `feature = "raw-probe"` as well as `not(target_os = "macos")` so
+// `decode_probe.rs`'s golden-hash regression tests can call this same
+// function from a mac dev build via `cargo test --bin decode_probe
+// --features raw-probe` — exact same reasoning and pattern as
+// `image_decode.rs`'s `decode_raw_via_rawler` (see that function's doc
+// comment). On mac+raw-probe this also compiles into the *main*
+// `lightphotos` binary, where nothing calls it — only `decode_probe.rs`'s
+// own copy of this module does.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[allow(dead_code)]
 pub(crate) fn decode_raw_fast_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
     let params = rawler::decoders::RawDecodeParams::default();
