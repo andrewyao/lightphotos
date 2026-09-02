@@ -6,22 +6,27 @@ A fast macOS Lightroom-lite photo culling & develop tool, written in Rust.
 
 Open a folder to browse thumbnails in a Grid; open a single image to jump
 straight into the Loupe. Decoding runs on background threads (Apple ImageIO
-on macOS; `image`/`rawler` crates on Linux/Windows) and images live as GPU
+on macOS; `image` / `rawler` / `mozjpeg-rs` / `kamadak-exif` crates on other
+platforms — including a Web Worker pool on wasm32) and images live as GPU
 textures, so zoom and pan only update a small transform uniform — never a
 re-decode. egui draws all the chrome (grid, filmstrip, filter bar, rating
 overlays); a hand-rolled wgpu renderer draws the loupe image.
 
 **Linux/Windows (experimental):** The codebase builds successfully via
-`cargo build --release` on Linux and Windows targets (verified via `cargo check`).
-However, real runtime testing has not yet been performed on those platforms.
+`cargo build --release` on Linux and Windows targets (verified via `cargo check`),
+after the one-time `rawler` vendor step (see [Build from scratch](#build-from-scratch)).
+However, real runtime testing has been performed on Linux only, not on Windows yet.
+
 HEIC support and Vision-backed features (duplicate refinement, face/blink
-scoring, subject-selection overlay) are macOS-only. See
-[`plans/plan-i-native-linux-windows-port.md`](plans/plan-i-native-linux-windows-port.md)
+scoring, subject-selection overlay) are macOS-only.
+
+See [`plans/plan-i-native-linux-windows-port.md`](plans/plan-i-native-linux-windows-port.md)
 for full implementation status.
 
 ## Requirements
 
 - **macOS 11.0 or later** (the app links AppKit / Core Graphics / ImageIO via `objc2`).
+  Linux, Windows, and wasm32 builds are experimental — see the note above.
 - **Rust stable ≥ 1.92.** The repo pins `channel = "stable"` in
   `rust-toolchain.toml`, so `rustup` selects a compatible toolchain automatically
   without touching your global default. The version floor comes from egui 0.34
@@ -35,13 +40,39 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ## Build from scratch
 
-Clone, then build the release binary:
+Clone, run the one-time vendor setup, then build the release binary:
 
 ```sh
 git clone <repo-url> lightphotos
 cd lightphotos
+./scripts/setup-vendor-rawler.sh   # one-time per clone — see below
 cargo build --release
 ```
+
+### The `rawler` vendor step
+
+`[patch.crates-io]` in `Cargo.toml` redirects the `rawler` crate (camera RAW
+decode) to a locally patched copy at `vendor/rawler-0.7.2`. The patch
+(`patches/rawler-web-time.patch`) swaps `std::time::Instant` for
+`web_time::Instant` at four call sites that otherwise panic on
+`wasm32-unknown-unknown` (no clock source); it is a real passthrough to
+`std::time::Instant` — zero functional change — on macOS/Linux/Windows.
+
+`vendor/` is **not** committed (it is git-ignored), so
+`scripts/setup-vendor-rawler.sh` must be run once per fresh clone: it fetches
+plain `rawler` 0.7.2 from crates.io and applies the patch. A cold clone
+therefore needs network access to crates.io before its first build. The script
+is a no-op on re-run (`--force` regenerates the tree), and
+`scripts/bundle.sh` / `scripts/deploy-web.sh` run it for you.
+
+Cargo applies `[patch.crates-io]` on every target, so this step is required
+before **any** Cargo command — `cargo build`, `cargo test`, `cargo check` — not
+just wasm builds.
+
+**Windows:** run the script from Git Bash (bundled with
+[Git for Windows](https://git-scm.com/download/win)), which provides the `sh`,
+`patch`, and `mktemp` it needs; `curl` and `tar` are already part of
+Windows 10+.
 
 The binary lands at `target/release/lightphotos`. You can run it directly:
 
@@ -53,6 +84,20 @@ The binary lands at `target/release/lightphotos`. You can run it directly:
 A debug build (`cargo build`) works too, but release is strongly recommended —
 the `[profile.release]` settings (`opt-level = 3`, thin LTO, single codegen
 unit) matter a lot for decode/render throughput.
+
+### Web build (experimental)
+
+A wasm32 build runs in the browser via [trunk](https://trunkrs.dev) (after the
+`rawler` vendor step above):
+
+```sh
+RUSTFLAGS="--cfg=web_sys_unstable_apis" trunk build --release
+```
+
+`scripts/deploy-web.sh` wraps this and syncs the output into the companion site
+repo. The browser build reads folders through the File System Access API and
+decodes on a hand-rolled Web Worker pool; it has none of the macOS-only
+features (no HEIC, no Vision-backed scoring).
 
 ## Package as `LightPhotos.app`
 
@@ -84,34 +129,11 @@ without hijacking your default image handler.
 
 ## Keyboard shortcuts
 
-| Key | Action |
-| --- | --- |
-| `G` | Grid view |
-| `E` / `Enter` | Loupe (open selected) |
-| `Esc` | Back out (Loupe → Grid, Grid → quit) |
-| Arrows | Move grid selection / step the loupe |
-| `1`–`5` | Rate current image; `0` clears |
-| `Shift`+`1`–`5` | Set a "≥ N stars" filter; `Shift`+`0` clears |
-| `B` | Toggle Bursts view |
-| `+` / `-` | Adjust thumbnail size (Grid) |
-| Scroll | Zoom (Loupe) |
-| `Space`+drag | Pan (Loupe) |
-| `Cmd`+`[` / `Cmd`+`]` | Rotate (Loupe) |
-| `Alt`+`0` | Reset to 100% |
-| `C` | Crop mode (Loupe): drag edges, `Shift` keeps ratio, `C`/`Enter` commits, `Esc` cancels |
-| `X` | Export selected image as `.jpg` in the same folder (edits baked in, never overwrites) |
+See [`docs/KEYBOARD_SHORTCUTS.md`](docs/KEYBOARD_SHORTCUTS.md) for the full table. Press `?` in-app for the built-in overlay.
 
 ## Project layout
 
-- `src/main.rs` — crate root: owns the winit event loop and `main()`.
-- `src/app.rs` — all viewer state and behavior.
-- `src/renderer.rs`, `src/shader.wgsl` — the wgpu loupe renderer.
-- `src/ui.rs` — egui chrome (grid, filmstrip, filter bar, overlays).
-- `src/loader.rs`, `src/image_decode.rs`, `src/thumbnail.rs` — background decode & thumbnails.
-- `src/develop.rs`, `src/image_ops.rs`, `src/export.rs` — edits, transforms, JPEG export.
-- `src/burst.rs`, `src/sharpness.rs` — burst grouping & best-of-burst scoring.
-- `src/catalog.rs` — SQLite catalog persistence (ratings, metadata).
-- `src/coregraphics.rs`, `src/macos_delegate.rs` — macOS/AppKit integration.
+See [`docs/PROJECT_LAYOUT.md`](docs/PROJECT_LAYOUT.md) for the full directory listing.
 
 ## License
 
