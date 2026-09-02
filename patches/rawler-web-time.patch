@@ -1,0 +1,63 @@
+# The diff applied to vendor/rawler-0.7.2/ (plain rawler from crates.io —
+# no third-party fork). Swaps std::time::Instant for web_time::Instant at
+# the 4 call sites that otherwise panic unconditionally on bare
+# wasm32/64-unknown-unknown, which has no clock source. Regenerate the full
+# vendored copy via ./scripts/setup-vendor-rawler.sh.
+--- a/rawler-upstream/Cargo.toml	2006-07-23 18:21:28
++++ b/rawler-0.7.2/Cargo.toml	2026-08-22 08:01:56
+@@ -151,6 +151,13 @@
+ version = "0.8.26"
+ features = ["derive"]
+ 
++# Added locally (not upstream): std::time::Instant panics unconditionally on
++# bare wasm32/64-unknown-unknown. web-time is API-compatible, backed by
++# performance.now() there, real std::time::Instant everywhere else. See
++# plans/wasm-decode-verification-results.md.
++[dependencies.web-time]
++version = "1"
++
+ [dev-dependencies.anyhow]
+ version = "1.0"
+ 
+--- a/rawler-upstream/src/decompressors/crx/decoder.rs	2006-07-23 18:21:28
++++ b/rawler-0.7.2/src/decompressors/crx/decoder.rs	2026-08-22 08:01:44
+@@ -14,7 +14,9 @@
+ use itertools::izip;
+ use log::debug;
+ use rayon::prelude::*;
+-use std::{convert::TryInto, io::Cursor, time::Instant};
++use std::{convert::TryInto, io::Cursor};
++// See imgop/sensor/bayer/ppg.rs for why web_time::Instant, not std's.
++use web_time::Instant;
+ 
+ /// Maximum value for K during Adaptive Golomb-Rice for K prediction
+ pub(super) const PREDICT_K_MAX: u32 = 15;
+--- a/rawler-upstream/src/dng/writer.rs	2006-07-23 18:21:28
++++ b/rawler-0.7.2/src/dng/writer.rs	2026-08-22 08:01:49
+@@ -2,8 +2,9 @@
+   borrow::Cow,
+   io::{self, Seek, Write},
+   mem::size_of,
+-  time::Instant,
+ };
++// See imgop/sensor/bayer/ppg.rs for why web_time::Instant, not std's.
++use web_time::Instant;
+ 
+ use image::{DynamicImage, codecs::jpeg::JpegEncoder, imageops::FilterType};
+ use log::debug;
+--- a/rawler-upstream/src/imgop/sensor/bayer/ppg.rs	2006-07-23 18:21:28
++++ b/rawler-0.7.2/src/imgop/sensor/bayer/ppg.rs	2026-08-22 08:01:41
+@@ -3,7 +3,12 @@
+ 
+ use multiversion::multiversion;
+ use rayon::prelude::*;
+-use std::{ops::Add, time::Instant};
++use std::ops::Add;
++// std::time::Instant panics unconditionally on bare wasm32/64-unknown-unknown
++// (no clock source). web_time::Instant is API-compatible and backed by
++// performance.now() there, real std::time::Instant elsewhere — see
++// plans/wasm-decode-verification-results.md.
++use web_time::Instant;
+ 
+ use crate::{
+   cfa::{CFA, CFA_COLOR_B, CFA_COLOR_G, CFA_COLOR_R, PlaneColor},

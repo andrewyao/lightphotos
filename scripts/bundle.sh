@@ -9,6 +9,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/LightPhotos.app"
 BIN_NAME="lightphotos"
 
+echo "==> Ensuring vendored rawler is present"
+"$ROOT/scripts/setup-vendor-rawler.sh"
+
 echo "==> Building release binary"
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
 

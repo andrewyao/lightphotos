@@ -21,6 +21,9 @@ if [[ ! -f "$SITE_PUBLIC/app.html" ]]; then
   exit 1
 fi
 
+echo "==> Ensuring vendored rawler is present"
+"$ROOT/scripts/setup-vendor-rawler.sh"
+
 echo "==> Building (trunk build --release)"
 RUSTFLAGS="--cfg=web_sys_unstable_apis" trunk build --release --config "$ROOT/Trunk.toml"
 
