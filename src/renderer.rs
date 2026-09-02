@@ -5,17 +5,36 @@
 //! than on the CPU — `set_image` runs on the UI thread at the exact moment a
 //! photo should appear, so it must not touch bulk pixels. Zoom/pan are applied
 //! purely through a small transform uniform — no per-frame re-upload.
+//!
+//! ## Pipeline position
+//! - Last, shared stage of Pipeline 1 (opening a photo).
+//! - Every platform's decode path (ImageIO on macOS, `image`/`rawler` on
+//!   Linux/Windows, `rawler` in a Web Worker on wasm32) ends by calling
+//!   `App::upload_shown` (`app/thumbs.rs`), which calls `set_image` here.
+//! - One render pipeline, `shader.wgsl`, draws every image regardless of
+//!   which platform decoded it.
+//! - Single exception: `PixelFormat::LinearF16` (wasm32's RAW "Quality" tier
+//!   only) — `render()` routes that to `raw_pipeline`/`raw_shader.wgsl`
+//!   instead. See `ARCHITECTURE.md`.
 
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::develop::{GpuAdjust, GpuTouchUp};
-use crate::image_decode::DecodedImage;
+use crate::image_decode::{DecodedImage, PixelFormat};
 
-/// Texture format the decoded photo is uploaded as. Named because the mip-gen
-/// render pipeline's color target has to match it exactly — it renders into the
-/// image's own mip levels, not into the surface.
+/// RAW-preview GPU tonemap pipeline builders + `LINEAR_IMAGE_FORMAT` — see
+/// that file's own module doc comment. Pure code move out of this file's
+/// `Renderer::new()`/consts; `Renderer`'s fields and `render()`'s dispatch
+/// still live here (a struct can't be split across files).
+#[path = "raw/render.rs"]
+mod raw_render;
+
+/// Texture format a `PixelFormat::Srgb8` decoded photo is uploaded as. Named
+/// because the mip-gen render pipeline's color target has to match it
+/// exactly — it renders into the image's own mip levels, not into the
+/// surface.
 const IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 /// Subject-selection overlay uniform. Field order MUST match `Overlay` in
@@ -69,6 +88,13 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    /// Own RAW tonemap (`raw_shader.wgsl`), drawn instead of `pipeline`
+    /// whenever the current image is `PixelFormat::LinearF16` (see
+    /// `image_pixel_format`). Built against the exact same 4-group
+    /// `pipeline_layout` as `pipeline` — its fragment shader just doesn't
+    /// read groups 1-3, so `render()` needs no branching on which bind
+    /// groups to set.
+    raw_pipeline: wgpu::RenderPipeline,
 
     sampler: wgpu::Sampler,
     tex_bind_layout: wgpu::BindGroupLayout,
@@ -101,11 +127,23 @@ pub struct Renderer {
     image_bind: Option<wgpu::BindGroup>,
     /// Current image dimensions in pixels.
     pub image_size: (u32, u32),
+    // TEMPORARY DEBUG — remove once the Loupe zoom-refit fix is verified.
+    // Overrides `render()`'s image-pass clear color so `upload_shown`
+    // (app/thumbs.rs) can tint the Loupe background by which tier is
+    // currently shown: white = Thumb, 18% gray = Speed, black = Preview
+    // (quality) / Full.
+    pub(crate) tier_debug_color: wgpu::Color,
+    /// Pixel format of the currently-uploaded image (set by `set_image`) —
+    /// picks `pipeline` vs. `raw_pipeline` in `render()`.
+    image_pixel_format: PixelFormat,
 
     pub max_dim: u32,
 
     /// Pipeline + sampler that build the image's mip chain on the GPU.
     mip_pipeline: wgpu::RenderPipeline,
+    /// Same mip-gen shader, targeting `LINEAR_IMAGE_FORMAT` instead —
+    /// `set_image` picks whichever matches the image just uploaded.
+    mip_pipeline_linear: wgpu::RenderPipeline,
     mip_sampler: wgpu::Sampler,
 
     /// egui paint backend; shares this Renderer's device/queue + surface format.
@@ -321,6 +359,13 @@ impl Renderer {
             cache: None,
         });
 
+        // Dedicated RAW tonemap — drawn instead of `pipeline` whenever
+        // the current image is `PixelFormat::LinearF16`. See
+        // `raw_render::create_raw_pipeline`'s own doc comment for why it
+        // reuses this exact `pipeline_layout` and `shader` module.
+        let raw_pipeline =
+            raw_render::create_raw_pipeline(&device, &pipeline_layout, &shader, format);
+
         // Same vertex shader as the image, so the tint lands on exactly the
         // same quad under the same zoom/pan/rotation. Group 0 (the image
         // texture) goes unused: the overlay reads the mask, not the photo.
@@ -400,6 +445,12 @@ impl Renderer {
             multiview_mask: None,
             cache: None,
         });
+
+        // Same mip-gen shader/layout, targeting `raw_render::LINEAR_IMAGE_FORMAT`
+        // instead — `set_image` picks whichever pipeline matches the image
+        // just uploaded.
+        let mip_pipeline_linear =
+            raw_render::create_mip_pipeline_linear(&device, &mip_pipeline_layout, &mip_shader);
 
         // Deliberately *not* the main `sampler`: this one must never follow the
         // mip chain it is in the middle of building, so its mipmap filter is
@@ -506,6 +557,7 @@ impl Renderer {
             queue,
             config,
             pipeline,
+            raw_pipeline,
             sampler,
             tex_bind_layout,
             xform_buf,
@@ -522,8 +574,13 @@ impl Renderer {
             overlay_bind: None,
             image_bind: None,
             image_size: (0, 0),
+            // TEMPORARY DEBUG default — matches the fixed color this
+            // replaces below until `upload_shown` starts setting it.
+            tier_debug_color: wgpu::Color { r: 0.07, g: 0.07, b: 0.08, a: 1.0 },
+            image_pixel_format: PixelFormat::Srgb8,
             max_dim,
             mip_pipeline,
+            mip_pipeline_linear,
             mip_sampler,
             egui_renderer,
         }
@@ -561,6 +618,15 @@ impl Renderer {
         let (w, h) = (img.width, img.height);
         let mip_count = (32 - (w.max(h)).leading_zeros()).max(1); // floor(log2(max))+1
 
+        let (format, bytes_per_pixel, mip_pipeline): (wgpu::TextureFormat, u32, &wgpu::RenderPipeline) =
+            match img.pixel_format {
+                PixelFormat::Srgb8 => (IMAGE_FORMAT, 4, &self.mip_pipeline),
+                PixelFormat::LinearF16 => {
+                    (raw_render::LINEAR_IMAGE_FORMAT, 8, &self.mip_pipeline_linear)
+                }
+            };
+        self.image_pixel_format = img.pixel_format;
+
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("image"),
             size: wgpu::Extent3d {
@@ -571,7 +637,7 @@ impl Renderer {
             mip_level_count: mip_count,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: IMAGE_FORMAT,
+            format,
             // RENDER_ATTACHMENT so the mip levels below can be rendered into.
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_DST
@@ -580,7 +646,27 @@ impl Renderer {
         });
 
         // Level 0 is the decoded pixels, uploaded straight from the caller's
-        // buffer — no intermediate copy.
+        // buffer where possible — no intermediate copy for the common
+        // (Srgb8, `bytes_per_row` already a multiple of
+        // `COPY_BYTES_PER_ROW_ALIGNMENT` in practice) case. `write_texture`
+        // needs row-aligned `bytes_per_row` (see `set_selection_mask`'s own
+        // comment on the same constraint for its 1-byte/texel format) — pad
+        // when it isn't, rather than assuming an arbitrary RAW width happens
+        // to land on a clean multiple.
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let row = bytes_per_pixel * w;
+        let padded_row = row.div_ceil(align) * align;
+        let level0: std::borrow::Cow<[u8]> = if padded_row == row {
+            std::borrow::Cow::Borrowed(&img.rgba)
+        } else {
+            let mut padded = vec![0u8; (padded_row * h) as usize];
+            for y in 0..h as usize {
+                let src = y * row as usize;
+                let dst = y * padded_row as usize;
+                padded[dst..dst + row as usize].copy_from_slice(&img.rgba[src..src + row as usize]);
+            }
+            std::borrow::Cow::Owned(padded)
+        };
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -588,10 +674,10 @@ impl Renderer {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &img.rgba,
+            &level0,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(4 * w),
+                bytes_per_row: Some(padded_row),
                 rows_per_image: Some(h),
             },
             wgpu::Extent3d {
@@ -654,7 +740,7 @@ impl Renderer {
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
-                pass.set_pipeline(&self.mip_pipeline);
+                pass.set_pipeline(mip_pipeline);
                 pass.set_bind_group(0, &bind, &[]);
                 pass.draw(0..3, 0..1);
             }
@@ -883,12 +969,10 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.07,
-                            g: 0.07,
-                            b: 0.08,
-                            a: 1.0,
-                        }),
+                        // TEMPORARY DEBUG: was the fixed `wgpu::Color { r:
+                        // 0.07, g: 0.07, b: 0.08, a: 1.0 }` — see
+                        // `tier_debug_color`'s own doc comment.
+                        load: wgpu::LoadOp::Clear(self.tier_debug_color),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -900,7 +984,14 @@ impl Renderer {
             });
             if let Some(image_bind) = &self.image_bind {
                 let (sw, sh) = (self.config.width, self.config.height);
-                let pipeline = &self.pipeline;
+                // Dedicated tonemap for a linear (wasm32 Loupe RAW,
+                // `DemosaicMode::Quality`) image; the usual pipeline
+                // otherwise. Both share `pipeline_layout`, so every
+                // `set_bind_group` call below stays unchanged either way.
+                let pipeline = match self.image_pixel_format {
+                    PixelFormat::Srgb8 => &self.pipeline,
+                    PixelFormat::LinearF16 => &self.raw_pipeline,
+                };
                 let xform_bind = &self.xform_bind;
                 // Draw the quad into a viewport rect (clamped to the surface) with
                 // the given adjustments bind group. Shared by the single-image and

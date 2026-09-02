@@ -1,6 +1,6 @@
 //! wasm32-only: a hand-rolled `web_sys::Worker` pool — the wasm port plan's
 //! M4 (real threading). Each worker runs an independent instance of the
-//! `wasm_worker` binary (`src/bin/wasm_worker.rs`), decoding on its own
+//! `wasm_worker` binary (`src/web/wasm_worker.rs`), decoding on its own
 //! thread with its own separate wasm linear memory — no `SharedArrayBuffer`/
 //! atomics, no nightly toolchain, chosen specifically over
 //! `wasm-bindgen-rayon` (whose JS-orchestrated `init()`/`initThreadPool()`
@@ -14,6 +14,19 @@
 //! job without borrowing `App` across the `spawn_local` future's `'static`
 //! bound, the same shape `web_thumb_tx`/`web_preview_tx` already use for the
 //! same reason.
+//!
+//! ## Pipeline position
+//! - Main-thread dispatcher for wasm32's Pipeline 1 (Loupe) and Pipeline 2
+//!   (Grid/filmstrip) decode: `app/web.rs` calls
+//!   `WorkerPoolHandle::submit` after reading a file's bytes
+//!   (`web_fs::read_array_buffer`), tagged with a `JobKind` that says which
+//!   tier this decode is for.
+//! - `submit` derives `quality` from `JobKind` and queues the job; `pump`
+//!   hands it to the next idle, ready `Worker` (running `wasm_worker.rs`).
+//! - `App::poll` (called every frame) drains `WorkerPool::poll`'s finished
+//!   results back into `app/web.rs`'s tier-specific handling, which lands
+//!   them in `loader.rs`'s caches.
+//! - See `ARCHITECTURE.md`.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -26,14 +39,33 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{Blob, BlobPropertyBag, MessageEvent, Url, Worker};
 
-use crate::image_decode::DecodedImage;
+use crate::image_decode::{DecodedImage, PixelFormat};
 
 /// Which cache tier a finished decode belongs in — mirrors
-/// `insert_thumb_external` vs. `insert_preview_external` in `loader.rs`.
+/// `insert_thumb_external`/`insert_preview_external`/`insert_full_external`
+/// in `loader.rs` (except `Speed`, which bypasses `loader.rs`'s cache
+/// entirely — see `app/web.rs`'s `poll_web_preview` doc comment for why).
+/// Also drives `submit()`'s `quality` derivation (see its doc comment):
+/// `Preview`/`Full` (Loupe, real content) get full PPG demosaic + linear
+/// output; `Thumb`/`Speed` (Grid, and the Loupe's screen-fit first paint)
+/// stay on the quarter-res Fast tier.
+///
+/// A `Speed` tier at screen resolution — a cheap first pass shown before the
+/// `Preview`/quality decode lands — was tried once before and reverted: the
+/// Loupe's zoom transform was carried across a same-photo tier upgrade
+/// rather than recomputed (`app/thumbs.rs::upload_shown`), so an extra tier
+/// boundary meant an extra chance for a wrongly-zoomed flash. That's now
+/// fixed at the root (`upload_shown` re-fits on any same-photo tier swap
+/// while `self.fitted` is still true), so `Speed` is reinstated here, plus a
+/// `Full` tier (real full-resolution decode, requested only once the user
+/// zooms past what `Preview` holds — `app/loupe.rs::ensure_full_for_zoom`'s
+/// wasm32 branch) mirroring native's own `Quick`/`Preview`/`Full` staging.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JobKind {
     Thumb,
     Preview,
+    Speed,
+    Full,
 }
 
 pub struct PoolResult {
@@ -59,6 +91,10 @@ struct QueuedJob {
     bytes: js_sys::ArrayBuffer,
     max_px: u32,
     is_raw: bool,
+    /// Derived from `JobKind` at `submit()` time: `Preview` (Loupe) → full
+    /// PPG demosaic + linear output, `Thumb` (Grid) → the quarter-res Fast
+    /// tier — downgrades quality for thumbnails. See `submit`'s doc comment.
+    quality: bool,
 }
 
 struct WorkerSlot {
@@ -129,6 +165,11 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
             &msg,
             &JsValue::from_str("isRaw"),
             &JsValue::from_bool(job.is_raw),
+        );
+        let _ = Reflect::set(
+            &msg,
+            &JsValue::from_str("quality"),
+            &JsValue::from_bool(job.quality),
         );
         // No `Uint8Array::from(...)` copy here — `job.bytes` is already the
         // JS ArrayBuffer read straight off the file (see
@@ -317,7 +358,12 @@ fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: Messa
         let height = get_f64(&data, "height").unwrap_or(0.0) as u32;
         let rgba_val = Reflect::get(&data, &JsValue::from_str("rgba")).unwrap_or(JsValue::UNDEFINED);
         let rgba = Uint8Array::new(&rgba_val).to_vec();
-        Ok(DecodedImage { width, height, rgba })
+        let pixel_format = if get_bool(&data, "linear") {
+            PixelFormat::LinearF16
+        } else {
+            PixelFormat::Srgb8
+        };
+        Ok(DecodedImage { width, height, rgba, pixel_format })
     } else {
         Err(get_string(&data, "error").unwrap_or_else(|| "unknown worker error".to_string()))
     };
@@ -339,6 +385,12 @@ impl WorkerPoolHandle {
     /// thread's own wasm memory, which matters for a RAW file's tens of MB.
     /// `is_raw` should be `image_decode::is_raw_extension(path)`, decided by
     /// the caller since the job carries no `Path`, only the bytes.
+    ///
+    /// No `quality` parameter: it's derived internally from `kind`
+    /// (`Preview`/`Full` → full PPG demosaic + linear output, `Thumb`/
+    /// `Speed` → the quarter-res Fast tier), so `app/web.rs`'s call sites —
+    /// which already know exactly this via the `kind` they pass — need no
+    /// changes.
     pub fn submit(
         &self,
         path: PathBuf,
@@ -347,6 +399,7 @@ impl WorkerPoolHandle {
         is_raw: bool,
         kind: JobKind,
     ) {
+        let quality = matches!(kind, JobKind::Preview | JobKind::Full);
         let id = {
             let mut inner_mut = self.0.borrow_mut();
             let id = inner_mut.next_id;
@@ -357,6 +410,7 @@ impl WorkerPoolHandle {
                 bytes,
                 max_px: target,
                 is_raw,
+                quality,
             });
             id
         };

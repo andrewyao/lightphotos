@@ -14,11 +14,26 @@
 //! image. Metadata reading (EXIF camera/lens fields, capture time beyond
 //! mtime) isn't wired up yet on this platform — see each function's non-mac
 //! doc comment for its exact fallback behavior.
+//!
+//! ## Pipeline position
+//! - `decode()` is called from `loader.rs`'s worker threads, for Pipeline 1's
+//!   `Job::Preview`/`Job::Full` stages (forced preview and full-resolution
+//!   decode) — never the cheap `Job::Quick` pass, which goes through
+//!   `thumbnail::decode_at_size` instead.
+//! - `decode()` is also called from `export.rs`'s `do_export`, for
+//!   Pipeline 3's full-resolution read before baking edits.
+//! - `read_metadata`/`capture_time`/`pixel_size` are called from
+//!   `loader.rs`'s `Job::Exif`/`Job::Meta` — background reads for the info
+//!   panel and burst grouping, never on the UI thread. See
+//!   `ARCHITECTURE.md`.
 
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+#[cfg(any(target_os = "macos", test))]
+use std::time::Duration;
+#[cfg(any(target_os = "macos", test))]
+use std::time::SystemTime;
 
 #[cfg(target_os = "macos")]
 use objc2_core_foundation::{
@@ -39,16 +54,49 @@ use objc2_image_io::{
 #[cfg(target_os = "macos")]
 use crate::coregraphics;
 
+/// Non-mac (Linux/Windows/wasm32) decode/metadata + RAW-preview tonemap —
+/// see `src/raw/nonmac_decode.rs`'s own module doc. Re-exported by name so
+/// every `image_decode::decode`/`image_decode::pixel_size`/etc. call site
+/// elsewhere in the crate keeps resolving unchanged; this is a pure physical
+/// move, same trick `src/web/*` already uses for wasm-only files.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[path = "raw/nonmac_decode.rs"]
+mod nonmac_decode;
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+pub(crate) use nonmac_decode::*;
+
+/// How `DecodedImage::rgba`'s bytes are laid out. Every decode path on every
+/// platform produces `Srgb8` — the one exception is
+/// `raw_fast_preview::decode_raw_quality_from_bytes` (wasm32 Loupe RAW
+/// decode, `DemosaicMode::Quality`), which stops at linear camera-RGB
+/// (post white-balance, post color-matrix, post highlight rolloff) rather
+/// than baking sRGB gamma + the display brightness/contrast boost
+/// into a CPU lookup table the way every other RAW decode path does —
+/// `renderer.rs` uploads that as an `Rgba16Float` texture instead of the
+/// usual `Rgba8UnormSrgb`, and `raw_shader.wgsl` (not `shader.wgsl`) does the
+/// gamma + boost on the GPU. See `plans/use-rapidraw-s-algorithm-completely-dynamic-puffin.md`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum PixelFormat {
+    /// Tightly packed sRGB-gamma-encoded RGBA8, 4 bytes/pixel.
+    #[default]
+    Srgb8,
+    /// Tightly packed linear-light RGBA, 2 bytes/channel (`half::f16`), 8
+    /// bytes/pixel. Alpha is always opaque (`f16::from_f32(1.0)`).
+    LinearF16,
+}
+
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
-    /// Tightly packed RGBA8, row-major. Premultiplied alpha on the mac arm
-    /// (drawn through a CGBitmapContext); straight (non-premultiplied) alpha
-    /// on the non-mac arm (produced by the `image` crate). The renderer's
-    /// blend mode is straight-alpha, so this divergence is currently
-    /// harmless, but it is a real difference between platforms worth knowing
-    /// about before relying on alpha values off mac.
+    /// Tightly packed pixel bytes, row-major — layout depends on
+    /// `pixel_format`. For the default `Srgb8`: premultiplied alpha on the
+    /// mac arm (drawn through a CGBitmapContext); straight (non-premultiplied)
+    /// alpha on the non-mac arm (produced by the `image` crate). The
+    /// renderer's default blend mode is straight-alpha, so this divergence is
+    /// currently harmless, but it is a real difference between platforms
+    /// worth knowing about before relying on alpha values off mac.
     pub rgba: Vec<u8>,
+    pub pixel_format: PixelFormat,
 }
 
 // CoreFoundation runtime type introspection, used to verify a value's concrete
@@ -135,181 +183,11 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     Ok(apply_exif_orientation(decoded, read_orientation(&source)))
 }
 
-/// Extensions we treat as camera RAW on the non-mac decode path — these route
-/// to `decode_raw_nonmac` instead of the `image` crate (which doesn't parse
-/// RAW containers). Mirrors the RAW subset of `navigation.rs`'s `IMAGE_EXTS`.
-/// `pub(crate)`, not just private: `app/web.rs`'s wasm32 thumbnail decode
-/// reuses this same list to skip RAW files for now (M1's scope is JPEG
-/// only, per the wasm port plan — RAW gets its own decode path in M3,
-/// `image::load_from_memory` can't read RAW sensor data at all, it's not a
-/// baseline-TIFF image despite the TIFF-based container).
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn is_raw_extension(path: &Path) -> bool {
-    const RAW_EXTS: &[&str] = &[
-        "cr2", "cr3", "nef", "arw", "dng", "raf", "rw2", "orf", "pef", "srw",
-    ];
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| RAW_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-        .unwrap_or(false)
-}
-
-/// Decode a RAW/DNG file into rawler's native `RawImage`: undeveloped sensor
-/// samples (still mosaiced for a typical Bayer/X-Trans camera file, cpp=1;
-/// already-demosaiced for Linear DNG, cpp=3/4) — no white balance, color
-/// matrix, or gamma applied yet.
-///
-/// Gated on `feature = "raw-probe"` as well as `not(target_os = "macos")` so
-/// `decode_probe.rs`'s ground-truth harness (Task 8) can call this same
-/// function — including from a mac dev build via `cargo run --bin
-/// decode_probe --features raw-probe`, where `rawler` is available as the
-/// optional top-level dependency — instead of duplicating the
-/// `rawler::decode_file` call site. That harness compares these raw,
-/// undeveloped samples directly against an analytic fixture, so it must NOT
-/// be routed through [`decode_raw_nonmac`]'s develop/demosaic pipeline below.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-// On mac+raw-probe this compiles into the *main* `lightphotos` binary too
-// (the feature has no way to scope itself to just `decode_probe.rs`'s
-// build), where nothing calls it — only `decode_probe.rs`'s own copy of this
-// module does. Genuinely used on non-mac (by `decode_raw_nonmac` below) and
-// via `cargo run/test --bin decode_probe --features raw-probe`.
-#[allow(dead_code)]
-pub(crate) fn decode_raw_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
-    rawler::decode_file(path).map_err(|e| e.to_string())
-}
-
-/// Map rawler's own `Orientation` enum (read from the file's EXIF/TIFF
-/// orientation tag during decode) to the raw EXIF orientation code (`1..=8`)
-/// that [`apply_exif_orientation`] expects. This is a direct rename, not a
-/// reinterpretation — rawler's variants are the same 8 EXIF cases in the same
-/// order (see `rawler::Orientation::from_u16`).
-#[cfg(not(target_os = "macos"))]
-fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
-    use rawler::Orientation::*;
-    match o {
-        Normal => 1,
-        HorizontalFlip => 2,
-        Rotate180 => 3,
-        VerticalFlip => 4,
-        Transpose => 5,
-        Rotate90 => 6,
-        Transverse => 7,
-        Rotate270 => 8,
-        Unknown => 1,
-    }
-}
-
-/// Decode a camera RAW file on non-mac platforms via `rawler`: decode the raw
-/// sensor samples ([`decode_raw_via_rawler`]), then run rawler's own
-/// `RawDevelop` pipeline (rescale -> demosaic -> active-area crop -> white
-/// balance -> color-matrix calibration -> default crop -> sRGB gamma) to turn
-/// them into a viewable image — a raw sensor mosaic isn't displayable pixel
-/// data on its own. Finally applies the file's EXIF/TIFF orientation the same
-/// way the mac arm and the non-mac JPEG/PNG/TIFF arm do, so callers never see
-/// a sideways/mirrored RAW regardless of platform.
-///
-/// Known gap (tracked in the plan, Task 12/14): this pipeline has only been
-/// exercised end-to-end against the synthetic Linear DNG fixture (cpp=3, so
-/// the demosaic branch below is never taken) via `decode_probe.rs` — no
-/// real-camera Bayer-CFA RAW (CR2/NEF/ARW) has been run through it. Note also
-/// that rawler's own demosaic dispatch (`RawDevelop::develop_intermediate`)
-/// panics via `todo!()` for a couple of CFA layouts it doesn't recognize;
-/// ordinary Bayer/X-Trans cameras don't hit those arms, but it's a real,
-/// narrow panic surface inherited from the dependency, not something this
-/// function can guard against from the outside.
-#[cfg(not(target_os = "macos"))]
-fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
-    let raw = decode_raw_via_rawler(path)?;
-    let orientation = exif_code_from_rawler_orientation(raw.orientation);
-
-    let developed = rawler::imgop::develop::RawDevelop::default()
-        .develop_intermediate(&raw)
-        .map_err(|e| e.to_string())?;
-    let dynamic = developed
-        .to_dynamic_image()
-        .ok_or("rawler produced an empty developed image")?;
-    let img = dynamic.into_rgba8();
-
-    let (src_w, src_h) = (img.width(), img.height());
-    if src_w == 0 || src_h == 0 {
-        return Err("decoded RAW image has zero dimension".into());
-    }
-    let (w, h) = fit_within(src_w, src_h, max_dim);
-    let rgba = if (w, h) == (src_w, src_h) {
-        img.into_raw()
-    } else {
-        image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3).into_raw()
-    };
-    Ok(apply_exif_orientation(
-        DecodedImage {
-            width: w,
-            height: h,
-            rgba,
-        },
-        orientation,
-    ))
-}
-
-/// Decode `path`, optionally downscaling so neither side exceeds `max_dim`.
-/// JPEG/PNG/TIFF go through the `image` crate; RAW extensions are routed to
-/// `decode_raw_nonmac` (Task 10). Applies EXIF orientation via the decoder's
-/// own `orientation()` (JPEG/TIFF support it; PNG has none and defaults to
-/// identity), matching the mac arm's behavior so callers never see a
-/// sideways/mirrored image regardless of platform.
-#[cfg(not(target_os = "macos"))]
-pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
-    if is_raw_extension(path) {
-        return decode_raw_nonmac(path, max_dim);
-    }
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    decode_jpeg_png_tiff_from_bytes(&bytes, max_dim)
-}
-
-/// The non-RAW half of [`decode`] above, minus the file read — bytes-based
-/// so wasm32's own decode path (`app/web.rs`, reading via
-/// `FileSystemFileHandle` instead of `std::fs::read`) can share this exact
-/// logic (full decode + EXIF-orientation-correct + `Lanczos3` resize)
-/// rather than a second, easy-to-drift-from-correct reimplementation —
-/// which is exactly what happened once already: an earlier wasm32 version
-/// used `DynamicImage::thumbnail()` (a fast/low-quality filter, not
-/// `Lanczos3`) and applied no orientation at all.
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn decode_jpeg_png_tiff_from_bytes(
-    bytes: &[u8],
-    max_dim: u32,
-) -> Result<DecodedImage, String> {
-    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?;
-    let mut decoder = reader.into_decoder().map_err(|e| e.to_string())?;
-
-    use image::ImageDecoder;
-    let orientation = decoder
-        .orientation()
-        .unwrap_or(image::metadata::Orientation::NoTransforms);
-
-    let mut img = image::DynamicImage::from_decoder(decoder).map_err(|e| e.to_string())?;
-    img.apply_orientation(orientation);
-    let img = img.into_rgba8();
-
-    let (src_w, src_h) = (img.width(), img.height());
-    if src_w == 0 || src_h == 0 {
-        return Err("decoded image has zero dimension".into());
-    }
-    let (w, h) = fit_within(src_w, src_h, max_dim);
-    let rgba = if (w, h) == (src_w, src_h) {
-        img.into_raw()
-    } else {
-        image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3).into_raw()
-    };
-    Ok(DecodedImage {
-        width: w,
-        height: h,
-        rgba,
-    })
-}
-
 /// Validated calendar/time components parsed from an EXIF datetime string.
+// Only `read_capture_time`/`read_capture_date` (macOS-only, ImageIO EXIF
+// reads) call into this family outside of its own unit tests below, hence
+// the `any(macos, test)` gate on each item in it.
+#[cfg(any(target_os = "macos", test))]
 struct DateTimeParts {
     y: i64,
     mo: u32,
@@ -321,6 +199,7 @@ struct DateTimeParts {
 
 /// Parse an EXIF datetime string (`"YYYY:MM:DD HH:MM:SS"`) into validated
 /// components. Returns `None` for empty, zeroed, or malformed values.
+#[cfg(any(target_os = "macos", test))]
 fn parse_exif_datetime_parts(s: &str) -> Option<DateTimeParts> {
     let (date, time) = s.trim().split_once(' ')?;
     let mut d = date.split(':');
@@ -347,6 +226,7 @@ fn parse_exif_datetime_parts(s: &str) -> Option<DateTimeParts> {
 /// Parse an EXIF datetime string into a `SystemTime`, interpreting it as UTC
 /// (EXIF carries no timezone; only *consistency* matters for burst grouping,
 /// not absolute correctness).
+#[cfg(any(target_os = "macos", test))]
 fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
     let p = parse_exif_datetime_parts(s)?;
     let secs = days_from_civil(p.y, p.mo, p.da) * 86_400 + (p.h * 3600 + p.mi * 60 + p.se) as i64;
@@ -355,6 +235,7 @@ fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
 
 /// Parse an EXIF datetime string into calendar fields for display, as the
 /// camera recorded them — no timezone conversion (see `CaptureDate`).
+#[cfg(any(target_os = "macos", test))]
 fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
     let p = parse_exif_datetime_parts(s)?;
     Some(CaptureDate {
@@ -368,6 +249,7 @@ fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
 
 /// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
 /// `days_from_civil`). Valid for any in-range `m` (1..=12), `d` (1..=31).
+#[cfg(any(target_os = "macos", test))]
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = (if y >= 0 { y } else { y - 399 }) / 400;
@@ -386,14 +268,6 @@ pub fn capture_time(path: &Path) -> Option<SystemTime> {
     let source = open_image_source(path).ok()?;
     read_capture_time(&source)
         .or_else(|| std::fs::metadata(path).ok().and_then(|m| m.modified().ok()))
-}
-
-/// Capture time for `path`. Non-mac has no EXIF reader wired up yet, so this
-/// always takes the mtime fallback described above (the same path the mac
-/// arm takes for any file whose EXIF is absent/unparseable).
-#[cfg(not(target_os = "macos"))]
-pub fn capture_time(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 /// Read the capture timestamp from an open source: EXIF `DateTimeOriginal`
@@ -479,27 +353,6 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
     }
 
     meta
-}
-
-/// Read camera/lens/exposure metadata plus capture date for `path`. Non-mac
-/// has no EXIF reader wired up yet, so every field is `None` except
-/// `source_size`, which comes from [`pixel_size`] (the stored, pre-orientation
-/// dimensions) swapped into display orientation for the quarter-turn EXIF
-/// orientations via [`orientation_of`] — mirroring the mac arm's logic exactly
-/// so the result lines up with what [`decode`] actually produces.
-#[cfg(not(target_os = "macos"))]
-pub fn read_metadata(path: &Path) -> ImageMetadata {
-    let source_size = pixel_size(path).map(|(w, h)| {
-        if matches!(orientation_of(path), 5..=8) {
-            (h, w)
-        } else {
-            (w, h)
-        }
-    });
-    ImageMetadata {
-        source_size,
-        ..ImageMetadata::default()
-    }
 }
 
 /// Fetch a dictionary value by key with no type checking; null if absent.
@@ -605,14 +458,6 @@ pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
     Some((w as u32, h as u32))
 }
 
-/// The image's stored pixel dimensions, before EXIF orientation is applied —
-/// same semantics as the mac arm (see above). Reads just the header via the
-/// `image` crate's decoder, no full decode.
-#[cfg(not(target_os = "macos"))]
-pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
-    image::image_dimensions(path).ok()
-}
-
 /// The EXIF orientation of the image at `path` (`1..=8`, `1` when absent).
 ///
 /// [`decode`] already applies this, so callers only need it to line something
@@ -697,6 +542,11 @@ pub(crate) fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> Deco
     if orientation <= 1 {
         return img;
     }
+    // 4-bytes/pixel math below assumes `Srgb8` — the one producer of
+    // `LinearF16` (`raw_fast_preview::decode_raw_quality_from_bytes`) applies
+    // orientation itself, before this function's pixel_format is ever
+    // anything else.
+    debug_assert_eq!(img.pixel_format, PixelFormat::Srgb8);
     let (w, h) = (img.width, img.height);
     let swaps = matches!(orientation, 5 | 6 | 7 | 8);
     let (nw, nh) = if swaps { (h, w) } else { (w, h) };
@@ -722,6 +572,7 @@ pub(crate) fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> Deco
         width: nw,
         height: nh,
         rgba: dst,
+        pixel_format: img.pixel_format,
     }
 }
 
@@ -768,6 +619,7 @@ pub fn cgimage_to_rgba(
         width: target_w,
         height: target_h,
         rgba: buffer,
+        pixel_format: PixelFormat::Srgb8,
     })
 }
 
@@ -859,6 +711,7 @@ mod tests {
             width: 2,
             height: 1,
             rgba: [px(10), px(20)].concat(),
+            pixel_format: PixelFormat::Srgb8,
         };
         let out = apply_exif_orientation(img, 1);
         assert_eq!((out.width, out.height), (2, 1));
@@ -873,6 +726,7 @@ mod tests {
             width: 2,
             height: 1,
             rgba: [px(10), px(20)].concat(),
+            pixel_format: PixelFormat::Srgb8,
         };
         let out = apply_exif_orientation(img, 6);
         assert_eq!((out.width, out.height), (1, 2));
@@ -887,6 +741,7 @@ mod tests {
             width: 2,
             height: 1,
             rgba: [px(10), px(20)].concat(),
+            pixel_format: PixelFormat::Srgb8,
         };
         let cw = apply_exif_orientation(img, 6); // 1×2 [10; 20]
         let back = apply_exif_orientation(cw, 8); // rot270 CW → back to 2×1 [10,20]
@@ -901,6 +756,7 @@ mod tests {
             width: 2,
             height: 1,
             rgba: [px(10), px(20)].concat(),
+            pixel_format: PixelFormat::Srgb8,
         };
         let out = apply_exif_orientation(img, 2);
         assert_eq!((out.width, out.height), (2, 1));

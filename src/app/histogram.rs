@@ -12,15 +12,21 @@ impl App {
     /// can look up actual neighbor cells (needed for denoise) as well as
     /// re-bin cheaply as adjustments change.
     ///
-    /// The decode is premultiplied sRGB RGBA8; we un-premultiply (guarding a==0)
-    /// and convert sRGB → linear with the 2.2 gamma `apply_linear` assumes, so
-    /// the histogram domain matches the develop pipeline's input.
+    /// Decode either sRGB RGBA8 or linear RGBA16F into the linear-light domain
+    /// consumed by the Develop pipeline.
     pub(super) fn build_hist_sample(&mut self, img: &image_decode::DecodedImage) {
         let (w, h) = (img.width as usize, img.height as usize);
-        if w == 0 || h == 0 || img.rgba.len() < w * h * 4 {
+        if w == 0
+            || h == 0
+            || img.rgba.len() < w * h * match img.pixel_format {
+                image_decode::PixelFormat::Srgb8 => 4,
+                image_decode::PixelFormat::LinearF16 => 8,
+            }
+        {
             self.hist_sample.clear();
             self.hist_dw = 0;
             self.hist_dh = 0;
+            self.hist_pixel_format = image_decode::PixelFormat::Srgb8;
             self.hist_dirty = true;
             return;
         }
@@ -33,14 +39,11 @@ impl App {
         while y < h {
             let mut x = 0;
             while x < w {
-                let i = (y * w + x) * 4;
-                let lin = image_ops::unpremul_to_linear([
-                    img.rgba[i],
-                    img.rgba[i + 1],
-                    img.rgba[i + 2],
-                    img.rgba[i + 3],
-                ]);
-                sample.push(lin);
+                sample.push(image_ops::sample_linear(
+                    img,
+                    x as f32 / w.saturating_sub(1).max(1) as f32,
+                    y as f32 / h.saturating_sub(1).max(1) as f32,
+                ));
                 x += step;
             }
             y += step;
@@ -48,6 +51,7 @@ impl App {
         self.hist_sample = sample;
         self.hist_dw = dw;
         self.hist_dh = dh;
+        self.hist_pixel_format = img.pixel_format;
         self.hist_dirty = true;
     }
 
@@ -90,10 +94,21 @@ impl App {
                     let sy = (gy as i64 + dy as i64).clamp(0, dh as i64 - 1) as usize;
                     grid[sy * dw + sx]
                 });
-                let out = develop::apply_linear(&adj, px);
+                let out = match self.hist_pixel_format {
+                    image_decode::PixelFormat::Srgb8 => develop::apply_linear(&adj, px),
+                    image_decode::PixelFormat::LinearF16 => develop::apply_raw_display(&adj, px),
+                };
                 for ch in 0..3 {
-                    // Linear → display gamma (the same encoding the shader output gets).
-                    let v = out[ch].max(0.0).powf(1.0 / 2.2).clamp(0.0, 1.0);
+                    // `apply_raw_display` already returns the display-space
+                    // value produced by raw_shader.wgsl. The generic path
+                    // returns linear output and needs the usual approximation.
+                    let v = match self.hist_pixel_format {
+                        image_decode::PixelFormat::Srgb8 => {
+                            out[ch].max(0.0).powf(1.0 / 2.2)
+                        }
+                        image_decode::PixelFormat::LinearF16 => out[ch],
+                    }
+                    .clamp(0.0, 1.0);
                     // Fractional ("float") binning: splat the sample across its two
                     // neighbouring buckets by sub-bin position instead of rounding to
                     // one. Spreading the energy continuously is what keeps the curve

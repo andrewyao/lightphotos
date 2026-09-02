@@ -10,6 +10,18 @@
 //! Ranges: tone sliders are −100..=100 with 0 = identity; exposure is −5..=5 stops
 //! with 0 = identity. `Adjustments::default()` is the identity edit, which
 //! `is_identity()` reports so the catalog can skip serializing it.
+//!
+//! ## Pipeline position
+//! - `apply_linear` runs on the CPU, once per pixel, from
+//!   `image_ops::bake_edited` (Pipeline 2's thumbnail bake and Pipeline 3's
+//!   export bake) and from the live histogram sampler.
+//! - The GPU twin, `shader.wgsl`'s `fs_main`, is how Pipeline 1 (the Loupe)
+//!   applies edits — live, every frame, without ever touching this Rust
+//!   function.
+//! - Both copies MUST stay in lockstep — see the "MUST stay in sync" comment
+//!   on `apply_linear` below.
+//! - Nothing in this file is platform-gated — every target runs the
+//!   identical tone math.
 
 use serde::{Deserialize, Serialize};
 
@@ -308,6 +320,17 @@ impl From<&Adjustments> for GpuAdjust {
 /// copy). Fidelity to Lightroom exactly is NOT required — plausible and
 /// well-behaved is the goal. Keep it simple so the two copies stay in lockstep.
 pub fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
+    apply_linear_impl(adj, rgb, false)
+}
+
+/// Apply the RAW shader's display pipeline to a linear-light RGB pixel.
+/// Unlike `apply_linear`, this returns boosted sRGB working-space values
+/// because the RAW shader's render target is not an sRGB surface.
+pub fn apply_raw_display(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
+    apply_linear_impl(adj, rgb, true)
+}
+
+fn apply_linear_impl(adj: &Adjustments, rgb: [f32; 3], raw_display: bool) -> [f32; 3] {
     let [mut r, mut g, mut b] = rgb;
 
     // 1. White balance: turn temp/tint (−100..100) into gentle per-channel
@@ -331,7 +354,20 @@ pub fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
 
     // 3. Convert linear → working gamma (≈ perceptual). Clamp negatives first so
     //    powf is well-defined.
-    let to_gamma = |x: f32| x.max(0.0).powf(1.0 / 2.2);
+    let to_gamma = |x: f32| {
+        if raw_display {
+            let srgb = if x <= 0.0031308 {
+                x.max(0.0) * 12.92
+            } else {
+                1.055 * x.max(0.0).powf(1.0 / 2.4) - 0.055
+            };
+            let brightened = srgb.clamp(0.0, 1.0).powf(1.0 / 1.1);
+            let contrast_curve = brightened * brightened * (3.0 - 2.0 * brightened);
+            (brightened + (contrast_curve - brightened) * 0.75).clamp(0.0, 1.0)
+        } else {
+            x.max(0.0).powf(1.0 / 2.2)
+        }
+    };
     let mut rg = to_gamma(r);
     let mut gg = to_gamma(g);
     let mut bg = to_gamma(b);
@@ -397,6 +433,10 @@ pub fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
     rg = luma + (rg - luma) * total;
     gg = luma + (gg - luma) * total;
     bg = luma + (bg - luma) * total;
+
+    if raw_display {
+        return [rg.clamp(0.0, 1.0), gg.clamp(0.0, 1.0), bg.clamp(0.0, 1.0)];
+    }
 
     // 5. Convert working → linear.
     let to_linear = |x: f32| x.max(0.0).powf(2.2);
@@ -469,11 +509,24 @@ fn spatial_weight(dx: i32, dy: i32) -> f32 {
 /// MUST stay in sync with the `denoise > 0.0` branch of `fs_main` in
 /// shader.wgsl.
 pub(crate) fn denoise_sample(adj: &Adjustments, sample: impl Fn(i32, i32) -> [f32; 3]) -> [f32; 3] {
-    if adj.denoise <= 0.0 {
+    denoise_sample_with_strength(adj.denoise, sample)
+}
+
+/// The strength-parameterized core `denoise_sample` delegates to — split out
+/// so callers with no `Adjustments` value at hand (the automatic RAW-decode
+/// denoise pass in `raw/fast_preview.rs`/`raw/nonmac_decode.rs`, which runs
+/// at a fixed constant strength, never through the user-facing slider) can
+/// reuse the exact same bilateral math instead of constructing a throwaway
+/// `Adjustments` just to call through it.
+pub(crate) fn denoise_sample_with_strength(
+    strength: f32,
+    sample: impl Fn(i32, i32) -> [f32; 3],
+) -> [f32; 3] {
+    if strength <= 0.0 {
         return sample(0, 0);
     }
     let center = sample(0, 0);
-    let sigma_r = 0.02 + adj.denoise / 100.0 * 0.30;
+    let sigma_r = 0.02 + strength / 100.0 * 0.30;
     let sigma_r2 = sigma_r * sigma_r;
     let (mut sum, mut wsum) = ([0f32; 3], 0f32);
     for dy in -DENOISE_RADIUS..=DENOISE_RADIUS {
@@ -490,6 +543,43 @@ pub(crate) fn denoise_sample(adj: &Adjustments, sample: impl Fn(i32, i32) -> [f3
         }
     }
     [sum[0] / wsum, sum[1] / wsum, sum[2] / wsum]
+}
+
+/// Apply the bilateral denoise kernel to every pixel of a tightly-packed
+/// linear-light RGB buffer, clamping neighbor lookups to the buffer's own
+/// edges. This is the whole-image entry point for the automatic,
+/// decode-time RAW denoise pass (`raw/fast_preview.rs`'s wasm32 `Quality`
+/// tier, `raw/nonmac_decode.rs`'s native Linux/Windows decode) — unlike
+/// `denoise_sample`/`denoise_sample_with_strength` above, which apply to one
+/// pixel at a time via a caller-supplied neighbor closure (the shape the
+/// live GPU-mirrored bake/histogram path needs), this owns the whole buffer
+/// so a RAW decoder can call it once on its demosaiced output. Not reachable
+/// through `Adjustments`/the user-facing denoise slider — macOS's ImageIO
+/// decode already denoises internally and never calls this; native
+/// Linux/Windows and wasm32's `rawler`-based decode have no denoise of their
+/// own, which is the gap this closes. Returns `buf` unchanged (one clone, no
+/// filtering) at `strength <= 0.0` or a degenerate size, matching every
+/// other zero-strength fast path in this file.
+pub(crate) fn denoise_linear_rgb_buffer(
+    strength: f32,
+    width: usize,
+    height: usize,
+    buf: &[[f32; 3]],
+) -> Vec<[f32; 3]> {
+    if strength <= 0.0 || width == 0 || height == 0 || buf.len() < width * height {
+        return buf.to_vec();
+    }
+    (0..height)
+        .flat_map(|y| {
+            (0..width).map(move |x| {
+                denoise_sample_with_strength(strength, |dx, dy| {
+                    let sx = (x as i64 + dx as i64).clamp(0, width as i64 - 1) as usize;
+                    let sy = (y as i64 + dy as i64).clamp(0, height as i64 - 1) as usize;
+                    buf[sy * width + sx]
+                })
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -623,6 +713,61 @@ mod tests {
             (out[0] - 1.0).abs() < (out[0] - plain_avg).abs(),
             "expected range weighting to favor the pixel's own side, got {out:?}"
         );
+    }
+
+    #[test]
+    fn denoise_sample_with_strength_matches_denoise_sample_at_the_same_value() {
+        // The refactor must not change behavior: denoise_sample(adj, ..) is
+        // now defined in terms of this, so they must agree for every input
+        // adj.denoise already covers.
+        let adj = Adjustments {
+            denoise: 60.0,
+            ..Default::default()
+        };
+        let sample = |dx: i32, dy: i32| -> [f32; 3] {
+            let v = ((dx + dy) as f32) * 0.05 + 0.5;
+            [v, v, v]
+        };
+        assert_eq!(denoise_sample(&adj, sample), denoise_sample_with_strength(60.0, sample));
+    }
+
+    #[test]
+    fn denoise_linear_rgb_buffer_smooths_an_isolated_outlier() {
+        // Buffer-level counterpart of denoise_smooths_flat_noise: a 3x3
+        // linear-light buffer, uniform dark except a bright center pixel —
+        // this is the whole-image entry point the RAW decode paths call
+        // (raw/fast_preview.rs, raw/nonmac_decode.rs), not the per-pixel
+        // closure-based `denoise_sample`.
+        let (w, h) = (3, 3);
+        let mut buf = vec![[0.0f32; 3]; w * h];
+        buf[4] = [1.0, 1.0, 1.0]; // center
+        let out = denoise_linear_rgb_buffer(100.0, w, h, &buf);
+        assert!(
+            out[4][0] < 1.0 && out[4][0] > 0.0,
+            "expected the outlier pulled toward its neighbors, got {:?}",
+            out[4]
+        );
+        // Every non-center pixel is a hard-edge neighbor of the bright
+        // outlier, but the algorithm's own range weighting (proven by
+        // denoise_preserves_hard_edge above) should keep it from swinging
+        // all the way to the outlier's value.
+        assert!(out[0][0] < 0.5, "expected a far corner to stay close to its own dark value, got {:?}", out[0]);
+    }
+
+    #[test]
+    fn denoise_linear_rgb_buffer_zero_strength_is_identity() {
+        let buf = vec![[0.2, 0.3, 0.4], [1.0, 0.0, 0.0]];
+        let out = denoise_linear_rgb_buffer(0.0, 2, 1, &buf);
+        assert_eq!(out, buf);
+    }
+
+    #[test]
+    fn denoise_linear_rgb_buffer_clamps_at_edges_without_panicking() {
+        // Every pixel here is an edge/corner of a tiny 2x2 buffer — must not
+        // index out of bounds when a tap's (dx, dy) falls outside it.
+        let buf = vec![[0.1, 0.1, 0.1], [0.9, 0.9, 0.9], [0.5, 0.5, 0.5], [0.3, 0.3, 0.3]];
+        let out = denoise_linear_rgb_buffer(50.0, 2, 2, &buf);
+        assert_eq!(out.len(), 4);
     }
 
     #[test]

@@ -139,10 +139,10 @@ flowchart TD
     reqthumb --> webq["request_web_thumbs, app/web.rs\n(wasm32 only)"]
 
     subgraph mac2["macOS"]
-        nativeq --> mact["ThumbCache::get_or_make\n-> thumbnail::thumbnail (ImageIO,\ndecode-at-size + embedded preview)"]
+        nativeq --> mact["ThumbCache::get_or_make\n-> thumbnail::decode_at_size(ImageIO,\nEmbeddedPreview::UseIfPresent)"]
     end
     subgraph other2["Linux / Windows"]
-        nativeq --> othct["ThumbCache::get_or_make\n-> thumbnail::thumbnail\n(kamadak-exif embedded preview,\nfallback: full image_decode::decode)"]
+        nativeq --> othct["ThumbCache::get_or_make\n-> thumbnail::decode_at_size(EmbeddedPreview::UseIfPresent)\n(kamadak-exif embedded preview,\nfallback: full image_decode::decode)"]
     end
     subgraph web2["wasm32"]
         webq --> webct["wasm_worker.rs:\nembedded_preview_from_bytes, then\nrawler_full_image_from_bytes, then\nraw_fast_preview (Fast tier)"]

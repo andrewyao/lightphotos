@@ -253,6 +253,17 @@ impl Shown {
     }
 }
 
+/// Native/mac: no wasm32-style Loupe-loading state exists (decode is fast,
+/// real multi-core threads via ImageIO/`RawDevelop`), so the image draw
+/// never needs blanking while waiting on it. The real implementation is
+/// `app/web.rs`'s wasm32-gated `impl App` block (`loupe_is_loading`).
+#[cfg(not(target_arch = "wasm32"))]
+impl App {
+    pub(crate) fn loupe_is_loading(&self) -> bool {
+        false
+    }
+}
+
 /// Progress of an in-flight background export batch. `Some` from the moment
 /// jobs are submitted until the last outcome is drained.
 pub(crate) struct ExportProgress {
@@ -372,6 +383,33 @@ pub(crate) struct App {
     web_preview_inflight: HashSet<(PathBuf, u32)>,
     #[cfg(target_arch = "wasm32")]
     web_preview_failed: HashSet<(PathBuf, u32)>,
+    /// The Loupe's screen-fit *fast* decode (`JobKind::Speed`) — same shape
+    /// as `web_preview_inflight`/`web_preview_retries`/`web_preview_failed`,
+    /// tracked separately because a `Speed` result and the real `Preview`
+    /// (quality) result for the same `(path, target)` key both land at
+    /// (almost always) identical pixel dimensions once resized to fit the
+    /// same target, so they can't share `loader.rs`'s preview cache slot —
+    /// `try_show`'s "did a sharper tier land" check compares `(target,
+    /// actual)`, which wouldn't see a difference. `poll_web_preview` applies
+    /// a landed `Speed` result directly via `upload_shown` instead of
+    /// routing it through `loader.rs` at all.
+    #[cfg(target_arch = "wasm32")]
+    web_speed_inflight: HashSet<(PathBuf, u32)>,
+    #[cfg(target_arch = "wasm32")]
+    web_speed_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
+    #[cfg(target_arch = "wasm32")]
+    web_speed_failed: HashSet<(PathBuf, u32)>,
+    /// The Loupe's zoom-triggered full-resolution decode (`JobKind::Full`) —
+    /// wasm32 counterpart of `loader.rs`'s native `Job::Full`/`request_full`
+    /// (whose worker queue has no live workers on wasm32). Lands via
+    /// `loader.insert_full_external`, so `try_show`'s existing `get_full`
+    /// branch picks it up with no further changes there.
+    #[cfg(target_arch = "wasm32")]
+    web_full_inflight: HashSet<(PathBuf, u32)>,
+    #[cfg(target_arch = "wasm32")]
+    web_full_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
+    #[cfg(target_arch = "wasm32")]
+    web_full_failed: HashSet<(PathBuf, u32)>,
 
     /// Real parallel decode (wasm port plan's M4) — a hand-rolled
     /// `web_sys::Worker` pool, chosen over `wasm-bindgen-rayon` because that
@@ -391,6 +429,12 @@ pub(crate) struct App {
     /// a shared channel can't split one frame's results across two draws.
     #[cfg(target_arch = "wasm32")]
     web_preview_pending: Vec<crate::web_worker_pool::PoolResult>,
+    /// `Full`-tier results set aside the same way `web_preview_pending` sets
+    /// aside `Preview`/`Speed` ones — `poll_web_thumbs` routes them here
+    /// directly (see its own routing comment) since `poll_web_full` is a
+    /// separate function from `poll_web_preview`.
+    #[cfg(target_arch = "wasm32")]
+    web_full_pending: Vec<crate::web_worker_pool::PoolResult>,
 
     // ---- Browser state ----
     /// Grid vs. Loupe.
@@ -435,6 +479,9 @@ pub(crate) struct App {
     // cells for denoise, and can derive each cell's normalized (u, v)
     // position analytically to drop cells outside the active crop rect.
     hist_sample: Vec<[f32; 3]>,
+    /// Format of the image that produced `hist_sample`; RAW linear samples
+    /// need the RAW shader's real sRGB transfer and preview boost.
+    hist_pixel_format: image_decode::PixelFormat,
     /// `hist_sample`'s grid dimensions (0×0 when no image is loaded).
     hist_dw: usize,
     hist_dh: usize,
@@ -586,6 +633,13 @@ pub(crate) struct App {
     pub(crate) win_size: (f32, f32),
     /// True while the view is auto-fit to the window (so a resize re-fits).
     pub(crate) fitted: bool,
+    // TEMPORARY DEBUG — see `app/thumbs.rs::set_tier_debug`. Prefixed onto
+    // the window/tab title (`update_window_title`) since the clear-color
+    // tint alone is invisible whenever the fitted image fills the Loupe
+    // viewport edge-to-edge (no letterbox margin left for the color to show
+    // in). Remove alongside the color tint once the zoom-refit fix is
+    // verified.
+    pub(crate) debug_tier_label: &'static str,
     /// Per-image rotation, in 90° clockwise steps (0..=3).
     rotations: HashMap<PathBuf, u8>,
     /// The image viewport rect (physical px) the loupe drew into last frame, if any.
@@ -740,9 +794,23 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             web_preview_failed: HashSet::new(),
             #[cfg(target_arch = "wasm32")]
+            web_speed_inflight: HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_speed_retries: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_speed_failed: HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_full_inflight: HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_full_retries: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_full_failed: HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
             web_worker_pool,
             #[cfg(target_arch = "wasm32")]
             web_preview_pending: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_full_pending: Vec::new(),
             mode: ViewMode::Grid,
             catalog,
             catalog_load_pending: None,
@@ -759,6 +827,7 @@ impl App {
             touchup_selected: None,
             develop_open: true,
             hist_sample: Vec::new(),
+            hist_pixel_format: image_decode::PixelFormat::Srgb8,
             hist_dw: 0,
             hist_dh: 0,
             histogram: None,
@@ -809,6 +878,7 @@ impl App {
             pan: (0.0, 0.0),
             win_size: (1.0, 1.0),
             fitted: false,
+            debug_tier_label: "",
             rotations: HashMap::new(),
             loupe_viewport: None,
             crop_edit: None,
@@ -1089,6 +1159,24 @@ impl App {
                     compare_vp = Some((x + half + gap, y, half, h));
                 }
             }
+        }
+
+        // wasm32 RAW loading (see `App::loupe_is_loading`): don't draw the
+        // image quad at all while the real decode is in flight, so the
+        // previously-shown photo can't show through underneath — the Loupe
+        // just goes blank until the sharp image lands. Overriding
+        // `primary_vp` here rather than `image_viewport` itself keeps this
+        // out of `self.loupe_viewport`'s own change-detection above — a
+        // fake zero-size viewport would otherwise trigger a spurious
+        // `fit_to_window()`/`push_transform()` call on both the way into
+        // and out of loading. Same zero-size precedent Grid/Survey already
+        // establish (`image_viewport`'s own match arm, above) —
+        // `renderer.rs`'s `draw_into` early-returns before ever
+        // binding/drawing, so `image_bind`/the uploaded texture is left
+        // completely untouched, nothing to restore once loading ends.
+        if self.loupe_is_loading() {
+            primary_vp = Some((0, 0, 0, 0));
+            compare_vp = None;
         }
 
         let Some(renderer) = self.renderer.as_mut() else {

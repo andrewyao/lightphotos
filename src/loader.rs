@@ -24,6 +24,21 @@
 //! Every tier shares one priority work queue (fanned out to the workers via an
 //! `Arc<Mutex<Queue>>` plus a condvar) and one results channel drained by the
 //! poll methods, which route each result back to its tier.
+//!
+//! ## Pipeline position
+//! - Spine of both Pipeline 1 (opening a photo into the Loupe) and Pipeline 2
+//!   (Grid/filmstrip thumbnails) — macOS and Linux/Windows only. See
+//!   `ARCHITECTURE.md` for the full picture.
+//! - `App::try_show`/`app/thumbs.rs` call `request_preview`/`request_full`/
+//!   `request_thumb` as the user navigates or scrolls.
+//! - A worker thread here picks up the job and calls into
+//!   `image_decode.rs`/`thumbnail.rs` to actually produce pixels.
+//! - The result lands back in this module's caches for `get_preview`/
+//!   `get_full`/`get_thumb` to read.
+//! - wasm32 shares these same caches but never touches this file's queue:
+//!   no live OS threads exist there, so `web_worker_pool.rs` dispatches to
+//!   real Web Workers instead and feeds results in directly via
+//!   `insert_*_external` (see those methods below).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -452,6 +467,7 @@ impl Loader {
     /// this starts with the fast [`Job::Quick`] pass and escalates to a forced
     /// [`Job::Preview`] decode only if that came back short of `target_px` —
     /// see `escalate_if_short`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn request_preview(&mut self, path: PathBuf, target_px: u32) {
         self.enqueue_quick(path, target_px, true);
     }
@@ -680,24 +696,42 @@ impl Loader {
     /// touch `thumb_inflight`; callers own their own in-flight tracking for
     /// whatever they're driving this from (mirroring but not sharing
     /// `request_thumb`'s, since nothing here ever went through that queue).
+    #[cfg(target_arch = "wasm32")]
     pub fn insert_thumb_external(&mut self, path: PathBuf, max_px: u32, img: Arc<DecodedImage>) {
         self.insert_thumb((path, max_px), img);
     }
 
     /// Negative-cache an externally-decoded thumbnail that failed — same
     /// role as a worker's own failure path, for wasm32's decode path.
+    #[cfg(target_arch = "wasm32")]
     pub fn mark_thumb_failed_external(&mut self, path: PathBuf, max_px: u32) {
         self.thumb_failed.insert((path, max_px));
     }
 
     /// The preview-tier counterpart of `insert_thumb_external` — wasm32's
     /// Loupe decode (`app/web.rs`) feeds results in here directly rather
-    /// than through the quick/forced two-pass split `request_preview`'s
-    /// worker jobs use (`Job::Quick`/`Job::Preview`): there's no embedded-
-    /// preview-vs-full-decode distinction to make twice when the caller
-    /// already decoded once at the real target size.
+    /// than through `request_preview`'s worker-queue-based `Job::Quick`/
+    /// `Job::Preview` split: there's no embedded-preview-vs-full-decode
+    /// distinction to make twice when the caller already decoded once at
+    /// the real target size. (A wasm-side two-pass split — cheap `Fast`
+    /// shown first, `Quality` swapped in behind it — was tried and
+    /// reverted: getting the Loupe's zoom transform right across an extra
+    /// tier boundary proved fragile in practice.)
+    #[cfg(target_arch = "wasm32")]
     pub fn insert_preview_external(&mut self, path: PathBuf, target_px: u32, img: Arc<DecodedImage>) {
         self.insert_preview((path, target_px), img);
+    }
+
+    /// The full-resolution-tier counterpart of `insert_preview_external` —
+    /// wasm32's `app/web.rs::poll_web_full` feeds a zoom-triggered quality
+    /// decode in here, since `loader.rs`'s own worker queue (`Job::Full`,
+    /// driven by `request_full`) has no live workers on wasm32 to service
+    /// it. Lands in the same `self.cache` LRU `get_full`/`try_show` already
+    /// read from, keyed by path alone (unlike the preview/thumb tiers, one
+    /// photo has only one "full resolution").
+    #[cfg(target_arch = "wasm32")]
+    pub fn insert_full_external(&mut self, path: PathBuf, img: Arc<DecodedImage>) {
+        self.insert(path, img);
     }
 
     /// Drain finished jobs into the caches and return thumbnail `(path, max_px)`
@@ -967,6 +1001,7 @@ mod tests {
             width: w,
             height: h,
             rgba: vec![0; (w * h * 4) as usize],
+            pixel_format: image_decode::PixelFormat::Srgb8,
         })
     }
 

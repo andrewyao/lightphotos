@@ -27,6 +27,20 @@
 //! `src/main.rs` is the crate root, so there is nothing for a second binary
 //! to `use`. Declared at crate root (not nested in a module) so `crate::`
 //! paths inside those files resolve exactly as they do in the main binary.
+//!
+//! ## Pipeline position
+//! - This binary IS wasm32's decode step for both Pipeline 1 (Loupe) and
+//!   Pipeline 2 (Grid/filmstrip) — it never runs on macOS or native
+//!   Linux/Windows.
+//! - `web_worker_pool.rs` (main thread) posts a job here; this file's
+//!   `decode()` tries the cheap embedded-preview extractors first
+//!   (`thumbnail::embedded_preview_from_bytes`, then
+//!   `thumbnail::rawler_full_image_from_bytes` for RAF/CR3), falling back to
+//!   `raw_fast_preview`'s `Fast`/`Quality` tiers for everything else.
+//! - The result posts back to the main thread, which routes it into
+//!   `loader.rs`'s caches via `insert_*_external` (see that file's own
+//!   doc comment).
+//! - See `ARCHITECTURE.md`.
 #![allow(dead_code)]
 
 #[cfg(target_arch = "wasm32")]
@@ -36,7 +50,7 @@ mod image_decode;
 #[path = "../thumbnail.rs"]
 mod thumbnail;
 #[cfg(target_arch = "wasm32")]
-#[path = "../raw_fast_preview.rs"]
+#[path = "../raw/fast_preview.rs"]
 mod raw_fast_preview;
 // thumbnail.rs's on-disk `ThumbCache` (unused here — this worker only ever
 // calls its bytes-based `embedded_preview_from_bytes`) still pulls these two
@@ -47,6 +61,11 @@ mod paths;
 #[cfg(target_arch = "wasm32")]
 #[path = "../hash.rs"]
 mod hash;
+// Pulled in for `denoise_linear_rgb_buffer`, which `raw_fast_preview`'s
+// `Quality`-tier code now calls (see raw/fast_preview.rs).
+#[cfg(target_arch = "wasm32")]
+#[path = "../develop.rs"]
+mod develop;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
@@ -64,7 +83,7 @@ fn main() {
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
-    use crate::image_decode::{self, DecodedImage};
+    use crate::image_decode::{self, DecodedImage, PixelFormat};
     use crate::raw_fast_preview;
     use crate::thumbnail;
     use js_sys::{Array, Object, Reflect, Uint8Array};
@@ -76,24 +95,43 @@ mod wasm {
     /// embedded EXIF baseline thumbnail first (`thumbnail::
     /// embedded_preview_from_bytes` — already-decoded by the camera, just a
     /// small JPEG decode, same trick Photopea and every fast RAW browser
-    /// uses for quick previews), falling back to the quarter-res Bayer-
-    /// demosaic path (`raw_fast_preview`) only when that's missing or too
-    /// small for what was asked. This isn't only about speed: `raw_fast_
-    /// preview`'s `catch_unwind` guards around `rawler`'s parser are almost
-    /// certainly *ineffective* on wasm32-unknown-unknown (no real stack
-    /// unwinding without nightly + explicit exception-handling support,
-    /// which this build doesn't use) — a panic there traps the whole wasm
-    /// instance, permanently killing this worker with no console output at
-    /// all. That matched an observed symptom exactly: grid population
-    /// getting stuck after a small, fixed number of thumbnails (workers
-    /// dying off one at a time as each hit some RAW file that panicked
-    /// rawler's parser), independent of the separate `NotReadableError`
-    /// read-concurrency issue `app/web.rs` handles. Routing the common case
-    /// (a grid thumbnail) through the JPEG decoder instead — far less
-    /// panic-prone code — should make that far rarer, though a genuine
-    /// fix still wants real exception-handling support or an audited
-    /// panic-free `rawler` call path.
-    fn decode(bytes: &[u8], max_px: u32, is_raw: bool) -> Result<DecodedImage, String> {
+    /// uses for quick previews); if that container can't even be opened this
+    /// way (CR3's ISO-BMFF wrapper, RAF's proprietary header — neither is
+    /// TIFF/JPEG at byte 0), tries `thumbnail::rawler_full_image_from_bytes`
+    /// next — RAF/CR3-only by design (see that function's own doc comment):
+    /// several other formats treated as RAW here (CR2/NEF/ARW/DNG/RW2/PEF)
+    /// *also* have a `full_image()` override, but their containers already
+    /// open fine above, so letting this ask them too silently swapped the
+    /// camera's own embedded JPEG in for the real linear-RAW demosaic on
+    /// every one of those, confirmed on a real Sony ARW — a different
+    /// picture, not a subtly-off tonemap; only then falls back to
+    /// `raw_fast_preview`. This isn't only about
+    /// speed: `raw_fast_preview`'s `catch_unwind` guards around `rawler`'s
+    /// parser are almost certainly *ineffective* on wasm32-unknown-unknown
+    /// (no real stack unwinding without nightly + explicit exception-handling
+    /// support, which this build doesn't use) — a panic there traps the
+    /// whole wasm instance, permanently killing this worker with no console
+    /// output at all. That matched an observed symptom exactly: grid
+    /// population getting stuck after a small, fixed number of thumbnails
+    /// (workers dying off one at a time as each hit some RAW file that
+    /// panicked rawler's parser), independent of the separate
+    /// `NotReadableError` read-concurrency issue `app/web.rs` handles.
+    /// Routing the common case (a grid thumbnail, or a RAF/CR3 Loupe open)
+    /// through one of the two embedded-preview extractors instead — far less
+    /// panic-prone code than `raw_fast_preview`'s demosaic path — should make
+    /// that far rarer, though a genuine fix still wants real
+    /// exception-handling support or an audited panic-free `rawler` call
+    /// path.
+    ///
+    /// `quality`, set by `web_worker_pool.rs`'s `submit()` from the job's
+    /// `JobKind` (never decided here), picks which `raw_fast_preview` entry
+    /// point services the fallback: `false` (Grid/`Thumb`) →
+    /// `decode_raw_fast_from_bytes` (quarter-res Bayer bin, sRGB8 output,
+    /// unchanged); `true` (Loupe/`Preview`) → `decode_raw_quality_from_bytes`
+    /// (full PPG demosaic, `PixelFormat::LinearF16` output — the renderer
+    /// tonemaps this on the GPU via `raw_shader.wgsl` instead of expecting it
+    /// pre-baked). Meaningless for the non-RAW branch below.
+    fn decode(bytes: &[u8], max_px: u32, is_raw: bool, quality: bool) -> Result<DecodedImage, String> {
         if is_raw {
             if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
                 // "Too small for what was asked" — the embedded baseline
@@ -105,10 +143,28 @@ mod wasm {
                     return Ok(preview);
                 }
             }
-            return raw_fast_preview::decode_raw_fast_from_bytes(bytes, max_px);
+            // rawler's `full_image()` is the camera's own full-resolution
+            // embedded JPEG, not a small baseline thumbnail — no "too small"
+            // check needed, it's plenty big for Grid and Loupe alike.
+            if let Some(preview) = thumbnail::rawler_full_image_from_bytes(bytes, max_px) {
+                return Ok(preview);
+            }
+            return if quality {
+                raw_fast_preview::decode_raw_quality_from_bytes(bytes, max_px)
+            } else {
+                raw_fast_preview::decode_raw_fast_from_bytes(bytes, max_px)
+            };
         }
         if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
-            return Ok(preview);
+            // Same "too small for what was asked" gate as the RAW branch
+            // above: a JPEG's EXIF baseline thumbnail is typically ~160x120,
+            // fine for a grid cell but not a Loupe preview and never the
+            // full-resolution tier. Without this, a `Full`/`Preview` job
+            // caches that tiny image and zoom can never reach the real
+            // source pixels (`app/web.rs` sees `already_have` forever).
+            if preview.width.max(preview.height) * 2 >= max_px {
+                return Ok(preview);
+            }
         }
         image_decode::decode_jpeg_png_tiff_from_bytes(bytes, max_px)
     }
@@ -142,13 +198,14 @@ mod wasm {
             let id = get_f64(&data, "id");
             let max_px = get_f64(&data, "maxPx") as u32;
             let is_raw = get_bool(&data, "isRaw");
+            let quality = get_bool(&data, "quality");
             let bytes_val = Reflect::get(&data, &JsValue::from_str("bytes"))
                 .unwrap_or(JsValue::UNDEFINED);
             let bytes = Uint8Array::new(&bytes_val).to_vec();
 
             let result = Object::new();
             let _ = Reflect::set(&result, &JsValue::from_str("id"), &JsValue::from_f64(id));
-            match decode(&bytes, max_px, is_raw) {
+            match decode(&bytes, max_px, is_raw, quality) {
                 Ok(img) => {
                     let rgba = Uint8Array::from(img.rgba.as_slice());
                     let _ = Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::TRUE);
@@ -161,6 +218,11 @@ mod wasm {
                         &result,
                         &JsValue::from_str("height"),
                         &JsValue::from_f64(img.height as f64),
+                    );
+                    let _ = Reflect::set(
+                        &result,
+                        &JsValue::from_str("linear"),
+                        &JsValue::from_bool(img.pixel_format == PixelFormat::LinearF16),
                     );
                     let _ = Reflect::set(&result, &JsValue::from_str("rgba"), &rgba.buffer());
                     let transfer = Array::new();
