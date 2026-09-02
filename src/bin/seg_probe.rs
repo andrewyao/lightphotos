@@ -43,7 +43,9 @@ mod segmentation;
 #[path = "../vision.rs"]
 mod vision;
 
+#[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::ExitCode;
 
 /// Longest side the overlay preview is rendered at. Big enough to judge the
@@ -89,6 +91,7 @@ fn real_main() -> ExitCode {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn probe(path: &Path) -> Result<(), String> {
     let mask = segmentation::segment(path)?;
     // Both numbers, because their *ratio* is the tell: a real subject's matte

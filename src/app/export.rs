@@ -1,11 +1,16 @@
 use super::*;
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
 // Instant comes from `super::*` (app/mod.rs re-exports web_time::Instant,
 // not std::time::Instant — see loader.rs's launched_at() doc comment).
 
-
-use crate::export::{ExportJob, ExportOutcome};
+use crate::export::ExportOutcome;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::export::ExportJob;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::paths;
 
 impl App {
@@ -40,6 +45,9 @@ impl App {
     /// situation. File System Access could support a real wasm32 export
     /// (writable streams) — genuinely out of scope for this fix, not a
     /// permanent decision to never do it.
+    // TODO(wasm32 export): wire this up to the File System Access API
+    // (writable streams) once that lands for the web build, instead of
+    // this stub.
     #[cfg(target_arch = "wasm32")]
     pub(super) fn start_export(&mut self, _paths: Vec<PathBuf>) {
         self.set_status("Export isn't supported in the browser yet".into());

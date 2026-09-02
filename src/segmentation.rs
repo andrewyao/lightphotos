@@ -108,6 +108,7 @@ impl Mask {
 
     /// This mask reoriented per an EXIF orientation (`1..=8`), so it lines up
     /// with the decoded image. See [`crate::image_ops::orient_mask`].
+    #[cfg(target_os = "macos")]
     pub fn oriented(self, orientation: u8) -> Mask {
         if orientation <= 1 {
             return self;
@@ -145,6 +146,7 @@ impl Mask {
     /// person anywhere, person segmentation returns 13.2% mean / 13.4% solid:
     /// a confident, well-formed, completely imaginary subject. No coverage
     /// statistic separates that from a real one, so nothing here tries to.
+    #[cfg(any(target_os = "macos", test))]
     pub fn solid_coverage(&self) -> f32 {
         if self.alpha.is_empty() {
             return 0.0;
@@ -165,6 +167,7 @@ impl Mask {
 /// person mask rather than falling through to the general request. Whether that
 /// matters in practice is one of the questions this exploratory plan exists to
 /// answer on real photographs.
+#[cfg(any(target_os = "macos", test))]
 const EMPTY_COVERAGE: f32 = 0.01;
 
 /// Segment the subject of the photo at `path`, in *display* orientation.
@@ -220,13 +223,6 @@ pub fn segment_person(path: &Path) -> Result<Mask, String> {
     }
 }
 
-/// `VNGeneratePersonSegmentationRequest`. Unsupported on this platform —
-/// Vision is macOS-only.
-#[cfg(not(target_os = "macos"))]
-pub fn segment_person(_path: &Path) -> Result<Mask, String> {
-    Err("subject segmentation is unsupported on this platform".into())
-}
-
 /// `VNGenerateForegroundInstanceMaskRequest`, merging every instance it found
 /// into one mask.
 ///
@@ -248,13 +244,6 @@ pub fn segment_foreground(path: &Path) -> Result<Mask, String> {
             .map_err(|e| e.localizedDescription().to_string())?;
         pixel_buffer_to_mask(&buffer, MaskSource::ForegroundInstance)
     }
-}
-
-/// `VNGenerateForegroundInstanceMaskRequest`. Unsupported on this platform —
-/// Vision is macOS-only.
-#[cfg(not(target_os = "macos"))]
-pub fn segment_foreground(_path: &Path) -> Result<Mask, String> {
-    Err("subject segmentation is unsupported on this platform".into())
 }
 
 /// Copy a Vision mask buffer into a tightly-packed `Vec<u8>`.

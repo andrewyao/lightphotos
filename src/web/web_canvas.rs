@@ -4,6 +4,14 @@
 //! `<canvas>` element itself on this target but does not insert it into the
 //! DOM for you — that's explicitly left to the app, per winit's own
 //! `platform::web` docs.
+//!
+//! ## Pipeline position
+//! - Runs once, at startup, before any of the three pipelines exist —
+//!   `main.rs`'s wasm32 `resumed()` calls `attach` before constructing
+//!   `Renderer::new` (Pipeline 1's final stage), because `Renderer::new`
+//!   needs the real viewport size this function determines.
+//! - Not called again after startup, and not part of any per-photo pipeline
+//!   run.
 
 use winit::dpi::PhysicalSize;
 use winit::platform::web::WindowExtWebSys;

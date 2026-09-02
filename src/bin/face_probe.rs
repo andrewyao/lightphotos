@@ -34,7 +34,9 @@ mod image_decode;
 #[path = "../vision.rs"]
 mod vision;
 
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
 use std::process::ExitCode;
 
 fn main() {

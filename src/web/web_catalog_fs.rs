@@ -10,6 +10,16 @@
 //! `ImageRecord::is_empty` rather than re-deriving the sidecar convention
 //! here — this module only supplies the browser-specific transport, not a
 //! second definition of what a sidecar is.
+//!
+//! ## Pipeline position
+//! - Not part of Pipeline 1/2/3 (decode/thumbnail/export) — this is
+//!   ratings-and-edits persistence, read once when a folder opens
+//!   (`load_sidecars`) and written whenever the user rates or edits a photo
+//!   (`write_sidecar`/`delete_sidecar`).
+//! - Runs alongside the pipelines rather than inside them: `edits`/
+//!   `rotations` loaded here are what Pipeline 2's thumbnail bake
+//!   (`image_ops::bake_edited`) and Pipeline 1's live shader adjustments
+//!   read from.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};

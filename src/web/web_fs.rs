@@ -11,6 +11,15 @@
 //! full decode-at-size (embedded previews, RAW, WebCodecs) is still ahead,
 //! see the wasm port plan's M1; this only gets far enough for a naive
 //! full-decode-then-downscale JPEG thumbnail (`app/web.rs`).
+//!
+//! ## Pipeline position
+//! - `pick_and_list_folder` runs once, when the user picks a folder — the
+//!   wasm32 entry point into Pipeline 2 (there's no `navigation.rs`
+//!   directory walk on this platform, since there's no OS path to walk).
+//! - `read_array_buffer`/`read_bytes` run at the start of every wasm32
+//!   decode, in both Pipeline 1 and Pipeline 2: `app/web.rs` reads a
+//!   file's bytes this way before handing them to
+//!   `web_worker_pool.rs::WorkerPoolHandle::submit`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

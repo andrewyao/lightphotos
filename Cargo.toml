@@ -39,7 +39,7 @@ required-features = ["raw-probe"]
 # `#[cfg]` gating) so `cargo build`/`cargo test` are unaffected.
 [[bin]]
 name = "wasm_worker"
-path = "src/bin/wasm_worker.rs"
+path = "src/web/wasm_worker.rs"
 test = false
 
 [dependencies]
