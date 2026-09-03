@@ -514,7 +514,7 @@ pub(crate) fn denoise_sample(adj: &Adjustments, sample: impl Fn(i32, i32) -> [f3
 
 /// The strength-parameterized core `denoise_sample` delegates to — split out
 /// so callers with no `Adjustments` value at hand (the automatic RAW-decode
-/// denoise pass in `raw/fast_preview.rs`/`raw/nonmac_decode.rs`, which runs
+/// denoise pass in `raw/preview.rs`/`raw/nonmac_decode.rs`, which runs
 /// at a fixed constant strength, never through the user-facing slider) can
 /// reuse the exact same bilateral math instead of constructing a throwaway
 /// `Adjustments` just to call through it.
@@ -548,7 +548,7 @@ pub(crate) fn denoise_sample_with_strength(
 /// Apply the bilateral denoise kernel to every pixel of a tightly-packed
 /// linear-light RGB buffer, clamping neighbor lookups to the buffer's own
 /// edges. This is the whole-image entry point for the automatic,
-/// decode-time RAW denoise pass (`raw/fast_preview.rs`'s wasm32 `Quality`
+/// decode-time RAW denoise pass (`raw/preview.rs`'s wasm32 `Quality`
 /// tier, `raw/nonmac_decode.rs`'s native Linux/Windows decode) — unlike
 /// `denoise_sample`/`denoise_sample_with_strength` above, which apply to one
 /// pixel at a time via a caller-supplied neighbor closure (the shape the
@@ -736,7 +736,7 @@ mod tests {
         // Buffer-level counterpart of denoise_smooths_flat_noise: a 3x3
         // linear-light buffer, uniform dark except a bright center pixel —
         // this is the whole-image entry point the RAW decode paths call
-        // (raw/fast_preview.rs, raw/nonmac_decode.rs), not the per-pixel
+        // (raw/preview.rs, raw/nonmac_decode.rs), not the per-pixel
         // closure-based `denoise_sample`.
         let (w, h) = (3, 3);
         let mut buf = vec![[0.0f32; 3]; w * h];

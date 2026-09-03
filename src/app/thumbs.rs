@@ -68,7 +68,7 @@ impl App {
         }
 
         // Preview ready → show it, unless that exact image is already up. The
-        // size check is what lets the forced decode replace the quick pass
+        // size check is what lets the forced decode replace the Speed pass
         // behind it. Never downgrade a full-resolution image already on screen.
         if let Some(img) = self
             .loader
@@ -78,11 +78,12 @@ impl App {
             let actual = img.width.max(img.height);
             if !self.shown.is_preview_of(&want, target, actual) && !self.shown.is_full_of(&want) {
                 self.upload_shown(&want, &img, Shown::Preview(want.clone(), target, actual));
-                // Reached only via `loader.rs`'s preview cache — the
-                // wasm32 `Speed` tier bypasses this entirely (see
-                // `poll_web_preview`), so anything landing here is always
-                // the real quality decode (native's forced `Preview`, or
-                // wasm32's `JobKind::Preview`). TEMPORARY DEBUG.
+                // Reached via `loader.rs`'s preview OR speed cache
+                // (`get_preview` falls back speed→preview): on native either
+                // the `Speed` embedded-preview pass or the forced `Preview`
+                // decode, on wasm32 only `JobKind::Preview` (wasm32's `Speed`
+                // tier bypasses this cache entirely — see `poll_web_preview`).
+                // TEMPORARY DEBUG.
                 self.set_tier_debug(TIER_DEBUG_BLACK, "QUALITY");
             }
             return;
@@ -96,7 +97,7 @@ impl App {
         //
         // Native only: `loader.rs`'s own worker queue has zero live workers on
         // wasm32 (thread spawn always fails there), so nothing ever calls
-        // `Loader::drain()` to clear the `preview_inflight`/`quick_inflight`
+        // `Loader::drain()` to clear the `preview_inflight`/`speed_inflight`
         // entry this call would create — `has_pending_image()` would then
         // read as permanently true the moment any photo is opened in the
         // Loupe, locking `main.rs`'s frame loop into an indefinite busy-poll

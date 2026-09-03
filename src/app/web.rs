@@ -599,7 +599,7 @@ impl App {
                     // tier decodes at the GPU's `max_texture_dimension_2d`
                     // (>= 8192 per the WebGPU spec) and — for RAW — ignores
                     // that cap entirely (full sensor res, see
-                    // `raw/fast_preview.rs`), so its own dimensions are the
+                    // `raw/preview.rs`), so its own dimensions are the
                     // true source dimensions for every image the renderer can
                     // actually hold at full resolution. Correct `source_size`
                     // from them now. (An image longer than the max texture

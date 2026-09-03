@@ -41,11 +41,11 @@
 mod coregraphics;
 #[path = "../image_decode.rs"]
 mod image_decode;
-#[path = "fast_preview.rs"]
-mod raw_fast_preview;
+#[path = "preview.rs"]
+mod raw_preview;
 #[path = "../hash.rs"]
 mod hash;
-// Pulled in for `denoise_linear_rgb_buffer`, which `raw_fast_preview`'s
+// Pulled in for `denoise_linear_rgb_buffer`, which `raw_preview`'s
 // dual-gated (`raw-probe`) `Quality`-tier code now calls.
 #[path = "../develop.rs"]
 mod develop;
@@ -113,30 +113,30 @@ fn main() {
         }
 
         // Brightness comparison: ImageIO's own decode (what the mac app
-        // actually shows for this file) vs. `raw_fast_preview`'s decode
+        // actually shows for this file) vs. `raw_preview`'s decode
         // (what the wasm/non-mac path shows for the same file) — real
         // evidence for the "still way too dark" report, not another guess
         // at a formula. `raw-probe`'s dual cfg gate on both `image_decode`'s
-        // `decode_raw_via_rawler`/mac `decode` and `raw_fast_preview`'s
+        // `decode_raw_via_rawler`/mac `decode` and `raw_preview`'s
         // `decode_raw_fast_from_bytes` is exactly what makes this
         // side-by-side possible from one mac dev binary.
         #[cfg(target_os = "macos")]
         match (image_decode::decode(&path, 1600), std::fs::read(&path)) {
-            (Ok(imageio), Ok(bytes)) => match raw_fast_preview::decode_raw_fast_from_bytes(&bytes, 1600) {
+            (Ok(imageio), Ok(bytes)) => match raw_preview::decode_raw_fast_from_bytes(&bytes, 1600) {
                 Ok(fast) => {
                     let a = avg_luma(&imageio);
                     let b = avg_luma(&fast);
                     let (ar, ag, ab) = avg_rgb(&imageio);
                     let (br, bg, bb) = avg_rgb(&fast);
                     println!(
-                        "  brightness: ImageIO avg={a:.1}/255  raw_fast_preview avg={b:.1}/255  ratio={:.2}x",
+                        "  brightness: ImageIO avg={a:.1}/255  raw_preview avg={b:.1}/255  ratio={:.2}x",
                         a / b.max(0.01)
                     );
                     println!(
-                        "  per-channel: ImageIO R={ar:.1} G={ag:.1} B={ab:.1}  raw_fast_preview R={br:.1} G={bg:.1} B={bb:.1}"
+                        "  per-channel: ImageIO R={ar:.1} G={ag:.1} B={ab:.1}  raw_preview R={br:.1} G={bg:.1} B={bb:.1}"
                     );
                 }
-                Err(e) => println!("  raw_fast_preview FAILED: {e}"),
+                Err(e) => println!("  raw_preview FAILED: {e}"),
             },
             (Err(e), _) => println!("  ImageIO baseline FAILED: {e}"),
             (_, Err(e)) => println!("  read FAILED: {e}"),
@@ -147,7 +147,7 @@ fn main() {
         // extracts — a *camera-rendered* JPEG, no rawler/gain/gamma math of
         // ours involved at all. This is what the wasm Loupe placeholder and
         // Grid thumbnails actually show at default thumb sizes (~160-320px
-        // is common for this tag; `raw_fast_preview`'s own quarter-res
+        // is common for this tag; `raw_preview`'s own quarter-res
         // decode only kicks in above that). If *this* is dark, it's the
         // camera's own embedded thumbnail rendering, not anything in this
         // codebase's RAW pipeline.
@@ -1222,11 +1222,11 @@ mod tests {
         assert!(result.is_err(), "expected rawler to reject a non-RAW file, got Ok");
     }
 
-    /// Locks in `raw_fast_preview::decode_raw_fast_from_bytes`'s current
+    /// Locks in `raw_preview::decode_raw_fast_from_bytes`'s current
     /// output on a synthetic Bayer fixture, via `hash::Fnv1a` over
     /// width+height+rgba bytes (see `src/hash.rs` — chosen because it's
     /// stable/deterministic across process runs, unlike `DefaultHasher`).
-    /// Any future change to `bin_bayer_quarter_res` must keep this passing —
+    /// Any future change to `demosaic_cfa` must keep this passing —
     /// the `Fast` tier's output is meant to stay stable.
     ///
     /// The captured hash below was observed by running this test once with a
@@ -1234,14 +1234,14 @@ mod tests {
     /// standard golden-snapshot practice, not hand-computed (a multi-stage
     /// float pipeline's output isn't something to derive by hand).
     #[test]
-    fn raw_fast_preview_bayer_fast_tier_matches_golden_hash() {
+    fn raw_preview_bayer_fast_tier_matches_golden_hash() {
         let path = std::env::temp_dir().join(format!("lightphotos_bayer_dng_test_{}.dng", std::process::id()));
         let (width, height) = (8u32, 6u32);
         write_bayer_dng(&path, width, height).expect("write_bayer_dng failed");
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
-        let decoded = raw_fast_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
+        let decoded = raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
             .expect("decode_raw_fast_from_bytes failed on synthetic Bayer DNG fixture");
 
         let mut hasher = hash::Fnv1a::new();
@@ -1280,7 +1280,7 @@ mod tests {
     /// highlight rolloff and the gamma LUT on real gradient values, and the
     /// asymmetric coefficients mean a channel-order mistake changes the hash.
     #[test]
-    fn raw_fast_preview_linear_fast_tier_matches_golden_hash() {
+    fn raw_preview_linear_fast_tier_matches_golden_hash() {
         let path = std::env::temp_dir().join(format!("lightphotos_linear_wb_dng_test_{}.dng", std::process::id()));
         let (width, height) = (16u32, 12u32);
         write_linear_dng_with_wb(&path, width, height, Some([(1, 2), (1, 1), (2, 1)]))
@@ -1288,7 +1288,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
-        let decoded = raw_fast_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
+        let decoded = raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
             .expect("decode_raw_fast_from_bytes failed on the white-balanced Linear DNG fixture");
 
         let mut hasher = hash::Fnv1a::new();
@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_fast_preview_without_white_balance_metadata_is_not_black() {
+    fn raw_preview_without_white_balance_metadata_is_not_black() {
         let path = std::env::temp_dir().join(format!(
             "lightphotos_linear_no_wb_dng_test_{}.dng",
             std::process::id()
@@ -1328,7 +1328,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
-        let decoded = raw_fast_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
+        let decoded = raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
             .expect("decode_raw_fast_from_bytes failed without AsShotNeutral");
         assert!(
             decoded
@@ -1345,7 +1345,7 @@ mod tests {
     /// `half::f16` linear RGBA (8 bytes/pixel), not u8 sRGB (4 bytes/pixel) —
     /// see `DemosaicMode::bytes_per_pixel`.
     #[test]
-    fn raw_fast_preview_bayer_quality_tier_runs_without_panicking() {
+    fn raw_preview_bayer_quality_tier_runs_without_panicking() {
         let path = std::env::temp_dir().join(format!("lightphotos_bayer_quality_dng_test_{}.dng", std::process::id()));
         let (width, height) = (8u32, 6u32);
         write_bayer_dng(&path, width, height).expect("write_bayer_dng failed");
@@ -1354,16 +1354,16 @@ mod tests {
 
         // decode_raw_fast_from_bytes always uses DemosaicMode::Fast internally
         // (Step 3) - exercise Quality directly via rawler::decode + the same
-        // apply_scaling/bin_bayer_quarter_res call chain that function makes.
+        // apply_scaling/demosaic_cfa call chain that function makes.
         let source = rawler::rawsource::RawSource::new_from_slice(&bytes);
         let params = rawler::decoders::RawDecodeParams::default();
         let mut raw = rawler::decode(&source, &params).expect("rawler::decode failed on fixture");
         raw.apply_scaling().expect("apply_scaling failed");
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            raw_fast_preview::bin_bayer_quarter_res(&mut raw, raw_fast_preview::DemosaicMode::Quality, u32::MAX)
+            raw_preview::demosaic_cfa(&mut raw, raw_preview::DemosaicMode::Quality, u32::MAX)
         }));
-        let (w, h, rgba) = result.expect("PPGDemosaic panicked").expect("bin_bayer_quarter_res returned None");
+        let (w, h, rgba) = result.expect("PPGDemosaic panicked").expect("demosaic_cfa returned None");
 
         assert!(w > 0 && h > 0, "degenerate output dimensions");
         assert_eq!(rgba.len(), (w * h * 8) as usize, "Quality tier must be 8 bytes/pixel (half::f16 linear RGBA)");
@@ -1385,18 +1385,18 @@ mod tests {
     }
 
     /// Smoke test for the actual entry point (`decode_raw_quality_from_bytes`)
-    /// rather than `bin_bayer_quarter_res` directly — the test above never
-    /// touches `fast_preview`/`decode_raw_preview_from_bytes`'s own `mode`
+    /// rather than `demosaic_cfa` directly — the test above never
+    /// touches `demosaic_preview`/`decode_raw_preview_from_bytes`'s own `mode`
     /// threading, only the inner demosaic call.
     #[test]
-    fn raw_fast_preview_quality_entry_point_produces_linear_f16() {
+    fn raw_preview_quality_entry_point_produces_linear_f16() {
         let path = std::env::temp_dir().join(format!("lightphotos_bayer_quality_entry_dng_test_{}.dng", std::process::id()));
         let (width, height) = (8u32, 6u32);
         write_bayer_dng(&path, width, height).expect("write_bayer_dng failed");
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
-        let decoded = raw_fast_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX)
+        let decoded = raw_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX)
             .expect("decode_raw_quality_from_bytes failed on synthetic Bayer DNG fixture");
         assert!(decoded.width > 0 && decoded.height > 0);
         assert_eq!(decoded.pixel_format, image_decode::PixelFormat::LinearF16);
@@ -1416,7 +1416,7 @@ mod tests {
     /// made the reused value show a wrongly zoomed-in crop. `Quality`'s
     /// output must respect `max_px` exactly like every other decode tier.
     #[test]
-    fn raw_fast_preview_quality_tier_respects_max_px() {
+    fn raw_preview_quality_tier_respects_max_px() {
         let path = std::env::temp_dir().join(format!("lightphotos_bayer_quality_bound_dng_test_{}.dng", std::process::id()));
         let (width, height) = (8u32, 6u32);
         write_bayer_dng(&path, width, height).expect("write_bayer_dng failed");
@@ -1427,7 +1427,7 @@ mod tests {
         // (unbounded) demosaiced size is actually bigger than the small
         // max_px below — otherwise this test would pass trivially without
         // ever exercising the resize path.
-        let unbounded = raw_fast_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX)
+        let unbounded = raw_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX)
             .expect("unbounded decode_raw_quality_from_bytes failed");
         let natural_longest = unbounded.width.max(unbounded.height);
 
@@ -1437,7 +1437,7 @@ mod tests {
             "fixture's natural size ({natural_longest}) must exceed MAX_PX ({MAX_PX}) for this test to mean anything"
         );
 
-        let bounded = raw_fast_preview::decode_raw_quality_from_bytes(&bytes, MAX_PX)
+        let bounded = raw_preview::decode_raw_quality_from_bytes(&bytes, MAX_PX)
             .expect("bounded decode_raw_quality_from_bytes failed");
         assert!(
             bounded.width.max(bounded.height) <= MAX_PX,
@@ -1479,7 +1479,7 @@ mod tests {
     /// what makes the pre-fix failure legible as a test failure on native
     /// rather than aborting the test binary.
     #[test]
-    fn raw_fast_preview_rejects_unsupported_cfa_pattern_without_panicking() {
+    fn raw_preview_rejects_unsupported_cfa_pattern_without_panicking() {
         let path = std::env::temp_dir().join(format!("lightphotos_bayer_rgbg_dng_test_{}.dng", std::process::id()));
         let (width, height) = (8u32, 6u32);
         write_bayer_dng_with_cfa(&path, width, height, [0, 1, 2, 1]).expect("write_bayer_dng_with_cfa failed");
@@ -1487,7 +1487,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            raw_fast_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
+            raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
         }))
         .expect("decode_raw_fast_from_bytes panicked on an unsupported CFA pattern (fatal on wasm32)");
 
@@ -1567,8 +1567,8 @@ mod tests {
     ///
     /// - "Native-equivalent": `RawDevelop` with every default step except
     ///   `SRgb` (mirrors what `decode_raw_nonmac` computes right before its
-    ///   own gamma+boost) — real rawler code, not fast_preview.rs's.
-    /// - "wasm": `raw_fast_preview::decode_raw_quality_from_bytes`'s real
+    ///   own gamma+boost) — real rawler code, not preview.rs's.
+    /// - "wasm": `raw_preview::decode_raw_quality_from_bytes`'s real
     ///   `LinearF16` output, unpacked back to f32.
     ///
     /// Deliberately a global mean/percentile comparison, not a pixel-exact
@@ -1608,9 +1608,9 @@ mod tests {
         };
         let native_mean = mean_rgb(&native_pixels);
 
-        // --- wasm: real raw_fast_preview::decode_raw_quality_from_bytes ---
+        // --- wasm: real raw_preview::decode_raw_quality_from_bytes ---
         let wasm_decoded =
-            raw_fast_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX).expect("decode_raw_quality_from_bytes failed");
+            raw_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX).expect("decode_raw_quality_from_bytes failed");
         assert_eq!(
             wasm_decoded.pixel_format,
             image_decode::PixelFormat::LinearF16,
@@ -1737,7 +1737,7 @@ mod tests {
         let path = std::path::Path::new("/Users/andyyao/Desktop/07-26 Jackie/DSC02468.ARW");
         let bytes = std::fs::read(path).expect("read real ARW file");
 
-        let decoded = raw_fast_preview::decode_raw_quality_from_bytes(&bytes, 1600)
+        let decoded = raw_preview::decode_raw_quality_from_bytes(&bytes, 1600)
             .expect("decode_raw_quality_from_bytes failed");
         assert_eq!(decoded.pixel_format, image_decode::PixelFormat::LinearF16);
 

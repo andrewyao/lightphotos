@@ -7,16 +7,16 @@
 //!
 //! Cache tiers, coarsest to finest:
 //! - a thumbnail LRU (for the grid/filmstrip), driven by
-//!   `request_thumb`/`get_thumb`/`poll_thumbs`, backed by the on-disk
-//!   `ThumbCache`.
+//!   `request_thumb`/`get_thumb` (drained via `poll_all`), backed by the
+//!   on-disk `ThumbCache`.
 //! - the screen-fit view the loupe actually shows, driven by
 //!   `request_preview`/`prefetch_preview`/`get_preview`. Internally two passes:
-//!   a *quick* one that may return the file's embedded preview, and a *forced*
-//!   decode-at-size that runs only when the quick pass came back short of the
+//!   a *speed* one that may return the file's embedded preview, and a *forced*
+//!   decode-at-size that runs only when the speed pass came back short of the
 //!   requested size. That split is what makes RAW usable — a Sony ARW's
 //!   embedded preview lands in ~35ms where demosaicing to the same size takes
 //!   ~250ms — while costing formats like JPEG (no embedded preview, so the
-//!   quick pass already decodes at size) exactly one decode.
+//!   speed pass already decodes at size) exactly one decode.
 //! - a small full-resolution LRU (the loupe once zoomed in), driven by
 //!   `request_full`/`get_full`. Never speculative — a modern camera file costs
 //!   seconds and hundreds of megabytes at full resolution.
@@ -99,9 +99,9 @@ enum Job {
     /// embedded preview degrade gracefully: a JPEG has none, so ImageIO decodes
     /// at size and this single job is already the final answer; a HEIC's is a
     /// 240px stub, so it paints something immediately and `Preview` follows.
-    Quick(PathBuf, u32),
+    Speed(PathBuf, u32),
     /// Screen-fit decode of `path` capped at the carried `max_dim`, ignoring any
-    /// embedded preview. Enqueued only when `Quick` came back short of the
+    /// embedded preview. Enqueued only when `Speed` came back short of the
     /// target, so formats that answered in one pass never pay for two.
     Preview(PathBuf, u32),
     /// Full-resolution decode at the carried `max_dim` (the GPU's max texture
@@ -123,7 +123,7 @@ enum Job {
 
 /// A finished job, carrying its tier back to the poller.
 enum JobResult {
-    Quick(PathBuf, u32, Result<DecodedImage, String>),
+    Speed(PathBuf, u32, Result<DecodedImage, String>),
     Preview(PathBuf, u32, Result<DecodedImage, String>),
     Full(PathBuf, Result<DecodedImage, String>),
     Thumb(PathBuf, u32, Result<Arc<DecodedImage>, String>),
@@ -149,7 +149,7 @@ enum JobResult {
 /// dedicated-worker reservation in `Loader::new` for how that's handled.
 #[derive(Default)]
 struct Queue {
-    quick: VecDeque<Job>,
+    speed: VecDeque<Job>,
     preview: VecDeque<Job>,
     full: VecDeque<Job>,
     thumbs: VecDeque<Job>,
@@ -173,7 +173,7 @@ impl Queue {
     /// already mid-flight on every worker (queue order alone can't preempt a
     /// job that has already been popped).
     fn take_next(&mut self, dedicated: bool) -> Option<Job> {
-        self.quick
+        self.speed
             .pop_front()
             .or_else(|| self.preview.pop_front())
             .or_else(|| self.full.pop_front())
@@ -256,15 +256,15 @@ pub struct Loader {
     preview_inflight: HashSet<(PathBuf, u32)>,
     preview_capacity: usize,
 
-    // The `Quick` half of the preview tier: same key, but holding whatever came
+    // The `Speed` half of the preview tier: same key, but holding whatever came
     // back fastest (often a file's embedded preview). Kept in its own map so a
-    // short quick result can be shown immediately *and* replaced in place when
+    // short speed result can be shown immediately *and* replaced in place when
     // the full-quality preview lands behind it.
-    quick_cache: HashMap<(PathBuf, u32), Arc<DecodedImage>>,
-    quick_order: VecDeque<(PathBuf, u32)>,
-    quick_inflight: HashSet<(PathBuf, u32)>,
+    speed_cache: HashMap<(PathBuf, u32), Arc<DecodedImage>>,
+    speed_order: VecDeque<(PathBuf, u32)>,
+    speed_inflight: HashSet<(PathBuf, u32)>,
     /// Keys the user has actually looked at, and which therefore deserve the
-    /// forced decode if their quick pass came back short. Prefetched neighbors
+    /// forced decode if their speed pass came back short. Prefetched neighbors
     /// are absent from this set until they become the current photo.
     escalation_wanted: HashSet<(PathBuf, u32)>,
 
@@ -343,7 +343,7 @@ impl Loader {
                     // instead of spinning forever. AssertUnwindSafe: a panic here
                     // leaves no shared state in an observably broken condition.
                     let result = match job {
-                        Job::Quick(path, target) => {
+                        Job::Speed(path, target) => {
                             let t0 = web_time::Instant::now();
                             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 crate::thumbnail::decode_at_size(
@@ -353,10 +353,10 @@ impl Loader {
                                 )
                             }))
                             .unwrap_or_else(|_| {
-                                Err(format!("quick decode panicked: {}", path.display()))
+                                Err(format!("speed decode panicked: {}", path.display()))
                             });
-                            report_decode("quick", &path, target, t0, &r);
-                            JobResult::Quick(path, target, r)
+                            report_decode("speed", &path, target, t0, &r);
+                            JobResult::Speed(path, target, r)
                         }
                         Job::Preview(path, target) => {
                             let t0 = web_time::Instant::now();
@@ -443,9 +443,9 @@ impl Loader {
             preview_order: VecDeque::new(),
             preview_inflight: HashSet::new(),
             preview_capacity: PREVIEW_CAPACITY,
-            quick_cache: HashMap::new(),
-            quick_order: VecDeque::new(),
-            quick_inflight: HashSet::new(),
+            speed_cache: HashMap::new(),
+            speed_order: VecDeque::new(),
+            speed_inflight: HashSet::new(),
             escalation_wanted: HashSet::new(),
             thumb_cache: HashMap::new(),
             thumb_order: VecDeque::new(),
@@ -464,12 +464,12 @@ impl Loader {
     /// every other kind of work.
     ///
     /// Callers say *what they want to see*, not how to decode it. Internally
-    /// this starts with the fast [`Job::Quick`] pass and escalates to a forced
+    /// this starts with the fast [`Job::Speed`] pass and escalates to a forced
     /// [`Job::Preview`] decode only if that came back short of `target_px` —
     /// see `escalate_if_short`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn request_preview(&mut self, path: PathBuf, target_px: u32) {
-        self.enqueue_quick(path, target_px, true);
+        self.enqueue_speed(path, target_px, true);
     }
 
     /// Same, but for a photo the user hasn't navigated to yet: fetch only the
@@ -477,10 +477,10 @@ impl Loader {
     /// enough to make stepping onto it feel instant, and the moment it *is* the
     /// current photo, `request_preview` escalates it.
     pub fn prefetch_preview(&mut self, path: PathBuf, target_px: u32) {
-        self.enqueue_quick(path, target_px, false);
+        self.enqueue_speed(path, target_px, false);
     }
 
-    fn enqueue_quick(&mut self, path: PathBuf, target_px: u32, escalate: bool) {
+    fn enqueue_speed(&mut self, path: PathBuf, target_px: u32, escalate: bool) {
         let key = (path.clone(), target_px);
         // Record the intent *before* any early return. A photo can be prefetched
         // first and viewed a moment later, while its cheap pass is still in
@@ -495,14 +495,14 @@ impl Loader {
         // Already have the cheap pass. Nothing more to queue unless this is now
         // the photo being *viewed* and that pass fell short — the prefetch path
         // deliberately leaves that undone.
-        if let Some(img) = self.quick_cache.get(&key) {
+        if let Some(img) = self.speed_cache.get(&key) {
             if escalate {
                 let longest = img.width.max(img.height);
                 self.escalate_if_short(&path, target_px, longest);
             }
             return;
         }
-        if self.quick_inflight.contains(&key) {
+        if self.speed_inflight.contains(&key) {
             return;
         }
         // Only record the job as in-flight once it's actually enqueued. If the
@@ -510,8 +510,8 @@ impl Loader {
         // permanent in-flight marker would strand this path as "loading forever";
         // instead we skip it and let a later request retry.
         if let Ok(mut q) = self.shared.queue.lock() {
-            q.quick.push_back(Job::Quick(path, target_px));
-            self.quick_inflight.insert(key);
+            q.speed.push_back(Job::Speed(path, target_px));
+            self.speed_inflight.insert(key);
             // notify_all, not notify_one: the dedicated loupe worker (see
             // `Loader::new`) ignores thumbnail jobs, so a notify_one that happens
             // to wake it while only thumbnails are queued would strand them
@@ -520,18 +520,18 @@ impl Loader {
         }
     }
 
-    /// After a `Quick` result lands, queue the forced decode if what came back
+    /// After a `Speed` result lands, queue the forced decode if what came back
     /// doesn't already reach the requested size.
     ///
-    /// This is the whole point of the two-pass split: a JPEG's quick pass *is* a
+    /// This is the whole point of the two-pass split: a JPEG's speed pass *is* a
     /// decode-at-size and returns the full target, so nothing more is queued and
-    /// it costs exactly one decode. A RAW's quick pass returns its embedded
+    /// it costs exactly one decode. A RAW's speed pass returns its embedded
     /// preview — good enough to put on screen in 35ms, but short of the target,
     /// so the real decode follows behind it.
-    /// Apply the escalation policy to a landed `Quick` result: only photos the
+    /// Apply the escalation policy to a landed `Speed` result: only photos the
     /// user has actually asked to *see* get the forced decode. Split out from
     /// `drain` so the policy has one home and can be exercised directly.
-    fn escalate_from_quick(&mut self, path: &Path, target_px: u32, got_longest: u32) {
+    fn escalate_from_speed(&mut self, path: &Path, target_px: u32, got_longest: u32) {
         if self
             .escalation_wanted
             .contains(&(path.to_path_buf(), target_px))
@@ -579,20 +579,7 @@ impl Loader {
     pub fn has_pending_image(&self) -> bool {
         !self.inflight.is_empty()
             || !self.preview_inflight.is_empty()
-            || !self.quick_inflight.is_empty()
-    }
-
-    /// Drain finished decodes into the caches and return loupe-image arrivals.
-    ///
-    /// Thin wrapper over [`poll_all`](Self::poll_all): the single drain still
-    /// routes thumbnail arrivals into the thumb tier, but their arrival list is
-    /// discarded here. Calling both `poll` and `poll_thumbs` in the same frame
-    /// starves one tier (the second call finds the queue already drained), so
-    /// frame loops should prefer `poll_all`.
-    // The frame loop uses `poll_all`; kept for API symmetry with the thumb tier.
-    #[allow(dead_code)]
-    pub fn poll(&mut self) -> Vec<PathBuf> {
-        self.poll_all().0
+            || !self.speed_inflight.is_empty()
     }
 
     /// The full-resolution decode of `path`, if it has landed.
@@ -601,13 +588,13 @@ impl Loader {
     }
 
     /// The best screen-fit view of `path` at `target_px` that has landed: the
-    /// forced decode if it's finished, otherwise the quick pass. Returns `None`
+    /// forced decode if it's finished, otherwise the speed pass. Returns `None`
     /// only while both are still outstanding.
     pub fn get_preview(&self, path: &Path, target_px: u32) -> Option<Arc<DecodedImage>> {
         let key = (path.to_path_buf(), target_px);
         self.preview_cache
             .get(&key)
-            .or_else(|| self.quick_cache.get(&key))
+            .or_else(|| self.speed_cache.get(&key))
             .cloned()
     }
 
@@ -710,7 +697,7 @@ impl Loader {
 
     /// The preview-tier counterpart of `insert_thumb_external` — wasm32's
     /// Loupe decode (`app/web.rs`) feeds results in here directly rather
-    /// than through `request_preview`'s worker-queue-based `Job::Quick`/
+    /// than through `request_preview`'s worker-queue-based `Job::Speed`/
     /// `Job::Preview` split: there's no embedded-preview-vs-full-decode
     /// distinction to make twice when the caller already decoded once at
     /// the real target size. (A wasm-side two-pass split — cheap `Fast`
@@ -734,19 +721,6 @@ impl Loader {
         self.insert(path, img);
     }
 
-    /// Drain finished jobs into the caches and return thumbnail `(path, max_px)`
-    /// arrivals.
-    ///
-    /// Thin wrapper over [`poll_all`](Self::poll_all): the single drain still
-    /// routes full-image arrivals into the full tier, but their arrival list is
-    /// discarded here. Calling both `poll` and `poll_thumbs` in the same frame
-    /// starves one tier (the second call finds the queue already drained), so
-    /// frame loops should prefer `poll_all`.
-    #[allow(dead_code)]
-    pub fn poll_thumbs(&mut self) -> Vec<(PathBuf, u32)> {
-        self.poll_all().1
-    }
-
     // ---- Shared internals ----
 
     /// Drain every pending result exactly once, routing each into its tier
@@ -755,11 +729,6 @@ impl Loader {
     /// thumb_arrivals, ...)`. Preview and full arrivals share one list: every
     /// caller uses it only to decide "something for the loupe landed, reconcile
     /// what's on screen", and `try_show` picks the best tier itself.
-    ///
-    /// Prefer this in frame loops: it avoids the footgun where calling `poll`
-    /// and `poll_thumbs` separately makes the first call drain results destined
-    /// for the other tier, starving it.
-    #[allow(dead_code)]
     pub fn poll_all(
         &mut self,
     ) -> (
@@ -787,21 +756,21 @@ impl Loader {
         let mut exifs = vec![];
         while let Ok(result) = self.res_rx.try_recv() {
             match result {
-                JobResult::Quick(path, target, r) => {
+                JobResult::Speed(path, target, r) => {
                     let key = (path.clone(), target);
-                    self.quick_inflight.remove(&key);
+                    self.speed_inflight.remove(&key);
                     match r {
                         Ok(img) => {
                             let longest = img.width.max(img.height);
-                            self.insert_quick(key, Arc::new(img));
+                            self.insert_speed(key, Arc::new(img));
                             // Only the photo being viewed escalates; a
                             // prefetched neighbor stops at what it got.
-                            self.escalate_from_quick(&path, target, longest);
+                            self.escalate_from_speed(&path, target, longest);
                             full.push(path);
                         }
                         Err(e) => {
-                            eprintln!("quick decode failed for {}: {e}", path.display());
-                            // The quick pass is an optimization, not the only
+                            eprintln!("speed decode failed for {}: {e}", path.display());
+                            // The speed pass is an optimization, not the only
                             // way to get pixels — fall through to the forced
                             // decode rather than leaving the loupe on its
                             // thumbnail forever. Do this even for a prefetch:
@@ -871,16 +840,16 @@ impl Loader {
         }
     }
 
-    fn insert_quick(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>) {
-        if !self.quick_cache.contains_key(&key) {
-            self.quick_order.push_back(key.clone());
+    fn insert_speed(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>) {
+        if !self.speed_cache.contains_key(&key) {
+            self.speed_order.push_back(key.clone());
         }
-        self.quick_cache.insert(key, img);
+        self.speed_cache.insert(key, img);
         // Shares the preview tier's budget: these are the same photos at
         // roughly the same sizes, and one is superseded by the other.
-        while self.quick_order.len() > self.preview_capacity {
-            if let Some(old) = self.quick_order.pop_front() {
-                self.quick_cache.remove(&old);
+        while self.speed_order.len() > self.preview_capacity {
+            if let Some(old) = self.speed_order.pop_front() {
+                self.speed_cache.remove(&old);
             }
         }
     }
@@ -930,7 +899,7 @@ mod tests {
 
     fn label(job: &Job) -> &'static str {
         match job {
-            Job::Quick(..) => "quick",
+            Job::Speed(..) => "speed",
             Job::Preview(..) => "preview",
             Job::Full(..) => "full",
             Job::Exif(_) => "exif",
@@ -948,7 +917,7 @@ mod tests {
         q.exif.push_back(Job::Exif(path("e")));
         q.full.push_back(Job::Full(path("f"), 16384));
         q.preview.push_back(Job::Preview(path("p"), 2048));
-        q.quick.push_back(Job::Quick(path("q"), 2048));
+        q.speed.push_back(Job::Speed(path("q"), 2048));
         q
     }
 
@@ -964,7 +933,7 @@ mod tests {
     fn a_general_worker_serves_every_tier_in_priority_order() {
         assert_eq!(
             drain_labels(&mut every_kind(), false),
-            ["quick", "preview", "full", "exif", "thumb", "meta"]
+            ["speed", "preview", "full", "exif", "thumb", "meta"]
         );
     }
 
@@ -975,7 +944,7 @@ mod tests {
         // opened photo waiting on a folder's worth of in-flight thumbnails.
         assert_eq!(
             drain_labels(&mut every_kind(), true),
-            ["quick", "preview", "full", "exif", "meta"]
+            ["speed", "preview", "full", "exif", "meta"]
         );
     }
 
@@ -1048,9 +1017,9 @@ mod tests {
     }
 
     #[test]
-    fn a_quick_pass_that_already_hit_the_target_costs_only_one_decode() {
+    fn a_speed_pass_that_already_hit_the_target_costs_only_one_decode() {
         // The JPEG case: ImageIO has no embedded preview to hand back, so the
-        // quick pass decodes at size and *is* the answer. Queueing the forced
+        // speed pass decodes at size and *is* the answer. Queueing the forced
         // decode too would double the work for identical pixels.
         let mut loader = Loader::new(16384);
         loader.escalate_if_short(&path("a"), 2560, 2560);
@@ -1061,7 +1030,7 @@ mod tests {
     }
 
     #[test]
-    fn a_short_quick_pass_queues_the_forced_decode_behind_it() {
+    fn a_short_speed_pass_queues_the_forced_decode_behind_it() {
         // The RAW case: a 1616px embedded preview goes on screen immediately,
         // and the real 2560px decode follows.
         let mut loader = Loader::new(16384);
@@ -1071,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_quick_pass_still_falls_through_to_the_forced_decode() {
+    fn a_failed_speed_pass_still_falls_through_to_the_forced_decode() {
         // Otherwise a file whose embedded preview is corrupt would sit on its
         // thumbnail forever with nothing else queued.
         let mut loader = Loader::new(16384);
@@ -1094,8 +1063,8 @@ mod tests {
         // at once and tripled the time for the photo on screen to sharpen.
         let mut loader = Loader::new(16384);
         loader.prefetch_preview(path("neighbor"), 2560);
-        loader.insert_quick((path("neighbor"), 2560), image(1616, 1080));
-        loader.escalate_from_quick(&path("neighbor"), 2560, 1616);
+        loader.insert_speed((path("neighbor"), 2560), image(1616, 1080));
+        loader.escalate_from_speed(&path("neighbor"), 2560, 1616);
         assert_eq!(queued_previews(&loader), 0);
     }
 
@@ -1103,7 +1072,7 @@ mod tests {
     fn navigating_onto_a_prefetched_photo_escalates_it_after_all() {
         let mut loader = Loader::new(16384);
         loader.prefetch_preview(path("a"), 2560);
-        loader.insert_quick((path("a"), 2560), image(1616, 1080));
+        loader.insert_speed((path("a"), 2560), image(1616, 1080));
         // The user arrows onto it: now the short embedded preview isn't enough.
         loader.request_preview(path("a"), 2560);
         assert_eq!(queued_previews(&loader), 1);
@@ -1117,16 +1086,16 @@ mod tests {
         let mut loader = Loader::new(16384);
         loader.prefetch_preview(path("a"), 2560);
         loader.request_preview(path("a"), 2560); // still in flight
-        loader.quick_inflight.remove(&(path("a"), 2560));
-        loader.insert_quick((path("a"), 2560), image(1616, 1080));
-        loader.escalate_from_quick(&path("a"), 2560, 1616);
+        loader.speed_inflight.remove(&(path("a"), 2560));
+        loader.insert_speed((path("a"), 2560), image(1616, 1080));
+        loader.escalate_from_speed(&path("a"), 2560, 1616);
         assert_eq!(queued_previews(&loader), 1);
     }
 
     #[test]
-    fn the_preview_getter_prefers_the_forced_decode_over_the_quick_pass() {
+    fn the_preview_getter_prefers_the_forced_decode_over_the_speed_pass() {
         let mut loader = Loader::new(16384);
-        loader.insert_quick((path("a"), 2560), image(1616, 1080));
+        loader.insert_speed((path("a"), 2560), image(1616, 1080));
         assert_eq!(loader.get_preview(&path("a"), 2560).unwrap().width, 1616);
         // Once the sharper one lands it wins, and that difference in size is
         // what tells the app to re-upload.
@@ -1137,7 +1106,7 @@ mod tests {
     #[test]
     fn requesting_a_preview_that_is_already_answered_enqueues_nothing() {
         let mut loader = Loader::new(16384);
-        loader.insert_quick((path("a"), 2560), image(2560, 1707));
+        loader.insert_speed((path("a"), 2560), image(2560, 1707));
         loader.request_preview(path("a"), 2560);
         assert!(!loader.has_pending_image());
     }

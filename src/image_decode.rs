@@ -18,7 +18,7 @@
 //! ## Pipeline position
 //! - `decode()` is called from `loader.rs`'s worker threads, for Pipeline 1's
 //!   `Job::Preview`/`Job::Full` stages (forced preview and full-resolution
-//!   decode) — never the cheap `Job::Quick` pass, which goes through
+//!   decode) — never the cheap `Job::Speed` pass, which goes through
 //!   `thumbnail::decode_at_size` instead.
 //! - `decode()` is also called from `export.rs`'s `do_export`, for
 //!   Pipeline 3's full-resolution read before baking edits.
@@ -67,7 +67,7 @@ pub(crate) use nonmac_decode::*;
 
 /// How `DecodedImage::rgba`'s bytes are laid out. Every decode path on every
 /// platform produces `Srgb8` — the one exception is
-/// `raw_fast_preview::decode_raw_quality_from_bytes` (wasm32 Loupe RAW
+/// `raw_preview::decode_raw_quality_from_bytes` (wasm32 Loupe RAW
 /// decode, `DemosaicMode::Quality`), which stops at linear camera-RGB
 /// (post white-balance, post color-matrix, post highlight rolloff) rather
 /// than baking sRGB gamma + the display brightness/contrast boost
@@ -543,7 +543,7 @@ pub(crate) fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> Deco
         return img;
     }
     // 4-bytes/pixel math below assumes `Srgb8` — the one producer of
-    // `LinearF16` (`raw_fast_preview::decode_raw_quality_from_bytes`) applies
+    // `LinearF16` (`raw_preview::decode_raw_quality_from_bytes`) applies
     // orientation itself, before this function's pixel_format is ever
     // anything else.
     debug_assert_eq!(img.pixel_format, PixelFormat::Srgb8);

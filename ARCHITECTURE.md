@@ -38,7 +38,7 @@ What that means in practice:
 - "Non-mac" in a doc comment usually means "Linux, Windows, *and* wasm32
   before its own worker pool takes over."
 - wasm32 reuses the non-mac decode *functions* (`raw/nonmac_decode.rs`,
-  `raw/fast_preview.rs`) but drives them from Web Workers instead of native
+  `raw/preview.rs`) but drives them from Web Workers instead of native
   threads.
 - wasm32 feeds results into `loader.rs`'s caches through a side door
   (`insert_*_external`) instead of through its normal job queue.
@@ -58,22 +58,22 @@ flowchart TD
 
     subgraph mac["macOS"]
         direction TB
-        mq["Loader::request_preview\n-> Job::Quick"] --> mqd["thumbnail::decode_at_size\n(ImageIO, UseIfPresent)\nreturns the file's embedded preview if it has one"]
+        mq["Loader::request_preview\n-> Job::Speed"] --> mqd["thumbnail::decode_at_size\n(ImageIO, UseIfPresent)\nreturns the file's embedded preview if it has one"]
         mqd -- "short of the target size (a RAW's embedded preview)" --> mp["Job::Preview\nthumbnail::decode_at_size(Never)"]
         mp -.->|user zooms past the preview's resolution| mf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(ImageIO, full resolution)"]
     end
 
     subgraph other["Linux / Windows"]
         direction TB
-        lq["Loader::request_preview\n-> Job::Quick"] --> lqd["thumbnail::decode_at_size\nkamadak-exif embedded preview,\nor rawler full_image() for RAF/CR3"]
+        lq["Loader::request_preview\n-> Job::Speed"] --> lqd["thumbnail::decode_at_size\nkamadak-exif embedded preview,\nor rawler full_image() for RAF/CR3"]
         lqd -- "short of the target size" --> lp["Job::Preview\nimage_decode::decode\n(image crate; RAW via nonmac_decode::decode_raw_nonmac,\nrawler's RawDevelop pipeline)"]
         lp -.->|user zooms past the preview's resolution| lf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(full resolution)"]
     end
 
     subgraph web["wasm32 (browser)"]
         direction TB
-        wt["request_web_preview, app/web.rs\n-> JobKind::Speed"] --> wtd["wasm_worker.rs -> raw_fast_preview\nquarter-res Fast tier, sRGB8 output\n(shown first — this is the Loupe's placeholder)"]
-        wtd --> wp["JobKind::Preview\nraw_fast_preview::decode_raw_quality_from_bytes\nfull PPG demosaic, LinearF16 output"]
+        wt["request_web_preview, app/web.rs\n-> JobKind::Speed"] --> wtd["wasm_worker.rs -> raw_preview\nquarter-res Fast tier, sRGB8 output\n(shown first — this is the Loupe's placeholder)"]
+        wtd --> wp["JobKind::Preview\nraw_preview::decode_raw_quality_from_bytes\nfull PPG demosaic, LinearF16 output"]
         wp -.->|user zooms past the preview's resolution| wf["request_web_full, app/web.rs\n-> JobKind::Full, full-resolution decode"]
     end
 
@@ -98,12 +98,12 @@ flowchart TD
     rawshader --> screen
 ```
 
-**Why the two-pass split exists (`Quick`/`Speed` then `Preview`):**
+**Why the two-pass split exists (`Speed` then `Preview`):**
 - A RAW file's embedded JPEG preview decodes in ~35ms; demosaicing the
   sensor data to the same size takes ~250ms.
 - Showing the cheap pass first and upgrading in place is what makes opening
   a RAW file feel instant instead of frozen.
-- A JPEG has no embedded preview, so its "quick" pass already decodes at the
+- A JPEG has no embedded preview, so its Speed pass already decodes at the
   target size — the upgrade pass is skipped entirely, at no extra cost.
 
 **Why wasm32 stops at `LinearF16` for its Quality tier:**
@@ -145,7 +145,7 @@ flowchart TD
         nativeq --> othct["ThumbCache::get_or_make\n-> thumbnail::decode_at_size(EmbeddedPreview::UseIfPresent)\n(kamadak-exif embedded preview,\nfallback: full image_decode::decode)"]
     end
     subgraph web2["wasm32"]
-        webq --> webct["wasm_worker.rs:\nembedded_preview_from_bytes, then\nrawler_full_image_from_bytes, then\nraw_fast_preview (Fast tier)"]
+        webq --> webct["wasm_worker.rs:\nembedded_preview_from_bytes, then\nrawler_full_image_from_bytes, then\nraw_preview (Fast tier)"]
     end
 
     mact --> disk["ThumbCache's on-disk .tw cache\n~/Library/Caches/com.lightphotos/thumbnails\n(mac + Linux/Windows only)"]
@@ -214,7 +214,7 @@ flowchart TD
 | `loader.rs` | Job queue + LRU caches for both the Loupe and Grid tiers | native (macOS + Linux/Windows); wasm32 shares its caches via `insert_*_external` but bypasses its queue |
 | `image_decode.rs` | Full decode + metadata read, mac arm | macOS |
 | `raw/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `rawler`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
-| `raw/fast_preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | wasm32 (also reachable from a mac dev build via `--features raw-probe`) |
+| `raw/preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | wasm32 (also reachable from a mac dev build via `--features raw-probe`) |
 | `raw/render.rs` | Builds the GPU tonemap pipeline for `PixelFormat::LinearF16` images | all (only ever fed a linear image on wasm32) |
 | `thumbnail.rs` | Decode-at-size for both the Loupe's screen-fit preview and Grid thumbnails, plus the on-disk `.tw` cache | macOS (ImageIO) + Linux/Windows (`kamadak-exif`/`rawler`); disk cache is native-only |
 | `image_encode.rs` | JPEG write for export | macOS (ImageIO) / Linux/Windows (`mozjpeg-rs`) |

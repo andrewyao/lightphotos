@@ -36,7 +36,7 @@
 //!   `decode()` tries the cheap embedded-preview extractors first
 //!   (`thumbnail::embedded_preview_from_bytes`, then
 //!   `thumbnail::rawler_full_image_from_bytes` for RAF/CR3), falling back to
-//!   `raw_fast_preview`'s `Fast`/`Quality` tiers for everything else.
+//!   `raw_preview`'s `Fast`/`Quality` tiers for everything else.
 //! - The result posts back to the main thread, which routes it into
 //!   `loader.rs`'s caches via `insert_*_external` (see that file's own
 //!   doc comment).
@@ -50,8 +50,8 @@ mod image_decode;
 #[path = "../thumbnail.rs"]
 mod thumbnail;
 #[cfg(target_arch = "wasm32")]
-#[path = "../raw/fast_preview.rs"]
-mod raw_fast_preview;
+#[path = "../raw/preview.rs"]
+mod raw_preview;
 // thumbnail.rs's on-disk `ThumbCache` (unused here — this worker only ever
 // calls its bytes-based `embedded_preview_from_bytes`) still pulls these two
 // in at compile time; re-declared for the same reason the three above are.
@@ -61,8 +61,8 @@ mod paths;
 #[cfg(target_arch = "wasm32")]
 #[path = "../hash.rs"]
 mod hash;
-// Pulled in for `denoise_linear_rgb_buffer`, which `raw_fast_preview`'s
-// `Quality`-tier code now calls (see raw/fast_preview.rs).
+// Pulled in for `denoise_linear_rgb_buffer`, which `raw_preview`'s
+// `Quality`-tier code now calls (see raw/preview.rs).
 #[cfg(target_arch = "wasm32")]
 #[path = "../develop.rs"]
 mod develop;
@@ -84,7 +84,7 @@ fn main() {
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use crate::image_decode::{self, DecodedImage, PixelFormat};
-    use crate::raw_fast_preview;
+    use crate::raw_preview;
     use crate::thumbnail;
     use js_sys::{Array, Object, Reflect, Uint8Array};
     use wasm_bindgen::prelude::*;
@@ -105,8 +105,8 @@ mod wasm {
     /// camera's own embedded JPEG in for the real linear-RAW demosaic on
     /// every one of those, confirmed on a real Sony ARW — a different
     /// picture, not a subtly-off tonemap; only then falls back to
-    /// `raw_fast_preview`. This isn't only about
-    /// speed: `raw_fast_preview`'s `catch_unwind` guards around `rawler`'s
+    /// `raw_preview`. This isn't only about
+    /// speed: `raw_preview`'s `catch_unwind` guards around `rawler`'s
     /// parser are almost certainly *ineffective* on wasm32-unknown-unknown
     /// (no real stack unwinding without nightly + explicit exception-handling
     /// support, which this build doesn't use) — a panic there traps the
@@ -118,13 +118,13 @@ mod wasm {
     /// `NotReadableError` read-concurrency issue `app/web.rs` handles.
     /// Routing the common case (a grid thumbnail, or a RAF/CR3 Loupe open)
     /// through one of the two embedded-preview extractors instead — far less
-    /// panic-prone code than `raw_fast_preview`'s demosaic path — should make
+    /// panic-prone code than `raw_preview`'s demosaic path — should make
     /// that far rarer, though a genuine fix still wants real
     /// exception-handling support or an audited panic-free `rawler` call
     /// path.
     ///
     /// `quality`, set by `web_worker_pool.rs`'s `submit()` from the job's
-    /// `JobKind` (never decided here), picks which `raw_fast_preview` entry
+    /// `JobKind` (never decided here), picks which `raw_preview` entry
     /// point services the fallback: `false` (Grid/`Thumb`) →
     /// `decode_raw_fast_from_bytes` (quarter-res Bayer bin, sRGB8 output,
     /// unchanged); `true` (Loupe/`Preview`) → `decode_raw_quality_from_bytes`
@@ -150,9 +150,9 @@ mod wasm {
                 return Ok(preview);
             }
             return if quality {
-                raw_fast_preview::decode_raw_quality_from_bytes(bytes, max_px)
+                raw_preview::decode_raw_quality_from_bytes(bytes, max_px)
             } else {
-                raw_fast_preview::decode_raw_fast_from_bytes(bytes, max_px)
+                raw_preview::decode_raw_fast_from_bytes(bytes, max_px)
             };
         }
         if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
@@ -166,7 +166,7 @@ mod wasm {
                 return Ok(preview);
             }
         }
-        image_decode::decode_jpeg_png_tiff_from_bytes(bytes, max_px)
+        image_decode::decode_nonraw_from_bytes(bytes, max_px)
     }
 
     /// Read a numeric field off a job/result object via `Reflect`, panicking

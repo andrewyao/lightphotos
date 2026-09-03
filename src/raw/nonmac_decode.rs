@@ -2,7 +2,7 @@
 
 //! The non-mac (Linux/Windows/wasm32) half of `image_decode.rs`'s decode and
 //! metadata API, plus the RAW-preview tonemap it shares with
-//! `raw_fast_preview.rs`. This gets pulled into `image_decode.rs` via
+//! `raw/preview.rs`. This gets pulled into `image_decode.rs` via
 //! `#[path]` plus a glob `pub(crate) use`, so every existing
 //! `image_decode::decode` / `image_decode::pixel_size` / etc. call site keeps
 //! working unchanged — see that file's own `mod nonmac_decode` declaration
@@ -12,11 +12,11 @@
 //! - `decode()` is Linux/Windows's counterpart to `image_decode.rs`'s mac
 //!   `decode()` — called from `loader.rs`'s `Job::Preview`/`Job::Full`
 //!   (Pipeline 1) and `export.rs`'s `do_export` (Pipeline 3).
-//! - `decode_jpeg_png_tiff_from_bytes` is reused, bytes-in instead of
+//! - `decode_nonraw_from_bytes` is reused, bytes-in instead of
 //!   path-in, by wasm32's own non-RAW decode path (`wasm_worker.rs`) — one
 //!   implementation instead of two that could drift apart.
 //! - `apply_raw_preview_boost`/`exif_code_from_rawler_orientation` are also
-//!   reused by `raw/fast_preview.rs` (wasm32's RAW tiers) and `thumbnail.rs`
+//!   reused by `raw/preview.rs` (wasm32's RAW tiers) and `thumbnail.rs`
 //!   (the embedded-preview fallback) — see each function's doc comment.
 //! - See `ARCHITECTURE.md`.
 
@@ -106,7 +106,7 @@ pub(crate) fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
 /// Brightness+contrast boost applied unconditionally to every RAW photo's
 /// display rendering — ported verbatim, constants included, from the
 /// reference display shader this pipeline matches. Both callers here
-/// (`decode_raw_nonmac` below, `raw_fast_preview.rs`'s `to_srgb_u8`) are
+/// (`decode_raw_nonmac` below, `raw/preview.rs`'s `to_srgb_u8`) are
 /// RAW-only by construction, so there's no separate flag needed to scope it.
 ///
 /// A naive linear-matrix -> sRGB-gamma RAW conversion comes out flatter and
@@ -119,7 +119,7 @@ pub(crate) fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
 /// first, and this boost runs after.
 ///
 /// Has a WGSL twin, `raw_shader.wgsl`'s `apply_raw_preview_boost` — same
-/// constants, same formula — for `raw_fast_preview.rs`'s `Quality` tier
+/// constants, same formula — for `raw/preview.rs`'s `Quality` tier
 /// (wasm32 Loupe), which stops at linear camera-RGB and lets the GPU do this
 /// instead of baking it into a CPU LUT the way every caller of *this*
 /// function does.
@@ -144,7 +144,7 @@ pub(crate) fn apply_raw_preview_boost(srgb: f32) -> f32 {
 /// `RAW_PREVIEW_BRIGHTNESS_GAMMA`/`RAW_PREVIEW_CONTRAST_MIX` above.
 /// Deliberately not ISO-scaled: real ISO-adaptive strength needs an EXIF ISO
 /// read, which non-mac's `read_metadata` below doesn't have wired up yet.
-/// Applied by `decode_raw_nonmac` below and by `raw_fast_preview.rs`'s
+/// Applied by `decode_raw_nonmac` below and by `raw/preview.rs`'s
 /// `Quality` tier only — `Fast`'s quarter-resolution 2x2 bin already gets
 /// free noise reduction from averaging, so denoising it again would just
 /// soften an already-small preview further.
@@ -173,7 +173,7 @@ pub(crate) const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 /// Stage vocabulary note: this delegates black/white-normalize, white
 /// balance, and demosaic to `RawDevelop`'s own `ProcessingStep`s — this is
 /// literally the same `PPGDemosaic`/`apply_scaling`-equivalent machinery that
-/// `raw_fast_preview.rs`'s `Fast`/`Quality` `DemosaicMode` now also calls
+/// `raw/preview.rs`'s `Fast`/`Quality` `DemosaicMode` now also calls
 /// directly. Neither path applies any per-camera profile — both use
 /// `raw.color_matrix` (DNG-embedded calibration) directly.
 #[cfg(not(target_os = "macos"))]
@@ -211,7 +211,7 @@ fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> 
 
     // `RawDevelop::default()`'s `SRgb` step already gamma-encoded these
     // bytes, so now apply the same brightness/contrast boost
-    // `raw_fast_preview.rs`'s LUT uses, via a small local u8->u8 lookup table
+    // `raw/preview.rs`'s LUT uses, via a small local u8->u8 lookup table
     // (256 entries, built once per call — this path isn't hot-looped the way
     // the wasm decode path is, so a static/`OnceLock` would be overkill).
     let boost_lut: [u8; 256] =
@@ -226,7 +226,7 @@ fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> 
     // doc comment for why this exists and why it's a fixed constant, not a
     // slider. `RawDevelop`/the boost LUT above are a vendored black box with
     // no mid-pipeline hook, so this runs as a post-pass on the finished
-    // sRGB8 image rather than pre-gamma the way `raw_fast_preview.rs`'s
+    // sRGB8 image rather than pre-gamma the way `raw/preview.rs`'s
     // `Quality` tier can (see that file's own comment) — round-tripping
     // through this codebase's usual simple 2.2 gamma approximation
     // (`develop.rs`/`image_ops.rs`), not the real piecewise sRGB curve
@@ -284,7 +284,7 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
         return decode_raw_nonmac(path, max_dim);
     }
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    decode_jpeg_png_tiff_from_bytes(&bytes, max_dim)
+    decode_nonraw_from_bytes(&bytes, max_dim)
 }
 
 /// The non-RAW half of [`decode`] above, minus the file read — kept
@@ -296,7 +296,7 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
 /// version used `DynamicImage::thumbnail()` (a fast, low-quality filter, not
 /// `Lanczos3`) and applied no orientation at all.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn decode_jpeg_png_tiff_from_bytes(
+pub(crate) fn decode_nonraw_from_bytes(
     bytes: &[u8],
     max_dim: u32,
 ) -> Result<DecodedImage, String> {

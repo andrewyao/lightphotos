@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 // GPU half of the RAW display tonemap, ported to WGSL. The CPU side
-// (`raw_fast_preview.rs`'s `DemosaicMode::Quality`) does the demosaic and
+// (`raw/preview.rs`'s `DemosaicMode::Quality`) does the demosaic and
 // stops at linear camera-RGB; this shader finishes the job with real sRGB
 // gamma plus a display brightness/contrast boost, applied to every RAW
 // photo's rendering, and then the full Develop-slider tone pipeline

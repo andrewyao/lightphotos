@@ -223,7 +223,7 @@ enum Shown {
     /// The screen-fit preview — what the loupe shows for all normal viewing.
     /// Carries the target it was decoded for *and* the longest side actually
     /// uploaded. Both are needed: the target catches a window resize asking for
-    /// a different size, and the actual size catches the quick pass being
+    /// a different size, and the actual size catches the Speed pass being
     /// superseded by the forced decode behind it (same path, same target, more
     /// pixels) — which is the entire RAW fast path.
     Preview(PathBuf, u32, u32),

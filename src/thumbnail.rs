@@ -18,13 +18,13 @@
 //! are platform-independent (no objc2 dependency) and unconditional.
 //!
 //! ## Pipeline position
-//! - `loader.rs`'s `Job::Quick`/`Job::Preview` (Pipeline 1, opening a photo)
+//! - `loader.rs`'s `Job::Speed`/`Job::Preview` (Pipeline 1, opening a photo)
 //!   call `decode_at_size` directly — `UseIfPresent` for the cheap first
 //!   pass, `Never` for the forced screen-fit decode once that pass comes
 //!   back short.
 //! - `loader.rs`'s `Job::Thumb` (Pipeline 2, Grid/filmstrip) calls
 //!   `ThumbCache::get_or_make`, which checks the on-disk `.tw` cache before
-//!   falling back to `thumbnail()`.
+//!   falling back to `decode_at_size(.., UseIfPresent)`.
 //! - wasm32 doesn't reach `ThumbCache` at all — `wasm_worker.rs` calls the
 //!   bytes-based `embedded_preview_from_bytes`/`rawler_full_image_from_bytes`
 //!   helpers directly, in-memory only. See `ARCHITECTURE.md`.
@@ -53,33 +53,6 @@ use objc2_image_io::{
 #[cfg(target_os = "macos")]
 use crate::image_decode::cgimage_to_rgba;
 use crate::image_decode::{DecodedImage, PixelFormat};
-
-/// Decode a thumbnail of `path` whose longest side is at most `max_px` pixels.
-///
-/// Uses `CGImageSourceCreateThumbnailAtIndex`, which prefers an embedded preview
-/// when present, falls back to decoding-at-size from the full image, and applies
-/// the file's EXIF orientation.
-#[cfg(target_os = "macos")]
-pub fn thumbnail(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
-    decode_at_size(path, max_px, EmbeddedPreview::UseIfPresent)
-}
-
-/// Decode a thumbnail of `path` whose longest side is at most `max_px` pixels.
-///
-/// Tries [`try_extract_embedded_preview`] first (cheap when it works — no full
-/// decode needed); falls back to a real full decode-at-size via
-/// `image_decode::decode` on `None` (missing preview, decode failure,
-/// unsupported format — see that function's doc comment for exactly which
-/// failures it treats as "no preview"). The fallback is what makes the
-/// extractor above safe to keep best-effort: nothing it can get wrong actually
-/// fails a thumbnail request.
-#[cfg(not(target_os = "macos"))]
-pub fn thumbnail(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
-    if let Some(preview) = try_extract_embedded_preview(path, max_px) {
-        return Ok(preview);
-    }
-    crate::image_decode::decode(path, max_px)
-}
 
 /// Whether ImageIO may substitute the file's embedded preview for a real
 /// decode-at-size.
@@ -135,8 +108,12 @@ pub fn decode_at_size(
 /// there's no cross-platform equivalent of ImageIO's decode-at-size, so this
 /// is a full decode followed by a resize, same shape as
 /// `image_decode::decode`'s non-mac arm (which this calls directly).
-/// `EmbeddedPreview::UseIfPresent` (grid/filmstrip thumbnails) is exactly
-/// [`thumbnail`]'s body: try the embedded preview, fall back to full decode.
+/// `EmbeddedPreview::UseIfPresent` (grid/filmstrip thumbnails) tries the
+/// file's embedded preview ([`try_extract_embedded_preview`] — cheap when it
+/// works, no full decode) and falls back to a real full decode-at-size via
+/// `image_decode::decode` on `None` (missing preview, decode failure,
+/// unsupported format). That fallback is what keeps the extractor safe to
+/// treat as best-effort: nothing it can get wrong actually fails the request.
 #[cfg(not(target_os = "macos"))]
 pub fn decode_at_size(
     path: &Path,
@@ -145,7 +122,9 @@ pub fn decode_at_size(
 ) -> Result<DecodedImage, String> {
     match embedded {
         EmbeddedPreview::Never => crate::image_decode::decode(path, max_px),
-        EmbeddedPreview::UseIfPresent => thumbnail(path, max_px),
+        EmbeddedPreview::UseIfPresent => try_extract_embedded_preview(path, max_px)
+            .map(Ok)
+            .unwrap_or_else(|| crate::image_decode::decode(path, max_px)),
     }
 }
 
@@ -170,9 +149,9 @@ pub fn decode_at_size(
 ///
 /// Returns `None` on any failure — unreadable file, no TIFF/EXIF structure, no
 /// IFD1 thumbnail tags, an out-of-bounds offset/length, or a blob that
-/// doesn't actually decode as JPEG — so [`thumbnail`]'s full-decode fallback
-/// is always safe to take; this must never be what makes a thumbnail request
-/// fail outright.
+/// doesn't actually decode as JPEG — so `decode_at_size`'s full-decode
+/// fallback is always safe to take; this must never be what makes a thumbnail
+/// request fail outright.
 #[cfg(not(target_os = "macos"))]
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
     let bytes = fs::read(path).ok()?;
@@ -276,7 +255,7 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
 /// tonemap bug. Scoped back to its original purpose.
 ///
 /// Wrapped in `catch_unwind` for defense-in-depth, matching
-/// `raw_fast_preview.rs`'s own convention around `rawler` calls — largely a
+/// `raw/preview.rs`'s own convention around `rawler` calls — largely a
 /// no-op on `wasm32-unknown-unknown` (`panic = "abort"`, no real unwinding),
 /// but `full_image()`'s implementations read their embedded-image
 /// offset/length fields through `RawSource::subview`, which is
@@ -450,7 +429,8 @@ impl ThumbCache {
     }
 
     /// Return a cached thumbnail for `(path, max_px)` if present on disk;
-    /// otherwise generate it via `thumbnail()`, persist it, and return it.
+    /// otherwise generate it via `decode_at_size(.., UseIfPresent)`, persist
+    /// it, and return it.
     pub fn get_or_make(&self, path: &Path, max_px: u32) -> Result<Arc<DecodedImage>, String> {
         let key = self.cache_key(path, max_px)?;
         let file = self.root.join(format!("{:016x}.tw", key));
@@ -459,7 +439,7 @@ impl ThumbCache {
             return Ok(Arc::new(img));
         }
 
-        let img = thumbnail(path, max_px)?;
+        let img = decode_at_size(path, max_px, EmbeddedPreview::UseIfPresent)?;
         // Best-effort write; a failed cache write must not fail the request.
         let _ = write_tw(&file, &img);
         Ok(Arc::new(img))

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Two RAW preview tiers, both dispatched off `bin_bayer_quarter_res`'s and
+//! Two RAW preview tiers, both dispatched off `demosaic_cfa`'s and
 //! `decimate_linear_rgb`'s `mode: DemosaicMode` parameter — wired to
 //! `wasm_worker.rs`'s two job kinds (Grid `Thumb` vs. Loupe `Preview`):
 //!
@@ -58,7 +58,7 @@ pub(crate) enum DemosaicMode {
 }
 
 impl DemosaicMode {
-    /// Bytes per pixel this mode's `bin_bayer_quarter_res`/`decimate_linear_rgb`
+    /// Bytes per pixel this mode's `demosaic_cfa`/`decimate_linear_rgb`
     /// write: `Fast` → 4 (u8 sRGB RGBA), `Quality` → 8 (`half::f16` linear
     /// RGBA). Drives both the output buffer's allocation size and
     /// `apply_orientation`'s byte-swap stride, so the two never drift apart.
@@ -106,7 +106,7 @@ fn to_srgb_u8(v: f32) -> u8 {
 /// Decodes a RAW file's bytes into the quarter-res `Fast`/sRGB8 preview
 /// (`DemosaicMode::Fast`), resized to fit `max_px` (Lanczos3, same as every
 /// other decode path in this crate — see
-/// `image_decode::decode_jpeg_png_tiff_from_bytes`). Grid-only — the Loupe
+/// `image_decode::decode_nonraw_from_bytes`). Grid-only — the Loupe
 /// calls [`decode_raw_quality_from_bytes`] instead. Its name, signature, and
 /// output shape are kept stable across the `Fast`/`Quality` split below,
 /// since `decode_probe.rs`'s golden-hash regression tests call it by name.
@@ -183,7 +183,7 @@ fn decode_raw_preview_from_bytes(
 
     let (w, h, rgba) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         raw.apply_scaling().map_err(|e| e.to_string())?;
-        fast_preview(&mut raw, orientation, mode, max_px).ok_or_else(|| {
+        demosaic_preview(&mut raw, orientation, mode, max_px).ok_or_else(|| {
             format!(
                 "unsupported RAW layout (cpp={}, {})",
                 raw.cpp,
@@ -261,7 +261,7 @@ fn real_orientation(
         .unwrap_or(rawler::decoders::Orientation::Normal)
 }
 
-/// Dispatches on `raw.cpp`: `bin_bayer_quarter_res` for undemosaiced Bayer
+/// Dispatches on `raw.cpp`: `demosaic_cfa` for undemosaiced Bayer
 /// mosaics (cpp == 1 — ARW/CR2/NEF and most camera RAW), `decimate_linear_rgb`
 /// for already-demosaiced/linear data (cpp == 3 — some DNGs, which skip
 /// Bayer interpolation entirely). `None` for anything else (e.g. monochrome,
@@ -269,14 +269,14 @@ fn real_orientation(
 /// demosaic algorithm and the output pixel encoding (see `DemosaicMode`'s own
 /// doc comment) — threaded straight through to both branches and to
 /// `apply_orientation`'s byte stride.
-fn fast_preview(
+fn demosaic_preview(
     raw: &mut rawler::RawImage,
     orientation: rawler::decoders::Orientation,
     mode: DemosaicMode,
     max_px: u32,
 ) -> Option<(u32, u32, Vec<u8>)> {
     let (w, h, rgba) = match raw.cpp {
-        1 => bin_bayer_quarter_res(raw, mode, max_px),
+        1 => demosaic_cfa(raw, mode, max_px),
         3 => decimate_linear_rgb(raw, mode, max_px),
         _ => None,
     }?;
@@ -416,7 +416,7 @@ fn resize_linear_f16(rgba: &[u8], w: u32, h: u32, max_px: u32) -> (u32, u32, Vec
     (out_w as u32, out_h as u32, out)
 }
 
-/// `area` must lie inside `width * height` — `bin_bayer_quarter_res` checks
+/// `area` must lie inside `width * height` — `demosaic_cfa` checks
 /// that before calling.
 /// Camera-RGB → sRGB matrix, built once per image. Same algorithm `rawler`'s
 /// own `imgop::raw::map_3ch_to_rgb` uses internally — that function is
@@ -469,7 +469,7 @@ fn apply_cam2rgb(cam2rgb: &[[f32; 4]; 3], rgb: [f32; 3]) -> [f32; 3] {
 /// Renders one linear camera-RGB sample (already white-balanced, already
 /// black/white-level normalized by `raw.apply_scaling()` before demosaic) to
 /// display RGBA8: color matrix (if the camera has calibration data) -> gamma,
-/// alpha fixed opaque. Shared by both `bin_bayer_quarter_res` and
+/// alpha fixed opaque. Shared by both `demosaic_cfa` and
 /// `decimate_linear_rgb` — used to be duplicated inline in both.
 fn render_rgb_sample(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [u8; 4] {
     let srgb = match cam2rgb {
@@ -552,7 +552,7 @@ fn is_supported_bayer_layout(
 // `map_xtrans_coord` doesn't correctly translate an active-area origin that
 // falls inside a skipped tile into reduced-space, so a Fuji file with a
 // nonzero active-area offset can crop more of the first CFA tile than it
-// should; (2) `bin_bayer_quarter_res` runs X-Trans data through
+// should; (2) `demosaic_cfa` runs X-Trans data through
 // `RawImage::apply_scaling()`, which calls the Bayer-only
 // `correct_blacklevel_cfa` — that collapses X-Trans's 6x6 per-phase
 // black-level table down to a single repeated value, losing per-phase black
@@ -651,10 +651,10 @@ fn map_xtrans_coord(coord: usize, tile_step: usize) -> usize {
 /// Bayer-CFA preview via rawler's own `Demosaic` trait: `Fast` uses
 /// `Superpixel3Channel` (quarter-res 2x2 bin, no interpolation — matches this
 /// file's earlier hand-rolled output byte-for-byte), `Quality` uses
-/// `PPGDemosaic` (full-res, edge-directed interpolation). See `fast_preview`'s
+/// `PPGDemosaic` (full-res, edge-directed interpolation). See `demosaic_preview`'s
 /// doc comment for when this applies, and `is_supported_bayer_layout` for the
 /// layouts this turns away rather than handing to a panicking demosaic.
-pub(crate) fn bin_bayer_quarter_res(
+pub(crate) fn demosaic_cfa(
     raw: &mut rawler::RawImage,
     mode: DemosaicMode,
     max_px: u32,
@@ -896,7 +896,7 @@ fn downsample_xtrans_mosaic(source: &[f32], width: usize, height: usize, max_px:
 /// than an averaging box filter — this data has no CFA-driven reason to
 /// average 4 samples together. `mode` has no demosaic-algorithm effect here
 /// (there's no CFA to interpolate), only an output-encoding one — same
-/// `Fast`/`Quality` branch `bin_bayer_quarter_res` makes.
+/// `Fast`/`Quality` branch `demosaic_cfa` makes.
 fn decimate_linear_rgb(
     raw: &mut rawler::RawImage,
     mode: DemosaicMode,
@@ -982,9 +982,9 @@ fn decimate_linear_rgb(
     }
 
     // Automatic decode-time denoise — see `AUTO_RAW_DENOISE_STRENGTH`'s own
-    // doc comment (`raw/nonmac_decode.rs`) and `bin_bayer_quarter_res`'s
+    // doc comment (`raw/nonmac_decode.rs`) and `demosaic_cfa`'s
     // matching comment for why this exists and why `Fast` skips it. Applied
-    // here after white balance (unlike `bin_bayer_quarter_res`, which
+    // here after white balance (unlike `demosaic_cfa`, which
     // denoises before it) since this loop already folds `wb` into the
     // accumulation above — still before the color matrix, still linear
     // light, so the difference doesn't change what the filter is smoothing.

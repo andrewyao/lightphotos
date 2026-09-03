@@ -59,12 +59,12 @@ use crate::image_decode::{DecodedImage, PixelFormat};
 /// while `self.fitted` is still true), so `Speed` is reinstated here, plus a
 /// `Full` tier (real full-resolution decode, requested only once the user
 /// zooms past what `Preview` holds — `app/loupe.rs::ensure_full_for_zoom`'s
-/// wasm32 branch) mirroring native's own `Quick`/`Preview`/`Full` staging.
+/// wasm32 branch) mirroring native's own `Speed`/`Preview`/`Full` staging.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JobKind {
     Thumb,
-    Preview,
     Speed,
+    Preview,
     Full,
 }
 
