@@ -659,7 +659,7 @@ pub(crate) fn demosaic_cfa(
     mode: DemosaicMode,
     max_px: u32,
 ) -> Option<(u32, u32, Vec<u8>)> {
-    use rawler::imgop::sensor::{bayer::{ppg::PPGDemosaic, superpixel::Superpixel3Channel, Demosaic}, xtrans::xtrans_fast::XtransFastDemosaic};
+    use rawler::imgop::sensor::bayer::{ppg::PPGDemosaic, superpixel::Superpixel3Channel, Demosaic};
     use rawler::pixarray::Pix2D;
     use rawler::rawimage::RawPhotometricInterpretation;
     use rawler::RawImageData;
@@ -745,7 +745,18 @@ pub(crate) fn demosaic_cfa(
     };
 
     let demosaiced = if is_xtrans {
-        XtransFastDemosaic::new().demosaic(&pixels, &cfa, &colors, area)
+        // rawler 0.7.2 ships no wired-up X-Trans demosaic (the
+        // `imgop::sensor::xtrans` module is an empty stub upstream), so run
+        // the X-Trans mosaic through `PPGDemosaic` — it only guards
+        // `cfa.is_rgb()` (X-Trans passes: its 36-char name is all R/G/B) and
+        // indexes via `cfa.color_at()`, which honours the 6x6 tile, so it
+        // won't panic. The green interpolation still assumes Bayer
+        // neighbourhoods, so the result is soft/imperfect on X-Trans — but
+        // this path only runs on a RAF with no usable embedded preview
+        // (corrupted file), and the `TODO(x-trans)` above already documents
+        // it as wrong-when-it-runs. `Superpixel3Channel` is not an option
+        // here: it hits `unreachable!()` on any non-2x2 pattern.
+        PPGDemosaic::new().demosaic(&pixels, &cfa, &colors, area)
     } else {
         match mode {
             DemosaicMode::Fast => Superpixel3Channel::new().demosaic(&pixels, &cfa, &colors, area),
