@@ -58,8 +58,13 @@ jobs:
         shell: bash
         run: ./scripts/setup-vendor-rawler.sh
 
+      # Only the shipped binary. The src/bin probes (face_probe, seg_probe) are
+      # mac-only dev harnesses: they #[path]-reinclude the decode modules, and
+      # the non-mac decode path pulls in crate::develop / crate::coregraphics
+      # which the probes don't re-declare, so `cargo build` (all targets) fails
+      # to compile them on Linux/Windows.
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --bin lightphotos --target ${{ matrix.target }}
 
       # macOS: ship the double-clickable .app (bundle.sh also does lsregister,
       # which is a no-op / harmless on the runner; we inline the assembly here
