@@ -18,6 +18,15 @@ cargo test <name>         # run a single test by name substring, e.g. `cargo tes
 ./scripts/bundle.sh       # build release + assemble LightPhotos.app + register with Launch Services (lsregister)
 ```
 
+The wasm32 (browser) build goes through `trunk`, not bare `cargo` — plain `cargo build --target wasm32-unknown-unknown` misses the wgpu/WebGPU and File System Access bindings, which are gated behind an unstable-apis cfg that `Trunk.toml`'s `rustflags` key does *not* reach cargo with in trunk 0.21.14. Set it in the environment:
+
+```sh
+RUSTFLAGS="--cfg=web_sys_unstable_apis" trunk build --release --config Trunk.toml
+./scripts/deploy-web.sh   # the above + vendor setup + sync into the lightphotos.app site repo
+```
+
+Always `--release` for wasm: debug wasm is 10-30x slower at RAW decode/demosaic and the `bg.wasm` is ~10x larger.
+
 Run the binary directly against a path (no bundling needed for dev iteration):
 
 ```sh
