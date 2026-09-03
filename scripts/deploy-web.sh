@@ -12,7 +12,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SITE_DIR="${LIGHTPHOTOS_SITE_DIR:-$ROOT/../lightphotos.app}"
+SITE_DIR="${LIGHTPHOTOS_SITE_DIR:-$ROOT/../lightphotos-app}"
 SITE_PUBLIC="$SITE_DIR/public"
 
 if [[ ! -f "$SITE_PUBLIC/app.html" ]]; then
