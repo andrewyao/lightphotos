@@ -1,0 +1,109 @@
+name: release
+
+# Cut a release by pushing a tag:
+#   git tag v0.1.0 && git push origin v0.1.0
+# Each platform builds on its native runner (macOS decode uses Apple ImageIO;
+# HEIC/Vision code is cfg-gated off on Linux/Windows so they still compile).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
+
+permissions:
+  contents: write          # needed to create the GitHub Release
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14        # Apple Silicon
+            target: aarch64-apple-darwin
+            name: lightphotos-macos-arm64
+          - os: macos-13        # Intel
+            target: x86_64-apple-darwin
+            name: lightphotos-macos-x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: lightphotos-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: lightphotos-windows-x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins channel = "stable"; this respects it.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # winit build headers (usually already present, cheap insurance).
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
+      # Fetches plain rawler 0.7.2 from crates.io and applies the web-time
+      # patch into vendor/. Needs network (CI has it). Runs under git-bash on
+      # Windows.
+      - name: Vendor rawler
+        shell: bash
+        run: ./scripts/setup-vendor-rawler.sh
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # macOS: ship the double-clickable .app (bundle.sh also does lsregister,
+      # which is a no-op / harmless on the runner; we inline the assembly here
+      # so it targets the per-target binary).
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          APP="LightPhotos.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp Info.plist "$APP/Contents/Info.plist"
+          cp "target/${{ matrix.target }}/release/lightphotos" "$APP/Contents/MacOS/lightphotos"
+          chmod +x "$APP/Contents/MacOS/lightphotos"
+          tar -czf "${{ matrix.name }}.tar.gz" "$APP" "target/${{ matrix.target }}/release/lightphotos"
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: tar -czf "${{ matrix.name }}.tar.gz" -C "target/${{ matrix.target }}/release" lightphotos
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "target/${{ matrix.target }}/release/lightphotos.exe" -DestinationPath "${{ matrix.name }}.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            ${{ matrix.name }}.tar.gz
+            ${{ matrix.name }}.zip
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
