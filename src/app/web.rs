@@ -792,9 +792,46 @@ impl App {
         !self.web_dirlist_inflight.is_empty()
     }
 
-    // TODO(Task 6): full expansion-toggle + pure-container logic.
+    /// wasm counterpart of the tail of native `open_folder`: toggle the
+    /// folder's expansion, and if it is a pure container (subdirs but no
+    /// images of its own) skip straight to its first child. Assumes
+    /// `dir`'s own listing is cached in `self.subdirs` (the caller in
+    /// `open_folder` guarantees it; `poll_dir_listing` calls this only
+    /// after inserting `dir`'s listing).
     pub(crate) fn apply_web_open_folder(&mut self, dir: PathBuf) {
-        self.apply_web_load_folder(dir);
+        let subdirs = self.subdirs.get(&dir).cloned().unwrap_or_default();
+        let has_own_images = self
+            .web_file_handles
+            .keys()
+            .any(|p| p.parent() == Some(dir.as_path()));
+        let pure_container = !subdirs.is_empty() && !has_own_images;
+
+        if !subdirs.is_empty() {
+            if self.expanded.contains(&dir) {
+                if !pure_container {
+                    self.expanded.remove(&dir);
+                }
+            } else {
+                self.expanded.insert(dir.clone());
+            }
+        }
+
+        let target = if pure_container {
+            subdirs.into_iter().next().unwrap_or_else(|| dir.clone())
+        } else {
+            dir.clone()
+        };
+
+        // The pure-container target is a different folder; its own listing
+        // may not be loaded yet.
+        if target != dir && !self.subdirs.contains_key(&target) {
+            self.web_pending_nav = Some(WebPendingNav::Open(target.clone()));
+            self.request_dir_listing(&target);
+            self.request_redraw();
+            return;
+        }
+
+        self.apply_web_load_folder(target);
     }
 
     // TODO(Task 7): assumes `dir`'s listing is cached.

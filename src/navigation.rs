@@ -143,6 +143,7 @@ pub fn is_listable_subdir(name: &str) -> bool {
 /// name (matching the `from_dir` image sort). Skips hidden entries (names
 /// starting with `.`) and macOS bundles (`.app`/`.photoslibrary`). On a read
 /// error returns an empty vec.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn list_subdirs(dir: &Path) -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = read_dir_paths(dir)
         .into_iter()

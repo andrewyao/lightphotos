@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 
 use crate::develop::{self};
-use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp, Playlist};
+use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::navigation::Playlist;
 use crate::ui;
 
 impl App {
@@ -566,6 +568,12 @@ impl App {
             return;
         };
         self.ensure_subdirs(&cur);
+        #[cfg(target_arch = "wasm32")]
+        if !self.subdirs.contains_key(&cur) {
+            // Listing just kicked off; the user's next right-arrow press
+            // (after it lands and the triangle appears) will expand it.
+            return;
+        }
         if self.subdirs(&cur).is_empty() {
             return; // leaf
         }
@@ -608,33 +616,47 @@ impl App {
     /// and load its images into the grid. Shared by the folder-row click and
     /// the Enter key so mouse and keyboard behave identically.
     pub(super) fn open_folder(&mut self, path: PathBuf) {
-        self.ensure_subdirs(&path);
-        let subdirs = self.subdirs(&path).to_vec();
-        let pure_container = !subdirs.is_empty() && Playlist::from_dir(&path).entries().is_empty();
-        if !subdirs.is_empty() {
-            if self.expanded.contains(&path) {
-                if !pure_container {
-                    self.expanded.remove(&path);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.ensure_subdirs(&path);
+            let subdirs = self.subdirs(&path).to_vec();
+            let pure_container =
+                !subdirs.is_empty() && Playlist::from_dir(&path).entries().is_empty();
+            if !subdirs.is_empty() {
+                if self.expanded.contains(&path) {
+                    if !pure_container {
+                        self.expanded.remove(&path);
+                    }
+                } else {
+                    self.expanded.insert(path.clone());
                 }
-            } else {
-                self.expanded.insert(path.clone());
             }
+            // A pure container folder (subdirectories but no photos of its own,
+            // e.g. a plain year folder) has nothing to show in the grid — loading
+            // it anyway flashes an empty grid for a frame before the user drills
+            // further. Skip straight to its first child instead, same place a
+            // second `folder_expand` press on it would land.
+            let target = if pure_container {
+                subdirs.into_iter().next().unwrap_or(path)
+            } else {
+                path
+            };
+            self.load_folder(target);
+            self.mode = ViewMode::Grid;
+            self.update_window_title();
+            self.normalize_focus();
+            self.request_redraw();
         }
-        // A pure container folder (subdirectories but no photos of its own,
-        // e.g. a plain year folder) has nothing to show in the grid — loading
-        // it anyway flashes an empty grid for a frame before the user drills
-        // further. Skip straight to its first child instead, same place a
-        // second `folder_expand` press on it would land.
-        let target = if pure_container {
-            subdirs.into_iter().next().unwrap_or(path)
-        } else {
-            path
-        };
-        self.load_folder(target);
-        self.mode = ViewMode::Grid;
-        self.update_window_title();
-        self.normalize_focus();
-        self.request_redraw();
+        #[cfg(target_arch = "wasm32")]
+        {
+            if !self.subdirs.contains_key(&path) {
+                self.web_pending_nav = Some(crate::app::WebPendingNav::Open(path.clone()));
+                self.request_dir_listing(&path);
+                self.request_redraw();
+                return;
+            }
+            self.apply_web_open_folder(path);
+        }
     }
 
     // ---- Focus-routed arrow / Enter dispatchers ----
