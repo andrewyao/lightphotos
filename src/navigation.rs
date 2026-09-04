@@ -123,6 +123,22 @@ fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
     entries
 }
 
+/// Whether a directory entry named `name` should appear in the folder tree.
+/// Skips hidden entries (names starting with `.`) and macOS bundles
+/// (`.app` / `.photoslibrary`, case-insensitive). Shared by the native
+/// `list_subdirs` (`std::fs::read_dir`) and wasm32's `web_fs::list_dir`
+/// (File System Access `values()`), so the two platforms filter identically.
+pub fn is_listable_subdir(name: &str) -> bool {
+    if name.starts_with('.') {
+        return false;
+    }
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    !matches!(ext.as_deref(), Some("app") | Some("photoslibrary"))
+}
+
 /// List the immediate subdirectories of `dir`, sorted case-insensitively by
 /// name (matching the `from_dir` image sort). Skips hidden entries (names
 /// starting with `.`) and macOS bundles (`.app`/`.photoslibrary`). On a read
@@ -132,18 +148,9 @@ pub fn list_subdirs(dir: &Path) -> Vec<PathBuf> {
         .into_iter()
         .filter(|p| p.is_dir())
         .filter(|p| {
-            let name = match p.file_name().and_then(|s| s.to_str()) {
-                Some(n) => n,
-                None => return false,
-            };
-            if name.starts_with('.') {
-                return false;
-            }
-            let ext = p
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase());
-            !matches!(ext.as_deref(), Some("app") | Some("photoslibrary"))
+            p.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(is_listable_subdir)
         })
         .collect();
     sort_by_name(&mut entries);
@@ -485,6 +492,19 @@ mod tests {
         assert_eq!(names, vec!["a", "b"]);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn is_listable_subdir_filters_hidden_and_bundles() {
+        assert!(is_listable_subdir("2024"));
+        assert!(is_listable_subdir("Exports"));
+        assert!(is_listable_subdir("My Photos"));
+        assert!(!is_listable_subdir(".git"));
+        assert!(!is_listable_subdir(".lightphotos"));
+        assert!(!is_listable_subdir("Photos.app"));
+        assert!(!is_listable_subdir("Library.photoslibrary"));
+        // Case-insensitive extension match.
+        assert!(!is_listable_subdir("Thing.APP"));
     }
 
     #[test]
