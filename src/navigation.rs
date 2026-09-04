@@ -449,6 +449,30 @@ mod tests {
     }
 
     #[test]
+    fn flatten_visible_tree_descends_multiple_levels() {
+        use std::path::{Path, PathBuf};
+        let kids = |p: &Path| -> Vec<PathBuf> {
+            match p.to_str().unwrap() {
+                "root" => vec![PathBuf::from("root/a"), PathBuf::from("root/b")],
+                "root/a" => vec![PathBuf::from("root/a/a1"), PathBuf::from("root/a/a2")],
+                _ => vec![],
+            }
+        };
+        // root and root/a expanded, root/b collapsed.
+        let expanded = |p: &Path| matches!(p.to_str().unwrap(), "root" | "root/a");
+        assert_eq!(
+            flatten_visible_tree(Path::new("root"), &expanded, &kids),
+            vec![
+                PathBuf::from("root"),
+                PathBuf::from("root/a"),
+                PathBuf::from("root/a/a1"),
+                PathBuf::from("root/a/a2"),
+                PathBuf::from("root/b"),
+            ]
+        );
+    }
+
+    #[test]
     fn lists_sorted_siblings_positioned_on_opened_file() {
         let dir = Path::new("/tmp/iv-test");
         let start = dir.join("b.jpg");
