@@ -33,33 +33,35 @@ use web_sys::{
 
 use crate::navigation::{is_image, is_listable_subdir};
 
-/// A folder picked via `showDirectoryPicker`, already listed. `dir` is a
-/// synthetic label (the handle's own `.name()`), not a real filesystem path
-/// — nothing on the web side has one. `handles` lets a later decode step
-/// actually read a file's bytes (`FileSystemFileHandle::get_file`); listing
-/// alone doesn't touch file contents. `dir_handle` is the folder's own root
-/// handle — `Catalog`'s wasm32 sidecar I/O (`web_catalog_fs.rs`) needs it to
-/// find/create `.lightphotos` inside this folder, which is why the picker
-/// below requests `readwrite` mode up front rather than read-only.
+/// A folder picked via `showDirectoryPicker`, already listed one level deep.
+/// `dir` is a synthetic label (the handle's own `.name()`), not a real
+/// filesystem path — nothing on the web side has one. `handles` lets a later
+/// decode step actually read a file's bytes (`FileSystemFileHandle::get_file`);
+/// listing alone doesn't touch file contents. `dir_handles` carries the root
+/// and every immediate-subdirectory handle — `Catalog`'s wasm32 sidecar I/O
+/// (`web_catalog_fs.rs`) needs the handle for the current folder to find/create
+/// `.lightphotos` inside it, which is why the picker below requests `readwrite`
+/// mode up front rather than read-only.
 pub struct PickedFolder {
     pub dir: PathBuf,
     pub entries: Vec<PathBuf>,
     pub handles: HashMap<PathBuf, FileSystemFileHandle>,
-    pub dir_handle: FileSystemDirectoryHandle,
     /// Every directory handle discovered so far, keyed by relative path.
-    /// Seeded with just the root (`dir` → `dir_handle`); extended as the
-    /// user browses into subfolders (`web_fs::list_dir` via
+    /// Seeded with the root (`dir`) plus every first-level subdirectory;
+    /// extended as the user browses deeper (`web_fs::list_dir` via
     /// `app/web.rs::poll_dir_listing`).
     pub dir_handles: HashMap<PathBuf, FileSystemDirectoryHandle>,
 }
 
 /// Ask the user to pick a folder (`showDirectoryPicker`, requesting
 /// `readwrite` so rating/edit sidecars can actually be written back into
-/// it — see `PickedFolder::dir_handle`'s doc comment), then list its image
-/// files. One round trip — a cancelled picker or a listing failure both
-/// come back as `Err`, so the caller doesn't need to distinguish them
-/// (there's nothing more specific to do differently either way: report the
-/// message and let the user try again).
+/// it — see `PickedFolder::dir_handles`'s doc comment), then list its image
+/// files and its immediate subdirectories in one `list_dir` pass, returning
+/// `dir_handles` keyed by relative path (the root plus every first-level
+/// subdirectory handle). One round trip — a cancelled picker or a listing
+/// failure both come back as `Err`, so the caller doesn't need to
+/// distinguish them (there's nothing more specific to do differently either
+/// way: report the message and let the user try again).
 pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
     let window = web_sys::window().ok_or("no window")?;
     let opts = DirectoryPickerOptions::new();
@@ -84,7 +86,7 @@ pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
     }
 
     let mut dir_handles = HashMap::new();
-    dir_handles.insert(root.clone(), handle.clone());
+    dir_handles.insert(root.clone(), handle);
     for (p, h) in listing.subdirs {
         dir_handles.insert(p, h);
     }
@@ -93,7 +95,6 @@ pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
         dir: root,
         entries,
         handles,
-        dir_handle: handle,
         dir_handles,
     })
 }

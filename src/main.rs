@@ -361,7 +361,9 @@ impl ApplicationHandler<UserEvent> for App {
             // asynchronously — drain those into `last_error` every frame,
             // same convention as every other wasm32 poll here.
             self.poll_catalog_persist_errors();
-            self.poll_folder_pick()
+            let pick_pending = self.poll_folder_pick();
+            let listing_pending = self.poll_dir_listing();
+            pick_pending || listing_pending
         };
 
         // Drain all loader tiers once per frame.

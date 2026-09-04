@@ -719,4 +719,99 @@ impl App {
                 || self.web_preview_failed.contains(&key)
                 || self.web_file_handles.contains_key(&path))
     }
+
+    /// Kick off an async `web_fs::list_dir` for `dir` (a relative path)
+    /// unless its listing is already cached in `self.subdirs` or a scan is
+    /// already in flight. The result lands on `web_dirlist_rx`, drained by
+    /// `poll_dir_listing`. A missing directory handle is logged and treated
+    /// as an empty (leaf) listing — should not happen, since a folder only
+    /// becomes reachable after its parent's listing produced its handle.
+    pub(crate) fn request_dir_listing(&mut self, dir: &Path) {
+        if self.subdirs.contains_key(dir) || self.web_dirlist_inflight.contains(dir) {
+            return;
+        }
+        let Some(handle) = self.web_dir_handles.get(dir).cloned() else {
+            web_sys::console::error_1(
+                &format!("[web] no directory handle for {}", dir.display()).into(),
+            );
+            self.subdirs.insert(dir.to_path_buf(), Vec::new());
+            return;
+        };
+        self.web_dirlist_inflight.insert(dir.to_path_buf());
+        let base = dir.to_path_buf();
+        let tx = self.web_dirlist_tx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = web_fs::list_dir(&base, &handle).await;
+            let _ = tx.send((base, result));
+        });
+        self.request_redraw();
+    }
+
+    /// Drain finished subfolder listings. For each: merge image handles into
+    /// `web_file_handles`, merge subdir handles into `web_dir_handles`, set
+    /// `self.subdirs[dir]` to the subdir relative paths, clear the in-flight
+    /// mark, and — if a deferred navigation was waiting on this exact
+    /// directory — run its apply step. Returns whether any listing is still
+    /// outstanding (feeds the poll-cadence calc in `main.rs`).
+    pub(crate) fn poll_dir_listing(&mut self) -> bool {
+        while let Ok((dir, result)) = self.web_dirlist_rx.try_recv() {
+            self.web_dirlist_inflight.remove(&dir);
+            match result {
+                Ok(listing) => {
+                    let mut subdir_paths = Vec::with_capacity(listing.subdirs.len());
+                    for (path, handle) in listing.subdirs {
+                        subdir_paths.push(path.clone());
+                        self.web_dir_handles.insert(path, handle);
+                    }
+                    for (path, handle) in listing.images {
+                        self.web_file_handles.insert(path, handle);
+                    }
+                    self.subdirs.insert(dir.clone(), subdir_paths);
+                }
+                Err(e) => {
+                    self.set_status(format!("Couldn't list {}: {e}", dir.display()));
+                    // Treat as a leaf so the tree stops retrying every frame.
+                    self.subdirs.insert(dir.clone(), Vec::new());
+                }
+            }
+
+            // Complete a navigation that was blocked on this listing.
+            match self.web_pending_nav.clone() {
+                Some(WebPendingNav::Open(p)) if p == dir => {
+                    self.web_pending_nav = None;
+                    self.apply_web_open_folder(p);
+                }
+                Some(WebPendingNav::Load(p)) if p == dir => {
+                    self.web_pending_nav = None;
+                    self.apply_web_load_folder(p);
+                }
+                _ => {}
+            }
+            self.request_redraw();
+        }
+        !self.web_dirlist_inflight.is_empty()
+    }
+
+    // TODO(Task 6): full expansion-toggle + pure-container logic.
+    pub(crate) fn apply_web_open_folder(&mut self, dir: PathBuf) {
+        self.apply_web_load_folder(dir);
+    }
+
+    // TODO(Task 7): assumes `dir`'s listing is cached.
+    pub(crate) fn apply_web_load_folder(&mut self, dir: PathBuf) {
+        if let Some(h) = self.web_dir_handles.get(&dir) {
+            self.catalog.set_wasm_dir_handle(h.clone());
+        }
+        let mut entries: Vec<PathBuf> = self
+            .web_file_handles
+            .keys()
+            .filter(|p| p.parent() == Some(dir.as_path()))
+            .cloned()
+            .collect();
+        crate::navigation::sort_by_name(&mut entries);
+        let playlist = crate::navigation::Playlist::from_entries(dir.clone(), entries);
+        self.load_playlist(playlist, dir);
+        self.mode = ViewMode::Grid;
+        self.request_redraw();
+    }
 }

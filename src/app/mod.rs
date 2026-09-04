@@ -29,7 +29,7 @@ use crate::develop::{Adjustments, Crop, TouchUp};
 use crate::duplicates::DuplicateMark;
 use crate::export::Exporter;
 use crate::loader::Loader;
-use crate::navigation::{self, Cmp, Playlist};
+use crate::navigation::{Cmp, Playlist};
 use crate::renderer::{EguiPaint, Renderer};
 use crate::{image_decode, ui};
 
@@ -1024,9 +1024,18 @@ impl App {
 
     /// Populate `subdirs[dir]` (the folder's immediate children) if not cached.
     fn ensure_subdirs(&mut self, dir: &Path) {
-        if !self.subdirs.contains_key(dir) {
-            self.subdirs
-                .insert(dir.to_path_buf(), navigation::list_subdirs(dir));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !self.subdirs.contains_key(dir) {
+                self.subdirs
+                    .insert(dir.to_path_buf(), crate::navigation::list_subdirs(dir));
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            if !self.subdirs.contains_key(dir) {
+                self.request_dir_listing(dir);
+            }
         }
     }
 
