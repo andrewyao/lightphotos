@@ -34,6 +34,38 @@ use std::thread;
 use crate::develop::{Adjustments, TouchUp};
 use crate::{image_decode, image_encode};
 
+/// Decode `src_bytes` at full resolution, bake in the develop/crop/rotation
+/// edits, and encode to JPEG bytes. The platform-neutral heart of Pipeline 3,
+/// shared verbatim by native non-mac export (`do_export` below) and the
+/// wasm32 export worker (`wasm_worker.rs`) — the only thing that differs
+/// between those is how the source bytes arrive and where the JPEG goes
+/// (`ExportFs`). macOS export keeps its own ImageIO decode/encode path.
+///
+/// RAW goes through `decode_raw_nonmac_from_bytes` (rawler `RawDevelop`: PPG
+/// demosaic + the auto-denoise/boost pipeline, premul sRGB8 out — byte-for-
+/// byte what native's own `&Path` decode produces); everything else through
+/// `decode_nonraw_from_bytes`. Both yield the premul-sRGB8 shape
+/// `image_ops::bake_edited` expects.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+// Used by `do_export_nonmac`; on a mac+raw-probe build only the round-trip
+// test calls it.
+#[allow(dead_code)]
+pub fn bake_jpeg(
+    src_bytes: &[u8],
+    is_raw: bool,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+) -> Result<Vec<u8>, String> {
+    let img = if is_raw {
+        image_decode::decode_raw_nonmac_from_bytes(src_bytes, u32::MAX)?
+    } else {
+        image_decode::decode_nonraw_from_bytes(src_bytes, u32::MAX)?
+    };
+    let (w, h, rgba) = crate::image_ops::bake_edited(&img, adj, touchups, rot);
+    image_encode::encode_jpeg_to_vec(w, h, &rgba)
+}
+
 /// A self-contained unit of export work. `dest` is the exact, already
 /// collision-resolved output path (see `paths::jpg_export_target`), so the
 /// worker just writes there — no filename races between workers.
@@ -135,9 +167,117 @@ impl Exporter {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// `bake_jpeg` wires decode → `bake_edited` → `encode_jpeg_to_vec` into
+    /// one platform-neutral call. With default adjustments and no rotation a
+    /// solid-colour source should survive the round trip at its original
+    /// dimensions and roughly its original colour.
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[test]
+    fn bake_jpeg_nonraw_round_trips_identity_edit() {
+        let (w, h) = (10u32, 8u32);
+        let src = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 40, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(src)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode source png");
+
+        let jpeg = bake_jpeg(&png, false, &Adjustments::default(), &[], 0)
+            .expect("bake_jpeg should succeed");
+
+        let out = image::load_from_memory(&jpeg)
+            .expect("decode baked jpeg")
+            .into_rgba8();
+        assert_eq!(out.dimensions(), (w, h));
+        let px = out.get_pixel(0, 0).0;
+        assert!(px[0] > 140, "red channel should stay high, got {}", px[0]);
+        assert!(px[1] < 100 && px[2] < 100, "g/b should stay low, got {},{}", px[1], px[2]);
+    }
+
+    /// A 90° rotation swaps the baked output's width and height.
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[test]
+    fn bake_jpeg_applies_rotation() {
+        let (w, h) = (12u32, 6u32);
+        let src = image::RgbaImage::from_pixel(w, h, image::Rgba([120, 120, 120, 255]));
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(src)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .expect("encode source png");
+
+        let jpeg = bake_jpeg(&png, false, &Adjustments::default(), &[], 1)
+            .expect("bake_jpeg should succeed");
+        let out = image::load_from_memory(&jpeg).expect("decode").into_rgba8();
+        assert_eq!(out.dimensions(), (h, w), "90 deg rotation swaps dimensions");
+    }
+}
+
+/// The filesystem seam between native non-mac export and wasm32 export — the
+/// only thing that differs once `bake_jpeg` produces the JPEG bytes. Native
+/// (`NativeFs`) reads with `std::fs` and does a tmp-write + atomic rename;
+/// wasm32 (`web::web_export_fs::WebFs`) reads a `FileSystemFileHandle` and
+/// writes a File System Access writable stream (atomic swap on `close`).
+///
+/// Generic, never `dyn` — `NativeFs`'s method bodies contain no `.await`, so
+/// the worker threads `pollster::block_on` the already-ready futures for
+/// free, and `WebFs` runs on `wasm_bindgen_futures::spawn_local`.
+#[cfg(not(target_os = "macos"))]
+#[allow(async_fn_in_trait)] // crate-internal; no Send bound needed
+pub(crate) trait ExportFs {
+    /// Full source-file bytes for `src` (an absolute path natively, a
+    /// picked-folder-relative key on wasm32).
+    async fn read_source(&self, src: &std::path::Path) -> Result<Vec<u8>, String>;
+    /// Write `bytes` to `dest` atomically (no reader ever sees a partial
+    /// file). `dest` already has its collision-free `Exports/<stem>.jpg`
+    /// name resolved.
+    async fn write_atomic(&self, dest: &std::path::Path, bytes: &[u8]) -> Result<(), String>;
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) struct NativeFs;
+
+#[cfg(not(target_os = "macos"))]
+impl ExportFs for NativeFs {
+    async fn read_source(&self, src: &std::path::Path) -> Result<Vec<u8>, String> {
+        std::fs::read(src).map_err(|e| e.to_string())
+    }
+
+    async fn write_atomic(&self, dest: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+        // Temp sibling then rename, so a crash mid-write can't leave a
+        // truncated `.jpg` at the final path (the rename is atomic on one
+        // volume).
+        let tmp = dest.with_extension("jpg.tmp");
+        std::fs::write(&tmp, bytes).map_err(|e| format!("write: {e}"))?;
+        if let Err(e) = std::fs::rename(&tmp, dest) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("rename: {e}"));
+        }
+        Ok(())
+    }
+}
+
 /// Decode `src` at full resolution, bake in its edits, and write the JPEG to
 /// `dest`. The heavy, thread-safe half of the old `App::export_image`.
 fn do_export(job: ExportJob) -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        do_export_macos(job)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        do_export_nonmac(job)
+    }
+}
+
+/// macOS: ImageIO decode (RAW + non-RAW alike) and ImageIO JPEG encode,
+/// straight to a temp file then atomic rename. Unchanged from the original
+/// `do_export` — the shared `bake_jpeg`/`ExportFs` path is non-mac only.
+#[cfg(target_os = "macos")]
+fn do_export_macos(job: ExportJob) -> Result<PathBuf, String> {
     // Full resolution: u32::MAX means `fit_within` never downscales.
     let img = image_decode::decode(&job.src, u32::MAX)?;
     let (w, h, rgba) = crate::image_ops::bake_edited(&img, &job.adj, &job.touchups, job.rot);
@@ -149,5 +289,17 @@ fn do_export(job: ExportJob) -> Result<PathBuf, String> {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("rename: {e}"));
     }
+    Ok(job.dest)
+}
+
+/// Native Linux/Windows: the exact pipeline wasm32 export runs — `bake_jpeg`
+/// (shared decode → bake → encode) plus `NativeFs` for the byte IO.
+#[cfg(not(target_os = "macos"))]
+fn do_export_nonmac(job: ExportJob) -> Result<PathBuf, String> {
+    let fs = NativeFs;
+    let bytes = pollster::block_on(fs.read_source(&job.src))?;
+    let is_raw = image_decode::is_raw_extension(&job.src);
+    let jpeg = bake_jpeg(&bytes, is_raw, &job.adj, &job.touchups, job.rot)?;
+    pollster::block_on(fs.write_atomic(&job.dest, &jpeg))?;
     Ok(job.dest)
 }

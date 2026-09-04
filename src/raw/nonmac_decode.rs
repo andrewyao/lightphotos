@@ -343,7 +343,11 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
 /// That's not hypothetical — it already happened once: an earlier wasm32
 /// version used `DynamicImage::thumbnail()` (a fast, low-quality filter, not
 /// `Lanczos3`) and applied no orientation at all.
-#[cfg(not(target_os = "macos"))]
+// Dual-gated (`raw-probe`) alongside the RAW bytes core above so
+// `export::bake_jpeg`'s round-trip test can exercise the non-RAW branch on a
+// mac dev build; non-mac `decode` below is the real caller.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[allow(dead_code)]
 pub(crate) fn decode_nonraw_from_bytes(
     bytes: &[u8],
     max_dim: u32,
