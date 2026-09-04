@@ -93,6 +93,7 @@ impl App {
                 Ok(picked) => {
                     self.web_file_handles = picked.handles;
                     self.web_dir_handles = picked.dir_handles;
+                    self.subdirs.clear();
 
                     let root = picked.dir.clone();
                     // First level of the tree, derived from the seeded dir
@@ -735,6 +736,19 @@ impl App {
                 &format!("[web] no directory handle for {}", dir.display()).into(),
             );
             self.subdirs.insert(dir.to_path_buf(), Vec::new());
+            self.set_status(format!(
+                "Couldn't open {} — folder handle missing",
+                dir.display()
+            ));
+            // No channel send happens on this arm, so poll_dir_listing would
+            // never dispatch a nav that a caller stashed for this dir. Drop it
+            // rather than leave it stuck.
+            match &self.web_pending_nav {
+                Some(WebPendingNav::Open(p) | WebPendingNav::Load(p)) if p == dir => {
+                    self.web_pending_nav = None;
+                }
+                _ => {}
+            }
             return;
         };
         self.web_dirlist_inflight.insert(dir.to_path_buf());
@@ -825,7 +839,7 @@ impl App {
         // The pure-container target is a different folder; its own listing
         // may not be loaded yet.
         if target != dir && !self.subdirs.contains_key(&target) {
-            self.web_pending_nav = Some(WebPendingNav::Open(target.clone()));
+            self.web_pending_nav = Some(WebPendingNav::Load(target.clone()));
             self.request_dir_listing(&target);
             self.request_redraw();
             return;
@@ -864,6 +878,7 @@ impl App {
         let playlist = crate::navigation::Playlist::from_entries(dir.clone(), entries);
         self.load_playlist(playlist, dir);
         self.mode = ViewMode::Grid;
+        self.update_window_title();
         self.request_redraw();
     }
 }
