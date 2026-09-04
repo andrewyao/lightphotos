@@ -299,32 +299,53 @@ if !outcomes.is_empty() { self.on_export_outcomes(outcomes); }
   unchanged. The keep-awake redraw (`export_progress.is_some()`) already
   covers both.
 
+## Status
+
+Tasks 1–7 implemented and committed (`7d2ed42`..`HEAD`). Native + wasm
+(`trunk build --release`) both build clean; 193 native tests pass (incl. the
+new `encode_jpeg_to_vec`, RAW bytes-core parity, `bake_jpeg`, and
+`jpg_export_name` tests). The Task 2 link risk is resolved — `RawDevelop` /
+`to_dynamic_image` / `image::imageops::resize` all link for wasm32, so RAW
+export uses the real native pipeline with no `LinearF16` fallback. **Task 8
+(browser acceptance) is outstanding** — needs a human at a browser.
+
+Implementation notes / deviations from the sketch above:
+- `ExportFs` is `read_source` + `write_atomic` only; the collision scan is
+  `WebFs::existing_export_names` (inherent, wasm-only), not a trait method —
+  native keeps `jpg_export_target`'s `Path::exists()`.
+- `submit_export` takes `Vec<u8>`, not an `ArrayBuffer` — export isn't
+  latency-critical, so one copy into a fresh JS buffer is fine (the decode
+  path's zero-copy transfer is kept only where it matters).
+- `main.rs`'s existing `export_progress.is_some()` → 100 ms poll cadence
+  already keeps the wasm loop draining `poll_exports` — no new keep-awake
+  wiring.
+
 ## Tasks
 
-- [ ] **Task 1 — `encode_jpeg_to_vec`.** Split `image_encode.rs`. Unit test:
+- [x] **Task 1 — `encode_jpeg_to_vec`.** Split `image_encode.rs`. Unit test:
   `encode_jpeg_to_vec` → `image_decode::decode` round-trips dims + colour
   (mirror the existing `encode_then_decode_round_trips`, minus the file).
   `cargo test`.
-- [ ] **Task 2 — RAW bytes core.** `decode_raw_via_rawler_bytes` +
+- [x] **Task 2 — RAW bytes core.** `decode_raw_via_rawler_bytes` +
   `decode_raw_nonmac_from_bytes` in `raw/nonmac_decode.rs`; native
   `decode_raw_nonmac` becomes a `std::fs::read` wrapper. `cargo test`
   (`decode_probe` golden hashes must not move). **Then `RUSTFLAGS="--cfg=
   web_sys_unstable_apis" trunk build --release` to confirm `RawDevelop` /
   `to_dynamic_image` / `image::imageops::resize` link for wasm32** — if
   not, take the `LinearF16` fallback noted in §2 before continuing.
-- [ ] **Task 3 — `bake_jpeg` + `ExportFs` + `NativeFs`.** Shared items in
+- [x] **Task 3 — `bake_jpeg` + `ExportFs` + `NativeFs`.** Shared items in
   `export.rs`; `resolve_targets`. Rewrite `Exporter`/`do_export` onto
   `bake_jpeg` + `NativeFs` + `pollster::block_on`. `cargo test`; run a
   native export by hand (RAW + JPEG, with crop/rotate/develop) and eyeball
   the output against the Loupe.
-- [ ] **Task 4 — `web_worker_pool` `JobKind::Export`.** `submit_export`,
+- [x] **Task 4 — `web_worker_pool` `JobKind::Export`.** `submit_export`,
   `ExportPoolResult`, `export_rx`, `poll_exports`, message routing.
-- [ ] **Task 5 — `wasm_worker.rs` export branch.** Module includes,
+- [x] **Task 5 — `wasm_worker.rs` export branch.** Module includes,
   `export: true` handling, `bake_jpeg` call, `{id, ok, jpeg}` reply. `trunk
   build --release`.
-- [ ] **Task 6 — `WebFs` + `web/web_export_fs.rs`.** `read_source` /
+- [x] **Task 6 — `WebFs` + `web/web_export_fs.rs`.** `read_source` /
   `existing_targets` / `write_atomic` against FSA handles.
-- [ ] **Task 7 — wasm `start_export` + result plumbing.** `App`
+- [x] **Task 7 — wasm `start_export` + result plumbing.** `App`
   `web_export_tx/rx`; the `app/export.rs` wasm arm; the `main.rs` wasm
   frame-loop drain. `trunk build --release`.
 - [ ] **Task 8 — browser acceptance (human).** `deploy-web.sh` or `trunk
