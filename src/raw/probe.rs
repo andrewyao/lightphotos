@@ -1208,6 +1208,65 @@ mod tests {
         result.expect("RawDevelop pipeline failed on the synthetic Linear DNG fixture");
     }
 
+    /// wasm export: `decode_raw_nonmac_from_bytes` is the bytes-in core that
+    /// native `decode_raw_nonmac` and the wasm32 export worker both call. It
+    /// runs the full `RawDevelop` + boost + auto-denoise + sRGB pipeline and
+    /// must preserve the fixture's horizontal gradient (a mid-row sample near
+    /// the left edge is clearly darker than one near the right edge).
+    #[test]
+    fn decode_raw_nonmac_from_bytes_develops_gradient_fixture() {
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_raw_bytes_core_{}.dng",
+            std::process::id()
+        ));
+        let (w, h) = (48u32, 16u32);
+        write_linear_dng(&path, w, h).expect("write_linear_dng failed");
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let _ = std::fs::remove_file(&path);
+
+        let img = image_decode::decode_raw_nonmac_from_bytes(&bytes, u32::MAX)
+            .expect("bytes-core RAW decode should succeed");
+
+        assert_eq!((img.width, img.height), (w, h));
+        let row_mid = (h / 2) as usize;
+        let at = |x: usize| img.rgba[(row_mid * w as usize + x) * 4] as i32;
+        assert!(
+            at((w - 2) as usize) - at(1) > 20,
+            "gradient should brighten left->right, got {} -> {}",
+            at(1),
+            at((w - 2) as usize)
+        );
+    }
+
+    /// The bytes core and the `&Path` entry point must produce byte-identical
+    /// output for the same input — this is what makes it safe to route native
+    /// export (which had its own `image_decode::decode` call) and the wasm
+    /// worker through one shared pipeline.
+    #[test]
+    fn decode_raw_nonmac_bytes_and_path_agree() {
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_raw_bytes_parity_{}.dng",
+            std::process::id()
+        ));
+        let (w, h) = (40u32, 30u32);
+        write_linear_dng(&path, w, h).expect("write_linear_dng failed");
+        let bytes = std::fs::read(&path).expect("read fixture");
+
+        let via_path = image_decode::decode_raw_nonmac(&path, u32::MAX).expect("path decode");
+        let via_bytes =
+            image_decode::decode_raw_nonmac_from_bytes(&bytes, u32::MAX).expect("bytes decode");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(
+            (via_path.width, via_path.height),
+            (via_bytes.width, via_bytes.height)
+        );
+        assert_eq!(
+            via_path.rgba, via_bytes.rgba,
+            "bytes-core and path decode must be byte-identical"
+        );
+    }
+
     /// A malformed/unsupported input (not a DNG at all) should come back as
     /// an `Err`, not panic — sanity check on `decode_via_rawler`'s error
     /// mapping.

@@ -22,11 +22,10 @@
 
 use std::path::Path;
 
-// Only the `not(macos)` items below actually use these. The dual-gated
-// (`raw-probe`) items never touch `DecodedImage`/`PixelFormat`, so on a
-// mac+raw-probe build — where only that dual-gated half compiles — this
-// import would otherwise sit unused.
-#[cfg(not(target_os = "macos"))]
+// `decode_raw_nonmac{,_from_bytes}` + `develop_raw_image_to_srgb8` are
+// dual-gated (`raw-probe`) so their parity test can run on mac; they use all
+// four of these, so the import follows the same gate.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 use crate::image_decode::{apply_exif_orientation, fit_within, DecodedImage, PixelFormat};
 
 /// File extensions we treat as camera RAW on the non-mac decode path — these
@@ -176,8 +175,11 @@ pub(crate) const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 /// `raw/preview.rs`'s `Fast`/`Quality` `DemosaicMode` now also calls
 /// directly. Neither path applies any per-camera profile — both use
 /// `raw.color_matrix` (DNG-embedded calibration) directly.
-#[cfg(not(target_os = "macos"))]
-fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+// On mac only reachable under `raw-probe` (parity test); non-mac `decode`
+// below calls it for real.
+#[allow(dead_code)]
+pub(crate) fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let raw = decode_raw_via_rawler(path)?;
     // `RawSource::new` (memory-mapped), not `std::fs::read` +
     // `new_from_slice`: the latter reads the whole file into a `Vec` and then
@@ -186,7 +188,9 @@ fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> 
     // sensor buffer above. A large RAW file can add hundreds of MB of
     // transient heap for a value (orientation) that's one byte deep in the
     // file's metadata. The mmap is file-backed and reclaimable, not a heap
-    // duplicate.
+    // duplicate. (The `_from_bytes` variant below can't get this — it only
+    // has the slice — so it reuses the slice-backed `RawSource` it already
+    // built for the decode.)
     let orientation = rawler::rawsource::RawSource::new(path)
         .ok()
         .and_then(|source| {
@@ -201,8 +205,52 @@ fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> 
         })
         .unwrap_or_else(|| exif_code_from_rawler_orientation(raw.orientation));
 
+    develop_raw_image_to_srgb8(&raw, orientation, max_dim)
+}
+
+/// The `&[u8]` counterpart of [`decode_raw_nonmac`]: rawler decodes the
+/// sensor data straight from an in-memory RAW file (`RawSource::new_from_slice`,
+/// the same entry `raw/preview.rs` uses on wasm32), then the identical
+/// `RawDevelop` → boost → auto-denoise → sRGB pipeline via
+/// [`develop_raw_image_to_srgb8`]. Shared by native export and the wasm32
+/// export worker (`export::bake_jpeg`) — a browser has no file path for the
+/// `&Path` version to open. The parity test in `raw/probe.rs` locks the two
+/// to byte-identical output.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[allow(dead_code)]
+pub(crate) fn decode_raw_nonmac_from_bytes(
+    bytes: &[u8],
+    max_dim: u32,
+) -> Result<DecodedImage, String> {
+    let source = rawler::rawsource::RawSource::new_from_slice(bytes);
+    let params = rawler::decoders::RawDecodeParams::default();
+    let raw = rawler::decode(&source, &params).map_err(|e| e.to_string())?;
+    let orientation = rawler::get_decoder(&source)
+        .ok()
+        .and_then(|decoder| decoder.raw_metadata(&source, &params).ok())
+        .and_then(|meta| meta.exif.orientation)
+        .map(|orientation| {
+            exif_code_from_rawler_orientation(rawler::Orientation::from_u16(orientation))
+        })
+        .unwrap_or_else(|| exif_code_from_rawler_orientation(raw.orientation));
+
+    develop_raw_image_to_srgb8(&raw, orientation, max_dim)
+}
+
+/// Shared tail of [`decode_raw_nonmac`] / [`decode_raw_nonmac_from_bytes`]:
+/// rawler's `RawDevelop` (PPG demosaic → white balance → colour-matrix
+/// calibration → default crop → sRGB gamma), then the display boost LUT, the
+/// fixed decode-time auto-denoise post-pass, the `max_dim` downscale, and the
+/// file's EXIF orientation. Output is premul sRGB8 — the shape
+/// `image_ops::bake_edited` (export) expects.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+fn develop_raw_image_to_srgb8(
+    raw: &rawler::RawImage,
+    orientation: u8,
+    max_dim: u32,
+) -> Result<DecodedImage, String> {
     let developed = rawler::imgop::develop::RawDevelop::default()
-        .develop_intermediate(&raw)
+        .develop_intermediate(raw)
         .map_err(|e| e.to_string())?;
     let dynamic = developed
         .to_dynamic_image()
