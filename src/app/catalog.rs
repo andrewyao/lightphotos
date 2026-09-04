@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use crate::develop::Adjustments;
 use crate::duplicates::DuplicateMark;
 use crate::navigation::Cmp;
-use crate::{trash, ui};
+use crate::ui;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::trash;
 
 impl App {
 
@@ -248,7 +250,8 @@ impl App {
         self.run_delete(self.selected_paths());
     }
 
-    /// Shared trash + cleanup body for `delete_selection`.
+    /// Move `paths` to the Trash (native) and prune all derived state.
+    #[cfg(not(target_arch = "wasm32"))]
     fn run_delete(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
@@ -265,6 +268,47 @@ impl App {
                 }
             }
         }
+        self.finish_delete(trashed, total, last_err);
+    }
+
+    /// wasm32: File System Access has no trash — `remove_entry` is a
+    /// permanent delete. Issued fire-and-forget per file (its parent
+    /// directory handle comes from `web_dir_handles`), with the UI pruned
+    /// optimistically the same way `catalog.rs`'s wasm sidecar writes are: a
+    /// `remove_entry` that fails leaves a stale file that reappears on
+    /// reload, which beats a phantom grid entry pointing at nothing.
+    #[cfg(target_arch = "wasm32")]
+    fn run_delete(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let total = paths.len();
+        for path in &paths {
+            let Some(name) = path.file_name().map(std::ffi::OsString::from) else {
+                continue;
+            };
+            let dir_key = path.parent().unwrap_or(Path::new("")).to_path_buf();
+            let Some(dir) = self.web_dir_handles.get(&dir_key).cloned() else {
+                web_sys::console::error_1(
+                    &format!("[web] delete: no directory handle for {}", path.display()).into(),
+                );
+                continue;
+            };
+            let display = path.display().to_string();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = crate::web_catalog_fs::remove_file(&dir, &name).await {
+                    web_sys::console::error_1(
+                        &format!("[web] delete failed for {display}: {e}").into(),
+                    );
+                }
+            });
+        }
+        self.finish_delete(paths, total, None);
+    }
+
+    /// Prune every derived structure for the just-deleted `trashed` paths and
+    /// repair the view — shared by both `run_delete` arms.
+    fn finish_delete(&mut self, trashed: Vec<PathBuf>, total: usize, last_err: Option<String>) {
         if !trashed.is_empty() {
             let gone: HashSet<PathBuf> = trashed.iter().cloned().collect();
             let survey_was_affected = self
@@ -279,6 +323,11 @@ impl App {
                 self.edits.remove(p);
                 self.rotations.remove(p);
                 self.catalog.remove(p);
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.web_file_handles.remove(p);
+                    self.web_dir_handles.remove(p);
+                }
             }
             // Remove stale path- and pair-keyed duplicate state. Pending jobs
             // for deleted files must not keep the redraw loop alive forever.
@@ -325,9 +374,14 @@ impl App {
             }
         }
         let n = trashed.len();
+        #[cfg(not(target_arch = "wasm32"))]
+        let done = format!("Moved {n} photo(s) to Trash");
+        // wasm32 `remove_entry` is a permanent delete, not a trash move — say so.
+        #[cfg(target_arch = "wasm32")]
+        let done = format!("Deleted {n} photo(s)");
         self.set_status(match last_err {
-            None => format!("Moved {n} photo(s) to Trash"),
-            Some(e) => format!("Trashed {n}/{total} \u{2014} last error: {e}"),
+            None => done,
+            Some(e) => format!("Deleted {n}/{total} \u{2014} last error: {e}"),
         });
         self.request_redraw();
     }

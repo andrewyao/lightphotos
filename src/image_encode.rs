@@ -112,8 +112,12 @@ pub fn encode_jpeg_to_vec(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8
 }
 
 /// Encode `rgba` (see [`encode_jpeg_to_vec`] for the pixel contract) to a JPEG
-/// file at `out`, via `mozjpeg-rs`.
+/// file at `out`, via `mozjpeg-rs`. Since export moved to
+/// `encode_jpeg_to_vec` + `ExportFs::write_atomic`, the only callers left are
+/// `seg_probe` and the fixture setup in several `#[cfg(test)]` modules —
+/// hence `dead_code` in a plain non-mac `--bin lightphotos` build.
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)]
 pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     let jpeg_data = encode_jpeg_to_vec(width, height, rgba)?;
     std::fs::write(out, jpeg_data).map_err(|e| e.to_string())

@@ -193,6 +193,23 @@ pub(crate) async fn delete_sidecar(root: &FileSystemDirectoryHandle, filename: &
     }
 }
 
+/// Permanently delete `dir/<filename>` — the wasm32 stand-in for
+/// `trash::move_to_trash` (File System Access has no trash/recycle
+/// primitive, only `remove_entry`). A file that's already gone is not an
+/// error, same as native's `NotFound => Ok(())`. Called from
+/// `app/catalog.rs`'s wasm `run_delete`, which issues it fire-and-forget and
+/// prunes the UI optimistically.
+pub(crate) async fn remove_file(
+    dir: &FileSystemDirectoryHandle,
+    filename: &OsStr,
+) -> Result<(), String> {
+    match JsFuture::from(dir.remove_entry(&filename.to_string_lossy())).await {
+        Ok(_) => Ok(()),
+        Err(e) if is_not_found(&e) => Ok(()),
+        Err(e) => Err(js_error_string(&e)),
+    }
+}
+
 /// True when a thrown JS value is a `DOMException` named `NotFoundError` —
 /// the File System Access equivalent of native's
 /// `std::io::ErrorKind::NotFound`.

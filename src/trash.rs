@@ -2,6 +2,7 @@
 
 //! Move files to trash — native NSFileManager on macOS, trash crate elsewhere.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 /// Move `path` to the user's Trash. Returns a human-readable error on failure
@@ -27,17 +28,11 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
     trash::delete(path).map_err(|e| e.to_string())
 }
 
-/// No web equivalent: File System Access has no trash/recycle-bin primitive
-/// (only permanent `remove()`), and Phase 1 of the wasm port deliberately
-/// doesn't implement a "move to a subfolder" workaround yet — see
-/// plans/web-wasm-port-feasibility.md and the current wasm port plan's scope
-/// notes. Always errors, same shape as a real failure so callers (already
-/// written to handle `move_to_trash` failing) degrade gracefully rather than
-/// silently deleting or silently doing nothing.
-#[cfg(target_arch = "wasm32")]
-pub fn move_to_trash(_path: &Path) -> Result<(), String> {
-    Err("Trash is not supported in the browser yet".to_string())
-}
+// wasm32 has no entry here: File System Access has no trash/recycle-bin
+// primitive, so the browser build does a *permanent* delete via
+// `web_catalog_fs::remove_file` (`FileSystemDirectoryHandle.removeEntry`),
+// driven directly from `app/catalog.rs`'s wasm `run_delete` — it needs a
+// directory handle, not a path, so it can't share this `&Path` signature.
 
 #[cfg(test)]
 mod tests {
