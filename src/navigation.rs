@@ -212,6 +212,7 @@ impl Playlist {
     /// Build a playlist from the images *inside* `dir` (a directory), sorted
     /// case-insensitively, positioned at index 0. Used when a folder is opened
     /// directly (→ Grid mode). Unlike `from_file`, it does NOT walk a parent.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn from_dir(dir: &Path) -> Self {
         let entries = sorted_images_in(dir);
         Self {
