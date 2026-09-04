@@ -22,7 +22,7 @@
 //!   `web_worker_pool.rs::WorkerPoolHandle::submit`.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
@@ -31,7 +31,7 @@ use web_sys::{
     FileSystemHandleKind, FileSystemPermissionMode,
 };
 
-use crate::navigation::{is_image, sort_by_name};
+use crate::navigation::{is_image, is_listable_subdir};
 
 /// A folder picked via `showDirectoryPicker`, already listed. `dir` is a
 /// synthetic label (the handle's own `.name()`), not a real filesystem path
@@ -46,6 +46,11 @@ pub struct PickedFolder {
     pub entries: Vec<PathBuf>,
     pub handles: HashMap<PathBuf, FileSystemFileHandle>,
     pub dir_handle: FileSystemDirectoryHandle,
+    /// Every directory handle discovered so far, keyed by relative path.
+    /// Seeded with just the root (`dir` → `dir_handle`); extended as the
+    /// user browses into subfolders (`web_fs::list_dir` via
+    /// `app/web.rs::poll_dir_listing`).
+    pub dir_handles: HashMap<PathBuf, FileSystemDirectoryHandle>,
 }
 
 /// Ask the user to pick a folder (`showDirectoryPicker`, requesting
@@ -68,20 +73,52 @@ pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
     .map_err(|e| js_error_string(&e))?
     .unchecked_into();
 
-    list_images(&handle).await
+    let root = PathBuf::from(handle.name());
+    let listing = list_dir(&root, &handle).await?;
+
+    let mut handles = HashMap::new();
+    let mut entries = Vec::with_capacity(listing.images.len());
+    for (path, fh) in listing.images {
+        handles.insert(path.clone(), fh);
+        entries.push(path);
+    }
+
+    let mut dir_handles = HashMap::new();
+    dir_handles.insert(root.clone(), handle.clone());
+    for (p, h) in listing.subdirs {
+        dir_handles.insert(p, h);
+    }
+
+    Ok(PickedFolder {
+        dir: root,
+        entries,
+        handles,
+        dir_handle: handle,
+        dir_handles,
+    })
 }
 
-/// Enumerate `handle`'s direct children via its async `values()` iterator
-/// (`FileSystemDirectoryHandle` has no synchronous listing at all — every
-/// browser directory read goes through this), keeping only files whose name
-/// looks like an image (`navigation::is_image` — the same extension check
-/// the native/non-mac folder listing uses). Doesn't recurse into
-/// subdirectories — matches `Playlist::from_dir`'s own "images directly in
-/// this folder" scope.
-async fn list_images(handle: &FileSystemDirectoryHandle) -> Result<PickedFolder, String> {
-    let dir_name = handle.name();
-    let mut entries = Vec::new();
-    let mut handles = HashMap::new();
+/// The image files and immediate subdirectories of one directory handle.
+/// Paths are relative to the picked root (`base` is this directory's own
+/// relative path; children are `base.join(child_name)`).
+pub struct DirListing {
+    pub images: Vec<(PathBuf, FileSystemFileHandle)>,
+    pub subdirs: Vec<(PathBuf, FileSystemDirectoryHandle)>,
+}
+
+/// One async `values()` scan of `handle`, split by entry kind. Image files
+/// are filtered by `navigation::is_image`; subdirectories by
+/// `navigation::is_listable_subdir` (hidden entries and macOS bundles
+/// dropped, same as the native `list_subdirs`). Both lists are sorted
+/// case-insensitively by file name, matching `Playlist::from_dir` /
+/// `list_subdirs` ordering. `FileSystemDirectoryHandle` has no synchronous
+/// listing — every browser directory read goes through this iterator.
+pub async fn list_dir(
+    base: &Path,
+    handle: &FileSystemDirectoryHandle,
+) -> Result<DirListing, String> {
+    let mut images: Vec<(PathBuf, FileSystemFileHandle)> = Vec::new();
+    let mut subdirs: Vec<(PathBuf, FileSystemDirectoryHandle)> = Vec::new();
 
     let iter = handle.values();
     loop {
@@ -101,26 +138,35 @@ async fn list_images(handle: &FileSystemDirectoryHandle) -> Result<PickedFolder,
         let Ok(child) = value.dyn_into::<web_sys::FileSystemHandle>() else {
             continue;
         };
-        if child.kind() != FileSystemHandleKind::File {
-            continue; // one level deep only, per this function's doc comment
-        }
         let name = child.name();
-        let path = PathBuf::from(&name);
-        if !is_image(&path) {
-            continue;
+        let path = base.join(&name);
+        match child.kind() {
+            FileSystemHandleKind::File => {
+                if is_image(&path) {
+                    images.push((path, child.unchecked_into()));
+                }
+            }
+            FileSystemHandleKind::Directory => {
+                if is_listable_subdir(&name) {
+                    subdirs.push((path, child.unchecked_into()));
+                }
+            }
+            _ => {}
         }
-        let file_handle: FileSystemFileHandle = child.unchecked_into();
-        handles.insert(path.clone(), file_handle);
-        entries.push(path);
     }
 
-    sort_by_name(&mut entries);
-    Ok(PickedFolder {
-        dir: PathBuf::from(dir_name),
-        entries,
-        handles,
-        dir_handle: handle.clone(),
-    })
+    sort_pairs_by_name(&mut images);
+    sort_pairs_by_name(&mut subdirs);
+    Ok(DirListing { images, subdirs })
+}
+
+/// `sort_by_name` for a `Vec<(PathBuf, T)>`, keyed on the path.
+fn sort_pairs_by_name<T>(v: &mut [(PathBuf, T)]) {
+    v.sort_by(|a, b| {
+        let an = a.0.file_name().map(|s| s.to_string_lossy().to_lowercase());
+        let bn = b.0.file_name().map(|s| s.to_string_lossy().to_lowercase());
+        an.cmp(&bn)
+    });
 }
 
 /// Read a file's contents as a raw JS `ArrayBuffer` — no copy into Rust/wasm
