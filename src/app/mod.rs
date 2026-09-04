@@ -277,6 +277,18 @@ pub(crate) struct ExportProgress {
 /// mask or the reason there isn't one.
 pub(crate) type SelectionOutcome = (PathBuf, Result<crate::segmentation::Mask, String>);
 
+/// A folder navigation deferred until its subfolder listing lands (wasm32
+/// only — see `app/nav.rs`'s request/apply split). `Open` toggles expansion
+/// and does native `open_folder`'s pure-container skip; `Load` just swaps
+/// the grid like native `load_folder` (used by `folder_move` /
+/// `folder_collapse`).
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone)]
+pub(crate) enum WebPendingNav {
+    Open(PathBuf),
+    Load(PathBuf),
+}
+
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
@@ -333,6 +345,34 @@ pub(crate) struct App {
     /// to look a path back up to its handle before it can read any bytes.
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_file_handles: HashMap<PathBuf, web_sys::FileSystemFileHandle>,
+    /// Directory handles for every folder the user has browsed into, keyed
+    /// by relative path (root's `.name()` as the first component). Seeded
+    /// from `PickedFolder::dir_handles` at pick time, extended by
+    /// `poll_dir_listing` as subfolders are listed. The catalog's wasm
+    /// sidecar handle is swapped to `web_dir_handles[current folder]` on
+    /// each navigation.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_dir_handles: HashMap<PathBuf, web_sys::FileSystemDirectoryHandle>,
+    /// Async subfolder-listing results (`web_fs::list_dir`), same one-shot
+    /// channel shape as `web_folder_tx`/`web_folder_rx`. Key is the listed
+    /// directory's relative path.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_dirlist_tx:
+        Sender<(PathBuf, Result<crate::web_fs::DirListing, String>)>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_dirlist_rx:
+        Receiver<(PathBuf, Result<crate::web_fs::DirListing, String>)>,
+    /// Directories with a `list_dir` in flight — dedupes repeated
+    /// `request_dir_listing` calls from per-frame nav polling.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_dirlist_inflight: std::collections::HashSet<PathBuf>,
+    /// A folder navigation deferred until its listing lands (see
+    /// `app/nav.rs`'s request/apply split). `Open` toggles expansion +
+    /// pure-container skip like native `open_folder`; `Load` just swaps the
+    /// grid like native `load_folder` (used by `folder_move` /
+    /// `folder_collapse`).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_pending_nav: Option<WebPendingNav>,
     /// Thumbnail decodes currently in flight — `loader.rs`'s own
     /// `thumb_inflight` isn't reused here since decode results arrive via
     /// the Web Worker pool (`web_worker_pool.rs`), not `loader.rs`'s own
@@ -759,6 +799,8 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let (web_folder_tx, web_folder_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
+        let (web_dirlist_tx, web_dirlist_rx) = std::sync::mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
         let web_worker_pool =
             crate::web_worker_pool::WorkerPool::new(crate::web_worker_pool::worker_count());
         Self {
@@ -781,6 +823,16 @@ impl App {
             web_folder_rx,
             #[cfg(target_arch = "wasm32")]
             web_file_handles: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_dir_handles: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_dirlist_tx,
+            #[cfg(target_arch = "wasm32")]
+            web_dirlist_rx,
+            #[cfg(target_arch = "wasm32")]
+            web_dirlist_inflight: std::collections::HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_pending_nav: None,
             #[cfg(target_arch = "wasm32")]
             web_thumb_inflight: HashSet::new(),
             #[cfg(target_arch = "wasm32")]

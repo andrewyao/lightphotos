@@ -92,13 +92,30 @@ impl App {
             match result {
                 Ok(picked) => {
                     self.web_file_handles = picked.handles;
-                    // Before `load_playlist` (below) triggers
-                    // `seed_mirrors`/`request_catalog_load` — its wasm32 arm
-                    // needs this handle to actually read `.lightphotos/*.xmp`
-                    // back.
-                    self.catalog.set_wasm_dir_handle(picked.dir_handle);
-                    let playlist = Playlist::from_entries(picked.dir.clone(), picked.entries);
-                    self.load_playlist(playlist, picked.dir);
+                    self.web_dir_handles = picked.dir_handles;
+
+                    let root = picked.dir.clone();
+                    // First level of the tree, derived from the seeded dir
+                    // handles (their keys whose parent is the root).
+                    let mut first_level: Vec<PathBuf> = self
+                        .web_dir_handles
+                        .keys()
+                        .filter(|p| p.parent() == Some(root.as_path()))
+                        .cloned()
+                        .collect();
+                    crate::navigation::sort_by_name(&mut first_level);
+                    self.subdirs.insert(root.clone(), first_level);
+
+                    self.folder_root = Some(root.clone());
+                    self.expanded = std::collections::HashSet::from([root.clone()]);
+
+                    // Before `load_playlist` triggers the catalog scan (its
+                    // wasm arm needs this handle to read `.lightphotos/*.xmp`).
+                    if let Some(h) = self.web_dir_handles.get(&root) {
+                        self.catalog.set_wasm_dir_handle(h.clone());
+                    }
+                    let playlist = Playlist::from_entries(root.clone(), picked.entries);
+                    self.load_playlist(playlist, root);
                     self.mode = ViewMode::Grid;
                 }
                 Err(e) => {
