@@ -34,6 +34,11 @@ use std::thread;
 use crate::develop::{Adjustments, TouchUp};
 use crate::{image_decode, image_encode};
 
+/// Subfolder under the current folder that exported JPEGs are written to, on
+/// every platform. `app/export.rs` joins it natively; `web_export_fs` creates
+/// it under the picked folder's directory handle.
+pub(crate) const EXPORTS_DIR: &str = "Exports";
+
 /// Decode `src_bytes` at full resolution, bake in the develop/crop/rotation
 /// edits, and encode to JPEG bytes. The platform-neutral heart of Pipeline 3,
 /// shared verbatim by native non-mac export (`do_export` below) and the

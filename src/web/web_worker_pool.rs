@@ -509,12 +509,16 @@ impl WorkerPoolHandle {
         path: PathBuf,
         dest_dir: PathBuf,
         filename: String,
-        bytes: js_sys::ArrayBuffer,
+        bytes: Vec<u8>,
         is_raw: bool,
         adj_json: String,
         touchups_json: String,
         rot: u8,
     ) {
+        // Export isn't latency-critical (no live view waiting on it), so one
+        // copy into a fresh JS buffer is fine here — unlike the decode path's
+        // zero-copy `ArrayBuffer` transfer.
+        let buffer = js_sys::Uint8Array::from(bytes.as_slice()).buffer();
         {
             let mut inner_mut = self.0.borrow_mut();
             let id = inner_mut.next_id;
@@ -530,7 +534,7 @@ impl WorkerPoolHandle {
             );
             inner_mut.backlog.push_back(QueuedJob {
                 id,
-                bytes,
+                bytes: buffer,
                 max_px: u32::MAX,
                 is_raw,
                 quality: true,

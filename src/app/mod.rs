@@ -366,6 +366,14 @@ pub(crate) struct App {
     /// `request_dir_listing` calls from per-frame nav polling.
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_dirlist_inflight: std::collections::HashSet<PathBuf>,
+    /// wasm32 export: finished JPEG writes (`web_export_fs::WebFs::write_atomic`,
+    /// driven from `main.rs`'s frame loop after `poll_exports`) report back
+    /// here as `ExportOutcome`s, drained into the shared `on_export_outcomes`
+    /// — the browser counterpart of native's `Exporter::poll()`.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_export_tx: Sender<crate::export::ExportOutcome>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_export_rx: Receiver<crate::export::ExportOutcome>,
     /// A folder navigation deferred until its listing lands (see
     /// `app/nav.rs`'s request/apply split). `Open` toggles expansion +
     /// pure-container skip like native `open_folder`; `Load` just swaps the
@@ -801,6 +809,8 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let (web_dirlist_tx, web_dirlist_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
+        let (web_export_tx, web_export_rx) = std::sync::mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
         let web_worker_pool =
             crate::web_worker_pool::WorkerPool::new(crate::web_worker_pool::worker_count());
         Self {
@@ -831,6 +841,10 @@ impl App {
             web_dirlist_rx,
             #[cfg(target_arch = "wasm32")]
             web_dirlist_inflight: std::collections::HashSet::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_export_tx,
+            #[cfg(target_arch = "wasm32")]
+            web_export_rx,
             #[cfg(target_arch = "wasm32")]
             web_pending_nav: None,
             #[cfg(target_arch = "wasm32")]

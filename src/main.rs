@@ -43,6 +43,9 @@ mod web_worker_pool;
 #[cfg(target_arch = "wasm32")]
 #[path = "web/web_catalog_fs.rs"]
 mod web_catalog_fs;
+#[cfg(target_arch = "wasm32")]
+#[path = "web/web_export_fs.rs"]
+mod web_export_fs;
 #[cfg(target_os = "macos")]
 mod coregraphics;
 mod develop;
@@ -466,6 +469,55 @@ impl ApplicationHandler<UserEvent> for App {
             // `ensure_full_for_zoom`'s wasm32 branch for what enqueues this.
             self.poll_web_full();
             if self.request_web_full() {
+                self.request_redraw();
+            }
+
+            // Pipeline 3 (export): the Web Worker has finished baking JPEG
+            // bytes; hand each to `WebFs::write_atomic` (async), then drain
+            // the completed writes into the shared `on_export_outcomes`.
+            for r in self.web_worker_pool.poll_exports() {
+                let crate::web_worker_pool::ExportPoolResult {
+                    path,
+                    dest_dir,
+                    filename,
+                    result,
+                } = r;
+                let tx = self.web_export_tx.clone();
+                match result {
+                    Ok(jpeg) => {
+                        // Rebuild a `WebFs` for the current folder — the batch
+                        // is short-lived and a per-write handle map clone is
+                        // cheap next to a full-res encode.
+                        let folder = self.folder_sel().unwrap_or_default();
+                        let handle = self.web_dir_handles.get(&folder).cloned();
+                        let file_handles = self.web_file_handles.clone();
+                        let dest = dest_dir.join(&filename);
+                        wasm_bindgen_futures::spawn_local(async move {
+                            let result = match handle {
+                                Some(h) => {
+                                    use crate::export::ExportFs;
+                                    crate::web_export_fs::WebFs::new(h, file_handles)
+                                        .write_atomic(&dest, &jpeg)
+                                        .await
+                                        .map(|()| dest.clone())
+                                }
+                                None => Err("current folder handle went away".to_string()),
+                            };
+                            let _ = tx.send(crate::export::ExportOutcome { src: path, result });
+                        });
+                    }
+                    Err(e) => {
+                        let _ = tx.send(crate::export::ExportOutcome {
+                            src: path,
+                            result: Err(e),
+                        });
+                    }
+                }
+            }
+            let export_outcomes: Vec<_> =
+                std::iter::from_fn(|| self.web_export_rx.try_recv().ok()).collect();
+            if !export_outcomes.is_empty() {
+                self.on_export_outcomes(export_outcomes);
                 self.request_redraw();
             }
         }

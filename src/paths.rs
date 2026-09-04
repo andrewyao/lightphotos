@@ -6,7 +6,6 @@
 //! canonicalized absolute path — but `migrate_legacy_dir` below still backs
 //! its one-time app-support directory rename.
 
-#[cfg(any(not(target_arch = "wasm32"), test))]
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -43,12 +42,44 @@ pub fn migrate_legacy_dir(new: &Path, legacy: &Path) {
 /// existing file is never overwritten and two same-stem sources exported
 /// together (e.g. `photo.raw` + `photo.jpg`) don't collide. Tries `stem.jpg`,
 /// then `stem-1.jpg`, `stem-2.jpg`, …
+fn export_stem(src: &Path) -> String {
+    src.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "export".into())
+}
+
+/// The bare `<stem>.jpg` (or `<stem>-N.jpg`) export filename for `src`,
+/// skipping any name in `existing` (already in the `Exports/` folder) or
+/// `taken` (handed out earlier in this batch, not yet written). The
+/// filesystem-free core of [`jpg_export_target`] — wasm32 export has no
+/// `Path::exists()`, so it pre-scans `Exports/` into `existing`
+/// (`web_export_fs::WebFs::existing_export_names`) and calls this.
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn jpg_export_name(
+    src: &Path,
+    existing: &HashSet<String>,
+    taken: &HashSet<String>,
+) -> String {
+    let stem = export_stem(src);
+    let free = |name: &str| !existing.contains(name) && !taken.contains(name);
+
+    let base = format!("{stem}.jpg");
+    if free(&base) {
+        return base;
+    }
+    let mut n = 1u32;
+    loop {
+        let candidate = format!("{stem}-{n}.jpg");
+        if free(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn jpg_export_target(src: &Path, dest_dir: &Path, taken: &HashSet<PathBuf>) -> PathBuf {
-    let stem = src
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "export".into());
+    let stem = export_stem(src);
 
     let free = |candidate: &Path| !candidate.exists() && !taken.contains(candidate);
 
@@ -69,6 +100,29 @@ pub fn jpg_export_target(src: &Path, dest_dir: &Path, taken: &HashSet<PathBuf>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_name_avoids_existing_and_taken() {
+        let src = Path::new("/photos/DSC_1000.NEF");
+        let mut existing = HashSet::new();
+        let taken = HashSet::new();
+        assert_eq!(jpg_export_name(src, &existing, &taken), "DSC_1000.jpg");
+
+        existing.insert("DSC_1000.jpg".to_string());
+        assert_eq!(jpg_export_name(src, &existing, &taken), "DSC_1000-1.jpg");
+
+        let mut taken = HashSet::new();
+        taken.insert("DSC_1000-1.jpg".to_string());
+        assert_eq!(jpg_export_name(src, &existing, &taken), "DSC_1000-2.jpg");
+    }
+
+    #[test]
+    fn export_name_falls_back_when_stemless() {
+        assert_eq!(
+            jpg_export_name(Path::new("/x/.."), &HashSet::new(), &HashSet::new()),
+            "export.jpg"
+        );
+    }
 
     #[test]
     fn export_target_avoids_clobbering_existing_files() {

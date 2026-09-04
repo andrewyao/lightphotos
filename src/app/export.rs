@@ -35,23 +35,98 @@ impl App {
         self.start_export(self.selected_paths());
     }
 
-    /// wasm32: `Exporter`'s worker pool degrades to zero live workers there
-    /// (thread spawn always fails, same as `Loader`'s), and its `submit()`
-    /// silently drops the resulting channel-send error — queuing a job on
-    /// this target would otherwise hang forever with no error and
-    /// permanently block every later export attempt too, via the
-    /// in-progress guard the native body below uses. Matches `trash.rs`'s
-    /// existing "not supported in the browser yet" pattern for the same
-    /// situation. File System Access could support a real wasm32 export
-    /// (writable streams) — genuinely out of scope for this fix, not a
-    /// permanent decision to never do it.
-    // TODO(wasm32 export): wire this up to the File System Access API
-    // (writable streams) once that lands for the web build, instead of
-    // this stub.
+    /// wasm32 export: the same `bake_jpeg` pipeline native runs, on the Web
+    /// Worker pool (`JobKind::Export`), with the JPEG written back through a
+    /// File System Access writable stream (`web_export_fs::WebFs`). Source
+    /// reads and the collision-free target scan are async, so the whole batch
+    /// setup runs in one `spawn_local`; `main.rs`'s frame loop drains
+    /// `poll_exports` and drives each write. `on_export_outcomes` (shared with
+    /// native) folds results into the progress toast.
     #[cfg(target_arch = "wasm32")]
-    pub(super) fn start_export(&mut self, _paths: Vec<PathBuf>) {
-        self.set_status("Export isn't supported in the browser yet".into());
+    pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
+        use crate::export::ExportFs; // read_source is a trait method
+        use std::collections::HashSet;
+
+        if paths.is_empty() {
+            self.set_status("Export: nothing selected".into());
+            self.request_redraw();
+            return;
+        }
+        // Same three rejections as the native arm: one batch at a time, and
+        // never before the catalog's sidecar reconciliation has populated the
+        // edit mirrors (`edits`/`touchups`/`rotations`) this reads.
+        if self.export_progress.is_some() {
+            self.set_status("Export already in progress\u{2026}".into());
+            self.request_redraw();
+            return;
+        }
+        if self.catalog_load_pending.is_some() {
+            self.set_status(
+                "Export: catalog still loading, try again in a moment\u{2026}".into(),
+            );
+            self.request_redraw();
+            return;
+        }
+
+        let folder = self.folder_sel.clone().unwrap_or_default();
+        let Some(folder_handle) = self.web_dir_handles.get(&folder).cloned() else {
+            self.set_status("Export: no directory handle for the current folder".into());
+            self.request_redraw();
+            return;
+        };
+        let dest_dir = folder.join(crate::export::EXPORTS_DIR);
+
+        // Gather + serialize each photo's edits up front (cheap, on the main
+        // thread) — the worker deserializes them for `bake_jpeg`.
+        let jobs: Vec<(PathBuf, bool, String, String, u8)> = paths
+            .iter()
+            .map(|src| {
+                let adj = self.edits.get(src).copied().unwrap_or_default();
+                let touchups = self.touchups.get(src).cloned().unwrap_or_default();
+                let rot = self.rotations.get(src).copied().unwrap_or(0);
+                (
+                    src.clone(),
+                    crate::image_decode::is_raw_extension(src),
+                    serde_json::to_string(&adj).unwrap_or_default(),
+                    serde_json::to_string(&touchups).unwrap_or_default(),
+                    rot,
+                )
+            })
+            .collect();
+
+        let total = jobs.len();
+        self.export_progress = Some(ExportProgress {
+            done: 0,
+            total,
+            errors: 0,
+            last_err: None,
+        });
+        self.set_status(format!("Exporting 0/{total}\u{2026}"));
         self.request_redraw();
+
+        let pool = self.web_worker_pool.handle();
+        let fs = crate::web_export_fs::WebFs::new(folder_handle, self.web_file_handles.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            let existing = fs.existing_export_names().await;
+            let mut taken: HashSet<String> = HashSet::new();
+            for (src, is_raw, adj_json, touchups_json, rot) in jobs {
+                let filename = crate::paths::jpg_export_name(&src, &existing, &taken);
+                taken.insert(filename.clone());
+                match fs.read_source(&src).await {
+                    Ok(bytes) => pool.submit_export(
+                        src,
+                        dest_dir.clone(),
+                        filename,
+                        bytes,
+                        is_raw,
+                        adj_json,
+                        touchups_json,
+                        rot,
+                    ),
+                    Err(e) => pool.fail_export(src, dest_dir.clone(), filename, e),
+                }
+            }
+        });
     }
 
     /// Queue `paths` for background export into `<current folder>/Exports/`.
@@ -97,7 +172,7 @@ impl App {
             .clone()
             .or_else(|| paths[0].parent().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from("."));
-        let exports_dir = base.join("Exports");
+        let exports_dir = base.join(crate::export::EXPORTS_DIR);
         if let Err(e) = std::fs::create_dir_all(&exports_dir) {
             self.set_status(format!(
                 "Export failed: could not create Exports folder: {e}"
