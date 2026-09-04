@@ -79,15 +79,24 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
 }
 
 /// Encode `rgba` (tightly packed RGBA8, row-major, sRGB; alpha may be opaque or
-/// premultiplied — export produces opaque) to a JPEG at `out`, via
-/// `mozjpeg-rs`.
+/// premultiplied — export produces opaque) to JPEG bytes, via `mozjpeg-rs`.
+/// The file-less half of [`encode_jpeg`] below — wasm32's export path
+/// (`export::bake_jpeg`) shares this exact encoder, then hands the bytes to a
+/// File System Access writable stream instead of `std::fs`.
 ///
 /// Quality 90 (mozjpeg-rs's own default preset quality is 75, tuned for
 /// general-purpose web images) — chosen to sit closer to the mac arm's
 /// ImageIO default, which favors fidelity for a photo-editing tool's export
 /// path over file size.
-#[cfg(not(target_os = "macos"))]
-pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+///
+/// Reachable on mac under `raw-probe` (like the non-mac decode paths) so its
+/// round-trip test can run there; the mac `encode_jpeg` above still uses
+/// ImageIO and never calls this.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+// On mac under `raw-probe` only the round-trip test calls this (the mac
+// `encode_jpeg` uses ImageIO); non-mac wires it into `encode_jpeg` below.
+#[allow(dead_code)]
+pub fn encode_jpeg_to_vec(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 {
         return Err("cannot encode a zero-sized image".into());
     }
@@ -96,11 +105,17 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
         return Err("pixel buffer too small for the given dimensions".into());
     }
 
-    let jpeg_data = mozjpeg_rs::Encoder::new(mozjpeg_rs::Preset::default())
+    mozjpeg_rs::Encoder::new(mozjpeg_rs::Preset::default())
         .quality(90)
         .encode_rgba(rgba, width, height)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+}
 
+/// Encode `rgba` (see [`encode_jpeg_to_vec`] for the pixel contract) to a JPEG
+/// file at `out`, via `mozjpeg-rs`.
+#[cfg(not(target_os = "macos"))]
+pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+    let jpeg_data = encode_jpeg_to_vec(width, height, rgba)?;
     std::fs::write(out, jpeg_data).map_err(|e| e.to_string())
 }
 
@@ -108,6 +123,52 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
 mod tests {
     use super::*;
     use crate::image_decode;
+
+    /// `encode_jpeg_to_vec` is the file-less half of the non-mac encoder,
+    /// shared with the wasm32 export path (which has no `std::fs` to write
+    /// to). Encode a solid-red image, decode the returned bytes back, and
+    /// confirm dimensions plus (approximately) the colour survive the JPEG
+    /// round trip.
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[test]
+    fn encode_jpeg_to_vec_round_trips() {
+        let (w, h) = (8u32, 6u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..w * h {
+            rgba.extend_from_slice(&[220, 30, 30, 255]);
+        }
+
+        let jpeg = encode_jpeg_to_vec(w, h, &rgba).expect("encode should succeed");
+        assert!(!jpeg.is_empty(), "should have produced JPEG bytes");
+
+        let decoded = image::load_from_memory(&jpeg)
+            .expect("re-decode should succeed")
+            .into_rgba8();
+        assert_eq!((decoded.width(), decoded.height()), (w, h));
+        let px = decoded.get_pixel(0, 0).0;
+        assert!(px[0] > 150, "red channel should be high, got {}", px[0]);
+        assert!(
+            px[1] < 100 && px[2] < 100,
+            "green/blue should be low, got {},{}",
+            px[1],
+            px[2]
+        );
+    }
+
+    /// Zero-sized input is rejected, not silently encoded to garbage.
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[test]
+    fn encode_jpeg_to_vec_rejects_zero_size() {
+        assert!(encode_jpeg_to_vec(0, 4, &[]).is_err());
+        assert!(encode_jpeg_to_vec(4, 0, &[]).is_err());
+    }
+
+    /// A pixel buffer shorter than `width * height * 4` is rejected.
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[test]
+    fn encode_jpeg_to_vec_rejects_short_buffer() {
+        assert!(encode_jpeg_to_vec(4, 4, &[0u8; 16]).is_err());
+    }
 
     /// End-to-end through the real ImageIO encoder: write a solid-red JPEG,
     /// decode it back, and confirm dimensions and (approximately) the color.
