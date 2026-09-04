@@ -834,8 +834,23 @@ impl App {
         self.apply_web_load_folder(target);
     }
 
-    // TODO(Task 7): assumes `dir`'s listing is cached.
+    /// wasm counterpart of native `load_folder`: rebuild the playlist from
+    /// `dir`'s cached image handles and switch the grid to it, without
+    /// touching expansion state. Deferred here by `nav_to_folder` /
+    /// `apply_web_open_folder` (or re-entered by `poll_dir_listing`) once
+    /// `dir`'s listing is cached — the guard below still re-checks and
+    /// re-defers if it somehow isn't.
     pub(crate) fn apply_web_load_folder(&mut self, dir: PathBuf) {
+        if !self.subdirs.contains_key(&dir) {
+            self.web_pending_nav = Some(WebPendingNav::Load(dir.clone()));
+            self.request_dir_listing(&dir);
+            self.request_redraw();
+            return;
+        }
+        // Point sidecar I/O at THIS folder's .lightphotos/ before
+        // load_playlist kicks off the catalog scan (request_catalog_load's
+        // wasm arm reads catalog.wasm_dir_handle()). Matches native's
+        // per-folder catalog switch.
         if let Some(h) = self.web_dir_handles.get(&dir) {
             self.catalog.set_wasm_dir_handle(h.clone());
         }

@@ -541,6 +541,25 @@ impl App {
         flatten_visible_tree(&root, &is_expanded, &children)
     }
 
+    /// Load `dir`'s images into the grid without touching expansion state —
+    /// the shared target of `folder_move` and `folder_collapse`'s
+    /// select-parent branch. Native: synchronous `load_folder`. wasm: defer
+    /// to `apply_web_load_folder` once `dir`'s listing is cached.
+    fn nav_to_folder(&mut self, dir: PathBuf) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.load_folder(dir);
+        #[cfg(target_arch = "wasm32")]
+        {
+            if !self.subdirs.contains_key(&dir) {
+                self.web_pending_nav = Some(crate::app::WebPendingNav::Load(dir.clone()));
+                self.request_dir_listing(&dir);
+                self.request_redraw();
+                return;
+            }
+            self.apply_web_load_folder(dir);
+        }
+    }
+
     /// Up/Down in the tree: move the selection by `delta` rows within the
     /// visible tree (clamped) and load the newly-selected folder, matching a
     /// standard single-select tree — there's no separate cursor to move
@@ -557,7 +576,7 @@ impl App {
             .unwrap_or(0);
         let next = (cur as isize + delta).clamp(0, tree.len() as isize - 1) as usize;
         if self.folder_sel.as_deref() != Some(tree[next].as_path()) {
-            self.load_folder(tree[next].clone());
+            self.nav_to_folder(tree[next].clone());
         }
     }
 
@@ -579,7 +598,7 @@ impl App {
         }
         if self.expanded.contains(&cur) {
             if let Some(first) = self.subdirs(&cur).first().cloned() {
-                self.load_folder(first);
+                self.nav_to_folder(first);
             }
         } else {
             self.expanded.insert(cur);
@@ -598,7 +617,7 @@ impl App {
             self.request_redraw();
         } else if Some(cur.as_path()) != self.folder_root.as_deref() {
             if let Some(parent) = cur.parent() {
-                self.load_folder(parent.to_path_buf());
+                self.nav_to_folder(parent.to_path_buf());
             }
         }
     }

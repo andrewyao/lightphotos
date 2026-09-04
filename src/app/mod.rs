@@ -1057,8 +1057,17 @@ impl App {
     /// Load `dir`'s images into the grid (browse-first): rebuild the playlist,
     /// seed ratings, recompute the visible view, reset selection to nothing
     /// selected, mark `dir` as the selected folder, and request thumbnails.
+    #[cfg(not(target_arch = "wasm32"))]
     fn load_folder(&mut self, dir: PathBuf) {
         self.load_playlist(Playlist::from_dir(&dir), dir);
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn load_folder(&mut self, _dir: PathBuf) {
+        debug_assert!(
+            false,
+            "load_folder must not run on wasm32 — use nav_to_folder / the async open path"
+        );
     }
 
     /// `load_folder`'s body, minus building the `Playlist` itself — shared
