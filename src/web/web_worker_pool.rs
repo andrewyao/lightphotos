@@ -66,6 +66,11 @@ pub enum JobKind {
     Speed,
     Preview,
     Full,
+    /// Pipeline 3: full-res decode → bake edits → JPEG encode, in the worker
+    /// (`export::bake_jpeg`). Unlike the decode kinds this returns encoded
+    /// JPEG bytes, not a `DecodedImage`, so its results come back on a
+    /// separate channel (`poll_exports`), not `poll`.
+    Export,
 }
 
 pub struct PoolResult {
@@ -75,10 +80,23 @@ pub struct PoolResult {
     pub result: Result<DecodedImage, String>,
 }
 
+/// A finished (or failed) export job. `dest_dir`/`filename` ride the job
+/// through the worker and back so the main thread can hand the bytes to
+/// `WebFs::write_atomic` with no side table.
+pub struct ExportPoolResult {
+    pub path: PathBuf,
+    pub dest_dir: PathBuf,
+    pub filename: String,
+    pub result: Result<Vec<u8>, String>,
+}
+
 struct PendingMeta {
     kind: JobKind,
     path: PathBuf,
     target: u32,
+    /// `Some` only for `JobKind::Export` — the resolved output location,
+    /// carried back onto `ExportPoolResult`.
+    export_dest: Option<(PathBuf, String)>,
 }
 
 struct QueuedJob {
@@ -95,6 +113,10 @@ struct QueuedJob {
     /// PPG demosaic + linear output, `Thumb` (Grid) → the quarter-res Fast
     /// tier — downgrades quality for thumbnails. See `submit`'s doc comment.
     quality: bool,
+    /// `Some` for `JobKind::Export`: `(adjustments_json, touchups_json, rot)`
+    /// — the develop/crop/rotation state `bake_jpeg` bakes in. The worker
+    /// switches to its export branch whenever this is present.
+    export: Option<(String, String, u8)>,
 }
 
 struct WorkerSlot {
@@ -116,6 +138,9 @@ struct Inner {
     /// ready.
     backlog: VecDeque<QueuedJob>,
     result_tx: Sender<PoolResult>,
+    /// `JobKind::Export` results land here instead of `result_tx` — they
+    /// carry JPEG bytes, not a `DecodedImage`.
+    export_tx: Sender<ExportPoolResult>,
 }
 
 fn get_f64(obj: &JsValue, key: &str) -> Option<f64> {
@@ -171,6 +196,20 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
             &JsValue::from_str("quality"),
             &JsValue::from_bool(job.quality),
         );
+        if let Some((adj_json, touchups_json, rot)) = &job.export {
+            let _ = Reflect::set(&msg, &JsValue::from_str("export"), &JsValue::TRUE);
+            let _ = Reflect::set(
+                &msg,
+                &JsValue::from_str("adjustments"),
+                &JsValue::from_str(adj_json),
+            );
+            let _ = Reflect::set(
+                &msg,
+                &JsValue::from_str("touchups"),
+                &JsValue::from_str(touchups_json),
+            );
+            let _ = Reflect::set(&msg, &JsValue::from_str("rot"), &JsValue::from_f64(*rot as f64));
+        }
         // No `Uint8Array::from(...)` copy here — `job.bytes` is already the
         // JS ArrayBuffer read straight off the file (see
         // `WorkerPoolHandle::submit`'s doc comment); it goes into the
@@ -249,6 +288,7 @@ pub fn worker_count() -> usize {
 pub struct WorkerPool {
     inner: Rc<RefCell<Inner>>,
     result_rx: Receiver<PoolResult>,
+    export_rx: Receiver<ExportPoolResult>,
 }
 
 /// A cheap-clone submit handle — see the module doc comment for why this
@@ -265,12 +305,14 @@ impl WorkerPool {
     /// (see `App`'s construction site for the actual cap).
     pub fn new(worker_count: usize) -> Self {
         let (result_tx, result_rx) = mpsc::channel();
+        let (export_tx, export_rx) = mpsc::channel();
         let inner = Rc::new(RefCell::new(Inner {
             workers: Vec::new(),
             next_id: 0,
             pending: HashMap::new(),
             backlog: VecDeque::new(),
             result_tx,
+            export_tx,
         }));
 
         let base = asset_base_url();
@@ -302,7 +344,7 @@ impl WorkerPool {
             }
         }
 
-        WorkerPool { inner, result_rx }
+        WorkerPool { inner, result_rx, export_rx }
     }
 
     pub fn handle(&self) -> WorkerPoolHandle {
@@ -315,6 +357,16 @@ impl WorkerPool {
     pub fn poll(&self) -> Vec<PoolResult> {
         let mut out = Vec::new();
         while let Ok(r) = self.result_rx.try_recv() {
+            out.push(r);
+        }
+        out
+    }
+
+    /// Drain every finished `JobKind::Export` result since the last poll —
+    /// the export counterpart of `poll` (JPEG bytes, separate channel).
+    pub fn poll_exports(&self) -> Vec<ExportPoolResult> {
+        let mut out = Vec::new();
+        while let Ok(r) = self.export_rx.try_recv() {
             out.push(r);
         }
         out
@@ -351,7 +403,29 @@ fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: Messa
         return;
     };
     let tx = inner_mut.result_tx.clone();
+    let export_tx = inner_mut.export_tx.clone();
     drop(inner_mut);
+
+    if meta.kind == JobKind::Export {
+        let (dest_dir, filename) = meta
+            .export_dest
+            .expect("Export pending meta always carries its dest");
+        let result = if ok {
+            let jpeg_val =
+                Reflect::get(&data, &JsValue::from_str("jpeg")).unwrap_or(JsValue::UNDEFINED);
+            Ok(Uint8Array::new(&jpeg_val).to_vec())
+        } else {
+            Err(get_string(&data, "error").unwrap_or_else(|| "unknown worker error".to_string()))
+        };
+        let _ = export_tx.send(ExportPoolResult {
+            path: meta.path,
+            dest_dir,
+            filename,
+            result,
+        });
+        pump(inner);
+        return;
+    }
 
     let result = if ok {
         let width = get_f64(&data, "width").unwrap_or(0.0) as u32;
@@ -404,18 +478,80 @@ impl WorkerPoolHandle {
             let mut inner_mut = self.0.borrow_mut();
             let id = inner_mut.next_id;
             inner_mut.next_id += 1;
-            inner_mut.pending.insert(id, PendingMeta { kind, path, target });
+            inner_mut.pending.insert(
+                id,
+                PendingMeta { kind, path, target, export_dest: None },
+            );
             inner_mut.backlog.push_back(QueuedJob {
                 id,
                 bytes,
                 max_px: target,
                 is_raw,
                 quality,
+                export: None,
             });
             id
         };
         let _ = id;
         pump(&self.0);
+    }
+
+    /// Submit a `JobKind::Export` job: full-res decode + `bake_jpeg` in the
+    /// worker, JPEG bytes back on `poll_exports`. `bytes` is the source
+    /// file's `ArrayBuffer` (read via `web_fs::read_array_buffer`, same
+    /// no-copy transfer as `submit`); `adj_json`/`touchups_json` are the
+    /// serde_json-encoded develop/touch-up state; `dest_dir`/`filename` are
+    /// the already-resolved output location, carried straight back onto the
+    /// `ExportPoolResult`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_export(
+        &self,
+        path: PathBuf,
+        dest_dir: PathBuf,
+        filename: String,
+        bytes: js_sys::ArrayBuffer,
+        is_raw: bool,
+        adj_json: String,
+        touchups_json: String,
+        rot: u8,
+    ) {
+        {
+            let mut inner_mut = self.0.borrow_mut();
+            let id = inner_mut.next_id;
+            inner_mut.next_id += 1;
+            inner_mut.pending.insert(
+                id,
+                PendingMeta {
+                    kind: JobKind::Export,
+                    path,
+                    target: 0,
+                    export_dest: Some((dest_dir, filename)),
+                },
+            );
+            inner_mut.backlog.push_back(QueuedJob {
+                id,
+                bytes,
+                max_px: u32::MAX,
+                is_raw,
+                quality: true,
+                export: Some((adj_json, touchups_json, rot)),
+            });
+        }
+        pump(&self.0);
+    }
+
+    /// Report an export failure that happened before the job could be
+    /// submitted (e.g. the source read failed) — straight to the export
+    /// channel, mirroring `fail`.
+    pub fn fail_export(
+        &self,
+        path: PathBuf,
+        dest_dir: PathBuf,
+        filename: String,
+        error: String,
+    ) {
+        let tx = self.0.borrow().export_tx.clone();
+        let _ = tx.send(ExportPoolResult { path, dest_dir, filename, result: Err(error) });
     }
 
     /// Report a failure that happened before a job could even be submitted

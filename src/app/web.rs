@@ -464,6 +464,9 @@ impl App {
                 // `web_full_pending` before they ever reach here (see its
                 // own routing) — `poll_web_full` is what drains those.
                 JobKind::Full => continue,
+                // Export results never reach the decode channel — they come
+                // back on `poll_exports` (JPEG bytes, not a `DecodedImage`).
+                JobKind::Export => continue,
                 JobKind::Preview | JobKind::Thumb => {}
             }
             self.web_preview_inflight.remove(&key);

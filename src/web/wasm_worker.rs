@@ -66,6 +66,18 @@ mod hash;
 #[cfg(target_arch = "wasm32")]
 #[path = "../develop.rs"]
 mod develop;
+// The export branch (`JobKind::Export`) runs the full decode → bake → encode
+// pipeline in-worker via `export::bake_jpeg`, so it needs the bake and encode
+// halves too.
+#[cfg(target_arch = "wasm32")]
+#[path = "../image_ops.rs"]
+mod image_ops;
+#[cfg(target_arch = "wasm32")]
+#[path = "../image_encode.rs"]
+mod image_encode;
+#[cfg(target_arch = "wasm32")]
+#[path = "../export.rs"]
+mod export;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
@@ -169,6 +181,53 @@ mod wasm {
         image_decode::decode_nonraw_from_bytes(bytes, max_px)
     }
 
+    /// `JobKind::Export`: deserialize the develop/touch-up state, run the
+    /// shared `export::bake_jpeg` (full-res decode → bake → JPEG encode), and
+    /// post the JPEG bytes back (transferred) as `{ id, ok, jpeg }`, or
+    /// `{ id, ok: false, error }` on failure. `web_worker_pool.rs`'s
+    /// `handle_worker_message` routes the reply to `poll_exports`.
+    fn handle_export(
+        scope: &DedicatedWorkerGlobalScope,
+        result: &Object,
+        data: &JsValue,
+        bytes: &[u8],
+        is_raw: bool,
+    ) {
+        let adj_json = Reflect::get(data, &JsValue::from_str("adjustments"))
+            .ok()
+            .and_then(|v| v.as_string())
+            .unwrap_or_default();
+        let touchups_json = Reflect::get(data, &JsValue::from_str("touchups"))
+            .ok()
+            .and_then(|v| v.as_string())
+            .unwrap_or_default();
+        let rot = get_f64(data, "rot") as u8;
+
+        let baked = (|| -> Result<Vec<u8>, String> {
+            let adj: crate::develop::Adjustments = serde_json::from_str(&adj_json)
+                .map_err(|e| format!("bad adjustments json: {e}"))?;
+            let touchups: Vec<crate::develop::TouchUp> = serde_json::from_str(&touchups_json)
+                .map_err(|e| format!("bad touchups json: {e}"))?;
+            crate::export::bake_jpeg(bytes, is_raw, &adj, &touchups, rot)
+        })();
+
+        match baked {
+            Ok(jpeg) => {
+                let arr = Uint8Array::from(jpeg.as_slice());
+                let _ = Reflect::set(result, &JsValue::from_str("ok"), &JsValue::TRUE);
+                let _ = Reflect::set(result, &JsValue::from_str("jpeg"), &arr.buffer());
+                let transfer = Array::new();
+                transfer.push(&arr.buffer());
+                let _ = scope.post_message_with_transfer(result, &transfer.into());
+            }
+            Err(e) => {
+                let _ = Reflect::set(result, &JsValue::from_str("ok"), &JsValue::FALSE);
+                let _ = Reflect::set(result, &JsValue::from_str("error"), &JsValue::from_str(&e));
+                let _ = scope.post_message(result);
+            }
+        }
+    }
+
     /// Read a numeric field off a job/result object via `Reflect`, panicking
     /// with a clear message on a malformed message rather than silently
     /// coercing `NaN` to `0` — a malformed job means a real protocol bug in
@@ -205,6 +264,12 @@ mod wasm {
 
             let result = Object::new();
             let _ = Reflect::set(&result, &JsValue::from_str("id"), &JsValue::from_f64(id));
+
+            if get_bool(&data, "export") {
+                handle_export(&scope_for_closure, &result, &data, &bytes, is_raw);
+                return;
+            }
+
             match decode(&bytes, max_px, is_raw, quality) {
                 Ok(img) => {
                     let rgba = Uint8Array::from(img.rgba.as_slice());
