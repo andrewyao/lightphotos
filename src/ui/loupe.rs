@@ -1,9 +1,8 @@
-use super::*;
 use super::grid::{thumbnail_cell, STRIP_CELL_STYLE};
+use super::*;
 
 use crate::app::{App, CropEdge, FocusLevel, Region};
 use crate::image_decode;
-
 
 pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let thumb_px = app.thumb_px();
@@ -165,7 +164,12 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     // progress bar was tried here and reverted.
 }
 
-pub(super) fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
+pub(super) fn loupe_touchup_overlay(
+    ui: &mut egui::Ui,
+    app: &App,
+    central: egui::Rect,
+    out: &mut FrameOutput,
+) {
     let painter = ui.painter_at(central);
     for (i, t) in app.current_touchups().iter().enumerate() {
         let c = app.loupe_tex_to_screen(central, t.center[0], t.center[1]);
@@ -232,7 +236,12 @@ pub(super) fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui:
 /// whole central rect, shown only while `App::wb_picker_active()` is true. A
 /// click samples that pixel (via `UiAction::PickWhiteBalance`) and the app
 /// disarms picker mode in response, so this overlay stops being drawn.
-pub(super) fn loupe_wb_picker_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
+pub(super) fn loupe_wb_picker_overlay(
+    ui: &egui::Ui,
+    app: &App,
+    central: egui::Rect,
+    out: &mut FrameOutput,
+) {
     egui::Area::new(egui::Id::new("loupe_wb_picker"))
         .order(egui::Order::Foreground)
         .fixed_pos(central.min)
@@ -522,7 +531,13 @@ pub(super) fn format_shutter(seconds: f64) -> String {
 }
 
 /// Format an EXIF capture date/time for display: `"Jul 14, 2026 3:42 PM"`.
-pub(super) fn format_capture_date(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> String {
+pub(super) fn format_capture_date(
+    year: i32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
@@ -544,7 +559,12 @@ pub(super) fn format_capture_date(year: i32, month: u32, day: u32, hour: u32, mi
 /// user grabs. The rectangle is stored in the app in texture space; here we map
 /// it to screen via `App::loupe_tex_to_screen` (which accounts for zoom, pan and
 /// rotation), so a grabbed screen edge maps back to the correct texture edge.
-pub(super) fn loupe_crop_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
+pub(super) fn loupe_crop_overlay(
+    ui: &egui::Ui,
+    app: &App,
+    central: egui::Rect,
+    out: &mut FrameOutput,
+) {
     let Some(rect) = app.crop_rect() else { return };
 
     // The four texture-space edges as screen segments (endpoint pairs).

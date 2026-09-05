@@ -3,7 +3,6 @@ use super::*;
 use crate::app::{App, Region, ViewMode};
 use crate::navigation::Cmp;
 
-
 /// The Grid/Survey toolbar, drawn once from `ui::draw` above the middle
 /// column. Hosts the rating filter (`All` + 5 stars → show photos rated ≥
 /// N), Bursts/Duplicates/Eyes-closed grouping, and selection-dependent bulk

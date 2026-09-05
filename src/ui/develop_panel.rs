@@ -2,7 +2,6 @@ use super::*;
 
 use crate::app::{App, FocusLevel, Region};
 
-
 /// The right-hand Develop panel: the Basic tone sliders, matching Lightroom's
 /// order (WB → Tone → Highlights/Shadows/Whites/Blacks). Reads the current
 /// image's adjustments from the app, and pushes `SetAdjustments` whenever a

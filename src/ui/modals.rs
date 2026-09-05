@@ -2,7 +2,6 @@ use super::*;
 
 use crate::app::App;
 
-
 /// A modal confirming a pending bulk action. Confirm runs it; Cancel / Esc /
 /// clicking the backdrop dismisses it.
 pub(super) fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {

@@ -10,7 +10,6 @@
 //! it. The Loupe leaves its central region frameless/transparent so the wgpu
 //! image shows through.
 
-
 use crate::app::{App, CropEdge, FocusLevel, Region, ViewMode};
 use crate::develop::Adjustments;
 use crate::navigation::Cmp;
@@ -182,21 +181,20 @@ pub struct FrameOutput {
     pub actions: Vec<UiAction>,
 }
 
-/// Build the egui UI for one frame and return the loupe rect + actions.
-
-mod toolbar;
-mod modals;
+mod develop_panel;
 mod grid;
 mod loupe;
+mod modals;
 mod survey;
-mod develop_panel;
+/// Build the egui UI for one frame and return the loupe rect + actions.
+mod toolbar;
 
-use toolbar::{grid_toolbar, loupe_toolbar};
+use develop_panel::draw_develop_panel;
 use grid::{draw_folders_panel, draw_grid};
 use loupe::draw_loupe;
-use survey::draw_survey;
-use develop_panel::draw_develop_panel;
 use modals::{confirm_modal, help_modal, quit_modal};
+use survey::draw_survey;
+use toolbar::{grid_toolbar, loupe_toolbar};
 
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     let mut out = FrameOutput::default();

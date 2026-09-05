@@ -5,7 +5,6 @@ use crate::app::{App, Region};
 use crate::burst::BurstMark;
 use crate::duplicates::DuplicateMark;
 
-
 /// Left folder-tree sidebar, rooted at the opened folder. Called once from
 /// `ui::draw`, before the toolbar, so it spans the full window height (Grid
 /// and Loupe both use it; Survey mode does not call this).
@@ -127,7 +126,13 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
 
 /// One folder row in the tree: an indent, a clickable disclosure glyph, and a
 /// selectable folder name. Recurses into expanded folders' cached children.
-pub(super) fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mut FrameOutput) {
+pub(super) fn folder_node(
+    ui: &mut egui::Ui,
+    app: &App,
+    path: &Path,
+    depth: usize,
+    out: &mut FrameOutput,
+) {
     let selected = app.folder_sel().as_deref() == Some(path);
     let row = ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 14.0);
@@ -361,7 +366,10 @@ pub(super) fn grid_cell(
         if app.dup_mark_at(pos).is_some() {
             if let Some(click_pos) = response.interact_pointer_pos() {
                 let badge_center = response.rect.right_top()
-                    + egui::vec2(-(GRID_CELL_STYLE.corner + 9.0), GRID_CELL_STYLE.corner + 9.0);
+                    + egui::vec2(
+                        -(GRID_CELL_STYLE.corner + 9.0),
+                        GRID_CELL_STYLE.corner + 9.0,
+                    );
                 if click_pos.distance(badge_center) <= 10.0 {
                     out.actions.push(UiAction::OpenSurvey(pos));
                     out.actions.push(UiAction::Focus(Region::Grid));
