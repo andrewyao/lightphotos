@@ -746,14 +746,10 @@ impl App {
                 dir.display()
             ));
             // No channel send happens on this arm, so poll_dir_listing would
-            // never dispatch a nav that a caller stashed for this dir. Drop it
-            // rather than leave it stuck.
-            match &self.web_pending_nav {
-                Some(WebPendingNav::Open(p) | WebPendingNav::Load(p)) if p == dir => {
-                    self.web_pending_nav = None;
-                }
-                _ => {}
-            }
+            // never dispatch a nav that a caller stashed for this dir. Drop
+            // the whole pending generation rather than leave any older nav
+            // eligible for a later listing completion.
+            self.supersede_web_pending_nav();
             return;
         };
         self.web_dirlist_inflight.insert(dir.to_path_buf());

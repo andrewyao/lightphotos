@@ -562,7 +562,6 @@ impl App {
         self.load_folder(dir);
         #[cfg(target_arch = "wasm32")]
         {
-            self.supersede_web_pending_nav();
             if !self.subdirs.contains_key(&dir) {
                 self.defer_web_nav(crate::app::WebPendingNav::Load(dir.clone()));
                 self.request_dir_listing(&dir);
@@ -578,6 +577,8 @@ impl App {
     /// standard single-select tree — there's no separate cursor to move
     /// without also loading.
     pub(super) fn folder_move(&mut self, delta: isize) {
+        #[cfg(target_arch = "wasm32")]
+        self.supersede_web_pending_nav();
         let tree = self.visible_tree();
         if tree.is_empty() {
             return;
@@ -624,11 +625,11 @@ impl App {
     /// Left-arrow in the tree: collapse the selected folder if open, else
     /// select+load its parent (stopping at the root).
     pub(super) fn folder_collapse(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.supersede_web_pending_nav();
         let Some(cur) = self.folder_sel.clone() else {
             return;
         };
-        #[cfg(target_arch = "wasm32")]
-        self.supersede_web_pending_nav();
         if self.expanded.contains(&cur) {
             self.expanded.remove(&cur);
             self.request_redraw();
