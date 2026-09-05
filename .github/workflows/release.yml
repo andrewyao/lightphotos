@@ -3,8 +3,10 @@ name: release
 # Cut a release by pushing a tag:
 #   git tag v0.1.0 && git push origin v0.1.0
 # Each platform builds on its native runner (macOS decode uses Apple ImageIO;
-# HEIC/Vision code is cfg-gated off on Linux so it still compiles).
-# Ships: macOS Apple Silicon + Linux x86_64. No Intel-mac / Windows.
+# HEIC/Vision code is cfg-gated off on non-macOS so it still compiles).
+# Ships: macOS Apple Silicon .dmg + Linux x86_64 tarball + Windows x86_64 zip.
+# No Intel-mac. The .app inside the .dmg carries the CLI binary at
+# Contents/MacOS/lightphotos.
 
 on:
   push:
@@ -26,6 +28,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: lightphotos-linux-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: lightphotos-windows-x86_64
 
     runs-on: ${{ matrix.os }}
 
@@ -58,13 +63,14 @@ jobs:
       # mac-only dev harnesses: they #[path]-reinclude the decode modules, and
       # the non-mac decode path pulls in crate::develop / crate::coregraphics
       # which the probes don't re-declare, so `cargo build` (all targets) fails
-      # to compile them on Linux.
+      # to compile them on Linux / Windows.
       - name: Build
         run: cargo build --release --bin lightphotos --target ${{ matrix.target }}
 
-      # macOS: ship the double-clickable .app (bundle.sh also does lsregister,
-      # which is a no-op / harmless on the runner; we inline the assembly here
-      # so it targets the per-target binary).
+      # macOS: ship the double-clickable .app inside a drag-install .dmg.
+      # bundle.sh also does lsregister, which is a no-op / harmless on the
+      # runner; we inline the assembly here so it targets the per-target binary.
+      # hdiutil is built into the runner.
       - name: Package (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -73,16 +79,32 @@ jobs:
           cp Info.plist "$APP/Contents/Info.plist"
           cp "target/${{ matrix.target }}/release/lightphotos" "$APP/Contents/MacOS/lightphotos"
           chmod +x "$APP/Contents/MacOS/lightphotos"
-          tar -czf "${{ matrix.name }}.tar.gz" "$APP" "target/${{ matrix.target }}/release/lightphotos"
+
+          # .dmg: stage the app + an /Applications symlink for drag-install.
+          STAGE="$(mktemp -d)"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname LightPhotos -srcfolder "$STAGE" \
+            -fs HFS+ -format UDZO -ov "${{ matrix.name }}.dmg"
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: tar -czf "${{ matrix.name }}.tar.gz" -C "target/${{ matrix.target }}/release" lightphotos
 
+      # Windows: zip the bare .exe. Compress-Archive ships with the runner;
+      # git-bash has no `zip`.
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "target/${{ matrix.target }}/release/lightphotos.exe" -DestinationPath "${{ matrix.name }}.zip"
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: ${{ matrix.name }}.tar.gz
+          path: |
+            ${{ matrix.name }}.dmg
+            ${{ matrix.name }}.tar.gz
+            ${{ matrix.name }}.zip
 
   release:
     needs: build
