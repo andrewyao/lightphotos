@@ -40,7 +40,13 @@ fn crop_bounds(crop: Option<Crop>, w: u32, h: u32) -> (u32, u32, u32, u32) {
 /// exact `out_w`×`out_h` grid (`out_w`/`out_h` ≤ input dims). Shared by the
 /// sharpness metric (long-side-capped downscale) and dHash (fixed 9×8 grid for
 /// gradient hashing) so both agree on how pixels become grayscale samples.
-pub(crate) fn resize_luma(rgba: &[u8], width: u32, height: u32, out_w: usize, out_h: usize) -> Vec<f32> {
+pub(crate) fn resize_luma(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    out_w: usize,
+    out_h: usize,
+) -> Vec<f32> {
     let (w, h) = (width as usize, height as usize);
     let mut out = vec![0f32; out_w * out_h];
     for oy in 0..out_h {
@@ -185,7 +191,10 @@ pub(crate) fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
     let i = ((y * img.width + x) * 4) as usize;
     match img.pixel_format {
         PixelFormat::Srgb8 => unpremul_to_linear([
-            img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3],
+            img.rgba[i],
+            img.rgba[i + 1],
+            img.rgba[i + 2],
+            img.rgba[i + 3],
         ]),
         PixelFormat::LinearF16 => [
             half::f16::from_le_bytes([img.rgba[i * 2], img.rgba[i * 2 + 1]]).to_f32(),
@@ -273,13 +282,7 @@ pub(crate) fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, V
 // resolution and lets the GPU sampler stretch it. This is the CPU path, for
 // `seg_probe`'s composite and for anything that later bakes a mask into pixels.
 #[allow(dead_code)]
-pub(crate) fn resample_bilinear_u8(
-    src: &[u8],
-    sw: u32,
-    sh: u32,
-    dw: u32,
-    dh: u32,
-) -> Vec<u8> {
+pub(crate) fn resample_bilinear_u8(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < (sw * sh) as usize {
         return Vec::new();
     }

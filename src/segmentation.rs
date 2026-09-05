@@ -265,7 +265,9 @@ fn pixel_buffer_to_mask(buffer: &CVPixelBuffer, source: MaskSource) -> Result<Ma
     unsafe {
         let lock = CVPixelBufferLockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly);
         if lock != 0 {
-            return Err(format!("could not lock Vision's mask buffer (CVReturn {lock})"));
+            return Err(format!(
+                "could not lock Vision's mask buffer (CVReturn {lock})"
+            ));
         }
         let base = CVPixelBufferGetBaseAddress(buffer);
         let stride = CVPixelBufferGetBytesPerRow(buffer);
@@ -365,7 +367,10 @@ mod tests {
             alpha: vec![70; 100], // 27% mean coverage, nothing committed
             source: MaskSource::Person,
         };
-        assert!(smear.coverage() > EMPTY_COVERAGE, "mean alone would be fooled");
+        assert!(
+            smear.coverage() > EMPTY_COVERAGE,
+            "mean alone would be fooled"
+        );
         assert_eq!(smear.solid_coverage(), 0.0);
 
         let mut small_subject = vec![0u8; 100];
@@ -400,7 +405,10 @@ mod tests {
         assert_eq!(big.width, 8);
         assert_eq!(big.height, 8);
         assert_eq!(big.alpha.len(), 64);
-        assert_eq!(big.source, small.source, "resizing must not relabel the source");
+        assert_eq!(
+            big.source, small.source,
+            "resizing must not relabel the source"
+        );
         // Corners keep their original values; the soft interior is what
         // bilinear buys over nearest-neighbour.
         assert_eq!(big.at(0, 0), 0);

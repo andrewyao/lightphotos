@@ -73,7 +73,10 @@ pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
             let bb = obs.boundingBox();
             let (left_eye, right_eye) = match obs.landmarks() {
                 Some(marks) => (
-                    marks.leftEye().map(|r| region_points(&r)).unwrap_or_default(),
+                    marks
+                        .leftEye()
+                        .map(|r| region_points(&r))
+                        .unwrap_or_default(),
                     marks
                         .rightEye()
                         .map(|r| region_points(&r))
@@ -120,10 +123,7 @@ fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
             return Vec::new();
         }
         let slice = std::slice::from_raw_parts(ptr, count);
-        slice
-            .iter()
-            .map(|p| (p.x as f32, p.y as f32))
-            .collect()
+        slice.iter().map(|p| (p.x as f32, p.y as f32)).collect()
     }
 }
 

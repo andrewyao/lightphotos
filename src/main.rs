@@ -31,21 +31,6 @@ mod catalog;
 // `crate::web_fs::`/etc. call site elsewhere in the codebase resolves by
 // module path, not file location, so this move needed no other file's
 // `use` statements touched.
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_canvas.rs"]
-mod web_canvas;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_fs.rs"]
-mod web_fs;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_worker_pool.rs"]
-mod web_worker_pool;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_catalog_fs.rs"]
-mod web_catalog_fs;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_export_fs.rs"]
-mod web_export_fs;
 #[cfg(target_os = "macos")]
 mod coregraphics;
 mod develop;
@@ -70,6 +55,21 @@ mod trash;
 mod ui;
 #[cfg(target_os = "macos")]
 mod vision;
+#[cfg(target_arch = "wasm32")]
+#[path = "web/web_canvas.rs"]
+mod web_canvas;
+#[cfg(target_arch = "wasm32")]
+#[path = "web/web_catalog_fs.rs"]
+mod web_catalog_fs;
+#[cfg(target_arch = "wasm32")]
+#[path = "web/web_export_fs.rs"]
+mod web_export_fs;
+#[cfg(target_arch = "wasm32")]
+#[path = "web/web_fs.rs"]
+mod web_fs;
+#[cfg(target_arch = "wasm32")]
+#[path = "web/web_worker_pool.rs"]
+mod web_worker_pool;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;

@@ -728,7 +728,10 @@ mod tests {
             let v = ((dx + dy) as f32) * 0.05 + 0.5;
             [v, v, v]
         };
-        assert_eq!(denoise_sample(&adj, sample), denoise_sample_with_strength(60.0, sample));
+        assert_eq!(
+            denoise_sample(&adj, sample),
+            denoise_sample_with_strength(60.0, sample)
+        );
     }
 
     #[test]
@@ -751,7 +754,11 @@ mod tests {
         // outlier, but the algorithm's own range weighting (proven by
         // denoise_preserves_hard_edge above) should keep it from swinging
         // all the way to the outlier's value.
-        assert!(out[0][0] < 0.5, "expected a far corner to stay close to its own dark value, got {:?}", out[0]);
+        assert!(
+            out[0][0] < 0.5,
+            "expected a far corner to stay close to its own dark value, got {:?}",
+            out[0]
+        );
     }
 
     #[test]
@@ -765,7 +772,12 @@ mod tests {
     fn denoise_linear_rgb_buffer_clamps_at_edges_without_panicking() {
         // Every pixel here is an edge/corner of a tiny 2x2 buffer — must not
         // index out of bounds when a tap's (dx, dy) falls outside it.
-        let buf = vec![[0.1, 0.1, 0.1], [0.9, 0.9, 0.9], [0.5, 0.5, 0.5], [0.3, 0.3, 0.3]];
+        let buf = vec![
+            [0.1, 0.1, 0.1],
+            [0.9, 0.9, 0.9],
+            [0.5, 0.5, 0.5],
+            [0.3, 0.3, 0.3],
+        ];
         let out = denoise_linear_rgb_buffer(50.0, 2, 2, &buf);
         assert_eq!(out.len(), 4);
     }

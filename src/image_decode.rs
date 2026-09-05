@@ -47,8 +47,8 @@ use objc2_image_io::{
     kCGImagePropertyExifExposureTime, kCGImagePropertyExifFNumber, kCGImagePropertyExifFocalLength,
     kCGImagePropertyExifISOSpeedRatings, kCGImagePropertyExifLensModel,
     kCGImagePropertyOrientation, kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
-    kCGImagePropertyTIFFDateTime, kCGImagePropertyTIFFMake,
-    kCGImagePropertyTIFFModel, CGImageSource,
+    kCGImagePropertyTIFFDateTime, kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel,
+    CGImageSource,
 };
 
 #[cfg(target_os = "macos")]

@@ -79,7 +79,10 @@ fn launched_at() -> web_time::Instant {
 /// Stamp a timing event with milliseconds since launch.
 pub fn mark(what: &str) {
     if timing_enabled() {
-        eprintln!("[t+{:>7.1}ms] {what}", launched_at().elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "[t+{:>7.1}ms] {what}",
+            launched_at().elapsed().as_secs_f64() * 1000.0
+        );
     }
 }
 
@@ -705,7 +708,12 @@ impl Loader {
     /// reverted: getting the Loupe's zoom transform right across an extra
     /// tier boundary proved fragile in practice.)
     #[cfg(target_arch = "wasm32")]
-    pub fn insert_preview_external(&mut self, path: PathBuf, target_px: u32, img: Arc<DecodedImage>) {
+    pub fn insert_preview_external(
+        &mut self,
+        path: PathBuf,
+        target_px: u32,
+        img: Arc<DecodedImage>,
+    ) {
         self.insert_preview((path, target_px), img);
     }
 
@@ -984,7 +992,9 @@ mod tests {
         // The two oldest are gone; the newest survive.
         assert!(loader.get_full(&path("0")).is_none());
         assert!(loader.get_full(&path("1")).is_none());
-        assert!(loader.get_full(&path(&(FULL_CAPACITY + 1).to_string())).is_some());
+        assert!(loader
+            .get_full(&path(&(FULL_CAPACITY + 1).to_string()))
+            .is_some());
     }
 
     #[test]

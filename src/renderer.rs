@@ -290,37 +290,38 @@ impl Renderer {
 
         // Overlay resources sit in group 3 alongside (never overlapping) the
         // touch-up storage buffer at binding 0 — see the note in shader.wgsl.
-        let overlay_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("overlay_bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let overlay_bind_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("overlay_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pl"),
@@ -576,7 +577,12 @@ impl Renderer {
             image_size: (0, 0),
             // TEMPORARY DEBUG default — matches the fixed color this
             // replaces below until `upload_shown` starts setting it.
-            tier_debug_color: wgpu::Color { r: 0.07, g: 0.07, b: 0.08, a: 1.0 },
+            tier_debug_color: wgpu::Color {
+                r: 0.07,
+                g: 0.07,
+                b: 0.08,
+                a: 1.0,
+            },
             image_pixel_format: PixelFormat::Srgb8,
             max_dim,
             mip_pipeline,
@@ -618,13 +624,18 @@ impl Renderer {
         let (w, h) = (img.width, img.height);
         let mip_count = (32 - (w.max(h)).leading_zeros()).max(1); // floor(log2(max))+1
 
-        let (format, bytes_per_pixel, mip_pipeline): (wgpu::TextureFormat, u32, &wgpu::RenderPipeline) =
-            match img.pixel_format {
-                PixelFormat::Srgb8 => (IMAGE_FORMAT, 4, &self.mip_pipeline),
-                PixelFormat::LinearF16 => {
-                    (raw_render::LINEAR_IMAGE_FORMAT, 8, &self.mip_pipeline_linear)
-                }
-            };
+        let (format, bytes_per_pixel, mip_pipeline): (
+            wgpu::TextureFormat,
+            u32,
+            &wgpu::RenderPipeline,
+        ) = match img.pixel_format {
+            PixelFormat::Srgb8 => (IMAGE_FORMAT, 4, &self.mip_pipeline),
+            PixelFormat::LinearF16 => (
+                raw_render::LINEAR_IMAGE_FORMAT,
+                8,
+                &self.mip_pipeline_linear,
+            ),
+        };
         self.image_pixel_format = img.pixel_format;
 
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -1112,4 +1123,3 @@ impl Renderer {
         }
     }
 }
-

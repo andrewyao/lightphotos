@@ -55,11 +55,7 @@ fn export_stem(src: &Path) -> String {
 /// `Path::exists()`, so it pre-scans `Exports/` into `existing`
 /// (`web_export_fs::WebFs::existing_export_names`) and calls this.
 #[cfg(any(target_arch = "wasm32", test))]
-pub fn jpg_export_name(
-    src: &Path,
-    existing: &HashSet<String>,
-    taken: &HashSet<String>,
-) -> String {
+pub fn jpg_export_name(src: &Path, existing: &HashSet<String>, taken: &HashSet<String>) -> String {
     let stem = export_stem(src);
     let free = |name: &str| !existing.contains(name) && !taken.contains(name);
 

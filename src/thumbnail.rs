@@ -155,7 +155,8 @@ pub fn decode_at_size(
 #[cfg(not(target_os = "macos"))]
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
     let bytes = fs::read(path).ok()?;
-    embedded_preview_from_bytes(&bytes, max_px).or_else(|| rawler_full_image_from_bytes(&bytes, max_px))
+    embedded_preview_from_bytes(&bytes, max_px)
+        .or_else(|| rawler_full_image_from_bytes(&bytes, max_px))
 }
 
 /// The bytes-based core of [`try_extract_embedded_preview`] above — same
@@ -291,7 +292,9 @@ pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<
             .ok()
             .and_then(|meta| meta.exif.orientation)
             .map(|code| {
-                crate::image_decode::exif_code_from_rawler_orientation(rawler::Orientation::from_u16(code))
+                crate::image_decode::exif_code_from_rawler_orientation(
+                    rawler::Orientation::from_u16(code),
+                )
             })
             .unwrap_or(1);
 

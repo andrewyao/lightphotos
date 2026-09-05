@@ -115,10 +115,7 @@ fn print_region(label: &str, points: &facequality::Points, aspect_wh: f32) {
     }
     let openness = facequality::eye_openness(points, aspect_wh)
         .map_or("n/a".to_string(), |o| format!("{o:.4}"));
-    println!(
-        "    {label}: {} points, openness {openness}",
-        points.len()
-    );
+    println!("    {label}: {} points, openness {openness}", points.len());
     // Full point dump — the whole reason this harness exists is to eyeball
     // whether the contour is plausible, so truncating would defeat it.
     for (i, (x, y)) in points.iter().enumerate() {

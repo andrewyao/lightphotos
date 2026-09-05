@@ -98,7 +98,10 @@ pub fn compute_marks(group_ids: &[u32], scores: &[Option<f64>]) -> Vec<Option<Bu
 /// frame with a *known* blink still outranks a frame with no sharpness score at
 /// all, because [`compute_marks`] ranks any score above none. That only shows up
 /// mid-scan, and resolves as soon as the missing score lands.
-pub fn combined_score(sharpness: Option<f64>, eyes: Option<crate::facequality::EyeState>) -> Option<f64> {
+pub fn combined_score(
+    sharpness: Option<f64>,
+    eyes: Option<crate::facequality::EyeState>,
+) -> Option<f64> {
     let s = sharpness?;
     match eyes {
         Some(crate::facequality::EyeState::Closed) => Some(-1.0 / (1.0 + s.max(0.0))),

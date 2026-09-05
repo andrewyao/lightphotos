@@ -412,8 +412,7 @@ impl Catalog {
         let name = name.to_os_string();
         let tx = self.persist_err_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            if let Err(e) = crate::web_catalog_fs::write_sidecar(&dir_handle, &name, &bytes).await
-            {
+            if let Err(e) = crate::web_catalog_fs::write_sidecar(&dir_handle, &name, &bytes).await {
                 let _ = tx.send(format!("could not save {}: {e}", name.to_string_lossy()));
             }
         });
@@ -1053,7 +1052,10 @@ mod tests {
         let loaded = load_sidecars(&dir);
         assert_eq!(loaded.skipped, 0);
         assert_eq!(
-            loaded.images.get(std::ffi::OsStr::new("photo.jpg")).and_then(|r| r.rating),
+            loaded
+                .images
+                .get(std::ffi::OsStr::new("photo.jpg"))
+                .and_then(|r| r.rating),
             Some(4)
         );
 
