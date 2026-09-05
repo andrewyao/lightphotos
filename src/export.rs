@@ -297,14 +297,26 @@ fn do_export_macos(job: ExportJob) -> Result<PathBuf, String> {
     Ok(job.dest)
 }
 
-/// Native Linux/Windows: the exact pipeline wasm32 export runs — `bake_jpeg`
-/// (shared decode → bake → encode) plus `NativeFs` for the byte IO.
+/// Native Linux/Windows: use the shared byte pipeline for ordinary images,
+/// while keeping RAW decoding path-based so rawler can memory-map the source.
 #[cfg(not(target_os = "macos"))]
 fn do_export_nonmac(job: ExportJob) -> Result<PathBuf, String> {
     let fs = NativeFs;
-    let bytes = pollster::block_on(fs.read_source(&job.src))?;
     let is_raw = image_decode::is_raw_extension(&job.src);
-    let jpeg = bake_jpeg(&bytes, is_raw, &job.adj, &job.touchups, job.rot)?;
+
+    let jpeg = if is_raw {
+        // Keep native RAW exports on rawler's path-based decoder. It uses a
+        // memory map, avoiding the full-file Vec plus RawSource clone that
+        // the bytes-based entry point necessarily needs.
+        let img = image_decode::decode_raw_nonmac(&job.src, u32::MAX)?;
+        let (w, h, rgba) =
+            crate::image_ops::bake_edited(&img, &job.adj, &job.touchups, job.rot);
+        image_encode::encode_jpeg_to_vec(w, h, &rgba)?
+    } else {
+        let bytes = pollster::block_on(fs.read_source(&job.src))?;
+        bake_jpeg(&bytes, false, &job.adj, &job.touchups, job.rot)?
+    };
+
     pollster::block_on(fs.write_atomic(&job.dest, &jpeg))?;
     Ok(job.dest)
 }
