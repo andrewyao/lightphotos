@@ -223,6 +223,27 @@ pub(crate) fn decode_raw_nonmac_from_bytes(
     max_dim: u32,
 ) -> Result<DecodedImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
+    decode_raw_nonmac_from_source(source, max_dim)
+}
+
+/// The ownership-preserving counterpart used by the wasm export worker. The
+/// transferred source buffer is already a `Vec<u8>`; keep it in rawler's
+/// `Arc`-backed source instead of copying it into a second vector.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[allow(dead_code)]
+pub(crate) fn decode_raw_nonmac_from_shared_vec(
+    bytes: std::sync::Arc<Vec<u8>>,
+    max_dim: u32,
+) -> Result<DecodedImage, String> {
+    let source = rawler::rawsource::RawSource::new_from_shared_vec(bytes);
+    decode_raw_nonmac_from_source(source, max_dim)
+}
+
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+fn decode_raw_nonmac_from_source(
+    source: rawler::rawsource::RawSource,
+    max_dim: u32,
+) -> Result<DecodedImage, String> {
     let params = rawler::decoders::RawDecodeParams::default();
     let raw = rawler::decode(&source, &params).map_err(|e| e.to_string())?;
     let orientation = rawler::get_decoder(&source)
@@ -291,8 +312,13 @@ fn develop_raw_image_to_srgb8(
             ]
         })
         .collect();
-    let denoised = crate::develop::denoise_linear_rgb_buffer(AUTO_RAW_DENOISE_STRENGTH, dw, dh, &linear);
-    let encode = |v: f32| (v.max(0.0).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let denoised =
+        crate::develop::denoise_linear_rgb_buffer(AUTO_RAW_DENOISE_STRENGTH, dw, dh, &linear);
+    let encode = |v: f32| {
+        (v.max(0.0).powf(1.0 / 2.2) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
     for (px, lin) in img.pixels_mut().zip(denoised) {
         px[0] = encode(lin[0]);
         px[1] = encode(lin[1]);
@@ -348,10 +374,7 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
 // mac dev build; non-mac `decode` below is the real caller.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
-pub(crate) fn decode_nonraw_from_bytes(
-    bytes: &[u8],
-    max_dim: u32,
-) -> Result<DecodedImage, String> {
+pub(crate) fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedImage, String> {
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;

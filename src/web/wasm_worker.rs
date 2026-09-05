@@ -47,20 +47,20 @@
 #[path = "../image_decode.rs"]
 mod image_decode;
 #[cfg(target_arch = "wasm32")]
-#[path = "../thumbnail.rs"]
-mod thumbnail;
-#[cfg(target_arch = "wasm32")]
 #[path = "../raw/preview.rs"]
 mod raw_preview;
+#[cfg(target_arch = "wasm32")]
+#[path = "../thumbnail.rs"]
+mod thumbnail;
 // thumbnail.rs's on-disk `ThumbCache` (unused here — this worker only ever
 // calls its bytes-based `embedded_preview_from_bytes`) still pulls these two
 // in at compile time; re-declared for the same reason the three above are.
 #[cfg(target_arch = "wasm32")]
-#[path = "../paths.rs"]
-mod paths;
-#[cfg(target_arch = "wasm32")]
 #[path = "../hash.rs"]
 mod hash;
+#[cfg(target_arch = "wasm32")]
+#[path = "../paths.rs"]
+mod paths;
 // Pulled in for `denoise_linear_rgb_buffer`, which `raw_preview`'s
 // `Quality`-tier code now calls (see raw/preview.rs).
 #[cfg(target_arch = "wasm32")]
@@ -70,14 +70,14 @@ mod develop;
 // pipeline in-worker via `export::bake_jpeg`, so it needs the bake and encode
 // halves too.
 #[cfg(target_arch = "wasm32")]
-#[path = "../image_ops.rs"]
-mod image_ops;
+#[path = "../export.rs"]
+mod export;
 #[cfg(target_arch = "wasm32")]
 #[path = "../image_encode.rs"]
 mod image_encode;
 #[cfg(target_arch = "wasm32")]
-#[path = "../export.rs"]
-mod export;
+#[path = "../image_ops.rs"]
+mod image_ops;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
@@ -99,6 +99,7 @@ mod wasm {
     use crate::raw_preview;
     use crate::thumbnail;
     use js_sys::{Array, Object, Reflect, Uint8Array};
+    use std::sync::Arc;
     use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
     use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
@@ -143,7 +144,12 @@ mod wasm {
     /// (full PPG demosaic, `PixelFormat::LinearF16` output — the renderer
     /// tonemaps this on the GPU via `raw_shader.wgsl` instead of expecting it
     /// pre-baked). Meaningless for the non-RAW branch below.
-    fn decode(bytes: &[u8], max_px: u32, is_raw: bool, quality: bool) -> Result<DecodedImage, String> {
+    fn decode(
+        bytes: &[u8],
+        max_px: u32,
+        is_raw: bool,
+        quality: bool,
+    ) -> Result<DecodedImage, String> {
         if is_raw {
             if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
                 // "Too small for what was asked" — the embedded baseline
@@ -190,7 +196,7 @@ mod wasm {
         scope: &DedicatedWorkerGlobalScope,
         result: &Object,
         data: &JsValue,
-        bytes: &[u8],
+        bytes: Vec<u8>,
         is_raw: bool,
     ) {
         let adj_json = Reflect::get(data, &JsValue::from_str("adjustments"))
@@ -208,7 +214,7 @@ mod wasm {
                 .map_err(|e| format!("bad adjustments json: {e}"))?;
             let touchups: Vec<crate::develop::TouchUp> = serde_json::from_str(&touchups_json)
                 .map_err(|e| format!("bad touchups json: {e}"))?;
-            crate::export::bake_jpeg(bytes, is_raw, &adj, &touchups, rot)
+            crate::export::bake_jpeg_from_shared_vec(Arc::new(bytes), is_raw, &adj, &touchups, rot)
         })();
 
         match baked {
@@ -258,15 +264,15 @@ mod wasm {
             let max_px = get_f64(&data, "maxPx") as u32;
             let is_raw = get_bool(&data, "isRaw");
             let quality = get_bool(&data, "quality");
-            let bytes_val = Reflect::get(&data, &JsValue::from_str("bytes"))
-                .unwrap_or(JsValue::UNDEFINED);
+            let bytes_val =
+                Reflect::get(&data, &JsValue::from_str("bytes")).unwrap_or(JsValue::UNDEFINED);
             let bytes = Uint8Array::new(&bytes_val).to_vec();
 
             let result = Object::new();
             let _ = Reflect::set(&result, &JsValue::from_str("id"), &JsValue::from_f64(id));
 
             if get_bool(&data, "export") {
-                handle_export(&scope_for_closure, &result, &data, &bytes, is_raw);
+                handle_export(&scope_for_closure, &result, &data, bytes, is_raw);
                 return;
             }
 
@@ -292,16 +298,12 @@ mod wasm {
                     let _ = Reflect::set(&result, &JsValue::from_str("rgba"), &rgba.buffer());
                     let transfer = Array::new();
                     transfer.push(&rgba.buffer());
-                    let _ = scope_for_closure
-                        .post_message_with_transfer(&result, &transfer.into());
+                    let _ = scope_for_closure.post_message_with_transfer(&result, &transfer.into());
                 }
                 Err(e) => {
                     let _ = Reflect::set(&result, &JsValue::from_str("ok"), &JsValue::FALSE);
-                    let _ = Reflect::set(
-                        &result,
-                        &JsValue::from_str("error"),
-                        &JsValue::from_str(&e),
-                    );
+                    let _ =
+                        Reflect::set(&result, &JsValue::from_str("error"), &JsValue::from_str(&e));
                     let _ = scope_for_closure.post_message(&result);
                 }
             }

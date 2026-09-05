@@ -37,7 +37,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{Blob, BlobPropertyBag, MessageEvent, Url, Worker};
+use web_sys::{Blob, BlobPropertyBag, ErrorEvent, MessageEvent, Url, Worker};
 
 use crate::image_decode::{DecodedImage, PixelFormat};
 
@@ -127,16 +127,17 @@ struct WorkerSlot {
     /// until it yields to the JS event loop once).
     ready: bool,
     busy: bool,
+    active_job: Option<u32>,
 }
 
 struct Inner {
     workers: Vec<WorkerSlot>,
     next_id: u32,
     pending: HashMap<u32, PendingMeta>,
-    /// Jobs submitted before an idle ready worker was available. Drained
-    /// whenever a slot frees up (a result lands) or a new slot becomes
-    /// ready.
-    backlog: VecDeque<QueuedJob>,
+    /// Decode work is kept ahead of exports so a bulk export cannot make the
+    /// grid or Loupe wait behind a large FIFO backlog.
+    decode_backlog: VecDeque<QueuedJob>,
+    export_backlog: VecDeque<QueuedJob>,
     result_tx: Sender<PoolResult>,
     /// `JobKind::Export` results land here instead of `result_tx` — they
     /// carry JPEG bytes, not a `DecodedImage`.
@@ -165,22 +166,46 @@ fn get_string(obj: &JsValue, key: &str) -> Option<String> {
 fn pump(inner: &Rc<RefCell<Inner>>) {
     loop {
         let mut inner_mut = inner.borrow_mut();
-        let Some(slot_idx) = inner_mut
-            .workers
-            .iter()
-            .position(|s| s.ready && !s.busy)
-        else {
+        let Some(slot_idx) = inner_mut.workers.iter().position(|s| s.ready && !s.busy) else {
             return;
         };
-        let Some(job) = inner_mut.backlog.pop_front() else {
-            return;
+        let job = if let Some(job) = inner_mut.decode_backlog.pop_front() {
+            job
+        } else {
+            // Keep one worker available for interactive decode work whenever
+            // the pool has more than one worker. A single-worker pool still
+            // makes progress on exports.
+            let export_limit = inner_mut.workers.len().saturating_sub(1).max(1);
+            let active_exports = inner_mut
+                .workers
+                .iter()
+                .filter(|s| s.busy && s.active_job.is_some())
+                .filter(|s| {
+                    inner_mut
+                        .pending
+                        .get(&s.active_job.unwrap())
+                        .is_some_and(|m| m.kind == JobKind::Export)
+                })
+                .count();
+            if active_exports >= export_limit {
+                return;
+            }
+            let Some(job) = inner_mut.export_backlog.pop_front() else {
+                return;
+            };
+            job
         };
         inner_mut.workers[slot_idx].busy = true;
+        inner_mut.workers[slot_idx].active_job = Some(job.id);
         let worker = inner_mut.workers[slot_idx].worker.clone();
         drop(inner_mut);
 
         let msg = Object::new();
-        let _ = Reflect::set(&msg, &JsValue::from_str("id"), &JsValue::from_f64(job.id as f64));
+        let _ = Reflect::set(
+            &msg,
+            &JsValue::from_str("id"),
+            &JsValue::from_f64(job.id as f64),
+        );
         let _ = Reflect::set(
             &msg,
             &JsValue::from_str("maxPx"),
@@ -208,7 +233,11 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
                 &JsValue::from_str("touchups"),
                 &JsValue::from_str(touchups_json),
             );
-            let _ = Reflect::set(&msg, &JsValue::from_str("rot"), &JsValue::from_f64(*rot as f64));
+            let _ = Reflect::set(
+                &msg,
+                &JsValue::from_str("rot"),
+                &JsValue::from_f64(*rot as f64),
+            );
         }
         // No `Uint8Array::from(...)` copy here — `job.bytes` is already the
         // JS ArrayBuffer read straight off the file (see
@@ -219,7 +248,9 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
         let transfer = Array::new();
         transfer.push(&job.bytes);
         if let Err(e) = worker.post_message_with_transfer(&msg, &transfer.into()) {
-            web_sys::console::error_1(&format!("[web_worker_pool] post_message failed: {e:?}").into());
+            web_sys::console::error_1(
+                &format!("[web_worker_pool] post_message failed: {e:?}").into(),
+            );
         }
     }
 }
@@ -310,7 +341,8 @@ impl WorkerPool {
             workers: Vec::new(),
             next_id: 0,
             pending: HashMap::new(),
-            backlog: VecDeque::new(),
+            decode_backlog: VecDeque::new(),
+            export_backlog: VecDeque::new(),
             result_tx,
             export_tx,
         }));
@@ -326,15 +358,11 @@ impl WorkerPool {
                             worker: worker.clone(),
                             ready: false,
                             busy: false,
+                            active_job: None,
                         });
                         inner_mut.workers.len() - 1
                     };
-                    let inner_for_closure = inner.clone();
-                    let onmessage = Closure::wrap(Box::new(move |msg: MessageEvent| {
-                        handle_worker_message(&inner_for_closure, slot_idx, msg);
-                    }) as Box<dyn Fn(MessageEvent)>);
-                    worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-                    onmessage.forget();
+                    attach_worker(&inner, slot_idx, worker);
                 }
                 Err(e) => {
                     web_sys::console::error_1(
@@ -344,7 +372,11 @@ impl WorkerPool {
             }
         }
 
-        WorkerPool { inner, result_rx, export_rx }
+        WorkerPool {
+            inner,
+            result_rx,
+            export_rx,
+        }
     }
 
     pub fn handle(&self) -> WorkerPoolHandle {
@@ -396,6 +428,7 @@ fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: Messa
     let mut inner_mut = inner.borrow_mut();
     if let Some(slot) = inner_mut.workers.get_mut(slot_idx) {
         slot.busy = false;
+        slot.active_job = None;
     }
     let Some(meta) = inner_mut.pending.remove(&id) else {
         drop(inner_mut);
@@ -430,14 +463,20 @@ fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: Messa
     let result = if ok {
         let width = get_f64(&data, "width").unwrap_or(0.0) as u32;
         let height = get_f64(&data, "height").unwrap_or(0.0) as u32;
-        let rgba_val = Reflect::get(&data, &JsValue::from_str("rgba")).unwrap_or(JsValue::UNDEFINED);
+        let rgba_val =
+            Reflect::get(&data, &JsValue::from_str("rgba")).unwrap_or(JsValue::UNDEFINED);
         let rgba = Uint8Array::new(&rgba_val).to_vec();
         let pixel_format = if get_bool(&data, "linear") {
             PixelFormat::LinearF16
         } else {
             PixelFormat::Srgb8
         };
-        Ok(DecodedImage { width, height, rgba, pixel_format })
+        Ok(DecodedImage {
+            width,
+            height,
+            rgba,
+            pixel_format,
+        })
     } else {
         Err(get_string(&data, "error").unwrap_or_else(|| "unknown worker error".to_string()))
     };
@@ -449,6 +488,84 @@ fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: Messa
         result,
     });
     pump(inner);
+}
+
+fn handle_worker_error(inner: &Rc<RefCell<Inner>>, slot_idx: usize, event: ErrorEvent) {
+    let error = if event.message().is_empty() {
+        "worker crashed or trapped".to_string()
+    } else {
+        event.message()
+    };
+
+    let (old_worker, active_job, tx, export_tx) = {
+        let mut inner_mut = inner.borrow_mut();
+        let Some(slot) = inner_mut.workers.get_mut(slot_idx) else {
+            return;
+        };
+        let old_worker = slot.worker.clone();
+        let active_job = slot.active_job.take();
+        slot.ready = false;
+        slot.busy = false;
+        (
+            old_worker,
+            active_job,
+            inner_mut.result_tx.clone(),
+            inner_mut.export_tx.clone(),
+        )
+    };
+    old_worker.terminate();
+
+    if let Some(id) = active_job {
+        let meta = inner.borrow_mut().pending.remove(&id);
+        if let Some(meta) = meta {
+            if meta.kind == JobKind::Export {
+                if let Some((dest_dir, filename)) = meta.export_dest {
+                    let _ = export_tx.send(ExportPoolResult {
+                        path: meta.path,
+                        dest_dir,
+                        filename,
+                        result: Err(error.clone()),
+                    });
+                }
+            } else {
+                let _ = tx.send(PoolResult {
+                    kind: meta.kind,
+                    path: meta.path,
+                    target: meta.target,
+                    result: Err(error.clone()),
+                });
+            }
+        }
+    }
+
+    match spawn_worker(&asset_base_url()) {
+        Ok(worker) => {
+            if let Some(slot) = inner.borrow_mut().workers.get_mut(slot_idx) {
+                slot.worker = worker.clone();
+            }
+            attach_worker(inner, slot_idx, worker);
+        }
+        Err(e) => web_sys::console::error_1(
+            &format!("[web_worker_pool] failed to replace crashed worker: {e}").into(),
+        ),
+    }
+    pump(inner);
+}
+
+fn attach_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize, worker: Worker) {
+    let inner_for_message = inner.clone();
+    let onmessage = Closure::wrap(Box::new(move |msg: MessageEvent| {
+        handle_worker_message(&inner_for_message, slot_idx, msg);
+    }) as Box<dyn Fn(MessageEvent)>);
+    worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+    onmessage.forget();
+
+    let inner_for_error = inner.clone();
+    let onerror = Closure::wrap(Box::new(move |event: ErrorEvent| {
+        handle_worker_error(&inner_for_error, slot_idx, event);
+    }) as Box<dyn FnMut(ErrorEvent)>);
+    worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+    onerror.forget();
 }
 
 impl WorkerPoolHandle {
@@ -480,9 +597,14 @@ impl WorkerPoolHandle {
             inner_mut.next_id += 1;
             inner_mut.pending.insert(
                 id,
-                PendingMeta { kind, path, target, export_dest: None },
+                PendingMeta {
+                    kind,
+                    path,
+                    target,
+                    export_dest: None,
+                },
             );
-            inner_mut.backlog.push_back(QueuedJob {
+            inner_mut.decode_backlog.push_back(QueuedJob {
                 id,
                 bytes,
                 max_px: target,
@@ -532,7 +654,7 @@ impl WorkerPoolHandle {
                     export_dest: Some((dest_dir, filename)),
                 },
             );
-            inner_mut.backlog.push_back(QueuedJob {
+            inner_mut.export_backlog.push_back(QueuedJob {
                 id,
                 bytes: buffer,
                 max_px: u32::MAX,
@@ -547,15 +669,14 @@ impl WorkerPoolHandle {
     /// Report an export failure that happened before the job could be
     /// submitted (e.g. the source read failed) — straight to the export
     /// channel, mirroring `fail`.
-    pub fn fail_export(
-        &self,
-        path: PathBuf,
-        dest_dir: PathBuf,
-        filename: String,
-        error: String,
-    ) {
+    pub fn fail_export(&self, path: PathBuf, dest_dir: PathBuf, filename: String, error: String) {
         let tx = self.0.borrow().export_tx.clone();
-        let _ = tx.send(ExportPoolResult { path, dest_dir, filename, result: Err(error) });
+        let _ = tx.send(ExportPoolResult {
+            path,
+            dest_dir,
+            filename,
+            result: Err(error),
+        });
     }
 
     /// Report a failure that happened before a job could even be submitted
@@ -564,6 +685,11 @@ impl WorkerPoolHandle {
     /// need one failure path (`poll`'s `Err` arm) instead of two.
     pub fn fail(&self, path: PathBuf, target: u32, kind: JobKind, error: String) {
         let tx = self.0.borrow().result_tx.clone();
-        let _ = tx.send(PoolResult { kind, path, target, result: Err(error) });
+        let _ = tx.send(PoolResult {
+            kind,
+            path,
+            target,
+            result: Err(error),
+        });
     }
 }

@@ -62,6 +62,35 @@ pub fn bake_jpeg(
     touchups: &[TouchUp],
     rot: u8,
 ) -> Result<Vec<u8>, String> {
+    bake_jpeg_impl(src_bytes, is_raw, adj, touchups, rot)
+}
+
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[allow(dead_code)]
+pub fn bake_jpeg_from_shared_vec(
+    src_bytes: std::sync::Arc<Vec<u8>>,
+    is_raw: bool,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+) -> Result<Vec<u8>, String> {
+    let img = if is_raw {
+        image_decode::decode_raw_nonmac_from_shared_vec(src_bytes.clone(), u32::MAX)?
+    } else {
+        image_decode::decode_nonraw_from_bytes(src_bytes.as_slice(), u32::MAX)?
+    };
+    let (w, h, rgba) = crate::image_ops::bake_edited(&img, adj, touchups, rot);
+    image_encode::encode_jpeg_to_vec(w, h, &rgba)
+}
+
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+fn bake_jpeg_impl(
+    src_bytes: &[u8],
+    is_raw: bool,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+) -> Result<Vec<u8>, String> {
     let img = if is_raw {
         image_decode::decode_raw_nonmac_from_bytes(src_bytes, u32::MAX)?
     } else {
@@ -200,7 +229,12 @@ mod tests {
         assert_eq!(out.dimensions(), (w, h));
         let px = out.get_pixel(0, 0).0;
         assert!(px[0] > 140, "red channel should stay high, got {}", px[0]);
-        assert!(px[1] < 100 && px[2] < 100, "g/b should stay low, got {},{}", px[1], px[2]);
+        assert!(
+            px[1] < 100 && px[2] < 100,
+            "g/b should stay low, got {},{}",
+            px[1],
+            px[2]
+        );
     }
 
     /// A 90° rotation swaps the baked output's width and height.
@@ -309,8 +343,7 @@ fn do_export_nonmac(job: ExportJob) -> Result<PathBuf, String> {
         // memory map, avoiding the full-file Vec plus RawSource clone that
         // the bytes-based entry point necessarily needs.
         let img = image_decode::decode_raw_nonmac(&job.src, u32::MAX)?;
-        let (w, h, rgba) =
-            crate::image_ops::bake_edited(&img, &job.adj, &job.touchups, job.rot);
+        let (w, h, rgba) = crate::image_ops::bake_edited(&img, &job.adj, &job.touchups, job.rot);
         image_encode::encode_jpeg_to_vec(w, h, &rgba)?
     } else {
         let bytes = pollster::block_on(fs.read_source(&job.src))?;

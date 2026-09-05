@@ -193,6 +193,7 @@ web-sys = { version = "0.3", features = [
     "Worker",
     "DedicatedWorkerGlobalScope",
     "MessageEvent",
+    "ErrorEvent",
     "Navigator",
     "DirectoryPickerOptions",
     "FileSystemPermissionMode",
