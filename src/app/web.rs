@@ -771,6 +771,7 @@ impl App {
     pub(crate) fn poll_dir_listing(&mut self) -> bool {
         while let Ok((dir, result)) = self.web_dirlist_rx.try_recv() {
             self.web_dirlist_inflight.remove(&dir);
+            let listing_succeeded = result.is_ok();
             match result {
                 Ok(listing) => {
                     let mut subdir_paths = Vec::with_capacity(listing.subdirs.len());
@@ -797,11 +798,24 @@ impl App {
             match self.web_pending_nav.clone() {
                 Some(WebPendingNav::Open(p)) if p == dir => {
                     self.web_pending_nav = None;
-                    self.apply_web_open_folder(p);
+                    if listing_succeeded {
+                        self.apply_web_open_folder(p);
+                    }
                 }
                 Some(WebPendingNav::Load(p)) if p == dir => {
                     self.web_pending_nav = None;
-                    self.apply_web_load_folder(p);
+                    if listing_succeeded {
+                        self.apply_web_load_folder(p);
+                    }
+                }
+                Some(WebPendingNav::LoadAfterOpen(p)) if p == dir => {
+                    self.web_pending_nav = None;
+                    if listing_succeeded {
+                        self.apply_web_load_folder(p);
+                        self.mode = ViewMode::Grid;
+                        self.update_window_title();
+                        self.normalize_focus();
+                    }
                 }
                 _ => {}
             }
@@ -843,7 +857,10 @@ impl App {
         // The pure-container target is a different folder; its own listing
         // may not be loaded yet.
         if target != dir && !self.subdirs.contains_key(&target) {
-            self.defer_web_nav(WebPendingNav::Load(target.clone()));
+            // The original open already toggled `dir`. Once the child is
+            // listed, only load it; applying `Open` would toggle the child
+            // and could recursively skip another pure-container level.
+            self.defer_web_nav(WebPendingNav::LoadAfterOpen(target.clone()));
             self.request_dir_listing(&target);
             self.request_redraw();
             return;
@@ -881,8 +898,6 @@ impl App {
         crate::navigation::sort_by_name(&mut entries);
         let playlist = crate::navigation::Playlist::from_entries(dir.clone(), entries);
         self.load_playlist(playlist, dir);
-        self.mode = ViewMode::Grid;
-        self.update_window_title();
         self.request_redraw();
     }
 }

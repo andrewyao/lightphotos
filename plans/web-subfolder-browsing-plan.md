@@ -565,6 +565,7 @@ Add to the `impl App` block in `src/app/web.rs`:
     pub(crate) fn poll_dir_listing(&mut self) -> bool {
         while let Ok((dir, result)) = self.web_dirlist_rx.try_recv() {
             self.web_dirlist_inflight.remove(&dir);
+            let listing_succeeded = result.is_ok();
             match result {
                 Ok(listing) => {
                     let mut subdir_paths = Vec::with_capacity(listing.subdirs.len());
@@ -584,22 +585,30 @@ Add to the `impl App` block in `src/app/web.rs`:
                 }
             }
 
-            // Complete a navigation that was blocked on this listing.
+            // Complete a navigation only after a successful listing. On
+            // failure, clear the matching intent but preserve the current
+            // folder and mode.
             match self.web_pending_nav.clone() {
                 Some(WebPendingNav::Open(p)) if p == dir => {
                     self.web_pending_nav = None;
-                    self.apply_web_open_folder(p);
+                    if listing_succeeded {
+                        self.apply_web_open_folder(p);
+                    }
                 }
                 Some(WebPendingNav::Load(p)) if p == dir => {
                     self.web_pending_nav = None;
-                    self.apply_web_load_folder(p);
+                    if listing_succeeded {
+                        self.apply_web_load_folder(p);
+                    }
                 }
                 Some(WebPendingNav::LoadAfterOpen(p)) if p == dir => {
                     self.web_pending_nav = None;
-                    self.apply_web_load_folder(p);
-                    self.mode = ViewMode::Grid;
-                    self.update_window_title();
-                    self.normalize_focus();
+                    if listing_succeeded {
+                        self.apply_web_load_folder(p);
+                        self.mode = ViewMode::Grid;
+                        self.update_window_title();
+                        self.normalize_focus();
+                    }
                 }
                 _ => {}
             }

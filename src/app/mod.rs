@@ -281,12 +281,14 @@ pub(crate) type SelectionOutcome = (PathBuf, Result<crate::segmentation::Mask, S
 /// only — see `app/nav.rs`'s request/apply split). `Open` toggles expansion
 /// and does native `open_folder`'s pure-container skip; `Load` just swaps
 /// the grid like native `load_folder` (used by `folder_move` /
-/// `folder_collapse`).
+/// `folder_collapse`); `LoadAfterOpen` completes an open's pure-container
+/// skip without applying open semantics to the child.
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug, Clone)]
 pub(crate) enum WebPendingNav {
     Open(PathBuf),
     Load(PathBuf),
+    LoadAfterOpen(PathBuf),
 }
 
 pub(crate) struct App {
