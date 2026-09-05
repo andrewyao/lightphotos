@@ -173,7 +173,11 @@ fn get_string(obj: &JsValue, key: &str) -> Option<String> {
 /// replacement is still starting (or has already failed) must not count
 /// toward export capacity or the scheduler's interactive-decode reservation.
 fn ready_worker_count(inner: &Inner) -> usize {
-    inner.workers.iter().filter(|slot| slot.ready).count()
+    inner
+        .workers
+        .iter()
+        .filter(|slot| slot.ready && !slot.unavailable)
+        .count()
 }
 
 fn export_capacity_for(inner: &Inner) -> usize {
@@ -192,25 +196,23 @@ fn export_capacity_for(inner: &Inner) -> usize {
 fn pump(inner: &Rc<RefCell<Inner>>) {
     loop {
         let mut inner_mut = inner.borrow_mut();
-        if inner_mut.workers.is_empty()
-            && (!inner_mut.decode_backlog.is_empty() || !inner_mut.export_backlog.is_empty())
-        {
+        let has_backlog =
+            !inner_mut.decode_backlog.is_empty() || !inner_mut.export_backlog.is_empty();
+        let no_viable_workers =
+            inner_mut.workers.is_empty() || inner_mut.workers.iter().all(|slot| slot.unavailable);
+        if has_backlog && no_viable_workers {
             drop(inner_mut);
-            fail_queued_jobs(inner, "no workers could be created");
+            fail_queued_jobs(
+                inner,
+                "no worker capacity remains after replacement failures",
+            );
             return;
         }
-        let Some(slot_idx) = inner_mut.workers.iter().position(|s| s.ready && !s.busy) else {
-            let no_usable_capacity = !inner_mut.workers.is_empty()
-                && inner_mut.workers.iter().all(|slot| slot.unavailable);
-            if no_usable_capacity
-                && (!inner_mut.decode_backlog.is_empty() || !inner_mut.export_backlog.is_empty())
-            {
-                drop(inner_mut);
-                fail_queued_jobs(
-                    inner,
-                    "no worker capacity remains after replacement failures",
-                );
-            }
+        let Some(slot_idx) = inner_mut
+            .workers
+            .iter()
+            .position(|s| s.ready && !s.busy && !s.unavailable)
+        else {
             return;
         };
         let job = if let Some(job) = inner_mut.decode_backlog.pop_front() {
