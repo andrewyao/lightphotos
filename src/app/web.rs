@@ -93,6 +93,9 @@ impl App {
             self.web_folder_pending = false;
             match result {
                 Ok(picked) => {
+                    // Replacing the picked folder invalidates any listing or
+                    // deferred navigation from the previous folder.
+                    self.supersede_web_pending_nav();
                     self.web_file_handles = picked.handles;
                     self.web_dir_handles = picked.dir_handles;
                     self.subdirs.clear();
@@ -781,20 +784,27 @@ impl App {
     }
 
     /// Kick off an async `web_fs::list_dir` for `dir` (a relative path)
-    /// unless its listing is already cached in `self.subdirs` or a scan is
-    /// already in flight. The result lands on `web_dirlist_rx`, drained by
-    /// `poll_dir_listing`. A missing directory handle is logged and treated
-    /// as an empty (leaf) listing — should not happen, since a folder only
-    /// becomes reachable after its parent's listing produced its handle.
+    /// unless its listing is already cached in `self.subdirs` or a scan for
+    /// the current navigation generation is already in flight. The result
+    /// lands on `web_dirlist_rx`, drained by `poll_dir_listing`. A missing
+    /// directory handle is logged and treated as an empty (leaf) listing —
+    /// should not happen, since a folder only becomes reachable after its
+    /// parent's listing produced its handle.
     pub(crate) fn request_dir_listing(&mut self, dir: &Path) {
-        if self.subdirs.contains_key(dir) || self.web_dirlist_inflight.contains(dir) {
+        let generation = self.web_nav_generation;
+        let dir = dir.to_path_buf();
+        if self.subdirs.contains_key(&dir)
+            || self
+                .web_dirlist_inflight
+                .contains(&(dir.clone(), generation))
+        {
             return;
         }
-        let Some(handle) = self.web_dir_handles.get(dir).cloned() else {
+        let Some(handle) = self.web_dir_handles.get(&dir).cloned() else {
             web_sys::console::error_1(
                 &format!("[web] no directory handle for {}", dir.display()).into(),
             );
-            self.subdirs.insert(dir.to_path_buf(), Vec::new());
+            self.subdirs.insert(dir.clone(), Vec::new());
             self.set_status(format!(
                 "Couldn't open {} — folder handle missing",
                 dir.display()
@@ -806,9 +816,8 @@ impl App {
             self.supersede_web_pending_nav();
             return;
         };
-        self.web_dirlist_inflight.insert(dir.to_path_buf());
-        let base = dir.to_path_buf();
-        let generation = self.web_nav_generation;
+        self.web_dirlist_inflight.insert((dir.clone(), generation));
+        let base = dir;
         let tx = self.web_dirlist_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let result = web_fs::list_dir(&base, &handle).await;
@@ -825,7 +834,7 @@ impl App {
     /// outstanding (feeds the poll-cadence calc in `main.rs`).
     pub(crate) fn poll_dir_listing(&mut self) -> bool {
         while let Ok((generation, dir, result)) = self.web_dirlist_rx.try_recv() {
-            self.web_dirlist_inflight.remove(&dir);
+            self.web_dirlist_inflight.remove(&(dir.clone(), generation));
 
             // A close or newer navigation superseded this request. Do not
             // merge its handles/cache or let it trigger deferred navigation.

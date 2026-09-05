@@ -375,10 +375,11 @@ pub(crate) struct App {
     pub(crate) web_dirlist_tx: Sender<(u64, PathBuf, Result<crate::web_fs::DirListing, String>)>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_dirlist_rx: Receiver<(u64, PathBuf, Result<crate::web_fs::DirListing, String>)>,
-    /// Directories with a `list_dir` in flight — dedupes repeated
-    /// `request_dir_listing` calls from per-frame nav polling.
+    /// `(directory, navigation generation)` pairs with a `list_dir` in
+    /// flight — dedupes repeated requests from per-frame nav polling while
+    /// allowing a newer generation to retry the same directory.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) web_dirlist_inflight: std::collections::HashSet<PathBuf>,
+    pub(crate) web_dirlist_inflight: std::collections::HashSet<(PathBuf, u64)>,
     /// wasm32 export: finished JPEG writes (`web_export_fs::WebFs::write_atomic`,
     /// driven from `main.rs`'s frame loop after `poll_exports`) report back
     /// here as `ExportOutcome`s, drained into the shared `on_export_outcomes`
