@@ -75,7 +75,7 @@ way the native tree logic already assumes.
   ```rust
   pub struct PickedFolder {
       pub dir: PathBuf,
-      pub entries: Vec<DirEntry>,
+      pub entries: Vec<PathBuf>,
       pub handles: HashMap<PathBuf, FileSystemFileHandle>,
       pub subdirs: Vec<PathBuf>,
       pub dir_handles: HashMap<PathBuf, FileSystemDirectoryHandle>,
@@ -96,7 +96,8 @@ way the native tree logic already assumes.
   initialized empty, populated from `PickedFolder.dir_handles` in
   `poll_folder_pick` and extended as subfolders are listed.
 - New field `web_pending_open: Option<WebPendingNav>` where
-  `enum WebPendingNav { Open(PathBuf), Load(PathBuf) }` (see "Async folder-open").
+  `enum WebPendingNav { Open(PathBuf), OpenResolved(PathBuf), Load(PathBuf) }`
+  (see "Async folder-open").
 - New field for in-flight listing dedupe: `web_dirlist_inflight: HashSet<PathBuf>`.
 
 ### Call sites keyed by the old bare-filename paths
@@ -161,8 +162,9 @@ pub(crate) fn request_dir_listing(&mut self, dir: &Path)
 ///  - set `self.subdirs[dir]` to the subdir relative paths
 ///  - clear `web_dirlist_inflight` for `dir`
 ///  - if `web_pending_open` targets `dir`, take it and call the matching
-///    apply step — `apply_web_open_folder` for `Open`, `apply_web_load_folder`
-///    for `Load` (both below)
+///    apply step — `apply_web_open_folder` for `Open`,
+///    `apply_web_open_resolved` for `OpenResolved`, or
+///    `apply_web_load_folder` for `Load` (all below)
 ///  - `request_redraw`
 /// Returns whether any listing is still outstanding.
 pub(crate) fn poll_dir_listing(&mut self) -> bool
