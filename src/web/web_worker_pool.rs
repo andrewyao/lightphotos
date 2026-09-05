@@ -35,8 +35,8 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use js_sys::{Array, Object, Reflect, Uint8Array};
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use web_sys::{
     Blob, BlobPropertyBag, ErrorEvent, FileSystemDirectoryHandle, MessageEvent, Url, Worker,
 };
@@ -136,6 +136,8 @@ struct WorkerSlot {
     active_job: Option<u32>,
     generation: u32,
     replacement_attempts: u8,
+    /// Permanently unusable after all replacement attempts are exhausted.
+    unavailable: bool,
 }
 
 struct Inner {
@@ -198,6 +200,17 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
             return;
         }
         let Some(slot_idx) = inner_mut.workers.iter().position(|s| s.ready && !s.busy) else {
+            let no_usable_capacity = !inner_mut.workers.is_empty()
+                && inner_mut.workers.iter().all(|slot| slot.unavailable);
+            if no_usable_capacity
+                && (!inner_mut.decode_backlog.is_empty() || !inner_mut.export_backlog.is_empty())
+            {
+                drop(inner_mut);
+                fail_queued_jobs(
+                    inner,
+                    "no worker capacity remains after replacement failures",
+                );
+            }
             return;
         };
         let job = if let Some(job) = inner_mut.decode_backlog.pop_front() {
@@ -391,6 +404,7 @@ impl WorkerPool {
                             active_job: None,
                             generation: 0,
                             replacement_attempts: 0,
+                            unavailable: false,
                         });
                         inner_mut.workers.len() - 1
                     };
@@ -452,6 +466,7 @@ fn handle_worker_message(
             if slot.generation == generation {
                 slot.ready = true;
                 slot.replacement_attempts = 0;
+                slot.unavailable = false;
             }
         }
         drop(inner_mut);
@@ -677,6 +692,7 @@ fn replace_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize) {
                     slot.busy = false;
                     slot.active_job = None;
                     slot.generation = slot.generation.wrapping_add(1);
+                    slot.unavailable = false;
                     slot.generation
                 };
                 attach_worker(inner, slot_idx, worker, generation);
@@ -687,7 +703,14 @@ fn replace_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize) {
             ),
         }
     }
-    if inner.borrow().workers.iter().all(|slot| !slot.ready) {
+    let exhausted = {
+        let mut inner_mut = inner.borrow_mut();
+        if let Some(slot) = inner_mut.workers.get_mut(slot_idx) {
+            slot.unavailable = true;
+        }
+        inner_mut.workers.iter().all(|slot| slot.unavailable)
+    };
+    if exhausted {
         fail_queued_jobs(
             inner,
             "no worker capacity remains after replacement failures",

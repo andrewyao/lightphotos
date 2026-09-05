@@ -126,9 +126,12 @@ impl App {
                 // is currently zero: pump() can then either hold it until a
                 // worker becomes ready or fail it immediately when no worker
                 // can be created, giving the batch a terminal outcome.
-                while pool.export_in_flight() > 0
-                    && pool.export_in_flight() >= pool.export_capacity()
-                {
+                loop {
+                    let in_flight = pool.export_in_flight();
+                    let capacity = pool.export_capacity();
+                    if in_flight == 0 || (capacity > 0 && in_flight < capacity) {
+                        break;
+                    }
                     Self::wait_for_export_capacity().await;
                 }
                 let filename = crate::paths::jpg_export_name(&src, &existing, &taken);
