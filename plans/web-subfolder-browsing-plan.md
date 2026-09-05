@@ -349,7 +349,7 @@ git commit -m "feat(web): list_dir + DirListing + relative-path keys for File Sy
   - `web_dirlist_tx: Sender<(PathBuf, Result<web_fs::DirListing, String>)>`
   - `web_dirlist_rx: Receiver<(PathBuf, Result<web_fs::DirListing, String>)>`
   - `web_dirlist_inflight: HashSet<PathBuf>`
-  - `web_pending_nav: Option<WebPendingNav>` where `pub(crate) enum WebPendingNav { Open(PathBuf), Load(PathBuf) }`
+  - `web_pending_nav: Option<WebPendingNav>` where `pub(crate) enum WebPendingNav { Open(PathBuf), Load(PathBuf), LoadAfterOpen(PathBuf) }`
 - After this task, `poll_folder_pick` sets `folder_root`, `expanded`, `subdirs[root]`, `web_dir_handles`.
 
 - [ ] **Step 1: Declare the enum and fields**
@@ -382,7 +382,8 @@ In `src/app/mod.rs`, near the other wasm field declarations (after `web_file_han
     /// `app/nav.rs`'s request/apply split). `Open` toggles expansion +
     /// pure-container skip like native `open_folder`; `Load` just swaps the
     /// grid like native `load_folder` (used by `folder_move` /
-    /// `folder_collapse`).
+    /// `folder_collapse`); `LoadAfterOpen` completes an open's pure-container
+    /// skip without applying open semantics to the child.
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_pending_nav: Option<WebPendingNav>,
 ```
@@ -395,6 +396,7 @@ Add the enum near the top-level `use` block or beside the other small `App`-supp
 pub(crate) enum WebPendingNav {
     Open(PathBuf),
     Load(PathBuf),
+    LoadAfterOpen(PathBuf),
 }
 ```
 
@@ -592,6 +594,13 @@ Add to the `impl App` block in `src/app/web.rs`:
                     self.web_pending_nav = None;
                     self.apply_web_load_folder(p);
                 }
+                Some(WebPendingNav::LoadAfterOpen(p)) if p == dir => {
+                    self.web_pending_nav = None;
+                    self.apply_web_load_folder(p);
+                    self.mode = ViewMode::Grid;
+                    self.update_window_title();
+                    self.normalize_focus();
+                }
                 _ => {}
             }
             self.request_redraw();
@@ -622,7 +631,6 @@ Add to the `impl App` block in `src/app/web.rs`:
         crate::navigation::sort_by_name(&mut entries);
         let playlist = crate::navigation::Playlist::from_entries(dir.clone(), entries);
         self.load_playlist(playlist, dir);
-        self.mode = ViewMode::Grid;
         self.request_redraw();
     }
 ```
@@ -684,6 +692,9 @@ In `src/app/nav.rs`, wrap the existing body of `open_folder` in `#[cfg(not(targe
         }
         #[cfg(target_arch = "wasm32")]
         {
+            // A newer tree action supersedes any older deferred navigation,
+            // including when this action can be applied from cache.
+            self.web_pending_nav = None;
             if !self.subdirs.contains_key(&path) {
                 self.web_pending_nav = Some(crate::app::WebPendingNav::Open(path.clone()));
                 self.request_dir_listing(&path);
@@ -706,6 +717,11 @@ Confirm the `WebPendingNav` path: it is declared in `src/app/mod.rs` as `pub(cra
         let Some(cur) = self.folder_sel.clone() else {
             return;
         };
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Every tree action supersedes an older deferred navigation.
+            self.web_pending_nav = None;
+        }
         self.ensure_subdirs(&cur);
         #[cfg(target_arch = "wasm32")]
         if !self.subdirs.contains_key(&cur) {
@@ -760,17 +776,29 @@ Replace the Task 5 stub in `src/app/web.rs`:
         // The pure-container target is a different folder; its own listing
         // may not be loaded yet.
         if target != dir && !self.subdirs.contains_key(&target) {
-            self.web_pending_nav = Some(WebPendingNav::Open(target.clone()));
+            // The original open already toggled `dir`. Once the child is
+            // listed, only load it; applying `Open` would toggle the child
+            // and could recursively skip another pure-container level.
+            self.web_pending_nav = Some(WebPendingNav::LoadAfterOpen(target.clone()));
             self.request_dir_listing(&target);
             self.request_redraw();
             return;
         }
 
         self.apply_web_load_folder(target);
+        self.mode = ViewMode::Grid;
+        self.update_window_title();
+        self.normalize_focus();
+        self.request_redraw();
     }
 ```
 
 `apply_web_load_folder` still swaps the grid + sets the catalog handle (Task 5 stub is already correct for that part; Task 7 only adds its own deferral guard).
+
+The Grid-mode transition belongs to `apply_web_open_folder`, after the target
+has been loaded, and must also run in the `LoadAfterOpen` completion arm in
+`poll_dir_listing`. `apply_web_load_folder` is shared by folder movement and
+collapse, which preserve the current mode just like native `load_folder`.
 
 - [ ] **Step 4: Compile gates**
 
@@ -802,7 +830,7 @@ git commit -m "feat(web): expansion-aware folder open with pure-container skip"
 - Modify: `src/app/web.rs` — add the deferral guard to `apply_web_load_folder`
 
 **Interfaces:**
-- Consumes: `apply_web_load_folder`, `WebPendingNav::Load`, `request_dir_listing`.
+- Consumes: `apply_web_load_folder`, `WebPendingNav::{Load,LoadAfterOpen}`, `request_dir_listing`.
 - Produces: `fn nav_to_folder(&mut self, dir: PathBuf)` on `App` — `load_folder` on native, deferred `apply_web_load_folder` on wasm. All `load_folder` calls in `nav.rs` route through it.
 
 - [ ] **Step 1: `nav_to_folder` helper**
@@ -819,6 +847,9 @@ In `src/app/nav.rs` (in the `impl App` block):
         self.load_folder(dir);
         #[cfg(target_arch = "wasm32")]
         {
+            // A newer tree action supersedes any older deferred navigation,
+            // including when this action can be applied from cache.
+            self.web_pending_nav = None;
             if !self.subdirs.contains_key(&dir) {
                 self.web_pending_nav = Some(crate::app::WebPendingNav::Load(dir.clone()));
                 self.request_dir_listing(&dir);
@@ -835,6 +866,9 @@ In `src/app/nav.rs` (in the `impl App` block):
 - `folder_move`: `self.load_folder(tree[next].clone());` → `self.nav_to_folder(tree[next].clone());`
 - `folder_collapse`: `self.load_folder(parent.to_path_buf());` → `self.nav_to_folder(parent.to_path_buf());`
 - `folder_expand` (already-expanded branch): `self.load_folder(first);` → `self.nav_to_folder(first);`
+- Invalidate `web_pending_nav` at the start of the wasm `folder_collapse`
+  path as well, including the collapse-only branch that does not call
+  `nav_to_folder`. Every newer tree action must supersede the prior intent.
 
 - [ ] **Step 3: `load_folder` wasm guard**
 
@@ -1019,7 +1053,7 @@ No gaps.
 
 **3. Type consistency:**
 - `DirListing { images: Vec<(PathBuf, FileSystemFileHandle)>, subdirs: Vec<(PathBuf, FileSystemDirectoryHandle)> }` — same in Task 3 (def), Task 4 (channel type), Task 5 (`poll_dir_listing` destructure). ✓
-- `WebPendingNav { Open(PathBuf), Load(PathBuf) }` — Task 4 decl, Tasks 5/6/7 use. ✓
+- `WebPendingNav { Open(PathBuf), Load(PathBuf), LoadAfterOpen(PathBuf) }` — Task 4 decl, Tasks 5/6/7 use. ✓
 - `web_dirlist_tx/rx: (PathBuf, Result<DirListing, String>)` — Task 4 decl, Task 5 `request_dir_listing` send / `poll_dir_listing` recv. ✓
 - `request_dir_listing(&mut self, dir: &Path)` / `poll_dir_listing(&mut self) -> bool` / `apply_web_open_folder(&mut self, dir: PathBuf)` / `apply_web_load_folder(&mut self, dir: PathBuf)` / `nav_to_folder(&mut self, dir: PathBuf)` — consistent across Tasks 5–7. ✓
 - `is_listable_subdir(name: &str) -> bool` — Task 1 def, Task 3 use (`&name` where `name: String` from `child.name()` → `&name` derefs to `&str`). ✓
