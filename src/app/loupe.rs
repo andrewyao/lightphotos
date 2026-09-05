@@ -148,6 +148,7 @@ impl App {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
         };
+        let old_zoom = self.zoom();
         let step = (self.current_rotation() + if cw { 1 } else { 3 }) % 4;
         if step == 0 {
             self.rotations.remove(&path);
@@ -158,6 +159,10 @@ impl App {
         if self.fitted {
             self.fit_to_window();
         } else {
+            let fs = self.fit_scale();
+            if fs > 0.0 {
+                self.zoom_rel = old_zoom / fs;
+            }
             self.center();
             self.push_transform();
         }
@@ -544,7 +549,7 @@ fn loupe_xform(
 fn fit_scale_of(image_size: (f32, f32), area: (f32, f32)) -> f32 {
     let (iw, ih) = image_size;
     let (ww, wh) = area;
-    (ww / iw).min(wh / ih).clamp(MIN_ZOOM, MAX_ZOOM)
+    (ww / iw).min(wh / ih)
 }
 
 #[cfg(test)]
@@ -624,8 +629,18 @@ mod tests {
         let before = loupe_xform(PREVIEW_DIMS, AREA, z_preview, pan, rot);
         let after = loupe_xform(SOURCE_DIMS, AREA, z_source, pan, rot);
         // …but the transform the shader sees does not (aspect drift only).
-        assert!(close(before.0, after.0), "scale {:?} vs {:?}", before.0, after.0);
-        assert!(close(before.1, after.1), "offset {:?} vs {:?}", before.1, after.1);
+        assert!(
+            close(before.0, after.0),
+            "scale {:?} vs {:?}",
+            before.0,
+            after.0
+        );
+        assert!(
+            close(before.1, after.1),
+            "offset {:?} vs {:?}",
+            before.1,
+            after.1
+        );
     }
 
     /// `reset_100` picks `zoom_rel = 1.0 / fit_scale()` so the effective zoom is
@@ -636,7 +651,10 @@ mod tests {
             for dims in [SOURCE_DIMS, PREVIEW_DIMS, (1200.0, 1600.0)] {
                 let fs = fit_scale_of(dims, area);
                 let zoom_rel = 1.0 / fs;
-                assert!((zoom_rel * fs - 1.0).abs() < 1e-4, "area {area:?} dims {dims:?}");
+                assert!(
+                    (zoom_rel * fs - 1.0).abs() < 1e-4,
+                    "area {area:?} dims {dims:?}"
+                );
             }
         }
     }
@@ -648,12 +666,22 @@ mod tests {
     fn fitted_exactly_contains_the_image() {
         for dims in [SOURCE_DIMS, PREVIEW_DIMS, (1200.0, 1600.0)] {
             let fs = fit_scale_of(dims, AREA);
-            let (scale, _, _) =
-                loupe_xform(dims, AREA, fs, (0.0, 0.0), [1.0, 0.0, 0.0, 1.0]);
+            let (scale, _, _) = loupe_xform(dims, AREA, fs, (0.0, 0.0), [1.0, 0.0, 0.0, 1.0]);
             let tight = scale[0].min(scale[1]);
             let loose = scale[0].max(scale[1]);
-            assert!((tight - 1.0).abs() < 1e-4, "dims {dims:?}: tight axis {tight}");
+            assert!(
+                (tight - 1.0).abs() < 1e-4,
+                "dims {dims:?}: tight axis {tight}"
+            );
             assert!(loose >= 1.0 - 1e-4, "dims {dims:?}: loose axis {loose}");
         }
+    }
+
+    #[test]
+    fn fit_anchor_is_not_limited_by_explicit_zoom_bounds() {
+        // Fit-relative zoom must preserve the contain scale even when fitting
+        // naturally lands outside the range used by explicit zoom operations.
+        assert_eq!(fit_scale_of((100_000.0, 100_000.0), (100.0, 100.0)), 0.001);
+        assert_eq!(fit_scale_of((1.0, 1.0), (100.0, 100.0)), 100.0);
     }
 }
