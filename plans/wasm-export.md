@@ -105,21 +105,22 @@ file-URL-based) is untouched — wasm never reaches it.
 
 ### 2. `raw/nonmac_decode.rs` — bytes core
 
-- `decode_raw_via_rawler(path)` → add `decode_raw_via_rawler_bytes(&[u8])`
-  using `rawler::rawsource::RawSource::new_from_slice(bytes)` (already used
-  on wasm by `raw/preview.rs`). The `path` version becomes a
-  `std::fs`-reading wrapper, or keeps its mmap `RawSource::new(path)` and
-  the two share only the post-parse `RawImage` handling.
-- `decode_raw_nonmac(path, max_dim)` → `decode_raw_nonmac_from_bytes(&[u8],
-  max_dim)`. The orientation lookup currently does a second
-  `RawSource::new(path)`; the bytes version reuses the already-parsed
-  metadata (or re-parses from the same slice). Everything after the raw
-  read — `RawDevelop::develop_intermediate`, the boost LUT, the
+- `decode_raw_via_rawler(path)` remains the native path-based rawler entry
+  point. The bytes path constructs `RawSource::new_from_slice(bytes)` (already
+  used on wasm by `raw/preview.rs`), and both paths share the post-parse
+  `RawImage` handling through `decode_raw_nonmac_from_source`.
+- `decode_raw_nonmac_from_bytes(&[u8], max_dim)` is the wasm entry point, while
+  `decode_raw_nonmac(path, max_dim)` remains the native path entry point. The
+  orientation lookup currently does a second `RawSource::new(path)`; the bytes
+  version reuses the already-parsed metadata (or re-parses from the same
+  slice). Everything after the raw read — `RawDevelop::develop_intermediate`,
+  the boost LUT, the
   `AUTO_RAW_DENOISE_STRENGTH` post-pass, `fit_within` + `Lanczos3` resize,
   `apply_exif_orientation` — is unchanged and already CPU-only.
-- Native `decode_raw_nonmac(path, ..)` keeps its signature (thin wrapper:
-  `std::fs::read` then delegate) so `nonmac_decode::decode` and
-  `decode_probe.rs` are unaffected.
+- Native `decode_raw_nonmac(path, ..)` keeps its signature and mmap-backed
+  `RawSource::new(path)` path for lower peak heap use; the bytes entry point is
+  used by wasm export. `nonmac_decode::decode` and `decode_probe.rs` remain
+  unaffected.
 - **Build risk:** `raw/preview.rs` calls lower-level rawler pieces, not
   `RawDevelop` / `DynamicImage::into_rgba8` / `image::imageops::resize`
   directly. If any of those three does not link for
@@ -373,6 +374,11 @@ Implementation notes / deviations from the sketch above:
 - `ExportFs` is `read_source` + `write_atomic` only; the collision scan is
   `WebFs::existing_export_names` (inherent, wasm-only), not a trait method —
   native keeps `jpg_export_target`'s `Path::exists()`.
+- Task 2 uses `decode_raw_nonmac_from_bytes` plus a shared
+  `decode_raw_nonmac_from_source` tail; there is no separate
+  `decode_raw_via_rawler_bytes`. The native path-based decoder intentionally
+  retains rawler's mmap-backed `RawSource::new(path)` instead of becoming an
+  `std::fs::read` wrapper.
 - `submit_export` takes `Vec<u8>`, not an `ArrayBuffer` — export isn't
   latency-critical, so one copy into a fresh JS buffer is fine (the decode
   path's zero-copy transfer is kept only where it matters).
@@ -382,13 +388,13 @@ Implementation notes / deviations from the sketch above:
 
 ## Tasks
 
-- [x] **Task 1 — `encode_jpeg_to_vec`.** Split `image_encode.rs`. Unit test:
-  `encode_jpeg_to_vec` → `image_decode::decode` round-trips dims + colour
-  (mirror the existing `encode_then_decode_round_trips`, minus the file).
-  `cargo test`.
-- [x] **Task 2 — RAW bytes core.** `decode_raw_via_rawler_bytes` +
-  `decode_raw_nonmac_from_bytes` in `raw/nonmac_decode.rs`; native
-  `decode_raw_nonmac` becomes a `std::fs::read` wrapper. `cargo test`
+- [x] **Task 1 — `encode_jpeg_to_vec`.** Split `image_encode.rs`. Unit test
+  writes the returned bytes to a temporary JPEG and uses
+  `image_decode::decode` to round-trip dims + colour. `cargo test`.
+- [x] **Task 2 — RAW bytes core.** Add the bytes-backed RAW source path and
+  `decode_raw_nonmac_from_bytes` in `raw/nonmac_decode.rs`; share the parsed
+  `RawImage` processing tail with native `decode_raw_nonmac`, which retains its
+  mmap-backed path-based decoder for lower peak memory use. `cargo test`
   (`decode_probe` golden hashes must not move). **Then `RUSTFLAGS="--cfg=
   web_sys_unstable_apis" trunk build --release` to confirm `RawDevelop` /
   `to_dynamic_image` / `image::imageops::resize` link for wasm32** — if

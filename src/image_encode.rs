@@ -145,11 +145,14 @@ mod tests {
         let jpeg = encode_jpeg_to_vec(w, h, &rgba).expect("encode should succeed");
         assert!(!jpeg.is_empty(), "should have produced JPEG bytes");
 
-        let decoded = image::load_from_memory(&jpeg)
-            .expect("re-decode should succeed")
-            .into_rgba8();
-        assert_eq!((decoded.width(), decoded.height()), (w, h));
-        let px = decoded.get_pixel(0, 0).0;
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos-encode-vec-test-{}.jpg",
+            std::process::id()
+        ));
+        std::fs::write(&path, jpeg).expect("write encoded JPEG should succeed");
+        let decoded = image_decode::decode(&path, u32::MAX).expect("re-decode should succeed");
+        assert_eq!((decoded.width, decoded.height), (w, h));
+        let px = &decoded.rgba[..4];
         assert!(px[0] > 150, "red channel should be high, got {}", px[0]);
         assert!(
             px[1] < 100 && px[2] < 100,
@@ -157,6 +160,7 @@ mod tests {
             px[1],
             px[2]
         );
+        std::fs::remove_file(path).ok();
     }
 
     /// Zero-sized input is rejected, not silently encoded to garbage.
