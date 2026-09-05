@@ -125,9 +125,10 @@ fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
 
 /// Whether a directory entry named `name` should appear in the folder tree.
 /// Skips hidden entries (names starting with `.`) and macOS bundles
-/// (`.app` / `.photoslibrary`, case-insensitive). Shared by the native
+/// (`.app` / `.photoslibrary`, case-insensitive). Used by the native
 /// `list_subdirs` (`std::fs::read_dir`) and wasm32's `web_fs::list_dir`
-/// (File System Access `values()`), so the two platforms filter identically.
+/// (File System Access `values()`), keeping the two platforms' filtering
+/// identical.
 pub fn is_listable_subdir(name: &str) -> bool {
     if name.starts_with('.') {
         return false;
