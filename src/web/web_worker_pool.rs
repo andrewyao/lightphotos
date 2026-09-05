@@ -35,8 +35,8 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use js_sys::{Array, Object, Reflect, Uint8Array};
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{
     Blob, BlobPropertyBag, ErrorEvent, FileSystemDirectoryHandle, MessageEvent, Url, Worker,
 };
@@ -140,7 +140,6 @@ struct WorkerSlot {
 
 struct Inner {
     workers: Vec<WorkerSlot>,
-    configured_workers: usize,
     next_id: u32,
     pending: HashMap<u32, PendingMeta>,
     /// Decode work is kept ahead of exports so a bulk export cannot make the
@@ -168,6 +167,22 @@ fn get_string(obj: &JsValue, key: &str) -> Option<String> {
     Reflect::get(obj, &JsValue::from_str(key)).ok()?.as_string()
 }
 
+/// Number of workers that can actually accept work right now. A slot whose
+/// replacement is still starting (or has already failed) must not count
+/// toward export capacity or the scheduler's interactive-decode reservation.
+fn ready_worker_count(inner: &Inner) -> usize {
+    inner.workers.iter().filter(|slot| slot.ready).count()
+}
+
+fn export_capacity_for(inner: &Inner) -> usize {
+    let ready_workers = ready_worker_count(inner);
+    if ready_workers > 1 {
+        ready_workers.saturating_sub(1)
+    } else {
+        ready_workers
+    }
+}
+
 /// Dispatch as many queued jobs as there are idle, ready workers — called
 /// both right after `submit` (in case a slot is already free) and whenever
 /// a slot frees up (a result lands, or a worker's readiness handshake
@@ -191,12 +206,7 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
             // Keep one worker available for interactive decode work whenever
             // the pool has more than one worker. A single-worker pool still
             // makes progress on exports.
-            let ready_workers = inner_mut.workers.iter().filter(|s| s.ready).count();
-            let export_limit = if inner_mut.configured_workers > 1 {
-                ready_workers.saturating_sub(1)
-            } else {
-                ready_workers
-            };
+            let export_limit = export_capacity_for(&inner_mut);
             let active_exports = inner_mut
                 .workers
                 .iter()
@@ -359,7 +369,6 @@ impl WorkerPool {
         let (export_tx, export_rx) = mpsc::channel();
         let inner = Rc::new(RefCell::new(Inner {
             workers: Vec::new(),
-            configured_workers: worker_count.max(1),
             next_id: 0,
             pending: HashMap::new(),
             decode_backlog: VecDeque::new(),
@@ -425,19 +434,6 @@ impl WorkerPool {
             out.push(r);
         }
         out
-    }
-
-    /// Maximum number of export source buffers/jobs kept in flight. Reserve
-    /// one worker for interactive decode work whenever possible, matching
-    /// `pump`'s export scheduling rule.
-    pub fn export_capacity(&self) -> usize {
-        let inner = self.inner.borrow();
-        let ready_workers = inner.workers.iter().filter(|s| s.ready).count();
-        if inner.configured_workers > 1 {
-            ready_workers.saturating_sub(1)
-        } else {
-            ready_workers
-        }
     }
 }
 
@@ -653,18 +649,6 @@ fn fail_queued_jobs(inner: &Rc<RefCell<Inner>>, error: &str) {
     }
 }
 
-fn fail_queued_exports(inner: &Rc<RefCell<Inner>>, error: &str) {
-    loop {
-        let id = inner
-            .borrow_mut()
-            .export_backlog
-            .pop_front()
-            .map(|job| job.id);
-        let Some(id) = id else { return };
-        fail_pending_job(inner, id, error.to_string());
-    }
-}
-
 fn replace_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize) {
     for _ in 0..MAX_REPLACEMENT_ATTEMPTS {
         if inner
@@ -707,19 +691,6 @@ fn replace_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize) {
         fail_queued_jobs(
             inner,
             "no worker capacity remains after replacement failures",
-        );
-    } else if inner.borrow().configured_workers > 1
-        && inner
-            .borrow()
-            .workers
-            .iter()
-            .filter(|slot| slot.ready)
-            .count()
-            <= 1
-    {
-        fail_queued_exports(
-            inner,
-            "no export worker capacity remains after replacement failures",
         );
     }
 }
@@ -777,6 +748,13 @@ fn attach_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize, worker: Worker, ge
 }
 
 impl WorkerPoolHandle {
+    /// Current export capacity, based only on ready workers. This is read
+    /// through the cloneable handle because the web export producer runs in a
+    /// `'static` task rather than on `WorkerPool` itself.
+    pub fn export_capacity(&self) -> usize {
+        export_capacity_for(&self.0.borrow())
+    }
+
     pub fn export_in_flight(&self) -> usize {
         self.0
             .borrow()

@@ -103,7 +103,6 @@ impl App {
 
         let pool = self.web_worker_pool.handle();
         let fs = crate::web_export_fs::WebFs::new(folder_handle, self.web_file_handles.clone());
-        let capacity = self.web_worker_pool.export_capacity();
         wasm_bindgen_futures::spawn_local(async move {
             let existing = match fs.existing_export_names().await {
                 Ok(existing) => existing,
@@ -122,7 +121,14 @@ impl App {
             };
             let mut taken: HashSet<String> = HashSet::new();
             for (src, is_raw, adj_json, touchups_json, rot) in jobs {
-                while pool.export_in_flight() >= capacity {
+                // Capacity is based on ready workers and can change while
+                // replacements start or fail. Allow one submission when it
+                // is currently zero: pump() can then either hold it until a
+                // worker becomes ready or fail it immediately when no worker
+                // can be created, giving the batch a terminal outcome.
+                while pool.export_in_flight() > 0
+                    && pool.export_in_flight() >= pool.export_capacity()
+                {
                     Self::wait_for_export_capacity().await;
                 }
                 let filename = crate::paths::jpg_export_name(&src, &existing, &taken);
