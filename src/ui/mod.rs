@@ -67,10 +67,6 @@ pub enum UiAction {
     CopySettings,
     /// Show/hide the keyboard-shortcut help overlay.
     ToggleHelp,
-    /// Switch to the Loupe (single-image / edit) view.
-    EnterLoupe,
-    /// Switch to the Grid (thumbnail) view.
-    EnterGrid,
     /// Confirm quitting the app (from the Esc quit-confirmation modal).
     ConfirmQuit,
     /// Dismiss the quit-confirmation modal without quitting.

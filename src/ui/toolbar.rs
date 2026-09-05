@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::app::{App, Region, ViewMode};
+use crate::app::{App, Region};
 use crate::navigation::Cmp;
 
 /// The Grid/Survey toolbar, drawn once from `ui::draw` above the middle
@@ -239,12 +239,11 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 }
             }
 
-            // Help + Loupe/Grid mode toggle, pinned to the far right. In a
-            // right-to-left layout the first widget is the rightmost, so add
-            // `?` first — it sits in the top-right corner, always visible —
-            // then `G`, then `E` to read "E  G  ?" left-to-right. Added in
-            // this order they land at `idx` (ToggleHelp), `idx + 1`
-            // (EnterGrid) and `idx + 2` (EnterLoupe), matching
+            // Help, pinned to the far right so `?` sits in the top-right
+            // corner, always visible. The clickable E/G mode toggle that used
+            // to sit to its left was dropped — the `E`/`G` keys still switch
+            // modes, and Home returns to the start screen. It's the last
+            // keyboard-focusable control, at `idx` (ToggleHelp), matching
             // `activate_toolbar_focus`'s Grid arm.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
@@ -252,22 +251,6 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                     out.actions.push(UiAction::ToggleHelp);
                 }
                 toolbar_focus_sync(ui, app, idx, &resp, out);
-
-                let resp = ui
-                    .selectable_label(app.mode() == ViewMode::Grid, "G")
-                    .on_hover_text("Grid (G)");
-                if resp.clicked() {
-                    out.actions.push(UiAction::EnterGrid);
-                }
-                toolbar_focus_sync(ui, app, idx + 1, &resp, out);
-
-                let resp = ui
-                    .selectable_label(app.mode() == ViewMode::Loupe, "E")
-                    .on_hover_text("Loupe / edit (E)");
-                if resp.clicked() {
-                    out.actions.push(UiAction::EnterLoupe);
-                }
-                toolbar_focus_sync(ui, app, idx + 2, &resp, out);
             });
 
             region_focus_marker(ui, app, Region::Toolbar);

@@ -1448,8 +1448,6 @@ impl App {
                     self.show_help = !self.show_help;
                     self.request_redraw();
                 }
-                ui::UiAction::EnterLoupe => self.enter_loupe(),
-                ui::UiAction::EnterGrid => self.enter_grid(),
                 ui::UiAction::ConfirmQuit => self.quit_requested = true,
                 ui::UiAction::CancelQuit => {
                     self.pending_quit = false;

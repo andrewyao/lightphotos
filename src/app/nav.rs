@@ -825,7 +825,7 @@ impl App {
     /// with this count and with `activate_toolbar_focus`'s index mapping.
     /// Rating-histogram bars and the selection-dependent bulk actions aren't
     /// included yet since their count varies frame to frame.
-    const TOOLBAR_CONTROLS: usize = 16;
+    const TOOLBAR_CONTROLS: usize = 14;
     /// Number of keyboard-focusable controls in the Loupe toolbar
     /// (`toolbar::loupe_toolbar`): just `?` (Help). The Loupe/Grid toggle
     /// was replaced by a non-interactive debug tier readout; everything
@@ -883,8 +883,6 @@ impl App {
             11 => ui::UiAction::ToggleDupes,
             12 => ui::UiAction::ToggleEyesClosed,
             13 => ui::UiAction::ToggleHelp,
-            14 => ui::UiAction::EnterGrid,
-            15 => ui::UiAction::EnterLoupe,
             _ => return,
         };
         self.apply_ui_actions(vec![action]);
@@ -923,7 +921,7 @@ mod tests {
     fn toolbar_control_count_is_smaller_in_loupe_than_grid() {
         let mut app = App::new(None);
         app.mode = ViewMode::Grid;
-        assert_eq!(app.toolbar_control_count(), 16);
+        assert_eq!(app.toolbar_control_count(), 14);
         app.mode = ViewMode::Loupe;
         assert_eq!(
             app.toolbar_control_count(),
