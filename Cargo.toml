@@ -29,7 +29,9 @@ test = false
 [[bin]]
 name = "decode_probe"
 path = "src/raw/probe.rs"
-test = false
+# Keep the probe's inline regression tests runnable with
+# `cargo test --features raw-probe --bin decode_probe`.
+test = true
 required-features = ["raw-probe"]
 
 # The wasm32 Web Worker pool's decode entry point (M4 of the wasm port plan).
