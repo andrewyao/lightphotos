@@ -556,6 +556,9 @@ impl App {
                 self.request_redraw();
                 return;
             }
+            // A cached navigation supersedes any older request whose listing
+            // may still complete later.
+            self.web_pending_nav = None;
             self.apply_web_load_folder(dir);
         }
     }
