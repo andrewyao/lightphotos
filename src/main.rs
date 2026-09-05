@@ -99,7 +99,12 @@ use renderer::Renderer;
 /// comment): winit's wasm32 `inner_size()` is a stale cache at this point,
 /// not a live query, and `app.win_size` below drives egui's own layout
 /// sizing, so getting this wrong doesn't just affect wgpu.
-fn finish_window_setup(app: &mut App, window: Arc<Window>, renderer: Renderer, size: winit::dpi::PhysicalSize<u32>) {
+fn finish_window_setup(
+    app: &mut App,
+    window: Arc<Window>,
+    renderer: Renderer,
+    size: winit::dpi::PhysicalSize<u32>,
+) {
     let loader = Loader::new(renderer.max_dim);
 
     let egui_state = egui_winit::State::new(
@@ -364,6 +369,7 @@ impl ApplicationHandler<UserEvent> for App {
             // asynchronously — drain those into `last_error` every frame,
             // same convention as every other wasm32 poll here.
             self.poll_catalog_persist_errors();
+            self.poll_web_deletes();
             let pick_pending = self.poll_folder_pick();
             let listing_pending = self.poll_dir_listing();
             pick_pending || listing_pending
@@ -417,14 +423,14 @@ impl ApplicationHandler<UserEvent> for App {
         //
         // A loupe decode is what the user is staring at, so it gets a tight
         // cadence; an export only feeds a progress toast, so it gets a lazy one.
-        let image_pending = self
-            .loader
-            .as_ref()
-            .is_some_and(|l| l.has_pending_image())
+        let image_pending = self.loader.as_ref().is_some_and(|l| l.has_pending_image())
             || self.selection_pending()
             || catalog_load_pending;
         #[cfg(target_arch = "wasm32")]
-        let image_pending = image_pending || web_folder_pending || self.web_decode_pending();
+        let image_pending = image_pending
+            || web_folder_pending
+            || self.web_decode_pending()
+            || self.web_delete_pending.is_some();
         let poll_delay = if image_pending {
             Some(16)
         } else if self.export_progress.is_some() {

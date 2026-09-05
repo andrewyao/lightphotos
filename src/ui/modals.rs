@@ -95,7 +95,14 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         ("Cmd + Shift + C", "Copy develop settings"),
         ("Cmd + Shift + Y", "Apply settings to selection"),
         ("X", "Export selected as JPG"),
-        ("Delete", "Move to Trash"),
+        (
+            "Delete",
+            if cfg!(target_arch = "wasm32") {
+                "Permanently delete; cannot be undone"
+            } else {
+                "Move to Trash"
+            },
+        ),
         ("+ / \u{2212}", "Thumbnail size (grid)"),
         ("Alt + 0", "Reset zoom (100%)"),
         ("?", "This help"),

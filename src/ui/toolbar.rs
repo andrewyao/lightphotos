@@ -215,10 +215,14 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 {
                     out.actions.push(UiAction::RequestBulk(BulkKind::Export));
                 }
-                // Move the selection to the Trash (confirmed).
+                // Delete the selection (confirmed).
                 if ui
                     .button("Delete")
-                    .on_hover_text("Move selected photos to the Trash (Delete)")
+                    .on_hover_text(if cfg!(target_arch = "wasm32") {
+                        "Permanently delete selected photos; cannot be undone (Delete)"
+                    } else {
+                        "Move selected photos to the Trash (Delete)"
+                    })
                     .clicked()
                 {
                     out.actions.push(UiAction::RequestBulk(BulkKind::Delete));

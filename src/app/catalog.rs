@@ -215,7 +215,12 @@ impl App {
             ui::BulkKind::ApplySettings => {
                 format!("Apply the copied settings to {n} photo(s)?")
             }
+            #[cfg(not(target_arch = "wasm32"))]
             ui::BulkKind::Delete => format!("Move {n} photo(s) to the Trash?"),
+            #[cfg(target_arch = "wasm32")]
+            ui::BulkKind::Delete => {
+                format!("Permanently delete {n} photo(s)? This cannot be undone.")
+            }
         })
     }
 
@@ -244,13 +249,13 @@ impl App {
         }
     }
 
-    /// Move every selected photo to the Trash, then drop it from the playlist,
+    /// Remove every selected photo from disk, then drop successful removals from the playlist,
     /// the in-memory maps, and the catalog, repairing the cursor + loupe.
     pub(super) fn delete_selection(&mut self) {
         self.run_delete(self.selected_paths());
     }
 
-    /// Move `paths` to the Trash (native) and prune all derived state.
+    /// Move `paths` to the Trash (native) and prune all successfully handled state.
     #[cfg(not(target_arch = "wasm32"))]
     fn run_delete(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
@@ -272,41 +277,62 @@ impl App {
     }
 
     /// wasm32: File System Access has no trash — `remove_entry` is a
-    /// permanent delete. Issued fire-and-forget per file (its parent
-    /// directory handle comes from `web_dir_handles`), with the UI pruned
-    /// optimistically the same way `catalog.rs`'s wasm sidecar writes are: a
-    /// `remove_entry` that fails leaves a stale file that reappears on
-    /// reload, which beats a phantom grid entry pointing at nothing.
+    /// permanent delete. Results are returned through `web_delete_rx`; the UI
+    /// is pruned only for operations that actually succeed.
     #[cfg(target_arch = "wasm32")]
     fn run_delete(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
         }
         let total = paths.len();
+        self.web_delete_pending = Some((total, total, Vec::new(), None));
         for path in &paths {
+            let tx = self.web_delete_tx.clone();
             let Some(name) = path.file_name().map(std::ffi::OsString::from) else {
+                let _ = tx.send((path.clone(), Err("path has no file name".into())));
                 continue;
             };
             let dir_key = path.parent().unwrap_or(Path::new("")).to_path_buf();
             let Some(dir) = self.web_dir_handles.get(&dir_key).cloned() else {
-                web_sys::console::error_1(
-                    &format!("[web] delete: no directory handle for {}", path.display()).into(),
-                );
+                let _ = tx.send((
+                    path.clone(),
+                    Err(format!("no directory handle for {}", path.display())),
+                ));
                 continue;
             };
-            let display = path.display().to_string();
+            let path = path.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                if let Err(e) = crate::web_catalog_fs::remove_file(&dir, &name).await {
-                    web_sys::console::error_1(
-                        &format!("[web] delete failed for {display}: {e}").into(),
-                    );
-                }
+                let result = crate::web_catalog_fs::remove_file(&dir, &name).await;
+                let _ = tx.send((path, result));
             });
         }
-        self.finish_delete(paths, total, None);
     }
 
-    /// Prune every derived structure for the just-deleted `trashed` paths and
+    /// Drain asynchronous browser deletion results and finish once every
+    /// requested path has reported success or failure.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn poll_web_deletes(&mut self) {
+        while let Ok((path, result)) = self.web_delete_rx.try_recv() {
+            let Some((remaining, _total, removed, last_err)) = self.web_delete_pending.as_mut()
+            else {
+                continue;
+            };
+            *remaining -= 1;
+            match result {
+                Ok(()) => removed.push(path),
+                Err(e) => {
+                    web_sys::console::error_1(&format!("[web] delete failed: {e}").into());
+                    *last_err = Some(e);
+                }
+            }
+            if *remaining == 0 {
+                let (_, total, removed, last_err) = self.web_delete_pending.take().unwrap();
+                self.finish_delete(removed, total, last_err);
+            }
+        }
+    }
+
+    /// Prune every derived structure for the just-deleted paths and
     /// repair the view — shared by both `run_delete` arms.
     fn finish_delete(&mut self, trashed: Vec<PathBuf>, total: usize, last_err: Option<String>) {
         if !trashed.is_empty() {
@@ -378,10 +404,16 @@ impl App {
         let done = format!("Moved {n} photo(s) to Trash");
         // wasm32 `remove_entry` is a permanent delete, not a trash move — say so.
         #[cfg(target_arch = "wasm32")]
-        let done = format!("Deleted {n} photo(s)");
+        let done = format!("Permanently deleted {n} photo(s)");
+        #[cfg(not(target_arch = "wasm32"))]
         self.set_status(match last_err {
             None => done,
-            Some(e) => format!("Deleted {n}/{total} \u{2014} last error: {e}"),
+            Some(e) => format!("Moved {n}/{total} \u{2014} last error: {e}"),
+        });
+        #[cfg(target_arch = "wasm32")]
+        self.set_status(match last_err {
+            None => done,
+            Some(e) => format!("Permanently deleted {n}/{total} \u{2014} last error: {e}"),
         });
         self.request_redraw();
     }

@@ -374,6 +374,14 @@ pub(crate) struct App {
     pub(crate) web_export_tx: Sender<crate::export::ExportOutcome>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_export_rx: Receiver<crate::export::ExportOutcome>,
+    /// Results from asynchronous File System Access deletions. A file is
+    /// removed from the UI only after its individual operation succeeds.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_delete_tx: Sender<(PathBuf, Result<(), String>)>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_delete_rx: Receiver<(PathBuf, Result<(), String>)>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_delete_pending: Option<(usize, usize, Vec<PathBuf>, Option<String>)>,
     /// A folder navigation deferred until its listing lands (see
     /// `app/nav.rs`'s request/apply split). `Open` toggles expansion +
     /// pure-container skip like native `open_folder`; `Load` just swaps the
@@ -817,6 +825,8 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let (web_export_tx, web_export_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
+        let (web_delete_tx, web_delete_rx) = std::sync::mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
         let web_worker_pool =
             crate::web_worker_pool::WorkerPool::new(crate::web_worker_pool::worker_count());
         Self {
@@ -851,6 +861,12 @@ impl App {
             web_export_tx,
             #[cfg(target_arch = "wasm32")]
             web_export_rx,
+            #[cfg(target_arch = "wasm32")]
+            web_delete_tx,
+            #[cfg(target_arch = "wasm32")]
+            web_delete_rx,
+            #[cfg(target_arch = "wasm32")]
+            web_delete_pending: None,
             #[cfg(target_arch = "wasm32")]
             web_pending_nav: None,
             #[cfg(target_arch = "wasm32")]
