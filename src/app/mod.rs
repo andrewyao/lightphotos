@@ -996,7 +996,24 @@ impl App {
             self.folder_root = Some(path.clone());
             self.expanded = HashSet::from([path.clone()]);
             self.ensure_subdirs(&path);
+            #[cfg(not(target_arch = "wasm32"))]
             self.load_folder(path);
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Browser-picked folders use synthetic paths backed by
+                // FileSystemDirectoryHandle values.  Their listing is
+                // asynchronous, so never fall through to native
+                // `load_folder`/`Playlist::from_dir` here.
+                if !self.subdirs.contains_key(&path) {
+                    self.web_pending_nav = Some(WebPendingNav::Load(path.clone()));
+                    self.request_dir_listing(&path);
+                    self.mode = ViewMode::Grid;
+                    self.normalize_focus();
+                    self.request_redraw();
+                    return;
+                }
+                self.apply_web_load_folder(path);
+            }
             self.mode = ViewMode::Grid;
             self.normalize_focus();
             self.request_redraw();
