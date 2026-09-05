@@ -381,6 +381,12 @@ pub(crate) struct App {
     /// `folder_collapse`).
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_pending_nav: Option<WebPendingNav>,
+    /// Monotonically increasing token for tree actions. A listing completion
+    /// may only apply navigation deferred by the latest tree action.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_nav_generation: u64,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_pending_nav_generation: u64,
     /// Thumbnail decodes currently in flight — `loader.rs`'s own
     /// `thumb_inflight` isn't reused here since decode results arrive via
     /// the Web Worker pool (`web_worker_pool.rs`), not `loader.rs`'s own
@@ -848,6 +854,10 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             web_pending_nav: None,
             #[cfg(target_arch = "wasm32")]
+            web_nav_generation: 0,
+            #[cfg(target_arch = "wasm32")]
+            web_pending_nav_generation: 0,
+            #[cfg(target_arch = "wasm32")]
             web_thumb_inflight: HashSet::new(),
             #[cfg(target_arch = "wasm32")]
             web_read_inflight: std::rc::Rc::new(std::cell::Cell::new(0)),
@@ -1005,7 +1015,8 @@ impl App {
                 // asynchronous, so never fall through to native
                 // `load_folder`/`Playlist::from_dir` here.
                 if !self.subdirs.contains_key(&path) {
-                    self.web_pending_nav = Some(WebPendingNav::Load(path.clone()));
+                    self.supersede_web_pending_nav();
+                    self.defer_web_nav(WebPendingNav::Load(path.clone()));
                     self.request_dir_listing(&path);
                     self.mode = ViewMode::Grid;
                     self.normalize_focus();

@@ -795,6 +795,9 @@ impl App {
             }
 
             // Complete a navigation that was blocked on this listing.
+            if self.web_pending_nav_generation != self.web_nav_generation {
+                self.web_pending_nav = None;
+            }
             match self.web_pending_nav.clone() {
                 Some(WebPendingNav::Open(p)) if p == dir => {
                     self.web_pending_nav = None;
@@ -844,7 +847,7 @@ impl App {
         // The pure-container target is a different folder; its own listing
         // may not be loaded yet.
         if target != dir && !self.subdirs.contains_key(&target) {
-            self.web_pending_nav = Some(WebPendingNav::Load(target.clone()));
+            self.defer_web_nav(WebPendingNav::Load(target.clone()));
             self.request_dir_listing(&target);
             self.request_redraw();
             return;
@@ -861,7 +864,7 @@ impl App {
     /// re-defers if it somehow isn't.
     pub(crate) fn apply_web_load_folder(&mut self, dir: PathBuf) {
         if !self.subdirs.contains_key(&dir) {
-            self.web_pending_nav = Some(WebPendingNav::Load(dir.clone()));
+            self.defer_web_nav(WebPendingNav::Load(dir.clone()));
             self.request_dir_listing(&dir);
             self.request_redraw();
             return;
