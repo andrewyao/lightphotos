@@ -107,16 +107,18 @@ impl App {
                     crate::navigation::sort_by_name(&mut first_level);
                     self.subdirs.insert(root.clone(), first_level);
 
-                    self.folder_root = Some(root.clone());
-                    self.expanded = std::collections::HashSet::from([root.clone()]);
-
                     // Before `load_playlist` triggers the catalog scan (its
                     // wasm arm needs this handle to read `.lightphotos/*.xmp`).
                     if let Some(h) = self.web_dir_handles.get(&root) {
                         self.catalog.set_wasm_dir_handle(h.clone());
                     }
                     let playlist = Playlist::from_entries(root.clone(), picked.entries);
-                    self.load_playlist(playlist, root);
+                    self.load_playlist(playlist, root.clone());
+                    // Expose the tree only after the handle-backed playlist
+                    // is installed. Folder-row actions are wasm-routed below
+                    // and must never fall through to native `load_folder`.
+                    self.folder_root = Some(root.clone());
+                    self.expanded = std::collections::HashSet::from([root]);
                     self.mode = ViewMode::Grid;
                 }
                 Err(e) => {
