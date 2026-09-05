@@ -34,6 +34,8 @@ mod catalog;
 #[cfg(target_os = "macos")]
 mod coregraphics;
 mod develop;
+#[cfg(not(target_arch = "wasm32"))]
+mod dialog;
 mod duplicates;
 mod export;
 mod facequality;
@@ -553,42 +555,36 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-/// True when running from inside a `.app` bundle (i.e. launched by Finder,
-/// double-click, or "Open With"). Those launches never carry a CLI arg — a
-/// file path instead arrives later via an AppleEvent (see
-/// [`macos_delegate`]) — so the dev-CLI's "require an argument" rule doesn't
-/// apply to them. Native only — `std::env::current_exe()` has no wasm32
-/// meaning (no filesystem, no bundle concept).
 #[cfg(not(target_arch = "wasm32"))]
-fn is_app_bundle() -> bool {
-    std::env::current_exe().ok().is_some_and(|exe| {
-        exe.components()
-            .any(|c| c.as_os_str().to_string_lossy().ends_with(".app"))
-    })
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn print_usage_and_exit() -> ! {
-    eprintln!("Usage: lightphotos <photo-or-folder>");
+fn print_usage_and_exit(code: i32) -> ! {
+    eprintln!("Usage: lightphotos [photo-or-folder]");
     eprintln!();
-    eprintln!("  <photo-or-folder>  Path to a folder of photos (opens in Grid)");
-    eprintln!("                     or a single photo (opens in Loupe).");
-    std::process::exit(1);
+    eprintln!("  photo-or-folder  Optional path to a folder of photos (opens in");
+    eprintln!("                   Grid) or a single photo (opens in Loupe). With");
+    eprintln!("                   no path, the app opens on a landing page with a");
+    eprintln!("                   \"Choose Folder\" button.");
+    std::process::exit(code);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     loader::start_clock();
-    // A file/dir path may be passed on the command line. The dev CLI binary
-    // requires one; the packaged .app doesn't (Finder "Open With" delivers
-    // the path via an AppleEvent after launch, with no argv).
-    let arg = std::env::args().nth(1).map(PathBuf::from);
-    let initial = match arg {
-        Some(p) if p.exists() => Some(p),
-        Some(_) if is_app_bundle() => None,
-        Some(_) => print_usage_and_exit(),
-        None if is_app_bundle() => None,
-        None => print_usage_and_exit(),
+    // A file/dir path may be passed on the command line, but it's optional:
+    // with none (or an unreadable one) the app opens on the landing page and
+    // the user picks a folder there. A packaged .app also gets its path this
+    // way *or* later via an AppleEvent (Finder "Open With", no argv).
+    let initial = match std::env::args().nth(1).as_deref() {
+        Some("-h" | "--help") => print_usage_and_exit(0),
+        Some(s) => {
+            let p = PathBuf::from(s);
+            if p.exists() {
+                Some(p)
+            } else {
+                eprintln!("[lightphotos] no such path: {s} — opening the folder picker");
+                None
+            }
+        }
+        None => None,
     };
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()

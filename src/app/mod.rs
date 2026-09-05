@@ -368,13 +368,13 @@ pub(crate) struct App {
     /// each navigation.
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_dir_handles: HashMap<PathBuf, web_sys::FileSystemDirectoryHandle>,
-    /// Async subfolder-listing results (`web_fs::list_dir`), same one-shot
-    /// channel shape as `web_folder_tx`/`web_folder_rx`. Key is the listed
-    /// directory's relative path.
+    /// Async subfolder-listing results (`web_fs::list_dir`), tagged with the
+    /// navigation generation that requested them. Stale generations are
+    /// discarded by `poll_dir_listing` after a close or replacement.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) web_dirlist_tx: Sender<(PathBuf, Result<crate::web_fs::DirListing, String>)>,
+    pub(crate) web_dirlist_tx: Sender<(u64, PathBuf, Result<crate::web_fs::DirListing, String>)>,
     #[cfg(target_arch = "wasm32")]
-    pub(crate) web_dirlist_rx: Receiver<(PathBuf, Result<crate::web_fs::DirListing, String>)>,
+    pub(crate) web_dirlist_rx: Receiver<(u64, PathBuf, Result<crate::web_fs::DirListing, String>)>,
     /// Directories with a `list_dir` in flight — dedupes repeated
     /// `request_dir_listing` calls from per-frame nav polling.
     #[cfg(target_arch = "wasm32")]
@@ -1025,6 +1025,7 @@ impl App {
     /// on that file). Builds the playlist, seeds ratings, computes the visible
     /// view, and kicks off thumbnail/full requests.
     pub(crate) fn open(&mut self, path: PathBuf) {
+        self.teardown_loupe_state();
         #[cfg(not(target_arch = "wasm32"))]
         let is_dir = std::fs::metadata(&path)
             .map(|m| m.is_dir())
@@ -1100,6 +1101,62 @@ impl App {
         }
     }
 
+    /// Open a folder picker and load whatever the user chooses. Backs the
+    /// landing page's "Choose Folder" button, the toolbar "Open" button, and
+    /// `Cmd/Ctrl+O`. On the web the picker is asynchronous (its result is
+    /// drained by `poll_folder_pick`); on native it is a modal OS dialog, so
+    /// `open` runs inline once it returns.
+    pub(crate) fn open_folder_picker(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.request_folder_pick();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = crate::dialog::pick_folder() {
+            self.open(path);
+        }
+    }
+
+    /// Close the current folder and return to the landing page — the toolbar
+    /// "Home" button. Resets to the same "nothing open" state a fresh no-arg
+    /// launch has (`playlist` is `None`), so `ui::draw` shows the landing page
+    /// next frame. Does not quit.
+    pub(crate) fn close_folder(&mut self) {
+        self.teardown_loupe_state();
+        #[cfg(target_arch = "wasm32")]
+        self.supersede_web_pending_nav();
+        self.playlist = None;
+        self.folder_root = None;
+        self.folder_sel = None;
+        self.expanded.clear();
+        self.subdirs.clear();
+        self.mode = ViewMode::Grid;
+        self.develop_open = false;
+        self.reset_burst_state();
+        self.reset_dup_state();
+        // Clears `visible`, `sel`, `selected`, `anchor` when `playlist` is None.
+        self.recompute_visible();
+        self.grid_range = (0, 0);
+        self.grid_scroll_reset = true;
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.web_file_handles.clear();
+            self.web_dir_handles.clear();
+        }
+        self.focus = Region::Grid;
+        self.focus_level = FocusLevel::Selected;
+        self.normalize_focus();
+        self.request_redraw();
+    }
+
+    /// Clear transient state that only makes sense while editing the current
+    /// Loupe image. This must happen before navigation so keyboard and pointer
+    /// input cannot remain captured by a stale image's editing mode.
+    fn teardown_loupe_state(&mut self) {
+        self.crop_edit = None;
+        self.wb_picker = false;
+        self.touchup_active = false;
+        self.touchup_selected = None;
+    }
+
     /// Populate `subdirs[dir]` (the folder's immediate children) if not cached.
     fn ensure_subdirs(&mut self, dir: &Path) {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1153,6 +1210,7 @@ impl App {
     /// builds one via `Playlist::from_entries` instead of `from_dir` (no
     /// `std::fs::read_dir` on a browser-picked folder; see that module).
     fn load_playlist(&mut self, playlist: Playlist, dir: PathBuf) {
+        self.teardown_loupe_state();
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
         self.reset_burst_state();
@@ -1437,10 +1495,8 @@ impl App {
                     self.set_focus(Region::Folders, FocusLevel::Entered);
                     self.open_folder(p);
                 }
-                #[cfg(target_arch = "wasm32")]
-                ui::UiAction::PickFolder => self.request_folder_pick(),
-                #[cfg(not(target_arch = "wasm32"))]
-                ui::UiAction::PickFolder => {}
+                ui::UiAction::PickFolder => self.open_folder_picker(),
+                ui::UiAction::CloseFolder => self.close_folder(),
                 ui::UiAction::Focus(region) => {
                     self.focus = region;
                     self.focus_level = FocusLevel::Entered;

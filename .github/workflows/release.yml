@@ -42,6 +42,8 @@ jobs:
           key: ${{ matrix.target }}
 
       # winit build headers (usually already present, cheap insurance).
+      # rfd's Linux folder dialog uses the XDG desktop portal (D-Bus, pure
+      # Rust) — no GTK/system -dev package needed.
       - name: Linux deps
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev

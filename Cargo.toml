@@ -99,6 +99,14 @@ raw-probe = ["dep:rawler", "dep:mozjpeg-rs", "dep:img-parts", "dep:image", "dep:
 # "clipboard" (and the Linux-only "wayland"/"x11", inert there anyway).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 egui-winit = "0.34"
+# Native "choose a folder" dialog for the landing page / Cmd+O. Per-OS native
+# picker: Cocoa NSOpenPanel via objc2 on macOS (same objc2 stack as the deps
+# above — no new system libs), the Win32 dialog on Windows, and the XDG
+# desktop portal (D-Bus, pure Rust — no GTK/system -dev package) on Linux.
+# The Linux portal pulls a zbus/async-io transitive tree, but it is
+# target_os = "linux"-gated inside rfd, so macOS/Windows builds never compile
+# it. wasm has its own picker (`web_fs::pick_and_list_folder`).
+rfd = "0.15"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"

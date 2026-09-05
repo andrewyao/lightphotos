@@ -22,7 +22,12 @@ impl App {
     /// Handle a key press per the Lightroom key-binding table.
     pub(crate) fn handle_key(&mut self, code: KeyCode, _event_loop: &ActiveEventLoop) {
         let shift = self.modifiers.shift_key();
+        #[cfg(target_arch = "wasm32")]
+        let cmd = self.modifiers.super_key() || self.modifiers.control_key();
+        #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
         let cmd = self.modifiers.super_key();
+        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
+        let cmd = self.modifiers.control_key();
         let alt = self.modifiers.alt_key();
 
         // While cropping, the keyboard is limited to the crop sub-mode: `C`/Enter
@@ -191,6 +196,10 @@ impl App {
                 self.focus_level = FocusLevel::Entered;
                 self.step_loupe(!shift);
             }
+
+            // Cmd/Ctrl+O: open the folder picker (same as the toolbar "Open"
+            // button and the landing page). Works in any mode.
+            KeyCode::KeyO if cmd && !alt => self.open_folder_picker(),
 
             KeyCode::KeyG => self.enter_grid(),
             // `B` toggles best-of-burst badges (grid). No-op while a filter is

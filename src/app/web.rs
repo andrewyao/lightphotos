@@ -808,10 +808,11 @@ impl App {
         };
         self.web_dirlist_inflight.insert(dir.to_path_buf());
         let base = dir.to_path_buf();
+        let generation = self.web_nav_generation;
         let tx = self.web_dirlist_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let result = web_fs::list_dir(&base, &handle).await;
-            let _ = tx.send((base, result));
+            let _ = tx.send((generation, base, result));
         });
         self.request_redraw();
     }
@@ -823,8 +824,15 @@ impl App {
     /// directory — run its apply step. Returns whether any listing is still
     /// outstanding (feeds the poll-cadence calc in `main.rs`).
     pub(crate) fn poll_dir_listing(&mut self) -> bool {
-        while let Ok((dir, result)) = self.web_dirlist_rx.try_recv() {
+        while let Ok((generation, dir, result)) = self.web_dirlist_rx.try_recv() {
             self.web_dirlist_inflight.remove(&dir);
+
+            // A close or newer navigation superseded this request. Do not
+            // merge its handles/cache or let it trigger deferred navigation.
+            if generation != self.web_nav_generation {
+                continue;
+            }
+
             let listing_succeeded = result.is_ok();
             match result {
                 Ok(listing) => {

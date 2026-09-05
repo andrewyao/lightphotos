@@ -119,12 +119,15 @@ pub enum UiAction {
     FocusSurveyMember(usize),
     /// Open this folder as one unit: load its images and toggle its expansion.
     OpenFolder(std::path::PathBuf),
-    /// wasm32 only: the landing page's "Choose Folder" button — fires the
-    /// browser's File System Access folder picker. A no-op action type on
-    /// native (nothing ever pushes it there — there's no landing page), kept
-    /// unconditional rather than `#[cfg]`-gated so `ui.rs`'s own code
-    /// doesn't need target-specific branches just to build this enum.
+    /// The landing page's "Choose Folder" button and the toolbar "Open" /
+    /// `Cmd+O` shortcut — opens a folder picker. On the web that's the File
+    /// System Access `showDirectoryPicker`; on native it's the OS folder
+    /// dialog (`crate::dialog::pick_folder`). Routed through
+    /// `App::open_folder_picker`.
     PickFolder,
+    /// The toolbar "Home" button — close the current folder and return to the
+    /// landing page (`App::close_folder`). Does not quit the app.
+    CloseFolder,
     /// Begin dragging this crop edge (pointer pressed near it).
     CropGrab(CropEdge),
     /// Begin moving the whole crop rectangle, anchored at this texture coordinate.
@@ -206,13 +209,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     #[cfg(target_arch = "wasm32")]
     site_nav(ui);
 
-    // wasm32 landing page: shown until a folder is picked (there's no CLI
-    // arg / AppleEvent-delivered path on the web the way native gets one, so
-    // `self.playlist` being empty is a real, expected, waited-on state here
-    // — not just "nothing opened yet" the way it briefly is natively before
-    // resumed() finishes). Every other draw path below assumes a playlist
+    // Landing page: shown whenever no folder is open. On the web that's the
+    // start state (no CLI arg / AppleEvent path there); on native it's the
+    // no-arg launch and the state the "Home" button returns to
+    // (`App::close_folder`). Every other draw path below assumes a playlist
     // exists, so this returns early rather than falling through.
-    #[cfg(target_arch = "wasm32")]
     if !app.has_playlist() {
         draw_landing_page(ui, app, &mut out);
         return out;
@@ -256,18 +257,18 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     out
 }
 
-/// wasm32-only: the "pick a folder to get started" screen — see `draw`'s
-/// landing-page branch. Deliberately minimal (title + one button, no styling
-/// investment) — this is an early wasm-port milestone, not a polish pass;
-/// see the wasm port plan's M1.
-#[cfg(target_arch = "wasm32")]
+/// The "pick a folder to get started" screen — see `draw`'s landing-page
+/// branch. Shown on every platform when no folder is open. Deliberately
+/// minimal: title + one hint line + one button, no styling investment.
 fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::CentralPanel::default().show_inside(ui, |ui| {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.4);
             ui.heading("LightPhotos");
+            ui.add_space(4.0);
+            ui.label("Choose a folder of photos to get started");
             ui.add_space(12.0);
-            let pending = app.web_folder_pending();
+            let pending = app.folder_pick_pending();
             let resp = ui.add_enabled(
                 !pending,
                 egui::Button::new(if pending {
