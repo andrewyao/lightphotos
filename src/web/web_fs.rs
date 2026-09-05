@@ -27,8 +27,8 @@ use std::path::{Path, PathBuf};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
-    DirectoryPickerOptions, FileSystemDirectoryHandle, FileSystemFileHandle,
-    FileSystemHandleKind, FileSystemPermissionMode,
+    DirectoryPickerOptions, FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemHandleKind,
+    FileSystemPermissionMode,
 };
 
 use crate::navigation::{is_image, is_listable_subdir};
@@ -182,7 +182,9 @@ fn sort_pairs_by_name<T>(v: &mut [(PathBuf, T)]) {
 /// confirmed by an actual `RangeError: Array buffer allocation failed`
 /// crash before this existed (not the 4GB ceiling itself, just avoidable
 /// double-buffering pushing real allocations to fail well short of it).
-pub async fn read_array_buffer(handle: &FileSystemFileHandle) -> Result<js_sys::ArrayBuffer, String> {
+pub async fn read_array_buffer(
+    handle: &FileSystemFileHandle,
+) -> Result<js_sys::ArrayBuffer, String> {
     let file: web_sys::File = JsFuture::from(handle.get_file())
         .await
         .map_err(|e| js_error_string(&e))?

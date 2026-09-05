@@ -182,7 +182,10 @@ pub(crate) async fn write_sidecar(
 /// Delete `root/.lightphotos/<filename>.xmp`. A missing `.lightphotos`
 /// directory, or a missing sidecar within it, is not an error — matches
 /// native's `NotFound => Ok(())` arm.
-pub(crate) async fn delete_sidecar(root: &FileSystemDirectoryHandle, filename: &OsStr) -> Result<(), String> {
+pub(crate) async fn delete_sidecar(
+    root: &FileSystemDirectoryHandle,
+    filename: &OsStr,
+) -> Result<(), String> {
     let Some(dir) = sidecar_dir(root, false).await? else {
         return Ok(());
     };

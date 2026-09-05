@@ -77,8 +77,7 @@ pub fn attach(window: &Window) -> PhysicalSize<u32> {
         .and_then(|w| w.document())
         .expect("no document");
     let body = document.body().expect("document has no body");
-    body.append_child(&canvas)
-        .expect("append canvas to body");
+    body.append_child(&canvas).expect("append canvas to body");
 
     PhysicalSize::new(w.max(1), h.max(1))
 }
