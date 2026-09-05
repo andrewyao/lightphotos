@@ -1010,9 +1010,12 @@ impl App {
     /// on that file). Builds the playlist, seeds ratings, computes the visible
     /// view, and kicks off thumbnail/full requests.
     pub(crate) fn open(&mut self, path: PathBuf) {
+        #[cfg(not(target_arch = "wasm32"))]
         let is_dir = std::fs::metadata(&path)
             .map(|m| m.is_dir())
             .unwrap_or(false);
+        #[cfg(target_arch = "wasm32")]
+        let is_dir = self.web_dir_handles.contains_key(&path) || self.subdirs.contains_key(&path);
         eprintln!(
             "[lightphotos] open {}: {}",
             if is_dir { "dir" } else { "file" },
