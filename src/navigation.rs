@@ -458,17 +458,26 @@ mod tests {
             match p.to_str().unwrap() {
                 "root" => vec![PathBuf::from("root/a"), PathBuf::from("root/b")],
                 "root/a" => vec![PathBuf::from("root/a/a1"), PathBuf::from("root/a/a2")],
+                "root/a/a1" => vec![PathBuf::from("root/a/a1/i")],
+                "root/a/a1/i" => vec![PathBuf::from("root/a/a1/i/leaf")],
                 _ => vec![],
             }
         };
-        // root and root/a expanded, root/b collapsed.
-        let expanded = |p: &Path| matches!(p.to_str().unwrap(), "root" | "root/a");
+        // Expand through three descendant levels; root/b remains collapsed.
+        let expanded = |p: &Path| {
+            matches!(
+                p.to_str().unwrap(),
+                "root" | "root/a" | "root/a/a1" | "root/a/a1/i"
+            )
+        };
         assert_eq!(
             flatten_visible_tree(Path::new("root"), &expanded, &kids),
             vec![
                 PathBuf::from("root"),
                 PathBuf::from("root/a"),
                 PathBuf::from("root/a/a1"),
+                PathBuf::from("root/a/a1/i"),
+                PathBuf::from("root/a/a1/i/leaf"),
                 PathBuf::from("root/a/a2"),
                 PathBuf::from("root/b"),
             ]
