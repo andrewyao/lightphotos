@@ -16,11 +16,9 @@
 use super::*;
 use std::path::Path;
 
-
 use crate::develop::Adjustments;
 
 impl App {
-
     /// On-screen footprint after rotation (w/h swapped for 90°/270°).
     pub(super) fn display_size(&self) -> (f32, f32) {
         let (w, h) = self.image_size();
@@ -503,9 +501,17 @@ mod tests {
     #[test]
     fn the_preview_is_ridden_right_up_to_its_own_resolution() {
         // Exactly at the preview's pixel count is still not worth a full decode.
-        assert!(!zoom_outruns_preview(SOURCE, PREVIEW as f32 / SOURCE, PREVIEW));
+        assert!(!zoom_outruns_preview(
+            SOURCE,
+            PREVIEW as f32 / SOURCE,
+            PREVIEW
+        ));
         // A hair past it is.
-        assert!(zoom_outruns_preview(SOURCE, (PREVIEW as f32 + 1.0) / SOURCE, PREVIEW));
+        assert!(zoom_outruns_preview(
+            SOURCE,
+            (PREVIEW as f32 + 1.0) / SOURCE,
+            PREVIEW
+        ));
     }
 
     #[test]

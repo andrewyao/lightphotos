@@ -2,14 +2,12 @@ use super::*;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-
 use crate::burst::{self, BurstMark};
 use crate::duplicates::{self, DuplicateMark};
 use crate::navigation::Cmp;
 
 impl App {
-
-/// Accessors used by the egui UI module (`ui.rs`).
+    /// Accessors used by the egui UI module (`ui.rs`).
     pub(crate) fn mode(&self) -> ViewMode {
         self.mode
     }
@@ -267,7 +265,10 @@ impl App {
             return;
         }
         let entries = pl.entries();
-        let hashes: Vec<Option<u64>> = entries.iter().map(|p| self.phashes.get(p).copied()).collect();
+        let hashes: Vec<Option<u64>> = entries
+            .iter()
+            .map(|p| self.phashes.get(p).copied())
+            .collect();
         let scores: Vec<Option<f64>> = entries.iter().map(|p| self.culling_score(p)).collect();
         let groups = duplicates::group_by_hash(&hashes, duplicates::DEFAULT_MAX_DISTANCE);
         // Second tier: split off any dHash false positive whose feature-print
@@ -354,7 +355,10 @@ impl App {
 
     /// Path-keyed counterpart to `thumb_texture_for(pos)`, for Survey Mode's
     /// arbitrary (non-visible-position) member list.
-    pub(crate) fn thumb_texture_for_path(&self, path: &Path) -> Option<(&egui::TextureHandle, u32, u32)> {
+    pub(crate) fn thumb_texture_for_path(
+        &self,
+        path: &Path,
+    ) -> Option<(&egui::TextureHandle, u32, u32)> {
         let key = (path.to_path_buf(), self.thumb_px, self.edit_sig_for(path));
         let handle = self.thumb_tex.get(&key)?;
         let [w, h] = handle.size();

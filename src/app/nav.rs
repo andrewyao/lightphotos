@@ -2,15 +2,13 @@ use super::*;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-
 use crate::develop::{self};
-use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::navigation::Playlist;
+use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp};
 use crate::ui;
 
 impl App {
-
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn supersede_web_pending_nav(&mut self) {
         self.web_nav_generation = self.web_nav_generation.wrapping_add(1);
@@ -253,10 +251,7 @@ impl App {
         // `on_exif_info` refills them (and re-fits) when the metadata read for
         // the new photo lands.
         if self.want.as_deref() != Some(path.as_path()) {
-            self.source_size = self
-                .exif_cache
-                .get(&path)
-                .and_then(|m| m.source_size);
+            self.source_size = self.exif_cache.get(&path).and_then(|m| m.source_size);
         }
         self.want = Some(path);
         // The selection overlay belongs to one photo; stepping to the next

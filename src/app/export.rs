@@ -7,14 +7,13 @@ use std::path::PathBuf;
 // Instant comes from `super::*` (app/mod.rs re-exports web_time::Instant,
 // not std::time::Instant — see loader.rs's launched_at() doc comment).
 
-use crate::export::ExportOutcome;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::export::ExportJob;
+use crate::export::ExportOutcome;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::paths;
 
 impl App {
-
     // ---- Export ----
 
     /// Export the selected image to a baked JPG (crop/rotation/develop applied)
@@ -60,9 +59,7 @@ impl App {
             return;
         }
         if self.catalog_load_pending.is_some() {
-            self.set_status(
-                "Export: catalog still loading, try again in a moment\u{2026}".into(),
-            );
+            self.set_status("Export: catalog still loading, try again in a moment\u{2026}".into());
             self.request_redraw();
             return;
         }

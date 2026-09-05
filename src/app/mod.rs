@@ -359,11 +359,9 @@ pub(crate) struct App {
     /// channel shape as `web_folder_tx`/`web_folder_rx`. Key is the listed
     /// directory's relative path.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) web_dirlist_tx:
-        Sender<(PathBuf, Result<crate::web_fs::DirListing, String>)>,
+    pub(crate) web_dirlist_tx: Sender<(PathBuf, Result<crate::web_fs::DirListing, String>)>,
     #[cfg(target_arch = "wasm32")]
-    pub(crate) web_dirlist_rx:
-        Receiver<(PathBuf, Result<crate::web_fs::DirListing, String>)>,
+    pub(crate) web_dirlist_rx: Receiver<(PathBuf, Result<crate::web_fs::DirListing, String>)>,
     /// Directories with a `list_dir` in flight — dedupes repeated
     /// `request_dir_listing` calls from per-frame nav polling.
     #[cfg(target_arch = "wasm32")]
@@ -797,16 +795,15 @@ pub(crate) struct App {
     pub(crate) egui_state: Option<egui_winit::State>,
 }
 
-
-mod nav;
-mod keys;
 mod accessors;
-mod catalog;
 mod adjust;
+mod catalog;
 mod crop;
 mod export;
 mod histogram;
+mod keys;
 mod loupe;
+mod nav;
 mod thumbs;
 #[cfg(target_arch = "wasm32")]
 mod web;

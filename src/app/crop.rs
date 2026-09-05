@@ -1,10 +1,8 @@
 use super::*;
 
-
 use crate::develop::Crop;
 
 impl App {
-
     // ---- Crop mode ----
 
     /// The crop rectangle currently being edited, if crop mode is active.

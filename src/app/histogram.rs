@@ -1,11 +1,9 @@
 use super::*;
 
-
 use crate::develop::{self};
 use crate::{image_decode, image_ops};
 
 impl App {
-
     /// Build the histogram sample from a freshly-shown image: a strided
     /// downsample (~256 px on the longest side) of LINEAR-light RGB, kept as a
     /// real 2D grid (row-major, `hist_dw` × `hist_dh`) so `recompute_histogram`
@@ -18,10 +16,12 @@ impl App {
         let (w, h) = (img.width as usize, img.height as usize);
         if w == 0
             || h == 0
-            || img.rgba.len() < w * h * match img.pixel_format {
-                image_decode::PixelFormat::Srgb8 => 4,
-                image_decode::PixelFormat::LinearF16 => 8,
-            }
+            || img.rgba.len()
+                < w * h
+                    * match img.pixel_format {
+                        image_decode::PixelFormat::Srgb8 => 4,
+                        image_decode::PixelFormat::LinearF16 => 8,
+                    }
         {
             self.hist_sample.clear();
             self.hist_dw = 0;
@@ -103,9 +103,7 @@ impl App {
                     // value produced by raw_shader.wgsl. The generic path
                     // returns linear output and needs the usual approximation.
                     let v = match self.hist_pixel_format {
-                        image_decode::PixelFormat::Srgb8 => {
-                            out[ch].max(0.0).powf(1.0 / 2.2)
-                        }
+                        image_decode::PixelFormat::Srgb8 => out[ch].max(0.0).powf(1.0 / 2.2),
                         image_decode::PixelFormat::LinearF16 => out[ch],
                     }
                     .clamp(0.0, 1.0);

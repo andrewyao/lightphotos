@@ -7,7 +7,6 @@ use crate::navigation::Cmp;
 use crate::ui;
 
 impl App {
-
     /// Whether an arrow key or Tab that egui reported as "consumed" should still
     /// reach the app's own navigation. egui keeps keyboard focus on a develop
     /// `Slider` after the user drags it, and then flags every subsequent arrow

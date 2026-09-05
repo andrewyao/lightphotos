@@ -58,7 +58,9 @@ const MAX_READ_RETRIES: u8 = 10;
 /// stays synchronized forever. Sampling the *whole* window uniformly (not
 /// "base plus a little jitter") is what actually breaks the lockstep.
 fn retry_backoff(attempt: u8) -> std::time::Duration {
-    let cap_ms = 500u64.saturating_mul(1u64 << attempt.saturating_sub(1).min(20)).min(10_000);
+    let cap_ms = 500u64
+        .saturating_mul(1u64 << attempt.saturating_sub(1).min(20))
+        .min(10_000);
     let jittered_ms = (js_sys::Math::random() * cap_ms as f64).max(50.0);
     std::time::Duration::from_millis(jittered_ms as u64)
 }
@@ -229,14 +231,23 @@ impl App {
                 self.web_preview_pending.push(r);
                 continue;
             }
-            let crate::web_worker_pool::PoolResult { path, target, result, .. } = r;
+            let crate::web_worker_pool::PoolResult {
+                path,
+                target,
+                result,
+                ..
+            } = r;
             let key = (path.clone(), target);
             self.web_thumb_inflight.remove(&key);
             match result {
                 Ok(img) => {
                     self.web_thumb_retries.remove(&key);
                     if let Some(loader) = &mut self.loader {
-                        loader.insert_thumb_external(path.clone(), target, std::sync::Arc::new(img));
+                        loader.insert_thumb_external(
+                            path.clone(),
+                            target,
+                            std::sync::Arc::new(img),
+                        );
                     }
                     arrived.push((path, target));
                 }
@@ -246,7 +257,10 @@ impl App {
                     // panics get surfaced (via console_error_panic_hook).
                     // web_sys::console::error_1/warn_1 is the actual way to
                     // reach DevTools.
-                    let entry = self.web_thumb_retries.entry(key).or_insert((0, Instant::now()));
+                    let entry = self
+                        .web_thumb_retries
+                        .entry(key)
+                        .or_insert((0, Instant::now()));
                     entry.0 += 1;
                     let retries = entry.0; // u8: Copy, avoids borrowing `entry` across the `entry.1 = ...` below
                     if retries <= MAX_READ_RETRIES {
@@ -316,9 +330,10 @@ impl App {
         let key = (path.clone(), target);
         let is_raw = crate::image_decode::is_raw_extension(&path);
 
-        let already_have = self.loader.as_ref().is_some_and(|l| {
-            l.get_full(&path).is_some() || l.get_preview(&path, target).is_some()
-        });
+        let already_have = self
+            .loader
+            .as_ref()
+            .is_some_and(|l| l.get_full(&path).is_some() || l.get_preview(&path, target).is_some());
         let quality_needed = !already_have
             && !self.web_preview_inflight.contains(&key)
             && !self.web_preview_failed.contains(&key)
@@ -415,7 +430,13 @@ impl App {
     pub(crate) fn poll_web_preview(&mut self) -> bool {
         let mut landed = false;
         let pending = std::mem::take(&mut self.web_preview_pending);
-        for crate::web_worker_pool::PoolResult { kind, path, target, result } in pending {
+        for crate::web_worker_pool::PoolResult {
+            kind,
+            path,
+            target,
+            result,
+        } in pending
+        {
             let key = (path.clone(), target);
             match kind {
                 JobKind::Speed => {
@@ -426,7 +447,11 @@ impl App {
                             if self.want.as_deref() == Some(path.as_path())
                                 && self.shown.path() != Some(path.as_path())
                             {
-                                self.upload_shown(&path, &img, Shown::Preview(path.clone(), target, img.width.max(img.height)));
+                                self.upload_shown(
+                                    &path,
+                                    &img,
+                                    Shown::Preview(path.clone(), target, img.width.max(img.height)),
+                                );
                                 self.set_tier_debug(super::thumbs::TIER_DEBUG_GRAY_18, "SPEED"); // TEMPORARY DEBUG
                                 landed = true;
                             }
@@ -438,7 +463,10 @@ impl App {
                             // request is still independently in flight), so
                             // this is silent (no `set_status`) beyond a
                             // console warning.
-                            let entry = self.web_speed_retries.entry(key.clone()).or_insert((0, Instant::now()));
+                            let entry = self
+                                .web_speed_retries
+                                .entry(key.clone())
+                                .or_insert((0, Instant::now()));
                             entry.0 += 1;
                             let retries = entry.0;
                             if retries <= MAX_READ_RETRIES {
@@ -453,7 +481,11 @@ impl App {
                                 );
                             } else {
                                 web_sys::console::warn_1(
-                                    &format!("[web] speed decode failed permanently for {}: {e}", path.display()).into(),
+                                    &format!(
+                                        "[web] speed decode failed permanently for {}: {e}",
+                                        path.display()
+                                    )
+                                    .into(),
                                 );
                                 self.web_speed_retries.remove(&key);
                                 self.web_speed_failed.insert(key);
@@ -482,14 +514,19 @@ impl App {
                     // carries the real dimensions, no separate metadata read
                     // needed to know them here.
                     let real_size = Some((img.width, img.height));
-                    if self.want.as_deref() == Some(path.as_path()) && self.source_size != real_size {
+                    if self.want.as_deref() == Some(path.as_path()) && self.source_size != real_size
+                    {
                         self.source_size = real_size;
                         if self.fitted {
                             self.fit_to_window();
                         }
                     }
                     if let Some(loader) = &mut self.loader {
-                        loader.insert_preview_external(path.clone(), target, std::sync::Arc::new(img));
+                        loader.insert_preview_external(
+                            path.clone(),
+                            target,
+                            std::sync::Arc::new(img),
+                        );
                     }
                     self.web_preview_retries.remove(&key);
                     landed = true;
@@ -526,7 +563,10 @@ impl App {
                         );
                         self.web_preview_retries.remove(&key);
                         self.web_preview_failed.insert(key);
-                        self.set_status(format!("Unable to load Loupe preview for {}", path.display()));
+                        self.set_status(format!(
+                            "Unable to load Loupe preview for {}",
+                            path.display()
+                        ));
                     }
                 }
             }
@@ -562,7 +602,10 @@ impl App {
             return false;
         };
         let key = (path.clone(), target);
-        let already_have = self.loader.as_ref().is_some_and(|l| l.get_full(&path).is_some());
+        let already_have = self
+            .loader
+            .as_ref()
+            .is_some_and(|l| l.get_full(&path).is_some());
         if already_have
             || self.web_full_inflight.contains(&key)
             || self.web_full_failed.contains(&key)
@@ -609,7 +652,13 @@ impl App {
     pub(crate) fn poll_web_full(&mut self) -> bool {
         let mut landed = false;
         let pending = std::mem::take(&mut self.web_full_pending);
-        for crate::web_worker_pool::PoolResult { path, target, result, .. } in pending {
+        for crate::web_worker_pool::PoolResult {
+            path,
+            target,
+            result,
+            ..
+        } in pending
+        {
             let key = (path.clone(), target);
             self.web_full_inflight.remove(&key);
             match result {
@@ -628,8 +677,7 @@ impl App {
                     // from them now. (An image longer than the max texture
                     // still can't be shown at a true 100% regardless.)
                     let real_size = Some((img.width, img.height));
-                    if self.want.as_deref() == Some(path.as_path())
-                        && self.source_size != real_size
+                    if self.want.as_deref() == Some(path.as_path()) && self.source_size != real_size
                     {
                         self.source_size = real_size;
                         if self.fitted {
@@ -642,7 +690,10 @@ impl App {
                     landed = true;
                 }
                 Err(e) => {
-                    let entry = self.web_full_retries.entry(key.clone()).or_insert((0, Instant::now()));
+                    let entry = self
+                        .web_full_retries
+                        .entry(key.clone())
+                        .or_insert((0, Instant::now()));
                     entry.0 += 1;
                     let retries = entry.0;
                     if retries <= MAX_READ_RETRIES {
@@ -657,8 +708,11 @@ impl App {
                         );
                     } else {
                         web_sys::console::error_1(
-                            &format!("[web] full-resolution decode failed permanently for {}: {e}", path.display())
-                                .into(),
+                            &format!(
+                                "[web] full-resolution decode failed permanently for {}: {e}",
+                                path.display()
+                            )
+                            .into(),
                         );
                         self.web_full_retries.remove(&key);
                         self.web_full_failed.insert(key);

@@ -1,12 +1,10 @@
 use super::*;
 use std::path::Path;
 
-
 use crate::develop::{self, Adjustments, GpuAdjust, GpuTouchUp, TouchUp};
 use crate::image_ops;
 
 impl App {
-
     /// Develop adjustments of the image currently shown (identity if unset).
     pub(crate) fn current_adjustments(&self) -> Adjustments {
         self.shown
@@ -126,8 +124,11 @@ impl App {
         let sample = |u: f32, v: f32| {
             let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
             let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;
-            image_ops::sample_linear(&img, x as f32 / img.width.saturating_sub(1).max(1) as f32,
-                y as f32 / img.height.saturating_sub(1).max(1) as f32)
+            image_ops::sample_linear(
+                &img,
+                x as f32 / img.width.saturating_sub(1).max(1) as f32,
+                y as f32 / img.height.saturating_sub(1).max(1) as f32,
+            )
         };
         // Match the source and target at the actual patch boundary. Using a
         // ring outside the patch leaves a color discontinuity at the edge,

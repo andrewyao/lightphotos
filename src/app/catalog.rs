@@ -2,16 +2,14 @@ use super::*;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-
 use crate::develop::Adjustments;
 use crate::duplicates::DuplicateMark;
 use crate::navigation::Cmp;
-use crate::ui;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::trash;
+use crate::ui;
 
 impl App {
-
     /// Point the catalog at `dir` and kick off its sidecar scan on a
     /// one-shot background thread — same idiom as subject segmentation's
     /// `request_selection_mask` (`app/loupe.rs`), not `loader.rs`'s
@@ -337,10 +335,7 @@ impl App {
     fn finish_delete(&mut self, trashed: Vec<PathBuf>, total: usize, last_err: Option<String>) {
         if !trashed.is_empty() {
             let gone: HashSet<PathBuf> = trashed.iter().cloned().collect();
-            let survey_was_affected = self
-                .survey_members
-                .iter()
-                .any(|p| gone.contains(p));
+            let survey_was_affected = self.survey_members.iter().any(|p| gone.contains(p));
             if let Some(pl) = self.playlist.as_mut() {
                 pl.remove_matching(|p| gone.contains(p));
             }
@@ -363,17 +358,11 @@ impl App {
                 self.capture_times.remove(p);
             }
             self.feature_distances
-                .retain(|(anchor, member), _| {
-                    !gone.contains(anchor) && !gone.contains(member)
-                });
+                .retain(|(anchor, member), _| !gone.contains(anchor) && !gone.contains(member));
             self.feature_failed
-                .retain(|(anchor, member)| {
-                    !gone.contains(anchor) && !gone.contains(member)
-                });
+                .retain(|(anchor, member)| !gone.contains(anchor) && !gone.contains(member));
             self.feature_pending
-                .retain(|(anchor, member)| {
-                    !gone.contains(anchor) && !gone.contains(member)
-                });
+                .retain(|(anchor, member)| !gone.contains(anchor) && !gone.contains(member));
 
             // Playlist indices changed, so all derived duplicate vectors need
             // to be rebuilt against the new playlist.

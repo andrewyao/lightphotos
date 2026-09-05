@@ -24,7 +24,6 @@ use super::*;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-
 use crate::develop::{self};
 use crate::featureprint;
 use crate::phash;
@@ -34,14 +33,28 @@ use crate::{image_decode, image_ops};
 // TEMPORARY DEBUG colors — see `Renderer::tier_debug_color`'s doc comment.
 // Remove alongside `set_tier_debug_color` once the Loupe zoom-refit fix is
 // verified.
-pub(super) const TIER_DEBUG_WHITE: wgpu::Color = wgpu::Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+pub(super) const TIER_DEBUG_WHITE: wgpu::Color = wgpu::Color {
+    r: 1.0,
+    g: 1.0,
+    b: 1.0,
+    a: 1.0,
+};
 // Only referenced from `app/web.rs` (the `Speed` tier is wasm32-only).
 #[cfg(target_arch = "wasm32")]
-pub(super) const TIER_DEBUG_GRAY_18: wgpu::Color = wgpu::Color { r: 0.18, g: 0.18, b: 0.18, a: 1.0 };
-pub(super) const TIER_DEBUG_BLACK: wgpu::Color = wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
+pub(super) const TIER_DEBUG_GRAY_18: wgpu::Color = wgpu::Color {
+    r: 0.18,
+    g: 0.18,
+    b: 0.18,
+    a: 1.0,
+};
+pub(super) const TIER_DEBUG_BLACK: wgpu::Color = wgpu::Color {
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
+    a: 1.0,
+};
 
 impl App {
-
     pub(crate) fn request_redraw(&self) {
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -224,8 +237,11 @@ impl App {
                         .unwrap_or_default();
                     let pos = self.sel.unwrap_or(0) + 1;
                     // TEMPORARY DEBUG prefix — see `App::debug_tier_label`.
-                    let tag =
-                        if self.debug_tier_label.is_empty() { String::new() } else { format!("[{}] ", self.debug_tier_label) };
+                    let tag = if self.debug_tier_label.is_empty() {
+                        String::new()
+                    } else {
+                        format!("[{}] ", self.debug_tier_label)
+                    };
                     w.set_title(&format!("{tag}{}  ({}/{})", name, pos, self.visible.len()));
                 }
             }
@@ -577,7 +593,8 @@ impl App {
 
         if let Some(pool) = &self.feature_pool {
             for (member, anchor) in to_submit {
-                self.feature_pending.insert((anchor.clone(), member.clone()));
+                self.feature_pending
+                    .insert((anchor.clone(), member.clone()));
                 pool.submit(featureprint::DistanceJob { member, anchor });
             }
         }
@@ -675,12 +692,8 @@ impl App {
         let mut to_submit: Vec<PathBuf> = Vec::new();
         for (i, p) in entries.iter().enumerate() {
             let in_burst = self.bursts_on && matches!(self.burst_marks.get(i), Some(Some(_)));
-            let in_dup_group = dups_valid
-                && sizes
-                    .get(&self.dup_refined[i])
-                    .copied()
-                    .unwrap_or(0)
-                    >= 2;
+            let in_dup_group =
+                dups_valid && sizes.get(&self.dup_refined[i]).copied().unwrap_or(0) >= 2;
             if !(in_burst || in_dup_group) {
                 continue;
             }
