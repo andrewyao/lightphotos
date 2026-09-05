@@ -827,10 +827,10 @@ impl App {
     /// included yet since their count varies frame to frame.
     const TOOLBAR_CONTROLS: usize = 16;
     /// Number of keyboard-focusable controls in the Loupe toolbar
-    /// (`toolbar::loupe_toolbar`): Help + Grid + Loupe toggle, nothing else
-    /// — everything Grid-only was deliberately dropped for Loupe, not
-    /// merely disabled, so it isn't shown here either.
-    const LOUPE_TOOLBAR_CONTROLS: usize = 3;
+    /// (`toolbar::loupe_toolbar`): just `?` (Help). The Loupe/Grid toggle
+    /// was replaced by a non-interactive debug tier readout; everything
+    /// else Grid-only was deliberately dropped for Loupe.
+    const LOUPE_TOOLBAR_CONTROLS: usize = 1;
 
     /// The current mode's toolbar control count — a different, much smaller
     /// toolbar renders in Loupe than in Grid/Survey (see `toolbar.rs`), so
@@ -861,13 +861,9 @@ impl App {
     /// actually rendering — see `toolbar_control_count`.
     pub(super) fn activate_toolbar_focus(&mut self) {
         if self.mode == ViewMode::Loupe {
-            let action = match self.toolbar_focus {
-                0 => ui::UiAction::ToggleHelp,
-                1 => ui::UiAction::EnterGrid,
-                2 => ui::UiAction::EnterLoupe,
-                _ => return,
-            };
-            self.apply_ui_actions(vec![action]);
+            if self.toolbar_focus == 0 {
+                self.apply_ui_actions(vec![ui::UiAction::ToggleHelp]);
+            }
             return;
         }
         let action = match self.toolbar_focus {
@@ -931,8 +927,8 @@ mod tests {
         app.mode = ViewMode::Loupe;
         assert_eq!(
             app.toolbar_control_count(),
-            3,
-            "the Loupe toolbar only has Help + Grid + Loupe toggle"
+            1,
+            "the Loupe toolbar only has the `?` Help button"
         );
     }
 
@@ -946,19 +942,6 @@ mod tests {
         assert!(
             app.show_help(),
             "index 0 in the Loupe toolbar must toggle help, matching the '?' button"
-        );
-    }
-
-    #[test]
-    fn loupe_toolbar_focus_one_enters_grid() {
-        let mut app = App::new(None);
-        app.mode = ViewMode::Loupe;
-        app.toolbar_focus = 1;
-        app.activate_toolbar_focus();
-        assert_eq!(
-            app.mode(),
-            ViewMode::Grid,
-            "index 1 in the Loupe toolbar must switch to Grid, matching the 'G' button"
         );
     }
 

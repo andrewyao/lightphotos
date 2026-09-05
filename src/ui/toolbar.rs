@@ -171,15 +171,6 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             toolbar_focus_sync(ui, app, idx, &resp, out);
             idx += 1;
 
-            // `?` opens the keyboard-shortcut help.
-            ui.separator();
-            let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
-            if resp.clicked() {
-                out.actions.push(UiAction::ToggleHelp);
-            }
-            toolbar_focus_sync(ui, app, idx, &resp, out);
-            idx += 1;
-
             // Show which photo's develop settings are on the clipboard, if any.
             if let Some(name) = app.copied_settings_name() {
                 ui.separator();
@@ -248,19 +239,27 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 }
             }
 
-            // Loupe / Grid mode toggle, pinned to the far right. In a
+            // Help + Loupe/Grid mode toggle, pinned to the far right. In a
             // right-to-left layout the first widget is the rightmost, so add
-            // `G` first to read "E  G" left-to-right. Added in this order, `G`
-            // naturally lands at `idx` (-> EnterGrid) and `E` at `idx + 1` (->
-            // EnterLoupe), matching `activate_toolbar_focus`.
+            // `?` first — it sits in the top-right corner, always visible —
+            // then `G`, then `E` to read "E  G  ?" left-to-right. Added in
+            // this order they land at `idx` (ToggleHelp), `idx + 1`
+            // (EnterGrid) and `idx + 2` (EnterLoupe), matching
+            // `activate_toolbar_focus`'s Grid arm.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
+                if resp.clicked() {
+                    out.actions.push(UiAction::ToggleHelp);
+                }
+                toolbar_focus_sync(ui, app, idx, &resp, out);
+
                 let resp = ui
                     .selectable_label(app.mode() == ViewMode::Grid, "G")
                     .on_hover_text("Grid (G)");
                 if resp.clicked() {
                     out.actions.push(UiAction::EnterGrid);
                 }
-                toolbar_focus_sync(ui, app, idx, &resp, out);
+                toolbar_focus_sync(ui, app, idx + 1, &resp, out);
 
                 let resp = ui
                     .selectable_label(app.mode() == ViewMode::Loupe, "E")
@@ -268,7 +267,7 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 if resp.clicked() {
                     out.actions.push(UiAction::EnterLoupe);
                 }
-                toolbar_focus_sync(ui, app, idx + 1, &resp, out);
+                toolbar_focus_sync(ui, app, idx + 2, &resp, out);
             });
 
             region_focus_marker(ui, app, Region::Toolbar);
@@ -281,9 +280,9 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
 /// rather than shown-disabled — the photo currently open has its own
 /// keyboard shortcuts (rate with 1-5, copy settings Cmd+Shift+C, delete via
 /// Delete) and the Develop panel/info bar for everything else, so there's
-/// nothing Grid-toolbar-shaped left to offer here. Index order (0/1/2) must
-/// match `App::activate_toolbar_focus`'s Loupe-mode arm and
-/// `toolbar_control_count`'s `LOUPE_TOOLBAR_CONTROLS`.
+/// nothing Grid-toolbar-shaped left to offer here. The only focusable
+/// control is `?` at index 0 — must match `App::activate_toolbar_focus`'s
+/// Loupe-mode arm and `toolbar_control_count`'s `LOUPE_TOOLBAR_CONTROLS`.
 pub(super) fn loupe_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::Panel::top("loupe_toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
@@ -305,34 +304,33 @@ pub(super) fn loupe_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
             {
                 out.actions.push(UiAction::PickFolder);
             }
-            ui.separator();
-
-            // `?` opens the keyboard-shortcut help.
-            let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
-            if resp.clicked() {
-                out.actions.push(UiAction::ToggleHelp);
-            }
-            toolbar_focus_sync(ui, app, idx, &resp, out);
-
-            // Loupe / Grid mode toggle, pinned to the far right — same
-            // right-to-left ordering as `grid_toolbar`'s, so `G`/`E` land in
-            // the same visual spot in both toolbars.
+            // Help + a TEMPORARY DEBUG decode-tier readout, pinned to the far
+            // right. Right-to-left: `?` is added first so it sits in the
+            // top-right corner (always visible); the tier letter sits to its
+            // left. The old Loupe/Grid toggle was dropped here — `E`/`G` keys
+            // still switch modes, and Home returns to the start screen.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let resp = ui
-                    .selectable_label(app.mode() == ViewMode::Grid, "G")
-                    .on_hover_text("Grid (G)");
+                let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
                 if resp.clicked() {
-                    out.actions.push(UiAction::EnterGrid);
+                    out.actions.push(UiAction::ToggleHelp);
                 }
-                toolbar_focus_sync(ui, app, idx + 1, &resp, out);
+                toolbar_focus_sync(ui, app, idx, &resp, out);
 
-                let resp = ui
-                    .selectable_label(app.mode() == ViewMode::Loupe, "E")
-                    .on_hover_text("Loupe / edit (E)");
-                if resp.clicked() {
-                    out.actions.push(UiAction::EnterLoupe);
-                }
-                toolbar_focus_sync(ui, app, idx + 2, &resp, out);
+                // Which decode tier the Loupe currently has on the GPU:
+                // T=thumb, S=speed, P=preview/quality, F=full. Debug only —
+                // pairs with the `[TIER]` window-title prefix (see
+                // `App::debug_tier_label`). Non-interactive, so it's not in
+                // the F6 focus cycle.
+                let tier = match app.debug_tier_label {
+                    "THUMB" => "T",
+                    "SPEED" => "S",
+                    "QUALITY" => "P",
+                    "FULL" => "F",
+                    _ => "\u{2013}",
+                };
+                ui.label(tier).on_hover_text(
+                    "Loupe decode tier (debug): T=thumb  S=speed  P=preview  F=full",
+                );
             });
 
             region_focus_marker(ui, app, Region::Toolbar);
