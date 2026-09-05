@@ -690,7 +690,12 @@ pub(crate) struct App {
     survey_focus: usize,
 
     // ---- Loupe view state ----
-    zoom: f32,
+    /// Manual zoom as a multiple of the current fit-scale: `1.0` == fitted, `2.0`
+    /// == twice fit size. Stored fit-relative rather than as an absolute
+    /// source-pixel→screen-pixel ratio so a decode-tier swap that changes
+    /// `image_size()` (preview dims → true `source_size`) produces an identical
+    /// on-screen transform — see `App::zoom`/`App::fit_scale` in `app/loupe.rs`.
+    zoom_rel: f32,
     pub(crate) pan: (f32, f32), // screen-space pixel coords of the image's top-left corner
     pub(crate) win_size: (f32, f32),
     /// True while the view is auto-fit to the window (so a resize re-fits).
@@ -965,7 +970,7 @@ impl App {
             survey_members: Vec::new(),
             survey_best: None,
             survey_focus: 0,
-            zoom: 1.0,
+            zoom_rel: 1.0,
             pan: (0.0, 0.0),
             win_size: (1.0, 1.0),
             fitted: false,
@@ -1259,8 +1264,8 @@ impl App {
         // If the loupe viewport changed, re-fit so the image stays centered in it.
         if self.mode == ViewMode::Loupe {
             if image_viewport != self.loupe_viewport {
-                self.loupe_viewport = image_viewport;
                 if self.fitted {
+                    self.loupe_viewport = image_viewport;
                     // While cropping, keep the whole image (all 4 edges) visible.
                     if self.crop_edit.is_some() {
                         self.fit_for_crop();
@@ -1268,6 +1273,17 @@ impl App {
                         self.fit_to_window();
                     }
                 } else {
+                    // Manually zoomed: hold the current magnification (absolute
+                    // zoom), not the fit-relative factor — a window resize
+                    // should reveal more/less image, not rescale it. Re-derive
+                    // `zoom_rel` against the new `loupe_area()` so `zoom()` is
+                    // unchanged across the viewport swap.
+                    let keep = self.zoom();
+                    self.loupe_viewport = image_viewport;
+                    let fs = self.fit_scale();
+                    if fs > 0.0 {
+                        self.zoom_rel = keep / fs;
+                    }
                     self.push_transform();
                 }
             }

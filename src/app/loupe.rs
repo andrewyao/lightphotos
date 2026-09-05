@@ -47,12 +47,28 @@ impl App {
         }
     }
 
+    /// The absolute source-pixel→screen-pixel ratio at which the whole image
+    /// exactly fits the loupe area ("contain"). The anchor `zoom_rel` is measured
+    /// against: `zoom_rel == 1.0` is fitted, `zoom() == zoom_rel * fit_scale()`.
+    ///
+    /// Depends only on the image's aspect ratio and the loupe area, never on
+    /// which decode tier's pixel dimensions happen to be uploaded — that is what
+    /// makes the loupe transform survive a preview→full swap without a jump.
+    pub(super) fn fit_scale(&self) -> f32 {
+        fit_scale_of(self.display_size(), self.loupe_area())
+    }
+
+    /// The current absolute zoom (source-pixel→screen-pixel ratio), derived from
+    /// the fit-relative `zoom_rel` and the live `fit_scale()`. Every consumer
+    /// that needs an absolute scale goes through here.
+    pub(crate) fn zoom(&self) -> f32 {
+        self.zoom_rel * self.fit_scale()
+    }
+
     /// Fit to the loupe area, centered: scales the image up or down so the whole
     /// image is as large as possible while staying fully on-screen ("contain").
     pub(super) fn fit_to_window(&mut self) {
-        let (iw, ih) = self.display_size();
-        let (ww, wh) = self.loupe_area();
-        self.zoom = (ww / iw).min(wh / ih).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.zoom_rel = 1.0;
         self.fitted = true;
         self.center();
         self.push_transform();
@@ -63,19 +79,22 @@ impl App {
     /// floor) and leaves a small margin, so the entire image — and thus all four
     /// crop edges and their handles — stay on-screen and grabbable.
     pub(super) fn fit_for_crop(&mut self) {
-        let (iw, ih) = self.display_size();
-        let (ww, wh) = self.loupe_area();
         // ~5% border each side so edge handles aren't flush against the viewport.
         const MARGIN: f32 = 0.9;
-        self.zoom = ((ww / iw).min(wh / ih) * MARGIN).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.zoom_rel = MARGIN;
         self.fitted = true;
         self.center();
         self.push_transform();
     }
 
-    /// Reset to 100% (1 image pixel == 1 screen pixel), centered.
+    /// Reset to 100% (1 image pixel == 1 screen pixel), centered. `zoom_rel` is
+    /// `1.0 / fit_scale()` so that `zoom()` lands on exactly `1.0` right now (the
+    /// `fit_scale()` factors cancel). If `image_size()` later gains its true
+    /// `source_size` the effective zoom drifts slightly — negligible in practice,
+    /// since that metadata almost always lands before the user hits this.
     pub(super) fn reset_100(&mut self) {
-        self.zoom = 1.0;
+        let fs = self.fit_scale();
+        self.zoom_rel = if fs > 0.0 { 1.0 / fs } else { 1.0 };
         self.fitted = false;
         self.center();
         self.push_transform();
@@ -93,7 +112,7 @@ impl App {
             return false;
         }
         let (iw, ih) = self.image_size();
-        zoom_outruns_preview(iw.max(ih), self.zoom, self.preview_px())
+        zoom_outruns_preview(iw.max(ih), self.zoom(), self.preview_px())
     }
 
     /// Fetch the full-resolution decode once the current zoom would magnify the
@@ -147,18 +166,23 @@ impl App {
     pub(super) fn center(&mut self) {
         let (iw, ih) = self.display_size();
         let (ww, wh) = self.loupe_area();
-        self.pan = ((ww - iw * self.zoom) / 2.0, (wh - ih * self.zoom) / 2.0);
+        let z = self.zoom();
+        self.pan = ((ww - iw * z) / 2.0, (wh - ih * z) / 2.0);
     }
 
     /// Zoom by `factor`, keeping the image point under (cx, cy) fixed. `cx/cy`
     /// are in loupe-area-local pixels (origin at the viewport's top-left).
     pub(crate) fn zoom_at(&mut self, factor: f32, cx: f32, cy: f32) {
-        let new_zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-        let ipx = (cx - self.pan.0) / self.zoom;
-        let ipy = (cy - self.pan.1) / self.zoom;
+        let cur_zoom = self.zoom();
+        let new_zoom = (cur_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        let ipx = (cx - self.pan.0) / cur_zoom;
+        let ipy = (cy - self.pan.1) / cur_zoom;
         self.pan.0 = cx - ipx * new_zoom;
         self.pan.1 = cy - ipy * new_zoom;
-        self.zoom = new_zoom;
+        let fs = self.fit_scale();
+        if fs > 0.0 {
+            self.zoom_rel = new_zoom / fs;
+        }
 
         // Once an axis fully fits in the viewport, keep the image centered on that
         // axis so the surrounding gap stays even (matches `center()`).
@@ -209,13 +233,13 @@ impl App {
     /// between screen points and texture UVs using the exact same geometry.
     /// `rot` is the row-major 2×2 `[m00, m01, m10, m11]` used by the shader.
     pub(super) fn loupe_transform(&self) -> ([f32; 2], [f32; 2], [f32; 4]) {
-        let (iw, ih) = self.display_size();
-        let (ww, wh) = self.loupe_area();
-        let denom_x = self.zoom * iw;
-        let denom_y = self.zoom * ih;
-        let scale = [ww / denom_x, wh / denom_y];
-        let offset = [-self.pan.0 / denom_x, -self.pan.1 / denom_y];
-        (scale, offset, self.rot_matrix())
+        loupe_xform(
+            self.display_size(),
+            self.loupe_area(),
+            self.zoom(),
+            self.pan,
+            self.rot_matrix(),
+        )
     }
 
     /// The display-UV → texture-UV rotation matrix for the current 90° step.
@@ -260,6 +284,10 @@ impl App {
             return;
         }
         let old_width = self.loupe_area().0;
+        // Absolute zoom before the split changes `loupe_area()` (and thus
+        // `fit_scale()`); restored below so a compare toggle never rescales a
+        // manually-zoomed view.
+        let keep_zoom = self.zoom();
         self.compare = !self.compare;
         if self.fitted {
             if self.crop_edit.is_some() {
@@ -270,6 +298,10 @@ impl App {
         } else {
             let new_width = self.loupe_area().0;
             self.pan.0 += (new_width - old_width) / 2.0;
+            let fs = self.fit_scale();
+            if fs > 0.0 {
+                self.zoom_rel = keep_zoom / fs;
+            }
             self.push_transform();
         }
         if !self.compare {
@@ -481,6 +513,40 @@ fn zoom_outruns_preview(source_longest: f32, zoom: f32, preview_px: u32) -> bool
     source_longest * zoom > preview_px as f32
 }
 
+/// The `(scale, offset, rot)` shader transform for a given loupe view state.
+/// Pulled out as a free function so the dimension-invariance property (an
+/// `image_size` change from one decode tier to the next must not move the
+/// on-screen image) can be unit-tested without constructing an `App`.
+///
+/// `image_size` is the display-oriented source size, `area` the loupe viewport,
+/// `zoom` the absolute source-pixel→screen-pixel ratio (`App::zoom`), `pan` the
+/// image's top-left corner in screen pixels, `rot` the display-UV→texture-UV
+/// matrix.
+fn loupe_xform(
+    image_size: (f32, f32),
+    area: (f32, f32),
+    zoom: f32,
+    pan: (f32, f32),
+    rot: [f32; 4],
+) -> ([f32; 2], [f32; 2], [f32; 4]) {
+    let (iw, ih) = image_size;
+    let (ww, wh) = area;
+    let denom_x = zoom * iw;
+    let denom_y = zoom * ih;
+    let scale = [ww / denom_x, wh / denom_y];
+    let offset = [-pan.0 / denom_x, -pan.1 / denom_y];
+    (scale, offset, rot)
+}
+
+/// The fit ("contain") scale for an image of `image_size` in a loupe `area` —
+/// the free-function core of `App::fit_scale`, so `zoom_rel` conversions can be
+/// checked in isolation.
+fn fit_scale_of(image_size: (f32, f32), area: (f32, f32)) -> f32 {
+    let (iw, ih) = image_size;
+    let (ww, wh) = area;
+    (ww / iw).min(wh / ih).clamp(MIN_ZOOM, MAX_ZOOM)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,5 +592,68 @@ mod tests {
         // The preview *is* the full image here (decode-at-size can't upscale),
         // so even 1:1 must not trigger a redundant full decode.
         assert!(!zoom_outruns_preview(1600.0, 1.0, PREVIEW));
+    }
+
+    // ---- Fit-relative zoom / dimension invariance --------------------------
+
+    const AREA: (f32, f32) = (2560.0, 1440.0);
+    // Same 3:2 aspect, two decode tiers: the screen-fit preview and the full
+    // source. `4000 * 2560 / 6000 = 1706.67` floors to 1707 — the ~0.02%
+    // aspect drift a real `fit_within` decode leaves behind.
+    const PREVIEW_DIMS: (f32, f32) = (2560.0, 1707.0);
+    const SOURCE_DIMS: (f32, f32) = (6000.0, 4000.0);
+
+    fn close(a: [f32; 2], b: [f32; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3
+    }
+
+    /// The whole point of storing `zoom` fit-relative: a manual zoom + pan,
+    /// re-evaluated after `image_size()` jumps from the preview's dimensions to
+    /// the true source dimensions, must yield the same shader transform.
+    #[test]
+    fn the_transform_survives_a_preview_to_full_swap() {
+        let rot = [1.0, 0.0, 0.0, 1.0];
+        let zoom_rel = 3.0;
+        let pan = (-812.0, -430.0);
+
+        let z_preview = zoom_rel * fit_scale_of(PREVIEW_DIMS, AREA);
+        let z_source = zoom_rel * fit_scale_of(SOURCE_DIMS, AREA);
+        // Absolute zoom differs wildly between the two tiers…
+        assert!((z_preview / z_source - SOURCE_DIMS.0 / PREVIEW_DIMS.0).abs() < 0.01);
+
+        let before = loupe_xform(PREVIEW_DIMS, AREA, z_preview, pan, rot);
+        let after = loupe_xform(SOURCE_DIMS, AREA, z_source, pan, rot);
+        // …but the transform the shader sees does not (aspect drift only).
+        assert!(close(before.0, after.0), "scale {:?} vs {:?}", before.0, after.0);
+        assert!(close(before.1, after.1), "offset {:?} vs {:?}", before.1, after.1);
+    }
+
+    /// `reset_100` picks `zoom_rel = 1.0 / fit_scale()` so the effective zoom is
+    /// exactly 1:1 regardless of window or image size.
+    #[test]
+    fn reset_100_lands_on_true_one_to_one() {
+        for area in [(2560.0, 1440.0), (800.0, 600.0), (5000.0, 3000.0)] {
+            for dims in [SOURCE_DIMS, PREVIEW_DIMS, (1200.0, 1600.0)] {
+                let fs = fit_scale_of(dims, area);
+                let zoom_rel = 1.0 / fs;
+                assert!((zoom_rel * fs - 1.0).abs() < 1e-4, "area {area:?} dims {dims:?}");
+            }
+        }
+    }
+
+    /// Fitted (`zoom_rel == 1.0`) fills the fit-limiting axis exactly: the
+    /// visible region spans the whole texture on that axis (`scale` == 1.0) and
+    /// letterboxes the other (`scale` > 1.0, more than the texture visible).
+    #[test]
+    fn fitted_exactly_contains_the_image() {
+        for dims in [SOURCE_DIMS, PREVIEW_DIMS, (1200.0, 1600.0)] {
+            let fs = fit_scale_of(dims, AREA);
+            let (scale, _, _) =
+                loupe_xform(dims, AREA, fs, (0.0, 0.0), [1.0, 0.0, 0.0, 1.0]);
+            let tight = scale[0].min(scale[1]);
+            let loose = scale[0].max(scale[1]);
+            assert!((tight - 1.0).abs() < 1e-4, "dims {dims:?}: tight axis {tight}");
+            assert!(loose >= 1.0 - 1e-4, "dims {dims:?}: loose axis {loose}");
+        }
     }
 }
