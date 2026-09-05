@@ -41,6 +41,9 @@ use web_sys::{
     Blob, BlobPropertyBag, ErrorEvent, FileSystemDirectoryHandle, MessageEvent, Url, Worker,
 };
 
+const MAX_REPLACEMENT_ATTEMPTS: u8 = 3;
+const WORKER_READY_TIMEOUT_MS: i32 = 10_000;
+
 use crate::image_decode::{DecodedImage, PixelFormat};
 
 /// Which cache tier a finished decode belongs in — mirrors
@@ -131,10 +134,13 @@ struct WorkerSlot {
     ready: bool,
     busy: bool,
     active_job: Option<u32>,
+    generation: u32,
+    replacement_attempts: u8,
 }
 
 struct Inner {
     workers: Vec<WorkerSlot>,
+    configured_workers: usize,
     next_id: u32,
     pending: HashMap<u32, PendingMeta>,
     /// Decode work is kept ahead of exports so a bulk export cannot make the
@@ -169,6 +175,13 @@ fn get_string(obj: &JsValue, key: &str) -> Option<String> {
 fn pump(inner: &Rc<RefCell<Inner>>) {
     loop {
         let mut inner_mut = inner.borrow_mut();
+        if inner_mut.workers.is_empty()
+            && (!inner_mut.decode_backlog.is_empty() || !inner_mut.export_backlog.is_empty())
+        {
+            drop(inner_mut);
+            fail_queued_jobs(inner, "no workers could be created");
+            return;
+        }
         let Some(slot_idx) = inner_mut.workers.iter().position(|s| s.ready && !s.busy) else {
             return;
         };
@@ -178,7 +191,12 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
             // Keep one worker available for interactive decode work whenever
             // the pool has more than one worker. A single-worker pool still
             // makes progress on exports.
-            let export_limit = inner_mut.workers.len().saturating_sub(1).max(1);
+            let ready_workers = inner_mut.workers.iter().filter(|s| s.ready).count();
+            let export_limit = if inner_mut.configured_workers > 1 {
+                ready_workers.saturating_sub(1)
+            } else {
+                ready_workers
+            };
             let active_exports = inner_mut
                 .workers
                 .iter()
@@ -251,9 +269,8 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
         let transfer = Array::new();
         transfer.push(&job.bytes);
         if let Err(e) = worker.post_message_with_transfer(&msg, &transfer.into()) {
-            web_sys::console::error_1(
-                &format!("[web_worker_pool] post_message failed: {e:?}").into(),
-            );
+            handle_worker_failure(inner, slot_idx, format!("post_message failed: {e:?}"));
+            return;
         }
     }
 }
@@ -342,6 +359,7 @@ impl WorkerPool {
         let (export_tx, export_rx) = mpsc::channel();
         let inner = Rc::new(RefCell::new(Inner {
             workers: Vec::new(),
+            configured_workers: worker_count.max(1),
             next_id: 0,
             pending: HashMap::new(),
             decode_backlog: VecDeque::new(),
@@ -362,10 +380,12 @@ impl WorkerPool {
                             ready: false,
                             busy: false,
                             active_job: None,
+                            generation: 0,
+                            replacement_attempts: 0,
                         });
                         inner_mut.workers.len() - 1
                     };
-                    attach_worker(&inner, slot_idx, worker);
+                    attach_worker(&inner, slot_idx, worker, 0);
                 }
                 Err(e) => {
                     web_sys::console::error_1(
@@ -411,18 +431,32 @@ impl WorkerPool {
     /// one worker for interactive decode work whenever possible, matching
     /// `pump`'s export scheduling rule.
     pub fn export_capacity(&self) -> usize {
-        self.inner.borrow().workers.len().saturating_sub(1).max(1)
+        let inner = self.inner.borrow();
+        let ready_workers = inner.workers.iter().filter(|s| s.ready).count();
+        if inner.configured_workers > 1 {
+            ready_workers.saturating_sub(1)
+        } else {
+            ready_workers
+        }
     }
 }
 
-fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: MessageEvent) {
+fn handle_worker_message(
+    inner: &Rc<RefCell<Inner>>,
+    slot_idx: usize,
+    generation: u32,
+    msg: MessageEvent,
+) {
     let data = msg.data();
 
     // Readiness handshake: `{ready: true}`, no `id` field.
     if get_bool(&data, "ready") {
         let mut inner_mut = inner.borrow_mut();
         if let Some(slot) = inner_mut.workers.get_mut(slot_idx) {
-            slot.ready = true;
+            if slot.generation == generation {
+                slot.ready = true;
+                slot.replacement_attempts = 0;
+            }
         }
         drop(inner_mut);
         pump(inner);
@@ -437,6 +471,9 @@ fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: Messa
 
     let mut inner_mut = inner.borrow_mut();
     if let Some(slot) = inner_mut.workers.get_mut(slot_idx) {
+        if slot.generation != generation {
+            return;
+        }
         slot.busy = false;
         slot.active_job = None;
     }
@@ -501,83 +538,242 @@ fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: Messa
     pump(inner);
 }
 
-fn handle_worker_error(inner: &Rc<RefCell<Inner>>, slot_idx: usize, event: ErrorEvent) {
+fn handle_worker_error(
+    inner: &Rc<RefCell<Inner>>,
+    slot_idx: usize,
+    generation: u32,
+    event: ErrorEvent,
+) {
     let error = if event.message().is_empty() {
         "worker crashed or trapped".to_string()
     } else {
         event.message()
     };
 
-    let (old_worker, active_job, tx, export_tx) = {
+    let (old_worker, active_job) = {
         let mut inner_mut = inner.borrow_mut();
         let Some(slot) = inner_mut.workers.get_mut(slot_idx) else {
             return;
         };
+        if slot.generation != generation {
+            return;
+        }
         let old_worker = slot.worker.clone();
         let active_job = slot.active_job.take();
         slot.ready = false;
         slot.busy = false;
-        (
-            old_worker,
-            active_job,
-            inner_mut.result_tx.clone(),
-            inner_mut.export_tx.clone(),
-        )
+        (old_worker, active_job)
     };
     old_worker.terminate();
 
     if let Some(id) = active_job {
-        let meta = inner.borrow_mut().pending.remove(&id);
-        if let Some(meta) = meta {
-            if meta.kind == JobKind::Export {
-                if let Some((folder, dest_dir, filename)) = meta.export_dest {
-                    let _ = export_tx.send(ExportPoolResult {
-                        path: meta.path,
-                        folder,
-                        dest_dir,
-                        filename,
-                        result: Err(error.clone()),
-                    });
-                }
-            } else {
-                let _ = tx.send(PoolResult {
-                    kind: meta.kind,
-                    path: meta.path,
-                    target: meta.target,
-                    result: Err(error.clone()),
-                });
-            }
-        }
+        fail_pending_job(inner, id, error.clone());
     }
 
-    match spawn_worker(&asset_base_url()) {
-        Ok(worker) => {
-            if let Some(slot) = inner.borrow_mut().workers.get_mut(slot_idx) {
-                slot.worker = worker.clone();
-            }
-            attach_worker(inner, slot_idx, worker);
-        }
-        Err(e) => web_sys::console::error_1(
-            &format!("[web_worker_pool] failed to replace crashed worker: {e}").into(),
-        ),
-    }
+    replace_worker(inner, slot_idx);
     pump(inner);
 }
 
-fn attach_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize, worker: Worker) {
+fn handle_worker_failure(inner: &Rc<RefCell<Inner>>, slot_idx: usize, error: String) {
+    let generation = inner.borrow().workers.get(slot_idx).map(|s| s.generation);
+    if let Some(generation) = generation {
+        handle_worker_error_with_generation(inner, slot_idx, generation, error);
+    }
+}
+
+fn handle_worker_error_with_generation(
+    inner: &Rc<RefCell<Inner>>,
+    slot_idx: usize,
+    generation: u32,
+    error: String,
+) {
+    let (old_worker, active_job) = {
+        let mut inner_mut = inner.borrow_mut();
+        let Some(slot) = inner_mut.workers.get_mut(slot_idx) else {
+            return;
+        };
+        if slot.generation != generation {
+            return;
+        }
+        let active_job = slot.active_job.take();
+        slot.ready = false;
+        slot.busy = false;
+        (slot.worker.clone(), active_job)
+    };
+    old_worker.terminate();
+    if let Some(id) = active_job {
+        fail_pending_job(inner, id, error);
+    }
+    replace_worker(inner, slot_idx);
+    pump(inner);
+}
+
+fn fail_pending_job(inner: &Rc<RefCell<Inner>>, id: u32, error: String) {
+    let (meta, tx, export_tx) = {
+        let mut inner_mut = inner.borrow_mut();
+        (
+            inner_mut.pending.remove(&id),
+            inner_mut.result_tx.clone(),
+            inner_mut.export_tx.clone(),
+        )
+    };
+    let Some(meta) = meta else { return };
+    if meta.kind == JobKind::Export {
+        if let Some((folder, dest_dir, filename)) = meta.export_dest {
+            let _ = export_tx.send(ExportPoolResult {
+                path: meta.path,
+                folder,
+                dest_dir,
+                filename,
+                result: Err(error),
+            });
+        }
+    } else {
+        let _ = tx.send(PoolResult {
+            kind: meta.kind,
+            path: meta.path,
+            target: meta.target,
+            result: Err(error),
+        });
+    }
+}
+
+fn fail_queued_jobs(inner: &Rc<RefCell<Inner>>, error: &str) {
+    loop {
+        let id = {
+            let mut inner_mut = inner.borrow_mut();
+            inner_mut
+                .decode_backlog
+                .pop_front()
+                .or_else(|| inner_mut.export_backlog.pop_front())
+                .map(|job| job.id)
+        };
+        let Some(id) = id else { return };
+        fail_pending_job(inner, id, error.to_string());
+    }
+}
+
+fn fail_queued_exports(inner: &Rc<RefCell<Inner>>, error: &str) {
+    loop {
+        let id = inner
+            .borrow_mut()
+            .export_backlog
+            .pop_front()
+            .map(|job| job.id);
+        let Some(id) = id else { return };
+        fail_pending_job(inner, id, error.to_string());
+    }
+}
+
+fn replace_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize) {
+    for _ in 0..MAX_REPLACEMENT_ATTEMPTS {
+        if inner
+            .borrow()
+            .workers
+            .get(slot_idx)
+            .is_none_or(|slot| slot.replacement_attempts >= MAX_REPLACEMENT_ATTEMPTS)
+        {
+            break;
+        }
+        let attempt = {
+            let mut inner_mut = inner.borrow_mut();
+            let Some(slot) = inner_mut.workers.get_mut(slot_idx) else {
+                return;
+            };
+            slot.replacement_attempts = slot.replacement_attempts.saturating_add(1);
+            slot.replacement_attempts
+        };
+        match spawn_worker(&asset_base_url()) {
+            Ok(worker) => {
+                let generation = {
+                    let mut inner_mut = inner.borrow_mut();
+                    let slot = &mut inner_mut.workers[slot_idx];
+                    slot.worker = worker.clone();
+                    slot.ready = false;
+                    slot.busy = false;
+                    slot.active_job = None;
+                    slot.generation = slot.generation.wrapping_add(1);
+                    slot.generation
+                };
+                attach_worker(inner, slot_idx, worker, generation);
+                return;
+            }
+            Err(e) => web_sys::console::error_1(
+                &format!("[web_worker_pool] replacement attempt {attempt} failed: {e:?}").into(),
+            ),
+        }
+    }
+    if inner.borrow().workers.iter().all(|slot| !slot.ready) {
+        fail_queued_jobs(
+            inner,
+            "no worker capacity remains after replacement failures",
+        );
+    } else if inner.borrow().configured_workers > 1
+        && inner
+            .borrow()
+            .workers
+            .iter()
+            .filter(|slot| slot.ready)
+            .count()
+            <= 1
+    {
+        fail_queued_exports(
+            inner,
+            "no export worker capacity remains after replacement failures",
+        );
+    }
+}
+
+fn attach_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize, worker: Worker, generation: u32) {
     let inner_for_message = inner.clone();
     let onmessage = Closure::wrap(Box::new(move |msg: MessageEvent| {
-        handle_worker_message(&inner_for_message, slot_idx, msg);
+        handle_worker_message(&inner_for_message, slot_idx, generation, msg);
     }) as Box<dyn Fn(MessageEvent)>);
     worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
     onmessage.forget();
 
     let inner_for_error = inner.clone();
     let onerror = Closure::wrap(Box::new(move |event: ErrorEvent| {
-        handle_worker_error(&inner_for_error, slot_idx, event);
+        handle_worker_error(&inner_for_error, slot_idx, generation, event);
     }) as Box<dyn FnMut(ErrorEvent)>);
     worker.set_onerror(Some(onerror.as_ref().unchecked_ref()));
     onerror.forget();
+
+    let inner_for_message_error = inner.clone();
+    let onmessageerror = Closure::wrap(Box::new(move |_event: MessageEvent| {
+        handle_worker_error_with_generation(
+            &inner_for_message_error,
+            slot_idx,
+            generation,
+            "worker messageerror".to_string(),
+        );
+    }) as Box<dyn FnMut(MessageEvent)>);
+    worker.set_onmessageerror(Some(onmessageerror.as_ref().unchecked_ref()));
+    onmessageerror.forget();
+
+    let inner_for_timeout = inner.clone();
+    let timeout = Closure::wrap(Box::new(move || {
+        if inner_for_timeout
+            .borrow()
+            .workers
+            .get(slot_idx)
+            .is_some_and(|s| s.generation == generation && !s.ready)
+        {
+            handle_worker_error_with_generation(
+                &inner_for_timeout,
+                slot_idx,
+                generation,
+                "worker readiness timed out".to_string(),
+            );
+        }
+    }) as Box<dyn FnMut()>);
+    if let Some(window) = web_sys::window() {
+        let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+            timeout.as_ref().unchecked_ref(),
+            WORKER_READY_TIMEOUT_MS,
+        );
+    }
+    timeout.forget();
 }
 
 impl WorkerPoolHandle {
