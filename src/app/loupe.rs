@@ -179,7 +179,7 @@ impl App {
     /// are in loupe-area-local pixels (origin at the viewport's top-left).
     pub(crate) fn zoom_at(&mut self, factor: f32, cx: f32, cy: f32) {
         let cur_zoom = self.zoom();
-        let new_zoom = (cur_zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        let new_zoom = bounded_zoom(cur_zoom, factor);
         let ipx = (cx - self.pan.0) / cur_zoom;
         let ipy = (cy - self.pan.1) / cur_zoom;
         self.pan.0 = cx - ipx * new_zoom;
@@ -552,6 +552,21 @@ fn fit_scale_of(image_size: (f32, f32), area: (f32, f32)) -> f32 {
     (ww / iw).min(wh / ih)
 }
 
+/// Apply explicit zoom bounds without snapping a contain-fit zoom into them.
+/// A fit can be outside the range used for manual zooming, so while below the
+/// minimum only zoom-in can move it toward the range, and while above the
+/// maximum only zoom-out can do so.
+fn bounded_zoom(cur_zoom: f32, factor: f32) -> f32 {
+    let requested = cur_zoom * factor;
+    if cur_zoom < MIN_ZOOM {
+        requested.clamp(cur_zoom, MIN_ZOOM)
+    } else if cur_zoom > MAX_ZOOM {
+        requested.clamp(MAX_ZOOM, cur_zoom)
+    } else {
+        requested.clamp(MIN_ZOOM, MAX_ZOOM)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,5 +698,19 @@ mod tests {
         // naturally lands outside the range used by explicit zoom operations.
         assert_eq!(fit_scale_of((100_000.0, 100_000.0), (100.0, 100.0)), 0.001);
         assert_eq!(fit_scale_of((1.0, 1.0), (100.0, 100.0)), 100.0);
+    }
+
+    #[test]
+    fn zoom_below_minimum_moves_only_toward_the_allowed_range() {
+        assert_eq!(bounded_zoom(0.001, 2.0), 0.002);
+        assert_eq!(bounded_zoom(0.001, 0.5), 0.001);
+        assert_eq!(bounded_zoom(0.001, 100.0), MIN_ZOOM);
+    }
+
+    #[test]
+    fn zoom_above_maximum_moves_only_toward_the_allowed_range() {
+        assert_eq!(bounded_zoom(100.0, 1.1), 100.0);
+        assert_eq!(bounded_zoom(100.0, 0.5), 64.0);
+        assert_eq!(bounded_zoom(100.0, 2.0), 100.0);
     }
 }
