@@ -47,8 +47,8 @@ pub struct PickedFolder {
     pub entries: Vec<PathBuf>,
     pub handles: HashMap<PathBuf, FileSystemFileHandle>,
     /// Every directory handle discovered so far, keyed by relative path.
-    /// Seeded with the root (`dir`) plus every first-level subdirectory;
-    /// extended as the user browses deeper (`web_fs::list_dir` via
+    /// Seeded with the root (`dir`) plus every initially discovered child
+    /// directory; extended as the user browses deeper (`web_fs::list_dir` via
     /// `app/web.rs::poll_dir_listing`).
     pub dir_handles: HashMap<PathBuf, FileSystemDirectoryHandle>,
 }
