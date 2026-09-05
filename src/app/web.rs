@@ -840,8 +840,10 @@ impl App {
                 }
                 Err(e) => {
                     self.set_status(format!("Couldn't list {}: {e}", dir.display()));
-                    // Treat as a leaf so the tree stops retrying every frame.
-                    self.subdirs.insert(dir.clone(), Vec::new());
+                    // Leave the listing uncached so a later explicit
+                    // navigation can retry transient failures. A cached
+                    // empty listing would make the failure indistinguishable
+                    // from a successfully empty folder.
                 }
             }
 
@@ -921,6 +923,9 @@ impl App {
         }
 
         self.apply_web_load_folder(target);
+        self.mode = ViewMode::Grid;
+        self.update_window_title();
+        self.normalize_focus();
     }
 
     /// wasm counterpart of native `load_folder`: rebuild the playlist from
