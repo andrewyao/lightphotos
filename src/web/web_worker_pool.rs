@@ -37,7 +37,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use js_sys::{Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{Blob, BlobPropertyBag, ErrorEvent, MessageEvent, Url, Worker};
+use web_sys::{
+    Blob, BlobPropertyBag, ErrorEvent, FileSystemDirectoryHandle, MessageEvent, Url, Worker,
+};
 
 use crate::image_decode::{DecodedImage, PixelFormat};
 
@@ -85,6 +87,7 @@ pub struct PoolResult {
 /// `WebFs::write_atomic` with no side table.
 pub struct ExportPoolResult {
     pub path: PathBuf,
+    pub folder: FileSystemDirectoryHandle,
     pub dest_dir: PathBuf,
     pub filename: String,
     pub result: Result<Vec<u8>, String>,
@@ -96,7 +99,7 @@ struct PendingMeta {
     target: u32,
     /// `Some` only for `JobKind::Export` — the resolved output location,
     /// carried back onto `ExportPoolResult`.
-    export_dest: Option<(PathBuf, String)>,
+    export_dest: Option<(FileSystemDirectoryHandle, PathBuf, String)>,
 }
 
 struct QueuedJob {
@@ -403,6 +406,13 @@ impl WorkerPool {
         }
         out
     }
+
+    /// Maximum number of export source buffers/jobs kept in flight. Reserve
+    /// one worker for interactive decode work whenever possible, matching
+    /// `pump`'s export scheduling rule.
+    pub fn export_capacity(&self) -> usize {
+        self.inner.borrow().workers.len().saturating_sub(1).max(1)
+    }
 }
 
 fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: MessageEvent) {
@@ -440,7 +450,7 @@ fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: Messa
     drop(inner_mut);
 
     if meta.kind == JobKind::Export {
-        let (dest_dir, filename) = meta
+        let (folder, dest_dir, filename) = meta
             .export_dest
             .expect("Export pending meta always carries its dest");
         let result = if ok {
@@ -452,6 +462,7 @@ fn handle_worker_message(inner: &Rc<RefCell<Inner>>, slot_idx: usize, msg: Messa
         };
         let _ = export_tx.send(ExportPoolResult {
             path: meta.path,
+            folder,
             dest_dir,
             filename,
             result,
@@ -519,9 +530,10 @@ fn handle_worker_error(inner: &Rc<RefCell<Inner>>, slot_idx: usize, event: Error
         let meta = inner.borrow_mut().pending.remove(&id);
         if let Some(meta) = meta {
             if meta.kind == JobKind::Export {
-                if let Some((dest_dir, filename)) = meta.export_dest {
+                if let Some((folder, dest_dir, filename)) = meta.export_dest {
                     let _ = export_tx.send(ExportPoolResult {
                         path: meta.path,
+                        folder,
                         dest_dir,
                         filename,
                         result: Err(error.clone()),
@@ -569,6 +581,15 @@ fn attach_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize, worker: Worker) {
 }
 
 impl WorkerPoolHandle {
+    pub fn export_in_flight(&self) -> usize {
+        self.0
+            .borrow()
+            .pending
+            .values()
+            .filter(|meta| meta.kind == JobKind::Export)
+            .count()
+    }
+
     /// Submit a decode job. `bytes` should be the file's raw contents read
     /// via `web_fs::read_array_buffer` (NOT `read_bytes`) — deliberately a
     /// JS `ArrayBuffer`, not a Rust `Vec<u8>`: it goes straight into a
@@ -629,18 +650,15 @@ impl WorkerPoolHandle {
     pub fn submit_export(
         &self,
         path: PathBuf,
+        folder: FileSystemDirectoryHandle,
         dest_dir: PathBuf,
         filename: String,
-        bytes: Vec<u8>,
+        bytes: js_sys::ArrayBuffer,
         is_raw: bool,
         adj_json: String,
         touchups_json: String,
         rot: u8,
     ) {
-        // Export isn't latency-critical (no live view waiting on it), so one
-        // copy into a fresh JS buffer is fine here — unlike the decode path's
-        // zero-copy `ArrayBuffer` transfer.
-        let buffer = js_sys::Uint8Array::from(bytes.as_slice()).buffer();
         {
             let mut inner_mut = self.0.borrow_mut();
             let id = inner_mut.next_id;
@@ -651,12 +669,12 @@ impl WorkerPoolHandle {
                     kind: JobKind::Export,
                     path,
                     target: 0,
-                    export_dest: Some((dest_dir, filename)),
+                    export_dest: Some((folder, dest_dir, filename)),
                 },
             );
             inner_mut.export_backlog.push_back(QueuedJob {
                 id,
-                bytes: buffer,
+                bytes,
                 max_px: u32::MAX,
                 is_raw,
                 quality: true,
@@ -669,10 +687,18 @@ impl WorkerPoolHandle {
     /// Report an export failure that happened before the job could be
     /// submitted (e.g. the source read failed) — straight to the export
     /// channel, mirroring `fail`.
-    pub fn fail_export(&self, path: PathBuf, dest_dir: PathBuf, filename: String, error: String) {
+    pub fn fail_export(
+        &self,
+        path: PathBuf,
+        folder: FileSystemDirectoryHandle,
+        dest_dir: PathBuf,
+        filename: String,
+        error: String,
+    ) {
         let tx = self.0.borrow().export_tx.clone();
         let _ = tx.send(ExportPoolResult {
             path,
+            folder,
             dest_dir,
             filename,
             result: Err(error),

@@ -478,6 +478,7 @@ impl ApplicationHandler<UserEvent> for App {
             for r in self.web_worker_pool.poll_exports() {
                 let crate::web_worker_pool::ExportPoolResult {
                     path,
+                    folder,
                     dest_dir,
                     filename,
                     result,
@@ -485,24 +486,14 @@ impl ApplicationHandler<UserEvent> for App {
                 let tx = self.web_export_tx.clone();
                 match result {
                     Ok(jpeg) => {
-                        // Rebuild a `WebFs` for the current folder — the batch
-                        // is short-lived and a per-write handle map clone is
-                        // cheap next to a full-res encode.
-                        let folder = self.folder_sel().unwrap_or_default();
-                        let handle = self.web_dir_handles.get(&folder).cloned();
                         let file_handles = self.web_file_handles.clone();
                         let dest = dest_dir.join(&filename);
                         wasm_bindgen_futures::spawn_local(async move {
-                            let result = match handle {
-                                Some(h) => {
-                                    use crate::export::ExportFs;
-                                    crate::web_export_fs::WebFs::new(h, file_handles)
-                                        .write_atomic(&dest, &jpeg)
-                                        .await
-                                        .map(|()| dest.clone())
-                                }
-                                None => Err("current folder handle went away".to_string()),
-                            };
+                            use crate::export::ExportFs;
+                            let result = crate::web_export_fs::WebFs::new(folder, file_handles)
+                                .write_atomic(&dest, &jpeg)
+                                .await
+                                .map(|()| dest.clone());
                             let _ = tx.send(crate::export::ExportOutcome { src: path, result });
                         });
                     }

@@ -44,7 +44,6 @@ impl App {
     /// native) folds results into the progress toast.
     #[cfg(target_arch = "wasm32")]
     pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
-        use crate::export::ExportFs; // read_source is a trait method
         use std::collections::HashSet;
 
         if paths.is_empty() {
@@ -75,6 +74,7 @@ impl App {
             return;
         };
         let dest_dir = folder.join(crate::export::EXPORTS_DIR);
+        let output_folder = folder_handle.clone();
 
         // Gather + serialize each photo's edits up front (cheap, on the main
         // thread) — the worker deserializes them for `bake_jpeg`.
@@ -106,15 +106,34 @@ impl App {
 
         let pool = self.web_worker_pool.handle();
         let fs = crate::web_export_fs::WebFs::new(folder_handle, self.web_file_handles.clone());
+        let capacity = self.web_worker_pool.export_capacity();
         wasm_bindgen_futures::spawn_local(async move {
-            let existing = fs.existing_export_names().await;
+            let existing = match fs.existing_export_names().await {
+                Ok(existing) => existing,
+                Err(e) => {
+                    for (src, ..) in jobs {
+                        pool.fail_export(
+                            src,
+                            output_folder.clone(),
+                            dest_dir.clone(),
+                            String::new(),
+                            format!("could not scan Exports: {e}"),
+                        );
+                    }
+                    return;
+                }
+            };
             let mut taken: HashSet<String> = HashSet::new();
             for (src, is_raw, adj_json, touchups_json, rot) in jobs {
+                while pool.export_in_flight() >= capacity {
+                    Self::wait_for_export_capacity().await;
+                }
                 let filename = crate::paths::jpg_export_name(&src, &existing, &taken);
                 taken.insert(filename.clone());
-                match fs.read_source(&src).await {
+                match fs.read_source_array_buffer(&src).await {
                     Ok(bytes) => pool.submit_export(
                         src,
+                        output_folder.clone(),
                         dest_dir.clone(),
                         filename,
                         bytes,
@@ -123,10 +142,28 @@ impl App {
                         touchups_json,
                         rot,
                     ),
-                    Err(e) => pool.fail_export(src, dest_dir.clone(), filename, e),
+                    Err(e) => {
+                        pool.fail_export(src, output_folder.clone(), dest_dir.clone(), filename, e)
+                    }
                 }
             }
         });
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn wait_for_export_capacity() {
+        use wasm_bindgen::JsCast;
+        let promise = js_sys::Promise::new(
+            &mut |resolve: js_sys::Function, _reject: js_sys::Function| {
+                if let Some(window) = web_sys::window() {
+                    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                        resolve.unchecked_ref(),
+                        16,
+                    );
+                }
+            },
+        );
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
     }
 
     /// Queue `paths` for background export into `<current folder>/Exports/`.

@@ -25,7 +25,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
     FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions,
-    FileSystemGetFileOptions, FileSystemHandleKind, FileSystemWritableFileStream,
+    FileSystemGetFileOptions, FileSystemWritableFileStream,
 };
 
 use crate::export::{ExportFs, EXPORTS_DIR};
@@ -47,53 +47,55 @@ impl WebFs {
         folder: FileSystemDirectoryHandle,
         file_handles: HashMap<PathBuf, FileSystemFileHandle>,
     ) -> Self {
-        Self { folder, file_handles }
+        Self {
+            folder,
+            file_handles,
+        }
     }
 
-    /// Names already present in `Exports/` (any file, not just `.jpg`), so
+    /// Names already present in `Exports/` (any entry kind), so
     /// `start_export` can resolve collision-free targets without a
     /// per-candidate FSA round trip. An absent `Exports/` yields an empty
-    /// set — nothing to collide with yet.
-    pub(crate) async fn existing_export_names(&self) -> HashSet<String> {
+    /// set — nothing to collide with yet. All other access and iteration
+    /// failures are returned: a partial scan is unsafe for collision checks.
+    pub(crate) async fn existing_export_names(&self) -> Result<HashSet<String>, String> {
         let mut names = HashSet::new();
         let opts = FileSystemGetDirectoryOptions::new();
         opts.set_create(false);
         let dir: FileSystemDirectoryHandle = match JsFuture::from(
-            self.folder.get_directory_handle_with_options(EXPORTS_DIR, &opts),
+            self.folder
+                .get_directory_handle_with_options(EXPORTS_DIR, &opts),
         )
         .await
         {
             Ok(v) => v.unchecked_into(),
-            Err(_) => return names,
+            Err(e) if is_not_found(&e) => return Ok(names),
+            Err(e) => return Err(js_error_string(&e)),
         };
 
         let iter = dir.values();
         loop {
             let next = match iter.next() {
-                Ok(promise) => match JsFuture::from(promise).await {
-                    Ok(v) => v,
-                    Err(_) => break,
-                },
-                Err(_) => break,
+                Ok(promise) => JsFuture::from(promise)
+                    .await
+                    .map_err(|e| js_error_string(&e))?,
+                Err(e) => return Err(js_error_string(&e)),
             };
             let done = js_sys::Reflect::get(&next, &"done".into())
-                .ok()
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
+                .map_err(|e| js_error_string(&e))?
+                .as_bool()
+                .ok_or_else(|| "Exports iterator returned invalid done flag".to_string())?;
             if done {
                 break;
             }
-            let Ok(value) = js_sys::Reflect::get(&next, &"value".into()) else {
-                continue;
-            };
-            let Ok(child) = value.dyn_into::<web_sys::FileSystemHandle>() else {
-                continue;
-            };
-            if child.kind() == FileSystemHandleKind::File {
-                names.insert(child.name());
-            }
+            let value =
+                js_sys::Reflect::get(&next, &"value".into()).map_err(|e| js_error_string(&e))?;
+            let child = value
+                .dyn_into::<web_sys::FileSystemHandle>()
+                .map_err(|_| "Exports iterator returned an invalid entry".to_string())?;
+            names.insert(child.name());
         }
-        names
+        Ok(names)
     }
 }
 
@@ -115,7 +117,8 @@ impl ExportFs for WebFs {
         let dir_opts = FileSystemGetDirectoryOptions::new();
         dir_opts.set_create(true);
         let dir: FileSystemDirectoryHandle = JsFuture::from(
-            self.folder.get_directory_handle_with_options(EXPORTS_DIR, &dir_opts),
+            self.folder
+                .get_directory_handle_with_options(EXPORTS_DIR, &dir_opts),
         )
         .await
         .map_err(|e| js_error_string(&e))?
@@ -148,6 +151,27 @@ impl ExportFs for WebFs {
             .map_err(|e| js_error_string(&e))?;
         Ok(())
     }
+}
+
+impl WebFs {
+    pub(crate) async fn read_source_array_buffer(
+        &self,
+        src: &Path,
+    ) -> Result<js_sys::ArrayBuffer, String> {
+        let handle = self
+            .file_handles
+            .get(src)
+            .ok_or_else(|| format!("no file handle for {}", src.display()))?;
+        crate::web_fs::read_array_buffer(handle).await
+    }
+}
+
+fn is_not_found(e: &JsValue) -> bool {
+    js_sys::Reflect::get(e, &"name".into())
+        .ok()
+        .and_then(|v| v.as_string())
+        .as_deref()
+        == Some("NotFoundError")
 }
 
 /// Same extraction `web_fs`/`web_catalog_fs` use — duplicated for the same
