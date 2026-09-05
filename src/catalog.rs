@@ -223,6 +223,12 @@ impl Catalog {
         self.dirty.clear();
     }
 
+    /// Whether `dir` is the directory represented by the in-memory cache.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn is_active_dir(&self, dir: &Path) -> bool {
+        self.dir.as_deref() == Some(dir)
+    }
+
     /// Merge a [`SidecarLoad`] (typically produced by `load_sidecars` on a
     /// background thread) into the cache, if `dir` is still the active
     /// directory — a load whose directory was since switched away from is
@@ -438,6 +444,43 @@ impl Catalog {
             }
         });
         Ok(())
+    }
+
+    /// Delete a sidecar through an explicitly captured directory handle. This
+    /// is used when a photo deletion completes after navigation changed the
+    /// catalog's active handle.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn delete_sidecar_with_handle(
+        &self,
+        path: &Path,
+        dir_handle: &web_sys::FileSystemDirectoryHandle,
+    ) {
+        let Some(name) = path.file_name() else {
+            return;
+        };
+        let name = name.to_os_string();
+        let dir_handle = dir_handle.clone();
+        let tx = self.persist_err_tx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = crate::web_catalog_fs::delete_sidecar(&dir_handle, &name).await {
+                let _ = tx.send(format!("could not delete {}: {e}", name.to_string_lossy()));
+            }
+        });
+    }
+
+    /// Remove the cached record and delete its sidecar through an explicitly
+    /// captured directory handle.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn remove_with_handle(
+        &mut self,
+        path: &Path,
+        dir_handle: &web_sys::FileSystemDirectoryHandle,
+    ) {
+        if let Some(name) = path.file_name() {
+            self.images.remove(name);
+            self.dirty.insert(name.to_os_string());
+        }
+        self.delete_sidecar_with_handle(path, dir_handle);
     }
 }
 

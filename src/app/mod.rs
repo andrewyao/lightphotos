@@ -291,6 +291,19 @@ pub(crate) enum WebPendingNav {
     LoadAfterOpen(PathBuf),
 }
 
+/// State for one in-flight browser deletion batch. The directory handle is
+/// retained so completion can remove sidecars from the directory where the
+/// deletion started, even if navigation changes the active folder meanwhile.
+#[cfg(target_arch = "wasm32")]
+pub(crate) struct WebDeletePending {
+    pub(crate) origin_dir: PathBuf,
+    pub(crate) origin_handle: web_sys::FileSystemDirectoryHandle,
+    pub(crate) remaining: usize,
+    pub(crate) total: usize,
+    pub(crate) removed: Vec<PathBuf>,
+    pub(crate) last_err: Option<String>,
+}
+
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
@@ -381,7 +394,7 @@ pub(crate) struct App {
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_delete_rx: Receiver<(PathBuf, Result<(), String>)>,
     #[cfg(target_arch = "wasm32")]
-    pub(crate) web_delete_pending: Option<(usize, usize, Vec<PathBuf>, Option<String>)>,
+    pub(crate) web_delete_pending: Option<WebDeletePending>,
     /// A folder navigation deferred until its listing lands (see
     /// `app/nav.rs`'s request/apply split). `Open` toggles expansion +
     /// pure-container skip like native `open_folder`; `Load` just swaps the

@@ -231,6 +231,10 @@ impl App {
     /// Open the confirm modal for `kind` (no-op when there's nothing to act
     /// on). Shared by the toolbar buttons and the Delete/Backspace key.
     pub(super) fn request_bulk(&mut self, kind: ui::BulkKind) {
+        #[cfg(target_arch = "wasm32")]
+        if kind == ui::BulkKind::Delete && self.web_delete_pending.is_some() {
+            return;
+        }
         if self.bulk_available() {
             self.pending_bulk = Some(kind);
             self.request_redraw();
@@ -279,11 +283,26 @@ impl App {
     /// is pruned only for operations that actually succeed.
     #[cfg(target_arch = "wasm32")]
     fn run_delete(&mut self, paths: Vec<PathBuf>) {
-        if paths.is_empty() {
+        if paths.is_empty() || self.web_delete_pending.is_some() {
             return;
         }
         let total = paths.len();
-        self.web_delete_pending = Some((total, total, Vec::new(), None));
+        let origin_dir = paths[0].parent().unwrap_or(Path::new("")).to_path_buf();
+        let Some(origin_handle) = self.web_dir_handles.get(&origin_dir).cloned() else {
+            self.set_status(format!(
+                "Could not delete photos: no directory handle for {}",
+                origin_dir.display()
+            ));
+            return;
+        };
+        self.web_delete_pending = Some(WebDeletePending {
+            origin_dir,
+            origin_handle,
+            remaining: total,
+            total,
+            removed: Vec::new(),
+            last_err: None,
+        });
         for path in &paths {
             let tx = self.web_delete_tx.clone();
             let Some(name) = path.file_name().map(std::ffi::OsString::from) else {
@@ -311,28 +330,40 @@ impl App {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn poll_web_deletes(&mut self) {
         while let Ok((path, result)) = self.web_delete_rx.try_recv() {
-            let Some((remaining, _total, removed, last_err)) = self.web_delete_pending.as_mut()
-            else {
+            let Some(pending) = self.web_delete_pending.as_mut() else {
                 continue;
             };
-            *remaining -= 1;
+            pending.remaining -= 1;
             match result {
-                Ok(()) => removed.push(path),
+                Ok(()) => pending.removed.push(path),
                 Err(e) => {
                     web_sys::console::error_1(&format!("[web] delete failed: {e}").into());
-                    *last_err = Some(e);
+                    pending.last_err = Some(e);
                 }
             }
-            if *remaining == 0 {
-                let (_, total, removed, last_err) = self.web_delete_pending.take().unwrap();
-                self.finish_delete(removed, total, last_err);
+            if pending.remaining == 0 {
+                let pending = self.web_delete_pending.take().unwrap();
+                self.finish_delete(
+                    pending.removed,
+                    pending.total,
+                    pending.last_err,
+                    pending.origin_dir,
+                    pending.origin_handle,
+                );
             }
         }
     }
 
     /// Prune every derived structure for the just-deleted paths and
     /// repair the view — shared by both `run_delete` arms.
-    fn finish_delete(&mut self, trashed: Vec<PathBuf>, total: usize, last_err: Option<String>) {
+    fn finish_delete(
+        &mut self,
+        trashed: Vec<PathBuf>,
+        total: usize,
+        last_err: Option<String>,
+        #[cfg(target_arch = "wasm32")] origin_dir: PathBuf,
+        #[cfg(target_arch = "wasm32")] origin_handle: web_sys::FileSystemDirectoryHandle,
+    ) {
         if !trashed.is_empty() {
             let gone: HashSet<PathBuf> = trashed.iter().cloned().collect();
             let survey_was_affected = self.survey_members.iter().any(|p| gone.contains(p));
@@ -343,7 +374,14 @@ impl App {
                 self.ratings.remove(p);
                 self.edits.remove(p);
                 self.rotations.remove(p);
+                #[cfg(not(target_arch = "wasm32"))]
                 self.catalog.remove(p);
+                #[cfg(target_arch = "wasm32")]
+                if self.catalog.is_active_dir(&origin_dir) {
+                    self.catalog.remove_with_handle(p, &origin_handle);
+                } else {
+                    self.catalog.delete_sidecar_with_handle(p, &origin_handle);
+                }
                 #[cfg(target_arch = "wasm32")]
                 {
                     self.web_file_handles.remove(p);
