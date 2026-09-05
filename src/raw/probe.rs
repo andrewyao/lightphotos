@@ -39,12 +39,12 @@
 #[cfg(target_os = "macos")]
 #[path = "../coregraphics.rs"]
 mod coregraphics;
+#[path = "../hash.rs"]
+mod hash;
 #[path = "../image_decode.rs"]
 mod image_decode;
 #[path = "preview.rs"]
 mod raw_preview;
-#[path = "../hash.rs"]
-mod hash;
 // Pulled in for `denoise_linear_rgb_buffer`, which `raw_preview`'s
 // dual-gated (`raw-probe`) `Quality`-tier code now calls.
 #[path = "../develop.rs"]
@@ -65,7 +65,10 @@ fn main() {
     match decode_via_rawler(&dng_path) {
         Ok(raw) => match compare_against_gradient_ground_truth(&raw, width, height) {
             Ok(report) => {
-                println!("rawler decoded {}x{} cpp={} bps={}: {report}", raw.width, raw.height, raw.cpp, raw.bps);
+                println!(
+                    "rawler decoded {}x{} cpp={} bps={}: {report}",
+                    raw.width, raw.height, raw.cpp, raw.bps
+                );
                 println!("PASS: rawler's Linear DNG decode matches the analytic gradient ground truth exactly.");
             }
             Err(e) => {
@@ -122,7 +125,8 @@ fn main() {
         // side-by-side possible from one mac dev binary.
         #[cfg(target_os = "macos")]
         match (image_decode::decode(&path, 1600), std::fs::read(&path)) {
-            (Ok(imageio), Ok(bytes)) => match raw_preview::decode_raw_fast_from_bytes(&bytes, 1600) {
+            (Ok(imageio), Ok(bytes)) => match raw_preview::decode_raw_fast_from_bytes(&bytes, 1600)
+            {
                 Ok(fast) => {
                     let a = avg_luma(&imageio);
                     let b = avg_luma(&fast);
@@ -181,9 +185,9 @@ fn main() {
         // this needs their forked demosaic-mode enum.
         #[cfg(target_os = "macos")]
         match reference_mimic_avg_luma(&path) {
-            Ok((luma, (r, g, b))) => println!(
-                "  reference-mimic: avg={luma:.1}/255  R={r:.1} G={g:.1} B={b:.1}"
-            ),
+            Ok((luma, (r, g, b))) => {
+                println!("  reference-mimic: avg={luma:.1}/255  R={r:.1} G={g:.1} B={b:.1}")
+            }
             Err(e) => println!("  reference-mimic FAILED: {e}"),
         }
     }
@@ -280,7 +284,9 @@ fn rawler_full_image_diag(bytes: &[u8], max_px: u32) -> Option<image_decode::Dec
         .raw_metadata(&source, &params)
         .ok()
         .and_then(|meta| meta.exif.orientation)
-        .map(|code| image_decode::exif_code_from_rawler_orientation(rawler::Orientation::from_u16(code)))
+        .map(|code| {
+            image_decode::exif_code_from_rawler_orientation(rawler::Orientation::from_u16(code))
+        })
         .unwrap_or(1);
 
     let (nw, nh) = image_decode::fit_within(w, h, max_px);
@@ -312,14 +318,21 @@ fn reference_mimic_avg_luma(path: &Path) -> Result<(f64, (f64, f64, f64)), Strin
 
     let mut raw = decode_via_rawler(path)?;
     let original_white_level = raw.whitelevel.0.first().copied().unwrap_or(u16::MAX as u32) as f32;
-    let original_black_level = raw.blacklevel.levels.first().map(|r| r.as_f32()).unwrap_or(0.0);
+    let original_black_level = raw
+        .blacklevel
+        .levels
+        .first()
+        .map(|r| r.as_f32())
+        .unwrap_or(0.0);
     for level in raw.whitelevel.0.iter_mut() {
         *level = u32::MAX;
     }
 
     let mut developer = RawDevelop::default();
     developer.steps.retain(|&step| step != ProcessingStep::SRgb);
-    let mut developed = developer.develop_intermediate(&raw).map_err(|e| e.to_string())?;
+    let mut developed = developer
+        .develop_intermediate(&raw)
+        .map_err(|e| e.to_string())?;
 
     let denominator = (original_white_level - original_black_level).max(1.0);
     let rescale_factor = (u32::MAX as f32 - original_black_level) / denominator;
@@ -359,9 +372,12 @@ fn reference_mimic_avg_luma(path: &Path) -> Result<(f64, (f64, f64, f64)), Strin
             }
         }
         let (r, g, b) = (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
-        let sr8 = image_decode::apply_raw_preview_boost(rawler::imgop::srgb::srgb_apply_gamma(r)) * 255.0;
-        let sg8 = image_decode::apply_raw_preview_boost(rawler::imgop::srgb::srgb_apply_gamma(g)) * 255.0;
-        let sb8 = image_decode::apply_raw_preview_boost(rawler::imgop::srgb::srgb_apply_gamma(b)) * 255.0;
+        let sr8 =
+            image_decode::apply_raw_preview_boost(rawler::imgop::srgb::srgb_apply_gamma(r)) * 255.0;
+        let sg8 =
+            image_decode::apply_raw_preview_boost(rawler::imgop::srgb::srgb_apply_gamma(g)) * 255.0;
+        let sb8 =
+            image_decode::apply_raw_preview_boost(rawler::imgop::srgb::srgb_apply_gamma(b)) * 255.0;
         sum += (sr8 + sg8 + sb8) as f64;
         sr += sr8 as f64;
         sg += sg8 as f64;
@@ -369,7 +385,10 @@ fn reference_mimic_avg_luma(path: &Path) -> Result<(f64, (f64, f64, f64)), Strin
         n += 1;
     }
     let n = n.max(1);
-    Ok((sum / (n as f64 * 3.0), (sr / n as f64, sg / n as f64, sb / n as f64)))
+    Ok((
+        sum / (n as f64 * 3.0),
+        (sr / n as f64, sg / n as f64, sb / n as f64),
+    ))
 }
 
 /// Mean of R+G+B (not alpha) across every pixel, 0..=255 — a single scalar
@@ -512,7 +531,11 @@ fn develop_smoke_check(path: &Path, width: u32, height: u32) -> Result<(), Strin
 /// actual decode bug (wrong stride, byte order, or sample offset), not
 /// floating-point or interpolation noise. A single mismatched sample fails
 /// the check.
-fn compare_against_gradient_ground_truth(raw: &rawler::RawImage, width: u32, height: u32) -> Result<String, String> {
+fn compare_against_gradient_ground_truth(
+    raw: &rawler::RawImage,
+    width: u32,
+    height: u32,
+) -> Result<String, String> {
     if raw.width != width as usize || raw.height != height as usize {
         return Err(format!(
             "dimension mismatch: fixture is {width}x{height}, rawler reports {}x{}",
@@ -520,7 +543,10 @@ fn compare_against_gradient_ground_truth(raw: &rawler::RawImage, width: u32, hei
         ));
     }
     if raw.cpp != 3 {
-        return Err(format!("expected cpp=3 (RGB, already demosaiced), rawler reports cpp={}", raw.cpp));
+        return Err(format!(
+            "expected cpp=3 (RGB, already demosaiced), rawler reports cpp={}",
+            raw.cpp
+        ));
     }
     let data = match &raw.data {
         rawler::RawImageData::Integer(v) => v,
@@ -530,7 +556,10 @@ fn compare_against_gradient_ground_truth(raw: &rawler::RawImage, width: u32, hei
     };
     let expected_len = width as usize * height as usize * 3;
     if data.len() != expected_len {
-        return Err(format!("sample count mismatch: expected {expected_len} (w*h*cpp), got {}", data.len()));
+        return Err(format!(
+            "sample count mismatch: expected {expected_len} (w*h*cpp), got {}",
+            data.len()
+        ));
     }
 
     let w = width.max(1) as u64;
@@ -566,7 +595,9 @@ fn compare_against_gradient_ground_truth(raw: &rawler::RawImage, width: u32, hei
 
     if mismatches > 0 {
         let (x, y, expected, got) = first_mismatch.unwrap();
-        return Err(format!("{report} (first mismatch at pixel ({x},{y}): expected {expected}, got {got})"));
+        return Err(format!(
+            "{report} (first mismatch at pixel ({x},{y}): expected {expected}, got {got})"
+        ));
     }
 
     Ok(report)
@@ -698,7 +729,13 @@ fn write_linear_dng_with_wb(
     push_entry(&mut buf, 254, T_LONG, 1, inline_u32(0)); // NewSubfileType = 0 (primary image)
     push_entry(&mut buf, 256, T_LONG, 1, inline_u32(width)); // ImageWidth
     push_entry(&mut buf, 257, T_LONG, 1, inline_u32(height)); // ImageLength
-    push_entry(&mut buf, 258, T_SHORT, 3, inline_u32(bits_per_sample_offset)); // BitsPerSample
+    push_entry(
+        &mut buf,
+        258,
+        T_SHORT,
+        3,
+        inline_u32(bits_per_sample_offset),
+    ); // BitsPerSample
     push_entry(&mut buf, 259, T_SHORT, 1, inline_u16(1)); // Compression = none
     push_entry(&mut buf, 262, T_SHORT, 1, inline_u16(34892)); // PhotometricInterpretation = LinearRaw
     push_entry(&mut buf, 273, T_LONG, 1, inline_u32(pixel_offset)); // StripOffsets
@@ -708,13 +745,29 @@ fn write_linear_dng_with_wb(
     push_entry(&mut buf, 284, T_SHORT, 1, inline_u16(1)); // PlanarConfiguration = chunky
     push_entry(&mut buf, 50706, T_BYTE, 4, [1, 4, 0, 0]); // DNGVersion
     push_entry(&mut buf, 50707, T_BYTE, 4, [1, 1, 0, 0]); // DNGBackwardVersion
-    push_entry(&mut buf, 50721, T_SRATIONAL, 9, inline_u32(color_matrix_offset)); // ColorMatrix1
+    push_entry(
+        &mut buf,
+        50721,
+        T_SRATIONAL,
+        9,
+        inline_u32(color_matrix_offset),
+    ); // ColorMatrix1
     if as_shot_neutral.is_some() {
-        push_entry(&mut buf, 50728, T_RATIONAL, 3, inline_u32(as_shot_neutral_offset)); // AsShotNeutral
+        push_entry(
+            &mut buf,
+            50728,
+            T_RATIONAL,
+            3,
+            inline_u32(as_shot_neutral_offset),
+        ); // AsShotNeutral
     }
     buf.extend_from_slice(&0u32.to_le_bytes()); // next IFD offset = none
 
-    debug_assert_eq!(buf.len(), after_ifd, "IFD size drifted from the computed layout");
+    debug_assert_eq!(
+        buf.len(),
+        after_ifd,
+        "IFD size drifted from the computed layout"
+    );
 
     // --- Out-of-line: BitsPerSample = [16, 16, 16] ---
     for _ in 0..3 {
@@ -763,7 +816,10 @@ fn write_linear_dng_with_wb(
             buf.extend_from_slice(&sample); // B
         }
     }
-    debug_assert_eq!(buf.len() as u64, pixel_offset as u64 + strip_byte_count as u64);
+    debug_assert_eq!(
+        buf.len() as u64,
+        pixel_offset as u64 + strip_byte_count as u64
+    );
 
     let mut f = std::fs::File::create(path)?;
     f.write_all(&buf)?;
@@ -845,8 +901,17 @@ fn write_dng_with_preview_subifd(
     push_entry(&mut buf, 277, T_SHORT, 1, inline_u16(3)); // SamplesPerPixel
     push_entry(&mut buf, 278, T_LONG, 1, inline_u32(height)); // RowsPerStrip
     let strip_byte_count_u64 = (width as u64) * (height as u64) * 3 * 2;
-    assert!(strip_byte_count_u64 <= u32::MAX as u64, "fixture too large for a LONG StripByteCounts");
-    push_entry(&mut buf, 279, T_LONG, 1, inline_u32(strip_byte_count_u64 as u32)); // StripByteCounts
+    assert!(
+        strip_byte_count_u64 <= u32::MAX as u64,
+        "fixture too large for a LONG StripByteCounts"
+    );
+    push_entry(
+        &mut buf,
+        279,
+        T_LONG,
+        1,
+        inline_u32(strip_byte_count_u64 as u32),
+    ); // StripByteCounts
     push_entry(&mut buf, 284, T_SHORT, 1, inline_u16(1)); // PlanarConfiguration = chunky
     push_entry(&mut buf, 50706, T_BYTE, 4, [1, 4, 0, 0]); // DNGVersion
     push_entry(&mut buf, 50707, T_BYTE, 4, [1, 1, 0, 0]); // DNGBackwardVersion
@@ -864,8 +929,17 @@ fn write_dng_with_preview_subifd(
     // --- Root out-of-line: ColorMatrix1, identity 3x3 SRATIONAL (num, denom) ---
     pad_to_even(&mut buf);
     let color_matrix_offset = buf.len() as u32;
-    const IDENTITY_3X3: [(i32, i32); 9] =
-        [(1, 1), (0, 1), (0, 1), (0, 1), (1, 1), (0, 1), (0, 1), (0, 1), (1, 1)];
+    const IDENTITY_3X3: [(i32, i32); 9] = [
+        (1, 1),
+        (0, 1),
+        (0, 1),
+        (0, 1),
+        (1, 1),
+        (0, 1),
+        (0, 1),
+        (0, 1),
+        (1, 1),
+    ];
     for (num, den) in IDENTITY_3X3 {
         buf.extend_from_slice(&num.to_le_bytes());
         buf.extend_from_slice(&den.to_le_bytes());
@@ -885,7 +959,13 @@ fn write_dng_with_preview_subifd(
     push_entry(&mut buf, 277, T_SHORT, 1, inline_u16(3)); // SamplesPerPixel
     push_entry(&mut buf, 278, T_LONG, 1, inline_u32(preview_height)); // RowsPerStrip
     let preview_strip_byte_count = preview_width * preview_height * 3;
-    push_entry(&mut buf, 279, T_LONG, 1, inline_u32(preview_strip_byte_count)); // StripByteCounts
+    push_entry(
+        &mut buf,
+        279,
+        T_LONG,
+        1,
+        inline_u32(preview_strip_byte_count),
+    ); // StripByteCounts
     buf.extend_from_slice(&0u32.to_le_bytes()); // next IFD offset = none
 
     // --- Preview out-of-line: BitsPerSample = [8, 8, 8] ---
@@ -917,7 +997,8 @@ fn write_dng_with_preview_subifd(
     }
 
     // --- Patch back every out-of-line/sub-IFD offset now that all of them are known ---
-    buf[bits_per_sample_pos..bits_per_sample_pos + 4].copy_from_slice(&bits_per_sample_offset.to_le_bytes());
+    buf[bits_per_sample_pos..bits_per_sample_pos + 4]
+        .copy_from_slice(&bits_per_sample_offset.to_le_bytes());
     buf[strip_offsets_pos..strip_offsets_pos + 4].copy_from_slice(&pixel_offset.to_le_bytes());
     buf[sub_ifds_pos..sub_ifds_pos + 4].copy_from_slice(&preview_ifd_offset.to_le_bytes());
     buf[color_matrix_pos..color_matrix_pos + 4].copy_from_slice(&color_matrix_offset.to_le_bytes());
@@ -951,7 +1032,12 @@ fn write_bayer_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()> 
 /// that function's doc comment), so a test can build a fixture whose CFA is
 /// *not* one of the four RGGB-family patterns rawler's `Superpixel3Channel`
 /// can demosaic.
-fn write_bayer_dng_with_cfa(path: &Path, width: u32, height: u32, cfa_pattern: [u8; 4]) -> std::io::Result<()> {
+fn write_bayer_dng_with_cfa(
+    path: &Path,
+    width: u32,
+    height: u32,
+    cfa_pattern: [u8; 4],
+) -> std::io::Result<()> {
     use std::io::Write;
 
     const T_BYTE: u16 = 1;
@@ -982,7 +1068,10 @@ fn write_bayer_dng_with_cfa(path: &Path, width: u32, height: u32, cfa_pattern: [
         }
     }
 
-    assert!(width % 2 == 0 && height % 2 == 0, "Bayer fixture needs even dimensions");
+    assert!(
+        width % 2 == 0 && height % 2 == 0,
+        "Bayer fixture needs even dimensions"
+    );
 
     let ifd_size = 2 + (ENTRY_COUNT as usize) * 12 + 4;
     let after_ifd = IFD_OFFSET as usize + ifd_size;
@@ -1031,8 +1120,20 @@ fn write_bayer_dng_with_cfa(path: &Path, width: u32, height: u32, cfa_pattern: [
     push_entry(&mut buf, 50713, T_SHORT, 2, inline_u32(0x0002_0002)); // BlackLevelRepeatDim = [2,2]
     push_entry(&mut buf, 50714, T_SHORT, 4, inline_u32(blacklevels_offset)); // BlackLevels
     push_entry(&mut buf, 50717, T_LONG, 1, inline_u32(1024)); // WhiteLevel
-    push_entry(&mut buf, 50721, T_SRATIONAL, 9, inline_u32(colormatrix_offset)); // ColorMatrix1
-    push_entry(&mut buf, 50728, T_RATIONAL, 3, inline_u32(asshotneutral_offset)); // AsShotNeutral
+    push_entry(
+        &mut buf,
+        50721,
+        T_SRATIONAL,
+        9,
+        inline_u32(colormatrix_offset),
+    ); // ColorMatrix1
+    push_entry(
+        &mut buf,
+        50728,
+        T_RATIONAL,
+        3,
+        inline_u32(asshotneutral_offset),
+    ); // AsShotNeutral
     buf.extend_from_slice(&0u32.to_le_bytes()); // next IFD = none
 
     debug_assert_eq!(buf.len(), after_ifd);
@@ -1045,7 +1146,17 @@ fn write_bayer_dng_with_cfa(path: &Path, width: u32, height: u32, cfa_pattern: [
     debug_assert_eq!(buf.len() as u32, colormatrix_offset);
 
     // ColorMatrix1 = identity 3x3 SRATIONAL
-    const IDENTITY_3X3: [(i32, i32); 9] = [(1, 1), (0, 1), (0, 1), (0, 1), (1, 1), (0, 1), (0, 1), (0, 1), (1, 1)];
+    const IDENTITY_3X3: [(i32, i32); 9] = [
+        (1, 1),
+        (0, 1),
+        (0, 1),
+        (0, 1),
+        (1, 1),
+        (0, 1),
+        (0, 1),
+        (0, 1),
+        (1, 1),
+    ];
     for (num, den) in IDENTITY_3X3 {
         buf.extend_from_slice(&num.to_le_bytes());
         buf.extend_from_slice(&den.to_le_bytes());
@@ -1068,7 +1179,10 @@ fn write_bayer_dng_with_cfa(path: &Path, width: u32, height: u32, cfa_pattern: [
             buf.extend_from_slice(&v.to_le_bytes());
         }
     }
-    debug_assert_eq!(buf.len() as u64, pixel_offset as u64 + strip_byte_count as u64);
+    debug_assert_eq!(
+        buf.len() as u64,
+        pixel_offset as u64 + strip_byte_count as u64
+    );
 
     let mut f = std::fs::File::create(path)?;
     f.write_all(&buf)?;
@@ -1175,7 +1289,10 @@ mod tests {
     /// rawler decodes them and matches ground truth exactly.
     #[test]
     fn rawler_decodes_linear_dng_matching_gradient_ground_truth() {
-        let path = std::env::temp_dir().join(format!("lightphotos_linear_dng_rawler_test_{}.dng", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_linear_dng_rawler_test_{}.dng",
+            std::process::id()
+        ));
         let (width, height) = (64u32, 48u32);
 
         write_linear_dng(&path, width, height).expect("write_linear_dng failed");
@@ -1272,13 +1389,20 @@ mod tests {
     /// mapping.
     #[test]
     fn rawler_reports_error_on_non_raw_file() {
-        let path = std::env::temp_dir().join(format!("lightphotos_not_a_raw_file_{}.bin", std::process::id()));
-        std::fs::write(&path, b"this is not a TIFF or any known RAW format").expect("write dummy file");
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_not_a_raw_file_{}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"this is not a TIFF or any known RAW format")
+            .expect("write dummy file");
 
         let result = decode_via_rawler(&path);
         let _ = std::fs::remove_file(&path);
 
-        assert!(result.is_err(), "expected rawler to reject a non-RAW file, got Ok");
+        assert!(
+            result.is_err(),
+            "expected rawler to reject a non-RAW file, got Ok"
+        );
     }
 
     /// Locks in `raw_preview::decode_raw_fast_from_bytes`'s current
@@ -1294,7 +1418,10 @@ mod tests {
     /// float pipeline's output isn't something to derive by hand).
     #[test]
     fn raw_preview_bayer_fast_tier_matches_golden_hash() {
-        let path = std::env::temp_dir().join(format!("lightphotos_bayer_dng_test_{}.dng", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_bayer_dng_test_{}.dng",
+            std::process::id()
+        ));
         let (width, height) = (8u32, 6u32);
         write_bayer_dng(&path, width, height).expect("write_bayer_dng failed");
         let bytes = std::fs::read(&path).expect("read fixture bytes");
@@ -1340,7 +1467,10 @@ mod tests {
     /// asymmetric coefficients mean a channel-order mistake changes the hash.
     #[test]
     fn raw_preview_linear_fast_tier_matches_golden_hash() {
-        let path = std::env::temp_dir().join(format!("lightphotos_linear_wb_dng_test_{}.dng", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_linear_wb_dng_test_{}.dng",
+            std::process::id()
+        ));
         let (width, height) = (16u32, 12u32);
         write_linear_dng_with_wb(&path, width, height, Some([(1, 2), (1, 1), (2, 1)]))
             .expect("write_linear_dng_with_wb failed");
@@ -1366,7 +1496,10 @@ mod tests {
         // if this ever goes all-black again, the hash below stops testing any
         // pixel math and silently degrades into a dimensions check.
         assert!(
-            decoded.rgba.chunks_exact(4).any(|p| p[0] != 0 || p[1] != 0 || p[2] != 0),
+            decoded
+                .rgba
+                .chunks_exact(4)
+                .any(|p| p[0] != 0 || p[1] != 0 || p[2] != 0),
             "decoded image has no non-zero color channel anywhere - the golden hash \
              below would then discriminate nothing but the output dimensions"
         );
@@ -1405,7 +1538,10 @@ mod tests {
     /// see `DemosaicMode::bytes_per_pixel`.
     #[test]
     fn raw_preview_bayer_quality_tier_runs_without_panicking() {
-        let path = std::env::temp_dir().join(format!("lightphotos_bayer_quality_dng_test_{}.dng", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_bayer_quality_dng_test_{}.dng",
+            std::process::id()
+        ));
         let (width, height) = (8u32, 6u32);
         write_bayer_dng(&path, width, height).expect("write_bayer_dng failed");
         let bytes = std::fs::read(&path).expect("read fixture bytes");
@@ -1422,10 +1558,16 @@ mod tests {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             raw_preview::demosaic_cfa(&mut raw, raw_preview::DemosaicMode::Quality, u32::MAX)
         }));
-        let (w, h, rgba) = result.expect("PPGDemosaic panicked").expect("demosaic_cfa returned None");
+        let (w, h, rgba) = result
+            .expect("PPGDemosaic panicked")
+            .expect("demosaic_cfa returned None");
 
         assert!(w > 0 && h > 0, "degenerate output dimensions");
-        assert_eq!(rgba.len(), (w * h * 8) as usize, "Quality tier must be 8 bytes/pixel (half::f16 linear RGBA)");
+        assert_eq!(
+            rgba.len(),
+            (w * h * 8) as usize,
+            "Quality tier must be 8 bytes/pixel (half::f16 linear RGBA)"
+        );
         // Color channels only, decoded as f16: alpha is hardcoded opaque by
         // `render_rgb_sample_linear_bytes`, so a plain "any byte nonzero"
         // check would be satisfied by the alpha bytes alone and would pass
@@ -1437,7 +1579,10 @@ mod tests {
             let r = half::f16::from_le_bytes([px[0], px[1]]).to_f32();
             let g = half::f16::from_le_bytes([px[2], px[3]]).to_f32();
             let b = half::f16::from_le_bytes([px[4], px[5]]).to_f32();
-            assert!(r.is_finite() && g.is_finite() && b.is_finite(), "non-finite linear sample");
+            assert!(
+                r.is_finite() && g.is_finite() && b.is_finite(),
+                "non-finite linear sample"
+            );
             any_nonzero |= r != 0.0 || g != 0.0 || b != 0.0;
         }
         assert!(any_nonzero, "output looks all-zero/degenerate");
@@ -1449,7 +1594,10 @@ mod tests {
     /// threading, only the inner demosaic call.
     #[test]
     fn raw_preview_quality_entry_point_produces_linear_f16() {
-        let path = std::env::temp_dir().join(format!("lightphotos_bayer_quality_entry_dng_test_{}.dng", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_bayer_quality_entry_dng_test_{}.dng",
+            std::process::id()
+        ));
         let (width, height) = (8u32, 6u32);
         write_bayer_dng(&path, width, height).expect("write_bayer_dng failed");
         let bytes = std::fs::read(&path).expect("read fixture bytes");
@@ -1476,7 +1624,10 @@ mod tests {
     /// output must respect `max_px` exactly like every other decode tier.
     #[test]
     fn raw_preview_quality_tier_respects_max_px() {
-        let path = std::env::temp_dir().join(format!("lightphotos_bayer_quality_bound_dng_test_{}.dng", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_bayer_quality_bound_dng_test_{}.dng",
+            std::process::id()
+        ));
         let (width, height) = (8u32, 6u32);
         write_bayer_dng(&path, width, height).expect("write_bayer_dng failed");
         let bytes = std::fs::read(&path).expect("read fixture bytes");
@@ -1516,7 +1667,10 @@ mod tests {
             let r = half::f16::from_le_bytes([px[0], px[1]]).to_f32();
             let g = half::f16::from_le_bytes([px[2], px[3]]).to_f32();
             let b = half::f16::from_le_bytes([px[4], px[5]]).to_f32();
-            assert!(r.is_finite() && g.is_finite() && b.is_finite(), "non-finite resized sample");
+            assert!(
+                r.is_finite() && g.is_finite() && b.is_finite(),
+                "non-finite resized sample"
+            );
             any_nonzero |= r != 0.0 || g != 0.0 || b != 0.0;
         }
         assert!(any_nonzero, "resized output looks all-zero/degenerate");
@@ -1539,16 +1693,22 @@ mod tests {
     /// rather than aborting the test binary.
     #[test]
     fn raw_preview_rejects_unsupported_cfa_pattern_without_panicking() {
-        let path = std::env::temp_dir().join(format!("lightphotos_bayer_rgbg_dng_test_{}.dng", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_bayer_rgbg_dng_test_{}.dng",
+            std::process::id()
+        ));
         let (width, height) = (8u32, 6u32);
-        write_bayer_dng_with_cfa(&path, width, height, [0, 1, 2, 1]).expect("write_bayer_dng_with_cfa failed");
+        write_bayer_dng_with_cfa(&path, width, height, [0, 1, 2, 1])
+            .expect("write_bayer_dng_with_cfa failed");
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX)
         }))
-        .expect("decode_raw_fast_from_bytes panicked on an unsupported CFA pattern (fatal on wasm32)");
+        .expect(
+            "decode_raw_fast_from_bytes panicked on an unsupported CFA pattern (fatal on wasm32)",
+        );
 
         // `DecodedImage` isn't `Debug`, so unwrap the error by hand rather
         // than via `expect_err`.
@@ -1585,7 +1745,8 @@ mod tests {
             "lightphotos_dng_preview_subifd_test_{}.dng",
             std::process::id()
         ));
-        write_dng_with_preview_subifd(&path, 8, 6, 4, 3, [200, 100, 50]).expect("write_dng_with_preview_subifd failed");
+        write_dng_with_preview_subifd(&path, 8, 6, 4, 3, [200, 100, 50])
+            .expect("write_dng_with_preview_subifd failed");
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
@@ -1660,7 +1821,9 @@ mod tests {
                 ProcessingStep::CropDefault,
             ],
         };
-        let native_linear = native_dev.develop_intermediate(&raw).expect("native develop_intermediate failed");
+        let native_linear = native_dev
+            .develop_intermediate(&raw)
+            .expect("native develop_intermediate failed");
         let native_pixels: Vec<[f32; 3]> = match native_linear {
             rawler::imgop::develop::Intermediate::ThreeColor(pixels) => pixels.pixels().to_vec(),
             _ => panic!("expected ThreeColor intermediate for a Bayer ARW"),
@@ -1668,8 +1831,8 @@ mod tests {
         let native_mean = mean_rgb(&native_pixels);
 
         // --- wasm: real raw_preview::decode_raw_quality_from_bytes ---
-        let wasm_decoded =
-            raw_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX).expect("decode_raw_quality_from_bytes failed");
+        let wasm_decoded = raw_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX)
+            .expect("decode_raw_quality_from_bytes failed");
         assert_eq!(
             wasm_decoded.pixel_format,
             image_decode::PixelFormat::LinearF16,
@@ -1728,7 +1891,11 @@ mod tests {
                 }
             }
             let n = n.max(1) as f64;
-            [(sum[0] / n) as f32, (sum[1] / n) as f32, (sum[2] / n) as f32]
+            [
+                (sum[0] / n) as f32,
+                (sum[1] / n) as f32,
+                (sum[2] / n) as f32,
+            ]
         }
         let native_boosted = mean_boosted_srgb(&native_pixels);
         let wasm_boosted = mean_boosted_srgb(&wasm_pixels);
@@ -1758,7 +1925,11 @@ mod tests {
                 n += 1;
             }
             let n = n.max(1) as f64;
-            let embedded_mean = [(sum[0] / n) as f32, (sum[1] / n) as f32, (sum[2] / n) as f32];
+            let embedded_mean = [
+                (sum[0] / n) as f32,
+                (sum[1] / n) as f32,
+                (sum[2] / n) as f32,
+            ];
             println!("embedded JPEG mean sRGB (0..1):       {embedded_mean:?}");
             println!(
                 "  vs native-equivalent boosted sRGB:  {native_boosted:?}  <- compare these two"
@@ -1780,7 +1951,11 @@ mod tests {
             }
         }
         let n = n.max(1) as f64;
-        [(sum[0] / n) as f32, (sum[1] / n) as f32, (sum[2] / n) as f32]
+        [
+            (sum[0] / n) as f32,
+            (sum[1] / n) as f32,
+            (sum[2] / n) as f32,
+        ]
     }
 
     /// Throwaway visual diagnostic for tuning `AUTO_RAW_DENOISE_STRENGTH`
@@ -1804,7 +1979,9 @@ mod tests {
         let mut img = image::RgbImage::new(w, h);
         let enc = |v: f32| -> u8 {
             let srgb = rawler::imgop::srgb::srgb_apply_gamma(v.clamp(0.0, 1.0));
-            (image_decode::apply_raw_preview_boost(srgb) * 255.0).round().clamp(0.0, 255.0) as u8
+            (image_decode::apply_raw_preview_boost(srgb) * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8
         };
         for (i, px) in decoded.rgba.chunks_exact(8).enumerate() {
             let r = half::f16::from_le_bytes([px[0], px[1]]).to_f32();

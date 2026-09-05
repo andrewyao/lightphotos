@@ -112,7 +112,10 @@ fn to_srgb_u8(v: f32) -> u8 {
 /// since `decode_probe.rs`'s golden-hash regression tests call it by name.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
-pub(crate) fn decode_raw_fast_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
+pub(crate) fn decode_raw_fast_from_bytes(
+    bytes: &[u8],
+    max_px: u32,
+) -> Result<DecodedImage, String> {
     decode_raw_preview_from_bytes(bytes, max_px, DemosaicMode::Fast)
 }
 
@@ -133,7 +136,10 @@ pub(crate) fn decode_raw_fast_from_bytes(bytes: &[u8], max_px: u32) -> Result<De
 /// wrongly zoomed-in crop the instant `Quality` landed.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
-pub(crate) fn decode_raw_quality_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
+pub(crate) fn decode_raw_quality_from_bytes(
+    bytes: &[u8],
+    max_px: u32,
+) -> Result<DecodedImage, String> {
     decode_raw_preview_from_bytes(bytes, max_px, DemosaicMode::Quality)
 }
 
@@ -160,9 +166,11 @@ fn decode_raw_preview_from_bytes(
     let params = rawler::decoders::RawDecodeParams::default();
     let orientation = real_orientation(&source, &params);
 
-    let mut raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rawler::decode(&source, &params)))
-        .map_err(|_| "panicked during RAW decode".to_string())?
-        .map_err(|e| e.to_string())?;
+    let mut raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rawler::decode(&source, &params)
+    }))
+    .map_err(|_| "panicked during RAW decode".to_string())?
+    .map_err(|e| e.to_string())?;
 
     // `apply_scaling()` hits a bare `todo!()` for `BlackIsZero` (rawler
     // 0.7.2, `rawimage.rs:510`) — that's a panic, not an error. The
@@ -178,7 +186,10 @@ fn decode_raw_preview_from_bytes(
         raw.photometric,
         RawPhotometricInterpretation::Cfa(_) | RawPhotometricInterpretation::LinearRaw
     ) {
-        return Err(format!("unsupported RAW layout ({})", describe_photometric(&raw.photometric)));
+        return Err(format!(
+            "unsupported RAW layout ({})",
+            describe_photometric(&raw.photometric)
+        ));
     }
 
     let (w, h, rgba) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -280,7 +291,13 @@ fn demosaic_preview(
         3 => decimate_linear_rgb(raw, mode, max_px),
         _ => None,
     }?;
-    Some(apply_orientation(orientation, w, h, rgba, mode.bytes_per_pixel()))
+    Some(apply_orientation(
+        orientation,
+        w,
+        h,
+        rgba,
+        mode.bytes_per_pixel(),
+    ))
 }
 
 /// Applies `rawler::decoders::Orientation`'s flip/transpose to a tightly
@@ -476,7 +493,12 @@ fn render_rgb_sample(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [u8; 4] 
         Some(m) => apply_cam2rgb(m, rgb),
         None => rgb,
     };
-    [to_srgb_u8(srgb[0]), to_srgb_u8(srgb[1]), to_srgb_u8(srgb[2]), 255]
+    [
+        to_srgb_u8(srgb[0]),
+        to_srgb_u8(srgb[1]),
+        to_srgb_u8(srgb[2]),
+        255,
+    ]
 }
 
 /// `render_rgb_sample`'s counterpart for `DemosaicMode::Quality`: color
@@ -596,7 +618,10 @@ mod tests {
         let rgb_with_unused_nan = neutral_if_non_finite([2.0, 1.0, 0.5, f32::NAN]);
         assert_eq!(rgb_with_unused_nan[..3], [2.0, 1.0, 0.5]);
         assert!(rgb_with_unused_nan[3].is_nan());
-        assert_eq!(neutral_if_non_finite([2.0, 1.0, 0.5, 1.0]), [2.0, 1.0, 0.5, 1.0]);
+        assert_eq!(
+            neutral_if_non_finite([2.0, 1.0, 0.5, 1.0]),
+            [2.0, 1.0, 0.5, 1.0]
+        );
     }
 
     #[test]
@@ -604,7 +629,9 @@ mod tests {
         // Column-independent so each output column's average collapses to
         // the same expression as the row it belongs to.
         let (width, height) = (72, 72);
-        let source: Vec<f32> = (0..width * height).map(|index| (index / width) as f32).collect();
+        let source: Vec<f32> = (0..width * height)
+            .map(|index| (index / width) as f32)
+            .collect();
         let (reduced, reduced_width, reduced_height) =
             downsample_xtrans_mosaic(&source, width, height, 12);
 
@@ -617,7 +644,8 @@ mod tests {
         // alone).
         for phase_row in 0..6 {
             let block0_mean: f32 = (0..6).map(|i| (phase_row + i * 6) as f32).sum::<f32>() / 6.0;
-            let block1_mean: f32 = (0..6).map(|i| (36 + phase_row + i * 6) as f32).sum::<f32>() / 6.0;
+            let block1_mean: f32 =
+                (0..6).map(|i| (36 + phase_row + i * 6) as f32).sum::<f32>() / 6.0;
             assert_eq!(reduced[phase_row * reduced_width], block0_mean);
             assert_eq!(reduced[(6 + phase_row) * reduced_width], block1_mean);
         }
@@ -639,7 +667,11 @@ mod tests {
 /// wrap a plain addition back into the valid range and defeat the check.
 fn area_fits(area: rawler::imgop::Rect, width: usize, height: usize) -> bool {
     area.p.x.checked_add(area.d.w).is_some_and(|x1| x1 <= width)
-        && area.p.y.checked_add(area.d.h).is_some_and(|y1| y1 <= height)
+        && area
+            .p
+            .y
+            .checked_add(area.d.h)
+            .is_some_and(|y1| y1 <= height)
 }
 
 fn map_xtrans_coord(coord: usize, tile_step: usize) -> usize {
@@ -659,7 +691,9 @@ pub(crate) fn demosaic_cfa(
     mode: DemosaicMode,
     max_px: u32,
 ) -> Option<(u32, u32, Vec<u8>)> {
-    use rawler::imgop::sensor::bayer::{ppg::PPGDemosaic, superpixel::Superpixel3Channel, Demosaic};
+    use rawler::imgop::sensor::bayer::{
+        ppg::PPGDemosaic, superpixel::Superpixel3Channel, Demosaic,
+    };
     use rawler::pixarray::Pix2D;
     use rawler::rawimage::RawPhotometricInterpretation;
     use rawler::RawImageData;
@@ -789,8 +823,13 @@ pub(crate) fn demosaic_cfa(
     // path already has its own open, separately-tracked correctness issues
     // (see the TODO on `is_supported_xtrans_layout`); not compounding that
     // here.
-    let demosaiced = match (!is_xtrans).then(|| raw.crop_area.or(Some(original_active_area))).flatten() {
-        Some(mut crop) if crop.d != rawler::imgop::Dim2::new(demosaiced.width, demosaiced.height) => {
+    let demosaiced = match (!is_xtrans)
+        .then(|| raw.crop_area.or(Some(original_active_area)))
+        .flatten()
+    {
+        Some(mut crop)
+            if crop.d != rawler::imgop::Dim2::new(demosaiced.width, demosaiced.height) =>
+        {
             crop = crop.adapt(&original_active_area);
             if mode == DemosaicMode::Fast {
                 crop.scale(0.5);
@@ -799,7 +838,8 @@ pub(crate) fn demosaic_cfa(
             // actually fit inside what got demosaiced (bad/inconsistent
             // metadata) must degrade to "no crop", not panic or produce a
             // nonsensical sub-rect.
-            let fits = crop.p.x + crop.d.w <= demosaiced.width && crop.p.y + crop.d.h <= demosaiced.height;
+            let fits =
+                crop.p.x + crop.d.w <= demosaiced.width && crop.p.y + crop.d.h <= demosaiced.height;
             if fits && !crop.is_empty() {
                 let cropped = rawler::imgop::crop(
                     demosaiced.pixels(),
@@ -872,7 +912,12 @@ pub(crate) fn demosaic_cfa(
 /// for. `.min(height - 1)`/`.min(width - 1)` clamps a partial trailing block
 /// to its last valid row/column, same as the point-sample version did — a
 /// harmless edge duplication, not a correctness issue.
-fn downsample_xtrans_mosaic(source: &[f32], width: usize, height: usize, max_px: u32) -> (Vec<f32>, usize, usize) {
+fn downsample_xtrans_mosaic(
+    source: &[f32],
+    width: usize,
+    height: usize,
+    max_px: u32,
+) -> (Vec<f32>, usize, usize) {
     let reduction = width.max(height).div_ceil(max_px.max(1) as usize).max(1);
     if reduction == 1 {
         return (source.to_vec(), width, height);
@@ -976,7 +1021,8 @@ fn decimate_linear_rgb(
             let mut count: f32 = 0.0;
             for sy in sy0..sy1.min(area.d.h as usize) {
                 for sx in sx0..sx1.min(area.d.w as usize) {
-                    let base = ((y0 as usize + sy) * width as usize + x0 as usize + sx) * cpp as usize;
+                    let base =
+                        ((y0 as usize + sy) * width as usize + x0 as usize + sx) * cpp as usize;
                     for (ch, slot) in rgb.iter_mut().enumerate() {
                         *slot += data[base + ch] * wb.get(ch).copied().unwrap_or(1.0);
                     }
