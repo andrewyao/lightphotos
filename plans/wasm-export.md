@@ -49,7 +49,10 @@ and Grid decode both dispatch there today.
   -> Result<Vec<u8>, String>` is called verbatim by native worker threads
   and by the wasm Web Worker. macOS keeps its own ImageIO decode/encode
   path (out of scope here — `bake_jpeg` is `#[cfg(not(target_os =
-  "macos"))]`).
+  "macos"))]`). The native and wasm implementations of `Exporter` are
+  separate cfg-gated implementations: macOS retains its existing exporter
+  and `App` field/constructor types, while only non-mac native targets use
+  the generic `Exporter<F: ExportFs>` described below.
 - **RAW export uses the native non-mac RAW pipeline, not a preview tier.**
   `raw/nonmac_decode.rs::decode_raw_nonmac` (rawler `RawDevelop`: PPG
   demosaic → white balance → colour matrix → sRGB gamma, then the shared
@@ -59,7 +62,8 @@ and Grid decode both dispatch there today.
   byte-identical to what native export bakes. No `LinearF16` bridge, no
   `DemosaicMode::Quality` reuse (that tier exists for the Loupe's GPU
   tonemap and outputs `LinearF16`).
-- **Filesystem seam is a trait, `ExportFs`, implemented on both platforms.**
+- **Filesystem seam is a trait, `ExportFs`, implemented on non-mac native
+  and wasm.**
   `NativeFs` (std::fs + tmp/rename) and `WebFs` (FSA dir handle +
   `create_writable` + `close`). Generic over `F: ExportFs` — no `dyn`, no
   `async-trait` crate (native impl bodies contain no `.await`; the worker
@@ -74,7 +78,12 @@ and Grid decode both dispatch there today.
   `Path::exists()`, which is always false in the browser and would clobber
   an `Exports/foo.jpg` left by a previous session. `ExportFs` owns an
   `existing_targets(dir) -> HashSet<String>` scan; a pure name resolver
-  seeds `taken` from it.
+  seeds `taken` from it. Enumeration errors are fatal: only a positively
+  identified missing `Exports/` directory is represented as an empty set.
+- **Exports have dedicated capacity.** Bulk export work uses a dedicated
+  export worker pool (or an equivalent reserved export queue/concurrency
+  limit), separate from the interactive thumbnail, preview, and Loupe
+  decode pool. Export jobs may not consume all interactive decode slots.
 
 ## Design
 
@@ -132,9 +141,9 @@ pub fn bake_jpeg(
     rot: u8,
 ) -> Result<Vec<u8>, String> {
     let img = if is_raw {
-        crate::raw::nonmac_decode::decode_raw_nonmac_from_bytes(src_bytes, u32::MAX)?
+        crate::image_decode::decode_raw_nonmac_from_bytes(src_bytes, u32::MAX)?
     } else {
-        crate::raw::nonmac_decode::decode_nonraw_from_bytes(src_bytes, u32::MAX)?
+        crate::image_decode::decode_nonraw_from_bytes(src_bytes, u32::MAX)?
     };
     let (w, h, rgba) = crate::image_ops::bake_edited(&img, adj, touchups, rot);
     crate::image_encode::encode_jpeg_to_vec(w, h, &rgba)
@@ -145,10 +154,14 @@ pub fn bake_jpeg(
 #[cfg(not(target_os = "macos"))]
 pub trait ExportFs {
     async fn read_source(&self, src: &Path) -> Result<Vec<u8>, String>;
-    async fn existing_targets(&self, dest_dir: &Path) -> Result<HashSet<String>, String>;
+    async fn existing_targets(&self, dest_dir: &Path) -> Result<HashSet<String>, ExportFsError>;
     async fn write_atomic(&self, dest_dir: &Path, filename: &str, bytes: &[u8]) -> Result<(), String>;
 }
 ```
+
+`ExportFsError` has a distinct `MissingDirectory` variant plus an error
+variant for permission, listing, and other failures. Only the former is
+converted to an empty set by target resolution.
 
 - `NativeFs` — unit struct. `read_source` = `std::fs::read`.
   `existing_targets` = `std::fs::read_dir` filenames (or `HashSet::new()`
@@ -158,8 +171,10 @@ pub trait ExportFs {
 - `WebFs` — holds the current folder's `FileSystemDirectoryHandle` plus a
   clone of the `web_file_handles` map (`PathBuf` → `FileSystemFileHandle`).
   `read_source` = map lookup + `web_fs::read_bytes`. `existing_targets` =
-  `values()` scan of the `Exports/` subdir handle (`Ok(HashSet::new())` if
-  it doesn't exist yet). `write_atomic` = get/create `Exports/` under the
+  `values()` scan of the `Exports/` subdir handle. It returns an explicit
+  `MissingDirectory` outcome only when the handle lookup confirms that
+  `Exports/` does not exist; permission, enumeration, and other failures
+  remain errors. `write_atomic` = get/create `Exports/` under the
   folder handle, `get_file_handle_with_options(create)`, `create_writable`,
   `write_with_js_u8_array`, `close` (atomic swap) — lifted from
   `web_catalog_fs::write_sidecar`. Lives in `src/web/web_export_fs.rs`.
@@ -177,6 +192,9 @@ main thread *before* dispatch, because the bytes cross to the Web Worker as a
 transferred `ArrayBuffer` (the established `request_web_preview` pattern);
 `dest_dir` + `filename` ride along on the job and come back on
 `ExportPoolResult` so the main thread can write without a side table.
+`submit_export` receives both destination fields and stores them in pending
+metadata; every success or failure result carries them, including read,
+worker, `postMessage`, and write failures.
 
 ### 4. Native — `export::Exporter` onto the shared path
 
@@ -188,27 +206,43 @@ let jpeg   = bake_jpeg(&bytes, job.is_raw, &job.adj, &job.touchups, job.rot)?;
 pollster::block_on(fs.write_atomic(&job.dest_dir, &job.filename, &jpeg))?;
 ```
 
-`Exporter` becomes `Exporter<F: ExportFs>` (or holds an `Arc<F>`);
-`main.rs:115` constructs `Exporter::new(NativeFs)`. `do_export`'s old
+`Exporter` becomes `Exporter<F: ExportFs>` (or holds an `Arc<F>`) only on
+non-mac native targets; macOS keeps its current concrete `Exporter` and
+constructor unchanged. The non-mac construction site is cfg-gated and
+constructs `Exporter::new(NativeFs)`. `do_export`'s old
 decode/bake/encode/rename body collapses into the three lines above. The
 `std::fs::create_dir_all(Exports/)` up-front check stays in `start_export`'s
 native arm (or moves behind `NativeFs`).
+Concretely, the existing macOS `App` exporter field and `main.rs`
+construction remain under the macOS cfg; the non-mac `App` field is
+`Exporter<NativeFs>` and its construction is under the complementary cfg.
+No generic `ExportFs` type may appear in the macOS-only module or
+constructor.
 
 ### 5. wasm — `web_worker_pool` `JobKind::Export`
 
 `web_worker_pool.rs`:
 
 - `enum JobKind { Thumb, Speed, Preview, Full, Export }`.
-- `WorkerPoolHandle::submit_export(id_key: PathBuf, bytes: ArrayBuffer,
-  is_raw: bool, adj_json: String, touchups_json: String, rot: u8)` — posts
+- `WorkerPoolHandle::submit_export(id_key: PathBuf, dest_dir: PathBuf,
+  filename: String, bytes: ArrayBuffer, is_raw: bool, adj_json: String,
+  touchups_json: String, rot: u8)` — stores the destination fields in the
+  pending entry, then posts
   `{ id, export: true, bytes (transferred), isRaw, adjustments, touchups,
   rot }`.
-- Second result channel: `struct ExportPoolResult { path: PathBuf, result:
-  Result<Vec<u8>, String> }`, `Inner.export_tx`, `WorkerPool.export_rx`,
+- Second result channel: `struct ExportPoolResult { path: PathBuf,
+  dest_dir: PathBuf, filename: String, result: Result<Vec<u8>, String> }`,
+  `Inner.export_tx`, `WorkerPool.export_rx`,
   `WorkerPool::poll_exports() -> Vec<ExportPoolResult>`.
 - `handle_worker_message`: when the pending job's kind is `Export`, read the
   `jpeg` `ArrayBuffer` field (not `rgba`/`width`/`height`) and route to
-  `export_tx`.
+  `export_tx`, copying `dest_dir` and `filename` from pending metadata.
+- Install both `Worker::onerror` and `Worker::onmessageerror` handlers, and
+  treat a failed `postMessage` as an immediate job failure. A worker trap,
+  termination, or message error fails every export assigned to that worker, removes
+  the dead worker slot, and replaces it (or marks the dedicated export slot
+  unavailable). This must produce an `ExportOutcome` so
+  `export_progress` cannot remain active forever.
 
 `wasm_worker.rs`:
 
@@ -247,13 +281,33 @@ pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
     let pool = self.web_worker_pool.handle();
     let tx   = self.web_export_tx.clone();
     wasm_bindgen_futures::spawn_local(async move {
-        let existing = fs.existing_targets(&dest_dir).await.unwrap_or_default();
-        let dests    = resolve_targets(&paths, &dest_dir, &existing);
+        let existing = match fs.existing_targets(&dest_dir).await {
+            Ok(names) => names,
+            Err(ExportFsError::MissingDirectory) => HashSet::new(),
+            Err(e) => {
+                // Abort the batch. A listing or permission error is not an
+                // empty directory and must never permit an overwrite.
+                for src in &paths {
+                    let _ = tx.send(ExportOutcome {
+                        src: src.clone(), dest_dir: dest_dir.clone(),
+                        filename: planned_filename(src),
+                        result: Err(format!("cannot enumerate export directory: {e}")),
+                    });
+                }
+                return;
+            }
+        };
+        let dests = resolve_targets(&paths, &dest_dir, &existing);
         for (src, dest) in paths.iter().zip(&dests) {
+            let filename = dest.file_name().unwrap().to_string_lossy().into_owned();
             match fs.read_source(src).await {
-                Ok(bytes) => pool.submit_export(src.clone(), bytes_to_arraybuffer(bytes),
-                                                is_raw_extension(src), adj_json, tu_json, rot),
-                Err(e)    => { let _ = tx.send(ExportOutcome { src: src.clone(), result: Err(e) }); }
+                Ok(bytes) => pool.submit_export(
+                    src.clone(), dest_dir.clone(), filename, bytes_to_arraybuffer(bytes),
+                    is_raw_extension(src), adj_json, tu_json, rot,
+                ),
+                Err(e) => { let _ = tx.send(ExportOutcome {
+                    src: src.clone(), dest_dir: dest_dir.clone(), filename, result: Err(e)
+                }); }
             }
         }
     });
@@ -268,23 +322,29 @@ pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
 
 - New `App` fields (wasm only): `web_export_tx: Sender<ExportOutcome>`,
   `web_export_rx: Receiver<ExportOutcome>` (mpsc, like `web_dirlist_tx/rx`).
-- `ExportPoolResult` carries `dest_dir` + `filename` (copied from the job by
-  `handle_worker_message`) so the write side needs no side table.
+- `ExportOutcome` and `ExportPoolResult` both carry `dest_dir` + `filename`.
+  These are copied from the pending job by `handle_worker_message`, so the
+  write side needs no side table; read, worker, message, and write errors
+  use the same fields.
 - `main.rs` frame loop, wasm arm:
 
 ```rust
-for ExportPoolResult { path, result } in self.web_worker_pool.poll_exports() {
+for ExportPoolResult { path, dest_dir, filename, result } in self.web_worker_pool.poll_exports() {
     match result {
         Ok(jpeg) => {
             let fs = /* WebFs for the current export dir */;
-            let (dir, name) = /* dest_dir + filename resolved for `path` */;
             let tx = self.web_export_tx.clone();
             spawn_local(async move {
-                let r = fs.write_atomic(&dir, &name, &jpeg).await.map(|_| dir.join(&name));
-                let _ = tx.send(ExportOutcome { src: path, result: r });
+                let r = fs.write_atomic(&dest_dir, &filename, &jpeg)
+                    .await.map(|_| dest_dir.join(&filename));
+                let _ = tx.send(ExportOutcome {
+                    src: path, dest_dir, filename, result: r
+                });
             });
         }
-        Err(e) => { let _ = self.web_export_tx.send(ExportOutcome { src: path, result: Err(e) }); }
+        Err(e) => { let _ = self.web_export_tx.send(ExportOutcome {
+            src: path, dest_dir, filename, result: Err(e)
+        }); }
     }
 }
 let outcomes: Vec<_> = std::iter::from_fn(|| self.web_export_rx.try_recv().ok()).collect();
@@ -361,6 +421,12 @@ Implementation notes / deviations from the sketch above:
     per-file errors surfaced.
   - `Exports/` shows up in the folder tree (subfolder-browsing work) and can
     be opened to view results.
+
+Implementation follow-ups for Tasks 4–7: use the dedicated export capacity
+specified above; preserve destination metadata on every `ExportOutcome`; and
+cover enumeration failure, worker loss/message failure, and failed writes in
+the progress/error tests. These are required correctness conditions, not
+optional browser-only behavior.
 
 ## Out of scope
 
