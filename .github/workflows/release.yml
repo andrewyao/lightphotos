@@ -4,7 +4,7 @@ name: release
 #   git tag v0.1.0 && git push origin v0.1.0
 # Each platform builds on its native runner (macOS decode uses Apple ImageIO;
 # HEIC/Vision code is cfg-gated off on non-macOS so it still compiles).
-# Ships: macOS Apple Silicon .dmg + Linux x86_64 tarball + Windows x86_64 zip.
+# Ships: macOS Apple Silicon .dmg + Linux x86_64/arm64 tarballs + Windows x86_64 zip.
 # No Intel-mac. The .app inside the .dmg carries the CLI binary at
 # Contents/MacOS/lightphotos.
 
@@ -28,6 +28,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: lightphotos-linux-x86_64
+          - os: ubuntu-24.04-arm   # native GitHub-hosted arm64 Linux runner
+            target: aarch64-unknown-linux-gnu
+            name: lightphotos-linux-arm64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             name: lightphotos-windows-x86_64
