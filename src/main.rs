@@ -142,6 +142,17 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("LightPhotos")
             .with_inner_size(LogicalSize::new(1100.0, 800.0));
+        // Native: create the window hidden and only map it once the renderer is
+        // up and the first frame's state is ready (below). wgpu device/pipeline
+        // bring-up runs synchronously on this thread via `pollster::block_on`,
+        // and under a software rasterizer (llvmpipe in a VM) it takes several
+        // seconds — long enough that a *mapped* X11/Wayland window that can't
+        // pump events in the meantime trips the desktop's "application is not
+        // responding — Wait / Force Quit" dialog. An unmapped window is never
+        // pinged, so the user just sees the window appear a beat later, already
+        // drawn, instead of a frozen frame behind a system prompt.
+        #[cfg(not(target_arch = "wasm32"))]
+        let attrs = attrs.with_visible(false);
         loader::mark("resumed: creating window");
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         loader::mark("window created; initializing wgpu");
@@ -157,7 +168,10 @@ impl ApplicationHandler<UserEvent> for App {
             let size = window.inner_size();
             let renderer = pollster::block_on(Renderer::new(window.clone(), size));
             loader::mark("wgpu ready");
-            finish_window_setup(self, window, renderer, size);
+            finish_window_setup(self, window.clone(), renderer, size);
+            // Renderer and initial open() are done — map the window and draw.
+            window.set_visible(true);
+            window.request_redraw();
         }
         #[cfg(target_arch = "wasm32")]
         {
