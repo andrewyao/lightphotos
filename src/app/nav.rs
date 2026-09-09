@@ -7,11 +7,18 @@ use crate::develop::{self};
 use crate::navigation::Playlist;
 use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp};
 use crate::ui;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::thumbnail::THUMB_PX;
 
 impl App {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn supersede_web_pending_nav(&mut self) {
         self.web_nav_generation = self.web_nav_generation.wrapping_add(1);
+        // Superseded thumbnail results are discarded; release their keys so
+        // the new generation can request the same browser paths again.
+        self.web_thumb_inflight.clear();
+        self.web_thumb_recovery_pending.clear();
+        self.web_thumb_retries.clear();
         self.web_pending_nav = None;
     }
 
@@ -240,7 +247,7 @@ impl App {
         // covered by `app/web.rs`'s `request_web_preview`/`request_web_thumbs`.
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let px = self.thumb_px;
+            let px = THUMB_PX;
             let preview_px = self.preview_px();
             if let Some(loader) = &mut self.loader {
                 loader.request_preview(path.clone(), preview_px);

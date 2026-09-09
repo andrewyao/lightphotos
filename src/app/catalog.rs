@@ -33,7 +33,11 @@ impl App {
                 .name("catalog-load".into())
                 .spawn(move || {
                     let loaded = crate::catalog::load_sidecars(&for_thread);
-                    let _ = tx.send((for_thread, token, loaded));
+                    let _ = tx.send((for_thread.clone(), token, loaded));
+                    // Sweep after sending: the catalog is what the UI is
+                    // waiting on, and evicting dead thumbnail entries is
+                    // pure housekeeping that nothing blocks on.
+                    crate::thumbnail::sweep_orphans(&for_thread);
                 });
             match spawned {
                 Ok(_) => self.catalog_load_pending = Some((dir, token)),
@@ -76,9 +80,22 @@ impl App {
         match self.catalog.wasm_dir_handle() {
             Some(handle) => {
                 let for_task = dir.clone();
+                // The photos actually in this folder, from the listing that
+                // produced its handles — everything else `.lightphotos/`
+                // holds a thumbnail for has been deleted or moved away.
+                let live: Vec<String> = self
+                    .web_file_handles
+                    .keys()
+                    .filter(|p| p.parent() == Some(dir.as_path()))
+                    .filter_map(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .collect();
                 wasm_bindgen_futures::spawn_local(async move {
                     let loaded = crate::web_catalog_fs::load_sidecars(&handle).await;
                     let _ = tx.send((for_task, token, loaded));
+                    // Sweep after sending, same as native: the catalog is
+                    // what the UI waits on, evicting dead entries is not.
+                    crate::web_thumb_cache::sweep_orphans(&handle, &live).await;
                 });
                 self.catalog_load_pending = Some((dir, token));
             }
@@ -734,16 +751,6 @@ impl App {
                 self.set_filter(Some((cmp, n)));
             }
         }
-        self.request_redraw();
-    }
-
-    pub(super) fn adjust_thumb_px(&mut self, grow: bool) {
-        let next = if grow {
-            self.thumb_px + THUMB_STEP
-        } else {
-            self.thumb_px.saturating_sub(THUMB_STEP)
-        };
-        self.thumb_px = next.clamp(THUMB_MIN, THUMB_MAX);
         self.request_redraw();
     }
 

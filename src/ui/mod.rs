@@ -78,7 +78,6 @@ pub enum UiAction {
     /// Dismiss the pending bulk action without running it.
     CancelBulk,
     /// Set the thumbnail size (longest-side px).
-    SetThumbPx(u32),
     /// Set (or clear) the star filter.
     SetFilter(Option<(Cmp, u8)>),
     /// Change the toolbar comparator applied to star-level clicks (≥ / = / ≤).

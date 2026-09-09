@@ -3,15 +3,15 @@ use super::*;
 
 use crate::app::{App, CropEdge, FocusLevel, Region};
 use crate::image_decode;
+use crate::app::GRID_CELL_PT;
 
 pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
-    let thumb_px = app.thumb_px();
     let sel = app.sel();
 
     // The bottom filmstrip, unless hidden (Shift+Tab). When hidden, arrow keys
     // still step the photo — the strip is just the visual.
     if app.filmstrip_visible() {
-        let strip_h = (thumb_px as f32 * 0.55).clamp(72.0, 200.0) + 8.0;
+        let strip_h = (GRID_CELL_PT * 0.55).clamp(72.0, 200.0) + 8.0;
         egui::Panel::bottom("filmstrip")
             .exact_size(strip_h)
             .show_inside(ui, |ui| {

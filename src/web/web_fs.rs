@@ -185,15 +185,23 @@ fn sort_pairs_by_name<T>(v: &mut [(PathBuf, T)]) {
 pub async fn read_array_buffer(
     handle: &FileSystemFileHandle,
 ) -> Result<js_sys::ArrayBuffer, String> {
-    let file: web_sys::File = JsFuture::from(handle.get_file())
-        .await
-        .map_err(|e| js_error_string(&e))?
-        .unchecked_into();
+    let file = stat(handle).await?;
     let buf: js_sys::ArrayBuffer = JsFuture::from(file.array_buffer())
         .await
         .map_err(|e| js_error_string(&e))?
         .unchecked_into();
     Ok(buf)
+}
+
+/// Resolve a handle to its `File` without reading any of its contents — the
+/// browser's nearest equivalent of `fs::metadata`. `File` carries `size` and
+/// `last_modified`, which is everything `web_thumb_cache` needs to name a
+/// photo's cache entry, so a cache hit never touches the source bytes.
+pub async fn stat(handle: &FileSystemFileHandle) -> Result<web_sys::File, String> {
+    Ok(JsFuture::from(handle.get_file())
+        .await
+        .map_err(|e| js_error_string(&e))?
+        .unchecked_into())
 }
 
 /// Read a file's full contents into an owned `Vec<u8>`. `FileSystemFileHandle

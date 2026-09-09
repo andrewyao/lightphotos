@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Small path helpers shared across the navigation and thumbnail layers so
-//! path identity is computed the same way everywhere. `catalog.rs` no longer
-//! uses `normalize()` — sidecar identity is filename-within-directory, not a
-//! canonicalized absolute path — but `migrate_legacy_dir` below still backs
-//! its one-time app-support directory rename.
+//! Small path helpers shared across the navigation and export layers so path
+//! identity is computed the same way everywhere. Neither `catalog.rs` nor
+//! `thumbnail.rs` uses `normalize()`: both key on filename-within-directory,
+//! since everything they write lives in the photo's own `.lightphotos/`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -18,21 +17,6 @@ use std::path::{Path, PathBuf};
 /// (if non-canonical) key rather than an error.
 pub fn normalize(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-/// One-time migration of a renamed app-support/cache directory: if `new` does
-/// not yet exist but `legacy` does, move `legacy` → `new` so data written under
-/// the old name (e.g. `com.imageviewer` → `com.lightphotos`) survives a rename.
-/// Best-effort — any error just leaves both paths untouched.
-pub fn migrate_legacy_dir(new: &Path, legacy: &Path) {
-    if new.exists() || !legacy.exists() {
-        return;
-    }
-    // Ensure the parent exists, then rename the whole directory in one move.
-    if let Some(parent) = new.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::rename(legacy, new);
 }
 
 /// The JPEG export target for `src`, placed in `dest_dir` (the `Exports/`

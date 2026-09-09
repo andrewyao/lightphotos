@@ -70,6 +70,9 @@ mod web_export_fs;
 #[path = "web/web_fs.rs"]
 mod web_fs;
 #[cfg(target_arch = "wasm32")]
+#[path = "web/web_thumb_cache.rs"]
+mod web_thumb_cache;
+#[cfg(target_arch = "wasm32")]
 #[path = "web/web_worker_pool.rs"]
 mod web_worker_pool;
 

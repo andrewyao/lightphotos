@@ -36,16 +36,16 @@ use crate::{image_decode, ui};
 const MIN_ZOOM: f32 = 0.02;
 const MAX_ZOOM: f32 = 64.0;
 
-/// Thumbnail size bounds (longest-side pixels) for the grid/filmstrip.
-const THUMB_MIN: u32 = 96;
-const THUMB_MAX: u32 = 512;
-const THUMB_DEFAULT: u32 = 192;
-const THUMB_STEP: u32 = 32;
+/// Side of a grid cell, in egui points. Deliberately smaller than
+/// [`crate::thumbnail::THUMB_PX`]: thumbnails decode and cache at 512 pixels
+/// so a HiDPI display has real pixels to draw with, while the grid lays out at
+/// this size regardless of scale factor.
+pub(crate) const GRID_CELL_PT: f32 = 192.0;
 
 /// Bounds for the loupe's screen-fit preview decode (longest-side pixels). The
-/// lower bound keeps the preview meaningfully sharper than the largest possible
-/// thumbnail; the upper bound stops a 5K display from asking for a decode so
-/// large it defeats the point of having a preview tier at all.
+/// lower bound keeps the preview meaningfully sharper than a thumbnail; the
+/// upper bound stops a 5K display from asking for a decode so large it
+/// defeats the point of having a preview tier at all.
 const PREVIEW_MIN: u32 = 1024;
 const PREVIEW_MAX: u32 = 4096;
 /// The preview target is rounded up to a multiple of this so that dragging a
@@ -415,6 +415,10 @@ pub(crate) struct App {
     /// (unserviced-on-wasm32) worker queue.
     #[cfg(target_arch = "wasm32")]
     web_thumb_inflight: HashSet<(PathBuf, u32)>,
+    /// Failed cached decodes awaiting a source-read slot. Keep their keys in
+    /// `web_thumb_inflight` so normal requests cannot retry the corrupt cache.
+    #[cfg(target_arch = "wasm32")]
+    web_thumb_recovery_pending: Vec<crate::web_worker_pool::PoolResult>,
     /// How many `FileSystemFileHandle::get_file()` reads are in flight right
     /// now, shared between `request_web_thumbs` and `request_web_preview`
     /// (both read from the same picked folder). Chrome throws a
@@ -589,8 +593,6 @@ pub(crate) struct App {
     /// Accumulated mouse-wheel delta over the filmstrip, not yet enough to
     /// cross the one-photo step threshold. See [`App::scroll_filmstrip`].
     filmstrip_scroll_accum: f32,
-    /// Thumbnail longest-side pixels for the grid + filmstrip.
-    thumb_px: u32,
     /// Columns the grid actually laid out last frame (for Up/Down row moves).
     grid_cols: usize,
     /// Visible cell range `[start, end)` the grid scrolled into view last frame.
@@ -601,7 +603,7 @@ pub(crate) struct App {
     /// Visible cell range `[start, end)` the loupe filmstrip scrolled into view
     /// last frame. The horizontal equivalent of `grid_range`.
     strip_range: (usize, usize),
-    /// egui textures for thumbnails, keyed by (path, thumb_px, edit_signature).
+    /// egui textures for thumbnails, keyed by (path, THUMB_PX, edit_signature).
     /// The edit signature makes an edit change (crop/tone/rotation) mint a new key,
     /// so `sync_thumb_textures` drops the stale texture and re-bakes. Rebuilt as
     /// thumbnails arrive; pruned to the current working set each frame.
@@ -894,6 +896,8 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             web_thumb_inflight: HashSet::new(),
             #[cfg(target_arch = "wasm32")]
+            web_thumb_recovery_pending: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
             web_read_inflight: std::rc::Rc::new(std::cell::Cell::new(0)),
             #[cfg(target_arch = "wasm32")]
             web_thumb_retries: HashMap::new(),
@@ -949,7 +953,6 @@ impl App {
             selected: BTreeSet::new(),
             anchor: None,
             filmstrip_scroll_accum: 0.0,
-            thumb_px: THUMB_DEFAULT,
             grid_cols: 1,
             grid_range: (0, 0),
             grid_scroll_reset: true,
@@ -1470,10 +1473,6 @@ impl App {
                         self.select_single(pos);
                         self.enter_loupe();
                     }
-                }
-                ui::UiAction::SetThumbPx(px) => {
-                    self.thumb_px = px.clamp(THUMB_MIN, THUMB_MAX);
-                    self.request_redraw();
                 }
                 ui::UiAction::SetFilter(f) => self.set_filter(f),
                 ui::UiAction::SetFilterCmp(cmp) => self.set_filter_cmp(cmp),

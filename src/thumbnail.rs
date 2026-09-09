@@ -14,8 +14,10 @@
 //! `image_decode::decode` — see each function's non-mac doc comment for
 //! exactly what is and isn't handled.
 //!
-//! `ThumbCache`, `EmbeddedPreview`, and the on-disk `.tw` cache format below
-//! are platform-independent (no objc2 dependency) and unconditional.
+//! `ThumbCache`, `EmbeddedPreview`, and the on-disk cache helpers below are
+//! platform-independent (no objc2 dependency) and unconditional. The cache
+//! stores one JPEG per photo in that photo's own `<dir>/.lightphotos/`, the
+//! directory `catalog.rs` already keeps ratings and edits in.
 //!
 //! ## Pipeline position
 //! - `loader.rs`'s `Job::Speed`/`Job::Preview` (Pipeline 1, opening a photo)
@@ -23,20 +25,25 @@
 //!   pass, `Never` for the forced screen-fit decode once that pass comes
 //!   back short.
 //! - `loader.rs`'s `Job::Thumb` (Pipeline 2, Grid/filmstrip) calls
-//!   `ThumbCache::get_or_make`, which checks the on-disk `.tw` cache before
-//!   falling back to `decode_at_size(.., UseIfPresent)`.
-//! - wasm32 doesn't reach `ThumbCache` at all — `wasm_worker.rs` calls the
-//!   bytes-based `embedded_preview_from_bytes`/`rawler_full_image_from_bytes`
-//!   helpers directly, in-memory only. See `ARCHITECTURE.md`.
+//!   `ThumbCache::get_or_make`, which checks the on-disk cache before falling
+//!   back to `decode_at_size(.., UseIfPresent)`.
+//! - wasm32 doesn't reach `ThumbCache` itself — it has no `std::fs` — but it
+//!   caches to the same directory, under the same filenames, through
+//!   `web/web_thumb_cache.rs` and the naming helpers below, which it shares.
+//!   A folder cached by either build is readable by the other.
+//!   See `ARCHITECTURE.md`.
 
 // TODO: remove once wired into loader (T3)
 #![allow(dead_code)]
 
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
+use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
 
 #[cfg(target_os = "macos")]
@@ -148,15 +155,20 @@ pub fn decode_at_size(
 /// (still satisfies "longest side at most `max_px`").
 ///
 /// Returns `None` on any failure — unreadable file, no TIFF/EXIF structure, no
-/// IFD1 thumbnail tags, an out-of-bounds offset/length, or a blob that
-/// doesn't actually decode as JPEG — so `decode_at_size`'s full-decode
+/// IFD1 thumbnail tags, an out-of-bounds offset/length, a blob that
+/// does not decode as JPEG, or no preview meeting the minimum resolution
+/// (including rawler's larger camera preview) — so `decode_at_size`'s full-decode
 /// fallback is always safe to take; this must never be what makes a thumbnail
 /// request fail outright.
 #[cfg(not(target_os = "macos"))]
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
     let bytes = fs::read(path).ok()?;
     embedded_preview_from_bytes(&bytes, max_px)
-        .or_else(|| rawler_full_image_from_bytes(&bytes, max_px))
+        .filter(|img| preview_is_large_enough(img.width, img.height, max_px))
+        .or_else(|| {
+            rawler_full_image_from_bytes(&bytes, max_px)
+                .filter(|img| preview_is_large_enough(img.width, img.height, max_px))
+        })
 }
 
 /// The bytes-based core of [`try_extract_embedded_preview`] above — same
@@ -381,155 +393,228 @@ fn build_thumbnail_options(
     Ok(dict)
 }
 
-/// On-disk thumbnail cache rooted at
-/// `~/Library/Caches/com.lightphotos/thumbnails/`.
+/// Longest-side pixel target every cached thumbnail is generated at.
 ///
-/// Cache files are named `<hex fnv1a-64 key>.tw`. The key hashes the
-/// canonicalized source path, its mtime (ns), its length, and `max_px`, so any
-/// change to the source file or requested size yields a fresh entry.
-pub struct ThumbCache {
-    root: PathBuf,
+/// One fixed size, not a per-request one: the cache lives in the user's photo
+/// folder, so a slider-driven target would write a separate entry for every
+/// size the user ever dragged through. 512 is the largest the grid ever draws
+/// and stays sharp on a HiDPI display, where the cell is 192 points.
+pub const THUMB_PX: u32 = 512;
+
+/// Embedded previews must reach at least half the requested longest side.
+/// Smaller previews fall back to source decoding; genuinely small originals
+/// can still be cached at their native resolution.
+pub(crate) fn preview_is_large_enough(width: u32, height: u32, max_px: u32) -> bool {
+    width > 0 && height > 0 && width.max(height) >= max_px.div_ceil(2)
 }
 
+/// Filename suffix shared by every cache entry, after the
+/// `<photo filename>.<16 hex key>` prefix. Deliberately not `.xmp`, so
+/// `catalog.rs`'s sidecar scans (which filter on that extension) skip these.
+const CACHE_SUFFIX: &str = ".thumb.jpg";
+
+/// FNV-1a-64 of the cache version and source's mtime and byte length — the half of a cache
+/// entry's identity that isn't already carried by its filename. Hand-rolled
+/// (not `DefaultHasher`) so the value is stable across process runs.
+///
+/// The path is deliberately *not* hashed: an entry lives in its photo's own
+/// `.lightphotos/` directory and is named after it, so moving or renaming the
+/// folder keeps the cache valid instead of orphaning all of it.
+///
+/// **Milliseconds, not nanoseconds**, even though every filesystem this runs
+/// on stores finer than that (APFS and ext4 both keep nanoseconds). The
+/// browser only ever exposes `File.lastModified`, which is milliseconds, so
+/// hashing native's full precision would make the two builds compute
+/// different keys for the same untouched file — each would miss the other's
+/// entries and rewrite them, quietly costing exactly the interop this cache
+/// exists in the photo folder to get. Resolution lost here doesn't weaken
+/// invalidation in practice: the byte length is hashed alongside, and a file
+/// rewritten within the same millisecond at an identical size is not a case
+/// worth chasing.
+pub(crate) fn cache_key(mtime_ms: u64, len: u64) -> u64 {
+    let mut h = crate::hash::Fnv1a::new();
+    // Invalidate older entries that discarded transparency or accepted undersized
+    // embedded previews. Native and web must miss the same obsolete entries.
+    h.write(b"lightphotos-thumb-v3");
+    h.write(&mtime_ms.to_le_bytes());
+    h.write(&len.to_le_bytes());
+    h.finish()
+}
+
+/// `<photo filename>.<key:016x>.thumb.jpg` — the cache entry name for `photo`.
+///
+/// Built by `OsString::push` rather than formatting through `to_string_lossy`
+/// so a non-UTF-8 filename round-trips exactly, same as `catalog.rs`'s
+/// `sidecar_path`.
+pub(crate) fn cache_name(photo: &OsStr, key: u64) -> OsString {
+    let mut name = photo.to_os_string();
+    name.push(format!(".{key:016x}{CACHE_SUFFIX}"));
+    name
+}
+
+/// The inverse of [`cache_name`]: split a cache entry's filename back into the
+/// photo it belongs to and the key it was written under. `None` for anything
+/// that isn't a cache entry, which is how the sweep below leaves `.xmp`
+/// sidecars (and anything else a user dropped in there) alone.
+///
+/// Requires a UTF-8 name, unlike `cache_name`. A non-UTF-8 photo filename
+/// still gets a working cache entry — lookup joins the exact `OsString` — it
+/// just isn't reachable by the orphan sweep.
+pub(crate) fn parse_cache_name(name: &OsStr) -> Option<(OsString, u64)> {
+    let rest = name.to_str()?.strip_suffix(CACHE_SUFFIX)?;
+    // The key is the final dot-separated field; `rsplit_once` keeps the rest
+    // intact, so a photo named `PHOTO1.ARW` (a dot of its own) survives.
+    let (photo, hex) = rest.rsplit_once('.')?;
+    if photo.is_empty() || hex.len() != 16 {
+        return None;
+    }
+    let key = u64::from_str_radix(hex, 16).ok()?;
+    Some((OsString::from(photo), key))
+}
+
+/// The cache entry path for `photo`, or `None` when the photo has no parent
+/// directory, no filename, or can't be stat'd (deleted between listing and
+/// decode). Reads the source's metadata, so it is the one place that decides
+/// whether an on-disk entry is current.
+#[cfg(not(target_arch = "wasm32"))]
+fn entry_path(photo: &Path) -> Option<PathBuf> {
+    let dir = photo.parent()?;
+    let name = photo.file_name()?;
+    Some(
+        dir.join(crate::catalog::SIDECAR_DIR)
+            .join(cache_name(name, current_key(photo)?)),
+    )
+}
+
+/// The key `photo`'s current bytes hash to, or `None` if it can't be stat'd.
+#[cfg(not(target_arch = "wasm32"))]
+fn current_key(photo: &Path) -> Option<u64> {
+    let meta = fs::metadata(photo).ok()?;
+    let mtime_ms = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    Some(cache_key(mtime_ms, meta.len()))
+}
+
+/// On-disk thumbnail cache, stored as JPEGs in each photo's own
+/// `<photo dir>/.lightphotos/` — the same directory `catalog.rs` already keeps
+/// ratings and develop edits in.
+///
+/// Holds no state: an entry's location is derived from the photo's own path,
+/// so the cache follows the photos when a folder is moved, copied, or opened
+/// from a different machine. That is also what lets the browser build share
+/// it, since File System Access has no path outside the picked folder to
+/// write to (`web/web_thumb_cache.rs` is the wasm32 half).
+///
+/// A folder that can't be written (read-only volume, locked card) simply
+/// decodes every session: writes are best-effort and their failure is never
+/// surfaced.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct ThumbCache;
+
+#[cfg(not(target_arch = "wasm32"))]
 impl ThumbCache {
-    /// Soft cap on the total size of the on-disk `.tw` cache. The cache keys on
-    /// (path, mtime, len, max_px), so edits/resizes/new folders accumulate stale
-    /// entries indefinitely; a startup sweep evicts the least-recently-modified
-    /// files back under this budget.
-    const BUDGET_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
-
-    /// Create the cache, ensuring the root directory exists. If `$HOME` is
-    /// unavailable, falls back to a relative `./.lightphotos-thumbnails`.
+    /// Reclaim the pre-`.lightphotos` central cache, then hand back the
+    /// (stateless) cache handle.
     pub fn new() -> ThumbCache {
-        let root = match std::env::var("HOME") {
-            Ok(home) => {
-                let base = PathBuf::from(home).join("Library/Caches");
-                let root = base.join("com.lightphotos/thumbnails");
-                // Preserve the cache built under the pre-rename name.
-                crate::paths::migrate_legacy_dir(&root, &base.join("com.imageviewer/thumbnails"));
-                root
-            }
-            Err(_) => PathBuf::from(".lightphotos-thumbnails"),
-        };
-        // Best-effort: errors here surface later on read/write.
-        let _ = fs::create_dir_all(&root);
-
-        // Prune stale entries off the main path so startup never blocks on a
-        // large cache directory. Best-effort — any failure just leaves the cache.
-        let prune_root = root.clone();
-        // Builder::spawn (Result-returning), not the bare free `thread::spawn`
-        // (which panics on failure): not every target has real threads yet
-        // (e.g. wasm32 pre-Web-Worker-pool — see the wasm port plan's M4),
-        // and startup must degrade (no pruning happens) rather than crash.
-        if let Err(e) = std::thread::Builder::new()
-            .name("thumb-cache-prune".into())
-            .spawn(move || prune_dir(&prune_root, ThumbCache::BUDGET_BYTES))
-        {
-            eprintln!("[thumbnail] could not spawn cache-prune thread: {e}");
-        }
-
-        ThumbCache { root }
+        remove_legacy_cache();
+        ThumbCache
     }
 
-    /// Return a cached thumbnail for `(path, max_px)` if present on disk;
-    /// otherwise generate it via `decode_at_size(.., UseIfPresent)`, persist
-    /// it, and return it.
-    pub fn get_or_make(&self, path: &Path, max_px: u32) -> Result<Arc<DecodedImage>, String> {
-        let key = self.cache_key(path, max_px)?;
-        let file = self.root.join(format!("{:016x}.tw", key));
+    /// Return `path`'s cached thumbnail if one is on disk and current;
+    /// otherwise decode it, persist it, and return it.
+    pub fn get_or_make(&self, path: &Path) -> Result<Arc<DecodedImage>, String> {
+        let entry = entry_path(path);
 
-        if let Ok(img) = read_tw(&file) {
-            return Ok(Arc::new(img));
+        // A hit decodes a ~45 KB JPEG instead of a multi-megabyte RAW. A
+        // corrupt or half-written entry just fails here and falls through to
+        // the real decode below, which overwrites it.
+        if let Some(file) = &entry {
+            if let Ok(img) = decode_at_size(file, THUMB_PX, EmbeddedPreview::UseIfPresent) {
+                return Ok(Arc::new(img));
+            }
         }
 
-        let img = decode_at_size(path, max_px, EmbeddedPreview::UseIfPresent)?;
+        let mut img = decode_at_size(path, THUMB_PX, EmbeddedPreview::UseIfPresent)?;
+        if !preview_is_large_enough(img.width, img.height, THUMB_PX) {
+            img = decode_at_size(path, THUMB_PX, EmbeddedPreview::Never)?;
+        }
         // Best-effort write; a failed cache write must not fail the request.
-        let _ = write_tw(&file, &img);
+        if let Some(file) = &entry {
+            let _ = write_entry(file, &img);
+        }
         Ok(Arc::new(img))
     }
-
-    /// FNV-1a 64-bit hash of (canonical path bytes, mtime_ns, len, max_px).
-    /// Hand-rolled so the key is stable across process runs (unlike
-    /// `std::collections::hash_map::DefaultHasher`).
-    fn cache_key(&self, path: &Path, max_px: u32) -> Result<u64, String> {
-        // normalize() yields the canonical path when the file exists; if it
-        // doesn't, the metadata() call below fails and we return Err anyway.
-        let canon = crate::paths::normalize(path);
-        let meta = fs::metadata(&canon).map_err(|e| format!("metadata: {e}"))?;
-        let mtime_ns = meta
-            .modified()
-            .map_err(|e| format!("mtime: {e}"))?
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        let len = meta.len();
-
-        let mut h = crate::hash::Fnv1a::new();
-        h.write(canon.as_os_str().as_encoded_bytes());
-        h.write(&mtime_ns.to_le_bytes());
-        h.write(&len.to_le_bytes());
-        h.write(&max_px.to_le_bytes());
-        Ok(h.finish())
-    }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Default for ThumbCache {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Evict the least-recently-modified `.tw` files in `root` until the total size
-/// of remaining cache files is at or below `budget`. Best-effort: metadata and
-/// remove errors are ignored, and a cache already under budget does no work.
-fn prune_dir(root: &Path, budget: u64) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    // (path, size, mtime) for every cache file.
-    let mut files: Vec<(PathBuf, u64, std::time::SystemTime)> = Vec::new();
-    let mut total: u64 = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("tw") {
-            continue;
-        }
-        let Ok(meta) = entry.metadata() else { continue };
-        let len = meta.len();
-        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-        total += len;
-        files.push((path, len, mtime));
+/// wasm32 stand-in. `loader.rs` builds a `ThumbCache` for its decode workers
+/// on every target, but those workers never run in a browser — the Web Worker
+/// pool decodes there instead (`web/web_worker_pool.rs`), and caches through
+/// `web/web_thumb_cache.rs`, which reaches `.lightphotos/` over File System
+/// Access rather than `std::fs`. Keeping the type present here is what lets
+/// `loader.rs` stay platform-agnostic.
+#[cfg(target_arch = "wasm32")]
+pub struct ThumbCache;
+
+#[cfg(target_arch = "wasm32")]
+impl ThumbCache {
+    pub fn new() -> ThumbCache {
+        ThumbCache
     }
-    if total <= budget {
-        return;
-    }
-    // Oldest first, delete until under budget.
-    files.sort_by_key(|(_, _, mtime)| *mtime);
-    for (path, len, _) in files {
-        if total <= budget {
-            break;
-        }
-        if fs::remove_file(&path).is_ok() {
-            total = total.saturating_sub(len);
-        }
+
+    pub fn get_or_make(&self, path: &Path) -> Result<std::sync::Arc<DecodedImage>, String> {
+        Err(format!(
+            "no std::fs on wasm32; {} is decoded by the Worker pool",
+            path.display()
+        ))
     }
 }
 
-/// `.tw` file format: little-endian `u32 width`, `u32 height`, then
-/// `width * height * 4` RGBA bytes.
-fn write_tw(path: &Path, img: &DecodedImage) -> Result<(), String> {
-    let mut buf = Vec::with_capacity(8 + img.rgba.len());
-    buf.extend_from_slice(&img.width.to_le_bytes());
-    buf.extend_from_slice(&img.height.to_le_bytes());
-    buf.extend_from_slice(&img.rgba);
-
-    // Atomic-ish: write to a temp sibling then rename.
-    let tmp = path.with_extension("tw.tmp");
-    {
-        let mut f = fs::File::create(&tmp).map_err(|e| format!("create temp: {e}"))?;
-        f.write_all(&buf).map_err(|e| format!("write temp: {e}"))?;
+#[cfg(target_arch = "wasm32")]
+impl Default for ThumbCache {
+    fn default() -> Self {
+        Self::new()
     }
-    if let Err(e) = fs::rename(&tmp, path) {
+}
+
+/// JPEG cannot preserve transparency or linear floating-point pixels.
+pub(crate) fn jpeg_cacheable(img: &DecodedImage) -> bool {
+    img.pixel_format == PixelFormat::Srgb8 && img.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255)
+}
+
+/// Encode `img` as a JPEG at `file`, creating `.lightphotos/` if this is the
+/// directory's first entry. Atomic: writes a `.tmp` sibling and renames, the
+/// same shape `catalog.rs`'s `write_sidecar_file` uses.
+///
+/// Only opaque sRGB8 is written. The RAW tiers can hand back `LinearF16`, which a
+/// JPEG can't represent — caching that would silently store wrong pixels, so
+/// those photos decode every session instead.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
+    if !jpeg_cacheable(img) {
+        return Err("only opaque sRGB8 images are cacheable as JPEG".into());
+    }
+    let dir = file.parent().ok_or("cache entry has no parent")?;
+    fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+
+    // Push rather than `with_extension`, so the temp name keeps the full
+    // entry name and the sweep below can recognise an interrupted write.
+    let mut tmp = file.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+
+    crate::image_encode::encode_jpeg(&tmp, img.width, img.height, &img.rgba)?;
+    if let Err(e) = fs::rename(&tmp, file) {
         // Don't leave the orphaned temp file behind on failure.
         let _ = fs::remove_file(&tmp);
         return Err(format!("rename: {e}"));
@@ -537,30 +622,57 @@ fn write_tw(path: &Path, img: &DecodedImage) -> Result<(), String> {
     Ok(())
 }
 
-fn read_tw(path: &Path) -> Result<DecodedImage, String> {
-    let mut f = fs::File::open(path).map_err(|e| format!("open: {e}"))?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).map_err(|e| format!("read: {e}"))?;
-    if buf.len() < 8 {
-        return Err("truncated .tw header".into());
+/// Delete every cache entry in `dir/.lightphotos/` whose photo is gone or has
+/// changed since the entry was written. Called when a folder opens.
+/// Temporary files are left alone: another worker or app may be writing them.
+///
+/// This is the whole eviction story — there is no byte budget. One entry per
+/// photo means a folder's cache is bounded by its own photo count, and an
+/// entry that stops matching its photo is deleted rather than aged out.
+/// Best-effort throughout: a failed delete just leaves the file.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn sweep_orphans(dir: &Path) {
+    let cache_dir = dir.join(crate::catalog::SIDECAR_DIR);
+    let Ok(entries) = fs::read_dir(&cache_dir) else {
+        return; // no .lightphotos yet — nothing was ever cached here
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some((photo, key)) = parse_cache_name(OsStr::new(name)) else {
+            continue;
+        };
+        if current_key(&dir.join(photo)) != Some(key) {
+            let _ = fs::remove_file(entry.path());
+        }
     }
-    let width = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
-    let height = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
-    let expected = (width as usize) * (height as usize) * 4;
-    let rgba = buf.split_off(8);
-    if rgba.len() != expected {
-        return Err(format!(
-            "truncated .tw body: {} bytes, expected {}",
-            rgba.len(),
-            expected
-        ));
-    }
-    Ok(DecodedImage {
-        width,
-        height,
-        rgba,
-        pixel_format: PixelFormat::Srgb8,
-    })
+}
+
+/// One-time reclaim of the central caches this cache replaced
+/// (`~/Library/Caches/com.lightphotos/thumbnails` and its pre-rename
+/// `com.imageviewer` predecessor). Runs off the main path — deleting a cache
+/// that grew to its old 512 MiB budget is thousands of unlinks, and startup
+/// must not block on it.
+///
+/// A no-op after the first launch, and on wasm32, where `$HOME` is unset.
+#[cfg(not(target_arch = "wasm32"))]
+fn remove_legacy_cache() {
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
+    let base = PathBuf::from(home).join("Library/Caches");
+    // Builder::spawn (Result-returning), not the bare free `thread::spawn`
+    // (which panics on failure): not every target has real threads, and
+    // startup must degrade rather than crash.
+    let _ = std::thread::Builder::new()
+        .name("thumb-cache-reclaim".into())
+        .spawn(move || {
+            for legacy in ["com.lightphotos/thumbnails", "com.imageviewer/thumbnails"] {
+                let _ = fs::remove_dir_all(base.join(legacy));
+            }
+        });
 }
 
 #[cfg(test)]
@@ -568,60 +680,161 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tw_round_trip_is_identical() {
-        // A known small (w, h, RGBA) blob; no real image fixture needed.
-        let img = DecodedImage {
-            width: 2,
-            height: 2,
-            rgba: vec![
-                1, 2, 3, 255, 4, 5, 6, 255, // row 0
-                7, 8, 9, 255, 10, 11, 12, 255, // row 1
-            ],
-            pixel_format: PixelFormat::Srgb8,
-        };
-
-        let dir = std::env::temp_dir().join(format!("iv-tw-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("blob.tw");
-
-        write_tw(&file, &img).expect("write should succeed");
-        let back = read_tw(&file).expect("read should succeed");
-
-        assert_eq!(back.width, img.width);
-        assert_eq!(back.height, img.height);
-        assert_eq!(back.rgba, img.rgba);
-
-        let _ = fs::remove_file(&file);
-        let _ = fs::remove_dir(&dir);
+    fn cache_key_invalidates_legacy_opaque_thumbnails() {
+        let mut legacy = crate::hash::Fnv1a::new();
+        legacy.write(&1_000u64.to_le_bytes());
+        legacy.write(&4_096u64.to_le_bytes());
+        assert_ne!(cache_key(1_000, 4_096), legacy.finish());
     }
 
     #[test]
-    fn prune_evicts_until_under_budget() {
-        let dir = std::env::temp_dir().join(format!("iv-prune-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+    fn cache_key_invalidates_undersized_previews() {
+        let mut legacy = crate::hash::Fnv1a::new();
+        legacy.write(b"lightphotos-thumb-v2");
+        legacy.write(&1_000u64.to_le_bytes());
+        legacy.write(&4_096u64.to_le_bytes());
+        assert_ne!(cache_key(1_000, 4_096), legacy.finish());
+    }
 
-        // Ten 1 KiB .tw files (10 KiB total) plus a non-.tw file that must survive.
-        for i in 0..10 {
-            fs::write(dir.join(format!("f{i}.tw")), vec![0u8; 1024]).unwrap();
-        }
-        fs::write(dir.join("keep.txt"), vec![0u8; 4096]).unwrap();
+    #[test]
+    fn preview_resolution_policy() {
+        assert!(!preview_is_large_enough(160, 120, THUMB_PX));
+        assert!(!preview_is_large_enough(255, 192, THUMB_PX));
+        assert!(preview_is_large_enough(256, 192, THUMB_PX));
+        assert!(preview_is_large_enough(192, 256, THUMB_PX));
+        assert!(!preview_is_large_enough(256, 192, 513));
+        assert!(!preview_is_large_enough(512, 0, THUMB_PX));
+    }
 
-        // Budget of 4 KiB → at most 4 of the .tw files may remain.
-        prune_dir(&dir, 4096);
-
-        let remaining_tw: u64 = fs::read_dir(&dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tw"))
-            .map(|e| e.metadata().unwrap().len())
-            .sum();
-        assert!(
-            remaining_tw <= 4096,
-            "cache should be pruned under budget, got {remaining_tw}"
+    #[test]
+    fn cache_name_round_trips_through_parse() {
+        let photo = OsStr::new("IMG_0001.ARW");
+        let name = cache_name(photo, 0xa3f1_c07b_91e4_d2f8);
+        assert_eq!(
+            name.to_str().unwrap(),
+            "IMG_0001.ARW.a3f1c07b91e4d2f8.thumb.jpg"
         );
+
+        let (back, key) = parse_cache_name(&name).expect("should parse");
+        assert_eq!(back, photo);
+        assert_eq!(key, 0xa3f1_c07b_91e4_d2f8);
+    }
+
+    #[test]
+    fn parse_rejects_non_cache_names() {
+        // A sidecar, which shares the directory and must be left alone.
+        assert!(parse_cache_name(OsStr::new("IMG_0001.ARW.xmp")).is_none());
+        // Right suffix, but no key field at all.
+        assert!(parse_cache_name(OsStr::new("IMG_0001.ARW.thumb.jpg")).is_none());
+        // Right suffix, key isn't 16 hex digits.
+        assert!(parse_cache_name(OsStr::new("IMG_0001.ARW.abc.thumb.jpg")).is_none());
+        assert!(parse_cache_name(OsStr::new("IMG_0001.ARW.zzzzzzzzzzzzzzzz.thumb.jpg")).is_none());
+        // No photo name left once the key is stripped.
+        assert!(parse_cache_name(OsStr::new(".a3f1c07b91e4d2f8.thumb.jpg")).is_none());
+    }
+
+    #[test]
+    fn key_changes_with_mtime_or_length() {
+        let base = cache_key(1_000, 4_096);
+        assert_eq!(base, cache_key(1_000, 4_096), "same inputs, same key");
+        assert_ne!(base, cache_key(1_001, 4_096), "a touched file must miss");
+        // The browser hands us whole milliseconds; native must agree with it
+        // exactly, or neither build ever reads the other's entries.
+        assert_eq!(
+            base,
+            cache_key(
+                std::time::Duration::from_nanos(1_000_999_999).as_millis() as u64,
+                4_096
+            ),
+            "sub-millisecond mtime precision must not reach the key"
+        );
+        assert_ne!(base, cache_key(1_000, 4_097), "a resized file must miss");
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn transparency_survives_reopening_and_opaque_images_hit_cache() {
+        let dir = std::env::temp_dir().join(format!("lp-alpha-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        const TRANSPARENT: &[u8] = &[
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 168, 8,
+            208, 96, 0, 0, 3, 37, 0, 241, 104, 150, 229, 28, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
+            96, 130,
+        ];
+        const OPAQUE: &[u8] = &[
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 120, 156, 99, 168, 8,
+            208, 248, 15, 0, 4, 36, 1, 240, 183, 238, 60, 203, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66,
+            96, 130,
+        ];
+        let cache = ThumbCache;
+        for (name, png, opaque) in [
+            ("transparent.png", TRANSPARENT, false),
+            ("opaque.png", OPAQUE, true),
+        ] {
+            let photo = dir.join(name);
+            fs::write(&photo, png).unwrap();
+            let entry = entry_path(&photo).unwrap();
+            let first = cache.get_or_make(&photo).unwrap();
+            assert_eq!(jpeg_cacheable(&first), opaque);
+            assert_eq!(entry.exists(), opaque);
+            // A second request hits JPEG for opaque images and re-decodes
+            // transparent sources without losing alpha.
+            let second = cache.get_or_make(&photo).unwrap();
+            assert_eq!(jpeg_cacheable(&second), opaque);
+            assert_eq!(first.rgba[3], second.rgba[3]);
+            assert_eq!(entry.exists(), opaque);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A photo, its current cache entry, a stale entry from before it was
+    /// edited, an entry for a photo that's been deleted, an interrupted
+    /// write's `.tmp`, and a sidecar that must survive all of it.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn sweep_keeps_current_entries_and_sidecars() {
+        let dir = std::env::temp_dir().join(format!("lp-sweep-test-{}", std::process::id()));
+        let cache = dir.join(crate::catalog::SIDECAR_DIR);
+        fs::create_dir_all(&cache).unwrap();
+
+        let photo = dir.join("IMG_0001.ARW");
+        fs::write(&photo, b"pretend raw bytes").unwrap();
+        let key = current_key(&photo).unwrap();
+
+        let current = cache.join(cache_name(OsStr::new("IMG_0001.ARW"), key));
+        let stale = cache.join(cache_name(OsStr::new("IMG_0001.ARW"), key ^ 1));
+        let orphan = cache.join(cache_name(OsStr::new("GONE.JPG"), key));
+        let interrupted = cache.join("IMG_0001.ARW.0123456789abcdef.thumb.jpg.tmp");
+        let sidecar = cache.join("IMG_0001.ARW.xmp");
+        for f in [&current, &stale, &orphan, &interrupted, &sidecar] {
+            fs::write(f, b"x").unwrap();
+        }
+
+        let malformed = [
+            "reference.thumb.jpg",
+            "reference.thumb.jpg.tmp",
+            "IMG_0001.ARW.abc.thumb.jpg",
+            "IMG_0001.ARW.zzzzzzzzzzzzzzzz.thumb.jpg.tmp",
+            ".0123456789abcdef.thumb.jpg",
+        ];
+        for name in malformed {
+            fs::write(cache.join(name), b"unrelated user file").unwrap();
+        }
+
+        sweep_orphans(&dir);
+        for name in malformed {
+            assert!(cache.join(name).exists(), "{name} must survive");
+        }
+
+        assert!(current.exists(), "an entry matching its photo must survive");
+        assert!(sidecar.exists(), "sidecars are not ours to delete");
+        assert!(!stale.exists(), "an entry from before an edit must go");
+        assert!(!orphan.exists(), "an entry whose photo is gone must go");
         assert!(
-            dir.join("keep.txt").exists(),
-            "non-cache files must be left alone"
+            interrupted.exists(),
+            "a potentially active temp file must survive"
         );
 
         let _ = fs::remove_dir_all(&dir);

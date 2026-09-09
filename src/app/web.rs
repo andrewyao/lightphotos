@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::navigation::Playlist;
+use crate::thumbnail::THUMB_PX;
 use crate::web_fs;
 use crate::web_worker_pool::JobKind;
 
@@ -147,7 +148,7 @@ impl App {
     /// decoding inline via `spawn_local` — multiple decodes now genuinely run
     /// in parallel, off the main thread, across the pool's workers.
     pub(crate) fn request_web_thumbs(&mut self) -> bool {
-        let px = self.thumb_px;
+        let px = THUMB_PX;
         let keys: Vec<PathBuf> = self
             .working_thumb_keys()
             .into_iter()
@@ -185,16 +186,53 @@ impl App {
             let Some(handle) = self.web_file_handles.get(&path).cloned() else {
                 continue; // shouldn't happen — every playlist entry came from a handle
             };
+            // The photo's own folder handle, for the `.lightphotos/` cache
+            // beside it. Absent only if navigation dropped it mid-flight, in
+            // which case this decodes uncached rather than failing.
+            let cache_dir = path
+                .parent()
+                .and_then(|d| self.web_dir_handles.get(d))
+                .cloned();
+            let generation = self.web_nav_generation;
             self.web_thumb_inflight.insert(key);
             self.web_read_inflight.set(self.web_read_inflight.get() + 1);
             let read_inflight = self.web_read_inflight.clone();
             let pool = self.web_worker_pool.handle();
             wasm_bindgen_futures::spawn_local(async move {
                 let is_raw = crate::image_decode::is_raw_extension(&path);
+
+                // Metadata first: `get_file()` resolves the File object
+                // without reading a byte, and its size + mtime are what name
+                // this photo's cache entry.
+                let entry = match (web_fs::stat(&handle).await, path.file_name()) {
+                    (Ok(file), Some(name)) => Some(crate::web_thumb_cache::entry_name(
+                        name,
+                        crate::web_thumb_cache::key_for(&file),
+                    )),
+                    _ => None,
+                };
+
+                // A hit decodes a ~45 KB JPEG; the multi-megabyte source (a
+                // RAW, typically) is never read at all. This is the whole
+                // point of the cache on web, where nothing else persists
+                // between page loads.
+                if let (Some(name), Some(root)) = (&entry, &cache_dir) {
+                    if let Some(cached) = crate::web_thumb_cache::load(root, name).await {
+                        read_inflight.set(read_inflight.get().saturating_sub(1));
+                        let buf = js_sys::Uint8Array::from(cached.as_slice()).buffer();
+                        pool.submit_thumb(path, px, buf, false, entry, generation, true);
+                        return;
+                    }
+                }
+
                 let result = web_fs::read_array_buffer(&handle).await;
                 read_inflight.set(read_inflight.get().saturating_sub(1));
                 match result {
-                    Ok(bytes) => pool.submit(path, px, bytes, is_raw, JobKind::Thumb),
+                    // A miss: the worker encodes the JPEG alongside the
+                    // decode and `poll_web_thumbs` stores it.
+                    Ok(bytes) => {
+                        pool.submit_thumb(path, px, bytes, is_raw, entry, generation, false)
+                    }
                     Err(e) => {
                         web_sys::console::error_1(
                             &format!("[web] reading bytes failed for {}: {e}", path.display())
@@ -206,12 +244,43 @@ impl App {
                         // masking the thumbnail as pending. Route straight
                         // to the same negative-cache path a decode failure
                         // uses.
-                        pool.fail(path, px, JobKind::Thumb, e);
+                        pool.fail(path, px, JobKind::Thumb, Some(generation), e);
                     }
                 }
             });
         }
         any_missing
+    }
+
+    /// Write a worker-encoded thumbnail JPEG into the photo's own
+    /// `.lightphotos/`, fire-and-forget.
+    ///
+    /// Same shape as `Catalog::write_sidecar`'s wasm32 arm: File System
+    /// Access has no synchronous write, and nothing on screen depends on the
+    /// outcome — the decoded thumbnail is already in `loader.rs`'s cache
+    /// either way. A failure only costs a re-decode next session, so it is
+    /// logged rather than surfaced as a toast; a full disk or a revoked
+    /// permission would otherwise spam one per photo in the grid.
+    fn store_web_thumb(&self, path: &Path, name: String, bytes: Vec<u8>) {
+        let Some(root) = path
+            .parent()
+            .and_then(|d| self.web_dir_handles.get(d))
+            .cloned()
+        else {
+            return;
+        };
+        let display = path.to_path_buf();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = crate::web_thumb_cache::store(&root, &name, &bytes).await {
+                web_sys::console::warn_1(
+                    &format!(
+                        "[web] could not cache thumbnail for {}: {e}",
+                        display.display()
+                    )
+                    .into(),
+                );
+            }
+        });
     }
 
     /// Drain finished thumbnail decodes (from the shared Worker pool result
@@ -225,7 +294,8 @@ impl App {
     /// of which path decoded the thumbnail.
     pub(crate) fn poll_web_thumbs(&mut self) -> Vec<(PathBuf, u32)> {
         let mut arrived = Vec::new();
-        for r in self.web_worker_pool.poll() {
+        let pending = std::mem::take(&mut self.web_thumb_recovery_pending);
+        for r in pending.into_iter().chain(self.web_worker_pool.poll()) {
             if r.kind == JobKind::Full {
                 self.web_full_pending.push(r);
                 continue;
@@ -234,17 +304,69 @@ impl App {
                 self.web_preview_pending.push(r);
                 continue;
             }
+            // Browser paths identify only the picked folder's name. Discard
+            // old jobs before recovery or storage can resolve a new handle
+            // for an identically named folder.
+            if r.generation != Some(self.web_nav_generation) {
+                continue;
+            }
+            let recover_source = r.needs_source_decode();
+            // Retry queued recoveries first, but only reserve source reads
+            // within the shared budget. Retain the result (including its cache
+            // name) and in-flight key without consuming a retry attempt.
+            if recover_source && self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
+                self.web_thumb_recovery_pending.push(r);
+                continue;
+            }
             let crate::web_worker_pool::PoolResult {
                 path,
                 target,
                 result,
+                jpeg,
+                cache_name,
+                generation,
                 ..
             } = r;
             let key = (path.clone(), target);
+            // Keep this thumbnail in flight while recovering, and do not charge
+            // a corrupt cache entry against the source's retry budget.
+            if recover_source {
+                if let Some(handle) = self.web_file_handles.get(&path).cloned() {
+                    let pool = self.web_worker_pool.handle();
+                    let read_inflight = self.web_read_inflight.clone();
+                    read_inflight.set(read_inflight.get() + 1);
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let source = web_fs::read_array_buffer(&handle).await;
+                        read_inflight.set(read_inflight.get().saturating_sub(1));
+                        match source {
+                            Ok(bytes) => {
+                                let is_raw = crate::image_decode::is_raw_extension(&path);
+                                pool.submit_thumb(
+                                    path,
+                                    target,
+                                    bytes,
+                                    is_raw,
+                                    cache_name,
+                                    generation.expect("validated thumbnail generation"),
+                                    false,
+                                );
+                            }
+                            Err(e) => pool.fail(path, target, JobKind::Thumb, generation, e),
+                        }
+                    });
+                    continue;
+                }
+            }
             self.web_thumb_inflight.remove(&key);
             match result {
                 Ok(img) => {
                     self.web_thumb_retries.remove(&key);
+                    // Persist the worker-encoded JPEG for the next page load.
+                    // `Some` only on a cache miss, so a hit never rewrites
+                    // what it just read.
+                    if let (Some(bytes), Some(name)) = (jpeg, cache_name) {
+                        self.store_web_thumb(&path, name, bytes);
+                    }
                     if let Some(loader) = &mut self.loader {
                         loader.insert_thumb_external(
                             path.clone(),
@@ -404,10 +526,10 @@ impl App {
                         &format!("[web] reading bytes failed for {}: {e}", path.display()).into(),
                     );
                     if quality_needed {
-                        pool.fail(path.clone(), target, JobKind::Preview, e.clone());
+                        pool.fail(path.clone(), target, JobKind::Preview, None, e.clone());
                     }
                     if speed_needed {
-                        pool.fail(path, target, JobKind::Speed, e);
+                        pool.fail(path, target, JobKind::Speed, None, e);
                     }
                 }
             }
@@ -438,6 +560,7 @@ impl App {
             path,
             target,
             result,
+            ..
         } in pending
         {
             let key = (path.clone(), target);
@@ -639,7 +762,7 @@ impl App {
                     web_sys::console::error_1(
                         &format!("[web] reading bytes failed for {}: {e}", path.display()).into(),
                     );
-                    pool.fail(path, target, JobKind::Full, e);
+                    pool.fail(path, target, JobKind::Full, None, e);
                 }
             }
         });

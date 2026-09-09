@@ -83,6 +83,28 @@ pub struct PoolResult {
     pub path: PathBuf,
     pub target: u32,
     pub result: Result<DecodedImage, String>,
+    /// The same image encoded as a JPEG, for `JobKind::Thumb` jobs submitted
+    /// with `from_cache: false` — the bytes `app/web.rs` writes into
+    /// `.lightphotos/`. `None` for every other kind, for a thumbnail that was
+    /// itself read back from the cache, and for a decode whose pixels a JPEG
+    /// can't represent (the linear RAW tier).
+    pub jpeg: Option<Vec<u8>>,
+    /// The cache filename. Computed
+    /// from the source's size and mtime in `app/web.rs`'s `request_web_thumbs`
+    /// and carried through the job, so storing the result needs no second
+    /// `get_file()` round-trip. Rides along the way `export_dest` does.
+    pub cache_name: Option<String>,
+    /// Originating navigation generation, independent of cache metadata.
+    pub generation: Option<u64>,
+    /// True when the worker decoded cached bytes, including failed jobs.
+    pub from_cache: bool,
+}
+
+impl PoolResult {
+    /// Cache failures are recoverable without spending a source retry.
+    pub fn needs_source_decode(&self) -> bool {
+        self.kind == JobKind::Thumb && self.from_cache && self.result.is_err()
+    }
 }
 
 /// A finished (or failed) export job. `dest_dir`/`filename` ride the job
@@ -98,6 +120,10 @@ pub struct ExportPoolResult {
 
 struct PendingMeta {
     kind: JobKind,
+    /// See `PoolResult::cache_name`.
+    cache_name: Option<String>,
+    generation: Option<u64>,
+    from_cache: bool,
     path: PathBuf,
     target: u32,
     /// `Some` only for `JobKind::Export` — the resolved output location,
@@ -119,6 +145,10 @@ struct QueuedJob {
     /// PPG demosaic + linear output, `Thumb` (Grid) → the quarter-res Fast
     /// tier — downgrades quality for thumbnails. See `submit`'s doc comment.
     quality: bool,
+    /// Set for a `JobKind::Thumb` job whose bytes came from the source file
+    /// rather than the on-disk cache: the worker encodes the decoded image as
+    /// a JPEG and returns it for `app/web.rs` to store. See `submit_thumb`.
+    encode_jpeg: bool,
     /// `Some` for `JobKind::Export`: `(adjustments_json, touchups_json, rot)`
     /// — the develop/crop/rotation state `bake_jpeg` bakes in. The worker
     /// switches to its export branch whenever this is present.
@@ -266,6 +296,11 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
             &msg,
             &JsValue::from_str("quality"),
             &JsValue::from_bool(job.quality),
+        );
+        let _ = Reflect::set(
+            &msg,
+            &JsValue::from_str("encodeJpeg"),
+            &JsValue::from_bool(job.encode_jpeg),
         );
         if let Some((adj_json, touchups_json, rot)) = &job.export {
             let _ = Reflect::set(&msg, &JsValue::from_str("export"), &JsValue::TRUE);
@@ -542,11 +577,20 @@ fn handle_worker_message(
         Err(get_string(&data, "error").unwrap_or_else(|| "unknown worker error".to_string()))
     };
 
+    let jpeg = Reflect::get(&data, &JsValue::from_str("jpeg"))
+        .ok()
+        .filter(|v| !v.is_undefined() && !v.is_null())
+        .map(|v| Uint8Array::new(&v).to_vec());
+
     let _ = tx.send(PoolResult {
         kind: meta.kind,
         path: meta.path,
         target: meta.target,
         result,
+        jpeg,
+        cache_name: meta.cache_name,
+        generation: meta.generation,
+        from_cache: meta.from_cache,
     });
     pump(inner);
 }
@@ -647,6 +691,10 @@ fn fail_pending_job(inner: &Rc<RefCell<Inner>>, id: u32, error: String) {
             path: meta.path,
             target: meta.target,
             result: Err(error),
+            jpeg: None,
+            cache_name: meta.cache_name,
+            generation: meta.generation,
+            from_cache: meta.from_cache,
         });
     }
 }
@@ -810,6 +858,54 @@ impl WorkerPoolHandle {
         is_raw: bool,
         kind: JobKind,
     ) {
+        self.submit_inner(path, target, bytes, is_raw, kind, false, None, None, false);
+    }
+
+    /// A `JobKind::Thumb` job that also says where its bytes came from.
+    ///
+    /// `from_cache` is true when `bytes` is an entry already read back from
+    /// `.lightphotos/` — decode it and stop. False means the source file was
+    /// read because no entry existed, so the worker encodes a JPEG alongside
+    /// the decode and returns it on `PoolResult::jpeg` for `app/web.rs` to
+    /// write. Encoding there rather than here keeps it off the main thread,
+    /// which on wasm is also the thread drawing the grid.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_thumb(
+        &self,
+        path: PathBuf,
+        target: u32,
+        bytes: js_sys::ArrayBuffer,
+        is_raw: bool,
+        cache_name: Option<String>,
+        generation: u64,
+        from_cache: bool,
+    ) {
+        self.submit_inner(
+            path,
+            target,
+            bytes,
+            is_raw,
+            JobKind::Thumb,
+            !from_cache,
+            cache_name,
+            Some(generation),
+            from_cache,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn submit_inner(
+        &self,
+        path: PathBuf,
+        target: u32,
+        bytes: js_sys::ArrayBuffer,
+        is_raw: bool,
+        kind: JobKind,
+        encode_jpeg: bool,
+        cache_name: Option<String>,
+        generation: Option<u64>,
+        from_cache: bool,
+    ) {
         let quality = matches!(kind, JobKind::Preview | JobKind::Full);
         let id = {
             let mut inner_mut = self.0.borrow_mut();
@@ -819,6 +915,9 @@ impl WorkerPoolHandle {
                 id,
                 PendingMeta {
                     kind,
+                    cache_name,
+                    generation,
+                    from_cache,
                     path,
                     target,
                     export_dest: None,
@@ -830,6 +929,7 @@ impl WorkerPoolHandle {
                 max_px: target,
                 is_raw,
                 quality,
+                encode_jpeg,
                 export: None,
             });
             id
@@ -866,6 +966,9 @@ impl WorkerPoolHandle {
                 id,
                 PendingMeta {
                     kind: JobKind::Export,
+                    cache_name: None,
+                    generation: None,
+                    from_cache: false,
                     path,
                     target: 0,
                     export_dest: Some((folder, dest_dir, filename)),
@@ -877,6 +980,7 @@ impl WorkerPoolHandle {
                 max_px: u32::MAX,
                 is_raw,
                 quality: true,
+                encode_jpeg: false,
                 export: Some((adj_json, touchups_json, rot)),
             });
         }
@@ -908,13 +1012,60 @@ impl WorkerPoolHandle {
     /// (e.g. `web_fs::read_bytes` itself failed) — bypasses the worker
     /// entirely and pushes straight to the result channel, so callers only
     /// need one failure path (`poll`'s `Err` arm) instead of two.
-    pub fn fail(&self, path: PathBuf, target: u32, kind: JobKind, error: String) {
+    pub fn fail(
+        &self,
+        path: PathBuf,
+        target: u32,
+        kind: JobKind,
+        generation: Option<u64>,
+        error: String,
+    ) {
         let tx = self.0.borrow().result_tx.clone();
         let _ = tx.send(PoolResult {
             kind,
             path,
             target,
             result: Err(error),
+            jpeg: None,
+            cache_name: None,
+            generation,
+            from_cache: false,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_cached_jpeg_recovers_from_source() {
+        let mut result = PoolResult {
+            kind: JobKind::Thumb,
+            path: PathBuf::from("photo.jpg"),
+            target: 32,
+            result: crate::image_decode::decode_nonraw_from_bytes(b"corrupt JPEG", 32),
+            jpeg: None,
+            cache_name: Some("photo.jpg.0123456789abcdef.thumb.jpg".into()),
+            generation: Some(0),
+            from_cache: true,
+        };
+        assert!(result.needs_source_decode());
+
+        let pixels = image::RgbImage::from_pixel(8, 8, image::Rgb([120, 80, 40]));
+        let mut source = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut source)
+            .encode_image(&pixels)
+            .unwrap();
+        result.result = crate::image_decode::decode_nonraw_from_bytes(&source, 32);
+        result.from_cache = false;
+        assert!(result.result.is_ok());
+        assert!(!result.needs_source_decode());
+
+        result.result = Err("source failed".into());
+        assert!(
+            !result.needs_source_decode(),
+            "source failures use normal retries"
+        );
     }
 }

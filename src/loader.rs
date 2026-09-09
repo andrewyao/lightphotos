@@ -394,7 +394,7 @@ impl Loader {
                         }
                         Job::Thumb(path, max_px) => {
                             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                thumbs.get_or_make(&path, max_px)
+                                thumbs.get_or_make(&path)
                             }))
                             .unwrap_or_else(|_| {
                                 Err(format!("thumbnail panicked: {}", path.display()))

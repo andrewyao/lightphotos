@@ -96,6 +96,7 @@ fn main() {
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use crate::image_decode::{self, DecodedImage, PixelFormat};
+    use crate::image_encode;
     use crate::raw_preview;
     use crate::thumbnail;
     use js_sys::{Array, Object, Reflect, Uint8Array};
@@ -152,19 +153,16 @@ mod wasm {
     ) -> Result<DecodedImage, String> {
         if is_raw {
             if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
-                // "Too small for what was asked" — the embedded baseline
-                // thumbnail is typically ~160x120 (see its own doc
-                // comment), fine for a grid cell but not the Loupe. Half
-                // the requested size is a rough-but-workable cutoff, not a
-                // precise one.
-                if preview.width.max(preview.height) * 2 >= max_px {
+                // Use the same minimum resolution as native thumbnails.
+                // Tiny EXIF previews must not enter the shared cache.
+                if thumbnail::preview_is_large_enough(preview.width, preview.height, max_px) {
                     return Ok(preview);
                 }
             }
-            // rawler's `full_image()` is the camera's own full-resolution
-            // embedded JPEG, not a small baseline thumbnail — no "too small"
-            // check needed, it's plenty big for Grid and Loupe alike.
-            if let Some(preview) = thumbnail::rawler_full_image_from_bytes(bytes, max_px) {
+            // Try the larger camera preview before decoding the RAW source.
+            if let Some(preview) = thumbnail::rawler_full_image_from_bytes(bytes, max_px)
+                .filter(|img| thumbnail::preview_is_large_enough(img.width, img.height, max_px))
+            {
                 return Ok(preview);
             }
             return if quality {
@@ -174,13 +172,9 @@ mod wasm {
             };
         }
         if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
-            // Same "too small for what was asked" gate as the RAW branch
-            // above: a JPEG's EXIF baseline thumbnail is typically ~160x120,
-            // fine for a grid cell but not a Loupe preview and never the
-            // full-resolution tier. Without this, a `Full`/`Preview` job
-            // caches that tiny image and zoom can never reach the real
-            // source pixels (`app/web.rs` sees `already_have` forever).
-            if preview.width.max(preview.height) * 2 >= max_px {
+            // Apply the same gate to non-RAW EXIF previews, including
+            // Loupe jobs that need more pixels than a grid thumbnail.
+            if thumbnail::preview_is_large_enough(preview.width, preview.height, max_px) {
                 return Ok(preview);
             }
         }
@@ -264,6 +258,11 @@ mod wasm {
             let max_px = get_f64(&data, "maxPx") as u32;
             let is_raw = get_bool(&data, "isRaw");
             let quality = get_bool(&data, "quality");
+            // Set only for a thumbnail that missed the on-disk cache. The
+            // encode happens here, not on the main thread, because the main
+            // thread is the one drawing the grid and wasm has no other way
+            // to get work off it.
+            let encode_jpeg = get_bool(&data, "encodeJpeg");
             let bytes_val =
                 Reflect::get(&data, &JsValue::from_str("bytes")).unwrap_or(JsValue::UNDEFINED);
             let bytes = Uint8Array::new(&bytes_val).to_vec();
@@ -298,6 +297,19 @@ mod wasm {
                     let _ = Reflect::set(&result, &JsValue::from_str("rgba"), &rgba.buffer());
                     let transfer = Array::new();
                     transfer.push(&rgba.buffer());
+                    // JPEG can't carry alpha or LinearF16, so such a result
+                    // is returned uncached rather than silently mis-encoded —
+                    // the same rule `thumbnail::write_entry` applies natively.
+                    if encode_jpeg && crate::thumbnail::jpeg_cacheable(&img) {
+                        if let Ok(bytes) =
+                            image_encode::encode_jpeg_to_vec(img.width, img.height, &img.rgba)
+                        {
+                            let jpeg = Uint8Array::from(bytes.as_slice());
+                            let _ =
+                                Reflect::set(&result, &JsValue::from_str("jpeg"), &jpeg.buffer());
+                            transfer.push(&jpeg.buffer());
+                        }
+                    }
                     let _ = scope_for_closure.post_message_with_transfer(&result, &transfer.into());
                 }
                 Err(e) => {

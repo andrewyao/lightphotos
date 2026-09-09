@@ -15,7 +15,6 @@ Press `?` (`Shift`+`/`) in the app for the built-in overlay.
 | `B` | Toggle best-of-burst badges (Grid) |
 | `D` | Toggle content-duplicate badges (Grid) |
 | `Y` | Toggle before/after compare (Loupe) |
-| `+` / `-` | Adjust thumbnail size (Grid) |
 | Scroll | Zoom (Loupe) |
 | `Space`+drag | Pan (Loupe) |
 | `Cmd`+`[` / `Cmd`+`]` | Rotate (Loupe) |

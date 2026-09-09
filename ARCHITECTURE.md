@@ -148,8 +148,9 @@ flowchart TD
         webq --> webct["wasm_worker.rs:\nembedded_preview_from_bytes, then\nrawler_full_image_from_bytes, then\nraw_preview (Fast tier)"]
     end
 
-    mact --> disk["ThumbCache's on-disk .tw cache\n~/Library/Caches/com.lightphotos/thumbnails\n(mac + Linux/Windows only)"]
+    mact --> disk["on-disk JPEG cache\n<photo dir>/.lightphotos/<photo>.<key>.thumb.jpg\nThumbCache (native) / web_thumb_cache.rs (wasm32)"]
     othct --> disk
+    webct --> disk
 
     mact --> sync["App::sync_thumb_textures\napp/thumbs.rs"]
     othct --> sync
@@ -162,16 +163,28 @@ flowchart TD
     baked --> grid
 ```
 
-**Why the disk cache is native-only:**
-- wasm32 has no writable path to cache against outside the picked folder's
-  own File System Access handle.
-- A `.tw` file next to the user's photos would be an unwanted side effect of
-  just browsing — so its thumbnails are recomputed each session instead.
+**Why the disk cache lives in the photo folder:**
+- The picked folder's own File System Access handle is the only place wasm32
+  can write, so a cache anywhere else can't exist in a browser at all. Putting
+  it beside the photos is what makes the browser build cache thumbnails.
+- `.lightphotos/` is already there for ratings and develop edits, is already
+  created lazily on first write, and already travels with the photos when a
+  folder is moved or copied. The cache inherits all of that, and a folder
+  cached natively populates instantly in the browser and the reverse.
+- Entries are JPEGs, not raw RGBA: ~45 KB rather than ~700 KB each, which
+  matters both in the user's own folder and on web, where every byte crosses
+  File System Access.
+- One entry per photo, always at `THUMB_PX`, so a folder's cache is bounded
+  by its photo count. There is no byte budget; cleanup is
+  `thumbnail::sweep_orphans` at folder open, dropping entries whose photo is
+  gone or has changed.
+- A folder that can't be written just decodes every session. Writes are
+  best-effort and their failure is never surfaced.
 
 **Why edits are baked at upload time, not cached alongside the raw
 thumbnail:**
-- The loader/disk thumbnail cache key doesn't include the edit signature, so
-  a develop-panel tweak doesn't invalidate the expensive decode.
+- The loader/disk thumbnail cache key is the photo's size and mtime, not its
+  edits, so a develop-panel tweak doesn't invalidate the expensive decode.
 - Only the cheap `image_ops::bake_edited` re-runs, and only for the texture
   that's actually on screen.
 

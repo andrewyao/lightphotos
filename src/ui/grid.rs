@@ -4,6 +4,7 @@ use std::path::Path;
 use crate::app::{App, Region};
 use crate::burst::BurstMark;
 use crate::duplicates::DuplicateMark;
+use crate::app::GRID_CELL_PT;
 
 /// Left folder-tree sidebar, rooted at the opened folder. Called once from
 /// `ui::draw`, before the toolbar, so it spans the full window height (Grid
@@ -67,26 +68,16 @@ pub(super) fn folder_content_width(
 }
 
 pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
-    let thumb_px = app.thumb_px();
     let sel = app.sel();
 
     egui::Panel::top("toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label("Size");
-            let mut px = thumb_px as f32;
-            if ui
-                .add(egui::Slider::new(&mut px, 96.0..=512.0).show_value(false))
-                .changed()
-            {
-                out.actions.push(UiAction::SetThumbPx(px.round() as u32));
-            }
-            ui.separator();
             ui.label(format!("{} photos", app.visible_len()));
         });
     });
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
-        let cell = thumb_px as f32;
+        let cell = GRID_CELL_PT;
         let spacing = ui.spacing().item_spacing.x;
         // Leave room for the scrollbar so the last column isn't clipped (cols is
         // fixed before we enter the scroll area, where the inner width shrinks).

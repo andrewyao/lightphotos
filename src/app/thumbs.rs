@@ -29,6 +29,7 @@ use crate::featureprint;
 use crate::phash;
 use crate::sharpness;
 use crate::{image_decode, image_ops};
+use crate::thumbnail::THUMB_PX;
 
 // TEMPORARY DEBUG colors — see `Renderer::tier_debug_color`'s doc comment.
 // Remove alongside `set_tier_debug_color` once the Loupe zoom-refit fix is
@@ -143,7 +144,7 @@ impl App {
             if let Some(thumb) = self
                 .loader
                 .as_ref()
-                .and_then(|l| l.get_thumb(&want, self.thumb_px))
+                .and_then(|l| l.get_thumb(&want, THUMB_PX))
             {
                 self.upload_shown(&want, &thumb, Shown::Thumb(want.clone()));
                 self.set_tier_debug(TIER_DEBUG_WHITE, "THUMB"); // TEMPORARY DEBUG
@@ -335,7 +336,7 @@ impl App {
     }
 
     pub(super) fn working_thumb_keys(&self) -> Vec<(PathBuf, u32, u64)> {
-        let px = self.thumb_px;
+        let px = THUMB_PX;
         let Some(pl) = &self.playlist else {
             return Vec::new();
         };
@@ -364,7 +365,7 @@ impl App {
     /// thumb is still missing (so the caller can keep redrawing until they
     /// arrive).
     pub(crate) fn request_working_thumbs(&mut self) -> bool {
-        let px = self.thumb_px;
+        let px = THUMB_PX;
         let paths: Vec<PathBuf> = self
             .working_thumb_keys()
             .into_iter()
@@ -400,7 +401,7 @@ impl App {
         if !self.bursts_on {
             return false;
         }
-        let px = self.thumb_px;
+        let px = THUMB_PX;
 
         // Capture-time scan still running → grouping not final yet; stay awake.
         let scan_pending = {
@@ -468,7 +469,7 @@ impl App {
         if !self.dupes_on {
             return false;
         }
-        let px = self.thumb_px;
+        let px = THUMB_PX;
         let pending: Vec<PathBuf> = {
             let Some(pl) = &self.playlist else {
                 return false;
@@ -516,7 +517,7 @@ impl App {
         if !self.dupes_on {
             return;
         }
-        let px = self.thumb_px;
+        let px = THUMB_PX;
         let mut newly: Vec<(PathBuf, u64, f64)> = Vec::new();
         if let Some(loader) = &self.loader {
             for (path, mpx) in arrivals {
@@ -790,7 +791,7 @@ impl App {
         if !self.bursts_on {
             return;
         }
-        let px = self.thumb_px;
+        let px = THUMB_PX;
         let mut newly: Vec<(PathBuf, f64)> = Vec::new();
         if let Some(loader) = &self.loader {
             for (path, mpx) in arrivals {

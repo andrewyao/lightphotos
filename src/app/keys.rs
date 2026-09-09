@@ -287,14 +287,6 @@ impl App {
                 self.step_loupe(true)
             }
 
-            // +/- thumbnail size (Grid). Equal/Plus share a physical key.
-            KeyCode::Equal | KeyCode::NumpadAdd if self.mode == ViewMode::Grid => {
-                self.adjust_thumb_px(true)
-            }
-            KeyCode::Minus | KeyCode::NumpadSubtract if self.mode == ViewMode::Grid => {
-                self.adjust_thumb_px(false)
-            }
-
             _ => {}
         }
     }

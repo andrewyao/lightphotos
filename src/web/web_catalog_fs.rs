@@ -34,10 +34,11 @@ use web_sys::{
 use crate::catalog::{ImageRecord, SidecarLoad, SIDECAR_DIR, SIDECAR_EXT};
 
 /// Get the `.lightphotos` subdirectory under `root`, creating it if `create`
-/// and it doesn't exist yet. `Ok(None)` (not an error) when it's missing and
-/// `create` is false — mirrors `catalog::load_sidecars`' "a missing
+/// and it doesn't exist yet. Shared with `web_thumb_cache.rs`, which caches
+/// thumbnails into the same directory. `Ok(None)` (not an error) when it's
+/// missing and `create` is false — mirrors `catalog::load_sidecars`' "a missing
 /// `.lightphotos` directory is not an error, just an empty catalog".
-async fn sidecar_dir(
+pub(crate) async fn sidecar_dir(
     root: &FileSystemDirectoryHandle,
     create: bool,
 ) -> Result<Option<FileSystemDirectoryHandle>, String> {
@@ -216,7 +217,7 @@ pub(crate) async fn remove_file(
 /// True when a thrown JS value is a `DOMException` named `NotFoundError` —
 /// the File System Access equivalent of native's
 /// `std::io::ErrorKind::NotFound`.
-fn is_not_found(e: &JsValue) -> bool {
+pub(crate) fn is_not_found(e: &JsValue) -> bool {
     js_sys::Reflect::get(e, &"name".into())
         .ok()
         .and_then(|v| v.as_string())
@@ -228,7 +229,7 @@ fn is_not_found(e: &JsValue) -> bool {
 /// than imported since `web_fs::js_error_string` is private to that module
 /// (both are one-liners around `Reflect::get(e, "message")`, not worth a
 /// shared-visibility change for).
-fn js_error_string(e: &JsValue) -> String {
+pub(crate) fn js_error_string(e: &JsValue) -> String {
     js_sys::Reflect::get(e, &"message".into())
         .ok()
         .and_then(|v| v.as_string())

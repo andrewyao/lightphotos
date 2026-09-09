@@ -5,6 +5,7 @@ use std::time::SystemTime;
 use crate::burst::{self, BurstMark};
 use crate::duplicates::{self, DuplicateMark};
 use crate::navigation::Cmp;
+use crate::thumbnail::THUMB_PX;
 
 impl App {
     /// Accessors used by the egui UI module (`ui.rs`).
@@ -94,10 +95,6 @@ impl App {
 
     pub(crate) fn pending_quit(&self) -> bool {
         self.pending_quit
-    }
-
-    pub(crate) fn thumb_px(&self) -> u32 {
-        self.thumb_px
     }
 
     /// Longest-side pixel target for the loupe's screen-fit preview decode:
@@ -367,7 +364,7 @@ impl App {
         &self,
         path: &Path,
     ) -> Option<(&egui::TextureHandle, u32, u32)> {
-        let key = (path.to_path_buf(), self.thumb_px, self.edit_sig_for(path));
+        let key = (path.to_path_buf(), THUMB_PX, self.edit_sig_for(path));
         let handle = self.thumb_tex.get(&key)?;
         let [w, h] = handle.size();
         Some((handle, w as u32, h as u32))
@@ -428,7 +425,7 @@ mod tests {
     #[test]
     fn a_preview_is_always_sharper_than_the_largest_thumbnail() {
         // The tiers must not overlap: if a preview could come back at or below
-        // THUMB_MAX, the "sharper tier arrived" swap would be a no-op.
-        assert!(PREVIEW_MIN > THUMB_MAX);
+        // THUMB_PX, the "sharper tier arrived" swap would be a no-op.
+        assert!(PREVIEW_MIN > THUMB_PX);
     }
 }
