@@ -88,7 +88,15 @@ unit) matter a lot for decode/render throughput.
 ### Web build (experimental)
 
 A wasm32 build runs in the browser via [trunk](https://trunkrs.dev) (after the
-`rawler` vendor step above):
+`rawler` vendor step above). Install `trunk` and the wasm target once per
+machine:
+
+```sh
+brew install trunk                      # or: cargo install --locked trunk
+rustup target add wasm32-unknown-unknown
+```
+
+Then build:
 
 ```sh
 RUSTFLAGS="--cfg=web_sys_unstable_apis" trunk build --release
