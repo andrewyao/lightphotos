@@ -28,8 +28,8 @@ use crate::develop::{self};
 use crate::featureprint;
 use crate::phash;
 use crate::sharpness;
-use crate::{image_decode, image_ops};
 use crate::thumbnail::THUMB_PX;
+use crate::{image_decode, image_ops};
 
 // TEMPORARY DEBUG colors — see `Renderer::tier_debug_color`'s doc comment.
 // Remove alongside `set_tier_debug_color` once the Loupe zoom-refit fix is

@@ -1,9 +1,9 @@
 use super::grid::{thumbnail_cell, STRIP_CELL_STYLE};
 use super::*;
 
+use crate::app::GRID_CELL_PT;
 use crate::app::{App, CropEdge, FocusLevel, Region};
 use crate::image_decode;
-use crate::app::GRID_CELL_PT;
 
 pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let sel = app.sel();
