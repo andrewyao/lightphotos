@@ -139,6 +139,9 @@ pub enum UiAction {
     SetAdjustments(Adjustments),
     /// Reset the current loupe image's develop adjustments to identity.
     ResetAdjustments,
+    /// Pick develop settings for the current loupe image from its own
+    /// histogram (Auto Tone).
+    AutoTone,
     /// Give keyboard focus to this region (e.g. the user clicked into its panel).
     Focus(Region),
     /// Clicked toolbar control at this index: give the Toolbar keyboard focus,
@@ -159,6 +162,8 @@ pub enum BulkKind {
     Export,
     /// Apply the copied develop settings to every selected photo.
     ApplySettings,
+    /// Auto Tone every selected photo from its own histogram.
+    AutoTone,
     /// Move every selected photo to the Trash.
     Delete,
 }

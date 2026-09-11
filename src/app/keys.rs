@@ -219,6 +219,11 @@ impl App {
             KeyCode::KeyX if !cmd && !alt => self.export_selected(),
             // Enter is focus-dependent (open image / expand folder / …).
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
+            // Cmd+Shift+U auto-tones the whole selection (checked before plain
+            // Cmd+U so the chord can't be eaten by the single-photo arm);
+            // Cmd+U auto-tones just the photo on screen. Lightroom's binding.
+            KeyCode::KeyU if cmd && shift => self.request_bulk(ui::BulkKind::AutoTone),
+            KeyCode::KeyU if cmd => self.auto_tone_shown(),
             // Cmd+Shift+Y applies the copied develop settings to the whole
             // selection (only when something has been copied; checked before
             // plain `Y` so the compare arm can't eat the Cmd+Shift chord).

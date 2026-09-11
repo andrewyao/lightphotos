@@ -783,6 +783,16 @@ pub(crate) struct App {
     /// Rebuilt when caches or the toggle change.
     dup_marks: Vec<Option<DuplicateMark>>,
 
+    // ---- Auto Tone batch state ----
+    /// Selected photos still waiting on a thumbnail before Auto Tone can
+    /// analyze them. Drained by `auto_tone_arrived_thumbs`; empty whenever no
+    /// batch is running.
+    autotone_pending: HashSet<PathBuf>,
+    /// Photos already toned in the running batch, and the batch's size, so the
+    /// status line can report progress. Both zero when nothing is running.
+    autotone_done: usize,
+    autotone_total: usize,
+
     // ---- Face / eyes-closed state ----
     /// Cached per-path face signals (face count + worst eye openness). Survives
     /// toggling off, like `sharpness` and `phashes`. Filled only for photos that
@@ -946,6 +956,7 @@ pub(crate) struct App {
 
 mod accessors;
 mod adjust;
+mod autotone;
 mod catalog;
 mod crop;
 mod export;
@@ -1100,6 +1111,9 @@ impl App {
             feature_failed: HashSet::new(),
             feature_pending: HashSet::new(),
             dup_marks: Vec::new(),
+            autotone_pending: HashSet::new(),
+            autotone_done: 0,
+            autotone_total: 0,
             face_quality: HashMap::new(),
             face_pending: HashSet::new(),
             face_failed: HashSet::new(),
@@ -1639,6 +1653,7 @@ impl App {
                     self.delete_selected_touchup();
                 }
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
+                ui::UiAction::AutoTone => self.auto_tone_shown(),
                 ui::UiAction::ResetAdjustments => {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else {
                         continue;

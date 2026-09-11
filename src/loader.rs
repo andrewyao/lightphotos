@@ -687,7 +687,6 @@ impl Loader {
 
     /// True if this thumbnail's decode permanently failed (negative cache), so
     /// callers can stop treating it as "still loading".
-    #[allow(dead_code)]
     pub fn thumb_failed(&self, path: &Path, max_px: u32) -> bool {
         self.thumb_failed.contains(&(path.to_path_buf(), max_px))
     }

@@ -24,6 +24,7 @@
 //! lives in [`app`]; the other modules are the supporting layers it coordinates.
 
 mod app;
+mod autotone;
 mod burst;
 mod catalog;
 // All four live under src/web/ (physically separated from native-only
@@ -411,6 +412,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.score_arrived_thumbs(&thumbs);
                 self.score_arrived_dup_thumbs(&thumbs);
             }
+            // Outside the `thumbs` guard on purpose: a running Auto Tone batch
+            // also has to notice thumbnails the loader has given up on, and
+            // those produce no arrival to trigger on.
+            self.poll_auto_tone(&thumbs);
             if any {
                 self.try_show();
                 // Now that something landed, the current photo may be on screen

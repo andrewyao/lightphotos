@@ -242,6 +242,7 @@ impl App {
             ui::BulkKind::ApplySettings => {
                 format!("Apply the copied settings to {n} photo(s)?")
             }
+            ui::BulkKind::AutoTone => format!("Auto Tone {n} photo(s)?"),
             #[cfg(not(target_arch = "wasm32"))]
             ui::BulkKind::Delete => format!("Move {n} photo(s) to the Trash?"),
             #[cfg(target_arch = "wasm32")]
@@ -275,6 +276,7 @@ impl App {
         match kind {
             ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
+            ui::BulkKind::AutoTone => self.auto_tone_selection(),
             ui::BulkKind::Export => self.export_selection(),
             ui::BulkKind::Delete => self.delete_selection(),
         }
