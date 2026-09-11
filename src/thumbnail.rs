@@ -661,9 +661,16 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
     Ok(())
 }
 
+/// How long an interrupted write's `.tmp` file is left alone before the sweep
+/// reclaims it. `write_entry` encodes and renames within one call, so a temp
+/// belonging to a worker still running is seconds old at most; anything older
+/// than this outlived the process that created it.
+#[cfg(not(target_arch = "wasm32"))]
+const TMP_REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// Delete every cache entry in `dir/.lightphotos/` whose photo is gone or has
-/// changed since the entry was written. Called when a folder opens.
-/// Temporary files are left alone: another worker or app may be writing them.
+/// changed since the entry was written, plus any `.tmp` left behind by a write
+/// that never finished. Called when a folder opens.
 ///
 /// This is the whole eviction story — there is no byte budget. One entry per
 /// photo means a folder's cache is bounded by its own photo count, and an
@@ -680,6 +687,17 @@ pub(crate) fn sweep_orphans(dir: &Path) {
         let Some(name) = name.to_str() else {
             continue;
         };
+        if let Some(stem) = name.strip_suffix(".tmp") {
+            // A crash or a quit mid-encode leaves this behind forever
+            // otherwise: the name carries the key it was written under, so
+            // editing the photo means no later write ever reuses it. The age
+            // check is what keeps this from racing a concurrent writer.
+            if parse_cache_name(OsStr::new(stem)).is_some() && is_older_than(&entry, TMP_REAP_AFTER)
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+            continue;
+        }
         let Some((photo, key)) = parse_cache_name(OsStr::new(name)) else {
             continue;
         };
@@ -687,6 +705,19 @@ pub(crate) fn sweep_orphans(dir: &Path) {
             let _ = fs::remove_file(entry.path());
         }
     }
+}
+
+/// Whether `entry` was last modified more than `age` ago. `false` whenever the
+/// answer can't be established (no mtime, a clock that moved backwards), so an
+/// unreadable timestamp leaves the file in place rather than deleting it.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_older_than(entry: &fs::DirEntry, age: std::time::Duration) -> bool {
+    entry
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| std::time::SystemTime::now().duration_since(m).ok())
+        .is_some_and(|elapsed| elapsed > age)
 }
 
 /// One-time reclaim of the central caches this cache replaced
@@ -829,8 +860,9 @@ mod tests {
     }
 
     /// A photo, its current cache entry, a stale entry from before it was
-    /// edited, an entry for a photo that's been deleted, an interrupted
-    /// write's `.tmp`, and a sidecar that must survive all of it.
+    /// edited, an entry for a photo that's been deleted, a `.tmp` a live
+    /// writer may still be holding, a `.tmp` abandoned by a crashed one, and
+    /// a sidecar that must survive all of it.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn sweep_keeps_current_entries_and_sidecars() {
@@ -846,10 +878,25 @@ mod tests {
         let stale = cache.join(cache_name(OsStr::new("IMG_0001.ARW"), key ^ 1));
         let orphan = cache.join(cache_name(OsStr::new("GONE.JPG"), key));
         let interrupted = cache.join("IMG_0001.ARW.0123456789abcdef.thumb.jpg.tmp");
+        let abandoned = cache.join("IMG_0002.ARW.fedcba9876543210.thumb.jpg.tmp");
         let sidecar = cache.join("IMG_0001.ARW.xmp");
-        for f in [&current, &stale, &orphan, &interrupted, &sidecar] {
+        for f in [
+            &current,
+            &stale,
+            &orphan,
+            &interrupted,
+            &abandoned,
+            &sidecar,
+        ] {
             fs::write(f, b"x").unwrap();
         }
+        // Backdated past `TMP_REAP_AFTER`: no process is still writing this.
+        fs::File::options()
+            .write(true)
+            .open(&abandoned)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - TMP_REAP_AFTER * 2)
+            .unwrap();
 
         let malformed = [
             "reference.thumb.jpg",
@@ -873,7 +920,11 @@ mod tests {
         assert!(!orphan.exists(), "an entry whose photo is gone must go");
         assert!(
             interrupted.exists(),
-            "a potentially active temp file must survive"
+            "a temp file a live writer may still hold must survive"
+        );
+        assert!(
+            !abandoned.exists(),
+            "a temp file older than any live write must go"
         );
 
         let _ = fs::remove_dir_all(&dir);
