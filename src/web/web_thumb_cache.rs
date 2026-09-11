@@ -19,7 +19,10 @@
 //!   it (`wasm_worker.rs`), and `poll_web_thumbs` hands those bytes to
 //!   [`store`]. Encoding in the worker keeps it off the single main thread.
 
-use std::ffi::OsStr;
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::rc::Rc;
 
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::JsFuture;
@@ -110,24 +113,37 @@ pub(crate) async fn store(
     Ok(())
 }
 
-/// Delete every entry in `root/.lightphotos/` whose photo is no longer in
-/// `live` — the browser half of `thumbnail::sweep_orphans`, run once when a
-/// folder opens.
+/// Delete entries whose photo is no longer in `live` or whose metadata key
+/// no longer matches — the browser half of `thumbnail::sweep_orphans`, run
+/// once when a folder opens.
 ///
-/// Narrower than native's sweep, which also drops entries whose photo changed:
-/// deciding that needs each photo's size and mtime, and on File System Access
-/// that is a `get_file()` per photo rather than a `stat`. Photos are never
-/// modified in place through the browser build, so the case native catches
-/// barely arises here; a folder edited natively and then opened on the web
-/// keeps a stale entry until it is opened natively again.
+/// `live` maps each photo's filename to its already-resolved
+/// `FileSystemFileHandle`: the caller has the handles from the folder listing,
+/// and resolving them again here would double the File System Access
+/// round-trips this makes.
+/// What remains is one `get_file()` per *cached* photo, which resolves size
+/// and mtime without touching contents — enough to spot a photo edited or
+/// replaced outside the browser, even one never scrolled into view this visit.
+/// Metadata failures leave that photo's entries intact for a later sweep.
+///
+/// `reads` is the shared `MAX_CONCURRENT_READS` counter (`app/web.rs`). This
+/// runs one `get_file()` at a time and charges the slot only for its duration,
+/// so it costs the grid at most one concurrent read while it works, rather
+/// than racing it unaccounted — the exact pressure that budget exists to keep
+/// off Chrome's `NotReadableError`.
 ///
 /// Best-effort throughout: a failed delete just leaves the file.
-pub(crate) async fn sweep_orphans(root: &FileSystemDirectoryHandle, live: &[String]) {
+pub(crate) async fn sweep_orphans(
+    root: &FileSystemDirectoryHandle,
+    live: &HashMap<OsString, FileSystemFileHandle>,
+    reads: Rc<Cell<u32>>,
+) {
     let Ok(Some(dir)) = sidecar_dir(root, false).await else {
         return; // no .lightphotos yet — nothing was ever cached here
     };
 
     let mut doomed: Vec<String> = Vec::new();
+    let mut keys: HashMap<OsString, Option<u64>> = HashMap::new();
     let iter = dir.values();
     loop {
         let Ok(promise) = iter.next() else { break };
@@ -150,10 +166,24 @@ pub(crate) async fn sweep_orphans(root: &FileSystemDirectoryHandle, live: &[Stri
         let name = child.name();
         // Anything `parse_cache_name` rejects is not ours — sidecars above
         // all — and is left alone.
-        let Some((photo, _)) = crate::thumbnail::parse_cache_name(OsStr::new(&name)) else {
+        let Some((photo, key)) = crate::thumbnail::parse_cache_name(OsStr::new(&name)) else {
             continue;
         };
-        if !live.iter().any(|p| OsStr::new(p) == photo) {
+        let Some(handle) = live.get(&photo) else {
+            doomed.push(name);
+            continue;
+        };
+        let current_key = match keys.get(&photo) {
+            Some(key) => *key,
+            None => {
+                reads.set(reads.get() + 1);
+                let key = crate::web_fs::stat(handle).await.ok().map(|f| key_for(&f));
+                reads.set(reads.get().saturating_sub(1));
+                keys.insert(photo, key);
+                key
+            }
+        };
+        if current_key.is_some_and(|current| current != key) {
             doomed.push(name);
         }
     }

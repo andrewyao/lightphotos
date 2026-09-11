@@ -89,20 +89,25 @@ impl App {
                 let for_task = dir.clone();
                 // The photos actually in this folder, from the listing that
                 // produced its handles — everything else `.lightphotos/`
-                // holds a thumbnail for has been deleted or moved away.
-                let live: Vec<String> = self
+                // holds a thumbnail for has been deleted or moved away. Each
+                // one's handle rides along so the sweep can read its size and
+                // mtime without resolving the handle a second time.
+                let live: std::collections::HashMap<
+                    std::ffi::OsString,
+                    web_sys::FileSystemFileHandle,
+                > = self
                     .web_file_handles
-                    .keys()
-                    .filter(|p| p.parent() == Some(dir.as_path()))
-                    .filter_map(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
+                    .iter()
+                    .filter(|(p, _)| p.parent() == Some(dir.as_path()))
+                    .filter_map(|(p, h)| p.file_name().map(|n| (n.to_os_string(), h.clone())))
                     .collect();
+                let reads = self.web_read_inflight.clone();
                 wasm_bindgen_futures::spawn_local(async move {
                     let loaded = crate::web_catalog_fs::load_sidecars(&handle).await;
                     let _ = tx.send((for_task, token, loaded));
                     // Sweep after sending, same as native: the catalog is
                     // what the UI waits on, evicting dead entries is not.
-                    crate::web_thumb_cache::sweep_orphans(&handle, &live).await;
+                    crate::web_thumb_cache::sweep_orphans(&handle, &live, reads).await;
                 });
                 self.catalog_load_pending = Some((dir, token));
             }
