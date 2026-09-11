@@ -95,8 +95,11 @@ impl App {
             match result {
                 Ok(picked) => {
                     // Replacing the picked folder invalidates any listing or
-                    // deferred navigation from the previous folder.
+                    // deferred navigation from the previous folder, and every
+                    // thumbnail decode still in flight against the handle maps
+                    // about to be replaced.
                     self.supersede_web_pending_nav();
+                    self.invalidate_web_thumb_handles();
                     self.web_file_handles = picked.handles;
                     self.web_dir_handles = picked.dir_handles;
                     self.subdirs.clear();
@@ -193,7 +196,7 @@ impl App {
                 .parent()
                 .and_then(|d| self.web_dir_handles.get(d))
                 .cloned();
-            let generation = self.web_nav_generation;
+            let generation = self.web_handle_generation;
             self.web_thumb_inflight.insert(key);
             self.web_read_inflight.set(self.web_read_inflight.get() + 1);
             let read_inflight = self.web_read_inflight.clone();
@@ -305,9 +308,11 @@ impl App {
                 continue;
             }
             // Browser paths identify only the picked folder's name. Discard
-            // old jobs before recovery or storage can resolve a new handle
-            // for an identically named folder.
-            if r.generation != Some(self.web_nav_generation) {
+            // jobs from before the last pick, so neither recovery nor storage
+            // can resolve a new handle for an identically named folder. Keyed
+            // to the handle maps, not to tree navigation — moving around the
+            // tree does not invalidate a decode already under way.
+            if r.generation != Some(self.web_handle_generation) {
                 continue;
             }
             let recover_source = r.needs_source_decode();
@@ -330,6 +335,13 @@ impl App {
             let key = (path.clone(), target);
             // Keep this thumbnail in flight while recovering, and do not charge
             // a corrupt cache entry against the source's retry budget.
+            //
+            // With no handle for the path there is nothing to recover *from*,
+            // so this deliberately falls through to the failure arm below and
+            // does charge a retry: `request_web_thumbs` skips a handle-less
+            // path too, and the retry budget running out is what eventually
+            // negative-caches it instead of leaving the grid asking for it
+            // every frame forever.
             if recover_source {
                 if let Some(handle) = self.web_file_handles.get(&path).cloned() {
                     let pool = self.web_worker_pool.handle();

@@ -6,20 +6,36 @@ use crate::develop::{self};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::navigation::Playlist;
 use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp};
-use crate::ui;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::thumbnail::THUMB_PX;
+use crate::ui;
 
 impl App {
+    /// Invalidate anything keyed to the *tree* state: in-flight directory
+    /// listings and a navigation deferred behind one.
+    ///
+    /// Deliberately leaves thumbnails alone. This fires on every tree action,
+    /// including ones that change no folder at all (a collapse, an arrow key
+    /// that lands on the already-selected row), and the grid's decodes are
+    /// keyed to the folder handles rather than to tree state — see
+    /// [`App::invalidate_web_thumb_handles`].
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn supersede_web_pending_nav(&mut self) {
         self.web_nav_generation = self.web_nav_generation.wrapping_add(1);
-        // Superseded thumbnail results are discarded; release their keys so
-        // the new generation can request the same browser paths again.
+        self.web_pending_nav = None;
+    }
+
+    /// Invalidate everything keyed to the folder *handle* maps, after a pick
+    /// has replaced them. Results already in flight decoded against handles
+    /// that no longer exist, so they are dropped on arrival
+    /// (`poll_web_thumbs`); releasing their keys here is what lets the new
+    /// generation request the same browser paths again.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn invalidate_web_thumb_handles(&mut self) {
+        self.web_handle_generation = self.web_handle_generation.wrapping_add(1);
         self.web_thumb_inflight.clear();
         self.web_thumb_recovery_pending.clear();
         self.web_thumb_retries.clear();
-        self.web_pending_nav = None;
     }
 
     #[cfg(target_arch = "wasm32")]

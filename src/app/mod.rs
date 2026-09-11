@@ -524,6 +524,19 @@ pub(crate) struct App {
     pub(crate) web_nav_generation: u64,
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_pending_nav_generation: u64,
+    /// Monotonically increasing token for the *handle maps*
+    /// (`web_file_handles`/`web_dir_handles`), bumped only when a folder pick
+    /// replaces them. Thumbnail jobs carry it so a result decoded against the
+    /// old maps is discarded — browser paths identify only the picked
+    /// folder's name, so a new pick of an identically named folder would
+    /// otherwise let a stale job resolve against the wrong handle.
+    ///
+    /// Deliberately *not* `web_nav_generation`: that one bumps on every tree
+    /// action, including a collapse that changes no folder at all, and
+    /// keying thumbnails to it threw away every in-flight decode each time
+    /// the user held an arrow key in the tree.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_handle_generation: u64,
     /// Thumbnail decodes currently in flight — `loader.rs`'s own
     /// `thumb_inflight` isn't reused here since decode results arrive via
     /// the Web Worker pool (`web_worker_pool.rs`), not `loader.rs`'s own
@@ -1008,6 +1021,8 @@ impl App {
             web_nav_generation: 0,
             #[cfg(target_arch = "wasm32")]
             web_pending_nav_generation: 0,
+            #[cfg(target_arch = "wasm32")]
+            web_handle_generation: 0,
             #[cfg(target_arch = "wasm32")]
             web_thumb_inflight: HashSet::new(),
             #[cfg(target_arch = "wasm32")]
