@@ -174,7 +174,9 @@ fn tone(v: f32) -> f32 {
     // Blacks/whites: shift the endpoints. ±100 → ±0.2 endpoint move.
     let blacks = adj.blacks / 100.0 * 0.2;
     let whites = adj.whites / 100.0 * 0.2;
-    x = (x - (-blacks)) / ((1.0 + whites) - (-blacks));
+    // Positive whites brightens/clips the top end, negative recovers it —
+    // Lightroom's convention. MUST stay in sync with develop.rs.
+    x = (x + blacks) / ((1.0 - whites) + blacks);
 
     // Contrast: S-curve pivoting at mid-gray. ±100 → ±0.5 strength.
     let c = adj.contrast / 100.0 * 0.5;

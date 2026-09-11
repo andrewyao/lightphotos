@@ -446,8 +446,14 @@ fn apply_linear_impl(adj: &Adjustments, rgb: [f32; 3], raw_display: bool) -> [f3
         // pushes the top; each ±100 maps to a ±0.2 endpoint move.
         let blacks = adj.blacks / 100.0 * 0.2;
         let whites = adj.whites / 100.0 * 0.2;
-        // Remap [0,1] so 0 → -blacks (lift/deepen the floor) and 1 → 1+whites.
-        x = (x - (-blacks)) / ((1.0 + whites) - (-blacks));
+        // Remap [0,1] so input -blacks → 0 and input (1 - whites) → 1.
+        //
+        // Note the sign on whites: POSITIVE whites pulls the white point down,
+        // so the top end brightens and clips sooner, and negative whites adds
+        // headroom and recovers highlights. That's Lightroom's convention (and
+        // RapidRAW's). This ran the other way round until the direction was
+        // measured against both — see `whites_brightens_the_top_end`.
+        x = (x + blacks) / ((1.0 - whites) + blacks);
 
         // Contrast: S-curve pivoting at mid-gray (0.5). ±100 → ±0.5 strength.
         let c = adj.contrast / 100.0 * 0.5;
@@ -797,6 +803,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn whites_brightens_the_top_end() {
+        // Lightroom's (and RapidRAW's) convention: positive Whites pushes the
+        // highlights up toward clipping, negative pulls them back. This ran
+        // backwards until it was measured, so pin the direction here.
+        let bright = [0.8, 0.8, 0.8];
+        let up = apply_linear(&Adjustments { whites: 60.0, ..Default::default() }, bright);
+        let down = apply_linear(&Adjustments { whites: -60.0, ..Default::default() }, bright);
+        assert!(up[0] > bright[0], "whites +60 should brighten: {}", up[0]);
+        assert!(down[0] < bright[0], "whites -60 should recover: {}", down[0]);
+    }
+
+    #[test]
+    fn blacks_lifts_the_floor() {
+        // The companion direction, unchanged by the whites fix but worth
+        // pinning alongside it: positive Blacks lifts the darkest tones.
+        let dark = [0.03, 0.03, 0.03];
+        let up = apply_linear(&Adjustments { blacks: 60.0, ..Default::default() }, dark);
+        let down = apply_linear(&Adjustments { blacks: -60.0, ..Default::default() }, dark);
+        assert!(up[0] > dark[0], "blacks +60 should lift: {}", up[0]);
+        assert!(down[0] < dark[0], "blacks -60 should crush: {}", down[0]);
     }
 
     #[test]
