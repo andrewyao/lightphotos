@@ -1225,38 +1225,6 @@ impl App {
         }
     }
 
-    /// Close the current folder and return to the landing page — the toolbar
-    /// "Home" button. Resets to the same "nothing open" state a fresh no-arg
-    /// launch has (`playlist` is `None`), so `ui::draw` shows the landing page
-    /// next frame. Does not quit.
-    pub(crate) fn close_folder(&mut self) {
-        self.teardown_loupe_state();
-        #[cfg(target_arch = "wasm32")]
-        self.supersede_web_pending_nav();
-        self.playlist = None;
-        self.folder_root = None;
-        self.folder_sel = None;
-        self.expanded.clear();
-        self.subdirs.clear();
-        self.mode = ViewMode::Grid;
-        self.develop_open = false;
-        self.reset_burst_state();
-        self.reset_dup_state();
-        // Clears `visible`, `sel`, `selected`, `anchor` when `playlist` is None.
-        self.recompute_visible();
-        self.grid_range = (0, 0);
-        self.grid_scroll_reset = true;
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.web_file_handles.clear();
-            self.web_dir_handles.clear();
-        }
-        self.focus = Region::Grid;
-        self.focus_level = FocusLevel::Selected;
-        self.normalize_focus();
-        self.request_redraw();
-    }
-
     /// Clear transient state that only makes sense while editing the current
     /// Loupe image. This must happen before navigation so keyboard and pointer
     /// input cannot remain captured by a stale image's editing mode.
@@ -1600,7 +1568,6 @@ impl App {
                     self.open_folder(p);
                 }
                 ui::UiAction::PickFolder => self.open_folder_picker(),
-                ui::UiAction::CloseFolder => self.close_folder(),
                 ui::UiAction::Focus(region) => {
                     self.focus = region;
                     self.focus_level = FocusLevel::Entered;

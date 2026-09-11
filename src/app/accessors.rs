@@ -14,10 +14,10 @@ impl App {
     }
 
     /// Whether a folder/file is currently open. `false` is the landing-page
-    /// state on every platform: at startup with no CLI arg / AppleEvent path,
-    /// or after the user closes the current folder (the "Home" button →
-    /// `App::close_folder`). `ui::draw` checks this to decide whether to show
-    /// the landing page instead of the Grid/Loupe chrome.
+    /// state on every platform: startup with no CLI arg / AppleEvent path.
+    /// `ui::draw` checks this to decide whether to show the landing page
+    /// instead of the Grid/Loupe chrome, and `ui::app_header` to decide
+    /// whether its "Open" button has anything to replace.
     pub(crate) fn has_playlist(&self) -> bool {
         self.playlist.is_some()
     }

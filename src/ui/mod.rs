@@ -45,10 +45,7 @@ mod theme {
     /// (`lp.css:11`). The site paints that text with a CSS gradient
     /// (`background-clip: text`) that egui has no equivalent for, so this
     /// is a flat stand-in for the gradient's dominant color; keep it in
-    /// sync with `lp.css` if that value ever changes. `site_nav`-only
-    /// (wasm32's persistent marketing-site nav bar), hence the cfg gate
-    /// unlike every other color in this module.
-    #[cfg(target_arch = "wasm32")]
+    /// sync with `lp.css` if that value ever changes.
     pub const BRAND_BLUE: Color32 = Color32::from_rgb(79, 140, 255);
 }
 
@@ -77,7 +74,6 @@ pub enum UiAction {
     ConfirmBulk,
     /// Dismiss the pending bulk action without running it.
     CancelBulk,
-    /// Set the thumbnail size (longest-side px).
     /// Set (or clear) the star filter.
     SetFilter(Option<(Cmp, u8)>),
     /// Change the toolbar comparator applied to star-level clicks (≥ / = / ≤).
@@ -114,15 +110,12 @@ pub enum UiAction {
     FocusSurveyMember(usize),
     /// Open this folder as one unit: load its images and toggle its expansion.
     OpenFolder(std::path::PathBuf),
-    /// The landing page's "Choose Folder" button and the toolbar "Open" /
-    /// `Cmd+O` shortcut — opens a folder picker. On the web that's the File
+    /// The landing page's "Choose Folder" button, the header's "Open" button
+    /// and the `Cmd+O` shortcut — opens a folder picker. On the web that's the File
     /// System Access `showDirectoryPicker`; on native it's the OS folder
     /// dialog (`crate::dialog::pick_folder`). Routed through
     /// `App::open_folder_picker`.
     PickFolder,
-    /// The toolbar "Home" button — close the current folder and return to the
-    /// landing page (`App::close_folder`). Does not quit the app.
-    CloseFolder,
     /// Begin dragging this crop edge (pointer pressed near it).
     CropGrab(CropEdge),
     /// Begin moving the whole crop rectangle, anchored at this texture coordinate.
@@ -197,18 +190,16 @@ use toolbar::{grid_toolbar, loupe_toolbar};
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     let mut out = FrameOutput::default();
 
-    // The lightphotos.app marketing site's own nav, redrawn in egui —
-    // persistent across every screen (landing page, Grid, Loupe), not just
-    // the landing page, per direct request. Drawn first so it stacks above
-    // everything else `draw` shows this frame.
-    #[cfg(target_arch = "wasm32")]
-    site_nav(ui);
+    // The app header: wordmark on the left, the folder picker beside it.
+    // Drawn first so it stacks above everything else `draw` shows this frame,
+    // and drawn on every screen (landing page, Grid, Loupe) so "open
+    // something" never moves.
+    app_header(ui, app, &mut out);
 
-    // Landing page: shown whenever no folder is open. On the web that's the
-    // start state (no CLI arg / AppleEvent path there); on native it's the
-    // no-arg launch and the state the "Home" button returns to
-    // (`App::close_folder`). Every other draw path below assumes a playlist
-    // exists, so this returns early rather than falling through.
+    // Landing page: shown whenever no folder is open — on the web the start
+    // state (no CLI arg / AppleEvent path there), on native the no-arg launch.
+    // Every other draw path below assumes a playlist exists, so this returns
+    // early rather than falling through.
     if !app.has_playlist() {
         draw_landing_page(ui, app, &mut out);
         return out;
@@ -281,23 +272,24 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     status_toast(ui, app);
 }
 
-/// The lightphotos.app marketing site's own nav, redrawn in egui so it's
-/// consistent even though this page lives inside the wasm canvas rather than
-/// the site's plain-HTML chrome (the canvas wants the full viewport —
-/// `overflow: hidden` — so wrapping it in the site's HTML header wasn't an
-/// option). Persistent across every screen (landing page, Grid, Loupe), per
-/// direct request — called once from `draw`'s own top, before the
-/// landing-page early return. Just the "LightPhotos" wordmark, styled to
-/// match the real site's own CSS treatment (`lp.css`'s `.lp-wordmark`/
-/// `.lp-brand` rules: "Light" in the default ink color, "Photos" italic in
-/// the brand blue, abutting with no gap) via a two-section `LayoutJob`; no
-/// Downloads/Blogs/Help. Plain, non-interactive text, not a link — an
-/// earlier version linked back to lightphotos.app via `hyperlink_to`, but
-/// the click never actually opened a tab on web and wasn't worth chasing
-/// further, so the link was dropped.
-#[cfg(target_arch = "wasm32")]
-fn site_nav(ui: &mut egui::Ui) {
-    egui::Panel::top("lp_site_nav").show_inside(ui, |ui| {
+/// The app header: the "LightPhotos" wordmark, with the folder picker next to
+/// it. Persistent across every screen (landing page, Grid, Loupe) — called
+/// once from `draw`'s own top, before the landing-page early return.
+///
+/// The wordmark is the lightphotos.app marketing site's own, redrawn in egui:
+/// on the web this page lives inside the wasm canvas rather than the site's
+/// plain-HTML chrome (the canvas wants the full viewport — `overflow: hidden`
+/// — so wrapping it in the site's HTML header wasn't an option), and native
+/// now shows the same header so the two builds don't diverge. It matches the
+/// site's own CSS treatment (`lp.css`'s `.lp-wordmark`/`.lp-brand` rules:
+/// "Light" in the default ink color, "Photos" italic in the brand blue,
+/// abutting with no gap) via a two-section `LayoutJob`; no Downloads/Blogs/
+/// Help. Plain, non-interactive text, not a link — an earlier version linked
+/// back to lightphotos.app via `hyperlink_to`, but the click never actually
+/// opened a tab on web and wasn't worth chasing further, so the link was
+/// dropped.
+fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    egui::Panel::top("lp_app_header").show_inside(ui, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
@@ -328,6 +320,23 @@ fn site_nav(ui: &mut egui::Ui) {
                 },
             );
             ui.label(job);
+
+            // The folder picker lives beside the wordmark rather than in the
+            // toolbar, so it stays in the same top-left corner in every mode.
+            // Kept out of the F6 keyboard-focus cycle (like the bulk actions)
+            // — `Cmd+O` is its keyboard route. The landing page has its own,
+            // larger "Choose Folder" button, so this only appears once a
+            // folder is open.
+            if app.has_playlist() {
+                ui.add_space(12.0);
+                if ui
+                    .button("Open\u{2026}")
+                    .on_hover_text("Open a different folder (Cmd+O)")
+                    .clicked()
+                {
+                    out.actions.push(UiAction::PickFolder);
+                }
+            }
         });
         ui.add_space(4.0);
     });

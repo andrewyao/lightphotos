@@ -22,26 +22,6 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             // cycle yet since their count varies frame to frame.
             let mut idx = 0usize;
 
-            // Folder controls, kept out of the F6 keyboard-focus cycle (like
-            // the selection-dependent bulk actions) — `Cmd+O` and `Esc`-free
-            // mouse affordances. "Home" closes the folder back to the landing
-            // page; "Open" swaps to another folder.
-            if ui
-                .button("Home")
-                .on_hover_text("Close this folder, back to the start screen")
-                .clicked()
-            {
-                out.actions.push(UiAction::CloseFolder);
-            }
-            if ui
-                .button("Open\u{2026}")
-                .on_hover_text("Open a different folder (Cmd+O)")
-                .clicked()
-            {
-                out.actions.push(UiAction::PickFolder);
-            }
-            ui.separator();
-
             ui.label("Filter:");
             // `All` clears the filter; selected only when no filter is set.
             let resp = ui.selectable_label(app.filter().is_none(), "All");
@@ -242,7 +222,7 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             // Help, pinned to the far right so `?` sits in the top-right
             // corner, always visible. The clickable E/G mode toggle that used
             // to sit to its left was dropped — the `E`/`G` keys still switch
-            // modes, and Home returns to the start screen. It's the last
+            // modes. It's the last
             // keyboard-focusable control, at `idx` (ToggleHelp), matching
             // `activate_toolbar_focus`'s Grid arm.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -271,27 +251,11 @@ pub(super) fn loupe_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
         ui.horizontal(|ui| {
             let idx = 0usize;
 
-            // Folder controls (mouse-only, not in the F6 cycle) — mirror the
-            // Grid toolbar's so they stay put when switching modes.
-            if ui
-                .button("Home")
-                .on_hover_text("Close this folder, back to the start screen")
-                .clicked()
-            {
-                out.actions.push(UiAction::CloseFolder);
-            }
-            if ui
-                .button("Open\u{2026}")
-                .on_hover_text("Open a different folder (Cmd+O)")
-                .clicked()
-            {
-                out.actions.push(UiAction::PickFolder);
-            }
             // Help + a TEMPORARY DEBUG decode-tier readout, pinned to the far
             // right. Right-to-left: `?` is added first so it sits in the
             // top-right corner (always visible); the tier letter sits to its
             // left. The old Loupe/Grid toggle was dropped here — `E`/`G` keys
-            // still switch modes, and Home returns to the start screen.
+            // still switch modes.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
                 if resp.clicked() {
