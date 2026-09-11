@@ -99,6 +99,12 @@ raw-probe = ["dep:rawler", "dep:mozjpeg-rs", "dep:img-parts", "dep:image", "dep:
 # "clipboard" (and the Linux-only "wayland"/"x11", inert there anyway).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 egui-winit = "0.34"
+# Reads a system font's vertical metrics at load time so `configure_system_fonts`
+# can put every fallback face's baseline on the primary UI font's. Deliberately
+# the same crate (and version) epaint parses fonts with, so the metrics we
+# correct against are the ones it actually lays glyphs out with. wasm32 has no
+# readable system fonts, so it never needs this.
+skrifa = "0.40"
 # Native "choose a folder" dialog for the landing page / Cmd+O. Per-OS native
 # picker: Cocoa NSOpenPanel via objc2 on macOS (same objc2 stack as the deps
 # above — no new system libs), the Win32 dialog on Windows, and the XDG

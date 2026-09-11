@@ -63,13 +63,69 @@ const TOUCHUP_FEATHER: f32 = 1.0;
 /// saturation, denoise).
 const DEVELOP_SLIDERS: usize = 11;
 
+/// One font face's vertical metrics, in ems, already multiplied by the
+/// `FontTweak::scale` epaint will draw that face at.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+struct FaceMetrics {
+    /// Top of the line box down to the baseline.
+    ascent: f32,
+    /// Ascent + descent + line gap: the height of one line of this face.
+    row_height: f32,
+}
+
+/// Read `bytes`' vertical metrics, or `None` if it isn't a font we can parse.
+#[cfg(not(target_arch = "wasm32"))]
+fn face_metrics(bytes: &[u8], index: u32, scale: f32) -> Option<FaceMetrics> {
+    use skrifa::MetadataProvider as _;
+    let font = skrifa::FontRef::from_index(bytes, index).ok()?;
+    let metrics = font.metrics(
+        skrifa::instance::Size::unscaled(),
+        skrifa::instance::LocationRef::default(),
+    );
+    let upem = metrics.units_per_em as f32;
+    if upem <= 0.0 {
+        return None;
+    }
+    let ascent = metrics.ascent / upem * scale;
+    // Descent is negative (it points below the baseline), hence the subtraction.
+    let descent = metrics.descent / upem * scale;
+    let leading = metrics.leading / upem * scale;
+    Some(FaceMetrics {
+        ascent,
+        row_height: ascent - descent + leading,
+    })
+}
+
+/// The `FontTweak::y_offset_factor` that lands `face`'s baseline on `primary`'s.
+///
+/// A font *family* in egui is a list of faces, and a glyph is drawn by whichever
+/// face has it — but the row's own metrics come from the family's *first* face
+/// alone, and each glyph is then placed at `face.ascent + (primary.row_height -
+/// face.row_height) / 2`. So any fallback face whose ascent-to-line-height ratio
+/// differs from the primary's sits visibly off the text around it: a CJK face,
+/// whose line gap is huge by design (Hiragino reserves half an em of it), lands
+/// about a quarter of an em too high, which is exactly what a folder named in
+/// Japanese looked like next to an ASCII one. The shift is cosmetic, not a
+/// layout change, which is what `y_offset_factor` is for. epaint multiplies the
+/// factor by the face's own `scale` before applying it, so divide that back out.
+#[cfg(not(target_arch = "wasm32"))]
+fn baseline_correction(primary: FaceMetrics, face: FaceMetrics, scale: f32) -> f32 {
+    let drawn_baseline = face.ascent + 0.5 * (primary.row_height - face.row_height);
+    (primary.ascent - drawn_baseline) / scale
+}
+
 /// Load macOS fonts at runtime so the binary does not need to embed a large
 /// Unicode font. The built-in egui fonts remain after these entries as a
 /// fallback for machines where a system font path differs or is unavailable.
+/// Every face, ours and egui's own, is given a baseline correction against the
+/// first one so mixed-script text (a folder named in Japanese, an accented
+/// filename, the star and arrow glyphs this UI draws) sits on one line.
+#[cfg(not(target_arch = "wasm32"))]
 fn configure_system_fonts(ctx: &egui::Context) {
     let mut definitions = egui::FontDefinitions::default();
     let candidates = [
-        ("macos-ui", "/System/Library/Fonts/SFNS.ttf", 0),
+        ("macos-ui", "/System/Library/Fonts/SFNS.ttf", 0u32),
         // Covers CJK characters that are not present in SFNS. TTC files may
         // contain multiple faces; index 0 is the regular face on macOS.
         ("macos-cjk", "/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
@@ -85,30 +141,80 @@ fn configure_system_fonts(ctx: &egui::Context) {
         let Ok(bytes) = std::fs::read(path) else {
             continue;
         };
+        let Some(metrics) = face_metrics(&bytes, index, 1.0) else {
+            continue;
+        };
+        loaded.push((name.to_owned(), bytes, index, metrics));
+    }
+
+    // The first face that loaded is the family's primary: it supplies the row
+    // metrics every other face is corrected against.
+    let Some(primary) = loaded.first().map(|entry| entry.3) else {
+        return;
+    };
+
+    let mut names = Vec::new();
+    for (name, bytes, index, metrics) in loaded {
         definitions.font_data.insert(
-            name.to_owned(),
+            name.clone(),
             Arc::new(egui::FontData {
                 font: std::borrow::Cow::Owned(bytes),
                 index,
-                tweak: Default::default(),
+                tweak: egui::FontTweak {
+                    y_offset_factor: baseline_correction(primary, metrics, 1.0),
+                    ..Default::default()
+                },
             }),
         );
-        loaded.push(name.to_owned());
+        names.push(name);
     }
 
-    if loaded.is_empty() {
-        return;
+    // egui's own fallbacks (Ubuntu plus the two emoji faces) were drawn against
+    // Ubuntu-Light as the primary; a system font is the primary now, so they
+    // need the same correction. Done before the system fonts join the family
+    // list so this pass only ever clones egui's statically-borrowed font data,
+    // never the tens of megabytes we just read off disk.
+    let builtins = definitions
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    for name in builtins {
+        let Some(data) = definitions.font_data.get(&name) else {
+            continue;
+        };
+        let scale = data.tweak.scale;
+        let Some(metrics) = face_metrics(data.font.as_ref(), data.index, scale) else {
+            continue;
+        };
+        let mut data = (**data).clone();
+        data.tweak.y_offset_factor = baseline_correction(primary, metrics, scale);
+        definitions.font_data.insert(name, Arc::new(data));
     }
 
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        if let Some(fonts) = definitions.families.get_mut(&family) {
-            for name in loaded.iter().rev() {
-                fonts.insert(0, name.clone());
-            }
+    if let Some(fonts) = definitions
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+    {
+        for name in names.iter().rev() {
+            fonts.insert(0, name.clone());
         }
+    }
+    // Monospace keeps Hack first — these join it only as a fallback for the
+    // characters Hack lacks. Prepending them, as this used to, quietly made
+    // every monospace string proportional. Their correction is still the
+    // Proportional family's, which is the right one for the chrome this app
+    // draws; nothing here asks for monospace text.
+    if let Some(fonts) = definitions.families.get_mut(&egui::FontFamily::Monospace) {
+        fonts.extend(names.iter().cloned());
     }
     ctx.set_fonts(definitions);
 }
+
+/// The browser cannot read the machine's font files, so the web build keeps
+/// egui's built-in (Latin-only) fonts — see the native `configure_system_fonts`.
+#[cfg(target_arch = "wasm32")]
+fn configure_system_fonts(_ctx: &egui::Context) {}
 
 /// Two top-level views: a thumbnail Grid and a single-image Loupe.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -1612,6 +1718,57 @@ mod tests {
 
     fn set(items: &[usize]) -> BTreeSet<usize> {
         items.iter().copied().collect()
+    }
+
+    /// The primary face defines the baseline, so it is never shifted.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn the_primary_face_needs_no_baseline_correction() {
+        let sf = FaceMetrics {
+            ascent: 0.9668,
+            row_height: 1.1777,
+        };
+        assert_eq!(baseline_correction(sf, sf, 1.0), 0.0);
+    }
+
+    /// The bug this exists for: Hiragino reserves half an em of line gap, which
+    /// drops its drawn baseline a quarter of an em above San Francisco's, so a
+    /// Japanese folder name floated above the ASCII one beneath it. The
+    /// correction has to push it back *down*, i.e. be positive.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_cjk_face_with_a_large_line_gap_is_pushed_back_down() {
+        let sf = FaceMetrics {
+            ascent: 0.9668,
+            row_height: 1.1777,
+        };
+        let hiragino = FaceMetrics {
+            ascent: 0.88,
+            row_height: 1.5,
+        };
+        let factor = baseline_correction(sf, hiragino, 1.0);
+        assert!(
+            (factor - 0.2479).abs() < 1e-3,
+            "expected ~0.248 em down, got {factor}"
+        );
+    }
+
+    /// epaint multiplies `y_offset_factor` by the face's own `scale` before
+    /// applying it, so a face egui shrinks (both its emoji fonts) needs a
+    /// correspondingly larger factor to move by the same distance on screen.
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a_scaled_down_face_gets_its_scale_divided_out() {
+        let primary = FaceMetrics {
+            ascent: 1.0,
+            row_height: 1.2,
+        };
+        let face = FaceMetrics {
+            ascent: 0.8,
+            row_height: 1.2,
+        };
+        assert!((baseline_correction(primary, face, 1.0) - 0.2).abs() < 1e-6);
+        assert!((baseline_correction(primary, face, 0.5) - 0.4).abs() < 1e-6);
     }
 
     #[test]
