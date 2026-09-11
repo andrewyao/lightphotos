@@ -228,7 +228,8 @@ impl App {
             // `Y` toggles the before/after compare view (Loupe only).
             KeyCode::KeyY if self.mode == ViewMode::Loupe && !cmd => self.toggle_compare(),
             // Escape is the exact inverse of Enter: exactly one step back per
-            // press, all the way out to a quit prompt. Priority order:
+            // press, all the way out to a quit prompt (native only — see the
+            // last arm). Priority order:
             // chrome (Toolbar/Filmstrip) returns to the remembered main
             // region (mirrors F6's toggle-back); Develop moves focus back to
             // Detail (the panel stays visible — only keyboard focus moves);
@@ -237,7 +238,8 @@ impl App {
             // selection, since leaving the grid means nothing is "the
             // selected photo" anymore; otherwise the generic focus-level rule
             // pops Entered back to Selected; and finally, already just
-            // Selected on Folders with nothing left to pop, ask to quit.
+            // Selected on Folders with nothing left to pop, ask to quit (on
+            // wasm there is nothing to quit, so that last step does nothing).
             KeyCode::Escape => {
                 if CHROME_ORDER.contains(&self.focus) {
                     self.focus = self.main_focus;
@@ -261,7 +263,12 @@ impl App {
                 } else if self.focus_level == FocusLevel::Entered {
                     self.focus_level = FocusLevel::Selected;
                 } else {
-                    self.pending_quit = true;
+                    // A browser tab has no "quit" for us to offer, so the last
+                    // Escape there is simply a no-op.
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        self.pending_quit = true;
+                    }
                 }
                 self.request_redraw();
             }

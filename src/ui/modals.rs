@@ -78,7 +78,11 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         ("E / G", "Loupe / Grid"),
         (
             "Esc",
-            "Back out one focus level, then quit-confirm; in Loupe, back to Grid; from the grid, back to the folder tree",
+            if cfg!(target_arch = "wasm32") {
+                "Back out one focus level; in Loupe, back to Grid; from the grid, back to the folder tree"
+            } else {
+                "Back out one focus level, then quit-confirm; in Loupe, back to Grid; from the grid, back to the folder tree"
+            },
         ),
         ("1 \u{2013} 5 / 0", "Rate / clear rating"),
         ("Shift + 1 \u{2013} 5", "Filter \u{2265} N stars"),
