@@ -831,8 +831,10 @@ impl App {
     /// — see `toolbar_focus_sync` in `ui.rs`, which must stay in lockstep
     /// with this count and with `activate_toolbar_focus`'s index mapping.
     /// Rating-histogram bars and the selection-dependent bulk actions aren't
-    /// included yet since their count varies frame to frame.
-    const TOOLBAR_CONTROLS: usize = 14;
+    /// included yet since their count varies frame to frame. The three
+    /// grouping toggles are only among them while `SHOW_GROUPING_TOOLS` draws
+    /// them, or F6 would cycle onto controls that aren't on screen.
+    const TOOLBAR_CONTROLS: usize = if SHOW_GROUPING_TOOLS { 14 } else { 11 };
     /// Number of keyboard-focusable controls in the Loupe toolbar
     /// (`toolbar::loupe_toolbar`): just `?` (Help). The Loupe/Grid toggle
     /// was replaced by a non-interactive debug tier readout; everything
@@ -886,10 +888,11 @@ impl App {
                 let unrated = matches!(self.filter, Some((Cmp::Eq, 0)));
                 ui::UiAction::SetFilter(if unrated { None } else { Some((Cmp::Eq, 0)) })
             }
-            10 => ui::UiAction::ToggleBursts,
-            11 => ui::UiAction::ToggleDupes,
-            12 => ui::UiAction::ToggleEyesClosed,
-            13 => ui::UiAction::ToggleHelp,
+            10 if SHOW_GROUPING_TOOLS => ui::UiAction::ToggleBursts,
+            11 if SHOW_GROUPING_TOOLS => ui::UiAction::ToggleDupes,
+            12 if SHOW_GROUPING_TOOLS => ui::UiAction::ToggleEyesClosed,
+            // Help is always the last control, whatever index that leaves it.
+            n if n == Self::TOOLBAR_CONTROLS - 1 => ui::UiAction::ToggleHelp,
             _ => return,
         };
         self.apply_ui_actions(vec![action]);
@@ -928,7 +931,10 @@ mod tests {
     fn toolbar_control_count_is_smaller_in_loupe_than_grid() {
         let mut app = App::new(None);
         app.mode = ViewMode::Grid;
-        assert_eq!(app.toolbar_control_count(), 14);
+        assert_eq!(
+            app.toolbar_control_count(),
+            if SHOW_GROUPING_TOOLS { 14 } else { 11 }
+        );
         app.mode = ViewMode::Loupe;
         assert_eq!(
             app.toolbar_control_count(),

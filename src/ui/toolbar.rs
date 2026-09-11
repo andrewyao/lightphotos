@@ -1,12 +1,13 @@
 use super::*;
 
-use crate::app::{App, Region};
+use crate::app::{App, Region, SHOW_GROUPING_TOOLS};
 use crate::navigation::Cmp;
 
 /// The Grid/Survey toolbar, drawn once from `ui::draw` above the middle
 /// column. Hosts the rating filter (`All` + 5 stars → show photos rated ≥
-/// N), Bursts/Duplicates/Eyes-closed grouping, and selection-dependent bulk
-/// actions — all Grid concepts, which is why Loupe gets a separate, much
+/// N), the selection-dependent bulk actions, and — while
+/// `SHOW_GROUPING_TOOLS` is on, which it currently is not — the
+/// Bursts/Duplicates/Eyes-closed grouping toggles. All Grid concepts, which is why Loupe gets a separate, much
 /// smaller toolbar (`loupe_toolbar` below) instead of this one merely
 /// disabled: filtering/grouping/bulk-selecting don't apply to "one photo,
 /// open for editing", and letting the filter stay live while a photo was
@@ -98,58 +99,65 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             toolbar_focus_sync(ui, app, idx, &resp, out);
             idx += 1;
 
-            // Best-of-burst toggle. Disabled while a filter is active (bursts
-            // need the whole, unfiltered folder to be meaningful).
-            ui.separator();
-            let filter_active = app.filter().is_some();
-            let resp = ui
-                .add_enabled(
-                    !filter_active,
-                    egui::Button::selectable(app.bursts_on(), "Bursts"),
-                )
-                .on_hover_text(if filter_active {
-                    "Clear the filter to use Bursts"
-                } else {
-                    "Group bursts and badge the sharpest frame (B)"
-                });
-            if resp.clicked() {
-                out.actions.push(UiAction::ToggleBursts);
-            }
-            toolbar_focus_sync(ui, app, idx, &resp, out);
-            idx += 1;
+            // Bursts / Duplicates / Eyes-closed, hidden for now behind
+            // `SHOW_GROUPING_TOOLS` (the `B` and `D` keys still toggle the
+            // first two). Their focus indices are still theirs while they are
+            // hidden — `App::TOOLBAR_CONTROLS` counts off the same flag, so
+            // the `?` button that follows keeps whatever index is left over.
+            if SHOW_GROUPING_TOOLS {
+                // Best-of-burst toggle. Disabled while a filter is active (bursts
+                // need the whole, unfiltered folder to be meaningful).
+                ui.separator();
+                let filter_active = app.filter().is_some();
+                let resp = ui
+                    .add_enabled(
+                        !filter_active,
+                        egui::Button::selectable(app.bursts_on(), "Bursts"),
+                    )
+                    .on_hover_text(if filter_active {
+                        "Clear the filter to use Bursts"
+                    } else {
+                        "Group bursts and badge the sharpest frame (B)"
+                    });
+                if resp.clicked() {
+                    out.actions.push(UiAction::ToggleBursts);
+                }
+                toolbar_focus_sync(ui, app, idx, &resp, out);
+                idx += 1;
 
-            // Content-duplicate (dHash) grouping toggle. Independent of the
-            // filter — unlike Bursts, this grouping is order-independent.
-            let resp = ui
-                .selectable_label(app.dupes_on(), "Duplicates")
-                .on_hover_text("Group visually-similar frames and badge them (D)");
-            if resp.clicked() {
-                out.actions.push(UiAction::ToggleDupes);
-            }
-            toolbar_focus_sync(ui, app, idx, &resp, out);
-            idx += 1;
+                // Content-duplicate (dHash) grouping toggle. Independent of the
+                // filter — unlike Bursts, this grouping is order-independent.
+                let resp = ui
+                    .selectable_label(app.dupes_on(), "Duplicates")
+                    .on_hover_text("Group visually-similar frames and badge them (D)");
+                if resp.clicked() {
+                    out.actions.push(UiAction::ToggleDupes);
+                }
+                toolbar_focus_sync(ui, app, idx, &resp, out);
+                idx += 1;
 
-            // "Eyes closed" filter. Enabled only alongside one of the grouping
-            // toggles, because the face pass those drive is the only thing that
-            // fills the cache this reads — Vision decodes at full resolution to
-            // find faces, too heavy to run folder-wide unasked. Turn one of them
-            // on and this narrows to whatever blinks the pass has found.
-            let grouped = app.bursts_on() || app.dupes_on();
-            let resp = ui
-                .add_enabled(
-                    grouped || app.eyes_filter_on(),
-                    egui::Button::selectable(app.eyes_filter_on(), "Eyes closed"),
-                )
-                .on_hover_text(if grouped || app.eyes_filter_on() {
-                    "Show only photos where someone blinked"
-                } else {
-                    "Turn on Bursts or Duplicates to detect blinks"
-                });
-            if resp.clicked() {
-                out.actions.push(UiAction::ToggleEyesClosed);
+                // "Eyes closed" filter. Enabled only alongside one of the grouping
+                // toggles, because the face pass those drive is the only thing that
+                // fills the cache this reads — Vision decodes at full resolution to
+                // find faces, too heavy to run folder-wide unasked. Turn one of them
+                // on and this narrows to whatever blinks the pass has found.
+                let grouped = app.bursts_on() || app.dupes_on();
+                let resp = ui
+                    .add_enabled(
+                        grouped || app.eyes_filter_on(),
+                        egui::Button::selectable(app.eyes_filter_on(), "Eyes closed"),
+                    )
+                    .on_hover_text(if grouped || app.eyes_filter_on() {
+                        "Show only photos where someone blinked"
+                    } else {
+                        "Turn on Bursts or Duplicates to detect blinks"
+                    });
+                if resp.clicked() {
+                    out.actions.push(UiAction::ToggleEyesClosed);
+                }
+                toolbar_focus_sync(ui, app, idx, &resp, out);
+                idx += 1;
             }
-            toolbar_focus_sync(ui, app, idx, &resp, out);
-            idx += 1;
 
             // Show which photo's develop settings are on the clipboard, if any.
             if let Some(name) = app.copied_settings_name() {

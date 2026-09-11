@@ -42,6 +42,15 @@ const MAX_ZOOM: f32 = 64.0;
 /// this size regardless of scale factor.
 pub(crate) const GRID_CELL_PT: f32 = 192.0;
 
+/// Whether the Grid toolbar shows its Bursts / Duplicates / Eyes-closed
+/// grouping controls. Off for now, by request: the grouping passes stay in the
+/// build and the `B` / `D` keys still drive bursts and duplicates, but the
+/// buttons are hidden until the feature earns its place in the toolbar. Read
+/// by `ui::toolbar::grid_toolbar` (which controls it draws) and by
+/// `App::TOOLBAR_CONTROLS` (how many the F6 focus cycle steps through) — the
+/// two must agree, so both read this one flag.
+pub(crate) const SHOW_GROUPING_TOOLS: bool = false;
+
 /// Bounds for the loupe's screen-fit preview decode (longest-side pixels). The
 /// lower bound keeps the preview meaningfully sharper than a thumbnail; the
 /// upper bound stops a 5K display from asking for a decode so large it
