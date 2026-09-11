@@ -13,12 +13,15 @@
 //! buffer needed).
 //!
 //! ## Pipeline position
-//! - Last stage of Pipeline 3 (export) only.
-//! - `export.rs`'s `do_export` calls `encode_jpeg` once the full-resolution
-//!   decode has been baked (`image_ops::bake_edited`) into final pixels.
-//! - Never called from Pipeline 1 or 2 — the Loupe and Grid only ever
-//!   *decode*, they don't write files.
-//! - Not reachable on wasm32 — export is a stub there (see `export.rs`).
+//! - Last stage of Pipeline 3 (export): `export.rs`'s `do_export` calls
+//!   `encode_jpeg` once the full-resolution decode has been baked
+//!   (`image_ops::bake_edited`) into final pixels.
+//! - Also the write half of Pipeline 2's on-disk thumbnail cache:
+//!   `thumbnail::write_entry` encodes each `.lightphotos/*.thumb.jpg` entry
+//!   through `encode_jpeg`, and on wasm32 the decode worker
+//!   (`web/wasm_worker.rs`) encodes the same bytes through
+//!   `encode_jpeg_to_vec` so the main thread never pays for it.
+//! - Pipeline 1 (the Loupe) only ever decodes; nothing here is on its path.
 
 use std::path::Path;
 

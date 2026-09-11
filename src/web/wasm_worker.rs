@@ -159,10 +159,13 @@ mod wasm {
                     return Ok(preview);
                 }
             }
-            // Try the larger camera preview before decoding the RAW source.
-            if let Some(preview) = thumbnail::rawler_full_image_from_bytes(bytes, max_px)
-                .filter(|img| thumbnail::preview_is_large_enough(img.width, img.height, max_px))
-            {
+            // rawler's `full_image()` is the camera's own full-resolution
+            // embedded JPEG, not a small baseline thumbnail — no "too small"
+            // check here, deliberately. Gating it would send a 12 MP camera
+            // whose embedded JPEG is 4000px into a full PPG demosaic in the
+            // browser for every Loupe job, which asks for `renderer.max_dim`
+            // (8192 on WebGPU) and so would demand 4096px to pass.
+            if let Some(preview) = thumbnail::rawler_full_image_from_bytes(bytes, max_px) {
                 return Ok(preview);
             }
             return if quality {

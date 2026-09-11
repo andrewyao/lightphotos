@@ -155,20 +155,24 @@ pub fn decode_at_size(
 /// (still satisfies "longest side at most `max_px`").
 ///
 /// Returns `None` on any failure — unreadable file, no TIFF/EXIF structure, no
-/// IFD1 thumbnail tags, an out-of-bounds offset/length, a blob that
-/// does not decode as JPEG, or no preview meeting the minimum resolution
-/// (including rawler's larger camera preview) — so `decode_at_size`'s full-decode
+/// IFD1 thumbnail tags, an out-of-bounds offset/length, or a blob that
+/// does not decode as JPEG — so `decode_at_size`'s full-decode
 /// fallback is always safe to take; this must never be what makes a thumbnail
 /// request fail outright.
+///
+/// Deliberately applies no minimum-resolution gate. Every caller reaches here
+/// through `EmbeddedPreview::UseIfPresent`, and that includes the Loupe's
+/// `Job::Speed` tier, whose whole point is to put *something* on screen
+/// immediately and let `loader.rs`'s `escalate_if_short` queue the real decode
+/// when it falls short. Rejecting a small preview here would turn that tier
+/// into the full software demosaic it exists to avoid. The cache's own
+/// minimum lives in [`ThumbCache::get_or_make`], which is the only caller that
+/// needs one.
 #[cfg(not(target_os = "macos"))]
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
     let bytes = fs::read(path).ok()?;
     embedded_preview_from_bytes(&bytes, max_px)
-        .filter(|img| preview_is_large_enough(img.width, img.height, max_px))
-        .or_else(|| {
-            rawler_full_image_from_bytes(&bytes, max_px)
-                .filter(|img| preview_is_large_enough(img.width, img.height, max_px))
-        })
+        .or_else(|| rawler_full_image_from_bytes(&bytes, max_px))
 }
 
 /// The bytes-based core of [`try_extract_embedded_preview`] above — same
@@ -408,6 +412,44 @@ pub(crate) fn preview_is_large_enough(width: u32, height: u32, max_px: u32) -> b
     width > 0 && height > 0 && width.max(height) >= max_px.div_ceil(2)
 }
 
+/// Decode `path` for the on-disk cache: one entry per photo, so an entry must
+/// be worth keeping for a whole folder's lifetime rather than merely fast to
+/// produce.
+///
+/// A camera's baseline EXIF thumbnail is commonly 160x120 — fine as the
+/// Loupe's first paint, far too soft as the grid's only cached rendition — so
+/// a preview under [`preview_is_large_enough`] is skipped in favour of the
+/// source. Genuinely small originals are still cached at their native size:
+/// the source decode *is* their best rendition.
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
+fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
+    // Exactly one decode on every path. Asking for `UseIfPresent` first and
+    // re-decoding when the answer came back short would decode a small
+    // original twice for identical pixels, every session for as long as its
+    // entry fails to write (an alpha PNG, a `LinearF16` RAW).
+    if let Some(img) = try_extract_embedded_preview(path, THUMB_PX)
+        .filter(|img| preview_is_large_enough(img.width, img.height, THUMB_PX))
+    {
+        return Ok(img);
+    }
+    crate::image_decode::decode(path, THUMB_PX)
+}
+
+/// macOS counterpart. ImageIO decides internally whether
+/// `kCGImageSourceCreateThumbnailFromImageIfAbsent` used the file's embedded
+/// preview or rendered from the full image, and does not report which — so
+/// asking again with `Never` is the only way to find out whether a bigger
+/// rendition exists. A source small enough to fail the gate on its own is
+/// small enough that the second decode is not worth avoiding.
+#[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
+    let img = decode_at_size(path, THUMB_PX, EmbeddedPreview::UseIfPresent)?;
+    if preview_is_large_enough(img.width, img.height, THUMB_PX) {
+        return Ok(img);
+    }
+    decode_at_size(path, THUMB_PX, EmbeddedPreview::Never)
+}
+
 /// Filename suffix shared by every cache entry, after the
 /// `<photo filename>.<16 hex key>` prefix. Deliberately not `.xmp`, so
 /// `catalog.rs`'s sidecar scans (which filter on that extension) skip these.
@@ -538,10 +580,7 @@ impl ThumbCache {
             }
         }
 
-        let mut img = decode_at_size(path, THUMB_PX, EmbeddedPreview::UseIfPresent)?;
-        if !preview_is_large_enough(img.width, img.height, THUMB_PX) {
-            img = decode_at_size(path, THUMB_PX, EmbeddedPreview::Never)?;
-        }
+        let img = decode_for_cache(path)?;
         // Best-effort write; a failed cache write must not fail the request.
         if let Some(file) = &entry {
             let _ = write_entry(file, &img);
