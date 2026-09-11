@@ -235,7 +235,20 @@ const FULL_CAPACITY: usize = 3;
 /// directions for instant arrow-key stepping.
 const PREVIEW_CAPACITY: usize = 8;
 /// In-memory thumbnail LRU capacity (grid/filmstrip tier).
-const THUMB_CAPACITY: usize = 512;
+///
+/// Sized against what an entry now costs: thumbnails decode at a fixed
+/// `thumbnail::THUMB_PX` (512), so one is roughly 700 KB of RGBA8 — about
+/// seven times the ~98 KB a 192px entry cost when a slider still drove the
+/// size, and this cache is the one wasm32 fills too (`app/web.rs` inserts
+/// through `insert_thumb_external`), where a 32-bit address space makes a
+/// multi-hundred-megabyte resident set a real tab failure rather than merely
+/// wasteful.
+///
+/// The floor is the working set: `working_positions` keeps the visible grid
+/// plus three rows of prefetch margin either side, which reaches roughly 180
+/// cells on a large display. Below that the LRU evicts entries the very frame
+/// after it decodes them.
+const THUMB_CAPACITY: usize = 256;
 
 pub struct Loader {
     shared: Arc<Shared>,
