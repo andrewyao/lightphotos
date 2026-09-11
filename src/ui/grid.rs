@@ -1,10 +1,10 @@
 use super::*;
 use std::path::Path;
 
+use crate::app::GRID_CELL_PT;
 use crate::app::{App, Region};
 use crate::burst::BurstMark;
 use crate::duplicates::DuplicateMark;
-use crate::app::GRID_CELL_PT;
 
 /// Left folder-tree sidebar, rooted at the opened folder. Called once from
 /// `ui::draw`, before the toolbar, so it spans the full window height (Grid
@@ -49,14 +49,13 @@ pub(super) fn folder_content_width(
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_string_lossy().into_owned());
-    let label = format!("{}  {name}", if app.is_expanded(path) { "▼" } else { "▶" });
     let text_width = ui.fonts_mut(|fonts| {
         fonts
-            .layout_no_wrap(label, font.clone(), egui::Color32::WHITE)
+            .layout_no_wrap(name, font.clone(), egui::Color32::WHITE)
             .size()
             .x
     });
-    let own_width = depth as f32 * 14.0 + text_width;
+    let own_width = depth as f32 * 14.0 + DISCLOSURE_W + ui.spacing().item_spacing.x + text_width;
     if app.is_expanded(path) {
         app.subdirs(path)
             .iter()
@@ -115,8 +114,49 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
     });
 }
 
-/// One folder row in the tree: an indent, a clickable disclosure glyph, and a
-/// selectable folder name. Recurses into expanded folders' cached children.
+/// Width reserved for a folder row's disclosure triangle, before the gap that
+/// separates it from the folder name.
+const DISCLOSURE_W: f32 = 14.0;
+
+/// Paint one folder row's disclosure triangle: pointing right when the folder
+/// is collapsed, down when it is expanded.
+///
+/// Drawn rather than written as text. The glyphs this used to set (▶ / ▼) are
+/// not in every font the app can end up running with — egui's own built-in
+/// fonts have no ▼ at all, so on any platform without the macOS system fonts
+/// an expanded folder showed the missing-glyph box — and a face that does
+/// carry them puts them on that face's baseline, not the folder name's.
+fn disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(DISCLOSURE_W, ui.spacing().interact_size.y),
+        egui::Sense::click(),
+    );
+    let c = rect.center();
+    let r = 4.0;
+    // Same triangle either way, a quarter turn apart; the long side leads.
+    let points = if expanded {
+        vec![
+            egui::pos2(c.x - r, c.y - r * 0.6),
+            egui::pos2(c.x + r, c.y - r * 0.6),
+            egui::pos2(c.x, c.y + r * 0.7),
+        ]
+    } else {
+        vec![
+            egui::pos2(c.x - r * 0.6, c.y - r),
+            egui::pos2(c.x - r * 0.6, c.y + r),
+            egui::pos2(c.x + r * 0.7, c.y),
+        ]
+    };
+    ui.painter().add(egui::Shape::convex_polygon(
+        points,
+        ui.visuals().text_color(),
+        egui::Stroke::NONE,
+    ));
+    response
+}
+
+/// One folder row in the tree: an indent, a clickable disclosure triangle, and
+/// a selectable folder name. Recurses into expanded folders' cached children.
 pub(super) fn folder_node(
     ui: &mut egui::Ui,
     app: &App,
@@ -127,21 +167,15 @@ pub(super) fn folder_node(
     let selected = app.folder_sel().as_deref() == Some(path);
     let row = ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 14.0);
-        // The disclosure glyph and name are a single selectable unit: one click
-        // anywhere on the row opens the folder (load + toggle expansion).
-        let glyph = if app.is_expanded(path) {
-            "\u{25bc}"
-        } else {
-            "\u{25b6}"
-        }; // ▼ / ▶
         let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
-        if ui
-            .selectable_label(selected, format!("{glyph}  {name}"))
-            .clicked()
-        {
+        // The triangle and the name are a single selectable unit: one click
+        // anywhere on the row opens the folder (load + toggle expansion).
+        let triangle = disclosure_triangle(ui, app.is_expanded(path));
+        let label = ui.selectable_label(selected, name);
+        if triangle.clicked() || label.clicked() {
             out.actions.push(UiAction::OpenFolder(path.to_path_buf()));
         }
     });
