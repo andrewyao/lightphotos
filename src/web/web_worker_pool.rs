@@ -102,6 +102,10 @@ pub struct PoolResult {
 
 impl PoolResult {
     /// Cache failures are recoverable without spending a source retry.
+    ///
+    /// Untested: this module is `cfg(target_arch = "wasm32")`, so `cargo test`
+    /// never compiles it, and there is no `wasm-bindgen-test` harness here to
+    /// run it under. Keep it small enough to be obviously right by reading.
     pub fn needs_source_decode(&self) -> bool {
         self.kind == JobKind::Thumb && self.from_cache && self.result.is_err()
     }
@@ -1031,41 +1035,5 @@ impl WorkerPoolHandle {
             generation,
             from_cache: false,
         });
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn corrupt_cached_jpeg_recovers_from_source() {
-        let mut result = PoolResult {
-            kind: JobKind::Thumb,
-            path: PathBuf::from("photo.jpg"),
-            target: 32,
-            result: crate::image_decode::decode_nonraw_from_bytes(b"corrupt JPEG", 32),
-            jpeg: None,
-            cache_name: Some("photo.jpg.0123456789abcdef.thumb.jpg".into()),
-            generation: Some(0),
-            from_cache: true,
-        };
-        assert!(result.needs_source_decode());
-
-        let pixels = image::RgbImage::from_pixel(8, 8, image::Rgb([120, 80, 40]));
-        let mut source = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new(&mut source)
-            .encode_image(&pixels)
-            .unwrap();
-        result.result = crate::image_decode::decode_nonraw_from_bytes(&source, 32);
-        result.from_cache = false;
-        assert!(result.result.is_ok());
-        assert!(!result.needs_source_decode());
-
-        result.result = Err("source failed".into());
-        assert!(
-            !result.needs_source_decode(),
-            "source failures use normal retries"
-        );
     }
 }
