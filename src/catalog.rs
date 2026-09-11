@@ -109,11 +109,11 @@ pub struct Catalog {
 
     /// The active directory's root folder handle — File System Access has
     /// no real OS path for `std::fs` to use, so wasm32's sidecar I/O
-    /// (`web_catalog_fs.rs`) needs this instead. Set via
-    /// [`Catalog::set_wasm_dir_handle`] (`app/web.rs`'s `poll_folder_pick`)
-    /// right after a folder is picked, before `open_dir`'s wasm32
-    /// counterpart (`app/catalog.rs`'s `request_catalog_load`) needs it to
-    /// read `.lightphotos/*.xmp` back.
+    /// (`write_sidecar`/`delete_sidecar` below) needs this instead. Set via
+    /// [`Catalog::set_wasm_dir_handle`] (`app/web.rs`'s `poll_folder_pick`
+    /// and `apply_web_load_folder`) right after a folder becomes active,
+    /// before `open_dir`'s wasm32 counterpart (`app/catalog.rs`'s
+    /// `request_catalog_load`) needs it to read `.lightphotos/*.xmp` back.
     #[cfg(target_arch = "wasm32")]
     wasm_dir_handle: Option<web_sys::FileSystemDirectoryHandle>,
     /// Sidecar writes/deletes are fire-and-forget `spawn_local` tasks (see
@@ -147,20 +147,21 @@ impl Catalog {
         }
     }
 
-    /// Point wasm32's sidecar I/O at `handle` (the picked folder's root) —
-    /// called once per folder pick, before the catalog load it also
+    /// Point wasm32's sidecar I/O at `handle` (the active folder's root) —
+    /// called on every folder switch, before the catalog load it also
     /// triggers needs it. See `wasm_dir_handle`'s doc comment.
+    ///
+    /// Takes an `Option` and is called unconditionally, so a folder with no
+    /// handle *clears* this rather than leaving the previous folder's in
+    /// place. Sidecar writes then fail loudly (`write_sidecar` returns an
+    /// error the toast path surfaces) instead of quietly saving one folder's
+    /// ratings and develop edits into another folder's `.lightphotos/`.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn set_wasm_dir_handle(&mut self, handle: web_sys::FileSystemDirectoryHandle) {
-        self.wasm_dir_handle = Some(handle);
-    }
-
-    /// The active directory's root handle, if a folder has been picked yet —
-    /// `request_catalog_load`'s wasm32 arm (`app/catalog.rs`) reads this to
-    /// know what to scan.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn wasm_dir_handle(&self) -> Option<web_sys::FileSystemDirectoryHandle> {
-        self.wasm_dir_handle.clone()
+    pub(crate) fn set_wasm_dir_handle(
+        &mut self,
+        handle: Option<web_sys::FileSystemDirectoryHandle>,
+    ) {
+        self.wasm_dir_handle = handle;
     }
 
     /// Drain persist failures that landed asynchronously since the last

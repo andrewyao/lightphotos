@@ -70,14 +70,21 @@ impl App {
         // read at all — `web_catalog_fs::load_sidecars` is async, dispatched
         // via `spawn_local` instead of a background thread, landing on the
         // exact same `catalog_load_tx`/`token` protocol so `poll_catalog_load`
-        // needs no platform branch of its own. The folder-pick handle
-        // (`Catalog::set_wasm_dir_handle`, called just before `load_playlist`
-        // triggers this) should always be set by the time this runs; if it
-        // somehow isn't, there's nothing to scan — leave the (already-
-        // cleared-by-`switch_dir`) cache empty rather than wait forever for
-        // a result that will never arrive.
+        // needs no platform branch of its own.
+        //
+        // The handle is looked up for `dir` here rather than read back from
+        // `Catalog::wasm_dir_handle`: `apply_web_load_folder` only calls
+        // `set_wasm_dir_handle` when a handle for the folder exists, so a
+        // folder whose listing failed (`request_dir_listing`'s missing-handle
+        // arm caches an empty listing for it) would leave the catalog still
+        // pointing at the *previous* folder while `live` below computes to
+        // empty — and the sweep would then delete every cached thumbnail in
+        // that previous folder. Same map either setter reads, so the normal
+        // case is unchanged. No handle means there's nothing to scan: leave
+        // the (already-cleared-by-`switch_dir`) cache empty rather than wait
+        // forever for a result that will never arrive.
         #[cfg(target_arch = "wasm32")]
-        match self.catalog.wasm_dir_handle() {
+        match self.web_dir_handles.get(&dir).cloned() {
             Some(handle) => {
                 let for_task = dir.clone();
                 // The photos actually in this folder, from the listing that

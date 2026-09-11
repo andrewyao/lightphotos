@@ -118,9 +118,8 @@ impl App {
 
                     // Before `load_playlist` triggers the catalog scan (its
                     // wasm arm needs this handle to read `.lightphotos/*.xmp`).
-                    if let Some(h) = self.web_dir_handles.get(&root) {
-                        self.catalog.set_wasm_dir_handle(h.clone());
-                    }
+                    let root_handle = self.web_dir_handles.get(&root).cloned();
+                    self.catalog.set_wasm_dir_handle(root_handle);
                     let playlist = Playlist::from_entries(root.clone(), picked.entries);
                     self.load_playlist(playlist, root.clone());
                     // Expose the tree only after the handle-backed playlist
@@ -1094,12 +1093,13 @@ impl App {
             return;
         }
         // Point sidecar I/O at THIS folder's .lightphotos/ before
-        // load_playlist kicks off the catalog scan (request_catalog_load's
-        // wasm arm reads catalog.wasm_dir_handle()). Matches native's
-        // per-folder catalog switch.
-        if let Some(h) = self.web_dir_handles.get(&dir) {
-            self.catalog.set_wasm_dir_handle(h.clone());
-        }
+        // load_playlist kicks off the catalog scan. Matches native's
+        // per-folder catalog switch. Set unconditionally: a folder with no
+        // handle (`request_dir_listing`'s missing-handle arm caches an empty
+        // listing for one) must leave sidecar I/O pointing nowhere rather
+        // than at whichever folder was open before.
+        let dir_handle = self.web_dir_handles.get(&dir).cloned();
+        self.catalog.set_wasm_dir_handle(dir_handle);
         let mut entries: Vec<PathBuf> = self
             .web_file_handles
             .keys()
