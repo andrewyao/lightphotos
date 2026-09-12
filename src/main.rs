@@ -484,6 +484,12 @@ impl ApplicationHandler<UserEvent> for App {
             if !web_thumbs.is_empty() {
                 self.score_arrived_thumbs(&web_thumbs);
                 self.score_arrived_dup_thumbs(&web_thumbs);
+                // Browser-decoded thumbnails land here instead of in
+                // `loader.poll_all()` above, so a running Auto Tone batch
+                // only sees them if they are fed in from this side too. The
+                // give-up sweep over `thumb_failed` still happens in the
+                // unguarded call above, which runs on this target as well.
+                self.poll_auto_tone(&web_thumbs);
             }
             if self.request_web_thumbs() {
                 self.request_redraw();

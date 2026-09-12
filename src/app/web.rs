@@ -151,11 +151,21 @@ impl App {
     /// in parallel, off the main thread, across the pool's workers.
     pub(crate) fn request_web_thumbs(&mut self) -> bool {
         let px = THUMB_PX;
-        let keys: Vec<PathBuf> = self
+        let mut keys: Vec<PathBuf> = self
             .working_thumb_keys()
             .into_iter()
             .map(|(p, _, _)| p)
             .collect();
+        // A running Auto Tone batch needs its photos' thumbnails whether or
+        // not they are on screen, and this is the only path that reads photo
+        // bytes in the browser — `loader.rs`'s queue has no workers here, so
+        // the `request_thumb` calls `auto_tone_selection` makes are inert.
+        // Without this a batch covering anything the user has not scrolled
+        // past would sit at "n/total" forever. Appended *after* the working
+        // set so the visible grid keeps first claim on the read budget
+        // (`MAX_CONCURRENT_READS`); repeats are dropped by the
+        // `web_thumb_inflight` check below.
+        keys.extend(self.autotone_pending.iter().cloned());
 
         let mut any_missing = false;
         for path in keys {
