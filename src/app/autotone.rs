@@ -154,20 +154,6 @@ impl App {
             self.autotone_pending.remove(&path);
             self.tone_one(&path, &auto);
         }
-        // Re-drive whatever is still outstanding. `auto_tone_batch` asks for
-        // each thumbnail exactly once, and that request can go missing without
-        // a trace: `request_thumb` skips the enqueue when the queue mutex is
-        // poisoned, after which no arrival and no `thumb_failed` will ever land
-        // for that key and the batch sits at n/total forever, redrawing. Asking
-        // again is free of consequence — `request_thumb` dedups against the
-        // cache, the in-flight set and the failure set — and it costs the same
-        // `to_path_buf` per key the give-up sweep just above already spends.
-        // wasm32 gets this for nothing, from `request_web_thumbs`.
-        if let Some(loader) = &mut self.loader {
-            for path in &self.autotone_pending {
-                loader.request_thumb(path.clone(), THUMB_PX);
-            }
-        }
         self.report_auto_tone_progress();
         self.request_redraw();
     }
@@ -335,6 +321,31 @@ mod tests {
         assert!(app.autotone_pending.is_empty());
         assert_eq!(app.autotone_done, 0);
         assert_eq!(app.autotone_total, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn poisoned_thumbnail_queue_terminates_auto_tone_batch() {
+        let (mut app, dir, a, b) = grid_with_two_photos("autotone-poison");
+        let mut loader = crate::loader::Loader::new(16384);
+        loader.poison_thumb_queue_for_test(a.clone(), THUMB_PX);
+        app.loader = Some(loader);
+        app.auto_tone_batch(vec![a.clone()]);
+        assert!(app.autotone_pending.contains(&a));
+        let loader = app.loader.as_mut().unwrap();
+        loader.poll_all();
+        assert!(loader.thumb_failed(&a, THUMB_PX));
+        app.auto_tone_batch(vec![b.clone()]);
+
+        let loader = app.loader.as_mut().unwrap();
+        let (_, arrivals, _, _) = loader.poll_all();
+        assert!(loader.thumb_failed(&a, THUMB_PX));
+        assert!(loader.thumb_failed(&b, THUMB_PX));
+        app.poll_auto_tone(&arrivals);
+        assert!(app.autotone_pending.is_empty());
+        assert_eq!(app.autotone_total, 0);
+        assert!(!app.edits.contains_key(&a));
+        assert!(!app.edits.contains_key(&b));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

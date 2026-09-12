@@ -636,15 +636,35 @@ impl Loader {
         {
             return;
         }
-        // Mark in-flight only after a successful enqueue (see `request`): a
-        // poisoned queue mutex must not strand this key as permanently loading.
-        if let Ok(mut q) = self.shared.queue.lock() {
-            q.thumbs.push_back(Job::Thumb(path, max_px));
-            self.thumb_inflight.insert(key);
-            // See the comment in `request`: must be notify_all so a general
-            // (non-dedicated) worker is guaranteed to wake and pick this up.
-            self.shared.ready.notify_all();
+        match self.shared.queue.lock() {
+            Ok(mut q) => {
+                q.thumbs.push_back(Job::Thumb(path, max_px));
+                self.thumb_inflight.insert(key);
+                // Wake a general worker even if the dedicated worker is idle.
+                self.shared.ready.notify_all();
+            }
+            Err(_) => {
+                // Poison is permanent and workers exit on it. Retrying cannot
+                // produce a result, so expose a terminal failure to callers.
+                self.thumb_failed.insert(key);
+                self.thumb_failed.extend(self.thumb_inflight.drain());
+            }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_thumb_queue_for_test(&mut self, path: PathBuf, max_px: u32) {
+        // Hold the lock through enqueue and poison so no worker can take the
+        // job first. This models a request stranded in the failed queue.
+        let shared = Arc::clone(&self.shared);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut queue = shared.queue.lock().unwrap();
+            queue.thumbs.push_back(Job::Thumb(path.clone(), max_px));
+            self.thumb_inflight.insert((path, max_px));
+            panic!("poison thumbnail queue");
+        }));
+        assert!(result.is_err());
+        shared.ready.notify_all();
     }
 
     /// Ask a worker to read `path`'s capture time unless already in flight.
@@ -756,7 +776,13 @@ impl Loader {
         Vec<(PathBuf, Option<SystemTime>)>,
         Vec<(PathBuf, ImageMetadata)>,
     ) {
-        self.drain()
+        let arrivals = self.drain();
+        if self.shared.queue.is_poisoned() {
+            // Includes jobs enqueued before the failure: no worker is
+            // guaranteed to return a result for any outstanding thumbnail.
+            self.thumb_failed.extend(self.thumb_inflight.drain());
+        }
+        arrivals
     }
 
     /// Drain every pending result, routing each into its tier. Returns the
