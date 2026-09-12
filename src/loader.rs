@@ -697,7 +697,7 @@ impl Loader {
     /// touch `thumb_inflight`; callers own their own in-flight tracking for
     /// whatever they're driving this from (mirroring but not sharing
     /// `request_thumb`'s, since nothing here ever went through that queue).
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     pub fn insert_thumb_external(&mut self, path: PathBuf, max_px: u32, img: Arc<DecodedImage>) {
         self.insert_thumb((path, max_px), img);
     }

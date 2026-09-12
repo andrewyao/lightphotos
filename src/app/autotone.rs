@@ -62,7 +62,7 @@ impl App {
             self.auto_tone_shown();
             return;
         }
-        self.auto_tone_batch(vec![path]);
+        self.enqueue_auto_tone(vec![path]);
     }
 
     /// Auto Tone every selected photo. Photos whose thumbnail is already
@@ -79,10 +79,18 @@ impl App {
         }
         self.autotone_pending.clear();
         self.autotone_done = 0;
-        self.autotone_total = paths.len();
+        self.autotone_total = 0;
+        self.enqueue_auto_tone(paths);
+    }
 
+    /// Add targets without abandoning outstanding work or counting duplicates.
+    fn enqueue_auto_tone(&mut self, paths: Vec<PathBuf>) {
         let mut wanted: Vec<PathBuf> = Vec::new();
         for path in paths {
+            if self.autotone_pending.contains(&path) {
+                continue;
+            }
+            self.autotone_total += 1;
             // The photo on screen has a better sample than its thumbnail, and
             // it is the one the user is looking at, so prefer it.
             if self.shown.path() == Some(path.as_path()) && !self.hist_sample.is_empty() {
@@ -266,10 +274,14 @@ mod tests {
         app.shown = Shown::Preview(a.clone(), 1024, 1024);
         app.hist_sample = vec![[0.02f32; 3]; 64];
         // The grid cursor is on photo B.
-        app.sel = app.visible.iter().position(|&i| {
-            app.playlist.as_ref().and_then(|pl| pl.entry(i)) == Some(b.as_path())
-        });
-        assert!(app.sel.is_some(), "test setup: B must be in the visible grid");
+        app.sel = app
+            .visible
+            .iter()
+            .position(|&i| app.playlist.as_ref().and_then(|pl| pl.entry(i)) == Some(b.as_path()));
+        assert!(
+            app.sel.is_some(),
+            "test setup: B must be in the visible grid"
+        );
 
         app.auto_tone_one();
 
@@ -282,6 +294,47 @@ mod tests {
             "the cursor photo must be the one queued for toning"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn successive_single_photo_requests_preserve_pending_work() {
+        let (mut app, dir, a, b) = grid_with_two_photos("autotone-successive");
+        for path in [&a, &b, &a] {
+            app.sel = app.visible.iter().position(|&i| {
+                app.playlist.as_ref().and_then(|pl| pl.entry(i)) == Some(path.as_path())
+            });
+            assert!(app.sel.is_some());
+            app.auto_tone_one();
+        }
+        assert_eq!(app.autotone_pending.len(), 2);
+        assert_eq!(app.autotone_total, 2);
+        assert_eq!(app.autotone_done, 0);
+
+        // Deliver thumbnails deterministically, without background decoding.
+        app.loader = Some(crate::loader::Loader::new(16384));
+        for (index, path) in [&a, &b].into_iter().enumerate() {
+            app.loader.as_mut().unwrap().insert_thumb_external(
+                path.clone(),
+                THUMB_PX,
+                std::sync::Arc::new(crate::image_decode::DecodedImage {
+                    width: 8,
+                    height: 8,
+                    rgba: [32, 32, 32, 255].repeat(64),
+                    pixel_format: crate::image_decode::PixelFormat::Srgb8,
+                }),
+            );
+            app.poll_auto_tone(&[(path.clone(), THUMB_PX)]);
+            assert!(app.edits.contains_key(path), "each request must be toned");
+            if index == 0 {
+                assert!(app.autotone_pending.contains(&b));
+                assert_eq!(app.autotone_done, 1);
+                assert_eq!(app.autotone_total, 2);
+            }
+        }
+        assert!(app.autotone_pending.is_empty());
+        assert_eq!(app.autotone_done, 0);
+        assert_eq!(app.autotone_total, 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
