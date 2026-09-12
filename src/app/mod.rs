@@ -785,8 +785,9 @@ pub(crate) struct App {
 
     // ---- Auto Tone batch state ----
     /// Selected photos still waiting on a thumbnail before Auto Tone can
-    /// analyze them. Drained by `auto_tone_arrived_thumbs`; empty whenever no
-    /// batch is running.
+    /// analyze them. Drained by `poll_auto_tone` and abandoned wholesale by
+    /// `cancel_auto_tone` on a folder change; empty whenever no batch is
+    /// running.
     autotone_pending: HashSet<PathBuf>,
     /// Photos already toned in the running batch, and the batch's size, so the
     /// status line can report progress. Both zero when nothing is running.
@@ -1230,6 +1231,7 @@ impl App {
             self.playlist = Some(playlist);
             self.reset_burst_state();
             self.reset_dup_state();
+            self.cancel_auto_tone();
             self.recompute_visible();
             self.sel = Some(
                 self.visible
@@ -1331,6 +1333,7 @@ impl App {
         self.playlist = Some(playlist);
         self.reset_burst_state();
         self.reset_dup_state();
+        self.cancel_auto_tone();
         self.recompute_visible();
         self.sel = None;
         self.selected.clear();

@@ -122,6 +122,25 @@ impl App {
         self.request_redraw();
     }
 
+    /// Abandon a running batch's outstanding work. Called on every folder
+    /// change, because `tone_one` writes through whichever catalog is active
+    /// *now* and `Catalog` keys its records by filename alone: a folder-A
+    /// thumbnail landing after the user has moved to folder B would take B's
+    /// record for that filename, merge A's auto adjustments into it, and write
+    /// the result back out to A's sidecar — losing A's rating, rotation and
+    /// touch-ups and leaving a phantom record in B. Photos the batch already
+    /// toned keep their edits; only the ones still waiting are dropped.
+    pub(super) fn cancel_auto_tone(&mut self) {
+        if self.autotone_pending.is_empty() {
+            return;
+        }
+        let (done, total) = (self.autotone_done, self.autotone_total);
+        self.autotone_pending.clear();
+        self.autotone_done = 0;
+        self.autotone_total = 0;
+        self.set_status(format!("Auto Tone stopped at {done}/{total}"));
+    }
+
     /// Analyze `path`'s cached thumbnail, or `None` when it is not resident.
     fn analyze_thumb(&self, path: &Path) -> Option<crate::develop::Adjustments> {
         let img = self.loader.as_ref()?.get_thumb(path, THUMB_PX)?;
@@ -163,5 +182,55 @@ impl App {
         } else {
             self.set_status(format!("Auto Tone {done}/{total}\u{2026}"));
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+
+
+    /// active *now*, and `Catalog` keys its records by filename alone. A batch
+    /// left waiting on folder A's thumbnails while the user moves to folder B
+    /// would therefore fold A's auto adjustments into B's record of the same
+    /// filename, and write that record back out to A's sidecar — losing A's
+    /// rating, rotation and touch-ups. Switching folders has to drop the
+    /// outstanding work instead.
+    /// The bug this exists for: `tone_one` writes through whichever catalog is
+    /// active *now*, and `Catalog` keys its records by filename alone. A batch
+    /// left waiting on folder A's thumbnails while the user moves to folder B
+    /// would therefore fold A's auto adjustments into B's record of the same
+    /// filename, and write that record back out to A's sidecar — losing A's
+    /// rating, rotation and touch-ups. Switching folders has to drop the
+    /// outstanding work instead.
+    #[test]
+    fn switching_folders_cancels_a_pending_auto_tone_batch() {
+        let dir = std::env::temp_dir().join(format!("lp-autotone-switch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut app = App::new(None);
+        let stale = PathBuf::from("/folder-a/IMG_0001.jpg");
+        app.autotone_pending.insert(stale.clone());
+        app.autotone_done = 1;
+        app.autotone_total = 3;
+
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+
+        assert!(
+            app.autotone_pending.is_empty(),
+            "folder B must not inherit folder A's outstanding Auto Tone work"
+        );
+        assert_eq!(app.autotone_done, 0);
+        assert_eq!(app.autotone_total, 0);
+
+        // A thumbnail that lands after the switch must now be inert.
+        app.poll_auto_tone(&[(stale.clone(), THUMB_PX)]);
+        assert!(
+            !app.edits.contains_key(&stale),
+            "a late arrival from folder A must not be toned against folder B's catalog"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
