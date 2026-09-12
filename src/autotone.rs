@@ -574,6 +574,135 @@ mod tests {
         assert!((white - TARGET_WHITE).abs() < 0.06, "white point {white}");
     }
 
+    /// `saturated`'s counterpart in the linear camera-RGB domain that
+    /// `raw/preview.rs` hands back, with no sRGB encode applied.
+    fn raw_saturated(lo: f32, hi: f32, n: usize) -> Vec<[f32; 3]> {
+        let hues = [
+            [1.0, 0.15, 0.15],
+            [0.15, 1.0, 0.15],
+            [0.15, 0.15, 1.0],
+            [1.0, 1.0, 1.0],
+        ];
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / (n - 1) as f32;
+                let v = lo + (hi - lo) * t;
+                let h = hues[i % hues.len()];
+                [v * h[0], v * h[1], v * h[2]]
+            })
+            .collect()
+    }
+
+    /// The nth-percentile display value of a RAW sample under `adj`, measured
+    /// over real pixels rather than the binned stand-in. `percentile_under`'s
+    /// counterpart for the pipeline `raw_shader.wgsl` draws.
+    fn raw_percentile_under(samples: &[[f32; 3]], adj: &Adjustments, p: f32) -> f32 {
+        let mut out: Vec<f32> = samples
+            .iter()
+            .map(|&px| luma(develop::apply_raw_display(adj, px)))
+            .collect();
+        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        out[((out.len() as f32 * p) as usize).min(out.len() - 1)]
+    }
+
+    /// Sweep `field` across `range` and assert `measure` never goes backwards.
+    fn assert_monotonic(
+        what: &str,
+        range: std::ops::RangeInclusive<f32>,
+        field: fn(&mut Adjustments) -> &mut f32,
+        measure: impl Fn(&Adjustments) -> f32,
+    ) {
+        let mut prev = f32::NEG_INFINITY;
+        for step in 0..=128 {
+            let t = step as f32 / 128.0;
+            let mut adj = Adjustments::default();
+            *field(&mut adj) = range.start() + (range.end() - range.start()) * t;
+            let v = measure(&adj);
+            assert!(
+                v >= prev - 1e-4,
+                "{what} went backwards at t={t}: {prev} then {v}"
+            );
+            prev = v;
+        }
+    }
+
+    /// `solve` bisects, which is only valid while each measure is
+    /// non-decreasing in the slider it is solving. Every tone operator here is,
+    /// but the RAW display pipeline is a different curve from the sRGB one —
+    /// an sRGB encode, a brightening power, and a smoothstep contrast lift, all
+    /// clamped — and nothing checked that it keeps the promise. Contrast is
+    /// checked against the spread, because that is what the solver aims it at;
+    /// an individual bin is deliberately *not* monotonic in contrast.
+    #[test]
+    fn the_raw_solve_measures_are_monotonic_in_their_own_sliders() {
+        let photo = raw_saturated(0.005, 0.6, 512);
+        let hist = Histogram::build(&photo, PixelFormat::LinearF16).unwrap();
+        let lo_bin = hist.percentile_bin(0.01);
+        let mid_bin = hist.percentile_bin(0.50);
+        let hi_bin = hist.percentile_bin(0.99);
+
+        assert_monotonic("exposure/median", EXPOSURE_RANGE, |a| &mut a.exposure, |a| {
+            hist.percentile(mid_bin, a)
+        });
+        assert_monotonic("blacks/1st pct", TONE_RANGE, |a| &mut a.blacks, |a| {
+            hist.percentile(lo_bin, a)
+        });
+        assert_monotonic("whites/99th pct", TONE_RANGE, |a| &mut a.whites, |a| {
+            hist.percentile(hi_bin, a)
+        });
+        assert_monotonic("contrast/spread", TONE_RANGE, |a| &mut a.contrast, |a| {
+            hist.percentile(hi_bin, a) - hist.percentile(lo_bin, a)
+        });
+    }
+
+    /// The bin invariant again, on the RAW pipeline. `apply_raw_display` clamps
+    /// its own output, so this also pins down that the clamp does not strand a
+    /// bin's representative somewhere other than the level it stands for.
+    #[test]
+    fn every_bin_representative_reproduces_its_own_display_luma_for_raw() {
+        let photo = raw_saturated(0.001, 0.9, 2048);
+        let hist = Histogram::build(&photo, PixelFormat::LinearF16).unwrap();
+        let identity = Adjustments::default();
+        for bin in 0..BINS {
+            if hist.count[bin] == 0.0 {
+                continue;
+            }
+            let level = bin as f32 / (BINS - 1) as f32;
+            let got = respond(&identity, PixelFormat::LinearF16, hist.lin[bin]);
+            assert!(
+                (got - level).abs() < 0.005,
+                "bin {bin} stands for {level:.3} but reads back as {got:.3}"
+            );
+        }
+    }
+
+    /// And the whole solve end to end on the RAW pipeline, which until now had
+    /// no coverage at all: it is dead code on native macOS (ImageIO hands back
+    /// sRGB), but it is what the browser build's Loupe RAW tier runs on.
+    #[test]
+    fn the_solver_lands_on_its_targets_for_a_raw_photo() {
+        let photo = raw_saturated(0.005, 0.6, 512);
+        let adj = analyze(&photo, PixelFormat::LinearF16);
+        let median = raw_percentile_under(&photo, &adj, 0.50);
+        let black = raw_percentile_under(&photo, &adj, 0.01);
+        let white = raw_percentile_under(&photo, &adj, 0.99);
+        assert!((median - TARGET_MEDIAN).abs() < 0.06, "median {median}");
+        assert!((black - TARGET_BLACK).abs() < 0.06, "black point {black}");
+        assert!((white - TARGET_WHITE).abs() < 0.06, "white point {white}");
+    }
+
+    #[test]
+    fn an_underexposed_raw_photo_gets_positive_exposure() {
+        let dark = raw_saturated(0.002, 0.30, 512);
+        let adj = analyze(&dark, PixelFormat::LinearF16);
+        assert!(adj.exposure > 0.5, "expected a lift, got {}", adj.exposure);
+        let median = raw_percentile_under(&dark, &adj, 0.50);
+        assert!(
+            (median - TARGET_MEDIAN).abs() < 0.06,
+            "median after auto: {median}"
+        );
+    }
+
     #[test]
     fn contrast_stays_off_when_the_endpoints_suffice() {
         // A photo already spanning the range needs no help, and a Contrast
