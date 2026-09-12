@@ -41,11 +41,39 @@ impl App {
         self.set_status("Auto Tone applied".into());
     }
 
+    /// Auto Tone one photo: whichever one the user is pointing at. Bound to
+    /// Cmd+U, and unconfirmed, unlike the selection-wide `Cmd+Shift+U`.
+    ///
+    /// The target is the *selection*, not `shown`. Those agree in the Loupe,
+    /// but `shown` holds whatever the Loupe last uploaded and grid arrow
+    /// navigation never reloads it, so keying off it toned the photo the user
+    /// last looked at rather than the one under the cursor.
+    pub(super) fn auto_tone_one(&mut self) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        // The photo on screen already has a full-resolution histogram sample in
+        // memory, so prefer that to its thumbnail whenever the target happens
+        // to be it — in the Loupe always, in the Grid when the cursor sits on
+        // the photo last opened. `auto_tone_batch` makes the same choice, but
+        // going straight through `auto_tone_shown` keeps the Loupe's inline
+        // "no decode, no thread, no progress" path and its own status line.
+        if Some(path.as_path()) == self.shown.path() && !self.hist_sample.is_empty() {
+            self.auto_tone_shown();
+            return;
+        }
+        self.auto_tone_batch(vec![path]);
+    }
+
     /// Auto Tone every selected photo. Photos whose thumbnail is already
     /// resident are done immediately; the rest are queued and finished by
     /// `poll_auto_tone` as their thumbnails arrive.
     pub(super) fn auto_tone_selection(&mut self) {
-        let paths = self.selected_paths();
+        self.auto_tone_batch(self.selected_paths());
+    }
+
+    /// Run one batch over `paths`, replacing any batch already in flight.
+    fn auto_tone_batch(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
         }
@@ -176,7 +204,13 @@ impl App {
             return;
         }
         if self.autotone_pending.is_empty() {
-            self.set_status(format!("Auto Tone applied to {done} photo(s)"));
+            // Cmd+U routes a single photo through here whenever its thumbnail
+            // has to be decoded first, so the one-photo wording matters.
+            self.set_status(if done == 1 {
+                "Auto Tone applied".to_string()
+            } else {
+                format!("Auto Tone applied to {done} photos")
+            });
             self.autotone_done = 0;
             self.autotone_total = 0;
         } else {
@@ -190,13 +224,76 @@ impl App {
 mod tests {
     use super::*;
 
+    /// Two photos in a real folder, plus the app that has them loaded in the
+    /// Grid. Files are empty: nothing here decodes them, and a photo with no
+    /// resident thumbnail is exactly the case these tests want.
+    fn grid_with_two_photos(tag: &str) -> (App, PathBuf, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("lp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.jpg"), dir.join("b.jpg"));
+        std::fs::write(&a, []).unwrap();
+        std::fs::write(&b, []).unwrap();
 
-    /// active *now*, and `Catalog` keys its records by filename alone. A batch
-    /// left waiting on folder A's thumbnails while the user moves to folder B
-    /// would therefore fold A's auto adjustments into B's record of the same
-    /// filename, and write that record back out to A's sidecar — losing A's
-    /// rating, rotation and touch-ups. Switching folders has to drop the
-    /// outstanding work instead.
+        let mut app = App::new(None);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        app.mode = ViewMode::Grid;
+        (app, dir, a, b)
+    }
+
+    /// The bug this exists for: `shown` holds whatever the Loupe last had
+    /// uploaded, and grid arrow navigation never reloads it, so Cmd+U in the
+    /// Grid used to tone the photo the user last *looked at* rather than the
+    /// one under the cursor — and reported success for it.
+    #[test]
+    fn cmd_u_in_the_grid_tones_the_cursor_photo_not_the_last_loupe_photo() {
+        let (mut app, dir, a, b) = grid_with_two_photos("autotone-cursor");
+        // Photo A was open in the Loupe, and still has its histogram sample.
+        app.shown = Shown::Preview(a.clone(), 1024, 1024);
+        app.hist_sample = vec![[0.02f32; 3]; 64];
+        // The grid cursor is on photo B.
+        app.sel = app.visible.iter().position(|&i| {
+            app.playlist.as_ref().and_then(|pl| pl.entry(i)) == Some(b.as_path())
+        });
+        assert!(app.sel.is_some(), "test setup: B must be in the visible grid");
+
+        app.auto_tone_one();
+
+        assert!(
+            !app.edits.contains_key(&a),
+            "the photo left over in the Loupe must not be touched"
+        );
+        assert!(
+            app.autotone_pending.contains(&b),
+            "the cursor photo must be the one queued for toning"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Loupe case is unchanged, and must stay on the in-memory histogram
+    /// sample rather than falling back to the thumbnail: it is a better sample
+    /// and needs no decode.
+    #[test]
+    fn cmd_u_in_the_loupe_tones_the_open_photo_from_its_histogram_sample() {
+        let (mut app, dir, a, _b) = grid_with_two_photos("autotone-loupe");
+        app.mode = ViewMode::Loupe;
+        app.shown = Shown::Preview(a.clone(), 1024, 1024);
+        app.hist_sample = vec![[0.02f32; 3]; 64];
+        app.sel = None;
+        app.want = Some(a.clone());
+
+        app.auto_tone_one();
+
+        assert!(
+            app.edits.contains_key(&a),
+            "the open photo must be toned inline, with no decode queued"
+        );
+        assert!(app.autotone_pending.is_empty(), "nothing should be pending");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The bug this exists for: `tone_one` writes through whichever catalog is
     /// active *now*, and `Catalog` keys its records by filename alone. A batch
     /// left waiting on folder A's thumbnails while the user moves to folder B

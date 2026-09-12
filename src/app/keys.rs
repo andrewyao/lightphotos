@@ -221,9 +221,11 @@ impl App {
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
             // Cmd+Shift+U auto-tones the whole selection (checked before plain
             // Cmd+U so the chord can't be eaten by the single-photo arm);
-            // Cmd+U auto-tones just the photo on screen. Lightroom's binding.
+            // Cmd+U auto-tones the one photo the user is pointing at — the open
+            // one in the Loupe, the one under the cursor in the Grid, which are
+            // not the same thing (see `auto_tone_one`). Lightroom's binding.
             KeyCode::KeyU if cmd && shift => self.request_bulk(ui::BulkKind::AutoTone),
-            KeyCode::KeyU if cmd => self.auto_tone_shown(),
+            KeyCode::KeyU if cmd => self.auto_tone_one(),
             // Cmd+Shift+Y applies the copied develop settings to the whole
             // selection (only when something has been copied; checked before
             // plain `Y` so the compare arm can't eat the Cmd+Shift chord).
