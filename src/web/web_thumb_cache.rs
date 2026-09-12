@@ -110,7 +110,51 @@ pub(crate) async fn store(
     JsFuture::from(writable.close())
         .await
         .map_err(|e| js_error_string(&e))?;
+    remove_previous_versions(&dir, name).await;
     Ok(())
+}
+
+/// Only prune after close succeeds: a failed replacement must leave the old
+/// cache intact. The stored name carries the metadata key obtained at lookup,
+/// so cleanup does not need another source-file metadata read.
+async fn remove_previous_versions(dir: &FileSystemDirectoryHandle, stored_name: &str) {
+    let Some((photo, key)) = crate::thumbnail::parse_cache_name(OsStr::new(stored_name)) else {
+        return;
+    };
+    let mut doomed = Vec::new();
+    let iter = dir.values();
+    loop {
+        let Ok(promise) = iter.next() else { break };
+        let Ok(next) = JsFuture::from(promise).await else {
+            break;
+        };
+        if js_sys::Reflect::get(&next, &"done".into())
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+        {
+            break;
+        }
+        let Ok(value) = js_sys::Reflect::get(&next, &"value".into()) else {
+            continue;
+        };
+        let Ok(child) = value.dyn_into::<web_sys::FileSystemHandle>() else {
+            continue;
+        };
+        let name = child.name();
+        if let Some((candidate, candidate_key)) =
+            crate::thumbnail::parse_cache_name(OsStr::new(&name))
+        {
+            if candidate == photo && candidate_key != key {
+                doomed.push(name);
+            }
+        }
+    }
+    for name in doomed {
+        // Cleanup is best-effort; it must not turn a successful store into
+        // a failure, or touch sidecars and other photos' thumbnails.
+        let _ = JsFuture::from(dir.remove_entry(&name)).await;
+    }
 }
 
 /// Delete entries whose photo is no longer in `live` or whose metadata key
