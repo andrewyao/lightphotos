@@ -102,6 +102,7 @@ impl App {
                     self.invalidate_web_thumb_handles();
                     self.web_file_handles = picked.handles;
                     self.web_dir_handles = picked.dir_handles;
+                    self.web_thumb_cleanup.clear();
                     self.subdirs.clear();
 
                     let root = picked.dir.clone();
@@ -263,7 +264,7 @@ impl App {
     /// either way. A failure only costs a re-decode next session, so it is
     /// logged rather than surfaced as a toast; a full disk or a revoked
     /// permission would otherwise spam one per photo in the grid.
-    fn store_web_thumb(&self, path: &Path, name: String, bytes: Vec<u8>) {
+    fn store_web_thumb(&mut self, path: &Path, name: String, bytes: Vec<u8>) {
         let Some(root) = path
             .parent()
             .and_then(|d| self.web_dir_handles.get(d))
@@ -271,9 +272,14 @@ impl App {
         else {
             return;
         };
+        let cleanup = self
+            .web_thumb_cleanup
+            .entry(path.parent().unwrap().to_path_buf())
+            .or_default()
+            .clone();
         let display = path.to_path_buf();
         wasm_bindgen_futures::spawn_local(async move {
-            if let Err(e) = crate::web_thumb_cache::store(&root, &name, &bytes).await {
+            if let Err(e) = crate::web_thumb_cache::store(&root, &name, &bytes, &cleanup).await {
                 web_sys::console::warn_1(
                     &format!(
                         "[web] could not cache thumbnail for {}: {e}",
