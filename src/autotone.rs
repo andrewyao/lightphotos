@@ -73,19 +73,34 @@ const SHADOW_FRACTION: f32 = 0.05;
 /// below 1e-5, far past what `edit_signature` quantizes to.
 const SOLVE_STEPS: u32 = 24;
 
+/// Bisection steps used to seat each bin's representative colour on that bin's
+/// own display level (see [`fit_to_level`]). Fewer than `SOLVE_STEPS` because
+/// the factor being searched for is always just under 1.
+const FIT_STEPS: u32 = 16;
+
 /// The histogram of one photo, in the display space the user actually sees.
 ///
 /// `lin` is the piece that makes the solve cheap: for each display-luma bin it
-/// keeps a representative *linear-light* luma, so a candidate `Adjustments` can
-/// be evaluated by pushing 256 scalars through the real pipeline instead of
-/// every pixel. Because every tone operator is monotonic, a bin's rank never
-/// changes under an adjustment — so the percentile *indices* are computed once
-/// here and reused for every candidate.
+/// keeps one representative *linear-light colour*, so a candidate
+/// `Adjustments` can be evaluated by pushing 256 pixels through the real
+/// pipeline instead of every pixel in the photo. Because every tone operator
+/// is monotonic, a bin's rank never changes under an adjustment — so the
+/// percentile *indices* are computed once here and reused for every candidate.
+///
+/// The representative has to be a colour, not a scalar: bins are keyed by
+/// *display* luma, and a neutral grey carrying only the bin's linear luma
+/// does not land back on that display luma once a channel is saturated. Pure
+/// red shows at 0.299, but a grey of its linear luma comes back at ~0.578 —
+/// brighter than a mid-grey pixel that sorts above it. Standing in a grey
+/// therefore left the solve chasing statistics the photo did not have, and
+/// got worse the more saturated the photo was.
 struct Histogram {
     /// Pixel count per display-luma bin.
     count: [f32; BINS],
-    /// Mean linear-light luma of the pixels in each bin (0 where empty).
-    lin: [f32; BINS],
+    /// The bin's linear-light stand-in: its pixels' mean colour, scaled by
+    /// [`fit_to_level`] to read back at the bin's own display luma. Black
+    /// where the bin is empty, which no percentile can land on.
+    lin: [[f32; 3]; BINS],
     total: f32,
     /// Mean saturation, `(max - min) / max`, over display-space pixels.
     mean_sat: f32,
@@ -99,20 +114,55 @@ fn luma(px: [f32; 3]) -> f32 {
     0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2]
 }
 
-/// Push one linear-light neutral through the real tone pipeline and return the
-/// display-space result — the same transform `recompute_histogram` applies
+/// Push one linear-light pixel through the real tone pipeline and return the
+/// display-space colour — the same transform `recompute_histogram` applies
 /// before binning, so the analysis sees exactly what the Develop panel plots.
-///
-/// Neutral in means chroma is zero, so the vibrance/saturation stage is inert
-/// and this is a faithful scalar stand-in for the tone curve.
-fn respond(adj: &Adjustments, format: PixelFormat, linear: f32) -> f32 {
-    let px = [linear; 3];
+fn display(adj: &Adjustments, format: PixelFormat, px: [f32; 3]) -> [f32; 3] {
     match format {
         // `apply_linear` returns linear light; the panel gamma-encodes it.
-        PixelFormat::Srgb8 => develop::apply_linear(adj, px)[0].max(0.0).powf(1.0 / 2.2),
+        PixelFormat::Srgb8 => {
+            let out = develop::apply_linear(adj, px);
+            [
+                out[0].max(0.0).powf(1.0 / 2.2),
+                out[1].max(0.0).powf(1.0 / 2.2),
+                out[2].max(0.0).powf(1.0 / 2.2),
+            ]
+        }
         // `apply_raw_display` already returns raw_shader.wgsl's display value.
-        PixelFormat::LinearF16 => develop::apply_raw_display(adj, px)[0],
+        PixelFormat::LinearF16 => develop::apply_raw_display(adj, px),
     }
+}
+
+/// Display-space luma of one linear-light pixel under `adj` — the quantity
+/// every bin is keyed by and every target is written in.
+fn respond(adj: &Adjustments, format: PixelFormat, linear: [f32; 3]) -> f32 {
+    luma(display(adj, format, linear))
+}
+
+/// Scale `px` until the identity pipeline puts it back at display luma
+/// `level`, leaving its hue alone.
+///
+/// A bin's mean linear colour carries the right hue but not quite the right
+/// brightness. Display luma is gamma-encoded, and encoding is concave, so the
+/// encoded mean sits *above* the mean of what was encoded — by as much as 0.08
+/// on a bin that mixes a saturated pixel with a neutral one of the same
+/// apparent brightness. Left uncorrected that is a systematic over-read of
+/// every percentile, which stops Exposure short of its target. One scalar per
+/// bin removes it, and the bisection is cheap because the answer is always
+/// just under 1.
+fn fit_to_level(format: PixelFormat, px: [f32; 3], level: f32) -> [f32; 3] {
+    let identity = Adjustments::default();
+    let scaled = |k: f32| [px[0] * k, px[1] * k, px[2] * k];
+    let (mut lo, mut hi) = (0.0f32, 4.0f32);
+    for _ in 0..FIT_STEPS {
+        let mid = 0.5 * (lo + hi);
+        if respond(&identity, format, scaled(mid)) < level {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    scaled(0.5 * (lo + hi))
 }
 
 impl Histogram {
@@ -123,26 +173,18 @@ impl Histogram {
         }
         let identity = Adjustments::default();
         let mut count = [0f32; BINS];
-        let mut lin_sum = [0f32; BINS];
+        let mut lin_sum = [[0f32; 3]; BINS];
         let mut sat_sum = 0f32;
 
         for &px in samples {
             // Display-space colour, via the identity pipeline for this format.
-            let shown = match format {
-                PixelFormat::Srgb8 => {
-                    let out = develop::apply_linear(&identity, px);
-                    [
-                        out[0].max(0.0).powf(1.0 / 2.2),
-                        out[1].max(0.0).powf(1.0 / 2.2),
-                        out[2].max(0.0).powf(1.0 / 2.2),
-                    ]
-                }
-                PixelFormat::LinearF16 => develop::apply_raw_display(&identity, px),
-            };
+            let shown = display(&identity, format, px);
             let v = luma(shown).clamp(0.0, 1.0);
             let bin = ((v * (BINS - 1) as f32).round() as usize).min(BINS - 1);
             count[bin] += 1.0;
-            lin_sum[bin] += luma(px).max(0.0);
+            for c in 0..3 {
+                lin_sum[bin][c] += px[c].max(0.0);
+            }
 
             let cmax = shown[0].max(shown[1]).max(shown[2]);
             let cmin = shown[0].min(shown[1]).min(shown[2]);
@@ -152,10 +194,15 @@ impl Histogram {
         }
 
         let total = samples.len() as f32;
-        let mut lin = [0f32; BINS];
+        let mut lin = [[0f32; 3]; BINS];
         for i in 0..BINS {
             if count[i] > 0.0 {
-                lin[i] = lin_sum[i] / count[i];
+                let mean = [
+                    lin_sum[i][0] / count[i],
+                    lin_sum[i][1] / count[i],
+                    lin_sum[i][2] / count[i],
+                ];
+                lin[i] = fit_to_level(format, mean, i as f32 / (BINS - 1) as f32);
             }
         }
         Some(Histogram {
@@ -454,6 +501,70 @@ mod tests {
         // endpoints are reachable inside the slider range, all three targets
         // should actually be hit, not merely approached.
         let photo = ramp(0.12, 0.78, 512);
+        let adj = analyze(&photo, PixelFormat::Srgb8);
+        let median = percentile_under(&photo, &adj, 0.50);
+        let black = percentile_under(&photo, &adj, 0.01);
+        let white = percentile_under(&photo, &adj, 0.99);
+        assert!((median - TARGET_MEDIAN).abs() < 0.06, "median {median}");
+        assert!((black - TARGET_BLACK).abs() < 0.06, "black point {black}");
+        assert!((white - TARGET_WHITE).abs() < 0.06, "white point {white}");
+    }
+
+    /// A saturated photo: neutral pixels mixed with strongly coloured ones,
+    /// both sweeping the same display range. Four hues in rotation so no
+    /// single channel can accidentally agree with the luma weights.
+    fn saturated(lo: f32, hi: f32, n: usize) -> Vec<[f32; 3]> {
+        let hues = [
+            [1.0, 0.15, 0.15],
+            [0.15, 1.0, 0.15],
+            [0.15, 0.15, 1.0],
+            [1.0, 1.0, 1.0],
+        ];
+        (0..n)
+            .map(|i| {
+                let t = i as f32 / (n - 1) as f32;
+                let display = lo + (hi - lo) * t;
+                let h = hues[i % hues.len()];
+                [
+                    (display * h[0]).powf(2.2),
+                    (display * h[1]).powf(2.2),
+                    (display * h[2]).powf(2.2),
+                ]
+            })
+            .collect()
+    }
+
+    /// The invariant everything else rests on: bins are keyed by *display*
+    /// luma, so a bin's stored representative has to come back out of the
+    /// pipeline at that same luma. The grayscale tests cannot see this — for a
+    /// neutral pixel any stand-in carrying its linear luma is already exact.
+    /// A coloured one is not: pure red shows at 0.299 but a grey of its linear
+    /// luma reads ~0.578, brighter than a mid-grey pixel that sorts below it.
+    #[test]
+    fn every_bin_representative_reproduces_its_own_display_luma() {
+        let photo = saturated(0.02, 0.98, 2048);
+        let hist = Histogram::build(&photo, PixelFormat::Srgb8).unwrap();
+        let identity = Adjustments::default();
+        for bin in 0..BINS {
+            if hist.count[bin] == 0.0 {
+                continue;
+            }
+            let level = bin as f32 / (BINS - 1) as f32;
+            let got = respond(&identity, PixelFormat::Srgb8, hist.lin[bin]);
+            assert!(
+                (got - level).abs() < 0.005,
+                "bin {bin} stands for {level:.3} but reads back as {got:.3}"
+            );
+        }
+    }
+
+    /// And the consequence of that invariant: the same targets the grayscale
+    /// solve hits must be hit on a saturated photo too. Read off real pixels,
+    /// not the binned stand-in, so a self-consistent-but-wrong histogram
+    /// cannot pass. This used to leave the median at ~0.15 instead of 0.5.
+    #[test]
+    fn the_solver_lands_on_its_targets_for_a_saturated_photo() {
+        let photo = saturated(0.10, 0.55, 512);
         let adj = analyze(&photo, PixelFormat::Srgb8);
         let median = percentile_under(&photo, &adj, 0.50);
         let black = percentile_under(&photo, &adj, 0.01);
