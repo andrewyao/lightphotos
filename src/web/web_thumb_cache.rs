@@ -19,8 +19,8 @@
 //!   it (`wasm_worker.rs`), and `poll_web_thumbs` hands those bytes to
 //!   [`store`]. Encoding in the worker keeps it off the single main thread.
 
-use std::cell::Cell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::rc::Rc;
 
@@ -32,6 +32,17 @@ use web_sys::{
 };
 
 use crate::web_catalog_fs::{is_not_found, js_error_string, sidecar_dir};
+
+/// Shared by all writes to one directory for the lifetime of a folder pick.
+/// A single cleanup task builds the index and drains completed writes; other
+/// tasks only enqueue names, so neither scans nor deletions overlap.
+#[derive(Default)]
+pub(crate) struct Cleanup {
+    running: bool,
+    indexed: bool,
+    versions: HashMap<OsString, HashSet<String>>,
+    pending: VecDeque<String>,
+}
 
 /// The metadata a cache lookup keys on: a `File`'s size and last-modified
 /// time, the browser's equivalent of native's `fs::metadata`. Obtained from
@@ -80,6 +91,7 @@ pub(crate) async fn store(
     root: &FileSystemDirectoryHandle,
     name: &str,
     bytes: &[u8],
+    cleanup: &RefCell<Cleanup>,
 ) -> Result<(), String> {
     let dir = sidecar_dir(root, true)
         .await?
@@ -110,18 +122,68 @@ pub(crate) async fn store(
     JsFuture::from(writable.close())
         .await
         .map_err(|e| js_error_string(&e))?;
-    remove_previous_versions(&dir, name).await;
+    remove_previous_versions(&dir, name, cleanup).await;
     Ok(())
 }
 
 /// Only prune after close succeeds: a failed replacement must leave the old
 /// cache intact. The stored name carries the metadata key obtained at lookup,
 /// so cleanup does not need another source-file metadata read.
-async fn remove_previous_versions(dir: &FileSystemDirectoryHandle, stored_name: &str) {
-    let Some((photo, key)) = crate::thumbnail::parse_cache_name(OsStr::new(stored_name)) else {
+async fn remove_previous_versions(
+    dir: &FileSystemDirectoryHandle,
+    stored_name: &str,
+    cleanup: &RefCell<Cleanup>,
+) {
+    if crate::thumbnail::parse_cache_name(OsStr::new(stored_name)).is_none() {
         return;
-    };
-    let mut doomed = Vec::new();
+    }
+    {
+        let mut state = cleanup.borrow_mut();
+        state.pending.push_back(stored_name.to_owned());
+        if state.running {
+            return;
+        }
+        state.running = true;
+    }
+    if !cleanup.borrow().indexed {
+        let versions = index_versions(dir).await;
+        let mut state = cleanup.borrow_mut();
+        state.versions = versions;
+        state.indexed = true;
+    }
+    loop {
+        let next = cleanup.borrow_mut().pending.pop_front();
+        let Some(name) = next else { break };
+        let (photo, _) = crate::thumbnail::parse_cache_name(OsStr::new(&name)).unwrap();
+        let doomed = {
+            let mut state = cleanup.borrow_mut();
+            let versions = state.versions.entry(photo.clone()).or_default();
+            versions.insert(name.clone());
+            versions
+                .iter()
+                .filter(|old| **old != name)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        for old in doomed {
+            // Failed deletions stay indexed for a later successful write.
+            if JsFuture::from(dir.remove_entry(&old)).await.is_ok() {
+                cleanup
+                    .borrow_mut()
+                    .versions
+                    .get_mut(&photo)
+                    .unwrap()
+                    .remove(&old);
+            }
+        }
+    }
+    cleanup.borrow_mut().running = false;
+}
+
+/// Enumeration is best-effort, just like eviction. Entries missed because of
+/// a browser error or external writes can be collected on the next folder open.
+async fn index_versions(dir: &FileSystemDirectoryHandle) -> HashMap<OsString, HashSet<String>> {
+    let mut versions: HashMap<OsString, HashSet<String>> = HashMap::new();
     let iter = dir.values();
     loop {
         let Ok(promise) = iter.next() else { break };
@@ -142,19 +204,11 @@ async fn remove_previous_versions(dir: &FileSystemDirectoryHandle, stored_name: 
             continue;
         };
         let name = child.name();
-        if let Some((candidate, candidate_key)) =
-            crate::thumbnail::parse_cache_name(OsStr::new(&name))
-        {
-            if candidate == photo && candidate_key != key {
-                doomed.push(name);
-            }
+        if let Some((photo, _)) = crate::thumbnail::parse_cache_name(OsStr::new(&name)) {
+            versions.entry(photo).or_default().insert(name);
         }
     }
-    for name in doomed {
-        // Cleanup is best-effort; it must not turn a successful store into
-        // a failure, or touch sidecars and other photos' thumbnails.
-        let _ = JsFuture::from(dir.remove_entry(&name)).await;
-    }
+    versions
 }
 
 /// Delete entries whose photo is no longer in `live` or whose metadata key

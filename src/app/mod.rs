@@ -13,8 +13,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::SystemTime;
 // web_time::Instant, not std::time::Instant — see loader.rs's launched_at()
 // doc comment for why (no OS clock on bare wasm32/64).
@@ -483,6 +483,10 @@ pub(crate) struct App {
     /// each navigation.
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_dir_handles: HashMap<PathBuf, web_sys::FileSystemDirectoryHandle>,
+    /// Thumbnail version indexes shared across asynchronous writes per folder.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_thumb_cleanup:
+        HashMap<PathBuf, std::rc::Rc<std::cell::RefCell<crate::web_thumb_cache::Cleanup>>>,
     /// Async subfolder-listing results (`web_fs::list_dir`), tagged with the
     /// navigation generation that requested them. Stale generations are
     /// discarded by `poll_dir_listing` after a close or replacement.
@@ -1011,6 +1015,8 @@ impl App {
             web_file_handles: HashMap::new(),
             #[cfg(target_arch = "wasm32")]
             web_dir_handles: HashMap::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_thumb_cleanup: HashMap::new(),
             #[cfg(target_arch = "wasm32")]
             web_dirlist_tx,
             #[cfg(target_arch = "wasm32")]
