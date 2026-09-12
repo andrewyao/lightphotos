@@ -311,6 +311,81 @@ impl From<&Adjustments> for GpuAdjust {
     }
 }
 
+/// Filmic exposure: the curve behind the exposure slider, applied to one
+/// linear-light RGB pixel.
+///
+/// A plain `2^stops` gain drives bright values past white, where the end of the
+/// pipeline clamps them into a flat, detail-free patch. This instead shapes
+/// *luma* through a rational curve whose fixed point sits just above display
+/// white, so brightening compresses into white rather than clipping, and
+/// rescales chroma separately so colors go pale as they brighten instead of
+/// turning neon. Roughly the nominal number of stops lands in the shadows,
+/// tapering to much less near white.
+///
+/// Negative exposure uses linear gain to recover above-white RAW highlights.
+/// The brightening curve is adapted from RapidRAW's `apply_filmic_exposure`.
+///
+/// MUST stay in sync with `filmicExposure` in shader.wgsl and raw_shader.wgsl.
+fn filmic_exposure(rgb: [f32; 3], stops: f32) -> [f32; 3] {
+    // Share of the adjustment routed through the rational curve; the remainder
+    // stays a straight linear gain so the endpoints aren't perfectly rigid.
+    const MIX: f32 = 0.95;
+    // How hard the curve bends per stop.
+    const MIDTONE: f32 = 1.2;
+    // The curve's fixed point. Deliberately just *above* display white, so a
+    // 1.0 pixel still moves (sub-linearly) rather than being pinned: pulling
+    // exposure down on a blown sky has to do something.
+    const ANCHOR: f32 = 1.06;
+
+    if stops == 0.0 {
+        return rgb;
+    }
+
+    // Darkening must scale the entire RAW range, including values above white.
+    // Linear chroma scaling also preserves color ratios during recovery.
+    if stops < 0.0 {
+        let gain = stops.exp2();
+        return rgb.map(|v| v * gain);
+    }
+
+    // Rec.709 luma. These are linear-light values, so this is NOT the
+    // 0.299/0.587/0.114 set used by the gamma-space vibrance block below.
+    let luma = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+    if luma.abs() < 1e-5 {
+        return rgb;
+    }
+
+    let scale = (stops * (1.0 - MIX)).exp2();
+    // Curve strength: k == 1 is the identity, k < 1 lifts, k > 1 drops.
+    let k = (-stops * MIX * MIDTONE).exp2();
+
+    // Shape |luma| over [0, ANCHOR]. Past the anchor the curve tiles, so RAW
+    // values above white keep being shaped instead of saturating; `Srgb8`
+    // input never gets there, and `base` stays 0.
+    let la = luma.abs();
+    let base = (la / ANCHOR).floor() * ANCHOR;
+    let norm = (la - base) / ANCHOR;
+    let shaped = norm / (norm + (1.0 - norm) * k);
+    let new_luma = luma.signum() * (base + shaped * ANCHOR) * scale;
+
+    // Chroma grows more slowly than luma, and slower still near white. This is
+    // the half that makes a hot highlight read as film rather than as a gain.
+    // `luma_scale` is non-negative by construction; the clamp only guards
+    // `powf`, which is NaN for a negative base and a fractional exponent.
+    let luma_scale = (new_luma / luma).max(0.0);
+    let w = new_luma.clamp(0.0, 2.0) * 0.5;
+    let dyn_exp = 0.95 + (0.65 - 0.95) * w;
+    // Fade in highlight desaturation continuously from the identity at zero.
+    let rolloff = 1.0 / (1.0 + (new_luma - 0.9).max(0.0) * 2.0 * stops.min(1.0));
+    let chroma_scale = luma_scale.powf(dyn_exp) * rolloff;
+
+    [
+        new_luma + (rgb[0] - luma) * chroma_scale,
+        new_luma + (rgb[1] - luma) * chroma_scale,
+        new_luma + (rgb[2] - luma) * chroma_scale,
+    ]
+}
+
 // MUST stay in sync with the fs_main pipeline in shader.wgsl
 //
 /// Apply the tone pipeline to one linear-light RGB pixel (0..1+; values may
@@ -346,11 +421,11 @@ fn apply_linear_impl(adj: &Adjustments, rgb: [f32; 3], raw_display: bool) -> [f3
     g *= g_gain;
     b *= b_gain;
 
-    // 2. Exposure: a stop is a doubling of linear light.
-    let e = 2f32.powf(adj.exposure);
-    r *= e;
-    g *= e;
-    b *= e;
+    // 2. Exposure: a filmic curve, not a plain gain — see `filmic_exposure`.
+    let exposed = filmic_exposure([r, g, b], adj.exposure);
+    r = exposed[0];
+    g = exposed[1];
+    b = exposed[2];
 
     // 3. Convert linear → working gamma (≈ perceptual). Clamp negatives first so
     //    powf is well-defined.
@@ -380,8 +455,14 @@ fn apply_linear_impl(adj: &Adjustments, rgb: [f32; 3], raw_display: bool) -> [f3
         // pushes the top; each ±100 maps to a ±0.2 endpoint move.
         let blacks = adj.blacks / 100.0 * 0.2;
         let whites = adj.whites / 100.0 * 0.2;
-        // Remap [0,1] so 0 → -blacks (lift/deepen the floor) and 1 → 1+whites.
-        x = (x - (-blacks)) / ((1.0 + whites) - (-blacks));
+        // Remap [0,1] so input -blacks → 0 and input (1 - whites) → 1.
+        //
+        // Note the sign on whites: POSITIVE whites pulls the white point down,
+        // so the top end brightens and clips sooner, and negative whites adds
+        // headroom and recovers highlights. That's Lightroom's convention (and
+        // RapidRAW's). This ran the other way round until the direction was
+        // measured against both — see `whites_brightens_the_top_end`.
+        x = (x + blacks) / ((1.0 - whites) + blacks);
 
         // Contrast: S-curve pivoting at mid-gray (0.5). ±100 → ±0.5 strength.
         let c = adj.contrast / 100.0 * 0.5;
@@ -653,6 +734,144 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(edit_signature(&a, 0), edit_signature(&b, 0));
+    }
+
+    /// Rec.709 luma, matching `filmic_exposure`'s own weighting.
+    fn luma709(px: [f32; 3]) -> f32 {
+        0.2126 * px[0] + 0.7152 * px[1] + 0.0722 * px[2]
+    }
+
+    #[test]
+    fn filmic_exposure_zero_is_identity() {
+        // The whole pipeline must round-trip a non-gray pixel at the default
+        // adjustments, so the curve's no-op path has to be exact, not merely
+        // close. Same shape as `vibrance_saturation_zero_is_identity`.
+        let px = [0.6, 0.3, 0.2];
+        assert_eq!(filmic_exposure(px, 0.0), px);
+        let out = apply_linear(&Adjustments::default(), px);
+        for i in 0..3 {
+            assert!((out[i] - px[i]).abs() < 1e-5, "channel {i}: {} vs {}", out[i], px[i]);
+        }
+    }
+
+    #[test]
+    fn filmic_exposure_colored_highlights_are_continuous_at_zero() {
+        for px in [[1.0, 1.0, 0.0], [1.5, 1.0, 0.5], [3.0, 2.0, 1.0]] {
+            for stops in [-1e-4, -1e-5, 1e-5, 1e-4] {
+                let out = filmic_exposure(px, stops);
+                for i in 0..3 {
+                    assert!((out[i] - px[i]).abs() < 10.0 * stops.abs(),
+                        "discontinuity for {px:?} at {stops}: {out:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_exposure_recovers_raw_highlights_in_display_pipeline() {
+        for pipeline in [apply_linear, apply_raw_display] {
+            // Include tiled anchors and highlights several stops above white.
+            for level in [1.06, 2.12, 4.24, 8.0, 16.0] {
+                let mut previous = 1.0;
+                for step in 0..=50 {
+                    let adj = Adjustments {
+                        exposure: -(step as f32) / 10.0,
+                        ..Default::default()
+                    };
+                    let out = pipeline(&adj, [level; 3]);
+                    assert!(out.iter().all(|v| v.is_finite()));
+                    assert!(out[0] <= previous + 1e-6);
+                    assert!((out[0] - out[1]).abs() < 1e-6);
+                    assert!((out[0] - out[2]).abs() < 1e-6);
+                    previous = out[0];
+                }
+                assert!(previous > 0.0 && previous < 0.9,
+                    "highlight {level} failed to recover at -5 stops: {previous}");
+            }
+        }
+    }
+
+    #[test]
+    fn filmic_exposure_is_monotonic_in_the_slider() {
+        let px = [0.2, 0.2, 0.2];
+        let mut prev = f32::NEG_INFINITY;
+        for stops in [-5.0, -3.0, -1.0, 0.0, 1.0, 3.0, 5.0] {
+            let out = luma709(filmic_exposure(px, stops));
+            assert!(out > prev, "luma fell going to {stops} stops: {out} after {prev}");
+            prev = out;
+        }
+    }
+
+    #[test]
+    fn filmic_exposure_lifts_shadows_more_than_highlights() {
+        // The point of the curve: a nominal stop lands (roughly) in full down
+        // in the shadows and tapers off near white, so bright areas roll off
+        // instead of clipping. A reversion to the old `2^stops` multiply would
+        // make both ratios identical and fail here.
+        let shadow = [0.05, 0.05, 0.05];
+        let highlight = [0.9, 0.9, 0.9];
+        let shadow_gain = luma709(filmic_exposure(shadow, 1.0)) / luma709(shadow);
+        let highlight_gain = luma709(filmic_exposure(highlight, 1.0)) / luma709(highlight);
+        assert!(
+            shadow_gain > highlight_gain,
+            "expected shadows to gain more than highlights: {shadow_gain} vs {highlight_gain}"
+        );
+    }
+
+    #[test]
+    fn filmic_exposure_desaturates_as_it_brightens() {
+        // Chroma is scaled by a sub-unit power of the luma change, so a color
+        // pushed toward white comes back paler rather than more vivid.
+        let px = [0.5, 0.1, 0.1];
+        let chroma_ratio = |p: [f32; 3]| {
+            let l = luma709(p);
+            (p[0] - l).abs() / l
+        };
+        let before = chroma_ratio(px);
+        let after = chroma_ratio(filmic_exposure(px, 2.0));
+        assert!(
+            after < before,
+            "expected brightening to desaturate: {after} vs {before}"
+        );
+    }
+
+    #[test]
+    fn filmic_exposure_is_finite_at_the_edges() {
+        // Black hits the near-zero-luma early return, white sits just under the
+        // anchor, and a single-channel pixel drives chroma hardest. `powf` on a
+        // negative base would give NaN, so this pins the guard in place.
+        for px in [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 0.0], [2.0, 2.0, 2.0]] {
+            for stops in [-5.0, -1.0, 0.0, 1.0, 5.0] {
+                let out = filmic_exposure(px, stops);
+                assert!(
+                    out.iter().all(|v| v.is_finite()),
+                    "non-finite output for {px:?} at {stops} stops: {out:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn whites_brightens_the_top_end() {
+        // Lightroom's (and RapidRAW's) convention: positive Whites pushes the
+        // highlights up toward clipping, negative pulls them back. This ran
+        // backwards until it was measured, so pin the direction here.
+        let bright = [0.8, 0.8, 0.8];
+        let up = apply_linear(&Adjustments { whites: 60.0, ..Default::default() }, bright);
+        let down = apply_linear(&Adjustments { whites: -60.0, ..Default::default() }, bright);
+        assert!(up[0] > bright[0], "whites +60 should brighten: {}", up[0]);
+        assert!(down[0] < bright[0], "whites -60 should recover: {}", down[0]);
+    }
+
+    #[test]
+    fn blacks_lifts_the_floor() {
+        // The companion direction, unchanged by the whites fix but worth
+        // pinning alongside it: positive Blacks lifts the darkest tones.
+        let dark = [0.03, 0.03, 0.03];
+        let up = apply_linear(&Adjustments { blacks: 60.0, ..Default::default() }, dark);
+        let down = apply_linear(&Adjustments { blacks: -60.0, ..Default::default() }, dark);
+        assert!(up[0] > dark[0], "blacks +60 should lift: {}", up[0]);
+        assert!(down[0] < dark[0], "blacks -60 should crush: {}", down[0]);
     }
 
     #[test]

@@ -117,6 +117,59 @@ fn apply_raw_preview_boost(v: f32) -> f32 {
     return clamp(brightened + (contrast_curve - brightened) * RAW_PREVIEW_CONTRAST_MIX, 0.0, 1.0);
 }
 
+// Filmic exposure constants. MUST stay in sync with `filmic_exposure` in
+// develop.rs. MIX is the share of the adjustment routed through the rational
+// curve, MIDTONE is how hard it bends per stop, and ANCHOR is the curve's fixed
+// point — just *above* display white, so a 1.0 pixel still moves sub-linearly
+// rather than being pinned.
+const FILMIC_MIX: f32 = 0.95;
+const FILMIC_MIDTONE: f32 = 1.2;
+const FILMIC_ANCHOR: f32 = 1.06;
+
+// Filmic exposure, in linear light: shapes luma through a rational curve so
+// brightening compresses into white instead of clipping flat, then rescales
+// chroma separately so colors go pale as they brighten. MUST stay in sync with
+// `filmic_exposure` in develop.rs and shader.wgsl's own copy.
+fn filmicExposure(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
+    if (stops == 0.0) {
+        return rgb;
+    }
+
+    // Scale the entire RAW range to recover above-white highlights.
+    if (stops < 0.0) {
+        return rgb * exp2(stops);
+    }
+
+    // Rec.709 luma. Linear-light values, so NOT the 0.299/0.587/0.114 set the
+    // gamma-space vibrance block uses.
+    let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    if (abs(luma) < 1e-5) {
+        return rgb;
+    }
+
+    let scale = exp2(stops * (1.0 - FILMIC_MIX));
+    // Curve strength: k == 1 is the identity, k < 1 lifts, k > 1 drops.
+    let k = exp2(-stops * FILMIC_MIX * FILMIC_MIDTONE);
+
+    // Past the anchor the curve tiles, so RAW values above white keep being
+    // shaped instead of saturating. Srgb8 input never gets there.
+    let la = abs(luma);
+    let base = floor(la / FILMIC_ANCHOR) * FILMIC_ANCHOR;
+    let norm = (la - base) / FILMIC_ANCHOR;
+    let shaped = norm / (norm + (1.0 - norm) * k);
+    let newLuma = sign(luma) * (base + shaped * FILMIC_ANCHOR) * scale;
+
+    // Chroma grows more slowly than luma, and slower still near white.
+    let lumaScale = max(newLuma / luma, 0.0);
+    let w = clamp(newLuma, 0.0, 2.0) * 0.5;
+    let dynExp = mix(0.95, 0.65, w);
+    // Fade in highlight desaturation continuously from the identity at zero.
+    let rolloff = 1.0 / (1.0 + max(newLuma - 0.9, 0.0) * 2.0 * min(stops, 1.0));
+    let chromaScale = pow(lumaScale, dynExp) * rolloff;
+
+    return vec3<f32>(newLuma) + (rgb - vec3<f32>(luma)) * chromaScale;
+}
+
 // One gamma-space tone op, applied per channel. MUST stay in sync with the
 // `tone` closure in apply_linear in develop.rs, and with shader.wgsl's own
 // `tone` function — identical body, just fed by this file's real-sRGB+boost
@@ -127,7 +180,9 @@ fn tone(v: f32) -> f32 {
     // Blacks/whites: shift the endpoints. ±100 → ±0.2 endpoint move.
     let blacks = adj.blacks / 100.0 * 0.2;
     let whites = adj.whites / 100.0 * 0.2;
-    x = (x - (-blacks)) / ((1.0 + whites) - (-blacks));
+    // Positive whites brightens/clips the top end, negative recovers it —
+    // Lightroom's convention. MUST stay in sync with develop.rs.
+    x = (x + blacks) / ((1.0 - whites) + blacks);
 
     // Contrast: S-curve pivoting at mid-gray. ±100 → ±0.5 strength.
     let c = adj.contrast / 100.0 * 0.5;
@@ -257,11 +312,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = g * (1.0 - ti * 0.15);
     b = b * (1.0 - t * 0.3);
 
-    // 2. Exposure: a stop is a doubling of linear light.
-    let e = exp2(adj.exposure);
-    r = r * e;
-    g = g * e;
-    b = b * e;
+    // 2. Exposure: a filmic curve, not a plain gain — see `filmicExposure`.
+    let exposed = filmicExposure(vec3<f32>(r, g, b), adj.exposure);
+    r = exposed.r;
+    g = exposed.g;
+    b = exposed.b;
 
     // 3. Linear -> working gamma: real sRGB curve + display
     // boost, both left exactly as they were before this file had any
