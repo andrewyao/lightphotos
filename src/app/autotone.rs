@@ -146,6 +146,20 @@ impl App {
             self.autotone_pending.remove(&path);
             self.tone_one(&path, &auto);
         }
+        // Re-drive whatever is still outstanding. `auto_tone_batch` asks for
+        // each thumbnail exactly once, and that request can go missing without
+        // a trace: `request_thumb` skips the enqueue when the queue mutex is
+        // poisoned, after which no arrival and no `thumb_failed` will ever land
+        // for that key and the batch sits at n/total forever, redrawing. Asking
+        // again is free of consequence — `request_thumb` dedups against the
+        // cache, the in-flight set and the failure set — and it costs the same
+        // `to_path_buf` per key the give-up sweep just above already spends.
+        // wasm32 gets this for nothing, from `request_web_thumbs`.
+        if let Some(loader) = &mut self.loader {
+            for path in &self.autotone_pending {
+                loader.request_thumb(path.clone(), THUMB_PX);
+            }
+        }
         self.report_auto_tone_progress();
         self.request_redraw();
     }
