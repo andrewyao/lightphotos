@@ -156,6 +156,9 @@ impl App {
             .into_iter()
             .map(|(p, _, _)| p)
             .collect();
+        if let Some(loader) = &mut self.loader {
+            loader.set_thumb_working_set_size(keys.len());
+        }
         // A running Auto Tone batch needs its photos' thumbnails whether or
         // not they are on screen, and this is the only path that reads photo
         // bytes in the browser — `loader.rs`'s queue has no workers here, so

@@ -244,10 +244,9 @@ const PREVIEW_CAPACITY: usize = 8;
 /// multi-hundred-megabyte resident set a real tab failure rather than merely
 /// wasteful.
 ///
-/// The floor is the working set: `working_positions` keeps the visible grid
-/// plus three rows of prefetch margin either side, which reaches roughly 180
-/// cells on a large display. Below that the LRU evicts entries the very frame
-/// after it decodes them.
+/// This is the baseline, not a bound on the working set: large grids can need
+/// more entries including prefetch rows. Both request loops raise the capacity
+/// to their current working-set size before enqueueing decodes.
 const THUMB_CAPACITY: usize = 256;
 
 pub struct Loader {
@@ -886,11 +885,23 @@ impl Loader {
         }
     }
 
+    /// Keep the decoded cache large enough for the current grid/filmstrip,
+    /// including prefetch, so stationary views cannot cycle through evictions.
+    /// Shrinking the view releases excess entries immediately.
+    pub fn set_thumb_working_set_size(&mut self, len: usize) {
+        self.thumb_capacity = THUMB_CAPACITY.max(len);
+        self.trim_thumbs();
+    }
+
     fn insert_thumb(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>) {
         if !self.thumb_cache.contains_key(&key) {
             self.thumb_order.push_back(key.clone());
         }
         self.thumb_cache.insert(key, img);
+        self.trim_thumbs();
+    }
+
+    fn trim_thumbs(&mut self) {
         while self.thumb_order.len() > self.thumb_capacity {
             if let Some(old) = self.thumb_order.pop_front() {
                 self.thumb_cache.remove(&old);
@@ -992,6 +1003,32 @@ mod tests {
             rgba: vec![0; (w * h * 4) as usize],
             pixel_format: image_decode::PixelFormat::Srgb8,
         })
+    }
+
+    #[test]
+    fn thumbnail_cache_retains_large_grid_and_shrinks_after_resize() {
+        let mut loader = Loader::new(16384);
+        let px = crate::thumbnail::THUMB_PX;
+        // 18 columns, 10 visible rows, and three prefetch rows on either side.
+        let working_set = 18 * (10 + 6);
+        loader.set_thumb_working_set_size(working_set);
+        for i in 0..working_set {
+            loader.insert_thumb((path(&i.to_string()), px), image(1, 1));
+        }
+        // Repeated stationary frames must find every requested thumbnail.
+        for _ in 0..3 {
+            loader.set_thumb_working_set_size(working_set);
+            for i in 0..working_set {
+                assert!(loader.get_thumb(&path(&i.to_string()), px).is_some());
+            }
+        }
+        loader.set_thumb_working_set_size(0);
+        assert_eq!(loader.thumb_cache.len(), THUMB_CAPACITY);
+        assert_eq!(loader.thumb_order.len(), THUMB_CAPACITY);
+        assert!(loader.get_thumb(&path("0"), px).is_none());
+        assert!(loader
+            .get_thumb(&path(&(working_set - 1).to_string()), px)
+            .is_some());
     }
 
     #[test]
