@@ -11,8 +11,7 @@
 //! our own pipeline rather than guessed:
 //!
 //! - **Exposure** is bisected so the median lands on mid-gray.
-//! - **Blacks/Whites** fall out in closed form, because our endpoint remap is
-//!   linear (see [`solve_endpoints`]).
+//! - **Blacks/Whites** are bisected against the output endpoint percentiles.
 //! - **Contrast** is bisected to stretch what the endpoints could not, and
 //!   stays at zero whenever they already reached the target width.
 //!
@@ -83,9 +82,9 @@ const FIT_STEPS: u32 = 16;
 /// `lin` is the piece that makes the solve cheap: for each display-luma bin it
 /// keeps one representative *linear-light colour*, so a candidate
 /// `Adjustments` can be evaluated by pushing 256 pixels through the real
-/// pipeline instead of every pixel in the photo. Because every tone operator
-/// is monotonic, a bin's rank never changes under an adjustment — so the
-/// percentile *indices* are computed once here and reused for every candidate.
+/// pipeline instead of every pixel in the photo. Representatives are re-sorted by
+/// their output luma for every candidate: channel-wise monotonic operators do
+/// not preserve the relative display brightness of different colours.
 ///
 /// The representative has to be a colour, not a scalar: bins are keyed by
 /// *display* luma, and a neutral grey carrying only the bin's linear luma
@@ -214,23 +213,27 @@ impl Histogram {
         })
     }
 
-    /// Bin index at cumulative fraction `p`. Monotonic tone operators preserve
-    /// bin order, so this index is valid under any `Adjustments`.
-    fn percentile_bin(&self, p: f32) -> usize {
-        let target = self.total * p;
-        let mut cum = 0.0;
-        for (i, &c) in self.count.iter().enumerate() {
-            cum += c;
-            if cum >= target {
-                return i;
+    /// Display-space value of the pixel at cumulative fraction `p`, under `adj`.
+    fn percentile(&self, p: f32, adj: &Adjustments) -> f32 {
+        let mut output = [(0.0f32, 0.0f32); BINS];
+        let mut len = 0;
+        for (bin, &count) in self.count.iter().enumerate() {
+            if count > 0.0 {
+                output[len] = (respond(adj, self.format, self.lin[bin]), count);
+                len += 1;
             }
         }
-        BINS - 1
-    }
-
-    /// Display-space value of the pixel at cumulative fraction `p`, under `adj`.
-    fn percentile(&self, bin: usize, adj: &Adjustments) -> f32 {
-        respond(adj, self.format, self.lin[bin])
+        let output = &mut output[..len];
+        output.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+        let target = self.total * p;
+        let mut cumulative = 0.0;
+        for &(level, count) in output.iter() {
+            cumulative += count;
+            if cumulative >= target {
+                return level;
+            }
+        }
+        output.last().map_or(0.0, |entry| entry.0)
     }
 
     /// Fraction of pixels at or above display level `level`.
@@ -282,17 +285,13 @@ pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments 
         return Adjustments::default();
     };
 
-    let lo_bin = hist.percentile_bin(0.01);
-    let mid_bin = hist.percentile_bin(0.50);
-    let hi_bin = hist.percentile_bin(0.99);
-
     // Measured off the untouched photo, so the clipping guards below describe
     // what the camera actually recorded rather than what we just did to it.
     let highlight_fraction = hist.fraction_above(HIGHLIGHT_LEVEL);
     let clipped_fraction = hist.fraction_above(CLIPPED_LEVEL);
     let shadow_fraction = hist.fraction_below(SHADOW_LEVEL);
     let identity = Adjustments::default();
-    let white_point = hist.percentile(hi_bin, &identity);
+    let white_point = hist.percentile(0.99, &identity);
 
     // A photo that is already hot gets no more light, however dark its median.
     // Blowing a sky further is never the right answer, and this is the one
@@ -322,7 +321,7 @@ pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments 
             exposure_range.clone(),
             TARGET_MEDIAN,
             |a| &mut a.exposure,
-            |a| hist.percentile(mid_bin, a),
+            |a| hist.percentile(0.50, a),
         );
         // Endpoints: 1st and 99th percentile onto the target black and white.
         // Both are monotonic in their slider near the end they control.
@@ -331,19 +330,19 @@ pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments 
             TONE_RANGE,
             TARGET_BLACK,
             |a| &mut a.blacks,
-            |a| hist.percentile(lo_bin, a),
+            |a| hist.percentile(0.01, a),
         );
         solve(
             &mut adj,
             TONE_RANGE,
             TARGET_WHITE,
             |a| &mut a.whites,
-            |a| hist.percentile(hi_bin, a),
+            |a| hist.percentile(0.99, a),
         );
         // Contrast: stretch whatever spread the endpoints could not reach,
         // capped. Left at zero outright when they already got there, so a
         // well-exposed photo comes back with this slider untouched.
-        let spread = |a: &Adjustments| hist.percentile(hi_bin, a) - hist.percentile(lo_bin, a);
+        let spread = |a: &Adjustments| hist.percentile(0.99, a) - hist.percentile(0.01, a);
         adj.contrast = 0.0;
         if spread(&adj) < TARGET_RANGE {
             solve(
@@ -374,7 +373,9 @@ pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments 
         adj.vibrance = ((0.2 - hist.mean_sat) * 120.0).min(*TONE_RANGE.end());
     }
 
-    adj.exposure = adj.exposure.clamp(*EXPOSURE_RANGE.start(), *EXPOSURE_RANGE.end());
+    adj.exposure = adj
+        .exposure
+        .clamp(*EXPOSURE_RANGE.start(), *EXPOSURE_RANGE.end());
     adj.contrast = adj.contrast.clamp(*TONE_RANGE.start(), *TONE_RANGE.end());
     adj
 }
@@ -463,7 +464,11 @@ mod tests {
         // though the median sits above mid-gray and wants pulling down.
         let hot = ramp(0.75, 1.0, 512);
         let adj = analyze(&hot, PixelFormat::Srgb8);
-        assert!(adj.exposure <= 0.0, "expected no lift, got {}", adj.exposure);
+        assert!(
+            adj.exposure <= 0.0,
+            "expected no lift, got {}",
+            adj.exposure
+        );
     }
 
     #[test]
@@ -532,6 +537,30 @@ mod tests {
                 ]
             })
             .collect()
+    }
+
+    #[test]
+    fn adjusted_percentiles_follow_colours_when_their_brightness_order_changes() {
+        let mut photo = vec![[1.0, 0.0, 0.0]; 40];
+        photo.extend(flat(0.26, 60));
+        let hist = Histogram::build(&photo, PixelFormat::Srgb8).unwrap();
+        let adj = Adjustments {
+            whites: 100.0,
+            ..Default::default()
+        };
+        assert!(
+            respond(&Adjustments::default(), PixelFormat::Srgb8, photo[0])
+                > respond(&Adjustments::default(), PixelFormat::Srgb8, photo[99])
+        );
+        assert!(
+            respond(&adj, PixelFormat::Srgb8, photo[0])
+                < respond(&adj, PixelFormat::Srgb8, photo[99])
+        );
+        for p in [0.01, 0.25, 0.50, 0.75, 0.99] {
+            let expected = percentile_under(&photo, &adj, p);
+            let got = hist.percentile(p, &adj);
+            assert!((got - expected).abs() < 0.01, "p={p}: {got} vs {expected}");
+        }
     }
 
     /// The invariant everything else rests on: bins are keyed by *display*
@@ -637,22 +666,31 @@ mod tests {
     fn the_raw_solve_measures_are_monotonic_in_their_own_sliders() {
         let photo = raw_saturated(0.005, 0.6, 512);
         let hist = Histogram::build(&photo, PixelFormat::LinearF16).unwrap();
-        let lo_bin = hist.percentile_bin(0.01);
-        let mid_bin = hist.percentile_bin(0.50);
-        let hi_bin = hist.percentile_bin(0.99);
 
-        assert_monotonic("exposure/median", EXPOSURE_RANGE, |a| &mut a.exposure, |a| {
-            hist.percentile(mid_bin, a)
-        });
-        assert_monotonic("blacks/1st pct", TONE_RANGE, |a| &mut a.blacks, |a| {
-            hist.percentile(lo_bin, a)
-        });
-        assert_monotonic("whites/99th pct", TONE_RANGE, |a| &mut a.whites, |a| {
-            hist.percentile(hi_bin, a)
-        });
-        assert_monotonic("contrast/spread", TONE_RANGE, |a| &mut a.contrast, |a| {
-            hist.percentile(hi_bin, a) - hist.percentile(lo_bin, a)
-        });
+        assert_monotonic(
+            "exposure/median",
+            EXPOSURE_RANGE,
+            |a| &mut a.exposure,
+            |a| hist.percentile(0.50, a),
+        );
+        assert_monotonic(
+            "blacks/1st pct",
+            TONE_RANGE,
+            |a| &mut a.blacks,
+            |a| hist.percentile(0.01, a),
+        );
+        assert_monotonic(
+            "whites/99th pct",
+            TONE_RANGE,
+            |a| &mut a.whites,
+            |a| hist.percentile(0.99, a),
+        );
+        assert_monotonic(
+            "contrast/spread",
+            TONE_RANGE,
+            |a| &mut a.contrast,
+            |a| hist.percentile(0.99, a) - hist.percentile(0.01, a),
+        );
     }
 
     /// The bin invariant again, on the RAW pipeline. `apply_raw_display` clamps
@@ -708,7 +746,10 @@ mod tests {
         // A photo already spanning the range needs no help, and a Contrast
         // nudge on top of a good stretch is exactly the over-cooking this
         // slider's cap exists to avoid.
-        assert_eq!(analyze(&ramp(0.0, 1.0, 512), PixelFormat::Srgb8).contrast, 0.0);
+        assert_eq!(
+            analyze(&ramp(0.0, 1.0, 512), PixelFormat::Srgb8).contrast,
+            0.0
+        );
     }
 
     #[test]
@@ -717,7 +758,11 @@ mod tests {
         // Contrast at the slider maximum.
         let very_flat = ramp(0.47, 0.53, 512);
         let adj = analyze(&very_flat, PixelFormat::Srgb8);
-        assert!(adj.contrast <= MAX_AUTO_CONTRAST, "contrast {}", adj.contrast);
+        assert!(
+            adj.contrast <= MAX_AUTO_CONTRAST,
+            "contrast {}",
+            adj.contrast
+        );
     }
 
     #[test]

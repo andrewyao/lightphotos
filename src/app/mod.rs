@@ -1231,7 +1231,6 @@ impl App {
             self.playlist = Some(playlist);
             self.reset_burst_state();
             self.reset_dup_state();
-            self.cancel_auto_tone();
             self.recompute_visible();
             self.sel = Some(
                 self.visible
@@ -1303,6 +1302,8 @@ impl App {
     /// safely inserting nothing — and again from `poll_catalog_load` once the
     /// real data lands, so first paint is never blocked on sidecar count.
     fn seed_mirrors(&mut self, playlist: &Playlist) {
+        // Stop pending edits before replacing the catalog they would write to.
+        self.cancel_auto_tone();
         self.request_catalog_load(playlist.dir());
         self.reconcile_catalog_mirrors(playlist);
     }
@@ -1333,7 +1334,6 @@ impl App {
         self.playlist = Some(playlist);
         self.reset_burst_state();
         self.reset_dup_state();
-        self.cancel_auto_tone();
         self.recompute_visible();
         self.sel = None;
         self.selected.clear();
