@@ -322,7 +322,8 @@ impl From<&Adjustments> for GpuAdjust {
 /// turning neon. Roughly the nominal number of stops lands in the shadows,
 /// tapering to much less near white.
 ///
-/// Ported from RapidRAW's `apply_filmic_exposure`, constants included.
+/// Negative exposure uses linear gain to recover above-white RAW highlights.
+/// The brightening curve is adapted from RapidRAW's `apply_filmic_exposure`.
 ///
 /// MUST stay in sync with `filmicExposure` in shader.wgsl and raw_shader.wgsl.
 fn filmic_exposure(rgb: [f32; 3], stops: f32) -> [f32; 3] {
@@ -338,6 +339,13 @@ fn filmic_exposure(rgb: [f32; 3], stops: f32) -> [f32; 3] {
 
     if stops == 0.0 {
         return rgb;
+    }
+
+    // Darkening must scale the entire RAW range, including values above white.
+    // Linear chroma scaling also preserves color ratios during recovery.
+    if stops < 0.0 {
+        let gain = stops.exp2();
+        return rgb.map(|v| v * gain);
     }
 
     // Rec.709 luma. These are linear-light values, so this is NOT the
@@ -367,7 +375,8 @@ fn filmic_exposure(rgb: [f32; 3], stops: f32) -> [f32; 3] {
     let luma_scale = (new_luma / luma).max(0.0);
     let w = new_luma.clamp(0.0, 2.0) * 0.5;
     let dyn_exp = 0.95 + (0.65 - 0.95) * w;
-    let rolloff = 1.0 / (1.0 + (new_luma - 0.9).max(0.0) * 2.0);
+    // Fade in highlight desaturation continuously from the identity at zero.
+    let rolloff = 1.0 / (1.0 + (new_luma - 0.9).max(0.0) * 2.0 * stops.min(1.0));
     let chroma_scale = luma_scale.powf(dyn_exp) * rolloff;
 
     [
@@ -742,6 +751,43 @@ mod tests {
         let out = apply_linear(&Adjustments::default(), px);
         for i in 0..3 {
             assert!((out[i] - px[i]).abs() < 1e-5, "channel {i}: {} vs {}", out[i], px[i]);
+        }
+    }
+
+    #[test]
+    fn filmic_exposure_colored_highlights_are_continuous_at_zero() {
+        for px in [[1.0, 1.0, 0.0], [1.5, 1.0, 0.5], [3.0, 2.0, 1.0]] {
+            for stops in [-1e-4, -1e-5, 1e-5, 1e-4] {
+                let out = filmic_exposure(px, stops);
+                for i in 0..3 {
+                    assert!((out[i] - px[i]).abs() < 10.0 * stops.abs(),
+                        "discontinuity for {px:?} at {stops}: {out:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_exposure_recovers_raw_highlights_in_display_pipeline() {
+        for pipeline in [apply_linear, apply_raw_display] {
+            // Include tiled anchors and highlights several stops above white.
+            for level in [1.06, 2.12, 4.24, 8.0, 16.0] {
+                let mut previous = 1.0;
+                for step in 0..=50 {
+                    let adj = Adjustments {
+                        exposure: -(step as f32) / 10.0,
+                        ..Default::default()
+                    };
+                    let out = pipeline(&adj, [level; 3]);
+                    assert!(out.iter().all(|v| v.is_finite()));
+                    assert!(out[0] <= previous + 1e-6);
+                    assert!((out[0] - out[1]).abs() < 1e-6);
+                    assert!((out[0] - out[2]).abs() < 1e-6);
+                    previous = out[0];
+                }
+                assert!(previous > 0.0 && previous < 0.9,
+                    "highlight {level} failed to recover at -5 stops: {previous}");
+            }
         }
     }
 

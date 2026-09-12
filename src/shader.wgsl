@@ -118,6 +118,11 @@ fn filmicExposure(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
         return rgb;
     }
 
+    // Scale the entire RAW range to recover above-white highlights.
+    if (stops < 0.0) {
+        return rgb * exp2(stops);
+    }
+
     // Rec.709 luma. Linear-light values, so NOT the 0.299/0.587/0.114 set the
     // gamma-space vibrance block uses.
     let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
@@ -141,7 +146,8 @@ fn filmicExposure(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
     let lumaScale = max(newLuma / luma, 0.0);
     let w = clamp(newLuma, 0.0, 2.0) * 0.5;
     let dynExp = mix(0.95, 0.65, w);
-    let rolloff = 1.0 / (1.0 + max(newLuma - 0.9, 0.0) * 2.0);
+    // Fade in highlight desaturation continuously from the identity at zero.
+    let rolloff = 1.0 / (1.0 + max(newLuma - 0.9, 0.0) * 2.0 * min(stops, 1.0));
     let chromaScale = pow(lumaScale, dynExp) * rolloff;
 
     return vec3<f32>(newLuma) + (rgb - vec3<f32>(luma)) * chromaScale;
