@@ -73,8 +73,7 @@ const SHADOW_FRACTION: f32 = 0.05;
 const SOLVE_STEPS: u32 = 24;
 
 /// Bisection steps used to seat each bin's representative colour on that bin's
-/// own display level (see [`fit_to_level`]). Fewer than `SOLVE_STEPS` because
-/// the factor being searched for is always just under 1.
+/// measured mean display level (see [`fit_to_level`]). The scale is in [0, 1].
 const FIT_STEPS: u32 = 16;
 
 /// The histogram of one photo, in the display space the user actually sees.
@@ -97,7 +96,7 @@ struct Histogram {
     /// Pixel count per display-luma bin.
     count: [f32; BINS],
     /// The bin's linear-light stand-in: its pixels' mean colour, scaled by
-    /// [`fit_to_level`] to read back at the bin's own display luma. Black
+    /// [`fit_to_level`] to read back at the bin's measured mean display luma. Black
     /// where the bin is empty, which no percentile can land on.
     lin: [[f32; 3]; BINS],
     total: f32,
@@ -147,12 +146,17 @@ fn respond(adj: &Adjustments, format: PixelFormat, linear: [f32; 3]) -> f32 {
 /// on a bin that mixes a saturated pixel with a neutral one of the same
 /// apparent brightness. Left uncorrected that is a systematic over-read of
 /// every percentile, which stops Exposure short of its target. One scalar per
-/// bin removes it, and the bisection is cheap because the answer is always
-/// just under 1.
+/// bin removes it. Never scale above the original mean: if the target is
+/// unreachable (including rounding error at a clipping plateau), retaining
+/// the mean avoids inventing extra linear intensity. The RAW display curve
+/// is not everywhere concave, so its mean can also fall below the target.
 fn fit_to_level(format: PixelFormat, px: [f32; 3], level: f32) -> [f32; 3] {
     let identity = Adjustments::default();
     let scaled = |k: f32| [px[0] * k, px[1] * k, px[2] * k];
-    let (mut lo, mut hi) = (0.0f32, 4.0f32);
+    if respond(&identity, format, px) <= level + 1e-6 {
+        return px;
+    }
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
     for _ in 0..FIT_STEPS {
         let mid = 0.5 * (lo + hi);
         if respond(&identity, format, scaled(mid)) < level {
@@ -173,6 +177,7 @@ impl Histogram {
         let identity = Adjustments::default();
         let mut count = [0f32; BINS];
         let mut lin_sum = [[0f32; 3]; BINS];
+        let mut level_sum = [0f64; BINS];
         let mut sat_sum = 0f32;
 
         for &px in samples {
@@ -181,6 +186,7 @@ impl Histogram {
             let v = luma(shown).clamp(0.0, 1.0);
             let bin = ((v * (BINS - 1) as f32).round() as usize).min(BINS - 1);
             count[bin] += 1.0;
+            level_sum[bin] += f64::from(v);
             for c in 0..3 {
                 lin_sum[bin][c] += px[c].max(0.0);
             }
@@ -201,7 +207,7 @@ impl Histogram {
                     lin_sum[i][1] / count[i],
                     lin_sum[i][2] / count[i],
                 ];
-                lin[i] = fit_to_level(format, mean, i as f32 / (BINS - 1) as f32);
+                lin[i] = fit_to_level(format, mean, (level_sum[i] / f64::from(count[i])) as f32);
             }
         }
         Some(Histogram {
@@ -560,6 +566,55 @@ mod tests {
             let expected = percentile_under(&photo, &adj, p);
             let got = hist.percentile(p, &adj);
             assert!((got - expected).abs() < 0.01, "p={p}: {got} vs {expected}");
+        }
+    }
+
+    #[test]
+    fn contrast_percentiles_follow_reordered_coloured_and_neutral_samples() {
+        let mut photo = vec![[1.0, 0.0, 0.0]; 40];
+        photo.extend(flat(0.30, 60));
+        let hist = Histogram::build(&photo, PixelFormat::Srgb8).unwrap();
+        let adj = Adjustments {
+            contrast: 50.0,
+            ..Default::default()
+        };
+        assert!(
+            respond(&Adjustments::default(), PixelFormat::Srgb8, photo[0])
+                < respond(&Adjustments::default(), PixelFormat::Srgb8, photo[99])
+        );
+        assert!(
+            respond(&adj, PixelFormat::Srgb8, photo[0])
+                > respond(&adj, PixelFormat::Srgb8, photo[99])
+        );
+        for p in [0.01, 0.25, 0.50, 0.75, 0.99] {
+            assert!((hist.percentile(p, &adj) - percentile_under(&photo, &adj, p)).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn fully_saturated_representatives_preserve_exposure_response() {
+        for format in [PixelFormat::Srgb8, PixelFormat::LinearF16] {
+            for px in [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ] {
+                let hist = Histogram::build(&vec![px; 1000], format).unwrap();
+                for exposure in [-2.0, 0.0, 2.0] {
+                    let adj = Adjustments {
+                        exposure,
+                        ..Default::default()
+                    };
+                    let expected = respond(&adj, format, px);
+                    assert!((hist.percentile(0.5, &adj) - expected).abs() < 1e-5);
+                }
+                let level = respond(&Adjustments::default(), format, px);
+                assert_eq!(fit_to_level(format, px, level + 0.01), px);
+                assert_eq!(fit_to_level(format, px, level), px);
+            }
         }
     }
 
