@@ -13,40 +13,18 @@ impl App {
     /// Decode either sRGB RGBA8 or linear RGBA16F into the linear-light domain
     /// consumed by the Develop pipeline.
     pub(super) fn build_hist_sample(&mut self, img: &image_decode::DecodedImage) {
-        let (w, h) = (img.width as usize, img.height as usize);
-        if w == 0
-            || h == 0
-            || img.rgba.len()
-                < w * h
-                    * match img.pixel_format {
-                        image_decode::PixelFormat::Srgb8 => 4,
-                        image_decode::PixelFormat::LinearF16 => 8,
-                    }
-        {
+        // Stride so the longest side maps to ~256 samples. `downsample_linear`
+        // owns the striding and the degenerate-input guard; Auto Tone calls the
+        // same helper on thumbnails so the two analyses see the same pixels.
+        const TARGET: usize = 256;
+        let (sample, dw, dh) = image_ops::downsample_linear(img, TARGET);
+        if sample.is_empty() {
             self.hist_sample.clear();
             self.hist_dw = 0;
             self.hist_dh = 0;
             self.hist_pixel_format = image_decode::PixelFormat::Srgb8;
             self.hist_dirty = true;
             return;
-        }
-        // Stride so the longest side maps to ~256 samples.
-        const TARGET: usize = 256;
-        let step = (w.max(h) / TARGET).max(1);
-        let (dw, dh) = (w.div_ceil(step), h.div_ceil(step));
-        let mut sample = Vec::with_capacity(dw * dh);
-        let mut y = 0;
-        while y < h {
-            let mut x = 0;
-            while x < w {
-                sample.push(image_ops::sample_linear(
-                    img,
-                    x as f32 / w.saturating_sub(1).max(1) as f32,
-                    y as f32 / h.saturating_sub(1).max(1) as f32,
-                ));
-                x += step;
-            }
-            y += step;
         }
         self.hist_sample = sample;
         self.hist_dw = dw;

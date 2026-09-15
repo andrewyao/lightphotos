@@ -95,6 +95,8 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         ),
         ("Cmd + [ or ]", "Rotate 90\u{b0} clockwise or anti-clockwise"),
         ("Y", "Before / after compare"),
+        ("Cmd + U", "Auto Tone this photo"),
+        ("Cmd + Shift + U", "Auto Tone the selection"),
         ("Cmd + Shift + C", "Copy develop settings"),
         ("Cmd + Shift + Y", "Apply settings to selection"),
         ("X", "Export selected as JPG"),

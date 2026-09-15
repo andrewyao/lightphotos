@@ -24,6 +24,14 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                         out.actions.push(UiAction::ResetAdjustments);
                         out.actions.push(UiAction::Focus(Region::Develop));
                     }
+                    if ui
+                        .button("Auto")
+                        .on_hover_text("Set the tone sliders from this photo's own histogram")
+                        .clicked()
+                    {
+                        out.actions.push(UiAction::AutoTone);
+                        out.actions.push(UiAction::Focus(Region::Develop));
+                    }
                 });
             });
             ui.separator();

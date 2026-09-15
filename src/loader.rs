@@ -244,10 +244,9 @@ const PREVIEW_CAPACITY: usize = 8;
 /// multi-hundred-megabyte resident set a real tab failure rather than merely
 /// wasteful.
 ///
-/// The floor is the working set: `working_positions` keeps the visible grid
-/// plus three rows of prefetch margin either side, which reaches roughly 180
-/// cells on a large display. Below that the LRU evicts entries the very frame
-/// after it decodes them.
+/// This is the baseline, not a bound on the working set: large grids can need
+/// more entries including prefetch rows. Both request loops raise the capacity
+/// to their current working-set size before enqueueing decodes.
 const THUMB_CAPACITY: usize = 256;
 
 pub struct Loader {
@@ -637,15 +636,35 @@ impl Loader {
         {
             return;
         }
-        // Mark in-flight only after a successful enqueue (see `request`): a
-        // poisoned queue mutex must not strand this key as permanently loading.
-        if let Ok(mut q) = self.shared.queue.lock() {
-            q.thumbs.push_back(Job::Thumb(path, max_px));
-            self.thumb_inflight.insert(key);
-            // See the comment in `request`: must be notify_all so a general
-            // (non-dedicated) worker is guaranteed to wake and pick this up.
-            self.shared.ready.notify_all();
+        match self.shared.queue.lock() {
+            Ok(mut q) => {
+                q.thumbs.push_back(Job::Thumb(path, max_px));
+                self.thumb_inflight.insert(key);
+                // Wake a general worker even if the dedicated worker is idle.
+                self.shared.ready.notify_all();
+            }
+            Err(_) => {
+                // Poison is permanent and workers exit on it. Retrying cannot
+                // produce a result, so expose a terminal failure to callers.
+                self.thumb_failed.insert(key);
+                self.thumb_failed.extend(self.thumb_inflight.drain());
+            }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_thumb_queue_for_test(&mut self, path: PathBuf, max_px: u32) {
+        // Hold the lock through enqueue and poison so no worker can take the
+        // job first. This models a request stranded in the failed queue.
+        let shared = Arc::clone(&self.shared);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut queue = shared.queue.lock().unwrap();
+            queue.thumbs.push_back(Job::Thumb(path.clone(), max_px));
+            self.thumb_inflight.insert((path, max_px));
+            panic!("poison thumbnail queue");
+        }));
+        assert!(result.is_err());
+        shared.ready.notify_all();
     }
 
     /// Ask a worker to read `path`'s capture time unless already in flight.
@@ -687,7 +706,6 @@ impl Loader {
 
     /// True if this thumbnail's decode permanently failed (negative cache), so
     /// callers can stop treating it as "still loading".
-    #[allow(dead_code)]
     pub fn thumb_failed(&self, path: &Path, max_px: u32) -> bool {
         self.thumb_failed.contains(&(path.to_path_buf(), max_px))
     }
@@ -695,20 +713,31 @@ impl Loader {
     /// Feed an externally-decoded thumbnail into the same cache/LRU a normal
     /// worker result would land in — wasm32's own decode path (`app/web.rs`)
     /// uses this, since this struct's worker queue assumes real OS threads
-    /// it doesn't have there yet (see the wasm port plan's M4). Does not
-    /// touch `thumb_inflight`; callers own their own in-flight tracking for
-    /// whatever they're driving this from (mirroring but not sharing
-    /// `request_thumb`'s, since nothing here ever went through that queue).
-    #[cfg(target_arch = "wasm32")]
+    /// it doesn't have there yet (see the wasm port plan's M4). Callers own
+    /// their own in-flight tracking for whatever they're driving this from
+    /// (mirroring but not sharing `request_thumb`'s, since nothing here ever
+    /// went through that queue) — but `request_thumb` itself is still
+    /// reachable on wasm32 as a fallback (e.g. Auto Tone's `enqueue_auto_tone`
+    /// isn't gated by target), and its queued job never completes there since
+    /// no worker services the queue. Clear any such stray `thumb_inflight`
+    /// marker here so that fallback path doesn't leak an entry every time an
+    /// external decode beats it to the same key.
+    #[cfg(any(target_arch = "wasm32", test))]
     pub fn insert_thumb_external(&mut self, path: PathBuf, max_px: u32, img: Arc<DecodedImage>) {
-        self.insert_thumb((path, max_px), img);
+        let key = (path, max_px);
+        self.thumb_inflight.remove(&key);
+        self.insert_thumb(key, img);
     }
 
     /// Negative-cache an externally-decoded thumbnail that failed — same
-    /// role as a worker's own failure path, for wasm32's decode path.
+    /// role as a worker's own failure path, for wasm32's decode path. Also
+    /// clears any stray `thumb_inflight` marker left by `request_thumb`'s
+    /// wasm32 fallback path — see `insert_thumb_external`.
     #[cfg(target_arch = "wasm32")]
     pub fn mark_thumb_failed_external(&mut self, path: PathBuf, max_px: u32) {
-        self.thumb_failed.insert((path, max_px));
+        let key = (path, max_px);
+        self.thumb_inflight.remove(&key);
+        self.thumb_failed.insert(key);
     }
 
     /// The preview-tier counterpart of `insert_thumb_external` — wasm32's
@@ -758,7 +787,53 @@ impl Loader {
         Vec<(PathBuf, Option<SystemTime>)>,
         Vec<(PathBuf, ImageMetadata)>,
     ) {
-        self.drain()
+        let arrivals = self.drain();
+        if self.shared.queue.is_poisoned() {
+            // Includes jobs enqueued before the failure: no worker is
+            // guaranteed to return a result for any outstanding request, in
+            // any tier. Thumbnails get a negative-cache entry so callers can
+            // tell "failed" from "still loading". Image-tier markers for
+            // queued jobs are cleared below; markers for already-running
+            // jobs remain until their late results are drained.
+            let (queued_full, queued_preview, queued_speed) = {
+                let queue = match self.shared.queue.lock() {
+                    Ok(queue) => queue,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                let mut full = HashSet::new();
+                let mut preview = HashSet::new();
+                let mut speed = HashSet::new();
+                for job in queue.full.iter() {
+                    if let Job::Full(path, _) = job {
+                        full.insert(path.clone());
+                    }
+                }
+                for job in queue.preview.iter() {
+                    if let Job::Preview(path, target) = job {
+                        preview.insert((path.clone(), *target));
+                    }
+                }
+                for job in queue.speed.iter() {
+                    if let Job::Speed(path, target) = job {
+                        speed.insert((path.clone(), *target));
+                    }
+                }
+                (full, preview, speed)
+            };
+            for path in queued_full {
+                self.inflight.remove(&path);
+            }
+            for key in queued_preview {
+                self.preview_inflight.remove(&key);
+            }
+            for key in queued_speed {
+                self.speed_inflight.remove(&key);
+            }
+            self.thumb_failed.extend(self.thumb_inflight.drain());
+            self.meta_inflight.clear();
+            self.exif_inflight.clear();
+        }
+        arrivals
     }
 
     /// Drain every pending result, routing each into its tier. Returns the
@@ -887,11 +962,23 @@ impl Loader {
         }
     }
 
+    /// Keep the decoded cache large enough for the current grid/filmstrip,
+    /// including prefetch, so stationary views cannot cycle through evictions.
+    /// Shrinking the view releases excess entries immediately.
+    pub fn set_thumb_working_set_size(&mut self, len: usize) {
+        self.thumb_capacity = THUMB_CAPACITY.max(len);
+        self.trim_thumbs();
+    }
+
     fn insert_thumb(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>) {
         if !self.thumb_cache.contains_key(&key) {
             self.thumb_order.push_back(key.clone());
         }
         self.thumb_cache.insert(key, img);
+        self.trim_thumbs();
+    }
+
+    fn trim_thumbs(&mut self) {
         while self.thumb_order.len() > self.thumb_capacity {
             if let Some(old) = self.thumb_order.pop_front() {
                 self.thumb_cache.remove(&old);
@@ -993,6 +1080,32 @@ mod tests {
             rgba: vec![0; (w * h * 4) as usize],
             pixel_format: image_decode::PixelFormat::Srgb8,
         })
+    }
+
+    #[test]
+    fn thumbnail_cache_retains_large_grid_and_shrinks_after_resize() {
+        let mut loader = Loader::new(16384);
+        let px = crate::thumbnail::THUMB_PX;
+        // 18 columns, 10 visible rows, and three prefetch rows on either side.
+        let working_set = 18 * (10 + 6);
+        loader.set_thumb_working_set_size(working_set);
+        for i in 0..working_set {
+            loader.insert_thumb((path(&i.to_string()), px), image(1, 1));
+        }
+        // Repeated stationary frames must find every requested thumbnail.
+        for _ in 0..3 {
+            loader.set_thumb_working_set_size(working_set);
+            for i in 0..working_set {
+                assert!(loader.get_thumb(&path(&i.to_string()), px).is_some());
+            }
+        }
+        loader.set_thumb_working_set_size(0);
+        assert_eq!(loader.thumb_cache.len(), THUMB_CAPACITY);
+        assert_eq!(loader.thumb_order.len(), THUMB_CAPACITY);
+        assert!(loader.get_thumb(&path("0"), px).is_none());
+        assert!(loader
+            .get_thumb(&path(&(working_set - 1).to_string()), px)
+            .is_some());
     }
 
     #[test]

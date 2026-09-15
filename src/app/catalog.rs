@@ -147,6 +147,11 @@ impl App {
                 self.playlist = Some(playlist);
             }
         }
+        if self.catalog_load_pending.is_none() {
+            if let Some(paths) = self.autotone_deferred.take() {
+                self.enqueue_auto_tone(paths);
+            }
+        }
         self.catalog_load_pending.is_some()
     }
 
@@ -242,6 +247,7 @@ impl App {
             ui::BulkKind::ApplySettings => {
                 format!("Apply the copied settings to {n} photo(s)?")
             }
+            ui::BulkKind::AutoTone => format!("Auto Tone {n} photo(s)?"),
             #[cfg(not(target_arch = "wasm32"))]
             ui::BulkKind::Delete => format!("Move {n} photo(s) to the Trash?"),
             #[cfg(target_arch = "wasm32")]
@@ -275,6 +281,7 @@ impl App {
         match kind {
             ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
+            ui::BulkKind::AutoTone => self.auto_tone_selection(),
             ui::BulkKind::Export => self.export_selection(),
             ui::BulkKind::Delete => self.delete_selection(),
         }
@@ -402,6 +409,8 @@ impl App {
             for p in &trashed {
                 self.ratings.remove(p);
                 self.edits.remove(p);
+                self.autotone_pending.remove(p);
+                self.autotone_base.remove(p);
                 self.rotations.remove(p);
                 #[cfg(not(target_arch = "wasm32"))]
                 self.catalog.remove(p);
@@ -415,6 +424,12 @@ impl App {
                 {
                     self.web_file_handles.remove(p);
                     self.web_dir_handles.remove(p);
+                }
+            }
+            if let Some(deferred) = self.autotone_deferred.as_mut() {
+                deferred.retain(|p| !gone.contains(p));
+                if deferred.is_empty() {
+                    self.autotone_deferred = None;
                 }
             }
             // Remove stale path- and pair-keyed duplicate state. Pending jobs
@@ -777,6 +792,31 @@ mod tests {
     use super::*;
     use crate::navigation::Playlist;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn deleting_photo_removes_it_from_deferred_auto_tone() {
+        let gone = PathBuf::from("/photos/gone.jpg");
+        let remaining = PathBuf::from("/photos/keep.jpg");
+        let mut app = App::new(None);
+        app.autotone_deferred = Some(vec![gone.clone(), remaining.clone()]);
+
+        app.finish_delete(vec![gone], 1, None);
+
+        assert_eq!(app.autotone_deferred, Some(vec![remaining]));
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn deleting_all_deferred_auto_tone_targets_clears_state() {
+        let gone = PathBuf::from("/photos/gone.jpg");
+        let mut app = App::new(None);
+        app.autotone_deferred = Some(vec![gone.clone()]);
+
+        app.finish_delete(vec![gone], 1, None);
+
+        assert!(app.autotone_deferred.is_none());
+    }
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
