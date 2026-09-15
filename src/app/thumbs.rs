@@ -374,6 +374,7 @@ impl App {
 
         let mut any_missing = false;
         if let Some(loader) = &mut self.loader {
+            loader.set_thumb_working_set_size(paths.len());
             for p in &paths {
                 // Skip thumbs whose decode permanently failed (deleted/corrupt) —
                 // otherwise we'd re-request every frame and spin the redraw loop.

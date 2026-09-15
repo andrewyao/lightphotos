@@ -205,6 +205,16 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                     out.actions
                         .push(UiAction::RequestBulk(BulkKind::ApplySettings));
                 }
+                // Auto Tone every selected photo from its own histogram.
+                if ui
+                    .button("Auto Tone")
+                    .on_hover_text(
+                        "Set each selected photo's tone sliders from its own histogram (Cmd+Shift+U)",
+                    )
+                    .clicked()
+                {
+                    out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));
+                }
                 // Export every selected photo as a baked JPG.
                 if ui
                     .button("Export JPG")

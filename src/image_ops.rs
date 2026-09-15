@@ -185,6 +185,44 @@ pub(crate) fn bake_edited(
 /// Sample a decoded image at texture UV coordinates and return linear RGB.
 /// This is format-aware because the wasm RAW Loupe uses tightly packed
 /// linear-light RGBA16F rather than sRGB RGBA8.
+/// Strided downsample of `img` into linear-light RGB, reducing the longest side
+/// to roughly `target` samples. Returns the grid row-major with its dimensions,
+/// or an empty grid when the image is degenerate or its buffer is short.
+///
+/// Shared by the Develop histogram and Auto Tone so both analyze the same
+/// pixels through the same conversion, whichever pixel format the decode
+/// handed back.
+pub(crate) fn downsample_linear(
+    img: &DecodedImage,
+    target: usize,
+) -> (Vec<[f32; 3]>, usize, usize) {
+    let (w, h) = (img.width as usize, img.height as usize);
+    let bytes_per_px = match img.pixel_format {
+        PixelFormat::Srgb8 => 4,
+        PixelFormat::LinearF16 => 8,
+    };
+    if w == 0 || h == 0 || img.rgba.len() < w * h * bytes_per_px {
+        return (Vec::new(), 0, 0);
+    }
+    let step = (w.max(h) / target.max(1)).max(1);
+    let (dw, dh) = (w.div_ceil(step), h.div_ceil(step));
+    let mut grid = Vec::with_capacity(dw * dh);
+    let mut y = 0;
+    while y < h {
+        let mut x = 0;
+        while x < w {
+            grid.push(sample_linear(
+                img,
+                x as f32 / w.saturating_sub(1).max(1) as f32,
+                y as f32 / h.saturating_sub(1).max(1) as f32,
+            ));
+            x += step;
+        }
+        y += step;
+    }
+    (grid, dw, dh)
+}
+
 pub(crate) fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
     let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
     let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;

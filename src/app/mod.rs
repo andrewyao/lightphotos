@@ -787,6 +787,28 @@ pub(crate) struct App {
     /// Rebuilt when caches or the toggle change.
     dup_marks: Vec<Option<DuplicateMark>>,
 
+    // ---- Auto Tone batch state ----
+    /// Selected photos still waiting on a thumbnail before Auto Tone can
+    /// analyze them. Drained by `poll_auto_tone` and abandoned wholesale by
+    /// `cancel_auto_tone` on a folder change; empty whenever no batch is
+    /// running.
+    autotone_pending: HashSet<PathBuf>,
+    /// Snapshot of each pending photo's edits at the moment it was queued,
+    /// keyed the same as `autotone_pending`. Lets `tone_one` tell "this photo
+    /// still has the base it was queued against" from "the user edited it by
+    /// hand while its thumbnail was in flight" — merging a stale auto result
+    /// onto the latter would silently clobber the manual edit.
+    autotone_base: HashMap<PathBuf, crate::develop::Adjustments>,
+    /// Targets waiting for the catalog sidecar scan before Auto Tone can
+    /// safely snapshot their persisted adjustments.
+    autotone_deferred: Option<Vec<PathBuf>>,
+    /// Photos already toned in the running batch, so the status line can
+    /// report progress. The batch's total size is derived from this plus
+    /// `autotone_pending.len()` rather than tracked separately, so it can't
+    /// drift out of sync the way a hand-maintained counter could. Zero
+    /// whenever no batch is running.
+    autotone_done: usize,
+
     // ---- Face / eyes-closed state ----
     /// Cached per-path face signals (face count + worst eye openness). Survives
     /// toggling off, like `sharpness` and `phashes`. Filled only for photos that
@@ -950,6 +972,7 @@ pub(crate) struct App {
 
 mod accessors;
 mod adjust;
+mod autotone;
 mod catalog;
 mod crop;
 mod export;
@@ -1106,6 +1129,10 @@ impl App {
             feature_failed: HashSet::new(),
             feature_pending: HashSet::new(),
             dup_marks: Vec::new(),
+            autotone_pending: HashSet::new(),
+            autotone_base: HashMap::new(),
+            autotone_deferred: None,
+            autotone_done: 0,
             face_quality: HashMap::new(),
             face_pending: HashSet::new(),
             face_failed: HashSet::new(),
@@ -1293,6 +1320,8 @@ impl App {
     /// safely inserting nothing — and again from `poll_catalog_load` once the
     /// real data lands, so first paint is never blocked on sidecar count.
     fn seed_mirrors(&mut self, playlist: &Playlist) {
+        // Stop pending edits before replacing the catalog they would write to.
+        self.cancel_auto_tone();
         self.request_catalog_load(playlist.dir());
         self.reconcile_catalog_mirrors(playlist);
     }
@@ -1645,6 +1674,7 @@ impl App {
                     self.delete_selected_touchup();
                 }
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
+                ui::UiAction::AutoTone => self.auto_tone_shown(),
                 ui::UiAction::ResetAdjustments => {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else {
                         continue;

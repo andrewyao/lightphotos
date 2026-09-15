@@ -24,6 +24,7 @@
 //! lives in [`app`]; the other modules are the supporting layers it coordinates.
 
 mod app;
+mod autotone;
 mod burst;
 mod catalog;
 // All four live under src/web/ (physically separated from native-only
@@ -411,6 +412,10 @@ impl ApplicationHandler<UserEvent> for App {
                 self.score_arrived_thumbs(&thumbs);
                 self.score_arrived_dup_thumbs(&thumbs);
             }
+            // Outside the `thumbs` guard on purpose: a running Auto Tone batch
+            // also has to notice thumbnails the loader has given up on, and
+            // those produce no arrival to trigger on.
+            self.poll_auto_tone(&thumbs);
             if any {
                 self.try_show();
                 // Now that something landed, the current photo may be on screen
@@ -475,10 +480,17 @@ impl ApplicationHandler<UserEvent> for App {
         // requesting/redrawing while any are still outstanding.
         #[cfg(target_arch = "wasm32")]
         {
+            self.prepare_web_thumb_cache();
             let web_thumbs = self.poll_web_thumbs();
             if !web_thumbs.is_empty() {
                 self.score_arrived_thumbs(&web_thumbs);
                 self.score_arrived_dup_thumbs(&web_thumbs);
+                // Browser-decoded thumbnails land here instead of in
+                // `loader.poll_all()` above, so a running Auto Tone batch
+                // only sees them if they are fed in from this side too. The
+                // give-up sweep over `thumb_failed` still happens in the
+                // unguarded call above, which runs on this target as well.
+                self.poll_auto_tone(&web_thumbs);
             }
             if self.request_web_thumbs() {
                 self.request_redraw();

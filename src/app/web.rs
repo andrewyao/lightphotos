@@ -67,6 +67,17 @@ fn retry_backoff(attempt: u8) -> std::time::Duration {
 }
 
 impl App {
+    /// Raise the wasm thumbnail cache floor before draining worker results.
+    /// The native-style working-set request runs earlier in the frame and can
+    /// otherwise evict Auto Tone thumbnails before `poll_auto_tone` sees them.
+    pub(crate) fn prepare_web_thumb_cache(&mut self) {
+        let visible = self.working_thumb_keys().len();
+        let capacity = visible + self.autotone_pending.len();
+        if let Some(loader) = &mut self.loader {
+            loader.set_thumb_working_set_size(capacity);
+        }
+    }
+
     /// Fire the browser's folder picker, unless one's already in flight.
     /// Called from the landing page's "Choose Folder" button
     /// (`UiAction::PickFolder`).
@@ -152,11 +163,26 @@ impl App {
     /// in parallel, off the main thread, across the pool's workers.
     pub(crate) fn request_web_thumbs(&mut self) -> bool {
         let px = THUMB_PX;
-        let keys: Vec<PathBuf> = self
+        let mut keys: Vec<PathBuf> = self
             .working_thumb_keys()
             .into_iter()
             .map(|(p, _, _)| p)
             .collect();
+        // A running Auto Tone batch needs its photos' thumbnails whether or
+        // not they are on screen, and this is the only path that reads photo
+        // bytes in the browser — `loader.rs`'s queue has no workers here, so
+        // the `request_thumb` calls `auto_tone_selection` makes are inert.
+        // Without this a batch covering anything the user has not scrolled
+        // past would sit at "n/total" forever. Appended *after* the working
+        // set so the visible grid keeps first claim on the read budget
+        // (`MAX_CONCURRENT_READS`); repeats are dropped by the
+        // `web_thumb_inflight` check below.
+        keys.extend(self.autotone_pending.iter().cloned());
+        // Sized *after* the Auto Tone keys are folded in, so the cache floor
+        // covers the whole read list for this frame — otherwise LRU trimming
+        // could evict an Auto Tone thumbnail inserted earlier in the same
+        // drain before `poll_auto_tone` gets to read it back.
+        self.prepare_web_thumb_cache();
 
         let mut any_missing = false;
         for path in keys {
@@ -187,7 +213,19 @@ impl App {
                 continue;
             }
             let Some(handle) = self.web_file_handles.get(&path).cloned() else {
-                continue; // shouldn't happen — every playlist entry came from a handle
+                // Normally unreachable — every playlist entry came from a
+                // handle — except a path still in `autotone_pending` whose
+                // handle `finish_delete` has since dropped (deletion doesn't
+                // touch a running batch's pending set). Left as a silent
+                // `continue`, this key is never marked inflight or failed,
+                // so it gets re-offered every frame forever and the batch
+                // stalls at "n/total" permanently. Negative-cache it like any
+                // other terminal failure so `poll_auto_tone`'s give-up sweep
+                // drops it.
+                if let Some(loader) = &mut self.loader {
+                    loader.mark_thumb_failed_external(path.clone(), px);
+                }
+                continue;
             };
             // The photo's own folder handle, for the `.lightphotos/` cache
             // beside it. Absent only if navigation dropped it mid-flight, in
@@ -375,6 +413,16 @@ impl App {
                 }
             }
             self.web_thumb_inflight.remove(&key);
+            // A read/decode may finish after its file was deleted. Do not let
+            // that late result repopulate the cache or feed Auto Tone.
+            if !self
+                .playlist
+                .as_ref()
+                .is_some_and(|playlist| playlist.entries().contains(&path))
+                || !self.web_file_handles.contains_key(&path)
+            {
+                continue;
+            }
             match result {
                 Ok(img) => {
                     self.web_thumb_retries.remove(&key);
