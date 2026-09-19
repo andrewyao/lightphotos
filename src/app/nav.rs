@@ -207,8 +207,7 @@ impl App {
         let Some(path) = self.selected_path() else {
             return;
         };
-        // `loader.rs`'s queue has no workers on wasm32. A request there would
-        // leave an in-flight marker that never clears; `app/web.rs` covers it.
+        // On wasm32 `app/web.rs` decodes the preview and thumbnail instead.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let px = THUMB_PX;
