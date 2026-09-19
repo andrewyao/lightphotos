@@ -238,18 +238,6 @@ pub(super) fn loupe_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
                 }
                 toolbar_focus_sync(ui, app, idx, &resp, out);
 
-                // TEMPORARY DEBUG: the decode tier on the GPU. See
-                // `App::debug_tier_label`.
-                let tier = match app.debug_tier_label {
-                    "THUMB" => "T",
-                    "SPEED" => "S",
-                    "QUALITY" => "P",
-                    "FULL" => "F",
-                    _ => "\u{2013}",
-                };
-                ui.label(tier).on_hover_text(
-                    "Loupe decode tier (debug): T=thumb  S=speed  P=preview  F=full",
-                );
             });
 
             region_focus_marker(ui, app, Region::Toolbar);
