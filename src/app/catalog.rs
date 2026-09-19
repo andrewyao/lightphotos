@@ -546,7 +546,7 @@ impl App {
             self.request_feature_prints();
             self.request_face_quality();
         } else {
-            self.dup_groups.clear();
+            self.dup_index = Default::default();
             self.dup_marks.clear();
         }
         self.request_redraw();
