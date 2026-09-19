@@ -272,11 +272,10 @@ mod tests {
         let mut app = App::new(None);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
         // Auto Tone waits for the async catalog load, so let it finish first.
-        for _ in 0..1000 {
-            if !app.poll_catalog_load() {
-                break;
-            }
-            std::thread::yield_now();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.poll_catalog_load() {
+            assert!(std::time::Instant::now() < deadline, "catalog load timed out");
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         app.mode = ViewMode::Grid;
         (app, dir, a, b)
