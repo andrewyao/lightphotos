@@ -592,7 +592,7 @@ pub(crate) struct App {
     phashes: HashMap<PathBuf, u64>,
     /// dHash groups before feature-print refinement, by playlist entry.
     /// `request_feature_prints` reads each group's anchor and candidates here.
-    dup_groups: Vec<u32>,
+    dup_index: crate::duplicates::HashGroups,
     /// Groups after the feature-print split, by playlist entry. Survey Mode
     /// uses this to find a clicked badge's members, which `dup_marks` loses.
     dup_refined: Vec<u32>,
@@ -872,7 +872,7 @@ impl App {
             burst_marks: Vec::new(),
             dupes_on: false,
             phashes: HashMap::new(),
-            dup_groups: Vec::new(),
+            dup_index: Default::default(),
             dup_refined: Vec::new(),
             feature_distances: HashMap::new(),
             feature_failed: HashSet::new(),

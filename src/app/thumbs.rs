@@ -347,11 +347,12 @@ impl App {
             }
         }
         if !newly.is_empty() {
+            let paths: Vec<PathBuf> = newly.iter().map(|(p, _, _)| p.clone()).collect();
             for (p, h, s) in newly {
                 self.phashes.insert(p.clone(), h);
                 self.sharpness.insert(p, s);
             }
-            self.recompute_dup_marks();
+            self.add_dup_hashes(&paths);
         }
         still_unhashed
     }
@@ -380,11 +381,12 @@ impl App {
             }
         }
         if !newly.is_empty() {
+            let paths: Vec<PathBuf> = newly.iter().map(|(p, _, _)| p.clone()).collect();
             for (p, h, s) in newly {
                 self.phashes.insert(p.clone(), h);
                 self.sharpness.insert(p, s);
             }
-            self.recompute_dup_marks();
+            self.add_dup_hashes(&paths);
             self.request_redraw();
         }
     }
@@ -400,18 +402,18 @@ impl App {
             return false;
         };
         let entries = pl.entries();
-        // `dup_groups` hasn't been rebuilt for this playlist yet.
-        if entries.len() != self.dup_groups.len() {
+        // `dup_index` hasn't been rebuilt for this playlist yet.
+        if entries.len() != self.dup_index.ids().len() {
             return !self.feature_pending.is_empty();
         }
 
         let mut sizes: HashMap<u32, usize> = HashMap::new();
-        for &g in &self.dup_groups {
+        for &g in self.dup_index.ids() {
             *sizes.entry(g).or_insert(0) += 1;
         }
         let mut anchor_of: HashMap<u32, PathBuf> = HashMap::new();
         let mut to_submit: Vec<(PathBuf, PathBuf)> = Vec::new();
-        for (i, &g) in self.dup_groups.iter().enumerate() {
+        for (i, &g) in self.dup_index.ids().iter().enumerate() {
             if sizes.get(&g).copied().unwrap_or(0) < 2 {
                 continue;
             }
@@ -461,7 +463,8 @@ impl App {
             .map(|pl| {
                 let entries = pl.entries();
                 let mut anchors: HashMap<u32, PathBuf> = HashMap::new();
-                self.dup_groups
+                self.dup_index
+                    .ids()
                     .iter()
                     .enumerate()
                     .filter_map(|(i, &group)| {

@@ -20,50 +20,83 @@ pub enum DuplicateMark {
     Sibling,
 }
 
-/// A group id per entry. Any pair within `max_distance` bits joins one group,
-/// and joins chain: if a~b and b~c, all three share a group even when a and c
-/// are far apart. [`refine_by_feature_print`] splits chains later. `None`
-/// hashes are never grouped, not even with each other.
-pub fn group_by_hash(hashes: &[Option<u64>], max_distance: u32) -> Vec<u32> {
-    let n = hashes.len();
-    let mut parent: Vec<usize> = (0..n).collect();
+/// dHash duplicate candidates, as a group id per entry. Any pair within
+/// `max_distance` bits joins one group, and joins chain: if a~b and b~c, all
+/// three share a group even when a and c are far apart.
+/// [`refine_by_feature_print`] splits chains later. Entries without a hash
+/// are never grouped. Hashes are added as they arrive, so a batch of k new
+/// hashes costs O(k·n) instead of regrouping all n photos.
+#[derive(Default)]
+pub struct HashGroups {
+    hashes: Vec<Option<u64>>,
+    /// `(entry, hash)` for every hashed entry, contiguous for the scan in `add`.
+    hashed: Vec<(usize, u64)>,
+    parent: Vec<usize>,
+    ids: Vec<u32>,
+    max_distance: u32,
+}
 
-    fn find(parent: &mut [usize], x: usize) -> usize {
-        if parent[x] != x {
-            parent[x] = find(parent, parent[x]);
+impl HashGroups {
+    pub fn new(len: usize, max_distance: u32) -> Self {
+        Self {
+            hashes: vec![None; len],
+            hashed: Vec::new(),
+            parent: (0..len).collect(),
+            ids: (0..len as u32).collect(),
+            max_distance,
         }
-        parent[x]
     }
 
-    fn union(parent: &mut [usize], a: usize, b: usize) {
-        let (ra, rb) = (find(parent, a), find(parent, b));
-        if ra != rb {
-            parent[rb] = ra;
-        }
+    /// A group id per entry, numbered in order of each group's first entry.
+    pub fn ids(&self) -> &[u32] {
+        &self.ids
     }
 
-    for i in 0..n {
-        let Some(hi) = hashes[i] else { continue };
-        for j in (i + 1)..n {
-            let Some(hj) = hashes[j] else { continue };
-            if hamming(hi, hj) <= max_distance {
-                union(&mut parent, i, j);
+    /// Adds `(entry, hash)` pairs. Returns false if an entry already had a
+    /// different hash: groups can't be split, so the caller must rebuild.
+    pub fn add(&mut self, new: impl IntoIterator<Item = (usize, u64)>) -> bool {
+        for (i, hash) in new {
+            match self.hashes[i] {
+                Some(h) if h == hash => continue,
+                Some(_) => return false,
+                None => {}
             }
+            for k in 0..self.hashed.len() {
+                let (j, hj) = self.hashed[k];
+                if hamming(hash, hj) <= self.max_distance {
+                    self.union(i, j);
+                }
+            }
+            self.hashes[i] = Some(hash);
+            self.hashed.push((i, hash));
         }
+        let mut id_of_root: HashMap<usize, u32> = HashMap::new();
+        for i in 0..self.parent.len() {
+            let next = id_of_root.len() as u32;
+            self.ids[i] = *id_of_root.entry(self.find(i)).or_insert(next);
+        }
+        true
     }
 
-    let mut next_id = 0u32;
-    let mut id_of_root: HashMap<usize, u32> = HashMap::new();
-    (0..n)
-        .map(|i| {
-            let root = find(&mut parent, i);
-            *id_of_root.entry(root).or_insert_with(|| {
-                let id = next_id;
-                next_id += 1;
-                id
-            })
-        })
-        .collect()
+    fn find(&mut self, mut x: usize) -> usize {
+        let mut root = x;
+        while self.parent[root] != root {
+            root = self.parent[root];
+        }
+        while self.parent[x] != root {
+            let next = self.parent[x];
+            self.parent[x] = root;
+            x = next;
+        }
+        root
+    }
+
+    fn union(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.parent[rb] = ra;
+        }
+    }
 }
 
 /// Max Vision feature-print distance from the group's anchor to stay a
@@ -124,6 +157,92 @@ pub fn compute_marks(group_ids: &[u32], scores: &[Option<f64>]) -> Vec<Option<Du
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn group_by_hash(hashes: &[Option<u64>], max_distance: u32) -> Vec<u32> {
+        let mut groups = HashGroups::new(hashes.len(), max_distance);
+        groups.add(
+            hashes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| Some((i, (*h)?))),
+        );
+        groups.ids().to_vec()
+    }
+
+    /// Connected components by brute force, ids in first-member order.
+    fn reference_groups(hashes: &[Option<u64>], max_distance: u32) -> Vec<u32> {
+        let n = hashes.len();
+        let mut id = vec![u32::MAX; n];
+        let mut next = 0;
+        for start in 0..n {
+            if id[start] != u32::MAX {
+                continue;
+            }
+            id[start] = next;
+            let mut stack = vec![start];
+            while let Some(i) = stack.pop() {
+                let Some(hi) = hashes[i] else { continue };
+                for j in 0..n {
+                    if id[j] == u32::MAX
+                        && hashes[j].is_some_and(|hj| hamming(hi, hj) <= max_distance)
+                    {
+                        id[j] = next;
+                        stack.push(j);
+                    }
+                }
+            }
+            next += 1;
+        }
+        id
+    }
+
+    #[test]
+    fn adding_hashes_in_any_order_and_batches_matches_a_full_grouping() {
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..50 {
+            let n = 60;
+            // Few base hashes plus a few flipped bits, so chains and near misses occur.
+            let bases: Vec<u64> = (0..4).map(|_| rand()).collect();
+            let hashes: Vec<Option<u64>> = (0..n)
+                .map(|_| {
+                    if rand() % 7 == 0 {
+                        return None;
+                    }
+                    let mut h = bases[(rand() % 4) as usize];
+                    for _ in 0..(rand() % 12) {
+                        h ^= 1 << (rand() % 64);
+                    }
+                    Some(h)
+                })
+                .collect();
+            let expected = reference_groups(&hashes, DEFAULT_MAX_DISTANCE);
+            assert_eq!(group_by_hash(&hashes, DEFAULT_MAX_DISTANCE), expected);
+
+            let mut order: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                order.swap(i, (rand() % (i as u64 + 1)) as usize);
+            }
+            let mut groups = HashGroups::new(n, DEFAULT_MAX_DISTANCE);
+            for batch in order.chunks(1 + (rand() % 9) as usize) {
+                assert!(groups.add(batch.iter().filter_map(|&i| Some((i, hashes[i]?)))));
+            }
+            assert_eq!(groups.ids(), expected.as_slice());
+        }
+    }
+
+    #[test]
+    fn a_changed_hash_asks_for_a_rebuild() {
+        let mut groups = HashGroups::new(2, DEFAULT_MAX_DISTANCE);
+        assert!(groups.add([(0, 0)]));
+        assert!(groups.add([(0, 0)]), "the same hash again is fine");
+        assert!(!groups.add([(0, u64::MAX)]));
+    }
 
     #[test]
     fn empty_and_single_unknown() {

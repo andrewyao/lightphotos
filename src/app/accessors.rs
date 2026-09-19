@@ -219,22 +219,50 @@ impl App {
     /// can run on a partial scan: an unknown hash never joins a group.
     pub(super) fn recompute_dup_marks(&mut self) {
         let Some(pl) = &self.playlist else {
-            self.dup_groups.clear();
+            self.dup_index = Default::default();
             self.dup_marks.clear();
             return;
         };
         if !self.dupes_on {
-            self.dup_groups.clear();
+            self.dup_index = Default::default();
             self.dup_marks.clear();
             return;
         }
-        let hashes: Vec<Option<u64>> = pl
-            .entries()
-            .iter()
-            .map(|p| self.phashes.get(p).copied())
-            .collect();
-        self.dup_groups = duplicates::group_by_hash(&hashes, duplicates::DEFAULT_MAX_DISTANCE);
+        let entries = pl.entries();
+        let mut index =
+            duplicates::HashGroups::new(entries.len(), duplicates::DEFAULT_MAX_DISTANCE);
+        index.add(
+            entries
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| Some((i, *self.phashes.get(p)?))),
+        );
+        self.dup_index = index;
         self.refine_dup_marks();
+    }
+
+    /// Adds newly hashed photos to the duplicate groups without regrouping the
+    /// folder. Falls back to `recompute_dup_marks` when the groups are not for
+    /// this playlist or a hash changed.
+    pub(super) fn add_dup_hashes(&mut self, paths: &[PathBuf]) {
+        let Some(pl) = &self.playlist else { return };
+        let entries = pl.entries();
+        if !self.dupes_on || self.dup_index.ids().len() != entries.len() {
+            return self.recompute_dup_marks();
+        }
+        let new: HashSet<&PathBuf> = paths.iter().collect();
+        let added = self.dup_index.add(
+            entries
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| new.contains(p))
+                .filter_map(|(i, p)| Some((i, *self.phashes.get(p)?))),
+        );
+        if added {
+            self.refine_dup_marks();
+        } else {
+            self.recompute_dup_marks();
+        }
     }
 
     /// Re-applies feature-print splits and scores to the current hash groups.
@@ -247,7 +275,7 @@ impl App {
         }
         let entries = pl.entries();
         let scores: Vec<Option<f64>> = entries.iter().map(|p| self.culling_score(p)).collect();
-        let groups = &self.dup_groups;
+        let groups = self.dup_index.ids();
         // Split off dHash false positives whose feature-print distance to the
         // group's anchor is too large. Members without a feature print stay.
         let refined = duplicates::refine_by_feature_print(
@@ -278,7 +306,7 @@ impl App {
     /// never opens to a silently empty grid. Path-keyed caches are kept.
     pub(super) fn reset_dup_state(&mut self) {
         self.dupes_on = false;
-        self.dup_groups.clear();
+        self.dup_index = Default::default();
         self.dup_refined.clear();
         self.dup_marks.clear();
         self.eyes_filter = false;
@@ -340,6 +368,37 @@ pub(crate) fn preview_target_px(longest_physical: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hashes_added_in_batches_match_a_full_recompute() {
+        let dir = std::env::temp_dir().join(format!("lp-dup-add-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["a.jpg", "b.jpg", "c.jpg", "d.jpg"] {
+            std::fs::write(dir.join(n), []).unwrap();
+        }
+        let mut app = App::new(None);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        app.dupes_on = true;
+        app.recompute_dup_marks();
+        let entries = app.playlist.as_ref().unwrap().entries().to_vec();
+        // a~b and b~c chain into one group; d stands alone.
+        let hashes = [0u64, 0b1111, 0xff, u64::MAX];
+        for batch in [&[2usize][..], &[0, 3], &[1]] {
+            let paths: Vec<PathBuf> = batch.iter().map(|&i| entries[i].clone()).collect();
+            for &i in batch {
+                app.phashes.insert(entries[i].clone(), hashes[i]);
+            }
+            app.add_dup_hashes(&paths);
+        }
+        let (ids, marks) = (app.dup_index.ids().to_vec(), app.dup_marks.clone());
+        assert_eq!(ids, vec![0, 0, 0, 1]);
+
+        app.recompute_dup_marks();
+        assert_eq!(app.dup_index.ids(), ids.as_slice());
+        assert_eq!(app.dup_marks, marks);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn refining_after_a_feature_print_matches_a_full_recompute() {
