@@ -58,10 +58,29 @@ impl App {
         } else {
             self.edits.insert(path.clone(), adj);
         }
-        self.catalog.set_adjustments(&path, &adj);
+        if self.unsaved_edit.as_ref().is_some_and(|p| *p != path) {
+            self.save_edit();
+        }
+        self.unsaved_edit = Some(path);
+        self.save_edit_unless_dragging();
         self.push_adjustments();
         self.hist_dirty = true;
         self.request_redraw();
+    }
+
+    /// A slider drag changes the edit every frame. Writing the sidecar each
+    /// time blocks the UI thread on disk I/O, so wait for the mouse release.
+    pub(crate) fn save_edit_unless_dragging(&mut self) {
+        if !self.egui_ctx.input(|i| i.pointer.any_down()) {
+            self.save_edit();
+        }
+    }
+
+    pub(crate) fn save_edit(&mut self) {
+        if let Some(path) = self.unsaved_edit.take() {
+            let adj = self.edits.get(&path).copied().unwrap_or_default();
+            self.catalog.set_adjustments(&path, &adj);
+        }
     }
 
     /// Push the current image's adjustments to the renderer. Call it whenever
@@ -237,5 +256,69 @@ impl App {
                 self.set_status("Pick a brighter, less saturated pixel for white balance".into());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(app: &App, down: bool) {
+        let pos = egui::pos2(1.0, 1.0);
+        let input = egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: down,
+                    modifiers: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+        let _ = app.egui_ctx.run_ui(input, |_| {});
+    }
+
+    fn one_photo(tag: &str) -> (App, PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("lp-adjust-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("a.jpg");
+        std::fs::write(&photo, []).unwrap();
+        let mut app = App::new(None);
+        app.shown = Shown::Preview(photo.clone(), 1024, 1024);
+        (app, dir, photo)
+    }
+
+    #[test]
+    fn a_slider_drag_writes_the_sidecar_once_on_release() {
+        let (mut app, dir, photo) = one_photo("drag");
+        let sidecar = dir.join(".lightphotos").join("a.jpg.xmp");
+        press(&app, true);
+        for step in 1..=5 {
+            app.apply_adjustments(Adjustments {
+                exposure: step as f32 * 0.1,
+                ..Default::default()
+            });
+        }
+        assert!(!sidecar.exists(), "nothing is written while the mouse is held");
+
+        press(&app, false);
+        app.save_edit_unless_dragging();
+        assert!(sidecar.exists(), "the release writes the edit");
+        assert_eq!(app.catalog.adjustments(&photo).exposure, 0.5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_keyboard_nudge_is_written_at_once() {
+        let (mut app, dir, _) = one_photo("key");
+        app.apply_adjustments(Adjustments {
+            contrast: 10.0,
+            ..Default::default()
+        });
+        assert!(dir.join(".lightphotos").join("a.jpg.xmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

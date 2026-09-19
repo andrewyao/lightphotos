@@ -534,6 +534,9 @@ pub(crate) struct App {
     /// across neighboring bins, so a tone stretch doesn't leave a comb of gaps.
     histogram: Option<[[f32; 256]; 3]>,
     hist_dirty: bool,
+    /// Photo whose edit is not yet written to its sidecar. See
+    /// `save_edit_unless_dragging`.
+    unsaved_edit: Option<PathBuf>,
     /// Active star filter. `None` shows all.
     filter: Option<(Cmp, u8)>,
     /// Comparator used when a star level is clicked. Stays set across "All".
@@ -842,6 +845,7 @@ impl App {
             hist_dh: 0,
             histogram: None,
             hist_dirty: false,
+            unsaved_edit: None,
             filter: None,
             filter_cmp: Cmp::Gte,
             visible: Vec::new(),
@@ -1133,6 +1137,7 @@ impl App {
         self.egui_state = Some(state);
 
         self.apply_ui_actions(out.actions);
+        self.save_edit_unless_dragging();
 
         // Show catalog write failures, or the user loses the change silently.
         if let Some(msg) = self.catalog.take_error() {
