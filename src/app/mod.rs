@@ -53,9 +53,6 @@ pub(crate) const TOUCHUP_MAX_RADIUS: f32 = 0.15;
 /// Fraction of the patch radius used to blend the correction into its edges.
 const TOUCHUP_FEATHER: f32 = 1.0;
 
-/// Number of Develop sliders the keyboard cycles through, in panel order.
-const DEVELOP_SLIDERS: usize = 11;
-
 /// One font face's vertical metrics, in ems, already multiplied by the
 /// `FontTweak::scale` epaint draws that face at.
 #[cfg(not(target_arch = "wasm32"))]
@@ -705,7 +702,7 @@ pub(crate) struct App {
     /// The last focused main-chain region. F6 and Escape return here from chrome.
     main_focus: Region,
     focus_level: FocusLevel,
-    /// Keyboard-focused Develop slider, `0..DEVELOP_SLIDERS` in panel order.
+    /// Keyboard-focused Develop slider, an index into `develop::SLIDERS`.
     develop_focus: usize,
     toolbar_focus: usize,
 

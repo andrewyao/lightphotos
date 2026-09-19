@@ -81,8 +81,6 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
             // keyboard cursor can follow it.
             let mut changed = false;
             let mut interacted_idx: Option<usize> = None;
-            // Slider index, matching `App::develop_focus` and `develop_adjust`.
-            let mut idx = 0usize;
             let focus_idx =
                 if app.focus() == Region::Develop && app.focus_level() == FocusLevel::Entered {
                     Some(app.develop_focus())
@@ -128,70 +126,37 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                 (changed, interacted)
             }
 
-            macro_rules! row {
-                ($label:expr, $field:expr, $range:expr, $dec:expr) => {{
-                    let (c, i) = slider(ui, $label, $field, $range, $dec, focus_idx == Some(idx));
-                    changed |= c;
-                    if i {
-                        interacted_idx = Some(idx);
+            let mut section = "";
+            for (idx, s) in crate::develop::SLIDERS.iter().enumerate() {
+                if s.section != section {
+                    if !section.is_empty() {
+                        ui.add_space(6.0);
                     }
-                    idx += 1;
-                }};
+                    section = s.section;
+                    if section == crate::develop::WHITE_BALANCE {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(section).strong());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui
+                                    .selectable_label(app.wb_picker_active(), "Pick Gray")
+                                    .on_hover_text("Click a neutral-gray pixel in the image")
+                                    .clicked()
+                                {
+                                    out.actions.push(UiAction::ToggleWbPicker);
+                                }
+                            });
+                        });
+                    } else {
+                        ui.label(egui::RichText::new(section).strong());
+                    }
+                }
+                let field = (s.field)(&mut adj);
+                let (c, i) = slider(ui, s.label, field, s.range.clone(), s.decimals, focus_idx == Some(idx));
+                changed |= c;
+                if i {
+                    interacted_idx = Some(idx);
+                }
             }
-
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("White Balance").strong());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .selectable_label(app.wb_picker_active(), "Pick Gray")
-                        .on_hover_text("Click a neutral-gray pixel in the image")
-                        .clicked()
-                    {
-                        out.actions.push(UiAction::ToggleWbPicker);
-                    }
-                });
-            });
-            row!("Temp", &mut adj.temp, crate::develop::TONE_RANGE, 0);
-            row!("Tint", &mut adj.tint, crate::develop::TONE_RANGE, 0);
-            ui.add_space(6.0);
-
-            ui.label(egui::RichText::new("Tone").strong());
-            row!(
-                "Exposure",
-                &mut adj.exposure,
-                crate::develop::EXPOSURE_RANGE,
-                2
-            );
-            row!("Contrast", &mut adj.contrast, crate::develop::TONE_RANGE, 0);
-            row!(
-                "Highlights",
-                &mut adj.highlights,
-                crate::develop::TONE_RANGE,
-                0
-            );
-            row!("Shadows", &mut adj.shadows, crate::develop::TONE_RANGE, 0);
-            row!("Whites", &mut adj.whites, crate::develop::TONE_RANGE, 0);
-            row!("Blacks", &mut adj.blacks, crate::develop::TONE_RANGE, 0);
-            ui.add_space(6.0);
-
-            ui.label(egui::RichText::new("Presence").strong());
-            row!("Vibrance", &mut adj.vibrance, crate::develop::TONE_RANGE, 0);
-            row!(
-                "Saturation",
-                &mut adj.saturation,
-                crate::develop::TONE_RANGE,
-                0
-            );
-            ui.add_space(6.0);
-
-            ui.label(egui::RichText::new("Detail").strong());
-            row!(
-                "Denoise",
-                &mut adj.denoise,
-                crate::develop::DENOISE_RANGE,
-                0
-            );
-            let _ = idx; // silences the unused final increment
 
             if changed {
                 out.actions.push(UiAction::SetAdjustments(adj));

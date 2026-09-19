@@ -705,7 +705,7 @@ impl App {
     }
 
     pub(super) fn develop_move(&mut self, delta: isize) {
-        let max = DEVELOP_SLIDERS as isize - 1;
+        let max = develop::SLIDERS.len() as isize - 1;
         self.develop_focus = (self.develop_focus as isize + delta).clamp(0, max) as usize;
         self.request_redraw();
     }
@@ -768,25 +768,13 @@ impl App {
     }
 
     /// Nudge the focused Develop slider one step in direction `dir` (-1 or +1).
-    /// Exposure steps 0.05 stops; the other sliders step 1.
     pub(super) fn develop_adjust(&mut self, dir: isize) {
+        let Some(slider) = develop::SLIDERS.get(self.develop_focus) else {
+            return;
+        };
         let mut adj = self.current_adjustments();
-        let sign = dir as f32;
-        let (field, range, step): (&mut f32, std::ops::RangeInclusive<f32>, f32) =
-            match self.develop_focus {
-                0 => (&mut adj.temp, develop::TONE_RANGE, 1.0),
-                1 => (&mut adj.tint, develop::TONE_RANGE, 1.0),
-                2 => (&mut adj.exposure, develop::EXPOSURE_RANGE, 0.05),
-                3 => (&mut adj.contrast, develop::TONE_RANGE, 1.0),
-                4 => (&mut adj.highlights, develop::TONE_RANGE, 1.0),
-                5 => (&mut adj.shadows, develop::TONE_RANGE, 1.0),
-                6 => (&mut adj.whites, develop::TONE_RANGE, 1.0),
-                7 => (&mut adj.blacks, develop::TONE_RANGE, 1.0),
-                8 => (&mut adj.vibrance, develop::TONE_RANGE, 1.0),
-                9 => (&mut adj.saturation, develop::TONE_RANGE, 1.0),
-                _ => (&mut adj.denoise, develop::DENOISE_RANGE, 1.0),
-            };
-        *field = (*field + sign * step).clamp(*range.start(), *range.end());
+        let field = (slider.field)(&mut adj);
+        *field = (*field + dir as f32 * slider.step).clamp(*slider.range.start(), *slider.range.end());
         self.apply_adjustments(adj);
     }
 }
@@ -794,6 +782,32 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_nudges_follow_the_develop_panel_order() {
+        let mut app = App::new(None);
+        app.shown = Shown::Preview(PathBuf::from("/nonexistent/a.jpg"), 1024, 1024);
+        let order: [fn(&Adjustments) -> f32; 11] = [
+            |a| a.temp,
+            |a| a.tint,
+            |a| a.exposure,
+            |a| a.contrast,
+            |a| a.highlights,
+            |a| a.shadows,
+            |a| a.whites,
+            |a| a.blacks,
+            |a| a.vibrance,
+            |a| a.saturation,
+            |a| a.denoise,
+        ];
+        for (i, read) in order.iter().enumerate() {
+            app.develop_focus = i;
+            let before = read(&app.current_adjustments());
+            app.develop_adjust(1);
+            let step = if i == 2 { 0.05 } else { 1.0 };
+            assert!((read(&app.current_adjustments()) - before - step).abs() < 1e-6, "slider {i}");
+        }
+    }
 
     #[test]
     fn toolbar_control_count_is_smaller_in_loupe_than_grid() {
