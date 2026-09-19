@@ -38,20 +38,20 @@ mod vision;
 
 #[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "macos")]
 use std::process::ExitCode;
 
 /// Longest side of the overlay, in pixels.
 const PREVIEW_MAX_DIM: u32 = 1600;
 
-fn main() {
+fn main() -> ExitCode {
     #[cfg(target_os = "macos")]
     {
-        real_main();
+        real_main()
     }
     #[cfg(not(target_os = "macos"))]
     {
         eprintln!("seg_probe is macOS-only (uses Apple Vision).");
+        ExitCode::FAILURE
     }
 }
 
