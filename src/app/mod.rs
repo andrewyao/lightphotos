@@ -349,6 +349,16 @@ pub(crate) struct WebDeletePending {
     pub(crate) last_err: Option<String>,
 }
 
+/// What a click on the Loupe image does, besides panning.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LoupeTool {
+    None,
+    /// The next click solves temp and tint to make that pixel neutral.
+    WbPicker,
+    /// Clicks add spot-heal touch-ups.
+    TouchUp,
+}
+
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
@@ -517,7 +527,8 @@ pub(crate) struct App {
     /// Per-image develop edits. Holds only non-identity edits.
     edits: HashMap<PathBuf, Adjustments>,
     touchups: HashMap<PathBuf, Vec<TouchUp>>,
-    touchup_active: bool,
+    /// Loupe click tool. Crop mode (`crop_edit`) turns it off.
+    tool: LoupeTool,
     touchup_radius: f32,
     touchup_selected: Option<usize>,
     develop_open: bool,
@@ -650,9 +661,6 @@ pub(crate) struct App {
     /// The viewport rect (physical px) the loupe drew into last frame.
     loupe_viewport: Option<(u32, u32, u32, u32)>,
     crop_edit: Option<CropDraft>,
-    /// White balance picker armed: the next click on the image solves temp and
-    /// tint to make that pixel neutral, then disarms.
-    wb_picker: bool,
     /// Before/after split. The left half keeps crop and rotation but no tone edits.
     compare: bool,
     /// Camera and exposure metadata for the info panel. Memory only, read from
@@ -834,7 +842,7 @@ impl App {
             ratings: HashMap::new(),
             edits: HashMap::new(),
             touchups: HashMap::new(),
-            touchup_active: false,
+            tool: LoupeTool::None,
             // Clamped up to TOUCHUP_MIN_PIXELS once an image is loaded.
             touchup_radius: 0.001,
             touchup_selected: None,
@@ -898,7 +906,6 @@ impl App {
             rotations: HashMap::new(),
             loupe_viewport: None,
             crop_edit: None,
-            wb_picker: false,
             compare: false,
             exif_cache: HashMap::new(),
             source_size: None,
@@ -1018,8 +1025,7 @@ impl App {
     /// captured by a mode meant for the previous image.
     fn teardown_loupe_state(&mut self) {
         self.crop_edit = None;
-        self.wb_picker = false;
-        self.touchup_active = false;
+        self.tool = LoupeTool::None;
         self.touchup_selected = None;
     }
 
@@ -1328,8 +1334,11 @@ impl App {
                 ui::UiAction::ToggleWbPicker => self.toggle_wb_picker(),
                 ui::UiAction::PickWhiteBalance(u, v) => self.pick_white_balance(u, v),
                 ui::UiAction::ToggleTouchUp => {
-                    self.touchup_active = !self.touchup_active;
-                    self.wb_picker = false;
+                    self.tool = if self.tool == LoupeTool::TouchUp {
+                        LoupeTool::None
+                    } else {
+                        LoupeTool::TouchUp
+                    };
                     self.request_redraw();
                 }
                 ui::UiAction::SetTouchUpRadius(r) => {
