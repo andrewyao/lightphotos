@@ -316,13 +316,13 @@ pub(crate) fn orient_mask(src: &[u8], w: u32, h: u32, orientation: u8) -> (u32, 
     for yo in 0..nh {
         for xo in 0..nw {
             let (xs, ys) = match orientation {
-                2 => (w - 1 - xo, yo),        
+                2 => (w - 1 - xo, yo),
                 3 => (w - 1 - xo, h - 1 - yo),
-                4 => (xo, h - 1 - yo),        
-                5 => (yo, xo),                
-                6 => (yo, h - 1 - xo),        
+                4 => (xo, h - 1 - yo),
+                5 => (yo, xo),
+                6 => (yo, h - 1 - xo),
                 7 => (w - 1 - yo, h - 1 - xo),
-                _ => (w - 1 - yo, xo),        
+                _ => (w - 1 - yo, xo),
             };
             dst[(yo * nw + xo) as usize] = src[(ys * w + xs) as usize];
         }
