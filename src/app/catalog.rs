@@ -196,22 +196,14 @@ impl App {
     pub(crate) fn pending_bulk_prompt(&self) -> Option<String> {
         let kind = self.pending_bulk?;
         let n = self.selection_count();
+        let t = crate::i18n::t();
         Some(match kind {
-            ui::BulkKind::Rate(0) => format!("Clear the rating on {n} photo(s)?"),
-            ui::BulkKind::Rate(s) => {
-                format!("Apply {} to {n} photo(s)?", "\u{2605}".repeat(s as usize))
-            }
-            ui::BulkKind::Export => format!("Export {n} photo(s) as JPG?"),
-            ui::BulkKind::ApplySettings => {
-                format!("Apply the copied settings to {n} photo(s)?")
-            }
-            ui::BulkKind::AutoTone => format!("Auto Tone {n} photo(s)?"),
-            #[cfg(not(target_arch = "wasm32"))]
-            ui::BulkKind::Delete => format!("Move {n} photo(s) to the Trash?"),
-            #[cfg(target_arch = "wasm32")]
-            ui::BulkKind::Delete => {
-                format!("Permanently delete {n} photo(s)? This cannot be undone.")
-            }
+            ui::BulkKind::Rate(0) => (t.confirm_clear_rating)(n),
+            ui::BulkKind::Rate(s) => (t.confirm_rate)(&"\u{2605}".repeat(s as usize), n),
+            ui::BulkKind::Export => (t.confirm_export)(n),
+            ui::BulkKind::ApplySettings => (t.confirm_apply_settings)(n),
+            ui::BulkKind::AutoTone => (t.confirm_auto_tone)(n),
+            ui::BulkKind::Delete => (t.confirm_delete)(n),
         })
     }
 
@@ -275,9 +267,8 @@ impl App {
         let total = paths.len();
         let origin_dir = paths[0].parent().unwrap_or(Path::new("")).to_path_buf();
         let Some(origin_handle) = self.web_dir_handles.get(&origin_dir).cloned() else {
-            self.set_status(format!(
-                "Could not delete photos: no directory handle for {}",
-                origin_dir.display()
+            self.set_status((crate::i18n::t().delete_no_handle)(
+                &origin_dir.display().to_string(),
             ));
             return;
         };
@@ -417,19 +408,10 @@ impl App {
             }
         }
         let n = trashed.len();
-        #[cfg(not(target_arch = "wasm32"))]
-        let done = format!("Moved {n} photo(s) to Trash");
-        #[cfg(target_arch = "wasm32")]
-        let done = format!("Permanently deleted {n} photo(s)");
-        #[cfg(not(target_arch = "wasm32"))]
+        let t = crate::i18n::t();
         self.set_status(match last_err {
-            None => done,
-            Some(e) => format!("Moved {n}/{total} \u{2014} last error: {e}"),
-        });
-        #[cfg(target_arch = "wasm32")]
-        self.set_status(match last_err {
-            None => done,
-            Some(e) => format!("Permanently deleted {n}/{total} \u{2014} last error: {e}"),
+            None => (t.deleted)(n),
+            Some(e) => (t.deleted_partial)(n, total, &e),
         });
         self.request_redraw();
     }
@@ -451,7 +433,7 @@ impl App {
             .tone_only();
         let name = file_label(&path);
         self.copied_settings = Some((path, tone));
-        self.set_status(format!("Copied settings from {name}"));
+        self.set_status((crate::i18n::t().copied_settings_from)(&name));
         self.request_redraw();
     }
 
@@ -485,7 +467,7 @@ impl App {
                 self.hist_dirty = true;
             }
         }
-        self.set_status(format!("Applied settings to {} photo(s)", paths.len()));
+        self.set_status((crate::i18n::t().applied_settings)(paths.len()));
         self.request_redraw();
     }
 
@@ -518,9 +500,9 @@ impl App {
         }
         let n = paths.len();
         self.set_status(if stars == 0 {
-            format!("Cleared rating on {n} photo(s)")
+            (crate::i18n::t().cleared_rating)(n)
         } else {
-            format!("Rated {n} photo(s) \u{2605}{stars}")
+            (crate::i18n::t().rated)(n, stars)
         });
         self.request_redraw();
     }
@@ -639,10 +621,7 @@ impl App {
             self.recompute_visible();
         }
         let n = self.survey_members.len();
-        self.set_status(format!(
-            "Kept best, rated {} sibling(s) \u{2605}1",
-            n.saturating_sub(1)
-        ));
+        self.set_status((crate::i18n::t().kept_best)(n.saturating_sub(1)));
         self.request_redraw();
     }
 

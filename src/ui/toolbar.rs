@@ -13,8 +13,9 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             // `App::activate_toolbar_focus`.
             let mut idx = 0usize;
 
-            ui.label("Rating:");
-            let resp = ui.selectable_label(app.filter().is_none(), "All");
+            let t = t();
+            ui.label(t.rating_filter);
+            let resp = ui.selectable_label(app.filter().is_none(), t.all);
             if resp.clicked() {
                 out.actions.push(UiAction::SetFilter(None));
             }
@@ -25,9 +26,9 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             // highlighted even when no filter is set.
             let sel_cmp = app.filter_cmp();
             for (cmp, glyph, tip) in [
-                (Cmp::Gte, "\u{2265}", "At least N stars"),
-                (Cmp::Eq, "=", "Exactly N stars"),
-                (Cmp::Lte, "\u{2264}", "At most N stars"),
+                (Cmp::Gte, "\u{2265}", t.at_least_n_stars),
+                (Cmp::Eq, "=", t.exactly_n_stars),
+                (Cmp::Lte, "\u{2264}", t.at_most_n_stars),
             ] {
                 let resp = ui
                     .selectable_label(sel_cmp == cmp, glyph)
@@ -63,9 +64,7 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 };
                 let star = egui::Label::new(egui::RichText::new(glyph).size(20.0).color(color))
                     .sense(egui::Sense::click());
-                let resp = ui
-                    .add(star)
-                    .on_hover_text(format!("Show photos rated {cmp_sym} {n}"));
+                let resp = ui.add(star).on_hover_text((t.show_rated)(cmp_sym, n));
                 if resp.clicked() {
                     out.actions.push(UiAction::SetFilter(Some((sel_cmp, n))));
                 }
@@ -75,8 +74,8 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             ui.separator();
             let unrated = matches!(app.filter(), Some((Cmp::Eq, 0)));
             let resp = ui
-                .selectable_label(unrated, "Unrated")
-                .on_hover_text("Show only photos with no rating");
+                .selectable_label(unrated, t.unrated)
+                .on_hover_text(t.unrated_tip);
             if resp.clicked() {
                 let next = if unrated { None } else { Some((Cmp::Eq, 0)) };
                 out.actions.push(UiAction::SetFilter(next));
@@ -94,12 +93,12 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 let resp = ui
                     .add_enabled(
                         !filter_active,
-                        egui::Button::selectable(app.bursts_on(), "Bursts"),
+                        egui::Button::selectable(app.bursts_on(), t.bursts),
                     )
                     .on_hover_text(if filter_active {
-                        "Clear the filter to use Bursts"
+                        t.bursts_needs_no_filter
                     } else {
-                        "Group bursts and badge the sharpest frame (B)"
+                        t.bursts_tip
                     });
                 if resp.clicked() {
                     out.actions.push(UiAction::ToggleBursts);
@@ -108,8 +107,8 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 idx += 1;
 
                 let resp = ui
-                    .selectable_label(app.dupes_on(), "Duplicates")
-                    .on_hover_text("Group visually-similar frames and badge them (D)");
+                    .selectable_label(app.dupes_on(), t.duplicates)
+                    .on_hover_text(t.duplicates_tip);
                 if resp.clicked() {
                     out.actions.push(UiAction::ToggleDupes);
                 }
@@ -123,12 +122,12 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 let resp = ui
                     .add_enabled(
                         grouped || app.eyes_filter_on(),
-                        egui::Button::selectable(app.eyes_filter_on(), "Eyes closed"),
+                        egui::Button::selectable(app.eyes_filter_on(), t.eyes_closed),
                     )
                     .on_hover_text(if grouped || app.eyes_filter_on() {
-                        "Show only photos where someone blinked"
+                        t.eyes_closed_tip
                     } else {
-                        "Turn on Bursts or Duplicates to detect blinks"
+                        t.eyes_closed_needs_grouping
                     });
                 if resp.clicked() {
                     out.actions.push(UiAction::ToggleEyesClosed);
@@ -139,7 +138,7 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             // Survey's own header already counts its photos.
             if app.mode() == ViewMode::Grid {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak(format!("{} photos", app.visible_len()));
+                    ui.weak((t.n_photos)(app.visible_len()));
                 });
             }
 
@@ -155,42 +154,41 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
 /// each has its own shortcut instead.
 pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let n = app.selection_count();
+    let t = t();
     egui::Panel::top("selection_bar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
             // Buttons are taller than a label; keep the row one height.
             ui.set_min_height(ui.spacing().interact_size.y);
             if n == 0 {
-                ui.weak("No selection \u{2014} click a photo, or Cmd+A to select all");
+                ui.weak(t.no_selection);
                 return;
             }
-            ui.strong(format!("{n} selected"));
+            ui.strong((t.n_selected)(n));
             ui.separator();
             egui::ComboBox::from_id_salt("bulk_star")
-                .selected_text("Rate \u{2605}")
+                .selected_text(t.rate_menu)
                 .show_ui(ui, |ui| {
                     for s in (1u8..=5).rev() {
                         if ui.button(star_string(s)).clicked() {
                             out.actions.push(UiAction::RequestBulk(BulkKind::Rate(s)));
                         }
                     }
-                    if ui.button("Clear rating").clicked() {
+                    if ui.button(t.clear_rating).clicked() {
                         out.actions.push(UiAction::RequestBulk(BulkKind::Rate(0)));
                     }
                 });
             if ui
-                .button("Auto Tone")
-                .on_hover_text(
-                    "Set each selected photo's tone sliders from its own histogram (Cmd+Shift+U)",
-                )
+                .button(t.auto_tone)
+                .on_hover_text(t.auto_tone_selection_tip)
                 .clicked()
             {
                 out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));
             }
             ui.separator();
             if ui
-                .add_enabled(n == 1, egui::Button::new("Copy Settings"))
-                .on_hover_text("Copy this photo's develop settings (Cmd+Shift+C)")
-                .on_disabled_hover_text("Select a single photo to copy its settings")
+                .add_enabled(n == 1, egui::Button::new(t.copy_settings))
+                .on_hover_text(t.copy_settings_tip)
+                .on_disabled_hover_text(t.copy_settings_needs_one)
                 .clicked()
             {
                 out.actions.push(UiAction::CopySettings);
@@ -198,20 +196,20 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
             let apply = ui
                 .add_enabled(
                     app.has_copied_settings(),
-                    egui::Button::new("Apply Settings"),
+                    egui::Button::new(t.apply_settings),
                 )
-                .on_disabled_hover_text("Copy settings from a photo first");
+                .on_disabled_hover_text(t.apply_settings_needs_copy);
             if apply.clicked() {
                 out.actions
                     .push(UiAction::RequestBulk(BulkKind::ApplySettings));
             }
             if let Some(name) = app.copied_settings_name() {
-                ui.weak(format!("from {name}"));
+                ui.weak((t.settings_from)(&name));
             }
             ui.separator();
             if ui
-                .button("Export JPG")
-                .on_hover_text("Export each selected photo as a baked JPG")
+                .button(t.export_jpg)
+                .on_hover_text(t.export_jpg_tip)
                 .clicked()
             {
                 out.actions.push(UiAction::RequestBulk(BulkKind::Export));
@@ -220,12 +218,8 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
             // Destructive, so it sits apart from the others at the far right.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button(egui::RichText::new("Delete").color(theme::DANGER_RED))
-                    .on_hover_text(if cfg!(target_arch = "wasm32") {
-                        "Permanently delete selected photos; cannot be undone (Delete)"
-                    } else {
-                        "Move selected photos to the Trash (Delete)"
-                    })
+                    .button(egui::RichText::new(t.delete).color(theme::DANGER_RED))
+                    .on_hover_text(t.delete_selection_tip)
                     .clicked()
                 {
                     out.actions.push(UiAction::RequestBulk(BulkKind::Delete));

@@ -7,6 +7,7 @@
 
 use crate::app::{App, CropEdge, FocusLevel, Region, ViewMode};
 use crate::develop::Adjustments;
+use crate::i18n::{t, Lang};
 use crate::navigation::Cmp;
 
 /// Colors shared by the grid, filmstrip, and panels.
@@ -106,6 +107,7 @@ pub enum UiAction {
     FocusToolbar(usize),
     /// Focus the Develop panel with the keyboard cursor on this slider index.
     FocusDevelop(usize),
+    SetLanguage(Lang),
 }
 
 /// A bulk action requested from the toolbar, run against the current
@@ -196,15 +198,15 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             ui.add_space(ui.available_height() * 0.4);
             ui.heading("LightPhotos");
             ui.add_space(4.0);
-            ui.label("Choose a folder of photos to get started");
+            ui.label(t().landing_prompt);
             ui.add_space(12.0);
             let pending = app.folder_pick_pending();
             let resp = ui.add_enabled(
                 !pending,
                 egui::Button::new(if pending {
-                    "Opening…"
+                    t().opening
                 } else {
-                    "Choose Folder"
+                    t().choose_folder
                 })
                 .min_size(egui::vec2(160.0, 32.0)),
             );
@@ -255,20 +257,28 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             if app.has_playlist() {
                 ui.add_space(12.0);
                 if ui
-                    .button("Open\u{2026}")
-                    .on_hover_text("Open a different folder (Cmd+O)")
+                    .button(t().open_folder)
+                    .on_hover_text(t().open_folder_tip)
                     .clicked()
                 {
                     out.actions.push(UiAction::PickFolder);
                 }
-                if ui
-                    .button("?")
-                    .on_hover_text("Keyboard shortcuts (?)")
-                    .clicked()
-                {
+                if ui.button("?").on_hover_text(t().help_tip).clicked() {
                     out.actions.push(UiAction::ToggleHelp);
                 }
             }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
+                let t = t();
+                if ui
+                    .button(t.other_language)
+                    .on_hover_text(t.other_language_tip)
+                    .clicked()
+                {
+                    out.actions.push(UiAction::SetLanguage(t.other));
+                }
+            });
         });
         ui.add_space(4.0);
     });
@@ -364,7 +374,7 @@ fn region_focus_marker(ui: &egui::Ui, app: &App, region: Region) {
 
 #[cfg(test)]
 mod tests {
-    use super::loupe::{format_capture_date, format_shutter};
+    use super::loupe::format_shutter;
 
     #[test]
     fn format_shutter_sub_second_is_a_fraction() {
@@ -381,21 +391,5 @@ mod tests {
     #[test]
     fn format_shutter_fractional_seconds_keeps_one_decimal() {
         assert_eq!(format_shutter(1.6), "1.6s");
-    }
-
-    #[test]
-    fn format_capture_date_formats_month_day_year_and_12h_clock() {
-        assert_eq!(
-            format_capture_date(2026, 7, 14, 15, 42),
-            "Jul 14, 2026 3:42 PM"
-        );
-        assert_eq!(
-            format_capture_date(2026, 1, 1, 0, 5),
-            "Jan 1, 2026 12:05 AM"
-        );
-        assert_eq!(
-            format_capture_date(2026, 1, 1, 12, 0),
-            "Jan 1, 2026 12:00 PM"
-        );
     }
 }

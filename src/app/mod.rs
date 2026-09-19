@@ -102,8 +102,7 @@ fn baseline_correction(primary: FaceMetrics, face: FaceMetrics, scale: f32) -> f
 /// Unicode font. egui's built-in fonts stay as fallbacks. Every face gets a
 /// baseline correction against the first, so mixed-script text sits on one line.
 #[cfg(not(target_arch = "wasm32"))]
-fn configure_system_fonts(ctx: &egui::Context) {
-    let mut definitions = egui::FontDefinitions::default();
+fn add_system_fonts(definitions: &mut egui::FontDefinitions) {
     let candidates = [
         ("macos-ui", "/System/Library/Fonts/SFNS.ttf", 0u32),
         // CJK coverage SFNS lacks. Index 0 of these TTCs is the regular face.
@@ -181,13 +180,32 @@ fn configure_system_fonts(ctx: &egui::Context) {
     if let Some(fonts) = definitions.families.get_mut(&egui::FontFamily::Monospace) {
         fonts.extend(names.iter().cloned());
     }
-    ctx.set_fonts(definitions);
 }
 
-/// The browser can't read system font files, so the web build keeps egui's
-/// built-in fonts.
-#[cfg(target_arch = "wasm32")]
-fn configure_system_fonts(_ctx: &egui::Context) {}
+/// System fonts where the platform has them, then the Chinese UI glyphs as a
+/// last resort. The browser can't read system fonts, and Linux and Windows
+/// have no known font paths here, so without the bundled subset those builds
+/// would draw Chinese as boxes.
+fn configure_fonts(ctx: &egui::Context) {
+    let mut definitions = egui::FontDefinitions::default();
+    #[cfg(not(target_arch = "wasm32"))]
+    add_system_fonts(&mut definitions);
+
+    // Built by `scripts/subset-cjk-font.sh` from the CJK text in `i18n.rs`.
+    const CJK: &str = "noto-sans-sc-ui-subset";
+    definitions.font_data.insert(
+        CJK.to_owned(),
+        Arc::new(egui::FontData::from_static(include_bytes!(
+            "../../assets/fonts/NotoSansSC-ui-subset.otf"
+        ))),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        if let Some(fonts) = definitions.families.get_mut(&family) {
+            fonts.push(CJK.to_owned());
+        }
+    }
+    ctx.set_fonts(definitions);
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ViewMode {
@@ -739,7 +757,7 @@ impl App {
     pub(crate) fn new(initial: Option<PathBuf>) -> Self {
         let catalog = Catalog::new();
         let egui_ctx = egui::Context::default();
-        configure_system_fonts(&egui_ctx);
+        configure_fonts(&egui_ctx);
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         let (catalog_load_tx, catalog_load_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
@@ -1148,8 +1166,8 @@ impl App {
         self.save_edit_unless_dragging();
 
         // Show catalog write failures, or the user loses the change silently.
-        if let Some(msg) = self.catalog.take_error() {
-            self.set_status(msg);
+        if let Some(cause) = self.catalog.take_error() {
+            self.set_status((crate::i18n::t().catalog_save_failed)(&cause));
         }
 
         let pixels_per_point = self.egui_ctx.pixels_per_point();
@@ -1328,6 +1346,11 @@ impl App {
                 ui::UiAction::FocusDevelop(idx) => {
                     self.set_focus(Region::Develop, FocusLevel::Entered);
                     self.develop_focus = idx;
+                    self.request_redraw();
+                }
+                ui::UiAction::SetLanguage(lang) => {
+                    crate::i18n::choose(lang);
+                    self.update_window_title();
                     self.request_redraw();
                 }
                 ui::UiAction::CropGrab(edge) => self.crop_grab(edge),

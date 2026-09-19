@@ -115,7 +115,7 @@ impl App {
             return;
         };
         if touchups.len() > 64 {
-            self.set_status("Touch Up supports up to 64 spots".into());
+            self.set_status(crate::i18n::t().touch_up_limit.into());
             return;
         }
         if touchups.is_empty() {
@@ -198,7 +198,7 @@ impl App {
 
     pub(super) fn add_touchup(&mut self, u: f32, v: f32) {
         let Some(t) = self.choose_touchup(u, v) else {
-            self.set_status("Touch Up needs a full-resolution image".into());
+            self.set_status(crate::i18n::t().touch_up_needs_full.into());
             return;
         };
         let mut all = self.current_touchups().to_vec();
@@ -240,7 +240,7 @@ impl App {
         self.tool = LoupeTool::None;
         self.request_redraw();
         if self.hist_dw == 0 || self.hist_dh == 0 {
-            self.set_status("No image loaded to pick from".into());
+            self.set_status(crate::i18n::t().wb_no_image.into());
             return;
         }
         let gx = ((u * self.hist_dw as f32) as usize).min(self.hist_dw - 1);
@@ -254,7 +254,7 @@ impl App {
                 self.apply_adjustments(adj);
             }
             None => {
-                self.set_status("Pick a brighter, less saturated pixel for white balance".into());
+                self.set_status(crate::i18n::t().wb_pick_brighter.into());
             }
         }
     }

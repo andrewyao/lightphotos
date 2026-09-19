@@ -18,7 +18,7 @@ impl App {
         match self.selected_path() {
             Some(path) => self.start_export(vec![path]),
             None => {
-                self.set_status("Export: no image selected".into());
+                self.set_status(crate::i18n::t().export_no_image.into());
                 self.request_redraw();
             }
         }
@@ -36,25 +36,25 @@ impl App {
         use std::collections::HashSet;
 
         if paths.is_empty() {
-            self.set_status("Export: nothing selected".into());
+            self.set_status(crate::i18n::t().export_nothing_selected.into());
             self.request_redraw();
             return;
         }
         // Same guards as the native `start_export`.
         if self.export_progress.is_some() {
-            self.set_status("Export already in progress\u{2026}".into());
+            self.set_status(crate::i18n::t().export_in_progress.into());
             self.request_redraw();
             return;
         }
         if self.catalog_load_pending.is_some() {
-            self.set_status("Export: catalog still loading, try again in a moment\u{2026}".into());
+            self.set_status(crate::i18n::t().export_catalog_loading.into());
             self.request_redraw();
             return;
         }
 
         let folder = self.folder_sel.clone().unwrap_or_default();
         let Some(folder_handle) = self.web_dir_handles.get(&folder).cloned() else {
-            self.set_status("Export: no directory handle for the current folder".into());
+            self.set_status(crate::i18n::t().export_no_handle.into());
             self.request_redraw();
             return;
         };
@@ -85,7 +85,7 @@ impl App {
             errors: 0,
             last_err: None,
         });
-        self.set_status(format!("Exporting 0/{total}\u{2026}"));
+        self.set_status((crate::i18n::t().exporting)(0, total));
         self.request_redraw();
 
         let pool = self.web_worker_pool.handle();
@@ -162,21 +162,21 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
-            self.set_status("Export: nothing selected".into());
+            self.set_status(crate::i18n::t().export_nothing_selected.into());
             self.request_redraw();
             return;
         }
         // One batch at a time. A second batch would pick the same file names
         // before the first batch's files exist on disk, and overwrite them.
         if self.export_progress.is_some() {
-            self.set_status("Export already in progress\u{2026}".into());
+            self.set_status(crate::i18n::t().export_in_progress.into());
             self.request_redraw();
             return;
         }
         // The edit maps read below fill in only after the background catalog
         // load finishes. Exporting earlier would silently drop edits.
         if self.catalog_load_pending.is_some() {
-            self.set_status("Export: catalog still loading, try again in a moment\u{2026}".into());
+            self.set_status(crate::i18n::t().export_catalog_loading.into());
             self.request_redraw();
             return;
         }
@@ -191,9 +191,7 @@ impl App {
             .unwrap_or_else(|| PathBuf::from("."));
         let exports_dir = base.join(crate::export::EXPORTS_DIR);
         if let Err(e) = std::fs::create_dir_all(&exports_dir) {
-            self.set_status(format!(
-                "Export failed: could not create Exports folder: {e}"
-            ));
+            self.set_status((crate::i18n::t().export_no_folder)(&e.to_string()));
             self.request_redraw();
             return;
         }
@@ -222,7 +220,7 @@ impl App {
             errors: 0,
             last_err: None,
         });
-        self.set_status(format!("Exporting 0/{total}\u{2026}"));
+        self.set_status((crate::i18n::t().exporting)(0, total));
         self.request_redraw();
     }
 
@@ -245,12 +243,13 @@ impl App {
         }
         if prog.done >= prog.total {
             let ok = prog.total - prog.errors;
+            let t = crate::i18n::t();
             self.set_status(match prog.last_err {
-                None => format!("Exported {ok} photo(s)"),
-                Some(e) => format!("Exported {ok}/{} \u{2014} last error: {e}", prog.total),
+                None => (t.exported)(ok),
+                Some(e) => (t.exported_partial)(ok, prog.total, &e),
             });
         } else {
-            self.set_status(format!("Exporting {}/{}\u{2026}", prog.done, prog.total));
+            self.set_status((crate::i18n::t().exporting)(prog.done, prog.total));
             self.export_progress = Some(prog);
         }
     }
