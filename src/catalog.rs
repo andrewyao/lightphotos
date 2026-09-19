@@ -28,6 +28,8 @@ pub(crate) const SIDECAR_EXT: &str = "xmp";
 pub struct ImageRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<ColorLabel>,
     #[serde(default, skip_serializing_if = "Adjustments::is_identity")]
     pub adjustments: Adjustments,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -35,6 +37,31 @@ pub struct ImageRecord {
     /// Manual rotation in 90° clockwise steps, `0..=3`.
     #[serde(default, skip_serializing_if = "is_zero_rot")]
     pub rotation: u8,
+}
+
+/// A photo's color label, set with Shift+1..5 in Lightroom's order.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorLabel {
+    Red,
+    Yellow,
+    Green,
+    Blue,
+    Purple,
+}
+
+impl ColorLabel {
+    /// The label Shift+`n` sets, for `n` in `1..=5`.
+    pub fn from_digit(n: u8) -> Option<ColorLabel> {
+        Some(match n {
+            1 => ColorLabel::Red,
+            2 => ColorLabel::Yellow,
+            3 => ColorLabel::Green,
+            4 => ColorLabel::Blue,
+            5 => ColorLabel::Purple,
+            _ => return None,
+        })
+    }
 }
 
 fn is_zero_rot(v: &u8) -> bool {
@@ -46,6 +73,7 @@ impl ImageRecord {
     /// deleted instead of written.
     pub(crate) fn is_empty(&self) -> bool {
         self.rating.is_none()
+            && self.label.is_none()
             && self.adjustments.is_identity()
             && self.touchups.is_empty()
             && self.rotation == 0
@@ -190,6 +218,16 @@ impl Catalog {
         let stars = stars.min(5);
         let rating = if stars == 0 { None } else { Some(stars) };
         self.update(path, |rec| rec.rating = rating);
+    }
+
+    pub fn label(&self, path: &Path) -> Option<ColorLabel> {
+        path.file_name()
+            .and_then(|n| self.images.get(n))
+            .and_then(|r| r.label)
+    }
+
+    pub fn set_label(&mut self, path: &Path, label: Option<ColorLabel>) {
+        self.update(path, |rec| rec.label = label);
     }
 
     pub fn adjustments(&self, path: &Path) -> Adjustments {
