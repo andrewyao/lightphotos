@@ -11,25 +11,18 @@ use crate::thumbnail::THUMB_PX;
 use crate::ui;
 
 impl App {
-    /// Invalidate anything keyed to the *tree* state: in-flight directory
-    /// listings and a navigation deferred behind one.
-    ///
-    /// Deliberately leaves thumbnails alone. This fires on every tree action,
-    /// including ones that change no folder at all (a collapse, an arrow key
-    /// that lands on the already-selected row), and the grid's decodes are
-    /// keyed to the folder handles rather than to tree state — see
-    /// [`App::invalidate_web_thumb_handles`].
+    /// Invalidate in-flight directory listings and any navigation deferred
+    /// behind one. Runs on every tree action. Thumbnails are keyed to the
+    /// handle maps instead, see [`App::invalidate_web_thumb_handles`].
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn supersede_web_pending_nav(&mut self) {
         self.web_nav_generation = self.web_nav_generation.wrapping_add(1);
         self.web_pending_nav = None;
     }
 
-    /// Invalidate everything keyed to the folder *handle* maps, after a pick
-    /// has replaced them. Results already in flight decoded against handles
-    /// that no longer exist, so they are dropped on arrival
-    /// (`poll_web_thumbs`); releasing their keys here is what lets the new
-    /// generation request the same browser paths again.
+    /// Invalidate thumbnail work after a pick replaces the handle maps.
+    /// `poll_web_thumbs` drops the old results on arrival. Clearing their keys
+    /// lets the new pick request the same browser paths again.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn invalidate_web_thumb_handles(&mut self) {
         self.web_handle_generation = self.web_handle_generation.wrapping_add(1);
@@ -44,12 +37,10 @@ impl App {
         self.web_pending_nav = Some(nav);
     }
 
-    /// Recompute `visible` from the current filter + ratings, clamping `sel` and
-    /// remapping the multi-selection so it survives re-filtering.
+    /// Recompute `visible` from the filters, keeping the same photos selected.
     pub(super) fn recompute_visible(&mut self) {
-        // Snapshot the multi-selection + anchor as *playlist* indices before the
-        // rebuild: positions within `visible` shift when the filter changes, but
-        // playlist indices are stable, so we can restore the same photos after.
+        // Positions in `visible` shift when the filter changes, so remember the
+        // selection as playlist indices.
         let sel_pl: Vec<usize> = self
             .selected
             .iter()
@@ -69,9 +60,6 @@ impl App {
         self.visible = visible_indices(entries, self.filter, |p| {
             ratings.get(p).copied().unwrap_or(0)
         });
-        // The blink filter narrows whatever the star filter left, rather than
-        // replacing it — they answer different questions, so stacking them is
-        // what a photographer would expect from two independent chips.
         if self.eyes_filter {
             let keep: Vec<usize> = self
                 .visible
@@ -81,7 +69,6 @@ impl App {
                 .collect();
             self.visible = keep;
         }
-        // Clamp the cursor to the new bounds; clear it if nothing is visible.
         if self.visible.is_empty() {
             self.sel = None;
         } else if let Some(s) = self.sel {
@@ -89,35 +76,18 @@ impl App {
                 self.sel = Some(self.visible.len() - 1);
             }
         }
-        // Remap the multi-selection + anchor from playlist indices to their new
-        // positions, dropping any photo the filter removed.
         self.selected = remap_positions(&sel_pl, &self.visible);
         self.anchor = anchor_pl.and_then(|i| self.visible.iter().position(|&v| v == i));
     }
 
-    /// The playlist index of the current selection, if any. `None` when the
-    /// grid has no active selection (browse-first state).
+    /// Playlist index of the current selection. `None` when nothing is selected.
     pub(super) fn selected_index(&self) -> Option<usize> {
         self.visible.get(self.sel?).copied()
     }
 
-    /// The path of the current selection, if any. In Survey Mode this is the
-    /// focused member (`survey_focus`) instead of the Grid/Loupe `sel` — so
-    /// rating hotkeys "just work" against whichever screen is showing without
-    /// Survey needing its own parallel rating path.
-    ///
-    /// In Loupe mode, falls back to `want` (the photo actually on screen)
-    /// when `sel` is `None` — which happens whenever the active star filter
-    /// matches nothing in the folder, including the photo currently open.
-    /// Without this, a filter that knocks the open photo out of the Grid's
-    /// filtered `visible` list orphans `sel` at `None` indefinitely (nothing
-    /// in Loupe mode ever re-clicks a grid cell to reset it), silently
-    /// breaking rating/export/etc. for the photo the user is actually
-    /// looking at, even though it's still right there on screen. Doesn't
-    /// touch the case where `sel` lands on a *different* (still-visible)
-    /// photo after a filter/rating change — that's the intentional
-    /// "advance to the next matching neighbor" behavior (see
-    /// `resync_loupe_selection`), left alone.
+    /// Path of the photo that single-photo actions apply to. In Survey Mode,
+    /// the focused member. In the Loupe with `sel` empty (the filter hid every
+    /// photo, including the open one), the photo on screen.
     pub(crate) fn selected_path(&self) -> Option<PathBuf> {
         if self.mode == ViewMode::Survey {
             return self.survey_members.get(self.survey_focus).cloned();
@@ -130,16 +100,8 @@ impl App {
         pl.entry(idx).map(|p| p.to_path_buf())
     }
 
-    /// Paths of every photo in the multi-selection, in `visible` order. Falls
-    /// back to the primary cell when the set is empty but a cell is active, so
-    /// bulk operations always have at least the current photo to work on.
-    ///
-    /// In Loupe mode, further falls back to `want` (the photo actually on
-    /// screen) when both the multi-selection and `sel` are empty — same
-    /// reasoning as `selected_path`'s own fallback: `sel` can go stale while
-    /// a photo is genuinely open, and bulk actions (Delete, Apply Settings,
-    /// Export) should still act on it rather than silently seeing "nothing
-    /// selected".
+    /// Paths bulk actions apply to, in `visible` order. Falls back to `sel`,
+    /// then in the Loupe to the photo on screen, like `selected_path`.
     pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
         if self.mode == ViewMode::Loupe && self.selected.is_empty() && self.sel.is_none() {
             return self.want.clone().into_iter().collect();
@@ -159,9 +121,7 @@ impl App {
             .collect()
     }
 
-    /// Number of photos a bulk action would affect (the multi-selection, or the
-    /// single primary cell when the set is empty). See `selected_paths`' doc
-    /// comment for the Loupe/`want` fallback this mirrors.
+    /// `selected_paths().len()` without building the list.
     pub(crate) fn selection_count(&self) -> usize {
         if self.selected.is_empty() {
             if self.sel.is_some() {
@@ -174,25 +134,22 @@ impl App {
         }
     }
 
-    /// Collapse the multi-selection down to just the primary cell (or empty when
-    /// nothing is active). Called after a plain arrow move / single click.
+    /// Reduce the multi-selection to `sel` alone.
     pub(super) fn collapse_selection(&mut self) {
         self.selected = self.sel.into_iter().collect();
         self.anchor = self.sel;
     }
 
-    /// Plain select: primary = `pos`, selection = `{pos}`.
     pub(super) fn select_single(&mut self, pos: usize) {
         self.sel = Some(pos);
         self.anchor = Some(pos);
         self.selected = BTreeSet::from([pos]);
     }
 
-    /// Cmd-click: toggle `pos` in the multi-selection; the primary follows the
-    /// clicked cell (or an adjacent survivor when the primary is deselected).
+    /// Cmd-click: toggle `pos`. `sel` moves to the clicked cell, or to the last
+    /// remaining member when the cell is deselected.
     pub(super) fn select_toggle(&mut self, pos: usize) {
         if self.selected.remove(&pos) {
-            // Deselected the clicked cell: move the primary to another member.
             self.sel = self.selected.iter().next_back().copied();
         } else {
             self.selected.insert(pos);
@@ -201,9 +158,8 @@ impl App {
         self.anchor = self.sel;
     }
 
-    /// Shift-click / Shift-arrow: select the inclusive range from the anchor
-    /// (or the primary, seeded on first use) to `pos`. The anchor stays put so
-    /// the range can be re-dragged from the same origin.
+    /// Shift-click or Shift-arrow: select from the anchor to `pos`. The anchor
+    /// stays put, so repeated Shift-clicks resize the same range.
     pub(super) fn select_range(&mut self, pos: usize) {
         if self.anchor.is_none() {
             self.anchor = self.sel.or(Some(pos));
@@ -213,7 +169,6 @@ impl App {
         self.sel = Some(pos);
     }
 
-    /// Cmd+A: select every visible cell.
     pub(super) fn select_all(&mut self) {
         let n = self.visible.len();
         if n == 0 {
@@ -226,8 +181,7 @@ impl App {
         self.anchor = self.sel;
     }
 
-    /// Shift+arrow in the grid: extend the range selection to the cell the
-    /// arrow lands on, keeping the anchor fixed.
+    /// Shift+arrow in the grid.
     pub(super) fn extend_grid(&mut self, dx: isize, dy: isize) {
         if self.visible.is_empty() {
             return;
@@ -241,26 +195,20 @@ impl App {
         self.request_redraw();
     }
 
-    /// True when the visible cell at `pos` is part of the multi-selection.
     pub(crate) fn is_selected(&self, pos: usize) -> bool {
         self.selected.contains(&pos)
     }
 
-    /// In Loupe mode, make the selection the wanted image and request decode.
-    /// Requests the screen-fit preview and (as an instant placeholder) the
-    /// thumbnail, so the shown image updates immediately even before the preview
-    /// decode finishes. Full resolution is deliberately *not* requested here —
-    /// it costs seconds and hundreds of megabytes, and is only needed once the
-    /// user zooms past what the preview holds (see `ensure_full_for_zoom`).
+    /// Make the selection the loupe's wanted image. Requests the preview, with
+    /// the thumbnail as an instant placeholder. Full resolution costs seconds
+    /// and hundreds of MB, so it waits until the user zooms
+    /// (`ensure_full_for_zoom`).
     pub(super) fn load_selected(&mut self) {
         let Some(path) = self.selected_path() else {
             return;
         };
-        // Native only — see the matching comment in `app/thumbs.rs::try_show`:
-        // `loader.rs`'s own worker queue is never serviced on wasm32, so
-        // calling into it here only leaves a permanent (never-cleared)
-        // in-flight marker behind; wasm32's Loupe/thumbnail needs are already
-        // covered by `app/web.rs`'s `request_web_preview`/`request_web_thumbs`.
+        // `loader.rs`'s queue has no workers on wasm32. A request there would
+        // leave an in-flight marker that never clears; `app/web.rs` covers it.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let px = THUMB_PX;
@@ -270,37 +218,24 @@ impl App {
                 loader.request_thumb(path.clone(), px);
             }
         }
-        // A different photo means the cached source dimensions no longer apply;
-        // `on_exif_info` refills them (and re-fits) when the metadata read for
-        // the new photo lands.
+        // A new photo needs its own source size. `on_exif_info` fills it and
+        // re-fits if the metadata isn't cached yet.
         if self.want.as_deref() != Some(path.as_path()) {
             self.source_size = self.exif_cache.get(&path).and_then(|m| m.source_size);
         }
         self.want = Some(path);
-        // The selection overlay belongs to one photo; stepping to the next
-        // drops the old mask and (if the overlay is on) starts the new one.
         self.invalidate_selection();
         self.request_selection_mask();
         self.try_show();
     }
 
-    /// Request screen-fit preview decodes of the loupe neighbors (prev/next in
-    /// the visible list) so stepping feels instant. Previews only: prefetching
-    /// full resolution for images the user hasn't even reached would swamp the
-    /// decode pool and the memory budget for no benefit.
-    ///
-    /// Deliberately does nothing until the photo actually on screen has its own
-    /// preview. Queue priority can't help here — the neighbors are the same tier
-    /// as the current photo, so idle workers pick them up immediately and all
-    /// three decode at once, competing for the same cores and memory bandwidth.
-    /// Measured on 24MP RAW, that turned a ~300ms open into ~970ms, with the
-    /// photo the user was *looking at* finishing last of the three. Prefetch is
-    /// only worth anything once there's nothing more urgent to do.
+    /// Prefetch previews of the previous and next photos so stepping feels
+    /// instant. Waits until the current photo's preview is ready: otherwise all
+    /// three decode at once, and on 24MP RAW the open went from ~300ms to
+    /// ~970ms with the current photo finishing last.
     pub(crate) fn request_neighbors(&mut self) {
-        // Guarded here rather than at each call site so the frame loop can call
-        // this whenever a decode lands without caring what mode we're in — in
-        // the grid, `sel` indexes grid cells while `want` is whatever the loupe
-        // last showed, so "neighbors" would mean nothing.
+        // The frame loop calls this in any mode. Outside the Loupe, neighbors
+        // mean nothing.
         if self.mode != ViewMode::Loupe || self.visible.len() <= 1 {
             return;
         }
@@ -328,14 +263,10 @@ impl App {
         }
     }
 
-    /// Move the loupe selection by ±1 within the visible list (wraps).
-    /// Mouse-wheel scroll over the filmstrip steps through photos (like the
-    /// Left/Right arrow keys) rather than just panning the strip: a plain
-    /// vertical wheel doesn't pan a horizontal-only `ScrollArea` in egui by
-    /// default, and stepping the selection is the more useful behavior for
-    /// "scroll to browse" anyway. `delta` is the raw wheel delta for this
-    /// frame (egui convention: positive = scroll up/left); it's accumulated
-    /// across frames so small trackpad increments still add up to a step.
+    /// Wheel over the filmstrip steps through photos, since egui doesn't pan a
+    /// horizontal `ScrollArea` with a vertical wheel. `delta` is this frame's
+    /// wheel delta (positive is up or left). It accumulates across frames so
+    /// small trackpad deltas still add up to a step.
     pub(super) fn scroll_filmstrip(&mut self, delta: f32) {
         const STEP_PX: f32 = 30.0;
         self.filmstrip_scroll_accum += delta;
@@ -366,13 +297,12 @@ impl App {
         self.request_redraw();
     }
 
-    /// Move the grid selection by (dx, dy) cells (clamped, row-aware). The first
-    /// arrow press with no active selection lands on the first cell.
+    /// Move the grid selection by (dx, dy) cells. With no selection, the first
+    /// press lands on the first cell.
     pub(super) fn move_grid(&mut self, dx: isize, dy: isize) {
         if self.visible.is_empty() {
             return;
         }
-        // First arrow press with no selection lands on the first cell.
         self.sel = Some(match self.sel {
             None => 0,
             Some(s) => navigation::grid_move(s, self.visible.len(), self.grid_cols, dx, dy),
@@ -381,13 +311,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Move keyboard focus into the Grid and put the cursor on its first image —
-    /// the Lightroom-style "jump into this folder's photos, starting at the
-    /// top". Used when Tab or Enter fires from the Folders region. Always
-    /// resets to the first image (not just when nothing was selected), so a
-    /// stale selection from a prior visit doesn't linger. Selection is skipped
-    /// on an empty grid, but focus still moves so Escape can jump back to
-    /// Folders.
+    /// Enter from Folders: focus the Grid and select its first image. Focus
+    /// moves even when the grid is empty, so Escape can return to Folders.
     pub(super) fn focus_grid_first(&mut self) {
         self.focus = Region::Grid;
         self.focus_level = FocusLevel::Selected;
@@ -399,10 +324,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Enter Loupe on the current selection. A no-op in the grid when nothing is
-    /// selected (the `selected_path` guard below).
+    /// Open the Loupe on the selection. Does nothing when nothing is selected.
     pub(super) fn enter_loupe(&mut self) {
-        // No-op when nothing is selected; the guard also guarantees sel is Some.
         if self.selected_path().is_none() {
             return;
         }
@@ -415,7 +338,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Switch to the Grid (thumbnail) view. No-op if already there.
     pub(super) fn enter_grid(&mut self) {
         if self.mode != ViewMode::Grid {
             self.mode = ViewMode::Grid;
@@ -425,35 +347,24 @@ impl App {
         }
     }
 
-    // ---- Keyboard focus & panel visibility ----
-
-    /// Whether the left folder-tree panel is currently shown.
     pub(crate) fn folders_visible(&self) -> bool {
         true
     }
 
-    /// Whether the right Develop panel is currently shown (Loupe only).
     pub(crate) fn develop_visible(&self) -> bool {
         self.develop_open
     }
 
-    /// Whether the bottom filmstrip is currently shown (Loupe only).
+    /// Loupe only.
     pub(crate) fn filmstrip_visible(&self) -> bool {
         true
     }
 
-    /// Whether the Loupe metadata panel is currently shown.
     pub(crate) fn metadata_panel_visible(&self) -> bool {
         true
     }
 
-    /// Whether a region can receive keyboard focus right now. `Grid` (grid
-    /// mode) and `Detail`/`Filmstrip` (loupe mode) are the content regions and
-    /// always available in their mode. `Detail` and `Develop` are both always
-    /// available in Loupe mode — the Develop panel stays visible throughout
-    /// Loupe, so the two only differ in *where keyboard focus is* (the image
-    /// vs. the slider list), never in what's on screen. Toolbar is always
-    /// available.
+    /// Whether region `r` can take keyboard focus in the current mode.
     pub(super) fn region_available(&self, r: Region) -> bool {
         match r {
             Region::Toolbar => true,
@@ -465,11 +376,8 @@ impl App {
         }
     }
 
-    /// Snap focus to a valid region when the current one isn't available (after a
-    /// mode switch). Defaults to the mode's main content region — Grid, or
-    /// Detail (the bare image) in Loupe — so focus lands on the image, not the
-    /// Filmstrip chrome or the Develop slider list. An unavailable region can't
-    /// stay "entered", so this also resets the level.
+    /// After a mode switch, move focus off an unavailable region to the mode's
+    /// main region (Grid, or Detail in the Loupe), at `Selected`.
     pub(super) fn normalize_focus(&mut self) {
         if !self.region_available(self.main_focus) {
             self.main_focus = match self.mode {
@@ -488,13 +396,8 @@ impl App {
         self.on_focus_changed();
     }
 
-    /// F6: toggle between the current main-chain region and the two chrome
-    /// regions, walking the fixed 3-slot ring `[main_focus, Toolbar,
-    /// Filmstrip]` (reversed when `backward`), wrapping and skipping
-    /// Filmstrip when it isn't available (i.e. not in Loupe mode). The main
-    /// slot is always available — it's wherever `main_focus` last was. Always
-    /// lands at `Selected` — F6 backs out of whatever was entered in the old
-    /// region.
+    /// F6: step around the ring `[main_focus, Toolbar, Filmstrip]`, skipping
+    /// unavailable regions. Always lands at `Selected`.
     pub(super) fn cycle_region(&mut self, backward: bool) {
         let main = if self.region_available(self.main_focus) {
             self.main_focus
@@ -524,10 +427,8 @@ impl App {
         }
     }
 
-    /// F6 while a region is entered. Only Toolbar has a control cursor to
-    /// move at this level — other regions' content navigation is already
-    /// fully covered by arrows, so F6 there falls through to `cycle_region`
-    /// like it would from `Selected`, instead of being swallowed.
+    /// F6 while a region is entered. Moves the Toolbar's control cursor;
+    /// elsewhere it cycles regions as usual.
     pub(super) fn cycle_control(&mut self, backward: bool) {
         if self.focus == Region::Toolbar {
             self.toolbar_move(if backward { -1 } else { 1 });
@@ -536,13 +437,8 @@ impl App {
         self.cycle_region(backward);
     }
 
-    /// Hook run whenever focus changes region (or is re-entered at the same
-    /// region). Resets the Develop/Toolbar cursor to the first slider/control
-    /// (Folders needs no seeding — `folder_sel` doubles as its cursor and is
-    /// always valid, since only interactive navigation changes it and that
-    /// keeps ancestors expanded/visible as it goes). Also records `main_focus`
-    /// whenever focus lands on a main-chain region, so F6/Escape can return to
-    /// it from the chrome regions.
+    /// Run on every focus change. Resets the Develop and Toolbar cursors to
+    /// their first control, and records `main_focus` for a main-chain region.
     pub(super) fn on_focus_changed(&mut self) {
         if !CHROME_ORDER.contains(&self.focus) {
             self.main_focus = self.focus;
@@ -560,8 +456,7 @@ impl App {
         self.on_focus_changed();
     }
 
-    /// The folder tree flattened to its currently-visible rows (DFS over expanded
-    /// folders), top to bottom — the order folder arrow-nav moves through.
+    /// The tree's visible rows, top to bottom.
     pub(super) fn visible_tree(&self) -> Vec<PathBuf> {
         let Some(root) = self.folder_root.clone() else {
             return Vec::new();
@@ -571,10 +466,8 @@ impl App {
         flatten_visible_tree(&root, &is_expanded, &children)
     }
 
-    /// Load `dir`'s images into the grid without touching expansion state —
-    /// the shared target of `folder_move` and `folder_collapse`'s
-    /// select-parent branch. Native: synchronous `load_folder`. wasm: defer
-    /// to `apply_web_load_folder` once `dir`'s listing is cached.
+    /// Load `dir` into the grid without changing expansion. On wasm32 this
+    /// waits for `dir`'s listing first.
     fn nav_to_folder(&mut self, dir: PathBuf) {
         #[cfg(not(target_arch = "wasm32"))]
         self.load_folder(dir);
@@ -590,10 +483,7 @@ impl App {
         }
     }
 
-    /// Up/Down in the tree: move the selection by `delta` rows within the
-    /// visible tree (clamped) and load the newly-selected folder, matching a
-    /// standard single-select tree — there's no separate cursor to move
-    /// without also loading.
+    /// Up/Down in the tree: move `delta` rows and load that folder.
     pub(super) fn folder_move(&mut self, delta: isize) {
         #[cfg(target_arch = "wasm32")]
         self.supersede_web_pending_nav();
@@ -612,8 +502,8 @@ impl App {
         }
     }
 
-    /// Right-arrow in the tree: expand the selected folder, or select+load its
-    /// first child if already expanded. A no-op on a childless folder.
+    /// Right arrow in the tree: expand the folder, or load its first child if
+    /// already expanded.
     pub(super) fn folder_expand(&mut self) {
         let Some(cur) = self.folder_sel.clone() else {
             return;
@@ -623,12 +513,11 @@ impl App {
         self.ensure_subdirs(&cur);
         #[cfg(target_arch = "wasm32")]
         if !self.subdirs.contains_key(&cur) {
-            // Listing just kicked off; the user's next right-arrow press
-            // (after it lands and the triangle appears) will expand it.
+            // The listing just started. The next press expands.
             return;
         }
         if self.subdirs(&cur).is_empty() {
-            return; // leaf
+            return;
         }
         if self.expanded.contains(&cur) {
             if let Some(first) = self.subdirs(&cur).first().cloned() {
@@ -640,8 +529,8 @@ impl App {
         }
     }
 
-    /// Left-arrow in the tree: collapse the selected folder if open, else
-    /// select+load its parent (stopping at the root).
+    /// Left arrow in the tree: collapse the folder, or load its parent if
+    /// already collapsed. Stops at the root.
     pub(super) fn folder_collapse(&mut self) {
         #[cfg(target_arch = "wasm32")]
         self.supersede_web_pending_nav();
@@ -658,8 +547,6 @@ impl App {
         }
     }
 
-    /// Enter in the tree: toggle the selected folder's expansion (when it has
-    /// children) and switch to the Grid.
     pub(super) fn folder_enter(&mut self) {
         let Some(sel) = self.folder_sel.clone() else {
             return;
@@ -667,9 +554,8 @@ impl App {
         self.open_folder(sel);
     }
 
-    /// Open a folder as one unit: toggle its expansion (when it has children)
-    /// and load its images into the grid. Shared by the folder-row click and
-    /// the Enter key so mouse and keyboard behave identically.
+    /// Folder-row click or Enter: toggle expansion and load the folder into
+    /// the grid.
     pub(super) fn open_folder(&mut self, path: PathBuf) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -686,11 +572,8 @@ impl App {
                     self.expanded.insert(path.clone());
                 }
             }
-            // A pure container folder (subdirectories but no photos of its own,
-            // e.g. a plain year folder) has nothing to show in the grid — loading
-            // it anyway flashes an empty grid for a frame before the user drills
-            // further. Skip straight to its first child instead, same place a
-            // second `folder_expand` press on it would land.
+            // A folder with subfolders but no photos (a year folder) would show
+            // an empty grid, so load its first child instead. It stays expanded.
             let target = if pure_container {
                 subdirs.into_iter().next().unwrap_or(path)
             } else {
@@ -715,13 +598,10 @@ impl App {
         }
     }
 
-    // ---- Focus-routed arrow / Enter dispatchers ----
-
     pub(super) fn nav_left(&mut self) {
         match self.focus {
             Region::Folders => self.folder_collapse(),
             Region::Grid => self.move_grid(-1, 0),
-            // Reserved for a future pan feature — not bound in this pass.
             Region::Detail => {}
             Region::Filmstrip => self.step_loupe(false),
             Region::Develop => self.develop_adjust(-1),
@@ -762,14 +642,9 @@ impl App {
         }
     }
 
-    /// Enter: perform the focused region's content-level action. Walks the
-    /// main chain one step deeper at a time — Folders -> Grid -> Detail ->
-    /// Develop — never skipping a step. For Toolbar, which has no single
-    /// always-right action besides "enter", the first Enter at `Selected`
-    /// just enters (cursor to the first control); a second Enter activates
-    /// the focused control. Filmstrip has no "activate" beyond what its
-    /// arrows already do (live-swap the shown image), so Enter there just
-    /// returns focus to the main region, same as Escape/F6 would.
+    /// Enter: go one step deeper in the main chain (Folders > Grid > Detail >
+    /// Develop). In the Toolbar, the first Enter enters and the second
+    /// activates the control. In the Filmstrip, it returns to the main region.
     pub(super) fn nav_enter(&mut self) {
         match self.focus {
             Region::Folders => {
@@ -808,17 +683,12 @@ impl App {
                     self.activate_toolbar_focus();
                 }
             }
-            // Arrows already do everything inside Develop; nothing further
-            // for Enter to do here.
             Region::Develop => {}
         }
     }
 
-    /// Route an arrow key. With Shift held in the grid it extends the range
-    /// selection; otherwise it's the normal focus-routed move. `(dx, dy)` maps to
-    /// left/right/up/down. Arrows always act on the region's content regardless
-    /// of focus level. Grid selection is already the region's content, so grid
-    /// arrows do not add an extra focus level that would consume the next Escape.
+    /// Route an arrow key to the focused region. Arrows enter every region but
+    /// the Grid, so one Escape still leaves the Grid.
     pub(super) fn nav_arrow(&mut self, dx: isize, dy: isize, shift: bool) {
         if self.focus != Region::Grid {
             self.focus_level = FocusLevel::Entered;
@@ -835,32 +705,20 @@ impl App {
         }
     }
 
-    /// Move the Develop slider cursor by `delta` (clamped to 0..=7).
     pub(super) fn develop_move(&mut self, delta: isize) {
         let max = DEVELOP_SLIDERS as isize - 1;
         self.develop_focus = (self.develop_focus as isize + delta).clamp(0, max) as usize;
         self.request_redraw();
     }
 
-    /// Number of keyboard-focusable controls in the Grid/Survey toolbar
-    /// (`toolbar::grid_toolbar`; Phase 1: the stable set that always renders
-    /// — see `toolbar_focus_sync` in `ui.rs`, which must stay in lockstep
-    /// with this count and with `activate_toolbar_focus`'s index mapping.
-    /// Rating-histogram bars and the selection-dependent bulk actions aren't
-    /// included yet since their count varies frame to frame. The three
-    /// grouping toggles are only among them while `SHOW_GROUPING_TOOLS` draws
-    /// them, or F6 would cycle onto controls that aren't on screen.
+    /// Keyboard-focusable controls in the Grid and Survey toolbar. Must match
+    /// the `toolbar_focus_sync` calls in `ui/mod.rs` and the index mapping in
+    /// `activate_toolbar_focus`. Controls whose count varies per frame (rating
+    /// bars, bulk actions) are excluded.
     const TOOLBAR_CONTROLS: usize = if SHOW_GROUPING_TOOLS { 14 } else { 11 };
-    /// Number of keyboard-focusable controls in the Loupe toolbar
-    /// (`toolbar::loupe_toolbar`): just `?` (Help). The Loupe/Grid toggle
-    /// was replaced by a non-interactive debug tier readout; everything
-    /// else Grid-only was deliberately dropped for Loupe.
+    /// The Loupe toolbar's only focusable control is `?` (Help).
     const LOUPE_TOOLBAR_CONTROLS: usize = 1;
 
-    /// The current mode's toolbar control count — a different, much smaller
-    /// toolbar renders in Loupe than in Grid/Survey (see `toolbar.rs`), so
-    /// the F6 keyboard-focus cycle must track whichever one is actually on
-    /// screen.
     pub(super) fn toolbar_control_count(&self) -> usize {
         if self.mode == ViewMode::Loupe {
             Self::LOUPE_TOOLBAR_CONTROLS
@@ -869,7 +727,6 @@ impl App {
         }
     }
 
-    /// Move the Toolbar control cursor by `delta`, wrapping.
     pub(super) fn toolbar_move(&mut self, delta: isize) {
         let n = self.toolbar_control_count() as isize;
         if n == 0 {
@@ -879,11 +736,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Activate the keyboard-focused Toolbar control — the same action its
-    /// click handler would push, so keyboard and mouse converge on one path.
-    /// Index order must match `toolbar_focus_sync`'s call sites in `ui.rs`,
-    /// separately for whichever toolbar (`grid_toolbar`/`loupe_toolbar`) is
-    /// actually rendering — see `toolbar_control_count`.
+    /// Run the focused toolbar control's click action. Index order must match
+    /// the `toolbar_focus_sync` calls in `ui/mod.rs` for the toolbar on screen.
     pub(super) fn activate_toolbar_focus(&mut self) {
         if self.mode == ViewMode::Loupe {
             if self.toolbar_focus == 0 {
@@ -914,9 +768,8 @@ impl App {
         self.apply_ui_actions(vec![action]);
     }
 
-    /// Nudge the focused Develop slider's value (`dir` = -1/+1) by one step and
-    /// apply it. Tone fields step ±1 (200-unit span, integer display); exposure
-    /// steps ±0.05 (10-stop span, two-decimal display).
+    /// Nudge the focused Develop slider one step in direction `dir` (-1 or +1).
+    /// Exposure steps 0.05 stops; the other sliders step 1.
     pub(super) fn develop_adjust(&mut self, dir: isize) {
         let mut adj = self.current_adjustments();
         let sign = dir as f32;
@@ -972,11 +825,8 @@ mod tests {
         );
     }
 
-    /// `selected_path()` falls back to `want` when `sel` has gone stale
-    /// (`None`) in Loupe mode (see its doc comment) — `selection_count`/
-    /// `selected_paths` must agree, or bulk actions (Delete, Apply Settings,
-    /// Export) silently see "nothing selected" for the photo actually open,
-    /// even though rating/single-photo actions work fine.
+    /// With `sel` empty in the Loupe, bulk actions must still act on the open
+    /// photo, matching `selected_path`.
     #[test]
     fn selection_count_and_paths_fall_back_to_want_when_sel_is_stale_in_loupe() {
         let mut app = App::new(None);

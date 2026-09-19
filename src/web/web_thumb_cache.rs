@@ -1,23 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! wasm32-only: File System Access counterpart to `thumbnail.rs`'s std::fs-
-//! backed `ThumbCache`. A picked folder has no real OS path, so everything
-//! here goes through the folder's `FileSystemDirectoryHandle`, exactly as
-//! `web_catalog_fs.rs` does for ratings sidecars — and into the same
-//! `.lightphotos/` directory, which that module's `sidecar_dir` resolves.
-//!
-//! The filenames come from `thumbnail.rs`'s own `cache_key`/`cache_name`, not
-//! from a second convention defined here, so a folder cached by the native
-//! app populates instantly in the browser and the reverse. This module only
-//! supplies the browser-specific transport.
-//!
-//! ## Pipeline position
-//! - Pipeline 2 (Grid/filmstrip). `app/web.rs`'s `request_web_thumbs` calls
-//!   [`load`] before reading a photo at all; on a hit the multi-megabyte
-//!   source is never touched and a ~45 KB JPEG is decoded instead.
-//! - On a miss the worker decodes the source and encodes the JPEG alongside
-//!   it (`wasm_worker.rs`), and `poll_web_thumbs` hands those bytes to
-//!   [`store`]. Encoding in the worker keeps it off the single main thread.
+//! wasm32-only: the thumbnail cache in `.lightphotos/`, read and written
+//! through File System Access handles. Entry names come from `thumbnail.rs`,
+//! so the native app and the browser share one cache per folder.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -33,9 +18,9 @@ use web_sys::{
 
 use crate::web_catalog_fs::{is_not_found, js_error_string, sidecar_dir};
 
-/// Shared by all writes to one directory for the lifetime of a folder pick.
-/// A single cleanup task builds the index and drains completed writes; other
-/// tasks only enqueue names, so neither scans nor deletions overlap.
+/// Shared by all writes to one directory while that folder is open. One
+/// task at a time (`running`) builds the index and deletes old versions.
+/// Other writers only enqueue names, so scans and deletes never overlap.
 #[derive(Default)]
 pub(crate) struct Cleanup {
     running: bool,
@@ -44,33 +29,20 @@ pub(crate) struct Cleanup {
     pending: VecDeque<String>,
 }
 
-/// The metadata a cache lookup keys on: a `File`'s size and last-modified
-/// time, the browser's equivalent of native's `fs::metadata`. Obtained from
-/// `FileSystemFileHandle::get_file()`, which resolves the file object without
-/// reading a single byte of its contents.
+/// Cache key from a `File`'s size and modified time. `last_modified` is
+/// already in milliseconds, the unit `thumbnail::cache_key` expects.
 pub(crate) fn key_for(file: &web_sys::File) -> u64 {
-    // `last_modified` is milliseconds since the epoch, which is exactly what
-    // `thumbnail::cache_key` hashes — native truncates its own nanosecond
-    // mtime to match. See that function's doc comment on why.
     crate::thumbnail::cache_key(file.last_modified() as u64, file.size() as u64)
 }
 
-/// The cache entry name for the photo `filename` at `key` — `thumbnail.rs`'s
-/// naming, lossily converted, the same way `web_catalog_fs::xmp_name` handles
-/// sidecar names.
 pub(crate) fn entry_name(filename: &OsStr, key: u64) -> String {
     crate::thumbnail::cache_name(filename, key)
         .to_string_lossy()
         .into_owned()
 }
 
-/// Read `root/.lightphotos/<entry_name>` if it exists. `None` covers both a
-/// missing `.lightphotos` and a missing entry within it — a cache miss is not
-/// an error, same as native's "no file, decode the source".
-///
-/// Errors are swallowed to `None` deliberately: every failure mode here
-/// (permission lost, corrupt entry, quota) has the same correct response,
-/// which is to decode the source instead.
+/// Read `root/.lightphotos/<name>`. Every failure returns `None`, because
+/// the right response to any of them is to decode the source instead.
 pub(crate) async fn load(root: &FileSystemDirectoryHandle, name: &str) -> Option<Vec<u8>> {
     let dir = sidecar_dir(root, false).await.ok()??;
     let handle: FileSystemFileHandle = match JsFuture::from(dir.get_file_handle(name)).await {
@@ -80,13 +52,10 @@ pub(crate) async fn load(root: &FileSystemDirectoryHandle, name: &str) -> Option
     crate::web_fs::read_bytes(&handle).await.ok()
 }
 
-/// Write `bytes` to `root/.lightphotos/<name>`, creating `.lightphotos` if
-/// this is the folder's first entry — the same lazy creation native does, so
-/// browsing a folder without ever filling the grid leaves no trace.
-///
-/// `FileSystemWritableFileStream::close()` swaps the file in atomically on
-/// supporting browsers, which is the same guarantee native gets from its
-/// explicit temp-file-plus-rename.
+/// Write `bytes` to `root/.lightphotos/<name>`, then delete older cache
+/// versions of the same photo. Creates `.lightphotos` only on the first
+/// write. The write is atomic because the stream swaps the file in on
+/// `close()`.
 pub(crate) async fn store(
     root: &FileSystemDirectoryHandle,
     name: &str,
@@ -126,9 +95,9 @@ pub(crate) async fn store(
     Ok(())
 }
 
-/// Only prune after close succeeds: a failed replacement must leave the old
-/// cache intact. The stored name carries the metadata key obtained at lookup,
-/// so cleanup does not need another source-file metadata read.
+/// Call only after the new entry's write succeeded, so a failed write keeps
+/// the old entry. The key is parsed from `stored_name`, so this needs no
+/// extra metadata read of the source file.
 async fn remove_previous_versions(
     dir: &FileSystemDirectoryHandle,
     stored_name: &str,
@@ -180,8 +149,8 @@ async fn remove_previous_versions(
     cleanup.borrow_mut().running = false;
 }
 
-/// Enumeration is best-effort, just like eviction. Entries missed because of
-/// a browser error or external writes can be collected on the next folder open.
+/// Best-effort. Entries missed after a browser error are collected by the
+/// sweep on the next folder open.
 async fn index_versions(dir: &FileSystemDirectoryHandle) -> HashMap<OsString, HashSet<String>> {
     let mut versions: HashMap<OsString, HashSet<String>> = HashMap::new();
     let iter = dir.values();
@@ -211,33 +180,22 @@ async fn index_versions(dir: &FileSystemDirectoryHandle) -> HashMap<OsString, Ha
     versions
 }
 
-/// Delete entries whose photo is no longer in `live` or whose metadata key
-/// no longer matches — the browser half of `thumbnail::sweep_orphans`, run
-/// once when a folder opens.
+/// Run once when a folder opens. Deletes entries whose photo is not in
+/// `live` or whose key no longer matches the photo's size and mtime. Costs
+/// one `get_file()` per cached photo. If that fails, the photo's entries
+/// stay for a later sweep. A failed delete leaves the file.
 ///
-/// `live` maps each photo's filename to its already-resolved
-/// `FileSystemFileHandle`: the caller has the handles from the folder listing,
-/// and resolving them again here would double the File System Access
-/// round-trips this makes.
-/// What remains is one `get_file()` per *cached* photo, which resolves size
-/// and mtime without touching contents — enough to spot a photo edited or
-/// replaced outside the browser, even one never scrolled into view this visit.
-/// Metadata failures leave that photo's entries intact for a later sweep.
-///
-/// `reads` is the shared `MAX_CONCURRENT_READS` counter (`app/web.rs`). This
-/// runs one `get_file()` at a time and charges the slot only for its duration,
-/// so it costs the grid at most one concurrent read while it works, rather
-/// than racing it unaccounted — the exact pressure that budget exists to keep
-/// off Chrome's `NotReadableError`.
-///
-/// Best-effort throughout: a failed delete just leaves the file.
+/// `reads` is the shared `MAX_CONCURRENT_READS` counter from `app/web.rs`.
+/// Each `get_file()` holds one slot while it runs, so the sweep takes at
+/// most one read from the grid. Too many concurrent reads make Chrome throw
+/// `NotReadableError`.
 pub(crate) async fn sweep_orphans(
     root: &FileSystemDirectoryHandle,
     live: &HashMap<OsString, FileSystemFileHandle>,
     reads: Rc<Cell<u32>>,
 ) {
     let Ok(Some(dir)) = sidecar_dir(root, false).await else {
-        return; // no .lightphotos yet — nothing was ever cached here
+        return;
     };
 
     let mut doomed: Vec<String> = Vec::new();
@@ -262,8 +220,7 @@ pub(crate) async fn sweep_orphans(
             continue;
         };
         let name = child.name();
-        // Anything `parse_cache_name` rejects is not ours — sidecars above
-        // all — and is left alone.
+        // Skip sidecars and anything else that is not a cache entry.
         let Some((photo, key)) = crate::thumbnail::parse_cache_name(OsStr::new(&name)) else {
             continue;
         };

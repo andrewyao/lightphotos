@@ -1,22 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Perceptual hash (dHash) for duplicate-photo grouping.
-//!
-//! Unlike `sharpness.rs`'s variance-of-Laplacian (a focus metric), dHash is a
-//! similarity fingerprint: images that look alike hash to nearby bit patterns
-//! regardless of resolution or minor recompression. It reduces an image to a
-//! 9×8 grayscale grid (via `image_ops::resize_luma`, shared with the
-//! sharpness metric) and encodes each row's left-to-right brightness trend
-//! (8 comparisons/row × 8 rows = 64 bits) — a difference hash, robust to
-//! uniform brightness/contrast shifts since it only looks at relative
-//! neighbor comparisons, not absolute pixel values.
+//! Difference hash (dHash) for finding duplicate photos. The image shrinks to a
+//! 9x8 gray grid, and each bit records whether a pixel is darker than its right
+//! neighbor. Similar images get hashes a few bits apart, regardless of size or
+//! uniform brightness changes.
 
 const HASH_W: usize = 9;
 const HASH_H: usize = 8;
 
-/// 64-bit difference hash of RGBA8 pixels (`width`×`height`, row-major).
-/// Returns `0` for empty/degenerate input or a short buffer (matches
-/// `sharpness::sharpness`'s degenerate-input convention).
+/// 64-bit difference hash of row-major RGBA8 pixels. `0` for empty input or a
+/// short buffer.
 pub fn dhash(rgba: &[u8], width: u32, height: u32) -> u64 {
     if width == 0 || height == 0 || rgba.len() < (width as usize * height as usize * 4) {
         return 0;
@@ -37,7 +30,7 @@ pub fn dhash(rgba: &[u8], width: u32, height: u32) -> u64 {
     hash
 }
 
-/// Hamming distance (number of differing bits) between two hashes.
+/// Number of differing bits.
 pub fn hamming(a: u64, b: u64) -> u32 {
     (a ^ b).count_ones()
 }
@@ -89,7 +82,7 @@ mod tests {
     #[test]
     fn degenerate_input_is_zero_hash() {
         assert_eq!(dhash(&[], 0, 0), 0);
-        assert_eq!(dhash(&[0, 0, 0, 255], 10, 10), 0); // buffer too short
+        assert_eq!(dhash(&[0, 0, 0, 255], 10, 10), 0);
     }
 
     #[test]
@@ -101,8 +94,6 @@ mod tests {
 
     #[test]
     fn reversed_gradient_is_far_from_original() {
-        // Every left<right comparison in the original flips to left>right
-        // in the mirrored version, so nearly every bit differs.
         let (w, h) = (32, 32);
         let fwd = horizontal_gradient(w, h);
         let rev = reversed_gradient(w, h);
@@ -115,9 +106,8 @@ mod tests {
 
     #[test]
     fn solid_images_of_any_brightness_hash_the_same() {
-        // dHash only encodes relative neighbor trends, so flat images (no
-        // gradient at all) collapse to the same all-zero hash regardless of
-        // absolute brightness — an intentional/expected limitation, not a bug.
+        // Known limitation: dHash only sees neighbor differences, so every flat
+        // image hashes to 0.
         let (w, h) = (16, 16);
         let black = solid(w, h, 0);
         let white = solid(w, h, 255);

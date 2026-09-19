@@ -4,8 +4,6 @@ use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::path::PathBuf;
-// Instant comes from `super::*` (app/mod.rs re-exports web_time::Instant,
-// not std::time::Instant — see loader.rs's launched_at() doc comment).
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::export::ExportJob;
@@ -14,10 +12,8 @@ use crate::export::ExportOutcome;
 use crate::paths;
 
 impl App {
-    // ---- Export ----
-
-    /// Export the selected image to a baked JPG (crop/rotation/develop applied)
-    /// in the folder's `Exports/` subfolder. Runs in the background.
+    /// Export the selected image as a JPG with all edits applied, into the
+    /// folder's `Exports/` subfolder. Runs in the background.
     pub(super) fn export_selected(&mut self) {
         match self.selected_path() {
             Some(path) => self.start_export(vec![path]),
@@ -28,19 +24,13 @@ impl App {
         }
     }
 
-    /// Export every selected photo to a baked JPG in the folder's `Exports/`
-    /// subfolder, in the background.
     pub(super) fn export_selection(&mut self) {
         self.start_export(self.selected_paths());
     }
 
-    /// wasm32 export: the same `bake_jpeg` pipeline native runs, on the Web
-    /// Worker pool (`JobKind::Export`), with the JPEG written back through a
-    /// File System Access writable stream (`web_export_fs::WebFs`). Source
-    /// reads and the collision-free target scan are async, so the whole batch
-    /// setup runs in one `spawn_local`; `main.rs`'s frame loop drains
-    /// `poll_exports` and drives each write. `on_export_outcomes` (shared with
-    /// native) folds results into the progress toast.
+    /// Web export. Runs the native `bake_jpeg` pipeline on the Web Worker pool
+    /// and writes each JPEG through the File System Access API. Reading sources
+    /// and listing `Exports/` are async, so the batch setup runs in `spawn_local`.
     #[cfg(target_arch = "wasm32")]
     pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
         use std::collections::HashSet;
@@ -50,9 +40,7 @@ impl App {
             self.request_redraw();
             return;
         }
-        // Same three rejections as the native arm: one batch at a time, and
-        // never before the catalog's sidecar reconciliation has populated the
-        // edit mirrors (`edits`/`touchups`/`rotations`) this reads.
+        // Same guards as the native `start_export`.
         if self.export_progress.is_some() {
             self.set_status("Export already in progress\u{2026}".into());
             self.request_redraw();
@@ -73,8 +61,7 @@ impl App {
         let dest_dir = folder.join(crate::export::EXPORTS_DIR);
         let output_folder = folder_handle.clone();
 
-        // Gather + serialize each photo's edits up front (cheap, on the main
-        // thread) — the worker deserializes them for `bake_jpeg`.
+        // Workers receive each photo's edits as JSON.
         let jobs: Vec<(PathBuf, bool, String, String, u8)> = paths
             .iter()
             .map(|src| {
@@ -121,11 +108,9 @@ impl App {
             };
             let mut taken: HashSet<String> = HashSet::new();
             for (src, is_raw, adj_json, touchups_json, rot) in jobs {
-                // Capacity is based on ready workers and can change while
-                // replacements start or fail. Allow one submission when it
-                // is currently zero: pump() can then either hold it until a
-                // worker becomes ready or fail it immediately when no worker
-                // can be created, giving the batch a terminal outcome.
+                // Capacity counts ready workers and can drop to zero while
+                // workers restart. Still allow one job in flight then, so the
+                // pool either runs it later or fails it and the batch finishes.
                 loop {
                     let in_flight = pool.export_in_flight();
                     let capacity = pool.export_capacity();
@@ -173,8 +158,7 @@ impl App {
     }
 
     /// Queue `paths` for background export into `<current folder>/Exports/`.
-    /// Returns immediately: the heavy decode/bake/encode runs on the exporter's
-    /// worker pool, and `on_export_outcomes` reports progress as jobs finish.
+    /// Returns at once; `on_export_outcomes` reports progress.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
@@ -182,23 +166,15 @@ impl App {
             self.request_redraw();
             return;
         }
-        // One export batch at a time. A second batch launched before the first's
-        // files land on disk would re-resolve the same `Exports/stem.jpg` targets
-        // (both `.exists()` and the per-call `taken` set see nothing yet) and two
-        // workers would race to write the same file — and it would clobber the
-        // in-flight progress. Reject the overlap instead.
+        // One batch at a time. A second batch would pick the same file names
+        // before the first batch's files exist on disk, and overwrite them.
         if self.export_progress.is_some() {
             self.set_status("Export already in progress\u{2026}".into());
             self.request_redraw();
             return;
         }
-        // The catalog's sidecar scan for the active directory runs on a
-        // background thread (`app/catalog.rs::request_catalog_load`) and can
-        // still be in flight right after opening it. `adj`/`touchups` below
-        // read the `self.edits`/`self.touchups` mirrors, which only get
-        // populated once that load reconciles — starting an export before
-        // then would silently bake with missing edits rather than fail
-        // loudly, so refuse instead.
+        // The edit maps read below fill in only after the background catalog
+        // load finishes. Exporting earlier would silently drop edits.
         if self.catalog_load_pending.is_some() {
             self.set_status("Export: catalog still loading, try again in a moment\u{2026}".into());
             self.request_redraw();
@@ -208,8 +184,6 @@ impl App {
             return;
         };
 
-        // Exports live under the current folder (the one whose images are
-        // shown), so they stay together and never clutter the RAW folder.
         let base = self
             .folder_sel
             .clone()
@@ -224,20 +198,12 @@ impl App {
             return;
         }
 
-        // Resolve every destination up front (sequential, so the `taken` set
-        // dedupes same-stem sources), gather each photo's edits, and hand off a
-        // self-contained job. No decode happens here — only cheap bookkeeping.
+        // Pick destinations one at a time so `taken` keeps same-stem sources apart.
         let total = paths.len();
         let mut taken: HashSet<PathBuf> = HashSet::new();
         for src in paths {
             let dest = paths::jpg_export_target(&src, &exports_dir, &taken);
             taken.insert(dest.clone());
-            // Read from the in-memory mirrors, same as `rot` below, rather
-            // than `Catalog` directly — consistent with how rotation was
-            // already sourced. The `catalog_load_pending` check above is
-            // what actually guarantees these are populated by the time we
-            // get here; reading the mirrors alone would not (they're filled
-            // by the same background reconciliation `Catalog` itself is).
             let adj = self.edits.get(&src).copied().unwrap_or_default();
             let touchups = self.touchups.get(&src).cloned().unwrap_or_default();
             let rot = self.rotations.get(&src).copied().unwrap_or(0);
@@ -260,9 +226,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Fold a batch of finished exports into the progress toast. When the last
-    /// job lands, replace the live counter with a final summary and clear the
-    /// in-flight state (which stops the keep-awake redraw loop in `main.rs`).
+    /// Add finished exports to the progress toast. After the last one, show a
+    /// summary and clear `export_progress`.
     pub(crate) fn on_export_outcomes(&mut self, outcomes: Vec<ExportOutcome>) {
         let Some(mut prog) = self.export_progress.take() else {
             return;
@@ -284,22 +249,18 @@ impl App {
                 None => format!("Exported {ok} photo(s)"),
                 Some(e) => format!("Exported {ok}/{} \u{2014} last error: {e}", prog.total),
             });
-            // export_progress stays None (taken above) → toast expires normally.
         } else {
             self.set_status(format!("Exporting {}/{}\u{2026}", prog.done, prog.total));
             self.export_progress = Some(prog);
         }
     }
 
-    // ---- Status toast ----
-
     pub(super) fn set_status(&mut self, msg: String) {
         self.status = Some((msg, Instant::now()));
     }
 
-    /// The current status message. While an export is in flight the message is
-    /// held without expiry (a slow single decode must not blank the progress
-    /// toast mid-run); otherwise it fades after a few seconds.
+    /// The current status message. It expires after 3 seconds, except during
+    /// an export, so a slow decode can't blank the progress toast.
     pub(crate) fn status_text(&self) -> Option<&str> {
         if self.export_progress.is_some() {
             return self.status.as_ref().map(|(s, _)| s.as_str());

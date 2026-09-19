@@ -1,38 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! `decode_probe` — RAW decode validation harness (see plan
-//! `native-linux-windows-port-feasibility.md`, Task 6/7/8).
+//! `decode_probe`: a RAW decode test harness. It writes synthetic DNG
+//! fixtures (Linear DNG, Bayer, and DNG with a preview sub-IFD) and checks
+//! rawler's decode against the known pixel values it wrote. Extra CLI paths
+//! get a decode and brightness report for real camera files.
 //!
-//! No real camera RAW file exists on this machine or in this repo, so this
-//! binary also carries a synthetic **Linear DNG** fixture builder
-//! (`write_linear_dng`): a hand-written, valid TIFF/DNG container holding
-//! already-demosaiced 16-bit RGB samples (not a Bayer mosaic). That's
-//! realistic to hand-construct, unlike real sensor RAW data, and it's enough
-//! to exercise DNG container/tag parsing end-to-end — it does *not* validate
-//! real-camera Bayer-CFA demosaic fidelity across makes (CR2/NEF/ARW); that
-//! gap stays open (see the plan's Task 14).
+//! ImageIO cannot decode LinearRaw DNG pixels (see
+//! `linear_dng_pixel_decode_is_blocked_on_this_machine`), so the baseline is
+//! the analytic gradient the fixture was built from, not ImageIO.
 //!
-//! The modules are pulled in by `#[path]` rather than through the crate,
-//! because lightphotos has no lib target — `src/main.rs` is the crate root, so
-//! there is nothing for a second binary to `use`. Re-declaring them here makes
-//! `crate::` resolve the same way it does in the main binary (same pattern as
-//! `face_probe.rs`/`seg_probe.rs`).
-//!
-//! **Task 8 note on the comparison baseline**: the original plan for this
-//! binary compared `rawler`'s decode against `image_decode::decode()` (the
-//! ImageIO pixel-decode path) as a baseline. Task 7 discovered that
-//! `CGImageSourceCreateImageAtIndex` cannot decode ANY DNG with
-//! `PhotometricInterpretation = 34892` (LinearRaw) on this machine — see
-//! `linear_dng_pixel_decode_is_blocked_on_this_machine` below — so there is no
-//! ImageIO baseline available for this fixture. Per controller ruling, the
-//! comparison baseline here is instead the **known analytic ground truth**
-//! used to construct the fixture (the horizontal gradient
-//! `R=G=B=(x * 65535 / width) as u16` written by `write_linear_dng` below),
-//! which `rawler`'s own decode is checked against directly. This is a
-//! stronger check than two-decoders-agree (ground truth vs. one decoder) and
-//! sidesteps the ImageIO gap entirely. `image_decode`/`coregraphics` are still
-//! pulled in for the container-level open check
-//! (`linear_dng_fixture_writes_and_reopens_as_image_source`).
+//! There is no lib target, so modules come in by `#[path]` and `crate::`
+//! resolves as in the main binary.
 
 #![allow(dead_code)]
 
@@ -45,8 +23,7 @@ mod hash;
 mod image_decode;
 #[path = "preview.rs"]
 mod raw_preview;
-// Pulled in for `denoise_linear_rgb_buffer`, which `raw_preview`'s
-// dual-gated (`raw-probe`) `Quality`-tier code now calls.
+// For `denoise_linear_rgb_buffer`, used by `raw_preview`'s `Quality` tier.
 #[path = "../develop.rs"]
 mod develop;
 
@@ -95,11 +72,8 @@ fn main() {
         }
     }
 
-    // Extra files passed on the CLI: decode each with rawler and report
-    // shape/timing. These are the user's own real RAW files — there's no
-    // analytic ground truth to compare against, so this is a decode-succeeds
-    // + timing smoke check only, no assertion (mirrors loader.rs's existing
-    // report_decode/timing_enabled instrumentation pattern in spirit).
+    // Real RAW files from the CLI have no ground truth, so this only reports
+    // decode success, shape, and timing.
     for path in args.into_iter().map(PathBuf::from) {
         let t0 = std::time::Instant::now();
         match decode_via_rawler(&path) {
@@ -115,14 +89,8 @@ fn main() {
             Err(e) => println!("{}: FAILED: {e}", path.display()),
         }
 
-        // Brightness comparison: ImageIO's own decode (what the mac app
-        // actually shows for this file) vs. `raw_preview`'s decode
-        // (what the wasm/non-mac path shows for the same file) — real
-        // evidence for the "still way too dark" report, not another guess
-        // at a formula. `raw-probe`'s dual cfg gate on both `image_decode`'s
-        // `decode_raw_via_rawler`/mac `decode` and `raw_preview`'s
-        // `decode_raw_fast_from_bytes` is exactly what makes this
-        // side-by-side possible from one mac dev binary.
+        // Brightness of ImageIO's decode (what the mac app shows) against
+        // `raw_preview`'s `Fast` decode (what the browser shows).
         #[cfg(target_os = "macos")]
         match (image_decode::decode(&path, 1600), std::fs::read(&path)) {
             (Ok(imageio), Ok(bytes)) => match raw_preview::decode_raw_fast_from_bytes(&bytes, 1600)
@@ -146,15 +114,8 @@ fn main() {
             (_, Err(e)) => println!("  read FAILED: {e}"),
         }
 
-        // Fourth comparison point: the tiny EXIF thumbnail (IFD1
-        // JPEGInterchangeFormat) `thumbnail::embedded_preview_from_bytes`
-        // extracts — a *camera-rendered* JPEG, no rawler/gain/gamma math of
-        // ours involved at all. This is what the wasm Loupe placeholder and
-        // Grid thumbnails actually show at default thumb sizes (~160-320px
-        // is common for this tag; `raw_preview`'s own quarter-res
-        // decode only kicks in above that). If *this* is dark, it's the
-        // camera's own embedded thumbnail rendering, not anything in this
-        // codebase's RAW pipeline.
+        // Brightness of the camera-rendered EXIF thumbnail. If this is dark
+        // too, the darkness comes from the camera, not our RAW pipeline.
         #[cfg(target_os = "macos")]
         match (image_decode::decode(&path, 1600), std::fs::read(&path)) {
             (Ok(imageio), Ok(bytes)) => match embedded_preview_diag(&bytes, 1600) {
@@ -174,15 +135,8 @@ fn main() {
             (_, Err(e)) => println!("  read FAILED (embedded-preview check): {e}"),
         }
 
-        // Third comparison point: does the reference implementation's actual
-        // algorithm (verified against its real source, not inferred) look
-        // dark on this same file? Not a guess — this replicates its exact
-        // published logic (inflate whitelevel to u32::MAX before
-        // develop_intermediate so nothing internally clips, rescale by the
-        // real black/white levels after, real compress-toward-min-channel
-        // highlight compression, same real sRGB gamma + brightness/contrast
-        // boost this repo already ported) using vanilla `rawler` — none of
-        // this needs their forked demosaic-mode enum.
+        // Brightness of a reimplementation of the reference app's develop
+        // pipeline, using vanilla rawler.
         #[cfg(target_os = "macos")]
         match reference_mimic_avg_luma(&path) {
             Ok((luma, (r, g, b))) => {
@@ -193,13 +147,9 @@ fn main() {
     }
 }
 
-/// Standalone diagnostic copy of `thumbnail.rs`'s (non-mac-gated)
-/// `embedded_preview_from_bytes` — same logic verbatim, duplicated here
-/// rather than pulled in via `#[path]` so this probe doesn't drag
-/// `thumbnail.rs`'s mac-vs-non-mac cfg split and its `crate::paths`
-/// dependency into a mac dev binary just to answer one brightness question.
-/// Extracts the file's tiny EXIF IFD1 thumbnail (`JPEGInterchangeFormat`) —
-/// a camera-rendered JPEG, no rawler/gain/gamma math of ours involved.
+/// Copy of `thumbnail.rs`'s `embedded_preview_from_bytes`: decodes the EXIF
+/// IFD1 thumbnail JPEG. Copied so this binary avoids `thumbnail.rs`'s cfg
+/// split and its `crate::paths` dependency.
 #[cfg(target_os = "macos")]
 fn embedded_preview_diag(bytes: &[u8], max_px: u32) -> Option<image_decode::DecodedImage> {
     let mut reader = std::io::Cursor::new(bytes);
@@ -254,14 +204,9 @@ fn embedded_preview_diag(bytes: &[u8], max_px: u32) -> Option<image_decode::Deco
     ))
 }
 
-/// Standalone diagnostic copy of `thumbnail.rs`'s (non-mac-gated)
-/// `rawler_full_image_from_bytes` — same logic verbatim, duplicated here for
-/// the same reason as `embedded_preview_diag` above (avoids pulling
-/// `thumbnail.rs`'s mac-vs-non-mac cfg split into this binary), but not
-/// mac-only: unlike `embedded_preview_diag` (a one-off diagnostic question),
-/// this backs a real regression test (`rawler_full_image_returns_preview_subifd`
-/// below) that needs to run on every `decode_probe` target, mac dev machines
-/// included.
+/// Copy of `thumbnail.rs`'s `rawler_full_image_from_bytes`, for the same
+/// reason as `embedded_preview_diag`. Not mac-only because regression tests
+/// below use it.
 fn rawler_full_image_diag(bytes: &[u8], max_px: u32) -> Option<image_decode::DecodedImage> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
     let params = rawler::decoders::RawDecodeParams::default();
@@ -306,12 +251,9 @@ fn rawler_full_image_diag(bytes: &[u8], max_px: u32) -> Option<image_decode::Dec
     ))
 }
 
-/// Replicates the reference implementation's actual `develop_internal`
-/// (read in full from its source, not guessed) against vanilla `rawler`
-/// 0.7.2. `highlight_compression = 4.0` is a reasonable default guess for
-/// its own UI slider default (not confirmed from source — this only
-/// affects near-clipped highlights, not the overall/midtone brightness
-/// comparison this function exists to answer).
+/// Mean brightness from a reimplementation of the reference app's
+/// `develop_internal` on vanilla rawler 0.7.2. `highlight_compression = 4.0`
+/// is a guess at its default; it only affects near-clipped highlights.
 #[cfg(target_os = "macos")]
 fn reference_mimic_avg_luma(path: &Path) -> Result<(f64, (f64, f64, f64)), String> {
     use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
@@ -391,9 +333,7 @@ fn reference_mimic_avg_luma(path: &Path) -> Result<(f64, (f64, f64, f64)), Strin
     ))
 }
 
-/// Mean of R+G+B (not alpha) across every pixel, 0..=255 — a single scalar
-/// "how bright overall" number, coarse but enough to quantify "way too
-/// dark" against the ImageIO baseline.
+/// Mean of all R, G, and B values, 0..=255.
 #[cfg(target_os = "macos")]
 fn avg_luma(img: &image_decode::DecodedImage) -> f64 {
     let mut sum: u64 = 0;
@@ -405,9 +345,7 @@ fn avg_luma(img: &image_decode::DecodedImage) -> f64 {
     sum as f64 / n.max(1) as f64
 }
 
-/// Per-channel average — `avg_luma` alone is blind to a color cast (a
-/// boosted red / crushed blue can average out to a similar overall number
-/// as neutral).
+/// Per-channel mean. Catches color casts that `avg_luma` averages away.
 #[cfg(target_os = "macos")]
 fn avg_rgb(img: &image_decode::DecodedImage) -> (f64, f64, f64) {
     let (mut r, mut g, mut b) = (0u64, 0u64, 0u64);
@@ -422,63 +360,17 @@ fn avg_rgb(img: &image_decode::DecodedImage) -> (f64, f64, f64) {
     (r as f64 / n, g as f64 / n, b as f64 / n)
 }
 
-/// Decode a RAW/DNG file via `rawler`'s top-level convenience entry point.
-///
-/// Confirmed against the real `rawler` 0.7.2 source (not guessed): reading
-/// `~/.cargo/registry/src/index.crates.io-*/rawler-0.7.2/src/lib.rs` shows
-/// `pub fn decode_file<P: AsRef<Path>>(path: P) -> Result<RawImage>`, which
-/// delegates to `RawLoader::decode_file` -> `RawLoader::decode` ->
-/// `RawLoader::get_decoder`. `get_decoder` (`src/decoders/mod.rs`) sniffs the
-/// TIFF and routes to `DngDecoder` whenever the file carries a `DNGVersion`
-/// tag (0xC612) — which `write_linear_dng` writes — regardless of Make/Model
-/// being present (both default to an empty string when absent, per
-/// `DngDecoder::make_camera`, not an error).
-///
-/// `DngDecoder::raw_image` (`src/decoders/dng.rs`) explicitly branches on
-/// `PhotometricInterpretation`, with `34892 => RawPhotometricInterpretation::
-/// LinearRaw` as a first-class case (not merely tolerated) — confirming
-/// `rawler` *does* support already-demosaiced Linear DNG, not just
-/// Bayer-mosaiced camera RAW. It then reads pixels via
-/// `plain_image_from_ifd`, which for our fixture's `Compression = 1`
-/// (uncompressed) + strip-based layout takes the
-/// `decode_strips::<u16>(.., PackedDecompressor::new(bits, endian))` path — a
-/// direct unpack of the stored 16-bit little-endian samples, with no
-/// resampling or color-matrix math applied before the samples land in
-/// `RawImage.data`.
-///
-/// Returns rawler's native `RawImage` rather than adapting it into
-/// `image_decode::DecodedImage`: the ground-truth comparison below works
-/// directly against rawler's raw 16-bit interleaved samples, which is a more
-/// direct (and more exacting) check than routing through an 8-bit RGBA
-/// intermediate would be.
-///
-/// Task 10: delegates to `image_decode::decode_raw_via_rawler` (the exact
-/// same `rawler::decode_file` call site `decode_raw_nonmac` uses) instead of
-/// calling `rawler::decode_file` a second time here — see that function's doc
-/// comment for why it's gated to also compile under `feature = "raw-probe"`
-/// on mac, which is what makes this delegation possible in this dev build.
+/// Decodes with rawler, returning its native `RawImage` so the ground-truth
+/// check sees the raw 16-bit samples. For the fixture's uncompressed LinearRaw
+/// strips, rawler unpacks samples directly with no resampling or color math.
 fn decode_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
     image_decode::decode_raw_via_rawler(path)
 }
 
-/// Runs the exact rawler API calls `image_decode::decode_raw_nonmac` (Task
-/// 10) uses after `decode_raw_via_rawler` — `RawDevelop::default()
-/// .develop_intermediate(&raw)` then `.to_dynamic_image()` — against the
-/// synthetic Linear DNG fixture and checks the result isn't degenerate.
-///
-/// This is deliberately a *different*, weaker check than
-/// `compare_against_gradient_ground_truth` above: the develop pipeline
-/// rescales, calibrates against `ColorMatrix1`, and applies sRGB gamma, so the
-/// output pixel values no longer equal the analytic gradient formula
-/// (correctly — that transform is the point of developing a RAW file). What
-/// this *does* prove, for real, on this machine: the develop call chain
-/// `decode_raw_nonmac` depends on does not panic or error on real
-/// rawler-decoded `RawImage` data, and produces an image of the expected
-/// dimensions. `decode_raw_nonmac` itself is `#[cfg(not(target_os =
-/// "macos"))]` and so cannot be called directly from this mac binary — this
-/// is the closest real exercise of its logic available here (see the Task 10
-/// report for why: it also applies EXIF-orientation swapping and a resize
-/// that this fixture's identity orientation and small size don't exercise).
+/// Runs `RawDevelop::default().develop_intermediate` and `to_dynamic_image`,
+/// the calls `decode_raw_nonmac` makes, on the fixture. Develop changes the
+/// pixel values, so this checks only for success, matching dimensions, and a
+/// non-uniform result.
 fn develop_smoke_check(path: &Path, width: u32, height: u32) -> Result<(), String> {
     let raw = decode_via_rawler(path)?;
     let developed = rawler::imgop::develop::RawDevelop::default()
@@ -496,9 +388,7 @@ fn develop_smoke_check(path: &Path, width: u32, height: u32) -> Result<(), Strin
         ));
     }
 
-    // Sanity: a real image, not a degenerate all-zero/uniform buffer (which
-    // would indicate the pipeline silently produced garbage rather than
-    // actually processing the gradient).
+    // A uniform result means the gradient was not processed.
     let rgba = dynamic.into_rgba8();
     let first = rgba.get_pixel(0, 0);
     let last = rgba.get_pixel(width - 1, 0);
@@ -512,25 +402,10 @@ fn develop_smoke_check(path: &Path, width: u32, height: u32) -> Result<(), Strin
     Ok(())
 }
 
-/// Compares a `rawler`-decoded `RawImage` against the exact analytic formula
-/// `write_linear_dng` used to generate its pixel data: a horizontal gradient,
-/// `R=G=B=(x * 65535 / width) as u16` per pixel, RGB16 interleaved (mirrored
-/// exactly from that function's pixel-writing loop above, not a
-/// restatement — see `write_linear_dng`'s "Pixel data" block).
-///
-/// Tolerance is **zero** — not a "close enough" threshold. This fixture's
-/// pixel data is uncompressed 16-bit little-endian samples, and the decode
-/// path rawler takes for that case (`plain_image_from_ifd` ->
-/// `decode_strips` with a `PackedDecompressor`, verified above) is a direct
-/// byte unpack with no resampling, color conversion, or rounding applied
-/// before `RawImage::new_with_data` stores the samples (also verified by
-/// reading that constructor: it only computes geometry/black-area metadata,
-/// never touches sample values). So unlike an ImageIO RGBA8 round-trip —
-/// which would need a nonzero "close enough" tolerance to absorb an 8-bit
-/// quantization + alpha-premultiply step — any deviation here reflects an
-/// actual decode bug (wrong stride, byte order, or sample offset), not
-/// floating-point or interpolation noise. A single mismatched sample fails
-/// the check.
+/// Checks decoded samples against the gradient `write_linear_dng` wrote,
+/// `R=G=B=(x * 65535 / width) as u16`, with zero tolerance. The decode is a
+/// plain byte unpack, so any difference is a real bug such as a wrong stride,
+/// byte order, or offset.
 fn compare_against_gradient_ground_truth(
     raw: &rawler::RawImage,
     width: u32,
@@ -603,49 +478,25 @@ fn compare_against_gradient_ground_truth(
     Ok(report)
 }
 
-/// Writes a minimal, valid Linear DNG: a little-endian TIFF with one IFD
-/// carrying the DNG tags a reader needs to treat this as linear (non-mosaiced)
-/// raw data, plus `width * height` RGB16 samples (test pattern: a horizontal
-/// gradient, so a fidelity comparison has something non-uniform to diff).
+/// Writes a minimal Linear DNG: one little-endian TIFF IFD with
+/// PhotometricInterpretation 34892 (LinearRaw) and `width * height` RGB16
+/// samples forming a horizontal gradient.
 ///
-/// Tags written (ascending tag-ID order, as TIFF requires for the IFD):
-///   0x00FE NewSubfileType = 0 (marks this IFD as the primary full-res image;
-///     ImageIO's RAW/DNG reader refused to decode without it — see the
-///     fixture test's TDD notes)
-///   0x0100 ImageWidth, 0x0101 ImageLength
-///   0x0102 BitsPerSample = [16,16,16]
-///   0x0103 Compression = 1 (none)
-///   0x0106 PhotometricInterpretation = 34892 (DNG LinearRaw)
-///   0x0111 StripOffsets
-///   0x0115 SamplesPerPixel = 3
-///   0x0116 RowsPerStrip = height (single strip)
-///   0x0117 StripByteCounts = width * height * 3 * 2
-///   0x011C PlanarConfiguration = 1 (chunky/interleaved)
-///   0xC612 DNGVersion = [1,4,0,0]
-///   0xC613 DNGBackwardVersion = [1,1,0,0]
-///   0xC621 ColorMatrix1 = identity 3x3 (SRATIONAL) — readers need *a* matrix
-///     present even though this fixture doesn't care about color accuracy.
-///   0xC628 AsShotNeutral = 3 RATIONALs — *only* via
-///     `write_linear_dng_with_wb` below. Omitted by this entry point so the
-///     long-standing fixture stays byte-identical for the tests built around
-///     it; supplied by the `Fast`-tier linear golden-hash test, which needs
-///     real (non-NaN) `wb_coeffs` to exercise any pixel math at all.
+/// Tags, in the ascending order TIFF requires: NewSubfileType = 0 (ImageIO
+/// rejects the file without it), ImageWidth, ImageLength, BitsPerSample,
+/// Compression = 1, PhotometricInterpretation, StripOffsets, SamplesPerPixel,
+/// RowsPerStrip, StripByteCounts, PlanarConfiguration = 1, DNGVersion,
+/// DNGBackwardVersion, and an identity ColorMatrix1 (readers need one).
+/// No AsShotNeutral, so rawler's `wb_coeffs` are all NaN.
 ///
-/// Byte layout: 8-byte header, then the IFD, then the out-of-line value
-/// blocks the IFD entries can't inline (`BitsPerSample`'s 3 SHORTs,
-/// `ColorMatrix1`'s 9 SRATIONALs, and `AsShotNeutral`'s 3 RATIONALs when
-/// present), then the pixel data. Every out-of-line offset in this fixed tag
-/// set happens to land on an even byte already, but the code still
-/// checks/pads defensively rather than assuming that.
+/// Layout: 8-byte header, IFD, out-of-line values, pixel data.
 fn write_linear_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()> {
     write_linear_dng_with_wb(path, width, height, None)
 }
 
-/// `write_linear_dng`, plus an optional `AsShotNeutral` tag written as 3
-/// RATIONALs (`(numerator, denominator)` per channel, the same encoding
-/// `write_bayer_dng` uses). rawler's `DngDecoder::get_wb` turns that into
-/// `wb_coeffs = [1/n0, 1/n1, 1/n2, NaN]`; with the tag absent it returns
-/// `[NaN; 4]` instead.
+/// [`write_linear_dng`] with an optional `AsShotNeutral` of three
+/// `(numerator, denominator)` rationals. rawler turns it into
+/// `wb_coeffs = [1/n0, 1/n1, 1/n2, NaN]`.
 fn write_linear_dng_with_wb(
     path: &Path,
     width: u32,
@@ -676,19 +527,16 @@ fn write_linear_dng_with_wb(
         buf.extend_from_slice(&count.to_le_bytes());
         buf.extend_from_slice(&value);
     }
-    /// Pad `buf` to an even length (TIFF requires out-of-line values to start
-    /// on a word boundary).
+    /// TIFF out-of-line values start on a word boundary.
     fn pad_to_even(buf: &mut Vec<u8>) {
         if buf.len() % 2 != 0 {
             buf.push(0);
         }
     }
 
-    // Layout is fixed given this exact tag set, independent of width/height
-    // (every per-image value — ImageWidth, StripByteCounts, etc. — fits
-    // inline in its own 12-byte IFD entry). Compute the out-of-line offsets
-    // up front so the IFD entries that reference them can be written in one
-    // pass, in ascending tag-ID order.
+    // Every per-image value fits inline, so the layout does not depend on
+    // width or height. Compute out-of-line offsets first so the IFD can be
+    // written in one pass.
     let ifd_size = 2 + (entry_count as usize) * 12 + 4;
     let after_ifd = IFD_OFFSET as usize + ifd_size;
 
@@ -720,11 +568,9 @@ fn write_linear_dng_with_wb(
 
     let mut buf: Vec<u8> = Vec::with_capacity(pixel_offset as usize + strip_byte_count as usize);
 
-    // --- 8-byte header ---
     buf.extend_from_slice(&[0x49, 0x49, 0x2A, 0x00]); // "II" + magic 42 (LE)
     buf.extend_from_slice(&IFD_OFFSET.to_le_bytes());
 
-    // --- IFD ---
     buf.extend_from_slice(&entry_count.to_le_bytes());
     push_entry(&mut buf, 254, T_LONG, 1, inline_u32(0)); // NewSubfileType = 0 (primary image)
     push_entry(&mut buf, 256, T_LONG, 1, inline_u32(width)); // ImageWidth
@@ -769,14 +615,14 @@ fn write_linear_dng_with_wb(
         "IFD size drifted from the computed layout"
     );
 
-    // --- Out-of-line: BitsPerSample = [16, 16, 16] ---
+    // Out-of-line: BitsPerSample = [16, 16, 16].
     for _ in 0..3 {
         buf.extend_from_slice(&16u16.to_le_bytes());
     }
     pad_to_even(&mut buf);
     debug_assert_eq!(buf.len() as u32, color_matrix_offset);
 
-    // --- Out-of-line: ColorMatrix1, identity 3x3 SRATIONAL (num, denom) ---
+    // Out-of-line: ColorMatrix1, identity 3x3 SRATIONAL (num, denom).
     const IDENTITY_3X3: [(i32, i32); 9] = [
         (1, 1),
         (0, 1),
@@ -794,7 +640,7 @@ fn write_linear_dng_with_wb(
     }
     pad_to_even(&mut buf);
 
-    // --- Out-of-line: AsShotNeutral, 3 RATIONAL (num, denom) — optional ---
+    // Out-of-line: AsShotNeutral, 3 RATIONAL (num, denom), optional.
     if let Some(neutral) = as_shot_neutral {
         debug_assert_eq!(buf.len() as u32, as_shot_neutral_offset);
         for (num, den) in neutral {
@@ -805,7 +651,7 @@ fn write_linear_dng_with_wb(
     }
     debug_assert_eq!(buf.len() as u32, pixel_offset);
 
-    // --- Pixel data: horizontal gradient test pattern, R=G=B per pixel ---
+    // Pixel data: horizontal gradient test pattern, R=G=B per pixel.
     let w = width.max(1);
     for _y in 0..height {
         for x in 0..width {
@@ -826,21 +672,10 @@ fn write_linear_dng_with_wb(
     Ok(())
 }
 
-/// `write_linear_dng`'s root IFD (same 14-entry shape, no `AsShotNeutral`)
-/// plus one additional `NewSubfileType=1` preview sub-IFD referenced via the
-/// root's `SubIFDs` tag (330) — an uncompressed 8-bit RGB strip, the shape
-/// rawler's `DngDecoder::full_image()`/`dynamic_image_from_ifd`
-/// (`vendor/rawler-0.7.2/src/decoders/{dng,mod}.rs`) reads: it finds the
-/// first `SubIFDs`-referenced sub-IFD with `NewSubfileType == 1` and decodes
-/// it as a plain TIFF strip image, independent of the root/primary image.
-/// Confirmed `SubIFDs` is auto-descended by rawler's TIFF reader by default
-/// (`formats/tiff/{ifd,reader}.rs`'s `wellknown_sub_ifd_tags`/`new_root`), so
-/// no extra `sub_tags` plumbing is needed for this fixture to work.
-///
-/// Solid-color preview pixel data (deterministic, trivial to assert on)
-/// rather than a gradient — this fixture exists to prove the *container
-/// plumbing* (`SubIFDs` -> preview IFD -> strip decode) works, not to
-/// exercise pixel math the way `write_bayer_dng`'s gradient does.
+/// [`write_linear_dng`]'s IFD plus a `SubIFDs` tag pointing at an
+/// uncompressed 8-bit RGB preview IFD with `NewSubfileType = 1`. That is the
+/// shape rawler's `DngDecoder::full_image()` reads. The preview is a solid
+/// color so tests can assert on it easily.
 fn write_dng_with_preview_subifd(
     path: &Path,
     width: u32,
@@ -863,9 +698,8 @@ fn write_dng_with_preview_subifd(
     fn inline_u32(v: u32) -> [u8; 4] {
         v.to_le_bytes()
     }
-    /// Pushes a 12-byte IFD entry, returning the file offset of its 4-byte
-    /// value field so out-of-line offsets (computed only after everything
-    /// that follows is laid out) can be patched back in at the end.
+    /// Pushes a 12-byte IFD entry and returns the offset of its value field,
+    /// so out-of-line offsets can be patched in later.
     fn push_entry(buf: &mut Vec<u8>, tag: u16, typ: u16, count: u32, value: [u8; 4]) -> usize {
         let value_pos = buf.len() + 8;
         buf.extend_from_slice(&tag.to_le_bytes());
@@ -874,8 +708,7 @@ fn write_dng_with_preview_subifd(
         buf.extend_from_slice(&value);
         value_pos
     }
-    /// Pad `buf` to an even length (TIFF requires out-of-line values to start
-    /// on a word boundary).
+    /// TIFF out-of-line values start on a word boundary.
     fn pad_to_even(buf: &mut Vec<u8>) {
         if buf.len() % 2 != 0 {
             buf.push(0);
@@ -884,11 +717,10 @@ fn write_dng_with_preview_subifd(
 
     let mut buf: Vec<u8> = Vec::new();
 
-    // --- 8-byte header ---
     buf.extend_from_slice(&[0x49, 0x49, 0x2A, 0x00]); // "II" + magic 42 (LE)
     buf.extend_from_slice(&8u32.to_le_bytes()); // root IFD at offset 8
 
-    // --- Root IFD: `write_linear_dng`'s 14 entries, plus SubIFDs ---
+    // Root IFD: `write_linear_dng`'s 14 entries, plus SubIFDs.
     const ROOT_ENTRY_COUNT: u16 = 15;
     buf.extend_from_slice(&ROOT_ENTRY_COUNT.to_le_bytes());
     push_entry(&mut buf, 254, T_LONG, 1, inline_u32(0)); // NewSubfileType = 0 (primary)
@@ -919,14 +751,14 @@ fn write_dng_with_preview_subifd(
     let color_matrix_pos = push_entry(&mut buf, 50721, T_SRATIONAL, 9, inline_u32(0)); // ColorMatrix1 (patched)
     buf.extend_from_slice(&0u32.to_le_bytes()); // next IFD offset = none
 
-    // --- Root out-of-line: BitsPerSample = [16, 16, 16] ---
+    // Root out-of-line: BitsPerSample = [16, 16, 16].
     pad_to_even(&mut buf);
     let bits_per_sample_offset = buf.len() as u32;
     for _ in 0..3 {
         buf.extend_from_slice(&16u16.to_le_bytes());
     }
 
-    // --- Root out-of-line: ColorMatrix1, identity 3x3 SRATIONAL (num, denom) ---
+    // Root out-of-line: ColorMatrix1, identity 3x3 SRATIONAL (num, denom).
     pad_to_even(&mut buf);
     let color_matrix_offset = buf.len() as u32;
     const IDENTITY_3X3: [(i32, i32); 9] = [
@@ -945,7 +777,7 @@ fn write_dng_with_preview_subifd(
         buf.extend_from_slice(&den.to_le_bytes());
     }
 
-    // --- Preview sub-IFD (NewSubfileType=1), referenced via root's SubIFDs ---
+    // Preview sub-IFD (NewSubfileType=1), referenced via root's SubIFDs.
     pad_to_even(&mut buf);
     let preview_ifd_offset = buf.len() as u32;
     const PREVIEW_ENTRY_COUNT: u16 = 9;
@@ -968,21 +800,21 @@ fn write_dng_with_preview_subifd(
     ); // StripByteCounts
     buf.extend_from_slice(&0u32.to_le_bytes()); // next IFD offset = none
 
-    // --- Preview out-of-line: BitsPerSample = [8, 8, 8] ---
+    // Preview out-of-line: BitsPerSample = [8, 8, 8].
     pad_to_even(&mut buf);
     let preview_bits_offset = buf.len() as u32;
     for _ in 0..3 {
         buf.extend_from_slice(&8u16.to_le_bytes());
     }
 
-    // --- Preview pixel data: solid color, 1 byte/sample, chunky RGB ---
+    // Preview pixel data: solid color, 1 byte/sample, chunky RGB.
     pad_to_even(&mut buf);
     let preview_pixel_offset = buf.len() as u32;
     for _ in 0..(preview_width * preview_height) {
         buf.extend_from_slice(&preview_rgb);
     }
 
-    // --- Root pixel data: horizontal gradient test pattern, R=G=B, 16-bit ---
+    // Root pixel data: horizontal gradient test pattern, R=G=B, 16-bit.
     pad_to_even(&mut buf);
     let pixel_offset = buf.len() as u32;
     let w = width.max(1);
@@ -996,7 +828,7 @@ fn write_dng_with_preview_subifd(
         }
     }
 
-    // --- Patch back every out-of-line/sub-IFD offset now that all of them are known ---
+    // Patch back every out-of-line/sub-IFD offset now that all of them are known.
     buf[bits_per_sample_pos..bits_per_sample_pos + 4]
         .copy_from_slice(&bits_per_sample_offset.to_le_bytes());
     buf[strip_offsets_pos..strip_offsets_pos + 4].copy_from_slice(&pixel_offset.to_le_bytes());
@@ -1011,27 +843,19 @@ fn write_dng_with_preview_subifd(
     Ok(())
 }
 
-/// Writes a minimal, valid Bayer-CFA DNG: an RGGB mosaic, single 16-bit
-/// sample per pixel, with the DNG tags a real Bayer decode path reads
-/// (`CFAPattern`, black/white levels, `AsShotNeutral` for white balance).
-/// Test pattern: `v = 100 + ((x * 53 + y * 197) % 800)`, deterministic and
-/// non-uniform (unlike a flat value, gives 2x2-bin/PPG demosaic something
-/// real to interpolate/average). `width`/`height` must be even (Bayer 2x2
-/// tiling).
+/// Writes a minimal RGGB Bayer DNG with 16-bit samples, black and white
+/// levels, and a neutral `AsShotNeutral`. Pixels follow
+/// `v = 100 + ((x * 53 + y * 197) % 800)` so demosaic has real variation.
+/// `width` and `height` must be even.
 ///
-/// Confirmed against the real `rawler` 0.7.2 source: `DngDecoder::get_cfa`
-/// (`src/decoders/dng.rs`) reads only `TiffCommonTag::CFAPattern`
-/// (0x828E) — `CFARepeatPatternDim` isn't consulted for the `CFA` object,
-/// so it's omitted here. `CFAColor` numeric codes (`src/cfa.rs`) are
-/// RED=0, GREEN=1, BLUE=2 — `CFAPattern = [0,1,1,2]` is RGGB.
+/// rawler reads only `CFAPattern` for the CFA, so `CFARepeatPatternDim` is
+/// omitted. Color codes are RED=0, GREEN=1, BLUE=2, so `[0,1,1,2]` is RGGB.
 fn write_bayer_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()> {
     write_bayer_dng_with_cfa(path, width, height, [0, 1, 1, 2])
 }
 
-/// `write_bayer_dng` with an explicit 4-byte `CFAPattern` (color codes, see
-/// that function's doc comment), so a test can build a fixture whose CFA is
-/// *not* one of the four RGGB-family patterns rawler's `Superpixel3Channel`
-/// can demosaic.
+/// [`write_bayer_dng`] with an explicit `CFAPattern`, for fixtures outside
+/// the four RGGB-family patterns.
 fn write_bayer_dng_with_cfa(
     path: &Path,
     width: u32,
@@ -1193,20 +1017,9 @@ fn write_bayer_dng_with_cfa(
 mod tests {
     use super::*;
 
-    /// Writes the 32x24 fixture and confirms its *byte layout* is internally
-    /// self-consistent: every out-of-line offset the writer computed actually
-    /// lands where the IFD entries say it does, sizes match, and the file
-    /// re-opens as a `CGImageSource` at all. This is deliberately not a full
-    /// `image_decode::decode()` pixel round-trip — see
-    /// `linear_dng_pixel_decode_is_blocked_on_this_machine` below for why
-    /// that specific check doesn't currently pass on macOS, and why that's a
-    /// platform-API finding rather than a fixture bug.
-    ///
-    /// mac-only: `image_decode::open_image_source` (Task 9's cfg-split) only
-    /// exists under `#[cfg(target_os = "macos")]` — non-mac has no
-    /// `CGImageSource` equivalent to open a container without decoding it, so
-    /// this specific check has no non-mac counterpart to gate it into instead
-    /// (deferred fix from Task 9's review, folded into Task 10).
+    /// ImageIO can open the fixture as a `CGImageSource`, which checks the
+    /// TIFF/DNG container without decoding pixels. mac-only because
+    /// `open_image_source` exists only there.
     #[test]
     #[cfg(target_os = "macos")]
     fn linear_dng_fixture_writes_and_reopens_as_image_source() {
@@ -1217,47 +1030,16 @@ mod tests {
 
         write_linear_dng(&path, 32, 24).expect("write_linear_dng failed");
 
-        // `open_image_source` only parses the container (CFURL -> CGImageSource);
-        // it doesn't attempt to decode pixels, so this exercises the TIFF/DNG
-        // header + IFD parsing this fixture exists to validate, independent of
-        // the pixel-decode gap documented below.
         let source = image_decode::open_image_source(&path);
         let _ = std::fs::remove_file(&path);
         source.expect("ImageIO could not even open the fixture as an image source");
     }
 
-    /// TDD record, not a bug report against `write_linear_dng`: this fixture's
-    /// byte layout is correct per the DNG 1.7 / TIFF 6.0 spec (verified by hand
-    /// against a hex dump — header, IFD entry order/offsets, out-of-line
-    /// blocks, and pixel data all line up exactly where the writer computes
-    /// them), yet `image_decode::decode()` (which calls
-    /// `CGImageSource::image_at_index`) fails on it with "ImageIO could not
-    /// decode image".
-    ///
-    /// What ruled out a fixture bug: systematically toggling one variable at a
-    /// time (10 variants total) shows the failure tracks
-    /// `PhotometricInterpretation == 34892` (LinearRaw) alone, independent of
-    /// every other tag:
-    ///   - plain TIFF, PhotometricInterpretation=2 (RGB)              -> decodes fine
-    ///   - + DNGVersion/DNGBackwardVersion/ColorMatrix1 tags present  -> still decodes fine
-    ///   - swap PhotometricInterpretation to 34892 (LinearRaw)        -> fails
-    ///   - + Make/Model/UniqueCameraModel (including a real, ImageIO-
-    ///     recognized Apple ProRAW camera string)                    -> still fails
-    ///   - two-IFD file (IFD0 = normal 4x3 RGB preview, IFD1 = the
-    ///     32x24 LinearRaw data, chained via next-IFD-offset)         -> IFD0 (the
-    ///     preview) decodes fine at index 0, but `CGImageSourceGetCount`
-    ///     reports only 1 image — the LinearRaw IFD isn't enumerable via this
-    ///     API at all, not merely rejected.
-    ///
-    /// Conclusion: on this machine, `CGImageSourceCreateImageAtIndex` (what
-    /// `image_decode::decode` calls) does not expose DNG raw-IFD pixel data
-    /// through the generic multi-image API, regardless of tag completeness or
-    /// camera recognition. Real DNG raw pixel access on macOS goes through a
-    /// different Apple API (`CIRAWFilter`/Core Image), which nothing in this
-    /// codebase currently uses. This is a macOS ImageIO API-surface gap, not
-    /// something a differently-shaped DNG byte layout can route around — so
-    /// this test is `#[ignore]`d with this explanation rather than deleted or
-    /// forced green. See Task 7's report for the full experiment log.
+    /// Documents a macOS limit, not a fixture bug. The fixture matches the
+    /// DNG spec, but `CGImageSourceCreateImageAtIndex` fails on any DNG with
+    /// PhotometricInterpretation 34892 (LinearRaw). Toggling one tag at a
+    /// time showed LinearRaw alone causes it; in a two-IFD file the LinearRaw
+    /// IFD is not even counted. Decoding it needs `CIRAWFilter`.
     #[test]
     #[ignore = "CGImageSourceCreateImageAtIndex does not expose DNG raw-IFD \
                 pixel data on this machine regardless of tag completeness — \
@@ -1279,14 +1061,8 @@ mod tests {
         assert_eq!(decoded.height, 24, "unexpected decoded height");
     }
 
-    /// The Task 8 check this binary exists to perform: `rawler` decodes the
-    /// synthetic Linear DNG fixture and its pixel samples match the exact
-    /// analytic gradient formula `write_linear_dng` wrote, with zero
-    /// tolerance (see `compare_against_gradient_ground_truth`'s doc comment
-    /// for why zero, not "close enough", is the right bar here). This is the
-    /// positive counterpart to `linear_dng_pixel_decode_is_blocked_on_this_machine`
-    /// above: where ImageIO can't even expose this DNG's raw-IFD pixels,
-    /// rawler decodes them and matches ground truth exactly.
+    /// rawler decodes the Linear DNG fixture to exactly the gradient written,
+    /// which ImageIO cannot do (see the test above).
     #[test]
     fn rawler_decodes_linear_dng_matching_gradient_ground_truth() {
         let path = std::env::temp_dir().join(format!(
@@ -1304,12 +1080,7 @@ mod tests {
         report.expect("rawler's decoded pixels diverged from the analytic gradient ground truth");
     }
 
-    /// Task 10: `RawDevelop::default().develop_intermediate(&raw)
-    /// .to_dynamic_image()` — the exact call chain `image_decode::
-    /// decode_raw_nonmac` runs after `decode_raw_via_rawler` — completes
-    /// without error/panic on the synthetic fixture and produces a
-    /// same-dimensions, non-degenerate image. See `develop_smoke_check`'s doc
-    /// comment for what this does and doesn't prove.
+    /// See `develop_smoke_check`.
     #[test]
     fn develop_pipeline_runs_end_to_end_on_linear_dng() {
         let path = std::env::temp_dir().join(format!(
@@ -1325,11 +1096,8 @@ mod tests {
         result.expect("RawDevelop pipeline failed on the synthetic Linear DNG fixture");
     }
 
-    /// wasm export: `decode_raw_nonmac_from_bytes` is the bytes-in core that
-    /// native `decode_raw_nonmac` and the wasm32 export worker both call. It
-    /// runs the full `RawDevelop` + boost + auto-denoise + sRGB pipeline and
-    /// must preserve the fixture's horizontal gradient (a mid-row sample near
-    /// the left edge is clearly darker than one near the right edge).
+    /// The full bytes pipeline (develop, boost, denoise) keeps the fixture's
+    /// left-to-right gradient.
     #[test]
     fn decode_raw_nonmac_from_bytes_develops_gradient_fixture() {
         let path = std::env::temp_dir().join(format!(
@@ -1355,10 +1123,8 @@ mod tests {
         );
     }
 
-    /// The bytes core and the `&Path` entry point must produce byte-identical
-    /// output for the same input — this is what makes it safe to route native
-    /// export (which had its own `image_decode::decode` call) and the wasm
-    /// worker through one shared pipeline.
+    /// Path and bytes entry points give byte-identical output, so native and
+    /// wasm export can share one pipeline.
     #[test]
     fn decode_raw_nonmac_bytes_and_path_agree() {
         let path = std::env::temp_dir().join(format!(
@@ -1384,9 +1150,7 @@ mod tests {
         );
     }
 
-    /// A malformed/unsupported input (not a DNG at all) should come back as
-    /// an `Err`, not panic — sanity check on `decode_via_rawler`'s error
-    /// mapping.
+    /// A non-RAW file returns `Err` instead of panicking.
     #[test]
     fn rawler_reports_error_on_non_raw_file() {
         let path = std::env::temp_dir().join(format!(
@@ -1405,17 +1169,9 @@ mod tests {
         );
     }
 
-    /// Locks in `raw_preview::decode_raw_fast_from_bytes`'s current
-    /// output on a synthetic Bayer fixture, via `hash::Fnv1a` over
-    /// width+height+rgba bytes (see `src/hash.rs` — chosen because it's
-    /// stable/deterministic across process runs, unlike `DefaultHasher`).
-    /// Any future change to `demosaic_cfa` must keep this passing —
-    /// the `Fast` tier's output is meant to stay stable.
-    ///
-    /// The captured hash below was observed by running this test once with a
-    /// dummy value and reading the actual value off the `println!` output —
-    /// standard golden-snapshot practice, not hand-computed (a multi-stage
-    /// float pipeline's output isn't something to derive by hand).
+    /// Golden hash of the `Fast` tier on the Bayer fixture. `hash::Fnv1a` is
+    /// stable across runs, unlike `DefaultHasher`. The expected value was
+    /// captured from a run; update it only for intentional output changes.
     #[test]
     fn raw_preview_bayer_fast_tier_matches_golden_hash() {
         let path = std::env::temp_dir().join(format!(
@@ -1451,20 +1207,10 @@ mod tests {
         );
     }
 
-    /// Same idea, for the already-linear (`cpp == 3`, `decimate_linear_rgb`)
-    /// path.
-    ///
-    /// Uses `write_linear_dng_with_wb` with a deliberately *non*-neutral
-    /// `AsShotNeutral` (`[1/2, 1/1, 2/1]` → `wb_coeffs = [2.0, 1.0, 0.5]`)
-    /// rather than the plain `write_linear_dng` fixture. That plain fixture
-    /// writes no `AsShotNeutral` at all, so `DngDecoder::get_wb` returns
-    /// `[NaN; 4]`, every sample gets multiplied to NaN, `to_srgb_u8`
-    /// saturates it to 0, and the resulting "golden" image is uniformly
-    /// black — a hash that discriminates output *dimensions* and nothing
-    /// else, on the exact function this plan rewrote. With real coefficients
-    /// this exercises the per-channel WB multiply, the color matrix, the
-    /// highlight rolloff and the gamma LUT on real gradient values, and the
-    /// asymmetric coefficients mean a channel-order mistake changes the hash.
+    /// Golden hash for the cpp == 3 path (`decimate_linear_rgb`). The fixture
+    /// has a non-neutral `AsShotNeutral` (`wb_coeffs = [2.0, 1.0, 0.5]`) so
+    /// white balance, matrix, rolloff, and gamma all affect the hash, and a
+    /// channel-order mistake changes it.
     #[test]
     fn raw_preview_linear_fast_tier_matches_golden_hash() {
         let path = std::env::temp_dir().join(format!(
@@ -1492,9 +1238,7 @@ mod tests {
             decoded.height,
             decoded.rgba.len()
         );
-        // Guards the property the fixture change above exists to establish:
-        // if this ever goes all-black again, the hash below stops testing any
-        // pixel math and silently degrades into a dimensions check.
+        // An all-black image would make the hash check only dimensions.
         assert!(
             decoded
                 .rgba
@@ -1531,11 +1275,8 @@ mod tests {
         );
     }
 
-    /// `DemosaicMode::Quality` (`PPGDemosaic`) has no golden hash to match —
-    /// this confirms it decodes without panicking and produces a plausible,
-    /// non-degenerate image on the same fixture Task 1 uses. Output is
-    /// `half::f16` linear RGBA (8 bytes/pixel), not u8 sRGB (4 bytes/pixel) —
-    /// see `DemosaicMode::bytes_per_pixel`.
+    /// `Quality` (PPG) demosaic runs without panicking and yields finite,
+    /// non-black f16 output at 8 bytes per pixel.
     #[test]
     fn raw_preview_bayer_quality_tier_runs_without_panicking() {
         let path = std::env::temp_dir().join(format!(
@@ -1547,9 +1288,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
-        // decode_raw_fast_from_bytes always uses DemosaicMode::Fast internally
-        // (Step 3) - exercise Quality directly via rawler::decode + the same
-        // apply_scaling/demosaic_cfa call chain that function makes.
+        // Call `demosaic_cfa` directly to force `Quality` mode.
         let source = rawler::rawsource::RawSource::new_from_slice(&bytes);
         let params = rawler::decoders::RawDecodeParams::default();
         let mut raw = rawler::decode(&source, &params).expect("rawler::decode failed on fixture");
@@ -1568,12 +1307,8 @@ mod tests {
             (w * h * 8) as usize,
             "Quality tier must be 8 bytes/pixel (half::f16 linear RGBA)"
         );
-        // Color channels only, decoded as f16: alpha is hardcoded opaque by
-        // `render_rgb_sample_linear_bytes`, so a plain "any byte nonzero"
-        // check would be satisfied by the alpha bytes alone and would pass
-        // on a fully-black image — the exact degenerate case this is meant
-        // to rule out. Also requires every sample to be finite (no NaN/inf
-        // leaking out of the color-matrix/highlight-rolloff math).
+        // Check color channels only. Alpha is always 1, so checking any byte
+        // would pass on a black image.
         let mut any_nonzero = false;
         for px in rgba.chunks_exact(8) {
             let r = half::f16::from_le_bytes([px[0], px[1]]).to_f32();
@@ -1588,10 +1323,8 @@ mod tests {
         assert!(any_nonzero, "output looks all-zero/degenerate");
     }
 
-    /// Smoke test for the actual entry point (`decode_raw_quality_from_bytes`)
-    /// rather than `demosaic_cfa` directly — the test above never
-    /// touches `demosaic_preview`/`decode_raw_preview_from_bytes`'s own `mode`
-    /// threading, only the inner demosaic call.
+    /// The `Quality` entry point returns `LinearF16`, covering the `mode`
+    /// plumbing the test above skips.
     #[test]
     fn raw_preview_quality_entry_point_produces_linear_f16() {
         let path = std::env::temp_dir().join(format!(
@@ -1614,14 +1347,8 @@ mod tests {
         );
     }
 
-    /// Regression test for a real bug: `decode_raw_quality_from_bytes` once
-    /// skipped resizing entirely (uploaded the full demosaiced resolution
-    /// unconditionally), which broke the Loupe's zoom transform the instant
-    /// `Quality` replaced a same-photo `Fast` upload — `zoom` is
-    /// screen-px-per-image-px and is reused (not recomputed) across a
-    /// same-photo sharper-tier swap, so a wild resolution jump between tiers
-    /// made the reused value show a wrongly zoomed-in crop. `Quality`'s
-    /// output must respect `max_px` exactly like every other decode tier.
+    /// `Quality` output respects `max_px`. The Loupe reuses its zoom across
+    /// tiers of the same photo, so an oversized `Quality` image shows zoomed in.
     #[test]
     fn raw_preview_quality_tier_respects_max_px() {
         let path = std::env::temp_dir().join(format!(
@@ -1633,10 +1360,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture bytes");
         let _ = std::fs::remove_file(&path);
 
-        // Full-max_px decode first, to confirm this fixture's natural
-        // (unbounded) demosaiced size is actually bigger than the small
-        // max_px below — otherwise this test would pass trivially without
-        // ever exercising the resize path.
+        // The fixture must be larger than MAX_PX or the resize never runs.
         let unbounded = raw_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX)
             .expect("unbounded decode_raw_quality_from_bytes failed");
         let natural_longest = unbounded.width.max(unbounded.height);
@@ -1661,7 +1385,7 @@ mod tests {
             (bounded.width * bounded.height * 8) as usize,
             "LinearF16 must be 8 bytes/pixel"
         );
-        // Non-degenerate: the box-filter resize didn't just zero everything.
+        // The resize must not zero the image.
         let mut any_nonzero = false;
         for px in bounded.rgba.chunks_exact(8) {
             let r = half::f16::from_le_bytes([px[0], px[1]]).to_f32();
@@ -1676,21 +1400,10 @@ mod tests {
         assert!(any_nonzero, "resized output looks all-zero/degenerate");
     }
 
-    /// The panic guard: rawler's `Superpixel3Channel::demosaic` matches the
-    /// (ROI-shifted) CFA name against exactly `RGGB`/`BGGR`/`GBRG`/`GRBG` and
-    /// falls through to `_ => unreachable!()` for anything else that still
-    /// clears its `is_rgb()` check — Fuji X-Trans being the real-world case
-    /// (its 36-char name is all R/G/B). `wasm32-unknown-unknown`, the only
-    /// production target for this code, is `panic=abort`, so that would take
-    /// down the whole decode worker rather than surfacing an error.
-    ///
-    /// `CFAPattern = [0,1,2,1]` ("RGBG") is the cheapest fixture that
-    /// reproduces it: a 2x2 pattern, so rawler decodes it happily, `is_rgb()`
-    /// is true (only R/G/B characters, one of each present), and the name is
-    /// none of the four — the same `unreachable!()` an X-Trans file reaches,
-    /// without hand-building a 6x6 X-Trans DNG. The `catch_unwind` here is
-    /// what makes the pre-fix failure legible as a test failure on native
-    /// rather than aborting the test binary.
+    /// An unsupported CFA returns an error instead of panicking, which would
+    /// abort the wasm32 worker. `CFAPattern = [0,1,2,1]` ("RGBG") passes
+    /// `is_rgb()` but is not an RGGB-family name, so it reaches the same
+    /// `unreachable!()` in `Superpixel3Channel` that X-Trans does.
     #[test]
     fn raw_preview_rejects_unsupported_cfa_pattern_without_panicking() {
         let path = std::env::temp_dir().join(format!(
@@ -1710,8 +1423,7 @@ mod tests {
             "decode_raw_fast_from_bytes panicked on an unsupported CFA pattern (fatal on wasm32)",
         );
 
-        // `DecodedImage` isn't `Debug`, so unwrap the error by hand rather
-        // than via `expect_err`.
+        // `DecodedImage` is not `Debug`, so `expect_err` is unavailable.
         let err = match outcome {
             Ok(decoded) => panic!(
                 "expected an Err for a CFA pattern rawler's demosaic can't handle, got a {}x{} image",
@@ -1725,20 +1437,10 @@ mod tests {
         );
     }
 
-    /// `rawler_full_image_diag` (this file's standalone copy of
-    /// `thumbnail.rs`'s `rawler_full_image_from_bytes`) is gated to
-    /// `FormatHint::RAF`/`CR3` only — confirmed necessary the hard way (a
-    /// real Sony ARW: an earlier, ungated version of this function silently
-    /// substituted the camera's own embedded JPEG for the Loupe's real
-    /// linear-RAW demosaic on every ARW/CR2/NEF/DNG/RW2/PEF file, since all
-    /// of those *also* override `full_image()`, just with containers
-    /// `embedded_preview_from_bytes` already opens fine). This fixture has a
-    /// perfectly valid preview sub-IFD (`write_dng_with_preview_subifd`,
-    /// still exercising the real `SubIFDs` -> `NewSubfileType=1` -> strip
-    /// decode plumbing internally before the gate check runs) — the point of
-    /// this test is that `format_hint()` for a DNG is `FormatHint::DNG`, not
-    /// `RAF`/`CR3`, so the gate must still return `None` regardless of a
-    /// present, well-formed preview.
+    /// The `full_image()` path only runs for RAF and CR3. Other formats (ARW,
+    /// NEF, DNG, ...) also implement `full_image()` and would swap in the
+    /// camera JPEG for the real RAW decode. A DNG with a valid preview must
+    /// still return `None`.
     #[test]
     fn rawler_full_image_ignores_dng_despite_valid_preview_subifd() {
         let path = std::env::temp_dir().join(format!(
@@ -1756,10 +1458,7 @@ mod tests {
         );
     }
 
-    /// Negative case for the same function: `write_linear_dng`'s fixture has
-    /// no `SubIFDs`/preview at all *and* isn't RAF/CR3 — `full_image()` must
-    /// return `None` for either reason, proving the fallback doesn't crash
-    /// or misbehave on a format/file with no embedded image.
+    /// A DNG with no preview sub-IFD returns `None`.
     #[test]
     fn rawler_full_image_returns_none_without_preview_subifd() {
         let path = std::env::temp_dir().join(format!(
@@ -1776,31 +1475,10 @@ mod tests {
         );
     }
 
-    /// THROWAWAY DIAGNOSTIC — investigating "wasm32 Loupe RAW renders too
-    /// dark vs Linux" (see plans/... in-flight session). Compares the actual
-    /// *linear* (pre-gamma/pre-boost) pixel values the native path and the
-    /// wasm32 path each produce for the same real camera file, using real
-    /// production code on both sides (not a reimplementation), so a
-    /// systematic brightness gap here — rather than in the already-confirmed
-    /// -identical gamma/boost formulas — pins the bug to the
-    /// demosaic/WB/matrix/scaling stage instead of the tonemap stage.
-    ///
-    /// - "Native-equivalent": `RawDevelop` with every default step except
-    ///   `SRgb` (mirrors what `decode_raw_nonmac` computes right before its
-    ///   own gamma+boost) — real rawler code, not preview.rs's.
-    /// - "wasm": `raw_preview::decode_raw_quality_from_bytes`'s real
-    ///   `LinearF16` output, unpacked back to f32.
-    ///
-    /// Deliberately a global mean/percentile comparison, not a pixel-exact
-    /// diff: `CropDefault`/`crop_area` is confirmed missing on the wasm side
-    /// (separate, already-known gap), so the two outputs have different
-    /// dimensions and can't be aligned pixel-for-pixel here anyway — but a
-    /// systematic *brightness* gap should show up in the aggregate
-    /// regardless of the crop difference.
-    ///
-    /// Path is hardcoded to a real file the user provided for this specific
-    /// investigation — not a portable regression test. Remove once the bug
-    /// is found and fixed, or gate/relocate if kept.
+    /// Manual diagnostic: compares mean linear brightness of native
+    /// `RawDevelop` (every default step but `SRgb`) and the wasm `Quality`
+    /// decode on a real camera file, plus the embedded JPEG if any. Uses a
+    /// hardcoded local path.
     #[test]
     #[ignore = "hardcoded path to a real camera file on the developer's machine, not portable"]
     fn diag_wasm_vs_native_linear_brightness() {
@@ -1809,7 +1487,7 @@ mod tests {
         let path = std::path::Path::new("/Users/andyyao/Desktop/07-26 Jackie/DSC02468.ARW");
         let bytes = std::fs::read(path).expect("read real ARW file");
 
-        // --- Native-equivalent: real RawDevelop, every default step but SRgb ---
+        // Native: `RawDevelop` with every default step but `SRgb`.
         let raw = decode_via_rawler(path).expect("decode_via_rawler failed on real ARW");
         let native_dev = RawDevelop {
             steps: vec![
@@ -1830,7 +1508,7 @@ mod tests {
         };
         let native_mean = mean_rgb(&native_pixels);
 
-        // --- wasm: real raw_preview::decode_raw_quality_from_bytes ---
+        // wasm: the `Quality` tier.
         let wasm_decoded = raw_preview::decode_raw_quality_from_bytes(&bytes, u32::MAX)
             .expect("decode_raw_quality_from_bytes failed");
         assert_eq!(
@@ -1872,12 +1550,7 @@ mod tests {
             wasm_luma / native_luma
         );
 
-        // Apply the exact gamma+boost formula both platforms claim to share
-        // (rawler::imgop::srgb::srgb_apply_gamma then
-        // image_decode::apply_raw_preview_boost) to both linear datasets, to
-        // see whether the *formula*, correctly applied, actually produces
-        // matching brightness — isolating "the formula is wrong" from "the
-        // formula isn't what's actually running in the browser."
+        // Apply the shared gamma + boost to both, to compare display brightness.
         fn mean_boosted_srgb(pixels: &[[f32; 3]]) -> [f32; 3] {
             let mut sum = [0f64; 3];
             let mut n = 0u64;
@@ -1902,15 +1575,7 @@ mod tests {
         println!("native-equivalent mean boosted sRGB: {native_boosted:?}");
         println!("wasm mean boosted sRGB:               {wasm_boosted:?}");
 
-        // NEW HYPOTHESIS: does the live wasm `decode()` (wasm_worker.rs)
-        // actually reach `decode_raw_quality_from_bytes` at all for this
-        // file, or does `rawler_full_image_from_bytes` (this session's
-        // earlier RAF/embedded-preview work — generic, applies to any
-        // format overriding `full_image()`, ARW included) win first and
-        // return the camera's own embedded JPEG instead? That's a
-        // completely different image (in-camera JPEG rendering, not a raw
-        // demosaic) and would explain a real visible difference with
-        // matching-formula math being a red herring.
+        // Compare against the camera's embedded JPEG, when rawler has one.
         if let Some(embedded) = rawler_full_image_diag(&bytes, u32::MAX) {
             println!(
                 "embedded full_image() JPEG: {}x{}, format {:?}",
@@ -1958,13 +1623,9 @@ mod tests {
         ]
     }
 
-    /// Throwaway visual diagnostic for tuning `AUTO_RAW_DENOISE_STRENGTH`
-    /// against the real photo from the "wasm denoise still way worse than
-    /// ImageIO" report — writes a PNG so the actual `Quality`-tier output
-    /// (real decode, real denoise, real gamma+boost, same as what
-    /// `raw_shader.wgsl` renders) can be looked at directly instead of
-    /// guessing at the constant again. Not a real regression test; remove
-    /// once the constant is settled.
+    /// Manual diagnostic for tuning `AUTO_RAW_DENOISE_STRENGTH`: writes the
+    /// `Quality` output, with gamma and boost applied, to a PNG. Uses a
+    /// hardcoded local path.
     #[test]
     #[ignore = "hardcoded path to a real camera file on the developer's machine, not portable; writes a PNG for manual visual inspection"]
     fn diag_quality_tier_denoise_png() {

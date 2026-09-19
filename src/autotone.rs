@@ -1,123 +1,77 @@
-//! Auto Tone: choose Develop slider values from a photo's own histogram.
+//! Auto Tone: pick Develop slider values from a photo's histogram.
 //!
-//! The structure follows RapidRAW's `perform_auto_analysis` — downscale, build
-//! a luma histogram, read percentiles and clipping fractions off it, then set
-//! sliders — but none of its constants transfer. Its tone operators are
-//! different from ours (its Blacks is a masked lift near black, ours is a
-//! global linear remap; its sliders divide by five different scales, ours all
-//! divide by 100), so a value copied across would mean something else entirely.
-//!
-//! Instead, the sliders that have a target worth hitting are *solved* against
-//! our own pipeline rather than guessed:
-//!
-//! - **Exposure** is bisected so the median lands on mid-gray.
-//! - **Blacks/Whites** are bisected against the output endpoint percentiles.
-//! - **Contrast** is bisected to stretch what the endpoints could not, and
-//!   stays at zero whenever they already reached the target width.
-//!
-//! The remaining three answer taste questions with no target to solve for, so
-//! they keep RapidRAW's heuristic shape and are frankly guesses: Highlights and
-//! Shadows key off how much of the frame is clipped or crushed, and Vibrance
-//! off mean saturation. Expect to retune those by eye; they are marked below.
-//!
-//! Everything is evaluated through [`develop::apply_linear`] (or
-//! `apply_raw_display` for RAW), never a reimplementation of the tone math, so
-//! this module cannot drift out of sync with what the shader draws.
+//! Exposure, Blacks, Whites, and Contrast are solved by bisection against our
+//! real tone pipeline ([`develop::apply_linear`], or `apply_raw_display` for
+//! RAW), so results match what the shader draws. Highlights, Shadows, and
+//! Vibrance have no target to solve for and use hand-picked rules adapted from
+//! RapidRAW. RapidRAW's constants don't carry over because its sliders work
+//! differently.
 
 use crate::develop::{self, Adjustments, EXPOSURE_RANGE, TONE_RANGE};
 use crate::image_decode::PixelFormat;
 
-/// Number of histogram bins. Matches the 8-bit display domain the percentile
-/// thresholds below are written in.
+/// One bin per 8-bit display level.
 const BINS: usize = 256;
 
-/// Where the median should land, in display space. Mid-gray.
+/// Display-space target for the median.
 const TARGET_MEDIAN: f32 = 0.5;
-/// Where the 1st and 99th percentiles should land. Inset from true black and
-/// white on purpose: aiming at exactly 0 and 1 would crush one percent of the
-/// frame and blow another percent by definition, which is a stronger stretch
-/// than any photo asks for.
+/// Targets for the 1st and 99th percentiles. Aiming at exactly 0 and 1 would
+/// clip 1% of the frame at each end.
 const TARGET_BLACK: f32 = 0.01;
 const TARGET_WHITE: f32 = 0.99;
-/// Target spread between the 1st and 99th percentile, in display space. Below
-/// this the image reads as flat and Contrast is brought in to help.
+/// Below this spread between the 1st and 99th percentiles, Contrast is added.
 const TARGET_RANGE: f32 = 220.0 / 255.0;
-/// Ceiling on the Contrast that Auto Tone will add. Contrast here is an assist
-/// for what the endpoints could not stretch on their own, and the endpoints
-/// clamp often enough that an uncapped solve would sit at +100 on any flat
-/// photo. A capped assist is the honest version of what this slider is for.
+/// Cap on added Contrast. Without it, any flat photo whose endpoints can't
+/// stretch far enough would end up at +100.
 const MAX_AUTO_CONTRAST: f32 = 50.0;
-/// Coordinate-descent passes over the solved sliders. Each one moves the
-/// others, so a single pass leaves the earlier ones stale; three is enough for
-/// the values to settle well inside the 1e-3 that `edit_signature` quantizes to.
+/// Passes over the solved sliders. Each slider shifts the others, so one pass
+/// isn't enough. Three settles well inside `edit_signature`'s 1e-3 rounding.
 const REFINE_PASSES: u32 = 3;
 
-/// A pixel at or above this is treated as a blown highlight.
+// Display levels for blown, clipped, and crushed pixels, and the fractions of
+// the frame past which each counts. A "hot" photo gets no extra Exposure.
 const HIGHLIGHT_LEVEL: f32 = 240.0 / 255.0;
-/// A pixel at or above this is treated as fully clipped.
 const CLIPPED_LEVEL: f32 = 250.0 / 255.0;
-/// A pixel at or below this is treated as crushed shadow.
 const SHADOW_LEVEL: f32 = 32.0 / 255.0;
-/// White point above which the photo is considered already hot, so Exposure is
-/// not allowed to add any more light.
 const HOT_WHITE_POINT: f32 = 245.0 / 255.0;
-/// Fraction of blown pixels past which the photo counts as highlight-heavy.
 const HIGHLIGHT_FRACTION: f32 = 0.02;
-/// Fraction of fully-clipped pixels past which the photo counts as hot.
 const CLIPPED_FRACTION: f32 = 0.005;
-/// Fraction of crushed pixels past which Shadows starts lifting.
 const SHADOW_FRACTION: f32 = 0.05;
 
-/// Bisection steps for each solved slider. 24 halvings take a ±100 slider
-/// below 1e-5, far past what `edit_signature` quantizes to.
+/// Bisection steps per slider. 24 halvings of a ±100 range reach 1e-5.
 const SOLVE_STEPS: u32 = 24;
 
-/// Bisection steps used to seat each bin's representative colour on that bin's
-/// measured mean display level (see [`fit_to_level`]). The scale is in [0, 1].
+/// Bisection steps for [`fit_to_level`]'s 0..1 scale factor.
 const FIT_STEPS: u32 = 16;
 
-/// The histogram of one photo, in the display space the user actually sees.
+/// A photo's display-luma histogram. Each bin keeps one linear-light colour
+/// that stands in for its pixels, so trying a candidate `Adjustments` pushes
+/// 256 colours through the pipeline instead of the whole photo.
 ///
-/// `lin` is the piece that makes the solve cheap: for each display-luma bin it
-/// keeps one representative *linear-light colour*, so a candidate
-/// `Adjustments` can be evaluated by pushing 256 pixels through the real
-/// pipeline instead of every pixel in the photo. Representatives are re-sorted by
-/// their output luma for every candidate: channel-wise monotonic operators do
-/// not preserve the relative display brightness of different colours.
-///
-/// The representative has to be a colour, not a scalar: bins are keyed by
-/// *display* luma, and a neutral grey carrying only the bin's linear luma
-/// does not land back on that display luma once a channel is saturated. Pure
-/// red shows at 0.299, but a grey of its linear luma comes back at ~0.578 —
-/// brighter than a mid-grey pixel that sorts above it. Standing in a grey
-/// therefore left the solve chasing statistics the photo did not have, and
-/// got worse the more saturated the photo was.
+/// The stand-in must be a colour, not a gray. Pure red displays at luma 0.299,
+/// but a gray with red's linear luma displays at about 0.578. Bins are re-sorted
+/// by output luma for each candidate, because adjustments can reorder colours.
 struct Histogram {
-    /// Pixel count per display-luma bin.
     count: [f32; BINS],
-    /// The bin's linear-light stand-in: its pixels' mean colour, scaled by
-    /// [`fit_to_level`] to read back at the bin's measured mean display luma. Black
-    /// where the bin is empty, which no percentile can land on.
+    /// Each bin's mean linear colour, scaled by [`fit_to_level`]. Black for
+    /// empty bins.
     lin: [[f32; 3]; BINS],
     total: f32,
-    /// Mean saturation, `(max - min) / max`, over display-space pixels.
+    /// Mean of `(max - min) / max` over display-space pixels.
     mean_sat: f32,
     format: PixelFormat,
 }
 
-/// Rec.601 luma, matching the weighting the gamma-space vibrance block in
-/// `develop.rs` uses. This runs on display-space values, so it is deliberately
-/// not the Rec.709 set `filmic_exposure` uses on linear light.
+/// Rec.601 luma for display-space values, the same weights as Vibrance in
+/// `develop.rs`. Linear-light code uses Rec.709 instead.
 fn luma(px: [f32; 3]) -> f32 {
     0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2]
 }
 
-/// Push one linear-light pixel through the real tone pipeline and return the
-/// display-space colour — the same transform `recompute_histogram` applies
-/// before binning, so the analysis sees exactly what the Develop panel plots.
+/// Linear-light pixel to display colour under `adj`. Matches what
+/// `recompute_histogram` plots in the Develop panel.
 fn display(adj: &Adjustments, format: PixelFormat, px: [f32; 3]) -> [f32; 3] {
     match format {
-        // `apply_linear` returns linear light; the panel gamma-encodes it.
         PixelFormat::Srgb8 => {
             let out = develop::apply_linear(adj, px);
             [
@@ -126,30 +80,20 @@ fn display(adj: &Adjustments, format: PixelFormat, px: [f32; 3]) -> [f32; 3] {
                 out[2].max(0.0).powf(1.0 / 2.2),
             ]
         }
-        // `apply_raw_display` already returns raw_shader.wgsl's display value.
         PixelFormat::LinearF16 => develop::apply_raw_display(adj, px),
     }
 }
 
-/// Display-space luma of one linear-light pixel under `adj` — the quantity
-/// every bin is keyed by and every target is written in.
 fn respond(adj: &Adjustments, format: PixelFormat, linear: [f32; 3]) -> f32 {
     luma(display(adj, format, linear))
 }
 
-/// Scale `px` until the identity pipeline puts it back at display luma
-/// `level`, leaving its hue alone.
+/// Scale `px` down until it displays at luma `level`, keeping its hue.
 ///
-/// A bin's mean linear colour carries the right hue but not quite the right
-/// brightness. Display luma is gamma-encoded, and encoding is concave, so the
-/// encoded mean sits *above* the mean of what was encoded — by as much as 0.08
-/// on a bin that mixes a saturated pixel with a neutral one of the same
-/// apparent brightness. Left uncorrected that is a systematic over-read of
-/// every percentile, which stops Exposure short of its target. One scalar per
-/// bin removes it. Never scale above the original mean: if the target is
-/// unreachable (including rounding error at a clipping plateau), retaining
-/// the mean avoids inventing extra linear intensity. The RAW display curve
-/// is not everywhere concave, so its mean can also fall below the target.
+/// Gamma encoding is concave, so a bin's mean linear colour displays up to
+/// 0.08 brighter than the bin's mean display level. Uncorrected, every
+/// percentile reads high and Exposure stops short. Never scales up: if `px`
+/// is already at or below `level`, it is returned unchanged.
 fn fit_to_level(format: PixelFormat, px: [f32; 3], level: f32) -> [f32; 3] {
     let identity = Adjustments::default();
     let scaled = |k: f32| [px[0] * k, px[1] * k, px[2] * k];
@@ -169,7 +113,6 @@ fn fit_to_level(format: PixelFormat, px: [f32; 3], level: f32) -> [f32; 3] {
 }
 
 impl Histogram {
-    /// Bin a downscaled linear-light sample.
     fn build(samples: &[[f32; 3]], format: PixelFormat) -> Option<Histogram> {
         if samples.is_empty() {
             return None;
@@ -181,7 +124,6 @@ impl Histogram {
         let mut sat_sum = 0f32;
 
         for &px in samples {
-            // Display-space colour, via the identity pipeline for this format.
             let shown = display(&identity, format, px);
             let v = luma(shown).clamp(0.0, 1.0);
             let bin = ((v * (BINS - 1) as f32).round() as usize).min(BINS - 1);
@@ -219,7 +161,7 @@ impl Histogram {
         })
     }
 
-    /// Display-space value of the pixel at cumulative fraction `p`, under `adj`.
+    /// Display luma at cumulative fraction `p` under `adj`.
     fn percentile(&self, p: f32, adj: &Adjustments) -> f32 {
         let mut output = [(0.0f32, 0.0f32); BINS];
         let mut len = 0;
@@ -255,11 +197,9 @@ impl Histogram {
     }
 }
 
-/// Bisect `field` over `range` so that `measure` hits `target`.
-///
-/// `measure` must be non-decreasing in the field, which every tone operator
-/// here is. Returns the low end of the range when even that overshoots, and
-/// the high end when it cannot reach.
+/// Bisect `field` over `range` until `measure` hits `target`. `measure` must
+/// not decrease as the field grows. Out-of-reach targets land on the nearest
+/// end of `range`.
 fn solve(
     adj: &mut Adjustments,
     range: std::ops::RangeInclusive<f32>,
@@ -282,46 +222,35 @@ fn solve(
     out
 }
 
-/// Analyze a downscaled linear-light RGB sample and return the adjustments Auto
-/// Tone would apply. `format` says which display pipeline the sample feeds.
-///
-/// Returns identity for an empty or degenerate sample.
+/// Auto Tone adjustments for a downscaled linear-light sample. `format` picks
+/// the display pipeline. An empty sample returns the defaults.
 pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments {
     let Some(hist) = Histogram::build(samples, format) else {
         return Adjustments::default();
     };
 
-    // Measured off the untouched photo, so the clipping guards below describe
-    // what the camera actually recorded rather than what we just did to it.
+    // Measured before any adjustment, so the guards reflect the original photo.
     let highlight_fraction = hist.fraction_above(HIGHLIGHT_LEVEL);
     let clipped_fraction = hist.fraction_above(CLIPPED_LEVEL);
     let shadow_fraction = hist.fraction_below(SHADOW_LEVEL);
     let identity = Adjustments::default();
     let white_point = hist.percentile(0.99, &identity);
 
-    // A photo that is already hot gets no more light, however dark its median.
-    // Blowing a sky further is never the right answer, and this is the one
-    // guard of RapidRAW's that transfers unchanged: it is a statement about the
-    // photo, not about either app's tone curve.
+    // A hot photo gets no more light, however dark its median.
     let hot = white_point > HOT_WHITE_POINT
         || highlight_fraction > HIGHLIGHT_FRACTION
         || clipped_fraction > CLIPPED_FRACTION;
 
     let mut adj = Adjustments::default();
 
-    // Coordinate descent: solve each slider against the *finished* pipeline
-    // with the others held where they currently sit, then go round again.
-    // Ordering inside a pass follows the pipeline (exposure, endpoints,
-    // contrast) so the first pass starts from a sensible place, but nothing
-    // depends on that ordering being right — the repeats are what make it
-    // converge, and each measurement is of the real output either way.
+    // Solve one slider at a time with the others held, then repeat. The
+    // repeats make it converge, whatever the order.
     let exposure_range = if hot {
         *EXPOSURE_RANGE.start()..=0.0
     } else {
         EXPOSURE_RANGE
     };
     for _ in 0..REFINE_PASSES {
-        // Exposure: median to mid-gray.
         solve(
             &mut adj,
             exposure_range.clone(),
@@ -329,8 +258,6 @@ pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments 
             |a| &mut a.exposure,
             |a| hist.percentile(0.50, a),
         );
-        // Endpoints: 1st and 99th percentile onto the target black and white.
-        // Both are monotonic in their slider near the end they control.
         solve(
             &mut adj,
             TONE_RANGE,
@@ -345,9 +272,8 @@ pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments 
             |a| &mut a.whites,
             |a| hist.percentile(0.99, a),
         );
-        // Contrast: stretch whatever spread the endpoints could not reach,
-        // capped. Left at zero outright when they already got there, so a
-        // well-exposed photo comes back with this slider untouched.
+        // Contrast only covers spread the endpoints couldn't reach, so a
+        // well-exposed photo keeps Contrast at zero.
         let spread = |a: &Adjustments| hist.percentile(0.99, a) - hist.percentile(0.01, a);
         adj.contrast = 0.0;
         if spread(&adj) < TARGET_RANGE {
@@ -358,17 +284,14 @@ pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments 
                 |a| &mut a.contrast,
                 spread,
             );
-            // More contrast on a frame that is already blowing mostly buys
-            // more blown pixels.
+            // On a frame already blowing out, contrast mostly adds blown pixels.
             if highlight_fraction > HIGHLIGHT_FRACTION {
                 adj.contrast *= 0.5;
             }
         }
     }
 
-    // 5. Taste, not measurement. These three keep RapidRAW's heuristic shape
-    //    because there is no target to solve them against; the constants are
-    //    eyeball values and should be treated as such.
+    // Hand-picked rules with eyeballed constants. Retune by eye.
     if shadow_fraction > SHADOW_FRACTION {
         adj.shadows = (shadow_fraction * 40.0).min(50.0);
     }
@@ -386,8 +309,8 @@ pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments 
     adj
 }
 
-/// Overlay the sliders Auto Tone owns onto `base`, leaving everything else —
-/// crop, white balance, saturation, denoise — exactly as the user set it.
+/// Copy Auto Tone's sliders onto `base`. Crop, white balance, saturation, and
+/// denoise keep the user's values.
 pub(crate) fn merge(base: &Adjustments, auto: &Adjustments) -> Adjustments {
     Adjustments {
         exposure: auto.exposure,
@@ -405,9 +328,7 @@ pub(crate) fn merge(base: &Adjustments, auto: &Adjustments) -> Adjustments {
 mod tests {
     use super::*;
 
-    /// A synthetic photo: `n` neutral samples whose display-space luma sweeps
-    /// linearly from `lo` to `hi`. Values are returned in linear light, which
-    /// is what `analyze` consumes.
+    /// `n` gray linear-light samples whose display luma runs from `lo` to `hi`.
     fn ramp(lo: f32, hi: f32, n: usize) -> Vec<[f32; 3]> {
         (0..n)
             .map(|i| {
@@ -423,8 +344,6 @@ mod tests {
         vec![[display.powf(2.2); 3]; n]
     }
 
-    /// Display-space median of a sample under `adj`, the thing Auto Tone aims
-    /// at. Mirrors what the Develop panel's histogram would show.
     fn median_under(samples: &[[f32; 3]], adj: &Adjustments) -> f32 {
         let mut out: Vec<f32> = samples
             .iter()
@@ -443,8 +362,6 @@ mod tests {
 
     #[test]
     fn a_well_exposed_ramp_is_left_nearly_alone() {
-        // Already spans the full range with its median on mid-gray, so there
-        // is nothing for the solved sliders to do.
         let adj = analyze(&ramp(0.0, 1.0, 512), PixelFormat::Srgb8);
         assert!(adj.exposure.abs() < 0.15, "exposure {}", adj.exposure);
         assert!(adj.blacks.abs() < 10.0, "blacks {}", adj.blacks);
@@ -456,7 +373,6 @@ mod tests {
         let dark = ramp(0.0, 0.35, 512);
         let adj = analyze(&dark, PixelFormat::Srgb8);
         assert!(adj.exposure > 0.5, "expected a lift, got {}", adj.exposure);
-        // And it actually lands near the target it was solving for.
         let median = median_under(&dark, &adj);
         assert!(
             (median - TARGET_MEDIAN).abs() < 0.1,
@@ -466,8 +382,7 @@ mod tests {
 
     #[test]
     fn an_overexposed_photo_is_never_brightened() {
-        // Mostly blown: the hot guard must hold exposure at or below zero even
-        // though the median sits above mid-gray and wants pulling down.
+        // Mostly blown, so the hot guard must keep exposure at or below zero.
         let hot = ramp(0.75, 1.0, 512);
         let adj = analyze(&hot, PixelFormat::Srgb8);
         assert!(
@@ -479,17 +394,14 @@ mod tests {
 
     #[test]
     fn a_flat_photo_has_its_endpoints_pulled_out() {
-        // A foggy frame: nothing near black, nothing near white. Blacks should
-        // crush down and Whites should push up.
         let fogged = ramp(0.35, 0.62, 512);
         let adj = analyze(&fogged, PixelFormat::Srgb8);
         assert!(adj.blacks < -20.0, "blacks {}", adj.blacks);
         assert!(adj.whites > 20.0, "whites {}", adj.whites);
     }
 
-    /// The nth-percentile display value of a sample under `adj` — what the
-    /// solver is actually aiming at, measured over real pixels rather than the
-    /// binned stand-in the solver uses.
+    /// Display luma at percentile `p`, measured over every pixel instead of the
+    /// histogram's stand-ins.
     fn percentile_under(samples: &[[f32; 3]], adj: &Adjustments, p: f32) -> f32 {
         let mut out: Vec<f32> = samples
             .iter()
@@ -508,9 +420,6 @@ mod tests {
 
     #[test]
     fn the_solver_lands_on_its_targets() {
-        // The whole point of solving rather than guessing: on a photo whose
-        // endpoints are reachable inside the slider range, all three targets
-        // should actually be hit, not merely approached.
         let photo = ramp(0.12, 0.78, 512);
         let adj = analyze(&photo, PixelFormat::Srgb8);
         let median = percentile_under(&photo, &adj, 0.50);
@@ -521,9 +430,8 @@ mod tests {
         assert!((white - TARGET_WHITE).abs() < 0.06, "white point {white}");
     }
 
-    /// A saturated photo: neutral pixels mixed with strongly coloured ones,
-    /// both sweeping the same display range. Four hues in rotation so no
-    /// single channel can accidentally agree with the luma weights.
+    /// Gray and strongly coloured pixels over the same display range. Four
+    /// rotating hues keep any one channel from matching the luma weights.
     fn saturated(lo: f32, hi: f32, n: usize) -> Vec<[f32; 3]> {
         let hues = [
             [1.0, 0.15, 0.15],
@@ -618,12 +526,8 @@ mod tests {
         }
     }
 
-    /// The invariant everything else rests on: bins are keyed by *display*
-    /// luma, so a bin's stored representative has to come back out of the
-    /// pipeline at that same luma. The grayscale tests cannot see this — for a
-    /// neutral pixel any stand-in carrying its linear luma is already exact.
-    /// A coloured one is not: pure red shows at 0.299 but a grey of its linear
-    /// luma reads ~0.578, brighter than a mid-grey pixel that sorts below it.
+    /// Each bin's stand-in must display at the bin's own luma. Gray test photos
+    /// can't catch a violation; only coloured pixels do.
     #[test]
     fn every_bin_representative_reproduces_its_own_display_luma() {
         let photo = saturated(0.02, 0.98, 2048);
@@ -642,10 +546,8 @@ mod tests {
         }
     }
 
-    /// And the consequence of that invariant: the same targets the grayscale
-    /// solve hits must be hit on a saturated photo too. Read off real pixels,
-    /// not the binned stand-in, so a self-consistent-but-wrong histogram
-    /// cannot pass. This used to leave the median at ~0.15 instead of 0.5.
+    /// A saturated photo must hit the same targets as a gray one. Measured on
+    /// real pixels so a wrong histogram can't pass.
     #[test]
     fn the_solver_lands_on_its_targets_for_a_saturated_photo() {
         let photo = saturated(0.10, 0.55, 512);
@@ -658,8 +560,7 @@ mod tests {
         assert!((white - TARGET_WHITE).abs() < 0.06, "white point {white}");
     }
 
-    /// `saturated`'s counterpart in the linear camera-RGB domain that
-    /// `raw/preview.rs` hands back, with no sRGB encode applied.
+    /// `saturated` in linear camera RGB, as `raw/preview.rs` returns it.
     fn raw_saturated(lo: f32, hi: f32, n: usize) -> Vec<[f32; 3]> {
         let hues = [
             [1.0, 0.15, 0.15],
@@ -677,9 +578,7 @@ mod tests {
             .collect()
     }
 
-    /// The nth-percentile display value of a RAW sample under `adj`, measured
-    /// over real pixels rather than the binned stand-in. `percentile_under`'s
-    /// counterpart for the pipeline `raw_shader.wgsl` draws.
+    /// `percentile_under` for the RAW display pipeline.
     fn raw_percentile_under(samples: &[[f32; 3]], adj: &Adjustments, p: f32) -> f32 {
         let mut out: Vec<f32> = samples
             .iter()
@@ -689,7 +588,6 @@ mod tests {
         out[((out.len() as f32 * p) as usize).min(out.len() - 1)]
     }
 
-    /// Sweep `field` across `range` and assert `measure` never goes backwards.
     fn assert_monotonic(
         what: &str,
         range: std::ops::RangeInclusive<f32>,
@@ -710,13 +608,9 @@ mod tests {
         }
     }
 
-    /// `solve` bisects, which is only valid while each measure is
-    /// non-decreasing in the slider it is solving. Every tone operator here is,
-    /// but the RAW display pipeline is a different curve from the sRGB one —
-    /// an sRGB encode, a brightening power, and a smoothstep contrast lift, all
-    /// clamped — and nothing checked that it keeps the promise. Contrast is
-    /// checked against the spread, because that is what the solver aims it at;
-    /// an individual bin is deliberately *not* monotonic in contrast.
+    /// Bisection needs each measure to never decrease as its slider grows. The
+    /// RAW display curve differs from sRGB, so check it. Contrast is checked
+    /// against the spread, since single bins don't move monotonically with it.
     #[test]
     fn the_raw_solve_measures_are_monotonic_in_their_own_sliders() {
         let photo = raw_saturated(0.005, 0.6, 512);
@@ -748,9 +642,7 @@ mod tests {
         );
     }
 
-    /// The bin invariant again, on the RAW pipeline. `apply_raw_display` clamps
-    /// its own output, so this also pins down that the clamp does not strand a
-    /// bin's representative somewhere other than the level it stands for.
+    /// The bin stand-in check on the RAW pipeline, whose output is clamped.
     #[test]
     fn every_bin_representative_reproduces_its_own_display_luma_for_raw() {
         let photo = raw_saturated(0.001, 0.9, 2048);
@@ -769,9 +661,8 @@ mod tests {
         }
     }
 
-    /// And the whole solve end to end on the RAW pipeline, which until now had
-    /// no coverage at all: it is dead code on native macOS (ImageIO hands back
-    /// sRGB), but it is what the browser build's Loupe RAW tier runs on.
+    /// The full solve on the RAW pipeline, which the browser build's RAW Loupe
+    /// uses. Native macOS never reaches it because ImageIO returns sRGB.
     #[test]
     fn the_solver_lands_on_its_targets_for_a_raw_photo() {
         let photo = raw_saturated(0.005, 0.6, 512);
@@ -798,9 +689,6 @@ mod tests {
 
     #[test]
     fn contrast_stays_off_when_the_endpoints_suffice() {
-        // A photo already spanning the range needs no help, and a Contrast
-        // nudge on top of a good stretch is exactly the over-cooking this
-        // slider's cap exists to avoid.
         assert_eq!(
             analyze(&ramp(0.0, 1.0, 512), PixelFormat::Srgb8).contrast,
             0.0
@@ -809,8 +697,6 @@ mod tests {
 
     #[test]
     fn contrast_is_capped() {
-        // Even a photo far too flat for the endpoints to rescue must not pin
-        // Contrast at the slider maximum.
         let very_flat = ramp(0.47, 0.53, 512);
         let adj = analyze(&very_flat, PixelFormat::Srgb8);
         assert!(

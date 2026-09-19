@@ -1,22 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! wasm32-only: the File System Access implementation of `export::ExportFs`.
-//! Native export (`export::NativeFs`) reads with `std::fs` and does a
-//! tmp-write + atomic rename; in the browser a picked folder has no OS path,
-//! so source reads go through a `FileSystemFileHandle` and the JPEG is
-//! written through a File System Access writable stream (which performs its
-//! own atomic swap on `close()` — the same guarantee native's tmp+rename
-//! gets). The transport mirrors `web_catalog_fs::write_sidecar`.
-//!
-//! ## Pipeline position
-//! - This is wasm32's tail of Pipeline 3 (export): `app/export.rs`'s wasm
-//!   `start_export` builds a `WebFs`, the worker pool runs `export::bake_jpeg`
-//!   (`wasm_worker.rs`), and `main.rs`'s frame loop hands each finished
-//!   JPEG's bytes to `WebFs::write_atomic`.
-//! - `existing_export_names` is the browser counterpart of native
-//!   `paths::jpg_export_target`'s `Path::exists()` collision check — the FSA
-//!   API has no synchronous existence test, so `start_export` pre-scans the
-//!   `Exports/` directory once per batch instead.
+//! Sources are read through file handles. JPEGs are written through a
+//! writable stream, which swaps the file in atomically on `close()`, the
+//! same guarantee native export gets from write-to-temp plus rename.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -30,15 +17,12 @@ use web_sys::{
 
 use crate::export::{ExportFs, EXPORTS_DIR};
 
-/// File System Access backing for `export::ExportFs`. Built fresh per export
-/// batch in `app/export.rs`'s wasm `start_export`, so its handle map is a
-/// snapshot of `App::web_file_handles` at that moment.
+/// Built fresh for each export batch, so `file_handles` is a snapshot of
+/// `App::web_file_handles` at that moment.
 pub(crate) struct WebFs {
-    /// The currently-shown folder's directory handle — `Exports/` is created
-    /// under this.
+    /// The current folder. `Exports/` is created under it.
     folder: FileSystemDirectoryHandle,
-    /// Picked-folder-relative source path → its `FileSystemFileHandle`
-    /// (cloned from `App::web_file_handles`).
+    /// Keyed by path relative to the picked root.
     file_handles: HashMap<PathBuf, FileSystemFileHandle>,
 }
 
@@ -53,11 +37,10 @@ impl WebFs {
         }
     }
 
-    /// Names already present in `Exports/` (any entry kind), so
-    /// `start_export` can resolve collision-free targets without a
-    /// per-candidate FSA round trip. An absent `Exports/` yields an empty
-    /// set — nothing to collide with yet. All other access and iteration
-    /// failures are returned: a partial scan is unsafe for collision checks.
+    /// Names already in `Exports/`, so a batch can pick collision-free
+    /// targets up front. The API has no synchronous exists check. A missing
+    /// `Exports/` gives an empty set. Any other failure is an error, because
+    /// a partial scan could miss a collision.
     pub(crate) async fn existing_export_names(&self) -> Result<HashSet<String>, String> {
         let mut names = HashSet::new();
         let opts = FileSystemGetDirectoryOptions::new();
@@ -174,9 +157,6 @@ fn is_not_found(e: &JsValue) -> bool {
         == Some("NotFoundError")
 }
 
-/// Same extraction `web_fs`/`web_catalog_fs` use — duplicated for the same
-/// reason they duplicate it (each is a one-liner around `Reflect::get(e,
-/// "message")`, not worth a shared-visibility change).
 fn js_error_string(e: &JsValue) -> String {
     js_sys::Reflect::get(e, &"message".into())
         .ok()

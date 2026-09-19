@@ -1,19 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Feature-print (learned image-similarity) refinement for duplicate
-//! grouping, via Apple's Vision framework (`VNGenerateImageFeaturePrintRequest`).
-//!
-//! Unlike `phash.rs`'s dHash (cheap pixel-gradient hashing), this is a real
-//! learned embedding — meaningfully better at telling a true duplicate (same
-//! framing, same moment) apart from a creative variation (different
-//! pose/expression, similar framing). Only run on the small subset of photos
-//! dHash already flagged as candidates, so its cost stays bounded.
-//!
-//! Vision decodes the file itself (its own ImageIO-backed path), independent
-//! of lightphotos' own decode/thumbnail pipeline — so this module needs
-//! nothing from `image_decode.rs` beyond a file path. The handler setup that
-//! gets it there lives in `vision.rs`, shared with the other Vision-backed
-//! features.
+//! Vision feature prints: a learned image embedding that tells true duplicates
+//! from similar shots better than dHash. It only runs on photos dHash already
+//! flagged, which keeps the cost bounded. macOS only.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -36,13 +25,10 @@ use crate::vision;
 pub struct FeaturePrint(Retained<objc2_vision::VNFeaturePrintObservation>);
 
 /// A computed feature print for one photo. Opaque; compare two with
-/// [`feature_distance`]. Unsupported on this platform — Vision is
-/// macOS-only, so there is nothing to wrap here.
+/// [`feature_distance`].
 #[cfg(not(target_os = "macos"))]
 pub struct FeaturePrint;
 
-/// Compute the feature print of the image at `path`. Vision decodes the file
-/// itself, so this doesn't touch lightphotos' own decode/thumbnail cache.
 #[cfg(target_os = "macos")]
 pub fn compute(path: &Path) -> Result<FeaturePrint, String> {
     unsafe {
@@ -58,16 +44,13 @@ pub fn compute(path: &Path) -> Result<FeaturePrint, String> {
     }
 }
 
-/// Compute the feature print of the image at `path`. Unsupported on this
-/// platform — Vision is macOS-only.
 #[cfg(not(target_os = "macos"))]
 pub fn compute(_path: &Path) -> Result<FeaturePrint, String> {
     Err("feature-print computation is unsupported on this platform".into())
 }
 
-/// Vision-native distance between two feature prints (lower = more similar;
-/// Vision doesn't document a fixed scale, so this is only meaningful as a
-/// relative ordering / threshold, not an absolute similarity percentage).
+/// Lower is more similar. Vision documents no fixed scale, so only compare
+/// distances with each other or a threshold.
 #[cfg(target_os = "macos")]
 pub fn feature_distance(a: &FeaturePrint, b: &FeaturePrint) -> Result<f32, String> {
     let mut distance: f32 = 0.0;
@@ -78,35 +61,28 @@ pub fn feature_distance(a: &FeaturePrint, b: &FeaturePrint) -> Result<f32, Strin
     Ok(distance)
 }
 
-/// Vision-native distance between two feature prints. Unsupported on this
-/// platform — Vision is macOS-only.
 #[cfg(not(target_os = "macos"))]
 pub fn feature_distance(_a: &FeaturePrint, _b: &FeaturePrint) -> Result<f32, String> {
     Err("feature-print distance is unsupported on this platform".into())
 }
 
-/// One feature-print comparison job: compute the feature prints of `member`
-/// and its dHash group's `anchor`, then the distance between them.
+/// Compare `member` against its dHash group's `anchor`.
 pub struct DistanceJob {
     pub member: PathBuf,
     pub anchor: PathBuf,
 }
 
-/// A finished comparison, carrying both paths back so the caller can reject
-/// the result if the member's anchor changed while it was in flight.
+/// Carries both paths so the caller can drop the result if the member's
+/// anchor changed while the job ran.
 pub struct DistanceOutcome {
     pub anchor: PathBuf,
     pub member: PathBuf,
     pub result: Result<f32, String>,
 }
 
-/// Background worker pool for feature-print comparisons. `VNFeaturePrintObservation`
-/// isn't `Send` (Vision's Rust bindings make no thread-safety claim about it),
-/// so — unlike `export.rs`'s pool, which ships a `Retained` `CGImage` result
-/// back to the main thread — each job computes *both* feature prints and the
-/// distance between them on the same worker thread, and only the resulting
-/// `f32` (plus the paths) crosses the channel back. Mirrors `export::Exporter`
-/// otherwise: small pool, self-contained jobs, drained once per frame.
+/// Background workers for feature-print comparisons. `VNFeaturePrintObservation`
+/// isn't `Send`, so each job computes both prints and their distance on one
+/// thread and sends back only the `f32`.
 pub struct DistancePool {
     job_tx: Sender<DistanceJob>,
     res_rx: Receiver<DistanceOutcome>,
@@ -118,9 +94,8 @@ impl DistancePool {
         let (res_tx, res_rx) = std::sync::mpsc::channel::<DistanceOutcome>();
         let job_rx = Arc::new(Mutex::new(job_rx));
 
-        // Bounded candidate subset (dHash-flagged only), not a bulk pass like
-        // export — a couple of workers is plenty and keeps Vision/ANE
-        // contention low.
+        // Only dHash candidates reach this pool, so two workers are enough and
+        // keep contention for Vision and the Neural Engine low.
         let cores = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -139,7 +114,7 @@ impl DistancePool {
                         };
                         match rx.recv() {
                             Ok(job) => job,
-                            Err(_) => return, // all senders dropped → shut down
+                            Err(_) => return,
                         }
                     };
                     let result = (|| {
@@ -153,12 +128,11 @@ impl DistancePool {
                         result,
                     };
                     if res_tx.send(outcome).is_err() {
-                        break; // UI side gone
+                        break;
                     }
                 });
-            // See loader.rs's identical fallback: not every target has real
-            // threads yet (e.g. wasm32 pre-Web-Worker-pool) — degrade
-            // instead of crashing the app at startup.
+            // Some targets (wasm32) can't spawn threads. Log instead of
+            // crashing at startup.
             if let Err(e) = spawned {
                 eprintln!("[featureprint] could not spawn worker {i}: {e}");
             }
@@ -172,7 +146,7 @@ impl DistancePool {
         let _ = self.job_tx.send(job);
     }
 
-    /// Drain all finished comparisons (non-blocking).
+    /// Drain finished comparisons without blocking.
     pub fn poll(&self) -> Vec<DistanceOutcome> {
         let mut out = Vec::new();
         while let Ok(o) = self.res_rx.try_recv() {
@@ -221,12 +195,7 @@ mod tests {
         out
     }
 
-    // Real Vision-framework round trip (like image_encode's own ImageIO round
-    // trip test): confirms the FFI plumbing (VNImageRequestHandler ->
-    // VNGenerateImageFeaturePrintRequest -> VNFeaturePrintObservation ->
-    // computeDistance) actually runs end to end, and that its distance
-    // ordering is sane — identical images score near zero, clearly different
-    // ones score higher.
+    // Runs real Vision end to end and checks that the distance ordering is sane.
     #[test]
     fn identical_images_are_closer_than_different_ones() {
         let (w, h) = (64, 64);

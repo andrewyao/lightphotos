@@ -1,26 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! `face_probe` — the validation harness for `facequality.rs`.
-//!
-//! The eye-openness heuristic can't be trusted until it's been pointed at real
-//! photographs: synthetic fixtures have no faces, so the unit tests can only
-//! prove the plumbing works, never that the numbers mean anything. This binary
-//! is how a human closes that gap — run it over a folder holding known
-//! open-eyed and known blinking frames and read the printed openness scores.
+//! `face_probe`: prints Vision face landmarks and eye-openness scores so a
+//! person can check `facequality.rs` against real open-eyed and blinking
+//! photos. Unit tests cannot, because synthetic fixtures have no faces.
 //!
 //! ```sh
 //! cargo run --bin face_probe -- ~/Pictures/burst/*.jpg
 //! ```
 //!
-//! The modules are pulled in by `#[path]` rather than through the crate,
-//! because lightphotos has no lib target — `src/main.rs` is the crate root, so
-//! there is nothing for a second binary to `use`. Re-declaring them here makes
-//! `crate::` resolve the same way it does in the main binary; the list is
-//! `facequality.rs` plus its transitive dependencies, and it needs extending
-//! whenever those grow.
+//! There is no lib target, so `facequality.rs` and its dependencies come in
+//! through `#[path]`. Extend the list when its dependencies grow.
 
-// Those modules carry plenty the probe itself never calls (the whole decode
-// path, for one) — that's expected of a re-include, not a code smell.
 #![allow(dead_code)]
 
 #[cfg(target_os = "macos")]
@@ -116,8 +106,7 @@ fn print_region(label: &str, points: &facequality::Points, aspect_wh: f32) {
     let openness = facequality::eye_openness(points, aspect_wh)
         .map_or("n/a".to_string(), |o| format!("{o:.4}"));
     println!("    {label}: {} points, openness {openness}", points.len());
-    // Full point dump — the whole reason this harness exists is to eyeball
-    // whether the contour is plausible, so truncating would defeat it.
+    // Print every point so a person can judge whether the contour is plausible.
     for (i, (x, y)) in points.iter().enumerate() {
         println!("      [{i:2}] {x:.5}, {y:.5}");
     }

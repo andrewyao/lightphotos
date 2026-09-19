@@ -1,31 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Decode an image to RGBA8 bytes.
-//!
-//! macOS: any format macOS understands (JPEG/PNG/GIF/TIFF/BMP/HEIC/RAW) via
-//! Apple's ImageIO + CoreGraphics, no third-party codecs. Pipeline: CFURL ->
-//! CGImageSource -> CGImage -> draw into a CGBitmapContext backed by our own
-//! buffer (sRGB, premultiplied RGBA, big-endian byte order), then read the
-//! buffer back.
-//!
-//! Non-mac: JPEG/PNG/TIFF via the `image` crate; camera RAW via `rawler`
-//! (`decode_raw_nonmac`) — decode the sensor samples, then run rawler's own
-//! demosaic/white-balance/color-calibration/gamma pipeline to get a viewable
-//! image. Metadata reading (EXIF camera/lens fields, capture time beyond
-//! mtime) isn't wired up yet on this platform — see each function's non-mac
-//! doc comment for its exact fallback behavior.
-//!
-//! ## Pipeline position
-//! - `decode()` is called from `loader.rs`'s worker threads, for Pipeline 1's
-//!   `Job::Preview`/`Job::Full` stages (forced preview and full-resolution
-//!   decode) — never the cheap `Job::Speed` pass, which goes through
-//!   `thumbnail::decode_at_size` instead.
-//! - `decode()` is also called from `export.rs`'s `do_export`, for
-//!   Pipeline 3's full-resolution read before baking edits.
-//! - `read_metadata`/`capture_time`/`pixel_size` are called from
-//!   `loader.rs`'s `Job::Exif`/`Job::Meta` — background reads for the info
-//!   panel and burst grouping, never on the UI thread. See
-//!   `ARCHITECTURE.md`.
+//! Decode images to RGBA8 and read their metadata. macOS uses ImageIO for
+//! every format, RAW included. Other targets use the `image` crate and
+//! `rawler`, in `raw/nonmac_decode.rs`, and read almost no EXIF metadata.
 
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
@@ -54,53 +31,39 @@ use objc2_image_io::{
 #[cfg(target_os = "macos")]
 use crate::coregraphics;
 
-/// Non-mac (Linux/Windows/wasm32) decode/metadata + RAW-preview tonemap —
-/// see `src/raw/nonmac_decode.rs`'s own module doc. Re-exported by name so
-/// every `image_decode::decode`/`image_decode::pixel_size`/etc. call site
-/// elsewhere in the crate keeps resolving unchanged; this is a pure physical
-/// move, same trick `src/web/*` already uses for wasm-only files.
+/// The non-mac decode and metadata functions, re-exported so callers use
+/// `image_decode::decode` on every platform.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[path = "raw/nonmac_decode.rs"]
 mod nonmac_decode;
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 pub(crate) use nonmac_decode::*;
 
-/// How `DecodedImage::rgba`'s bytes are laid out. Every decode path on every
-/// platform produces `Srgb8` — the one exception is
-/// `raw_preview::decode_raw_quality_from_bytes` (wasm32 Loupe RAW
-/// decode, `DemosaicMode::Quality`), which stops at linear camera-RGB
-/// (post white-balance, post color-matrix, post highlight rolloff) rather
-/// than baking sRGB gamma + the display brightness/contrast boost
-/// into a CPU lookup table the way every other RAW decode path does —
-/// `renderer.rs` uploads that as an `Rgba16Float` texture instead of the
-/// usual `Rgba8UnormSrgb`, and `raw_shader.wgsl` (not `shader.wgsl`) does the
-/// gamma + boost on the GPU. See `plans/use-rapidraw-s-algorithm-completely-dynamic-puffin.md`.
+/// How `DecodedImage::rgba` is laid out. Every decoder produces `Srgb8`
+/// except `raw_preview::decode_raw_quality_from_bytes` (the wasm32 Loupe RAW
+/// decode). It returns linear light, and `raw_shader.wgsl` applies gamma and
+/// the display boost on the GPU.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum PixelFormat {
-    /// Tightly packed sRGB-gamma-encoded RGBA8, 4 bytes/pixel.
+    /// sRGB-encoded RGBA8, 4 bytes per pixel.
     #[default]
     Srgb8,
-    /// Tightly packed linear-light RGBA, 2 bytes/channel (`half::f16`), 8
-    /// bytes/pixel. Alpha is always opaque (`f16::from_f32(1.0)`).
+    /// Linear-light RGBA as `half::f16`, 8 bytes per pixel. Alpha is always 1.
     LinearF16,
 }
 
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
-    /// Tightly packed pixel bytes, row-major — layout depends on
-    /// `pixel_format`. For the default `Srgb8`: premultiplied alpha on the
-    /// mac arm (drawn through a CGBitmapContext); straight (non-premultiplied)
-    /// alpha on the non-mac arm (produced by the `image` crate). The
-    /// renderer's default blend mode is straight-alpha, so this divergence is
-    /// currently harmless, but it is a real difference between platforms
-    /// worth knowing about before relying on alpha values off mac.
+    /// Tightly packed, row-major pixels in `pixel_format`. For `Srgb8`, alpha
+    /// is premultiplied on macOS (CoreGraphics output) and straight elsewhere
+    /// (`image` crate output). Do not rely on alpha values matching across
+    /// platforms.
     pub rgba: Vec<u8>,
     pub pixel_format: PixelFormat,
 }
 
-// CoreFoundation runtime type introspection, used to verify a value's concrete
-// type before reinterpreting it. CoreFoundation is already linked transitively.
+// CoreFoundation type IDs, used to check a value's type before casting it.
 #[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
@@ -111,10 +74,8 @@ extern "C" {
     fn CFArrayGetTypeID() -> core::ffi::c_ulong;
 }
 
-/// Camera/lens/exposure metadata plus capture date, read live from a file's
-/// EXIF/TIFF properties for display (never persisted — see `catalog.rs`).
-/// Any field absent from the source (screenshots, re-exports, stripped EXIF)
-/// is simply `None`.
+/// Camera, lens, exposure, and capture date for display. Read from the file
+/// each time and never stored in the catalog. Missing fields are `None`.
 #[derive(Default)]
 pub struct ImageMetadata {
     pub camera_make: Option<String>,
@@ -125,17 +86,14 @@ pub struct ImageMetadata {
     pub iso: Option<u32>,
     pub focal_length: Option<f64>,
     pub capture_date: Option<CaptureDate>,
-    /// The original's pixel dimensions in *display* orientation (i.e. with the
-    /// EXIF rotation already applied, matching what [`decode`] produces). Read
-    /// from the image properties, so it costs no decode — which is the point:
-    /// it lets the loupe know the true source resolution while it is still
-    /// showing a thumbnail or a downscaled preview.
+    /// Full-resolution size in display orientation, as [`decode`] would
+    /// return it. Read from the header without decoding, so the Loupe knows
+    /// the true resolution while it still shows a preview.
     pub source_size: Option<(u32, u32)>,
 }
 
-/// A capture timestamp broken into calendar fields as the camera recorded them
-/// (EXIF carries no timezone, so these are displayed as-is — the camera's own
-/// wall-clock reading — rather than converted through `SystemTime`).
+/// Capture time as the camera's wall clock recorded it. EXIF has no time
+/// zone, so this is shown as-is instead of going through `SystemTime`.
 #[derive(Clone, Copy)]
 pub struct CaptureDate {
     pub year: i32,
@@ -145,20 +103,18 @@ pub struct CaptureDate {
     pub minute: u32,
 }
 
-/// Decode `path`, optionally downscaling so neither side exceeds `max_dim`
-/// (so images larger than the GPU's max texture size still display).
-/// Open `path` as a `CGImageSource` (the shared CFURL + ImageIO open path used
-/// by both full-resolution decode and thumbnail generation).
+/// Open `path` as an ImageIO `CGImageSource`.
 #[cfg(target_os = "macos")]
 pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, String> {
     let url = coregraphics::file_url(path)?;
 
-    // SAFETY: url is a valid CFURL; passing no decode options. The returned
-    // CGImageSource is +1 retained and wrapped in CFRetained, released on drop.
+    // SAFETY: url is a valid CFURL and no options are passed.
     unsafe { CGImageSource::with_url(&url, None) }
         .ok_or_else(|| "ImageIO could not open file".into())
 }
 
+/// Decode `path` upright, downscaled so neither side exceeds `max_dim`
+/// (the GPU's max texture size, or `u32::MAX` for full resolution).
 #[cfg(target_os = "macos")]
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let source = open_image_source(path)?;
@@ -172,21 +128,16 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
         return Err("decoded image has zero dimension".into());
     }
 
-    // Downscale to fit max_dim while preserving aspect ratio.
     let (w, h) = fit_within(src_w, src_h, max_dim);
 
     let decoded = cgimage_to_rgba(&image, w, h)?;
-    // `image_at_index` returns raw pixels; apply the file's EXIF orientation so
-    // the full decode matches the thumbnails (which orient via ImageIO's
-    // WithTransform). Loupe, crop, and export all consume `decode()`, so this
-    // keeps every downstream view upright and consistent.
+    // `image_at_index` ignores EXIF orientation, so rotate here to match the
+    // thumbnails, which ImageIO orients for us.
     Ok(apply_exif_orientation(decoded, read_orientation(&source)))
 }
 
-/// Validated calendar/time components parsed from an EXIF datetime string.
-// Only `read_capture_time`/`read_capture_date` (macOS-only, ImageIO EXIF
-// reads) call into this family outside of its own unit tests below, hence
-// the `any(macos, test)` gate on each item in it.
+/// Validated fields of an EXIF datetime. Only the macOS EXIF readers and
+/// tests use the parsing helpers, hence their `any(macos, test)` gate.
 #[cfg(any(target_os = "macos", test))]
 struct DateTimeParts {
     y: i64,
@@ -223,9 +174,8 @@ fn parse_exif_datetime_parts(s: &str) -> Option<DateTimeParts> {
     })
 }
 
-/// Parse an EXIF datetime string into a `SystemTime`, interpreting it as UTC
-/// (EXIF carries no timezone; only *consistency* matters for burst grouping,
-/// not absolute correctness).
+/// Parse an EXIF datetime as UTC. EXIF has no time zone, and burst grouping
+/// only needs times to be consistent with each other.
 #[cfg(any(target_os = "macos", test))]
 fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
     let p = parse_exif_datetime_parts(s)?;
@@ -233,8 +183,6 @@ fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
     (secs >= 0).then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64))
 }
 
-/// Parse an EXIF datetime string into calendar fields for display, as the
-/// camera recorded them — no timezone conversion (see `CaptureDate`).
 #[cfg(any(target_os = "macos", test))]
 fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
     let p = parse_exif_datetime_parts(s)?;
@@ -247,8 +195,8 @@ fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
     })
 }
 
-/// Days since the Unix epoch for a proleptic-Gregorian date (Howard Hinnant's
-/// `days_from_civil`). Valid for any in-range `m` (1..=12), `d` (1..=31).
+/// Days since the Unix epoch for a Gregorian date (Howard Hinnant's
+/// `days_from_civil`). Expects `m` in 1..=12 and `d` in 1..=31.
 #[cfg(any(target_os = "macos", test))]
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
@@ -260,9 +208,8 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// Capture time for `path` from its EXIF/TIFF metadata, falling back to the
-/// file's modification time so grouping always has *something* to order by.
-/// Never panics; returns `None` only when even the mtime is unavailable.
+/// Capture time from EXIF or TIFF, else the file's mtime so grouping always
+/// has something to sort by. `None` only when the mtime is unreadable too.
 #[cfg(target_os = "macos")]
 pub fn capture_time(path: &Path) -> Option<SystemTime> {
     let source = open_image_source(path).ok()?;
@@ -270,14 +217,12 @@ pub fn capture_time(path: &Path) -> Option<SystemTime> {
         .or_else(|| std::fs::metadata(path).ok().and_then(|m| m.modified().ok()))
 }
 
-/// Read the capture timestamp from an open source: EXIF `DateTimeOriginal`
-/// first, then TIFF `DateTime`. `None` when neither is present/parseable.
+/// EXIF `DateTimeOriginal`, else TIFF `DateTime`.
 #[cfg(target_os = "macos")]
 fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
-    // SAFETY: index 0 exists; no options. Dictionary is +1 retained, freed on drop.
+    // SAFETY: index 0 exists and no options are passed.
     let props = unsafe { source.properties_at_index(0, None) }?;
 
-    // EXIF sub-dictionary → DateTimeOriginal (preferred).
     if let Some(exif) = dict_dictionary(&props, unsafe { kCGImagePropertyExifDictionary }) {
         if let Some(t) = dict_string(exif, unsafe { kCGImagePropertyExifDateTimeOriginal })
             .and_then(|s| parse_exif_datetime(&s))
@@ -286,15 +231,12 @@ fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
         }
     }
 
-    // TIFF DateTime (top-level) fallback.
     dict_string(&props, unsafe { kCGImagePropertyTIFFDateTime })
         .and_then(|s| parse_exif_datetime(&s))
 }
 
-/// Read the capture date for display: EXIF `DateTimeOriginal` first, then
-/// TIFF `DateTime`. `None` when neither is present/parseable — unlike
-/// `capture_time`, this has no filesystem-mtime fallback, since a
-/// modification time isn't a capture date and shouldn't be shown as one.
+/// Like `read_capture_time`, but for display. No mtime fallback, because an
+/// mtime is not a capture date and should not be shown as one.
 #[cfg(target_os = "macos")]
 fn read_capture_date(source: &CGImageSource) -> Option<CaptureDate> {
     let props = unsafe { source.properties_at_index(0, None) }?;
@@ -311,8 +253,7 @@ fn read_capture_date(source: &CGImageSource) -> Option<CaptureDate> {
         .and_then(|s| parse_exif_datetime_display(&s))
 }
 
-/// Read camera/lens/exposure metadata plus capture date for `path`. Never
-/// panics; an unreadable file yields an all-`None` `ImageMetadata`.
+/// Metadata for `path`. An unreadable file gives all `None`.
 #[cfg(target_os = "macos")]
 pub fn read_metadata(path: &Path) -> ImageMetadata {
     let mut meta = ImageMetadata::default();
@@ -328,8 +269,7 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
     meta.camera_make = dict_string(&props, unsafe { kCGImagePropertyTIFFMake });
     meta.camera_model = dict_string(&props, unsafe { kCGImagePropertyTIFFModel });
 
-    // Stored pixel dimensions, swapped into display orientation for the
-    // quarter-turn EXIF orientations so they line up with `decode`'s output.
+    // Swap to display orientation for EXIF 5..=8, matching `decode`.
     if let (Some(w), Some(h)) = (
         dict_f64(&props, unsafe { kCGImagePropertyPixelWidth }),
         dict_f64(&props, unsafe { kCGImagePropertyPixelHeight }),
@@ -355,16 +295,15 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
     meta
 }
 
-/// Fetch a dictionary value by key with no type checking; null if absent.
+/// Borrowed pointer to the value for `key`, unchecked. Null if absent.
 #[cfg(target_os = "macos")]
 fn dict_raw(dict: &CFDictionary, key: &CFString) -> *const c_void {
-    // SAFETY: `key` is a valid CFString option key; `value` returns a borrowed
-    // pointer to the stored value, or null when absent.
+    // SAFETY: `key` is a valid CFString.
     unsafe { dict.value(key as *const CFString as *const c_void) }
 }
 
-/// Read a CFString value from a CFDictionary for `key`, verifying the concrete
-/// type before reinterpreting (a crafted file could store another CFType).
+/// String value for `key`. This and the helpers below check the CF type
+/// before casting, because a crafted file can store any type under any key.
 #[cfg(target_os = "macos")]
 fn dict_string(dict: &CFDictionary, key: &CFString) -> Option<String> {
     let ptr = dict_raw(dict, key);
@@ -375,7 +314,6 @@ fn dict_string(dict: &CFDictionary, key: &CFString) -> Option<String> {
     Some(unsafe { &*(ptr as *const CFString) }.to_string())
 }
 
-/// Read a CFDictionary sub-value from a CFDictionary for `key`.
 #[cfg(target_os = "macos")]
 fn dict_dictionary<'a>(dict: &'a CFDictionary, key: &CFString) -> Option<&'a CFDictionary> {
     let ptr = dict_raw(dict, key);
@@ -386,8 +324,6 @@ fn dict_dictionary<'a>(dict: &'a CFDictionary, key: &CFString) -> Option<&'a CFD
     Some(unsafe { &*(ptr as *const CFDictionary) })
 }
 
-/// Read a `CFNumber` at a raw (already-fetched) pointer as `f64`, verifying
-/// the concrete type before reinterpreting.
 #[cfg(target_os = "macos")]
 fn number_f64(ptr: *const c_void) -> Option<f64> {
     if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFNumberGetTypeID() } {
@@ -405,15 +341,13 @@ fn number_f64(ptr: *const c_void) -> Option<f64> {
     ok.then_some(out)
 }
 
-/// Read a CFNumber value from a CFDictionary for `key` as `f64`.
 #[cfg(target_os = "macos")]
 fn dict_f64(dict: &CFDictionary, key: &CFString) -> Option<f64> {
     number_f64(dict_raw(dict, key))
 }
 
-/// Read the first numeric value from a CFDictionary entry for `key`, which per
-/// the EXIF spec may be stored as a CFArray of CFNumbers (ISOSpeedRatings) —
-/// falls back to reading it as a bare CFNumber for lenient sources.
+/// First number under `key`. EXIF stores some values, like ISOSpeedRatings,
+/// as an array of numbers, but some files store a bare number.
 #[cfg(target_os = "macos")]
 fn dict_first_u32(dict: &CFDictionary, key: &CFString) -> Option<u32> {
     let ptr = dict_raw(dict, key);
@@ -430,25 +364,19 @@ fn dict_first_u32(dict: &CFDictionary, key: &CFString) -> Option<u32> {
         if array.count() == 0 {
             return None;
         }
-        // SAFETY: index 0 is in bounds (count checked above); borrowed pointer.
+        // SAFETY: count is non-zero, so index 0 is in bounds.
         let first = unsafe { array.value_at_index(0) };
         return number_f64(first).map(|v| v as u32);
     }
     None
 }
 
-/// The image's stored pixel dimensions, read from ImageIO's properties without
-/// decoding a single pixel.
-///
-/// These are the dimensions *as stored*, before EXIF orientation is applied —
-/// which is exactly what a caller comparing against another framework's
-/// upright-assuming coordinate space wants (see `facequality.rs`). Callers who
-/// want display dimensions should swap the axes themselves for orientations
-/// `5..=8`, the way [`apply_exif_orientation`] does.
+/// Stored pixel size, before EXIF orientation, read without decoding. Swap
+/// the axes for orientations `5..=8` to get the display size.
 #[cfg(target_os = "macos")]
 pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
     let source = open_image_source(path).ok()?;
-    // SAFETY: index 0 exists for any image the source opened; no options passed.
+    // SAFETY: index 0 exists for any image the source opened.
     let props = unsafe { source.properties_at_index(0, None) }?;
     let w = dict_f64(&props, unsafe { kCGImagePropertyPixelWidth })?;
     let h = dict_f64(&props, unsafe { kCGImagePropertyPixelHeight })?;
@@ -458,11 +386,9 @@ pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
     Some((w as u32, h as u32))
 }
 
-/// The EXIF orientation of the image at `path` (`1..=8`, `1` when absent).
-///
-/// [`decode`] already applies this, so callers only need it to line something
-/// up with a decoded image that was produced *outside* this pipeline — Vision's
-/// segmentation masks, which are computed in the file's stored orientation.
+/// EXIF orientation `1..=8` of `path`, `1` when absent. [`decode`] already
+/// applies it. Use it to align output computed in stored orientation, such as
+/// Vision's segmentation masks.
 #[cfg(target_os = "macos")]
 pub fn orientation_of(path: &Path) -> u8 {
     open_image_source(path)
@@ -470,12 +396,8 @@ pub fn orientation_of(path: &Path) -> u8 {
         .unwrap_or(1)
 }
 
-/// The EXIF orientation of the image at `path`. Non-mac: reads it via the
-/// `image` crate's own decoder-level orientation support (the same mechanism
-/// [`decode`]'s non-mac arm already uses), converted back to the raw EXIF
-/// code (`1..=8`) via [`image::metadata::Orientation::to_exif`]. Returns the
-/// identity orientation (`1`) for RAW files (no `image`-crate decoder), PNGs
-/// (no orientation tag), or any unreadable/unrecognized file.
+/// EXIF orientation `1..=8` of `path` via the `image` crate. `1` for RAW
+/// files, PNGs, and anything unreadable.
 #[cfg(not(target_os = "macos"))]
 pub fn orientation_of(path: &Path) -> u8 {
     let Ok(reader) = image::ImageReader::open(path) else {
@@ -494,29 +416,25 @@ pub fn orientation_of(path: &Path) -> u8 {
         .to_exif()
 }
 
-/// The image's EXIF orientation tag (`1..=8`), or `1` when absent/unreadable.
-/// Never panics — any missing property yields the identity orientation.
+/// EXIF orientation `1..=8`, or `1` when absent or invalid.
 #[cfg(target_os = "macos")]
 fn read_orientation(source: &CGImageSource) -> u8 {
-    // SAFETY: index 0 exists (we already decoded it); no options passed. The
-    // returned dictionary is +1 retained and released on drop.
+    // SAFETY: index 0 exists and no options are passed.
     let Some(props) = (unsafe { source.properties_at_index(0, None) }) else {
         return 1;
     };
-    // SAFETY: the orientation key is a valid CFString option key; `value` returns
-    // a borrowed (non-owned) pointer to the CFNumber, or null if absent.
+    // SAFETY: the key is a valid CFString. The result is borrowed or null.
     let ptr =
         unsafe { props.value(kCGImagePropertyOrientation as *const CFString as *const c_void) };
     if ptr.is_null() {
         return 1;
     }
-    // A well-formed file stores a CFNumber here, but a crafted/broken file could
-    // store some other CFType. Verify the concrete type before reinterpreting —
-    // casting an arbitrary CF object to CFNumber and calling `value` on it is UB.
+    // A crafted file can store any CF type here, and reading a non-CFNumber
+    // as one is UB.
     if unsafe { CFGetTypeID(ptr) } != unsafe { CFNumberGetTypeID() } {
         return 1;
     }
-    // SAFETY: confirmed above that the value is a CFNumber; read it as SInt32.
+    // SAFETY: the type check above confirmed a CFNumber.
     let number = unsafe { &*(ptr as *const CFNumber) };
     let mut out: i32 = 0;
     let ok = unsafe {
@@ -532,20 +450,14 @@ fn read_orientation(source: &CGImageSource) -> u8 {
     }
 }
 
-/// Reorient tightly-packed RGBA8 pixels per an EXIF orientation (`1..=8`),
-/// returning the corrected image. Orientation `1` is returned untouched (fast
-/// path). Cases `5..=8` swap width/height.
-///
-/// Mapping is `out(xo, yo) = in(xs, ys)`; see the EXIF orientation table. Shares
-/// its shape with `app::rotate_rgba`, extended to cover the mirrored cases.
+/// Rotate or mirror RGBA8 pixels upright for EXIF orientation `1..=8`.
+/// Orientations `5..=8` swap width and height.
 pub(crate) fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImage {
     if orientation <= 1 {
         return img;
     }
-    // 4-bytes/pixel math below assumes `Srgb8` — the one producer of
-    // `LinearF16` (`raw_preview::decode_raw_quality_from_bytes`) applies
-    // orientation itself, before this function's pixel_format is ever
-    // anything else.
+    // The loop assumes 4 bytes per pixel. The only `LinearF16` producer
+    // orients its own output and never calls this.
     debug_assert_eq!(img.pixel_format, PixelFormat::Srgb8);
     let (w, h) = (img.width, img.height);
     let swaps = matches!(orientation, 5 | 6 | 7 | 8);
@@ -576,12 +488,8 @@ pub(crate) fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> Deco
     }
 }
 
-/// Draw a `CGImage` into a freshly-allocated sRGB bitmap context sized
-/// `(target_w, target_h)` and read back the result as tightly-packed,
-/// premultiplied RGBA8 (byte order R,G,B,A — matches `Rgba8UnormSrgb`).
-///
-/// Scales the image into the target rect, so callers can use this both for a
-/// full-size decode and for a thumbnail (passing the thumbnail's own size).
+/// Draw `image` scaled to `target_w` x `target_h` and return premultiplied
+/// sRGB RGBA8 pixels.
 #[cfg(target_os = "macos")]
 pub fn cgimage_to_rgba(
     image: &CGImage,
@@ -595,7 +503,7 @@ pub fn cgimage_to_rgba(
     let bytes_per_row = (target_w as usize) * 4;
     let mut buffer = vec![0u8; bytes_per_row * (target_h as usize)];
 
-    // SAFETY: buffer is large enough (target_w*target_h*4) and outlives `ctx`.
+    // SAFETY: buffer holds target_w * target_h * 4 bytes and outlives `ctx`.
     let ctx = unsafe {
         coregraphics::srgb_bitmap_context(
             buffer.as_mut_ptr() as *mut c_void,
@@ -605,7 +513,6 @@ pub fn cgimage_to_rgba(
         )?
     };
 
-    // Draw the image scaled into our (possibly smaller) context rect.
     let rect = CGRect {
         origin: CGPoint { x: 0.0, y: 0.0 },
         size: CGSize {
@@ -623,6 +530,8 @@ pub fn cgimage_to_rgba(
     })
 }
 
+/// Scale `(w, h)` down, keeping aspect ratio, so neither side exceeds
+/// `max_dim`.
 pub(crate) fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
     if w <= max_dim && h <= max_dim {
         return (w, h);
@@ -662,7 +571,6 @@ mod tests {
 
     #[test]
     fn parse_exif_datetime_handles_leap_year() {
-        // 2024 is a leap year, so Feb 28 -> Mar 1 is two days (Feb 29 exists).
         let feb28 = parse_exif_datetime("2024:02:28 00:00:00").unwrap();
         let mar01 = parse_exif_datetime("2024:03:01 00:00:00").unwrap();
         assert_eq!(
@@ -680,9 +588,8 @@ mod tests {
         assert_eq!(parse_exif_datetime("2026:07:15"), None); // no time part
     }
 
-    /// End-to-end decode through ImageIO + our CGBitmapContext path. Requires a
-    /// test image at /tmp/iv-test/a.png (created by the dev workflow). Skipped
-    /// if absent so the suite still passes on CI without it.
+    /// Needs a solid-color image at /tmp/iv-test/a.png. Skips when it is
+    /// missing.
     #[test]
     fn decodes_known_image_to_nonblank_rgba() {
         let path = Path::new("/tmp/iv-test/a.png");
@@ -693,8 +600,7 @@ mod tests {
         let img = decode(path, 16384).expect("decode should succeed");
         assert!(img.width > 0 && img.height > 0, "non-zero dimensions");
         assert_eq!(img.rgba.len(), (img.width * img.height * 4) as usize);
-        // The fixture is a solid color, so the alpha channel must be opaque and
-        // the RGB must not be all-zero (which would mean nothing was drawn).
+        // All-zero RGB would mean nothing was drawn.
         let any_color = img.rgba.chunks_exact(4).any(|p| p[0] | p[1] | p[2] != 0);
         let opaque = img.rgba.chunks_exact(4).all(|p| p[3] == 255);
         assert!(any_color, "decoded pixels are all black -> draw failed");
@@ -721,7 +627,7 @@ mod tests {
 
     #[test]
     fn orientation_6_rotates_90cw_and_swaps_dims() {
-        // A,B side by side (w=2,h=1). Rotate 90° CW → 1×2 column A over B.
+        // 2x1 [A, B] rotated 90° CW is a 1x2 column, A over B.
         let img = DecodedImage {
             width: 2,
             height: 1,
@@ -736,15 +642,14 @@ mod tests {
 
     #[test]
     fn orientation_8_rotates_270cw() {
-        // 90° CW then 90° CCW must return to the original layout.
         let img = DecodedImage {
             width: 2,
             height: 1,
             rgba: [px(10), px(20)].concat(),
             pixel_format: PixelFormat::Srgb8,
         };
-        let cw = apply_exif_orientation(img, 6); // 1×2 [10; 20]
-        let back = apply_exif_orientation(cw, 8); // rot270 CW → back to 2×1 [10,20]
+        let cw = apply_exif_orientation(img, 6);
+        let back = apply_exif_orientation(cw, 8);
         assert_eq!((back.width, back.height), (2, 1));
         assert_eq!(&back.rgba[0..4], &px(10));
         assert_eq!(&back.rgba[4..8], &px(20));

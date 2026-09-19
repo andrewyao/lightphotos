@@ -1,57 +1,28 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// GPU half of the RAW display tonemap, ported to WGSL. The CPU side
-// (`raw/preview.rs`'s `DemosaicMode::Quality`) does the demosaic and
-// stops at linear camera-RGB; this shader finishes the job with real sRGB
-// gamma plus a display brightness/contrast boost, applied to every RAW
-// photo's rendering, and then the full Develop-slider tone pipeline
-// (`develop.rs`'s `Adjustments`/`GpuAdjust`) on top — full parity with
-// `shader.wgsl`, the non-RAW pipeline's own fragment shader.
-// `image_decode.rs`'s `apply_raw_preview_boost` is the CPU twin of the
-// gamma+boost math here — used by every OTHER RAW decode path (native
-// non-mac, and this file's own `Fast`/Grid tier), which bakes the transform
-// into u8 sRGB bytes at decode time instead. This module exists because
-// `decode_raw_quality_from_bytes` (Loupe/`Preview` jobs, wasm32) deliberately
-// stops at linear camera-RGB and hands the rest to the GPU — a two-stage
-// CPU-decode/GPU-tonemap split, instead of lightphotos's usual CPU-LUT
-// approach.
+// Fragment shader for linear-light RAW images (`PixelFormat::LinearF16`, the
+// wasm32 Loupe path). The CPU demosaics to linear camera RGB and this shader
+// does the rest: sRGB gamma, the RAW display boost, and the Develop sliders.
+// `apply_raw_preview_boost` in `raw/nonmac_decode.rs` is the CPU twin that
+// every other RAW path bakes into u8 sRGB at decode time.
 //
-// Composition order (deliberately NOT a straight copy of `shader.wgsl`'s
-// pipeline — see the two divergences called out inline below):
-//   denoise -> touch-ups -> WB -> exposure -> real sRGB gamma + display
-//   boost -> tone curve -> vibrance/saturation -> clamp -> return.
+// Order: denoise -> touch-ups -> WB -> exposure -> sRGB gamma + boost ->
+// tone -> vibrance/saturation -> clamp.
 //
-// Divergence 1: the real sRGB curve + display boost (`linear_to_srgb` +
-// `apply_raw_preview_boost`) stay exactly where they were before this file
-// grew develop-slider support, unmodified and undecomposed — they ARE this
-// pipeline's "linear -> working gamma" step, `shader.wgsl`'s real-curve
-// analog of its own `pow(x, 1/2.2)`. Keeping them untouched, in this exact
-// position, is what makes the identity case (every slider at its default)
-// render byte-identical to this file's pre-develop-slider output: `tone()`
-// and the vibrance/saturation factor are both no-ops at default slider
-// values (confirmed against `develop.rs`), so nothing downstream of the
-// boost disturbs identity either.
-//
-// Divergence 2: this pipeline does NOT convert back to linear before
-// returning (`shader.wgsl`'s final step, needed because ITS target is an
-// sRGB-format swapchain view that auto-encodes linear values on store). This
-// pipeline's target never gets that hardware encode: `wgpu`'s WebGPU canvas
-// backend (`wgpu-29.0.3/src/backend/webgpu.rs`'s `WebSurface::get_capabilities`)
-// only ever reports `Rgba8Unorm`/`Bgra8Unorm`/`Rgba16Float` for a canvas
-// surface — never an sRGB variant, a real WebGPU spec restriction on canvas
-// `configure()` formats — so `Renderer::new`'s `format.is_srgb()` search
-// (`renderer.rs`) is always false here, and the boosted+toned value already
-// IS the final display-ready output. Converting it back to linear here would
-// be wrong for this target even though `shader.wgsl` requires exactly that
-// for its own.
+// Two differences from `shader.wgsl`:
+// 1. The working gamma is the real sRGB curve plus the display boost, not
+//    `pow(x, 1/2.2)`. With every slider at default the output equals the
+//    plain gamma + boost result.
+// 2. No conversion back to linear at the end. WebGPU canvases never offer an
+//    sRGB surface format, so nothing re-encodes on store and this output is
+//    already display-ready.
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
 };
 
-// Packed tone/crop uniform. Field order MUST match GpuAdjust in develop.rs,
-// and MUST stay identical to shader.wgsl's own `Adjust` struct.
+// Field order must match `GpuAdjust` in develop.rs and `Adjust` in shader.wgsl.
 struct Adjust {
     exposure: f32,
     contrast: f32,
@@ -86,14 +57,10 @@ struct TouchUp {
 @group(0) @binding(1) var samp: sampler;
 @group(2) @binding(0) var<uniform> adj: Adjust;
 @group(3) @binding(0) var<storage, read> touchups: array<TouchUp>;
-// Group 1 (xform) stays bound per the shared 4-group `pipeline_layout` (see
-// `raw/render.rs::create_raw_pipeline`) but isn't declared here — only
-// `shader.wgsl`'s own `vs_main` (the vertex stage this pipeline reuses)
-// reads it, not this file's `fs_main`.
+// Group 1 (pan/zoom) is bound but only read by the shared `vs_main`.
 
-// Standard sRGB EOTF^-1 (linear -> sRGB-gamma-encoded). MUST stay in sync
-// with `rawler::imgop::srgb::srgb_apply_gamma` (what the CPU LUT paths use)
-// and shader.wgsl's own `linear_to_srgb` — same piecewise curve everywhere.
+// Linear to sRGB-encoded. Must match `rawler::imgop::srgb::srgb_apply_gamma`
+// (used by the CPU LUT paths) and `linear_to_srgb` in shader.wgsl.
 fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     let cutoff = vec3<f32>(0.0031308);
     let a = vec3<f32>(0.055);
@@ -102,12 +69,9 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
     return select(higher, lower, c <= cutoff);
 }
 
-// RAW-only display boost, ported verbatim (constants included) from the
-// reference implementation this pipeline matches — flattens/darkens less
-// than a naive linear-matrix -> sRGB-gamma conversion, by design. MUST stay
-// in sync with `image_decode.rs`'s `RAW_PREVIEW_BRIGHTNESS_GAMMA`/
-// `RAW_PREVIEW_CONTRAST_MIX`/`apply_raw_preview_boost` — same formula, same
-// constants, this module's WGSL twin of that CPU LUT.
+// RAW display boost: brightens and adds contrast on top of the sRGB curve so
+// RAW files look less flat. Formula and constants must match
+// `apply_raw_preview_boost` in raw/nonmac_decode.rs.
 const RAW_PREVIEW_BRIGHTNESS_GAMMA: f32 = 1.1;
 const RAW_PREVIEW_CONTRAST_MIX: f32 = 0.75;
 
@@ -117,19 +81,16 @@ fn apply_raw_preview_boost(v: f32) -> f32 {
     return clamp(brightened + (contrast_curve - brightened) * RAW_PREVIEW_CONTRAST_MIX, 0.0, 1.0);
 }
 
-// Filmic exposure constants. MUST stay in sync with `filmic_exposure` in
-// develop.rs. MIX is the share of the adjustment routed through the rational
-// curve, MIDTONE is how hard it bends per stop, and ANCHOR is the curve's fixed
-// point — just *above* display white, so a 1.0 pixel still moves sub-linearly
-// rather than being pinned.
+// Must match `filmic_exposure` in develop.rs. MIX is the share of the change
+// routed through the curve, MIDTONE is how hard it bends per stop, and ANCHOR
+// is the curve's fixed point, just above white so a 1.0 pixel still moves.
 const FILMIC_MIX: f32 = 0.95;
 const FILMIC_MIDTONE: f32 = 1.2;
 const FILMIC_ANCHOR: f32 = 1.06;
 
-// Filmic exposure, in linear light: shapes luma through a rational curve so
-// brightening compresses into white instead of clipping flat, then rescales
-// chroma separately so colors go pale as they brighten. MUST stay in sync with
-// `filmic_exposure` in develop.rs and shader.wgsl's own copy.
+// Exposure in linear light. Luma goes through a rational curve so brightening
+// rolls into white instead of clipping, and chroma grows slower so colors go
+// pale. Must match `filmic_exposure` in develop.rs and shader.wgsl.
 fn filmicExposure(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
     if (stops == 0.0) {
         return rgb;
@@ -140,8 +101,7 @@ fn filmicExposure(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
         return rgb * exp2(stops);
     }
 
-    // Rec.709 luma. Linear-light values, so NOT the 0.299/0.587/0.114 set the
-    // gamma-space vibrance block uses.
+    // Rec.709 luma weights, because this runs in linear light.
     let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
     if (abs(luma) < 1e-5) {
         return rgb;
@@ -170,18 +130,15 @@ fn filmicExposure(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
     return vec3<f32>(newLuma) + (rgb - vec3<f32>(luma)) * chromaScale;
 }
 
-// One gamma-space tone op, applied per channel. MUST stay in sync with the
-// `tone` closure in apply_linear in develop.rs, and with shader.wgsl's own
-// `tone` function — identical body, just fed by this file's real-sRGB+boost
-// working space instead of shader.wgsl's `pow(1/2.2)` one.
+// Per-channel tone ops in gamma space. Must match the `tone` closure in
+// develop.rs `apply_linear` and `tone` in shader.wgsl.
 fn tone(v: f32) -> f32 {
     var x = v;
 
     // Blacks/whites: shift the endpoints. ±100 → ±0.2 endpoint move.
     let blacks = adj.blacks / 100.0 * 0.2;
     let whites = adj.whites / 100.0 * 0.2;
-    // Positive whites brightens/clips the top end, negative recovers it —
-    // Lightroom's convention. MUST stay in sync with develop.rs.
+    // Positive whites brightens the top end, as in Lightroom.
     x = (x + blacks) / ((1.0 - whites) + blacks);
 
     // Contrast: S-curve pivoting at mid-gray. ±100 → ±0.5 strength.
@@ -208,9 +165,8 @@ fn tone(v: f32) -> f32 {
     return x;
 }
 
-// Hand-baked σ=1.0 Gaussian spatial weight for the 5×5 denoise kernel,
-// indexed by squared tap distance. MUST stay in sync with `spatial_weight`
-// in develop.rs and shader.wgsl's own copy.
+// σ=1.0 Gaussian weight for the 5×5 denoise kernel, keyed by squared tap
+// distance. Must match `spatial_weight` in develop.rs.
 fn spatialWeight(d2: i32) -> f32 {
     if (d2 == 0) { return 1.0; }
     if (d2 == 1) { return 0.606531; }
@@ -223,23 +179,16 @@ fn spatialWeight(d2: i32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Sampled unconditionally, before any branching — same WebGPU uniformity
-    // requirement shader.wgsl's fs_main documents at its own textureSample
-    // call: an implicit-LOD sample reachable only after a per-fragment
-    // discard/return fails WebGPU's validator even though every fragment
-    // that reaches it took the same path.
-    //
-    // Rgba16Float is not an sRGB-variant format, so this returns the stored
-    // values AS-IS — genuinely linear, no hardware gamma decode (unlike
-    // shader.wgsl's Rgba8UnormSrgb sample).
+    // Sample before any early return. WebGPU rejects an implicit-LOD sample
+    // after non-uniform control flow. Rgba16Float has no sRGB decode, so this
+    // is linear.
     let texel = textureSample(tex, samp, in.uv);
 
     // Outside the image (UV beyond 0..1): draw the neutral background.
     if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
         return vec4<f32>(0.12, 0.12, 0.13, 1.0);
     }
-    // Outside the crop rectangle: same neutral background (identity crop
-    // 0,0,1,1 never triggers this).
+    // Outside the crop rectangle.
     if (in.uv.x < adj.crop_l || in.uv.x > adj.crop_r || in.uv.y < adj.crop_t || in.uv.y > adj.crop_b) {
         return vec4<f32>(0.12, 0.12, 0.13, 1.0);
     }
@@ -248,15 +197,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var g = texel.g;
     var b = texel.b;
 
-    // 0. Edge-aware (bilateral-style) denoise: a fixed 5x5 neighborhood, blended
-    // by spatial + color-similarity weight. Only taken when denoise is active —
-    // the identity path above (implicit-LOD textureSample) is left completely
-    // untouched, so denoise == 0 renders byte-identical to before this branch
-    // existed. Explicit textureSampleLevel (not textureSample) is used for every
-    // tap since the tap loop isn't uniform control flow that implicit-LOD
-    // derivatives can rely on; this also means minification antialiasing is
-    // bypassed while denoise is active (a known, accepted trade-off when
-    // zoomed far out). MUST stay in sync with `denoise_sample` in develop.rs.
+    // 0. Edge-aware denoise over a 5x5 neighborhood, weighted by distance and
+    // color similarity. The loop is not uniform control flow, so taps use
+    // textureSampleLevel at LOD 0; this skips mip antialiasing when zoomed
+    // out. Must match `denoise_sample` in develop.rs.
     if (adj.denoise > 0.0) {
         let center = textureSampleLevel(tex, samp, in.uv, 0.0).rgb;
         let sigmaR = 0.02 + adj.denoise / 100.0 * 0.30;
@@ -281,16 +225,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         b = denoised.z;
     }
 
-    // Content-aware spot healing. Source centers and local color corrections
-    // are selected on the CPU; the GPU only applies the feathered patches.
-    // Keep this after denoise to match the CPU bake/export pipeline.
+    // Spot healing. The CPU picks source spots and color deltas; the GPU
+    // blends the feathered patches. Runs after denoise to match export.
+    // The touch-up count rides in `_pad0`.
     let touch_count = u32(adj._pad0);
     for (var i = 0u; i < touch_count; i = i + 1u) {
         let t = touchups[i];
         let d = (in.uv - t.center_radius_feather.xy) /
             vec2<f32>(adj.texel_w, adj.texel_h);
-        // Touch-up radii are normalized against the source image's shorter
-        // dimension, matching the CPU bake/export path.
+            // Radii are normalized to the image's shorter side.
         let radius_px = t.center_radius_feather.z / max(adj.texel_w, adj.texel_h);
         let distance_px = length(d);
         if (distance_px < radius_px) {
@@ -312,15 +255,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = g * (1.0 - ti * 0.15);
     b = b * (1.0 - t * 0.3);
 
-    // 2. Exposure: a filmic curve, not a plain gain — see `filmicExposure`.
+    // 2. Exposure.
     let exposed = filmicExposure(vec3<f32>(r, g, b), adj.exposure);
     r = exposed.r;
     g = exposed.g;
     b = exposed.b;
 
-    // 3. Linear -> working gamma: real sRGB curve + display
-    // boost, both left exactly as they were before this file had any
-    // develop-slider math — see this file's module doc, "Divergence 1".
+    // 3. Linear to working gamma (difference 1 in the header).
     let srgb = linear_to_srgb(vec3<f32>(r, g, b));
     r = apply_raw_preview_boost(srgb.r);
     g = apply_raw_preview_boost(srgb.g);
@@ -331,9 +272,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = tone(g);
     b = tone(b);
 
-    // 4.5. Vibrance/saturation: a cross-channel chroma scale about luma, in
-    // gamma space. MUST stay in sync with the equivalent block in
-    // apply_linear in develop.rs and shader.wgsl's own copy.
+    // 4.5. Vibrance/saturation: scale chroma around luma in gamma space.
+    // Must match develop.rs `apply_linear` and shader.wgsl.
     let luma = 0.299 * r + 0.587 * g + 0.114 * b;
     let satTotal = 1.0 + adj.saturation / 100.0;
     let cmax = max(r, max(g, b));
@@ -348,8 +288,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = luma + (g - luma) * total;
     b = luma + (b - luma) * total;
 
-    // 5. Clamp final to 0..1, preserve sampled alpha. No linear round-trip
-    // here — see this file's module doc, "Divergence 2": this target never
-    // auto-encodes on store, so this IS the final display-ready value.
+    // 5. Clamp and keep alpha. No return to linear (difference 2 in the header).
     return vec4<f32>(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), texel.a);
 }

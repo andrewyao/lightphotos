@@ -1,27 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Encode RGBA8 pixels to a JPEG file — the encode counterpart to
-//! `image_decode`.
-//!
-//! macOS: Apple's ImageIO + CoreGraphics, no third-party codecs. Pipeline:
-//! build a CGBitmapContext over the pixels (sRGB, byte order R,G,B,A),
-//! snapshot a CGImage from it, then hand that to a CGImageDestination pointed
-//! at the output file and finalize.
-//!
-//! Non-mac: `mozjpeg-rs`'s pure-Rust encoder, via its `encode_rgba` entry
-//! point (reads RGBA directly, ignores alpha — no separate RGB conversion
-//! buffer needed).
-//!
-//! ## Pipeline position
-//! - Last stage of Pipeline 3 (export): `export.rs`'s `do_export` calls
-//!   `encode_jpeg` once the full-resolution decode has been baked
-//!   (`image_ops::bake_edited`) into final pixels.
-//! - Also the write half of Pipeline 2's on-disk thumbnail cache:
-//!   `thumbnail::write_entry` encodes each `.lightphotos/*.thumb.jpg` entry
-//!   through `encode_jpeg`, and on wasm32 the decode worker
-//!   (`web/wasm_worker.rs`) encodes the same bytes through
-//!   `encode_jpeg_to_vec` so the main thread never pays for it.
-//! - Pipeline 1 (the Loupe) only ever decodes; nothing here is on its path.
+//! Encode RGBA8 pixels to JPEG. macOS uses ImageIO through a CoreGraphics
+//! bitmap context. Other targets use the pure-Rust `mozjpeg-rs` encoder.
+//! Export and the on-disk thumbnail cache both write through here.
 
 use std::path::Path;
 
@@ -36,8 +17,8 @@ use objc2_image_io::CGImageDestination;
 #[cfg(target_os = "macos")]
 use crate::coregraphics;
 
-/// Encode `rgba` (tightly packed RGBA8, row-major, sRGB; alpha may be opaque or
-/// premultiplied — export produces opaque) to a JPEG at `out`.
+/// Encode `rgba` (tightly packed RGBA8, row-major, sRGB, alpha opaque or
+/// premultiplied) to a JPEG at `out`.
 #[cfg(target_os = "macos")]
 pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     if width == 0 || height == 0 {
@@ -48,8 +29,7 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
         return Err("pixel buffer too small for the given dimensions".into());
     }
 
-    // The context reads from `buffer` while it lives; CreateImage snapshots the
-    // pixels into an independent CGImage, so `buffer` can drop afterwards.
+    // `bitmap_context_image` copies the pixels, so `buffer` may drop after it.
     let mut buffer = rgba.to_vec();
     // SAFETY: buffer is width*height*4 bytes and outlives `ctx`.
     let ctx = unsafe {
@@ -66,8 +46,8 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
     let url = coregraphics::file_url(out)?;
 
     let jpeg_uti = CFString::from_str("public.jpeg");
-    // SAFETY: url/type are valid; count 1; default options (ImageIO's default
-    // JPEG quality). The destination is +1 retained and released on drop.
+    // SAFETY: url and type are valid. No options, so ImageIO uses its default
+    // JPEG quality.
     let dest = unsafe { CGImageDestination::with_url(&url, &jpeg_uti, 1, None) }
         .ok_or("could not create image destination (unwritable path?)")?;
 
@@ -81,23 +61,12 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
     Ok(())
 }
 
-/// Encode `rgba` (tightly packed RGBA8, row-major, sRGB; alpha may be opaque or
-/// premultiplied — export produces opaque) to JPEG bytes, via `mozjpeg-rs`.
-/// The file-less half of [`encode_jpeg`] below — wasm32's export path
-/// (`export::bake_jpeg`) shares this exact encoder, then hands the bytes to a
-/// File System Access writable stream instead of `std::fs`.
+/// Encode `rgba` (same pixel contract as [`encode_jpeg`]) to JPEG bytes with
+/// `mozjpeg-rs`. The wasm32 export path uses this because it has no `std::fs`.
 ///
-/// Quality 90 (mozjpeg-rs's own default preset quality is 75, tuned for
-/// general-purpose web images) — chosen to sit closer to the mac arm's
-/// ImageIO default, which favors fidelity for a photo-editing tool's export
-/// path over file size.
-///
-/// Reachable on mac under `raw-probe` (like the non-mac decode paths) so its
-/// round-trip test can run there; the mac `encode_jpeg` above still uses
-/// ImageIO and never calls this.
+/// Quality is 90, not mozjpeg's default 75, to stay close to ImageIO's
+/// default on macOS. Built on macOS only under `raw-probe`, for its tests.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-// On mac under `raw-probe` only the round-trip test calls this (the mac
-// `encode_jpeg` uses ImageIO); non-mac wires it into `encode_jpeg` below.
 #[allow(dead_code)]
 pub fn encode_jpeg_to_vec(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 {
@@ -114,11 +83,8 @@ pub fn encode_jpeg_to_vec(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8
         .map_err(|e| e.to_string())
 }
 
-/// Encode `rgba` (see [`encode_jpeg_to_vec`] for the pixel contract) to a JPEG
-/// file at `out`, via `mozjpeg-rs`. Since export moved to
-/// `encode_jpeg_to_vec` + `ExportFs::write_atomic`, the only callers left are
-/// `seg_probe` and the fixture setup in several `#[cfg(test)]` modules —
-/// hence `dead_code` in a plain non-mac `--bin lightphotos` build.
+/// Encode `rgba` to a JPEG file at `out` with `mozjpeg-rs`. The wasm32 build
+/// has no caller, hence `dead_code`.
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
@@ -131,11 +97,8 @@ mod tests {
     use super::*;
     use crate::image_decode;
 
-    /// `encode_jpeg_to_vec` is the file-less half of the non-mac encoder,
-    /// shared with the wasm32 export path (which has no `std::fs` to write
-    /// to). Encode a solid-red image, decode the returned bytes back, and
-    /// confirm dimensions plus (approximately) the colour survive the JPEG
-    /// round trip.
+    /// Encode solid red, decode the bytes back, and check that the size and
+    /// the approximate color survive.
     #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
     #[test]
     fn encode_jpeg_to_vec_round_trips() {
@@ -166,7 +129,6 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-    /// Zero-sized input is rejected, not silently encoded to garbage.
     #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
     #[test]
     fn encode_jpeg_to_vec_rejects_zero_size() {
@@ -174,15 +136,14 @@ mod tests {
         assert!(encode_jpeg_to_vec(4, 0, &[]).is_err());
     }
 
-    /// A pixel buffer shorter than `width * height * 4` is rejected.
     #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
     #[test]
     fn encode_jpeg_to_vec_rejects_short_buffer() {
         assert!(encode_jpeg_to_vec(4, 4, &[0u8; 16]).is_err());
     }
 
-    /// End-to-end through the real ImageIO encoder: write a solid-red JPEG,
-    /// decode it back, and confirm dimensions and (approximately) the color.
+    /// Write solid red through the platform encoder, decode it back, and check
+    /// the size and the approximate color.
     #[test]
     fn encode_then_decode_round_trips() {
         let (w, h) = (8u32, 6u32);
@@ -197,9 +158,7 @@ mod tests {
 
         let decoded = image_decode::decode(&out, 16384).expect("re-decode should succeed");
         assert_eq!((decoded.width, decoded.height), (w, h));
-        // JPEG is lossy, so allow a generous tolerance; just confirm it's a
-        // predominantly-red image, not black/garbage. Decode is premultiplied
-        // sRGB8, alpha 255 so RGB is straight.
+        // JPEG is lossy, so only check that the result is mostly red.
         let (r, g, b) = (decoded.rgba[0], decoded.rgba[1], decoded.rgba[2]);
         assert!(r > 150, "red channel should be high, got {r}");
         assert!(g < 100 && b < 100, "green/blue should be low, got {g},{b}");

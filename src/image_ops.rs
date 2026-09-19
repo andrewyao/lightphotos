@@ -1,29 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Pure pixel operations shared by export, thumbnail baking, and the histogram.
-//!
-//! These have no `App` dependency, so the exporter's worker pool and the
-//! thumbnail-upload path can both call them without reaching back into the UI
-//! state module. Keeping the crop/tone/rotate math in one place is also what
-//! guarantees the exported JPEG and the on-screen edited thumbnail agree.
-//!
-//! ## Pipeline position
-//! - `bake_edited` is called from `export.rs`'s `do_export` (Pipeline 3, a
-//!   background worker, full resolution).
-//! - It's also called from `app/thumbs.rs`'s `sync_thumb_textures`
-//!   (Pipeline 2, the UI thread, thumbnail resolution) — only when the photo
-//!   actually has edits; an unedited photo's raw thumbnail uploads unbaked.
-//! - Never called from Pipeline 1 — the Loupe applies edits live in the GPU
-//!   shader (`develop.rs`'s `apply_linear`, mirrored in `shader.wgsl`)
-//!   instead of baking them into pixels.
-//! - Same platform on every target — no `cfg` split in this file.
+//! CPU pixel operations with no UI dependency. [`bake_edited`] is the one
+//! place edits are burned into pixels, for both export and edited thumbnails,
+//! so the two always match. The Loupe applies edits on the GPU instead.
 
 use crate::develop::{self, Adjustments, Crop, TouchUp};
 use crate::image_decode::{DecodedImage, PixelFormat};
 
-/// A crop rectangle (normalized 0..1, or `None` for the full frame) → integer
-/// pixel bounds `(x0, y0, x1, y1)` in texture space, clamped so the region is
-/// always at least 1×1. Used by `bake_edited` (crop + tone + rotate).
+/// Normalized crop (`None` = full frame) to pixel bounds `(x0, y0, x1, y1)`,
+/// at least 1x1.
 fn crop_bounds(crop: Option<Crop>, w: u32, h: u32) -> (u32, u32, u32, u32) {
     let (cl, ct, cr, cb) = match crop {
         Some(c) => (c.left, c.top, c.right, c.bottom),
@@ -36,10 +21,8 @@ fn crop_bounds(crop: Option<Crop>, w: u32, h: u32) -> (u32, u32, u32, u32) {
     (x0, y0, x1, y1)
 }
 
-/// Reduce RGBA8 to grayscale (Rec.601 luma, 0..255), box-averaged down to an
-/// exact `out_w`×`out_h` grid (`out_w`/`out_h` ≤ input dims). Shared by the
-/// sharpness metric (long-side-capped downscale) and dHash (fixed 9×8 grid for
-/// gradient hashing) so both agree on how pixels become grayscale samples.
+/// RGBA8 to Rec.601 luma (0..255), box-averaged down to `out_w` x `out_h`.
+/// The output must not be larger than the input. Used by sharpness and dHash.
 pub(crate) fn resize_luma(
     rgba: &[u8],
     width: u32,
@@ -71,12 +54,9 @@ pub(crate) fn resize_luma(
     out
 }
 
-/// Un-premultiply a premultiplied-sRGB8 RGBA pixel and convert it to
-/// linear-light RGB with the 2.2 gamma that `develop::apply_linear` assumes.
-///
-/// The decode path produces premultiplied alpha; both the histogram sampler and
-/// the bake pipeline consume pixels through this one helper so their input
-/// domains can't drift apart.
+/// Premultiplied sRGB8 pixel (as decoded) to linear RGB, using the 2.2 gamma
+/// that `develop::apply_linear` assumes. Every CPU reader of decoded pixels
+/// goes through this so they all see the same values.
 pub(crate) fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
     let [r, g, b, a] = px;
     let (r, g, b) = if a == 0 {
@@ -95,16 +75,9 @@ pub(crate) fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
     [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b)]
 }
 
-/// Bake `adj` (crop + tone) and `rot` (90° CW steps) into a fresh, straight
-/// (opaque) sRGB8 RGBA buffer. Order: crop in texture space → apply the tone
-/// pipeline per pixel → rotate. Returns `(w, h, rgba)`. Used both for JPEG export
-/// (full-res) and to render edited grid/filmstrip thumbnails (on the cached raw
-/// thumbnail RGBA), so the two always agree.
-///
-/// The decode is premultiplied sRGB8; the un-premultiply + sRGB→linear (via
-/// [`unpremul_to_linear`]) matches the histogram sampler, and
-/// `develop::apply_linear` is the same tone pipeline the shader runs, so the
-/// result matches what's on screen.
+/// Burn edits into an opaque sRGB8 RGBA buffer: crop, then touch-ups and tone
+/// per pixel, then rotate by `rot` 90-degree clockwise steps. Returns
+/// `(w, h, rgba)`. Tone uses `develop::apply_linear`, which matches the shader.
 pub(crate) fn bake_edited(
     img: &DecodedImage,
     adj: &Adjustments,
@@ -116,7 +89,6 @@ pub(crate) fn bake_edited(
         return (0, 0, Vec::new());
     }
 
-    // Crop rectangle → integer pixel bounds in texture space.
     let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
     let (cw, ch) = (x1 - x0, y1 - y0);
 
@@ -126,15 +98,9 @@ pub(crate) fn bake_edited(
             .clamp(0.0, 255.0) as u8
     };
 
-    // When denoise is active, precompute the whole source image's linear-light
-    // buffer once so the 25-tap neighborhood lookup (`denoise_sample`) is a
-    // cheap indexed read instead of re-running unpremul_to_linear per tap.
-    // Taps read from the full source image (not just the crop), clamped to its
-    // bounds — matching the shader's clamp-to-edge sampling against the full
-    // uploaded texture — so pixels near the crop edge still see real
-    // neighbors instead of the crop boundary. When denoise == 0.0 this is
-    // skipped entirely, leaving the original single-conversion-per-pixel path
-    // (and its cost) unchanged.
+    // Denoise reads 25 neighbors per pixel, so convert the whole image to
+    // linear once. Neighbors come from the full image, clamped at its edges,
+    // to match the shader's clamp-to-edge sampling of the uncropped texture.
     let full_linear: Option<Vec<[f32; 3]>> = (adj.denoise > 0.0).then(|| {
         (0..(w * h) as usize)
             .map(|i| {
@@ -149,7 +115,6 @@ pub(crate) fn bake_edited(
             .collect()
     });
 
-    // Cropped + tone-applied buffer, still in texture orientation.
     let mut cropped = vec![0u8; (cw * ch * 4) as usize];
     for y in 0..ch {
         for x in 0..cw {
@@ -182,16 +147,9 @@ pub(crate) fn bake_edited(
     rotate_rgba(&cropped, cw, ch, rot)
 }
 
-/// Sample a decoded image at texture UV coordinates and return linear RGB.
-/// This is format-aware because the wasm RAW Loupe uses tightly packed
-/// linear-light RGBA16F rather than sRGB RGBA8.
-/// Strided downsample of `img` into linear-light RGB, reducing the longest side
-/// to roughly `target` samples. Returns the grid row-major with its dimensions,
-/// or an empty grid when the image is degenerate or its buffer is short.
-///
-/// Shared by the Develop histogram and Auto Tone so both analyze the same
-/// pixels through the same conversion, whichever pixel format the decode
-/// handed back.
+/// Strided downsample of `img` to linear RGB with about `target` samples on
+/// the long side. Returns `(grid, w, h)`, or an empty grid for a bad image.
+/// The histogram and Auto Tone both use this so they see the same pixels.
 pub(crate) fn downsample_linear(
     img: &DecodedImage,
     target: usize,
@@ -223,6 +181,8 @@ pub(crate) fn downsample_linear(
     (grid, dw, dh)
 }
 
+/// Nearest-pixel sample at UV coordinates, as linear RGB. Handles both pixel
+/// formats; the browser RAW path decodes to linear RGBA16F.
 pub(crate) fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
     let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
     let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;
@@ -279,8 +239,8 @@ fn apply_touchups(
     out
 }
 
-/// Rotate a tightly-packed RGBA8 buffer by `steps` × 90° clockwise. Returns the
-/// (possibly swapped) `(width, height, rgba)`.
+/// Rotate packed RGBA8 by `steps` 90-degree clockwise turns. Returns the new
+/// `(width, height, rgba)`.
 pub(crate) fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, Vec<u8>) {
     let steps = steps % 4;
     if steps == 0 {
@@ -291,7 +251,6 @@ pub(crate) fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, V
     let px = |x: u32, y: u32| ((y * w + x) * 4) as usize;
     for yo in 0..nh {
         for xo in 0..nw {
-            // Source pixel that lands at output (xo, yo).
             let (xs, ys) = match steps {
                 1 => (yo, h - 1 - xo),         // 90° CW
                 2 => (w - 1 - xo, h - 1 - yo), // 180°
@@ -305,20 +264,11 @@ pub(crate) fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, V
     (nw, nh, dst)
 }
 
-/// Bilinearly resample a tightly-packed single-channel buffer to `dw × dh`.
-///
-/// Written for Vision's segmentation masks, which come back at whatever
-/// resolution the model chose (typically much smaller than the photo) and have
-/// to be stretched to display size before they can be overlaid. Nearest-
-/// neighbour would turn the model's soft matte edge into visible stair-steps,
-/// which is exactly the part of the mask worth looking at.
-///
-/// Uses pixel-*center* mapping (the `+ 0.5 … - 0.5` shuffle) rather than naive
-/// `x * sw / dw`, so the resampled image stays centered instead of drifting
-/// half a source pixel toward the origin. Edge samples clamp rather than wrap.
-// The Loupe overlay doesn't need this — it uploads the mask at Vision's own
-// resolution and lets the GPU sampler stretch it. This is the CPU path, for
-// `seg_probe`'s composite and for anything that later bakes a mask into pixels.
+/// Bilinearly resample a packed one-channel buffer (a segmentation mask) to
+/// `dw x dh`. Bilinear keeps the mask's soft edges. The `+ 0.5 ... - 0.5`
+/// maps pixel centers, so the result doesn't shift half a pixel toward the
+/// origin. Edges clamp.
+// Only `seg_probe` uses this. The Loupe stretches masks on the GPU.
 #[allow(dead_code)]
 pub(crate) fn resample_bilinear_u8(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < (sw * sh) as usize {
@@ -352,16 +302,9 @@ pub(crate) fn resample_bilinear_u8(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u3
     out
 }
 
-/// Reorient a tightly-packed single-channel buffer per an EXIF orientation
-/// (`1..=8`), returning `(width, height, buffer)` — the one-channel counterpart
-/// of `image_decode`'s `apply_exif_orientation`, sharing its mapping table.
-///
-/// Needed because Vision reads a file in its *stored* orientation while
-/// everything downstream of `image_decode` works in display orientation. A mask
-/// that skipped this step would sit sideways on any portrait shot from a camera
-/// that records rotation in EXIF rather than in the pixels.
-// Only `Mask::oriented` (macOS-only, Vision) calls this outside of its own
-// unit tests below, hence the `any(macos, test)` gate.
+/// Apply an EXIF orientation (`1..=8`) to a packed one-channel mask. Returns
+/// `(width, height, buffer)`. Same mapping as `image_decode`'s
+/// `apply_exif_orientation`.
 #[cfg(any(target_os = "macos", test))]
 pub(crate) fn orient_mask(src: &[u8], w: u32, h: u32, orientation: u8) -> (u32, u32, Vec<u8>) {
     if orientation <= 1 || src.len() < (w * h) as usize {
@@ -373,13 +316,13 @@ pub(crate) fn orient_mask(src: &[u8], w: u32, h: u32, orientation: u8) -> (u32, 
     for yo in 0..nh {
         for xo in 0..nw {
             let (xs, ys) = match orientation {
-                2 => (w - 1 - xo, yo),         // mirror horizontal
-                3 => (w - 1 - xo, h - 1 - yo), // rotate 180
-                4 => (xo, h - 1 - yo),         // mirror vertical
-                5 => (yo, xo),                 // transpose
-                6 => (yo, h - 1 - xo),         // rotate 90° CW
-                7 => (w - 1 - yo, h - 1 - xo), // transverse
-                _ => (w - 1 - yo, xo),         // 8: rotate 270° CW
+                2 => (w - 1 - xo, yo),        
+                3 => (w - 1 - xo, h - 1 - yo),
+                4 => (xo, h - 1 - yo),        
+                5 => (yo, xo),                
+                6 => (yo, h - 1 - xo),        
+                7 => (w - 1 - yo, h - 1 - xo),
+                _ => (w - 1 - yo, xo),        
             };
             dst[(yo * nw + xo) as usize] = src[(ys * w + xs) as usize];
         }
@@ -398,17 +341,16 @@ mod tests {
 
     #[test]
     fn rotate_90cw_swaps_dims_and_moves_pixels() {
-        // Two horizontal pixels A,B (w=2,h=1). 90° CW → a 1×2 column A over B.
         let src = [px(10), px(20)].concat();
         let (w, h, out) = rotate_rgba(&src, 2, 1, 1);
         assert_eq!((w, h), (1, 2));
-        assert_eq!(&out[0..4], &px(10)); // top
-        assert_eq!(&out[4..8], &px(20)); // bottom
+        assert_eq!(&out[0..4], &px(10));
+        assert_eq!(&out[4..8], &px(20));
     }
 
     #[test]
     fn rotate_360_is_identity() {
-        let src = [px(1), px(2), px(3), px(4)].concat(); // 2×2
+        let src = [px(1), px(2), px(3), px(4)].concat();
         let (w, h, out) = rotate_rgba(&src, 2, 2, 4);
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
@@ -416,9 +358,8 @@ mod tests {
 
     #[test]
     fn identity_bake_preserves_opaque_pixels() {
-        // No crop, no rotation, identity adjustments → pixels survive the
-        // premultiply/sRGB↔linear round-trip unchanged (alpha becomes opaque).
-        let src = [px(0), px(64), px(128), px(255)].concat(); // 2×2
+        // Opaque pixels survive the sRGB to linear round trip exactly.
+        let src = [px(0), px(64), px(128), px(255)].concat();
         let img = DecodedImage {
             width: 2,
             height: 2,
@@ -432,7 +373,6 @@ mod tests {
 
     #[test]
     fn bake_crop_slices_to_the_crop_rect() {
-        // 4×1 image; crop the right half → 2×1 keeping the last two pixels.
         let src = [px(1), px(2), px(3), px(4)].concat();
         let img = DecodedImage {
             width: 4,
@@ -455,9 +395,6 @@ mod tests {
 
     #[test]
     fn bake_denoise_zero_matches_identity_bake() {
-        // Same fixture/assertion as identity_bake_preserves_opaque_pixels,
-        // just with an explicit denoise: 0.0 to confirm the new field doesn't
-        // change the fast path at all.
         let src = [px(0), px(64), px(128), px(255)].concat();
         let img = DecodedImage {
             width: 2,
@@ -476,8 +413,6 @@ mod tests {
 
     #[test]
     fn bake_denoise_changes_output() {
-        // A noisy 3x3 image: a bright outlier pixel surrounded by dark ones.
-        // Denoising should visibly pull the center pixel away from raw white.
         let mut src = vec![0u8; 3 * 3 * 4];
         for i in 0..9 {
             let v = if i == 4 { 255 } else { 0 };
@@ -495,7 +430,7 @@ mod tests {
             ..Default::default()
         };
         let (_, _, out100) = bake_edited(&img, &denoised, &[], 0);
-        let center = 4 * 4; // pixel index 4, byte offset
+        let center = 4 * 4;
         assert_eq!(out0[center], 255);
         assert!(
             out100[center] < 255,
@@ -529,8 +464,7 @@ mod tests {
 
     #[test]
     fn bake_denoise_clamps_at_edges() {
-        // Small 3x3 image; denoise must not panic or read out of bounds when
-        // taps for a corner pixel fall outside the image.
+        // Corner pixels read neighbors outside the image; that must not panic.
         let src = [
             px(10),
             px(20),
@@ -560,7 +494,6 @@ mod tests {
 
     #[test]
     fn unpremul_opaque_is_linear_of_srgb() {
-        // Opaque pixel: un-premultiply is a no-op, output is sRGB→linear.
         let out = unpremul_to_linear([255, 0, 128, 255]);
         assert!((out[0] - 1.0).abs() < 1e-6);
         assert!((out[1] - 0.0).abs() < 1e-6);
@@ -574,15 +507,13 @@ mod tests {
 
     #[test]
     fn resize_luma_identity_is_per_pixel_luma() {
-        // out dims == input dims: no averaging, exact Rec.601 luma per pixel.
-        let src = [px(0), px(64), px(128), px(255)].concat(); // 2x2
+        let src = [px(0), px(64), px(128), px(255)].concat();
         let out = resize_luma(&src, 2, 2, 2, 2);
         assert_eq!(out, vec![0.0, 64.0, 128.0, 255.0]);
     }
 
     #[test]
     fn resize_luma_downscale_averages_blocks() {
-        // 4x4 image, four uniform 2x2 quadrants: 0, 100, 200, 300(clamped later).
         let mut src = vec![0u8; 4 * 4 * 4];
         for y in 0..4u32 {
             for x in 0..4u32 {
@@ -611,19 +542,14 @@ mod tests {
 
     #[test]
     fn resampling_a_ramp_interpolates_between_the_two_ends() {
-        // 2 source pixels stretched to 4. Pixel-center mapping puts the two
-        // outer destination samples outside the source centers, so they clamp
-        // to the endpoints, and the two inner ones land a quarter and three
-        // quarters of the way along.
+        // Outer samples clamp to the ends; inner ones land at 1/4 and 3/4.
         let out = resample_bilinear_u8(&[0, 255], 2, 1, 4, 1);
         assert_eq!(out, vec![0, 64, 191, 255]);
     }
 
     #[test]
     fn resampling_stays_centered_rather_than_drifting_to_the_origin() {
-        // A symmetric source must resample to a symmetric result — the check
-        // that catches a naive `x * sw / dw` mapping, which shifts everything
-        // half a source pixel toward the origin.
+        // A naive `x * sw / dw` mapping shifts the result and breaks symmetry.
         let out = resample_bilinear_u8(&[0, 255, 255, 0], 4, 1, 8, 1);
         let reversed: Vec<u8> = out.iter().rev().copied().collect();
         assert_eq!(out, reversed, "resampled {out:?} is not symmetric");
@@ -636,8 +562,6 @@ mod tests {
 
     #[test]
     fn resampling_a_2x2_block_gives_a_smooth_bilinear_field() {
-        // Corners keep their values; the middle of the upscaled field averages
-        // all four, both of which fail under nearest-neighbour.
         let out = resample_bilinear_u8(&[0, 100, 200, 255], 2, 2, 4, 4);
         assert_eq!(out.len(), 16);
         assert_eq!(out[0], 0, "top-left corner");
@@ -653,7 +577,6 @@ mod tests {
 
     #[test]
     fn orienting_a_mask_matches_the_exif_table() {
-        // 2 wide × 3 tall, distinct values so every mapping is distinguishable.
         let src = vec![1, 2, 3, 4, 5, 6];
 
         assert_eq!(orient_mask(&src, 2, 3, 1), (2, 3, src.clone()));
@@ -668,8 +591,6 @@ mod tests {
             "horizontal mirror reverses each row"
         );
 
-        // 90° CW: the axes swap, and the left column becomes the top row
-        // bottom-to-top.
         let (w, h, rot) = orient_mask(&src, 2, 3, 6);
         assert_eq!((w, h), (3, 2));
         assert_eq!(rot, vec![5, 3, 1, 6, 4, 2]);
@@ -678,7 +599,7 @@ mod tests {
     #[test]
     fn orienting_a_mask_is_reversible_through_its_inverse() {
         let src: Vec<u8> = (0..12).collect();
-        // 6 (90° CW) and 8 (270° CW) undo each other.
+        // Orientations 6 and 8 undo each other.
         let (w, h, once) = orient_mask(&src, 4, 3, 6);
         let (w2, h2, back) = orient_mask(&once, w, h, 8);
         assert_eq!((w2, h2), (4, 3));
@@ -689,8 +610,7 @@ mod tests {
     fn degenerate_resample_requests_produce_nothing() {
         assert!(resample_bilinear_u8(&[1, 2, 3, 4], 2, 2, 0, 4).is_empty());
         assert!(resample_bilinear_u8(&[1, 2, 3, 4], 0, 2, 4, 4).is_empty());
-        // Source buffer smaller than its declared dimensions: refuse rather
-        // than index out of bounds.
+        // Buffer shorter than its declared size.
         assert!(resample_bilinear_u8(&[1, 2], 4, 4, 8, 8).is_empty());
     }
 }

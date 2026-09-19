@@ -2,16 +2,10 @@
 
 //! Finder "open document" handling.
 //!
-//! winit 0.30 registers its OWN `NSApplicationDelegate` (class
-//! `WinitApplicationDelegate`) and panics if you replace the app delegate.
-//! winit's delegate does not implement `application:openURLs:`, so Finder open
-//! events are otherwise dropped.
-//!
-//! Solution: at runtime, add an `application:openURLs:` method to winit's
-//! delegate class via the Objective-C runtime. AppKit then calls it for
-//! double-click / "Open With" / `open -a`, and we forward the path into the
-//! winit event loop via an `EventLoopProxy`. We do not touch the delegate
-//! object, so winit's identity assertion still holds.
+//! winit 0.30 installs its own app delegate and panics if it is replaced, and
+//! that delegate drops Finder open events. So we add an `application:openURLs:`
+//! method to winit's delegate class at runtime and forward each path into the
+//! event loop through an `EventLoopProxy`.
 
 use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,11 +31,7 @@ pub enum UserEvent {
     OpenFile(PathBuf),
 }
 
-/// Set once in `main`; read by the injected Objective-C method. Only
-/// `main.rs`'s native `fn main()` ever calls `set_proxy`/
-/// `install_open_handler` — wasm32's own `fn main()` has no Finder
-/// equivalent to wire up at all — so both are `not(wasm32)`-gated here too,
-/// on top of `install_open_handler`'s own mac/non-mac split below.
+/// Set once in `main`; read by the injected Objective-C method.
 #[cfg(not(target_arch = "wasm32"))]
 static PROXY: OnceLock<EventLoopProxy<UserEvent>> = OnceLock::new();
 
@@ -50,8 +40,7 @@ pub fn set_proxy(proxy: EventLoopProxy<UserEvent>) {
     let _ = PROXY.set(proxy);
 }
 
-/// The implementation for `-[WinitApplicationDelegate application:openURLs:]`.
-/// Objective-C calls this with (self, _cmd, NSApplication*, NSArray<NSURL>*).
+/// The body of `-[WinitApplicationDelegate application:openURLs:]`.
 #[cfg(target_os = "macos")]
 extern "C-unwind" fn application_open_urls(
     _this: *mut AnyObject,
@@ -72,10 +61,9 @@ extern "C-unwind" fn application_open_urls(
     }
 }
 
-/// Add `application:openURLs:` to winit's delegate class. Call this once the
-/// delegate class is registered (i.e. from `ApplicationHandler::resumed`,
-/// which runs inside `applicationDidFinishLaunching:`, before the launch-time
-/// open event is dispatched). Returns true if the method was installed.
+/// Add `application:openURLs:` to winit's delegate class. Returns true if the
+/// method was installed. Call it after winit registers the class but before
+/// AppKit dispatches the launch-time open event.
 #[cfg(target_os = "macos")]
 pub fn install_open_handler() -> bool {
     let class = match AnyClass::get(c"WinitApplicationDelegate") {
@@ -83,9 +71,8 @@ pub fn install_open_handler() -> bool {
         None => return false,
     };
 
-    // SAFETY: We register the selector, then add a method whose type encoding
-    // ("v@:@@": void return; self, _cmd, id, id args) matches both the C
-    // function above and the Objective-C `application:openURLs:` selector.
+    // SAFETY: the type encoding "v@:@@" (void; self, _cmd, id, id) matches both
+    // `application_open_urls` and the `application:openURLs:` selector.
     unsafe {
         let Some(sel) = ffi::sel_registerName(c"application:openURLs:".as_ptr()) else {
             return false;
@@ -97,13 +84,7 @@ pub fn install_open_handler() -> bool {
     }
 }
 
-/// Non-mac native "open with" already works via the CLI path argument
-/// (`lightphotos /path/to/photo.jpg`) — no Finder-equivalent hook exists to
-/// install, so this is a no-op that reports "not installed" so main.rs's
-/// existing warning still prints (harmless — there's nothing to warn about
-/// on this platform, but the warning is not incorrect either). wasm32 has no
-/// caller for this at all (see `PROXY`'s doc comment), hence the extra
-/// `not(wasm32)` on top of the mac/non-mac split every version here has.
+/// No-op off macOS: other desktops pass the file as a CLI argument instead.
 #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
 pub fn install_open_handler() -> bool {
     false
