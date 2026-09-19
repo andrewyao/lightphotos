@@ -1,27 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! `seg_probe` — the validation harness for `segmentation.rs`.
+//! `seg_probe`: writes Vision subject masks as images so a person can check
+//! `segmentation.rs` on real photos. For each input it writes, into the
+//! current directory:
 //!
-//! Whether a Vision mask actually traces the subject is not something a unit
-//! test can answer: synthetic fixtures have no subject, so the tests can only
-//! prove the buffer plumbing. This binary closes that gap by writing out
-//! artifacts a human can look at — for each input photo:
-//!
-//! - `<stem>.mask.jpg`  — the raw mask as grayscale, at Vision's own resolution
-//! - `<stem>.overlay.jpg` — the photo with the foreground tinted, i.e. a preview
-//!   of what the Loupe's "Show Selection" overlay will look like
-//!
-//! Both land in the current directory, never beside the originals.
+//! - `<stem>.mask.jpg`: the mask as grayscale, at Vision's resolution.
+//! - `<stem>.overlay.jpg`: the photo with the subject tinted red, like the
+//!   Loupe's "Show Selection" overlay.
 //!
 //! ```sh
 //! cargo run --bin seg_probe -- ~/Pictures/portrait.jpg
 //! ```
 //!
-//! Like `face_probe`, the modules are re-declared by `#[path]` because the
-//! crate has no lib target; the list is `segmentation.rs` plus its transitive
-//! dependencies.
+//! There is no lib target, so `segmentation.rs` and its dependencies come in
+//! through `#[path]`.
 
-// Re-including whole modules pulls in plenty this probe never calls.
 #![allow(dead_code)]
 
 #[cfg(target_os = "macos")]
@@ -48,8 +41,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::ExitCode;
 
-/// Longest side the overlay preview is rendered at. Big enough to judge the
-/// mask edge, small enough to write quickly.
+/// Longest side of the overlay, in pixels.
 const PREVIEW_MAX_DIM: u32 = 1600;
 
 fn main() {
@@ -94,10 +86,9 @@ fn real_main() -> ExitCode {
 #[cfg(target_os = "macos")]
 fn probe(path: &Path) -> Result<(), String> {
     let mask = segmentation::segment(path)?;
-    // Both numbers, because their *ratio* is the tell: a real subject's matte
-    // is nearly binary so they track each other, while a model firing at
-    // nothing smears low-confidence coverage everywhere and the solid fraction
-    // collapses. See `Mask::solid_coverage`.
+    // A real subject's mask is nearly binary, so mean and solid coverage
+    // match. A spurious mask has a low solid fraction. See
+    // `Mask::solid_coverage`.
     println!(
         "  source {:?}, mask {}x{}, coverage {:.1}% mean / {:.1}% solid",
         mask.source,
@@ -135,7 +126,7 @@ fn probe(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Single-channel mask → opaque RGBA, so it can go through the JPEG encoder.
+/// Grayscale mask to opaque RGBA for the JPEG encoder.
 fn gray_to_rgba(alpha: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(alpha.len() * 4);
     for &a in alpha {
@@ -144,8 +135,8 @@ fn gray_to_rgba(alpha: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Tint the masked region red, in proportion to its coverage — soft mask edges
-/// come out as a soft tint, which is the whole point of looking at this.
+/// Tint the subject red in proportion to mask alpha, so soft edges show as
+/// a soft tint.
 fn tint_foreground(rgba: &[u8], alpha: &[u8]) -> Vec<u8> {
     let mut out = rgba.to_vec();
     for (i, chunk) in out.chunks_exact_mut(4).enumerate() {

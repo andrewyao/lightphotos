@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Full-screen quad. The vertex shader maps each corner to a UV that is
-// scaled and offset by the zoom/pan transform, so panning and zooming are
-// pure GPU transforms — the texture is never re-uploaded.
+// The loupe image shader. The vertex shader applies zoom, pan, and rotation to
+// the UVs; the fragment shader applies develop adjustments.
 
 struct Transform {
-    // scale.xy: how much of the texture is visible (smaller = zoomed in)
+    // How much of the texture is visible; smaller is zoomed in.
     scale: vec2<f32>,
-    // offset.xy: top-left UV of the visible region
+    // Top-left UV of the visible region.
     offset: vec2<f32>,
-    // rot: 2x2 display-UV -> texture-UV rotation, row-major [m00, m01, m10, m11].
+    // 2x2 display-UV to texture-UV rotation, row-major [m00, m01, m10, m11].
     rot: vec4<f32>,
 };
 
-// Packed tone/crop uniform. Field order MUST match GpuAdjust in develop.rs.
+// Field order must match `GpuAdjust` in develop.rs.
 struct Adjust {
     exposure: f32,
     contrast: f32,
@@ -44,10 +43,8 @@ struct TouchUp {
     delta: vec4<f32>,
 };
 
-// Subject-selection overlay parameters. Visualization only — nothing here
-// feeds the tone pipeline.
+// Must match `OverlayParams` in renderer.rs.
 struct Overlay {
-    // Colour laid over the selected region.
     tint: vec4<f32>,
     // 1.0 = highlight the background instead of the subject.
     invert: f32,
@@ -62,10 +59,9 @@ struct Overlay {
 @group(1) @binding(0) var<uniform> xform: Transform;
 @group(2) @binding(0) var<uniform> adj: Adjust;
 @group(3) @binding(0) var<storage, read> touchups: array<TouchUp>;
-// The overlay's own resources share group 3 with the touch-ups because wgpu
-// guarantees only four bind groups. They never collide: each pipeline declares
-// a layout covering exactly the bindings its own entry point reads, and no
-// entry point reads both.
+// The overlay shares group 3 with the touch-ups because WebGPU guarantees only
+// four bind groups. No entry point reads both, and each pipeline's layout
+// declares only the bindings its entry point reads.
 @group(3) @binding(1) var<uniform> overlay: Overlay;
 @group(3) @binding(2) var mask_tex: texture_2d<f32>;
 @group(3) @binding(3) var mask_samp: sampler;
@@ -77,7 +73,6 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
-    // Two triangles covering clip space [-1, 1].
     var corners = array<vec2<f32>, 4>(
         vec2<f32>(-1.0, -1.0),
         vec2<f32>( 1.0, -1.0),
@@ -89,42 +84,40 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 
     var out: VsOut;
     out.pos = vec4<f32>(c, 0.0, 1.0);
-    // Map clip-space corner (-1..1) to base UV (0..1), y flipped.
+    // Clip space (-1..1, y up) to UV (0..1, y down).
     let base_uv = vec2<f32>((c.x + 1.0) * 0.5, (1.0 - c.y) * 0.5);
-    // Display-space UV (0..1 over the on-screen, possibly-rotated footprint).
+    // Display-space UV, before undoing rotation.
     let d = base_uv * xform.scale + xform.offset;
-    // Rotate about the center to get the texture-space UV. rot is row-major
-    // [m00, m01, m10, m11]; mat2x2 takes columns, so feed it transposed.
+    // Rotate about the center. `mat2x2` takes columns, so transpose `rot`.
     let m = mat2x2<f32>(xform.rot.x, xform.rot.z, xform.rot.y, xform.rot.w);
     out.uv = m * (d - vec2<f32>(0.5, 0.5)) + vec2<f32>(0.5, 0.5);
     return out;
 }
 
-// Filmic exposure constants. MUST stay in sync with `filmic_exposure` in
-// develop.rs. MIX is the share of the adjustment routed through the rational
-// curve, MIDTONE is how hard it bends per stop, and ANCHOR is the curve's fixed
-// point — just *above* display white, so a 1.0 pixel still moves sub-linearly
-// rather than being pinned.
+// Must match `filmic_exposure` in develop.rs. MIX is the share of the
+// adjustment that goes through the curve, MIDTONE is how hard it bends per
+// stop, and ANCHOR is the curve's fixed point. ANCHOR sits just above white so
+// a 1.0 pixel still moves instead of being pinned.
 const FILMIC_MIX: f32 = 0.95;
 const FILMIC_MIDTONE: f32 = 1.2;
 const FILMIC_ANCHOR: f32 = 1.06;
 
-// Filmic exposure, in linear light: shapes luma through a rational curve so
-// brightening compresses into white instead of clipping flat, then rescales
-// chroma separately so colors go pale as they brighten. MUST stay in sync with
-// `filmic_exposure` in develop.rs and raw_shader.wgsl's own copy.
+// Exposure in linear light. Positive stops bend luma through a curve that
+// rolls into white instead of clipping, and colors fade toward white as they
+// brighten. Must match `filmic_exposure` in develop.rs and raw_shader.wgsl.
 fn filmicExposure(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
     if (stops == 0.0) {
         return rgb;
     }
 
-    // Scale the entire RAW range to recover above-white highlights.
+    // Negative stops are a plain gain, which recovers above-white RAW
+    // highlights.
     if (stops < 0.0) {
         return rgb * exp2(stops);
     }
 
-    // Rec.709 luma. Linear-light values, so NOT the 0.299/0.587/0.114 set the
-    // gamma-space vibrance block uses.
+    // Rec.709 luma weights for linear light. The gamma-space vibrance block
+    // uses different weights.
     let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
     if (abs(luma) < 1e-5) {
         return rgb;
@@ -153,33 +146,32 @@ fn filmicExposure(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
     return vec3<f32>(newLuma) + (rgb - vec3<f32>(luma)) * chromaScale;
 }
 
-// One gamma-space tone op, applied per channel. MUST stay in sync with the
-// `tone` closure in apply_linear in develop.rs.
+// Gamma-space tone ops, per channel. Must match the `tone` closure in
+// `apply_linear` in develop.rs.
 fn tone(v: f32) -> f32 {
     var x = v;
 
-    // Blacks/whites: shift the endpoints. ±100 → ±0.2 endpoint move.
+    // Blacks and whites move the endpoints by up to 0.2.
     let blacks = adj.blacks / 100.0 * 0.2;
     let whites = adj.whites / 100.0 * 0.2;
-    // Positive whites brightens/clips the top end, negative recovers it —
-    // Lightroom's convention. MUST stay in sync with develop.rs.
+    // Positive whites brighten and clip the top end, as in Lightroom.
     x = (x + blacks) / ((1.0 - whites) + blacks);
 
-    // Contrast: S-curve pivoting at mid-gray. ±100 → ±0.5 strength.
+    // Contrast: an S-curve around mid-gray, strength up to 0.5.
     let c = adj.contrast / 100.0 * 0.5;
     if (c != 0.0) {
         let d = x - 0.5;
         x = 0.5 + d + c * d * (1.0 - 4.0 * d * d);
     }
 
-    // Shadows: luminance-masked lift/compress near black.
+    // Shadows: masked to act near black.
     let s = adj.shadows / 100.0 * 0.3;
     if (s != 0.0) {
         let mask = pow(1.0 - clamp(x, 0.0, 1.0), 2.0);
         x = x + s * mask;
     }
 
-    // Highlights: luminance-masked lift/compress near white.
+    // Highlights: masked to act near white.
     let h = adj.highlights / 100.0 * 0.3;
     if (h != 0.0) {
         let mask = pow(clamp(x, 0.0, 1.0), 2.0);
@@ -189,9 +181,8 @@ fn tone(v: f32) -> f32 {
     return x;
 }
 
-// Hand-baked σ=1.0 Gaussian spatial weight for the 5×5 denoise kernel,
-// indexed by squared tap distance. MUST stay in sync with `spatial_weight`
-// in develop.rs.
+// Gaussian (sigma 1.0) weights for the 5x5 denoise kernel, by squared tap
+// distance. Must match `spatial_weight` in develop.rs.
 fn spatialWeight(d2: i32) -> f32 {
     if (d2 == 0) { return 1.0; }
     if (d2 == 1) { return 0.606531; }
@@ -204,30 +195,19 @@ fn spatialWeight(d2: i32) -> f32 {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    // Sampled unconditionally, before any branching: WebGPU's WGSL validator
-    // requires textureSample's implicit-LOD/derivative computation to happen
-    // under *uniform* control flow, and an early return keyed on a
-    // per-fragment value like `in.uv` (as this used to do, sampling only
-    // after the bounds checks) makes everything past it non-uniform in the
-    // validator's eyes — even though every fragment reaching this line took
-    // the same path. Native Metal/Vulkan tolerated the old shape silently;
-    // WebGPU rejects the whole shader module at CreateShaderModule time.
-    // Sampling first and discarding the result below for out-of-bounds
-    // fragments costs one wasted texture fetch at the edges, not a
-    // correctness or quality tradeoff — unlike swapping to
-    // textureSampleLevel(0.0), which would also "fix" this but forces mip 0
-    // always, breaking minification antialiasing when zoomed out.
+    // Sample before any early return. WebGPU requires `textureSample` under
+    // uniform control flow and rejects the shader module otherwise.
+    // `textureSampleLevel(0.0)` would also pass but skips mips, which breaks
+    // antialiasing when zoomed out.
     //
-    // Sampling an Rgba8UnormSrgb texture returns LINEAR-light RGB.
-    // MUST stay in sync with apply_linear in develop.rs.
+    // An Rgba8UnormSrgb texture samples as linear light. The math below must
+    // match `apply_linear` in develop.rs.
     let texel = textureSample(tex, samp, in.uv);
 
-    // Outside the image (UV beyond 0..1): draw the neutral background.
+    // Outside the image or the crop: the neutral background.
     if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
         return vec4<f32>(0.12, 0.12, 0.13, 1.0);
     }
-    // Outside the crop rectangle: same neutral background (identity crop
-    // 0,0,1,1 never triggers this).
     if (in.uv.x < adj.crop_l || in.uv.x > adj.crop_r || in.uv.y < adj.crop_t || in.uv.y > adj.crop_b) {
         return vec4<f32>(0.12, 0.12, 0.13, 1.0);
     }
@@ -236,15 +216,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var g = texel.g;
     var b = texel.b;
 
-    // 0. Edge-aware (bilateral-style) denoise: a fixed 5x5 neighborhood, blended
-    // by spatial + color-similarity weight. Only taken when denoise is active —
-    // the identity path above (implicit-LOD textureSample) is left completely
-    // untouched, so denoise == 0 renders byte-identical to before this branch
-    // existed. Explicit textureSampleLevel (not textureSample) is used for every
-    // tap since the tap loop isn't uniform control flow that implicit-LOD
-    // derivatives can rely on; this also means minification antialiasing is
-    // bypassed while denoise is active (a known, accepted trade-off when
-    // zoomed far out). MUST stay in sync with `denoise_sample` in develop.rs.
+    // 0. Edge-aware denoise over a 5x5 neighborhood, weighted by distance and
+    // color similarity. The taps use `textureSampleLevel` because the loop is
+    // not uniform control flow, so denoise loses mip antialiasing when zoomed
+    // out. Must match `denoise_sample` in develop.rs.
     if (adj.denoise > 0.0) {
         let center = textureSampleLevel(tex, samp, in.uv, 0.0).rgb;
         let sigmaR = 0.02 + adj.denoise / 100.0 * 0.30;
@@ -269,16 +244,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         b = denoised.z;
     }
 
-    // Content-aware spot healing. Source centers and local color corrections
-    // are selected on the CPU; the GPU only applies the feathered patches.
-    // Keep this after denoise to match the CPU bake/export pipeline.
+    // Spot healing. The CPU picks each source patch and color correction; the
+    // GPU blends the feathered patches. Keep this after denoise to match the
+    // CPU export path. The touch-up count is packed into `adj._pad0`.
     let touch_count = u32(adj._pad0);
     for (var i = 0u; i < touch_count; i = i + 1u) {
         let t = touchups[i];
         let d = (in.uv - t.center_radius_feather.xy) /
             vec2<f32>(adj.texel_w, adj.texel_h);
-        // Touch-up radii are normalized against the source image's shorter
-        // dimension, matching the CPU bake/export path.
+        // Radii are fractions of the image's shorter side, as on the CPU.
         let radius_px = t.center_radius_feather.z / max(adj.texel_w, adj.texel_h);
         let distance_px = length(d);
         if (distance_px < radius_px) {
@@ -293,32 +267,31 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // 1. White balance: temp/tint (−100..100) → gentle per-channel gains.
+    // 1. White balance: temp and tint (-100..100) as per-channel gains.
     let t = adj.temp / 100.0;
     let ti = adj.tint / 100.0;
     r = r * (1.0 + t * 0.3);
     g = g * (1.0 - ti * 0.15);
     b = b * (1.0 - t * 0.3);
 
-    // 2. Exposure: a filmic curve, not a plain gain — see `filmicExposure`.
+    // 2. Exposure.
     let exposed = filmicExposure(vec3<f32>(r, g, b), adj.exposure);
     r = exposed.r;
     g = exposed.g;
     b = exposed.b;
 
-    // 3. Linear → working gamma (clamp negatives first).
+    // 3. Linear to gamma 2.2 working space.
     r = pow(max(r, 0.0), 1.0 / 2.2);
     g = pow(max(g, 0.0), 1.0 / 2.2);
     b = pow(max(b, 0.0), 1.0 / 2.2);
 
-    // 4. Perceptual tone ops in gamma space.
+    // 4. Tone ops in gamma space.
     r = tone(r);
     g = tone(g);
     b = tone(b);
 
-    // 4.5. Vibrance/saturation: a cross-channel chroma scale about luma, in
-    // gamma space. MUST stay in sync with the equivalent block in
-    // apply_linear in develop.rs.
+    // 4.5. Vibrance and saturation scale chroma around luma, in gamma space.
+    // Must match `apply_linear` in develop.rs.
     let luma = 0.299 * r + 0.587 * g + 0.114 * b;
     let satTotal = 1.0 + adj.saturation / 100.0;
     let cmax = max(r, max(g, b));
@@ -333,32 +306,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = luma + (g - luma) * total;
     b = luma + (b - luma) * total;
 
-    // 5. Working → linear.
+    // 5. Back to linear.
     r = pow(max(r, 0.0), 2.2);
     g = pow(max(g, 0.0), 2.2);
     b = pow(max(b, 0.0), 2.2);
 
-    // 6. Clamp final to 0..1, preserve sampled alpha.
     return vec4<f32>(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), texel.a);
 }
 
-// Subject-selection overlay: a second draw of the same quad, alpha-blended over
-// the already-rendered image. Deliberately separate from `fs_main` — the
-// selection is a thing you look at, never a thing that changes the picture, so
-// it cannot touch the tone pipeline even by accident.
+// Subject-selection overlay, drawn as a second pass blended over the image.
+// It is separate from `fs_main` so it can never change the rendered tone.
 @fragment
 fn fs_overlay(in: VsOut) -> @location(0) vec4<f32> {
-    // Sampled before the discards, same reasoning as fs_main's identity
-    // sample above — WebGPU's uniformity validator rejects an implicit-LOD
-    // textureSample reachable only after a per-fragment `discard`/`return`,
-    // even though native Metal/Vulkan tolerated it.
-    //
-    // The mask is single-channel coverage: 0 background, 1 subject, soft rim
-    // between. Inverting is a read of the same mask from the other side.
+    // Sample before the discards, as in `fs_main`. Coverage is 0 for
+    // background, 1 for subject, soft in between.
     var coverage = textureSample(mask_tex, mask_samp, in.uv).r;
 
-    // Outside the image, or outside the crop: draw nothing, so the overlay
-    // never spills onto the neutral surround.
     if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
         discard;
     }

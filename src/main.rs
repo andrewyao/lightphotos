@@ -1,37 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! LightPhotos — a fast macOS Lightroom-lite photo culling & develop tool.
-//!
-//! - Open a folder from Finder / "Open With" → thumbnail Grid; open a file → Loupe.
-//! - `G` Grid, `E`/Enter Loupe (open selected), `Esc` backs out (Loupe→Grid, Grid→quit).
-//! - Arrows move the grid selection / step the loupe; `1`–`5` rate, `0` clears.
-//! - The always-visible top toolbar hosts the rating filter (All + 5 stars);
-//!   `Shift`+`1`–`5` set a "≥ N" star filter and `Shift`+`0` clears it.
-//! - `+`/`-` adjust thumbnail size (Grid).
-//! - Loupe keeps the GPU pan/zoom path: scroll to zoom, Space+drag pan,
-//!   Cmd+[ / Cmd+] rotate, grow-only fit. Alt+0 resets to 100%.
-//! - `C` enters crop mode (Loupe): drag the 4 edges (hold `Shift` to keep the
-//!   ratio), `C`/Enter commits, `Esc` cancels. `X` exports the selected image as
-//!   a `.jpg` in the same folder (edits baked in), never overwriting.
-//!
-//! Speed: images decode on background threads (Apple ImageIO) and live as a GPU
-//! texture; zoom/pan only update a tiny transform uniform, never re-decode.
-//! egui draws all chrome (grid, filmstrip, filter bar, rating overlays); the
-//! hand-rolled wgpu renderer draws the loupe image, confined to a viewport rect.
-//!
-//! This file is the crate root: it owns the winit event loop (translating raw
-//! window events into `App` calls) and `main()`. All viewer state and behavior
-//! lives in [`app`]; the other modules are the supporting layers it coordinates.
+//! LightPhotos, a fast Lightroom-lite photo culling and develop tool. This
+//! crate root owns `main()` and the winit event loop, which turns window events
+//! into `App` calls. Viewer state and behavior live in [`app`].
 
 mod app;
 mod autotone;
 mod burst;
 mod catalog;
-// All four live under src/web/ (physically separated from native-only
-// code), but keep their existing flat module names via #[path] — every
-// `crate::web_fs::`/etc. call site elsewhere in the codebase resolves by
-// module path, not file location, so this move needed no other file's
-// `use` statements touched.
 #[cfg(target_os = "macos")]
 mod coregraphics;
 mod develop;
@@ -93,18 +69,9 @@ use loader::Loader;
 use macos_delegate::UserEvent;
 use renderer::Renderer;
 
-/// The rest of window setup, once a `Renderer` exists — shared by native's
-/// `resumed()` (called directly, straight after the blocking
-/// `pollster::block_on`) and wasm32's `about_to_wait` poll (called once the
-/// async renderer-init task's result arrives over `renderer_init_rx`; see
-/// `resumed()`'s doc comment). Everything here is itself synchronous and
-/// platform-independent — only *how the Renderer got here* differs.
-///
-/// `size` is passed in rather than read via `window.inner_size()` here too —
-/// same reason as `Renderer::new`'s identical parameter (see its doc
-/// comment): winit's wasm32 `inner_size()` is a stale cache at this point,
-/// not a live query, and `app.win_size` below drives egui's own layout
-/// sizing, so getting this wrong doesn't just affect wgpu.
+/// Finish window setup once a `Renderer` exists. Native calls it from
+/// `resumed`; wasm calls it from `about_to_wait` when the async renderer init
+/// lands. `size` is passed in because winit's wasm `inner_size()` is stale here.
 fn finish_window_setup(
     app: &mut App,
     window: Arc<Window>,
@@ -146,43 +113,32 @@ impl ApplicationHandler<UserEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("LightPhotos")
             .with_inner_size(LogicalSize::new(1100.0, 800.0));
-        // Native: create the window hidden and only map it once the renderer is
-        // up and the first frame's state is ready (below). wgpu device/pipeline
-        // bring-up runs synchronously on this thread via `pollster::block_on`,
-        // and under a software rasterizer (llvmpipe in a VM) it takes several
-        // seconds — long enough that a *mapped* X11/Wayland window that can't
-        // pump events in the meantime trips the desktop's "application is not
-        // responding — Wait / Force Quit" dialog. An unmapped window is never
-        // pinged, so the user just sees the window appear a beat later, already
-        // drawn, instead of a frozen frame behind a system prompt.
+        // Create the window hidden and show it once the renderer is ready. wgpu
+        // setup blocks this thread, and under a software rasterizer (llvmpipe)
+        // it takes seconds. A visible X11/Wayland window that stops pumping
+        // events that long gets a "not responding" dialog.
         #[cfg(not(target_arch = "wasm32"))]
         let attrs = attrs.with_visible(false);
         loader::mark("resumed: creating window");
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         loader::mark("window created; initializing wgpu");
 
-        // `Renderer::new` is async (see its doc comment) — wgpu's
-        // adapter/device acquisition is a real browser Promise under WebGPU,
-        // and the browser main thread can never block waiting on one.
-        // `pollster::block_on` (native only — it has no wasm32 support at
-        // all) is the one native/wasm fork in this function; everything
-        // finish_window_setup does afterward is shared, unchanged code.
+        // `Renderer::new` is async because WebGPU device setup is a browser
+        // Promise, and the browser main thread can't block on it. Native blocks
+        // with `pollster`.
         #[cfg(not(target_arch = "wasm32"))]
         {
             let size = window.inner_size();
             let renderer = pollster::block_on(Renderer::new(window.clone(), size));
             loader::mark("wgpu ready");
             finish_window_setup(self, window.clone(), renderer, size);
-            // Renderer and initial open() are done — map the window and draw.
             window.set_visible(true);
             window.request_redraw();
         }
         #[cfg(target_arch = "wasm32")]
         {
-            // winit creates its own <canvas> on wasm32 but doesn't insert it
-            // into the page for you — do that now, before anything tries to
-            // draw. Also hands back the real viewport size: window.inner_size()
-            // can't be used here (see Renderer::new's doc comment).
+            // winit creates a <canvas> on wasm but doesn't add it to the page.
+            // `attach` adds it and returns the real size.
             let size = web_canvas::attach(&window);
             self.window = Some(window.clone());
             let tx = self.renderer_init_tx.clone();
@@ -206,20 +162,13 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        // Give egui first crack at the event. Consumed events (clicks/keys in an
-        // egui widget) normally skip the app's own handling.
+        // egui sees each event first. Events it consumes skip the app.
         let consumed =
             if let (Some(window), Some(state)) = (self.window.clone(), self.egui_state.as_mut()) {
                 let response = state.on_window_event(&*window, &event);
-                // egui_winit reports `repaint: true` for `RedrawRequested` itself
-                // (it's in its "things that may require repaint" bucket alongside
-                // Resized/Moved/etc.) — forwarding that into another
-                // `request_redraw()` would re-arm the very redraw we're about to
-                // perform in the `RedrawRequested` arm below, forever, regardless
-                // of whether anything actually changed. Every other event in that
-                // bucket legitimately means "something happened, please repaint";
-                // this one alone must be excluded or `ControlFlow::Wait` never
-                // actually gets to wait.
+                // egui_winit asks for a repaint on `RedrawRequested` itself.
+                // Honoring that would redraw forever and `ControlFlow::Wait`
+                // would never wait.
                 if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
                     window.request_redraw();
                 }
@@ -228,13 +177,8 @@ impl ApplicationHandler<UserEvent> for App {
                 false
             };
         if consumed {
-            // Exception: arrow keys keep driving navigation even when a develop
-            // slider still holds egui's keyboard focus (egui reports the key as
-            // consumed for as long as the slider stays focused), and Tab is
-            // always reported as consumed by egui_winit regardless of focus (its
-            // own hardcoded widget-focus traversal — see the Tab-stripping
-            // comment in `App::redraw`). Let both fall through unless a slider is
-            // actively being dragged or we're cropping.
+            // Navigation keys may still reach the app. See
+            // `nav_key_should_fall_through`.
             let nav_key = matches!(
                 event,
                 WindowEvent::KeyboardInput {
@@ -267,10 +211,9 @@ impl ApplicationHandler<UserEvent> for App {
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                 }
-                // The preview decode is sized from the window, so a resize can
-                // mean the loupe now wants a sharper one than it is showing.
+                // The preview decode is sized from the window, so a bigger
+                // window may need a sharper one.
                 self.try_show();
-                // The loupe viewport is recomputed from egui panels next frame.
                 self.request_redraw();
             }
 
@@ -280,8 +223,7 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
-                // Becoming visible again: redraw (we skip frames while occluded,
-                // so the surface needs a fresh draw to stop showing blank).
+                // Frames are skipped while occluded, so redraw when visible again.
                 if !occluded {
                     self.request_redraw();
                 }
@@ -293,8 +235,7 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 if self.dragging && self.mode == ViewMode::Loupe {
-                    // `position` is physical pixels, the same units as `pan` — add
-                    // the delta directly (no scale-factor multiply).
+                    // `position` and `pan` are both physical pixels.
                     let dx = position.x - self.last_drag.0;
                     let dy = position.y - self.last_drag.1;
                     self.pan.0 += dx as f32;
@@ -347,7 +288,6 @@ impl ApplicationHandler<UserEvent> for App {
                         self.handle_key(code, event_loop);
                     }
                 }
-                // Track Space release for pan.
                 if let PhysicalKey::Code(KeyCode::Space) = event.physical_key {
                     self.space_down = event.state == ElementState::Pressed;
                 }
@@ -358,18 +298,14 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // The user confirmed quit in the Esc modal — exit the event loop (lets
-        // Drop run for the loader/exporter, unlike a hard process::exit).
+        // Exit the loop rather than `process::exit`, so loader and exporter
+        // `Drop`s run.
         if self.quit_requested {
             event_loop.exit();
             return;
         }
 
-        // Pick up the async-initialized Renderer once it lands — see
-        // resumed()'s doc comment. `window` is already set (resumed() does
-        // that synchronously before spawning); everything else (loader,
-        // exporter, worker pools, egui_state, the initial open()) is only
-        // constructed now, once there's a real device to hand them.
+        // Finish wasm window setup once the async renderer init lands.
         #[cfg(target_arch = "wasm32")]
         if let Ok((renderer, size)) = self.renderer_init_rx.try_recv() {
             loader::mark("wgpu ready (async)");
@@ -379,15 +315,11 @@ impl ApplicationHandler<UserEvent> for App {
             self.request_redraw();
         }
 
-        // Landing page's folder picker (see ui::draw's landing-page branch
-        // and app/web.rs) — its own bool return feeds the poll-cadence
-        // calculation below, same convention as request_working_thumbs.
+        // True while web folder picking or listing is in flight. Feeds the poll
+        // interval below.
         #[cfg(target_arch = "wasm32")]
         let web_folder_pending = {
-            // Fire-and-forget sidecar writes/deletes (catalog.rs's wasm32
-            // `write_sidecar`/`delete_sidecar`) report failures
-            // asynchronously — drain those into `last_error` every frame,
-            // same convention as every other wasm32 poll here.
+            // Web sidecar writes and deletes report failures asynchronously.
             self.poll_catalog_persist_errors();
             self.poll_web_deletes();
             let pick_pending = self.poll_folder_pick();
@@ -395,13 +327,10 @@ impl ApplicationHandler<UserEvent> for App {
             pick_pending || listing_pending
         };
 
-        // Drain all loader tiers once per frame.
         if let Some(loader) = &mut self.loader {
             let (full, thumbs, metas, exifs) = loader.poll_all();
             let any =
                 !full.is_empty() || !thumbs.is_empty() || !metas.is_empty() || !exifs.is_empty();
-            // Note: `loader`'s borrow ends at `poll_all` above (NLL), so these
-            // `&mut self` calls are allowed even though `loader` is still in scope.
             if !metas.is_empty() {
                 self.on_capture_times(metas);
             }
@@ -412,41 +341,27 @@ impl ApplicationHandler<UserEvent> for App {
                 self.score_arrived_thumbs(&thumbs);
                 self.score_arrived_dup_thumbs(&thumbs);
             }
-            // Outside the `thumbs` guard on purpose: a running Auto Tone batch
-            // also has to notice thumbnails the loader has given up on, and
-            // those produce no arrival to trigger on.
+            // Runs even with no arrivals, so Auto Tone notices failed thumbnails.
             self.poll_auto_tone(&thumbs);
             if any {
                 self.try_show();
-                // Now that something landed, the current photo may be on screen
-                // — which is the condition `request_neighbors` waits for before
-                // it will spend workers on prefetch.
+                // Prefetch waits until the current photo is on screen, which
+                // may now be true.
                 self.request_neighbors();
                 self.request_redraw();
             }
         }
-        // Drain finished background catalog (sidecar) loads. Redraws itself
-        // when a load actually reconciles into the ratings/edits/touchups/
-        // rotations mirrors; its return value only feeds `image_pending`
-        // below so the loop keeps polling at the tight cadence until it lands.
         let catalog_load_pending = self.poll_catalog_load();
 
-        // Drain finished background exports and fold them into the progress toast.
         let outcomes = self.exporter.as_ref().map(|e| e.poll()).unwrap_or_default();
         if !outcomes.is_empty() {
             self.on_export_outcomes(outcomes);
             self.request_redraw();
         }
-        // Worker threads finishing a job do not wake winit, so anything whose
-        // result arrives over a channel needs the loop kept alive or it sits
-        // undrained until some unrelated event happens to arrive — which for a
-        // loupe decode means the blurry placeholder stays on screen long after
-        // the sharp image is ready. WaitUntil wakes `about_to_wait` on a timer
-        // to re-poll *without* forcing a full egui re-tessellation + GPU submit
-        // every vsync; the actual redraw only happens above, when results land.
-        //
-        // A loupe decode is what the user is staring at, so it gets a tight
-        // cadence; an export only feeds a progress toast, so it gets a lazy one.
+        // Worker threads don't wake winit, so poll on a timer while work is
+        // pending. `WaitUntil` re-polls without redrawing every vsync. A loupe
+        // decode polls every 16 ms because the user is waiting on it; an export
+        // only updates a toast, so 100 ms is enough.
         let image_pending = self.loader.as_ref().is_some_and(|l| l.has_pending_image())
             || self.selection_pending()
             || catalog_load_pending;
@@ -469,15 +384,10 @@ impl ApplicationHandler<UserEvent> for App {
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
 
-        // Keep redrawing while working-set thumbnails are still loading.
         if self.request_working_thumbs() {
             self.request_redraw();
         }
-        // wasm32's own thumbnail path — loader.rs's worker queue above has
-        // no workers to service it yet (see app/web.rs). Drain first (a
-        // decode that finished this frame should count toward "did
-        // anything arrive" the same way loader results do), then keep
-        // requesting/redrawing while any are still outstanding.
+        // The loader has no workers on wasm, so web decodes are polled here.
         #[cfg(target_arch = "wasm32")]
         {
             self.prepare_web_thumb_cache();
@@ -485,33 +395,24 @@ impl ApplicationHandler<UserEvent> for App {
             if !web_thumbs.is_empty() {
                 self.score_arrived_thumbs(&web_thumbs);
                 self.score_arrived_dup_thumbs(&web_thumbs);
-                // Browser-decoded thumbnails land here instead of in
-                // `loader.poll_all()` above, so a running Auto Tone batch
-                // only sees them if they are fed in from this side too. The
-                // give-up sweep over `thumb_failed` still happens in the
-                // unguarded call above, which runs on this target as well.
+                // Web thumbnails skip `loader.poll_all()`, so feed them to Auto
+                // Tone here too.
                 self.poll_auto_tone(&web_thumbs);
             }
             if self.request_web_thumbs() {
                 self.request_redraw();
             }
-            // Loupe tier — poll_web_preview calls try_show() itself once
-            // something lands, same as the native loader-arrival branch
-            // above does for its own tier.
             self.poll_web_preview();
             if self.request_web_preview() {
                 self.request_redraw();
             }
-            // Zoom-triggered full-resolution tier — see
-            // `ensure_full_for_zoom`'s wasm32 branch for what enqueues this.
             self.poll_web_full();
             if self.request_web_full() {
                 self.request_redraw();
             }
 
-            // Pipeline 3 (export): the Web Worker has finished baking JPEG
-            // bytes; hand each to `WebFs::write_atomic` (async), then drain
-            // the completed writes into the shared `on_export_outcomes`.
+            // Write each JPEG a Web Worker finished baking, then report the
+            // completed writes.
             for r in self.web_worker_pool.poll_exports() {
                 let crate::web_worker_pool::ExportPoolResult {
                     path,
@@ -550,36 +451,27 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
 
-        // Keep the loop alive while burst background work (capture-time reads,
-        // off-screen member scoring) is outstanding. Worker-thread completions
-        // don't wake the loop, so without this a settled grid would freeze burst
-        // badges mid-computation until an unrelated event arrives.
+        // Each `request_*` below returns true while background work is still
+        // outstanding. Worker completions don't wake the loop, so keep redrawing.
         if self.request_burst_thumbs() {
             self.request_redraw();
         }
 
-        // Same rationale as above, for the content-duplicate dHash pass.
         if self.request_dup_thumbs() {
             self.request_redraw();
         }
 
-        // Drain finished feature-print comparisons (the second, Vision-backed
-        // refinement tier), then keep polling while any are still in flight.
         self.poll_feature_prints();
         if self.request_feature_prints() {
             self.request_redraw();
         }
 
-        // Same again for the face/eyes-closed pass, which runs over whatever
-        // the two grouping passes above have already identified.
         self.poll_face_quality();
         if self.request_face_quality() {
             self.request_redraw();
         }
 
-        // Pick up a finished subject-segmentation run. No matching "request"
-        // call here: unlike the passes above, that one is driven by the user
-        // switching the overlay on or stepping to another photo.
+        // Segmentation starts from user actions, so it has no `request_*` call.
         self.poll_selection_mask();
     }
 }
@@ -598,10 +490,8 @@ fn print_usage_and_exit(code: i32) -> ! {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
     loader::start_clock();
-    // A file/dir path may be passed on the command line, but it's optional:
-    // with none (or an unreadable one) the app opens on the landing page and
-    // the user picks a folder there. A packaged .app also gets its path this
-    // way *or* later via an AppleEvent (Finder "Open With", no argv).
+    // The path argument is optional. Without one the app opens on the landing
+    // page. A packaged .app may instead get its path from Finder later.
     let initial = match std::env::args().nth(1).as_deref() {
         Some("-h" | "--help") => print_usage_and_exit(0),
         Some(s) => {
@@ -632,16 +522,8 @@ fn main() {
     event_loop.run_app(&mut app).expect("run app");
 }
 
-/// wasm32 entry point. No CLI args (no argv on the web) — nothing to open
-/// yet; picking a folder is File System Access's `showDirectoryPicker`,
-/// wired up in a later milestone (see the wasm port plan's M1), not
-/// something available at process-start the way a CLI arg is.
-///
-/// `EventLoopExtWebSys::spawn_app`, not `run_app`: winit's web backend can't
-/// use the blocking native entry point at all — the browser main thread must
-/// return control to the browser's own event loop rather than looping
-/// forever inside Rust, so winit instead schedules the app's callbacks via
-/// the browser's normal animation-frame/event machinery under the hood.
+/// wasm entry point. Uses `spawn_app`, not the blocking `run_app`, because
+/// the browser main thread must return to the browser's event loop.
 #[cfg(target_arch = "wasm32")]
 fn main() {
     console_error_panic_hook::set_once();

@@ -6,9 +6,7 @@ use crate::app::{App, Region};
 use crate::burst::BurstMark;
 use crate::duplicates::DuplicateMark;
 
-/// Left folder-tree sidebar, rooted at the opened folder. Called once from
-/// `ui::draw`, before the toolbar, so it spans the full window height (Grid
-/// and Loupe both use it; Survey mode does not call this).
+/// Left folder-tree sidebar, rooted at the opened folder.
 pub(super) fn draw_folders_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.folders_visible() {
         return;
@@ -35,9 +33,8 @@ pub(super) fn draw_folders_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
         });
 }
 
-/// Width needed by the currently visible folder rows, measured with the same
-/// body font used by `selectable_label`. The side panel follows this width
-/// automatically; it has no user resize affordance.
+/// Width of the widest visible folder row, measured in the body font that
+/// `selectable_label` uses. The sidebar sizes itself to this.
 pub(super) fn folder_content_width(
     ui: &egui::Ui,
     app: &App,
@@ -78,17 +75,16 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
     egui::CentralPanel::default().show_inside(ui, |ui| {
         let cell = GRID_CELL_PT;
         let spacing = ui.spacing().item_spacing.x;
-        // Leave room for the scrollbar so the last column isn't clipped (cols is
-        // fixed before we enter the scroll area, where the inner width shrinks).
+        // Leave room for the scrollbar, which narrows the scroll area's inner
+        // width after `cols` is fixed.
         let avail = (ui.available_width() - 16.0).max(cell);
         let cols = ((avail + spacing) / (cell + spacing)).floor().max(1.0) as usize;
         app.set_grid_cols(cols);
 
         let len = app.visible_len();
         let rows = len.div_ceil(cols);
-        // Virtualized: build only the rows scrolled into view. A folder with
-        // thousands of images must not allocate every cell or load every
-        // thumbnail (that exhausts memory and crashes).
+        // Build only the rows in view. Loading every thumbnail of a large
+        // folder runs out of memory.
         let reset_scroll = app.take_grid_scroll_reset();
         let mut grid_scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -114,18 +110,11 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
     });
 }
 
-/// Width reserved for a folder row's disclosure triangle, before the gap that
-/// separates it from the folder name.
 const DISCLOSURE_W: f32 = 14.0;
 
-/// Paint one folder row's disclosure triangle: pointing right when the folder
-/// is collapsed, down when it is expanded.
-///
-/// Drawn rather than written as text. The glyphs this used to set (▶ / ▼) are
-/// not in every font the app can end up running with — egui's own built-in
-/// fonts have no ▼ at all, so on any platform without the macOS system fonts
-/// an expanded folder showed the missing-glyph box — and a face that does
-/// carry them puts them on that face's baseline, not the folder name's.
+/// Paint the folder row's disclosure triangle. It is drawn, not text, because
+/// egui's built-in fonts have no ▼ glyph, and fonts that do have it place it
+/// off the folder name's baseline.
 fn disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(DISCLOSURE_W, ui.spacing().interact_size.y),
@@ -133,7 +122,6 @@ fn disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
     );
     let c = rect.center();
     let r = 4.0;
-    // Same triangle either way, a quarter turn apart; the long side leads.
     let points = if expanded {
         vec![
             egui::pos2(c.x - r, c.y - r * 0.6),
@@ -155,8 +143,7 @@ fn disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
     response
 }
 
-/// One folder row in the tree: an indent, a clickable disclosure triangle, and
-/// a selectable folder name. Recurses into expanded folders' cached children.
+/// One folder row. Recurses into expanded folders.
 pub(super) fn folder_node(
     ui: &mut egui::Ui,
     app: &App,
@@ -171,8 +158,6 @@ pub(super) fn folder_node(
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
-        // The triangle and the name are a single selectable unit: one click
-        // anywhere on the row opens the folder (load + toggle expansion).
         let triangle = disclosure_triangle(ui, app.is_expanded(path));
         let label = ui.selectable_label(selected, name);
         if triangle.clicked() || label.clicked() {
@@ -180,9 +165,6 @@ pub(super) fn folder_node(
         }
     });
 
-    // Keyboard-focus outline around the selected row (single-select tree, so
-    // this is the same folder as the blue selection above). Only shown while
-    // the folder tree holds keyboard focus.
     if app.focus() == Region::Folders && selected {
         ui.painter().rect_stroke(
             row.response.rect,
@@ -193,25 +175,20 @@ pub(super) fn folder_node(
     }
 
     if app.is_expanded(path) {
-        // `app` is a shared (&App) borrow, so the recursive call can read the
-        // same slice concurrently — no clone needed.
         for child in app.subdirs(path) {
             folder_node(ui, app, child, depth + 1, out);
         }
     }
 }
 
-/// The few visual/behavioral knobs that differ between a grid cell and a
-/// filmstrip cell. Everything else about drawing a thumbnail cell is shared.
+/// What differs between a grid cell and a filmstrip cell.
 pub(super) struct CellStyle {
     /// Corner radius, also used as the thumbnail inset.
     corner: f32,
-    /// Background gray level for an unselected cell.
     bg_gray: u8,
     /// Star label offset from the cell's bottom-left corner.
     star_dx: f32,
     star_dy: f32,
-    /// Star label font size.
     star_size: f32,
     /// Draw a "…" placeholder while the thumbnail decodes (grid only).
     show_placeholder: bool,
@@ -239,11 +216,9 @@ pub(super) const STRIP_CELL_STYLE: CellStyle = CellStyle {
     hide_zero_stars: true,
 };
 
-/// Shared thumbnail cell for the grid and the filmstrip: paints background,
-/// fitted thumbnail (or placeholder), star rating, and selection outline.
-/// `selected` marks membership in the multi-selection; `primary` marks the
-/// active cell (drawn with a brighter outline). Returns the response so callers
-/// can add view-specific behavior (click routing, double-click, auto-scroll).
+/// Thumbnail cell shared by the grid and the filmstrip. `selected` means the
+/// cell is in the multi-selection; `primary` means it is the active cell and
+/// gets a thicker outline.
 pub(super) fn thumbnail_cell(
     ui: &mut egui::Ui,
     app: &App,
@@ -280,15 +255,14 @@ pub(super) fn thumbnail_cell(
         );
     }
 
-    // Best-of-burst overlay. Bursts imply no active filter, so every burst is
-    // whole in the grid: the sharpest frame gets a badge, the rest are dimmed.
+    // Corners: burst badge top-left, duplicate badge top-right, eyes-closed
+    // bottom-right, stars bottom-left. One photo can show all four.
     match app.burst_mark_at(pos) {
         Some(BurstMark::Sibling) => {
             ui.painter()
                 .rect_filled(rect, style.corner, egui::Color32::from_black_alpha(140));
         }
         Some(BurstMark::Best) => {
-            // Top-left corner — rating stars live bottom-left, so no clash.
             let c = rect.left_top() + egui::vec2(style.corner + 9.0, style.corner + 9.0);
             ui.painter()
                 .circle_filled(c, 9.0, egui::Color32::from_black_alpha(170));
@@ -303,11 +277,6 @@ pub(super) fn thumbnail_cell(
         None => {}
     }
 
-    // Content-duplicate-group overlay. A photo can be in both a time-burst and
-    // a content-duplicate group at once — these are separate underlying
-    // computations, unified only here at the badge layer. Anchored at the
-    // top-right corner so it never collides with the burst badge (top-left) or
-    // the rating stars (bottom-left).
     match app.dup_mark_at(pos) {
         Some(DuplicateMark::Sibling) => {
             ui.painter()
@@ -328,9 +297,6 @@ pub(super) fn thumbnail_cell(
         None => {}
     }
 
-    // Eyes-closed warning. Bottom-right is the last free corner (burst badge
-    // top-left, duplicate badge top-right, rating stars bottom-left) — a frame
-    // can legitimately carry all four at once.
     if app.eyes_closed_at(pos) {
         let c = rect.right_bottom() + egui::vec2(-(style.corner + 9.0), -(style.corner + 9.0));
         ui.painter()
@@ -338,7 +304,7 @@ pub(super) fn thumbnail_cell(
         ui.painter().text(
             c,
             egui::Align2::CENTER_CENTER,
-            // A closed eye: the lid arc, without the open eye's iris.
+            // An arc, read as a closed eyelid.
             "\u{2312}",
             egui::FontId::proportional(13.0),
             theme::EYES_BADGE,
@@ -356,8 +322,6 @@ pub(super) fn thumbnail_cell(
         );
     }
 
-    // Selection outline on top of the thumbnail: a brighter 3px stroke for the
-    // primary/active cell, a thinner 2px stroke for other selected members.
     if selected || primary {
         let width = if primary { 3.0f32 } else { 2.0f32 };
         ui.painter().rect_stroke(
@@ -371,7 +335,6 @@ pub(super) fn thumbnail_cell(
     response
 }
 
-/// One grid cell: a thumbnail image-button with selection highlight + stars.
 pub(super) fn grid_cell(
     ui: &mut egui::Ui,
     app: &App,
@@ -380,14 +343,12 @@ pub(super) fn grid_cell(
     sel: Option<usize>,
     out: &mut FrameOutput,
 ) {
-    // No outline in the grid's browse-first state (sel is None).
     let primary = sel == Some(pos);
     let selected = app.is_selected(pos);
     let response = thumbnail_cell(ui, app, pos, cell, selected, primary, &GRID_CELL_STYLE);
     if response.clicked() {
-        // A click landing on the duplicate-group badge (top-right corner)
-        // opens Survey Mode on that group instead of the normal select
-        // behavior — same badge rect math as the one `thumbnail_cell` draws.
+        // A click on the duplicate badge opens Survey Mode. The badge
+        // position must match the one `thumbnail_cell` draws.
         if app.dup_mark_at(pos).is_some() {
             if let Some(click_pos) = response.interact_pointer_pos() {
                 let badge_center = response.rect.right_top()
@@ -402,7 +363,6 @@ pub(super) fn grid_cell(
                 }
             }
         }
-        // Cmd toggles a cell, Shift extends the range, plain click selects one.
         let mods = ui.input(|i| i.modifiers);
         let action = if mods.shift {
             UiAction::SelectRange(pos)

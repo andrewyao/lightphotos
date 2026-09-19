@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Survey Mode: side-by-side review of one duplicate group (entered from a
-//! duplicate-group badge click in the Grid — see `grid.rs`'s `grid_cell`).
+//! Survey Mode: side-by-side review of one duplicate group, opened by clicking
+//! a duplicate badge in the Grid.
 
 use super::*;
 use std::path::{Path, PathBuf};
@@ -52,7 +52,6 @@ pub(super) fn draw_survey(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutpu
     });
 }
 
-/// One member's thumbnail + focus outline + best badge + rating + filename.
 fn survey_member(
     ui: &mut egui::Ui,
     app: &App,

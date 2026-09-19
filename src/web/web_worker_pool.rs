@@ -1,32 +1,8 @@
-//! wasm32-only: a hand-rolled `web_sys::Worker` pool — the wasm port plan's
-//! M4 (real threading). Each worker runs an independent instance of the
-//! `wasm_worker` binary (`src/web/wasm_worker.rs`), decoding on its own
-//! thread with its own separate wasm linear memory — no `SharedArrayBuffer`/
-//! atomics, no nightly toolchain, chosen specifically over
-//! `wasm-bindgen-rayon` (whose JS-orchestrated `init()`/`initThreadPool()`
-//! usage model doesn't fit this app's binary-crate + `spawn_app` entry
-//! point, and whose documented bundler support never mentions `trunk`).
-//!
-//! `App` holds the `WorkerPool` itself (for `poll`); `app/web.rs`'s spawned
-//! byte-read tasks hold a cheaply-`Clone`-able [`WorkerPoolHandle`] (a wrapped
-//! `Rc<RefCell<..>>`, safe here because wasm32 is single-threaded — nothing
-//! but re-entrant JS callbacks ever touches it) so they can submit a decode
-//! job without borrowing `App` across the `spawn_local` future's `'static`
-//! bound, the same shape `web_thumb_tx`/`web_preview_tx` already use for the
-//! same reason.
-//!
-//! ## Pipeline position
-//! - Main-thread dispatcher for wasm32's Pipeline 1 (Loupe) and Pipeline 2
-//!   (Grid/filmstrip) decode: `app/web.rs` calls
-//!   `WorkerPoolHandle::submit` after reading a file's bytes
-//!   (`web_fs::read_array_buffer`), tagged with a `JobKind` that says which
-//!   tier this decode is for.
-//! - `submit` derives `quality` from `JobKind` and queues the job; `pump`
-//!   hands it to the next idle, ready `Worker` (running `wasm_worker.rs`).
-//! - `App::poll` (called every frame) drains `WorkerPool::poll`'s finished
-//!   results back into `app/web.rs`'s tier-specific handling, which lands
-//!   them in `loader.rs`'s caches.
-//! - See `ARCHITECTURE.md`.
+//! wasm32-only: a pool of `web_sys::Worker`s, each running the `wasm_worker`
+//! binary with its own wasm memory. `App` owns the `WorkerPool` and polls it
+//! each frame. Async tasks submit jobs through a cloneable
+//! [`WorkerPoolHandle`], because a `spawn_local` future cannot borrow `App`.
+//! Sharing an `Rc<RefCell<..>>` is safe because wasm32 is single-threaded.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
@@ -46,35 +22,17 @@ const WORKER_READY_TIMEOUT_MS: i32 = 10_000;
 
 use crate::image_decode::{DecodedImage, PixelFormat};
 
-/// Which cache tier a finished decode belongs in — mirrors
-/// `insert_thumb_external`/`insert_preview_external`/`insert_full_external`
-/// in `loader.rs` (except `Speed`, which bypasses `loader.rs`'s cache
-/// entirely — see `app/web.rs`'s `poll_web_preview` doc comment for why).
-/// Also drives `submit()`'s `quality` derivation (see its doc comment):
-/// `Preview`/`Full` (Loupe, real content) get full PPG demosaic + linear
-/// output; `Thumb`/`Speed` (Grid, and the Loupe's screen-fit first paint)
-/// stay on the quarter-res Fast tier.
-///
-/// A `Speed` tier at screen resolution — a cheap first pass shown before the
-/// `Preview`/quality decode lands — was tried once before and reverted: the
-/// Loupe's zoom transform was carried across a same-photo tier upgrade
-/// rather than recomputed (`app/thumbs.rs::upload_shown`), so an extra tier
-/// boundary meant an extra chance for a wrongly-zoomed flash. That's now
-/// fixed at the root (`upload_shown` re-fits on any same-photo tier swap
-/// while `self.fitted` is still true), so `Speed` is reinstated here, plus a
-/// `Full` tier (real full-resolution decode, requested only once the user
-/// zooms past what `Preview` holds — `app/loupe.rs::ensure_full_for_zoom`'s
-/// wasm32 branch) mirroring native's own `Speed`/`Preview`/`Full` staging.
+/// What a job is for. `Preview` and `Full` get the full RAW demosaic with
+/// linear output. `Thumb` and `Speed` (the Loupe's quick screen-fit first
+/// paint) use the fast quarter-res RAW decode.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum JobKind {
     Thumb,
     Speed,
     Preview,
     Full,
-    /// Pipeline 3: full-res decode → bake edits → JPEG encode, in the worker
-    /// (`export::bake_jpeg`). Unlike the decode kinds this returns encoded
-    /// JPEG bytes, not a `DecodedImage`, so its results come back on a
-    /// separate channel (`poll_exports`), not `poll`.
+    /// Decode, bake edits, and encode a JPEG in the worker. Results arrive
+    /// on `poll_exports`, not `poll`.
     Export,
 }
 
@@ -83,37 +41,29 @@ pub struct PoolResult {
     pub path: PathBuf,
     pub target: u32,
     pub result: Result<DecodedImage, String>,
-    /// The same image encoded as a JPEG, for `JobKind::Thumb` jobs submitted
-    /// with `from_cache: false` — the bytes `app/web.rs` writes into
-    /// `.lightphotos/`. `None` for every other kind, for a thumbnail that was
-    /// itself read back from the cache, and for a decode whose pixels a JPEG
-    /// can't represent (the linear RAW tier).
+    /// The image as a JPEG for the disk cache. Set only for thumbnails decoded
+    /// from the source, and only when JPEG can represent the pixels.
     pub jpeg: Option<Vec<u8>>,
-    /// The cache filename. Computed
-    /// from the source's size and mtime in `app/web.rs`'s `request_web_thumbs`
-    /// and carried through the job, so storing the result needs no second
-    /// `get_file()` round-trip. Rides along the way `export_dest` does.
+    /// The cache entry name, computed when the job was submitted, so storing
+    /// the result needs no second `get_file()`.
     pub cache_name: Option<String>,
-    /// Originating navigation generation, independent of cache metadata.
+    /// The navigation generation that requested this job.
     pub generation: Option<u64>,
-    /// True when the worker decoded cached bytes, including failed jobs.
+    /// True when the job decoded bytes from the disk cache, whether or not
+    /// it succeeded.
     pub from_cache: bool,
 }
 
 impl PoolResult {
-    /// Cache failures are recoverable without spending a source retry.
-    ///
-    /// Untested: this module is `cfg(target_arch = "wasm32")`, so `cargo test`
-    /// never compiles it, and there is no `wasm-bindgen-test` harness here to
-    /// run it under. Keep it small enough to be obviously right by reading.
+    /// A cached thumbnail that failed to decode. The caller re-reads the
+    /// source without spending a retry attempt.
     pub fn needs_source_decode(&self) -> bool {
         self.kind == JobKind::Thumb && self.from_cache && self.result.is_err()
     }
 }
 
-/// A finished (or failed) export job. `dest_dir`/`filename` ride the job
-/// through the worker and back so the main thread can hand the bytes to
-/// `WebFs::write_atomic` with no side table.
+/// A finished or failed export. The destination rides along with the job,
+/// so the main thread can write the bytes without a lookup table.
 pub struct ExportPoolResult {
     pub path: PathBuf,
     pub folder: FileSystemDirectoryHandle,
@@ -124,47 +74,35 @@ pub struct ExportPoolResult {
 
 struct PendingMeta {
     kind: JobKind,
-    /// See `PoolResult::cache_name`.
     cache_name: Option<String>,
     generation: Option<u64>,
     from_cache: bool,
     path: PathBuf,
     target: u32,
-    /// `Some` only for `JobKind::Export` — the resolved output location,
-    /// carried back onto `ExportPoolResult`.
+    /// `Some` only for `JobKind::Export`.
     export_dest: Option<(FileSystemDirectoryHandle, PathBuf, String)>,
 }
 
 struct QueuedJob {
     id: u32,
-    /// The file's raw bytes as a JS `ArrayBuffer`, not a Rust `Vec<u8>` —
-    /// deliberately never copied into the main thread's own wasm memory
-    /// (see `WorkerPoolHandle::submit`'s doc comment): it's read directly as
-    /// an `ArrayBuffer` and transferred here as-is, so a large RAW file's
-    /// bytes exist on the main thread only as this one JS-side buffer.
+    /// Kept as a JS `ArrayBuffer` and transferred to the worker, so the bytes
+    /// never enter main-thread wasm memory.
     bytes: js_sys::ArrayBuffer,
     max_px: u32,
     is_raw: bool,
-    /// Derived from `JobKind` at `submit()` time: `Preview` (Loupe) → full
-    /// PPG demosaic + linear output, `Thumb` (Grid) → the quarter-res Fast
-    /// tier — downgrades quality for thumbnails. See `submit`'s doc comment.
+    /// Full RAW demosaic instead of the fast decode. Derived from `JobKind`.
     quality: bool,
-    /// Set for a `JobKind::Thumb` job whose bytes came from the source file
-    /// rather than the on-disk cache: the worker encodes the decoded image as
-    /// a JPEG and returns it for `app/web.rs` to store. See `submit_thumb`.
+    /// Ask the worker to also return a JPEG for the disk cache.
     encode_jpeg: bool,
-    /// `Some` for `JobKind::Export`: `(adjustments_json, touchups_json, rot)`
-    /// — the develop/crop/rotation state `bake_jpeg` bakes in. The worker
-    /// switches to its export branch whenever this is present.
+    /// `(adjustments_json, touchups_json, rot)` for an export job. Its
+    /// presence switches the worker to the export path.
     export: Option<(String, String, u8)>,
 }
 
 struct WorkerSlot {
     worker: Worker,
-    /// Set once the worker's own readiness handshake message arrives — a
-    /// job posted before that lands in the void (see `wasm_worker.rs`'s
-    /// `run` doc comment on why the worker script itself doesn't listen
-    /// until it yields to the JS event loop once).
+    /// Set when the worker's ready message arrives. A worker drops jobs
+    /// posted before then.
     ready: bool,
     busy: bool,
     active_job: Option<u32>,
@@ -178,13 +116,11 @@ struct Inner {
     workers: Vec<WorkerSlot>,
     next_id: u32,
     pending: HashMap<u32, PendingMeta>,
-    /// Decode work is kept ahead of exports so a bulk export cannot make the
-    /// grid or Loupe wait behind a large FIFO backlog.
+    /// Decodes always go before exports, so a bulk export never makes the
+    /// grid or Loupe wait.
     decode_backlog: VecDeque<QueuedJob>,
     export_backlog: VecDeque<QueuedJob>,
     result_tx: Sender<PoolResult>,
-    /// `JobKind::Export` results land here instead of `result_tx` — they
-    /// carry JPEG bytes, not a `DecodedImage`.
     export_tx: Sender<ExportPoolResult>,
 }
 
@@ -203,9 +139,8 @@ fn get_string(obj: &JsValue, key: &str) -> Option<String> {
     Reflect::get(obj, &JsValue::from_str(key)).ok()?.as_string()
 }
 
-/// Number of workers that can actually accept work right now. A slot whose
-/// replacement is still starting (or has already failed) must not count
-/// toward export capacity or the scheduler's interactive-decode reservation.
+/// Workers that can take a job now. A replacement that is still starting,
+/// or has failed, does not count.
 fn ready_worker_count(inner: &Inner) -> usize {
     inner
         .workers
@@ -214,6 +149,8 @@ fn ready_worker_count(inner: &Inner) -> usize {
         .count()
 }
 
+/// Exports may use every ready worker but one, so a decode can always start.
+/// A single-worker pool still runs exports.
 fn export_capacity_for(inner: &Inner) -> usize {
     let ready_workers = ready_worker_count(inner);
     if ready_workers > 1 {
@@ -223,10 +160,8 @@ fn export_capacity_for(inner: &Inner) -> usize {
     }
 }
 
-/// Dispatch as many queued jobs as there are idle, ready workers — called
-/// both right after `submit` (in case a slot is already free) and whenever
-/// a slot frees up (a result lands, or a worker's readiness handshake
-/// arrives).
+/// Send queued jobs to idle, ready workers. Call after every submit and
+/// whenever a worker becomes free or ready.
 fn pump(inner: &Rc<RefCell<Inner>>) {
     loop {
         let mut inner_mut = inner.borrow_mut();
@@ -252,9 +187,6 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
         let job = if let Some(job) = inner_mut.decode_backlog.pop_front() {
             job
         } else {
-            // Keep one worker available for interactive decode work whenever
-            // the pool has more than one worker. A single-worker pool still
-            // makes progress on exports.
             let export_limit = export_capacity_for(&inner_mut);
             let active_exports = inner_mut
                 .workers
@@ -324,11 +256,6 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
                 &JsValue::from_f64(*rot as f64),
             );
         }
-        // No `Uint8Array::from(...)` copy here — `job.bytes` is already the
-        // JS ArrayBuffer read straight off the file (see
-        // `WorkerPoolHandle::submit`'s doc comment); it goes into the
-        // transfer list as-is, so this dispatch never touches the main
-        // thread's own wasm memory at all.
         let _ = Reflect::set(&msg, &JsValue::from_str("bytes"), &job.bytes);
         let transfer = Array::new();
         transfer.push(&job.bytes);
@@ -339,14 +266,9 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
     }
 }
 
-/// Directory the main app's own JS/wasm was loaded from — origin alone
-/// isn't enough, since a deploy can nest the trunk output under a subpath
-/// (e.g. lightphotos.app serves it from `/app/`, not site root; trunk's own
-/// dev server serves it from `/`). Read off the `<link rel="modulepreload">`
-/// href trunk always emits alongside the main bundle (see index.html /
-/// dist/index.html and the site's public/app.html), since that's the one
-/// place the actual deployed path is known at runtime — falls back to bare
-/// origin if that tag is missing for some reason.
+/// The URL directory the app's JS and wasm were served from. The site
+/// serves the app under `/app/`, so the origin alone is wrong. Read from
+/// the `<link rel="modulepreload">` trunk emits; falls back to the origin.
 fn asset_base_url() -> String {
     let window = match web_sys::window() {
         Some(w) => w,
@@ -364,12 +286,9 @@ fn asset_base_url() -> String {
     }
 }
 
-/// Build one `Worker`, its script loaded via the same Blob+`importScripts`
-/// trick trunk's own webworker example uses — `wasm_worker`'s output
-/// filenames are stable (not content-hashed, unlike the main app's own
-/// trunk output), per `data-type="worker"`'s documented behavior, so this
-/// URL needs no build-hash knowledge beyond the base directory (see
-/// `asset_base_url`).
+/// Start one worker from a Blob script that `importScripts` the worker
+/// bundle, as in trunk's webworker example. Trunk does not hash worker
+/// filenames, so the URL is fixed under `base`.
 fn spawn_worker(base: &str) -> Result<Worker, String> {
     let script = Array::new();
     script.push(
@@ -387,12 +306,9 @@ fn spawn_worker(base: &str) -> Result<Worker, String> {
     Worker::new(&url).map_err(|e| format!("Worker::new failed: {e:?}"))
 }
 
-/// Worker count for `WorkerPool::new` — `navigator.hardwareConcurrency`
-/// capped at 4 rather than reused unchanged like native's `cores - 2`
-/// formula (`loader.rs`): concurrent large-RAW decodes each carry their own
-/// scratch-buffer peak against one shared 4GB wasm32 address space per
-/// worker instance, unlike native's per-thread 64-bit space, so unbounded
-/// worker fan-out risks that peak multiplying badly on a many-core machine.
+/// `navigator.hardwareConcurrency`, capped at 4. Each large RAW decode has
+/// a big scratch-memory peak, and every worker adds its own wasm heap, so
+/// many workers on a many-core machine use too much memory.
 pub fn worker_count() -> usize {
     let cores = web_sys::window()
         .map(|w| w.navigator().hardware_concurrency() as usize)
@@ -406,18 +322,12 @@ pub struct WorkerPool {
     export_rx: Receiver<ExportPoolResult>,
 }
 
-/// A cheap-clone submit handle — see the module doc comment for why this
-/// exists separately from `WorkerPool` itself.
+/// A cloneable handle for submitting jobs from async tasks.
 #[derive(Clone)]
 pub struct WorkerPoolHandle(Rc<RefCell<Inner>>);
 
 impl WorkerPool {
-    /// `worker_count`: the plan's M4 goal explicitly calls for capping this
-    /// deliberately on wasm32 rather than reusing native's `cores - 2`
-    /// formula unchanged, since concurrent large-RAW decodes share one 4GB
-    /// linear-memory budget per worker instance, not native's per-thread
-    /// 64-bit address space. Callers should pass an already-capped count
-    /// (see `App`'s construction site for the actual cap).
+    /// Pass `worker_count()`. Always starts at least one worker.
     pub fn new(worker_count: usize) -> Self {
         let (result_tx, result_rx) = mpsc::channel();
         let (export_tx, export_rx) = mpsc::channel();
@@ -470,9 +380,7 @@ impl WorkerPool {
         WorkerPoolHandle(self.inner.clone())
     }
 
-    /// Drain every result that's landed since the last poll — same
-    /// one-shot-per-frame convention as every other `poll_*` in this
-    /// codebase (`app/web.rs`, `app/catalog.rs`).
+    /// Drain decode results that arrived since the last call.
     pub fn poll(&self) -> Vec<PoolResult> {
         let mut out = Vec::new();
         while let Ok(r) = self.result_rx.try_recv() {
@@ -481,8 +389,7 @@ impl WorkerPool {
         out
     }
 
-    /// Drain every finished `JobKind::Export` result since the last poll —
-    /// the export counterpart of `poll` (JPEG bytes, separate channel).
+    /// Drain export results that arrived since the last call.
     pub fn poll_exports(&self) -> Vec<ExportPoolResult> {
         let mut out = Vec::new();
         while let Ok(r) = self.export_rx.try_recv() {
@@ -500,7 +407,7 @@ fn handle_worker_message(
 ) {
     let data = msg.data();
 
-    // Readiness handshake: `{ready: true}`, no `id` field.
+    // The ready message is `{ready: true}` with no `id`.
     if get_bool(&data, "ready") {
         let mut inner_mut = inner.borrow_mut();
         if let Some(slot) = inner_mut.workers.get_mut(slot_idx) {
@@ -825,9 +732,7 @@ fn attach_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize, worker: Worker, ge
 }
 
 impl WorkerPoolHandle {
-    /// Current export capacity, based only on ready workers. This is read
-    /// through the cloneable handle because the web export producer runs in a
-    /// `'static` task rather than on `WorkerPool` itself.
+    /// How many exports may run at once, given the workers ready now.
     pub fn export_capacity(&self) -> usize {
         export_capacity_for(&self.0.borrow())
     }
@@ -841,19 +746,9 @@ impl WorkerPoolHandle {
             .count()
     }
 
-    /// Submit a decode job. `bytes` should be the file's raw contents read
-    /// via `web_fs::read_array_buffer` (NOT `read_bytes`) — deliberately a
-    /// JS `ArrayBuffer`, not a Rust `Vec<u8>`: it goes straight into a
-    /// `postMessage` transfer list (see `pump`) with no copy into the main
-    /// thread's own wasm memory, which matters for a RAW file's tens of MB.
-    /// `is_raw` should be `image_decode::is_raw_extension(path)`, decided by
-    /// the caller since the job carries no `Path`, only the bytes.
-    ///
-    /// No `quality` parameter: it's derived internally from `kind`
-    /// (`Preview`/`Full` → full PPG demosaic + linear output, `Thumb`/
-    /// `Speed` → the quarter-res Fast tier), so `app/web.rs`'s call sites —
-    /// which already know exactly this via the `kind` they pass — need no
-    /// changes.
+    /// Queue a decode. Read `bytes` with `web_fs::read_array_buffer`, not
+    /// `read_bytes`, so the buffer transfers to the worker without a copy.
+    /// `is_raw` comes from the caller because the worker sees only bytes.
     pub fn submit(
         &self,
         path: PathBuf,
@@ -865,14 +760,9 @@ impl WorkerPoolHandle {
         self.submit_inner(path, target, bytes, is_raw, kind, false, None, None, false);
     }
 
-    /// A `JobKind::Thumb` job that also says where its bytes came from.
-    ///
-    /// `from_cache` is true when `bytes` is an entry already read back from
-    /// `.lightphotos/` — decode it and stop. False means the source file was
-    /// read because no entry existed, so the worker encodes a JPEG alongside
-    /// the decode and returns it on `PoolResult::jpeg` for `app/web.rs` to
-    /// write. Encoding there rather than here keeps it off the main thread,
-    /// which on wasm is also the thread drawing the grid.
+    /// Queue a thumbnail decode. `from_cache` is true when `bytes` came from
+    /// the `.lightphotos/` cache. When false, the worker also returns a JPEG
+    /// on `PoolResult::jpeg` for the caller to cache.
     #[allow(clippy::too_many_arguments)]
     pub fn submit_thumb(
         &self,
@@ -942,13 +832,9 @@ impl WorkerPoolHandle {
         pump(&self.0);
     }
 
-    /// Submit a `JobKind::Export` job: full-res decode + `bake_jpeg` in the
-    /// worker, JPEG bytes back on `poll_exports`. `bytes` is the source
-    /// file's `ArrayBuffer` (read via `web_fs::read_array_buffer`, same
-    /// no-copy transfer as `submit`); `adj_json`/`touchups_json` are the
-    /// serde_json-encoded develop/touch-up state; `dest_dir`/`filename` are
-    /// the already-resolved output location, carried straight back onto the
-    /// `ExportPoolResult`.
+    /// Queue an export. The JPEG arrives on `poll_exports`. `adj_json` and
+    /// `touchups_json` are the serde_json develop state. `dest_dir` and
+    /// `filename` are returned unchanged on the result.
     #[allow(clippy::too_many_arguments)]
     pub fn submit_export(
         &self,
@@ -991,9 +877,8 @@ impl WorkerPoolHandle {
         pump(&self.0);
     }
 
-    /// Report an export failure that happened before the job could be
-    /// submitted (e.g. the source read failed) — straight to the export
-    /// channel, mirroring `fail`.
+    /// Report an export that failed before submit, such as a failed source
+    /// read, through `poll_exports`.
     pub fn fail_export(
         &self,
         path: PathBuf,
@@ -1012,10 +897,8 @@ impl WorkerPoolHandle {
         });
     }
 
-    /// Report a failure that happened before a job could even be submitted
-    /// (e.g. `web_fs::read_bytes` itself failed) — bypasses the worker
-    /// entirely and pushes straight to the result channel, so callers only
-    /// need one failure path (`poll`'s `Err` arm) instead of two.
+    /// Report a decode that failed before submit, such as a failed source
+    /// read, through `poll`, so callers handle every failure in one place.
     pub fn fail(
         &self,
         path: PathBuf,

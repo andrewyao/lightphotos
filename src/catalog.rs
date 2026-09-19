@@ -1,32 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Per-photo sidecar catalog — the persistence layer for ratings + develop edits.
+//! Per-photo sidecars that persist ratings and develop edits. Each photo's
+//! record lives in `<photo dir>/.lightphotos/<photo filename>.xmp`, so edits
+//! travel with the folder and originals are never touched. The body is our
+//! own JSON, not Adobe XMP; the extension is cosmetic. `.lightphotos/` is
+//! created on the first write, so browsing a folder never changes it.
 //!
-//! Each photo's rating/adjustments/touchups/rotation lives in its own file,
-//! `<photo's directory>/.lightphotos/<photo filename>.xmp`. **The `.xmp`
-//! extension here is cosmetic only** — the body is our own compact JSON
-//! serialization of [`ImageRecord`], NOT real Adobe XMP/RDF. Do not "fix"
-//! this into real XML; the extension was picked because it reads as a
-//! familiar sidecar-file convention, nothing more.
-//!
-//! Sidecars travel with the photos: moving, copying, or sharing a folder
-//! carries its `.lightphotos/` subfolder — and thus every rating/edit —
-//! along with it. Originals are never touched, and `.lightphotos` is
-//! created lazily (only on the first write for that directory), so
-//! browsing a folder read-only never litters it.
-//!
-//! [`Catalog`] is scoped to one directory at a time (the "active"
-//! directory) — there is no cross-folder cache or index. Opening a
-//! different folder calls [`Catalog::open_dir`], which reloads the
-//! in-memory read cache from that directory's `.lightphotos/*.xmp` files.
-//! Individual reads/writes locate their sidecar directly from the photo's
-//! own path (not from the active directory), so they stay correct even if
-//! called for a path outside it.
-//!
-//! (An older global `catalog.json`, and before that a global SQLite
-//! `catalog.db`, both predate this per-directory sidecar design. Neither
-//! is auto-migrated anymore — that one-time migration path was removed
-//! once it was no longer needed.)
+//! [`Catalog`] caches one directory at a time. Reads and writes derive the
+//! sidecar path from the photo's own path.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -36,16 +17,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::develop::{Adjustments, TouchUp};
 
-/// Hidden per-directory subfolder holding that directory's sidecar files.
-/// `pub(crate)` so `web_catalog_fs.rs` (wasm32's File System Access
-/// counterpart to this module's std::fs calls) names the exact same
-/// subfolder rather than duplicating the literal.
+/// Hidden subfolder holding a directory's sidecars and thumbnail cache.
 pub(crate) const SIDECAR_DIR: &str = ".lightphotos";
-/// Sidecar file extension (cosmetic only — see module docs).
+/// Sidecar file extension. Cosmetic; see the module docs.
 pub(crate) const SIDECAR_EXT: &str = "xmp";
 
-/// Per-image persisted state: an optional rating plus develop edits. Identity
-/// adjustments are skipped on write so unedited (but rated) images stay compact.
+/// Persisted state for one photo. Default fields are skipped on write, so a
+/// rated but unedited photo's sidecar stays small.
 #[derive(Serialize, Deserialize, Default, Clone)]
 pub struct ImageRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,8 +32,7 @@ pub struct ImageRecord {
     pub adjustments: Adjustments,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub touchups: Vec<TouchUp>,
-    /// Manual rotation in 90° clockwise steps (0..=3). Kept separate from the
-    /// develop adjustments (it's not a tone/crop edit).
+    /// Manual rotation in 90° clockwise steps, `0..=3`.
     #[serde(default, skip_serializing_if = "is_zero_rot")]
     pub rotation: u8,
 }
@@ -65,11 +42,8 @@ fn is_zero_rot(v: &u8) -> bool {
 }
 
 impl ImageRecord {
-    /// True when this record carries nothing worth persisting (no rating,
-    /// identity edit, no rotation) — such a record's sidecar is deleted
-    /// rather than written, keeping unrated/unedited folders sidecar-free.
-    /// `pub(crate)` so `web_catalog_fs.rs`'s load path can apply the same
-    /// "don't cache an empty record" rule `load_sidecars` uses below.
+    /// True when there is nothing to persist. An empty record's sidecar is
+    /// deleted instead of written.
     pub(crate) fn is_empty(&self) -> bool {
         self.rating.is_none()
             && self.adjustments.is_identity()
@@ -78,49 +52,26 @@ impl ImageRecord {
     }
 }
 
-/// In-memory catalog of per-image records, backed by per-photo sidecar files
-/// under the active directory's `.lightphotos/` subfolder.
-///
-/// `images` is a read cache mirroring the active directory's sidecars, keyed
-/// by filename (the catalog is scoped to one directory at a time — see the
-/// module docs). Reads/writes for a path outside the active directory still
-/// resolve correctly (they derive their sidecar location from the path
-/// itself), they just won't be reflected in this particular cache until
-/// [`Catalog::open_dir`] is called for their directory.
+/// Records for the active directory, backed by its sidecar files. `images`
+/// is a read cache keyed by filename.
 pub struct Catalog {
     images: HashMap<OsString, ImageRecord>,
-    /// Filenames written or removed (via `update`/`remove`) since the last
-    /// [`Catalog::switch_dir`], so [`Catalog::apply_loaded`] knows which keys
-    /// a background load's snapshot must not touch — including a key the
-    /// local write *deleted*, which `images` alone can't distinguish from
-    /// "never loaded yet" (both are simply absent). Cleared on every
-    /// `switch_dir`, since it's scoped to "since the active directory
-    /// became active", same as `images` itself.
+    /// Filenames written or removed since [`Catalog::switch_dir`]. A
+    /// background load must not overwrite these. It covers removals, which
+    /// look the same as "not loaded yet" in `images`.
     dirty: HashSet<OsString>,
-    /// The directory currently active, or `None` before the first
-    /// [`Catalog::open_dir`] call — degrades to an empty catalog rather than
-    /// panicking.
+    /// The active directory. `None` before the first folder opens.
     dir: Option<PathBuf>,
-    /// The most recent persist failure, if any, awaiting delivery to the
-    /// user. Set whenever a write fails; drained by [`Catalog::take_error`]
-    /// so the UI can surface a toast instead of the change being silently
-    /// lost.
+    /// The latest persist failure, drained by [`Catalog::take_error`] into a
+    /// toast.
     last_error: Option<String>,
 
-    /// The active directory's root folder handle — File System Access has
-    /// no real OS path for `std::fs` to use, so wasm32's sidecar I/O
-    /// (`write_sidecar`/`delete_sidecar` below) needs this instead. Set via
-    /// [`Catalog::set_wasm_dir_handle`] (`app/web.rs`'s `poll_folder_pick`
-    /// and `apply_web_load_folder`) right after a folder becomes active,
-    /// before `open_dir`'s wasm32 counterpart (`app/catalog.rs`'s
-    /// `request_catalog_load`) needs it to read `.lightphotos/*.xmp` back.
+    /// The active folder's File System Access handle. wasm32 has no OS paths,
+    /// so sidecar I/O goes through this.
     #[cfg(target_arch = "wasm32")]
     wasm_dir_handle: Option<web_sys::FileSystemDirectoryHandle>,
-    /// Sidecar writes/deletes are fire-and-forget `spawn_local` tasks (see
-    /// the wasm32 arms of `write_sidecar`/`delete_sidecar` below) — this is
-    /// how a failure gets back to `last_error` despite not being on the call
-    /// stack that triggered the write. Drained each frame by
-    /// [`Catalog::poll_persist_errors`] (`main.rs`'s `about_to_wait`).
+    /// wasm32 sidecar writes run as detached `spawn_local` tasks and report
+    /// failures here. [`Catalog::poll_persist_errors`] drains it each frame.
     #[cfg(target_arch = "wasm32")]
     persist_err_tx: std::sync::mpsc::Sender<String>,
     #[cfg(target_arch = "wasm32")]
@@ -128,8 +79,7 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// A directory-less catalog with nothing loaded yet. Used at startup,
-    /// before any folder/file has been opened.
+    /// An empty catalog with no active directory.
     pub fn new() -> Catalog {
         #[cfg(target_arch = "wasm32")]
         let (persist_err_tx, persist_err_rx) = std::sync::mpsc::channel();
@@ -147,15 +97,8 @@ impl Catalog {
         }
     }
 
-    /// Point wasm32's sidecar I/O at `handle` (the active folder's root) —
-    /// called on every folder switch, before the catalog load it also
-    /// triggers needs it. See `wasm_dir_handle`'s doc comment.
-    ///
-    /// Takes an `Option` and is called unconditionally, so a folder with no
-    /// handle *clears* this rather than leaving the previous folder's in
-    /// place. Sidecar writes then fail loudly (`write_sidecar` returns an
-    /// error the toast path surfaces) instead of quietly saving one folder's
-    /// ratings and develop edits into another folder's `.lightphotos/`.
+    /// Set the active folder's handle on every folder switch. `None` clears
+    /// it, so writes fail loudly instead of landing in the previous folder.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn set_wasm_dir_handle(
         &mut self,
@@ -164,11 +107,7 @@ impl Catalog {
         self.wasm_dir_handle = handle;
     }
 
-    /// Drain persist failures that landed asynchronously since the last
-    /// poll (writes/deletes are fire-and-forget on wasm32 — see
-    /// `write_sidecar`/`delete_sidecar`'s wasm32 arms) into `last_error`,
-    /// same one-shot-per-frame convention as every other `poll_*` in this
-    /// codebase.
+    /// Move async persist failures into `last_error`. Call once per frame.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn poll_persist_errors(&mut self) {
         while let Ok(e) = self.persist_err_rx.try_recv() {
@@ -176,10 +115,7 @@ impl Catalog {
         }
     }
 
-    /// `new()` + `open_dir(&dir)` in one step — a convenience mainly used by
-    /// tests, which always know their directory up front. Native/test-only —
-    /// see `open_dir`'s doc comment on why wasm32 has no synchronous
-    /// counterpart at all.
+    /// `new()` plus `open_dir(&dir)`.
     #[allow(dead_code)] // only called from #[cfg(test)] today
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_dir(dir: PathBuf) -> Catalog {
@@ -188,23 +124,10 @@ impl Catalog {
         cat
     }
 
-    /// (Re)point the catalog at `dir` as the active directory and rebuild the
-    /// read cache from `dir/.lightphotos/*.xmp`, synchronously. Always
-    /// reloads from disk, even if `dir` equals the previously-active
-    /// directory, so an external change (another process, a hand-fixed
-    /// sidecar) is picked up. A missing `.lightphotos` directory is not an
-    /// error — it's just an empty catalog; the directory itself is never
-    /// eagerly created here.
-    ///
-    /// This blocks on disk I/O proportional to `dir`'s sidecar count — for
-    /// the async equivalent used by the live app (so opening a heavily
-    /// rated/edited directory never stalls first paint), see
-    /// [`Catalog::switch_dir`] + [`Catalog::apply_loaded`], composed exactly
-    /// as this function does but with `load_sidecars` run on a background
-    /// thread in between. Native-only: File System Access has no
-    /// synchronous read at all (everything is a Promise), so wasm32 has no
-    /// equivalent of this function — `app/catalog.rs`'s `request_catalog_load`
-    /// is the only path there, always async.
+    /// Make `dir` active and reload its sidecars from disk, blocking. The app
+    /// instead calls [`Catalog::switch_dir`], runs `load_sidecars` on a
+    /// background thread, then calls [`Catalog::apply_loaded`]. Native only,
+    /// because File System Access has no synchronous reads.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn open_dir(&mut self, dir: &Path) {
         self.switch_dir(dir);
@@ -212,12 +135,8 @@ impl Catalog {
         self.apply_loaded(dir, loaded);
     }
 
-    /// Point the catalog at `dir` and clear the read cache immediately —
-    /// no disk I/O. This alone is what prevents cross-directory leakage
-    /// (see `open_dir_switches_active_directory_without_cross_directory_leakage`):
-    /// a lookup for the new directory's photos returns nothing (correctly
-    /// "not yet known") rather than a stale entry from whatever directory
-    /// was active before, until [`Catalog::apply_loaded`] populates it.
+    /// Make `dir` active and clear the cache without disk I/O, so no lookup
+    /// sees the previous directory's records.
     pub(crate) fn switch_dir(&mut self, dir: &Path) {
         self.dir = Some(dir.to_path_buf());
         self.images.clear();
@@ -230,34 +149,16 @@ impl Catalog {
         self.dir.as_deref() == Some(dir)
     }
 
-    /// Merge a [`SidecarLoad`] (typically produced by `load_sidecars` on a
-    /// background thread) into the cache, if `dir` is still the active
-    /// directory — a load whose directory was since switched away from is
-    /// silently discarded, same as `poll_selection_mask`'s stale-result
-    /// handling.
-    ///
-    /// Skips any key in `dirty` rather than replacing `images` outright:
-    /// `switch_dir` clears the cache immediately, so a `set`/
-    /// `set_adjustments`/`remove`/etc. call arriving after switch but before
-    /// this load lands mutates the (now-empty) cache directly — a full
-    /// replace would clobber that local write (or, for `remove`, resurrect a
-    /// record the user just deleted, since an absent key can't otherwise be
-    /// told apart from "not loaded yet") with `loaded`'s necessarily-older
-    /// disk snapshot. The sidecar on disk is unaffected either way; this
-    /// only protects the in-memory read cache from momentarily
-    /// reverting/resurrecting.
-    ///
-    /// `skipped` (corrupt/unreadable sidecars found during the scan) is
-    /// folded into `last_error` unconditionally, even for a directory the
-    /// user has since navigated away from — the old synchronous `open_dir`
-    /// always surfaced this, and a real read failure on disk doesn't stop
-    /// being true just because it's no longer the active directory.
+    /// Merge a background load into the cache if `dir` is still active.
+    /// Keys in `dirty` are skipped, because the load's snapshot is older than
+    /// any edit made after `switch_dir`. Unreadable sidecars are reported
+    /// even when the load is stale.
     pub(crate) fn apply_loaded(&mut self, dir: &Path, loaded: SidecarLoad) {
         if loaded.skipped > 0 {
             self.last_error = Some(skipped_message(loaded.skipped));
         }
         if self.dir.as_deref() != Some(dir) {
-            return; // stale: the active directory has since changed
+            return;
         }
         for (name, rec) in loaded.images {
             if !self.dirty.contains(&name) {
@@ -266,41 +167,31 @@ impl Catalog {
         }
     }
 
-    /// Take the pending persist error, if any. Returns `Some(message)` exactly
-    /// once per failure so callers can show a single toast; subsequent calls
-    /// return `None` until the next failed write.
+    /// Take the pending persist error. Each failure is returned once.
     pub fn take_error(&mut self) -> Option<String> {
         self.last_error.take()
     }
 
-    /// Record a persist failure: log it and stash it for the UI to surface.
-    /// `pub(crate)` so callers outside this module (e.g. `App` failing to
-    /// even spawn a background load thread) can report through the same
-    /// toast mechanism as an on-disk write failure, rather than that
-    /// failure going silently unreported.
+    /// Log a persist failure and keep it for the UI to show.
     pub(crate) fn note_persist_error(&mut self, e: impl std::fmt::Display) {
         let msg = format!("Failed to save catalog entry: {e}");
         eprintln!("[catalog] {msg}");
         self.last_error = Some(msg);
     }
 
-    /// Rating for `path`, if any.
     pub fn get(&self, path: &Path) -> Option<u8> {
         path.file_name()
             .and_then(|n| self.images.get(n))
             .and_then(|r| r.rating)
     }
 
-    /// Set the rating for `path`, clamped to `0..=5`. A rating of `0` removes
-    /// the rating. If the record ends up empty (no rating + identity edit)
-    /// its sidecar is deleted. Persisted atomically.
+    /// Set the rating, clamped to `0..=5`. `0` clears it.
     pub fn set(&mut self, path: &Path, stars: u8) {
         let stars = stars.min(5);
         let rating = if stars == 0 { None } else { Some(stars) };
         self.update(path, |rec| rec.rating = rating);
     }
 
-    /// Develop adjustments for `path` (identity when unset).
     pub fn adjustments(&self, path: &Path) -> Adjustments {
         path.file_name()
             .and_then(|n| self.images.get(n))
@@ -308,8 +199,6 @@ impl Catalog {
             .unwrap_or_default()
     }
 
-    /// Store develop adjustments for `path`. If the record ends up empty (no
-    /// rating + identity edit) its sidecar is deleted. Persisted atomically.
     pub fn set_adjustments(&mut self, path: &Path, adj: &Adjustments) {
         let adj = *adj;
         self.update(path, |rec| rec.adjustments = adj);
@@ -327,7 +216,6 @@ impl Catalog {
         self.update(path, |rec| rec.touchups = touchups);
     }
 
-    /// Manual rotation (90° CW steps, 0..=3) for `path`.
     pub fn rotation(&self, path: &Path) -> u8 {
         path.file_name()
             .and_then(|n| self.images.get(n))
@@ -335,18 +223,13 @@ impl Catalog {
             .unwrap_or(0)
     }
 
-    /// Store the manual rotation for `path` (0..=3). Persisted atomically.
     pub fn set_rotation(&mut self, path: &Path, rotation: u8) {
         let rotation = rotation % 4;
         self.update(path, |rec| rec.rotation = rotation);
     }
 
-    /// Forget any record for `path` (rating + adjustments + touchups +
-    /// rotation) by deleting its sidecar. Used when a photo is deleted from
-    /// disk. A no-op when nothing was stored. The sidecar is deleted outright
-    /// (not moved to Trash) — it has no meaningful pairing to its photo once
-    /// separated from `.lightphotos/`, and this matches the old catalog's
-    /// unconditional delete-on-remove behavior.
+    /// Delete the record and sidecar for `path`, when its photo is deleted.
+    /// The sidecar skips the Trash, since it is useless apart from its photo.
     pub fn remove(&mut self, path: &Path) {
         if let Some(name) = path.file_name() {
             self.images.remove(name);
@@ -357,8 +240,8 @@ impl Catalog {
         }
     }
 
-    /// Apply `mutate` to the record for `path` (creating it if needed), drop
-    /// its sidecar if it became empty, then persist just that one file.
+    /// Apply `mutate` to the record for `path`, then write its sidecar, or
+    /// delete it if the record became empty. Native writes are atomic.
     fn update(&mut self, path: &Path, mutate: impl FnOnce(&mut ImageRecord)) {
         let Some(name) = path.file_name().map(|n| n.to_os_string()) else {
             return;
@@ -399,14 +282,9 @@ impl Catalog {
         }
     }
 
-    /// File System Access has no synchronous write — this fires the actual
-    /// disk write as a background `spawn_local` task and returns
-    /// immediately (always `Ok(())`, since there's no synchronous result to
-    /// report). `update`'s caller already applied the change to the
-    /// in-memory `images` cache regardless of persist outcome, same as
-    /// native; a failure here surfaces later, asynchronously, via
-    /// `persist_err_tx` → [`Catalog::poll_persist_errors`] → `last_error`,
-    /// instead of being available on this call's return value.
+    /// File System Access has no synchronous write, so this starts a
+    /// `spawn_local` task. Only a missing folder handle fails here. Write
+    /// failures arrive later through `persist_err_tx`.
     #[cfg(target_arch = "wasm32")]
     fn write_sidecar(&self, path: &Path, rec: &ImageRecord) -> Result<(), String> {
         let Some(name) = path.file_name() else {
@@ -426,14 +304,12 @@ impl Catalog {
         Ok(())
     }
 
-    /// Same fire-and-forget shape as the wasm32 `write_sidecar` above.
     #[cfg(target_arch = "wasm32")]
     fn delete_sidecar(&self, path: &Path) -> Result<(), String> {
         let Some(name) = path.file_name() else {
             return Ok(());
         };
-        // No handle means nothing was ever written for this directory
-        // either — matches native's "missing sidecar is fine" NotFound arm.
+        // Without a handle nothing was written, so there is nothing to delete.
         let Some(dir_handle) = self.wasm_dir_handle.clone() else {
             return Ok(());
         };
@@ -447,9 +323,8 @@ impl Catalog {
         Ok(())
     }
 
-    /// Delete a sidecar through an explicitly captured directory handle. This
-    /// is used when a photo deletion completes after navigation changed the
-    /// catalog's active handle.
+    /// Delete a sidecar through a captured handle, for a photo deletion that
+    /// finishes after the user navigated to another folder.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn delete_sidecar_with_handle(
         &self,
@@ -469,8 +344,7 @@ impl Catalog {
         });
     }
 
-    /// Remove the cached record and delete its sidecar through an explicitly
-    /// captured directory handle.
+    /// [`Catalog::remove`] through a captured directory handle.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn remove_with_handle(
         &mut self,
@@ -491,20 +365,14 @@ impl Default for Catalog {
     }
 }
 
-/// Result of scanning one directory's `.lightphotos/*.xmp` sidecars —
-/// [`load_sidecars`]'s return type. Free-standing (no `&Catalog` needed) so
-/// it can run on a background thread; `Catalog::apply_loaded` folds it in.
+/// The sidecars read from one directory, plus a count of unreadable ones.
 pub(crate) struct SidecarLoad {
     pub images: HashMap<OsString, ImageRecord>,
     pub skipped: usize,
 }
 
-/// Scan `dir/.lightphotos/*.xmp` and parse every sidecar into a
-/// [`SidecarLoad`]. Pure disk I/O, independent of any `Catalog` instance —
-/// the same scan `Catalog::open_dir` used to do inline against `&mut self`,
-/// extracted so it can run on a background thread (see `Catalog::switch_dir`
-/// / `Catalog::apply_loaded`) as well as synchronously (`Catalog::open_dir`).
-/// A missing `.lightphotos` directory is not an error — just an empty result.
+/// Read every sidecar in `dir/.lightphotos/`. Needs no `Catalog`, so it can
+/// run on a background thread. A missing folder gives an empty result.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
     let mut images = HashMap::new();
@@ -523,8 +391,7 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
         if path.extension().and_then(|e| e.to_str()) != Some(SIDECAR_EXT) {
             continue;
         }
-        // file_stem() strips exactly the trailing ".xmp", correctly
-        // preserving a name like "PHOTO1.ARW" which itself contains a dot.
+        // `file_stem` strips only ".xmp", so "PHOTO1.ARW" keeps its dot.
         let Some(stem) = path.file_stem() else {
             continue;
         };
@@ -533,7 +400,7 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
                 Ok(rec) if !rec.is_empty() => {
                     images.insert(stem.to_os_string(), rec);
                 }
-                Ok(_) => {} // an empty record on disk: nothing to cache
+                Ok(_) => {}
                 Err(e) => {
                     eprintln!("[catalog] unreadable sidecar {}: {e}", path.display());
                     skipped += 1;
@@ -549,7 +416,6 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
     SidecarLoad { images, skipped }
 }
 
-/// Human-readable "N entries could not be read" message for `last_error`.
 fn skipped_message(skipped: usize) -> String {
     format!(
         "{skipped} catalog entr{} could not be read and {} skipped.",
@@ -558,10 +424,8 @@ fn skipped_message(skipped: usize) -> String {
     )
 }
 
-/// The sidecar path for `path`: `<path's directory>/.lightphotos/<filename>.xmp`.
-/// `None` when `path` has no parent or no filename (e.g. `/` or `..`).
-/// Built via `OsString` concatenation (not a lossy `to_string_lossy` round
-/// trip) so non-UTF8 filenames stay exact.
+/// `<dir>/.lightphotos/<filename>.xmp`, or `None` for a path like `/` or `..`.
+/// Built from `OsString` so non-UTF-8 names stay exact.
 #[cfg(not(target_arch = "wasm32"))]
 fn sidecar_path(path: &Path) -> Option<PathBuf> {
     let dir = path.parent()?;
@@ -572,10 +436,8 @@ fn sidecar_path(path: &Path) -> Option<PathBuf> {
     Some(dir.join(SIDECAR_DIR).join(sidecar_name))
 }
 
-/// Write `rec` as pretty-printed JSON to `sidecar`, creating its parent
-/// `.lightphotos` directory as needed. Atomic: writes to a `.tmp` sibling
-/// then renames over the target, matching the existing convention in
-/// `export.rs`/`thumbnail.rs`.
+/// Write `rec` as JSON to `sidecar` through a `.tmp` sibling and rename, so a
+/// crash never leaves a partial file.
 #[cfg(not(target_arch = "wasm32"))]
 fn write_sidecar_file(sidecar: &Path, rec: &ImageRecord) -> Result<(), String> {
     let parent = sidecar
@@ -599,7 +461,7 @@ mod tests {
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    /// A unique temp dir under `std::env::temp_dir()` (no tempfile crate).
+    /// A unique temp dir under `std::env::temp_dir()`.
     fn unique_tmp_dir() -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
@@ -810,9 +672,8 @@ mod tests {
 
     #[test]
     fn failed_persist_is_reported_once_via_take_error() {
-        // Point the catalog at a directory whose .lightphotos can't be
-        // created because a *file* sits where it would need to go, so
-        // create_dir_all (and thus persist) fails deterministically.
+        // A file named .lightphotos makes create_dir_all, and so every
+        // write, fail.
         let dir = unique_tmp_dir();
         std::fs::write(dir.join(SIDECAR_DIR), b"not a dir").unwrap();
 
@@ -942,7 +803,7 @@ mod tests {
         cat.remove(&p);
         assert_eq!(cat.get(&p), None);
         assert!(!sidecar_for(&dir, "photo.jpg").exists());
-        // Removing again (already gone) is a harmless no-op.
+        // Removing again is a no-op.
         cat.remove(&p);
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -978,8 +839,6 @@ mod tests {
         std::fs::remove_dir_all(&b).unwrap();
     }
 
-    // --- async load (switch_dir / apply_loaded / load_sidecars) ------
-
     #[test]
     fn apply_loaded_is_discarded_for_a_directory_no_longer_active() {
         let a = unique_tmp_dir();
@@ -993,7 +852,7 @@ mod tests {
         cat.switch_dir(&b);
         assert_eq!(cat.get(&pa), None, "switching clears the cache immediately");
 
-        // The stale `a` load now lands — it must be ignored, not merged in.
+        // The stale `a` load lands and must be ignored.
         let stale = load_sidecars(&a);
         cat.apply_loaded(&a, stale);
         assert_eq!(
@@ -1019,9 +878,8 @@ mod tests {
 
         let mut cat = Catalog::new();
         cat.switch_dir(&dir);
-        // A write lands after switch_dir but before the background load
-        // (spawned at switch time, snapshotting the pre-write disk state)
-        // has returned.
+        // A write lands after switch_dir but before the background load,
+        // whose snapshot predates the write, returns.
         cat.set(&written, 5);
         let loaded = load_sidecars(&dir); // snapshot predates `written`'s sidecar...
         cat.apply_loaded(&dir, loaded);

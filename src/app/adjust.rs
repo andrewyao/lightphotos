@@ -47,10 +47,8 @@ impl App {
         (radius * min_dim / w, radius * min_dim / h)
     }
 
-    /// Persist and apply `adj` to the currently-shown image: update the in-memory
-    /// edits map (dropping identity edits), write the catalog, push to the GPU
-    /// uniform, and mark the histogram dirty. Shared by the Develop sliders
-    /// (`SetAdjustments`) and the keyboard slider nudges (`develop_adjust`).
+    /// Save `adj` for the shown image and push it to the GPU. Identity edits are
+    /// removed from the edits map rather than stored.
     pub(super) fn apply_adjustments(&mut self, adj: Adjustments) {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
@@ -66,8 +64,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Push the current image's adjustments into the renderer uniform. Mirrors
-    /// `push_transform`; call it whenever the shown image or its edits change.
+    /// Push the current image's adjustments to the renderer. Call it whenever
+    /// the shown image or its edits change.
     pub(super) fn push_adjustments(&mut self) {
         let gpu = self.gpu_adjust(&self.current_adjustments());
         let gpu_touchups: Vec<GpuTouchUp> = self
@@ -82,10 +80,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Convert `adj` to its GPU uniform mirror, filling in `texel_w`/`texel_h`
-    /// from the shown image's pixel dimensions (`GpuAdjust::from` alone can't,
-    /// since it only sees `Adjustments`) — the denoise shader taps need these
-    /// to offset by whole texels.
+    /// Convert `adj` to the GPU uniform. Also fills `texel_w`/`texel_h` from the
+    /// image size, which denoise needs to step by whole texels.
     pub(super) fn gpu_adjust(&self, adj: &Adjustments) -> GpuAdjust {
         let (w, h) = self.image_size();
         let mut g = GpuAdjust::from(adj);
@@ -130,9 +126,8 @@ impl App {
                 y as f32 / img.height.saturating_sub(1).max(1) as f32,
             )
         };
-        // Match the source and target at the actual patch boundary. Using a
-        // ring outside the patch leaves a color discontinuity at the edge,
-        // which becomes visible as a halo after feathering.
+        // Compare colors on the patch boundary itself. A ring outside the
+        // patch leaves a color step at the edge that shows as a halo.
         let ring = |cx: f32, cy: f32| -> [f32; 3] {
             let mut sum = [0.0; 3];
             for i in 0..8 {
@@ -205,15 +200,11 @@ impl App {
         self.apply_touchups(all);
     }
 
-    // ---- White Balance picker ----
-
     /// True while the next Loupe click samples a pixel for white balance.
     pub(crate) fn wb_picker_active(&self) -> bool {
         self.wb_picker
     }
 
-    /// Toggle the WB picker on/off. Clicking the "Pick Gray" button again
-    /// while it's armed cancels it without sampling anything.
     pub(super) fn toggle_wb_picker(&mut self) {
         self.wb_picker = !self.wb_picker;
         if self.wb_picker {
@@ -223,10 +214,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Sample the shown image's histogram grid at texture UV `(u, v)` and, if
-    /// the pixel isn't too dark to solve reliably, set temp/tint so it
-    /// becomes neutral gray. Always exits picker mode, even on a failed pick,
-    /// so a stray click can't strand the user in picker mode.
+    /// Set temp/tint so the histogram-grid pixel at UV `(u, v)` becomes neutral
+    /// gray. Always leaves picker mode, even when the pixel is too dark to use.
     pub(super) fn pick_white_balance(&mut self, u: f32, v: f32) {
         self.wb_picker = false;
         self.request_redraw();
