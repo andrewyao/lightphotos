@@ -13,28 +13,6 @@ use crate::sharpness;
 use crate::thumbnail::THUMB_PX;
 use crate::{image_decode, image_ops};
 
-// TEMPORARY DEBUG colors, removed together with `set_tier_debug`.
-pub(super) const TIER_DEBUG_WHITE: wgpu::Color = wgpu::Color {
-    r: 1.0,
-    g: 1.0,
-    b: 1.0,
-    a: 1.0,
-};
-// The wasm32 `Speed` tier's color.
-#[cfg(target_arch = "wasm32")]
-pub(super) const TIER_DEBUG_GRAY_18: wgpu::Color = wgpu::Color {
-    r: 0.18,
-    g: 0.18,
-    b: 0.18,
-    a: 1.0,
-};
-pub(super) const TIER_DEBUG_BLACK: wgpu::Color = wgpu::Color {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 1.0,
-};
-
 impl App {
     pub(crate) fn request_redraw(&self) {
         if let Some(w) = &self.window {
@@ -53,7 +31,6 @@ impl App {
         if let Some(img) = self.loader.as_ref().and_then(|l| l.get_full(&want)) {
             if !self.shown.is_full_of(&want) {
                 self.upload_shown(&want, &img, Shown::Full(want.clone()));
-                self.set_tier_debug(TIER_DEBUG_BLACK, "FULL"); // TEMPORARY DEBUG
             }
             return;
         }
@@ -68,8 +45,6 @@ impl App {
             let actual = img.width.max(img.height);
             if !self.shown.is_preview_of(&want, target, actual) && !self.shown.is_full_of(&want) {
                 self.upload_shown(&want, &img, Shown::Preview(want.clone(), target, actual));
-                // TEMPORARY DEBUG. On native this may be the Speed pass too.
-                self.set_tier_debug(TIER_DEBUG_BLACK, "QUALITY");
             }
             return;
         }
@@ -94,30 +69,8 @@ impl App {
                 .and_then(|l| l.get_thumb(&want, THUMB_PX))
             {
                 self.upload_shown(&want, &thumb, Shown::Thumb(want.clone()));
-                self.set_tier_debug(TIER_DEBUG_WHITE, "THUMB"); // TEMPORARY DEBUG
             }
         }
-    }
-
-    // TEMPORARY DEBUG: tints the clear color and titles the window with the
-    // decode tier on screen. Remove with its call sites and
-    // `Renderer::tier_debug_color`.
-    pub(super) fn set_tier_debug(&mut self, color: wgpu::Color, label: &'static str) {
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.tier_debug_color = color;
-        }
-        self.debug_tier_label = label;
-        self.update_window_title();
-        // An installed web app may have no visible title, so log it too.
-        #[cfg(target_arch = "wasm32")]
-        web_sys::console::log_1(
-            &format!(
-                "[debug] tier -> {label} ({}x{})",
-                self.renderer.as_ref().map(|r| r.image_size.0).unwrap_or(0),
-                self.renderer.as_ref().map(|r| r.image_size.1).unwrap_or(0),
-            )
-            .into(),
-        );
     }
 
     /// Upload `img` as the loupe image. `tier` records which decode it came from.
@@ -165,13 +118,7 @@ impl App {
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_default();
                     let pos = self.sel.unwrap_or(0) + 1;
-                    // TEMPORARY DEBUG prefix.
-                    let tag = if self.debug_tier_label.is_empty() {
-                        String::new()
-                    } else {
-                        format!("[{}] ", self.debug_tier_label)
-                    };
-                    w.set_title(&format!("{tag}{}  ({}/{})", name, pos, self.visible.len()));
+                    w.set_title(&format!("{}  ({}/{})", name, pos, self.visible.len()));
                 }
             }
             ViewMode::Grid => {
