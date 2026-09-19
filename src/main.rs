@@ -262,15 +262,11 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::MouseWheel { delta, .. } => {
                 if self.mode == ViewMode::Loupe {
-                    let s = match delta {
-                        MouseScrollDelta::PixelDelta(p) => p.y as f32,
-                        MouseScrollDelta::LineDelta(_, y) => y * 20.0,
+                    let (dx, dy) = match delta {
+                        MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
+                        MouseScrollDelta::LineDelta(x, y) => (x * 20.0, y * 20.0),
                     };
-                    if s != 0.0 {
-                        let factor = (s * 0.0025).exp();
-                        let (cx, cy) = self.cursor_in_loupe();
-                        self.zoom_at(factor, cx, cy);
-                    }
+                    self.on_scroll(dx, dy);
                 }
             }
 
@@ -285,7 +281,7 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
                     if let PhysicalKey::Code(code) = event.physical_key {
-                        self.handle_key(code, event_loop);
+                        self.handle_key(code);
                     }
                 }
                 if let PhysicalKey::Code(KeyCode::Space) = event.physical_key {

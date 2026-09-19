@@ -170,6 +170,15 @@ impl App {
         self.request_redraw();
     }
 
+    /// Labels the selected photo; `None` clears the label.
+    pub(super) fn set_label(&mut self, label: Option<crate::catalog::ColorLabel>) {
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        self.catalog.set_label(&path, label);
+        self.request_redraw();
+    }
+
     /// In the loupe, loads the selected photo if a filter recompute moved the
     /// cursor off the one shown.
     pub(super) fn resync_loupe_selection(&mut self) {

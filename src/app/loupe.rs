@@ -165,6 +165,14 @@ impl App {
         self.ensure_full_for_zoom();
     }
 
+    /// A scroll of `(dx, dy)` physical pixels over the loupe zooms at the cursor.
+    pub(crate) fn on_scroll(&mut self, _dx: f32, dy: f32) {
+        if dy != 0.0 {
+            let (cx, cy) = self.cursor_in_loupe();
+            self.zoom_at((dy * 0.0025).exp(), cx, cy);
+        }
+    }
+
     /// Cursor position from the loupe viewport's top-left, in physical pixels.
     /// While comparing, the right half maps onto the same space as the left.
     pub(crate) fn cursor_in_loupe(&self) -> (f32, f32) {

@@ -1,6 +1,5 @@
 use super::*;
 
-use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::KeyCode;
 
 use crate::navigation::Cmp;
@@ -16,7 +15,7 @@ impl App {
     }
 
     /// Handle a key press per the Lightroom key-binding table.
-    pub(crate) fn handle_key(&mut self, code: KeyCode, _event_loop: &ActiveEventLoop) {
+    pub(crate) fn handle_key(&mut self, code: KeyCode) {
         let shift = self.modifiers.shift_key();
         #[cfg(target_arch = "wasm32")]
         let cmd = self.modifiers.super_key() || self.modifiers.control_key();
@@ -247,5 +246,185 @@ impl App {
 
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog::{Catalog, ColorLabel};
+    use crate::navigation::Playlist;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use winit::keyboard::ModifiersState;
+
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+    const CMD: ModifiersState = ModifiersState::SUPER;
+    #[cfg(not(all(not(target_arch = "wasm32"), target_os = "macos")))]
+    const CMD: ModifiersState = ModifiersState::CONTROL;
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn folder_app(photos: usize) -> (App, Vec<PathBuf>) {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "lightphotos-keys-test-{}-{}",
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths: Vec<PathBuf> = (0..photos)
+            .map(|i| {
+                let p = dir.join(format!("{i}.jpg"));
+                std::fs::write(&p, b"").unwrap();
+                p
+            })
+            .collect();
+        let mut app = App::new(None);
+        app.catalog.open_dir(&dir);
+        app.playlist = Some(Playlist::from_dir(&dir));
+        app.mode = ViewMode::Grid;
+        app.focus = Region::Grid;
+        app.recompute_visible();
+        app.sel = Some(0);
+        (app, paths)
+    }
+
+    /// An editor showing a 1000x1000 photo in a 500x500 viewport, so fit is 0.5.
+    fn editor_app() -> (App, Vec<PathBuf>) {
+        let (mut app, paths) = folder_app(2);
+        app.mode = ViewMode::Loupe;
+        app.focus = Region::Detail;
+        app.want = Some(paths[0].clone());
+        app.shown = Shown::Preview(paths[0].clone(), 1000, 1000);
+        app.source_size = Some((1000, 1000));
+        app.loupe_viewport = Some((0, 0, 500, 500));
+        app.fit_to_window();
+        (app, paths)
+    }
+
+    fn press(app: &mut App, mods: ModifiersState, code: KeyCode) {
+        app.modifiers = mods;
+        app.handle_key(code);
+    }
+
+    fn assert_zoom(app: &App, want: f32) {
+        assert!(
+            (app.zoom() - want).abs() < 1e-4,
+            "zoom {} != {want}",
+            app.zoom()
+        );
+    }
+
+    #[test]
+    fn space_opens_the_selected_photo_from_the_library() {
+        let (mut app, _) = folder_app(2);
+        press(&mut app, ModifiersState::empty(), KeyCode::Space);
+        assert_eq!(app.mode, ViewMode::Loupe);
+    }
+
+    #[test]
+    fn left_and_right_step_photos_in_the_editor() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowRight);
+        assert_eq!(app.sel, Some(1));
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowLeft);
+        assert_eq!(app.sel, Some(0));
+    }
+
+    #[test]
+    fn up_and_down_zoom_by_ten_percent_in_the_editor() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowUp);
+        assert_zoom(&app, 0.55);
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowDown);
+        assert_zoom(&app, 0.5);
+        assert_eq!(app.sel, Some(0));
+    }
+
+    #[test]
+    fn space_cycles_fit_then_double_fit_then_one_to_one() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::Space);
+        assert_zoom(&app, 1.0 * 2.0 * 0.5);
+        assert!(!app.fitted);
+        // 2x fit is exactly 100% here, so the next step still goes to 1:1
+        // and the one after returns to fit.
+        press(&mut app, ModifiersState::empty(), KeyCode::Space);
+        assert_zoom(&app, 1.0);
+        press(&mut app, ModifiersState::empty(), KeyCode::Space);
+        assert!(app.fitted);
+        assert_zoom(&app, 0.5);
+    }
+
+    #[test]
+    fn primary_modifier_zoom_keys() {
+        let (mut app, _) = editor_app();
+        press(&mut app, CMD, KeyCode::Digit1);
+        assert_zoom(&app, 1.0);
+        press(&mut app, CMD, KeyCode::Digit0);
+        assert!(app.fitted);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::Digit1);
+        assert_zoom(&app, 1.0);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::Digit0);
+        assert!(app.fitted);
+
+        press(&mut app, CMD, KeyCode::Equal);
+        assert_zoom(&app, 0.6);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::Equal);
+        assert_zoom(&app, 0.72);
+        press(&mut app, CMD, KeyCode::Minus);
+        assert_zoom(&app, 0.6);
+        assert!(app.selected_label().is_none(), "zoom keys must not label");
+        assert_eq!(app.rating_of(&app.selected_path().unwrap()), 0);
+    }
+
+    #[test]
+    fn brackets_rotate_without_a_modifier() {
+        let (mut app, paths) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::BracketRight);
+        assert_eq!(app.rotations.get(&paths[0]), Some(&1));
+        press(&mut app, ModifiersState::empty(), KeyCode::BracketLeft);
+        press(&mut app, ModifiersState::empty(), KeyCode::BracketLeft);
+        assert_eq!(app.rotations.get(&paths[0]), Some(&3));
+    }
+
+    #[test]
+    fn shift_digits_set_and_clear_the_color_label() {
+        let (mut app, paths) = folder_app(1);
+        let dir = paths[0].parent().unwrap().to_path_buf();
+        press(&mut app, ModifiersState::SHIFT, KeyCode::Digit2);
+        assert_eq!(app.selected_label(), Some(ColorLabel::Yellow));
+        assert_eq!(
+            Catalog::with_dir(dir.clone()).label(&paths[0]),
+            Some(ColorLabel::Yellow),
+            "label persisted to the sidecar"
+        );
+        assert!(app.filter.is_none(), "Shift+digit no longer filters");
+
+        press(&mut app, ModifiersState::SHIFT, KeyCode::Digit5);
+        assert_eq!(app.selected_label(), Some(ColorLabel::Purple));
+        press(&mut app, ModifiersState::SHIFT, KeyCode::Digit0);
+        assert_eq!(app.selected_label(), None);
+        assert_eq!(Catalog::with_dir(dir).label(&paths[0]), None);
+    }
+
+    #[test]
+    fn modified_scroll_pans_or_zooms() {
+        let (mut app, _) = editor_app();
+        press(&mut app, CMD, KeyCode::Digit1);
+        let pan = app.pan;
+
+        app.modifiers = ModifiersState::SHIFT;
+        app.on_scroll(0.0, 30.0);
+        assert_eq!(app.pan, (pan.0 + 30.0, pan.1), "Shift+scroll pans horizontally");
+        assert_zoom(&app, 1.0);
+
+        app.modifiers = ModifiersState::ALT;
+        app.on_scroll(0.0, 30.0);
+        assert_eq!(app.pan, (pan.0 + 30.0, pan.1 + 30.0), "Alt+scroll pans vertically");
+
+        app.modifiers = ModifiersState::SHIFT | ModifiersState::ALT;
+        app.on_scroll(0.0, 30.0);
+        assert!(app.zoom() > 1.0, "Shift+Alt+scroll zooms");
     }
 }

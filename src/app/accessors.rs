@@ -132,6 +132,18 @@ impl App {
             .unwrap_or(0)
     }
 
+    /// Color label of the visible cell at `pos`.
+    pub(crate) fn label_at(&self, pos: usize) -> Option<crate::catalog::ColorLabel> {
+        self.visible
+            .get(pos)
+            .and_then(|&i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))
+            .and_then(|p| self.catalog.label(p))
+    }
+
+    pub(crate) fn selected_label(&self) -> Option<crate::catalog::ColorLabel> {
+        self.selected_path().and_then(|p| self.catalog.label(&p))
+    }
+
     /// The "which frame is better" score: sharpness with a blink penalty. Bursts
     /// and duplicates both use it, so they agree on which frame to keep.
     pub(super) fn culling_score(&self, path: &Path) -> Option<f64> {
