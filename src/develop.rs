@@ -17,8 +17,8 @@ pub const DENOISE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=100.0;
 /// One Develop slider. The panel draws `SLIDERS` in order and keyboard focus
 /// indexes it, so both always agree.
 pub struct Slider {
-    pub section: &'static str,
-    pub label: &'static str,
+    pub section: Section,
+    pub id: SliderId,
     pub field: fn(&mut Adjustments) -> &mut f32,
     pub range: std::ops::RangeInclusive<f32>,
     pub decimals: usize,
@@ -27,13 +27,13 @@ pub struct Slider {
 }
 
 const fn tone(
-    section: &'static str,
-    label: &'static str,
+    section: Section,
+    id: SliderId,
     field: fn(&mut Adjustments) -> &mut f32,
 ) -> Slider {
     Slider {
         section,
-        label,
+        id,
         field,
         range: TONE_RANGE,
         decimals: 0,
@@ -41,29 +41,50 @@ const fn tone(
     }
 }
 
-pub const WHITE_BALANCE: &str = "White Balance";
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum Section {
+    WhiteBalance,
+    Tone,
+    Presence,
+    Detail,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum SliderId {
+    Temp,
+    Tint,
+    Exposure,
+    Contrast,
+    Highlights,
+    Shadows,
+    Whites,
+    Blacks,
+    Vibrance,
+    Saturation,
+    Denoise,
+}
 
 pub const SLIDERS: [Slider; 11] = [
-    tone(WHITE_BALANCE, "Temp", |a| &mut a.temp),
-    tone(WHITE_BALANCE, "Tint", |a| &mut a.tint),
+    tone(Section::WhiteBalance, SliderId::Temp, |a| &mut a.temp),
+    tone(Section::WhiteBalance, SliderId::Tint, |a| &mut a.tint),
     Slider {
-        section: "Tone",
-        label: "Exposure",
+        section: Section::Tone,
+        id: SliderId::Exposure,
         field: |a| &mut a.exposure,
         range: EXPOSURE_RANGE,
         decimals: 2,
         step: 0.05,
     },
-    tone("Tone", "Contrast", |a| &mut a.contrast),
-    tone("Tone", "Highlights", |a| &mut a.highlights),
-    tone("Tone", "Shadows", |a| &mut a.shadows),
-    tone("Tone", "Whites", |a| &mut a.whites),
-    tone("Tone", "Blacks", |a| &mut a.blacks),
-    tone("Presence", "Vibrance", |a| &mut a.vibrance),
-    tone("Presence", "Saturation", |a| &mut a.saturation),
+    tone(Section::Tone, SliderId::Contrast, |a| &mut a.contrast),
+    tone(Section::Tone, SliderId::Highlights, |a| &mut a.highlights),
+    tone(Section::Tone, SliderId::Shadows, |a| &mut a.shadows),
+    tone(Section::Tone, SliderId::Whites, |a| &mut a.whites),
+    tone(Section::Tone, SliderId::Blacks, |a| &mut a.blacks),
+    tone(Section::Presence, SliderId::Vibrance, |a| &mut a.vibrance),
+    tone(Section::Presence, SliderId::Saturation, |a| &mut a.saturation),
     Slider {
-        section: "Detail",
-        label: "Denoise",
+        section: Section::Detail,
+        id: SliderId::Denoise,
         field: |a| &mut a.denoise,
         range: DENOISE_RANGE,
         decimals: 0,

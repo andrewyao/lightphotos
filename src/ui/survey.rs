@@ -13,16 +13,16 @@ const MEMBER_CELL: f32 = 320.0;
 pub(super) fn draw_survey(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     egui::Panel::top("survey_toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.heading(format!("Survey \u{2014} {} photos", app.survey_members().len()));
+            ui.heading((t().survey_heading)(app.survey_members().len()));
             ui.separator();
             if ui
-                .button("Keep Best, Reject Rest")
-                .on_hover_text("Rate the best photo \u{2605}5 and every other photo in this group \u{2605}1 (Enter)")
+                .button(t().keep_best)
+                .on_hover_text(t().keep_best_tip)
                 .clicked()
             {
                 out.actions.push(UiAction::KeepBestRejectRest);
             }
-            if ui.button("Close (Esc)").clicked() {
+            if ui.button(t().close_esc).clicked() {
                 out.actions.push(UiAction::CloseSurvey);
             }
         });

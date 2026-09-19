@@ -9,6 +9,6 @@ use std::path::PathBuf;
 /// until the dialog closes, so call it only on the main thread.
 pub fn pick_folder() -> Option<PathBuf> {
     rfd::FileDialog::new()
-        .set_title("Choose a folder of photos")
+        .set_title(crate::i18n::t().picker_title)
         .pick_folder()
 }

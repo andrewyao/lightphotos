@@ -242,12 +242,12 @@ pub(super) fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     label(
         central.min + egui::vec2(pad, pad),
         egui::Align2::LEFT_TOP,
-        "Before",
+        t().before,
     );
     label(
         egui::pos2(central.max.x - pad, central.min.y + pad),
         egui::Align2::RIGHT_TOP,
-        "After",
+        t().after,
     );
 }
 
@@ -381,9 +381,9 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                         if ui
                             .add_enabled(
                                 app.selection_on(),
-                                egui::Button::selectable(inverted, "Invert"),
+                                egui::Button::selectable(inverted, t().invert),
                             )
-                            .on_hover_text("Highlight the background instead of the subject")
+                            .on_hover_text(t().invert_tip)
                             .clicked()
                         {
                             out.actions.push(UiAction::ToggleSelectionInvert);
@@ -392,17 +392,17 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                         // The label shows pending and "no subject" states, which
                         // would otherwise look like a broken button.
                         let label = if !app.selection_on() {
-                            "Show Selection"
+                            t().show_selection
                         } else if app.selection_pending() {
-                            "Selection…"
+                            t().selection_pending
                         } else if app.current_selection().is_some() {
-                            "Show Selection"
+                            t().show_selection
                         } else {
-                            "No subject"
+                            t().no_subject
                         };
                         if ui
                             .add(egui::Button::selectable(app.selection_on(), label))
-                            .on_hover_text("Outline the subject Vision finds in this photo")
+                            .on_hover_text(t().show_selection_tip)
                             .clicked()
                         {
                             out.actions.push(UiAction::ToggleSelection);
@@ -447,9 +447,7 @@ pub(super) fn secondary_text(meta: &image_decode::ImageMetadata) -> String {
         (None, None) => {}
     }
     if let Some(d) = meta.capture_date {
-        parts.push(format_capture_date(
-            d.year, d.month, d.day, d.hour, d.minute,
-        ));
+        parts.push((t().capture_date)(d.year, d.month, d.day, d.hour, d.minute));
     }
     parts.join("   \u{b7}   ")
 }
@@ -467,30 +465,6 @@ pub(super) fn format_shutter(seconds: f64) -> String {
     } else {
         format!("{seconds:.1}s")
     }
-}
-
-/// For example `"Jul 14, 2026 3:42 PM"`.
-pub(super) fn format_capture_date(
-    year: i32,
-    month: u32,
-    day: u32,
-    hour: u32,
-    minute: u32,
-) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let mon = MONTHS
-        .get(month.wrapping_sub(1) as usize)
-        .copied()
-        .unwrap_or("");
-    let (h12, ampm) = match hour {
-        0 => (12, "AM"),
-        1..=11 => (hour, "AM"),
-        12 => (12, "PM"),
-        _ => (hour - 12, "PM"),
-    };
-    format!("{mon} {day}, {year} {h12}:{minute:02} {ampm}")
 }
 
 /// The crop overlay and its drag handling. The crop rect is in texture space.

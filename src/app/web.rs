@@ -97,7 +97,7 @@ impl App {
                 Err(e) => {
                     // Usually a cancelled picker, but a permission or listing
                     // failure lands here too, so always show it.
-                    self.set_status(format!("Couldn't open folder: {e}"));
+                    self.set_status((crate::i18n::t().open_folder_failed)(&e.to_string()));
                 }
             }
             self.request_redraw();
@@ -593,9 +593,8 @@ impl App {
                         );
                         self.web_preview_retries.remove(&key);
                         self.web_preview_failed.insert(key);
-                        self.set_status(format!(
-                            "Unable to load Loupe preview for {}",
-                            path.display()
+                        self.set_status((crate::i18n::t().preview_failed)(
+                            &path.display().to_string(),
                         ));
                     }
                 }
@@ -791,9 +790,8 @@ impl App {
                 &format!("[web] no directory handle for {}", dir.display()).into(),
             );
             self.subdirs.insert(dir.clone(), Vec::new());
-            self.set_status(format!(
-                "Couldn't open {} — folder handle missing",
-                dir.display()
+            self.set_status((crate::i18n::t().folder_handle_missing)(
+                &dir.display().to_string(),
             ));
             // No result will arrive, so a navigation waiting on this listing
             // would never run. Cancel pending navigation.
@@ -836,7 +834,10 @@ impl App {
                     self.subdirs.insert(dir.clone(), subdir_paths);
                 }
                 Err(e) => {
-                    self.set_status(format!("Couldn't list {}: {e}", dir.display()));
+                    self.set_status((crate::i18n::t().list_folder_failed)(
+                        &dir.display().to_string(),
+                        &e.to_string(),
+                    ));
                     // Not cached, so navigating here again retries.
                 }
             }

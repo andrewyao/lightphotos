@@ -32,13 +32,13 @@ impl App {
             return;
         }
         if self.hist_sample.is_empty() {
-            self.set_status("Auto Tone needs the photo to finish loading".into());
+            self.set_status(crate::i18n::t().auto_tone_needs_load.into());
             return;
         }
         let auto = autotone::analyze(&self.hist_sample, self.hist_pixel_format);
         let merged = autotone::merge(&self.current_adjustments(), &auto);
         self.apply_adjustments(merged);
-        self.set_status("Auto Tone applied".into());
+        self.set_status(crate::i18n::t().auto_tone_applied.into());
     }
 
     /// Auto Tone the selected photo (Cmd+U). Target the selection, not
@@ -92,7 +92,7 @@ impl App {
                     }
                 }
             }
-            self.set_status("Auto Tone will start after the catalog loads…".into());
+            self.set_status(crate::i18n::t().auto_tone_waits_for_catalog.into());
             self.request_redraw();
             return;
         }
@@ -199,7 +199,7 @@ impl App {
         self.autotone_base.clear();
         self.autotone_deferred = None;
         self.autotone_done = 0;
-        self.set_status(format!("Auto Tone stopped at {done}/{total}"));
+        self.set_status((crate::i18n::t().auto_tone_stopped)(done, total));
     }
 
     /// Batch size: photos toned plus photos waiting. Dropped or skipped photos
@@ -242,14 +242,15 @@ impl App {
         }
         if self.autotone_pending.is_empty() {
             // Cmd+U lands here for one photo when its thumbnail had to load.
+            let t = crate::i18n::t();
             self.set_status(if done == 1 {
-                "Auto Tone applied".to_string()
+                t.auto_tone_applied.to_string()
             } else {
-                format!("Auto Tone applied to {done} photos")
+                (t.auto_tone_applied_n)(done)
             });
             self.autotone_done = 0;
         } else {
-            self.set_status(format!("Auto Tone {done}/{total}\u{2026}"));
+            self.set_status((crate::i18n::t().auto_tone_progress)(done, total));
         }
     }
 }

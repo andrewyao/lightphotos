@@ -120,10 +120,10 @@ impl App {
                 }
             }
             ViewMode::Grid => {
-                w.set_title(&format!("Grid  ({} photos)", self.visible.len()));
+                w.set_title(&(crate::i18n::t().grid_title)(self.visible.len()));
             }
             ViewMode::Survey => {
-                w.set_title(&format!("Survey  ({} photos)", self.survey_members.len()));
+                w.set_title(&(crate::i18n::t().survey_title)(self.survey_members.len()));
             }
         }
     }

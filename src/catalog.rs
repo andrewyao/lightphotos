@@ -195,16 +195,15 @@ impl Catalog {
         }
     }
 
-    /// Take the pending persist error. Each failure is returned once.
+    /// Take the pending persist error's cause. Each failure is returned once.
     pub fn take_error(&mut self) -> Option<String> {
         self.last_error.take()
     }
 
     /// Log a persist failure and keep it for the UI to show.
     pub(crate) fn note_persist_error(&mut self, e: impl std::fmt::Display) {
-        let msg = format!("Failed to save catalog entry: {e}");
-        eprintln!("[catalog] {msg}");
-        self.last_error = Some(msg);
+        eprintln!("[catalog] Failed to save catalog entry: {e}");
+        self.last_error = Some(e.to_string());
     }
 
     pub fn get(&self, path: &Path) -> Option<u8> {
@@ -723,8 +722,8 @@ mod tests {
             .take_error()
             .expect("failed save should report an error");
         assert!(
-            msg.contains("Failed to save"),
-            "error should describe the failed save, got: {msg}"
+            msg.contains("os error"),
+            "error should carry the OS cause, got: {msg}"
         );
         assert!(
             cat.take_error().is_none(),

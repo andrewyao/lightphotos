@@ -7,6 +7,7 @@ use crate::app::{App, FocusLevel, Region};
 /// slider resets it to 0.
 pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let mut adj = app.current_adjustments();
+    let t = t();
 
     egui::Panel::right("develop")
         .resizable(true)
@@ -16,17 +17,13 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
             ui.add_space(6.0);
 
             ui.horizontal(|ui| {
-                ui.heading("Develop");
+                ui.heading(t.develop);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Reset").clicked() {
+                    if ui.button(t.reset).clicked() {
                         out.actions.push(UiAction::ResetAdjustments);
                         out.actions.push(UiAction::Focus(Region::Develop));
                     }
-                    if ui
-                        .button("Auto")
-                        .on_hover_text("Set the tone sliders from this photo's own histogram")
-                        .clicked()
-                    {
+                    if ui.button(t.auto).on_hover_text(t.auto_tone_tip).clicked() {
                         out.actions.push(UiAction::AutoTone);
                         out.actions.push(UiAction::Focus(Region::Develop));
                     }
@@ -35,12 +32,12 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
             ui.separator();
             ui.horizontal(|ui| {
                 if ui
-                    .selectable_label(app.touchup_active(), "Touch Up")
+                    .selectable_label(app.touchup_active(), t.touch_up)
                     .clicked()
                 {
                     out.actions.push(UiAction::ToggleTouchUp);
                 }
-                ui.label("Size");
+                ui.label(t.brush_size);
                 let mut radius = app.touchup_radius();
                 if ui
                     .add(
@@ -54,16 +51,16 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                 {
                     out.actions.push(UiAction::SetTouchUpRadius(radius));
                 }
-                if ui.button("Undo").clicked() {
+                if ui.button(t.undo).clicked() {
                     out.actions.push(UiAction::UndoTouchUp);
                 }
-                if ui.button("Delete").clicked() {
+                if ui.button(t.delete).clicked() {
                     out.actions.push(UiAction::DeleteTouchUp);
                 }
             });
             if !app.current_touchups().is_empty() {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Spots:");
+                    ui.label(t.spots);
                     for i in 0..app.current_touchups().len() {
                         let label = format!("{}", i + 1);
                         if ui
@@ -126,22 +123,23 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                 (changed, interacted)
             }
 
-            let mut section = "";
+            let mut section = None;
             for (idx, s) in crate::develop::SLIDERS.iter().enumerate() {
-                if s.section != section {
-                    if !section.is_empty() {
+                if section != Some(s.section) {
+                    if section.is_some() {
                         ui.add_space(6.0);
                     }
-                    section = s.section;
-                    if section == crate::develop::WHITE_BALANCE {
+                    section = Some(s.section);
+                    let title = t.section(s.section);
+                    if s.section == crate::develop::Section::WhiteBalance {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(section).strong());
+                            ui.label(egui::RichText::new(title).strong());
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui
-                                        .selectable_label(app.wb_picker_active(), "Pick Gray")
-                                        .on_hover_text("Click a neutral-gray pixel in the image")
+                                        .selectable_label(app.wb_picker_active(), t.pick_gray)
+                                        .on_hover_text(t.pick_gray_tip)
                                         .clicked()
                                     {
                                         out.actions.push(UiAction::ToggleWbPicker);
@@ -150,13 +148,13 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                             );
                         });
                     } else {
-                        ui.label(egui::RichText::new(section).strong());
+                        ui.label(egui::RichText::new(title).strong());
                     }
                 }
                 let field = (s.field)(&mut adj);
                 let (c, i) = slider(
                     ui,
-                    s.label,
+                    t.slider(s.id),
                     field,
                     s.range.clone(),
                     s.decimals,

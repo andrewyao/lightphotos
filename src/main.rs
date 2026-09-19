@@ -18,6 +18,7 @@ mod export;
 mod facequality;
 mod featureprint;
 mod hash;
+mod i18n;
 mod image_decode;
 mod image_encode;
 mod image_ops;
@@ -528,6 +529,7 @@ fn main() {
         eprintln!("[lightphotos] warning: could not install Finder open handler");
     }
 
+    i18n::init();
     loader::mark("event loop built; constructing App");
     let mut app = App::new(initial);
     loader::mark("App constructed; entering event loop");
@@ -546,6 +548,7 @@ fn main() {
         .expect("build event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
+    i18n::init();
     loader::mark("event loop built; constructing App");
     let app = App::new(None);
     loader::mark("App constructed; entering event loop");
