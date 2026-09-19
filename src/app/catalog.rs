@@ -115,26 +115,33 @@ impl App {
         self.catalog.poll_persist_errors();
     }
 
-    /// Copies ratings, edits, touchups, and rotations for `playlist` from the
-    /// catalog into the app's in-memory maps.
+    /// Makes the app's ratings, edits, touchups, and rotations for `playlist`
+    /// match the loaded catalog, removing values its sidecars no longer have.
     pub(super) fn reconcile_catalog_mirrors(&mut self, playlist: &Playlist) {
+        // A drag in progress lives only in `edits`; write it before the
+        // catalog overwrites it.
         self.save_edit();
         for p in playlist.entries() {
-            if let Some(stars) = self.catalog.get(p) {
-                self.ratings.insert(p.clone(), stars);
-            }
+            match self.catalog.get(p) {
+                Some(stars) => self.ratings.insert(p.clone(), stars),
+                None => self.ratings.remove(p),
+            };
             let adj = self.catalog.adjustments(p);
-            if !adj.is_identity() {
+            if adj.is_identity() {
+                self.edits.remove(p);
+            } else {
                 self.edits.insert(p.clone(), adj);
             }
             let touchups = self.catalog.touchups(p);
-            if !touchups.is_empty() {
+            if touchups.is_empty() {
+                self.touchups.remove(p);
+            } else {
                 self.touchups.insert(p.clone(), touchups);
             }
-            let rot = self.catalog.rotation(p);
-            if rot != 0 {
-                self.rotations.insert(p.clone(), rot);
-            }
+            match self.catalog.rotation(p) {
+                0 => self.rotations.remove(p),
+                rot => self.rotations.insert(p.clone(), rot),
+            };
         }
     }
 
@@ -723,6 +730,37 @@ mod tests {
     }
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Values cached in memory from an earlier visit must not outlive a
+    /// sidecar that no longer has them, e.g. after another tool cleared it.
+    #[test]
+    fn reloading_a_folder_drops_values_its_sidecars_no_longer_have() {
+        let dir = unique_tmp_dir();
+        let photo = dir.join("a.jpg");
+        std::fs::write(&photo, b"").unwrap();
+
+        let mut app = App::new(None);
+        app.ratings.insert(photo.clone(), 4);
+        app.rotations.insert(photo.clone(), 1);
+        app.edits.insert(
+            photo.clone(),
+            Adjustments {
+                exposure: 1.0,
+                ..Default::default()
+            },
+        );
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.poll_catalog_load() {
+            assert!(std::time::Instant::now() < deadline, "catalog load timed out");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        assert_eq!(app.ratings.get(&photo), None);
+        assert_eq!(app.rotations.get(&photo), None);
+        assert_eq!(app.edits.get(&photo), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn unique_tmp_dir() -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
