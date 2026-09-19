@@ -2,7 +2,7 @@ use super::*;
 
 use winit::keyboard::KeyCode;
 
-use crate::navigation::Cmp;
+use crate::catalog::ColorLabel;
 use crate::ui;
 
 impl App {
@@ -115,16 +115,15 @@ impl App {
             }
         }
 
-        // Shift+1..5 filters to rating >= N and Shift+0 clears the filter.
-        // `set_filter` ignores this in Loupe.
-        if shift {
+        // Shift+1..5 set a color label and Shift+0 clears it.
+        if shift && !cmd && !alt {
             if let Some(n) = digit_of(code) {
-                if (1..=5).contains(&n) {
-                    self.set_filter(Some((Cmp::Gte, n)));
+                if n == 0 {
+                    self.set_label(None);
                     return;
                 }
-                if n == 0 {
-                    self.set_filter(None);
+                if let Some(label) = ColorLabel::from_digit(n) {
+                    self.set_label(Some(label));
                     return;
                 }
             }
@@ -138,10 +137,18 @@ impl App {
             }
         }
 
+        let loupe = self.mode == ViewMode::Loupe;
         match code {
-            KeyCode::Digit0 if alt => self.reset_100(),
-            KeyCode::BracketLeft if cmd && self.mode == ViewMode::Loupe => self.rotate(false),
-            KeyCode::BracketRight if cmd && self.mode == ViewMode::Loupe => self.rotate(true),
+            // Shift is allowed so `)`, `!` and `+` work on a US layout.
+            KeyCode::Digit0 | KeyCode::Numpad0 if cmd && loupe => self.fit_to_window(),
+            KeyCode::Digit1 | KeyCode::Numpad1 if cmd && loupe => self.reset_100(),
+            KeyCode::Equal | KeyCode::NumpadAdd if cmd && loupe => self.zoom_by(1.2),
+            KeyCode::Minus | KeyCode::NumpadSubtract if cmd && loupe => self.zoom_by(1.0 / 1.2),
+            KeyCode::BracketLeft if loupe => self.rotate(false),
+            KeyCode::BracketRight if loupe => self.rotate(true),
+            // `main.rs` sends Space only on a tap, not while it's held to pan.
+            KeyCode::Space if loupe => self.cycle_zoom(),
+            KeyCode::Space if self.focus == Region::Grid => self.nav_enter(),
 
             // F6 cycles between the main region and the Toolbar and Filmstrip.
             // Inside an entered region it moves between that region's controls.
@@ -344,16 +351,24 @@ mod tests {
     #[test]
     fn space_cycles_fit_then_double_fit_then_one_to_one() {
         let (mut app, _) = editor_app();
+        app.source_size = Some((4000, 4000));
+        app.fit_to_window();
         press(&mut app, ModifiersState::empty(), KeyCode::Space);
-        assert_zoom(&app, 1.0 * 2.0 * 0.5);
-        assert!(!app.fitted);
-        // 2x fit is exactly 100% here, so the next step still goes to 1:1
-        // and the one after returns to fit.
+        assert_zoom(&app, 0.25);
         press(&mut app, ModifiersState::empty(), KeyCode::Space);
         assert_zoom(&app, 1.0);
         press(&mut app, ModifiersState::empty(), KeyCode::Space);
         assert!(app.fitted);
-        assert_zoom(&app, 0.5);
+        assert_zoom(&app, 0.125);
+    }
+
+    #[test]
+    fn space_skips_a_stage_that_would_not_change_the_zoom() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::Space);
+        assert_zoom(&app, 1.0);
+        press(&mut app, ModifiersState::empty(), KeyCode::Space);
+        assert!(app.fitted, "2x fit is already 100%, so the next press fits");
     }
 
     #[test]
@@ -416,12 +431,20 @@ mod tests {
 
         app.modifiers = ModifiersState::SHIFT;
         app.on_scroll(0.0, 30.0);
-        assert_eq!(app.pan, (pan.0 + 30.0, pan.1), "Shift+scroll pans horizontally");
+        assert_eq!(
+            app.pan,
+            (pan.0 + 30.0, pan.1),
+            "Shift+scroll pans horizontally"
+        );
         assert_zoom(&app, 1.0);
 
         app.modifiers = ModifiersState::ALT;
         app.on_scroll(0.0, 30.0);
-        assert_eq!(app.pan, (pan.0 + 30.0, pan.1 + 30.0), "Alt+scroll pans vertically");
+        assert_eq!(
+            app.pan,
+            (pan.0 + 30.0, pan.1 + 30.0),
+            "Alt+scroll pans vertically"
+        );
 
         app.modifiers = ModifiersState::SHIFT | ModifiersState::ALT;
         app.on_scroll(0.0, 30.0);

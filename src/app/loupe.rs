@@ -165,11 +165,58 @@ impl App {
         self.ensure_full_for_zoom();
     }
 
-    /// A scroll of `(dx, dy)` physical pixels over the loupe zooms at the cursor.
-    pub(crate) fn on_scroll(&mut self, _dx: f32, dy: f32) {
-        if dy != 0.0 {
-            let (cx, cy) = self.cursor_in_loupe();
-            self.zoom_at((dy * 0.0025).exp(), cx, cy);
+    /// A scroll of `(dx, dy)` physical pixels over the loupe. Shift pans
+    /// horizontally, Alt pans vertically, and plain or Shift+Alt zooms at the
+    /// cursor.
+    pub(crate) fn on_scroll(&mut self, dx: f32, dy: f32) {
+        let shift = self.modifiers.shift_key();
+        let alt = self.modifiers.alt_key();
+        // macOS turns a Shift+wheel into horizontal scrolling.
+        let s = if shift && dy == 0.0 { dx } else { dy };
+        if s == 0.0 {
+            return;
+        }
+        match (shift, alt) {
+            (true, false) => self.pan_by(s, 0.0),
+            (false, true) => self.pan_by(0.0, s),
+            _ => {
+                let (cx, cy) = self.cursor_in_loupe();
+                self.zoom_at((s * 0.0025).exp(), cx, cy);
+            }
+        }
+    }
+
+    fn pan_by(&mut self, dx: f32, dy: f32) {
+        self.pan.0 += dx;
+        self.pan.1 += dy;
+        self.fitted = false;
+        self.push_transform();
+    }
+
+    /// Zoom by `factor` about the center of the loupe area.
+    pub(super) fn zoom_by(&mut self, factor: f32) {
+        let (w, h) = self.loupe_area();
+        self.zoom_at(factor, w / 2.0, h / 2.0);
+    }
+
+    /// Step to the next of fit, 2x fit and 100% that is larger than the
+    /// current zoom, wrapping back to fit. A stage that wouldn't change the
+    /// zoom is skipped, so every press does something.
+    pub(super) fn cycle_zoom(&mut self) {
+        let fs = self.fit_scale();
+        let cur = self.zoom() * 1.001;
+        if fs > cur {
+            self.fit_to_window();
+        } else if 2.0 * fs > cur {
+            self.zoom_rel = 2.0;
+            self.fitted = false;
+            self.center();
+            self.push_transform();
+            self.ensure_full_for_zoom();
+        } else if 1.0 > cur {
+            self.reset_100();
+        } else {
+            self.fit_to_window();
         }
     }
 

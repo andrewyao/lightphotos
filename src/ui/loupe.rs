@@ -359,6 +359,14 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                 });
             });
 
+            if let Some(label) = app.selected_label() {
+                ui.painter().circle_filled(
+                    egui::pos2(stars_rect.right() + 10.0, main_y),
+                    5.0,
+                    label_color(label),
+                );
+            }
+
             // Subject selection is a way of viewing the photo, not an edit, so
             // it lives here rather than in the Develop panel.
             let sel_w = 190.0;

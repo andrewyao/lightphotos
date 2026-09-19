@@ -60,28 +60,49 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.show_help() {
         return;
     }
+    // The primary modifier: Cmd in the native macOS app, Ctrl elsewhere.
+    macro_rules! primary {
+        ($keys:literal) => {
+            if cfg!(all(not(target_arch = "wasm32"), target_os = "macos")) {
+                concat!("Cmd", $keys)
+            } else {
+                concat!("Ctrl", $keys)
+            }
+        };
+    }
     const SHORTCUTS: &[(&str, &str)] = &[
+        ("Enter or Space", "Open the selected photo (library)"),
+        ("Esc", "Back to the library (editor)"),
+        ("\u{2190} / \u{2192}", "Previous / next photo (editor)"),
+        ("\u{2190} \u{2192} \u{2191} \u{2193}", "Move the selection (library)"),
+        ("Shift + arrows", "Extend the selection (library)"),
+        (primary!(" + A"), "Select all in the current folder"),
+        (
+            primary!("-click / Shift-click"),
+            "Toggle one photo / select a range",
+        ),
+        ("0 \u{2013} 5", "Set star rating (0 clears)"),
+        (
+            "Shift + 1 \u{2013} 5",
+            "Color label: red / yellow / green / blue / purple",
+        ),
+        ("Shift + 0", "Clear the color label"),
+        ("Space", "Cycle zoom: fit \u{2192} 2\u{d7} fit \u{2192} 100% (editor)"),
+        (primary!(" + 0"), "Fit to window"),
+        (primary!(" + 1"), "100% (1:1 pixels)"),
+        (primary!(" + = / \u{2212}"), "Zoom in / out 20%"),
+        ("\u{2191} / \u{2193}", "Zoom in / out 10% (editor)"),
+        ("Shift + scroll", "Pan horizontally"),
+        ("Alt + scroll", "Pan vertically"),
+        ("Shift + Alt + scroll", "Zoom"),
+        ("Space + drag", "Pan"),
+        ("[ / ]", "Rotate \u{2212}90\u{b0} / +90\u{b0}"),
         ("F6 / Shift+F6", "Cycle keyboard focus between regions"),
         (
             "Tab / Shift+Tab",
             "From the folder tree, jump to the grid's first image; in the grid, step to the next/previous image",
         ),
-        ("Arrow keys", "Navigate/adjust the focused region's content"),
-        ("Shift + arrows", "Extend selection (grid)"),
-        ("Cmd + A", "Select all"),
-        ("Click / Cmd-click / Shift-click", "Select / toggle / range"),
-        ("Enter", "Enter the focused region / open photo / expand folder"),
         ("E / G", "Loupe / Grid"),
-        (
-            "Esc",
-            if cfg!(target_arch = "wasm32") {
-                "Back out one focus level; in Loupe, back to Grid; from the grid, back to the folder tree"
-            } else {
-                "Back out one focus level, then quit-confirm; in Loupe, back to Grid; from the grid, back to the folder tree"
-            },
-        ),
-        ("1 \u{2013} 5 / 0", "Rate / clear rating"),
-        ("Shift + 1 \u{2013} 5", "Filter \u{2265} N stars"),
         ("C", "Crop"),
         ("B", "Best-of-burst badges (grid)"),
         ("D", "Duplicate-group badges (grid)"),
@@ -89,12 +110,11 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
             "Click badge",
             "Open Survey Mode on that duplicate group; Left/Right focus a member, Enter keeps best/rejects rest, Esc closes",
         ),
-        ("Cmd + [ or ]", "Rotate 90\u{b0} clockwise or anti-clockwise"),
         ("Y", "Before / after compare"),
-        ("Cmd + U", "Auto Tone this photo"),
-        ("Cmd + Shift + U", "Auto Tone the selection"),
-        ("Cmd + Shift + C", "Copy develop settings"),
-        ("Cmd + Shift + Y", "Apply settings to selection"),
+        (primary!(" + U"), "Auto Tone this photo"),
+        (primary!(" + Shift + U"), "Auto Tone the selection"),
+        (primary!(" + Shift + C"), "Copy develop settings"),
+        (primary!(" + Shift + Y"), "Apply settings to selection"),
         ("X", "Export selected as JPG"),
         (
             "Delete",
@@ -104,8 +124,6 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
                 "Move to Trash"
             },
         ),
-        ("+ / \u{2212}", "Thumbnail size (grid)"),
-        ("Alt + 0", "Reset zoom (100%)"),
         ("?", "This help"),
     ];
     let resp = egui::Modal::new(egui::Id::new("help_overlay")).show(ui.ctx(), |ui| {

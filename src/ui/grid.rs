@@ -311,6 +311,23 @@ pub(super) fn thumbnail_cell(
         );
     }
 
+    // The color label fills the cell's bottom margin, below the thumbnail.
+    if let Some(label) = app.label_at(pos) {
+        let strip = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.bottom() - style.corner),
+            rect.right_bottom(),
+        );
+        ui.painter().rect_filled(
+            strip,
+            egui::CornerRadius {
+                sw: style.corner as u8,
+                se: style.corner as u8,
+                ..Default::default()
+            },
+            label_color(label),
+        );
+    }
+
     let stars = app.rating_at(pos);
     if !(style.hide_zero_stars && stars == 0) {
         ui.painter().text(
