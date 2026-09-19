@@ -712,6 +712,8 @@ pub(crate) struct App {
     pub(crate) cursor: (f64, f64),
     pub(crate) modifiers: ModifiersState,
     pub(crate) space_down: bool,
+    /// Whether the current Space hold started a drag, so its release is not a tap.
+    pub(crate) space_panned: bool,
     pub(crate) dragging: bool,
     pub(crate) last_drag: (f64, f64),
 
@@ -928,6 +930,7 @@ impl App {
             cursor: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
             space_down: false,
+            space_panned: false,
             dragging: false,
             last_drag: (0.0, 0.0),
             egui_ctx,

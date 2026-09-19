@@ -287,6 +287,17 @@ fn status_toast(ui: &egui::Ui, app: &App) {
         .request_repaint_after(std::time::Duration::from_millis(250));
 }
 
+fn label_color(label: crate::catalog::ColorLabel) -> egui::Color32 {
+    use crate::catalog::ColorLabel::*;
+    match label {
+        Red => egui::Color32::from_rgb(230, 70, 70),
+        Yellow => egui::Color32::from_rgb(235, 200, 60),
+        Green => egui::Color32::from_rgb(80, 190, 90),
+        Blue => egui::Color32::from_rgb(70, 130, 230),
+        Purple => egui::Color32::from_rgb(160, 90, 210),
+    }
+}
+
 /// Stars as a compact string, e.g. 3 → "★★★☆☆".
 fn star_string(stars: u8) -> String {
     let s = stars.min(5) as usize;

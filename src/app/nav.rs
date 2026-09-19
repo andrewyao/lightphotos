@@ -601,7 +601,7 @@ impl App {
         match self.focus {
             Region::Folders => self.folder_collapse(),
             Region::Grid => self.move_grid(-1, 0),
-            Region::Detail => {}
+            Region::Detail => self.step_loupe(false),
             Region::Filmstrip => self.step_loupe(false),
             Region::Develop => self.develop_adjust(-1),
             Region::Toolbar => {}
@@ -612,7 +612,7 @@ impl App {
         match self.focus {
             Region::Folders => self.folder_expand(),
             Region::Grid => self.move_grid(1, 0),
-            Region::Detail => {}
+            Region::Detail => self.step_loupe(true),
             Region::Filmstrip => self.step_loupe(true),
             Region::Develop => self.develop_adjust(1),
             Region::Toolbar => {}
@@ -623,7 +623,7 @@ impl App {
         match self.focus {
             Region::Folders => self.folder_move(-1),
             Region::Grid => self.move_grid(0, -1),
-            Region::Detail => {}
+            Region::Detail => self.zoom_by(1.1),
             Region::Filmstrip => self.step_loupe(false),
             Region::Develop => self.develop_move(-1),
             Region::Toolbar => {}
@@ -634,7 +634,7 @@ impl App {
         match self.focus {
             Region::Folders => self.folder_move(1),
             Region::Grid => self.move_grid(0, 1),
-            Region::Detail => {}
+            Region::Detail => self.zoom_by(1.0 / 1.1),
             Region::Filmstrip => self.step_loupe(true),
             Region::Develop => self.develop_move(1),
             Region::Toolbar => {}

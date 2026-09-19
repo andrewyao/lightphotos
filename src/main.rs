@@ -254,6 +254,7 @@ impl ApplicationHandler<UserEvent> for App {
             } => match state {
                 ElementState::Pressed if self.space_down && self.mode == ViewMode::Loupe => {
                     self.dragging = true;
+                    self.space_panned = true;
                     self.last_drag = self.cursor;
                 }
                 ElementState::Released => self.dragging = false,
@@ -278,16 +279,27 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
 
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
-                    if let PhysicalKey::Code(code) = event.physical_key {
-                        self.handle_key(code);
+            WindowEvent::KeyboardInput { event, .. } => match event.physical_key {
+                // Holding Space and dragging pans the loupe, so Space acts
+                // only on a release that didn't pan.
+                PhysicalKey::Code(KeyCode::Space) => match event.state {
+                    ElementState::Pressed if !self.space_down => {
+                        self.space_down = true;
+                        self.space_panned = false;
                     }
+                    ElementState::Released if self.space_down => {
+                        self.space_down = false;
+                        if !self.space_panned {
+                            self.handle_key(KeyCode::Space);
+                        }
+                    }
+                    _ => {}
+                },
+                PhysicalKey::Code(code) if event.state == ElementState::Pressed => {
+                    self.handle_key(code)
                 }
-                if let PhysicalKey::Code(KeyCode::Space) = event.physical_key {
-                    self.space_down = event.state == ElementState::Pressed;
-                }
-            }
+                _ => {}
+            },
 
             _ => {}
         }
