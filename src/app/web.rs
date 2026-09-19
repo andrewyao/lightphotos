@@ -499,7 +499,6 @@ impl App {
                                     &img,
                                     Shown::Preview(path.clone(), target, img.width.max(img.height)),
                                 );
-                                self.set_tier_debug(super::thumbs::TIER_DEBUG_GRAY_18, "SPEED"); // TEMPORARY DEBUG
                                 landed = true;
                             }
                         }

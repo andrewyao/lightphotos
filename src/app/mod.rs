@@ -642,10 +642,6 @@ pub(crate) struct App {
     pub(crate) win_size: (f32, f32),
     /// True while the view is auto-fit, so a resize re-fits.
     pub(crate) fitted: bool,
-    // TEMPORARY DEBUG, removed together with `set_tier_debug`. The decode tier
-    // name is shown in the title because the clear-color tint is hidden when
-    // the image fills the viewport.
-    pub(crate) debug_tier_label: &'static str,
     /// Per-image rotation, in 90° clockwise steps (0..=3).
     rotations: HashMap<PathBuf, u8>,
     /// The viewport rect (physical px) the loupe drew into last frame.
@@ -895,7 +891,6 @@ impl App {
             pan: (0.0, 0.0),
             win_size: (1.0, 1.0),
             fitted: false,
-            debug_tier_label: "",
             rotations: HashMap::new(),
             loupe_viewport: None,
             crop_edit: None,
