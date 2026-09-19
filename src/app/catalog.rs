@@ -752,7 +752,10 @@ mod tests {
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while app.poll_catalog_load() {
-            assert!(std::time::Instant::now() < deadline, "catalog load timed out");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "catalog load timed out"
+            );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
 

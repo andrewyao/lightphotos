@@ -26,8 +26,19 @@ pub struct Slider {
     pub step: f32,
 }
 
-const fn tone(section: &'static str, label: &'static str, field: fn(&mut Adjustments) -> &mut f32) -> Slider {
-    Slider { section, label, field, range: TONE_RANGE, decimals: 0, step: 1.0 }
+const fn tone(
+    section: &'static str,
+    label: &'static str,
+    field: fn(&mut Adjustments) -> &mut f32,
+) -> Slider {
+    Slider {
+        section,
+        label,
+        field,
+        range: TONE_RANGE,
+        decimals: 0,
+        step: 1.0,
+    }
 }
 
 pub const WHITE_BALANCE: &str = "White Balance";

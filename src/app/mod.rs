@@ -215,7 +215,10 @@ enum CropGrab {
     Edge(CropEdge),
     /// Moving the whole rectangle. Stores the pointer's texture uv and the
     /// rectangle at grab time, so the drag is anchor-relative and doesn't drift.
-    Move { anchor: (f32, f32), rect0: Crop },
+    Move {
+        anchor: (f32, f32),
+        rect0: Crop,
+    },
 }
 
 /// Crop-mode state, present only while crop mode is active. `rect` is in

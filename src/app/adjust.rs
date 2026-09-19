@@ -303,7 +303,10 @@ mod tests {
                 ..Default::default()
             });
         }
-        assert!(!sidecar.exists(), "nothing is written while the mouse is held");
+        assert!(
+            !sidecar.exists(),
+            "nothing is written while the mouse is held"
+        );
 
         press(&app, false);
         app.save_edit_unless_dragging();

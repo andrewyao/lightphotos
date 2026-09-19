@@ -801,7 +801,8 @@ impl Loader {
     }
 
     fn insert_preview(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>) {
-        let known = self.speed_cache.remove(&key).is_some() || self.preview_cache.contains_key(&key);
+        let known =
+            self.speed_cache.remove(&key).is_some() || self.preview_cache.contains_key(&key);
         if !known {
             self.preview_order.push_back(key.clone());
         }
@@ -940,10 +941,16 @@ mod tests {
         // The sharper preview replaces its own speed result.
         loader.insert_preview((path("0"), 2560), image(4, 4));
         assert_eq!(loader.get_preview(&path("0"), 2560).unwrap().width, 4);
-        assert_eq!(loader.speed_cache.len() + loader.preview_cache.len(), PREVIEW_CAPACITY);
+        assert_eq!(
+            loader.speed_cache.len() + loader.preview_cache.len(),
+            PREVIEW_CAPACITY
+        );
         // A new arrival evicts the oldest entry across both maps.
         loader.insert_preview((path("new"), 2560), image(4, 4));
-        assert_eq!(loader.speed_cache.len() + loader.preview_cache.len(), PREVIEW_CAPACITY);
+        assert_eq!(
+            loader.speed_cache.len() + loader.preview_cache.len(),
+            PREVIEW_CAPACITY
+        );
         assert!(loader.get_preview(&path("0"), 2560).is_none());
     }
 
