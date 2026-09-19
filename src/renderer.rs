@@ -60,6 +60,13 @@ pub struct EguiPaint {
     pub screen_descriptor: egui_wgpu::ScreenDescriptor,
 }
 
+const CLEAR_COLOR: wgpu::Color = wgpu::Color {
+    r: 0.07,
+    g: 0.07,
+    b: 0.08,
+    a: 1.0,
+};
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -96,11 +103,6 @@ pub struct Renderer {
     /// `None` until the first image loads.
     image_bind: Option<wgpu::BindGroup>,
     pub image_size: (u32, u32),
-    // TEMPORARY DEBUG: remove once the Loupe zoom-refit fix is verified.
-    // The image-pass clear color, set by `upload_shown` to show the decode
-    // tier: white = Thumb, 18% gray = Speed, black = Preview or Full. The
-    // initial value is the normal clear color.
-    pub(crate) tier_debug_color: wgpu::Color,
     /// Picks `pipeline` or `raw_pipeline` in `render()`.
     image_pixel_format: PixelFormat,
 
@@ -513,12 +515,6 @@ impl Renderer {
             overlay_bind: None,
             image_bind: None,
             image_size: (0, 0),
-            tier_debug_color: wgpu::Color {
-                r: 0.07,
-                g: 0.07,
-                b: 0.08,
-                a: 1.0,
-            },
             image_pixel_format: PixelFormat::Srgb8,
             max_dim,
             mip_pipeline,
@@ -885,8 +881,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // TEMPORARY DEBUG: see `tier_debug_color`.
-                        load: wgpu::LoadOp::Clear(self.tier_debug_color),
+                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
