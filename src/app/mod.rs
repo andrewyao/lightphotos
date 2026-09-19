@@ -1040,15 +1040,14 @@ impl App {
         }
     }
 
-    /// Start loading `playlist`'s saved ratings, edits, and rotations. The
-    /// sidecar scan runs in the background, so this reconcile finds nothing,
-    /// and `poll_catalog_load` reconciles again when the data lands. First
+    /// Start loading `playlist`'s saved ratings, edits, and rotations in the
+    /// background. `poll_catalog_load` copies them in when they land, so first
     /// paint never waits on the sidecars.
     fn seed_mirrors(&mut self, playlist: &Playlist) {
-        // Stop pending edits before replacing the catalog they would write to.
+        // Finish pending edits before replacing the catalog they write to.
         self.cancel_auto_tone();
+        self.save_edit();
         self.request_catalog_load(playlist.dir());
-        self.reconcile_catalog_mirrors(playlist);
     }
 
     /// Show `dir`'s images in the grid with nothing selected.
