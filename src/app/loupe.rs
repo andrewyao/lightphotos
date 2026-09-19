@@ -1,17 +1,6 @@
-//! Loupe view-state math: zoom/pan/fit, the crop/UV coordinate transforms,
-//! and the subject-selection overlay.
-//!
-//! ## Pipeline position
-//! - This is Pipeline 1's UI-thread half — it decides *what to ask for* and
-//!   *how to show what comes back*, never decodes a pixel itself.
-//! - `ensure_full_for_zoom` is the trigger for Pipeline 1's most expensive
-//!   step: it's called after every zoom change and only then decides
-//!   whether to call `Loader::request_full` (native) or
-//!   `request_web_full` (`app/web.rs`, wasm32) — normal browsing at
-//!   "fit to window" never reaches it.
-//! - `fit_to_window`/`fit_for_crop`/`center`/`zoom_at` all end by calling
-//!   `push_transform`, which uploads the new transform to `renderer.rs` —
-//!   the same shared final stage every pipeline path converges on.
+//! Loupe view state: zoom, pan and fit, the screen-to-texture coordinate
+//! transforms, and the subject-selection overlay. It never decodes pixels. It
+//! requests the full-resolution decode only once zoom outruns the preview.
 
 use super::*;
 use std::path::Path;
@@ -19,7 +8,7 @@ use std::path::Path;
 use crate::develop::Adjustments;
 
 impl App {
-    /// On-screen footprint after rotation (w/h swapped for 90°/270°).
+    /// Image size after rotation, with w and h swapped for 90° and 270°.
     pub(super) fn display_size(&self) -> (f32, f32) {
         let (w, h) = self.image_size();
         if self.current_rotation() % 2 == 1 {
@@ -29,11 +18,8 @@ impl App {
         }
     }
 
-    /// The loupe image area in physical pixels: the whole surface unless a
-    /// viewport was carved out by egui panels last frame. While comparing,
-    /// each side only occupies half the width, so zoom/pan/fit math must
-    /// target that half — this must match the equal-width split used to carve
-    /// the actual GPU viewports (see the compare render call site).
+    /// The loupe image area in physical pixels. While comparing, each side
+    /// gets half the width. This must match the split the compare render uses.
     pub(super) fn loupe_area(&self) -> (f32, f32) {
         match self.loupe_viewport {
             Some((_, _, w, h)) => {
@@ -47,26 +33,19 @@ impl App {
         }
     }
 
-    /// The absolute source-pixel→screen-pixel ratio at which the whole image
-    /// exactly fits the loupe area ("contain"). The anchor `zoom_rel` is measured
-    /// against: `zoom_rel == 1.0` is fitted, `zoom() == zoom_rel * fit_scale()`.
-    ///
-    /// Depends only on the image's aspect ratio and the loupe area, never on
-    /// which decode tier's pixel dimensions happen to be uploaded — that is what
-    /// makes the loupe transform survive a preview→full swap without a jump.
+    /// Screen pixels per source pixel at which the whole image fits the loupe
+    /// area. `zoom_rel` is relative to this, so swapping the preview for the
+    /// full decode doesn't make the image jump.
     pub(super) fn fit_scale(&self) -> f32 {
         fit_scale_of(self.display_size(), self.loupe_area())
     }
 
-    /// The current absolute zoom (source-pixel→screen-pixel ratio), derived from
-    /// the fit-relative `zoom_rel` and the live `fit_scale()`. Every consumer
-    /// that needs an absolute scale goes through here.
+    /// The current zoom in screen pixels per source pixel.
     pub(crate) fn zoom(&self) -> f32 {
         self.zoom_rel * self.fit_scale()
     }
 
-    /// Fit to the loupe area, centered: scales the image up or down so the whole
-    /// image is as large as possible while staying fully on-screen ("contain").
+    /// Scale the image up or down so it just fits the loupe area, centered.
     pub(super) fn fit_to_window(&mut self) {
         self.zoom_rel = 1.0;
         self.fitted = true;
@@ -74,12 +53,9 @@ impl App {
         self.push_transform();
     }
 
-    /// Fit the *whole* image into the loupe area for crop mode: unlike
-    /// `fit_to_window` this shrinks images larger than the viewport (no grow-only
-    /// floor) and leaves a small margin, so the entire image — and thus all four
-    /// crop edges and their handles — stay on-screen and grabbable.
+    /// Fit for crop mode: like `fit_to_window` but with a margin, so all four
+    /// crop handles stay on screen and grabbable.
     pub(super) fn fit_for_crop(&mut self) {
-        // ~5% border each side so edge handles aren't flush against the viewport.
         const MARGIN: f32 = 0.9;
         self.zoom_rel = MARGIN;
         self.fitted = true;
@@ -87,11 +63,8 @@ impl App {
         self.push_transform();
     }
 
-    /// Reset to 100% (1 image pixel == 1 screen pixel), centered. `zoom_rel` is
-    /// `1.0 / fit_scale()` so that `zoom()` lands on exactly `1.0` right now (the
-    /// `fit_scale()` factors cancel). If `image_size()` later gains its true
-    /// `source_size` the effective zoom drifts slightly — negligible in practice,
-    /// since that metadata almost always lands before the user hits this.
+    /// Zoom to 100% (one image pixel per screen pixel), centered. If the true
+    /// source size arrives later, the zoom drifts slightly off 100%.
     pub(super) fn reset_100(&mut self) {
         let fs = self.fit_scale();
         self.zoom_rel = if fs > 0.0 { 1.0 / fs } else { 1.0 };
@@ -101,12 +74,8 @@ impl App {
         self.ensure_full_for_zoom();
     }
 
-    /// Whether the full-resolution decode is currently justified: a photo is
-    /// wanted and the zoom has magnified the screen-fit preview past its own
-    /// pixels. Both `ensure_full_for_zoom` (the one-shot trigger, fired on
-    /// every zoom change) and `request_web_full` (`app/web.rs`, re-polled every
-    /// frame from `main.rs` so retry/backoff eventually fires) gate on this, so
-    /// normal fitted browsing never reaches the expensive decode path.
+    /// Whether the zoom has magnified the preview past its own pixels, so the
+    /// full-resolution decode is worth fetching.
     pub(super) fn full_wanted_for_zoom(&self) -> bool {
         if self.want.is_none() {
             return false;
@@ -115,22 +84,14 @@ impl App {
         zoom_outruns_preview(iw.max(ih), self.zoom(), self.preview_px())
     }
 
-    /// Fetch the full-resolution decode once the current zoom would magnify the
-    /// screen-fit preview past its own pixels — i.e. the moment the preview
-    /// stops being enough and softness would actually be visible. Below that
-    /// threshold this does nothing, which is what keeps normal browsing off the
-    /// expensive decode path entirely. `Loader::request_full` de-duplicates, so
-    /// calling this on every zoom step is cheap.
+    /// Request the full-resolution decode if `full_wanted_for_zoom`. Cheap to
+    /// call on every zoom step because `Loader::request_full` de-duplicates.
     pub(super) fn ensure_full_for_zoom(&mut self) {
         if !self.full_wanted_for_zoom() {
             return;
         }
-        // wasm32: `loader.rs`'s own worker queue has no live workers there
-        // (same reason `try_show`'s `request_preview` call is native-only —
-        // see its own comment), so `loader.request_full` would silently do
-        // nothing. `request_web_full` (`app/web.rs`) is the wasm-effective
-        // equivalent, polled every frame from `main.rs` the same way
-        // `request_web_preview` is.
+        // The loader has no workers on wasm, so the web build decodes through
+        // `request_web_full` instead.
         #[cfg(target_arch = "wasm32")]
         {
             self.request_web_full();
@@ -143,7 +104,7 @@ impl App {
         }
     }
 
-    /// Rotate the current image 90° (clockwise if `cw`), remembering it per-image.
+    /// Rotate the shown image 90°, clockwise if `cw`, and save it.
     pub(super) fn rotate(&mut self, cw: bool) {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
@@ -175,8 +136,8 @@ impl App {
         self.pan = ((ww - iw * z) / 2.0, (wh - ih * z) / 2.0);
     }
 
-    /// Zoom by `factor`, keeping the image point under (cx, cy) fixed. `cx/cy`
-    /// are in loupe-area-local pixels (origin at the viewport's top-left).
+    /// Zoom by `factor`, keeping the image point under `(cx, cy)` fixed. The
+    /// point is in pixels from the loupe area's top-left.
     pub(crate) fn zoom_at(&mut self, factor: f32, cx: f32, cy: f32) {
         let cur_zoom = self.zoom();
         let new_zoom = bounded_zoom(cur_zoom, factor);
@@ -189,8 +150,7 @@ impl App {
             self.zoom_rel = new_zoom / fs;
         }
 
-        // Once an axis fully fits in the viewport, keep the image centered on that
-        // axis so the surrounding gap stays even (matches `center()`).
+        // Center any axis that fits entirely in the viewport.
         let (iw, ih) = self.display_size();
         let (ww, wh) = self.loupe_area();
         if iw * new_zoom <= ww {
@@ -205,14 +165,10 @@ impl App {
         self.ensure_full_for_zoom();
     }
 
-    /// Cursor position relative to the loupe viewport's top-left, in physical px.
-    /// While comparing, a cursor over the right half is folded back into the
-    /// same `0..half` local space as the left half, matching `loupe_area()`,
-    /// so zoom-at-cursor anchors correctly regardless of which side it's over.
+    /// Cursor position from the loupe viewport's top-left, in physical pixels.
+    /// While comparing, the right half maps onto the same space as the left.
     pub(crate) fn cursor_in_loupe(&self) -> (f32, f32) {
-        // `self.cursor` is already physical pixels (winit `CursorMoved` reports a
-        // `PhysicalPosition`), and `loupe_viewport` is physical too — so we just
-        // subtract the viewport origin; no scale-factor conversion.
+        // Both values are already physical pixels, so no DPI scaling.
         let (px, py) = (self.cursor.0 as f32, self.cursor.1 as f32);
         match self.loupe_viewport {
             Some((x, y, w, h)) => {
@@ -220,8 +176,7 @@ impl App {
                 let ly = py - y as f32;
                 if self.compare && self.mode == ViewMode::Loupe && w >= 2 && h > 0 {
                     let half = (w / 2) as f32;
-                    // Equal-sized viewports leave an odd spare pixel as a
-                    // divider between the before and after images.
+                    // An odd width leaves one spare pixel as the divider.
                     let right_start = half + (w % 2) as f32;
                     if lx >= right_start {
                         lx -= right_start;
@@ -233,10 +188,8 @@ impl App {
         }
     }
 
-    /// The `(scale, offset, rot)` the shader transform is currently built from —
-    /// the values `push_transform` uploads. Shared so the crop overlay can map
-    /// between screen points and texture UVs using the exact same geometry.
-    /// `rot` is the row-major 2×2 `[m00, m01, m10, m11]` used by the shader.
+    /// The `(scale, offset, rot)` shader transform that `push_transform`
+    /// uploads. `rot` is a row-major 2×2 `[m00, m01, m10, m11]`.
     pub(super) fn loupe_transform(&self) -> ([f32; 2], [f32; 2], [f32; 4]) {
         loupe_xform(
             self.display_size(),
@@ -247,7 +200,7 @@ impl App {
         )
     }
 
-    /// The display-UV → texture-UV rotation matrix for the current 90° step.
+    /// The display-UV to texture-UV rotation matrix for the current rotation.
     pub(super) fn rot_matrix(&self) -> [f32; 4] {
         match self.current_rotation() {
             1 => [0.0, 1.0, -1.0, 0.0],
@@ -257,11 +210,8 @@ impl App {
         }
     }
 
-    /// Configure the renderer for the before/after compare view: the shared
-    /// live zoom/pan transform (compare-aware via `loupe_area()`, so it
-    /// targets the half-width area each side actually occupies), the primary
-    /// adjustments = "before" (identity tone but the same crop), the
-    /// secondary = "after" (the full edits).
+    /// Set up the renderer for before/after compare. "Before" keeps only the
+    /// crop; "after" has all edits. Both share the zoom and pan.
     pub(super) fn push_compare(&mut self) {
         let after = self.current_adjustments();
         let before = Adjustments {
@@ -279,19 +229,14 @@ impl App {
         }
     }
 
-    /// Toggle the before/after compare view (Loupe only). Flipping it changes
-    /// what `loupe_area()` returns (full width <-> half width) with no
-    /// viewport-resize event to trigger the usual per-frame refit. Preserve
-    /// the image point at the viewport center when the view is manually
-    /// zoomed, so toggling compare does not discard the current pan.
+    /// Toggle before/after compare (Loupe only). This halves or doubles the
+    /// loupe width with no resize event, so refit here. A manual zoom keeps
+    /// its scale and the image point at the center.
     pub(super) fn toggle_compare(&mut self) {
         if self.mode != ViewMode::Loupe {
             return;
         }
         let old_width = self.loupe_area().0;
-        // Absolute zoom before the split changes `loupe_area()` (and thus
-        // `fit_scale()`); restored below so a compare toggle never rescales a
-        // manually-zoomed view.
         let keep_zoom = self.zoom();
         self.compare = !self.compare;
         if self.fitted {
@@ -320,9 +265,6 @@ impl App {
         self.compare
     }
 
-    // ---- Subject-selection overlay ------------------------------------------
-
-    /// Whether the subject-selection overlay is switched on.
     pub(crate) fn selection_on(&self) -> bool {
         self.selection_on
     }
@@ -341,13 +283,12 @@ impl App {
             .map(|(_, mask)| mask)
     }
 
-    /// Whether a mask is being computed for the photo on screen right now
-    /// (so the UI can say "working" rather than "no subject found").
+    /// Whether a mask is being computed, so the UI can say "working" instead of
+    /// "no subject found".
     pub(crate) fn selection_pending(&self) -> bool {
         self.selection_pending.is_some()
     }
 
-    /// Flip the overlay on/off, kicking off the mask computation on the way on.
     pub(super) fn toggle_selection(&mut self) {
         self.selection_on = !self.selection_on;
         if self.selection_on {
@@ -357,19 +298,15 @@ impl App {
         self.request_redraw();
     }
 
-    /// Flip the overlay between highlighting the subject and the background.
-    /// Purely a display change — the same mask, read the other way round.
     pub(super) fn toggle_selection_invert(&mut self) {
         self.selection_invert = !self.selection_invert;
         self.sync_selection_overlay();
         self.request_redraw();
     }
 
-    /// Push the current mask (or its absence) to the renderer.
-    ///
-    /// The mask goes up at Vision's own resolution: the shader samples it with
-    /// the image's normalized UVs, so the GPU's bilinear filter does the
-    /// stretching and there's nothing to keep in step with zoom or pan.
+    /// Push the current mask, or its absence, to the renderer. The mask stays
+    /// at Vision's resolution. The shader samples it by image UV, so it needs
+    /// no update on zoom or pan.
     pub(super) fn sync_selection_overlay(&mut self) {
         let want = self.want.clone();
         let mask = if self.selection_on {
@@ -387,8 +324,7 @@ impl App {
         }
     }
 
-    /// Drop a mask that no longer belongs to the photo on screen. Called when
-    /// the Loupe moves to a different picture.
+    /// Drop a mask that belongs to a photo no longer on screen.
     pub(super) fn invalidate_selection(&mut self) {
         let stale = match (&self.current_selection, &self.want) {
             (Some((path, _)), Some(want)) => path != want,
@@ -401,12 +337,8 @@ impl App {
         }
     }
 
-    /// Start segmenting the photo on screen, unless it's already done or
-    /// already running.
-    ///
-    /// One detached thread per request rather than a worker pool: this fires
-    /// on a deliberate user action, for exactly one photo at a time, so there
-    /// is no queue to schedule and nothing to keep warm between uses.
+    /// Start segmenting the photo on screen on its own thread, unless it's done
+    /// or running. It runs for one photo per user action, so no pool is needed.
     pub(super) fn request_selection_mask(&mut self) {
         if !self.selection_on || self.selection_pending.is_some() {
             return;
@@ -420,8 +352,8 @@ impl App {
 
         self.selection_pending = Some(want.clone());
         let tx = self.selection_tx.clone();
-        // If the spawn fails, clear the pending marker so the next frame can
-        // retry rather than the overlay hanging on "working" forever.
+        // If the spawn fails, clear pending so the overlay doesn't show
+        // "working" forever.
         if std::thread::Builder::new()
             .name("segmentation-worker".to_string())
             .spawn(move || {
@@ -434,20 +366,18 @@ impl App {
         }
     }
 
-    /// Fold a finished segmentation into `current_selection`, discarding it if
-    /// the Loupe has moved on to a different photo meanwhile.
+    /// Store a finished mask, unless the Loupe has moved to another photo.
     pub(crate) fn poll_selection_mask(&mut self) {
         while let Ok((path, result)) = self.selection_rx.try_recv() {
             if self.selection_pending.as_ref() == Some(&path) {
                 self.selection_pending = None;
             }
             if self.want.as_ref() != Some(&path) {
-                continue; // moved on; this mask is for a photo nobody is looking at
+                continue;
             }
             match result {
                 Ok(mask) => self.current_selection = Some((path, mask)),
-                // No subject found is a legitimate answer, not an error worth a
-                // toast — the overlay simply has nothing to draw.
+                // "No subject found" is a normal result, so show no error.
                 Err(_) => self.current_selection = None,
             }
             self.sync_selection_overlay();
@@ -464,9 +394,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Map a normalized texture UV (crop space, 0..1) to a screen point inside
-    /// the loupe rect `central` (egui logical px). Inverse of
-    /// `loupe_screen_to_tex`; used to draw the crop rectangle/handles/mask.
+    /// Map a texture UV (0..1) to a point in the loupe rect `central`, in egui
+    /// logical pixels. Inverse of `loupe_screen_to_tex`.
     pub(crate) fn loupe_tex_to_screen(&self, central: egui::Rect, u: f32, v: f32) -> egui::Pos2 {
         let (scale, offset, rot) = self.loupe_transform();
         // Invert uv = R·(d − 0.5) + 0.5. R is a rotation, so R⁻¹ = Rᵀ.
@@ -482,9 +411,8 @@ impl App {
         )
     }
 
-    /// Map a screen point inside the loupe rect `central` to a normalized texture
-    /// UV (crop space, 0..1). Inverse of `loupe_tex_to_screen`; used to turn a
-    /// crop-edge drag into a crop coordinate.
+    /// Map a point in the loupe rect `central` to a texture UV (0..1). Inverse
+    /// of `loupe_tex_to_screen`.
     pub(crate) fn loupe_screen_to_tex(&self, central: egui::Rect, p: egui::Pos2) -> (f32, f32) {
         let (scale, offset, rot) = self.loupe_transform();
         let bx = if central.width() > 0.0 {
@@ -506,27 +434,15 @@ impl App {
     }
 }
 
-/// Whether the current zoom magnifies the screen-fit preview past its own
-/// pixels, i.e. whether softness would now be visible and the full-resolution
-/// decode is worth its cost.
-///
-/// `source_longest` is the original's longest side in pixels and `zoom` is
-/// source-pixels-to-screen-pixels, so their product is how many screen pixels
-/// the image spans — compare that against how many pixels the preview actually
-/// has.
+/// Whether the image, at `zoom` screen pixels per source pixel, spans more
+/// screen pixels than the preview has. Then the preview looks soft.
 fn zoom_outruns_preview(source_longest: f32, zoom: f32, preview_px: u32) -> bool {
     source_longest * zoom > preview_px as f32
 }
 
-/// The `(scale, offset, rot)` shader transform for a given loupe view state.
-/// Pulled out as a free function so the dimension-invariance property (an
-/// `image_size` change from one decode tier to the next must not move the
-/// on-screen image) can be unit-tested without constructing an `App`.
-///
-/// `image_size` is the display-oriented source size, `area` the loupe viewport,
-/// `zoom` the absolute source-pixel→screen-pixel ratio (`App::zoom`), `pan` the
-/// image's top-left corner in screen pixels, `rot` the display-UV→texture-UV
-/// matrix.
+/// The `(scale, offset, rot)` shader transform for a loupe view. `image_size`
+/// is the rotated source size, `zoom` is `App::zoom`, and `pan` is the image's
+/// top-left corner in screen pixels. A free function so tests need no `App`.
 fn loupe_xform(
     image_size: (f32, f32),
     area: (f32, f32),
@@ -543,19 +459,14 @@ fn loupe_xform(
     (scale, offset, rot)
 }
 
-/// The fit ("contain") scale for an image of `image_size` in a loupe `area` —
-/// the free-function core of `App::fit_scale`, so `zoom_rel` conversions can be
-/// checked in isolation.
 fn fit_scale_of(image_size: (f32, f32), area: (f32, f32)) -> f32 {
     let (iw, ih) = image_size;
     let (ww, wh) = area;
     (ww / iw).min(wh / ih)
 }
 
-/// Apply explicit zoom bounds without snapping a contain-fit zoom into them.
-/// A fit can be outside the range used for manual zooming, so while below the
-/// minimum only zoom-in can move it toward the range, and while above the
-/// maximum only zoom-out can do so.
+/// Clamp a manual zoom to `MIN_ZOOM..=MAX_ZOOM`. A fit zoom can lie outside
+/// that range, so from there only moves toward the range are allowed.
 fn bounded_zoom(cur_zoom: f32, factor: f32) -> f32 {
     let requested = cur_zoom * factor;
     if cur_zoom < MIN_ZOOM {
@@ -577,22 +488,18 @@ mod tests {
 
     #[test]
     fn browsing_at_fit_never_asks_for_the_expensive_decode() {
-        // Fit in a 2560px-wide window is zoom ~0.43: the preview has more pixels
-        // than the screen can show, so full resolution would be invisible.
+        // Fit in a 2560px window is zoom ~0.43, and the preview covers it.
         assert!(!zoom_outruns_preview(SOURCE, 2560.0 / SOURCE, PREVIEW));
-        // Zoomed out further, even more so.
         assert!(!zoom_outruns_preview(SOURCE, 0.1, PREVIEW));
     }
 
     #[test]
     fn the_preview_is_ridden_right_up_to_its_own_resolution() {
-        // Exactly at the preview's pixel count is still not worth a full decode.
         assert!(!zoom_outruns_preview(
             SOURCE,
             PREVIEW as f32 / SOURCE,
             PREVIEW
         ));
-        // A hair past it is.
         assert!(zoom_outruns_preview(
             SOURCE,
             (PREVIEW as f32 + 1.0) / SOURCE,
@@ -602,24 +509,19 @@ mod tests {
 
     #[test]
     fn hitting_one_to_one_on_a_big_photo_fetches_full_resolution() {
-        // Alt+0 sets zoom to 1.0 — every source pixel on screen, which no
-        // preview can satisfy for a photo larger than the preview target.
+        // Alt+0 sets zoom to 1.0, which no preview smaller than the source covers.
         assert!(zoom_outruns_preview(SOURCE, 1.0, PREVIEW));
     }
 
     #[test]
     fn a_photo_smaller_than_the_preview_never_needs_a_second_decode() {
-        // The preview *is* the full image here (decode-at-size can't upscale),
-        // so even 1:1 must not trigger a redundant full decode.
+        // The preview is already the full image, since decoding never upscales.
         assert!(!zoom_outruns_preview(1600.0, 1.0, PREVIEW));
     }
 
-    // ---- Fit-relative zoom / dimension invariance --------------------------
-
     const AREA: (f32, f32) = (2560.0, 1440.0);
-    // Same 3:2 aspect, two decode tiers: the screen-fit preview and the full
-    // source. `4000 * 2560 / 6000 = 1706.67` floors to 1707 — the ~0.02%
-    // aspect drift a real `fit_within` decode leaves behind.
+    // The preview and full sizes of one 3:2 photo. Rounding 1706.67 to 1707
+    // adds the small aspect drift a real preview decode has.
     const PREVIEW_DIMS: (f32, f32) = (2560.0, 1707.0);
     const SOURCE_DIMS: (f32, f32) = (6000.0, 4000.0);
 
@@ -627,9 +529,8 @@ mod tests {
         (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3
     }
 
-    /// The whole point of storing `zoom` fit-relative: a manual zoom + pan,
-    /// re-evaluated after `image_size()` jumps from the preview's dimensions to
-    /// the true source dimensions, must yield the same shader transform.
+    /// A manual zoom and pan must give the same shader transform after the
+    /// image size jumps from the preview's to the source's.
     #[test]
     fn the_transform_survives_a_preview_to_full_swap() {
         let rot = [1.0, 0.0, 0.0, 1.0];
@@ -638,12 +539,10 @@ mod tests {
 
         let z_preview = zoom_rel * fit_scale_of(PREVIEW_DIMS, AREA);
         let z_source = zoom_rel * fit_scale_of(SOURCE_DIMS, AREA);
-        // Absolute zoom differs wildly between the two tiers…
         assert!((z_preview / z_source - SOURCE_DIMS.0 / PREVIEW_DIMS.0).abs() < 0.01);
 
         let before = loupe_xform(PREVIEW_DIMS, AREA, z_preview, pan, rot);
         let after = loupe_xform(SOURCE_DIMS, AREA, z_source, pan, rot);
-        // …but the transform the shader sees does not (aspect drift only).
         assert!(
             close(before.0, after.0),
             "scale {:?} vs {:?}",
@@ -658,8 +557,6 @@ mod tests {
         );
     }
 
-    /// `reset_100` picks `zoom_rel = 1.0 / fit_scale()` so the effective zoom is
-    /// exactly 1:1 regardless of window or image size.
     #[test]
     fn reset_100_lands_on_true_one_to_one() {
         for area in [(2560.0, 1440.0), (800.0, 600.0), (5000.0, 3000.0)] {
@@ -674,9 +571,8 @@ mod tests {
         }
     }
 
-    /// Fitted (`zoom_rel == 1.0`) fills the fit-limiting axis exactly: the
-    /// visible region spans the whole texture on that axis (`scale` == 1.0) and
-    /// letterboxes the other (`scale` > 1.0, more than the texture visible).
+    /// At fit, the tighter axis shows exactly the whole texture (`scale` 1.0)
+    /// and the other axis is letterboxed (`scale` >= 1.0).
     #[test]
     fn fitted_exactly_contains_the_image() {
         for dims in [SOURCE_DIMS, PREVIEW_DIMS, (1200.0, 1600.0)] {
@@ -694,8 +590,6 @@ mod tests {
 
     #[test]
     fn fit_anchor_is_not_limited_by_explicit_zoom_bounds() {
-        // Fit-relative zoom must preserve the contain scale even when fitting
-        // naturally lands outside the range used by explicit zoom operations.
         assert_eq!(fit_scale_of((100_000.0, 100_000.0), (100.0, 100.0)), 0.001);
         assert_eq!(fit_scale_of((1.0, 1.0), (100.0, 100.0)), 100.0);
     }

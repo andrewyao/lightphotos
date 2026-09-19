@@ -1,21 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Thin shared wrappers over the classic (non-block) CoreGraphics symbols that
-//! `objc2-core-graphics` 0.3 doesn't surface, plus the CFURL/bitmap-context
-//! setup common to `image_decode` and `image_encode`. Both symbols are stable
-//! and the framework is already linked, so we declare them here once instead of
-//! in each codec module.
-//!
-//! ## Pipeline position
-//! Plumbing only, macOS-only, called on every decode and every encode:
-//! - `image_decode.rs` calls `file_url` to open a photo (Pipeline 1's full
-//!   decode, and the metadata reads).
-//! - `image_decode.rs`/`thumbnail.rs` call `srgb_bitmap_context` inside
-//!   `cgimage_to_rgba` (Pipeline 1's decode, and Pipeline 2's thumbnails).
-//! - `image_encode.rs` calls all three functions here to write a JPEG
-//!   (Pipeline 3, export).
-//! - Nothing here decides *when* to run — it's called from whichever of
-//!   those three pipelines is already running.
+//! macOS-only CoreGraphics helpers shared by `image_decode` and `image_encode`:
+//! a file `CFURL` and an sRGB RGBA bitmap context. `objc2-core-graphics` 0.3
+//! does not expose the two bitmap-context functions, so they are declared here.
 
 use std::ffi::c_void;
 use std::path::Path;
@@ -40,8 +27,7 @@ extern "C" {
     fn CGBitmapContextCreateImage(ctx: *const CGContext) -> *mut CGImage;
 }
 
-/// Build a POSIX-path file `CFURL` for `path` (the shared construction used by
-/// both the ImageIO decode open-path and the encode destination).
+/// Build a POSIX-path file `CFURL` for `path`.
 pub(crate) fn file_url(path: &Path) -> Result<CFRetained<CFURL>, String> {
     let path_str = path.to_string_lossy();
     let cf_path = CFString::from_str(&path_str);
@@ -54,15 +40,12 @@ pub(crate) fn file_url(path: &Path) -> Result<CFRetained<CFURL>, String> {
     .ok_or_else(|| "could not build CFURL".into())
 }
 
-/// Create a CGBitmapContext over `data` sized `width × height` with the sRGB
-/// color space and byte order R,G,B,A (premultiplied, big-endian — matches
-/// `Rgba8UnormSrgb`). `data` must point at a buffer of at least
-/// `bytes_per_row * height` bytes and must outlive the returned context.
+/// Create an sRGB bitmap context over `data` with premultiplied R,G,B,A byte
+/// order, which matches `Rgba8UnormSrgb`.
 ///
 /// # Safety
-/// `data` must be valid and large enough for the given geometry, and it must
-/// remain alive and exclusively owned for as long as the returned context is
-/// used.
+/// `data` must hold at least `bytes_per_row * height` bytes and stay alive and
+/// exclusively owned while the returned context is used.
 pub(crate) unsafe fn srgb_bitmap_context(
     data: *mut c_void,
     width: u32,
@@ -74,8 +57,7 @@ pub(crate) unsafe fn srgb_bitmap_context(
     let bitmap_info: u32 =
         CGImageAlphaInfo::PremultipliedLast.0 | CGImageByteOrderInfo::Order32Big.0;
 
-    // SAFETY: caller guarantees `data` is valid for `bytes_per_row * height`;
-    // color_space is valid for the call.
+    // SAFETY: the caller guarantees `data` covers `bytes_per_row * height`.
     let ctx_ptr = unsafe {
         CGBitmapContextCreate(
             data,
@@ -90,18 +72,18 @@ pub(crate) unsafe fn srgb_bitmap_context(
     if ctx_ptr.is_null() {
         return Err("CGBitmapContextCreate failed".into());
     }
-    // SAFETY: non-null (checked), +1 retained → released on drop.
+    // SAFETY: non-null, and returned +1 retained, so drop releases it.
     Ok(unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(ctx_ptr)) })
 }
 
-/// Snapshot the pixels currently in a bitmap `ctx` into an independent
-/// `CGImage` (so the backing buffer may drop afterwards).
+/// Copy the pixels in `ctx` into an independent `CGImage`, so the context's
+/// backing buffer can be dropped afterwards.
 pub(crate) fn bitmap_context_image(ctx: &CGContext) -> Result<CFRetained<CGImage>, String> {
     // SAFETY: `ctx` is a valid bitmap context.
     let img_ptr = unsafe { CGBitmapContextCreateImage(ctx as *const CGContext) };
     if img_ptr.is_null() {
         return Err("CGBitmapContextCreateImage failed".into());
     }
-    // SAFETY: non-null (checked), +1 retained → released on drop.
+    // SAFETY: non-null, and returned +1 retained, so drop releases it.
     Ok(unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(img_ptr)) })
 }

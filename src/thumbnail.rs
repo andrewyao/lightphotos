@@ -1,39 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Thumbnail generation plus a small on-disk thumbnail cache.
-//!
-//! macOS: via Apple's ImageIO (decode-at-size, uses embedded previews, applies
-//! EXIF orientation). Mirrors `image_decode.rs`: open a `CGImageSource` from
-//! the file, ask ImageIO for a thumbnail `CGImage`, then reuse
-//! `image_decode::cgimage_to_rgba` to read it back as tightly-packed RGBA8.
-//!
-//! Non-mac: tries to extract a file's embedded EXIF/TIFF preview
-//! (`try_extract_embedded_preview`, via `kamadak-exif`) first, then rawler's
-//! own per-format `Decoder::full_image()` for containers the former can't
-//! even open (CR3, RAF), falling back to a full decode-at-size through
-//! `image_decode::decode` — see each function's non-mac doc comment for
-//! exactly what is and isn't handled.
-//!
-//! `ThumbCache`, `EmbeddedPreview`, and the on-disk cache helpers below are
-//! platform-independent (no objc2 dependency) and unconditional. The cache
-//! stores one JPEG per photo in that photo's own `<dir>/.lightphotos/`, the
-//! directory `catalog.rs` already keeps ratings and edits in.
-//!
-//! ## Pipeline position
-//! - `loader.rs`'s `Job::Speed`/`Job::Preview` (Pipeline 1, opening a photo)
-//!   call `decode_at_size` directly — `UseIfPresent` for the cheap first
-//!   pass, `Never` for the forced screen-fit decode once that pass comes
-//!   back short.
-//! - `loader.rs`'s `Job::Thumb` (Pipeline 2, Grid/filmstrip) calls
-//!   `ThumbCache::get_or_make`, which checks the on-disk cache before falling
-//!   back to `decode_at_size(.., UseIfPresent)`.
-//! - wasm32 doesn't reach `ThumbCache` itself — it has no `std::fs` — but it
-//!   caches to the same directory, under the same filenames, through
-//!   `web/web_thumb_cache.rs` and the naming helpers below, which it shares.
-//!   A folder cached by either build is readable by the other.
-//!   See `ARCHITECTURE.md`.
+//! Reduced-size decodes and the on-disk thumbnail cache. macOS asks ImageIO
+//! for a thumbnail. Other targets try the file's embedded preview, then fall
+//! back to a full decode and resize. The cache stores one JPEG per photo in
+//! `<dir>/.lightphotos/`, beside the catalog sidecars. The wasm32 build reads
+//! and writes the same files through `web/web_thumb_cache.rs`.
 
-// TODO: remove once wired into loader (T3)
 #![allow(dead_code)]
 
 #[cfg(target_os = "macos")]
@@ -65,22 +37,17 @@ use crate::image_decode::{DecodedImage, PixelFormat};
 /// decode-at-size.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddedPreview {
-    /// Take the embedded preview when the file has one. Right for grid
-    /// thumbnails: they're small, so a camera's embedded JPEG is already more
-    /// than enough detail, and skipping the decode is most of the speed.
+    /// Use the embedded preview when there is one. Fast, and detailed enough
+    /// for small grid thumbnails.
     UseIfPresent,
-    /// Always decode from the full image. Right for the loupe's screen-fit
-    /// preview: embedded previews are typically ~1600px, which would show as
-    /// visible softness at the size the loupe displays.
+    /// Always decode the full image. For the Loupe's screen-fit preview,
+    /// where a ~1600px embedded preview looks soft.
     Never,
 }
 
-/// Decode `path` at a reduced size, longest side at most `max_px`.
-///
-/// This is the fast path that makes the loupe's preview tier worth having:
-/// ImageIO scales *during* decode, unlike `image_decode::decode`, which decodes
-/// the full image and only then draws it down — strictly more work than not
-/// downscaling at all.
+/// Decode `path` with its longest side at most `max_px`. ImageIO scales
+/// during decode, which is much cheaper than `image_decode::decode`'s full
+/// decode followed by a downscale.
 #[cfg(target_os = "macos")]
 pub fn decode_at_size(
     path: &Path,
@@ -91,10 +58,8 @@ pub fn decode_at_size(
 
     let options = build_thumbnail_options(max_px, embedded)?;
 
-    // SAFETY: `source` is valid; `options` is a CFDictionary whose keys are the
-    // documented thumbnail option keys and whose values are the correct CF types
-    // (CFBoolean / CFNumber). The returned CGImage is +1 retained and wrapped in
-    // CFRetained, which releases it on drop.
+    // SAFETY: `options` holds documented thumbnail keys with CFBoolean and
+    // CFNumber values of the right types.
     let image: CFRetained<_> = unsafe { source.thumbnail_at_index(0, Some(&options)) }
         .ok_or("ImageIO could not create thumbnail")?;
 
@@ -104,23 +69,12 @@ pub fn decode_at_size(
         return Err("thumbnail has zero dimension".into());
     }
 
-    // Convert the thumbnail CGImage to RGBA at its own (already-scaled) size.
     cgimage_to_rgba(&image, w, h)
 }
 
-/// Decode `path` at a reduced size, longest side at most `max_px`.
-///
-/// `EmbeddedPreview::Never` (the loupe's screen-fit preview) skips the
-/// preview-extraction branch entirely and always does a real full decode —
-/// there's no cross-platform equivalent of ImageIO's decode-at-size, so this
-/// is a full decode followed by a resize, same shape as
-/// `image_decode::decode`'s non-mac arm (which this calls directly).
-/// `EmbeddedPreview::UseIfPresent` (grid/filmstrip thumbnails) tries the
-/// file's embedded preview ([`try_extract_embedded_preview`] — cheap when it
-/// works, no full decode) and falls back to a real full decode-at-size via
-/// `image_decode::decode` on `None` (missing preview, decode failure,
-/// unsupported format). That fallback is what keeps the extractor safe to
-/// treat as best-effort: nothing it can get wrong actually fails the request.
+/// Decode `path` with its longest side at most `max_px`. Without ImageIO
+/// there is no scaled decode, so this is a full decode plus resize, unless
+/// `UseIfPresent` finds an embedded preview first.
 #[cfg(not(target_os = "macos"))]
 pub fn decode_at_size(
     path: &Path,
@@ -135,39 +89,13 @@ pub fn decode_at_size(
     }
 }
 
-/// Best-effort extraction of a RAW/TIFF-based file's embedded EXIF thumbnail:
-/// the standard baseline JPEG thumbnail stored in IFD1 via the
-/// `JPEGInterchangeFormat`/`JPEGInterchangeFormatLength` tags (TIFF 6.0 / EXIF
-/// 2.3 §4.6.4), decoded and resized to fit `max_px`.
+/// The file's embedded preview, fit within `max_px` and never upscaled.
+/// `None` on any failure, so the caller falls back to a full decode.
 ///
-/// **What this does and doesn't handle**: camera RAW containers (CR2, NEF,
-/// ARW, DNG, ...) are TIFF-based, so `kamadak-exif`'s generic TIFF/EXIF reader
-/// (`Reader::read_from_container`, which detects the TIFF magic and reads the
-/// whole file) can open them directly, and this reads the same baseline
-/// thumbnail tag every EXIF-aware JPEG/TIFF viewer already relies on. That
-/// baseline thumbnail is typically small — cameras commonly store around
-/// 160x120 — not a full-size preview. Several formats additionally carry a
-/// much larger preview via a manufacturer-specific mechanism (CR2's second
-/// IFD, a DNG sub-image with `NewSubfileType=1`, MakerNote `PreviewImageStart`
-/// tags, ...); none of that is parsed here — a genuinely complete marker
-/// parser was explicitly out of scope for this first pass. Never upscales: if
-/// the extracted preview is already smaller than `max_px`, it's returned as-is
-/// (still satisfies "longest side at most `max_px`").
-///
-/// Returns `None` on any failure — unreadable file, no TIFF/EXIF structure, no
-/// IFD1 thumbnail tags, an out-of-bounds offset/length, or a blob that
-/// does not decode as JPEG — so `decode_at_size`'s full-decode
-/// fallback is always safe to take; this must never be what makes a thumbnail
-/// request fail outright.
-///
-/// Deliberately applies no minimum-resolution gate. Every caller reaches here
-/// through `EmbeddedPreview::UseIfPresent`, and that includes the Loupe's
-/// `Job::Speed` tier, whose whole point is to put *something* on screen
-/// immediately and let `loader.rs`'s `escalate_if_short` queue the real decode
-/// when it falls short. Rejecting a small preview here would turn that tier
-/// into the full software demosaic it exists to avoid. The cache's own
-/// minimum lives in [`ThumbCache::get_or_make`], which is the only caller that
-/// needs one.
+/// Reads the EXIF IFD1 thumbnail, which is often only 160x120. Larger
+/// maker-specific previews are not parsed, except CR3 and RAF through rawler.
+/// There is no minimum size here: the Loupe's `Job::Speed` tier wants any
+/// preview fast and escalates later. The cache applies its own minimum.
 #[cfg(not(target_os = "macos"))]
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
     let bytes = fs::read(path).ok()?;
@@ -175,13 +103,8 @@ fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage
         .or_else(|| rawler_full_image_from_bytes(&bytes, max_px))
 }
 
-/// The bytes-based core of [`try_extract_embedded_preview`] above — same
-/// logic, minus the file read, so wasm32's own thumbnail decode
-/// (`app/web.rs`, reading via `FileSystemFileHandle` instead of
-/// `std::fs::read`) can share it exactly rather than re-implementing EXIF
-/// thumbnail extraction a second time. `kamadak-exif`'s
-/// `read_from_container` only needs `Read + Seek`, which `io::Cursor` gives
-/// a byte slice for free — no real file involved at all.
+/// The EXIF IFD1 thumbnail from file bytes. wasm32 calls this directly
+/// because it has no file path.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<DecodedImage> {
     let mut reader = std::io::Cursor::new(bytes);
@@ -214,10 +137,7 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
         return None;
     }
 
-    // The orientation tag describes the *main* image, not the embedded
-    // thumbnail — read it from the primary IFD, matching
-    // `image_decode.rs`'s non-mac `orientation_of`. Defaults to identity (1)
-    // when absent, same as every other orientation read path in this crate.
+    // Orientation belongs to the main image, so read it from the primary IFD.
     let orientation = source
         .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
         .and_then(|f| f.value.get_uint(0))
@@ -229,10 +149,6 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
     } else {
         image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
     };
-    // Resize before orienting (same order `decode_raw_nonmac` uses) so the
-    // fit-within math runs against the pre-rotation aspect ratio consistently
-    // with the rest of this crate; orientation swaps width/height for the
-    // 5..=8 cases, which would otherwise fit the wrong ratio.
     Some(crate::image_decode::apply_exif_orientation(
         DecodedImage {
             width: nw,
@@ -244,40 +160,13 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
     ))
 }
 
-/// Fallback for when [`embedded_preview_from_bytes`] above can't even open
-/// the container — CR3's ISO-BMFF (`ftyp`/`crx`) wrapper and RAF's
-/// proprietary `"FUJIFILM..."` header both fail `kamadak-exif`'s TIFF/JPEG
-/// magic sniff outright, so that function always returns `None` for them,
-/// regardless of file content.
+/// The embedded preview of a CR3 or RAF file, via rawler's
+/// `Decoder::full_image()`. `kamadak-exif` cannot open those containers.
 ///
-/// Asks `rawler`'s own `Decoder::full_image()` instead — a per-format trait
-/// method (default `Ok(None)`) that formats overriding it use to hand back
-/// whatever embedded JPEG/preview their container carries, without touching
-/// the CFA/sensor block or running any demosaic.
-///
-/// **Gated to `FormatHint::RAF`/`CR3` on purpose** — those are the only two
-/// formats [`embedded_preview_from_bytes`] can't open at all, which is this
-/// function's actual job. `full_image()` is *also* overridden by several
-/// TIFF-based decoders this crate treats as RAW (CR2, NEF, ARW, DNG, RW2,
-/// PEF — confirmed against `vendor/rawler-0.7.2/src/decoders/*.rs`), whose
-/// containers `embedded_preview_from_bytes` opens fine already; an earlier,
-/// ungated version of this function asked `full_image()` unconditionally for
-/// any format, and for those it would win over the caller's real RAW-quality
-/// decode whenever the baseline IFD1 thumbnail was "too small" — which is
-/// nearly always. That silently substituted the camera's own embedded JPEG
-/// (its own in-camera tone/color rendering, often a very different image)
-/// for the Loupe's actual linear-RAW develop, on every ARW/CR2/NEF/DNG/RW2/
-/// PEF file, confirmed via a real Sony ARW: embedded JPEG mean sRGB ~0.27 vs
-/// the real demosaic's ~0.18 — a completely different picture, not a subtle
-/// tonemap bug. Scoped back to its original purpose.
-///
-/// Wrapped in `catch_unwind` for defense-in-depth, matching
-/// `raw/preview.rs`'s own convention around `rawler` calls — largely a
-/// no-op on `wasm32-unknown-unknown` (`panic = "abort"`, no real unwinding),
-/// but `full_image()`'s implementations read their embedded-image
-/// offset/length fields through `RawSource::subview`, which is
-/// bounds-checked and `Result`-returning rather than raw slice indexing, so
-/// this call path isn't the panic-prone kind to begin with.
+/// Only CR3 and RAF. rawler also returns a preview for TIFF-based RAWs, but
+/// that camera JPEG has the camera's own tone and color and looks very
+/// different from our RAW develop, so it must not stand in for it.
+/// `catch_unwind` guards against panics inside rawler.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<DecodedImage> {
     let run = std::panic::AssertUnwindSafe(|| -> Option<DecodedImage> {
@@ -298,11 +187,8 @@ pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<
             return None;
         }
 
-        // Orientation from `raw_metadata()`, not the embedded image's own
-        // EXIF (may be absent, or describe only the sub-image rather than
-        // the shot) — same source and the same `Option<u16>` ->
-        // `rawler::Orientation` -> EXIF-code conversion `decode_raw_nonmac`
-        // already uses for the full-decode path.
+        // Take orientation from the RAW metadata, as `decode_raw_nonmac`
+        // does. The embedded image's own EXIF may lack it.
         let orientation = decoder
             .raw_metadata(&source, &params)
             .ok()
@@ -320,9 +206,6 @@ pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<
         } else {
             image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
         };
-        // Resize before orienting — same order `embedded_preview_from_bytes`
-        // uses, for the same reason (orientation swaps w/h for cases 5..=8,
-        // which would otherwise fit the wrong aspect ratio).
         Some(crate::image_decode::apply_exif_orientation(
             DecodedImage {
                 width: nw,
@@ -336,7 +219,8 @@ pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<
     std::panic::catch_unwind(run).ok().flatten()
 }
 
-/// Build the options `CFDictionary` for `CGImageSourceCreateThumbnailAtIndex`.
+/// Options for `CGImageSourceCreateThumbnailAtIndex`. `WithTransform` makes
+/// ImageIO apply EXIF orientation.
 #[cfg(target_os = "macos")]
 fn build_thumbnail_options(
     max_px: u32,
@@ -357,7 +241,6 @@ fn build_thumbnail_options(
     // SAFETY: kCFBooleanTrue is a valid static; present at runtime on macOS.
     let bool_true = unsafe { kCFBooleanTrue }.ok_or("kCFBooleanTrue unavailable")?;
 
-    // Keys and values as raw CFType pointers, in matching order.
     // SAFETY: these statics are valid CFString option keys at runtime.
     let mut keys: [*const c_void; 3] = unsafe {
         [
@@ -379,9 +262,8 @@ fn build_thumbnail_options(
         bool_true as *const _ as *const c_void,
     ];
 
-    // SAFETY: keys/values are valid arrays of 3 CFType pointers; the standard
-    // CFType callbacks retain/release entries, so the dictionary keeps its own
-    // references and the temporaries (max_px_num) may drop after this returns.
+    // SAFETY: keys and values hold 3 valid CFType pointers each. The CFType
+    // callbacks retain entries, so `max_px_num` may drop afterwards.
     let dict = unsafe {
         CFDictionary::new(
             None,
@@ -397,36 +279,23 @@ fn build_thumbnail_options(
     Ok(dict)
 }
 
-/// Longest-side pixel target every cached thumbnail is generated at.
-///
-/// One fixed size, not a per-request one: the cache lives in the user's photo
-/// folder, so a slider-driven target would write a separate entry for every
-/// size the user ever dragged through. 512 is the largest the grid ever draws
-/// and stays sharp on a HiDPI display, where the cell is 192 points.
+/// Longest side of every cached thumbnail. One fixed size, so the cache
+/// holds one entry per photo. 512 covers the largest grid cell on a HiDPI
+/// display.
 pub const THUMB_PX: u32 = 512;
 
-/// Embedded previews must reach at least half the requested longest side.
-/// Smaller previews fall back to source decoding; genuinely small originals
-/// can still be cached at their native resolution.
+/// Whether a preview reaches at least half of `max_px` on its longest side.
 pub(crate) fn preview_is_large_enough(width: u32, height: u32, max_px: u32) -> bool {
     width > 0 && height > 0 && width.max(height) >= max_px.div_ceil(2)
 }
 
-/// Decode `path` for the on-disk cache: one entry per photo, so an entry must
-/// be worth keeping for a whole folder's lifetime rather than merely fast to
-/// produce.
-///
-/// A camera's baseline EXIF thumbnail is commonly 160x120 — fine as the
-/// Loupe's first paint, far too soft as the grid's only cached rendition — so
-/// a preview under [`preview_is_large_enough`] is skipped in favour of the
-/// source. Genuinely small originals are still cached at their native size:
-/// the source decode *is* their best rendition.
+/// Decode `path` for the cache. Entries last as long as the photo, so a tiny
+/// embedded preview (under [`preview_is_large_enough`]) is skipped for a
+/// source decode. Small originals are cached at their native size.
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
 fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
-    // Exactly one decode on every path. Asking for `UseIfPresent` first and
-    // re-decoding when the answer came back short would decode a small
-    // original twice for identical pixels, every session for as long as its
-    // entry fails to write (an alpha PNG, a `LinearF16` RAW).
+    // Try the preview directly instead of `decode_at_size(UseIfPresent)`, so
+    // a small original is never decoded twice.
     if let Some(img) = try_extract_embedded_preview(path, THUMB_PX)
         .filter(|img| preview_is_large_enough(img.width, img.height, THUMB_PX))
     {
@@ -435,12 +304,9 @@ fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
     crate::image_decode::decode(path, THUMB_PX)
 }
 
-/// macOS counterpart. ImageIO decides internally whether
-/// `kCGImageSourceCreateThumbnailFromImageIfAbsent` used the file's embedded
-/// preview or rendered from the full image, and does not report which — so
-/// asking again with `Never` is the only way to find out whether a bigger
-/// rendition exists. A source small enough to fail the gate on its own is
-/// small enough that the second decode is not worth avoiding.
+/// macOS version. ImageIO does not report whether it used the embedded
+/// preview, so a short result is retried with `Never`. The retry is cheap
+/// when the source itself is small.
 #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
 fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
     let img = decode_at_size(path, THUMB_PX, EmbeddedPreview::UseIfPresent)?;
@@ -450,62 +316,39 @@ fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
     decode_at_size(path, THUMB_PX, EmbeddedPreview::Never)
 }
 
-/// Filename suffix shared by every cache entry, after the
-/// `<photo filename>.<16 hex key>` prefix. Deliberately not `.xmp`, so
-/// `catalog.rs`'s sidecar scans (which filter on that extension) skip these.
+/// Suffix of every cache entry name. Not `.xmp`, so the catalog's sidecar
+/// scans skip these files.
 const CACHE_SUFFIX: &str = ".thumb.jpg";
 
-/// FNV-1a-64 of the cache version and source's mtime and byte length — the half of a cache
-/// entry's identity that isn't already carried by its filename. Hand-rolled
-/// (not `DefaultHasher`) so the value is stable across process runs.
+/// Cache key from the source's mtime and length. FNV-1a instead of
+/// `DefaultHasher`, so keys are stable across runs. The path is not hashed,
+/// so moving a folder keeps its cache valid.
 ///
-/// The path is deliberately *not* hashed: an entry lives in its photo's own
-/// `.lightphotos/` directory and is named after it, so moving or renaming the
-/// folder keeps the cache valid instead of orphaning all of it.
-///
-/// **Milliseconds, not nanoseconds**, even though every filesystem this runs
-/// on stores finer than that (APFS and ext4 both keep nanoseconds). The
-/// browser only ever exposes `File.lastModified`, which is milliseconds, so
-/// hashing native's full precision would make the two builds compute
-/// different keys for the same untouched file — each would miss the other's
-/// entries and rewrite them, quietly costing exactly the interop this cache
-/// exists in the photo folder to get. Resolution lost here doesn't weaken
-/// invalidation in practice: the byte length is hashed alongside, and a file
-/// rewritten within the same millisecond at an identical size is not a case
-/// worth chasing.
+/// The mtime is in milliseconds because the browser's `File.lastModified` is.
+/// Native and web builds must compute the same key to share entries.
 pub(crate) fn cache_key(mtime_ms: u64, len: u64) -> u64 {
     let mut h = crate::hash::Fnv1a::new();
-    // Invalidate older entries that discarded transparency or accepted undersized
-    // embedded previews. Native and web must miss the same obsolete entries.
+    // Bump the version to invalidate every existing entry on native and web.
     h.write(b"lightphotos-thumb-v3");
     h.write(&mtime_ms.to_le_bytes());
     h.write(&len.to_le_bytes());
     h.finish()
 }
 
-/// `<photo filename>.<key:016x>.thumb.jpg` — the cache entry name for `photo`.
-///
-/// Built by `OsString::push` rather than formatting through `to_string_lossy`
-/// so a non-UTF-8 filename round-trips exactly, same as `catalog.rs`'s
-/// `sidecar_path`.
+/// Cache entry name `<photo filename>.<key:016x>.thumb.jpg`. Built with
+/// `OsString::push` so non-UTF-8 names round-trip exactly.
 pub(crate) fn cache_name(photo: &OsStr, key: u64) -> OsString {
     let mut name = photo.to_os_string();
     name.push(format!(".{key:016x}{CACHE_SUFFIX}"));
     name
 }
 
-/// The inverse of [`cache_name`]: split a cache entry's filename back into the
-/// photo it belongs to and the key it was written under. `None` for anything
-/// that isn't a cache entry, which is how the sweep below leaves `.xmp`
-/// sidecars (and anything else a user dropped in there) alone.
-///
-/// Requires a UTF-8 name, unlike `cache_name`. A non-UTF-8 photo filename
-/// still gets a working cache entry — lookup joins the exact `OsString` — it
-/// just isn't reachable by the orphan sweep.
+/// Split a cache entry name into photo name and key. `None` for anything
+/// else, so the sweep leaves sidecars and user files alone. Needs UTF-8, so
+/// the sweep never removes entries for non-UTF-8 photo names.
 pub(crate) fn parse_cache_name(name: &OsStr) -> Option<(OsString, u64)> {
     let rest = name.to_str()?.strip_suffix(CACHE_SUFFIX)?;
-    // The key is the final dot-separated field; `rsplit_once` keeps the rest
-    // intact, so a photo named `PHOTO1.ARW` (a dot of its own) survives.
+    // The key is the last field. The photo name may contain dots.
     let (photo, hex) = rest.rsplit_once('.')?;
     if photo.is_empty() || hex.len() != 16 {
         return None;
@@ -514,10 +357,7 @@ pub(crate) fn parse_cache_name(name: &OsStr) -> Option<(OsString, u64)> {
     Some((OsString::from(photo), key))
 }
 
-/// The cache entry path for `photo`, or `None` when the photo has no parent
-/// directory, no filename, or can't be stat'd (deleted between listing and
-/// decode). Reads the source's metadata, so it is the one place that decides
-/// whether an on-disk entry is current.
+/// Current cache entry path for `photo`, or `None` if it cannot be stat'd.
 #[cfg(not(target_arch = "wasm32"))]
 fn entry_path(photo: &Path) -> Option<PathBuf> {
     let dir = photo.parent()?;
@@ -528,7 +368,6 @@ fn entry_path(photo: &Path) -> Option<PathBuf> {
     )
 }
 
-/// The key `photo`'s current bytes hash to, or `None` if it can't be stat'd.
 #[cfg(not(target_arch = "wasm32"))]
 fn current_key(photo: &Path) -> Option<u64> {
     let meta = fs::metadata(photo).ok()?;
@@ -541,39 +380,25 @@ fn current_key(photo: &Path) -> Option<u64> {
     Some(cache_key(mtime_ms, meta.len()))
 }
 
-/// On-disk thumbnail cache, stored as JPEGs in each photo's own
-/// `<photo dir>/.lightphotos/` — the same directory `catalog.rs` already keeps
-/// ratings and develop edits in.
-///
-/// Holds no state: an entry's location is derived from the photo's own path,
-/// so the cache follows the photos when a folder is moved, copied, or opened
-/// from a different machine. That is also what lets the browser build share
-/// it, since File System Access has no path outside the picked folder to
-/// write to (`web/web_thumb_cache.rs` is the wasm32 half).
-///
-/// A folder that can't be written (read-only volume, locked card) simply
-/// decodes every session: writes are best-effort and their failure is never
-/// surfaced.
+/// On-disk thumbnail cache in `<photo dir>/.lightphotos/`. It lives beside
+/// the photos because the browser can write only inside the picked folder.
+/// Writes are best-effort, so a read-only folder decodes every session.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct ThumbCache;
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ThumbCache {
-    /// Reclaim the pre-`.lightphotos` central cache, then hand back the
-    /// (stateless) cache handle.
+    /// Also deletes the old central cache in the background.
     pub fn new() -> ThumbCache {
         remove_legacy_cache();
         ThumbCache
     }
 
-    /// Return `path`'s cached thumbnail if one is on disk and current;
-    /// otherwise decode it, persist it, and return it.
+    /// The cached thumbnail if current, else decode, cache, and return it.
     pub fn get_or_make(&self, path: &Path) -> Result<Arc<DecodedImage>, String> {
         let entry = entry_path(path);
 
-        // A hit decodes a ~45 KB JPEG instead of a multi-megabyte RAW. A
-        // corrupt or half-written entry just fails here and falls through to
-        // the real decode below, which overwrites it.
+        // A corrupt entry fails to decode and is overwritten below.
         if let Some(file) = &entry {
             if let Ok(img) = decode_at_size(file, THUMB_PX, EmbeddedPreview::UseIfPresent) {
                 return Ok(Arc::new(img));
@@ -581,7 +406,6 @@ impl ThumbCache {
         }
 
         let img = decode_for_cache(path)?;
-        // Best-effort write; a failed cache write must not fail the request.
         if let Some(file) = &entry {
             let _ = write_entry(file, &img);
         }
@@ -596,12 +420,8 @@ impl Default for ThumbCache {
     }
 }
 
-/// wasm32 stand-in. `loader.rs` builds a `ThumbCache` for its decode workers
-/// on every target, but those workers never run in a browser — the Web Worker
-/// pool decodes there instead (`web/web_worker_pool.rs`), and caches through
-/// `web/web_thumb_cache.rs`, which reaches `.lightphotos/` over File System
-/// Access rather than `std::fs`. Keeping the type present here is what lets
-/// `loader.rs` stay platform-agnostic.
+/// wasm32 stub so `loader.rs` compiles unchanged. In the browser the Web
+/// Worker pool decodes, and `web/web_thumb_cache.rs` does the caching.
 #[cfg(target_arch = "wasm32")]
 pub struct ThumbCache;
 
@@ -631,13 +451,8 @@ pub(crate) fn jpeg_cacheable(img: &DecodedImage) -> bool {
     img.pixel_format == PixelFormat::Srgb8 && img.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255)
 }
 
-/// Encode `img` as a JPEG at `file`, creating `.lightphotos/` if this is the
-/// directory's first entry. Atomic: writes a `.tmp` sibling and renames, the
-/// same shape `catalog.rs`'s `write_sidecar_file` uses.
-///
-/// Only opaque sRGB8 is written. The RAW tiers can hand back `LinearF16`, which a
-/// JPEG can't represent — caching that would silently store wrong pixels, so
-/// those photos decode every session instead.
+/// Write `img` to `file` as a JPEG via a `.tmp` sibling and rename. Refuses
+/// anything [`jpeg_cacheable`] rejects, so those photos decode every session.
 #[cfg(not(target_arch = "wasm32"))]
 fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
     if !jpeg_cacheable(img) {
@@ -646,41 +461,31 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
     let dir = file.parent().ok_or("cache entry has no parent")?;
     fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
-    // Push rather than `with_extension`, so the temp name keeps the full
-    // entry name and the sweep below can recognise an interrupted write.
+    // Append `.tmp` to the full name so `sweep_orphans` can parse it.
     let mut tmp = file.as_os_str().to_os_string();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
 
     crate::image_encode::encode_jpeg(&tmp, img.width, img.height, &img.rgba)?;
     if let Err(e) = fs::rename(&tmp, file) {
-        // Don't leave the orphaned temp file behind on failure.
         let _ = fs::remove_file(&tmp);
         return Err(format!("rename: {e}"));
     }
     Ok(())
 }
 
-/// How long an interrupted write's `.tmp` file is left alone before the sweep
-/// reclaims it. `write_entry` encodes and renames within one call, so a temp
-/// belonging to a worker still running is seconds old at most; anything older
-/// than this outlived the process that created it.
+/// Age after which a `.tmp` entry is abandoned. A live write takes seconds.
 #[cfg(not(target_arch = "wasm32"))]
 const TMP_REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(3600);
 
-/// Delete every cache entry in `dir/.lightphotos/` whose photo is gone or has
-/// changed since the entry was written, plus any `.tmp` left behind by a write
-/// that never finished. Called when a folder opens.
-///
-/// This is the whole eviction story — there is no byte budget. One entry per
-/// photo means a folder's cache is bounded by its own photo count, and an
-/// entry that stops matching its photo is deleted rather than aged out.
-/// Best-effort throughout: a failed delete just leaves the file.
+/// Delete cache entries whose photo is gone or changed, and abandoned `.tmp`
+/// files. Runs when a folder opens. This is the only eviction; there is no
+/// size budget, since there is one entry per photo.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn sweep_orphans(dir: &Path) {
     let cache_dir = dir.join(crate::catalog::SIDECAR_DIR);
     let Ok(entries) = fs::read_dir(&cache_dir) else {
-        return; // no .lightphotos yet — nothing was ever cached here
+        return;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -688,10 +493,7 @@ pub(crate) fn sweep_orphans(dir: &Path) {
             continue;
         };
         if let Some(stem) = name.strip_suffix(".tmp") {
-            // A crash or a quit mid-encode leaves this behind forever
-            // otherwise: the name carries the key it was written under, so
-            // editing the photo means no later write ever reuses it. The age
-            // check is what keeps this from racing a concurrent writer.
+            // The age check avoids deleting a temp file a worker is writing.
             if parse_cache_name(OsStr::new(stem)).is_some() && is_older_than(&entry, TMP_REAP_AFTER)
             {
                 let _ = fs::remove_file(entry.path());
@@ -707,9 +509,8 @@ pub(crate) fn sweep_orphans(dir: &Path) {
     }
 }
 
-/// Whether `entry` was last modified more than `age` ago. `false` whenever the
-/// answer can't be established (no mtime, a clock that moved backwards), so an
-/// unreadable timestamp leaves the file in place rather than deleting it.
+/// `false` when the mtime is unreadable or in the future, so unknown files
+/// are kept.
 #[cfg(not(target_arch = "wasm32"))]
 fn is_older_than(entry: &fs::DirEntry, age: std::time::Duration) -> bool {
     entry
@@ -720,22 +521,15 @@ fn is_older_than(entry: &fs::DirEntry, age: std::time::Duration) -> bool {
         .is_some_and(|elapsed| elapsed > age)
 }
 
-/// One-time reclaim of the central caches this cache replaced
-/// (`~/Library/Caches/com.lightphotos/thumbnails` and its pre-rename
-/// `com.imageviewer` predecessor). Runs off the main path — deleting a cache
-/// that grew to its old 512 MiB budget is thousands of unlinks, and startup
-/// must not block on it.
-///
-/// A no-op after the first launch, and on wasm32, where `$HOME` is unset.
+/// Delete the old central caches under `~/Library/Caches` on a background
+/// thread. They can hold thousands of files, and startup must not wait.
 #[cfg(not(target_arch = "wasm32"))]
 fn remove_legacy_cache() {
     let Ok(home) = std::env::var("HOME") else {
         return;
     };
     let base = PathBuf::from(home).join("Library/Caches");
-    // Builder::spawn (Result-returning), not the bare free `thread::spawn`
-    // (which panics on failure): not every target has real threads, and
-    // startup must degrade rather than crash.
+    // `Builder::spawn` returns an error instead of panicking.
     let _ = std::thread::Builder::new()
         .name("thumb-cache-reclaim".into())
         .spawn(move || {
@@ -792,14 +586,10 @@ mod tests {
 
     #[test]
     fn parse_rejects_non_cache_names() {
-        // A sidecar, which shares the directory and must be left alone.
         assert!(parse_cache_name(OsStr::new("IMG_0001.ARW.xmp")).is_none());
-        // Right suffix, but no key field at all.
         assert!(parse_cache_name(OsStr::new("IMG_0001.ARW.thumb.jpg")).is_none());
-        // Right suffix, key isn't 16 hex digits.
         assert!(parse_cache_name(OsStr::new("IMG_0001.ARW.abc.thumb.jpg")).is_none());
         assert!(parse_cache_name(OsStr::new("IMG_0001.ARW.zzzzzzzzzzzzzzzz.thumb.jpg")).is_none());
-        // No photo name left once the key is stripped.
         assert!(parse_cache_name(OsStr::new(".a3f1c07b91e4d2f8.thumb.jpg")).is_none());
     }
 
@@ -808,8 +598,6 @@ mod tests {
         let base = cache_key(1_000, 4_096);
         assert_eq!(base, cache_key(1_000, 4_096), "same inputs, same key");
         assert_ne!(base, cache_key(1_001, 4_096), "a touched file must miss");
-        // The browser hands us whole milliseconds; native must agree with it
-        // exactly, or neither build ever reads the other's entries.
         assert_eq!(
             base,
             cache_key(
@@ -849,8 +637,8 @@ mod tests {
             let first = cache.get_or_make(&photo).unwrap();
             assert_eq!(jpeg_cacheable(&first), opaque);
             assert_eq!(entry.exists(), opaque);
-            // A second request hits JPEG for opaque images and re-decodes
-            // transparent sources without losing alpha.
+            // Opaque images hit the cache. Transparent ones re-decode and
+            // keep alpha.
             let second = cache.get_or_make(&photo).unwrap();
             assert_eq!(jpeg_cacheable(&second), opaque);
             assert_eq!(first.rgba[3], second.rgba[3]);
@@ -859,10 +647,8 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// A photo, its current cache entry, a stale entry from before it was
-    /// edited, an entry for a photo that's been deleted, a `.tmp` a live
-    /// writer may still be holding, a `.tmp` abandoned by a crashed one, and
-    /// a sidecar that must survive all of it.
+    /// Covers current, stale, and orphaned entries, a fresh and an abandoned
+    /// `.tmp`, a sidecar, and unrelated files.
     #[test]
     #[cfg(not(target_arch = "wasm32"))]
     fn sweep_keeps_current_entries_and_sidecars() {
@@ -890,7 +676,6 @@ mod tests {
         ] {
             fs::write(f, b"x").unwrap();
         }
-        // Backdated past `TMP_REAP_AFTER`: no process is still writing this.
         fs::File::options()
             .write(true)
             .open(&abandoned)

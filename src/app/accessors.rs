@@ -8,25 +8,17 @@ use crate::navigation::Cmp;
 use crate::thumbnail::THUMB_PX;
 
 impl App {
-    /// Accessors used by the egui UI module (`ui.rs`).
     pub(crate) fn mode(&self) -> ViewMode {
         self.mode
     }
 
-    /// Whether a folder/file is currently open. `false` is the landing-page
-    /// state on every platform: startup with no CLI arg / AppleEvent path.
-    /// `ui::draw` checks this to decide whether to show the landing page
-    /// instead of the Grid/Loupe chrome, and `ui::app_header` to decide
-    /// whether its "Open" button has anything to replace.
+    /// Whether a folder or file is open. `false` means the landing page shows.
     pub(crate) fn has_playlist(&self) -> bool {
         self.playlist.is_some()
     }
 
-    /// Whether a folder-picker dialog is currently in flight — drives the
-    /// landing page's button label ("Opening…" / disabled). Only ever true on
-    /// wasm32, whose File System Access picker is asynchronous; native's OS
-    /// dialog is modal and blocks the calling thread, so it is never observed
-    /// mid-pick.
+    /// Whether a folder picker is open. Always false on native, where the
+    /// picker blocks the main thread. The web picker is async.
     pub(crate) fn folder_pick_pending(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
@@ -38,43 +30,37 @@ impl App {
         }
     }
 
-    /// The keyboard-focused region (lit panel, arrow-key target).
     pub(crate) fn focus(&self) -> Region {
         self.focus
     }
 
-    /// The focus depth used by the UI to distinguish a selected region from an
-    /// entered control within that region.
     pub(crate) fn focus_level(&self) -> FocusLevel {
         self.focus_level
     }
 
-    /// The index of the keyboard-focused Develop slider (0..=7).
     pub(crate) fn develop_focus(&self) -> usize {
         self.develop_focus
     }
 
-    /// The index of the keyboard-focused Toolbar control.
     pub(crate) fn toolbar_focus(&self) -> usize {
         self.toolbar_focus
     }
 
-    /// The root of the folder tree (the opened folder, or a file's parent).
+    /// The root of the folder tree: the opened folder, or a file's parent.
     pub(crate) fn folder_root(&self) -> Option<PathBuf> {
         self.folder_root.clone()
     }
 
-    /// The folder whose images are currently in the grid (highlighted in tree).
+    /// The folder whose images are in the grid.
     pub(crate) fn folder_sel(&self) -> Option<PathBuf> {
         self.folder_sel.clone()
     }
 
-    /// Whether a tree folder is expanded.
     pub(crate) fn is_expanded(&self, dir: &Path) -> bool {
         self.expanded.contains(dir)
     }
 
-    /// The cached immediate subdirectories of `dir` (empty slice if uncached).
+    /// The cached subdirectories of `dir`. Empty if not cached yet.
     pub(crate) fn subdirs(&self, dir: &Path) -> &[PathBuf] {
         self.subdirs.get(dir).map(|v| v.as_slice()).unwrap_or(&[])
     }
@@ -88,7 +74,6 @@ impl App {
         self.filter_cmp
     }
 
-    /// Whether the shortcut-help overlay is showing.
     pub(crate) fn show_help(&self) -> bool {
         self.show_help
     }
@@ -97,20 +82,15 @@ impl App {
         self.pending_quit
     }
 
-    /// Longest-side pixel target for the loupe's screen-fit preview decode:
-    /// the window's longest side, quantized and clamped. Also the cache key for
-    /// the preview tier, so it must be stable — see [`preview_target_px`].
-    ///
-    /// `win_size` is already in physical pixels (winit hands us a
-    /// `PhysicalSize`), so it must *not* be scaled by the DPI factor again —
-    /// doing so asks for a 4096px preview on a window that only needs 2560,
-    /// which is most of the cost this tier exists to avoid.
+    /// Longest-side size in pixels for the loupe's screen-fit preview decode.
+    /// `win_size` is already in physical pixels, so don't scale it by the DPI
+    /// factor again.
     pub(crate) fn preview_px(&self) -> u32 {
         preview_target_px(self.win_size.0.max(self.win_size.1))
     }
 
-    /// Position of the current selection within `visible`, or `None` in the
-    /// grid's browse-first state (before any click/arrow).
+    /// Position of the selection within `visible`. `None` until the user
+    /// clicks or presses an arrow key.
     pub(crate) fn sel(&self) -> Option<usize> {
         self.sel
     }
@@ -123,8 +103,8 @@ impl App {
         self.grid_cols = cols.max(1);
     }
 
-    /// The grid reports which cell range `[start, end)` is scrolled into view so
-    /// thumbnail loading can be virtualized to just those cells.
+    /// The grid's on-screen cell range `[start, end)`. Thumbnails load only
+    /// for these cells.
     pub(crate) fn set_visible_grid_range(&mut self, start: usize, end: usize) {
         self.grid_range = (start, end);
     }
@@ -133,21 +113,17 @@ impl App {
         std::mem::take(&mut self.grid_scroll_reset)
     }
 
-    /// The filmstrip reports which cell range `[start, end)` is scrolled into view
-    /// so thumbnail loading is virtualized to just those cells (horizontal
-    /// equivalent of `set_visible_grid_range`).
+    /// The filmstrip's on-screen cell range `[start, end)`.
     pub(crate) fn set_visible_strip_range(&mut self, start: usize, end: usize) {
         self.strip_range = (start, end);
     }
 
-    /// The filmstrip's cell range `[start, end)` scrolled into view as of last
-    /// frame — used to tell whether the current selection is near enough to
-    /// the visible edge to warrant scrolling.
+    /// The filmstrip's on-screen cell range as of last frame.
     pub(crate) fn strip_range(&self) -> (usize, usize) {
         self.strip_range
     }
 
-    /// Rating of the visible cell at `pos` (0 when unset/out of range).
+    /// Rating of the visible cell at `pos`. 0 when unrated or out of range.
     pub(crate) fn rating_at(&self, pos: usize) -> u8 {
         self.visible
             .get(pos)
@@ -156,10 +132,8 @@ impl App {
             .unwrap_or(0)
     }
 
-    /// The single "which frame is better" number, shared by burst and duplicate
-    /// picking: sharpness with a blink penalty folded in (see
-    /// [`burst::combined_score`]). Both groupings answer the same question, so
-    /// neither should have its own idea of what makes a frame the keeper.
+    /// The "which frame is better" score: sharpness with a blink penalty. Bursts
+    /// and duplicates both use it, so they agree on which frame to keep.
     pub(super) fn culling_score(&self, path: &Path) -> Option<f64> {
         burst::combined_score(
             self.sharpness.get(path).copied(),
@@ -167,22 +141,20 @@ impl App {
         )
     }
 
-    /// The face signal for a path, once analyzed. `None` while the analysis is
-    /// still pending, failed, or was never requested (the pass only covers
-    /// grouped photos).
+    /// The face analysis for a path. `None` while pending, after a failure, or
+    /// when never requested. Only grouped photos are analyzed.
     pub(crate) fn face_quality_of(&self, path: &Path) -> Option<crate::facequality::FaceQuality> {
         self.face_quality.get(path).copied()
     }
 
-    /// Whether the face pass found a blink in this path's photo.
     pub(super) fn eyes_closed(&self, path: &Path) -> bool {
         self.face_quality_of(path)
             .and_then(|q| q.eye_state())
             .is_some_and(|s| s == crate::facequality::EyeState::Closed)
     }
 
-    /// Whether the visible cell at `pos` has a detected blink (drives the grid
-    /// badge). `false` when out of range or not yet analyzed.
+    /// Whether the visible cell at `pos` has a detected blink. `false` when out
+    /// of range or not yet analyzed.
     pub(crate) fn eyes_closed_at(&self, pos: usize) -> bool {
         self.visible
             .get(pos)
@@ -190,21 +162,18 @@ impl App {
             .is_some_and(|p| self.eyes_closed(p))
     }
 
-    /// Whether the "eyes closed" filter is on (for the toolbar toggle state).
     pub(crate) fn eyes_filter_on(&self) -> bool {
         self.eyes_filter
     }
 
-    /// Flip the "eyes closed" filter and re-narrow the grid.
     pub(super) fn toggle_eyes_filter(&mut self) {
         self.eyes_filter = !self.eyes_filter;
         self.recompute_visible();
         self.request_redraw();
     }
 
-    /// Rebuild `burst_marks` from the cached capture times + sharpness over the
-    /// current playlist entries. Clears the marks when bursts are off or there
-    /// is no playlist. Cheap: O(entries).
+    /// Rebuild `burst_marks` from cached capture times and scores. Clears them
+    /// when bursts are off or no folder is open.
     pub(super) fn recompute_burst_marks(&mut self) {
         let Some(pl) = &self.playlist else {
             self.burst_marks.clear();
@@ -215,10 +184,8 @@ impl App {
             return;
         }
         let entries = pl.entries();
-        // Grouping is only valid once every entry's capture time has been read.
-        // Until then, unread entries collapse into one giant "burst"
-        // (group_by_time treats a run of unknowns as one group), which would dim
-        // the whole folder to a single frame. Paint nothing until the scan is done.
+        // Wait until every capture time is read. `group_by_time` treats a run of
+        // unknown times as one burst, which would dim the whole folder.
         if entries.iter().any(|p| !self.capture_times.contains_key(p)) {
             self.burst_marks.clear();
             return;
@@ -232,32 +199,24 @@ impl App {
     }
 
     /// Burst mark for the visible cell at `pos`. `None` when bursts are off, the
-    /// cell is a singleton, or `pos` is out of range. `burst_marks` is indexed by
-    /// playlist entry index, so we map the visible position through `visible`.
+    /// photo is not in a burst, or `pos` is out of range.
     pub(crate) fn burst_mark_at(&self, pos: usize) -> Option<BurstMark> {
         let idx = *self.visible.get(pos)?;
         self.burst_marks.get(idx).copied().flatten()
     }
 
-    /// Whether burst mode is currently on (for the toolbar toggle state).
     pub(crate) fn bursts_on(&self) -> bool {
         self.bursts_on
     }
 
-    /// Reset transient burst view state on a folder change. Keeps the path-keyed
-    /// caches (harmless across folders; helps on revisit) but drops the toggle
-    /// and derived marks so a new folder starts plain.
+    /// Turn bursts off for a new folder. Path-keyed caches are kept for revisits.
     pub(super) fn reset_burst_state(&mut self) {
         self.bursts_on = false;
         self.burst_marks.clear();
     }
 
-    /// Rebuild `dup_marks` from the cached dHashes + sharpness over the current
-    /// playlist entries. Clears the marks when dupes are off or there is no
-    /// playlist. Unlike `recompute_burst_marks`, this doesn't need to wait for a
-    /// full scan first: `duplicates::group_by_hash` treats an unknown hash as
-    /// its own private singleton (never merged), so a partial scan just means
-    /// fewer groups are found yet, not a false single giant group.
+    /// Rebuild `dup_marks` from cached dHashes and scores. Unlike bursts, this
+    /// can run on a partial scan: an unknown hash never joins a group.
     pub(super) fn recompute_dup_marks(&mut self) {
         let Some(pl) = &self.playlist else {
             self.dup_groups.clear();
@@ -276,9 +235,8 @@ impl App {
             .collect();
         let scores: Vec<Option<f64>> = entries.iter().map(|p| self.culling_score(p)).collect();
         let groups = duplicates::group_by_hash(&hashes, duplicates::DEFAULT_MAX_DISTANCE);
-        // Second tier: split off any dHash false positive whose feature-print
-        // distance to its group's anchor exceeds the threshold. Members
-        // without a feature print yet stay in their dHash group unchanged.
+        // Split off dHash false positives whose feature-print distance to the
+        // group's anchor is too large. Members without a feature print stay.
         let refined = duplicates::refine_by_feature_print(
             &groups,
             duplicates::DEFAULT_MAX_FEATURE_DISTANCE,
@@ -294,72 +252,59 @@ impl App {
     }
 
     /// Duplicate mark for the visible cell at `pos`. `None` when dupes are off,
-    /// the cell is a singleton, or `pos` is out of range. `dup_marks` is indexed
-    /// by playlist entry index, so we map the visible position through `visible`.
+    /// the photo has no duplicates, or `pos` is out of range.
     pub(crate) fn dup_mark_at(&self, pos: usize) -> Option<DuplicateMark> {
         let idx = *self.visible.get(pos)?;
         self.dup_marks.get(idx).copied().flatten()
     }
 
-    /// Whether duplicate-grouping mode is currently on (for the toolbar toggle state).
     pub(crate) fn dupes_on(&self) -> bool {
         self.dupes_on
     }
 
-    /// Reset transient duplicate-grouping view state on a folder change. Keeps
-    /// the path-keyed `phashes` cache (harmless across folders) but drops the
-    /// toggle and derived marks so a new folder starts plain.
+    /// Turn duplicate grouping and the blink filter off for a new folder, so it
+    /// never opens to a silently empty grid. Path-keyed caches are kept.
     pub(super) fn reset_dup_state(&mut self) {
         self.dupes_on = false;
         self.dup_groups.clear();
         self.dup_refined.clear();
         self.dup_marks.clear();
-        // Same rationale for the blink filter: the `face_quality` cache is
-        // path-keyed and worth keeping, but a new folder starts unfiltered
-        // rather than silently showing an empty grid.
         self.eyes_filter = false;
     }
 
-    /// Paths of the duplicate group currently under review in Survey Mode
-    /// (empty outside `ViewMode::Survey`).
+    /// The duplicate group shown in Survey. Empty outside Survey.
     pub(crate) fn survey_members(&self) -> &[PathBuf] {
         &self.survey_members
     }
 
-    /// The Survey group's best member, if any (see `open_survey`).
     pub(crate) fn survey_best(&self) -> Option<&Path> {
         self.survey_best.as_deref()
     }
 
-    /// Index into `survey_members()` that rating hotkeys/arrow-keys apply to.
+    /// Index into `survey_members()` that the rating keys apply to.
     pub(crate) fn survey_focus(&self) -> usize {
         self.survey_focus
     }
 
-    /// Rating of `path` (0 when unset). Path-keyed counterpart to
-    /// `rating_at(pos)`, for Survey Mode's arbitrary (non-visible-position)
-    /// member list.
+    /// Rating of `path`, 0 when unrated. Survey uses it for its member list.
     pub(crate) fn rating_of_path(&self, path: &Path) -> u8 {
         self.rating_of(path)
     }
 
-    /// Rating of the current selection (0 when unset).
     pub(crate) fn selected_rating(&self) -> u8 {
         self.selected_path()
             .map(|p| self.rating_of(&p))
             .unwrap_or(0)
     }
 
-    /// The egui texture + source dimensions for the visible cell at `pos`, if
-    /// its thumbnail has been uploaded this frame.
+    /// The thumbnail texture and its size for the visible cell at `pos`, if
+    /// uploaded.
     pub(crate) fn thumb_texture_for(&self, pos: usize) -> Option<(&egui::TextureHandle, u32, u32)> {
         let idx = *self.visible.get(pos)?;
         let path = self.playlist.as_ref()?.entry(idx)?;
         self.thumb_texture_for_path(path)
     }
 
-    /// Path-keyed counterpart to `thumb_texture_for(pos)`, for Survey Mode's
-    /// arbitrary (non-visible-position) member list.
     pub(crate) fn thumb_texture_for_path(
         &self,
         path: &Path,
@@ -371,12 +316,9 @@ impl App {
     }
 }
 
-/// Round a window's longest side (in physical pixels) up to the preview decode
-/// target, clamped to the tier's bounds.
-///
-/// The rounding is the point: this value is part of the preview cache key, so
-/// returning the raw window size would make every pixel of a window drag miss
-/// the cache, queue another full decode, and evict the one already on screen.
+/// Round a window's longest side (physical pixels) up to the preview decode
+/// size, clamped to the tier's bounds. The result is part of the preview cache
+/// key, so rounding stops a window resize from re-decoding on every pixel.
 pub(crate) fn preview_target_px(longest_physical: f32) -> u32 {
     let longest = longest_physical.max(1.0) as u32;
     let quantized = longest.div_ceil(PREVIEW_QUANTUM) * PREVIEW_QUANTUM;
@@ -389,8 +331,6 @@ mod tests {
 
     #[test]
     fn small_windows_still_get_a_preview_worth_having() {
-        // Below the floor the thumbnail placeholder would be nearly as good,
-        // and the decode is cheap anyway, so don't go under PREVIEW_MIN.
         assert_eq!(preview_target_px(1.0), PREVIEW_MIN);
         assert_eq!(preview_target_px(640.0), PREVIEW_MIN);
     }
@@ -404,8 +344,7 @@ mod tests {
 
     #[test]
     fn the_target_always_covers_the_window() {
-        // Rounding is *up*: a preview must never be smaller than the window it
-        // is about to fill, or fit-zoom would magnify it.
+        // A preview smaller than the window would be magnified by fit-zoom.
         for longest in [1100, 1400, 2048, 2049, 3000, 3584] {
             assert!(preview_target_px(longest as f32) >= longest.min(PREVIEW_MAX));
         }
@@ -413,19 +352,15 @@ mod tests {
 
     #[test]
     fn dragging_a_window_edge_does_not_thrash_the_cache() {
-        // Every size within one quantum maps to the same target, so a resize
-        // drag re-decodes at most once per 512px crossed.
         for longest in 1537..=2048 {
             assert_eq!(preview_target_px(longest as f32), 2048, "at {longest}");
         }
-        // ...and crossing the boundary does step up, exactly once.
         assert_eq!(preview_target_px(2049.0), 2560);
     }
 
     #[test]
     fn a_preview_is_always_sharper_than_the_largest_thumbnail() {
-        // The tiers must not overlap: if a preview could come back at or below
-        // THUMB_PX, the "sharper tier arrived" swap would be a no-op.
+        // A preview no larger than a thumbnail would add no detail when swapped in.
         assert!(PREVIEW_MIN > THUMB_PX);
     }
 }

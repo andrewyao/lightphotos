@@ -8,8 +8,6 @@ use crate::image_decode;
 pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let sel = app.sel();
 
-    // The bottom filmstrip, unless hidden (Shift+Tab). When hidden, arrow keys
-    // still step the photo — the strip is just the visual.
     if app.filmstrip_visible() {
         let strip_h = (GRID_CELL_PT * 0.55).clamp(72.0, 200.0) + 8.0;
         egui::Panel::bottom("filmstrip")
@@ -19,15 +17,8 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                 let cell_full = cell + ui.spacing().item_spacing.x;
                 let len = app.visible_len();
 
-                // A horizontal-only ScrollArea doesn't respond to a plain
-                // vertical mouse wheel in egui (only to a trackpad's
-                // horizontal swipe, or an explicit shift+scroll) — so on a
-                // vanilla mouse, wheeling over the filmstrip would otherwise
-                // do nothing. Read the vertical delta here, before the
-                // ScrollArea below (it never touches the y axis, so this
-                // doesn't fight it), and step through photos instead —
-                // that's the more useful reading of "scroll over the
-                // filmstrip" anyway.
+                // egui's horizontal ScrollArea ignores a vertical mouse wheel,
+                // so read the vertical delta here and step through photos.
                 if ui.rect_contains_pointer(ui.max_rect()) {
                     let dy = ui.input(|i| i.smooth_scroll_delta.y);
                     if dy != 0.0 {
@@ -35,22 +26,13 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                     }
                 }
 
-                // Virtualized horizontal strip (egui has no `show_columns`, so do
-                // the grid's `show_rows` trick by hand): build only the cells in
-                // view and report the range so loading tracks the scroll position.
+                // egui has no `show_columns`, so build only the cells in view by
+                // hand and report the range so thumbnail loading follows scrolling.
                 let mut area = egui::ScrollArea::horizontal().auto_shrink([false, false]);
-                // The strip only scrolls when the selection is about to run off
-                // the currently-visible edge — stepping through its middle moves
-                // just the highlight, not the strip itself. `filmstrip_last_sel`
-                // (egui memory, not App state — purely a rendering concern) marks
-                // when the selection actually changed; only then do we check
-                // proximity to last frame's visible range (`strip_range`) and, if
-                // warranted, arm a new `filmstrip_scroll_target` to glide toward
-                // (clamped so it never scrolls past either end of the strip).
-                // Once armed, the target keeps being animated toward — smoothly,
-                // not teleported — every frame until it converges, at which point
-                // we stop touching `scroll_offset` entirely so manual drags/clicks
-                // on settled frames aren't fought.
+                // The strip scrolls only when a new selection lands at the edge
+                // of last frame's visible range. It then animates toward a
+                // centered target and stops setting `scroll_offset` once there,
+                // so it doesn't fight manual scrolling.
                 if let Some(sel) = sel {
                     let last_sel_id = egui::Id::new("filmstrip_last_sel");
                     let target_id = egui::Id::new("filmstrip_scroll_target");
@@ -91,8 +73,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                     app.set_visible_strip_range(first, last);
 
                     ui.horizontal(|ui| {
-                        // Leading + trailing spacers preserve the full content width
-                        // so the scrollbar extent stays correct.
+                        // Spacers keep the full content width for the scrollbar.
                         ui.add_space(first as f32 * cell_full);
                         for pos in first..last {
                             filmstrip_cell(ui, app, pos, cell, sel, out);
@@ -101,41 +82,23 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                     });
                 });
 
-                // F6 can select the filmstrip as a region without entering an
-                // individual thumbnail; show the same amber region marker used
-                // by the other keyboard-focusable panels.
                 region_focus_marker(ui, app, Region::Filmstrip);
             });
     }
 
-    // Info bar: exposure/filename/date on the left+center, live star rating on
-    // the right. A docked panel like the filmstrip (reserved space, not drawn
-    // over the image), added right after the filmstrip so it sits directly
-    // above it — or at the very bottom of the window when the filmstrip is
-    // hidden, so it's always "below the image" either way.
+    // Added after the filmstrip so it sits directly above it.
     if app.metadata_panel_visible() {
         draw_loupe_info_bar(ui, app, out);
     }
 
-    // Right-hand Develop panel is now drawn from `ui::draw`, before the
-    // toolbar, so it spans the full window height rather than just this
-    // mode's leftover space — see that function's comment. By this point
-    // its width is already carved out of `ui`'s available rect, so the
-    // filmstrip/info-bar above and the central rect below are automatically
-    // confined to the middle column with no further change needed here.
-
-    // Central region: deliberately NOT a CentralPanel. Leaving it as the root
-    // UI's unused rect is what makes egui report the pointer there as "not over
-    // egui" (`is_pointer_over_egui` checks `!root_ui_available_rect.contains`),
-    // so scroll (zoom), clicks, and Space+drag (pan) reach the app. A
-    // CentralPanel would consume the rect and egui would claim all pointer input
-    // over the image, killing zoom/pan. The wgpu image is drawn into this rect.
+    // Not a CentralPanel. egui treats the root UI's unused rect as "not over
+    // egui" (`is_pointer_over_egui`), so zoom, pan, and clicks there reach the
+    // app. A CentralPanel would claim that input.
     let central = ui.available_rect_before_wrap();
     out.loupe_rect = Some(central);
 
-    // Detail focus indicator: the central rect is deliberately left unclaimed
-    // by egui (see the comment above) so `region_focus_marker`'s reliance on
-    // `ui.min_rect()` doesn't apply here — draw directly against `central`.
+    // `region_focus_marker` uses `ui.min_rect()`, which doesn't cover this
+    // unclaimed rect, so draw against `central` directly.
     if app.focus() == Region::Detail && app.focus_level() == FocusLevel::Selected {
         ui.painter_at(central).rect_stroke(
             central.shrink(2.0),
@@ -146,22 +109,14 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     }
 
     if app.crop_rect().is_some() {
-        // Crop mode: the crop overlay owns the whole central area (mask + edges).
         loupe_crop_overlay(ui, app, central, out);
     } else if app.touchup_active() {
         loupe_touchup_overlay(ui, app, central, out);
     } else if app.wb_picker_active() {
-        // WB picker: a click-catcher over the whole central area.
         loupe_wb_picker_overlay(ui, app, central, out);
     } else if app.compare() {
-        // Before/after: a center divider and corner labels over the split image.
         loupe_compare_overlay(ui, central);
     }
-    // wasm32 RAW loading (see `App::loupe_is_loading`): no overlay drawn
-    // here at all — `app/mod.rs` just blanks the wgpu image draw
-    // (`primary_vp` forced to zero-size) while it's in flight, so the Loupe
-    // goes blank rather than showing the previous photo. A percentage
-    // progress bar was tried here and reverted.
 }
 
 pub(super) fn loupe_touchup_overlay(
@@ -232,10 +187,8 @@ pub(super) fn loupe_touchup_overlay(
         });
 }
 
-/// The White Balance gray-picker overlay: a transparent click-catcher over the
-/// whole central rect, shown only while `App::wb_picker_active()` is true. A
-/// click samples that pixel (via `UiAction::PickWhiteBalance`) and the app
-/// disarms picker mode in response, so this overlay stops being drawn.
+/// A transparent click-catcher over the image while the WB picker is armed.
+/// The app disarms the picker after the click.
 pub(super) fn loupe_wb_picker_overlay(
     ui: &egui::Ui,
     app: &App,
@@ -248,7 +201,7 @@ pub(super) fn loupe_wb_picker_overlay(
         .show(ui.ctx(), |ui| {
             let (_id, resp) = ui.allocate_exact_size(central.size(), egui::Sense::click());
             let painter = ui.painter_at(central);
-            // A faint tint over the whole frame makes "picker mode is on" obvious.
+            // A faint tint shows that picker mode is on.
             painter.rect_filled(central, 0.0, egui::Color32::from_white_alpha(10));
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
@@ -262,9 +215,7 @@ pub(super) fn loupe_wb_picker_overlay(
         });
 }
 
-/// The before/after overlay: a vertical divider down the middle of the central
-/// rect and a "Before"/"After" label in each top corner. The two image halves
-/// themselves are drawn by the wgpu renderer.
+/// Divider and labels for before/after. The wgpu renderer draws the two halves.
 pub(super) fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     let painter = ui.painter_at(central);
     let mid_x = central.center().x;
@@ -300,14 +251,9 @@ pub(super) fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     );
 }
 
-/// The bar below the image (docked, reserved space — not an overlay): a
-/// two-row info readout plus the live star-rating control, Lightroom
-/// toolbar-style. Main row: exposure (left), filename + rating grouped and
-/// centered. Secondary row: camera+lens and capture date, right-aligned
-/// (less important than the filename/rating, so pushed out of the center).
-/// Fields absent from the file's EXIF (screenshots, re-exports) are simply
-/// omitted; the bar itself, filename, and rating control always render
-/// regardless.
+/// The info bar below the image. Top row: exposure, then filename and rating
+/// centered, then the selection controls. Bottom row: camera, lens, and date.
+/// EXIF fields the file lacks are omitted.
 pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let bar_h = 54.0;
     egui::Panel::bottom("loupe_info_bar")
@@ -351,9 +297,7 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                 );
             }
 
-            // Filename + star rating are grouped and centered together as a
-            // single unit — measure the filename first so the stars can sit
-            // immediately to its right while the pair as a whole stays centered.
+            // Center the filename and stars as one group.
             let star_w = 20.0;
             let stars_total_w = star_w * 5.0;
             let group_gap = 10.0;
@@ -379,10 +323,6 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                 );
             }
 
-            // Star rating: a plain child Ui pinned next to the filename. No
-            // Area/Foreground trick needed here (unlike the old floating
-            // overlay) — this bar is docked space, not drawn over the pannable
-            // image, so egui already owns clicks within it.
             let stars_left =
                 group_left + filename_w + if filename.is_empty() { 0.0 } else { group_gap };
             let stars_rect = egui::Rect::from_center_size(
@@ -411,7 +351,7 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                         );
                         if resp.clicked() {
                             let n = i + 1;
-                            // Clicking the current rating clears it (Lightroom behavior).
+                            // Clicking the current rating clears it, as in Lightroom.
                             let stars = if n == current { 0 } else { n };
                             out.actions.push(UiAction::SetRating(stars));
                         }
@@ -419,10 +359,8 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                 });
             });
 
-            // Subject-selection controls, right-hand end of the main row (the
-            // secondary row's camera/date text sits below, so nothing collides).
-            // They live here rather than in the Develop panel on purpose: this
-            // is a way of *looking* at the photo, not an edit to it.
+            // Subject selection is a way of viewing the photo, not an edit, so
+            // it lives here rather than in the Develop panel.
             let sel_w = 190.0;
             let sel_rect = egui::Rect::from_min_size(
                 egui::pos2(rect.right() - pad - sel_w, main_y - 11.0),
@@ -431,8 +369,6 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
             ui.scope_builder(egui::UiBuilder::new().max_rect(sel_rect), |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Invert is meaningless with the overlay off, and says
-                        // so by being disabled rather than by vanishing.
                         let inverted = app.selection_inverted();
                         if ui
                             .add_enabled(
@@ -445,10 +381,8 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                             out.actions.push(UiAction::ToggleSelectionInvert);
                         }
 
-                        // The label carries the state the user can't otherwise
-                        // see: segmentation takes a moment, and "no subject
-                        // found" is a real answer that would otherwise look
-                        // identical to a broken button.
+                        // The label shows pending and "no subject" states, which
+                        // would otherwise look like a broken button.
                         let label = if !app.selection_on() {
                             "Show Selection"
                         } else if app.selection_pending() {
@@ -471,9 +405,7 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
         });
 }
 
-/// The exposure string for the info bar's left section: `f/2.8  ISO 200
-/// 1/125s  55mm` — aperture, ISO, shutter, focal length, in that order.
-/// Fields absent from the file's EXIF are simply omitted.
+/// For example `f/2.8  ISO 200  1/125s  55mm`. Missing fields are omitted.
 pub(super) fn exposure_text(meta: &image_decode::ImageMetadata) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(f) = meta.f_number {
@@ -491,7 +423,6 @@ pub(super) fn exposure_text(meta: &image_decode::ImageMetadata) -> String {
     parts.join("  ")
 }
 
-/// The secondary line for the info bar: camera + lens, then capture date.
 pub(super) fn secondary_text(meta: &image_decode::ImageMetadata) -> String {
     let mut parts: Vec<String> = Vec::new();
     let camera = match (&meta.camera_make, &meta.camera_model) {
@@ -515,8 +446,8 @@ pub(super) fn secondary_text(meta: &image_decode::ImageMetadata) -> String {
     parts.join("   \u{b7}   ")
 }
 
-/// Format a shutter speed in seconds as EXIF conventionally displays it: a
-/// fraction for sub-second exposures, whole/one-decimal seconds otherwise.
+/// A fraction below one second (`1/250s`), otherwise whole or one-decimal
+/// seconds.
 pub(super) fn format_shutter(seconds: f64) -> String {
     if seconds <= 0.0 {
         return String::new();
@@ -530,7 +461,7 @@ pub(super) fn format_shutter(seconds: f64) -> String {
     }
 }
 
-/// Format an EXIF capture date/time for display: `"Jul 14, 2026 3:42 PM"`.
+/// For example `"Jul 14, 2026 3:42 PM"`.
 pub(super) fn format_capture_date(
     year: i32,
     month: u32,
@@ -554,11 +485,9 @@ pub(super) fn format_capture_date(
     format!("{mon} {day}, {year} {h12}:{minute:02} {ampm}")
 }
 
-/// The crop-mode overlay: a dimmed mask outside the crop rectangle, a bright
-/// outline with edge handles, and drag handling that moves whichever edge the
-/// user grabs. The rectangle is stored in the app in texture space; here we map
-/// it to screen via `App::loupe_tex_to_screen` (which accounts for zoom, pan and
-/// rotation), so a grabbed screen edge maps back to the correct texture edge.
+/// The crop overlay and its drag handling. The crop rect is in texture space.
+/// `App::loupe_tex_to_screen` maps it to screen, accounting for zoom, pan, and
+/// rotation.
 pub(super) fn loupe_crop_overlay(
     ui: &egui::Ui,
     app: &App,
@@ -567,7 +496,6 @@ pub(super) fn loupe_crop_overlay(
 ) {
     let Some(rect) = app.crop_rect() else { return };
 
-    // The four texture-space edges as screen segments (endpoint pairs).
     let corner = |u, v| app.loupe_tex_to_screen(central, u, v);
     let tl = corner(rect.left, rect.top);
     let tr = corner(rect.right, rect.top);
@@ -579,7 +507,7 @@ pub(super) fn loupe_crop_overlay(
         (CropEdge::Top, tl, tr),
         (CropEdge::Bottom, bl, br),
     ];
-    // Screen bounds of the crop (min/max copes with rotation flipping corners).
+    // `from_points` handles rotation swapping which corner is top-left.
     let crop_screen = egui::Rect::from_points(&[tl, tr, bl, br]).intersect(central);
 
     egui::Area::new(egui::Id::new("loupe_crop"))
@@ -589,7 +517,6 @@ pub(super) fn loupe_crop_overlay(
             let (_id, resp) = ui.allocate_exact_size(central.size(), egui::Sense::drag());
             let painter = ui.painter_at(central);
 
-            // Dim the four bands around the crop rectangle.
             let dim = egui::Color32::from_black_alpha(150);
             let r = crop_screen;
             let full = central;
@@ -611,7 +538,7 @@ pub(super) fn loupe_crop_overlay(
                 }
             }
 
-            // Crop outline + rule-of-thirds guides.
+            // Outline and rule-of-thirds guides.
             let line = egui::Color32::from_gray(235);
             painter.rect_stroke(
                 r,
@@ -632,21 +559,20 @@ pub(super) fn loupe_crop_overlay(
                     egui::Stroke::new(1.0f32, faint),
                 );
             }
-            // Edge handles: a short bright bar at each edge midpoint.
+            // A handle dot at each edge midpoint.
             for (_, a, b) in edges {
                 let mid = egui::pos2((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
                 painter.circle_filled(mid, 5.0, line);
             }
 
-            // Classify a pointer position: an edge (within grab threshold) takes
-            // priority; otherwise inside the rectangle means "move the whole crop".
+            // An edge within the grab distance wins; otherwise a point inside
+            // the rect moves the whole crop.
             const EDGE_GRAB_PX: f32 = 24.0;
             let inside_rect = |p: egui::Pos2| {
                 let (u, v) = app.loupe_screen_to_tex(central, p);
                 u >= rect.left && u <= rect.right && v >= rect.top && v <= rect.bottom
             };
 
-            // Hover cursor hints: resize arrows on the edges, move icon inside.
             if let Some(p) = resp.hover_pos() {
                 let icon = if let Some(edge) = nearest_edge(&edges, p, EDGE_GRAB_PX) {
                     match edge {
@@ -661,9 +587,6 @@ pub(super) fn loupe_crop_overlay(
                 ui.ctx().set_cursor_icon(icon);
             }
 
-            // Drag handling: on press, grab the nearest edge (resize) or, if the
-            // press is inside the rectangle, grab the whole rect (move). While
-            // dragging, feed the pointer's texture coordinate to the active grab.
             if resp.drag_started() {
                 if let Some(p) = resp.interact_pointer_pos() {
                     if let Some(edge) = nearest_edge(&edges, p, EDGE_GRAB_PX) {
@@ -686,8 +609,7 @@ pub(super) fn loupe_crop_overlay(
         });
 }
 
-/// The crop edge whose screen segment is nearest to `p`, if within `threshold`
-/// px. Segments are `(edge, endpoint_a, endpoint_b)`.
+/// The edge nearest to `p`, if within `threshold` px.
 pub(super) fn nearest_edge(
     edges: &[(CropEdge, egui::Pos2, egui::Pos2)],
     p: egui::Pos2,
@@ -703,7 +625,6 @@ pub(super) fn nearest_edge(
     best.filter(|&(_, d)| d <= threshold).map(|(e, _)| e)
 }
 
-/// Euclidean distance from point `p` to segment `a`–`b`.
 pub(super) fn dist_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
     let ab = b - a;
     let len2 = ab.length_sq();
@@ -715,7 +636,6 @@ pub(super) fn dist_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f3
     (p - proj).length()
 }
 
-/// One filmstrip cell. Returns the response so the caller can auto-scroll.
 pub(super) fn filmstrip_cell(
     ui: &mut egui::Ui,
     app: &App,

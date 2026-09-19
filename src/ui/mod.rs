@@ -1,131 +1,91 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! egui chrome: the thumbnail Grid, the Loupe filmstrip, the filter bar, and
-//! rating overlays. The GPU renderer draws the loupe image itself; this module
-//! draws everything around it and reports back the central image rect plus any
-//! user actions (clicks, slider, filter changes) for `main.rs` to apply.
-//!
-//! Built against egui 0.34's `Panel`/`show_inside` API: `main.rs` runs us with
-//! the root background `Ui` (from `Context::run_ui`), and we nest panels inside
-//! it. The Loupe leaves its central region frameless/transparent so the wgpu
-//! image shows through.
+//! The egui chrome: Grid, filmstrip, toolbar, panels, and overlays. The wgpu
+//! renderer draws the loupe image; this module draws everything around it and
+//! returns the loupe rect plus the user's actions for `main.rs` to apply. The
+//! Loupe's central panel is transparent so the wgpu image shows through.
 
 use crate::app::{App, CropEdge, FocusLevel, Region, ViewMode};
 use crate::develop::Adjustments;
 use crate::navigation::Cmp;
 
-/// Shared palette. Several of these colors were previously duplicated as inline
-/// `from_rgb(...)` literals across the grid and filmstrip cells; naming them
-/// keeps the two views in sync.
+/// Colors shared by the grid, filmstrip, and panels.
 mod theme {
     use egui::Color32;
-    /// Star rating overlay (gold).
     pub const STAR_GOLD: Color32 = Color32::from_rgb(255, 210, 80);
-    /// Selection outline on a thumbnail cell (blue).
+    /// Mouse selection outline on a thumbnail cell.
     pub const SELECTION_BLUE: Color32 = Color32::from_rgb(90, 160, 255);
-    /// Background tint behind the selected/active cell.
     pub const SELECTION_BG: Color32 = Color32::from_rgb(40, 80, 140);
-    /// Keyboard-cursor outline (amber) — distinct from the blue mouse selection,
-    /// used for the folder-tree cursor and the focused Develop slider.
+    /// Keyboard cursor outline, kept distinct from the blue mouse selection.
     pub const CURSOR_AMBER: Color32 = Color32::from_rgb(255, 190, 90);
-    /// Best-of-burst winner badge (mint green = "the keeper"), distinct from the
-    /// gold rating stars so the two overlays never read as the same mark.
+    /// The badge colors differ from each other and from the stars because one
+    /// photo can carry several badges at once. Eyes-closed is the only cool
+    /// color because it marks a defect, not a keeper.
     pub const BURST_BADGE: Color32 = Color32::from_rgb(120, 230, 160);
-    /// Content-duplicate-group badge (amber-orange), distinct from the burst
-    /// badge (mint) and rating stars (gold) — a photo can carry both a burst
-    /// and a duplicate-group badge at once, so the colors must never be
-    /// confusable at a glance.
     pub const DUP_BADGE: Color32 = Color32::from_rgb(255, 150, 90);
-    /// Eyes-closed warning badge. Deliberately the one *cool* badge colour: the
-    /// other two mark a frame worth keeping, this one marks a defect, so it
-    /// should not read as another kind of award at a glance.
     pub const EYES_BADGE: Color32 = Color32::from_rgb(150, 190, 255);
-    /// The site wordmark's "Photos" run (italic, blue) — matches
-    /// lightphotos.app's `--lp-accent` custom property, dark-theme value
-    /// (`lp.css:11`). The site paints that text with a CSS gradient
-    /// (`background-clip: text`) that egui has no equivalent for, so this
-    /// is a flat stand-in for the gradient's dominant color; keep it in
-    /// sync with `lp.css` if that value ever changes.
+    /// The wordmark's "Photos" color. Matches `--lp-accent` in lightphotos.app's
+    /// `lp.css`. The site uses a gradient that egui can't draw, so this is its
+    /// dominant color. Update it if `lp.css` changes.
     pub const BRAND_BLUE: Color32 = Color32::from_rgb(79, 140, 255);
 }
 
 /// An action the UI wants `App` to perform after the frame is built. Positions
 /// are indices into the *visible* list (same space as `App::sel`).
 pub enum UiAction {
-    /// Select the cell at this visible position (plain click / single select).
     Select(usize),
     /// Cmd-click: toggle this cell in the multi-selection.
     SelectToggle(usize),
     /// Shift-click: extend the range selection to this cell.
     SelectRange(usize),
-    /// Open the loupe on this visible position.
     OpenLoupe(usize),
     /// Copy the primary photo's develop settings to the in-app clipboard.
     CopySettings,
-    /// Show/hide the keyboard-shortcut help overlay.
     ToggleHelp,
-    /// Confirm quitting the app (from the Esc quit-confirmation modal).
     ConfirmQuit,
-    /// Dismiss the quit-confirmation modal without quitting.
     CancelQuit,
     /// Ask to run a bulk action on the current selection (opens a confirm modal).
     RequestBulk(BulkKind),
-    /// Confirm the pending bulk action.
     ConfirmBulk,
-    /// Dismiss the pending bulk action without running it.
     CancelBulk,
-    /// Set (or clear) the star filter.
+    /// `None` clears the star filter.
     SetFilter(Option<(Cmp, u8)>),
     /// Change the toolbar comparator applied to star-level clicks (≥ / = / ≤).
     SetFilterCmp(Cmp),
     /// Rate the current selection/shown image (0 clears).
     SetRating(u8),
-    /// Mouse-wheel scroll over the loupe filmstrip: step through photos.
-    /// Carries the raw per-frame wheel delta (egui convention: positive =
-    /// scroll up/left), accumulated in `App` across frames into whole steps.
+    /// Raw per-frame wheel delta over the filmstrip (egui: positive is up or
+    /// left). `App` accumulates it across frames into whole photo steps.
     ScrollFilmstrip(f32),
-    /// Toggle best-of-burst detection (badges + dimming). Ignored while a star
-    /// filter is active.
+    /// Best-of-burst badges and dimming. Ignored while a star filter is active.
     ToggleBursts,
-    /// Toggle content-duplicate (dHash) grouping badges. Independent of the
-    /// star filter — unlike bursts, this grouping is order-independent.
+    /// Duplicate-group badges. Unlike bursts, these ignore the star filter
+    /// because duplicate grouping does not depend on photo order.
     ToggleDupes,
-    /// Toggle the "eyes closed" filter: narrow the grid to photos where the
-    /// face pass found a blink. Reads the same cache the badge does, so it only
-    /// covers photos that pass has actually reached.
+    /// Show only photos where the face pass found a blink. Covers only photos
+    /// the face pass has reached so far.
     ToggleEyesClosed,
-    /// Toggle the Loupe's subject-selection overlay, computing the mask for the
-    /// photo on screen the first time it's switched on.
+    /// Subject-selection overlay. The mask is computed the first time it turns on.
     ToggleSelection,
-    /// Swap the overlay between highlighting the subject and the background.
     ToggleSelectionInvert,
-    /// Open Survey Mode on the duplicate group containing this visible cell
-    /// (a duplicate-badge click in the grid).
+    /// Open Survey Mode on the duplicate group containing this visible cell.
     OpenSurvey(usize),
-    /// Close Survey Mode, back to the Grid.
     CloseSurvey,
-    /// Survey Mode's one-click "keep best, reject rest" action.
     KeepBestRejectRest,
-    /// Click on a Survey Mode member: focus it (rating hotkeys then apply to it).
+    /// Focus this Survey member so rating hotkeys apply to it.
     FocusSurveyMember(usize),
-    /// Open this folder as one unit: load its images and toggle its expansion.
+    /// Load this folder's images and toggle its expansion.
     OpenFolder(std::path::PathBuf),
-    /// The landing page's "Choose Folder" button, the header's "Open" button
-    /// and the `Cmd+O` shortcut — opens a folder picker. On the web that's the File
-    /// System Access `showDirectoryPicker`; on native it's the OS folder
-    /// dialog (`crate::dialog::pick_folder`). Routed through
-    /// `App::open_folder_picker`.
+    /// Open the folder picker (`App::open_folder_picker`).
     PickFolder,
-    /// Begin dragging this crop edge (pointer pressed near it).
     CropGrab(CropEdge),
     /// Begin moving the whole crop rectangle, anchored at this texture coordinate.
     CropGrabMove(f32, f32),
     /// Move the active crop drag to this normalized texture coordinate.
     CropDragTo(f32, f32),
-    /// Release the active crop drag (drag ended).
     CropRelease,
-    /// Arm/disarm the White Balance gray-picker: while armed, the next Loupe
-    /// click samples that pixel and solves temp/tint to neutralize it.
+    /// While armed, the next Loupe click samples a pixel and solves temp and
+    /// tint to make it neutral gray.
     ToggleWbPicker,
     /// The WB picker's armed click landed at this normalized texture coordinate.
     PickWhiteBalance(f32, f32),
@@ -135,20 +95,14 @@ pub enum UiAction {
     SelectTouchUp(usize),
     DeleteTouchUp,
     UndoTouchUp,
-    /// Set the develop adjustments for the current loupe image.
     SetAdjustments(Adjustments),
-    /// Reset the current loupe image's develop adjustments to identity.
     ResetAdjustments,
-    /// Pick develop settings for the current loupe image from its own
-    /// histogram (Auto Tone).
+    /// Pick develop settings for the loupe image from its own histogram.
     AutoTone,
-    /// Give keyboard focus to this region (e.g. the user clicked into its panel).
     Focus(Region),
-    /// Clicked toolbar control at this index: give the Toolbar keyboard focus,
-    /// with the cursor on this control (see `toolbar_focus_sync`).
+    /// Focus the Toolbar with the keyboard cursor on this control index.
     FocusToolbar(usize),
-    /// Clicked/dragged this Develop slider: give the Develop panel keyboard
-    /// focus, with the cursor on this slider.
+    /// Focus the Develop panel with the keyboard cursor on this slider index.
     FocusDevelop(usize),
 }
 
@@ -156,15 +110,14 @@ pub enum UiAction {
 /// multi-selection after confirmation.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BulkKind {
-    /// Set every selected photo's rating (0 clears it).
+    /// 0 clears the rating.
     Rate(u8),
-    /// Export every selected photo as a baked JPG.
+    /// Export as JPG with develop settings applied.
     Export,
-    /// Apply the copied develop settings to every selected photo.
+    /// Apply the copied develop settings.
     ApplySettings,
-    /// Auto Tone every selected photo from its own histogram.
     AutoTone,
-    /// Move every selected photo to the Trash.
+    /// Move to the Trash.
     Delete,
 }
 
@@ -182,7 +135,6 @@ mod grid;
 mod loupe;
 mod modals;
 mod survey;
-/// Build the egui UI for one frame and return the loupe rect + actions.
 mod toolbar;
 
 use develop_panel::draw_develop_panel;
@@ -192,19 +144,14 @@ use modals::{confirm_modal, help_modal, quit_modal};
 use survey::draw_survey;
 use toolbar::{grid_toolbar, loupe_toolbar};
 
+/// Build the egui UI for one frame.
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     let mut out = FrameOutput::default();
 
-    // The app header: wordmark on the left, the folder picker beside it.
-    // Drawn first so it stacks above everything else `draw` shows this frame,
-    // and drawn on every screen (landing page, Grid, Loupe) so "open
-    // something" never moves.
+    // Drawn first and on every screen, so the Open button never moves.
     app_header(ui, app, &mut out);
 
-    // Landing page: shown whenever no folder is open — on the web the start
-    // state (no CLI arg / AppleEvent path there), on native the no-arg launch.
-    // Every other draw path below assumes a playlist exists, so this returns
-    // early rather than falling through.
+    // Everything below assumes a folder is open.
     if !app.has_playlist() {
         draw_landing_page(ui, app, &mut out);
         return out;
@@ -212,12 +159,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 
     let mode = app.mode();
 
-    // Left folder sidebar and right Develop panel are drawn first, outside
-    // (before) the toolbar, so egui's panel system — which claims space in
-    // call order against the same shrinking `Ui` rect — gives them the full
-    // window height, with the toolbar (and, in the loupe, the filmstrip/info
-    // bar/central rect below it) confined to the middle column between them.
-    // Grid + Loupe only; Survey mode has no sidebar and stays full-width.
+    // egui panels claim space in call order. Drawing the side panels before
+    // the toolbar gives them full window height and keeps the toolbar in the
+    // middle column. Survey mode has no side panels.
     if mode == ViewMode::Grid || mode == ViewMode::Loupe {
         draw_folders_panel(ui, app, &mut out);
     }
@@ -225,12 +169,6 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
         draw_develop_panel(ui, app, &mut out);
     }
 
-    // Loupe gets its own, much smaller toolbar (see `toolbar::loupe_toolbar`)
-    // instead of the Grid one shown-but-disabled — filter/grouping/bulk
-    // actions are Grid concepts that don't apply to one open photo, and
-    // letting the filter stay live while a photo was open was the root
-    // cause of a real bug: it could silently drop out of the Grid's
-    // filtered selection cursor, breaking rating for it.
     if mode == ViewMode::Loupe {
         loupe_toolbar(ui, app, &mut out);
     } else {
@@ -248,9 +186,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     out
 }
 
-/// The "pick a folder to get started" screen — see `draw`'s landing-page
-/// branch. Shown on every platform when no folder is open. Deliberately
-/// minimal: title + one hint line + one button, no styling investment.
+/// Shown when no folder is open.
 fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::CentralPanel::default().show_inside(ui, |ui| {
         ui.vertical_centered(|ui| {
@@ -277,22 +213,10 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     status_toast(ui, app);
 }
 
-/// The app header: the "LightPhotos" wordmark, with the folder picker next to
-/// it. Persistent across every screen (landing page, Grid, Loupe) — called
-/// once from `draw`'s own top, before the landing-page early return.
-///
-/// The wordmark is the lightphotos.app marketing site's own, redrawn in egui:
-/// on the web this page lives inside the wasm canvas rather than the site's
-/// plain-HTML chrome (the canvas wants the full viewport — `overflow: hidden`
-/// — so wrapping it in the site's HTML header wasn't an option), and native
-/// now shows the same header so the two builds don't diverge. It matches the
-/// site's own CSS treatment (`lp.css`'s `.lp-wordmark`/`.lp-brand` rules:
-/// "Light" in the default ink color, "Photos" italic in the brand blue,
-/// abutting with no gap) via a two-section `LayoutJob`; no Downloads/Blogs/
-/// Help. Plain, non-interactive text, not a link — an earlier version linked
-/// back to lightphotos.app via `hyperlink_to`, but the click never actually
-/// opened a tab on web and wasn't worth chasing further, so the link was
-/// dropped.
+/// The "LightPhotos" wordmark and the Open button. The wordmark copies the
+/// lightphotos.app site's `.lp-wordmark` style: "Light" in the default text
+/// color, "Photos" in italic brand blue. The web canvas fills the viewport, so
+/// the site's HTML header can't wrap it; native draws the same header.
 fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::Panel::top("lp_app_header").show_inside(ui, |ui| {
         ui.add_space(4.0);
@@ -305,11 +229,8 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 0.0,
                 egui::TextFormat {
                     font_id: font_id.clone(),
-                    // PLACEHOLDER = "not explicitly colored"; egui's
-                    // text-shape painter substitutes the widget's normal
-                    // text color for any PLACEHOLDER glyph at paint time
-                    // — exactly "inherit the default ink color" with no
-                    // color logic of our own to keep in sync.
+                    // egui paints PLACEHOLDER glyphs in the widget's normal
+                    // text color.
                     color: egui::Color32::PLACEHOLDER,
                     ..Default::default()
                 },
@@ -326,12 +247,8 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             );
             ui.label(job);
 
-            // The folder picker lives beside the wordmark rather than in the
-            // toolbar, so it stays in the same top-left corner in every mode.
-            // Kept out of the F6 keyboard-focus cycle (like the bulk actions)
-            // — `Cmd+O` is its keyboard route. The landing page has its own,
-            // larger "Choose Folder" button, so this only appears once a
-            // folder is open.
+            // Not in the F6 focus cycle; `Cmd+O` is its keyboard route. The
+            // landing page has its own "Choose Folder" button.
             if app.has_playlist() {
                 ui.add_space(12.0);
                 if ui
@@ -347,8 +264,8 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     });
 }
 
-/// A transient status message (e.g. an export result), shown bottom-center for a
-/// few seconds. Requests a repaint so it disappears without further input.
+/// A status message (such as an export result) shown bottom-center for a few
+/// seconds.
 fn status_toast(ui: &egui::Ui, app: &App) {
     let Some(text) = app.status_text() else {
         return;
@@ -383,10 +300,9 @@ fn star_string(stars: u8) -> String {
     out
 }
 
-/// Draw the amber keyboard-cursor outline on `resp` if it's the Toolbar's
-/// `idx`-th keyboard-focusable control, and sync keyboard focus to it on
-/// click — mirrors the folder-tree cursor (`folder_node`) and Develop slider
-/// (`slider`) patterns. Index order here must match `App::activate_toolbar_focus`.
+/// Outline `resp` if it is the Toolbar's keyboard-cursor control `idx`, and
+/// move keyboard focus to it on click. `idx` order must match
+/// `App::activate_toolbar_focus`.
 fn toolbar_focus_sync(
     ui: &egui::Ui,
     app: &App,
@@ -410,8 +326,8 @@ fn toolbar_focus_sync(
     }
 }
 
-/// Draw the region-level focus marker used when F6 has selected a panel. The
-/// Develop panel keeps its border while an individual control is active too.
+/// Outline a panel selected with F6. The Develop panel keeps the outline while
+/// one of its sliders is active.
 fn region_focus_marker(ui: &egui::Ui, app: &App, region: Region) {
     let selected = app.focus() == region && app.focus_level() == FocusLevel::Selected;
     let develop_active = region == Region::Develop && app.focus() == Region::Develop;

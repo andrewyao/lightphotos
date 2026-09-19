@@ -1,56 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Two RAW preview tiers, both dispatched off `demosaic_cfa`'s and
-//! `decimate_linear_rgb`'s `mode: DemosaicMode` parameter — wired to
-//! `wasm_worker.rs`'s two job kinds (Grid `Thumb` vs. Loupe `Preview`):
+//! RAW decode for the wasm32 worker, in two tiers picked by `DemosaicMode`.
+//! Browsers have no ImageIO, so this runs after the embedded-preview
+//! extractors fail. Native non-mac uses `decode_raw_nonmac` instead.
 //!
-//! - `Fast` (Grid/`Thumb`): quarter-resolution Bayer binning (or decimation
-//!   for already-linear sensor data) instead of full PPG demosaic, with
-//!   output baked to sRGB8 (`PixelFormat::Srgb8`) via a CPU lookup table
-//!   (real sRGB gamma plus a display brightness/contrast boost). Ported from
-//!   `tools/wasm-decode-probe`'s throwaway spike (`wasm-decode-probe-spike`
-//!   branch, `src/lib.rs`), where it measured ~6.3x faster than
-//!   `RawDevelop`'s default `Quality`/PPG path — fast enough that the wasm
-//!   port plan picked it as the interactive-browsing default.
-//! - `Quality` (Loupe/`Preview`): rawler's full-res `PPGDemosaic` — real
-//!   edge-directed interpolation. Measured 4-5x *slower* than native in that
-//!   same spike, which is fine here since it's one photo at a time, not a
-//!   grid flood. Output stops at linear camera-RGB (`PixelFormat::LinearF16`,
-//!   no gamma/boost baked in) — `renderer.rs` uploads it as an `Rgba16Float`
-//!   texture and `raw_shader.wgsl` (not the CPU LUT) does the sRGB gamma plus
-//!   boost on the GPU, a two-stage CPU-decode/GPU-tonemap split.
+//! - `Fast` (Grid thumbnails and the Loupe's first paint): quarter-res 2x2
+//!   binning, baked to sRGB8 through a CPU lookup table. About 6x faster than
+//!   full PPG demosaic in the original wasm benchmark.
+//! - `Quality` (Loupe `Preview`/`Full`): full-res PPG demosaic, left in linear
+//!   light as `PixelFormat::LinearF16`. `raw_shader.wgsl` applies gamma and
+//!   the display boost on the GPU.
 //!
-//! `#[cfg(not(target_os = "macos"))]`, like the rest of the non-mac RAW
-//! decode: this isn't wasm32-specific code, it's just currently only wired
-//! into the app via wasm32's decode path (`app/web.rs`) — nothing stops a
-//! future native non-mac caller from using it too. Exception: the
-//! bytes-based entry points are also gated on `feature = "raw-probe"` so
-//! `decode_probe.rs` can call them from a mac dev build (see their own
-//! comments for why).
-
-// ## Pipeline position
-// - `decode_raw_fast_from_bytes` is Pipeline 1's/Pipeline 2's wasm32
-//   fallback for a RAW file: `wasm_worker.rs`'s `decode` calls it when
-//   `quality` is `false` (Grid `JobKind::Thumb`, and the Loupe's first-paint
-//   `JobKind::Speed`), after the cheap embedded-preview extractors have
-//   already been tried and failed.
-// - `decode_raw_quality_from_bytes` is the same fallback for
-//   `quality == true` (Loupe `JobKind::Preview`/`Full`) — the tier that
-//   feeds `renderer.rs`'s `raw_shader.wgsl` path.
-// - Neither function runs on macOS or native Linux/Windows — those
-//   platforms' RAW decode goes through `raw/nonmac_decode.rs`'s
-//   `decode_raw_nonmac` (native) or ImageIO (mac) instead.
-// - See `ARCHITECTURE.md`.
+//! The bytes entry points are also built under `raw-probe` so the
+//! `decode_probe` binary (`raw/probe.rs`) can test them on macOS.
 
 use crate::image_decode::{fit_within, DecodedImage, PixelFormat};
 
-/// `Fast` = rawler's `Superpixel3Channel` (quarter-res 2x2 bin, matches this
-/// file's earlier hand-rolled output), wired to Grid/`JobKind::Thumb` jobs,
-/// output `PixelFormat::Srgb8`. `Quality` = rawler's `PPGDemosaic` (full-res,
-/// real edge-directed interpolation — the same algorithm the native non-mac
-/// path, `decode_raw_nonmac`, already uses via `RawDevelop`), wired to
-/// Loupe/`JobKind::Preview` jobs via `decode_raw_quality_from_bytes`, output
-/// `PixelFormat::LinearF16`.
+/// `Fast` is rawler's `Superpixel3Channel` (quarter-res 2x2 bin) with
+/// `Srgb8` output. `Quality` is rawler's `PPGDemosaic` (full-res,
+/// edge-directed) with `LinearF16` output.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DemosaicMode {
     Fast,
@@ -58,10 +26,7 @@ pub(crate) enum DemosaicMode {
 }
 
 impl DemosaicMode {
-    /// Bytes per pixel this mode's `demosaic_cfa`/`decimate_linear_rgb`
-    /// write: `Fast` → 4 (u8 sRGB RGBA), `Quality` → 8 (`half::f16` linear
-    /// RGBA). Drives both the output buffer's allocation size and
-    /// `apply_orientation`'s byte-swap stride, so the two never drift apart.
+    /// 4 for `Fast` (u8 sRGB RGBA), 8 for `Quality` (f16 linear RGBA).
     fn bytes_per_pixel(self) -> usize {
         match self {
             DemosaicMode::Fast => 4,
@@ -70,22 +35,9 @@ impl DemosaicMode {
     }
 }
 
-/// Precomputed sRGB-gamma + display-boost lookup table, built once on first
-/// use. Worth explaining why this exists: the early spike found both
-/// algorithms below landed at the same ~300-320ms/megapixel regardless of
-/// approach, and swapping three per-pixel gamma-function calls for an array
-/// index was what actually moved the needle — most of the measured 6.3x
-/// speedup came from this LUT, not either demosaic algorithm's own work. The
-/// LUT chains two independent curves: `rawler`'s own `srgb_apply_gamma` (the
-/// real piecewise sRGB transfer function, replacing a flat `1/2.2`
-/// approximation this file used before) and then
-/// `image_decode::apply_raw_preview_boost` (a brightness/contrast display
-/// transform — without it, a linear-matrix RAW conversion looks flatter and
-/// darker than a camera JPEG, by design). The LUT-as-perf-trick and the
-/// curves it encodes are separate decisions; `decode_raw_nonmac` (native
-/// non-mac) applies the exact same two curves through its own LUT, since it
-/// can't share this `OnceLock`'d one (different cfg gate, different call
-/// shape).
+/// Linear to display u8 lookup table: rawler's sRGB curve, then
+/// `apply_raw_preview_boost`. Replacing three per-pixel curve evaluations
+/// with a table lookup gave most of the `Fast` tier's measured speedup.
 const GAMMA_LUT_SIZE: usize = 4097;
 static GAMMA_LUT: std::sync::OnceLock<[u8; GAMMA_LUT_SIZE]> = std::sync::OnceLock::new();
 
@@ -103,13 +55,8 @@ fn to_srgb_u8(v: f32) -> u8 {
     lut[idx]
 }
 
-/// Decodes a RAW file's bytes into the quarter-res `Fast`/sRGB8 preview
-/// (`DemosaicMode::Fast`), resized to fit `max_px` (Lanczos3, same as every
-/// other decode path in this crate — see
-/// `image_decode::decode_nonraw_from_bytes`). Grid-only — the Loupe
-/// calls [`decode_raw_quality_from_bytes`] instead. Its name, signature, and
-/// output shape are kept stable across the `Fast`/`Quality` split below,
-/// since `decode_probe.rs`'s golden-hash regression tests call it by name.
+/// Decodes RAW bytes to the `Fast` sRGB8 preview, Lanczos3-resized to fit
+/// `max_px`. The `decode_probe` golden-hash tests call it by name.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
 pub(crate) fn decode_raw_fast_from_bytes(
@@ -119,21 +66,10 @@ pub(crate) fn decode_raw_fast_from_bytes(
     decode_raw_preview_from_bytes(bytes, max_px, DemosaicMode::Fast)
 }
 
-/// Decodes a RAW file's bytes into the `Quality`/PPG preview
-/// (`DemosaicMode::Quality`) — see this module's doc comment for what that
-/// means. Loupe-only. Output is `PixelFormat::LinearF16`, resized to fit
-/// `max_px` via [`resize_linear_f16`] (a box-filter downsample on
-/// linear-light data — actually more correct than resizing after gamma
-/// encoding, not just a workaround). The `image` crate's own Lanczos3 resize
-/// can't represent `half::f16` data, so this needed its own implementation —
-/// but it still has to happen: an *unbounded* full-native-resolution
-/// `Quality` upload once broke the Loupe's zoom transform. The Loupe's
-/// `zoom` is screen-px-per-image-px, and a same-photo sharper-tier upload
-/// deliberately reuses it rather than refitting (`app/thumbs.rs::upload_shown`)
-/// — correct only when the landing tiers are close in resolution, which
-/// `Fast` (already bounded to `max_px`) and an unbounded `Quality` are not.
-/// The pixel-dimension jump between them made the reused `zoom` show a
-/// wrongly zoomed-in crop the instant `Quality` landed.
+/// Decodes RAW bytes to the `Quality` preview: linear `LinearF16`, resized to
+/// fit `max_px`. The bound matters: the Loupe keeps its `zoom` when a sharper
+/// tier of the same photo lands (`app/thumbs.rs::upload_shown`), so a much
+/// larger `Quality` image would suddenly appear zoomed in.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
 pub(crate) fn decode_raw_quality_from_bytes(
@@ -143,17 +79,8 @@ pub(crate) fn decode_raw_quality_from_bytes(
     decode_raw_preview_from_bytes(bytes, max_px, DemosaicMode::Quality)
 }
 
-/// Shared body behind [`decode_raw_fast_from_bytes`]/[`decode_raw_quality_from_bytes`].
-//
-// Gated on `feature = "raw-probe"` as well as `not(target_os = "macos")` so
-// `decode_probe.rs`'s golden-hash regression tests can call this same
-// function from a mac dev build, via `cargo test --bin decode_probe
-// --features raw-probe` — same reasoning and pattern as
-// `image_decode.rs`'s `decode_raw_via_rawler` (see that function's doc
-// comment). Note this module isn't declared in `main.rs` at all, so it never
-// reaches the *main* `lightphotos` binary: the only two things that pull it
-// in are `wasm_worker.rs` (wasm32-gated — the sole production caller) and
-// `decode_probe.rs`'s own `#[path]` re-declaration.
+/// Shared body of [`decode_raw_fast_from_bytes`] and
+/// [`decode_raw_quality_from_bytes`].
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 fn decode_raw_preview_from_bytes(
     bytes: &[u8],
@@ -172,16 +99,9 @@ fn decode_raw_preview_from_bytes(
     .map_err(|_| "panicked during RAW decode".to_string())?
     .map_err(|e| e.to_string())?;
 
-    // `apply_scaling()` hits a bare `todo!()` for `BlackIsZero` (rawler
-    // 0.7.2, `rawimage.rs:510`) — that's a panic, not an error. The
-    // `catch_unwind` guards in this function only actually help on native:
-    // the sole production target here is `wasm32-unknown-unknown`, which
-    // builds with `panic=abort`, so *any* panic below takes down the whole
-    // decode worker with no recoverable error. Every unsupported layout
-    // therefore has to be turned away by an explicit check before the
-    // offending call, not caught after the fact — see
-    // `is_supported_bayer_layout` for the same reasoning applied to the
-    // `Demosaic` impls.
+    // wasm32 builds with `panic=abort`, so `catch_unwind` only helps on native.
+    // Every layout rawler would panic on must be rejected before the call.
+    // `apply_scaling()` hits `todo!()` for `BlackIsZero` (rawler 0.7.2).
     if !matches!(
         raw.photometric,
         RawPhotometricInterpretation::Cfa(_) | RawPhotometricInterpretation::LinearRaw
@@ -242,10 +162,8 @@ fn decode_raw_preview_from_bytes(
     })
 }
 
-/// A short, human-readable tag for an error message — `RawPhotometricInterpretation`
-/// isn't `Display`, and its `Debug` for the `Cfa` case would dump the whole
-/// 48x48 pattern matrix. The CFA's own name (e.g. `"RGGB"`, or X-Trans's
-/// 36-char name) is the part that's actually worth showing.
+/// Short label for error messages. The `Debug` output of the `Cfa` case
+/// dumps the whole 48x48 pattern matrix.
 fn describe_photometric(photometric: &rawler::rawimage::RawPhotometricInterpretation) -> String {
     use rawler::rawimage::RawPhotometricInterpretation as P;
     match photometric {
@@ -255,11 +173,8 @@ fn describe_photometric(photometric: &rawler::rawimage::RawPhotometricInterpreta
     }
 }
 
-/// `rawler` 0.7.2's `RawImage.orientation` is hardcoded to `Normal`
-/// regardless of the file's real EXIF tag (confirmed by reading
-/// `rawimage.rs:389,478` — a real upstream bug, not guessed at). Works
-/// around it with a separate `raw_metadata()` call that reads
-/// `.exif.orientation` directly instead.
+/// rawler 0.7.2 always sets `RawImage.orientation` to `Normal`, so read the
+/// EXIF orientation from `raw_metadata()` instead.
 fn real_orientation(
     source: &rawler::rawsource::RawSource,
     params: &rawler::decoders::RawDecodeParams,
@@ -272,14 +187,9 @@ fn real_orientation(
         .unwrap_or(rawler::decoders::Orientation::Normal)
 }
 
-/// Dispatches on `raw.cpp`: `demosaic_cfa` for undemosaiced Bayer
-/// mosaics (cpp == 1 — ARW/CR2/NEF and most camera RAW), `decimate_linear_rgb`
-/// for already-demosaiced/linear data (cpp == 3 — some DNGs, which skip
-/// Bayer interpolation entirely). `None` for anything else (e.g. monochrome,
-/// cpp == 4) rather than guessing at a wrong image. `mode` picks both the
-/// demosaic algorithm and the output pixel encoding (see `DemosaicMode`'s own
-/// doc comment) — threaded straight through to both branches and to
-/// `apply_orientation`'s byte stride.
+/// Demosaics a Bayer mosaic (cpp == 1) or decimates already-RGB data
+/// (cpp == 3, some DNGs), then applies orientation. `None` for any other
+/// layout, such as monochrome.
 fn demosaic_preview(
     raw: &mut rawler::RawImage,
     orientation: rawler::decoders::Orientation,
@@ -300,14 +210,9 @@ fn demosaic_preview(
     ))
 }
 
-/// Applies `rawler::decoders::Orientation`'s flip/transpose to a tightly
-/// packed pixel buffer — the sensor buffer is always laid out in the
-/// camera's native orientation regardless of how the photo was actually
-/// held. Per `Orientation::to_flips`'s own doc comment, flips must happen
-/// before the transpose for a correct result. `bpp` (bytes/pixel — 4 for
-/// `Fast`'s sRGB8, 8 for `Quality`'s linear f16, see `DemosaicMode::
-/// bytes_per_pixel`) is the only layout assumption this needs: every swap/
-/// copy below is otherwise encoding-agnostic.
+/// Applies `orientation` to a packed buffer with `bpp` bytes per pixel. The
+/// sensor buffer is always in the camera's native orientation. Flips must run
+/// before the transpose (see `Orientation::to_flips`).
 fn apply_orientation(
     orientation: rawler::decoders::Orientation,
     w: u32,
@@ -352,51 +257,10 @@ fn apply_orientation(
     (w as u32, h as u32, rgba)
 }
 
-/// White balance is applied to demosaiced RGB below, matching rawler's
-/// `RawDevelop` ordering. It must not be applied to the mosaic before PPG,
-/// because PPG's edge decisions are channel-dependent.
-///
-/// One deliberate behavior change from that older closure: it hard-clamped
-/// each sample to `[0,1]` *before* applying `wb`, so nothing above white
-/// ever reached the color matrix. `apply_scaling()`'s `correct_blacklevel_cfa`
-/// only clips negatives, and this pass doesn't clamp either, so with a real
-/// camera's `wb_coeffs` (something like `[2.0, 1.0, 1.4]`, not all 1.0)
-/// samples now legitimately exceed 1.0 and get `apply_cam2rgb`'s
-/// `clip_euclidean_norm_avg` soft rolloff instead of a hard pre-clamp.
-/// That's the intended pipeline, matching rawler's own `RawDevelop`: a soft
-/// highlight rolloff that keeps hue near white, rather than clipping each
-/// channel independently before the matrix ever sees it.
-///
-/// Also inherited from `correct_blacklevel_cfa`, and also matching
-/// `RawDevelop`: there's no divide-by-zero guard on `white - black` (the old
-/// closure's `.max(1.0)` on the denominator went away with the closure). A
-/// file claiming `white == black` yields inf/NaN samples — which stay
-/// non-fatal (`to_srgb_u8`'s `clamp` passes NaN through and the `as usize`
-/// cast saturates to 0), so worst case it's a black/garbage image, never a
-/// panic.
-///
-/// Deliberately *not* a flat `for (idx, v) in samples.iter_mut()` loop with
-/// `idx / width` / `idx % width` per sample: on a 24MP sensor that's ~50M
-/// integer divisions, and it would also touch masked/optical-black rows
-/// outside the active area that nothing downstream ever reads. This walks
-/// only the active-area rows, hoisting one 48-wide coefficient table per row
-/// (48 is `rawler::CFA`'s own pattern-matrix period, so this is exact for
-/// any CFA size it supports, X-Trans included), so the inner loop is just a
-/// multiply and a wrapping counter with no division at all.
-///
-/// Box-filter downsample of a `DemosaicMode::Quality` linear `half::f16`
-/// RGBA buffer to fit `max_px` — the f16-data equivalent of
-/// `image::imageops::resize`, which can't represent this layout. Used by
-/// [`decode_raw_quality_from_bytes`] (see its own doc comment for why this
-/// has to happen at all, not just how). A no-op — returns `rgba` unchanged —
-/// when `(w, h)` already fits, same contract as `fit_within`'s own callers.
-///
-/// Same box-average shape as `image_ops.rs`'s `resize_luma` (integer source
-/// range per destination pixel, exact for any ratio), but averaging
-/// *linear-light* samples here, which is the photometrically correct thing
-/// to do — averaging already-gamma-encoded u8 values instead darkens edges.
-/// So this isn't only a workaround for the missing library resize; it's
-/// arguably better than the `Fast` tier's post-gamma Lanczos3 resize.
+/// Box-filter downsample of a `Quality` f16 RGBA buffer to fit `max_px`. The
+/// `image` crate cannot resize f16 data. Averaging in linear light is also
+/// more accurate than resizing gamma-encoded values, which darkens edges.
+/// Returns the input unchanged when it already fits.
 fn resize_linear_f16(rgba: &[u8], w: u32, h: u32, max_px: u32) -> (u32, u32, Vec<u8>) {
     let (out_w, out_h) = fit_within(w, h, max_px);
     if (out_w, out_h) == (w, h) {
@@ -433,15 +297,10 @@ fn resize_linear_f16(rgba: &[u8], w: u32, h: u32, max_px: u32) -> (u32, u32, Vec
     (out_w as u32, out_h as u32, out)
 }
 
-/// `area` must lie inside `width * height` — `demosaic_cfa` checks
-/// that before calling.
-/// Camera-RGB → sRGB matrix, built once per image. Same algorithm `rawler`'s
-/// own `imgop::raw::map_3ch_to_rgb` uses internally — that function is
-/// `pub(crate)`-restricted inside `rawler`, so it's not callable from here,
-/// and this just replicates its ~10-line body from the public primitives
-/// it's built from. Returns `None` if `raw.color_matrix` has no calibration
-/// data for this camera; callers then fall back to WB-only output, same as
-/// `RawDevelop`'s own behavior on a missing matrix.
+/// Camera RGB to linear sRGB matrix. Reimplements rawler's
+/// `map_3ch_to_rgb`, which is crate-private. `None` when the file has no
+/// color matrix; callers then output white-balanced camera RGB, as
+/// `RawDevelop` does.
 fn build_cam2rgb(raw: &rawler::RawImage) -> Option<[[f32; 4]; 3]> {
     use rawler::imgop::matrix::{multiply, normalize, pseudo_inverse};
     use rawler::imgop::xyz::{Illuminant, SRGB_TO_XYZ_D65};
@@ -464,15 +323,9 @@ fn build_cam2rgb(raw: &rawler::RawImage) -> Option<[[f32; 4]; 3]> {
     Some(pseudo_inverse(rgb2cam))
 }
 
-/// Pipeline stage note: the `clip_euclidean_norm_avg` call below is a soft
-/// highlight rolloff applied right after the color-matrix multiply. It's
-/// folded into this one function rather than split into its own, since
-/// there's no separate exposure/gain step in this codebase to share a
-/// boundary with.
-///
-/// Applies `build_cam2rgb`'s matrix to one WB-corrected camera-RGB sample,
-/// including that soft highlight-rolloff clip (`clip_euclidean_norm_avg`)
-/// rather than a hard `.clamp` — it behaves better near white.
+/// Applies the color matrix to one white-balanced sample.
+/// Samples can exceed 1.0 here; `clip_euclidean_norm_avg` rolls them off
+/// softly, keeping hue near white, instead of clipping each channel.
 fn apply_cam2rgb(cam2rgb: &[[f32; 4]; 3], rgb: [f32; 3]) -> [f32; 3] {
     let [r, g, b] = rgb;
     let srgb = [
@@ -483,11 +336,7 @@ fn apply_cam2rgb(cam2rgb: &[[f32; 4]; 3], rgb: [f32; 3]) -> [f32; 3] {
     rawler::imgop::raw::clip_euclidean_norm_avg(&srgb)
 }
 
-/// Renders one linear camera-RGB sample (already white-balanced, already
-/// black/white-level normalized by `raw.apply_scaling()` before demosaic) to
-/// display RGBA8: color matrix (if the camera has calibration data) -> gamma,
-/// alpha fixed opaque. Shared by both `demosaic_cfa` and
-/// `decimate_linear_rgb` — used to be duplicated inline in both.
+/// One white-balanced, normalized camera-RGB sample to opaque display RGBA8.
 fn render_rgb_sample(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [u8; 4] {
     let srgb = match cam2rgb {
         Some(m) => apply_cam2rgb(m, rgb),
@@ -501,14 +350,8 @@ fn render_rgb_sample(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [u8; 4] 
     ]
 }
 
-/// `render_rgb_sample`'s counterpart for `DemosaicMode::Quality`: color
-/// matrix (including the highlight rolloff `apply_cam2rgb` already applies),
-/// same as above, but it stops there — no gamma, no
-/// `image_decode::apply_raw_preview_boost`, no u8 quantize, no exposure gain
-/// (see `render_rgb_sample`'s doc comment for why there's no gain multiply
-/// here either). Feeds `renderer.rs`'s `Rgba16Float` texture; `raw_shader.wgsl`
-/// does the real sRGB gamma plus display brightness/contrast boost on the GPU
-/// instead — a CPU-decode/GPU-tonemap split.
+/// Like [`render_rgb_sample`] but stops after the color matrix, leaving linear
+/// light for `raw_shader.wgsl`.
 fn render_rgb_sample_linear(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [f32; 3] {
     match cam2rgb {
         Some(m) => apply_cam2rgb(m, rgb),
@@ -516,9 +359,7 @@ fn render_rgb_sample_linear(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [
     }
 }
 
-/// [`render_rgb_sample_linear`], packed as 8 little-endian `half::f16` bytes
-/// (R, G, B, A — alpha always opaque) ready for a direct `Vec<u8>` buffer
-/// write, the same shape `render_rgb_sample`'s `[u8; 4]` serves for `Fast`.
+/// [`render_rgb_sample_linear`] packed as little-endian f16 RGBA, alpha 1.
 fn render_rgb_sample_linear_bytes(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>) -> [u8; 8] {
     let [r, g, b] = render_rgb_sample_linear(rgb, cam2rgb);
     let mut out = [0u8; 8];
@@ -529,30 +370,16 @@ fn render_rgb_sample_linear_bytes(rgb: [f32; 3], cam2rgb: &Option<[[f32; 4]; 3]>
     out
 }
 
-/// Whether rawler's 3-channel Bayer `Demosaic` impls can actually handle this
-/// layout. Both of them *panic* rather than erroring on anything else, and
-/// this file's only production target (`wasm32-unknown-unknown`) is
-/// `panic=abort`, so an unsupported layout has to be turned away here:
+/// Whether rawler's Bayer demosaic impls can take this layout without
+/// panicking, which is fatal under wasm32's `panic=abort`:
 ///
-/// - `Superpixel3Channel::demosaic` panics when `colors.plane_count() != 3`,
-///   panics when `!cfa.is_rgb()`, and hits `_ => unreachable!()` for any RGB
-///   CFA whose (ROI-shifted) name isn't exactly one of the four 2x2
-///   RGGB-family patterns. Fuji X-Trans clears `is_rgb()` — its 36-char name
-///   is all R/G/B — and lands squarely on that `unreachable!()`.
-/// - `PPGDemosaic::demosaic` guards only `is_rgb()`, so X-Trans gets past it
-///   and into pattern math that assumes a 2x2 tiling.
-/// - Both index the sample buffer at `roi`'s coordinates unchecked, so an
-///   active area larger than the decoded buffer is a slice-bounds panic.
+/// - `Superpixel3Channel` panics unless there are 3 planes and the CFA is one
+///   of the four 2x2 RGGB-family patterns. X-Trans hits its `unreachable!()`.
+/// - `PPGDemosaic` checks only `is_rgb()` and then assumes a 2x2 tiling.
+/// - Both index the buffer at the active area unchecked.
 ///
-/// The name has to be checked *after* `cfa.shift(roi.p.x, roi.p.y)`, because
-/// that's the CFA the demosaic impls actually match on — an odd active-area
-/// origin rotates e.g. RGGB into GRBG.
-///
-/// The earlier hand-rolled loop needed none of this: it used
-/// `cfa.color_at()`, which degrades to a color-artifacted (but non-crashing)
-/// image on any pattern. Returning `None` here replaces that graceful
-/// degradation — a wrong-but-visible image was never the contract we want; a
-/// clear error is.
+/// The name is checked after `cfa.shift` to the active-area origin, because an
+/// odd origin turns RGGB into GRBG.
 fn is_supported_bayer_layout(
     cfa: &rawler::CFA,
     colors: &rawler::cfa::PlaneColor,
@@ -568,25 +395,14 @@ fn is_supported_bayer_layout(
         && area_fits(area, width, height)
 }
 
-// TODO(x-trans): this file's X-Trans path (this function,
-// `downsample_xtrans_mosaic`, `map_xtrans_coord` below) still has open
-// correctness findings from roborev review history on this file: (1)
-// `map_xtrans_coord` doesn't correctly translate an active-area origin that
-// falls inside a skipped tile into reduced-space, so a Fuji file with a
-// nonzero active-area offset can crop more of the first CFA tile than it
-// should; (2) `demosaic_cfa` runs X-Trans data through
-// `RawImage::apply_scaling()`, which calls the Bayer-only
-// `correct_blacklevel_cfa` — that collapses X-Trans's 6x6 per-phase
-// black-level table down to a single repeated value, losing per-phase black
-// level and risking pattern noise/color casts; (3) `downsample_xtrans_mosaic`
-// clamps a partial trailing block's out-of-range coordinates to the last
-// valid row/column, which is generally a different CFA phase than the output
-// position it's filling in, corrupting color along the bottom/right edge.
-// Deferred, not blocking: `thumbnail.rs`'s `rawler_full_image_from_bytes`
-// (rawler's own `Decoder::full_image()`) now covers the common case for RAF
-// files ahead of this path — this demosaic code only still runs when a RAF
-// has no usable embedded image (corrupted file, decode error) — but it
-// remains genuinely wrong on those inputs when it does run.
+// TODO(x-trans): the X-Trans path has known bugs. (1) An active-area origin
+// inside a skipped tile may crop too much of the first tile. (2)
+// `apply_scaling()` uses the Bayer-only `correct_blacklevel_cfa`, which
+// collapses X-Trans's 6x6 per-phase black levels to one value. (3)
+// `downsample_xtrans_mosaic` clamps a partial trailing block to a row or
+// column of a different CFA phase, corrupting color at the bottom and right
+// edges. It only runs for RAF files with no usable embedded image, since
+// `thumbnail.rs`'s `rawler_full_image_from_bytes` handles the common case.
 fn is_supported_xtrans_layout(
     cfa: &rawler::CFA,
     colors: &rawler::cfa::PlaneColor,
@@ -637,11 +453,9 @@ mod tests {
 
         assert_eq!((reduced_width, reduced_height), (12, 12));
 
-        // reduction = 6, tile_step = 36: tile_row 0's phase_row `p` averages
-        // source rows {p, p+6, .., p+30}; tile_row 1's averages {36+p, ..,
-        // 66+p}. Confirms the fix aggregates every sub-tile in the block
-        // (the bug only ever read the block's first sub-tile, i.e. row `p`
-        // alone).
+        // reduction = 6, tile_step = 36: tile row 0's phase row `p` averages
+        // source rows {p, p+6, .., p+30}; tile row 1's averages {36+p, ..,
+        // 66+p}. Reading only row `p` would fail this.
         for phase_row in 0..6 {
             let block0_mean: f32 = (0..6).map(|i| (phase_row + i * 6) as f32).sum::<f32>() / 6.0;
             let block1_mean: f32 =
@@ -662,9 +476,9 @@ mod tests {
     }
 }
 
-/// `area` lies wholly inside a `width * height` buffer. `checked_add` rather
-/// than `+`: `usize` is 32 bits on wasm32, so a garbage active-area tag could
-/// wrap a plain addition back into the valid range and defeat the check.
+/// `area` lies inside a `width * height` buffer. `checked_add` because
+/// `usize` is 32 bits on wasm32, and a garbage active-area tag could wrap a
+/// plain addition back into range.
 fn area_fits(area: rawler::imgop::Rect, width: usize, height: usize) -> bool {
     area.p.x.checked_add(area.d.w).is_some_and(|x1| x1 <= width)
         && area
@@ -680,12 +494,9 @@ fn map_xtrans_coord(coord: usize, tile_step: usize) -> usize {
     tile * 6 + if offset < 6 { offset } else { 6 }
 }
 
-/// Bayer-CFA preview via rawler's own `Demosaic` trait: `Fast` uses
-/// `Superpixel3Channel` (quarter-res 2x2 bin, no interpolation — matches this
-/// file's earlier hand-rolled output byte-for-byte), `Quality` uses
-/// `PPGDemosaic` (full-res, edge-directed interpolation). See `demosaic_preview`'s
-/// doc comment for when this applies, and `is_supported_bayer_layout` for the
-/// layouts this turns away rather than handing to a panicking demosaic.
+/// Demosaics a CFA mosaic with rawler's `Demosaic` impls: `Superpixel3Channel`
+/// for `Fast`, `PPGDemosaic` for `Quality`. Returns `None` for layouts that
+/// would panic (see `is_supported_bayer_layout`).
 pub(crate) fn demosaic_cfa(
     raw: &mut rawler::RawImage,
     mode: DemosaicMode,
@@ -710,13 +521,8 @@ pub(crate) fn demosaic_cfa(
         rawler::imgop::Point::new(0, 0),
         rawler::imgop::Dim2::new(width, height),
     ));
-    // Captured before `area` is potentially reassigned below (X-Trans
-    // reduced-space remapping) — `demosaiced`'s own buffer origin sits at
-    // this rect's top-left (it was demosaiced against `area` as its ROI, at
-    // whatever `area` was *then*, which for the non-X-Trans case never
-    // changes anyway), and the `crop_area` handling further down needs the
-    // true active-area rect to `adapt()` against, matching what `RawDevelop`
-    // itself adapts crop_area to.
+    // `area` is remapped below for X-Trans. The default-crop step needs the
+    // real active area, which is also the demosaiced buffer's origin.
     let original_active_area = area;
     let is_xtrans = is_supported_xtrans_layout(&cfa, &colors, area, width, height);
     if !is_xtrans && !is_supported_bayer_layout(&cfa, &colors, area, width, height) {
@@ -729,18 +535,13 @@ pub(crate) fn demosaic_cfa(
     if data.len() != width * height {
         return None;
     }
-    // `mem::take`, not `clone`: the full-resolution sensor buffer is ~96MB on
-    // a 24MP RAW, and cloning it would double peak heap (especially painful
-    // on wasm32's 32-bit heap) plus cost a full memcpy, for no reason —
-    // nothing reads `raw.data` after this point (`build_cam2rgb` below only
-    // touches `raw.color_matrix`).
+    // `mem::take`, not `clone`: the sensor buffer is ~96MB at 24MP, and
+    // nothing reads `raw.data` after this.
     let pixels = if is_xtrans {
         let max_dim = width.max(height);
         let requested = max_px.max(1) as usize;
-        // Preserve every position in each 6x6 CFA tile while averaging
-        // equivalent phases across each skipped region (see
-        // `downsample_xtrans_mosaic`'s own doc comment). A pixel stride
-        // rounded to six would keep one CFA phase and corrupt the mosaic.
+        // Keep every position of each 6x6 CFA tile and average matching
+        // phases across skipped tiles. A plain stride would keep one phase.
         let reduction = max_dim.div_ceil(requested).max(1);
         if reduction == 1 {
             Pix2D::new_with(std::mem::take(data), width, height)
@@ -761,10 +562,8 @@ pub(crate) fn demosaic_cfa(
     };
     let area = if is_xtrans && pixels.width != width {
         let tile_step = xtrans_stride * 6;
-        // Return the first reduced coordinate whose retained source coordinate
-        // is at or after `coord`. Coordinates in the skipped part of a tile
-        // must advance to the next retained tile, rather than rounding down
-        // and accidentally including optical-border samples.
+        // Map to the first retained coordinate at or after `coord`, so
+        // coordinates in a skipped part of a tile never pull in border samples.
         let map_start = |coord: usize| map_xtrans_coord(coord, tile_step);
         let x0 = map_start(area.p.x).min(pixels.width);
         let y0 = map_start(area.p.y).min(pixels.height);
@@ -779,17 +578,9 @@ pub(crate) fn demosaic_cfa(
     };
 
     let demosaiced = if is_xtrans {
-        // rawler 0.7.2 ships no wired-up X-Trans demosaic (the
-        // `imgop::sensor::xtrans` module is an empty stub upstream), so run
-        // the X-Trans mosaic through `PPGDemosaic` — it only guards
-        // `cfa.is_rgb()` (X-Trans passes: its 36-char name is all R/G/B) and
-        // indexes via `cfa.color_at()`, which honours the 6x6 tile, so it
-        // won't panic. The green interpolation still assumes Bayer
-        // neighbourhoods, so the result is soft/imperfect on X-Trans — but
-        // this path only runs on a RAF with no usable embedded preview
-        // (corrupted file), and the `TODO(x-trans)` above already documents
-        // it as wrong-when-it-runs. `Superpixel3Channel` is not an option
-        // here: it hits `unreachable!()` on any non-2x2 pattern.
+        // rawler 0.7.2 has no X-Trans demosaic. `PPGDemosaic` does not panic
+        // on it because it reads colors via `cfa.color_at()`, but it assumes
+        // Bayer neighborhoods, so the result is soft.
         PPGDemosaic::new().demosaic(&pixels, &cfa, &colors, area)
     } else {
         match mode {
@@ -798,31 +589,12 @@ pub(crate) fn demosaic_cfa(
         }
     };
 
-    // `RawDevelop`'s `CropDefault` step (native's own pipeline, `RawDevelop::
-    // default()`) crops to `raw.crop_area.or(active_area)` after demosaic —
-    // the DNG "recommended default display" rectangle, usually a touch
-    // tighter than the full active area (trims a residual sensor-edge/mask
-    // margin the active-area crop alone doesn't). This file only ever
-    // cropped to `active_area` (as the demosaic ROI, matching `RawDevelop`'s
-    // separate `CropActiveArea` step) and never applied this second, tighter
-    // crop at all — confirmed via a real Sony ARW to make the wasm32 Loupe
-    // measurably darker than native/Linux even after the embedded-JPEG
-    // substitution bug (a different issue) was fixed, since that extra
-    // margin's typically-darker pixels get averaged into the GPU's mip chain
-    // whenever the fitted view is downscaled. Mirrors `RawDevelop`'s own
-    // `adapt`/`scale(0.5)` logic exactly (`vendor/rawler-0.7.2/src/imgop/
-    // develop.rs`'s `CropDefault` block): `crop_area` is in full-sensor
-    // coordinates, `adapt`ed to `original_active_area`-relative ones since
-    // that's where `demosaiced`'s own origin sits (it was demosaiced against
-    // `area` as its ROI), then halved if this is the quarter-res `Fast`
-    // superpixel bin (X-Trans and `Quality`/PPG are both full-res, no scale).
-    // X-Trans excluded: its ROI passed to `.demosaic()` above is `area` as
-    // reassigned into *reduced* (downsampled) space a few lines up, not
-    // `original_active_area` — adapting `crop_area` against the wrong
-    // reference rect would misplace the crop entirely. X-Trans's demosaic
-    // path already has its own open, separately-tracked correctness issues
-    // (see the TODO on `is_supported_xtrans_layout`); not compounding that
-    // here.
+    // Match `RawDevelop`'s `CropDefault` step: crop to `raw.crop_area`, the
+    // DNG default display rectangle, which is often tighter than the active
+    // area. Skipping it lets dark edge pixels into the mip chain and darkens
+    // the fitted view. `crop_area` is in sensor coordinates, so adapt it to the
+    // active area and halve it for `Fast`'s quarter-res bin. X-Trans is
+    // skipped because its demosaic ran in reduced coordinates.
     let demosaiced = match (!is_xtrans)
         .then(|| raw.crop_area.or(Some(original_active_area)))
         .flatten()
@@ -834,10 +606,7 @@ pub(crate) fn demosaic_cfa(
             if mode == DemosaicMode::Fast {
                 crop.scale(0.5);
             }
-            // Clamp rather than trust the file: a crop rect that doesn't
-            // actually fit inside what got demosaiced (bad/inconsistent
-            // metadata) must degrade to "no crop", not panic or produce a
-            // nonsensical sub-rect.
+            // A crop that does not fit (bad metadata) means no crop.
             let fits =
                 crop.p.x + crop.d.w <= demosaiced.width && crop.p.y + crop.d.h <= demosaiced.height;
             if fits && !crop.is_empty() {
@@ -857,15 +626,8 @@ pub(crate) fn demosaic_cfa(
     let cam2rgb = build_cam2rgb(raw);
     let (w, h) = (demosaiced.width, demosaiced.height);
 
-    // Automatic decode-time denoise — see `AUTO_RAW_DENOISE_STRENGTH`'s own
-    // doc comment (`raw/nonmac_decode.rs`) for why this exists. `Quality`
-    // only, applied here to the demosaiced camera-native samples
-    // (pre-white-balance, pre-color-matrix) rather than after rendering —
-    // the earliest linear-light point available, and (unlike
-    // `decode_raw_nonmac`'s post-hoc pass on a finished sRGB image) no
-    // gamma round-trip needed since this data is already linear. `Fast`
-    // skips this: its quarter-resolution 2x2 bin already gets free noise
-    // reduction from averaging.
+    // Auto-denoise (`AUTO_RAW_DENOISE_STRENGTH`), `Quality` only. Runs on
+    // linear camera RGB before white balance and the color matrix.
     let denoised_quality;
     let demosaic_pixels: &[[f32; 3]] = if mode == DemosaicMode::Quality {
         denoised_quality = crate::develop::denoise_linear_rgb_buffer(
@@ -879,6 +641,8 @@ pub(crate) fn demosaic_cfa(
         demosaiced.pixels()
     };
 
+    // White balance comes after demosaic, as in `RawDevelop`, because PPG's
+    // edge decisions depend on channel values.
     let mut rgba = vec![0u8; w * h * mode.bytes_per_pixel()];
     match mode {
         DemosaicMode::Fast => {
@@ -899,19 +663,11 @@ pub(crate) fn demosaic_cfa(
     Some((w as u32, h as u32, rgba))
 }
 
-/// For each retained 6x6 CFA tile, averages every same-phase sample across
-/// the whole `reduction`x`reduction` grid of sub-tiles the tile stands in
-/// for, rather than reading only the tile's own single sub-tile position.
-/// Point-sampling one sub-tile per block (the previous approach) concatenated
-/// 6-pixel strips from source positions `reduction`x6 pixels apart directly
-/// against each other, discarding everything between them — real image
-/// content, not just high-frequency detail — which showed up as periodic
-/// geometric distortion/banding in the output. Averaging keeps the CFA phase
-/// at each output position correct (every contributor shares that phase, six
-/// rows/columns apart) while actually representing the region it stands in
-/// for. `.min(height - 1)`/`.min(width - 1)` clamps a partial trailing block
-/// to its last valid row/column, same as the point-sample version did — a
-/// harmless edge duplication, not a correctness issue.
+/// Shrinks an X-Trans mosaic while keeping its 6x6 CFA pattern intact. Each
+/// output sample averages all same-phase samples in the
+/// `reduction`x`reduction` block of tiles it stands for. Averaging instead of
+/// picking one tile avoids banding. See the TODO on
+/// `is_supported_xtrans_layout` for the edge clamping bug.
 fn downsample_xtrans_mosaic(
     source: &[f32],
     width: usize,
@@ -945,14 +701,10 @@ fn downsample_xtrans_mosaic(
     (reduced, reduced_width, reduced_height)
 }
 
-/// Already-demosaiced/linear RGB preview (cpp == 3 — no CFA, no
-/// interpolation to do): white balance, color matrix and gamma (per-channel
-/// black/white-level normalize already happened upstream, in
-/// `apply_scaling()`), plus simple 2x2 nearest-neighbor decimation rather
-/// than an averaging box filter — this data has no CFA-driven reason to
-/// average 4 samples together. `mode` has no demosaic-algorithm effect here
-/// (there's no CFA to interpolate), only an output-encoding one — same
-/// `Fast`/`Quality` branch `demosaic_cfa` makes.
+/// Preview for data that is already RGB (cpp == 3), so there is nothing to
+/// demosaic. `Fast` takes every other pixel; `Quality` box-averages to fit
+/// `max_px`. Applies white balance and the color matrix, plus gamma for
+/// `Fast`.
 fn decimate_linear_rgb(
     raw: &mut rawler::RawImage,
     mode: DemosaicMode,
@@ -964,18 +716,13 @@ fn decimate_linear_rgb(
     let wb = neutral_if_non_finite(raw.wb_coeffs);
     let (width, height) = (raw.width, raw.height);
 
-    // Computed before the mutable borrow of `raw.data` below for
-    // borrow-checker reasons only — `build_cam2rgb` only reads
-    // `raw.color_matrix`.
     let cam2rgb = build_cam2rgb(raw);
 
     let area = raw.active_area.unwrap_or(rawler::imgop::Rect::new(
         rawler::imgop::Point::new(0, 0),
         rawler::imgop::Dim2::new(width, height),
     ));
-    // Same reasoning as `is_supported_bayer_layout`'s bounds check: an active
-    // area outside the decoded buffer would be a slice-bounds panic below,
-    // and `panic=abort` on wasm32 makes that fatal to the whole worker.
+    // Out-of-bounds indexing would panic, fatal under wasm32 `panic=abort`.
     if cpp == 0 || !area_fits(area, width, height) {
         return None;
     }
@@ -1000,10 +747,8 @@ fn decimate_linear_rgb(
     };
     let bpp = mode.bytes_per_pixel();
 
-    // Accumulate into a linear-light buffer first, render in a second pass —
-    // split out (rather than rendering inline, the way this loop used to)
-    // so `Quality`'s automatic denoise below has a whole-buffer neighbor
-    // lookup to run against; `Fast` pays the extra `Vec` but no extra math.
+    // Accumulate linear values first so `Quality`'s denoise can see the whole
+    // buffer, then render in a second pass.
     let mut linear = vec![[0f32; 3]; out_w * out_h];
     for oy in 0..out_h {
         for ox in 0..out_w {
@@ -1038,13 +783,8 @@ fn decimate_linear_rgb(
         }
     }
 
-    // Automatic decode-time denoise — see `AUTO_RAW_DENOISE_STRENGTH`'s own
-    // doc comment (`raw/nonmac_decode.rs`) and `demosaic_cfa`'s
-    // matching comment for why this exists and why `Fast` skips it. Applied
-    // here after white balance (unlike `demosaic_cfa`, which
-    // denoises before it) since this loop already folds `wb` into the
-    // accumulation above — still before the color matrix, still linear
-    // light, so the difference doesn't change what the filter is smoothing.
+    // Auto-denoise, `Quality` only. White balance is already folded in here,
+    // unlike `demosaic_cfa`; both still denoise before the color matrix.
     if mode == DemosaicMode::Quality {
         linear = crate::develop::denoise_linear_rgb_buffer(
             crate::image_decode::AUTO_RAW_DENOISE_STRENGTH,

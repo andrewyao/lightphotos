@@ -2,8 +2,7 @@ use super::*;
 
 use crate::app::App;
 
-/// A modal confirming a pending bulk action. Confirm runs it; Cancel / Esc /
-/// clicking the backdrop dismisses it.
+/// Confirms a pending bulk action. Cancel, Esc, or a backdrop click dismisses it.
 pub(super) fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     let Some(prompt) = app.pending_bulk_prompt() else {
         return;
@@ -23,14 +22,12 @@ pub(super) fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
             }
         });
     });
-    // Backdrop click / Escape → treat as cancel.
     if resp.should_close() {
         out.actions.push(UiAction::CancelBulk);
     }
 }
 
-/// A modal confirming quit (Esc in the grid). Quit exits the app; Cancel / Esc /
-/// clicking the backdrop keeps it running.
+/// Confirms quit, opened by Esc in the grid.
 pub(super) fn quit_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.pending_quit() {
         return;
@@ -48,7 +45,7 @@ pub(super) fn quit_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
             }
         });
     });
-    // Backdrop click cancels; Escape confirms, matching App::handle_key.
+    // A backdrop click cancels. A second Esc quits, matching `App::handle_key`.
     if resp.should_close() {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             out.actions.push(UiAction::ConfirmQuit);
@@ -58,8 +55,7 @@ pub(super) fn quit_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
-/// The keyboard-shortcut help overlay (toggled by `?`). A modal listing the
-/// key bindings; Close / Esc / backdrop dismisses it.
+/// The keyboard-shortcut list, toggled by `?`.
 pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.show_help() {
         return;

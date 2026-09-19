@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-// Mip-chain generation. Each level is produced by drawing a fullscreen triangle
-// into it while sampling the level above with a linear filter: because the
-// destination is exactly half the source's size, one bilinear tap at a
-// destination texel's center lands on the corner of a source 2x2 block and
-// averages it — the same box filter the CPU path used to compute, for none of
-// the CPU time.
+// Mip-chain generation. Each level is drawn by sampling the level above with
+// a linear filter. The destination is half the source size, so one bilinear
+// tap at a destination texel center averages a 2x2 source block.
 //
-// Kept separate from `shader.wgsl` because that module's vertex stage reads the
-// loupe's zoom/pan transform from group 1; this pass has no transform and no
-// viewport, it just covers its render target.
+// Separate from `shader.wgsl`, whose vertex stage needs the zoom/pan transform.
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -18,8 +13,7 @@ struct VsOut {
 
 @vertex
 fn vs_mip(@builtin(vertex_index) vi: u32) -> VsOut {
-    // One oversized triangle rather than two quad triangles: no seam along the
-    // diagonal, and it clips to the same covered area.
+    // One oversized triangle, clipped to the target, avoids a diagonal seam.
     var corners = array<vec2<f32>, 3>(
         vec2<f32>(-1.0, -1.0),
         vec2<f32>(3.0, -1.0),

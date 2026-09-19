@@ -1,46 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! wasm32 Web Worker decode entry point — the wasm port plan's M4 (real
-//! threading). `app/web.rs`'s `request_web_thumbs`/`request_web_preview`
-//! used to decode inline on the main thread via `spawn_local`, serially; this
-//! binary is what those requests get dispatched to instead, N copies of it
-//! running in independent `web_sys::Worker`s (`web_worker_pool.rs`, the
-//! main-thread counterpart), each with its own separate wasm linear memory —
-//! no `SharedArrayBuffer`/atomics, no nightly, stays on stable Rust (decided
-//! over `wasm-bindgen-rayon` specifically to avoid both).
+//! wasm32 Web Worker binary: decodes images and bakes exports off the main
+//! thread. `web_worker_pool.rs` runs several copies, each with its own wasm
+//! memory, so no `SharedArrayBuffer` or nightly Rust is needed.
 //!
-//! This has to be a **separate binary**, not a branch inside `main.rs`'s
-//! existing `fn main()`: a Worker context has no `window` (only
-//! `DedicatedWorkerGlobalScope`), so it can't run winit/wgpu/egui at all, and
-//! trunk's `data-type="worker"` link (`index.html`) needs its own compiled
-//! bin target to point at — see the Trunk asset-pipeline docs
-//! (`rel="rust"`/`data-type`) for how a second `[[bin]]` gets loaded as a
-//! worker with a stable (non-content-hashed) output filename
-//! (`wasm_worker.js`/`wasm_worker_bg.wasm`), unlike the main app's own
-//! trunk-hashed output — that stability is exactly what lets
-//! `web_worker_pool.rs` construct the worker's script URL without knowing
-//! any build hash.
-//!
-//! The modules are pulled in by `#[path]` rather than through a `use
-//! lightphotos::...`, because lightphotos has no lib target — same pattern
-//! `face_probe.rs`/`seg_probe.rs` already use, and for the same reason:
-//! `src/main.rs` is the crate root, so there is nothing for a second binary
-//! to `use`. Declared at crate root (not nested in a module) so `crate::`
-//! paths inside those files resolve exactly as they do in the main binary.
-//!
-//! ## Pipeline position
-//! - This binary IS wasm32's decode step for both Pipeline 1 (Loupe) and
-//!   Pipeline 2 (Grid/filmstrip) — it never runs on macOS or native
-//!   Linux/Windows.
-//! - `web_worker_pool.rs` (main thread) posts a job here; this file's
-//!   `decode()` tries the cheap embedded-preview extractors first
-//!   (`thumbnail::embedded_preview_from_bytes`, then
-//!   `thumbnail::rawler_full_image_from_bytes` for RAF/CR3), falling back to
-//!   `raw_preview`'s `Fast`/`Quality` tiers for everything else.
-//! - The result posts back to the main thread, which routes it into
-//!   `loader.rs`'s caches via `insert_*_external` (see that file's own
-//!   doc comment).
-//! - See `ARCHITECTURE.md`.
+//! It is a separate binary because a worker has no `window` and cannot run
+//! winit, wgpu, or egui. There is no lib target, so shared modules come in
+//! through `#[path]` at the crate root, where their `crate::` paths resolve
+//! the same as in the main binary.
 #![allow(dead_code)]
 
 #[cfg(target_arch = "wasm32")]
@@ -52,23 +19,16 @@ mod raw_preview;
 #[cfg(target_arch = "wasm32")]
 #[path = "../thumbnail.rs"]
 mod thumbnail;
-// thumbnail.rs's on-disk `ThumbCache` (unused here — this worker only ever
-// calls its bytes-based `embedded_preview_from_bytes`) still pulls these two
-// in at compile time; re-declared for the same reason the three above are.
+// `hash` and `paths` are unused here, but `thumbnail.rs` needs them.
 #[cfg(target_arch = "wasm32")]
 #[path = "../hash.rs"]
 mod hash;
 #[cfg(target_arch = "wasm32")]
 #[path = "../paths.rs"]
 mod paths;
-// Pulled in for `denoise_linear_rgb_buffer`, which `raw_preview`'s
-// `Quality`-tier code now calls (see raw/preview.rs).
 #[cfg(target_arch = "wasm32")]
 #[path = "../develop.rs"]
 mod develop;
-// The export branch (`JobKind::Export`) runs the full decode → bake → encode
-// pipeline in-worker via `export::bake_jpeg`, so it needs the bake and encode
-// halves too.
 #[cfg(target_arch = "wasm32")]
 #[path = "../export.rs"]
 mod export;
@@ -81,11 +41,8 @@ mod image_ops;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {
-    // Never actually invoked — trunk only builds/loads this bin for
-    // wasm32 — but `[[bin]]` targets are still considered by a native
-    // `cargo build`/`cargo test`, and the modules above (`web-sys`-backed)
-    // don't compile there at all. An empty stub keeps native builds clean
-    // without gating this bin out of the manifest entirely.
+    // Native `cargo build` still builds every `[[bin]]`. This stub lets it
+    // succeed without the wasm-only modules above.
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -105,46 +62,14 @@ mod wasm {
     use wasm_bindgen::JsCast;
     use web_sys::{DedicatedWorkerGlobalScope, MessageEvent};
 
-    /// Decode one job's bytes to RGBA. For RAW, tries the file's own
-    /// embedded EXIF baseline thumbnail first (`thumbnail::
-    /// embedded_preview_from_bytes` — already-decoded by the camera, just a
-    /// small JPEG decode, same trick Photopea and every fast RAW browser
-    /// uses for quick previews); if that container can't even be opened this
-    /// way (CR3's ISO-BMFF wrapper, RAF's proprietary header — neither is
-    /// TIFF/JPEG at byte 0), tries `thumbnail::rawler_full_image_from_bytes`
-    /// next — RAF/CR3-only by design (see that function's own doc comment):
-    /// several other formats treated as RAW here (CR2/NEF/ARW/DNG/RW2/PEF)
-    /// *also* have a `full_image()` override, but their containers already
-    /// open fine above, so letting this ask them too silently swapped the
-    /// camera's own embedded JPEG in for the real linear-RAW demosaic on
-    /// every one of those, confirmed on a real Sony ARW — a different
-    /// picture, not a subtly-off tonemap; only then falls back to
-    /// `raw_preview`. This isn't only about
-    /// speed: `raw_preview`'s `catch_unwind` guards around `rawler`'s
-    /// parser are almost certainly *ineffective* on wasm32-unknown-unknown
-    /// (no real stack unwinding without nightly + explicit exception-handling
-    /// support, which this build doesn't use) — a panic there traps the
-    /// whole wasm instance, permanently killing this worker with no console
-    /// output at all. That matched an observed symptom exactly: grid
-    /// population getting stuck after a small, fixed number of thumbnails
-    /// (workers dying off one at a time as each hit some RAW file that
-    /// panicked rawler's parser), independent of the separate
-    /// `NotReadableError` read-concurrency issue `app/web.rs` handles.
-    /// Routing the common case (a grid thumbnail, or a RAF/CR3 Loupe open)
-    /// through one of the two embedded-preview extractors instead — far less
-    /// panic-prone code than `raw_preview`'s demosaic path — should make
-    /// that far rarer, though a genuine fix still wants real
-    /// exception-handling support or an audited panic-free `rawler` call
-    /// path.
+    /// Decode one job's bytes. RAW files try the embedded EXIF preview,
+    /// then rawler's embedded full image (RAF/CR3 only), then a real
+    /// decode. The embedded paths are faster and avoid rawler's decode
+    /// path, where a panic aborts this worker on wasm32.
     ///
-    /// `quality`, set by `web_worker_pool.rs`'s `submit()` from the job's
-    /// `JobKind` (never decided here), picks which `raw_preview` entry
-    /// point services the fallback: `false` (Grid/`Thumb`) →
-    /// `decode_raw_fast_from_bytes` (quarter-res Bayer bin, sRGB8 output,
-    /// unchanged); `true` (Loupe/`Preview`) → `decode_raw_quality_from_bytes`
-    /// (full PPG demosaic, `PixelFormat::LinearF16` output — the renderer
-    /// tonemaps this on the GPU via `raw_shader.wgsl` instead of expecting it
-    /// pre-baked). Meaningless for the non-RAW branch below.
+    /// `quality` picks the RAW decode: `false` is the fast quarter-res sRGB8
+    /// grid decode, `true` is the full demosaic in `LinearF16`, which the
+    /// renderer tonemaps on the GPU. It is ignored for non-RAW files.
     fn decode(
         bytes: &[u8],
         max_px: u32,
@@ -159,12 +84,9 @@ mod wasm {
                     return Ok(preview);
                 }
             }
-            // rawler's `full_image()` is the camera's own full-resolution
-            // embedded JPEG, not a small baseline thumbnail — no "too small"
-            // check here, deliberately. Gating it would send a 12 MP camera
-            // whose embedded JPEG is 4000px into a full PPG demosaic in the
-            // browser for every Loupe job, which asks for `renderer.max_dim`
-            // (8192 on WebGPU) and so would demand 4096px to pass.
+            // No size gate here. This is the camera's full-resolution JPEG,
+            // and Loupe jobs ask for 8192px on WebGPU, so a gate would reject
+            // a 4000px embedded JPEG and force a full demosaic.
             if let Some(preview) = thumbnail::rawler_full_image_from_bytes(bytes, max_px) {
                 return Ok(preview);
             }
@@ -175,8 +97,7 @@ mod wasm {
             };
         }
         if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
-            // Apply the same gate to non-RAW EXIF previews, including
-            // Loupe jobs that need more pixels than a grid thumbnail.
+            // Loupe jobs need more pixels than a small EXIF preview has.
             if thumbnail::preview_is_large_enough(preview.width, preview.height, max_px) {
                 return Ok(preview);
             }
@@ -184,11 +105,8 @@ mod wasm {
         image_decode::decode_nonraw_from_bytes(bytes, max_px)
     }
 
-    /// `JobKind::Export`: deserialize the develop/touch-up state, run the
-    /// shared `export::bake_jpeg` (full-res decode → bake → JPEG encode), and
-    /// post the JPEG bytes back (transferred) as `{ id, ok, jpeg }`, or
-    /// `{ id, ok: false, error }` on failure. `web_worker_pool.rs`'s
-    /// `handle_worker_message` routes the reply to `poll_exports`.
+    /// Bake one export and post `{ id, ok, jpeg }`, with the JPEG buffer
+    /// transferred, or `{ id, ok: false, error }`.
     fn handle_export(
         scope: &DedicatedWorkerGlobalScope,
         result: &Object,
@@ -231,10 +149,8 @@ mod wasm {
         }
     }
 
-    /// Read a numeric field off a job/result object via `Reflect`, panicking
-    /// with a clear message on a malformed message rather than silently
-    /// coercing `NaN` to `0` — a malformed job means a real protocol bug in
-    /// `web_worker_pool.rs`, worth surfacing loudly during development.
+    /// Panics on a missing or non-numeric field. That means a protocol bug in
+    /// `web_worker_pool.rs`, so it should fail loudly.
     fn get_f64(obj: &JsValue, key: &str) -> f64 {
         Reflect::get(obj, &JsValue::from_str(key))
             .unwrap_or(JsValue::UNDEFINED)
@@ -261,10 +177,8 @@ mod wasm {
             let max_px = get_f64(&data, "maxPx") as u32;
             let is_raw = get_bool(&data, "isRaw");
             let quality = get_bool(&data, "quality");
-            // Set only for a thumbnail that missed the on-disk cache. The
-            // encode happens here, not on the main thread, because the main
-            // thread is the one drawing the grid and wasm has no other way
-            // to get work off it.
+            // Set for a thumbnail that missed the disk cache. The cache JPEG
+            // is encoded here to keep the work off the main thread.
             let encode_jpeg = get_bool(&data, "encodeJpeg");
             let bytes_val =
                 Reflect::get(&data, &JsValue::from_str("bytes")).unwrap_or(JsValue::UNDEFINED);
@@ -300,9 +214,8 @@ mod wasm {
                     let _ = Reflect::set(&result, &JsValue::from_str("rgba"), &rgba.buffer());
                     let transfer = Array::new();
                     transfer.push(&rgba.buffer());
-                    // JPEG can't carry alpha or LinearF16, so such a result
-                    // is returned uncached rather than silently mis-encoded —
-                    // the same rule `thumbnail::write_entry` applies natively.
+                    // JPEG cannot hold alpha or LinearF16, so those results
+                    // are not cached.
                     if encode_jpeg && crate::thumbnail::jpeg_cacheable(&img) {
                         if let Ok(bytes) =
                             image_encode::encode_jpeg_to_vec(img.width, img.height, &img.rgba)
@@ -326,11 +239,8 @@ mod wasm {
         scope.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
         onmessage.forget();
 
-        // Readiness handshake — mirrors trunk's own webworker example: a
-        // worker only starts processing MessageEvents once its script first
-        // yields to the JS event loop, so any job the pool sends before this
-        // fires would be silently dropped. `web_worker_pool.rs` queues jobs
-        // for a worker until it sees this.
+        // A worker drops messages sent before its script first yields to the
+        // event loop. The pool holds jobs until it receives this.
         let ready = Object::new();
         let _ = Reflect::set(&ready, &JsValue::from_str("ready"), &JsValue::TRUE);
         let _ = scope.post_message(&ready);

@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! A minimal, dependency-free FNV-1a 64-bit hasher.
-//!
-//! Stable and deterministic across process runs (unlike
-//! `std::collections::hash_map::DefaultHasher`), so it's safe to key persistent
-//! artifacts on. Shared by the on-disk thumbnail cache key (`thumbnail`) and the
-//! edit signature (`develop`).
+//! FNV-1a 64-bit hasher. Unlike `DefaultHasher`, its output is stable across
+//! runs, so it can key data saved to disk (thumbnail cache, edit signature).
 
 pub(crate) struct Fnv1a {
     state: u64,

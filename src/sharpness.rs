@@ -1,22 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Focus/blur metric via the variance of the Laplacian.
-//!
-//! A sharp image has strong high-frequency detail, so its Laplacian (a
-//! second-derivative edge operator) has a wide spread of responses — high
-//! variance. A blurred image smears edges, shrinking that spread. The score is
-//! relative (bigger = sharper), used to pick the sharpest frame within a burst.
-//!
-//! Pixels are first reduced to a grayscale image whose long side is at most
-//! [`TARGET_LONG`], so scores are comparable across images of differing
-//! resolution within a group.
+//! Focus score: the variance of the Laplacian (an edge filter). Sharp images
+//! have strong edges and a high variance; blur lowers it. Scores are relative
+//! and used to pick the sharpest frame in a burst.
 
-/// Long-side cap for the analysis image. Downscaling normalizes the metric
-/// across resolutions and cheapens the convolution.
+/// Long-side cap for the analysis image. Downscaling makes scores comparable
+/// across resolutions and speeds up the filter.
 const TARGET_LONG: u32 = 1024;
 
-/// Relative sharpness of RGBA8 pixels (`width`×`height`, row-major). Higher is
-/// sharper. Returns `0.0` for empty/degenerate input or a short buffer.
+/// Relative sharpness of row-major RGBA8 pixels. Higher is sharper. `0.0` for
+/// empty input or a short buffer.
 pub fn sharpness(rgba: &[u8], width: u32, height: u32) -> f64 {
     if width == 0 || height == 0 || rgba.len() < (width as usize * height as usize * 4) {
         return 0.0;
@@ -28,8 +21,6 @@ pub fn sharpness(rgba: &[u8], width: u32, height: u32) -> f64 {
     variance_of_laplacian(&gray, ow, oh)
 }
 
-/// Variance of the 3×3 Laplacian response over a grayscale image. `0.0` when the
-/// image is smaller than the 3×3 kernel.
 fn variance_of_laplacian(gray: &[f32], w: usize, h: usize) -> f64 {
     if w < 3 || h < 3 {
         return 0.0;
@@ -38,7 +29,6 @@ fn variance_of_laplacian(gray: &[f32], w: usize, h: usize) -> f64 {
     for y in 1..h - 1 {
         for x in 1..w - 1 {
             let c = gray[y * w + x];
-            // 4-neighbour Laplacian: ∑neighbours − 4·center.
             let lap = gray[(y - 1) * w + x]
                 + gray[(y + 1) * w + x]
                 + gray[y * w + x - 1]
@@ -71,7 +61,7 @@ mod tests {
 
     #[test]
     fn linear_gradient_is_near_zero() {
-        // Laplacian of a linear ramp is ~0 everywhere → tiny variance.
+        // The Laplacian of a linear ramp is about 0 everywhere.
         let (w, h) = (8usize, 8usize);
         let gray: Vec<f32> = (0..w * h).map(|i| (i % w) as f32 * 10.0).collect();
         assert!(variance_of_laplacian(&gray, w, h) < 1.0);
@@ -98,7 +88,6 @@ mod tests {
 
     #[test]
     fn sharp_rgba_beats_blurred() {
-        // 32x32 checkerboard vs its 3x3 box-blurred version.
         let (w, h) = (32u32, 32u32);
         let mut sharp = vec![0u8; (w * h * 4) as usize];
         for y in 0..h {
@@ -111,7 +100,6 @@ mod tests {
                 sharp[i + 3] = 255;
             }
         }
-        // Box-blur luma into a new RGBA buffer.
         let mut blur = sharp.clone();
         for y in 1..h - 1 {
             for x in 1..w - 1 {
@@ -139,6 +127,6 @@ mod tests {
     #[test]
     fn degenerate_input_is_zero() {
         assert_eq!(sharpness(&[], 0, 0), 0.0);
-        assert_eq!(sharpness(&[0, 0, 0, 255], 10, 10), 0.0); // buffer too short
+        assert_eq!(sharpness(&[0, 0, 0, 255], 10, 10), 0.0);
     }
 }

@@ -1,32 +1,24 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Best-of-burst derivation. Given a per-entry burst grouping and per-entry
-//! sharpness scores, decide which frame of each burst is the "best" (sharpest)
-//! and which are its siblings. Pure and total so it can be unit-tested without
-//! any UI, filesystem, or decode state.
+//! Picks the best frame of each burst from per-frame burst groups and scores.
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use crate::navigation::group_by_time;
 
-/// Max gap between consecutive shots for them to count as one burst. Fixed at
-/// the typical camera burst-mode cadence; no UI knob (YAGNI).
+/// Max gap between consecutive shots in one burst.
 pub const BURST_GAP: Duration = Duration::from_secs(2);
 
-/// How a single frame relates to its burst. Absent (`None` in the output)
-/// means the frame is a singleton (its group has size 1) — never badged.
+/// A frame's role in a burst of 2+ frames. Single frames get `None`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum BurstMark {
-    /// The sharpest known frame of a burst of 2+ frames.
     Best,
-    /// A non-best member of a burst of 2+ frames.
     Sibling,
 }
 
-/// Strict "a is a better score than b": a real score beats no score; two real
-/// scores compare numerically. Used so ties and unscored frames keep the
-/// earliest member as the provisional winner.
+/// Strictly better: any score beats no score. Strictness keeps the earliest
+/// frame as the winner on ties.
 fn score_gt(a: Option<f64>, b: Option<f64>) -> bool {
     match (a, b) {
         (Some(x), Some(y)) => x > y,
@@ -35,22 +27,17 @@ fn score_gt(a: Option<f64>, b: Option<f64>) -> bool {
     }
 }
 
-/// Mark each entry given its burst `group_ids` and optional sharpness `scores`
-/// (parallel to `group_ids`). Groups of size 1 → `None`. In a group of 2+, the
-/// member with the strictly-highest known score is `Best`, the rest `Sibling`;
-/// with all scores tied or unknown, the earliest member is the provisional
-/// `Best`. Output is 1:1 with `group_ids`.
+/// One mark per entry. `scores` is parallel to `group_ids`. In a group of 2+,
+/// the highest score is `Best` and the rest are `Sibling`. Ties and missing
+/// scores go to the earliest frame.
 pub fn compute_marks(group_ids: &[u32], scores: &[Option<f64>]) -> Vec<Option<BurstMark>> {
     let score_at = |i: usize| scores.get(i).copied().flatten();
 
-    // Group sizes.
     let mut sizes: HashMap<u32, usize> = HashMap::new();
     for &g in group_ids {
         *sizes.entry(g).or_insert(0) += 1;
     }
 
-    // Winner index per group: first member seen, replaced only on a strictly
-    // greater score (so ties/None keep the earliest).
     let mut best: HashMap<u32, usize> = HashMap::new();
     for (i, &g) in group_ids.iter().enumerate() {
         match best.get(&g).copied() {
@@ -80,24 +67,13 @@ pub fn compute_marks(group_ids: &[u32], scores: &[Option<f64>]) -> Vec<Option<Bu
         .collect()
 }
 
-/// Fold a frame's eye state into its sharpness score, *before* marking.
+/// Fold eye state into the sharpness score before [`compute_marks`]. New
+/// culling signals belong here, so marking only ever compares one number.
 ///
-/// [`compute_marks`] only knows how to pick the highest score, and keeping it
-/// that way is deliberate — every new culling signal folds in here instead of
-/// growing another parameter on the marking logic.
-///
-/// A blink is a hard demotion, not a tiebreak: sharpness is a variance, so it
-/// is never negative, which means mapping a closed-eyed frame into `(-1, 0)`
-/// puts it strictly below every open-eyed or unjudged frame no matter how much
-/// sharper it is. Within that band the mapping stays monotonic in sharpness, so
-/// a burst where *everyone* blinked still promotes its sharpest frame rather
-/// than falling back on shot order.
-///
-/// Unknown eyes (no face found, profile shot, analysis still running) leave the
-/// score untouched — never treated as closed. One asymmetry to know about: a
-/// frame with a *known* blink still outranks a frame with no sharpness score at
-/// all, because [`compute_marks`] ranks any score above none. That only shows up
-/// mid-scan, and resolves as soon as the missing score lands.
+/// Sharpness is never negative, so a blink maps to `(-1, 0)`: below every
+/// open or unknown frame, but still ordered by sharpness if everyone blinked.
+/// Unknown eyes leave the score alone. A blinking frame still beats a frame
+/// with no sharpness score yet, until that score arrives.
 pub fn combined_score(
     sharpness: Option<f64>,
     eyes: Option<crate::facequality::EyeState>,
@@ -109,8 +85,8 @@ pub fn combined_score(
     }
 }
 
-/// Convenience: group `times` by `gap` (via `group_by_time`) then mark. This is
-/// the entry point the app uses each time capture times or scores change.
+/// Group by capture time, then mark. The app calls this whenever times or
+/// scores change.
 pub fn marks_for(
     times: &[Option<SystemTime>],
     scores: &[Option<f64>],
@@ -128,7 +104,6 @@ mod tests {
 
     #[test]
     fn a_blink_loses_to_a_blurrier_open_eyed_sibling() {
-        // The blinking frame is four times sharper and must still lose.
         let scores = vec![
             combined_score(Some(400.0), Some(EyeState::Closed)),
             combined_score(Some(100.0), Some(EyeState::Open)),
@@ -157,7 +132,7 @@ mod tests {
         assert_eq!(combined_score(Some(12.5), Some(EyeState::Open)), Some(12.5));
         assert_eq!(combined_score(None, Some(EyeState::Open)), None);
         assert_eq!(combined_score(None, None), None);
-        // A frame nobody could judge must not be demoted below one that blinked.
+        // Unknown eyes must rank above a blink.
         let scores = vec![
             combined_score(Some(1.0), None),
             combined_score(Some(500.0), Some(EyeState::Closed)),
@@ -170,8 +145,7 @@ mod tests {
 
     #[test]
     fn a_blink_stays_below_zero_even_at_zero_sharpness() {
-        // The demotion relies on sharpness never being negative; a flat frame
-        // scoring exactly 0.0 is the boundary case.
+        // Boundary case: a flat frame scores exactly 0.0.
         let blink = combined_score(Some(0.0), Some(EyeState::Closed)).unwrap();
         let open = combined_score(Some(0.0), Some(EyeState::Open)).unwrap();
         assert!(blink < 0.0 && blink < open, "blink={blink} open={open}");
@@ -229,8 +203,6 @@ mod tests {
 
     #[test]
     fn mixed_groups_are_independent() {
-        // group 0: idx 0,1 (best = 1); group 1: idx 2 (singleton);
-        // group 2: idx 3,4 (best = 4, since idx3 is unscored).
         let groups = [0u32, 0, 1, 2, 2];
         let scores = [Some(1.0), Some(9.0), Some(3.0), None, Some(4.0)];
         assert_eq!(
@@ -248,9 +220,7 @@ mod tests {
     #[test]
     fn marks_for_groups_by_gap_then_marks() {
         let t = |s: u64| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(s));
-        // 0s,1s = burst A; 10s,11s = burst B (9s jump splits).
         let times = [t(0), t(1), t(10), t(11)];
-        // In A, idx1 sharper; in B, idx2 sharper.
         let scores = [Some(1.0), Some(2.0), Some(8.0), Some(3.0)];
         assert_eq!(
             marks_for(&times, &scores, Duration::from_secs(3)),

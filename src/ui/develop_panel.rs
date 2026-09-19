@@ -2,11 +2,9 @@ use super::*;
 
 use crate::app::{App, FocusLevel, Region};
 
-/// The right-hand Develop panel: the Basic tone sliders, matching Lightroom's
-/// order (WB → Tone → Highlights/Shadows/Whites/Blacks). Reads the current
-/// image's adjustments from the app, and pushes `SetAdjustments` whenever a
-/// slider actually changes (never every frame). A double-click on any slider
-/// resets that one field to 0.
+/// The right-hand Develop panel, with sliders in Lightroom's order. Pushes one
+/// `SetAdjustments` only on frames where a slider changed. Double-clicking a
+/// slider resets it to 0.
 pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let mut adj = app.current_adjustments();
 
@@ -79,14 +77,11 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
             }
             ui.add_space(4.0);
 
-            // True once any slider in this frame changed, so we push exactly one
-            // SetAdjustments after rendering the whole group. `interacted_idx`
-            // tracks which slider (if any) had a mouse click/drag this frame, so
-            // the keyboard cursor follows the mouse to that exact slider.
+            // `interacted_idx` is the slider the mouse touched this frame, so the
+            // keyboard cursor can follow it.
             let mut changed = false;
             let mut interacted_idx: Option<usize> = None;
-            // Index of the slider being drawn, matched against `develop_focus` to
-            // draw the keyboard-cursor outline. Advanced by every `slider(...)`.
+            // Slider index, matching `App::develop_focus` and `develop_adjust`.
             let mut idx = 0usize;
             let focus_idx =
                 if app.focus() == Region::Develop && app.focus_level() == FocusLevel::Entered {
@@ -95,8 +90,7 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                     None
                 };
 
-            // One labeled slider over `field`. `focused` draws the amber keyboard
-            // cursor. Returns (value changed, mouse-interacted).
+            // Returns (value changed, mouse interacted).
             fn slider(
                 ui: &mut egui::Ui,
                 label: &str,
@@ -106,10 +100,9 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                 focused: bool,
             ) -> (bool, bool) {
                 ui.label(label);
-                // Let the slider track fill the panel width, leaving room only
-                // for the value box egui draws to its right. spacing is persistent
-                // for the rest of the frame, so snapshot and restore it — otherwise
-                // every widget drawn after the last slider inherits this width.
+                // Widen the track to the panel, leaving room for the value box.
+                // egui keeps spacing changes for the rest of the frame, so restore
+                // the old width afterward.
                 let prev_width = ui.spacing().slider_width;
                 ui.spacing_mut().slider_width = (ui.available_width() - 56.0).max(80.0);
                 let resp = ui.add(
@@ -119,7 +112,6 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                 );
                 ui.spacing_mut().slider_width = prev_width;
                 let mut changed = resp.changed();
-                // Double-click the slider to reset this field to its default.
                 if resp.double_clicked() {
                     *field = 0.0;
                     changed = true;
@@ -136,7 +128,6 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                 (changed, interacted)
             }
 
-            // Render one slider: accumulate changed/interacted and bump `idx`.
             macro_rules! row {
                 ($label:expr, $field:expr, $range:expr, $dec:expr) => {{
                     let (c, i) = slider(ui, $label, $field, $range, $dec, focus_idx == Some(idx));
@@ -200,7 +191,7 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                 crate::develop::DENOISE_RANGE,
                 0
             );
-            let _ = idx; // final bump isn't read; silence unused-assignment
+            let _ = idx; // silences the unused final increment
 
             if changed {
                 out.actions.push(UiAction::SetAdjustments(adj));
@@ -213,17 +204,14 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
         });
 }
 
-/// The live post-adjustment histogram at the top of the Develop panel. Draws a
-/// dark frame, then the R/G/B channels as translucent filled curves (additive
-/// overlap brightens) over a fixed-height rect. Reflects the current image's
-/// adjustments because `App` re-bins `apply_linear`'d samples on every change.
+/// The R, G, B histogram of the image after develop adjustments. `App`
+/// re-bins it on every adjustment change.
 pub(super) fn draw_histogram(ui: &mut egui::Ui, app: &App) {
     let height = 120.0;
     let width = ui.available_width();
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     let painter = ui.painter_at(rect);
 
-    // Dark background frame.
     painter.rect_filled(rect, 3.0, egui::Color32::from_gray(16));
     painter.rect_stroke(
         rect,
@@ -234,13 +222,12 @@ pub(super) fn draw_histogram(ui: &mut egui::Ui, app: &App) {
 
     let Some(bins) = app.histogram() else { return };
 
-    // Bins arrive float (fractional splat in recompute_histogram), so the comb
-    // from re-quantizing a tone stretch is already gone. A single light box blur
-    // tidies any residual gaps from strong stretches without flattening peaks —
-    // giving Lightroom's smooth-but-detailed curve.
+    // `recompute_histogram` already spreads each sample across two bins, so
+    // tone stretches don't leave a comb. A radius-1 box blur fills the small
+    // gaps left by strong stretches without flattening peaks.
     let smooth = |ch: &[f32; 256]| -> [f32; 256] {
         let mut a = *ch;
-        const R: usize = 1; // box radius
+        const R: usize = 1;
         let src = a;
         for i in 0..256usize {
             let lo = i.saturating_sub(R);
@@ -255,9 +242,8 @@ pub(super) fn draw_histogram(ui: &mut egui::Ui, app: &App) {
     };
     let smoothed: [[f32; 256]; 3] = [smooth(&bins[0]), smooth(&bins[1]), smooth(&bins[2])];
 
-    // Shared max across all channels so relative channel heights stay honest.
-    // Skip the extreme end bins (0 and 255) when scaling: pure black/white
-    // clipping spikes would otherwise flatten everything else.
+    // One max across all channels keeps their heights comparable. Bins 0 and
+    // 255 are skipped because clipping spikes there would flatten the rest.
     let mut max = 1f32;
     for ch in &smoothed {
         for (i, &c) in ch.iter().enumerate() {
@@ -281,9 +267,8 @@ pub(super) fn draw_histogram(ui: &mut egui::Ui, app: &App) {
     };
 
     for (ch, &color) in smoothed.iter().zip(colors.iter()) {
-        // Each channel is a filled area curve: a triangle strip between the
-        // baseline and the curve top. Translucent fills overlap to brighten,
-        // giving the Lightroom additive look. A brighter polyline traces the top.
+        // A translucent filled area per channel, so overlaps look brighter,
+        // with an opaque line along the top.
         let mut mesh = egui::Mesh::default();
         let base = rect.bottom();
         let mut top_line: Vec<egui::Pos2> = Vec::with_capacity(256);
@@ -301,7 +286,6 @@ pub(super) fn draw_histogram(ui: &mut egui::Ui, app: &App) {
             }
         }
         painter.add(egui::Shape::mesh(mesh));
-        // Crisper top edge.
         let line_color = color.to_opaque();
         painter.add(egui::Shape::line(
             top_line,

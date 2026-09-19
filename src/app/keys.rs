@@ -7,14 +7,10 @@ use crate::navigation::Cmp;
 use crate::ui;
 
 impl App {
-    /// Whether an arrow key or Tab that egui reported as "consumed" should still
-    /// reach the app's own navigation. egui keeps keyboard focus on a develop
-    /// `Slider` after the user drags it, and then flags every subsequent arrow
-    /// key as consumed — which silently kills image navigation until the slider
-    /// loses focus; egui_winit separately hardcodes every Tab press as consumed
-    /// regardless of focus (see the Tab-stripping comment in `redraw`). We let
-    /// both fall through unless a slider is being *actively* dragged right now
-    /// (`is_using_pointer`) or a crop is in progress.
+    /// Whether an arrow or Tab key that egui marked "consumed" should still reach
+    /// app navigation. egui keeps focus on a slider after a drag and consumes
+    /// every later arrow key, and egui_winit consumes every Tab press. We ignore
+    /// that unless a slider is being dragged right now or a crop is in progress.
     pub(crate) fn nav_key_should_fall_through(&self) -> bool {
         self.crop_edit.is_none() && !self.egui_ctx.egui_is_using_pointer()
     }
@@ -30,9 +26,8 @@ impl App {
         let cmd = self.modifiers.control_key();
         let alt = self.modifiers.alt_key();
 
-        // While cropping, the keyboard is limited to the crop sub-mode: `C`/Enter
-        // commit, `Esc` cancels, `X` still exports. Everything else is inert so a
-        // stray arrow/digit can't move the selection out from under the crop.
+        // While cropping, other keys do nothing, so a stray arrow or digit
+        // can't move the selection out from under the crop.
         if self.crop_edit.is_some() {
             match code {
                 KeyCode::KeyC | KeyCode::Enter | KeyCode::NumpadEnter => self.commit_crop(),
@@ -43,8 +38,7 @@ impl App {
             return;
         }
 
-        // While the WB picker is armed, only Escape does anything (cancels
-        // it); everything else is inert until a pixel is clicked.
+        // While the WB picker is armed, only Escape (cancel) does anything.
         if self.wb_picker {
             if code == KeyCode::Escape {
                 self.wb_picker = false;
@@ -72,7 +66,7 @@ impl App {
             return;
         }
 
-        // `?` (Shift+/) toggles the shortcut-help overlay; Esc closes it if open.
+        // `?` (Shift+/) toggles the shortcut help.
         if shift && code == KeyCode::Slash {
             self.show_help = !self.show_help;
             self.request_redraw();
@@ -84,11 +78,8 @@ impl App {
             return;
         }
 
-        // While the quit-confirmation modal is up the app is otherwise inert.
-        // Escape confirms Quit — repeated Escape from anywhere naturally backs
-        // all the way out of the app, mirroring the Quit button's action —
-        // and Enter cancels, keeping "proceed into the app" consistent with
-        // every other Enter binding.
+        // In the quit prompt, Escape confirms and Enter cancels. Repeated Escape
+        // backs out of the app one step at a time, and Enter always goes deeper in.
         if self.pending_quit {
             match code {
                 KeyCode::Escape => self.quit_requested = true,
@@ -101,11 +92,8 @@ impl App {
             return;
         }
 
-        // Survey Mode is a modal-like screen entered from/exited to the Grid:
-        // Left/Right move which member the shared rating hotkeys apply to
-        // (via `selected_path`'s Survey branch), Escape closes it, Enter runs
-        // the one-click keep-best action. Digit ratings fall through to the
-        // shared block below unchanged.
+        // In Survey, Left/Right pick which photo the rating keys apply to.
+        // Digits fall through to the shared rating code below.
         if self.mode == ViewMode::Survey {
             match code {
                 KeyCode::Escape => {
@@ -128,10 +116,8 @@ impl App {
             }
         }
 
-        // Shift+1..5 → filter ≥ N; Shift+0 → clear. Grid/Survey only —
-        // `set_filter` itself no-ops in Loupe (see its doc comment), so this
-        // is dispatched unconditionally rather than mode-checked here too.
-        // Checked before plain digits.
+        // Shift+1..5 filters to rating >= N and Shift+0 clears the filter.
+        // `set_filter` ignores this in Loupe.
         if shift {
             if let Some(n) = digit_of(code) {
                 if (1..=5).contains(&n) {
@@ -145,7 +131,7 @@ impl App {
             }
         }
 
-        // Plain digits rate (0 clears) in both modes — never zoom.
+        // Plain digits set the rating, and 0 clears it.
         if !shift && !cmd && !alt {
             if let Some(n) = digit_of(code) {
                 self.set_rating(n);
@@ -154,28 +140,18 @@ impl App {
         }
 
         match code {
-            // Loupe-only existing transforms.
             KeyCode::Digit0 if alt => self.reset_100(),
             KeyCode::BracketLeft if cmd && self.mode == ViewMode::Loupe => self.rotate(false),
             KeyCode::BracketRight if cmd && self.mode == ViewMode::Loupe => self.rotate(true),
 
-            // F6 toggles keyboard focus between whatever main region you're in
-            // (Folders/Grid/Detail/Develop) and the two chrome regions
-            // (Toolbar, then Filmstrip) when a region is merely "selected";
-            // once a region is "entered", F6 instead moves within it
-            // (Toolbar's control cursor — other entered regions have nothing
-            // for F6 to do there, since arrows/Tab already cover their
-            // content). See `cycle_region`/`cycle_control`.
+            // F6 cycles between the main region and the Toolbar and Filmstrip.
+            // Inside an entered region it moves between that region's controls.
             KeyCode::F6 => match self.focus_level {
                 FocusLevel::Selected => self.cycle_region(shift),
                 FocusLevel::Entered => self.cycle_control(shift),
             },
-            // Tab/Shift+Tab cycle between selectable items *within* whichever
-            // region has focus (never between regions — that's F6's job).
-            // egui_winit hardcodes every Tab press as `consumed` to run its
-            // own competing Tab-driven widget-focus traversal (see the
-            // Tab-stripping comment in `redraw`), so these ride the same
-            // `nav_key_should_fall_through` path in `main.rs` that arrows use.
+            // Tab and Shift+Tab move between items inside the focused region.
+            // F6 moves between regions.
             KeyCode::Tab if self.focus == Region::Folders => {
                 self.focus_level = FocusLevel::Entered;
                 self.folder_move(if shift { -1 } else { 1 });
@@ -197,56 +173,30 @@ impl App {
                 self.step_loupe(!shift);
             }
 
-            // Cmd/Ctrl+O: open the folder picker (same as the toolbar "Open"
-            // button and the landing page). Works in any mode.
             KeyCode::KeyO if cmd && !alt => self.open_folder_picker(),
 
             KeyCode::KeyG => self.enter_grid(),
-            // `B` toggles best-of-burst badges (grid). No-op while a filter is
-            // active — `toggle_bursts` guards it.
             KeyCode::KeyB if !cmd && !alt => self.toggle_bursts(),
-            // `D` toggles content-duplicate (dHash) grouping badges (grid).
             KeyCode::KeyD if !cmd && !alt => self.toggle_dupes(),
-            // `E` is the focus-independent "enter loupe" edit key (Lightroom).
             KeyCode::KeyE => {
                 if self.mode == ViewMode::Grid {
                     self.enter_loupe();
                 }
             }
-            // `C` enters crop mode (opening the loupe first from the grid).
             KeyCode::KeyC if !cmd && !alt => self.enter_crop(),
-            // `X` exports the selected image as a baked JPG, in either mode.
             KeyCode::KeyX if !cmd && !alt => self.export_selected(),
-            // Enter is focus-dependent (open image / expand folder / …).
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
-            // Cmd+Shift+U auto-tones the whole selection (checked before plain
-            // Cmd+U so the chord can't be eaten by the single-photo arm);
-            // Cmd+U auto-tones the one photo the user is pointing at — the open
-            // one in the Loupe, the one under the cursor in the Grid, which are
-            // not the same thing (see `auto_tone_one`). Lightroom's binding.
+            // Cmd+Shift+U tones the selection. It must come before plain Cmd+U.
             KeyCode::KeyU if cmd && shift => self.request_bulk(ui::BulkKind::AutoTone),
             KeyCode::KeyU if cmd => self.auto_tone_one(),
-            // Cmd+Shift+Y applies the copied develop settings to the whole
-            // selection (only when something has been copied; checked before
-            // plain `Y` so the compare arm can't eat the Cmd+Shift chord).
+            // Cmd+Shift+Y pastes copied settings onto the selection. It must
+            // come before plain `Y`, which toggles the before/after view.
             KeyCode::KeyY if cmd && shift && self.has_copied_settings() => {
                 self.request_bulk(ui::BulkKind::ApplySettings)
             }
-            // `Y` toggles the before/after compare view (Loupe only).
             KeyCode::KeyY if self.mode == ViewMode::Loupe && !cmd => self.toggle_compare(),
-            // Escape is the exact inverse of Enter: exactly one step back per
-            // press, all the way out to a quit prompt (native only — see the
-            // last arm). Priority order:
-            // chrome (Toolbar/Filmstrip) returns to the remembered main
-            // region (mirrors F6's toggle-back); Develop moves focus back to
-            // Detail (the panel stays visible — only keyboard focus moves);
-            // Detail drops back to Grid; Grid at `Selected` (nothing left for
-            // the generic rule to pop) goes to Folders and withdraws the
-            // selection, since leaving the grid means nothing is "the
-            // selected photo" anymore; otherwise the generic focus-level rule
-            // pops Entered back to Selected; and finally, already just
-            // Selected on Folders with nothing left to pop, ask to quit (on
-            // wasm there is nothing to quit, so that last step does nothing).
+            // Escape undoes Enter one step per press, ending at the quit
+            // prompt. Leaving the Grid for Folders also clears the selection.
             KeyCode::Escape => {
                 if CHROME_ORDER.contains(&self.focus) {
                     self.focus = self.main_focus;
@@ -270,8 +220,7 @@ impl App {
                 } else if self.focus_level == FocusLevel::Entered {
                     self.focus_level = FocusLevel::Selected;
                 } else {
-                    // A browser tab has no "quit" for us to offer, so the last
-                    // Escape there is simply a no-op.
+                    // A browser tab can't quit, so the web build does nothing.
                     #[cfg(not(target_arch = "wasm32"))]
                     {
                         self.pending_quit = true;
@@ -280,11 +229,8 @@ impl App {
                 self.request_redraw();
             }
 
-            // Cmd+A selects every visible cell in the grid.
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
-            // Cmd+Shift+C copies the primary photo's develop settings.
             KeyCode::KeyC if cmd && shift => self.copy_settings(),
-            // Delete moves the selection to the Trash (after confirm).
             KeyCode::Delete => self.request_bulk(ui::BulkKind::Delete),
 
             KeyCode::ArrowLeft => self.nav_arrow(-1, 0, shift),
@@ -292,8 +238,6 @@ impl App {
             KeyCode::ArrowUp => self.nav_arrow(0, -1, shift),
             KeyCode::ArrowDown => self.nav_arrow(0, 1, shift),
 
-            // Page Up/Down step to the prev/next image in Detail or Develop
-            // (Grid keeps Arrow/Tab-only stepping).
             KeyCode::PageUp if matches!(self.focus, Region::Detail | Region::Develop) => {
                 self.step_loupe(false)
             }

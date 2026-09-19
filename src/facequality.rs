@@ -1,20 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Face detection + eye-openness ("did they blink?") scoring, via Apple's
-//! Vision framework (`VNDetectFaceLandmarksRequest`).
-//!
-//! Same shape as `featureprint.rs`: Vision decodes the file itself from a
-//! path, so nothing here touches lightphotos' own decode/thumbnail pipeline.
-//! Unlike feature prints, though, the *interesting* part isn't the framework
-//! call — it's the geometry we run on the landmark points afterwards. So this
-//! module is deliberately split the way `coregraphics.rs`/`image_decode.rs`
-//! are: [`detect_faces`] is thin, untestable framework glue that returns raw
-//! normalized landmark points, and the scoring built on top of those points is
-//! pure and unit-tested against fabricated arrays.
-//!
-//! Eye openness is classic geometry (an eye-aspect-ratio over the eye contour
-//! points), not a trained model — consistent with the roadmap's
-//! heuristic-first, on-device constraint.
+//! Blink detection. Vision finds faces and eye landmark points, then pure
+//! geometry scores how open each eye is. [`detect_faces`] is thin Vision glue;
+//! the scoring below it is tested with fabricated points.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
@@ -31,39 +19,31 @@ use objc2_vision::{
 #[cfg(target_os = "macos")]
 use crate::vision;
 
-/// A landmark region's points in Vision's normalized image space: origin
-/// bottom-left, both axes 0..1, relative to the *whole image* (not the face
-/// bounding box).
+/// Landmark points in Vision's normalized space: origin bottom-left, both axes
+/// 0..1 over the whole image, not the face box.
 pub type Points = Vec<(f32, f32)>;
 
-/// One detected face, as Vision reports it — raw framework output with no
-/// interpretation applied. The scoring layer consumes this; keeping it a plain
-/// data struct is what lets that layer be tested without Vision in the loop.
+/// One face as Vision reports it, before any scoring.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawFace {
-    /// Face bounding box `(x, y, width, height)`, normalized, origin bottom-left.
+    /// `(x, y, width, height)`, normalized, origin bottom-left.
     pub bounding_box: (f32, f32, f32, f32),
-    /// Vision's own detection confidence, 0..1.
+    /// 0..1.
     pub confidence: f32,
-    /// Left-eye contour points (empty if Vision didn't resolve that region).
+    /// Eye contour points, empty when Vision didn't find that eye.
     pub left_eye: Points,
-    /// Right-eye contour points (empty if Vision didn't resolve that region).
     pub right_eye: Points,
 }
 
-/// Run `VNDetectFaceLandmarksRequest` over the image at `path`.
-///
-/// Returns one [`RawFace`] per detected face, in Vision's own result order.
-/// An image with no faces is `Ok(vec![])` — only an actual framework failure
-/// (unreadable file, Vision error) is an `Err`.
+/// Faces with eye landmarks for the image at `path`. No faces is `Ok(vec![])`;
+/// `Err` means Vision failed.
 #[cfg(target_os = "macos")]
 pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
     unsafe {
         let request = VNDetectFaceLandmarksRequest::new();
         vision::perform_request(path, request.as_super().as_super())?;
 
-        // No results at all is a legitimate "no faces here", not an error —
-        // Vision leaves `results` nil rather than empty in some revisions.
+        // Some Vision revisions return nil instead of an empty list for no faces.
         let Some(results) = request.results() else {
             return Ok(Vec::new());
         };
@@ -100,20 +80,17 @@ pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
     }
 }
 
-/// Run `VNDetectFaceLandmarksRequest` over the image at `path`. Unsupported
-/// on this platform — Vision is macOS-only.
 #[cfg(not(target_os = "macos"))]
 pub fn detect_faces(_path: &Path) -> Result<Vec<RawFace>, String> {
     Err("face detection is unsupported on this platform".into())
 }
 
-/// Copy a landmark region's normalized points out of Vision's own buffer.
+/// Copy a landmark region's points out of Vision's buffer.
 ///
 /// # Safety
 ///
-/// `normalizedPoints` hands back a buffer owned by `region` and valid only for
-/// as long as `region` lives, holding exactly `pointCount` `CGPoint`s. We copy
-/// eagerly here so no caller ever holds that borrow.
+/// `normalizedPoints` returns `pointCount` `CGPoint`s owned by `region`. We copy
+/// them before returning, so no caller holds the borrow.
 #[cfg(target_os = "macos")]
 fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
     unsafe {
@@ -127,21 +104,9 @@ fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
     }
 }
 
-/// Face detection only — `VNDetectFaceRectanglesRequest`, no landmarks.
-///
-/// The cheap fallback for [`detect_faces`]: it answers "is there a face here,
-/// and where" without paying for the landmark constellation, which is the
-/// expensive and less reliable half of the request. Returns [`RawFace`]s with
-/// empty eye contours so it drops straight into [`face_quality`] — a photo
-/// scored this way simply reports `min_eye_openness: None`, i.e. "faces yes,
-/// blink unknown", which every consumer already has to handle.
-///
-/// Useful when landmarks prove too heavy for a background pass, or when a
-/// photo's landmarks come back garbage (profiles, small/distant faces) but the
-/// face count itself is still worth having.
-// Kept unwired on purpose: it exists so that swapping the heavy request out is
-// a one-line change in `analyze` if real-photo testing says the landmark pass
-// is too slow or too noisy.
+/// Faces without landmarks, a cheaper alternative to [`detect_faces`]. The
+/// eye contours are empty, so [`face_quality`] reports blinks as unknown.
+// Unused for now. Swap it into `analyze` if the landmark pass is too slow or noisy.
 #[allow(dead_code)]
 #[cfg(target_os = "macos")]
 pub fn detect_face_rects(path: &Path) -> Result<Vec<RawFace>, String> {
@@ -172,52 +137,37 @@ pub fn detect_face_rects(path: &Path) -> Result<Vec<RawFace>, String> {
     }
 }
 
-/// Face detection only, no landmarks. Unsupported on this platform — Vision
-/// is macOS-only.
 #[allow(dead_code)]
 #[cfg(not(target_os = "macos"))]
 pub fn detect_face_rects(_path: &Path) -> Result<Vec<RawFace>, String> {
     Err("face detection is unsupported on this platform".into())
 }
 
-// ---------------------------------------------------------------------------
-// Pure scoring layer — no Vision, no filesystem, fully unit-testable.
-// ---------------------------------------------------------------------------
-
-/// Openness below this counts as a blink. Tuned to sit well under a relaxed
-/// open eye (whose contour runs ~0.25–0.45 tall relative to its width) and well
-/// over a closed one (a near-flat contour, ~0.05–0.10) — the gap between those
-/// two populations is wide, which is what makes the heuristic workable at all.
-///
-/// Provisional until [`crate::facequality`]'s probe harness has been run over
-/// real open-eyed and blinking frames; it is the one number in this module that
-/// synthetic fixtures cannot validate.
+/// Openness below this counts as a blink. Open eyes run about 0.25 to 0.45 and
+/// closed eyes about 0.05 to 0.10. Not yet checked against real photos; use
+/// `src/bin/face_probe.rs` for that.
 pub const CLOSED_EYE_RATIO: f32 = 0.15;
 
 /// What the eye geometry says about a photo, once every face has been scored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EyeState {
-    /// Every resolved eye in the frame is open.
+    /// Every detected eye is open.
     Open,
-    /// At least one resolved eye is closed — someone blinked.
+    /// At least one detected eye is closed.
     Closed,
 }
 
-/// A photo's face-derived culling signals. Cheap, `Copy`, and cached per path
-/// in `app.rs` alongside `sharpness`.
+/// A photo's face-based culling signals.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct FaceQuality {
-    /// How many faces Vision found.
     pub faces: u32,
-    /// The least-open eye anywhere in the frame, as an eye-aspect ratio — so a
-    /// group shot is only as good as its worst blinker. `None` when no face had
-    /// usable eye landmarks (no faces at all, or a profile/occluded shot).
+    /// The least-open eye in the frame, so one blinker marks a group shot.
+    /// `None` when no eye landmarks were found.
     pub min_eye_openness: Option<f32>,
 }
 
 impl FaceQuality {
-    /// Classify the frame, or `None` when there's no eye geometry to judge —
-    /// callers must treat "unknown" as "don't penalize", never as "closed".
+    /// `None` means unknown. Callers must not treat unknown as closed.
     pub fn eye_state(&self) -> Option<EyeState> {
         self.min_eye_openness.map(|o| {
             if o < CLOSED_EYE_RATIO {
@@ -229,26 +179,17 @@ impl FaceQuality {
     }
 }
 
-/// Eye-aspect ratio of one eye contour: how tall the contour is relative to how
-/// wide, so an open eye scores high and a blink scores near zero.
+/// Height over width of one eye contour: high when open, near 0 when blinking.
+/// `None` for fewer than 3 points or a degenerate contour.
 ///
-/// `aspect_wh` is the source image's pixel width divided by its height, needed
-/// because Vision normalizes x by image width and y by image height
-/// *independently* — in a 3:2 frame a vertical distance of 0.1 is only two
-/// thirds of a horizontal 0.1. Rescaling y by `1 / aspect_wh` puts both axes
-/// back in the same units before any distance is measured.
-///
-/// The eye's own axes are found from the points themselves — the widest pair is
-/// taken as the corners and height is measured perpendicular to that line — so
-/// the result doesn't depend on Vision's point ordering (which differs between
-/// the 65- and 76-point constellations) and survives head roll.
-///
-/// `None` when there aren't enough points, or the contour is degenerate.
+/// `aspect_wh` is image width / height. Vision normalizes x and y by different
+/// lengths, so y is rescaled into x's units first. The widest point pair is
+/// taken as the eye corners, which ignores Vision's point order (it differs
+/// between the 65- and 76-point sets) and handles a tilted head.
 pub fn eye_openness(points: &[(f32, f32)], aspect_wh: f32) -> Option<f32> {
     if points.len() < 3 || !(aspect_wh > 0.0) {
         return None;
     }
-    // Into isotropic units: keep x, express y in the same width-relative scale.
     let pts: Vec<(f32, f32)> = points.iter().map(|&(x, y)| (x, y / aspect_wh)).collect();
 
     let mut width = 0.0f32;
@@ -266,7 +207,6 @@ pub fn eye_openness(points: &[(f32, f32)], aspect_wh: f32) -> Option<f32> {
         return None;
     }
 
-    // Unit vector along the corner-to-corner axis, and its normal.
     let (a, b) = corners;
     let (ux, uy) = ((b.0 - a.0) / width, (b.1 - a.1) / width);
     let (nx, ny) = (-uy, ux);
@@ -281,8 +221,7 @@ pub fn eye_openness(points: &[(f32, f32)], aspect_wh: f32) -> Option<f32> {
     Some((hi - lo) / width)
 }
 
-/// Reduce Vision's raw detections to the per-photo signal, taking the *worst*
-/// eye in the frame (see [`FaceQuality::min_eye_openness`]).
+/// Score all faces in a photo, keeping the least-open eye.
 pub fn face_quality(faces: &[RawFace], aspect_wh: f32) -> FaceQuality {
     let min_eye_openness = faces
         .iter()
@@ -301,10 +240,8 @@ pub fn face_quality(faces: &[RawFace], aspect_wh: f32) -> FaceQuality {
     }
 }
 
-/// Detect and score in one step: the entry point `app.rs` calls per photo.
-///
-/// Falls back to a square aspect if the file's dimensions can't be read, which
-/// only skews the ratio rather than losing the signal.
+/// Detect and score one photo. Assumes a square image if its size can't be
+/// read, which skews the ratio but keeps the signal.
 pub fn analyze(path: &Path) -> Result<FaceQuality, String> {
     let faces = detect_faces(path)?;
     let aspect_wh = crate::image_decode::pixel_size(path)
@@ -313,22 +250,13 @@ pub fn analyze(path: &Path) -> Result<FaceQuality, String> {
     Ok(face_quality(&faces, aspect_wh))
 }
 
-/// A finished analysis, carrying its path back so the caller can match it up.
 pub struct FaceOutcome {
     pub path: PathBuf,
     pub result: Result<FaceQuality, String>,
 }
 
-/// Background worker pool for face analysis, mirroring
-/// [`crate::featureprint::DistancePool`]: small pool, self-contained jobs,
-/// drained once per frame.
-///
-/// A pool rather than inline work because [`analyze`] makes Vision decode the
-/// file at full resolution — far heavier than the thumbnail-based blur and
-/// dHash scoring that run straight on the UI thread. Unlike feature prints,
-/// though, the result is a plain `Copy` struct, so there's no "compute both
-/// halves on one thread" constraint here: [`FaceQuality`] crosses the channel
-/// on its own.
+/// Background workers for [`analyze`], which makes Vision decode the full-size
+/// file and is too slow for the UI thread.
 pub struct FacePool {
     job_tx: Sender<PathBuf>,
     res_rx: Receiver<FaceOutcome>,
@@ -340,9 +268,8 @@ impl FacePool {
         let (res_tx, res_rx) = std::sync::mpsc::channel::<FaceOutcome>();
         let job_rx = Arc::new(Mutex::new(job_rx));
 
-        // Same sizing rationale as the feature-print pool: this only ever runs
-        // over burst/duplicate-group members, so a couple of workers is plenty
-        // and keeps Vision/ANE contention low.
+        // Only burst and duplicate members are analyzed, so two workers are
+        // enough and keep contention for Vision and the Neural Engine low.
         let cores = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -361,17 +288,16 @@ impl FacePool {
                         };
                         match rx.recv() {
                             Ok(p) => p,
-                            Err(_) => return, // all senders dropped → shut down
+                            Err(_) => return,
                         }
                     };
                     let result = analyze(&path);
                     if res_tx.send(FaceOutcome { path, result }).is_err() {
-                        break; // UI side gone
+                        break;
                     }
                 });
-            // See loader.rs's identical fallback: not every target has real
-            // threads yet (e.g. wasm32 pre-Web-Worker-pool) — degrade
-            // instead of crashing the app at startup.
+            // Some targets (wasm32) can't spawn threads. Log instead of
+            // crashing at startup.
             if let Err(e) = spawned {
                 eprintln!("[facequality] could not spawn worker {i}: {e}");
             }
@@ -385,7 +311,7 @@ impl FacePool {
         let _ = self.job_tx.send(path);
     }
 
-    /// Drain all finished analyses (non-blocking).
+    /// Drain finished analyses without blocking.
     pub fn poll(&self) -> Vec<FaceOutcome> {
         let mut out = Vec::new();
         while let Ok(o) = self.res_rx.try_recv() {
@@ -406,12 +332,8 @@ mod tests {
         path
     }
 
-    // Real Vision round trip, mirroring `featureprint.rs`'s own FFI test: a
-    // synthetic image obviously contains no faces, so what this actually pins
-    // down is the plumbing — the request runs, the result list is readable,
-    // and "no faces" comes back as an empty Ok rather than an error or a
-    // crash. Whether the *landmarks* are any good is a question only real
-    // portraits can answer; that's what `src/bin/face_probe.rs` is for.
+    // Runs real Vision on a blank image. "No faces" must be an empty Ok, not an
+    // error. Landmark quality needs real portraits; see `src/bin/face_probe.rs`.
     #[test]
     fn detect_faces_runs_and_finds_none_in_a_blank_image() {
         let (w, h) = (64, 64);
@@ -428,11 +350,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    // --- pure scoring layer: fabricated landmarks, no Vision involved --------
-
-    /// An almond eye contour in isotropic (square-pixel) space. Its openness is
-    /// exactly `half_h / half_w`, which is what makes these tests assertions
-    /// about the geometry rather than about a magic number.
+    /// An almond eye contour whose openness is exactly `half_h / half_w`.
     fn eye_contour(cx: f32, cy: f32, half_w: f32, half_h: f32) -> Points {
         vec![
             (cx - half_w, cy),
@@ -472,10 +390,8 @@ mod tests {
 
     #[test]
     fn openness_is_corrected_for_the_image_aspect_ratio() {
-        // The same physical eye — 100px wide, 30px tall, ratio 0.3 — sitting in
-        // a 3:2 landscape frame and in a 2:3 portrait one. Vision normalizes x
-        // and y against different denominators, so without the correction the
-        // two frames would disagree about the same eye.
+        // The same 100x30 px eye (ratio 0.3) in a 3:2 and a 2:3 frame must
+        // score the same.
         let pixels = eye_contour(1500.0, 1000.0, 50.0, 15.0);
 
         let landscape = to_normalized(&pixels, 3000.0, 2000.0);
@@ -486,8 +402,7 @@ mod tests {
         assert!((l - 0.3).abs() < 1e-4, "landscape ratio was {l}");
         assert!((p - 0.3).abs() < 1e-4, "portrait ratio was {p}");
 
-        // And it genuinely matters: assuming a square frame inflates the same
-        // landscape eye by exactly the 3:2 factor.
+        // Without the correction, the landscape eye is off by exactly 3:2.
         let uncorrected = eye_openness(&landscape, 1.0).unwrap();
         assert!(
             (uncorrected - 0.45).abs() < 1e-4,
@@ -516,16 +431,14 @@ mod tests {
     fn degenerate_contours_have_no_openness() {
         assert_eq!(eye_openness(&[], 1.0), None);
         assert_eq!(eye_openness(&[(0.1, 0.1), (0.2, 0.1)], 1.0), None);
-        // Every point identical: no axis to measure against.
         assert_eq!(eye_openness(&[(0.1, 0.1); 6], 1.0), None);
-        // A nonsensical aspect must not produce a nonsense score.
         assert_eq!(eye_openness(&eye_contour(0.5, 0.5, 0.05, 0.015), 0.0), None);
     }
 
     #[test]
     fn a_group_shot_is_only_as_good_as_its_worst_blinker() {
-        let open = eye_contour(0.3, 0.6, 0.03, 0.010); // 0.333
-        let blink = eye_contour(0.7, 0.6, 0.03, 0.001); // 0.033
+        let open = eye_contour(0.3, 0.6, 0.03, 0.010);
+        let blink = eye_contour(0.7, 0.6, 0.03, 0.001);
 
         let q = face_quality(
             &[
@@ -548,10 +461,8 @@ mod tests {
         assert_eq!(q.eye_state(), Some(EyeState::Open));
     }
 
-    // A profile shot resolves at most one eye, and a landscape resolves none.
-    // Both must come back "unknown" rather than "closed" — the culling logic
-    // penalizes closed eyes, so a false Closed would demote a perfectly good
-    // frame.
+    // No eyes found must read as unknown, never closed, or culling would
+    // demote a good frame. One found eye is judged on its own.
     #[test]
     fn missing_eye_landmarks_are_unknown_not_closed() {
         let empty = face_quality(&[], 1.0);
@@ -576,9 +487,7 @@ mod tests {
         assert!(detect_face_rects(&path).is_err());
     }
 
-    // Same plumbing check as the landmarks request, for the cheap fallback —
-    // and it must feed `face_quality` cleanly, reporting "faces unknown-eyed"
-    // rather than tripping over its empty eye contours.
+    // The rectangles request runs, and faces without eye contours score as unknown.
     #[test]
     fn rectangles_only_detection_runs_and_composes_with_scoring() {
         let (w, h) = (64, 64);

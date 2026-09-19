@@ -1,20 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Subject/foreground segmentation via Apple's Vision framework — the mask
-//! behind the Loupe's "Show Selection" overlay.
-//!
-//! Two requests, tried in order, because they answer different questions:
-//! `VNGeneratePersonSegmentationRequest` is purpose-built for people and gives
-//! a clean soft-edged matte, but returns nothing useful on a photo with no
-//! person in it. `VNGenerateForegroundInstanceMaskRequest` is the general
-//! "whatever the subject is" fallback — a dog, a plate of food, a bike.
-//!
-//! Both hand back a `CVPixelBuffer` at *their* chosen resolution, not the
-//! photo's, so [`Mask`] carries its own dimensions and callers must scale (see
-//! [`crate::image_ops::upsample_mask_bilinear`]).
-//!
-//! Vision decodes the file itself, so a path is the whole input — the handler
-//! setup is shared with the other Vision features in `vision.rs`.
+//! Subject masks from Apple Vision, used by the Loupe's "Show Selection"
+//! overlay. Person segmentation runs first because it gives the cleanest edge
+//! on people. If it finds no one, the general foreground request runs instead.
+//! Vision picks the mask resolution, so [`Mask`] carries its own size.
 
 use std::path::Path;
 
@@ -35,42 +24,36 @@ use objc2_vision::{
 #[cfg(target_os = "macos")]
 use crate::vision;
 
-/// `kCVPixelFormatType_OneComponent8` — one 8-bit channel, the format person
-/// segmentation produces.
+/// `kCVPixelFormatType_OneComponent8`, requested from person segmentation.
 #[cfg(target_os = "macos")]
 const ONE_COMPONENT_8: u32 = u32::from_be_bytes(*b"L008");
-/// `kCVPixelFormatType_OneComponent32Float` — one 32-bit float channel, which
-/// the instance-mask request can produce instead.
+/// `kCVPixelFormatType_OneComponent32Float`, which the foreground request can
+/// return.
 #[cfg(target_os = "macos")]
 const ONE_COMPONENT_32F: u32 = u32::from_be_bytes(*b"L00f");
 
-/// Which request produced a mask. Worth surfacing: the two behave differently
-/// enough on real photos that "why does this look like that" usually starts
-/// with knowing which one ran.
+/// Which Vision request produced a mask. The two behave differently enough
+/// that debugging a mask starts here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MaskSource {
-    /// `VNGeneratePersonSegmentationRequest` — a person was found.
     Person,
-    /// `VNGenerateForegroundInstanceMaskRequest` — the general subject fallback.
     ForegroundInstance,
 }
 
-/// A single-channel coverage mask at whatever resolution Vision chose:
-/// `0` = background, `255` = fully foreground, in between = soft edge.
+/// A coverage mask at Vision's resolution. `0` is background, `255` is fully
+/// foreground, values between are soft edges.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mask {
     pub width: u32,
     pub height: u32,
-    /// `width * height` bytes, tightly packed (Vision's row padding is already
-    /// stripped out).
+    /// `width * height` bytes with no row padding.
     pub alpha: Vec<u8>,
     pub source: MaskSource,
 }
 
 impl Mask {
     /// Coverage at `(x, y)`, or 0 outside the mask.
-    // Used by the tests and by `seg_probe`, not by the app: the Loupe overlay
-    // hands the whole mask to the GPU rather than sampling it pixel by pixel.
+    // Only tests and `seg_probe` use this. The Loupe samples the mask on the GPU.
     #[allow(dead_code)]
     pub fn at(&self, x: u32, y: u32) -> u8 {
         if x >= self.width || y >= self.height {
@@ -79,14 +62,8 @@ impl Mask {
         self.alpha[(y * self.width + x) as usize]
     }
 
-    /// This mask resampled to `width × height`, for overlaying at display size.
-    ///
-    /// Bilinear, so the model's soft matte edge survives the stretch — see
-    /// [`crate::image_ops::resample_bilinear_u8`]. Returns `self` unchanged when
-    /// the size already matches.
-    // For CPU-side consumers (`seg_probe`'s composite, and anything that later
-    // bakes a mask into pixels). The Loupe overlay doesn't call it — it uploads
-    // the mask at Vision's own resolution and lets the sampler do the stretch.
+    /// This mask resampled bilinearly to `width x height`, which keeps soft edges.
+    // Only CPU users like `seg_probe` call this. The Loupe lets the GPU sampler stretch the mask.
     #[allow(dead_code)]
     pub fn resized(&self, width: u32, height: u32) -> Mask {
         if (width, height) == (self.width, self.height) {
@@ -106,8 +83,8 @@ impl Mask {
         }
     }
 
-    /// This mask reoriented per an EXIF orientation (`1..=8`), so it lines up
-    /// with the decoded image. See [`crate::image_ops::orient_mask`].
+    /// This mask rotated or flipped by an EXIF orientation (`1..=8`) so it lines
+    /// up with the decoded image.
     #[cfg(target_os = "macos")]
     pub fn oriented(self, orientation: u8) -> Mask {
         if orientation <= 1 {
@@ -123,10 +100,8 @@ impl Mask {
         }
     }
 
-    /// Mean coverage, 0.0..=1.0. Cheap way to spot a mask that came back empty
-    /// (nothing found) or saturated (everything "foreground").
-    // Reported by `seg_probe` alongside `solid_coverage`; the app only needs
-    // the latter.
+    /// Mean coverage, 0.0..=1.0.
+    // Only `seg_probe` reports this. The app uses `solid_coverage`.
     #[allow(dead_code)]
     pub fn coverage(&self) -> f32 {
         if self.alpha.is_empty() {
@@ -136,16 +111,11 @@ impl Mask {
         total as f32 / (self.alpha.len() as f32 * 255.0)
     }
 
-    /// Fraction of the mask that is *confidently* foreground (over half
-    /// coverage), as opposed to [`coverage`](Self::coverage)'s mean.
-    ///
-    /// The emptiness test reads this rather than the mean, because a mask can
-    /// carry a respectable mean while committing to nothing. It is a test for
-    /// *nothing found*, and nothing more — it does not detect a wrong answer.
-    /// Measured on Apple's abstract `iMac Blue` wallpaper, which contains no
-    /// person anywhere, person segmentation returns 13.2% mean / 13.4% solid:
-    /// a confident, well-formed, completely imaginary subject. No coverage
-    /// statistic separates that from a real one, so nothing here tries to.
+    /// Fraction of pixels over half coverage. The "nothing found" test uses
+    /// this, not the mean, because a faint smear can have a high mean while
+    /// covering nothing. It can't catch a confident wrong mask: on Apple's
+    /// `iMac Blue` wallpaper, with no person in it, person segmentation
+    /// returns 13.4% solid coverage.
     #[cfg(any(target_os = "macos", test))]
     pub fn solid_coverage(&self) -> f32 {
         if self.alpha.is_empty() {
@@ -156,56 +126,32 @@ impl Mask {
     }
 }
 
-/// Solid coverage below this counts as "no person found", triggering the
-/// fallback. Person segmentation on a person-free photo doesn't error, so an
-/// empty result is the only in-band way it can say no.
-///
-/// Deliberately low: it catches the *nothing* case, and a small-but-real
-/// subject (someone a few metres back) must stay on the person path. It cannot
-/// catch a confident wrong answer — see [`Mask::solid_coverage`] for a measured
-/// example of one — so a photo with no person in it may still come back with a
-/// person mask rather than falling through to the general request. Whether that
-/// matters in practice is one of the questions this exploratory plan exists to
-/// answer on real photographs.
+/// Solid coverage below this means "no person found" and triggers the
+/// fallback. Person segmentation doesn't error on a photo without people; it
+/// returns an empty mask. Kept low so a small, distant person still counts.
 #[cfg(any(target_os = "macos", test))]
 const EMPTY_COVERAGE: f32 = 0.01;
 
-/// Segment the subject of the photo at `path`, in *display* orientation.
-///
-/// Tries person segmentation first and falls back to the general
-/// foreground-instance request when no person is found. Callers should treat an
-/// error as "no selection available for this photo" rather than as a bug —
-/// plenty of photographs simply have no subject to isolate.
-///
-/// The result is reoriented to match [`crate::image_decode::decode`]'s output.
-/// Vision reads the file in its stored orientation and knows nothing about the
-/// EXIF tag, so without this a portrait shot from a camera that records
-/// rotation in metadata would come back with its mask lying on its side.
+/// The subject mask for the photo at `path`, in display orientation. An error
+/// means no selection is available, which is normal for photos with no subject.
+/// Vision ignores EXIF orientation, so we rotate the mask ourselves.
 #[cfg(target_os = "macos")]
 pub fn segment(path: &Path) -> Result<Mask, String> {
     let mask = match segment_person(path) {
         Ok(mask) if mask.solid_coverage() >= EMPTY_COVERAGE => mask,
-        // Either no person, or the request itself failed — both mean "ask the
-        // general-purpose request instead". Its error is the one worth
-        // reporting, since it's the last word.
+        // No person, or the person request failed. Report the fallback's error.
         _ => segment_foreground(path)?,
     };
     Ok(mask.oriented(crate::image_decode::orientation_of(path)))
 }
 
-/// Segment the subject of the photo at `path`. Unsupported on this platform
-/// — Vision is macOS-only.
 #[cfg(not(target_os = "macos"))]
 pub fn segment(_path: &Path) -> Result<Mask, String> {
     Err("subject segmentation is unsupported on this platform".into())
 }
 
-/// `VNGeneratePersonSegmentationRequest` at accurate quality.
-///
-/// Accurate rather than balanced/fast because this runs once, on demand, for
-/// the single photo the user is looking at — there's no folder-wide pass to
-/// keep cheap, and a ragged matte would undermine the whole point of looking
-/// at the selection.
+/// Person segmentation at Accurate quality. It runs on demand for one photo,
+/// so speed matters less than a clean edge.
 #[cfg(target_os = "macos")]
 pub fn segment_person(path: &Path) -> Result<Mask, String> {
     unsafe {
@@ -223,12 +169,7 @@ pub fn segment_person(path: &Path) -> Result<Mask, String> {
     }
 }
 
-/// `VNGenerateForegroundInstanceMaskRequest`, merging every instance it found
-/// into one mask.
-///
-/// Merged rather than per-instance because this plan's selection is a single
-/// foreground/background split — per-instance selection would be a different
-/// (and much larger) feature.
+/// Foreground-instance segmentation, with every instance merged into one mask.
 #[cfg(target_os = "macos")]
 pub fn segment_foreground(path: &Path) -> Result<Mask, String> {
     unsafe {
@@ -246,10 +187,8 @@ pub fn segment_foreground(path: &Path) -> Result<Mask, String> {
     }
 }
 
-/// Copy a Vision mask buffer into a tightly-packed `Vec<u8>`.
-///
-/// Handles both single-channel formats Vision uses, and strips the row padding
-/// (`bytes_per_row` is generally wider than `width`, aligned for the GPU).
+/// Copy a Vision mask buffer into packed bytes, dropping row padding
+/// (`bytes_per_row` is usually wider than `width`).
 #[cfg(target_os = "macos")]
 fn pixel_buffer_to_mask(buffer: &CVPixelBuffer, source: MaskSource) -> Result<Mask, String> {
     let width = CVPixelBufferGetWidth(buffer);
@@ -259,9 +198,8 @@ fn pixel_buffer_to_mask(buffer: &CVPixelBuffer, source: MaskSource) -> Result<Ma
         return Err("Vision returned an empty mask buffer".into());
     }
 
-    // SAFETY: read-only lock held for exactly the span of the copy below; every
-    // read stays inside `height` rows of `bytes_per_row`, as reported by the
-    // buffer itself.
+    // SAFETY: the read-only lock is held for the whole copy, and every read stays
+    // inside `height` rows of `bytes_per_row` as the buffer reports them.
     unsafe {
         let lock = CVPixelBufferLockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly);
         if lock != 0 {
@@ -311,7 +249,7 @@ unsafe fn copy_u8_rows(base: *const u8, width: usize, height: usize, stride: usi
 /// # Safety
 ///
 /// Same contract as [`copy_u8_rows`], with rows of `width` `f32`s. `stride` is
-/// still in *bytes*, hence the division.
+/// still in bytes.
 #[cfg(target_os = "macos")]
 unsafe fn copy_f32_rows(base: *const f32, width: usize, height: usize, stride: usize) -> Vec<u8> {
     let stride_f32 = stride / std::mem::size_of::<f32>();
@@ -355,16 +293,14 @@ mod tests {
         );
     }
 
-    // Why the emptiness test reads the solid fraction and not the mean: a mask
-    // can carry a respectable mean while committing to nothing, and a small
-    // crisp subject can carry a lower mean than that smear while being exactly
-    // what we want to keep.
+    // A small crisp subject can have a lower mean than a faint smear, so the
+    // emptiness test must use solid coverage.
     #[test]
     fn a_low_confidence_smear_is_not_mistaken_for_a_subject() {
         let smear = Mask {
             width: 10,
             height: 10,
-            alpha: vec![70; 100], // 27% mean coverage, nothing committed
+            alpha: vec![70; 100],
             source: MaskSource::Person,
         };
         assert!(
@@ -374,7 +310,7 @@ mod tests {
         assert_eq!(smear.solid_coverage(), 0.0);
 
         let mut small_subject = vec![0u8; 100];
-        small_subject[..8].fill(250); // 8% of the frame, fully committed
+        small_subject[..8].fill(250);
         let subject = Mask {
             alpha: small_subject,
             ..smear.clone()
@@ -409,8 +345,7 @@ mod tests {
             big.source, small.source,
             "resizing must not relabel the source"
         );
-        // Corners keep their original values; the soft interior is what
-        // bilinear buys over nearest-neighbour.
+        // Corners keep their values and the interior blends.
         assert_eq!(big.at(0, 0), 0);
         assert_eq!(big.at(7, 0), 255);
         let mid = big.at(3, 3);
@@ -431,12 +366,8 @@ mod tests {
         assert_eq!(m.at(0, 1), 0);
     }
 
-    // Real Vision round trip, like `facequality.rs`'s: a synthetic image has no
-    // subject, so what this pins down is that both requests run, that the
-    // person request's emptiness routes to the fallback rather than being
-    // mistaken for a mask, and that whatever comes back is either a
-    // correctly-shaped buffer or a clean error — never a crash or a mask whose
-    // alpha length disagrees with its dimensions.
+    // Runs real Vision on a flat image with no subject. Both requests run, and
+    // the result is either a mask matching its own size or a clean error.
     #[test]
     fn segmentation_runs_end_to_end_on_a_subjectless_image() {
         let (w, h) = (96, 64);

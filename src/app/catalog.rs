@@ -10,15 +10,9 @@ use crate::trash;
 use crate::ui;
 
 impl App {
-    /// Point the catalog at `dir` and kick off its sidecar scan on a
-    /// one-shot background thread — same idiom as subject segmentation's
-    /// `request_selection_mask` (`app/loupe.rs`), not `loader.rs`'s
-    /// persistent pool: a directory switch is a single job, not a stream of
-    /// same-shaped ones. `Catalog::switch_dir` runs synchronously first (it's
-    /// just a clear, no I/O) so no stale cross-directory data is visible in
-    /// the meantime; the slow part (`load_sidecars`, one read per sidecar
-    /// file) happens on the spawned thread and is folded in later by
-    /// `poll_catalog_load`.
+    /// Points the catalog at `dir` and reads its sidecars in the background.
+    /// `switch_dir` clears the cache first, so the old folder's ratings never
+    /// show for the new one. `poll_catalog_load` folds in the result.
     pub(super) fn request_catalog_load(&mut self, dir: &Path) {
         self.catalog.switch_dir(dir);
         self.catalog_load_token += 1;
@@ -34,31 +28,17 @@ impl App {
                 .spawn(move || {
                     let loaded = crate::catalog::load_sidecars(&for_thread);
                     let _ = tx.send((for_thread.clone(), token, loaded));
-                    // Sweep after sending: the catalog is what the UI is
-                    // waiting on, and evicting dead thumbnail entries is
-                    // pure housekeeping that nothing blocks on.
+                    // Sweep after sending, because the UI waits on the catalog
+                    // and nothing waits on the sweep.
                     crate::thumbnail::sweep_orphans(&for_thread);
                 });
             match spawned {
                 Ok(_) => self.catalog_load_pending = Some((dir, token)),
                 Err(e) => {
-                    // No thread means `load_sidecars` never runs for `dir` —
-                    // `switch_dir` above already cleared the cache, so it would
-                    // otherwise silently stay empty (all ratings/edits appearing
-                    // lost) with no signal to the user. Report it through the
-                    // same toast mechanism as a failed sidecar write, AND leave
-                    // `catalog_load_pending` set to this (unrunnable) request —
-                    // not cleared/unchanged. `export.rs`'s `catalog_load_pending
-                    // .is_some()` guard exists specifically to refuse exporting
-                    // against an unloaded catalog; if this left pending at
-                    // whatever it was before (typically `None`, since directory
-                    // switches aren't usually mid-load), that guard would see
-                    // nothing pending and wave an export for `dir` straight
-                    // through against a cache that will now never populate —
-                    // worse than the toast alone. No result will ever arrive on
-                    // `catalog_load_rx` for this token, so this state persists
-                    // until the user switches directories again (a fresh
-                    // `request_catalog_load` call, which may succeed).
+                    // The catalog stays empty, so tell the user. Keep the load
+                    // marked pending on purpose: export refuses to run while a
+                    // load is pending, which stops it exporting without the
+                    // user's edits. Switching folders again retries.
                     self.catalog
                         .note_persist_error(format!("could not load {}: {e}", dir.display()));
                     self.catalog_load_pending = Some((dir, token));
@@ -66,32 +46,17 @@ impl App {
             }
         }
 
-        // wasm32: no real OS threads and no synchronous File System Access
-        // read at all — `web_catalog_fs::load_sidecars` is async, dispatched
-        // via `spawn_local` instead of a background thread, landing on the
-        // exact same `catalog_load_tx`/`token` protocol so `poll_catalog_load`
-        // needs no platform branch of its own.
+        // wasm32 has no threads and File System Access is async, so the load
+        // runs as a `spawn_local` task that sends on the same channel.
         //
-        // The handle is looked up for `dir` here rather than read back from
-        // `Catalog::wasm_dir_handle`: `apply_web_load_folder` only calls
-        // `set_wasm_dir_handle` when a handle for the folder exists, so a
-        // folder whose listing failed (`request_dir_listing`'s missing-handle
-        // arm caches an empty listing for it) would leave the catalog still
-        // pointing at the *previous* folder while `live` below computes to
-        // empty — and the sweep would then delete every cached thumbnail in
-        // that previous folder. Same map either setter reads, so the normal
-        // case is unchanged. No handle means there's nothing to scan: leave
-        // the (already-cleared-by-`switch_dir`) cache empty rather than wait
-        // forever for a result that will never arrive.
+        // Look the handle up by `dir` so the load and the thumbnail sweep can
+        // never target a different folder. No handle means nothing to load.
         #[cfg(target_arch = "wasm32")]
         match self.web_dir_handles.get(&dir).cloned() {
             Some(handle) => {
                 let for_task = dir.clone();
-                // The photos actually in this folder, from the listing that
-                // produced its handles — everything else `.lightphotos/`
-                // holds a thumbnail for has been deleted or moved away. Each
-                // one's handle rides along so the sweep can read its size and
-                // mtime without resolving the handle a second time.
+                // Photos still in this folder, with their handles. The sweep
+                // deletes cached thumbnails for any other name.
                 let live: std::collections::HashMap<
                     std::ffi::OsString,
                     web_sys::FileSystemFileHandle,
@@ -105,8 +70,6 @@ impl App {
                 wasm_bindgen_futures::spawn_local(async move {
                     let loaded = crate::web_catalog_fs::load_sidecars(&handle).await;
                     let _ = tx.send((for_task, token, loaded));
-                    // Sweep after sending, same as native: the catalog is
-                    // what the UI waits on, evicting dead entries is not.
                     crate::web_thumb_cache::sweep_orphans(&handle, &live, reads).await;
                 });
                 self.catalog_load_pending = Some((dir, token));
@@ -117,28 +80,18 @@ impl App {
         }
     }
 
-    /// Drain finished catalog loads. For each: fold it into `Catalog` (which
-    /// itself discards anything for a directory since switched away from —
-    /// see `Catalog::apply_loaded`), and if it's for the *currently active*
-    /// playlist's directory, re-run the ratings/edits/touchups/rotations
-    /// mirror seed (the loop `seed_mirrors` also runs eagerly, empty, at
-    /// request time) now that real data exists, and redraw. Returns whether
-    /// a load is still outstanding, same convention as
-    /// `request_working_thumbs`/`selection_pending`.
+    /// Applies finished catalog loads and refreshes the ratings and edits
+    /// mirrors for the open folder. Returns true while a load is still pending.
     pub(crate) fn poll_catalog_load(&mut self) -> bool {
         while let Ok((dir, token, loaded)) = self.catalog_load_rx.try_recv() {
             self.catalog.apply_loaded(&dir, loaded);
-            // Compare the token, not just `dir`: a second load for the same
-            // directory can be in flight (e.g. rapid A→B→A navigation) —
-            // only the result matching the *latest* request for the
-            // currently-pending directory should clear "still waiting". See
-            // `catalog_load_pending`'s doc comment on `App`.
+            // Match the token too: after A, B, A navigation two loads for A can
+            // be in flight, and only the latest clears pending.
             if self.catalog_load_pending.as_ref() == Some(&(dir.clone(), token)) {
                 self.catalog_load_pending = None;
             }
-            // Taken and put back rather than borrowed: `reconcile_catalog_mirrors`
-            // needs `&mut self` at the same time as the playlist it reads,
-            // and `Playlist` isn't `Clone`.
+            // Take and restore the playlist, because `reconcile_catalog_mirrors`
+            // needs `&mut self` while reading it.
             if let Some(playlist) = self.playlist.take() {
                 if playlist.dir() == dir.as_path() {
                     self.reconcile_catalog_mirrors(&playlist);
@@ -155,22 +108,15 @@ impl App {
         self.catalog_load_pending.is_some()
     }
 
-    /// Drain sidecar persist failures that landed asynchronously since the
-    /// last poll (`catalog.rs`'s wasm32 `write_sidecar`/`delete_sidecar` are
-    /// fire-and-forget `spawn_local` tasks — this is how a failure reaches
-    /// `last_error`/the status toast at all). `main.rs`'s `about_to_wait`
-    /// calls this every frame; a thin wrapper because `App::catalog` is
-    /// private to this module.
+    /// Surfaces wasm32 sidecar write failures, which arrive from async tasks.
+    /// Called every frame.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn poll_catalog_persist_errors(&mut self) {
         self.catalog.poll_persist_errors();
     }
 
-    /// Populate `self.ratings`/`edits`/`touchups`/`rotations` for every image
-    /// in `playlist` from whatever the catalog currently has cached. Called
-    /// once (against an as-yet-empty cache) from `seed_mirrors` at directory-
-    /// switch time, and again from `poll_catalog_load` once the background
-    /// scan actually lands.
+    /// Copies ratings, edits, touchups, and rotations for `playlist` from the
+    /// catalog into the app's in-memory maps.
     pub(super) fn reconcile_catalog_mirrors(&mut self, playlist: &Playlist) {
         for p in playlist.entries() {
             if let Some(stars) = self.catalog.get(p) {
@@ -191,8 +137,8 @@ impl App {
         }
     }
 
-    /// Set the rating of the selected/shown image; recompute the view if the
-    /// active filter drops it.
+    /// Rates the selected photo (0 clears). Under a filter the photo may drop
+    /// out of view, and the loupe then follows the cursor to a neighbor.
     pub(super) fn set_rating(&mut self, stars: u8) {
         let Some(path) = self.selected_path() else {
             return;
@@ -203,26 +149,21 @@ impl App {
             self.ratings.insert(path.clone(), stars);
         }
         self.catalog.set(&path, stars);
-        // A rating change can move the item in/out of a filtered view.
         if self.filter.is_some() {
             let want_idx = self.selected_index();
             self.recompute_visible();
-            // Keep selection on the same playlist entry if still visible.
             if let Some(idx) = want_idx {
                 if let Some(pos) = self.visible.iter().position(|&i| i == idx) {
                     self.sel = Some(pos);
                 }
             }
-            // If the rated photo dropped out of the filtered view, the cursor
-            // has moved to a neighbor — resync the loupe's main image to it.
             self.resync_loupe_selection();
         }
         self.request_redraw();
     }
 
-    /// After a filtered-view recompute, keep the loupe's shown image in sync with
-    /// the selection: if the previously shown photo was filtered out, the cursor
-    /// moved to a neighbor and the main image must follow it.
+    /// In the loupe, loads the selected photo if a filter recompute moved the
+    /// cursor off the one shown.
     pub(super) fn resync_loupe_selection(&mut self) {
         if self.mode != ViewMode::Loupe {
             return;
@@ -233,8 +174,8 @@ impl App {
         }
     }
 
-    /// Human-readable prompt for the pending bulk action, or `None` when no
-    /// confirmation is open. Drives the confirm modal.
+    /// The confirm-modal text for the pending bulk action, or `None` when no
+    /// confirmation is open.
     pub(crate) fn pending_bulk_prompt(&self) -> Option<String> {
         let kind = self.pending_bulk?;
         let n = self.selection_count();
@@ -257,14 +198,11 @@ impl App {
         })
     }
 
-    /// Whether there's anything for a bulk action to act on right now — the
-    /// guard for `request_bulk`. Every `BulkKind` acts on the multi-selection.
     fn bulk_available(&self) -> bool {
         self.selection_count() > 0
     }
 
-    /// Open the confirm modal for `kind` (no-op when there's nothing to act
-    /// on). Shared by the toolbar buttons and the Delete/Backspace key.
+    /// Opens the confirm modal for `kind` when something is selected.
     pub(super) fn request_bulk(&mut self, kind: ui::BulkKind) {
         #[cfg(target_arch = "wasm32")]
         if kind == ui::BulkKind::Delete && self.web_delete_pending.is_some() {
@@ -276,7 +214,6 @@ impl App {
         }
     }
 
-    /// Run a confirmed bulk action.
     pub(super) fn run_bulk(&mut self, kind: ui::BulkKind) {
         match kind {
             ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
@@ -287,13 +224,10 @@ impl App {
         }
     }
 
-    /// Remove every selected photo from disk, then drop successful removals from the playlist,
-    /// the in-memory maps, and the catalog, repairing the cursor + loupe.
     pub(super) fn delete_selection(&mut self) {
         self.run_delete(self.selected_paths());
     }
 
-    /// Move `paths` to the Trash (native) and prune all successfully handled state.
     #[cfg(not(target_arch = "wasm32"))]
     fn run_delete(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
@@ -314,9 +248,8 @@ impl App {
         self.finish_delete(trashed, total, last_err);
     }
 
-    /// wasm32: File System Access has no trash — `remove_entry` is a
-    /// permanent delete. Results are returned through `web_delete_rx`; the UI
-    /// is pruned only for operations that actually succeed.
+    /// File System Access has no trash, so this deletes permanently. Results
+    /// arrive on `web_delete_rx`, and `poll_web_deletes` finishes the delete.
     #[cfg(target_arch = "wasm32")]
     fn run_delete(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() || self.web_delete_pending.is_some() {
@@ -361,8 +294,7 @@ impl App {
         }
     }
 
-    /// Drain asynchronous browser deletion results and finish once every
-    /// requested path has reported success or failure.
+    /// Collects browser delete results and finishes once every path reports.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn poll_web_deletes(&mut self) {
         while let Ok((path, result)) = self.web_delete_rx.try_recv() {
@@ -390,8 +322,7 @@ impl App {
         }
     }
 
-    /// Prune every derived structure for the just-deleted paths and
-    /// repair the view — shared by both `run_delete` arms.
+    /// Drops the deleted paths from every per-photo map and rebuilds the view.
     fn finish_delete(
         &mut self,
         trashed: Vec<PathBuf>,
@@ -432,8 +363,8 @@ impl App {
                     self.autotone_deferred = None;
                 }
             }
-            // Remove stale path- and pair-keyed duplicate state. Pending jobs
-            // for deleted files must not keep the redraw loop alive forever.
+            // Pending duplicate jobs for deleted files would keep the redraw
+            // loop awake forever.
             for p in &trashed {
                 self.phashes.remove(p);
                 self.sharpness.remove(p);
@@ -446,21 +377,19 @@ impl App {
             self.feature_pending
                 .retain(|(anchor, member)| !gone.contains(anchor) && !gone.contains(member));
 
-            // Playlist indices changed, so all derived duplicate vectors need
-            // to be rebuilt against the new playlist.
+            // Duplicate marks are indexed by playlist position, which changed.
             self.recompute_dup_marks();
             if survey_was_affected && self.mode == ViewMode::Survey {
                 self.close_survey();
             }
-            // Every index is now invalidated; rebuild the view. The cursor keeps
-            // its position (clamped), landing on a neighbor of the deleted photos.
+            // The cursor keeps its position (clamped), so it lands on a
+            // neighbor of the deleted photos.
             self.selected.clear();
             self.anchor = None;
             self.recompute_visible();
             self.collapse_selection();
             if self.mode == ViewMode::Loupe {
                 if self.visible.is_empty() {
-                    // Nothing left to show — fall back to the grid.
                     self.mode = ViewMode::Grid;
                     self.normalize_focus();
                     self.update_window_title();
@@ -473,7 +402,6 @@ impl App {
         let n = trashed.len();
         #[cfg(not(target_arch = "wasm32"))]
         let done = format!("Moved {n} photo(s) to Trash");
-        // wasm32 `remove_entry` is a permanent delete, not a trash move — say so.
         #[cfg(target_arch = "wasm32")]
         let done = format!("Permanently deleted {n} photo(s)");
         #[cfg(not(target_arch = "wasm32"))]
@@ -489,9 +417,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Copy the primary photo's develop settings (tone only, no crop) to the
-    /// in-app clipboard for pasting onto other photos. Copy is from a single
-    /// photo, so it's a no-op unless exactly one is selected.
+    /// Copies the selected photo's tone settings (not crop) to the in-app
+    /// clipboard. Does nothing unless exactly one photo is selected.
     pub(super) fn copy_settings(&mut self) {
         if self.selection_count() != 1 {
             return;
@@ -511,9 +438,9 @@ impl App {
         self.request_redraw();
     }
 
-    /// Apply the copied tone settings to every selected photo, preserving each
-    /// photo's own crop (and rotation). Thumbnails re-bake automatically because
-    /// their cache key includes the edit signature.
+    /// Applies the copied tone settings to every selected photo, keeping each
+    /// photo's crop. Thumbnails refresh because their cache key includes the
+    /// edits.
     pub(super) fn apply_settings_to_selection(&mut self) {
         let Some((_, tone)) = self.copied_settings.clone() else {
             return;
@@ -523,7 +450,6 @@ impl App {
             return;
         }
         for path in &paths {
-            // Overwrite the tone fields; keep this photo's existing crop.
             let existing = self.edits.get(path).copied().unwrap_or_default();
             let merged = Adjustments {
                 crop: existing.crop,
@@ -536,7 +462,6 @@ impl App {
             }
             self.catalog.set_adjustments(path, &merged);
         }
-        // If the shown image was among them, push its new look to the GPU live.
         if let Some(shown) = self.shown.path().map(Path::to_path_buf) {
             if paths.contains(&shown) {
                 self.push_adjustments();
@@ -547,17 +472,16 @@ impl App {
         self.request_redraw();
     }
 
-    /// Name of the file the copied settings came from, if any (for the toolbar).
+    /// File name the copied settings came from, if any.
     pub(crate) fn copied_settings_name(&self) -> Option<String> {
         self.copied_settings.as_ref().map(|(p, _)| file_label(p))
     }
 
-    /// Whether develop settings are on the clipboard (enables bulk Apply Settings).
     pub(crate) fn has_copied_settings(&self) -> bool {
         self.copied_settings.is_some()
     }
 
-    /// Apply `stars` (0 clears) to every photo in the multi-selection.
+    /// Applies `stars` (0 clears) to every selected photo.
     pub(super) fn apply_rating_to_selection(&mut self, stars: u8) {
         let paths = self.selected_paths();
         if paths.is_empty() {
@@ -571,7 +495,6 @@ impl App {
             }
             self.catalog.set(path, stars);
         }
-        // Rated photos may move in/out of a filtered view; recompute + resync.
         if self.filter.is_some() {
             self.recompute_visible();
             self.resync_loupe_selection();
@@ -585,13 +508,12 @@ impl App {
         self.request_redraw();
     }
 
-    /// Flip best-of-burst mode. Ignored while a star filter is active (bursts run
-    /// only over the unfiltered folder). Turning on kicks off the background
-    /// capture-time scan and rebuilds marks; turning off clears the badges but
-    /// keeps the caches so re-enabling is instant.
+    /// Toggles best-of-burst badges. Ignored while a star filter is active,
+    /// because bursts are runs of adjacent photos in the unfiltered folder.
+    /// Turning off keeps the caches, so turning back on is instant.
     pub(super) fn toggle_bursts(&mut self) {
         if self.filter.is_some() {
-            return; // mutually exclusive with the filter
+            return;
         }
         self.bursts_on = !self.bursts_on;
         if self.bursts_on {
@@ -605,12 +527,9 @@ impl App {
         self.request_redraw();
     }
 
-    /// Flip content-duplicate grouping mode. Independent of `bursts_on`/the star
-    /// filter — dHash grouping is order-independent (union-find over the whole
-    /// folder), so filtering doesn't break its correctness the way it would for
-    /// time-adjacency bursts. Turning on kicks off the whole-folder background
-    /// dHash scoring pass and rebuilds marks; turning off clears the badges but
-    /// keeps the cache so re-enabling is instant.
+    /// Toggles duplicate badges. Unlike bursts this works under a filter,
+    /// because duplicate groups cover the whole folder regardless of order.
+    /// Turning off keeps the caches, so turning back on is instant.
     pub(super) fn toggle_dupes(&mut self) {
         self.dupes_on = !self.dupes_on;
         if self.dupes_on {
@@ -625,9 +544,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Open Survey Mode on the duplicate group containing the visible cell at
-    /// `pos` (a duplicate-badge click in the grid). No-op if the cell isn't
-    /// currently in a duplicate group of 2+.
+    /// Opens Survey Mode on the duplicate group of the visible cell at `pos`.
+    /// Does nothing unless that group has at least two photos.
     pub(super) fn open_survey(&mut self, pos: usize) {
         let Some(pl) = &self.playlist else { return };
         let Some(&idx) = self.visible.get(pos) else {
@@ -659,7 +577,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Close Survey Mode, back to the Grid.
     pub(super) fn close_survey(&mut self) {
         self.survey_members.clear();
         self.survey_best = None;
@@ -669,7 +586,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Set Survey Mode's focused member directly (a click on a member).
     pub(super) fn set_survey_focus(&mut self, i: usize) {
         if i < self.survey_members.len() {
             self.survey_focus = i;
@@ -677,8 +593,7 @@ impl App {
         }
     }
 
-    /// Move Survey Mode's focused member left/right (wrapping). No-op outside
-    /// Survey Mode or with fewer than 2 members.
+    /// Moves Survey Mode's focus by `delta`, wrapping at the ends.
     pub(super) fn survey_move_focus(&mut self, delta: i32) {
         let n = self.survey_members.len();
         if n < 2 {
@@ -689,10 +604,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// One-click Survey Mode action (Aftershoot's "Spray Can" analog): rate
-    /// the group's best member (from `dup_marks`, so it matches the grid
-    /// badge) 5 stars, and every sibling 1 star — landing them in the
-    /// existing reject range so "Delete all Rejects" can sweep them later.
+    /// Rates the group's best photo 5 stars and every other member 1 star.
+    /// "Best" is `survey_best`, which matches the grid's badge.
     pub(super) fn keep_best_reject_rest(&mut self) {
         if self.survey_members.len() < 2 {
             return;
@@ -716,7 +629,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Enqueue background capture-time reads for every entry not yet cached.
     pub(super) fn request_capture_times(&mut self) {
         let Some(pl) = &self.playlist else { return };
         let paths: Vec<PathBuf> = pl
@@ -732,27 +644,20 @@ impl App {
         }
     }
 
-    /// Apply a new filter (or clear it) and recompute the visible view.
-    /// No-op in Loupe mode: filtering is a Grid concept (which cells are
-    /// visible) and letting it change while a specific photo is open used to
-    /// be able to silently knock that photo out of the Grid's filtered
-    /// selection cursor, breaking rating for the photo actually on screen.
-    /// Both entry points (the Grid toolbar, hidden entirely in Loupe — see
-    /// `ui::toolbar::loupe_toolbar` — and the `Shift+1-5`/`Shift+0` keyboard
-    /// shortcut, which has no mode check of its own) go through here, so
-    /// gating it in one place covers both.
+    /// Sets or clears the star filter. Does nothing in the Loupe, because a
+    /// filter change there could hide the open photo from the selection
+    /// cursor. This is the only mode check for both the toolbar and the
+    /// `Shift+0`..`Shift+5` shortcuts.
     pub(super) fn set_filter(&mut self, filter: Option<(Cmp, u8)>) {
         if self.mode == ViewMode::Loupe {
             return;
         }
-        // Bursts run only over the unfiltered folder; applying a filter ends
-        // burst mode. Clearing the filter (`None`) leaves bursts off — the user
-        // re-enables with the toggle / `B`.
+        // Bursts need the unfiltered folder, so a filter turns them off.
+        // Clearing the filter does not turn them back on.
         if filter.is_some() && self.bursts_on {
             self.bursts_on = false;
             self.burst_marks.clear();
         }
-        // Keep the selected entry across the recompute when possible.
         let want_idx = self.selected_index();
         self.filter = filter;
         self.recompute_visible();
@@ -764,10 +669,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Change the toolbar comparator (≥ / = / ≤). If a star-level filter is
-    /// already active, re-apply it with the new comparator so the view updates
-    /// immediately. No-op in Loupe mode — same reasoning as `set_filter`,
-    /// which this can also indirectly trigger.
+    /// Sets the filter comparator (≥, =, ≤) and reapplies any active star
+    /// filter. Does nothing in the Loupe, like `set_filter`.
     pub(super) fn set_filter_cmp(&mut self, cmp: Cmp) {
         if self.mode == ViewMode::Loupe {
             return;
@@ -781,7 +684,7 @@ impl App {
         self.request_redraw();
     }
 
-    /// Rating of a given path (0 when unset).
+    /// 0 when unrated.
     pub(super) fn rating_of(&self, path: &Path) -> u8 {
         self.ratings.get(path).copied().unwrap_or(0)
     }
@@ -831,17 +734,9 @@ mod tests {
         dir
     }
 
-    /// Reproduces the reported bug. `set_filter` itself is now a no-op in
-    /// Loupe (see its doc comment), so the filter can no longer change while
-    /// a photo is open — but a filter set *before* entering Loupe (from the
-    /// Grid) can still knock the open photo out of `visible` via
-    /// `set_rating`'s own `recompute_visible()` call, e.g. rating a photo
-    /// below an already-active "≥N stars" threshold. `sel` goes stale
-    /// (`None`) either way, and nothing in Loupe mode ever resets it. This
-    /// constructs that end state directly (rather than via a specific
-    /// trigger, which could change) and checks a *subsequent* rating still
-    /// applies — `self.want` is what's really being looked at, independent
-    /// of the Grid's filtered cursor.
+    /// Rating a photo below an active "≥N" filter drops it from `visible` and
+    /// leaves `sel` as `None` in the Loupe. A later rating must still apply to
+    /// the photo on screen (`want`).
     #[test]
     fn rating_a_loupe_photo_applies_even_when_sel_has_gone_stale() {
         let dir = unique_tmp_dir();

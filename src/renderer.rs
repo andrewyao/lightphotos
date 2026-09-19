@@ -1,21 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! wgpu rendering. The decoded image is uploaded once as a texture, and its mip
-//! chain (for smooth zoom-out) is generated on the GPU by `mipgen.wgsl` rather
-//! than on the CPU — `set_image` runs on the UI thread at the exact moment a
-//! photo should appear, so it must not touch bulk pixels. Zoom/pan are applied
-//! purely through a small transform uniform — no per-frame re-upload.
-//!
-//! ## Pipeline position
-//! - Last, shared stage of Pipeline 1 (opening a photo).
-//! - Every platform's decode path (ImageIO on macOS, `image`/`rawler` on
-//!   Linux/Windows, `rawler` in a Web Worker on wasm32) ends by calling
-//!   `App::upload_shown` (`app/thumbs.rs`), which calls `set_image` here.
-//! - One render pipeline, `shader.wgsl`, draws every image regardless of
-//!   which platform decoded it.
-//! - Single exception: `PixelFormat::LinearF16` (wasm32's RAW "Quality" tier
-//!   only) — `render()` routes that to `raw_pipeline`/`raw_shader.wgsl`
-//!   instead. See `ARCHITECTURE.md`.
+//! wgpu rendering of the loupe image, plus the egui pass on top. Each decoded
+//! image is uploaded once as a texture with a GPU-built mip chain. Zoom and pan
+//! only update a small transform uniform. Every platform's decoder reaches
+//! `set_image` through `App::upload_shown`. `shader.wgsl` draws every image
+//! except `PixelFormat::LinearF16`, which uses `raw_shader.wgsl`.
 
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -24,21 +13,14 @@ use winit::window::Window;
 use crate::develop::{GpuAdjust, GpuTouchUp};
 use crate::image_decode::{DecodedImage, PixelFormat};
 
-/// RAW-preview GPU tonemap pipeline builders + `LINEAR_IMAGE_FORMAT` — see
-/// that file's own module doc comment. Pure code move out of this file's
-/// `Renderer::new()`/consts; `Renderer`'s fields and `render()`'s dispatch
-/// still live here (a struct can't be split across files).
 #[path = "raw/render.rs"]
 mod raw_render;
 
-/// Texture format a `PixelFormat::Srgb8` decoded photo is uploaded as. Named
-/// because the mip-gen render pipeline's color target has to match it
-/// exactly — it renders into the image's own mip levels, not into the
-/// surface.
+/// Texture format for a `PixelFormat::Srgb8` photo. The mip-gen pipeline
+/// renders into the image's mip levels, so its target must match this.
 const IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
-/// Subject-selection overlay uniform. Field order MUST match `Overlay` in
-/// `shader.wgsl`.
+/// Subject-selection overlay uniform. Must match `Overlay` in `shader.wgsl`.
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct OverlayParams {
@@ -52,12 +34,9 @@ struct OverlayParams {
 impl Default for OverlayParams {
     fn default() -> Self {
         Self {
-            // Green: the one hue that reads as "this region is chosen" without
-            // colliding with the red of the touch-up markers.
             tint: [0.25, 1.0, 0.45, 1.0],
             invert: 0.0,
-            // Strong enough to read at a glance, light enough to still see the
-            // photo underneath — the point is judging where the edge falls.
+            // Light enough to see the photo and judge where the edge falls.
             strength: 0.45,
             _pad0: 0.0,
             _pad1: 0.0,
@@ -74,8 +53,7 @@ struct Transform {
     rot: [f32; 4],
 }
 
-/// Everything egui needs to paint a frame, produced by the app each redraw.
-/// Coordinates are in physical pixels via `screen_descriptor`.
+/// Everything egui needs to paint one frame.
 pub struct EguiPaint {
     pub textures_delta: egui::TexturesDelta,
     pub paint_jobs: Vec<egui::ClippedPrimitive>,
@@ -88,12 +66,7 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
-    /// Own RAW tonemap (`raw_shader.wgsl`), drawn instead of `pipeline`
-    /// whenever the current image is `PixelFormat::LinearF16` (see
-    /// `image_pixel_format`). Built against the exact same 4-group
-    /// `pipeline_layout` as `pipeline` — its fragment shader just doesn't
-    /// read groups 1-3, so `render()` needs no branching on which bind
-    /// groups to set.
+    /// Drawn instead of `pipeline` for `PixelFormat::LinearF16` images.
     raw_pipeline: wgpu::RenderPipeline,
 
     sampler: wgpu::Sampler,
@@ -105,71 +78,49 @@ pub struct Renderer {
     adj_buf: wgpu::Buffer,
     adj_bind: wgpu::BindGroup,
 
-    /// Second adjustments uniform, used only for the "after" half of the
-    /// before/after compare view (the primary `adj_*` holds the "before").
+    /// Adjustments for the "after" half of the compare view.
     adj_buf_b: wgpu::Buffer,
     adj_bind_b: wgpu::BindGroup,
     touch_buf: wgpu::Buffer,
     touch_bind: wgpu::BindGroup,
 
-    /// Second pipeline drawing the subject-selection tint over the image. Kept
-    /// entirely separate from the main pipeline so the selection can never
-    /// affect rendered tone — it is a thing you look at, not an edit.
+    /// Draws the subject-selection tint over the image. It is a separate
+    /// pipeline so the selection can never change the rendered tone.
     overlay_pipeline: wgpu::RenderPipeline,
     overlay_bind_layout: wgpu::BindGroupLayout,
     overlay_buf: wgpu::Buffer,
-    /// Bind group holding the overlay uniform *and* the current mask texture.
-    /// `None` whenever there is no mask, which is also how the render pass
-    /// knows to skip the overlay draw entirely.
+    /// The overlay uniform and mask texture. `None` means no mask, and the
+    /// overlay draw is skipped.
     overlay_bind: Option<wgpu::BindGroup>,
 
-    /// Bind group for the current image texture (None until first image loads).
+    /// `None` until the first image loads.
     image_bind: Option<wgpu::BindGroup>,
-    /// Current image dimensions in pixels.
     pub image_size: (u32, u32),
-    // TEMPORARY DEBUG — remove once the Loupe zoom-refit fix is verified.
-    // Overrides `render()`'s image-pass clear color so `upload_shown`
-    // (app/thumbs.rs) can tint the Loupe background by which tier is
-    // currently shown: white = Thumb, 18% gray = Speed, black = Preview
-    // (quality) / Full.
+    // TEMPORARY DEBUG: remove once the Loupe zoom-refit fix is verified.
+    // The image-pass clear color, set by `upload_shown` to show the decode
+    // tier: white = Thumb, 18% gray = Speed, black = Preview or Full. The
+    // initial value is the normal clear color.
     pub(crate) tier_debug_color: wgpu::Color,
-    /// Pixel format of the currently-uploaded image (set by `set_image`) —
-    /// picks `pipeline` vs. `raw_pipeline` in `render()`.
+    /// Picks `pipeline` or `raw_pipeline` in `render()`.
     image_pixel_format: PixelFormat,
 
     pub max_dim: u32,
 
-    /// Pipeline + sampler that build the image's mip chain on the GPU.
     mip_pipeline: wgpu::RenderPipeline,
-    /// Same mip-gen shader, targeting `LINEAR_IMAGE_FORMAT` instead —
-    /// `set_image` picks whichever matches the image just uploaded.
+    /// The same mip-gen shader, targeting `LINEAR_IMAGE_FORMAT`.
     mip_pipeline_linear: wgpu::RenderPipeline,
     mip_sampler: wgpu::Sampler,
 
-    /// egui paint backend; shares this Renderer's device/queue + surface format.
     egui_renderer: egui_wgpu::Renderer,
 }
 
 impl Renderer {
-    /// `async` rather than `pollster::block_on`-ing internally, so this one
-    /// body serves both targets: native's `resumed()` wraps the call in
-    /// `pollster::block_on` (unchanged blocking behavior — `pollster` itself
-    /// has no wasm32 support, since the browser main thread cannot block, so
-    /// this split is required, not stylistic — see the wasm port plan's M0),
-    /// wasm's `resumed()` awaits it inside a `wasm_bindgen_futures::spawn_local`
-    /// task instead (see `main.rs`).
-    /// `size` is passed in rather than read via `window.inner_size()`
-    /// internally: on wasm32, winit's `inner_size()` isn't a live DOM query —
-    /// it's a cached field that starts at `(0, 0)` and only updates once the
-    /// browser's `ResizeObserver` fires, which hasn't happened yet the first
-    /// time this runs (confirmed by reading winit 0.30's own web platform
-    /// source, not guessed at). Configuring the surface at a stale `(0, 0)`
-    /// (clamped to `(1, 1)` below) produced a real bug: every render pass
-    /// failed WebGPU's scissor-rect validation against a 1×1 render area.
-    /// Callers pass the size they actually know is correct — native still
-    /// gets it from `window.inner_size()` (reliable there, no async lag);
-    /// wasm's caller uses the same real browser-viewport size it already set
-    /// the canvas's backing-store resolution to (see `web_canvas::attach`).
+    /// `async` because the browser main thread can't block. Native callers
+    /// wrap it in `pollster::block_on`; wasm awaits it in `spawn_local`.
+    ///
+    /// The caller passes `size` because on wasm32 winit's `inner_size()` is
+    /// `(0, 0)` until the browser's `ResizeObserver` first fires. A 1x1 surface
+    /// makes every render pass fail WebGPU's scissor-rect validation.
     pub async fn new(window: Arc<Window>, size: winit::dpi::PhysicalSize<u32>) -> Self {
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window).expect("create surface");
@@ -183,7 +134,7 @@ impl Renderer {
             .await
             .expect("no adapter");
 
-        // Request the adapter's real limits so large images aren't capped at 8192.
+        // Request the adapter's real limits; the defaults cap textures at 8192.
         let limits = adapter.limits();
         let max_dim = limits.max_texture_dimension_2d;
 
@@ -288,8 +239,8 @@ impl Renderer {
             }],
         });
 
-        // Overlay resources sit in group 3 alongside (never overlapping) the
-        // touch-up storage buffer at binding 0 — see the note in shader.wgsl.
+        // Overlay bindings start at 1 so they never overlap the touch-up
+        // buffer at group 3 binding 0. See shader.wgsl.
         let overlay_bind_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("overlay_bgl"),
@@ -360,16 +311,11 @@ impl Renderer {
             cache: None,
         });
 
-        // Dedicated RAW tonemap — drawn instead of `pipeline` whenever
-        // the current image is `PixelFormat::LinearF16`. See
-        // `raw_render::create_raw_pipeline`'s own doc comment for why it
-        // reuses this exact `pipeline_layout` and `shader` module.
         let raw_pipeline =
             raw_render::create_raw_pipeline(&device, &pipeline_layout, &shader, format);
 
-        // Same vertex shader as the image, so the tint lands on exactly the
-        // same quad under the same zoom/pan/rotation. Group 0 (the image
-        // texture) goes unused: the overlay reads the mask, not the photo.
+        // Same vertex shader as the image, so the tint follows zoom, pan, and
+        // rotation. Group 0 (the image) is unused: the overlay reads the mask.
         let overlay_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("overlay_pl"),
@@ -408,9 +354,7 @@ impl Renderer {
             cache: None,
         });
 
-        // Mip-chain generation runs on the GPU (see mipgen.wgsl). It reuses
-        // `tex_bind_layout`'s shape — texture at 0, sampler at 1 — so it needs no
-        // layout of its own.
+        // Mip generation reuses `tex_bind_layout` (texture at 0, sampler at 1).
         let mip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mipgen_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("mipgen.wgsl").into()),
@@ -447,15 +391,12 @@ impl Renderer {
             cache: None,
         });
 
-        // Same mip-gen shader/layout, targeting `raw_render::LINEAR_IMAGE_FORMAT`
-        // instead — `set_image` picks whichever pipeline matches the image
-        // just uploaded.
         let mip_pipeline_linear =
             raw_render::create_mip_pipeline_linear(&device, &mip_pipeline_layout, &mip_shader);
 
-        // Deliberately *not* the main `sampler`: this one must never follow the
-        // mip chain it is in the middle of building, so its mipmap filter is
-        // nearest and every view it reads is pinned to a single level.
+        // Not the main `sampler`: it must not read the mip chain it is still
+        // building, so its mipmap filter is nearest and each view it reads is
+        // pinned to one level.
         let mip_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("mip_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -546,9 +487,6 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        // egui's wgpu paint backend, built against the same device + surface
-        // format so its textures/buffers interoperate with ours. No depth
-        // buffer (we render none), single-sampled, one frame in flight.
         let egui_renderer =
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
 
@@ -575,8 +513,6 @@ impl Renderer {
             overlay_bind: None,
             image_bind: None,
             image_size: (0, 0),
-            // TEMPORARY DEBUG default — matches the fixed color this
-            // replaces below until `upload_shown` starts setting it.
             tier_debug_color: wgpu::Color {
                 r: 0.07,
                 g: 0.07,
@@ -592,9 +528,6 @@ impl Renderer {
         }
     }
 
-    /// Surface format egui must target. The egui paint backend is built from
-    /// this format inside `new`, so the app doesn't need it for T4.
-    // TODO: T6 — may be needed if egui textures are registered app-side.
     #[allow(dead_code)]
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.config.format
@@ -611,15 +544,10 @@ impl Renderer {
 
     /// Upload a decoded image as a mipmapped texture and bind it.
     ///
-    /// This runs on the UI thread at the exact moment a newly-decoded photo
-    /// should appear, so it must not do bulk pixel work: only level 0 is
-    /// uploaded, and the rest of the chain is generated by the GPU. The previous
-    /// CPU version cloned the whole RGBA buffer (~180 MB for a 45 MP file) and
-    /// box-filtered every level in a scalar loop, which froze the window for
-    /// roughly as long as the decode itself had taken.
+    /// Runs on the UI thread when the photo should appear, so it avoids bulk CPU
+    /// pixel work: it uploads level 0 and the GPU builds the other levels.
     pub fn set_image(&mut self, img: &DecodedImage) {
-        // web_time::Instant, not std::time::Instant — see loader.rs's
-        // launched_at() doc comment for why (no OS clock on bare wasm32/64).
+        // `std::time::Instant::now()` panics on wasm32.
         let t0 = web_time::Instant::now();
         let (w, h) = (img.width, img.height);
         let mip_count = (32 - (w.max(h)).leading_zeros()).max(1); // floor(log2(max))+1
@@ -649,21 +577,16 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            // RENDER_ATTACHMENT so the mip levels below can be rendered into.
+            // RENDER_ATTACHMENT lets the GPU render into the mip levels.
             usage: wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_DST
                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
 
-        // Level 0 is the decoded pixels, uploaded straight from the caller's
-        // buffer where possible — no intermediate copy for the common
-        // (Srgb8, `bytes_per_row` already a multiple of
-        // `COPY_BYTES_PER_ROW_ALIGNMENT` in practice) case. `write_texture`
-        // needs row-aligned `bytes_per_row` (see `set_selection_mask`'s own
-        // comment on the same constraint for its 1-byte/texel format) — pad
-        // when it isn't, rather than assuming an arbitrary RAW width happens
-        // to land on a clean multiple.
+        // `write_texture` needs rows aligned to `COPY_BYTES_PER_ROW_ALIGNMENT`
+        // (256 bytes). Upload the caller's buffer directly when rows already
+        // align, and copy into a padded buffer otherwise.
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let row = bytes_per_pixel * w;
         let padded_row = row.div_ceil(align) * align;
@@ -698,9 +621,8 @@ impl Renderer {
             },
         );
 
-        // Levels 1..n: each is drawn by sampling the level above at half size.
-        // One view per level, each pinned to that single level, so a pass can
-        // read level n-1 while writing level n without aliasing the resource.
+        // Each level n is drawn by sampling level n-1. One view per level lets
+        // a pass read n-1 while writing n without aliasing.
         if mip_count > 1 {
             let levels: Vec<wgpu::TextureView> = (0..mip_count)
                 .map(|level| {
@@ -739,8 +661,6 @@ impl Renderer {
                         view: &levels[level],
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            // The triangle covers every texel, so there is
-                            // nothing to preserve underneath.
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                             store: wgpu::StoreOp::Store,
                         },
@@ -776,15 +696,13 @@ impl Renderer {
         self.image_bind = Some(bind);
         self.image_size = (w, h);
 
-        // This runs on the UI thread at the moment the photo should appear, so
-        // it is the one span the user actually feels as a freeze.
+        // The user feels this UI-thread span as a freeze.
         crate::loader::mark(&format!(
             "set_image {w}x{h} ({mip_count} mips): took {:?}",
             t0.elapsed()
         ));
     }
 
-    /// Update the zoom/pan/rotation transform uniform.
     pub fn set_transform(&mut self, scale: [f32; 2], offset: [f32; 2], rot: [f32; 4]) {
         self.queue.write_buffer(
             &self.xform_buf,
@@ -793,24 +711,21 @@ impl Renderer {
         );
     }
 
-    /// Update the non-destructive adjustments uniform.
     pub fn set_adjustments(&mut self, a: GpuAdjust) {
         self.queue
             .write_buffer(&self.adj_buf, 0, bytemuck::bytes_of(&a));
     }
 
-    /// Update the second ("after") adjustments uniform for the compare view.
+    /// Adjustments for the "after" half of the compare view.
     pub fn set_adjustments_b(&mut self, a: GpuAdjust) {
         self.queue
             .write_buffer(&self.adj_buf_b, 0, bytemuck::bytes_of(&a));
     }
 
-    /// Upload a single-channel selection mask, or clear it with `None`.
-    ///
-    /// `alpha` is `width * height` tightly-packed coverage bytes in the same
-    /// texture space as the image (see `segmentation::Mask`), so the shader can
-    /// sample it with the image's own UVs — no separate transform to keep in
-    /// step. Clearing is what stops the overlay from drawing at all.
+    /// Upload a selection mask, or clear it with `None` to stop drawing the
+    /// overlay. `alpha` is `width * height` coverage bytes, packed with no row
+    /// padding, in the image's texture space so the shader samples it with the
+    /// image's UVs.
     pub fn set_selection_mask(&mut self, mask: Option<(&[u8], u32, u32)>) {
         let Some((alpha, w, h)) = mask else {
             self.overlay_bind = None;
@@ -836,9 +751,8 @@ impl Renderer {
             view_formats: &[],
         });
 
-        // write_texture needs rows aligned to COPY_BYTES_PER_ROW_ALIGNMENT. At
-        // one byte per texel that bites almost every time, unlike the RGBA8
-        // image path where a multiple-of-64 width is enough — so pad here.
+        // At one byte per texel, rows almost never meet the 256-byte
+        // alignment `write_texture` needs, so always pad.
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
         let row = w as usize;
         let padded_row = row.div_ceil(align) * align;
@@ -908,17 +822,15 @@ impl Renderer {
         }
     }
 
-    /// Render one frame: the image pass (optionally confined to `image_viewport`)
-    /// followed by the egui pass (if `egui` is `Some`), all in one submission.
+    /// Render the image pass, then the egui pass, in one submission.
     ///
-    /// `image_viewport` is `(x, y, w, h)` in **physical pixels** with the origin
-    /// at the surface's top-left. When `None`, the image draws across the whole
-    /// surface as before. The image quad is clipped to this rect via
-    /// `set_scissor_rect` so the loupe image can sit above a future filmstrip.
-    /// Render one frame. Returns `true` if a frame was presented, `false` if the
-    /// surface wasn't presentable this call (occluded/timeout/outdated) so the
-    /// caller can schedule a retry — otherwise a window that opens occluded would
-    /// stay blank forever (we'd skip every frame and never draw once revealed).
+    /// Viewports are `(x, y, w, h)` in physical pixels from the surface's
+    /// top-left. `image_viewport` of `None` draws across the whole surface.
+    /// `compare_viewport` draws the "after" half.
+    ///
+    /// Returns `false` when the surface wasn't presentable (occluded, timeout,
+    /// outdated). The caller must retry, or a window that opens occluded stays
+    /// blank.
     pub fn render(
         &mut self,
         image_viewport: Option<(u32, u32, u32, u32)>,
@@ -927,13 +839,9 @@ impl Renderer {
     ) -> bool {
         use wgpu::CurrentSurfaceTexture as C;
 
-        // Apply egui texture uploads FIRST, before testing surface presentability.
-        // `update_texture` only needs the device/queue (not the surface frame), and
-        // egui's Context emits each allocation delta exactly once. If we dropped it
-        // on an occluded/timeout frame (common while the window is appearing), the
-        // font atlas would never be allocated, and the next frame's incremental
-        // partial update would panic ("texture not allocated yet"). Keeping egui's
-        // texture state in sync every frame — even non-presented ones — avoids that.
+        // Apply egui texture uploads even when the frame can't be presented.
+        // egui sends each texture allocation only once. Dropping one leaves the
+        // font atlas unallocated, and the next partial update panics.
         if let Some(paint) = &egui {
             for (id, delta) in &paint.textures_delta.set {
                 self.egui_renderer
@@ -960,8 +868,6 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
 
-        // egui vertex/index buffers for this frame's paint jobs (textures already
-        // uploaded above).
         if let Some(paint) = &egui {
             self.egui_renderer.update_buffers(
                 &self.device,
@@ -972,7 +878,6 @@ impl Renderer {
             );
         }
 
-        // Pass 1: the image (clear the surface, draw the quad scissored to the rect).
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("image_pass"),
@@ -980,9 +885,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // TEMPORARY DEBUG: was the fixed `wgpu::Color { r:
-                        // 0.07, g: 0.07, b: 0.08, a: 1.0 }` — see
-                        // `tier_debug_color`'s own doc comment.
+                        // TEMPORARY DEBUG: see `tier_debug_color`.
                         load: wgpu::LoadOp::Clear(self.tier_debug_color),
                         store: wgpu::StoreOp::Store,
                     },
@@ -995,18 +898,13 @@ impl Renderer {
             });
             if let Some(image_bind) = &self.image_bind {
                 let (sw, sh) = (self.config.width, self.config.height);
-                // Dedicated tonemap for a linear (wasm32 Loupe RAW,
-                // `DemosaicMode::Quality`) image; the usual pipeline
-                // otherwise. Both share `pipeline_layout`, so every
-                // `set_bind_group` call below stays unchanged either way.
+                // Both pipelines share `pipeline_layout`, so the bind groups
+                // below are the same for either.
                 let pipeline = match self.image_pixel_format {
                     PixelFormat::Srgb8 => &self.pipeline,
                     PixelFormat::LinearF16 => &self.raw_pipeline,
                 };
                 let xform_bind = &self.xform_bind;
-                // Draw the quad into a viewport rect (clamped to the surface) with
-                // the given adjustments bind group. Shared by the single-image and
-                // both compare halves.
                 let overlay_pipeline = &self.overlay_pipeline;
                 let overlay_bind = self.overlay_bind.as_ref();
                 let draw_into = |pass: &mut wgpu::RenderPass,
@@ -1029,9 +927,6 @@ impl Renderer {
                     pass.set_bind_group(3, &self.touch_bind, &[]);
                     pass.draw(0..6, 0..1);
 
-                    // Selection tint, alpha-blended straight over the pixels
-                    // just drawn — same quad, same viewport, same transform, so
-                    // it tracks zoom and pan for free.
                     if let Some(overlay) = overlay_bind {
                         pass.set_pipeline(overlay_pipeline);
                         pass.set_bind_group(1, xform_bind, &[]);
@@ -1042,15 +937,12 @@ impl Renderer {
                 };
                 match image_viewport {
                     Some(vp) => {
-                        // Left half (or full image): the primary adjustments.
                         draw_into(&mut pass, vp, &self.adj_bind);
-                        // Right half in compare mode: the "after" adjustments.
                         if let Some(vp2) = compare_viewport {
                             draw_into(&mut pass, vp2, &self.adj_bind_b);
                         }
                     }
                     None => {
-                        // Full-surface draw (no scissor), primary adjustments.
                         pass.set_pipeline(pipeline);
                         pass.set_bind_group(0, image_bind, &[]);
                         pass.set_bind_group(1, xform_bind, &[]);
@@ -1069,7 +961,6 @@ impl Renderer {
             }
         }
 
-        // Pass 2: egui, loaded (not cleared) on top of the image.
         if let Some(paint) = &egui {
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui_pass"),
@@ -1096,9 +987,8 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
         if crate::loader::timing_enabled() {
-            // Only the first few frames matter here: the question is how long
-            // after launch the user sees *anything*, and then how long until
-            // that anything is the sharp photo rather than a placeholder.
+            // Only the first frames matter: time to first pixels, then time
+            // to the sharp photo.
             use std::sync::atomic::{AtomicU32, Ordering};
             static FRAMES: AtomicU32 = AtomicU32::new(0);
             let n = FRAMES.fetch_add(1, Ordering::Relaxed);
@@ -1107,14 +997,13 @@ impl Renderer {
             }
         }
 
-        // Free egui textures dropped this frame (after submit, per egui docs).
+        // egui requires freeing textures after submit.
         self.free_egui_textures(&egui);
         true
     }
 
-    /// Free any egui textures dropped this frame. Called on both the presented
-    /// path (after submit) and the early-return paths, so egui's texture state
-    /// stays in sync even when the surface wasn't presentable.
+    /// Also called when the frame isn't presented, to keep egui's texture
+    /// state in sync.
     fn free_egui_textures(&mut self, egui: &Option<EguiPaint>) {
         if let Some(paint) = egui {
             for id in &paint.textures_delta.free {
