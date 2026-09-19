@@ -66,12 +66,6 @@ pub(super) fn folder_content_width(
 pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let sel = app.sel();
 
-    egui::Panel::top("toolbar").show_inside(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(format!("{} photos", app.visible_len()));
-        });
-    });
-
     egui::CentralPanel::default().show_inside(ui, |ui| {
         let cell = GRID_CELL_PT;
         let spacing = ui.spacing().item_spacing.x;

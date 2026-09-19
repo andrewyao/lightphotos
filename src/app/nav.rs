@@ -366,7 +366,7 @@ impl App {
     /// Whether region `r` can take keyboard focus in the current mode.
     pub(super) fn region_available(&self, r: Region) -> bool {
         match r {
-            Region::Toolbar => true,
+            Region::Toolbar => self.mode != ViewMode::Loupe,
             Region::Grid => self.mode == ViewMode::Grid,
             Region::Detail => self.mode == ViewMode::Loupe,
             Region::Filmstrip => self.mode == ViewMode::Loupe,
@@ -711,39 +711,20 @@ impl App {
     }
 
     /// Keyboard-focusable controls in the Grid and Survey toolbar. Must match
-    /// the `toolbar_focus_sync` calls in `ui/mod.rs` and the index mapping in
-    /// `activate_toolbar_focus`. Controls whose count varies per frame (rating
-    /// bars, bulk actions) are excluded.
-    const TOOLBAR_CONTROLS: usize = if SHOW_GROUPING_TOOLS { 14 } else { 11 };
-    /// The Loupe toolbar's only focusable control is `?` (Help).
-    const LOUPE_TOOLBAR_CONTROLS: usize = 1;
-
-    pub(super) fn toolbar_control_count(&self) -> usize {
-        if self.mode == ViewMode::Loupe {
-            Self::LOUPE_TOOLBAR_CONTROLS
-        } else {
-            Self::TOOLBAR_CONTROLS
-        }
-    }
+    /// the `toolbar_focus_sync` calls in `ui/toolbar.rs` and the index mapping
+    /// in `activate_toolbar_focus`. Bulk actions are excluded because their
+    /// count varies with the selection.
+    const TOOLBAR_CONTROLS: usize = if SHOW_GROUPING_TOOLS { 13 } else { 10 };
 
     pub(super) fn toolbar_move(&mut self, delta: isize) {
-        let n = self.toolbar_control_count() as isize;
-        if n == 0 {
-            return;
-        }
+        let n = Self::TOOLBAR_CONTROLS as isize;
         self.toolbar_focus = (self.toolbar_focus as isize + delta).rem_euclid(n) as usize;
         self.request_redraw();
     }
 
     /// Run the focused toolbar control's click action. Index order must match
-    /// the `toolbar_focus_sync` calls in `ui/mod.rs` for the toolbar on screen.
+    /// the `toolbar_focus_sync` calls in `ui/toolbar.rs`.
     pub(super) fn activate_toolbar_focus(&mut self) {
-        if self.mode == ViewMode::Loupe {
-            if self.toolbar_focus == 0 {
-                self.apply_ui_actions(vec![ui::UiAction::ToggleHelp]);
-            }
-            return;
-        }
         let action = match self.toolbar_focus {
             0 => ui::UiAction::SetFilter(None),
             1 => ui::UiAction::SetFilterCmp(Cmp::Gte),
@@ -760,8 +741,6 @@ impl App {
             10 if SHOW_GROUPING_TOOLS => ui::UiAction::ToggleBursts,
             11 if SHOW_GROUPING_TOOLS => ui::UiAction::ToggleDupes,
             12 if SHOW_GROUPING_TOOLS => ui::UiAction::ToggleEyesClosed,
-            // Help is always the last control, whatever index that leaves it.
-            n if n == Self::TOOLBAR_CONTROLS - 1 => ui::UiAction::ToggleHelp,
             _ => return,
         };
         self.apply_ui_actions(vec![action]);
@@ -813,33 +792,20 @@ mod tests {
         }
     }
 
+    /// The Loupe has no toolbar, so F6 must not land on one there.
     #[test]
-    fn toolbar_control_count_is_smaller_in_loupe_than_grid() {
+    fn f6_skips_the_toolbar_in_the_loupe() {
         let mut app = App::new(None);
+        app.mode = ViewMode::Loupe;
+        app.focus = Region::Detail;
+        for _ in 0..4 {
+            app.cycle_region(false);
+            assert_ne!(app.focus, Region::Toolbar);
+        }
         app.mode = ViewMode::Grid;
-        assert_eq!(
-            app.toolbar_control_count(),
-            if SHOW_GROUPING_TOOLS { 14 } else { 11 }
-        );
-        app.mode = ViewMode::Loupe;
-        assert_eq!(
-            app.toolbar_control_count(),
-            1,
-            "the Loupe toolbar only has the `?` Help button"
-        );
-    }
-
-    #[test]
-    fn loupe_toolbar_focus_zero_toggles_help() {
-        let mut app = App::new(None);
-        app.mode = ViewMode::Loupe;
-        app.toolbar_focus = 0;
-        assert!(!app.show_help());
-        app.activate_toolbar_focus();
-        assert!(
-            app.show_help(),
-            "index 0 in the Loupe toolbar must toggle help, matching the '?' button"
-        );
+        app.focus = Region::Grid;
+        app.cycle_region(false);
+        assert_eq!(app.focus, Region::Toolbar);
     }
 
     /// With `sel` empty in the Loupe, bulk actions must still act on the open

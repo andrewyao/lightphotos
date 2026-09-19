@@ -4,16 +4,16 @@ use crate::app::{App, Region, SHOW_GROUPING_TOOLS};
 use crate::navigation::Cmp;
 
 /// The Grid and Survey toolbar: rating filter, grouping toggles (while
-/// `SHOW_GROUPING_TOOLS` is on), and bulk actions on the selection.
+/// `SHOW_GROUPING_TOOLS` is on), and the photo count. Actions on the selection
+/// live in `selection_bar`.
 pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::Panel::top("grid_toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
             // Keyboard-cursor index of each control, matching
-            // `App::activate_toolbar_focus`. The bulk actions are not in the
-            // keyboard cycle because their count changes with the selection.
+            // `App::activate_toolbar_focus`.
             let mut idx = 0usize;
 
-            ui.label("Filter:");
+            ui.label("Rating:");
             let resp = ui.selectable_label(app.filter().is_none(), "All");
             if resp.clicked() {
                 out.actions.push(UiAction::SetFilter(None));
@@ -134,68 +134,93 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                     out.actions.push(UiAction::ToggleEyesClosed);
                 }
                 toolbar_focus_sync(ui, app, idx, &resp, out);
-                idx += 1;
             }
 
+            // Survey's own header already counts its photos.
+            if app.mode() == ViewMode::Grid {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.weak(format!("{} photos", app.visible_len()));
+                });
+            }
+
+            region_focus_marker(ui, app, Region::Toolbar);
+        });
+    });
+}
+
+/// Bulk actions on the Grid or Survey selection, in a row under the toolbar.
+/// The row stays up with nothing selected so the grid doesn't shift when a
+/// selection starts. Every action opens a confirm modal before it runs. These
+/// are not in the keyboard cycle because they come and go with the selection;
+/// each has its own shortcut instead.
+pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let n = app.selection_count();
+    egui::Panel::top("selection_bar").show_inside(ui, |ui| {
+        ui.horizontal(|ui| {
+            // Buttons are taller than a label; keep the row one height.
+            ui.set_min_height(ui.spacing().interact_size.y);
+            if n == 0 {
+                ui.weak("No selection \u{2014} click a photo, or Cmd+A to select all");
+                return;
+            }
+            ui.strong(format!("{n} selected"));
+            ui.separator();
+            egui::ComboBox::from_id_salt("bulk_star")
+                .selected_text("Rate \u{2605}")
+                .show_ui(ui, |ui| {
+                    for s in (1u8..=5).rev() {
+                        if ui.button(star_string(s)).clicked() {
+                            out.actions.push(UiAction::RequestBulk(BulkKind::Rate(s)));
+                        }
+                    }
+                    if ui.button("Clear rating").clicked() {
+                        out.actions.push(UiAction::RequestBulk(BulkKind::Rate(0)));
+                    }
+                });
+            if ui
+                .button("Auto Tone")
+                .on_hover_text(
+                    "Set each selected photo's tone sliders from its own histogram (Cmd+Shift+U)",
+                )
+                .clicked()
+            {
+                out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));
+            }
+            ui.separator();
+            if ui
+                .add_enabled(n == 1, egui::Button::new("Copy Settings"))
+                .on_hover_text("Copy this photo's develop settings (Cmd+Shift+C)")
+                .on_disabled_hover_text("Select a single photo to copy its settings")
+                .clicked()
+            {
+                out.actions.push(UiAction::CopySettings);
+            }
+            let apply = ui
+                .add_enabled(
+                    app.has_copied_settings(),
+                    egui::Button::new("Apply Settings"),
+                )
+                .on_disabled_hover_text("Copy settings from a photo first");
+            if apply.clicked() {
+                out.actions
+                    .push(UiAction::RequestBulk(BulkKind::ApplySettings));
+            }
             if let Some(name) = app.copied_settings_name() {
-                ui.separator();
-                ui.label(format!("Settings from: {name}"));
+                ui.weak(format!("from {name}"));
+            }
+            ui.separator();
+            if ui
+                .button("Export JPG")
+                .on_hover_text("Export each selected photo as a baked JPG")
+                .clicked()
+            {
+                out.actions.push(UiAction::RequestBulk(BulkKind::Export));
             }
 
-            // Every bulk action opens a confirm modal before it runs.
-            let n = app.selection_count();
-            if n > 0 {
-                ui.separator();
-                ui.label(format!("{n} selected"));
-                egui::ComboBox::from_id_salt("bulk_star")
-                    .selected_text("Apply \u{2605}")
-                    .show_ui(ui, |ui| {
-                        for s in (1u8..=5).rev() {
-                            if ui.button(star_string(s)).clicked() {
-                                out.actions.push(UiAction::RequestBulk(BulkKind::Rate(s)));
-                            }
-                        }
-                        if ui.button("Clear rating").clicked() {
-                            out.actions.push(UiAction::RequestBulk(BulkKind::Rate(0)));
-                        }
-                    });
+            // Destructive, so it sits apart from the others at the far right.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .add_enabled(n == 1, egui::Button::new("Copy Settings"))
-                    .on_hover_text("Copy this photo's develop settings (Cmd+Shift+C)")
-                    .on_disabled_hover_text("Select a single photo to copy its settings")
-                    .clicked()
-                {
-                    out.actions.push(UiAction::CopySettings);
-                }
-                if ui
-                    .add_enabled(
-                        app.has_copied_settings(),
-                        egui::Button::new("Apply Settings"),
-                    )
-                    .on_disabled_hover_text("Copy settings from a photo first")
-                    .clicked()
-                {
-                    out.actions
-                        .push(UiAction::RequestBulk(BulkKind::ApplySettings));
-                }
-                if ui
-                    .button("Auto Tone")
-                    .on_hover_text(
-                        "Set each selected photo's tone sliders from its own histogram (Cmd+Shift+U)",
-                    )
-                    .clicked()
-                {
-                    out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));
-                }
-                if ui
-                    .button("Export JPG")
-                    .on_hover_text("Export each selected photo as a baked JPG")
-                    .clicked()
-                {
-                    out.actions.push(UiAction::RequestBulk(BulkKind::Export));
-                }
-                if ui
-                    .button("Delete")
+                    .button(egui::RichText::new("Delete").color(theme::DANGER_RED))
                     .on_hover_text(if cfg!(target_arch = "wasm32") {
                         "Permanently delete selected photos; cannot be undone (Delete)"
                     } else {
@@ -205,41 +230,7 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 {
                     out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
                 }
-            }
-
-            // `?` is the last keyboard-focusable control.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
-                if resp.clicked() {
-                    out.actions.push(UiAction::ToggleHelp);
-                }
-                toolbar_focus_sync(ui, app, idx, &resp, out);
             });
-
-            region_focus_marker(ui, app, Region::Toolbar);
-        });
-    });
-}
-
-/// The Loupe toolbar has no filter, grouping, or bulk controls. Changing the
-/// filter while a photo is open could drop that photo out of the Grid's
-/// selection and break rating it. The only focusable control is `?` at index
-/// 0, matching `App::LOUPE_TOOLBAR_CONTROLS`.
-pub(super) fn loupe_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    egui::Panel::top("loupe_toolbar").show_inside(ui, |ui| {
-        ui.horizontal(|ui| {
-            let idx = 0usize;
-
-            // Right-to-left, so `?` lands in the top-right corner.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let resp = ui.button("?").on_hover_text("Keyboard shortcuts (?)");
-                if resp.clicked() {
-                    out.actions.push(UiAction::ToggleHelp);
-                }
-                toolbar_focus_sync(ui, app, idx, &resp, out);
-            });
-
-            region_focus_marker(ui, app, Region::Toolbar);
         });
     });
 }
