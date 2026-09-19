@@ -228,17 +228,30 @@ impl App {
             self.dup_marks.clear();
             return;
         }
-        let entries = pl.entries();
-        let hashes: Vec<Option<u64>> = entries
+        let hashes: Vec<Option<u64>> = pl
+            .entries()
             .iter()
             .map(|p| self.phashes.get(p).copied())
             .collect();
+        self.dup_groups = duplicates::group_by_hash(&hashes, duplicates::DEFAULT_MAX_DISTANCE);
+        self.refine_dup_marks();
+    }
+
+    /// Re-applies feature-print splits and scores to the current hash groups.
+    /// Linear, unlike the O(n²) regroup in `recompute_dup_marks`, so call this
+    /// when only feature distances or scores changed.
+    pub(super) fn refine_dup_marks(&mut self) {
+        let Some(pl) = &self.playlist else { return };
+        if !self.dupes_on {
+            return;
+        }
+        let entries = pl.entries();
         let scores: Vec<Option<f64>> = entries.iter().map(|p| self.culling_score(p)).collect();
-        let groups = duplicates::group_by_hash(&hashes, duplicates::DEFAULT_MAX_DISTANCE);
+        let groups = &self.dup_groups;
         // Split off dHash false positives whose feature-print distance to the
         // group's anchor is too large. Members without a feature print stay.
         let refined = duplicates::refine_by_feature_print(
-            &groups,
+            groups,
             duplicates::DEFAULT_MAX_FEATURE_DISTANCE,
             |anchor, i| {
                 self.feature_distances
@@ -247,7 +260,6 @@ impl App {
             },
         );
         self.dup_marks = duplicates::compute_marks(&refined, &scores);
-        self.dup_groups = groups;
         self.dup_refined = refined;
     }
 
@@ -328,6 +340,39 @@ pub(crate) fn preview_target_px(longest_physical: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refining_after_a_feature_print_matches_a_full_recompute() {
+        let dir = std::env::temp_dir().join(format!("lp-dup-refine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let names = ["a.jpg", "b.jpg", "c.jpg"];
+        for n in names {
+            std::fs::write(dir.join(n), []).unwrap();
+        }
+        let mut app = App::new(None);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        let entries = app.playlist.as_ref().unwrap().entries().to_vec();
+        for p in &entries {
+            app.phashes.insert(p.clone(), 0);
+        }
+        app.dupes_on = true;
+        app.recompute_dup_marks();
+        assert_eq!(app.dup_refined, vec![0, 0, 0], "equal hashes form one group");
+
+        app.feature_distances.insert(
+            (entries[0].clone(), entries[2].clone()),
+            duplicates::DEFAULT_MAX_FEATURE_DISTANCE + 1.0,
+        );
+        app.refine_dup_marks();
+        let (refined, marks) = (app.dup_refined.clone(), app.dup_marks.clone());
+        assert_ne!(refined[2], refined[0], "the far feature print splits off");
+
+        app.recompute_dup_marks();
+        assert_eq!(app.dup_refined, refined);
+        assert_eq!(app.dup_marks, marks);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn small_windows_still_get_a_preview_worth_having() {
