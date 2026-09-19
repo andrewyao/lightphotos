@@ -52,9 +52,7 @@ impl App {
         // Re-request every frame: a resize can change the target and the LRU
         // can evict a landed preview. `request_preview` dedupes.
         //
-        // Native only. `loader.rs` has no workers on wasm32, so the in-flight
-        // marker would never clear and the frame loop would poll forever.
-        // `app/web.rs` decodes previews there.
+        // On wasm32 `app/web.rs` decodes previews instead.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(loader) = &mut self.loader {
             loader.request_preview(want.clone(), target);
