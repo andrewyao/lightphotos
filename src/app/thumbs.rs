@@ -493,7 +493,7 @@ impl App {
             }
         }
         if changed {
-            self.recompute_dup_marks();
+            self.refine_dup_marks();
             self.request_redraw();
         }
     }
@@ -575,7 +575,7 @@ impl App {
                 self.recompute_burst_marks();
             }
             if self.dupes_on {
-                self.recompute_dup_marks();
+                self.refine_dup_marks();
             }
             if self.eyes_filter_on() {
                 self.recompute_visible();
