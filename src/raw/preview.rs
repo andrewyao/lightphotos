@@ -297,6 +297,39 @@ fn resize_linear_f16(rgba: &[u8], w: u32, h: u32, max_px: u32) -> (u32, u32, Vec
     (out_w as u32, out_h as u32, out)
 }
 
+/// Box-average downsample of linear RGB to `(out_w, out_h)`, using the same
+/// boxes as [`resize_linear_f16`].
+fn box_downsample_rgb(
+    pixels: &[[f32; 3]],
+    w: usize,
+    h: usize,
+    out_w: usize,
+    out_h: usize,
+) -> Vec<[f32; 3]> {
+    let mut out = vec![[0f32; 3]; out_w * out_h];
+    for oy in 0..out_h {
+        let y0 = oy * h / out_h;
+        let y1 = ((oy + 1) * h / out_h).max(y0 + 1).min(h);
+        for ox in 0..out_w {
+            let x0 = ox * w / out_w;
+            let x1 = ((ox + 1) * w / out_w).max(x0 + 1).min(w);
+            let mut sum = [0f32; 3];
+            let mut n = 0u32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let p = pixels[y * w + x];
+                    sum[0] += p[0];
+                    sum[1] += p[1];
+                    sum[2] += p[2];
+                    n += 1;
+                }
+            }
+            out[oy * out_w + ox] = sum.map(|s| s / n.max(1) as f32);
+        }
+    }
+    out
+}
+
 /// Camera RGB to linear sRGB matrix. Reimplements rawler's
 /// `map_3ch_to_rgb`, which is crate-private. `None` when the file has no
 /// color matrix; callers then output white-balanced camera RGB, as
@@ -624,7 +657,26 @@ pub(crate) fn demosaic_cfa(
     };
 
     let cam2rgb = build_cam2rgb(raw);
-    let (w, h) = (demosaiced.width, demosaiced.height);
+    let (full_w, full_h) = (demosaiced.width, demosaiced.height);
+
+    // Bayer `Quality` demosaics at full sensor size. Shrink before denoise
+    // and f16 packing so those buffers are preview-sized. Box averaging is
+    // linear, so it commutes with the white balance and color matrix below.
+    // X-Trans is already reduced before demosaic.
+    let downsample_target = (mode == DemosaicMode::Quality && !is_xtrans)
+        .then(|| fit_within(full_w as u32, full_h as u32, max_px))
+        .map(|(w, h)| (w as usize, h as usize))
+        .filter(|&target| target != (full_w, full_h));
+    let (w, h) = downsample_target.unwrap_or((full_w, full_h));
+    let shrunk_pixels;
+    let source_pixels: &[[f32; 3]] = match downsample_target {
+        Some((target_w, target_h)) => {
+            shrunk_pixels =
+                box_downsample_rgb(demosaiced.pixels(), full_w, full_h, target_w, target_h);
+            &shrunk_pixels
+        }
+        None => demosaiced.pixels(),
+    };
 
     // Auto-denoise (`AUTO_RAW_DENOISE_STRENGTH`), `Quality` only. Runs on
     // linear camera RGB before white balance and the color matrix.
@@ -634,11 +686,11 @@ pub(crate) fn demosaic_cfa(
             crate::image_decode::AUTO_RAW_DENOISE_STRENGTH,
             w,
             h,
-            demosaiced.pixels(),
+            source_pixels,
         );
         &denoised_quality
     } else {
-        demosaiced.pixels()
+        source_pixels
     };
 
     // White balance comes after demosaic, as in `RawDevelop`, because PPG's
