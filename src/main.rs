@@ -297,6 +297,10 @@ impl ApplicationHandler<UserEvent> for App {
         }
     }
 
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.save_edit();
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         // Exit the loop rather than `process::exit`, so loader and exporter
         // `Drop`s run.

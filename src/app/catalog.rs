@@ -118,6 +118,7 @@ impl App {
     /// Copies ratings, edits, touchups, and rotations for `playlist` from the
     /// catalog into the app's in-memory maps.
     pub(super) fn reconcile_catalog_mirrors(&mut self, playlist: &Playlist) {
+        self.save_edit();
         for p in playlist.entries() {
             if let Some(stars) = self.catalog.get(p) {
                 self.ratings.insert(p.clone(), stars);
