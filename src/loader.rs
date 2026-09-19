@@ -75,6 +75,13 @@ enum Job {
     Meta(PathBuf),
 }
 
+#[derive(PartialEq, Eq)]
+enum Enqueued {
+    Yes,
+    NoWorkers,
+    Poisoned,
+}
+
 /// A finished job, carrying its tier back to the poller.
 enum JobResult {
     Speed(PathBuf, u32, Result<DecodedImage, String>),
@@ -210,10 +217,21 @@ pub struct Loader {
     meta_inflight: HashSet<PathBuf>,
 
     exif_inflight: HashSet<PathBuf>,
+
+    /// Worker threads that actually started. Zero on wasm32, where spawning
+    /// fails and the browser's Web Worker pool decodes instead.
+    workers: usize,
 }
 
 impl Loader {
     pub fn new(max_dim: u32) -> Self {
+        let cores = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        Self::with_workers(max_dim, cores.saturating_sub(2).max(1))
+    }
+
+    fn with_workers(max_dim: u32, workers: usize) -> Self {
         let (res_tx, res_rx) = std::sync::mpsc::channel::<JobResult>();
 
         let shared = Arc::new(Shared {
@@ -222,11 +240,7 @@ impl Loader {
         });
         let thumbs = Arc::new(ThumbCache::new());
 
-        let cores = thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let workers = cores.saturating_sub(2).max(1);
-
+        let mut started = 0;
         for i in 0..workers {
             let shared = Arc::clone(&shared);
             let res_tx = res_tx.clone();
@@ -340,8 +354,9 @@ impl Loader {
                 });
             // Spawning fails on wasm32, which has no OS threads. Log and carry
             // on; queued jobs then go unserviced.
-            if let Err(e) = spawned {
-                eprintln!("[loader] could not spawn decode worker {i}: {e}");
+            match spawned {
+                Ok(_) => started += 1,
+                Err(e) => eprintln!("[loader] could not spawn decode worker {i}: {e}"),
             }
         }
 
@@ -368,6 +383,7 @@ impl Loader {
             thumb_capacity: THUMB_CAPACITY,
             meta_inflight: HashSet::new(),
             exif_inflight: HashSet::new(),
+            workers: started,
         }
     }
 
@@ -407,15 +423,34 @@ impl Loader {
         if self.speed_inflight.contains(&key) {
             return;
         }
-        // Mark in-flight only after a successful enqueue. With a poisoned
-        // mutex, a marker would leave the path "loading" forever.
-        if let Ok(mut q) = self.shared.queue.lock() {
-            q.speed.push_back(Job::Speed(path, target_px));
+        if self.enqueue(Job::Speed(path, target_px)) == Enqueued::Yes {
             self.speed_inflight.insert(key);
-            // notify_all because notify_one might wake only the reserved
-            // worker, which skips thumbnails and would leave them queued.
-            self.shared.ready.notify_all();
         }
+    }
+
+    /// Hands `job` to the workers. Callers mark a job in flight only on
+    /// `Yes`: with no workers (wasm32) or a poisoned queue nothing would ever
+    /// clear the marker, and the frame loop would poll forever.
+    fn enqueue(&self, job: Job) -> Enqueued {
+        if self.workers == 0 {
+            return Enqueued::NoWorkers;
+        }
+        let Ok(mut q) = self.shared.queue.lock() else {
+            return Enqueued::Poisoned;
+        };
+        let lane = match &job {
+            Job::Speed(..) => &mut q.speed,
+            Job::Preview(..) => &mut q.preview,
+            Job::Full(..) => &mut q.full,
+            Job::Thumb(..) => &mut q.thumbs,
+            Job::Exif(..) => &mut q.exif,
+            Job::Meta(..) => &mut q.meta,
+        };
+        lane.push_back(job);
+        // notify_all because notify_one might wake only the reserved worker,
+        // which skips thumbnails and would leave them queued.
+        self.shared.ready.notify_all();
+        Enqueued::Yes
     }
 
     /// Queues the `Preview` decode for a landed `Speed` result, but only if the
@@ -440,11 +475,8 @@ impl Loader {
         if self.preview_cache.contains_key(&key) || self.preview_inflight.contains(&key) {
             return;
         }
-        if let Ok(mut q) = self.shared.queue.lock() {
-            q.preview
-                .push_back(Job::Preview(path.to_path_buf(), target_px));
+        if self.enqueue(Job::Preview(path.to_path_buf(), target_px)) == Enqueued::Yes {
             self.preview_inflight.insert(key);
-            self.shared.ready.notify_all();
         }
     }
 
@@ -454,10 +486,8 @@ impl Loader {
         if self.cache.contains_key(&path) || self.inflight.contains(&path) {
             return;
         }
-        if let Ok(mut q) = self.shared.queue.lock() {
-            q.full.push_back(Job::Full(path.clone(), self.full_target));
+        if self.enqueue(Job::Full(path.clone(), self.full_target)) == Enqueued::Yes {
             self.inflight.insert(path);
-            self.shared.ready.notify_all();
         }
     }
 
@@ -499,13 +529,12 @@ impl Loader {
         {
             return;
         }
-        match self.shared.queue.lock() {
-            Ok(mut q) => {
-                q.thumbs.push_back(Job::Thumb(path, max_px));
+        match self.enqueue(Job::Thumb(path, max_px)) {
+            Enqueued::Yes => {
                 self.thumb_inflight.insert(key);
-                self.shared.ready.notify_all();
             }
-            Err(_) => {
+            Enqueued::NoWorkers => {}
+            Enqueued::Poisoned => {
                 // Poison is permanent and workers exit on it, so report every
                 // pending thumbnail as failed rather than loading forever.
                 self.thumb_failed.insert(key);
@@ -536,10 +565,8 @@ impl Loader {
         if self.meta_inflight.contains(&path) {
             return;
         }
-        if let Ok(mut q) = self.shared.queue.lock() {
-            q.meta.push_back(Job::Meta(path.clone()));
+        if self.enqueue(Job::Meta(path.clone())) == Enqueued::Yes {
             self.meta_inflight.insert(path);
-            self.shared.ready.notify_all();
         }
     }
 
@@ -550,10 +577,8 @@ impl Loader {
         if self.exif_inflight.contains(&path) {
             return;
         }
-        if let Ok(mut q) = self.shared.queue.lock() {
-            q.exif.push_back(Job::Exif(path.clone()));
+        if self.enqueue(Job::Exif(path.clone())) == Enqueued::Yes {
             self.exif_inflight.insert(path);
-            self.shared.ready.notify_all();
         }
     }
 
@@ -982,6 +1007,23 @@ mod tests {
         loader.escalate_if_short(&path("a"), 2560, 1616);
         assert_eq!(queued_previews(&loader), 1);
         assert!(loader.has_pending_image());
+    }
+
+    #[test]
+    fn without_workers_requests_leave_nothing_pending() {
+        // wasm32 has no decode threads. A request that marks itself in flight
+        // there is never cleared, and the frame loop polls forever.
+        let mut loader = Loader::with_workers(16384, 0);
+        loader.prefetch_preview(path("a"), 2560);
+        loader.request_full(path("a"));
+        loader.request_exif(path("a"));
+        loader.request_meta(path("a"));
+        loader.request_thumb(path("a"), 192);
+        assert!(!loader.has_pending_image());
+        assert!(loader.exif_inflight.is_empty());
+        assert!(loader.meta_inflight.is_empty());
+        assert!(loader.thumb_inflight.is_empty());
+        assert!(!loader.thumb_failed(&path("a"), 192));
     }
 
     #[test]
