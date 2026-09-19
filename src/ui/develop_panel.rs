@@ -136,22 +136,32 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                     if section == crate::develop::WHITE_BALANCE {
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(section).strong());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui
-                                    .selectable_label(app.wb_picker_active(), "Pick Gray")
-                                    .on_hover_text("Click a neutral-gray pixel in the image")
-                                    .clicked()
-                                {
-                                    out.actions.push(UiAction::ToggleWbPicker);
-                                }
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .selectable_label(app.wb_picker_active(), "Pick Gray")
+                                        .on_hover_text("Click a neutral-gray pixel in the image")
+                                        .clicked()
+                                    {
+                                        out.actions.push(UiAction::ToggleWbPicker);
+                                    }
+                                },
+                            );
                         });
                     } else {
                         ui.label(egui::RichText::new(section).strong());
                     }
                 }
                 let field = (s.field)(&mut adj);
-                let (c, i) = slider(ui, s.label, field, s.range.clone(), s.decimals, focus_idx == Some(idx));
+                let (c, i) = slider(
+                    ui,
+                    s.label,
+                    field,
+                    s.range.clone(),
+                    s.decimals,
+                    focus_idx == Some(idx),
+                );
                 changed |= c;
                 if i {
                     interacted_idx = Some(idx);

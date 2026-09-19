@@ -11,33 +11,32 @@
 #![allow(dead_code)]
 
 #[cfg(target_arch = "wasm32")]
-#[path = "../image_decode.rs"]
-mod image_decode;
-#[cfg(target_arch = "wasm32")]
-#[path = "../raw/preview.rs"]
-mod raw_preview;
-#[cfg(target_arch = "wasm32")]
-#[path = "../thumbnail.rs"]
-mod thumbnail;
-// `hash` and `paths` are unused here, but `thumbnail.rs` needs them.
-#[cfg(target_arch = "wasm32")]
-#[path = "../hash.rs"]
-mod hash;
-#[cfg(target_arch = "wasm32")]
-#[path = "../paths.rs"]
-mod paths;
-#[cfg(target_arch = "wasm32")]
 #[path = "../develop.rs"]
 mod develop;
 #[cfg(target_arch = "wasm32")]
 #[path = "../export.rs"]
 mod export;
 #[cfg(target_arch = "wasm32")]
+#[path = "../hash.rs"]
+mod hash;
+#[cfg(target_arch = "wasm32")]
+#[path = "../image_decode.rs"]
+mod image_decode;
+#[cfg(target_arch = "wasm32")]
 #[path = "../image_encode.rs"]
 mod image_encode;
 #[cfg(target_arch = "wasm32")]
 #[path = "../image_ops.rs"]
 mod image_ops;
+#[cfg(target_arch = "wasm32")]
+#[path = "../paths.rs"]
+mod paths;
+#[cfg(target_arch = "wasm32")]
+#[path = "../raw/preview.rs"]
+mod raw_preview;
+#[cfg(target_arch = "wasm32")]
+#[path = "../thumbnail.rs"]
+mod thumbnail;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {

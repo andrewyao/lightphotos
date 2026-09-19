@@ -358,7 +358,11 @@ mod tests {
         }
         app.dupes_on = true;
         app.recompute_dup_marks();
-        assert_eq!(app.dup_refined, vec![0, 0, 0], "equal hashes form one group");
+        assert_eq!(
+            app.dup_refined,
+            vec![0, 0, 0],
+            "equal hashes form one group"
+        );
 
         app.feature_distances.insert(
             (entries[0].clone(), entries[2].clone()),

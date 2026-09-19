@@ -774,7 +774,8 @@ impl App {
         };
         let mut adj = self.current_adjustments();
         let field = (slider.field)(&mut adj);
-        *field = (*field + dir as f32 * slider.step).clamp(*slider.range.start(), *slider.range.end());
+        *field =
+            (*field + dir as f32 * slider.step).clamp(*slider.range.start(), *slider.range.end());
         self.apply_adjustments(adj);
     }
 }
@@ -805,7 +806,10 @@ mod tests {
             let before = read(&app.current_adjustments());
             app.develop_adjust(1);
             let step = if i == 2 { 0.05 } else { 1.0 };
-            assert!((read(&app.current_adjustments()) - before - step).abs() < 1e-6, "slider {i}");
+            assert!(
+                (read(&app.current_adjustments()) - before - step).abs() < 1e-6,
+                "slider {i}"
+            );
         }
     }
 
