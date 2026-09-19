@@ -237,7 +237,6 @@ pub(super) fn loupe_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
                     out.actions.push(UiAction::ToggleHelp);
                 }
                 toolbar_focus_sync(ui, app, idx, &resp, out);
-
             });
 
             region_focus_marker(ui, app, Region::Toolbar);

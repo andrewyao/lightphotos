@@ -166,12 +166,18 @@ mod tests {
         assert!(app.touchup_active());
         app.enter_crop();
         app.cancel_crop();
-        assert!(!app.touchup_active(), "touch-up must not return after a crop");
+        assert!(
+            !app.touchup_active(),
+            "touch-up must not return after a crop"
+        );
 
         app.toggle_wb_picker();
         assert!(app.wb_picker_active());
         app.enter_crop();
         app.cancel_crop();
-        assert!(!app.wb_picker_active(), "the picker must not return after a crop");
+        assert!(
+            !app.wb_picker_active(),
+            "the picker must not return after a crop"
+        );
     }
 }
