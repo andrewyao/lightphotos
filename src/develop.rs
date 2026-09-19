@@ -14,6 +14,52 @@ pub const EXPOSURE_RANGE: std::ops::RangeInclusive<f32> = -5.0..=5.0;
 /// Denoise strength range. 0 is off.
 pub const DENOISE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=100.0;
 
+/// One Develop slider. The panel draws `SLIDERS` in order and keyboard focus
+/// indexes it, so both always agree.
+pub struct Slider {
+    pub section: &'static str,
+    pub label: &'static str,
+    pub field: fn(&mut Adjustments) -> &mut f32,
+    pub range: std::ops::RangeInclusive<f32>,
+    pub decimals: usize,
+    /// Keyboard nudge size.
+    pub step: f32,
+}
+
+const fn tone(section: &'static str, label: &'static str, field: fn(&mut Adjustments) -> &mut f32) -> Slider {
+    Slider { section, label, field, range: TONE_RANGE, decimals: 0, step: 1.0 }
+}
+
+pub const WHITE_BALANCE: &str = "White Balance";
+
+pub const SLIDERS: [Slider; 11] = [
+    tone(WHITE_BALANCE, "Temp", |a| &mut a.temp),
+    tone(WHITE_BALANCE, "Tint", |a| &mut a.tint),
+    Slider {
+        section: "Tone",
+        label: "Exposure",
+        field: |a| &mut a.exposure,
+        range: EXPOSURE_RANGE,
+        decimals: 2,
+        step: 0.05,
+    },
+    tone("Tone", "Contrast", |a| &mut a.contrast),
+    tone("Tone", "Highlights", |a| &mut a.highlights),
+    tone("Tone", "Shadows", |a| &mut a.shadows),
+    tone("Tone", "Whites", |a| &mut a.whites),
+    tone("Tone", "Blacks", |a| &mut a.blacks),
+    tone("Presence", "Vibrance", |a| &mut a.vibrance),
+    tone("Presence", "Saturation", |a| &mut a.saturation),
+    Slider {
+        section: "Detail",
+        label: "Denoise",
+        field: |a| &mut a.denoise,
+        range: DENOISE_RANGE,
+        decimals: 0,
+        step: 1.0,
+    },
+];
+
 /// One spot-heal: copy a soft circle from `source` onto `center`. Coordinates
 /// are 0..1 of the unrotated image, so the edit works at any size or rotation.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]
