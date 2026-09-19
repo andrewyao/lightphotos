@@ -69,76 +69,136 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
                 concat!("Ctrl", $keys)
             }
         };
-    }
-    const SHORTCUTS: &[(&str, &str)] = &[
-        ("Enter or Space", "Open the selected photo (library)"),
-        ("Esc", "Back to the library (editor)"),
-        ("\u{2190} / \u{2192}", "Previous / next photo (editor)"),
-        ("\u{2190} \u{2192} \u{2191} \u{2193}", "Move the selection (library)"),
-        ("Shift + arrows", "Extend the selection (library)"),
-        (primary!(" + A"), "Select all in the current folder"),
-        (
-            primary!("-click / Shift-click"),
-            "Toggle one photo / select a range",
-        ),
-        ("0 \u{2013} 5", "Set star rating (0 clears)"),
-        (
-            "Shift + 1 \u{2013} 5",
-            "Color label: red / yellow / green / blue / purple",
-        ),
-        ("Shift + 0", "Clear the color label"),
-        ("Space", "Cycle zoom: fit \u{2192} 2\u{d7} fit \u{2192} 100% (editor)"),
-        (primary!(" + 0"), "Fit to window"),
-        (primary!(" + 1"), "100% (1:1 pixels)"),
-        (primary!(" + = / \u{2212}"), "Zoom in / out 20%"),
-        ("\u{2191} / \u{2193}", "Zoom in / out 10% (editor)"),
-        ("Shift + scroll", "Pan horizontally"),
-        ("Alt + scroll", "Pan vertically"),
-        ("Shift + Alt + scroll", "Zoom"),
-        ("Space + drag", "Pan"),
-        ("[ / ]", "Rotate \u{2212}90\u{b0} / +90\u{b0}"),
-        ("F6 / Shift+F6", "Cycle keyboard focus between regions"),
-        (
-            "Tab / Shift+Tab",
-            "From the folder tree, jump to the grid's first image; in the grid, step to the next/previous image",
-        ),
-        ("E / G", "Loupe / Grid"),
-        ("C", "Crop"),
-        ("B", "Best-of-burst badges (grid)"),
-        ("D", "Duplicate-group badges (grid)"),
-        (
-            "Click badge",
-            "Open Survey Mode on that duplicate group; Left/Right focus a member, Enter keeps best/rejects rest, Esc closes",
-        ),
-        ("Y", "Before / after compare"),
-        (primary!(" + U"), "Auto Tone this photo"),
-        (primary!(" + Shift + U"), "Auto Tone the selection"),
-        (primary!(" + Shift + C"), "Copy develop settings"),
-        (primary!(" + Shift + Y"), "Apply settings to selection"),
-        ("X", "Export selected as JPG"),
-        (
-            "Delete",
-            if cfg!(target_arch = "wasm32") {
-                "Permanently delete; cannot be undone"
+        ($a:literal or $b:literal) => {
+            if cfg!(all(not(target_arch = "wasm32"), target_os = "macos")) {
+                concat!("Cmd", $a, " or Cmd", $b)
             } else {
-                "Move to Trash"
-            },
+                concat!("Ctrl", $a, " or Ctrl", $b)
+            }
+        };
+    }
+    const SECTIONS: &[(&str, &[(&str, &str)])] = &[
+        (
+            "Navigate",
+            &[
+                ("Enter or Space", "Open selected photo (in library)"),
+                ("Esc", "Back to library (in editor)"),
+                ("\u{2190} / \u{2192}", "Previous / next photo (in editor)"),
+                (
+                    "\u{2190} \u{2192} \u{2191} \u{2193}",
+                    "Move selection in library grid",
+                ),
+                ("E / G", "Editor / library"),
+            ],
         ),
-        ("?", "This help"),
+        (
+            "Select",
+            &[
+                (primary!("+A"), "Select all in current folder"),
+                ("Shift+Click", "Range-select"),
+                (primary!("+Click"), "Toggle individual selection"),
+                ("Shift+arrows", "Extend selection (library)"),
+            ],
+        ),
+        (
+            "Rate and label",
+            &[
+                ("0 1 2 3 4 5", "Set star rating 0\u{2013}5"),
+                (
+                    "Shift+1 \u{2013} 5",
+                    "Set color label (red / yellow / green / blue / purple)",
+                ),
+                ("Shift+0", "Clear color label"),
+            ],
+        ),
+        (
+            "Zoom and pan (in editor)",
+            &[
+                (
+                    "Space",
+                    "Cycle zoom: fit \u{2192} 2\u{d7} fit \u{2192} 100%",
+                ),
+                (primary!("+0" or "+)"), "Fit to window"),
+                (primary!("+1" or "+!"), "100% (1:1 pixel)"),
+                (primary!("++" or "+="), "Zoom in (20% step)"),
+                (primary!("+\u{2212}"), "Zoom out (20% step)"),
+                ("\u{2191} / \u{2193}", "Zoom in / out (10% step)"),
+                ("Shift+Scroll", "Pan horizontally"),
+                ("Alt+Scroll", "Pan vertically"),
+                ("Shift+Alt+Scroll", "Trackpad zoom"),
+                ("Space+Drag", "Pan"),
+            ],
+        ),
+        (
+            "Edit",
+            &[
+                ("[", "Rotate image \u{2212}90\u{b0}"),
+                ("]", "Rotate image +90\u{b0}"),
+                ("C", "Crop"),
+                ("Y", "Before / after compare"),
+                (primary!("+U"), "Auto Tone this photo"),
+                (primary!("+Shift+U"), "Auto Tone the selection"),
+                (primary!("+Shift+C"), "Copy develop settings"),
+                (primary!("+Shift+Y"), "Apply settings to selection"),
+                ("X", "Export selected as JPG"),
+                (
+                    "Delete",
+                    if cfg!(target_arch = "wasm32") {
+                        "Permanently delete; cannot be undone"
+                    } else {
+                        "Move to Trash"
+                    },
+                ),
+            ],
+        ),
+        (
+            "Culling",
+            &[
+                ("B", "Best-of-burst badges (library)"),
+                ("D", "Duplicate-group badges (library)"),
+                (
+                    "Click badge",
+                    "Survey the group: \u{2190}/\u{2192} pick, Enter keeps best, Esc closes",
+                ),
+            ],
+        ),
+        (
+            "Keyboard focus",
+            &[
+                ("F6 / Shift+F6", "Cycle focus between regions"),
+                (
+                    "Tab / Shift+Tab",
+                    "Next / previous item in the focused region",
+                ),
+                ("?", "Show or hide this help"),
+            ],
+        ),
     ];
     let resp = egui::Modal::new(egui::Id::new("help_overlay")).show(ui.ctx(), |ui| {
-        ui.set_width(420.0);
+        ui.set_width(460.0);
         ui.heading("Keyboard shortcuts");
         ui.add_space(6.0);
-        egui::Grid::new("help_grid")
-            .num_columns(2)
-            .spacing([18.0, 6.0])
-            .striped(true)
+        egui::ScrollArea::vertical()
+            .max_height(ui.ctx().content_rect().height() * 0.7)
             .show(ui, |ui| {
-                for (key, desc) in SHORTCUTS {
-                    ui.label(egui::RichText::new(*key).strong());
-                    ui.label(*desc);
-                    ui.end_row();
+                for (i, (title, rows)) in SECTIONS.iter().enumerate() {
+                    if i > 0 {
+                        ui.add_space(10.0);
+                    }
+                    ui.label(egui::RichText::new(*title).small().weak());
+                    ui.separator();
+                    egui::Grid::new(("help_grid", i))
+                        .num_columns(2)
+                        .min_col_width(150.0)
+                        .spacing([18.0, 6.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for (key, desc) in *rows {
+                                ui.label(egui::RichText::new(*key).strong());
+                                ui.label(*desc);
+                                ui.end_row();
+                            }
+                        });
                 }
             });
         ui.add_space(10.0);
