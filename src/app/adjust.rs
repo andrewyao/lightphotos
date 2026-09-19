@@ -23,7 +23,7 @@ impl App {
     }
 
     pub(crate) fn touchup_active(&self) -> bool {
-        self.touchup_active
+        self.tool == LoupeTool::TouchUp
     }
     pub(crate) fn touchup_radius(&self) -> f32 {
         self.touchup_radius.max(self.touchup_radius_min())
@@ -221,13 +221,14 @@ impl App {
 
     /// True while the next Loupe click samples a pixel for white balance.
     pub(crate) fn wb_picker_active(&self) -> bool {
-        self.wb_picker
+        self.tool == LoupeTool::WbPicker
     }
 
     pub(super) fn toggle_wb_picker(&mut self) {
-        self.wb_picker = !self.wb_picker;
-        if self.wb_picker {
-            self.touchup_active = false;
+        if self.tool == LoupeTool::WbPicker {
+            self.tool = LoupeTool::None;
+        } else {
+            self.tool = LoupeTool::WbPicker;
             self.touchup_selected = None;
         }
         self.request_redraw();
@@ -236,7 +237,7 @@ impl App {
     /// Set temp/tint so the histogram-grid pixel at UV `(u, v)` becomes neutral
     /// gray. Always leaves picker mode, even when the pixel is too dark to use.
     pub(super) fn pick_white_balance(&mut self, u: f32, v: f32) {
-        self.wb_picker = false;
+        self.tool = LoupeTool::None;
         self.request_redraw();
         if self.hist_dw == 0 || self.hist_dh == 0 {
             self.set_status("No image loaded to pick from".into());
