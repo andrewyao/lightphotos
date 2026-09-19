@@ -28,6 +28,8 @@ mod theme {
     /// `lp.css`. The site uses a gradient that egui can't draw, so this is its
     /// dominant color. Update it if `lp.css` changes.
     pub const BRAND_BLUE: Color32 = Color32::from_rgb(79, 140, 255);
+    /// Text of the destructive Delete action.
+    pub const DANGER_RED: Color32 = Color32::from_rgb(235, 95, 95);
 }
 
 /// An action the UI wants `App` to perform after the frame is built. Positions
@@ -142,7 +144,7 @@ use grid::{draw_folders_panel, draw_grid};
 use loupe::draw_loupe;
 use modals::{confirm_modal, help_modal, quit_modal};
 use survey::draw_survey;
-use toolbar::{grid_toolbar, loupe_toolbar};
+use toolbar::{grid_toolbar, selection_bar};
 
 /// Build the egui UI for one frame.
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
@@ -169,10 +171,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
         draw_develop_panel(ui, app, &mut out);
     }
 
-    if mode == ViewMode::Loupe {
-        loupe_toolbar(ui, app, &mut out);
-    } else {
+    // The Loupe has no toolbar. Changing the filter while a photo is open
+    // could drop that photo out of the Grid's selection and break rating it.
+    if mode != ViewMode::Loupe {
         grid_toolbar(ui, app, &mut out);
+        selection_bar(ui, app, &mut out);
     }
     match mode {
         ViewMode::Grid => draw_grid(ui, app, &mut out),
@@ -247,8 +250,8 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             );
             ui.label(job);
 
-            // Not in the F6 focus cycle; `Cmd+O` is its keyboard route. The
-            // landing page has its own "Choose Folder" button.
+            // Not in the F6 focus cycle; `Cmd+O` and `?` are their keyboard
+            // routes. The landing page has its own "Choose Folder" button.
             if app.has_playlist() {
                 ui.add_space(12.0);
                 if ui
@@ -257,6 +260,13 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     .clicked()
                 {
                     out.actions.push(UiAction::PickFolder);
+                }
+                if ui
+                    .button("?")
+                    .on_hover_text("Keyboard shortcuts (?)")
+                    .clicked()
+                {
+                    out.actions.push(UiAction::ToggleHelp);
                 }
             }
         });
