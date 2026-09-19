@@ -26,17 +26,17 @@ mod vision;
 
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
-#[cfg(target_os = "macos")]
 use std::process::ExitCode;
 
-fn main() {
+fn main() -> ExitCode {
     #[cfg(target_os = "macos")]
     {
-        real_main();
+        real_main()
     }
     #[cfg(not(target_os = "macos"))]
     {
         eprintln!("face_probe is macOS-only (uses Apple Vision).");
+        ExitCode::FAILURE
     }
 }
 
