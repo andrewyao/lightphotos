@@ -39,18 +39,18 @@ impl App {
         }
 
         // While the WB picker is armed, only Escape (cancel) does anything.
-        if self.wb_picker {
+        if self.tool == LoupeTool::WbPicker {
             if code == KeyCode::Escape {
-                self.wb_picker = false;
+                self.tool = LoupeTool::None;
                 self.request_redraw();
             }
             return;
         }
 
-        if self.touchup_active {
+        if self.tool == LoupeTool::TouchUp {
             match code {
                 KeyCode::Escape => {
-                    self.touchup_active = false;
+                    self.tool = LoupeTool::None;
                     self.touchup_selected = None;
                     self.request_redraw();
                 }

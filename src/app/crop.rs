@@ -20,6 +20,7 @@ impl App {
         if self.shown.path().is_none() {
             return;
         }
+        self.tool = LoupeTool::None;
         let rect = self.current_adjustments().crop.unwrap_or(FULL_CROP);
         self.crop_edit = Some(CropDraft {
             rect,
@@ -148,5 +149,29 @@ impl App {
         if let Some(d) = self.crop_edit.as_mut() {
             d.grab = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cropping_turns_off_the_other_loupe_tools() {
+        let mut app = App::new(None);
+        app.mode = ViewMode::Loupe;
+        app.shown = Shown::Preview(PathBuf::from("/photos/a.jpg"), 1024, 1024);
+
+        app.apply_ui_actions(vec![ui::UiAction::ToggleTouchUp]);
+        assert!(app.touchup_active());
+        app.enter_crop();
+        app.cancel_crop();
+        assert!(!app.touchup_active(), "touch-up must not return after a crop");
+
+        app.toggle_wb_picker();
+        assert!(app.wb_picker_active());
+        app.enter_crop();
+        app.cancel_crop();
+        assert!(!app.wb_picker_active(), "the picker must not return after a crop");
     }
 }
