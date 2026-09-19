@@ -266,34 +266,59 @@ fn pump(inner: &Rc<RefCell<Inner>>) {
     }
 }
 
-/// The URL directory the app's JS and wasm were served from. The site
-/// serves the app under `/app/`, so the origin alone is wrong. Read from
-/// the `<link rel="modulepreload">` trunk emits; falls back to the origin.
-fn asset_base_url() -> String {
+/// Where to load the worker bundle from: the URL directory the app's JS and
+/// wasm were served from, plus a `?v=` cache-buster. The site serves the app
+/// under `/app/`, so the origin alone is wrong. Both come from the
+/// `<link rel="modulepreload">` trunk emits; falls back to the origin.
+///
+/// The cache-buster is the main bundle's content hash. Trunk does not hash
+/// worker filenames, and Cloudflare sends `wasm_worker.js` with a 4-hour
+/// max-age but `wasm_worker_bg.wasm` with max-age=0. Without it, a browser
+/// that saw the previous deploy pairs its cached glue JS with the new wasm
+/// and every decode fails with "wasm.wasm_bindgen_… is not a function".
+struct WorkerAssets {
+    dir: String,
+    version: String,
+}
+
+fn worker_assets() -> WorkerAssets {
     let window = match web_sys::window() {
         Some(w) => w,
-        None => return String::new(),
+        None => {
+            return WorkerAssets {
+                dir: String::new(),
+                version: String::new(),
+            }
+        }
     };
     let origin = window.location().origin().unwrap_or_default();
-    let dir = window
+    let href = window
         .document()
         .and_then(|d| d.query_selector("link[rel=modulepreload]").ok().flatten())
-        .and_then(|el| el.get_attribute("href"))
-        .and_then(|href| href.rfind('/').map(|i| href[..i].to_string()));
-    match dir {
-        Some(dir) => format!("{origin}{dir}"),
-        None => origin,
+        .and_then(|el| el.get_attribute("href"));
+    match href
+        .as_deref()
+        .and_then(|h| h.rfind('/').map(|i| (&h[..i], &h[i + 1..])))
+    {
+        Some((dir, file)) => WorkerAssets {
+            dir: format!("{origin}{dir}"),
+            version: file.to_string(),
+        },
+        None => WorkerAssets {
+            dir: origin,
+            version: String::new(),
+        },
     }
 }
 
 /// Start one worker from a Blob script that `importScripts` the worker
-/// bundle, as in trunk's webworker example. Trunk does not hash worker
-/// filenames, so the URL is fixed under `base`.
-fn spawn_worker(base: &str) -> Result<Worker, String> {
+/// bundle, as in trunk's webworker example.
+fn spawn_worker(assets: &WorkerAssets) -> Result<Worker, String> {
+    let WorkerAssets { dir, version } = assets;
     let script = Array::new();
     script.push(
         &format!(
-            r#"importScripts("{base}/wasm_worker.js");wasm_bindgen("{base}/wasm_worker_bg.wasm");"#
+            r#"importScripts("{dir}/wasm_worker.js?v={version}");wasm_bindgen("{dir}/wasm_worker_bg.wasm?v={version}");"#
         )
         .into(),
     );
@@ -341,10 +366,10 @@ impl WorkerPool {
             export_tx,
         }));
 
-        let base = asset_base_url();
+        let assets = worker_assets();
 
         for _ in 0..worker_count.max(1) {
-            match spawn_worker(&base) {
+            match spawn_worker(&assets) {
                 Ok(worker) => {
                     let slot_idx = {
                         let mut inner_mut = inner.borrow_mut();
@@ -643,7 +668,7 @@ fn replace_worker(inner: &Rc<RefCell<Inner>>, slot_idx: usize) {
             slot.replacement_attempts = slot.replacement_attempts.saturating_add(1);
             slot.replacement_attempts
         };
-        match spawn_worker(&asset_base_url()) {
+        match spawn_worker(&worker_assets()) {
             Ok(worker) => {
                 let generation = {
                     let mut inner_mut = inner.borrow_mut();
