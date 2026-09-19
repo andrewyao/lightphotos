@@ -179,6 +179,18 @@ fn develop_raw_image_to_srgb8(
         px[2] = boost_lut[px[2] as usize];
     }
 
+    let (src_w, src_h) = (img.width(), img.height());
+    if src_w == 0 || src_h == 0 {
+        return Err("decoded RAW image has zero dimension".into());
+    }
+    let (w, h) = fit_within(src_w, src_h, max_dim);
+
+    // Shrink before denoising, so the two f32 buffers below are preview-sized
+    // rather than sensor-sized (about 570 MB less on a 24 MP file).
+    if (w, h) != (src_w, src_h) {
+        img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3);
+    }
+
     // `RawDevelop` has no mid-pipeline hook, so denoise runs on the finished
     // sRGB8 image. It decodes with the 2.2 gamma approximation because that
     // is the space `denoise_linear_rgb_buffer` expects.
@@ -206,21 +218,11 @@ fn develop_raw_image_to_srgb8(
         px[2] = encode(lin[2]);
     }
 
-    let (src_w, src_h) = (img.width(), img.height());
-    if src_w == 0 || src_h == 0 {
-        return Err("decoded RAW image has zero dimension".into());
-    }
-    let (w, h) = fit_within(src_w, src_h, max_dim);
-    let rgba = if (w, h) == (src_w, src_h) {
-        img.into_raw()
-    } else {
-        image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3).into_raw()
-    };
     Ok(apply_exif_orientation(
         DecodedImage {
             width: w,
             height: h,
-            rgba,
+            rgba: img.into_raw(),
             pixel_format: PixelFormat::Srgb8,
         },
         orientation,

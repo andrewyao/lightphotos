@@ -32,6 +32,16 @@ use std::path::PathBuf;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // One decode, then exit: lets `/usr/bin/time -l` report that decode's
+    // own peak RSS instead of the whole fixture suite's.
+    match args.first().map(String::as_str) {
+        Some("--nonmac-decode") => return run_nonmac_decode_probe(&args[1..]),
+        Some("--wasm-quality-decode") => return run_wasm_quality_decode_probe(&args[1..]),
+        Some("--compare") => return run_compare_png(&args[1..]),
+        _ => {}
+    }
+
     let dir = std::env::temp_dir().join("lightphotos-decode-probe");
     std::fs::create_dir_all(&dir).expect("create probe fixture dir");
     let dng_path = dir.join("linear_test.dng");
@@ -145,6 +155,133 @@ fn main() {
             Err(e) => println!("  reference-mimic FAILED: {e}"),
         }
     }
+}
+
+/// `decode_probe --nonmac-decode <path> <max_dim> [png_out]`: one call to the
+/// native non-mac RAW decode path, for peak-RSS and wall-time measurement.
+fn run_nonmac_decode_probe(args: &[String]) {
+    let path = args
+        .first()
+        .expect("usage: --nonmac-decode <path> <max_dim> [png_out]");
+    let max_dim: u32 = args
+        .get(1)
+        .expect("max_dim required")
+        .parse()
+        .expect("max_dim must be a number");
+
+    let bytes = std::fs::read(path).expect("read RAW file");
+    let t0 = std::time::Instant::now();
+    let img = image_decode::decode_raw_nonmac_from_bytes(&bytes, max_dim)
+        .expect("decode_raw_nonmac_from_bytes failed");
+    println!(
+        "nonmac-decode {}x{} in {:?}",
+        img.width,
+        img.height,
+        t0.elapsed()
+    );
+
+    if let Some(out) = args.get(2) {
+        save_decoded_png(&img, out);
+    }
+}
+
+/// `decode_probe --wasm-quality-decode <path> <max_px> [png_out]`: one call
+/// to the wasm32-shared `Quality` preview tier, runnable on mac under
+/// `raw-probe` since it has no wasm-only dependency.
+fn run_wasm_quality_decode_probe(args: &[String]) {
+    let path = args
+        .first()
+        .expect("usage: --wasm-quality-decode <path> <max_px> [png_out]");
+    let max_px: u32 = args
+        .get(1)
+        .expect("max_px required")
+        .parse()
+        .expect("max_px must be a number");
+
+    let bytes = std::fs::read(path).expect("read RAW file");
+    let t0 = std::time::Instant::now();
+    let img = raw_preview::decode_raw_quality_from_bytes(&bytes, max_px)
+        .expect("decode_raw_quality_from_bytes failed");
+    println!(
+        "wasm-quality-decode {}x{} in {:?}",
+        img.width,
+        img.height,
+        t0.elapsed()
+    );
+
+    if let Some(out) = args.get(2) {
+        save_decoded_png(&img, out);
+    }
+}
+
+/// `decode_probe --compare <a.png> <b.png>`: mean absolute difference and
+/// PSNR between two same-size PNGs, for the raw-decode-memory task's
+/// before/after quality check.
+fn run_compare_png(args: &[String]) {
+    let a = image::open(args.first().expect("usage: --compare <a.png> <b.png>"))
+        .expect("open a.png")
+        .into_rgb8();
+    let b = image::open(args.get(1).expect("usage: --compare <a.png> <b.png>"))
+        .expect("open b.png")
+        .into_rgb8();
+    assert_eq!(
+        (a.width(), a.height()),
+        (b.width(), b.height()),
+        "compared images must be the same size"
+    );
+
+    let (mut sum_abs, mut sum_sq, mut max_abs, mut n) = (0f64, 0f64, 0f64, 0f64);
+    for (pa, pb) in a.pixels().zip(b.pixels()) {
+        for c in 0..3 {
+            let d = (pa[c] as f64 - pb[c] as f64).abs();
+            sum_abs += d;
+            sum_sq += d * d;
+            max_abs = max_abs.max(d);
+            n += 1.0;
+        }
+    }
+    let mae = sum_abs / n;
+    let mse = sum_sq / n;
+    let psnr = if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        20.0 * 255f64.log10() - 10.0 * mse.log10()
+    };
+    println!(
+        "{}x{}: MAE={mae:.4} MSE={mse:.4} PSNR={psnr:.2}dB max_abs_diff={max_abs}",
+        a.width(),
+        a.height()
+    );
+}
+
+/// Writes a `DecodedImage` as PNG, applying the same gamma and display boost
+/// as the loupe shader for `LinearF16` so both pixel formats look right.
+fn save_decoded_png(img: &image_decode::DecodedImage, out: &str) {
+    match img.pixel_format {
+        image_decode::PixelFormat::Srgb8 => {
+            let buf = image::RgbaImage::from_raw(img.width, img.height, img.rgba.clone())
+                .expect("rgba buffer size mismatch");
+            buf.save(out).expect("save png");
+        }
+        image_decode::PixelFormat::LinearF16 => {
+            let mut buf = image::RgbImage::new(img.width, img.height);
+            let enc = |v: f32| -> u8 {
+                let srgb = rawler::imgop::srgb::srgb_apply_gamma(v.clamp(0.0, 1.0));
+                (image_decode::apply_raw_preview_boost(srgb) * 255.0)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            };
+            for (i, px) in img.rgba.chunks_exact(8).enumerate() {
+                let r = half::f16::from_le_bytes([px[0], px[1]]).to_f32();
+                let g = half::f16::from_le_bytes([px[2], px[3]]).to_f32();
+                let b = half::f16::from_le_bytes([px[4], px[5]]).to_f32();
+                let (x, y) = (i as u32 % img.width, i as u32 / img.width);
+                buf.put_pixel(x, y, image::Rgb([enc(r), enc(g), enc(b)]));
+            }
+            buf.save(out).expect("save png");
+        }
+    }
+    println!("wrote {out}");
 }
 
 /// Copy of `thumbnail.rs`'s `embedded_preview_from_bytes`: decodes the EXIF
