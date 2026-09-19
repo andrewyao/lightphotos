@@ -201,7 +201,6 @@ pub struct Loader {
     // `Speed` results, same key as the preview tier. A separate map lets a
     // short speed result show at once and be replaced when the preview lands.
     speed_cache: HashMap<(PathBuf, u32), Arc<DecodedImage>>,
-    speed_order: VecDeque<(PathBuf, u32)>,
     speed_inflight: HashSet<(PathBuf, u32)>,
     /// Keys the user has viewed, which get the `Preview` decode if their speed
     /// pass came back short. Prefetched neighbors are not in this set.
@@ -373,7 +372,6 @@ impl Loader {
             preview_inflight: HashSet::new(),
             preview_capacity: PREVIEW_CAPACITY,
             speed_cache: HashMap::new(),
-            speed_order: VecDeque::new(),
             speed_inflight: HashSet::new(),
             escalation_wanted: HashSet::new(),
             thumb_cache: HashMap::new(),
@@ -788,27 +786,34 @@ impl Loader {
         }
     }
 
+    // Speed and preview results share `preview_order` and one budget. A key
+    // lives in at most one of the two maps: a landed preview replaces the
+    // speed result, which `get_preview` would never return again.
     fn insert_speed(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>) {
+        if self.preview_cache.contains_key(&key) {
+            return;
+        }
         if !self.speed_cache.contains_key(&key) {
-            self.speed_order.push_back(key.clone());
+            self.preview_order.push_back(key.clone());
         }
         self.speed_cache.insert(key, img);
-        // Shares the preview budget: same photos at similar sizes.
-        while self.speed_order.len() > self.preview_capacity {
-            if let Some(old) = self.speed_order.pop_front() {
-                self.speed_cache.remove(&old);
-            }
-        }
+        self.evict_previews();
     }
 
     fn insert_preview(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>) {
-        if !self.preview_cache.contains_key(&key) {
+        let known = self.speed_cache.remove(&key).is_some() || self.preview_cache.contains_key(&key);
+        if !known {
             self.preview_order.push_back(key.clone());
         }
         self.preview_cache.insert(key, img);
+        self.evict_previews();
+    }
+
+    fn evict_previews(&mut self) {
         while self.preview_order.len() > self.preview_capacity {
             if let Some(old) = self.preview_order.pop_front() {
                 self.preview_cache.remove(&old);
+                self.speed_cache.remove(&old);
             }
         }
     }
@@ -924,6 +929,22 @@ mod tests {
             rgba: vec![0; (w * h * 4) as usize],
             pixel_format: image_decode::PixelFormat::Srgb8,
         })
+    }
+
+    #[test]
+    fn speed_and_preview_results_share_one_budget() {
+        let mut loader = Loader::with_workers(16384, 0);
+        for i in 0..PREVIEW_CAPACITY {
+            loader.insert_speed((path(&i.to_string()), 2560), image(2, 2));
+        }
+        // The sharper preview replaces its own speed result.
+        loader.insert_preview((path("0"), 2560), image(4, 4));
+        assert_eq!(loader.get_preview(&path("0"), 2560).unwrap().width, 4);
+        assert_eq!(loader.speed_cache.len() + loader.preview_cache.len(), PREVIEW_CAPACITY);
+        // A new arrival evicts the oldest entry across both maps.
+        loader.insert_preview((path("new"), 2560), image(4, 4));
+        assert_eq!(loader.speed_cache.len() + loader.preview_cache.len(), PREVIEW_CAPACITY);
+        assert!(loader.get_preview(&path("0"), 2560).is_none());
     }
 
     #[test]
