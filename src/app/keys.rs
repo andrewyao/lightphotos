@@ -9,9 +9,13 @@ impl App {
     /// Whether an arrow or Tab key that egui marked "consumed" should still reach
     /// app navigation. egui keeps focus on a slider after a drag and consumes
     /// every later arrow key, and egui_winit consumes every Tab press. We ignore
-    /// that unless a slider is being dragged right now or a crop is in progress.
+    /// that unless a slider is being dragged right now, a crop is in progress,
+    /// or a text field holds focus, where Left has to move the caret rather
+    /// than also stepping to the previous photo.
     pub(crate) fn nav_key_should_fall_through(&self) -> bool {
-        self.crop_edit.is_none() && !self.egui_ctx.egui_is_using_pointer()
+        self.crop_edit.is_none()
+            && !self.egui_ctx.egui_is_using_pointer()
+            && !self.egui_ctx.egui_wants_keyboard_input()
     }
 
     /// Handle a key press per the Lightroom key-binding table.
@@ -425,6 +429,36 @@ mod tests {
         app.catalog
             .flush_blocking(std::time::Duration::from_secs(10));
         assert_eq!(Catalog::with_dir(dir).label(&paths[0]), None);
+    }
+
+    #[test]
+    fn arrows_stay_out_of_navigation_while_a_text_field_has_focus() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowRight);
+        assert_eq!(app.sel, Some(1));
+        assert!(
+            app.nav_key_should_fall_through(),
+            "with nothing focused, an arrow egui consumed still navigates"
+        );
+
+        // The first frame asks for focus; egui reports it from the second on.
+        let mut text = String::from("Golden");
+        for _ in 0..2 {
+            let _ = app.egui_ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.add(egui::TextEdit::singleline(&mut text))
+                    .request_focus();
+            });
+        }
+        assert!(
+            !app.nav_key_should_fall_through(),
+            "Left must move the caret, not step to the previous photo"
+        );
+
+        // What `main.rs` does with the guard for a key egui consumed.
+        if app.nav_key_should_fall_through() {
+            app.handle_key(KeyCode::ArrowLeft);
+        }
+        assert_eq!(app.sel, Some(1), "the shown photo did not change");
     }
 
     #[test]
