@@ -299,6 +299,11 @@ pub struct Strings {
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub list_folder_failed: fn(&str, &str) -> String,
     pub catalog_save_failed: fn(&str) -> String,
+    pub presets_load_failed: fn(&str) -> String,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub presets_locked: &'static str,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub presets_save_failed: fn(&str) -> String,
 }
 
 impl Strings {
@@ -596,6 +601,10 @@ pub static EN: Strings = Strings {
     folder_handle_missing: |dir| format!("Couldn't open {dir} \u{2014} folder handle missing"),
     list_folder_failed: |dir, e| format!("Couldn't list {dir}: {e}"),
     catalog_save_failed: |e| format!("Failed to save catalog entry: {e}"),
+    presets_load_failed: |e| format!("Could not read your presets: {e}"),
+    presets_locked:
+        "Presets are locked because the saved file could not be read. Move or fix it, then restart.",
+    presets_save_failed: |e| format!("Failed to save presets: {e}"),
 };
 
 pub static ZH: Strings = Strings {
@@ -848,6 +857,9 @@ pub static ZH: Strings = Strings {
     folder_handle_missing: |dir| format!("无法打开 {dir} \u{2014} 缺少文件夹句柄"),
     list_folder_failed: |dir, e| format!("无法列出 {dir}：{e}"),
     catalog_save_failed: |e| format!("无法保存目录条目：{e}"),
+    presets_load_failed: |e| format!("无法读取预设：{e}"),
+    presets_locked: "预设已锁定，因为无法读取已保存的文件。请将其移走或修复，然后重新启动。",
+    presets_save_failed: |e| format!("无法保存预设：{e}"),
 };
 
 #[cfg(test)]

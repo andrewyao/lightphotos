@@ -722,6 +722,9 @@ pub(crate) struct App {
     /// Copied tone settings (no crop) and the path they came from.
     copied_settings: Option<(PathBuf, Adjustments)>,
 
+    /// The named-look library, global to the app rather than per folder.
+    presets: crate::presets::PresetStore,
+
     show_help: bool,
 
     pending_quit: bool,
@@ -958,6 +961,11 @@ impl App {
             source_size: None,
             pending_bulk: None,
             copied_settings: None,
+            // A test must never write the developer's own preset library.
+            #[cfg(test)]
+            presets: crate::presets::PresetStore::in_memory(),
+            #[cfg(not(test))]
+            presets: crate::presets::PresetStore::load(),
             show_help: false,
             pending_quit: false,
             quit_requested: false,
@@ -1195,6 +1203,9 @@ impl App {
         // Show catalog write failures, or the user loses the change silently.
         if let Some(cause) = self.catalog.take_error() {
             self.set_status((crate::i18n::t().catalog_save_failed)(&cause));
+        }
+        if let Some(message) = self.presets.take_error() {
+            self.set_status(message);
         }
 
         let pixels_per_point = self.egui_ctx.pixels_per_point();
