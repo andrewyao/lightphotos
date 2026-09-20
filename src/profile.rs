@@ -98,6 +98,44 @@ impl Run {
 
         hotpath::measure_block!("path/thumbnail_grid", self.thumbnail_grid(&photos));
         hotpath::measure_block!("path/open_photo", self.open_photos(&photos));
+        hotpath::measure_block!("path/auto_tone", self.auto_tone(&photos));
+    }
+
+    /// What an Auto Tone batch costs per photo once its thumbnail is in
+    /// memory. This half runs on the UI thread and cannot be parallelised, so
+    /// it decides whether batching the decodes is worth anything. Mirrors
+    /// `App::analyze_thumb`.
+    fn auto_tone(&self, photos: &[PathBuf]) {
+        let wanted: Vec<PathBuf> = photos.iter().take(self.thumbs).cloned().collect();
+        let mut loader = Loader::new(16384);
+        loader.set_thumb_working_set_size(wanted.len());
+        for path in &wanted {
+            loader.request_thumb(path.clone(), THUMB_PX);
+        }
+        while wanted
+            .iter()
+            .any(|p| loader.get_thumb(p, THUMB_PX).is_none() && !loader.thumb_failed(p, THUMB_PX))
+        {
+            loader.poll_all();
+            std::thread::yield_now();
+        }
+
+        let t0 = Instant::now();
+        let mut analysed = 0usize;
+        for path in &wanted {
+            let Some(img) = loader.get_thumb(path, THUMB_PX) else {
+                continue;
+            };
+            let (grid, _, _) = crate::image_ops::downsample_linear(&img, 256);
+            if !grid.is_empty() {
+                crate::autotone::analyze(&grid, img.pixel_format);
+                analysed += 1;
+            }
+        }
+        eprintln!(
+            "[profile] auto tone analysed {analysed} in {:?}",
+            t0.elapsed()
+        );
     }
 
     /// What `App::open` does on a folder before the first frame: list the

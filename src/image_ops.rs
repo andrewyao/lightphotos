@@ -150,6 +150,7 @@ pub(crate) fn bake_edited(
 /// Strided downsample of `img` to linear RGB with about `target` samples on
 /// the long side. Returns `(grid, w, h)`, or an empty grid for a bad image.
 /// The histogram and Auto Tone both use this so they see the same pixels.
+#[hotpath::measure]
 pub(crate) fn downsample_linear(
     img: &DecodedImage,
     target: usize,
