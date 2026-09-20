@@ -4,7 +4,7 @@
 //! saved once and applied to any photo afterwards.
 //!
 //! Presets are global to the app, not per folder, so they live in
-//! [`crate::prefs`] rather than in a catalog sidecar: `Catalog` is scoped to
+//! [`crate::prefs`] rather than in a catalog sidecar. `Catalog` is scoped to
 //! one active directory and keys its records by filename.
 
 use serde::{Deserialize, Serialize};

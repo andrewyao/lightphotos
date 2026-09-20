@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Global app settings: state that belongs to the install rather than to a
-//! photo folder. Native keeps one file per key under the OS's config
+//! Global app settings, the state that belongs to the install rather than to
+//! a photo folder. Native keeps one file per key under the OS's config
 //! directory, the browser one `localStorage` entry per key.
 //!
 //! Values are raw strings, not typed values, so a caller can tell a value it
