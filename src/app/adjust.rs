@@ -310,6 +310,7 @@ mod tests {
 
         press(&app, false);
         app.save_edit_unless_dragging();
+        app.catalog.flush_blocking(std::time::Duration::from_secs(10));
         assert!(sidecar.exists(), "the release writes the edit");
         assert_eq!(app.catalog.adjustments(&photo).exposure, 0.5);
         let _ = std::fs::remove_dir_all(&dir);
@@ -322,6 +323,7 @@ mod tests {
             contrast: 10.0,
             ..Default::default()
         });
+        app.catalog.flush_blocking(std::time::Duration::from_secs(10));
         assert!(dir.join(".lightphotos").join("a.jpg.xmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

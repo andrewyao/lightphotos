@@ -108,13 +108,6 @@ impl App {
         self.catalog_load_pending.is_some()
     }
 
-    /// Surfaces wasm32 sidecar write failures, which arrive from async tasks.
-    /// Called every frame.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn poll_catalog_persist_errors(&mut self) {
-        self.catalog.poll_persist_errors();
-    }
-
     /// Makes the app's ratings, edits, touchups, and rotations for `playlist`
     /// match the loaded catalog, removing values its sidecars no longer have.
     pub(super) fn reconcile_catalog_mirrors(&mut self, playlist: &Playlist) {
@@ -788,6 +781,7 @@ mod tests {
              `sel` has gone stale (None) while in Loupe"
         );
 
+        app.catalog.flush_blocking(std::time::Duration::from_secs(10));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

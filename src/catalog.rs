@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::develop::{Adjustments, TouchUp};
 
+mod writeback;
+use writeback::{WriteOp, Writeback};
+
 /// Hidden subfolder holding a directory's sidecars and thumbnail cache.
 pub(crate) const SIDECAR_DIR: &str = ".lightphotos";
 /// Sidecar file extension. Cosmetic; see the module docs.
@@ -93,35 +96,50 @@ pub struct Catalog {
     /// The latest persist failure, drained by [`Catalog::take_error`] into a
     /// toast.
     last_error: Option<String>,
+    /// Sidecar mutations on their way to disk. Every write goes through here,
+    /// so no caller blocks a frame on the filesystem.
+    writeback: Writeback,
 
     /// The active folder's File System Access handle. wasm32 has no OS paths,
     /// so sidecar I/O goes through this.
     #[cfg(target_arch = "wasm32")]
     wasm_dir_handle: Option<web_sys::FileSystemDirectoryHandle>,
-    /// wasm32 sidecar writes run as detached `spawn_local` tasks and report
-    /// failures here. [`Catalog::poll_persist_errors`] drains it each frame.
-    #[cfg(target_arch = "wasm32")]
-    persist_err_tx: std::sync::mpsc::Sender<String>,
-    #[cfg(target_arch = "wasm32")]
-    persist_err_rx: std::sync::mpsc::Receiver<String>,
 }
 
 impl Catalog {
     /// An empty catalog with no active directory.
     pub fn new() -> Catalog {
-        #[cfg(target_arch = "wasm32")]
-        let (persist_err_tx, persist_err_rx) = std::sync::mpsc::channel();
         Catalog {
             images: HashMap::new(),
             dirty: HashSet::new(),
             dir: None,
             last_error: None,
+            writeback: Writeback::new(),
             #[cfg(target_arch = "wasm32")]
             wasm_dir_handle: None,
-            #[cfg(target_arch = "wasm32")]
-            persist_err_tx,
-            #[cfg(target_arch = "wasm32")]
-            persist_err_rx,
+        }
+    }
+
+    /// Retire finished sidecar writes and surface their failures. On wasm this
+    /// also starts the next queued writes, so it is the scheduler there. Call
+    /// once per frame: it is O(completions) and a no-op with nothing queued.
+    pub(crate) fn pump(&mut self) {
+        for e in self.writeback.pump() {
+            self.note_persist_error(e);
+        }
+    }
+
+    /// Photos whose sidecar has not caught up with memory yet.
+    pub(crate) fn backlog(&self) -> usize {
+        self.writeback.backlog()
+    }
+
+    /// Block until every queued sidecar write lands, or `timeout` elapses.
+    /// The app calls this on exit; `Drop` covers every other path.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn flush_blocking(&mut self, timeout: std::time::Duration) {
+        for e in self.writeback.flush_blocking(timeout) {
+            self.note_persist_error(e);
         }
     }
 
@@ -133,14 +151,6 @@ impl Catalog {
         handle: Option<web_sys::FileSystemDirectoryHandle>,
     ) {
         self.wasm_dir_handle = handle;
-    }
-
-    /// Move async persist failures into `last_error`. Call once per frame.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn poll_persist_errors(&mut self) {
-        while let Ok(e) = self.persist_err_rx.try_recv() {
-            self.note_persist_error(e);
-        }
     }
 
     /// `new()` plus `open_dir(&dir)`.
@@ -194,6 +204,7 @@ impl Catalog {
                 self.images.insert(name, rec);
             }
         }
+        self.writeback.overlay(dir, &mut self.images);
     }
 
     /// Take the pending persist error's cause. Each failure is returned once.
@@ -273,13 +284,11 @@ impl Catalog {
             self.images.remove(name);
             self.dirty.insert(name.to_os_string());
         }
-        if let Err(e) = self.delete_sidecar(path) {
-            self.note_persist_error(e);
-        }
+        self.enqueue(path, WriteOp::Delete);
     }
 
-    /// Apply `mutate` to the record for `path`, then write its sidecar, or
-    /// delete it if the record became empty. Native writes are atomic.
+    /// Apply `mutate` to the record for `path`, then queue its sidecar write,
+    /// or its deletion if the record became empty.
     fn update(&mut self, path: &Path, mutate: impl FnOnce(&mut ImageRecord)) {
         let Some(name) = path.file_name().map(|n| n.to_os_string()) else {
             return;
@@ -287,102 +296,51 @@ impl Catalog {
         self.dirty.insert(name.clone());
         let mut rec = self.images.remove(&name).unwrap_or_default();
         mutate(&mut rec);
-        let empty = rec.is_empty();
-        let result = if empty {
-            self.delete_sidecar(path)
+        if rec.is_empty() {
+            self.enqueue(path, WriteOp::Delete);
         } else {
-            self.write_sidecar(path, &rec)
-        };
-        if !empty {
+            self.enqueue(path, WriteOp::Put(rec.clone()));
             self.images.insert(name, rec);
         }
-        if let Err(e) = result {
-            self.note_persist_error(e);
-        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn write_sidecar(&self, path: &Path, rec: &ImageRecord) -> Result<(), String> {
-        let sidecar =
-            sidecar_path(path).ok_or_else(|| "cannot determine sidecar path".to_string())?;
-        write_sidecar_file(&sidecar, rec)
+    fn enqueue(&mut self, path: &Path, op: WriteOp) {
+        self.writeback.enqueue(path, op);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn delete_sidecar(&self, path: &Path) -> Result<(), String> {
-        let Some(sidecar) = sidecar_path(path) else {
-            return Ok(());
-        };
-        match std::fs::remove_file(&sidecar) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.to_string()),
+    /// wasm has no OS paths, so the queue entry carries the folder handle the
+    /// write must land in. Taking it here, at the moment of the edit, is what
+    /// keeps a write that outlives a folder switch pointed at the right folder.
+    #[cfg(target_arch = "wasm32")]
+    fn enqueue(&mut self, path: &Path, op: WriteOp) {
+        match self.wasm_dir_handle.clone() {
+            Some(dir_handle) => self.writeback.enqueue(path, op, dir_handle),
+            // Without a handle nothing was ever written, so a deletion has
+            // nothing to undo, but an edit the user made is being lost.
+            None => {
+                if matches!(op, WriteOp::Put(_)) {
+                    self.note_persist_error("no folder handle for this photo's directory");
+                }
+            }
         }
-    }
-
-    /// File System Access has no synchronous write, so this starts a
-    /// `spawn_local` task. Only a missing folder handle fails here. Write
-    /// failures arrive later through `persist_err_tx`.
-    #[cfg(target_arch = "wasm32")]
-    fn write_sidecar(&self, path: &Path, rec: &ImageRecord) -> Result<(), String> {
-        let Some(name) = path.file_name() else {
-            return Ok(());
-        };
-        let Some(dir_handle) = self.wasm_dir_handle.clone() else {
-            return Err("no folder handle for this photo's directory".to_string());
-        };
-        let bytes = serde_json::to_vec_pretty(rec).map_err(|e| e.to_string())?;
-        let name = name.to_os_string();
-        let tx = self.persist_err_tx.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Err(e) = crate::web_catalog_fs::write_sidecar(&dir_handle, &name, &bytes).await {
-                let _ = tx.send(format!("could not save {}: {e}", name.to_string_lossy()));
-            }
-        });
-        Ok(())
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn delete_sidecar(&self, path: &Path) -> Result<(), String> {
-        let Some(name) = path.file_name() else {
-            return Ok(());
-        };
-        // Without a handle nothing was written, so there is nothing to delete.
-        let Some(dir_handle) = self.wasm_dir_handle.clone() else {
-            return Ok(());
-        };
-        let name = name.to_os_string();
-        let tx = self.persist_err_tx.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Err(e) = crate::web_catalog_fs::delete_sidecar(&dir_handle, &name).await {
-                let _ = tx.send(format!("could not delete {}: {e}", name.to_string_lossy()));
-            }
-        });
-        Ok(())
     }
 
     /// Delete a sidecar through a captured handle, for a photo deletion that
-    /// finishes after the user navigated to another folder.
+    /// finishes after the user navigated to another folder. The cache is left
+    /// alone, because it now holds the new folder's records.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn delete_sidecar_with_handle(
-        &self,
+        &mut self,
         path: &Path,
         dir_handle: &web_sys::FileSystemDirectoryHandle,
     ) {
-        let Some(name) = path.file_name() else {
-            return;
-        };
-        let name = name.to_os_string();
-        let dir_handle = dir_handle.clone();
-        let tx = self.persist_err_tx.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            if let Err(e) = crate::web_catalog_fs::delete_sidecar(&dir_handle, &name).await {
-                let _ = tx.send(format!("could not delete {}: {e}", name.to_string_lossy()));
-            }
-        });
+        self.writeback
+            .enqueue(path, WriteOp::Delete, dir_handle.clone());
     }
 
-    /// [`Catalog::remove`] through a captured directory handle.
+    /// [`Catalog::remove`] through a captured directory handle, for a photo
+    /// deletion that finishes after the user navigated to another folder.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn remove_with_handle(
         &mut self,
@@ -463,36 +421,6 @@ fn skipped_message(skipped: usize) -> String {
     )
 }
 
-/// `<dir>/.lightphotos/<filename>.xmp`, or `None` for a path like `/` or `..`.
-/// Built from `OsString` so non-UTF-8 names stay exact.
-#[cfg(not(target_arch = "wasm32"))]
-fn sidecar_path(path: &Path) -> Option<PathBuf> {
-    let dir = path.parent()?;
-    let name = path.file_name()?;
-    let mut sidecar_name = name.to_os_string();
-    sidecar_name.push(".");
-    sidecar_name.push(SIDECAR_EXT);
-    Some(dir.join(SIDECAR_DIR).join(sidecar_name))
-}
-
-/// Write `rec` as JSON to `sidecar` through a `.tmp` sibling and rename, so a
-/// crash never leaves a partial file.
-#[cfg(not(target_arch = "wasm32"))]
-fn write_sidecar_file(sidecar: &Path, rec: &ImageRecord) -> Result<(), String> {
-    let parent = sidecar
-        .parent()
-        .ok_or_else(|| "sidecar path has no parent".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let bytes = serde_json::to_vec_pretty(rec).map_err(|e| e.to_string())?;
-    let tmp = sidecar.with_extension(format!("{SIDECAR_EXT}.tmp"));
-    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
-    if let Err(e) = std::fs::rename(&tmp, sidecar) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.to_string());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +438,13 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// Sidecar writes are queued, so a test that reads the disk waits here
+    /// first. A timeout rather than an unbounded wait, so a stuck writer
+    /// fails the assertion instead of hanging the suite.
+    fn flush(cat: &mut Catalog) {
+        cat.flush_blocking(std::time::Duration::from_secs(10));
     }
 
     fn sidecar_for(dir: &Path, filename: &str) -> PathBuf {
@@ -561,6 +496,7 @@ mod tests {
         cat.set(&p, 9);
         assert_eq!(cat.get(&p), Some(5));
 
+        flush(&mut cat);
         let reloaded = Catalog::with_dir(dir.clone());
         assert_eq!(reloaded.get(&p), Some(5));
 
@@ -647,6 +583,7 @@ mod tests {
         let mut reloaded = Catalog::with_dir(dir.clone());
         assert_eq!(reloaded.touchups(&p), vec![t]);
         reloaded.set_touchups(&p, &[]);
+        flush(&mut reloaded);
         assert!(Catalog::with_dir(dir.clone()).touchups(&p).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -720,6 +657,7 @@ mod tests {
         assert!(cat.take_error().is_none(), "no error before any write");
 
         cat.set(&dir.join("photo.jpg"), 3);
+        flush(&mut cat);
         let msg = cat
             .take_error()
             .expect("failed save should report an error");
@@ -764,6 +702,7 @@ mod tests {
         let mut cat = Catalog::with_dir(dir.clone());
         let _ = cat.take_error();
         cat.set(&dir.join("good.jpg"), 4);
+        flush(&mut cat);
         assert_eq!(cat.get(&dir.join("good.jpg")), Some(4));
 
         // Bad sidecar is untouched by the unrelated write, and only replaced
@@ -775,6 +714,7 @@ mod tests {
         cat.set(&dir.join("bad.jpg"), 5);
         assert_eq!(cat.get(&dir.join("bad.jpg")), Some(5));
 
+        flush(&mut cat);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -787,6 +727,7 @@ mod tests {
         let mut cat = Catalog::with_dir(dir.clone());
         cat.set(&raw, 5);
         cat.set(&jpg, 2);
+        flush(&mut cat);
         assert_eq!(cat.get(&raw), Some(5));
         assert_eq!(cat.get(&jpg), Some(2));
         assert!(sidecar_for(&dir, "PHOTO1.ARW").exists());
@@ -808,6 +749,7 @@ mod tests {
             "opening/reading a directory must not create .lightphotos"
         );
         cat.set(&dir.join("photo.jpg"), 3);
+        flush(&mut cat);
         assert!(
             dir.join(SIDECAR_DIR).exists(),
             ".lightphotos should appear after the first write"
@@ -822,8 +764,10 @@ mod tests {
         let p = dir.join("photo.jpg");
         let mut cat = Catalog::with_dir(dir.clone());
         cat.set(&p, 3);
+        flush(&mut cat);
         assert!(sidecar_for(&dir, "photo.jpg").exists());
         cat.set(&p, 0);
+        flush(&mut cat);
         assert!(
             !sidecar_for(&dir, "photo.jpg").exists(),
             "clearing the rating on an otherwise-identity record should delete the sidecar"
@@ -838,8 +782,10 @@ mod tests {
         let p = dir.join("photo.jpg");
         let mut cat = Catalog::with_dir(dir.clone());
         cat.set(&p, 4);
+        flush(&mut cat);
         assert!(sidecar_for(&dir, "photo.jpg").exists());
         cat.remove(&p);
+        flush(&mut cat);
         assert_eq!(cat.get(&p), None);
         assert!(!sidecar_for(&dir, "photo.jpg").exists());
         // Removing again is a no-op.
@@ -858,6 +804,7 @@ mod tests {
         let mut cat = Catalog::with_dir(a.clone());
         cat.set(&pa, 5);
 
+        flush(&mut cat);
         cat.open_dir(&b);
         assert_eq!(
             cat.get(&pb),
@@ -867,6 +814,7 @@ mod tests {
         cat.set(&pb, 2);
         assert_eq!(cat.get(&pb), Some(2));
 
+        flush(&mut cat);
         cat.open_dir(&a);
         assert_eq!(
             cat.get(&pa),
@@ -900,6 +848,7 @@ mod tests {
             "a load for a directory that's no longer active must be discarded"
         );
 
+        flush(&mut cat);
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();
     }
@@ -934,6 +883,7 @@ mod tests {
             "entries only present in the loaded snapshot must still be merged in"
         );
 
+        flush(&mut cat);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -958,6 +908,7 @@ mod tests {
              resurrected by a stale snapshot taken before it"
         );
 
+        flush(&mut cat);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -982,6 +933,79 @@ mod tests {
 
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    /// Every sidecar write used to happen inline, so a bulk rate paid the
+    /// filesystem once per photo and froze the window for seconds.
+    #[test]
+    fn rating_a_whole_folder_does_not_block_on_the_filesystem() {
+        let dir = unique_tmp_dir();
+        let paths: Vec<PathBuf> = (0..20_000)
+            .map(|i| dir.join(format!("photo{i:05}.jpg")))
+            .collect();
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        let started = std::time::Instant::now();
+        for p in &paths {
+            cat.set(p, 3);
+        }
+        let elapsed = started.elapsed();
+
+        assert!(
+            cat.backlog() > 0,
+            "the writes must still be outstanding, not already paid for inline"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(300),
+            "rating 20000 photos took {elapsed:?}; it must not wait on 20000 sidecar writes"
+        );
+
+        flush(&mut cat);
+        assert_eq!(cat.backlog(), 0);
+        assert_eq!(
+            Catalog::with_dir(dir.clone()).get(&paths[19_999]),
+            Some(3),
+            "every queued write must still reach the disk"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_folder_round_trip_during_a_flush_does_not_revert_the_edit() {
+        let dir = unique_tmp_dir();
+        let elsewhere = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+
+        // A previous session left this photo at three stars.
+        Catalog::with_dir(dir.clone()).set(&p, 3);
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        // The snapshot a background load would carry: taken before the edit.
+        let stale = load_sidecars(&dir);
+        cat.set(&p, 5);
+        // The user leaves and comes back while that write is still queued,
+        // which clears both the cache and `dirty`.
+        cat.switch_dir(&elsewhere);
+        cat.switch_dir(&dir);
+        cat.apply_loaded(&dir, stale);
+
+        assert_eq!(
+            cat.get(&p),
+            Some(5),
+            "a load that predates a still-queued write must not put the old \
+             rating back into the cache"
+        );
+
+        flush(&mut cat);
+        assert_eq!(
+            Catalog::with_dir(dir.clone()).get(&p),
+            Some(5),
+            "the queued write must still land in its own folder after the round trip"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&elsewhere).unwrap();
     }
 
     #[test]

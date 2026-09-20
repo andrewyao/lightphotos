@@ -330,12 +330,14 @@ impl ApplicationHandler<UserEvent> for App {
             self.request_redraw();
         }
 
+        // Outside the loader block below, because a queued sidecar write has
+        // no loader to wait on and can outlive the folder it came from.
+        self.catalog.pump();
+
         // True while web folder picking or listing is in flight. Feeds the poll
         // interval below.
         #[cfg(target_arch = "wasm32")]
         let web_folder_pending = {
-            // Web sidecar writes and deletes report failures asynchronously.
-            self.poll_catalog_persist_errors();
             self.poll_web_deletes();
             let pick_pending = self.poll_folder_pick();
             let listing_pending = self.poll_dir_listing();
