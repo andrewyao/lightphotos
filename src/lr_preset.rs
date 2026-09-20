@@ -33,13 +33,15 @@ enum Field {
 /// that fires on every export would train the user to ignore it.
 enum Untouched {
     Zero,
+    /// A field Camera Raw writes with a nonzero default, so only a value away
+    /// from that default means the user moved it.
+    Default(f32),
     /// A tone curve whose every point sits on the diagonal. Lightroom writes
     /// one into every sidecar.
     Linear,
 }
 
-/// The `crs:` keys that feed one slider. `Denoise` has two because Lightroom
-/// splits noise reduction by channel and this app does not; the larger wins.
+/// The `crs:` keys that feed one slider.
 fn keys(id: SliderId) -> &'static [&'static str] {
     match id {
         SliderId::Temp => &["IncrementalTemperature"],
@@ -52,7 +54,10 @@ fn keys(id: SliderId) -> &'static [&'static str] {
         SliderId::Blacks => &["Blacks2012"],
         SliderId::Vibrance => &["Vibrance"],
         SliderId::Saturation => &["Saturation"],
-        SliderId::Denoise => &["LuminanceSmoothing", "ColorNoiseReduction"],
+        // `LuminanceSmoothing` alone. Camera Raw defaults `ColorNoiseReduction`
+        // to 25, so reading it would put denoise on every import that carries
+        // the Detail panel at all, which nobody asked for.
+        SliderId::Denoise => &["LuminanceSmoothing"],
     }
 }
 
@@ -66,6 +71,11 @@ fn keys(id: SliderId) -> &'static [&'static str] {
 const UNSUPPORTED: &[(&str, &[&str], Untouched)] = &[
     ("Temperature", &["Temperature"], Untouched::Zero),
     ("Tint", &["Tint"], Untouched::Zero),
+    (
+        "ColorNoiseReduction",
+        &["ColorNoiseReduction"],
+        Untouched::Default(25.0),
+    ),
     ("Clarity2012", &["Clarity2012"], Untouched::Zero),
     ("Dehaze", &["Dehaze"], Untouched::Zero),
     ("Sharpness", &["Sharpness"], Untouched::Zero),
@@ -158,6 +168,7 @@ pub fn parse(xmp: &str) -> Result<Imported, String> {
     for (label, keys, default) in UNSUPPORTED {
         let set = keys.iter().any(|key| match default {
             Untouched::Zero => is_set(number(body, key)),
+            Untouched::Default(d) => is_away_from(number(body, key), *d),
             Untouched::Linear => raw_value(body, key).is_some_and(curve_is_bent),
         });
         if set {
@@ -202,10 +213,17 @@ fn number(body: &str, key: &str) -> Field {
 /// Whether a field is worth a note. An unreadable value is, since it cannot
 /// be shown harmless.
 fn is_set(field: Field) -> bool {
+    is_away_from(field, 0.0)
+}
+
+/// Whether Lightroom moved this field off `default`. Unparseable counts as
+/// moved, so a value we could not read is still reported rather than silently
+/// treated as the default.
+fn is_away_from(field: Field, default: f32) -> bool {
     match field {
         Field::Absent => false,
         Field::Unparseable => true,
-        Field::Value(v) => v != 0.0,
+        Field::Value(v) => v != default,
     }
 }
 
@@ -488,24 +506,39 @@ mod tests {
         assert!(!colour.monochrome);
     }
 
-    /// Pins the noise conversion so it cannot drift. The larger of the two
-    /// Lightroom fields wins, whichever is written first.
+    /// Pins the noise conversion so it cannot drift. Only `LuminanceSmoothing`
+    /// reaches denoise, and Camera Raw's default `ColorNoiseReduction` of 25 is
+    /// silent, so an import cannot arrive denoised when nobody asked.
     #[test]
-    fn denoise_is_the_larger_of_the_two_lightroom_fields() {
+    fn only_luminance_smoothing_reaches_denoise() {
         let lum = parse(&packet(
             "crs:LuminanceSmoothing=\"60\" crs:ColorNoiseReduction=\"25\"",
             "",
         ))
         .unwrap();
         assert_eq!(lum.adj.denoise, 60.0);
-        let col = parse(&packet(
-            "crs:LuminanceSmoothing=\"10\" crs:ColorNoiseReduction=\"45\"",
-            "",
-        ))
-        .unwrap();
-        assert_eq!(col.adj.denoise, 45.0);
-        let one = parse(&packet("crs:ColorNoiseReduction=\"35\"", "")).unwrap();
-        assert_eq!(one.adj.denoise, 35.0, "one field alone is enough");
+        assert!(
+            !lum.dropped.contains(&"ColorNoiseReduction"),
+            "25 is Camera Raw's default, so it is not worth reporting: {:?}",
+            lum.dropped
+        );
+
+        let untouched = parse(&packet("crs:ColorNoiseReduction=\"25\"", "")).unwrap();
+        assert_eq!(
+            untouched.adj.denoise, 0.0,
+            "a preset that never touched noise must not arrive denoised"
+        );
+
+        let moved = parse(&packet("crs:ColorNoiseReduction=\"45\"", "")).unwrap();
+        assert_eq!(
+            moved.adj.denoise, 0.0,
+            "colour noise reduction has no field here"
+        );
+        assert_eq!(
+            moved.dropped,
+            ["ColorNoiseReduction"],
+            "but moving it off the default is reported"
+        );
     }
 
     /// Catches a report that fires on Lightroom's zero defaults.
