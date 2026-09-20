@@ -724,6 +724,8 @@ pub(crate) struct App {
 
     /// The named-look library, global to the app rather than per folder.
     presets: crate::presets::PresetStore,
+    /// A preset awaiting delete confirmation in its own modal.
+    pending_preset_delete: Option<u64>,
 
     show_help: bool,
 
@@ -967,6 +969,7 @@ impl App {
             presets: crate::presets::PresetStore::in_memory(),
             #[cfg(not(test))]
             presets: crate::presets::PresetStore::load(),
+            pending_preset_delete: None,
             show_help: false,
             pending_quit: false,
             quit_requested: false,
@@ -1325,6 +1328,22 @@ impl App {
                     }
                 }
                 ui::UiAction::CopySettings => self.copy_settings(),
+                ui::UiAction::SavePreset => self.save_preset_suggested(),
+                ui::UiAction::ApplyPreset(id) => self.apply_preset(id),
+                ui::UiAction::RequestDeletePreset(id) => {
+                    self.pending_preset_delete = Some(id);
+                    self.request_redraw();
+                }
+                ui::UiAction::ConfirmDeletePreset => {
+                    if let Some(id) = self.pending_preset_delete.take() {
+                        self.delete_preset(id);
+                    }
+                    self.request_redraw();
+                }
+                ui::UiAction::CancelDeletePreset => {
+                    self.pending_preset_delete = None;
+                    self.request_redraw();
+                }
                 ui::UiAction::ToggleHelp => {
                     self.show_help = !self.show_help;
                     self.request_redraw();

@@ -241,6 +241,7 @@ impl App {
 
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
             KeyCode::KeyC if cmd && shift => self.copy_settings(),
+            KeyCode::KeyP if cmd && shift => self.save_preset_suggested(),
             KeyCode::Delete => self.request_bulk(ui::BulkKind::Delete),
 
             KeyCode::ArrowLeft => self.nav_arrow(-1, 0, shift),
