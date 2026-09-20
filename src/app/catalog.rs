@@ -437,18 +437,29 @@ impl App {
         self.request_redraw();
     }
 
-    /// Applies the copied tone settings to every selected photo, keeping each
-    /// photo's crop. Thumbnails refresh because their cache key includes the
-    /// edits.
+    /// Applies the copied tone settings to every selected photo.
     pub(super) fn apply_settings_to_selection(&mut self) {
         let Some((_, tone)) = self.copied_settings.clone() else {
             return;
         };
-        let paths = self.selected_paths();
-        if paths.is_empty() {
+        let n = self.apply_tone_to(tone, &self.selected_paths());
+        if n == 0 {
             return;
         }
-        for path in &paths {
+        self.set_status((crate::i18n::t().applied_settings)(n));
+    }
+
+    /// Writes one look onto every path, keeping each photo's own crop, and
+    /// returns how many were touched. An entry whose merge comes out identity
+    /// is removed rather than stored, matching how the catalog stores edits.
+    /// Grid and filmstrip thumbnails re-bake by themselves, because
+    /// `edit_sig_for` hashes the live edits into the thumbnail cache key.
+    /// Shared by the settings clipboard and by applying a preset.
+    pub(super) fn apply_tone_to(&mut self, tone: Adjustments, paths: &[PathBuf]) -> usize {
+        if paths.is_empty() {
+            return 0;
+        }
+        for path in paths {
             let existing = self.edits.get(path).copied().unwrap_or_default();
             let merged = Adjustments {
                 crop: existing.crop,
@@ -467,8 +478,8 @@ impl App {
                 self.hist_dirty = true;
             }
         }
-        self.set_status((crate::i18n::t().applied_settings)(paths.len()));
         self.request_redraw();
+        paths.len()
     }
 
     /// File name the copied settings came from, if any.
