@@ -27,7 +27,7 @@ mark it `BLOCKED: <reason>` — its sub-checklist keeps the partial progress.
 - [ ] Task 7: Clarity slider (requires Task 6; parallelizable with Tasks 8-9) (files: plans/plan-e-clarity.md)
 - [ ] Task 8: Dehaze slider (requires Task 6; parallelizable with Tasks 7, 9) (files: plans/plan-f-dehaze.md)
 - [ ] Task 9: HSL panel, 8-band hue/saturation/luminance (requires Task 6; parallelizable with Tasks 7-8) (files: plans/plan-g-hsl-panel.md)
-- [ ] Task 10: Presets with Lightroom `.xmp` import — library, parser and UI done on `feat/develop-presets`; import wiring and a real-`.xmp` check remain. **Not gated behind Tasks 7-9** as this line used to claim: only the importer's field coverage is, and an unmapped field is reported rather than silently lost (files: plans/plan-a-presets.md)
+- [ ] Task 10: Presets with Lightroom `.xmp` import — library, parser, UI and native import all done on `feat/develop-presets`; the browser picker, a real-`.xmp` check and the wider field coverage remain. **Not gated behind Tasks 7-9** as this line used to claim: only the importer's field coverage is, and an unmapped field is reported rather than silently lost (files: plans/plan-a-presets.md)
 - [ ] Task 11: DEFERRED — Tone Curve (full point-based spline); parked, no fixed slot, pick up separately (files: plans/plan-h-tone-curve.md)
 
 Standalone plans in this folder, not part of the roadmap sequence:
