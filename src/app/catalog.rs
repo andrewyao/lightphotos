@@ -569,7 +569,8 @@ mod tests {
              `sel` has gone stale (None) while in Loupe"
         );
 
-        app.catalog.flush_blocking(std::time::Duration::from_secs(10));
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

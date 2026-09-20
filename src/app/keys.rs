@@ -409,7 +409,8 @@ mod tests {
         let dir = paths[0].parent().unwrap().to_path_buf();
         press(&mut app, ModifiersState::SHIFT, KeyCode::Digit2);
         assert_eq!(app.selected_label(), Some(ColorLabel::Yellow));
-        app.catalog.flush_blocking(std::time::Duration::from_secs(10));
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
         assert_eq!(
             Catalog::with_dir(dir.clone()).label(&paths[0]),
             Some(ColorLabel::Yellow),
@@ -421,7 +422,8 @@ mod tests {
         assert_eq!(app.selected_label(), Some(ColorLabel::Purple));
         press(&mut app, ModifiersState::SHIFT, KeyCode::Digit0);
         assert_eq!(app.selected_label(), None);
-        app.catalog.flush_blocking(std::time::Duration::from_secs(10));
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
         assert_eq!(Catalog::with_dir(dir).label(&paths[0]), None);
     }
 
