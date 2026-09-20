@@ -213,6 +213,14 @@ pub struct Strings {
 
     // Develop panel.
     pub develop: &'static str,
+    pub presets: &'static str,
+    pub save_preset_tip: &'static str,
+    pub no_presets: &'static str,
+    pub apply_preset_tip: &'static str,
+    pub preset_actions_tip: &'static str,
+    /// The name the save button suggests, e.g. `Preset 3`.
+    pub preset_default_name: fn(usize) -> String,
+    pub confirm_delete_preset: fn(&str) -> String,
     pub reset: &'static str,
     pub auto: &'static str,
     pub auto_tone_tip: &'static str,
@@ -306,9 +314,7 @@ pub struct Strings {
     pub list_folder_failed: fn(&str, &str) -> String,
     pub catalog_save_failed: fn(&str) -> String,
     pub presets_load_failed: fn(&str) -> String,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub presets_locked: &'static str,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub presets_save_failed: fn(&str) -> String,
 }
 
@@ -461,6 +467,7 @@ pub static EN: Strings = Strings {
                 (primary!("+Shift+U"), "Auto Tone the selection"),
                 (primary!("+Shift+C"), "Copy develop settings"),
                 (primary!("+Shift+Y"), "Apply settings to selection"),
+                (primary!("+Shift+P"), "Save settings as a preset"),
                 ("X", "Export selected as JPG"),
                 (
                     "Delete",
@@ -508,6 +515,13 @@ pub static EN: Strings = Strings {
     },
 
     develop: "Develop",
+    presets: "Presets",
+    save_preset_tip: "Save these settings as a preset",
+    no_presets: "No presets yet",
+    apply_preset_tip: "Apply to this photo",
+    preset_actions_tip: "Rename or delete",
+    preset_default_name: |n| format!("Preset {n}"),
+    confirm_delete_preset: |name| format!("Delete the preset {name}?"),
     reset: "Reset",
     auto: "Auto",
     auto_tone_tip: "Set the tone sliders from this photo's own histogram",
@@ -743,6 +757,7 @@ pub static ZH: Strings = Strings {
                 (primary!("+Shift+U"), "对所选照片应用自动色调"),
                 (primary!("+Shift+C"), "拷贝调整设置"),
                 (primary!("+Shift+Y"), "将设置应用到所选照片"),
+                (primary!("+Shift+P"), "将设置保存为预设"),
                 ("X", "将所选照片导出为 JPG"),
                 (
                     "Delete",
@@ -787,6 +802,13 @@ pub static ZH: Strings = Strings {
     },
 
     develop: "调整",
+    presets: "预设",
+    save_preset_tip: "将当前设置保存为预设",
+    no_presets: "尚无预设",
+    apply_preset_tip: "应用到本张照片",
+    preset_actions_tip: "重命名或删除",
+    preset_default_name: |n| format!("预设 {n}"),
+    confirm_delete_preset: |name| format!("删除预设 {name}？"),
     reset: "复位",
     auto: "自动",
     auto_tone_tip: "根据这张照片自身的直方图设置色调滑块",

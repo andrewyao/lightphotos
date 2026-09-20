@@ -137,6 +137,8 @@ impl PresetStore {
 
     /// Renames one preset, suffixing the name if another already has it. A
     /// blank name, an unknown id, or a non-writable library changes nothing.
+    // The rename prompt reaches this in the commit that adds the name field.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn rename(&mut self, id: u64, name: &str) {
         let Some(name) = self.unique_name(name, Some(id)) else {
             return;
