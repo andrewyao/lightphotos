@@ -478,6 +478,25 @@ mod tests {
     }
 
     #[test]
+    fn the_save_preset_shortcut_opens_the_name_prompt() {
+        let (mut app, _) = editor_app();
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyP);
+        assert!(
+            app.preset_name_edit().is_some(),
+            "Cmd+Shift+P opens the prompt"
+        );
+
+        // The guard: while the prompt is open a stray key must not export or
+        // re-rate behind it.
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit3);
+        assert!(app.preset_name_edit().is_some(), "the prompt is still open");
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(app.preset_name_edit().is_none(), "Escape closes it");
+    }
+
+    #[test]
     fn a_focused_slider_still_lets_arrows_navigate() {
         let (app, _) = editor_app();
         let mut v = 0.5f32;
