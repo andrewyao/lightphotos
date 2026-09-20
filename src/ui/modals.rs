@@ -54,6 +54,57 @@ pub(super) fn delete_preset_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutpu
     }
 }
 
+/// Names a new preset or renames one. The in-progress string lives in `App`,
+/// because a draw function only reads it; the field pushes every change back as
+/// an action, the way the develop sliders do.
+pub(super) fn preset_name_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    let Some((name, renaming)) = app.preset_name_edit() else {
+        return;
+    };
+    let mut text = name;
+    let resp = egui::Modal::new(egui::Id::new("preset_name")).show(ui.ctx(), |ui| {
+        ui.set_width(300.0);
+        ui.heading(if renaming {
+            t().rename_preset_title
+        } else {
+            t().save_preset_title
+        });
+        ui.add_space(6.0);
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .hint_text(t().preset_name_hint)
+                .desired_width(f32::INFINITY),
+        );
+        if field.changed() {
+            out.actions.push(UiAction::SetPresetNameText(text.clone()));
+        }
+        // Enter is how a singleline field reports itself done: it surrenders
+        // focus that frame. This has to be read before asking for focus again,
+        // because `request_focus` makes the field focused for the frame it runs
+        // in, and `lost_focus` would then report nothing.
+        let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        // Tab is stripped before egui sees it, so the prompt focuses its own
+        // field. Asking only while unfocused also recovers a prompt whose focus
+        // was lost, without fighting a click inside the modal every frame.
+        if !entered && !field.has_focus() {
+            field.request_focus();
+        }
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button(t().cancel).clicked() {
+                out.actions.push(UiAction::CancelPresetName);
+            }
+            let save = if renaming { t().rename } else { t().save };
+            if ui.button(save).clicked() || entered {
+                out.actions.push(UiAction::CommitPresetName);
+            }
+        });
+    });
+    if resp.should_close() {
+        out.actions.push(UiAction::CancelPresetName);
+    }
+}
+
 /// Confirms quit, opened by Esc in the grid.
 pub(super) fn quit_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.pending_quit() {

@@ -35,6 +35,13 @@ impl App {
         self.presets.presets()
     }
 
+    /// The open name prompt's text, and whether it renames an existing preset.
+    pub(crate) fn preset_name_edit(&self) -> Option<(String, bool)> {
+        self.preset_name_edit
+            .as_ref()
+            .map(|(name, target)| (name.clone(), target.is_some()))
+    }
+
     /// Name of the preset awaiting delete confirmation, if any.
     pub(crate) fn pending_preset_delete_name(&self) -> Option<String> {
         self.presets

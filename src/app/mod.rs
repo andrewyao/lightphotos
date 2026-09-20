@@ -726,6 +726,9 @@ pub(crate) struct App {
     presets: crate::presets::PresetStore,
     /// A preset awaiting delete confirmation in its own modal.
     pending_preset_delete: Option<u64>,
+    /// Open name prompt: the edit buffer, and which preset it renames (`None`
+    /// is a new one).
+    preset_name_edit: Option<(String, Option<u64>)>,
 
     show_help: bool,
 
@@ -970,6 +973,7 @@ impl App {
             #[cfg(not(test))]
             presets: crate::presets::PresetStore::load(),
             pending_preset_delete: None,
+            preset_name_edit: None,
             show_help: false,
             pending_quit: false,
             quit_requested: false,
@@ -1182,7 +1186,10 @@ impl App {
 
         let mut raw_input = state.take_egui_input(&*window);
         // Drop Tab before egui sees it. Otherwise egui moves its own widget
-        // focus and draws a focus ring. No widget here needs egui's Tab handling.
+        // focus and draws a focus ring, while Tab is already how the keyboard
+        // moves between the controls of the focused region. The preset name
+        // prompt is the only text field, it has one field and nothing to Tab
+        // between, and it takes focus itself on the frame it opens.
         raw_input.events.retain(|e| {
             !matches!(
                 e,
@@ -1328,7 +1335,11 @@ impl App {
                     }
                 }
                 ui::UiAction::CopySettings => self.copy_settings(),
-                ui::UiAction::SavePreset => self.save_preset_suggested(),
+                ui::UiAction::SavePresetPrompt => self.prompt_save_preset(),
+                ui::UiAction::RenamePresetPrompt(id) => self.prompt_rename_preset(id),
+                ui::UiAction::SetPresetNameText(text) => self.set_preset_name_text(text),
+                ui::UiAction::CommitPresetName => self.commit_preset_name(),
+                ui::UiAction::CancelPresetName => self.cancel_preset_name(),
                 ui::UiAction::ApplyPreset(id) => self.apply_preset(id),
                 ui::UiAction::RequestDeletePreset(id) => {
                     self.pending_preset_delete = Some(id);
