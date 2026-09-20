@@ -234,8 +234,14 @@ impl App {
             self.autotone_base.remove(path);
         }
         for (path, auto) in toned {
-            self.autotone_pending.remove(&path);
+            let still_wanted = self.autotone_pending.remove(&path);
             let base = self.autotone_base.remove(&path);
+            // A photo trashed, or a batch cancelled, while this thumbnail
+            // loaded. Toning it now would write a sidecar for a file that is
+            // no longer there.
+            if !still_wanted {
+                continue;
+            }
             // If the user edited this photo while its thumbnail loaded, skip
             // it rather than overwrite their edit.
             let current = self.edits.get(&path).copied().unwrap_or_default();
@@ -728,6 +734,43 @@ mod tests {
     }
 
     /// A hand edit made while the photo's thumbnail loads must survive the batch.
+    /// A photo can leave the batch between its thumbnail being requested and
+    /// landing, because a bulk delete trashed it. Toning it then would write a
+    /// sidecar for a file that is already in the Trash.
+    #[test]
+    fn a_photo_dropped_while_its_thumbnail_loaded_is_not_toned() {
+        let (mut app, dir, a, b) = grid_with_two_photos("autotone-dropped");
+        app.auto_tone_batch(vec![a.clone(), b.clone()], DeferredAutoToneMode::Replace);
+        assert!(app.autotone_pending.contains(&a), "thumbnail not resident yet");
+
+        // What `forget_photo` does when the trash call for `a` lands. Its
+        // thumbnail request is already in the window.
+        app.autotone_pending.remove(&a);
+        app.autotone_base.remove(&a);
+
+        app.loader = Some(crate::loader::Loader::new(16384));
+        app.loader.as_mut().unwrap().insert_thumb_external(
+            a.clone(),
+            THUMB_PX,
+            std::sync::Arc::new(crate::image_decode::DecodedImage {
+                width: 8,
+                height: 8,
+                rgba: [32, 32, 32, 255].repeat(64),
+                pixel_format: crate::image_decode::PixelFormat::Srgb8,
+            }),
+        );
+        app.poll_auto_tone();
+
+        assert_eq!(
+            app.edits.get(&a),
+            None,
+            "a photo that left the batch must not be toned"
+        );
+        assert!(app.catalog.adjustments(&a).is_identity());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn manual_edit_made_while_pending_survives_the_batch() {
         let (mut app, dir, a, _b) = grid_with_two_photos("autotone-manual-edit-race");

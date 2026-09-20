@@ -285,8 +285,10 @@ pub struct Strings {
     pub survey_title: fn(usize) -> String,
 
     // Status messages.
+    pub deleting: fn(usize, usize) -> String,
     pub deleted: fn(usize) -> String,
     pub deleted_partial: fn(usize, usize, &str) -> String,
+    pub delete_in_progress: &'static str,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub delete_no_handle: fn(&str) -> String,
     pub copied_settings_from: fn(&str) -> String,
@@ -616,6 +618,11 @@ pub static EN: Strings = Strings {
     grid_title: |n| format!("Grid  ({n} photos)"),
     survey_title: |n| format!("Survey  ({n} photos)"),
 
+    deleting: if WEB {
+        |done, total| format!("Deleting {done}/{total}\u{2026}")
+    } else {
+        |done, total| format!("Moving {done}/{total} to Trash\u{2026}")
+    },
     deleted: if WEB {
         |n| format!("Permanently deleted {n} photo(s)")
     } else {
@@ -626,6 +633,7 @@ pub static EN: Strings = Strings {
     } else {
         |n, total, e| format!("Moved {n}/{total} \u{2014} last error: {e}")
     },
+    delete_in_progress: "Another delete is still running\u{2026}",
     delete_no_handle: |dir| format!("Could not delete photos: no directory handle for {dir}"),
     copied_settings_from: |name| format!("Copied settings from {name}"),
     applied_settings: |n| format!("Applied settings to {n} photo(s)"),
@@ -904,6 +912,11 @@ pub static ZH: Strings = Strings {
     grid_title: |n| format!("网格  ({n} 张照片)"),
     survey_title: |n| format!("组内比较  ({n} 张照片)"),
 
+    deleting: if WEB {
+        |done, total| format!("正在删除 {done}/{total}\u{2026}")
+    } else {
+        |done, total| format!("正在移到废纸篓 {done}/{total}\u{2026}")
+    },
     deleted: if WEB {
         |n| format!("已永久删除 {n} 张照片")
     } else {
@@ -914,6 +927,7 @@ pub static ZH: Strings = Strings {
     } else {
         |n, total, e| format!("已移动 {n}/{total} 张 \u{2014} 最后的错误：{e}")
     },
+    delete_in_progress: "已有删除正在进行\u{2026}",
     delete_no_handle: |dir| format!("无法删除照片：{dir} 没有目录句柄"),
     copied_settings_from: |name| format!("已从 {name} 拷贝设置"),
     applied_settings: |n| format!("已将设置应用到 {n} 张照片"),

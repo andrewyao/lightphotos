@@ -339,12 +339,12 @@ impl ApplicationHandler<UserEvent> for App {
         // Outside the loader block below, because a queued sidecar write has
         // no loader to wait on and can outlive the folder it came from.
         self.catalog.pump();
+        self.poll_delete();
 
         // True while web folder picking or listing is in flight. Feeds the poll
         // interval below.
         #[cfg(target_arch = "wasm32")]
         let web_folder_pending = {
-            self.poll_web_deletes();
             let pick_pending = self.poll_folder_pick();
             let listing_pending = self.poll_dir_listing();
             pick_pending || listing_pending
@@ -389,10 +389,8 @@ impl ApplicationHandler<UserEvent> for App {
             || self.selection_pending()
             || catalog_load_pending;
         #[cfg(target_arch = "wasm32")]
-        let image_pending = image_pending
-            || web_folder_pending
-            || self.web_decode_pending()
-            || self.web_delete_pending.is_some();
+        let image_pending =
+            image_pending || web_folder_pending || self.web_decode_pending();
         let poll_delay = if image_pending {
             Some(16)
         } else if self.export_progress.is_some() {

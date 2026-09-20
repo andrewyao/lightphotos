@@ -355,18 +355,6 @@ pub(crate) enum WebPendingNav {
     LoadAfterOpen(PathBuf),
 }
 
-/// One in-flight browser deletion batch. Keeps the origin directory handle so
-/// sidecar cleanup hits the right folder even if the user navigates away.
-#[cfg(target_arch = "wasm32")]
-pub(crate) struct WebDeletePending {
-    pub(crate) origin_dir: PathBuf,
-    pub(crate) origin_handle: web_sys::FileSystemDirectoryHandle,
-    pub(crate) remaining: usize,
-    pub(crate) total: usize,
-    pub(crate) removed: Vec<PathBuf>,
-    pub(crate) last_err: Option<String>,
-}
-
 /// What a click on the Loupe image does, besides panning.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum LoupeTool {
@@ -396,6 +384,9 @@ pub(crate) struct App {
     pub(crate) feature_pool: Option<crate::featureprint::DistancePool>,
     pub(crate) face_pool: Option<crate::facequality::FacePool>,
     pub(crate) export_progress: Option<ExportProgress>,
+    /// The running bulk delete, if any. `pub(crate)` because the frame loop
+    /// polls it.
+    pub(crate) bulk_delete: Option<bulk_delete::BulkDelete>,
 
     /// `Renderer::new` is async because WebGPU device setup is a browser
     /// Promise. wasm32 can't block the main thread, so `resumed()` spawns it
@@ -451,14 +442,6 @@ pub(crate) struct App {
     pub(crate) web_export_tx: Sender<crate::export::ExportOutcome>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_export_rx: Receiver<crate::export::ExportOutcome>,
-    /// Results of async File System Access deletions. A file leaves the UI only
-    /// after its own deletion succeeds.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_delete_tx: Sender<(PathBuf, Result<(), String>)>,
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_delete_rx: Receiver<(PathBuf, Result<(), String>)>,
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_delete_pending: Option<WebDeletePending>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_pending_nav: Option<WebPendingNav>,
     /// Bumped on every tree action. A listing may apply only the navigation
@@ -776,6 +759,7 @@ pub(crate) struct App {
 mod accessors;
 mod adjust;
 mod autotone;
+mod bulk_delete;
 mod catalog;
 mod crop;
 mod export;
@@ -804,8 +788,6 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let (web_export_tx, web_export_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
-        let (web_delete_tx, web_delete_rx) = std::sync::mpsc::channel();
-        #[cfg(target_arch = "wasm32")]
         let web_worker_pool =
             crate::web_worker_pool::WorkerPool::new(crate::web_worker_pool::worker_count());
         Self {
@@ -816,6 +798,7 @@ impl App {
             feature_pool: None,
             face_pool: None,
             export_progress: None,
+            bulk_delete: None,
             playlist: None,
             want: None,
             shown: Shown::Nothing,
@@ -842,12 +825,6 @@ impl App {
             web_export_tx,
             #[cfg(target_arch = "wasm32")]
             web_export_rx,
-            #[cfg(target_arch = "wasm32")]
-            web_delete_tx,
-            #[cfg(target_arch = "wasm32")]
-            web_delete_rx,
-            #[cfg(target_arch = "wasm32")]
-            web_delete_pending: None,
             #[cfg(target_arch = "wasm32")]
             web_pending_nav: None,
             #[cfg(target_arch = "wasm32")]
@@ -1117,6 +1094,7 @@ impl App {
     fn seed_mirrors(&mut self, playlist: &Playlist) {
         // Finish pending edits before replacing the catalog they write to.
         self.cancel_auto_tone();
+        self.cancel_delete();
         self.save_edit();
         self.request_catalog_load(playlist.dir());
     }

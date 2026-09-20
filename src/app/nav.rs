@@ -1,4 +1,5 @@
 use super::*;
+use super::bulk_delete::BulkDelete;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -68,6 +69,15 @@ impl App {
                 .filter(|&i| entries.get(i).is_some_and(|p| self.eyes_closed(p)))
                 .collect();
             self.visible = keep;
+        }
+        // A running delete has trashed these but not yet dropped them from the
+        // playlist, so hiding them here is what lets the grid shrink without
+        // invalidating anything indexed by playlist position.
+        if let Some(gone) = self.bulk_delete.as_ref().map(BulkDelete::gone) {
+            if !gone.is_empty() {
+                self.visible
+                    .retain(|&i| entries.get(i).is_none_or(|p| !gone.contains(p)));
+            }
         }
         if self.visible.is_empty() {
             self.sel = None;
