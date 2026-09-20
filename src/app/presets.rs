@@ -112,6 +112,65 @@ impl App {
         self.set_status((crate::i18n::t().applied_preset)(&name, n));
     }
 
+    /// Opens the Lightroom preset picker and imports what the user chose.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn import_lr_presets(&mut self) {
+        let paths = crate::dialog::pick_xmp_files();
+        self.add_lr_presets(&paths);
+    }
+
+    /// Reads each `.xmp` and stores what it could map, under the preset's own
+    /// `crs:Name` or the file stem. The batch is one write.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn add_lr_presets(&mut self, paths: &[PathBuf]) {
+        // Cancelling the picker is not an event worth a toast.
+        if paths.is_empty() {
+            return;
+        }
+        let t = crate::i18n::t();
+        let mut looks = Vec::new();
+        let mut failures = Vec::new();
+        for path in paths {
+            let imported = std::fs::read_to_string(path)
+                .map_err(|e| e.to_string())
+                .and_then(|xmp| crate::lr_preset::parse(&xmp));
+            let imported = match imported {
+                Ok(imported) => imported,
+                Err(reason) => {
+                    let file = path.file_name().unwrap_or_default().to_string_lossy();
+                    failures.push((t.lr_import_failed)(&file, &reason));
+                    continue;
+                }
+            };
+            let name = imported.name.unwrap_or_else(|| {
+                path.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into()
+            });
+            let mut notes = Vec::new();
+            if !imported.dropped.is_empty() {
+                notes.push((t.preset_import_note)(&imported.dropped.join(", ")));
+            }
+            if imported.monochrome {
+                notes.push(t.preset_monochrome_note.to_string());
+            }
+            looks.push((name, imported.adj, notes));
+        }
+
+        let stored = self.presets.add_all(looks);
+        // One status line, built once. Two `set_status` calls cannot both
+        // survive, because it replaces the message rather than appending. What
+        // each preset could not carry lives on the row as hover text, which is
+        // the durable channel for it; this line lasts three seconds.
+        self.set_status((t.lr_import_status)(
+            stored.len(),
+            failures.len(),
+            failures.first().map_or("", String::as_str),
+        ));
+        self.request_redraw();
+    }
+
     pub(super) fn delete_preset(&mut self, id: u64) {
         let Some(name) = self.presets.get(id).map(|p| p.name.clone()) else {
             return;
@@ -135,6 +194,24 @@ mod tests {
         right: 0.9,
         bottom: 0.9,
     };
+
+    /// The shape Camera Raw writes: attributes on the tag, the name in an
+    /// `rdf:Alt`, and one field this app has no slider for.
+    const NAMED_PRESET: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
+        <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+        <rdf:Description rdf:about=\"\" \
+        xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+        crs:Exposure2012=\"+0.35\" crs:Contrast2012=\"+15\" crs:Clarity2012=\"+22\">\
+        <crs:Name><rdf:Alt><rdf:li xml:lang=\"x-default\">Warm Film</rdf:li></rdf:Alt></crs:Name>\
+        </rdf:Description></rdf:RDF></x:xmpmeta>";
+
+    /// A preset with no `crs:Name` of its own, in Lightroom's B&W mode.
+    const GRAYSCALE_PRESET: &str = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
+        <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+        <rdf:Description rdf:about=\"\" \
+        xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+        crs:Exposure2012=\"-0.2\" crs:ConvertToGrayscale=\"True\"/>\
+        </rdf:RDF></x:xmpmeta>";
 
     /// A real `App` over a temp folder of empty files, the shape
     /// `app::keys::tests::folder_app` uses. No window and no GPU.
@@ -612,6 +689,152 @@ mod tests {
             confirm.texts()
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Catches a name read from somewhere other than `crs:Name`, a missing stem
+    /// fallback, and a dropped-field report that never reaches the durable
+    /// channel the Develop panel shows on hover.
+    #[test]
+    fn importing_two_xmp_files_stores_both_looks_with_their_notes() {
+        let (mut app, dir, _) = folder_app("lr-import", 1);
+        let named = dir.join("warm.xmp");
+        let unnamed = dir.join("gray.xmp");
+        std::fs::write(&named, NAMED_PRESET).unwrap();
+        std::fs::write(&unnamed, GRAYSCALE_PRESET).unwrap();
+
+        app.add_lr_presets(&[named, unnamed]);
+
+        let t = crate::i18n::t();
+        let names: Vec<&str> = app
+            .presets
+            .presets()
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["gray", "Warm Film"]);
+        assert_eq!(
+            app.status_text(),
+            Some((t.lr_import_status)(2, 0, "").as_str()),
+            "the status counts what landed and how much of it carries a note"
+        );
+
+        let warm = app
+            .presets
+            .presets()
+            .iter()
+            .find(|p| p.name == "Warm Film")
+            .unwrap();
+        assert_eq!(
+            warm.adjustments,
+            tone(0.35, 15.0),
+            "the name comes from crs:Name and the sliders from the mapped fields"
+        );
+        assert_eq!(
+            warm.notes,
+            [(t.preset_import_note)("Clarity2012")],
+            "what Lightroom set and we cannot represent is stored with the look"
+        );
+
+        let gray = app
+            .presets
+            .presets()
+            .iter()
+            .find(|p| p.name == "gray")
+            .unwrap();
+        assert_eq!(gray.adjustments.exposure, -0.2);
+        assert_eq!(
+            gray.adjustments.saturation, -100.0,
+            "B&W mode is approximated by pulling saturation out"
+        );
+        assert_eq!(gray.notes, [t.preset_monochrome_note]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Import entry's own wiring. `import_lr_presets` opens a blocking OS
+    /// dialog, so the action the button pushes is as far as a test can drive it,
+    /// and a button wired to the wrong action would show up nowhere else.
+    #[test]
+    fn the_import_button_asks_to_open_the_lightroom_picker() {
+        let (mut app, dir, paths) = folder_app("lr-button", 1);
+        app.mode = ViewMode::Loupe;
+        app.shown = Shown::Preview(paths[0].clone(), 100, 100);
+        app.develop_open = true;
+
+        let t = crate::i18n::t();
+        let painted = settled(&mut app);
+        let (_, open) = click(&mut app, painted.pos_of(t.presets));
+        assert!(
+            open.has(t.import_lr_presets),
+            "the Presets block offers the import entry: {:?}",
+            open.texts()
+        );
+
+        let (actions, _) = click(&mut app, open.pos_of(t.import_lr_presets));
+        assert!(
+            actions.contains(&crate::ui::UiAction::ImportLrPresets),
+            "which asks App to open the picker: {actions:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Catches an import that abandons the rest of the batch on one bad file, a
+    /// failure that never reaches the user, and a partial import that reports
+    /// only one of its two halves. `set_status` replaces the message rather
+    /// than appending, so a second call would drop whichever count came first.
+    #[test]
+    fn a_partial_import_reports_what_landed_as_well_as_what_did_not() {
+        let (mut app, dir, _) = folder_app("lr-skip", 1);
+        let junk = dir.join("notes.xmp");
+        let also_junk = dir.join("recipe.xmp");
+        let good = dir.join("warm.xmp");
+        std::fs::write(&junk, "shopping list, not a preset").unwrap();
+        std::fs::write(&also_junk, "nor is this one").unwrap();
+        std::fs::write(&good, NAMED_PRESET).unwrap();
+
+        app.add_lr_presets(&[junk, also_junk, good]);
+
+        let names: Vec<&str> = app
+            .presets
+            .presets()
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["Warm Film"], "the readable file still lands");
+
+        let t = crate::i18n::t();
+        let first_failure = (t.lr_import_failed)("notes.xmp", "no rdf:Description");
+        assert_eq!(
+            app.status_text(),
+            Some((t.lr_import_status)(1, 2, &first_failure).as_str()),
+            "one message carries both counts and the first reason"
+        );
+
+        let status = app.status_text().unwrap();
+        assert!(
+            status.contains("notes.xmp"),
+            "it names a file it could not read: {status}"
+        );
+        assert!(
+            status.contains('1') && status.contains('2'),
+            "and neither count is lost to the other: {status}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Catches a cancelled picker toasting "Imported 0 presets", which the
+    /// counting status line would otherwise do on every dismissed dialog.
+    #[test]
+    fn a_cancelled_picker_says_nothing() {
+        let (mut app, dir, _) = folder_app("lr-cancel", 1);
+
+        app.add_lr_presets(&[]);
+
+        assert_eq!(app.status_text(), None);
+        assert!(app.presets.presets().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
