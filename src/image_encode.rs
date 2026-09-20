@@ -20,6 +20,7 @@ use crate::coregraphics;
 /// Encode `rgba` (tightly packed RGBA8, row-major, sRGB, alpha opaque or
 /// premultiplied) to a JPEG at `out`.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     if width == 0 || height == 0 {
         return Err("cannot encode a zero-sized image".into());
@@ -68,6 +69,7 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
 /// default on macOS. Built on macOS only under `raw-probe`, for its tests.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
+#[hotpath::measure]
 pub fn encode_jpeg_to_vec(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 {
         return Err("cannot encode a zero-sized image".into());
@@ -87,6 +89,7 @@ pub fn encode_jpeg_to_vec(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8
 /// has no caller, hence `dead_code`.
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
+#[hotpath::measure]
 pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
     let jpeg_data = encode_jpeg_to_vec(width, height, rgba)?;
     std::fs::write(out, jpeg_data).map_err(|e| e.to_string())

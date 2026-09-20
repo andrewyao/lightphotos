@@ -27,6 +27,8 @@ mod macos_delegate;
 mod navigation;
 mod paths;
 mod phash;
+#[cfg(feature = "hotpath")]
+mod profile;
 mod renderer;
 mod segmentation;
 mod sharpness;
@@ -501,8 +503,17 @@ fn print_usage_and_exit(code: i32) -> ! {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[hotpath::main(percentiles = [50, 95, 99])]
 fn main() {
     loader::start_clock();
+
+    // Returning rather than exiting: that drops the hotpath guard, which is
+    // what prints the report.
+    #[cfg(feature = "hotpath")]
+    if profile::run_from_args() {
+        return;
+    }
+
     // The path argument is optional. Without one the app opens on the landing
     // page. A packaged .app may instead get its path from Finder later.
     let initial = match std::env::args().nth(1).as_deref() {

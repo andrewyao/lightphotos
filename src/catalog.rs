@@ -157,6 +157,7 @@ impl Catalog {
     /// background thread, then calls [`Catalog::apply_loaded`]. Native only,
     /// because File System Access has no synchronous reads.
     #[cfg(not(target_arch = "wasm32"))]
+    #[hotpath::measure]
     pub fn open_dir(&mut self, dir: &Path) {
         self.switch_dir(dir);
         let loaded = load_sidecars(dir);
@@ -411,6 +412,7 @@ pub(crate) struct SidecarLoad {
 /// Read every sidecar in `dir/.lightphotos/`. Needs no `Catalog`, so it can
 /// run on a background thread. A missing folder gives an empty result.
 #[cfg(not(target_arch = "wasm32"))]
+#[hotpath::measure]
 pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
     let mut images = HashMap::new();
     let mut skipped = 0usize;

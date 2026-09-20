@@ -542,6 +542,7 @@ impl Renderer {
     ///
     /// Runs on the UI thread when the photo should appear, so it avoids bulk CPU
     /// pixel work: it uploads level 0 and the GPU builds the other levels.
+    #[hotpath::measure]
     pub fn set_image(&mut self, img: &DecodedImage) {
         // `std::time::Instant::now()` panics on wasm32.
         let t0 = web_time::Instant::now();

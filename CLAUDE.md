@@ -34,6 +34,19 @@ Run the binary directly against a path (no bundling needed for dev iteration):
 ./target/release/lightphotos /path/to/a/folder        # opens in Grid
 ```
 
+## Profiling
+
+`hotpath` instruments the three paths a culling session waits on: listing a folder, filling the grid with thumbnails, and opening one photo. It is off unless a feature turns it on, and with its own features off its macros hand the function body back unchanged, so a default build carries no instrumentation.
+
+```sh
+cargo run --release --features hotpath -- --profile /path/to/a/folder        # timings
+cargo run --release --features hotpath-alloc -- --profile /path/to/a/folder  # timings + bytes allocated per function
+```
+
+`--profile` drives the paths headlessly through the real `navigation`, `catalog`, `Loader` and `thumbnail` code, prints a per-function report, and exits without opening a window. `src/profile.rs` explains why the measurement does not go through the window. `LIGHTPHOTOS_PROFILE_COLD=1` deletes the folder's cached thumbnails first, so the grid phase measures a first visit; `LIGHTPHOTOS_PROFILE_THUMBS`, `_OPENS` and `_PREVIEW_PX` size the run. hotpath's own `HOTPATH_*` variables still apply, so `HOTPATH_OUTPUT_FORMAT=json HOTPATH_OUTPUT_PATH=run.json` writes a report that a later run can be diffed against.
+
+Turning `hotpath` on instruments the windowed app too. There the report prints when `main` returns, which Cmd+Q does not always reach, so set `HOTPATH_SHUTDOWN_MS=30000` to have it report on a timer instead.
+
 Requires macOS 11+ and Rust stable ≥ 1.92 (pinned via `rust-toolchain.toml`; egui 0.34 needs it for wgpu 29 compatibility). No lint config (clippy.toml/rustfmt.toml) beyond cargo defaults.
 
 ## Architecture

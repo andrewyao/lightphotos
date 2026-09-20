@@ -199,6 +199,7 @@ impl App {
     }
 
     /// Texture keys for the working set.
+    #[hotpath::measure]
     pub(super) fn working_thumb_keys(&self) -> Vec<(PathBuf, u32, u64)> {
         let px = THUMB_PX;
         let Some(pl) = &self.playlist else {
@@ -224,6 +225,7 @@ impl App {
 
     /// Request thumbnails for the working set. Returns true while any is
     /// missing, so the caller keeps redrawing.
+    #[hotpath::measure]
     pub(crate) fn request_working_thumbs(&mut self) -> bool {
         let px = THUMB_PX;
         let paths: Vec<PathBuf> = self
@@ -653,6 +655,7 @@ impl App {
     }
 
     /// Upload decoded working-set thumbnails as egui textures and drop the rest.
+    #[hotpath::measure]
     pub(super) fn sync_thumb_textures(&mut self) {
         if self.playlist.is_none() {
             return;

@@ -49,6 +49,7 @@ pub enum EmbeddedPreview {
 /// during decode, which is much cheaper than `image_decode::decode`'s full
 /// decode followed by a downscale.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn decode_at_size(
     path: &Path,
     max_px: u32,
@@ -76,6 +77,7 @@ pub fn decode_at_size(
 /// there is no scaled decode, so this is a full decode plus resize, unless
 /// `UseIfPresent` finds an embedded preview first.
 #[cfg(not(target_os = "macos"))]
+#[hotpath::measure]
 pub fn decode_at_size(
     path: &Path,
     max_px: u32,
@@ -97,6 +99,7 @@ pub fn decode_at_size(
 /// There is no minimum size here: the Loupe's `Job::Speed` tier wants any
 /// preview fast and escalates later. The cache applies its own minimum.
 #[cfg(not(target_os = "macos"))]
+#[hotpath::measure]
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
     let bytes = fs::read(path).ok()?;
     embedded_preview_from_bytes(&bytes, max_px)
@@ -222,6 +225,7 @@ pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<
 /// Options for `CGImageSourceCreateThumbnailAtIndex`. `WithTransform` makes
 /// ImageIO apply EXIF orientation.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 fn build_thumbnail_options(
     max_px: u32,
     embedded: EmbeddedPreview,
@@ -293,6 +297,7 @@ pub(crate) fn preview_is_large_enough(width: u32, height: u32, max_px: u32) -> b
 /// embedded preview (under [`preview_is_large_enough`]) is skipped for a
 /// source decode. Small originals are cached at their native size.
 #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
+#[hotpath::measure]
 fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
     // Try the preview directly instead of `decode_at_size(UseIfPresent)`, so
     // a small original is never decoded twice.
@@ -308,6 +313,7 @@ fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
 /// preview, so a short result is retried with `Never`. The retry is cheap
 /// when the source itself is small.
 #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+#[hotpath::measure]
 fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
     let img = decode_at_size(path, THUMB_PX, EmbeddedPreview::UseIfPresent)?;
     if preview_is_large_enough(img.width, img.height, THUMB_PX) {
@@ -359,6 +365,7 @@ pub(crate) fn parse_cache_name(name: &OsStr) -> Option<(OsString, u64)> {
 
 /// Current cache entry path for `photo`, or `None` if it cannot be stat'd.
 #[cfg(not(target_arch = "wasm32"))]
+#[hotpath::measure]
 fn entry_path(photo: &Path) -> Option<PathBuf> {
     let dir = photo.parent()?;
     let name = photo.file_name()?;
@@ -369,6 +376,7 @@ fn entry_path(photo: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[hotpath::measure]
 fn current_key(photo: &Path) -> Option<u64> {
     let meta = fs::metadata(photo).ok()?;
     let mtime_ms = meta
@@ -395,6 +403,7 @@ impl ThumbCache {
     }
 
     /// The cached thumbnail if current, else decode, cache, and return it.
+    #[hotpath::measure]
     pub fn get_or_make(&self, path: &Path) -> Result<Arc<DecodedImage>, String> {
         let entry = entry_path(path);
 
@@ -431,6 +440,7 @@ impl ThumbCache {
         ThumbCache
     }
 
+    #[hotpath::measure]
     pub fn get_or_make(&self, path: &Path) -> Result<std::sync::Arc<DecodedImage>, String> {
         Err(format!(
             "no std::fs on wasm32; {} is decoded by the Worker pool",
@@ -447,6 +457,7 @@ impl Default for ThumbCache {
 }
 
 /// JPEG cannot preserve transparency or linear floating-point pixels.
+#[hotpath::measure]
 pub(crate) fn jpeg_cacheable(img: &DecodedImage) -> bool {
     img.pixel_format == PixelFormat::Srgb8 && img.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255)
 }
@@ -454,6 +465,7 @@ pub(crate) fn jpeg_cacheable(img: &DecodedImage) -> bool {
 /// Write `img` to `file` as a JPEG via a `.tmp` sibling and rename. Refuses
 /// anything [`jpeg_cacheable`] rejects, so those photos decode every session.
 #[cfg(not(target_arch = "wasm32"))]
+#[hotpath::measure]
 fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
     if !jpeg_cacheable(img) {
         return Err("only opaque sRGB8 images are cacheable as JPEG".into());
@@ -482,6 +494,7 @@ const TMP_REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(3600)
 /// files. Runs when a folder opens. This is the only eviction; there is no
 /// size budget, since there is one entry per photo.
 #[cfg(not(target_arch = "wasm32"))]
+#[hotpath::measure]
 pub(crate) fn sweep_orphans(dir: &Path) {
     let cache_dir = dir.join(crate::catalog::SIDECAR_DIR);
     let Ok(entries) = fs::read_dir(&cache_dir) else {
