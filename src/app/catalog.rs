@@ -1,12 +1,9 @@
 use super::*;
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::develop::Adjustments;
 use crate::duplicates::DuplicateMark;
 use crate::navigation::Cmp;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::trash;
 use crate::ui;
 
 impl App {
@@ -206,8 +203,7 @@ impl App {
 
     /// Opens the confirm modal for `kind` when something is selected.
     pub(super) fn request_bulk(&mut self, kind: ui::BulkKind) {
-        #[cfg(target_arch = "wasm32")]
-        if kind == ui::BulkKind::Delete && self.web_delete_pending.is_some() {
+        if kind == ui::BulkKind::Delete && self.bulk_delete_running() {
             return;
         }
         if self.bulk_available() {
@@ -224,189 +220,6 @@ impl App {
             ui::BulkKind::Export => self.export_selection(),
             ui::BulkKind::Delete => self.delete_selection(),
         }
-    }
-
-    pub(super) fn delete_selection(&mut self) {
-        self.run_delete(self.selected_paths());
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn run_delete(&mut self, paths: Vec<PathBuf>) {
-        if paths.is_empty() {
-            return;
-        }
-        let total = paths.len();
-        let mut trashed: Vec<PathBuf> = Vec::new();
-        let mut last_err: Option<String> = None;
-        for path in &paths {
-            match trash::move_to_trash(path) {
-                Ok(()) => trashed.push(path.clone()),
-                Err(e) => {
-                    eprintln!("[lightphotos] trash failed for {}: {e}", path.display());
-                    last_err = Some(e);
-                }
-            }
-        }
-        self.finish_delete(trashed, total, last_err);
-    }
-
-    /// File System Access has no trash, so this deletes permanently. Results
-    /// arrive on `web_delete_rx`, and `poll_web_deletes` finishes the delete.
-    #[cfg(target_arch = "wasm32")]
-    fn run_delete(&mut self, paths: Vec<PathBuf>) {
-        if paths.is_empty() || self.web_delete_pending.is_some() {
-            return;
-        }
-        let total = paths.len();
-        let origin_dir = paths[0].parent().unwrap_or(Path::new("")).to_path_buf();
-        let Some(origin_handle) = self.web_dir_handles.get(&origin_dir).cloned() else {
-            self.set_status((crate::i18n::t().delete_no_handle)(
-                &origin_dir.display().to_string(),
-            ));
-            return;
-        };
-        self.web_delete_pending = Some(WebDeletePending {
-            origin_dir,
-            origin_handle,
-            remaining: total,
-            total,
-            removed: Vec::new(),
-            last_err: None,
-        });
-        for path in &paths {
-            let tx = self.web_delete_tx.clone();
-            let Some(name) = path.file_name().map(std::ffi::OsString::from) else {
-                let _ = tx.send((path.clone(), Err("path has no file name".into())));
-                continue;
-            };
-            let dir_key = path.parent().unwrap_or(Path::new("")).to_path_buf();
-            let Some(dir) = self.web_dir_handles.get(&dir_key).cloned() else {
-                let _ = tx.send((
-                    path.clone(),
-                    Err(format!("no directory handle for {}", path.display())),
-                ));
-                continue;
-            };
-            let path = path.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let result = crate::web_catalog_fs::remove_file(&dir, &name).await;
-                let _ = tx.send((path, result));
-            });
-        }
-    }
-
-    /// Collects browser delete results and finishes once every path reports.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn poll_web_deletes(&mut self) {
-        while let Ok((path, result)) = self.web_delete_rx.try_recv() {
-            let Some(pending) = self.web_delete_pending.as_mut() else {
-                continue;
-            };
-            pending.remaining -= 1;
-            match result {
-                Ok(()) => pending.removed.push(path),
-                Err(e) => {
-                    web_sys::console::error_1(&format!("[web] delete failed: {e}").into());
-                    pending.last_err = Some(e);
-                }
-            }
-            if pending.remaining == 0 {
-                let pending = self.web_delete_pending.take().unwrap();
-                self.finish_delete(
-                    pending.removed,
-                    pending.total,
-                    pending.last_err,
-                    pending.origin_dir,
-                    pending.origin_handle,
-                );
-            }
-        }
-    }
-
-    /// Drops the deleted paths from every per-photo map and rebuilds the view.
-    fn finish_delete(
-        &mut self,
-        trashed: Vec<PathBuf>,
-        total: usize,
-        last_err: Option<String>,
-        #[cfg(target_arch = "wasm32")] origin_dir: PathBuf,
-        #[cfg(target_arch = "wasm32")] origin_handle: web_sys::FileSystemDirectoryHandle,
-    ) {
-        if !trashed.is_empty() {
-            let gone: HashSet<PathBuf> = trashed.iter().cloned().collect();
-            let survey_was_affected = self.survey_members.iter().any(|p| gone.contains(p));
-            if let Some(pl) = self.playlist.as_mut() {
-                pl.remove_matching(|p| gone.contains(p));
-            }
-            for p in &trashed {
-                self.ratings.remove(p);
-                self.edits.remove(p);
-                self.autotone_pending.remove(p);
-                self.autotone_base.remove(p);
-                self.rotations.remove(p);
-                #[cfg(not(target_arch = "wasm32"))]
-                self.catalog.remove(p);
-                #[cfg(target_arch = "wasm32")]
-                if self.catalog.is_active_dir(&origin_dir) {
-                    self.catalog.remove_with_handle(p, &origin_handle);
-                } else {
-                    self.catalog.delete_sidecar_with_handle(p, &origin_handle);
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    self.web_file_handles.remove(p);
-                    self.web_dir_handles.remove(p);
-                }
-            }
-            if let Some(deferred) = self.autotone_deferred.as_mut() {
-                deferred.retain(|p| !gone.contains(p));
-                if deferred.is_empty() {
-                    self.autotone_deferred = None;
-                }
-            }
-            // Pending duplicate jobs for deleted files would keep the redraw
-            // loop awake forever.
-            for p in &trashed {
-                self.phashes.remove(p);
-                self.sharpness.remove(p);
-                self.capture_times.remove(p);
-            }
-            self.feature_distances
-                .retain(|(anchor, member), _| !gone.contains(anchor) && !gone.contains(member));
-            self.feature_failed
-                .retain(|(anchor, member)| !gone.contains(anchor) && !gone.contains(member));
-            self.feature_pending
-                .retain(|(anchor, member)| !gone.contains(anchor) && !gone.contains(member));
-
-            // Duplicate marks are indexed by playlist position, which changed.
-            self.recompute_dup_marks();
-            if survey_was_affected && self.mode == ViewMode::Survey {
-                self.close_survey();
-            }
-            // The cursor keeps its position (clamped), so it lands on a
-            // neighbor of the deleted photos.
-            self.selected.clear();
-            self.anchor = None;
-            self.recompute_visible();
-            self.collapse_selection();
-            if self.mode == ViewMode::Loupe {
-                if self.visible.is_empty() {
-                    self.mode = ViewMode::Grid;
-                    self.normalize_focus();
-                    self.update_window_title();
-                } else {
-                    self.load_selected();
-                    self.request_neighbors();
-                }
-            }
-        }
-        let n = trashed.len();
-        let t = crate::i18n::t();
-        self.set_status(match last_err {
-            None => (t.deleted)(n),
-            Some(e) => (t.deleted_partial)(n, total, &e),
-        });
-        self.request_redraw();
     }
 
     /// Copies the selected photo's tone settings (not crop) to the in-app
@@ -684,31 +497,6 @@ mod tests {
     use super::*;
     use crate::navigation::Playlist;
     use std::sync::atomic::{AtomicU64, Ordering};
-
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn deleting_photo_removes_it_from_deferred_auto_tone() {
-        let gone = PathBuf::from("/photos/gone.jpg");
-        let remaining = PathBuf::from("/photos/keep.jpg");
-        let mut app = App::new(None);
-        app.autotone_deferred = Some(vec![gone.clone(), remaining.clone()]);
-
-        app.finish_delete(vec![gone], 1, None);
-
-        assert_eq!(app.autotone_deferred, Some(vec![remaining]));
-    }
-
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn deleting_all_deferred_auto_tone_targets_clears_state() {
-        let gone = PathBuf::from("/photos/gone.jpg");
-        let mut app = App::new(None);
-        app.autotone_deferred = Some(vec![gone.clone()]);
-
-        app.finish_delete(vec![gone], 1, None);
-
-        assert!(app.autotone_deferred.is_none());
-    }
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
