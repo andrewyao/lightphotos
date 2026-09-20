@@ -14,6 +14,7 @@ Check a box only after verification passes.
 - [x] Task 9: Native import — `dialog::pick_xmp_files` over `rfd::FileDialog::pick_files`, a no-argument `App::import_lr_presets` that runs the picker (a `UiAction` carries no payload) plus a testable `add_lr_presets(&[PathBuf])` writing the store once for the whole batch, an Import entry in the Presets block, and one status line carrying both counts and the first failure, since `set_status` replaces rather than appends (files: src/dialog.rs, src/app/presets.rs, src/ui/develop_panel.rs, src/i18n.rs)
 - [ ] Task 10: Browser import — `showOpenFilePicker` reached the way `web_fs.rs` reaches `showDirectoryPicker` (`js_sys::Reflect`, no new Cargo entry), async so it needs the `spawn_local` + channel + `poll_*` shape `request_folder_pick` already establishes (files: src/web/web_fs.rs, src/app/web.rs, src/app/mod.rs)
 - [ ] Task 11: **BLOCKED: needs real files.** Import two or three real exported Lightroom `.xmp` presets, apply one, confirm the sliders match and that the note names what was dropped. Task 8's fixtures are hand-written from the documented `crs:` names, so they prove the scanner and not the field semantics. No Adobe CameraRaw or Lightroom settings directory exists on this machine (files: —)
+- [ ] Task 12: Widen the mapping table as the sliders arrive — `Clarity2012` once Plan E lands, `Dehaze` once Plan F lands, the 24 `HueAdjustment*`/`SaturationAdjustment*`/`LuminanceAdjustment*` fields once Plan G lands, `ToneCurvePV2012*` if Plan H is ever picked up. Each is named in the import's note today, so moving one out of `UNSUPPORTED` and into the `SliderId` table is the whole change, and re-importing a file picks it up (requires plan-e, plan-f, plan-g) (files: src/lr_preset.rs)
 
 <!--
 Tips:
@@ -51,6 +52,6 @@ See `00-overview.md` for shared context and execution order. **This plan is not 
 
 **`.lrtemplate` is out of scope.** It is a Lua table, a second parser for a format Lightroom stopped writing in 7.3 (2018) and can re-export as `.xmp` from its own Presets panel.
 
-**Effort/Priority**: done except the browser picker (Task 10) and the real-file check (Task 11). The library reused existing plumbing almost entirely; the scanner was the new surface area and is covered by unit tests over inline fixtures.
+**Effort/Priority**: done except the browser picker (Task 10), the real-file check (Task 11) and the wider field coverage (Task 12). The library reused existing plumbing almost entirely; the scanner was the new surface area and is covered by unit tests over inline fixtures.
 
 **Critical files**: `src/presets.rs`, `src/prefs.rs`, `src/lr_preset.rs`, `src/app/presets.rs`, `src/ui/develop_panel.rs`, `src/ui/modals.rs`
