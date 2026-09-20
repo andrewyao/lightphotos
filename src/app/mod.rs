@@ -1355,6 +1355,8 @@ impl App {
                     self.pending_preset_delete = None;
                     self.request_redraw();
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::ImportLrPresets => self.import_lr_presets(),
                 ui::UiAction::ToggleHelp => {
                     self.show_help = !self.show_help;
                     self.request_redraw();

@@ -191,6 +191,14 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 if ui.button("+").on_hover_text(t.save_preset_tip).clicked() {
                     out.actions.push(UiAction::SavePresetPrompt);
                 }
+                #[cfg(not(target_arch = "wasm32"))]
+                if ui
+                    .button(t.import_lr_presets)
+                    .on_hover_text(t.import_lr_presets_tip)
+                    .clicked()
+                {
+                    out.actions.push(UiAction::ImportLrPresets);
+                }
                 if app.presets().is_empty() {
                     ui.weak(t.no_presets);
                 }

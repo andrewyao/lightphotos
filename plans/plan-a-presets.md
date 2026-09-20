@@ -11,7 +11,7 @@ Check a box only after verification passes.
 - [x] Task 6: Name entry — `preset_name_edit` on `App`, a `TextEdit` modal that takes focus itself (Tab is stripped before egui sees it), Enter read before re-requesting focus, and a `handle_key` guard so a lost-focus prompt can't let `x` export or a digit re-rate (files: src/ui/modals.rs, src/app/keys.rs, src/app/presets.rs, src/i18n.rs)
 - [x] Task 7: `BulkKind::ApplyPreset(u64)` + selection-bar dropdown, so the grid can apply one look across a selection behind the usual confirmation (files: src/ui/toolbar.rs, src/app/catalog.rs, src/i18n.rs)
 - [x] Task 8: `src/lr_preset.rs` — anchored `crs:` scanner reading both the attribute and child-element spellings, mapping table keyed by `SliderId` and clamped to each slider's own range, unsupported fields reported into `Preset::notes`. No XML crate (files: src/lr_preset.rs)
-- [ ] Task 9: Native import — `dialog::pick_xmp_files` over `rfd::FileDialog::pick_files`, `App::import_lr_presets(paths)` writing the store once for the whole batch, an Import entry in the Presets block, and a status line naming what was dropped (files: src/dialog.rs, src/app/presets.rs, src/ui/develop_panel.rs, src/i18n.rs)
+- [x] Task 9: Native import — `dialog::pick_xmp_files` over `rfd::FileDialog::pick_files`, a no-argument `App::import_lr_presets` that runs the picker (a `UiAction` carries no payload) plus a testable `add_lr_presets(&[PathBuf])` writing the store once for the whole batch, an Import entry in the Presets block, and one status line carrying both counts and the first failure, since `set_status` replaces rather than appends (files: src/dialog.rs, src/app/presets.rs, src/ui/develop_panel.rs, src/i18n.rs)
 - [ ] Task 10: Browser import — `showOpenFilePicker` reached the way `web_fs.rs` reaches `showDirectoryPicker` (`js_sys::Reflect`, no new Cargo entry), async so it needs the `spawn_local` + channel + `poll_*` shape `request_folder_pick` already establishes (files: src/web/web_fs.rs, src/app/web.rs, src/app/mod.rs)
 - [ ] Task 11: **BLOCKED: needs real files.** Import two or three real exported Lightroom `.xmp` presets, apply one, confirm the sliders match and that the note names what was dropped. Task 8's fixtures are hand-written from the documented `crs:` names, so they prove the scanner and not the field semantics. No Adobe CameraRaw or Lightroom settings directory exists on this machine (files: —)
 
@@ -51,6 +51,6 @@ See `00-overview.md` for shared context and execution order. **This plan is not 
 
 **`.lrtemplate` is out of scope.** It is a Lua table, a second parser for a format Lightroom stopped writing in 7.3 (2018) and can re-export as `.xmp` from its own Presets panel.
 
-**Effort/Priority**: done except the import wiring. The library reused existing plumbing almost entirely; the scanner was the new surface area and is covered by fourteen unit tests over inline fixtures.
+**Effort/Priority**: done except the browser picker (Task 10) and the real-file check (Task 11). The library reused existing plumbing almost entirely; the scanner was the new surface area and is covered by unit tests over inline fixtures.
 
 **Critical files**: `src/presets.rs`, `src/prefs.rs`, `src/lr_preset.rs`, `src/app/presets.rs`, `src/ui/develop_panel.rs`, `src/ui/modals.rs`

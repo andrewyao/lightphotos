@@ -59,6 +59,10 @@ pub enum UiAction {
     RequestDeletePreset(u64),
     ConfirmDeletePreset,
     CancelDeletePreset,
+    /// Open the Lightroom preset picker. Native only; the browser has no
+    /// multi-file picker wired up yet.
+    #[cfg(not(target_arch = "wasm32"))]
+    ImportLrPresets,
     ToggleHelp,
     ConfirmQuit,
     CancelQuit,

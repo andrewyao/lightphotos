@@ -23,8 +23,9 @@ mod image_decode;
 mod image_encode;
 mod image_ops;
 mod loader;
-// The native importer lands in the next commit; until then nothing calls this.
-#[allow(dead_code)]
+// The importer is native-only, so the browser build compiles the parser with
+// no caller until a wasm file picker exists.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 mod lr_preset;
 mod macos_delegate;
 mod navigation;
