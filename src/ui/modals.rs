@@ -27,6 +27,33 @@ pub(super) fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
+/// Confirms deleting one preset. This can't go through `confirm_modal`, whose
+/// text is built from the selected photo count, which has nothing to do with
+/// deleting a preset.
+pub(super) fn delete_preset_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    let Some(name) = app.pending_preset_delete_name() else {
+        return;
+    };
+    let resp = egui::Modal::new(egui::Id::new("preset_delete_confirm")).show(ui.ctx(), |ui| {
+        ui.set_width(300.0);
+        ui.heading(t().confirm);
+        ui.add_space(6.0);
+        ui.label((t().confirm_delete_preset)(&name));
+        ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            if ui.button(t().cancel).clicked() {
+                out.actions.push(UiAction::CancelDeletePreset);
+            }
+            if ui.button(t().delete).clicked() {
+                out.actions.push(UiAction::ConfirmDeletePreset);
+            }
+        });
+    });
+    if resp.should_close() {
+        out.actions.push(UiAction::CancelDeletePreset);
+    }
+}
+
 /// Confirms quit, opened by Esc in the grid.
 pub(super) fn quit_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.pending_quit() {

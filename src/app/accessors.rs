@@ -30,6 +30,18 @@ impl App {
         }
     }
 
+    /// The saved looks, in the order rows render.
+    pub(crate) fn presets(&self) -> &[crate::presets::Preset] {
+        self.presets.presets()
+    }
+
+    /// Name of the preset awaiting delete confirmation, if any.
+    pub(crate) fn pending_preset_delete_name(&self) -> Option<String> {
+        self.presets
+            .get(self.pending_preset_delete?)
+            .map(|p| p.name.clone())
+    }
+
     pub(crate) fn focus(&self) -> Region {
         self.focus
     }

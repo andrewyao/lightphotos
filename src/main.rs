@@ -28,9 +28,6 @@ mod navigation;
 mod paths;
 mod phash;
 mod prefs;
-// Removed in the commit that wires the store into `App`: until then only this
-// module's own tests call its mutations.
-#[cfg_attr(not(test), allow(dead_code))]
 mod presets;
 #[cfg(feature = "hotpath")]
 mod profile;

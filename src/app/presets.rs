@@ -1,9 +1,29 @@
 use super::*;
 
-// The Develop panel and the selection bar reach these in the commit that draws
-// them; until then only this module's own tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 impl App {
+    /// Saves under the suggested name. Both the panel's `+` and `Cmd+Shift+P`
+    /// take this route.
+    pub(super) fn save_preset_suggested(&mut self) {
+        let name = self.suggested_preset_name();
+        self.save_preset_from_shown(&name);
+    }
+
+    /// The first `Preset N` the library does not already have, so a suggestion
+    /// never arrives pre-suffixed.
+    fn suggested_preset_name(&self) -> String {
+        let default = crate::i18n::t().preset_default_name;
+        (1usize..)
+            .map(default)
+            .find(|name| {
+                !self
+                    .presets
+                    .presets()
+                    .iter()
+                    .any(|p| p.name.eq_ignore_ascii_case(name))
+            })
+            .unwrap_or_default()
+    }
+
     /// Saves the shown photo's tone settings under `name`, with no crop,
     /// rotation or touch-ups, so the look can be applied to any other photo.
     pub(super) fn save_preset_from_shown(&mut self, name: &str) {

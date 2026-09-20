@@ -30,6 +30,7 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                 });
             });
             ui.separator();
+            draw_presets(ui, app, out);
             ui.horizontal(|ui| {
                 if ui
                     .selectable_label(app.touchup_active(), t.touch_up)
@@ -174,6 +175,59 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
             }
 
             region_focus_marker(ui, app, Region::Develop);
+        });
+}
+
+/// The saved-look library. Collapsed by default, so opening a photo never
+/// moves a slider, and the list scrolls so a long library can't push the
+/// eleven sliders off a short window.
+fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = t();
+    egui::CollapsingHeader::new(t.presets)
+        .id_salt("presets")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("+").on_hover_text(t.save_preset_tip).clicked() {
+                    out.actions.push(UiAction::SavePreset);
+                }
+                if app.presets().is_empty() {
+                    ui.weak(t.no_presets);
+                }
+            });
+            egui::ScrollArea::vertical()
+                .max_height(140.0)
+                .show(ui, |ui| {
+                    for preset in app.presets() {
+                        ui.horizontal(|ui| {
+                            let hover = if preset.notes.is_empty() {
+                                t.apply_preset_tip.to_string()
+                            } else {
+                                preset.notes.join("\n")
+                            };
+                            let row = ui
+                                .selectable_label(false, &preset.name)
+                                .on_hover_text(hover);
+                            if row.clicked() {
+                                out.actions.push(UiAction::ApplyPreset(preset.id));
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.menu_button("\u{22ef}", |ui| {
+                                        if ui.button(t.delete).clicked() {
+                                            out.actions
+                                                .push(UiAction::RequestDeletePreset(preset.id));
+                                            ui.close();
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(t.preset_actions_tip);
+                                },
+                            );
+                        });
+                    }
+                });
         });
 }
 
