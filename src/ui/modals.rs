@@ -78,7 +78,7 @@ pub(super) fn preset_name_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput)
         if field.changed() {
             out.actions.push(UiAction::SetPresetNameText(text.clone()));
         }
-        // Enter is how a singleline field reports itself done: it surrenders
+        // Enter is how a singleline field reports itself done. It surrenders
         // focus that frame. This has to be read before asking for focus again,
         // because `request_focus` makes the field focused for the frame it runs
         // in, and `lost_focus` would then report nothing.
