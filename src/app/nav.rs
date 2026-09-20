@@ -1,5 +1,5 @@
-use super::*;
 use super::bulk_delete::BulkDelete;
+use super::*;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
