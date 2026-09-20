@@ -37,7 +37,10 @@ impl App {
     /// `poll_auto_tone` reads it. Call before draining worker results.
     pub(crate) fn prepare_web_thumb_cache(&mut self) {
         let visible = self.working_thumb_keys().len();
-        let capacity = visible + self.autotone_pending.len();
+        // The window, not the whole batch. Sizing this to `autotone_pending`
+        // told the cache to hold the entire selection, which on a 32-bit heap
+        // that never shrinks is how a large folder ran the tab out of memory.
+        let capacity = visible + self.autotone_window.len();
         if let Some(loader) = &mut self.loader {
             loader.set_thumb_working_set_size(capacity);
         }

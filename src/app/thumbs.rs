@@ -234,9 +234,12 @@ impl App {
             .map(|(p, _, _)| p)
             .collect();
 
+        // Auto Tone's window shares this cache, so it has to be counted in or
+        // its thumbnails can be evicted before `poll_auto_tone` reads them.
+        let reserved = paths.len() + self.autotone_window.len();
         let mut any_missing = false;
         if let Some(loader) = &mut self.loader {
-            loader.set_thumb_working_set_size(paths.len());
+            loader.set_thumb_working_set_size(reserved);
             for p in &paths {
                 // Skip failed decodes, or the redraw loop would spin on them.
                 if loader.get_thumb(p, px).is_none() && !loader.thumb_failed(p, px) {
