@@ -771,6 +771,7 @@ mod histogram;
 mod keys;
 mod loupe;
 mod nav;
+mod presets;
 mod thumbs;
 #[cfg(target_arch = "wasm32")]
 mod web;
