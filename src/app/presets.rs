@@ -377,6 +377,244 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// One real frame of the whole UI. Returns the actions it pushed and every
+    /// string it painted with where it landed, so a test can aim a click at a
+    /// widget it cannot see.
+    fn frame(app: &mut App, events: Vec<egui::Event>) -> (Vec<crate::ui::UiAction>, Painted) {
+        let ctx = app.egui_ctx.clone();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1100.0, 800.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut actions = Vec::new();
+        let output = ctx.run_ui(input, |ui| {
+            actions = crate::ui::draw(ui, app).actions;
+        });
+        let painted = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => Some((
+                    text.galley.text().to_string(),
+                    text.pos + egui::vec2(4.0, text.galley.size().y / 2.0),
+                )),
+                _ => None,
+            })
+            .collect();
+        (actions, Painted(painted))
+    }
+
+    struct Painted(Vec<(String, egui::Pos2)>);
+
+    impl Painted {
+        fn has(&self, text: &str) -> bool {
+            self.0.iter().any(|(t, _)| t == text)
+        }
+
+        fn any_containing(&self, needle: &str) -> bool {
+            self.0.iter().any(|(t, _)| t.contains(needle))
+        }
+
+        fn pos_of(&self, text: &str) -> egui::Pos2 {
+            self.0
+                .iter()
+                .find(|(t, _)| t == text)
+                .unwrap_or_else(|| panic!("nothing painted {text:?}; got {:?}", self.texts()))
+                .1
+        }
+
+        /// The `text` nearest `anchor`, for a label the window paints more than
+        /// once. Touch Up has its own Delete button, so the row menu's has to be
+        /// picked by where it opened.
+        fn pos_of_near(&self, text: &str, anchor: egui::Pos2) -> egui::Pos2 {
+            self.0
+                .iter()
+                .filter(|(t, _)| t == text)
+                .min_by(|(_, a), (_, b)| a.distance(anchor).total_cmp(&b.distance(anchor)))
+                .unwrap_or_else(|| panic!("nothing painted {text:?}; got {:?}", self.texts()))
+                .1
+        }
+
+        fn texts(&self) -> Vec<&str> {
+            self.0.iter().map(|(t, _)| t.as_str()).collect()
+        }
+    }
+
+    /// What the UI paints once it has settled. A modal is an `egui::Area`,
+    /// which egui sizes on one frame and paints on the next, so one frame is
+    /// not enough to see one.
+    fn settled(app: &mut App) -> Painted {
+        let _ = frame(app, Vec::new());
+        frame(app, Vec::new()).1
+    }
+
+    /// Presses at `pos` in one frame and releases in the next, which is when
+    /// egui reports the click. Returns that frame's actions, and what the UI
+    /// paints once it has settled afterwards.
+    fn click(app: &mut App, pos: egui::Pos2) -> (Vec<crate::ui::UiAction>, Painted) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let _ = frame(app, vec![egui::Event::PointerMoved(pos), button(true)]);
+        let (actions, _) = frame(app, vec![button(false)]);
+        (actions, settled(app))
+    }
+
+    /// The pointer paths the tests above reach through `App` directly: clicking
+    /// a preset row, and opening its row menu. Driven as real clicks against the
+    /// real widget tree, because a wiring mistake between the widget and the
+    /// action would not show up anywhere else.
+    #[test]
+    fn clicking_a_preset_row_applies_it_to_the_shown_photo() {
+        let (mut app, dir, paths) = folder_app("click", 2);
+        app.presets.add("Golden", tone(0.4, 0.0), Vec::new());
+        app.presets.add("Moody", tone(-0.4, 0.0), Vec::new());
+        app.mode = ViewMode::Loupe;
+        app.shown = Shown::Preview(paths[0].clone(), 100, 100);
+        app.develop_open = true;
+
+        let painted = settled(&mut app);
+        assert!(
+            painted.has(crate::i18n::t().presets),
+            "the Develop panel has a Presets section: {:?}",
+            painted.texts()
+        );
+        assert!(
+            !painted.has("Golden"),
+            "which starts collapsed, so no slider moves"
+        );
+
+        let (_, painted) = click(&mut app, painted.pos_of(crate::i18n::t().presets));
+        assert!(
+            painted.has("Golden") && painted.has("Moody"),
+            "clicking the header reveals every row: {:?}",
+            painted.texts()
+        );
+
+        let (actions, _) = click(&mut app, painted.pos_of("Golden"));
+        let golden = app
+            .presets
+            .presets()
+            .iter()
+            .find(|p| p.name == "Golden")
+            .unwrap()
+            .id;
+        assert!(
+            actions.contains(&crate::ui::UiAction::ApplyPreset(golden)),
+            "the row click asks to apply that preset: {actions:?}"
+        );
+
+        app.apply_ui_actions(actions);
+        assert_eq!(
+            app.edits.get(&paths[0]),
+            Some(&tone(0.4, 0.0)),
+            "and the look lands on the photo on screen"
+        );
+        assert!(
+            app.edits.get(&paths[1]).is_none(),
+            "only the photo on screen changed"
+        );
+
+        let dots = painted.pos_of("\u{22ef}");
+        let (actions, menu) = click(&mut app, dots);
+        assert!(actions.is_empty(), "the row menu opens without acting");
+        let t = crate::i18n::t();
+        assert!(
+            menu.has(t.rename) && menu.has(t.delete),
+            "and offers rename and delete: {:?}",
+            menu.texts()
+        );
+
+        let (actions, _) = click(&mut app, menu.pos_of_near(t.delete, dots));
+        assert!(
+            actions.contains(&crate::ui::UiAction::RequestDeletePreset(golden)),
+            "whose Delete asks for confirmation rather than deleting: {actions:?}"
+        );
+        assert_eq!(app.presets.presets().len(), 2, "nothing deleted yet");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The grid's own entry point, which the Develop panel cannot reach: the
+    /// panel only draws in the Loupe and the selection bar only outside it.
+    #[test]
+    fn the_selection_bar_dropdown_asks_to_apply_across_the_selection() {
+        let (mut app, dir, _) = folder_app("dropdown", 3);
+        app.presets.add("Golden", tone(0.4, 0.0), Vec::new());
+        app.mode = ViewMode::Grid;
+        app.selected = (0..3).collect();
+
+        let t = crate::i18n::t();
+        let painted = settled(&mut app);
+        assert!(
+            painted.has(t.preset_menu),
+            "the selection bar offers the preset dropdown: {:?}",
+            painted.texts()
+        );
+
+        let (_, open) = click(&mut app, painted.pos_of(t.preset_menu));
+        assert!(
+            open.has("Golden"),
+            "which lists every preset: {:?}",
+            open.texts()
+        );
+
+        let golden = app.presets.presets()[0].id;
+        let (actions, _) = click(&mut app, open.pos_of("Golden"));
+        assert!(
+            actions.contains(&crate::ui::UiAction::RequestBulk(
+                crate::ui::BulkKind::ApplyPreset(golden)
+            )),
+            "and picking one requests the confirmed bulk action: {actions:?}"
+        );
+
+        app.apply_ui_actions(actions);
+        assert!(
+            app.pending_bulk_prompt().is_some(),
+            "so the confirmation opens before anything is written"
+        );
+        assert!(app.edits.is_empty(), "nothing written before the confirm");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The name prompt and the delete confirmation, drawn over the panel.
+    #[test]
+    fn the_preset_modals_paint_what_they_are_about() {
+        let (mut app, dir, paths) = folder_app("modals", 1);
+        app.presets.add("Golden", tone(0.4, 0.0), Vec::new());
+        app.mode = ViewMode::Loupe;
+        app.shown = Shown::Preview(paths[0].clone(), 100, 100);
+        app.develop_open = true;
+
+        app.prompt_save_preset();
+        let prompt = settled(&mut app);
+        let t = crate::i18n::t();
+        assert!(
+            prompt.has(t.save_preset_title) && prompt.has("Preset 1"),
+            "the prompt opens seeded with a suggestion: {:?}",
+            prompt.texts()
+        );
+
+        app.cancel_preset_name();
+        app.pending_preset_delete = Some(app.presets.presets()[0].id);
+        let confirm = settled(&mut app);
+        assert!(
+            confirm.any_containing("Golden"),
+            "the delete confirmation names the preset: {:?}",
+            confirm.texts()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn deleting_a_preset_leaves_the_others() {
         let (mut app, dir, _) = folder_app("delete", 1);

@@ -35,6 +35,7 @@ mod theme {
 
 /// An action the UI wants `App` to perform after the frame is built. Positions
 /// are indices into the *visible* list (same space as `App::sel`).
+#[derive(Debug, PartialEq)]
 pub enum UiAction {
     Select(usize),
     /// Cmd-click: toggle this cell in the multi-selection.
@@ -126,7 +127,7 @@ pub enum UiAction {
 
 /// A bulk action requested from the toolbar, run against the current
 /// multi-selection after confirmation.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BulkKind {
     /// 0 clears the rating.
     Rate(u8),
