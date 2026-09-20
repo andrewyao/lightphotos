@@ -11,11 +11,13 @@ impl App {
     /// every later arrow key, and egui_winit consumes every Tab press. We ignore
     /// that unless a slider is being dragged right now, a crop is in progress,
     /// or a text field holds focus, where Left has to move the caret rather
-    /// than also stepping to the previous photo.
+    /// than also stepping to the previous photo. `text_edit_focused` rather
+    /// than `egui_wants_keyboard_input`, which is true of any focused widget
+    /// and so would strand the arrows this whole method exists to let through.
     pub(crate) fn nav_key_should_fall_through(&self) -> bool {
         self.crop_edit.is_none()
             && !self.egui_ctx.egui_is_using_pointer()
-            && !self.egui_ctx.egui_wants_keyboard_input()
+            && !self.egui_ctx.text_edit_focused()
     }
 
     /// Handle a key press per the Lightroom key-binding table.
@@ -473,6 +475,21 @@ mod tests {
             app.handle_key(KeyCode::ArrowLeft);
         }
         assert_eq!(app.sel, Some(1), "the shown photo did not change");
+    }
+
+    #[test]
+    fn a_focused_slider_still_lets_arrows_navigate() {
+        let (mut app, _) = editor_app();
+        let mut v = 0.5f32;
+        for _ in 0..2 {
+            let _ = app.egui_ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.add(egui::Slider::new(&mut v, 0.0..=1.0)).request_focus();
+            });
+        }
+        assert!(
+            app.nav_key_should_fall_through(),
+            "egui parks focus on a slider after a drag; arrows must still step photos"
+        );
     }
 
     #[test]
