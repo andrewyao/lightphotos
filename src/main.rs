@@ -316,6 +316,15 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         self.save_edit();
+        // AppKit delivers this from `applicationWillTerminate:` and then calls
+        // `exit()` itself, so `main`'s return is never reached on Cmd+Q and
+        // this is the last chance to get queued sidecars onto the disk. The
+        // bound is what a stuck filesystem can hold up the quit for; 20 000
+        // queued writes drain in about 2.5 s on APFS, and the usual backlog
+        // is one record.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -389,12 +398,18 @@ impl ApplicationHandler<UserEvent> for App {
             || self.selection_pending()
             || catalog_load_pending;
         #[cfg(target_arch = "wasm32")]
-        let image_pending =
-            image_pending || web_folder_pending || self.web_decode_pending();
-        let poll_delay = if image_pending {
+        let image_pending = image_pending || web_folder_pending || self.web_decode_pending();
+        // A write backlog needs the tight interval on wasm, where `pump` is
+        // the scheduler; on native the worker drains on its own and only the
+        // toast needs refreshing.
+        let poll_delay = if image_pending || self.bulk_delete_running() {
             Some(16)
-        } else if self.export_progress.is_some() {
-            Some(100)
+        } else if self.export_progress.is_some() || self.catalog.backlog() > 0 {
+            Some(if cfg!(target_arch = "wasm32") {
+                16
+            } else {
+                100
+            })
         } else {
             None
         };

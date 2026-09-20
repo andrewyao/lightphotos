@@ -258,14 +258,111 @@ impl App {
         self.status = Some((msg, Instant::now()));
     }
 
-    /// The current status message. It expires after 3 seconds, except during
-    /// an export, so a slow decode can't blank the progress toast.
+    /// True while a long operation owns the status line. One predicate rather
+    /// than a condition that grows an `||` per feature.
+    pub(crate) fn batch_running(&self) -> bool {
+        self.export_progress.is_some()
+            || self.bulk_delete.is_some()
+            || !self.autotone_pending.is_empty()
+            || self.catalog.backlog() > 0
+    }
+
+    /// The current status message. It expires after 3 seconds, except while a
+    /// batch is running, so a slow decode can't blank the progress toast.
     pub(crate) fn status_text(&self) -> Option<&str> {
-        if self.export_progress.is_some() {
+        if self.batch_running() {
             return self.status.as_ref().map(|(s, _)| s.as_str());
         }
         self.status
             .as_ref()
             .and_then(|(s, t)| (t.elapsed().as_secs_f32() < 3.0).then_some(s.as_str()))
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod status_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_tmp_dir() -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "lightphotos-status-test-{}-{}",
+            std::process::id(),
+            n
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// An App whose status was set longer ago than the 3-second expiry.
+    fn app_with_a_stale_status() -> App {
+        let mut app = App::new(None);
+        app.set_status("Rated 20000 photos".to_string());
+        let (msg, _) = app.status.take().unwrap();
+        app.status = Some((msg, Instant::now() - std::time::Duration::from_secs(4)));
+        app
+    }
+
+    #[test]
+    fn a_stale_status_expires_when_nothing_is_running() {
+        let app = app_with_a_stale_status();
+        assert_eq!(app.status_text(), None);
+    }
+
+    /// A batch that outlives the 3-second expiry would otherwise watch its own
+    /// progress toast blank out halfway through.
+    #[test]
+    fn a_stale_status_survives_while_sidecars_are_still_being_written() {
+        let dir = unique_tmp_dir();
+        let mut app = app_with_a_stale_status();
+        for i in 0..64 {
+            app.catalog.set(&dir.join(format!("p{i}.jpg")), 3);
+        }
+        assert!(app.catalog.backlog() > 0);
+        assert_eq!(
+            app.status_text(),
+            Some("Rated 20000 photos"),
+            "the toast must outlive its expiry while writes are still draining"
+        );
+
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        assert_eq!(app.catalog.backlog(), 0);
+        assert_eq!(
+            app.status_text(),
+            None,
+            "once the writes land the toast expires as usual"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stale_status_survives_while_a_delete_is_running() {
+        let dir = unique_tmp_dir();
+        std::fs::write(dir.join("a.jpg"), b"").unwrap();
+
+        let mut app = app_with_a_stale_status();
+        app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
+        app.recompute_visible();
+        app.selected.insert(0);
+        app.delete_selection();
+        // `delete_selection` sets its own progress toast; age it past expiry.
+        let (msg, _) = app.status.take().unwrap();
+        app.status = Some((
+            msg.clone(),
+            Instant::now() - std::time::Duration::from_secs(4),
+        ));
+
+        assert!(app.bulk_delete.is_some());
+        assert_eq!(
+            app.status_text(),
+            Some(msg.as_str()),
+            "a running delete must keep its progress toast on screen"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
