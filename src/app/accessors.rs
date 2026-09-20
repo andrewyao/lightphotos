@@ -351,7 +351,7 @@ impl App {
 
     /// The thumbnail texture and its size for the visible cell at `pos`, if
     /// uploaded.
-    pub(crate) fn thumb_texture_for(&self, pos: usize) -> Option<(&egui::TextureHandle, u32, u32)> {
+    pub(crate) fn thumb_texture_for(&self, pos: usize) -> Option<(egui::TextureId, u32, u32)> {
         let idx = *self.visible.get(pos)?;
         let path = self.playlist.as_ref()?.entry(idx)?;
         self.thumb_texture_for_path(path)
@@ -360,11 +360,10 @@ impl App {
     pub(crate) fn thumb_texture_for_path(
         &self,
         path: &Path,
-    ) -> Option<(&egui::TextureHandle, u32, u32)> {
+    ) -> Option<(egui::TextureId, u32, u32)> {
         let key = (path.to_path_buf(), THUMB_PX, self.edit_sig_for(path));
-        let handle = self.thumb_tex.get(&key)?;
-        let [w, h] = handle.size();
-        Some((handle, w as u32, h as u32))
+        let tex = self.thumb_tex.get(&key)?;
+        Some((tex.id, tex.width, tex.height))
     }
 }
 

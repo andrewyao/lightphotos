@@ -377,6 +377,16 @@ pub(crate) enum LoupeTool {
     TouchUp,
 }
 
+/// A grid thumbnail on the GPU. The size travels with the id because the
+/// renderer does not keep one, and every cell needs it to letterbox the photo
+/// in its square.
+#[derive(Clone, Copy)]
+pub(crate) struct ThumbTexture {
+    pub id: egui::TextureId,
+    pub width: u32,
+    pub height: u32,
+}
+
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
@@ -593,7 +603,10 @@ pub(crate) struct App {
     /// Thumbnail textures keyed by (path, THUMB_PX, edit signature). An edit
     /// changes the signature, so the stale texture drops and re-bakes. Pruned
     /// to the working set each frame.
-    thumb_tex: HashMap<(PathBuf, u32, u64), egui::TextureHandle>,
+    ///
+    /// The renderer owns the GPU side, so dropping an entry here is not enough;
+    /// `sync_thumb_textures` hands every pruned id back to `Renderer::free_thumb`.
+    thumb_tex: HashMap<(PathBuf, u32, u64), ThumbTexture>,
 
     /// Burst badges and dimming. Mutually exclusive with the star filter.
     bursts_on: bool,
