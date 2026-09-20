@@ -56,110 +56,62 @@ pub fn t() -> &'static Strings {
     }
 }
 
+/// `prefs` key holding the saved language code.
+const LANGUAGE_KEY: &str = "language";
+
 /// Pick the startup language: the saved choice, else the OS language, else
 /// English.
 pub fn init() {
-    let lang = pref::load()
-        .or_else(|| pref::system_tags().iter().find_map(|t| Lang::from_tag(t)))
+    let lang = saved_lang()
+        .or_else(|| system_tags().iter().find_map(|t| Lang::from_tag(t)))
         .unwrap_or(Lang::En);
     set_lang(lang);
 }
 
-/// Switch language and remember the choice for the next launch.
-pub fn choose(lang: Lang) {
-    set_lang(lang);
-    pref::save(lang);
+fn saved_lang() -> Option<Lang> {
+    Lang::from_tag(crate::prefs::load(LANGUAGE_KEY)?.trim())
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-mod pref {
-    use super::Lang;
-    use std::path::PathBuf;
-
-    fn path() -> Option<PathBuf> {
-        let dir = if cfg!(target_os = "macos") {
-            PathBuf::from(std::env::var_os("HOME")?).join("Library/Application Support/LightPhotos")
-        } else if cfg!(windows) {
-            PathBuf::from(std::env::var_os("APPDATA")?).join("LightPhotos")
-        } else {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?
-                .join("lightphotos")
-        };
-        Some(dir.join("language"))
+/// Switch language and remember the choice for the next launch. A storage
+/// failure costs one relaunch's language, so it is logged, not surfaced.
+pub fn choose(lang: Lang) {
+    set_lang(lang);
+    if let Err(e) = crate::prefs::save(LANGUAGE_KEY, lang.code()) {
+        eprintln!("[lightphotos] could not save the language: {e}");
     }
+}
 
-    pub fn load() -> Option<Lang> {
-        Lang::from_tag(std::fs::read_to_string(path()?).ok()?.trim())
-    }
+/// The user's preferred languages, most preferred first. Finder-launched apps
+/// get no `LANG`, so macOS asks Foundation instead.
+#[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
+fn system_tags() -> Vec<String> {
+    objc2_foundation::NSLocale::preferredLanguages()
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
 
-    pub fn save(lang: Lang) {
-        let Some(path) = path() else { return };
-        let written = path
-            .parent()
-            .map_or(Ok(()), std::fs::create_dir_all)
-            .and_then(|()| std::fs::write(&path, lang.code()));
-        if let Err(e) = written {
-            eprintln!(
-                "[lightphotos] could not save language to {}: {e}",
-                path.display()
-            );
-        }
-    }
-
-    /// The user's preferred languages, most preferred first. Finder-launched
-    /// apps get no `LANG`, so macOS asks Foundation instead.
-    #[cfg(target_os = "macos")]
-    pub fn system_tags() -> Vec<String> {
-        objc2_foundation::NSLocale::preferredLanguages()
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    pub fn system_tags() -> Vec<String> {
-        ["LC_ALL", "LC_MESSAGES", "LANG"]
-            .iter()
-            .filter_map(|k| std::env::var(k).ok())
-            .filter(|v| !v.is_empty())
-            .collect()
-    }
+#[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
+fn system_tags() -> Vec<String> {
+    ["LC_ALL", "LC_MESSAGES", "LANG"]
+        .iter()
+        .filter_map(|k| std::env::var(k).ok())
+        .filter(|v| !v.is_empty())
+        .collect()
 }
 
 #[cfg(target_arch = "wasm32")]
-mod pref {
-    use super::Lang;
-
-    const KEY: &str = "lightphotos.language";
-
-    fn storage() -> Option<web_sys::Storage> {
-        web_sys::window()?.local_storage().ok().flatten()
-    }
-
-    pub fn load() -> Option<Lang> {
-        Lang::from_tag(&storage()?.get_item(KEY).ok().flatten()?)
-    }
-
-    pub fn save(lang: Lang) {
-        if let Some(s) = storage() {
-            let _ = s.set_item(KEY, lang.code());
-        }
-    }
-
-    pub fn system_tags() -> Vec<String> {
-        let Some(nav) = web_sys::window().map(|w| w.navigator()) else {
-            return Vec::new();
-        };
-        let mut tags: Vec<String> = nav
-            .languages()
-            .iter()
-            .filter_map(|v| v.as_string())
-            .collect();
-        tags.extend(nav.language());
-        tags
-    }
+fn system_tags() -> Vec<String> {
+    let Some(nav) = web_sys::window().map(|w| w.navigator()) else {
+        return Vec::new();
+    };
+    let mut tags: Vec<String> = nav
+        .languages()
+        .iter()
+        .filter_map(|v| v.as_string())
+        .collect();
+    tags.extend(nav.language());
+    tags
 }
 
 /// One group of rows in the keyboard-shortcut overlay: (keys, description).

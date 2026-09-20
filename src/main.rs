@@ -27,6 +27,7 @@ mod macos_delegate;
 mod navigation;
 mod paths;
 mod phash;
+mod prefs;
 #[cfg(feature = "hotpath")]
 mod profile;
 mod renderer;
