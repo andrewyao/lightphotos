@@ -224,6 +224,7 @@ fn solve(
 
 /// Auto Tone adjustments for a downscaled linear-light sample. `format` picks
 /// the display pipeline. An empty sample returns the defaults.
+#[hotpath::measure]
 pub(crate) fn analyze(samples: &[[f32; 3]], format: PixelFormat) -> Adjustments {
     let Some(hist) = Histogram::build(samples, format) else {
         return Adjustments::default();
