@@ -71,23 +71,26 @@ impl PresetStore {
         }
     }
 
-    /// The saved library. A document that will not parse yields an empty list
-    /// with every write refused, so the user can fix or move the file instead
-    /// of losing it. `App::new` substitutes [`PresetStore::in_memory`] under
-    /// test, so no test writes the developer's own library.
+    /// The saved library, written back on every mutation. `App::new`
+    /// substitutes [`PresetStore::in_memory`] under test, so no test writes
+    /// the developer's own library.
     #[cfg_attr(test, allow(dead_code))]
     pub fn load() -> PresetStore {
+        PresetStore::from_text(&crate::prefs::load(KEY).unwrap_or_default(), true)
+    }
+
+    /// Adopts a stored document. A document that will not parse yields an
+    /// empty list with every write refused, so the user can fix or move the
+    /// file instead of losing it.
+    fn from_text(text: &str, persistent: bool) -> PresetStore {
         let mut store = PresetStore {
-            persistent: true,
+            persistent,
             ..PresetStore::in_memory()
-        };
-        let Some(text) = crate::prefs::load(KEY) else {
-            return store;
         };
         if text.trim().is_empty() {
             return store;
         }
-        match parse(&text) {
+        match parse(text) {
             Ok(mut presets) => {
                 store.next_id = presets.iter().map(|p| p.id + 1).max().unwrap_or(1);
                 presets.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
@@ -213,44 +216,20 @@ impl PresetStore {
         if !self.persistent {
             return;
         }
-        let document = Document {
-            version: VERSION,
-            presets: self.presets.clone(),
-        };
         // A failure leaves the change in memory and reports itself. The next
         // mutation rewrites the whole document, which is the retry.
-        let written = serde_json::to_string_pretty(&document)
-            .map_err(|e| e.to_string())
-            .and_then(|text| crate::prefs::save(KEY, &text));
-        if let Err(cause) = written {
+        if let Err(cause) = crate::prefs::save(KEY, &self.to_text()) {
             self.last_error = Some((crate::i18n::t().presets_save_failed)(&cause));
         }
     }
 
-    #[cfg(test)]
-    fn document(&self) -> String {
+    /// The document as stored. Infallible, because `Preset` is plain data.
+    fn to_text(&self) -> String {
         serde_json::to_string_pretty(&Document {
             version: VERSION,
             presets: self.presets.clone(),
         })
-        .unwrap()
-    }
-
-    #[cfg(test)]
-    fn from_document(text: &str) -> PresetStore {
-        let mut store = PresetStore::in_memory();
-        match parse(text) {
-            Ok(mut presets) => {
-                store.next_id = presets.iter().map(|p| p.id + 1).max().unwrap_or(1);
-                presets.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
-                store.presets = presets;
-            }
-            Err(cause) => {
-                store.corrupt = true;
-                store.last_error = Some((crate::i18n::t().presets_load_failed)(&cause));
-            }
-        }
-        store
+        .unwrap_or_default()
     }
 }
 
@@ -269,6 +248,12 @@ fn sort_key(p: &Preset) -> (String, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store built from a stored document, through the same code path
+    /// `PresetStore::load` uses, minus the write-back.
+    fn reload(text: &str) -> PresetStore {
+        PresetStore::from_text(text, false)
+    }
 
     fn tone(exposure: f32) -> Adjustments {
         Adjustments {
@@ -291,7 +276,7 @@ mod tests {
             )
             .unwrap();
 
-        let reloaded = PresetStore::from_document(&store.document());
+        let reloaded = reload(&store.to_text());
         assert_eq!(reloaded.presets(), store.presets());
         let identity = reloaded
             .presets()
@@ -310,7 +295,7 @@ mod tests {
 
     #[test]
     fn a_corrupt_document_loads_empty_and_refuses_every_write() {
-        let mut store = PresetStore::from_document("{\"presets\": [ truncated");
+        let mut store = reload("{\"presets\": [ truncated");
         assert!(store.presets().is_empty());
         assert!(store.take_error().is_some(), "the failure is reported");
 
@@ -326,7 +311,7 @@ mod tests {
 
     #[test]
     fn an_unknown_key_and_a_future_version_still_load() {
-        let store = PresetStore::from_document(
+        let store = reload(
             "{\"version\": 9, \"mood\": \"golden\", \"presets\": [\
              {\"id\": 3, \"name\": \"Golden\", \"adjustments\": {\"exposure\": 0.5}, \"future\": 1}]}",
         );
