@@ -541,6 +541,14 @@ impl Loader {
         }
     }
 
+    /// Thumbnails asked for and not yet answered. Callers that batch over a
+    /// whole folder are expected to keep this bounded, because each one in
+    /// flight becomes a decoded thumbnail the cache has to hold.
+    #[cfg(test)]
+    pub(crate) fn thumbs_in_flight(&self) -> usize {
+        self.thumb_inflight.len()
+    }
+
     #[cfg(test)]
     pub(crate) fn poison_thumb_queue_for_test(&mut self, path: PathBuf, max_px: u32) {
         // Hold the lock through enqueue and poison so no worker takes the job

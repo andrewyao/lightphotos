@@ -5,7 +5,7 @@
 //! keyboard bindings. `main.rs` runs the winit event loop and calls into the
 //! `pub(crate)` methods and fields here.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
@@ -638,7 +638,19 @@ pub(crate) struct App {
 
     /// Photos in the running Auto Tone batch still waiting on a thumbnail.
     /// Emptied by `cancel_auto_tone` on a folder change.
+    ///
+    /// The batch is paced across three stages so its memory never tracks the
+    /// selection: this set is the whole outstanding batch, for progress and
+    /// deduplication, and every photo in it sits in exactly one of
+    /// `autotone_queue` or `autotone_window`.
     autotone_pending: HashSet<PathBuf>,
+    /// Batch photos whose thumbnail has not been asked for yet, in the order
+    /// they will be. Unbounded, but a `PathBuf` each, not a decoded thumbnail.
+    autotone_queue: VecDeque<PathBuf>,
+    /// Batch photos whose thumbnail has been requested, oldest first. Capped at
+    /// `AUTOTONE_WINDOW`, and this is the only part of a batch the thumbnail
+    /// cache has to hold at once.
+    autotone_window: VecDeque<PathBuf>,
     /// Each pending photo's edits when it was queued. If they changed by the
     /// time its thumbnail lands, the user edited by hand, and `tone_one` must
     /// not overwrite that.
@@ -912,6 +924,8 @@ impl App {
             feature_pending: HashSet::new(),
             dup_marks: Vec::new(),
             autotone_pending: HashSet::new(),
+            autotone_queue: VecDeque::new(),
+            autotone_window: VecDeque::new(),
             autotone_base: HashMap::new(),
             autotone_deferred: None,
             autotone_done: 0,
