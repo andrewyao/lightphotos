@@ -188,6 +188,8 @@ pub struct Strings {
     pub copy_settings_needs_one: &'static str,
     pub apply_settings: &'static str,
     pub apply_settings_needs_copy: &'static str,
+    pub preset_menu: &'static str,
+    pub apply_preset_selection_tip: &'static str,
     pub settings_from: fn(&str) -> String,
     pub export_jpg: &'static str,
     pub export_jpg_tip: &'static str,
@@ -208,6 +210,8 @@ pub struct Strings {
     pub confirm_rate: fn(&str, usize) -> String,
     pub confirm_export: fn(usize) -> String,
     pub confirm_apply_settings: fn(usize) -> String,
+    /// (preset name, photo count)
+    pub confirm_apply_preset: fn(&str, usize) -> String,
     pub confirm_auto_tone: fn(usize) -> String,
     pub confirm_delete: fn(usize) -> String,
 
@@ -392,6 +396,8 @@ pub static EN: Strings = Strings {
     copy_settings_needs_one: "Select a single photo to copy its settings",
     apply_settings: "Apply Settings",
     apply_settings_needs_copy: "Copy settings from a photo first",
+    preset_menu: "Preset",
+    apply_preset_selection_tip: "Apply a saved preset to the selection",
     settings_from: |name| format!("from {name}"),
     export_jpg: "Export JPG",
     export_jpg_tip: "Export each selected photo as a baked JPG",
@@ -511,6 +517,7 @@ pub static EN: Strings = Strings {
     confirm_rate: |stars, n| format!("Apply {stars} to {n} photo(s)?"),
     confirm_export: |n| format!("Export {n} photo(s) as JPG?"),
     confirm_apply_settings: |n| format!("Apply the copied settings to {n} photo(s)?"),
+    confirm_apply_preset: |name, n| format!("Apply {name} to {n} photo(s)?"),
     confirm_auto_tone: |n| format!("Auto Tone {n} photo(s)?"),
     confirm_delete: if WEB {
         |n| format!("Permanently delete {n} photo(s)? This cannot be undone.")
@@ -682,6 +689,8 @@ pub static ZH: Strings = Strings {
     copy_settings_needs_one: "只选择一张照片才能拷贝其设置",
     apply_settings: "应用设置",
     apply_settings_needs_copy: "请先从一张照片拷贝设置",
+    preset_menu: "预设",
+    apply_preset_selection_tip: "将已保存的预设应用到所选照片",
     settings_from: |name| format!("来自 {name}"),
     export_jpg: "导出 JPG",
     export_jpg_tip: "将每张所选照片连同调整导出为 JPG",
@@ -798,6 +807,7 @@ pub static ZH: Strings = Strings {
     confirm_rate: |stars, n| format!("将 {n} 张照片评为 {stars}？"),
     confirm_export: |n| format!("将 {n} 张照片导出为 JPG？"),
     confirm_apply_settings: |n| format!("将拷贝的设置应用到 {n} 张照片？"),
+    confirm_apply_preset: |name, n| format!("将 {name} 应用到 {n} 张照片？"),
     confirm_auto_tone: |n| format!("对 {n} 张照片应用自动色调？"),
     confirm_delete: if WEB {
         |n| format!("永久删除 {n} 张照片？此操作无法撤销。")

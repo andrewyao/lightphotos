@@ -96,6 +96,22 @@ impl App {
         self.set_status((crate::i18n::t().applied_preset)(&name, n));
     }
 
+    /// Applies one preset across the grid selection. This is a bulk action, so
+    /// it is confirmed first: it overwrites eleven fields on N photos with no
+    /// undo, and N can be a whole folder after a stray `Cmd+A`.
+    pub(super) fn apply_preset_to_selection(&mut self, id: u64) {
+        let Some(preset) = self.presets.get(id) else {
+            return;
+        };
+        let name = preset.name.clone();
+        let tone = preset.adjustments.tone_only();
+        let n = self.apply_tone_to(tone, &self.selected_paths());
+        if n == 0 {
+            return;
+        }
+        self.set_status((crate::i18n::t().applied_preset)(&name, n));
+    }
+
     pub(super) fn delete_preset(&mut self, id: u64) {
         let Some(name) = self.presets.get(id).map(|p| p.name.clone()) else {
             return;
@@ -328,6 +344,36 @@ mod tests {
             Some(0.1),
             "the same id still carries the same look"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_selection_wide_apply_is_confirmed_and_then_writes_every_photo() {
+        let (mut app, dir, paths) = folder_app("bulk", 3);
+        app.presets.add("Golden", tone(0.4, 0.0), Vec::new());
+        let id = app.presets.presets()[0].id;
+        app.selected = (0..3).collect();
+
+        app.request_bulk(crate::ui::BulkKind::ApplyPreset(id));
+        let prompt = app.pending_bulk_prompt().expect("the confirm modal opens");
+        assert!(
+            prompt.contains("Golden") && prompt.contains('3'),
+            "the prompt names the preset and the photo count: {prompt}"
+        );
+        for path in &paths {
+            assert!(
+                app.edits.get(path).is_none(),
+                "nothing is written before the confirmation"
+            );
+        }
+
+        app.run_bulk(crate::ui::BulkKind::ApplyPreset(id));
+
+        let catalog = Catalog::with_dir(dir.clone());
+        for path in &paths {
+            assert_eq!(app.edits.get(path).unwrap().exposure, 0.4);
+            assert_eq!(catalog.adjustments(path).exposure, 0.4);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

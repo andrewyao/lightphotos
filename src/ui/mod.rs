@@ -134,6 +134,8 @@ pub enum BulkKind {
     Export,
     /// Apply the copied develop settings.
     ApplySettings,
+    /// Apply this saved preset.
+    ApplyPreset(u64),
     AutoTone,
     /// Move to the Trash.
     Delete,
