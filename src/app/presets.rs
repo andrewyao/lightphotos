@@ -564,14 +564,9 @@ mod tests {
             painted.texts()
         );
         assert!(
-            !painted.has("Golden"),
-            "which starts collapsed, so no slider moves"
-        );
-
-        let (_, painted) = click(&mut app, painted.pos_of(crate::i18n::t().presets));
-        assert!(
             painted.has("Golden") && painted.has("Moody"),
-            "clicking the header reveals every row: {:?}",
+            "whose rows are there to be seen without opening anything first, \
+             because a library nobody finds is not a feature: {:?}",
             painted.texts()
         );
 

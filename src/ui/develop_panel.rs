@@ -178,70 +178,63 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
         });
 }
 
-/// The saved-look library. Collapsed by default, so opening a photo never
-/// moves a slider, and the list scrolls so a long library can't push the
-/// eleven sliders off a short window.
+/// The saved-look library. A plain section header like the slider sections
+/// below it rather than a collapsing one, because a library folded away by
+/// default is a library nobody finds. The row list scrolls instead, so a long
+/// one cannot push the eleven sliders off a short window.
 fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    egui::CollapsingHeader::new(t.presets)
-        .id_salt("presets")
-        .default_open(false)
+    ui.label(egui::RichText::new(t.presets).strong());
+    ui.horizontal(|ui| {
+        if ui.button("+").on_hover_text(t.save_preset_tip).clicked() {
+            out.actions.push(UiAction::SavePresetPrompt);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui
+            .button(t.import_lr_presets)
+            .on_hover_text(t.import_lr_presets_tip)
+            .clicked()
+        {
+            out.actions.push(UiAction::ImportLrPresets);
+        }
+        if app.presets().is_empty() {
+            ui.weak(t.no_presets);
+        }
+    });
+    egui::ScrollArea::vertical()
+        .max_height(140.0)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("+").on_hover_text(t.save_preset_tip).clicked() {
-                    out.actions.push(UiAction::SavePresetPrompt);
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                if ui
-                    .button(t.import_lr_presets)
-                    .on_hover_text(t.import_lr_presets_tip)
-                    .clicked()
-                {
-                    out.actions.push(UiAction::ImportLrPresets);
-                }
-                if app.presets().is_empty() {
-                    ui.weak(t.no_presets);
-                }
-            });
-            egui::ScrollArea::vertical()
-                .max_height(140.0)
-                .show(ui, |ui| {
-                    for preset in app.presets() {
-                        ui.horizontal(|ui| {
-                            let hover = if preset.notes.is_empty() {
-                                t.apply_preset_tip.to_string()
-                            } else {
-                                preset.notes.join("\n")
-                            };
-                            let row = ui
-                                .selectable_label(false, &preset.name)
-                                .on_hover_text(hover);
-                            if row.clicked() {
-                                out.actions.push(UiAction::ApplyPreset(preset.id));
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.menu_button("\u{22ef}", |ui| {
-                                        if ui.button(t.rename).clicked() {
-                                            out.actions
-                                                .push(UiAction::RenamePresetPrompt(preset.id));
-                                            ui.close();
-                                        }
-                                        if ui.button(t.delete).clicked() {
-                                            out.actions
-                                                .push(UiAction::RequestDeletePreset(preset.id));
-                                            ui.close();
-                                        }
-                                    })
-                                    .response
-                                    .on_hover_text(t.preset_actions_tip);
-                                },
-                            );
-                        });
+            for preset in app.presets() {
+                ui.horizontal(|ui| {
+                    let hover = if preset.notes.is_empty() {
+                        t.apply_preset_tip.to_string()
+                    } else {
+                        preset.notes.join("\n")
+                    };
+                    let row = ui
+                        .selectable_label(false, &preset.name)
+                        .on_hover_text(hover);
+                    if row.clicked() {
+                        out.actions.push(UiAction::ApplyPreset(preset.id));
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.menu_button("\u{22ef}", |ui| {
+                            if ui.button(t.rename).clicked() {
+                                out.actions.push(UiAction::RenamePresetPrompt(preset.id));
+                                ui.close();
+                            }
+                            if ui.button(t.delete).clicked() {
+                                out.actions.push(UiAction::RequestDeletePreset(preset.id));
+                                ui.close();
+                            }
+                        })
+                        .response
+                        .on_hover_text(t.preset_actions_tip);
+                    });
                 });
+            }
         });
+    ui.add_space(6.0);
 }
 
 /// The R, G, B histogram of the image after develop adjustments. `App`
