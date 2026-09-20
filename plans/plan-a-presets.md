@@ -3,16 +3,17 @@
 Work through these top to bottom (or by worktree assignment, if parallel).
 Check a box only after verification passes.
 
-- [ ] Task 1: Add `presets(id INTEGER PRIMARY KEY, name TEXT NOT NULL, adjustments TEXT NOT NULL, touchups TEXT, created_at INTEGER)` table + `save_preset`/`list_presets`/`delete_preset`, following the existing additive `CREATE TABLE IF NOT EXISTS` convention (files: src/catalog.rs)
-- [ ] Task 2: New `src/lr_preset.rs` — minimal namespaced-XML reader that extracts flat Camera Raw attributes off the single `<rdf:Description>` node, with unit tests against 2-3 real exported `.xmp` fixtures (files: src/lr_preset.rs, tests/fixtures/*.xmp)
-- [ ] Task 3: Map the direct tone/WB/color fields (`Exposure2012`, `Contrast2012`, `Highlights2012`, `Shadows2012`, `Whites2012`, `Blacks2012`, `Temperature`, `Tint`, `Vibrance`, `Saturation`) into `Adjustments`, verifying stop/Kelvin ranges match; unmapped fields keep `Adjustments::default()` values (requires Task 2) (files: src/lr_preset.rs)
-- [ ] Task 4: Map `LuminanceSmoothing`/`ColorNoiseReduction` → `denoise` through a scaling function (not a 1:1 copy — different algorithm, same slider intent), with a unit test pinning the scaling (requires Task 3) (files: src/lr_preset.rs)
-- [ ] Task 5: Map `crs:RetouchInfo` heal-type circles (position/radius) → `TouchUp` list, defaulting `feather`/color-delta which have no LR equivalent; skip clone-type entries (requires Task 3) (files: src/lr_preset.rs, src/develop.rs)
-- [ ] Task 6: `presets: Vec<(i64, String, Adjustments, Vec<TouchUp>)>` loaded at startup; `apply_preset`/`apply_preset_to_selection` reusing the existing `apply_settings_to_selection` path (requires Task 1) (files: src/app/adjust.rs, src/app/mod.rs, src/app/catalog.rs)
-- [ ] Task 7: `import_lr_preset(path)` — calls `lr_preset::parse` then `Catalog::save_preset` (requires Tasks 1, 2, 6) (files: src/app/adjust.rs)
-- [ ] Task 8: Presets panel in Develop — list, click to apply, "+" saves current sliders as a new preset (existing modal machinery for name entry), "Import from Lightroom..." file-picker entry point; no "learns your style" auto-suggestion, stays user-driven (requires Tasks 6, 7) (files: src/ui/develop_panel.rs, src/ui/mod.rs)
-- [ ] Task 9: Extend the mapping table to `Clarity2012` → `clarity`, `Dehaze` → `dehaze`, and the 24 `HueAdjustment*`/`SaturationAdjustment*`/`LuminanceAdjustment*` fields → `hsl`, each only once its slider exists (requires plan-e, plan-f, plan-g) (files: src/lr_preset.rs)
-- [ ] Task 10: End-to-end — `cargo test`, then `cargo build --release`, import a real preset, apply to a photo, confirm sliders match expected values and spot-heals land in roughly the right place (requires all above) (files: —)
+- [x] Task 1: `src/prefs.rs` — global key/value storage, native file per key under the OS config dir, `localStorage` per key in the browser; `i18n`'s own copy of that path logic deleted (files: src/prefs.rs, src/i18n.rs)
+- [x] Task 2: `src/presets.rs` — `Preset { id, name, adjustments, notes }` + `PresetStore` (add/rename/remove, `unique_name` suffixing, `{"version":1,"presets":[…]}` envelope). A document that will not parse loads empty and refuses every write, so a corrupt library is never replaced by an empty one (files: src/presets.rs)
+- [x] Task 3: `nav_key_should_fall_through` also excludes a focused text field, via `text_edit_focused` — not `egui_wants_keyboard_input`, which is true of any focused widget and strands the arrows after a slider drag (files: src/app/keys.rs)
+- [x] Task 4: `App.presets` loaded at startup; `save_preset_from_shown`/`apply_preset`/`apply_preset_to_selection`/`delete_preset` in `src/app/presets.rs`; the crop-preserving merge factored out of `apply_settings_to_selection` into `apply_tone_to`, shared by the clipboard and by presets (files: src/app/presets.rs, src/app/catalog.rs, src/app/mod.rs)
+- [x] Task 5: Presets block in the Develop panel — a collapsed `CollapsingHeader` above Touch Up, scrolling row list, `+` to save, per-row menu for rename and delete, its own delete-confirm modal (files: src/ui/develop_panel.rs, src/ui/modals.rs, src/ui/mod.rs, src/i18n.rs)
+- [x] Task 6: Name entry — `preset_name_edit` on `App`, a `TextEdit` modal that takes focus itself (Tab is stripped before egui sees it), Enter read before re-requesting focus, and a `handle_key` guard so a lost-focus prompt can't let `x` export or a digit re-rate (files: src/ui/modals.rs, src/app/keys.rs, src/app/presets.rs, src/i18n.rs)
+- [x] Task 7: `BulkKind::ApplyPreset(u64)` + selection-bar dropdown, so the grid can apply one look across a selection behind the usual confirmation (files: src/ui/toolbar.rs, src/app/catalog.rs, src/i18n.rs)
+- [x] Task 8: `src/lr_preset.rs` — anchored `crs:` scanner reading both the attribute and child-element spellings, mapping table keyed by `SliderId` and clamped to each slider's own range, unsupported fields reported into `Preset::notes`. No XML crate (files: src/lr_preset.rs)
+- [ ] Task 9: Native import — `dialog::pick_xmp_files` over `rfd::FileDialog::pick_files`, `App::import_lr_presets(paths)` writing the store once for the whole batch, an Import entry in the Presets block, and a status line naming what was dropped (files: src/dialog.rs, src/app/presets.rs, src/ui/develop_panel.rs, src/i18n.rs)
+- [ ] Task 10: Browser import — `showOpenFilePicker` reached the way `web_fs.rs` reaches `showDirectoryPicker` (`js_sys::Reflect`, no new Cargo entry), async so it needs the `spawn_local` + channel + `poll_*` shape `request_folder_pick` already establishes (files: src/web/web_fs.rs, src/app/web.rs, src/app/mod.rs)
+- [ ] Task 11: **BLOCKED: needs real files.** Import two or three real exported Lightroom `.xmp` presets, apply one, confirm the sliders match and that the note names what was dropped. Task 8's fixtures are hand-written from the documented `crs:` names, so they prove the scanner and not the field semantics. No Adobe CameraRaw or Lightroom settings directory exists on this machine (files: —)
 
 <!--
 Tips:
@@ -27,32 +28,29 @@ Tips:
 
 ## Reference
 
-See `00-overview.md` for shared context, architecture patterns, and execution order (this plan runs last, after Plans E-G).
+See `00-overview.md` for shared context and execution order. **This plan is not gated behind Plans E/F/G**, as that file used to say. Only the importer's field *coverage* depends on them, and an unmapped field is reported rather than silently lost.
 
-**What**: Named, user-saved `Adjustments` snapshots — plain saved slider states, not AI-trained ("save current sliders as 'Golden Hour', reapply later to one photo or a whole selection"). Additionally: **import Lightroom `.xmp` presets**, mapping overlapping fields into lightphotos' `Adjustments`/`TouchUp` model. Reframes Aftershoot's "Instant AI Profiles" honestly within the heuristic-first constraint.
+**What**: Named, user-saved `Adjustments` snapshots — plain saved slider states, not AI-trained ("save current sliders as 'Golden Hour', reapply later to one photo or a whole selection"). Plus **import of Lightroom `.xmp` presets**, mapping the overlapping fields and naming the rest.
 
-**Lightroom field mapping** (import only — no export, confirmed with user):
+**Where presets live**: global to the install, not per folder, so `<app support>/LightPhotos/presets` rather than a catalog sidecar. `Catalog` is scoped to one active directory and keys its records by filename, so it is the wrong home. The earlier version of this plan specified a SQLite `presets` table; there is no SQLite any more.
+
+**What a preset carries**: the eleven tone fields only. `Adjustments::tone_only()` is exactly that set. No crop, no rotation, no touch-ups — those are decisions about one frame, and the earlier `crs:RetouchInfo` → `TouchUp` task was dropped for the same reason.
+
+**Lightroom field mapping** (import only, no export):
 
 | Lightroom XMP field (Camera Raw namespace) | lightphotos field | Notes |
 |---|---|---|
-| `Exposure2012` | `exposure` | direct, verify stop range matches (-5..5) |
-| `Contrast2012` | `contrast` | direct |
-| `Highlights2012` | `highlights` | direct |
-| `Shadows2012` | `shadows` | direct |
-| `Whites2012` | `whites` | direct |
-| `Blacks2012` | `blacks` | direct |
-| `Temperature` | `temp` | direct (verify Kelvin vs lightphotos' unit/range) |
-| `Tint` | `tint` | direct |
-| `Vibrance` | `vibrance` | direct |
-| `Saturation` | `saturation` | direct |
-| `LuminanceSmoothing`/`ColorNoiseReduction` | `denoise` | approximate — different algorithm, same slider intent, needs a scaling function not a 1:1 copy |
-| `crs:RetouchInfo` heal-type circles (position/radius) | `TouchUp` list | only heal-type entries map (no clone source point in lightphotos' model); `feather`/color-delta have no LR equivalent — default them on import |
-| `Clarity2012` | `clarity` | mappable once Plan E lands; unmapped/dropped until then |
-| `Dehaze` | `dehaze` | mappable once Plan F lands; unmapped/dropped until then |
-| `HueAdjustmentRed`...`SaturationAdjustment*`...`LuminanceAdjustment*` (24 fields) | `hsl` | mappable once Plan G lands; unmapped/dropped until then |
-| `ToneCurvePV2012`/`...Red/Green/Blue` | `tone_curve` | mappable once Plan H lands; unmapped/dropped until then |
-| Not mapped | — | sharpening, `CropAngle`/crop straighten, `Orientation` — crop straighten explicitly deferred (see `00-overview.md`); lightphotos' crop *rectangle* already matches LR's normalized coordinates, only the angle is missing |
+| `Exposure2012` | `exposure` | exact; both are stops, both clamp to -5..5 |
+| `Contrast2012`, `Highlights2012`, `Shadows2012`, `Whites2012`, `Blacks2012` | same names | exact; both -100..100 |
+| `Vibrance`, `Saturation` | same names | exact; both -100..100 |
+| `IncrementalTemperature`, `IncrementalTint` | `temp`, `tint` | exact; both relative -100..100. Written when the preset leaves white balance As Shot, the common case |
+| `Temperature`, `Tint` (absolute) | — | **dropped and reported.** Kelvin against one camera's as-shot reference, while `temp` here is a relative nudge. Any conversion would mis-white-balance every photo while looking like it worked |
+| `ConvertToGrayscale="True"` | `saturation = -100` | approximate; our closest monochrome. Overrides a mapped `Saturation`, as Lightroom's B&W mode does |
+| `LuminanceSmoothing`, `ColorNoiseReduction` | `denoise` | approximate; different algorithm, same 0..100 intent, the larger of the two wins. Pinned by a test |
+| `Clarity2012`, `Dehaze`, 24 `HueAdjustment*`/`SaturationAdjustment*`/`LuminanceAdjustment*`, `ToneCurvePV2012*`, `Sharpness`, `CropAngle` | — | **dropped and reported.** No slider exists yet; Plans E/F/G/H add them, and re-importing the file afterwards picks them up. A field Lightroom left at its default is not reported, so the note never cries wolf |
 
-**Effort/Priority**: Quick-to-medium. The in-app preset library (save/list/apply) is small and reuses existing plumbing almost entirely. The `.xmp` parser is the new surface area — keep it minimal (flat attribute extraction, not a general XMP library) and lean on fixture-file unit tests against a few real exported Lightroom presets.
+**`.lrtemplate` is out of scope.** It is a Lua table, a second parser for a format Lightroom stopped writing in 7.3 (2018) and can re-export as `.xmp` from its own Presets panel.
 
-**Critical files**: `src/catalog.rs`, `src/develop.rs`, `src/lr_preset.rs` (new), `src/app/`, `src/ui/`
+**Effort/Priority**: done except the import wiring. The library reused existing plumbing almost entirely; the scanner was the new surface area and is covered by fourteen unit tests over inline fixtures.
+
+**Critical files**: `src/presets.rs`, `src/prefs.rs`, `src/lr_preset.rs`, `src/app/presets.rs`, `src/ui/develop_panel.rs`, `src/ui/modals.rs`

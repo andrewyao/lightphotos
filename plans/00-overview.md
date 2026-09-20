@@ -27,7 +27,7 @@ mark it `BLOCKED: <reason>` — its sub-checklist keeps the partial progress.
 - [ ] Task 7: Clarity slider (requires Task 6; parallelizable with Tasks 8-9) (files: plans/plan-e-clarity.md)
 - [ ] Task 8: Dehaze slider (requires Task 6; parallelizable with Tasks 7, 9) (files: plans/plan-f-dehaze.md)
 - [ ] Task 9: HSL panel, 8-band hue/saturation/luminance (requires Task 6; parallelizable with Tasks 7-8) (files: plans/plan-g-hsl-panel.md)
-- [ ] Task 10: Presets with Lightroom `.xmp` import — runs last, its field coverage depends on Tasks 7-9 (files: plans/plan-a-presets.md)
+- [ ] Task 10: Presets with Lightroom `.xmp` import — library, parser and UI done on `feat/develop-presets`; import wiring and a real-`.xmp` check remain. **Not gated behind Tasks 7-9** as this line used to claim: only the importer's field coverage is, and an unmapped field is reported rather than silently lost (files: plans/plan-a-presets.md)
 - [ ] Task 11: DEFERRED — Tone Curve (full point-based spline); parked, no fixed slot, pick up separately (files: plans/plan-h-tone-curve.md)
 
 Standalone plans in this folder, not part of the roadmap sequence:
@@ -100,7 +100,7 @@ Aftershoot (aftershoot.com) is a commercial photographer's tool built on 4 pilla
 
 Aftershoot's "AI" implies trained ML models. lightphotos has zero ML today (only variance-of-Laplacian blur scoring in `sharpness.rs`). Every feature in this roadmap is **heuristic-first / on-device**: classic algorithms (perceptual hashing, XMP parsing) or calls into existing macOS system frameworks (Apple Vision for face/eye detection, segmentation, feature-print similarity) — no bundled or trained models.
 
-Plans E-G exist because Lightroom presets can reference Clarity/Dehaze/HSL, which lightphotos doesn't have yet — those fields are currently unmapped/dropped on import in Plan A. Plan H (Tone Curve) also feeds Plan A's mapping but is deferred/unscheduled. Crop straighten (Lightroom's `CropAngle`, an arbitrary-degree rotate paired with the crop rectangle) is explicitly **deferred, no plan written** — lightphotos' crop rectangle shape already matches Lightroom's normalized `CropLeft/Top/Right/Bottom`, but lightphotos only has coarse 90°-step rotation (`catalog.rs`'s `rotation: u8`), no fine-angle straighten. Crop stays unmapped in Plan A's LR import until/unless a straighten feature is separately planned.
+Plans E-G exist because Lightroom presets can reference Clarity/Dehaze/HSL, which lightphotos doesn't have yet — those fields are named in the import's own note rather than silently dropped, and re-importing the file once a slider exists picks them up. Plan H (Tone Curve) also feeds Plan A's mapping but is deferred/unscheduled. Crop straighten (Lightroom's `CropAngle`, an arbitrary-degree rotate paired with the crop rectangle) is explicitly **deferred, no plan written** — lightphotos' crop rectangle shape already matches Lightroom's normalized `CropLeft/Top/Right/Bottom`, but lightphotos only has coarse 90°-step rotation (`catalog.rs`'s `rotation: u8`), no fine-angle straighten. Crop stays unmapped in Plan A's LR import until/unless a straighten feature is separately planned.
 
 ### Execution discipline (user-confirmed)
 
