@@ -14,6 +14,32 @@ use crate::thumbnail::THUMB_PX;
 /// `build_hist_sample`, so the Loupe and a batch see the same statistics.
 const ANALYSIS_TARGET: usize = 256;
 
+/// How many of a batch's thumbnails may be outstanding at once.
+///
+/// A batch used to request every photo's thumbnail up front, which made the
+/// cache hold the whole selection: about 0.4 MB a photo, so a 20k selection
+/// asked for roughly 8 GB, and on wasm32 that is a 32-bit address space that
+/// never shrinks. Nothing needs that. A thumbnail only has to survive from
+/// landing to the next `poll_auto_tone`.
+///
+/// 32 is sized from the two measured halves. Analysing one photo costs about
+/// 8 ms on the UI thread and cannot be parallelised, while a thumbnail decode
+/// is 1.2 ms warm, 12 ms cold, and 137 ms at P95 for a cold RAW. A window has
+/// to cover the slowest decode divided by one analysis to keep the workers
+/// ahead of the UI thread, which is 17 for that RAW case. 32 has margin and
+/// still costs about 13 MB whatever the folder holds.
+const AUTOTONE_WINDOW: usize = 32;
+
+/// The window is a memory budget, so it has a ceiling as well as a value. At
+/// roughly 0.4 MB a cached thumbnail, 64 is about 26 MB, and past that a batch
+/// starts to look like the unbounded one this replaced.
+const _: () = assert!(AUTOTONE_WINDOW <= 64);
+
+/// How long one frame may spend analysing. Without a cap, a frame that found a
+/// full window ready would analyse all 32 and freeze the window for a quarter
+/// of a second.
+const AUTOTONE_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(5);
+
 #[derive(Clone, Copy)]
 enum DeferredAutoToneMode {
     Replace,
@@ -97,14 +123,20 @@ impl App {
             return;
         }
         self.autotone_pending.clear();
+        self.autotone_queue.clear();
+        self.autotone_window.clear();
         self.autotone_base.clear();
         self.autotone_done = 0;
         self.enqueue_auto_tone(paths);
     }
 
     /// Add targets without abandoning outstanding work or counting duplicates.
+    ///
+    /// Photos are only queued here, never analysed. Analysis costs about 8 ms
+    /// each, so toning the already-cached ones inline would freeze the window
+    /// for as long as the selection is large. `poll_auto_tone` does all of it
+    /// under a frame budget instead, one frame later at worst.
     pub(super) fn enqueue_auto_tone(&mut self, paths: Vec<PathBuf>) {
-        let mut wanted: Vec<PathBuf> = Vec::new();
         for path in paths {
             if self.autotone_pending.contains(&path) {
                 continue;
@@ -115,59 +147,88 @@ impl App {
                 self.tone_one(&path, &auto);
                 continue;
             }
-            match self.analyze_thumb(&path) {
-                Some(auto) => self.tone_one(&path, &auto),
-                None => {
-                    // Record the edits now, so a hand edit made while the
-                    // thumbnail loads can be detected later.
-                    self.autotone_base
-                        .insert(path.clone(), self.edits.get(&path).copied().unwrap_or_default());
-                    self.autotone_pending.insert(path.clone());
-                    wanted.push(path);
-                }
-            }
+            // Record the edits now, so a hand edit made while the photo waits
+            // its turn can be detected later.
+            self.autotone_base
+                .insert(path.clone(), self.edits.get(&path).copied().unwrap_or_default());
+            self.autotone_pending.insert(path.clone());
+            self.autotone_queue.push_back(path);
         }
-        if let Some(loader) = &mut self.loader {
-            for path in wanted {
-                loader.request_thumb(path, THUMB_PX);
-            }
-        }
+        self.pump_auto_tone();
         self.report_auto_tone_progress();
         self.request_redraw();
     }
 
-    /// Tone thumbnails that just arrived and drop ones that failed to decode.
-    /// Runs every frame, not only on arrivals, so a batch whose last
+    /// Refill the window from the queue, requesting each admitted photo's
+    /// thumbnail. This is the only place a batch asks the loader for anything,
+    /// so `AUTOTONE_WINDOW` is a hard ceiling on what the cache must hold.
+    fn pump_auto_tone(&mut self) {
+        let Some(loader) = &mut self.loader else {
+            return;
+        };
+        while self.autotone_window.len() < AUTOTONE_WINDOW {
+            let Some(path) = self.autotone_queue.pop_front() else {
+                return;
+            };
+            loader.request_thumb(path.clone(), THUMB_PX);
+            self.autotone_window.push_back(path);
+        }
+    }
+
+    /// Tone the window's thumbnails that have landed and drop the ones that
+    /// failed. Runs every frame, not only on arrivals, so a batch whose last
     /// thumbnails all fail still finishes.
-    pub(crate) fn poll_auto_tone(&mut self, arrivals: &[(PathBuf, u32)]) {
+    ///
+    /// Only the window is examined, never the whole batch, so the per-frame
+    /// cost is bounded by `AUTOTONE_WINDOW` and not by the selection. Analysis
+    /// stops at `AUTOTONE_FRAME_BUDGET` and resumes next frame.
+    pub(crate) fn poll_auto_tone(&mut self) {
         if self.autotone_pending.is_empty() {
             return;
         }
-        // Collect failures before arrivals. A late worker can still deliver a
-        // thumbnail the loader already marked failed, and that path must not
-        // be both dropped and toned.
+        self.pump_auto_tone();
+
+        let deadline = Instant::now() + AUTOTONE_FRAME_BUDGET;
         let mut dropped: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        if let Some(loader) = &self.loader {
-            for path in &self.autotone_pending {
-                if loader.thumb_failed(path, THUMB_PX) {
-                    dropped.insert(path.clone());
-                }
-            }
-        }
         let mut toned: Vec<(PathBuf, crate::develop::Adjustments)> = Vec::new();
-        for (path, px) in arrivals {
-            if *px != THUMB_PX || !self.autotone_pending.contains(path) || dropped.contains(path)
-            {
+        let mut waiting: VecDeque<PathBuf> = VecDeque::new();
+        let mut spent = false;
+        while let Some(path) = self.autotone_window.pop_front() {
+            let thumb = self.loader.as_ref().and_then(|loader| {
+                if loader.thumb_failed(&path, THUMB_PX) {
+                    None
+                } else {
+                    loader.get_thumb(&path, THUMB_PX)
+                }
+            });
+            let Some(img) = thumb else {
+                // Failed decodes must leave the batch or it never finishes;
+                // everything else is still in the pool.
+                match self.loader.as_ref() {
+                    Some(loader) if loader.thumb_failed(&path, THUMB_PX) => {
+                        dropped.insert(path);
+                    }
+                    _ => waiting.push_back(path),
+                }
+                continue;
+            };
+            // Hold the rest of the window for the next frame once the budget is
+            // gone, rather than freezing on a full window of analyses.
+            if spent {
+                waiting.push_back(path);
                 continue;
             }
-            match self.analyze_thumb(path) {
-                Some(auto) => toned.push((path.clone(), auto)),
+            let (grid, _, _) = image_ops::downsample_linear(&img, ANALYSIS_TARGET);
+            if grid.is_empty() {
                 // A degenerate buffer. Waiting on it again would never finish.
-                None => {
-                    dropped.insert(path.clone());
-                }
+                dropped.insert(path);
+                continue;
             }
+            toned.push((path, autotone::analyze(&grid, img.pixel_format)));
+            spent = Instant::now() >= deadline;
         }
+        self.autotone_window = waiting;
+
         for path in &dropped {
             self.autotone_pending.remove(path);
             self.autotone_base.remove(path);
@@ -196,6 +257,8 @@ impl App {
         }
         let (done, total) = (self.autotone_done, self.autotone_total());
         self.autotone_pending.clear();
+        self.autotone_queue.clear();
+        self.autotone_window.clear();
         self.autotone_base.clear();
         self.autotone_deferred = None;
         self.autotone_done = 0;
@@ -206,13 +269,6 @@ impl App {
     /// count toward neither, so the total shrinks.
     fn autotone_total(&self) -> usize {
         self.autotone_done + self.autotone_pending.len()
-    }
-
-    /// Analyze `path`'s cached thumbnail. `None` when it is not in memory.
-    fn analyze_thumb(&self, path: &Path) -> Option<crate::develop::Adjustments> {
-        let img = self.loader.as_ref()?.get_thumb(path, THUMB_PX)?;
-        let (grid, _, _) = image_ops::downsample_linear(&img, ANALYSIS_TARGET);
-        (!grid.is_empty()).then(|| autotone::analyze(&grid, img.pixel_format))
     }
 
     /// Save one photo's auto adjustments, keeping its crop, white balance,
@@ -343,7 +399,7 @@ mod tests {
                     pixel_format: crate::image_decode::PixelFormat::Srgb8,
                 }),
             );
-            app.poll_auto_tone(&[(path.clone(), THUMB_PX)]);
+            app.poll_auto_tone();
             assert!(app.edits.contains_key(path), "each request must be toned");
             if index == 0 {
                 assert!(app.autotone_pending.contains(&b));
@@ -354,6 +410,155 @@ mod tests {
         assert!(app.autotone_pending.is_empty());
         assert_eq!(app.autotone_done, 0);
         assert_eq!(app.autotone_total(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A batch used to request every photo's thumbnail at once, which made the
+    /// cache hold the whole selection. The window is what keeps a 20k-photo
+    /// selection from asking for 20k decoded thumbnails.
+    #[test]
+    fn a_large_batch_only_requests_a_window_of_thumbnails_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("lp-autotone-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photos: Vec<PathBuf> = (0..AUTOTONE_WINDOW * 3)
+            .map(|i| {
+                let p = dir.join(format!("p{i:03}.jpg"));
+                std::fs::write(&p, []).unwrap();
+                p
+            })
+            .collect();
+
+        let mut app = App::new(None);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while app.poll_catalog_load() {
+            assert!(Instant::now() < deadline, "catalog load timed out");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.mode = ViewMode::Grid;
+        app.loader = Some(crate::loader::Loader::new(16384));
+
+        app.auto_tone_batch(photos.clone(), DeferredAutoToneMode::Replace);
+
+        let in_flight = app.loader.as_ref().unwrap().thumbs_in_flight();
+        assert!(
+            in_flight <= AUTOTONE_WINDOW && in_flight < photos.len(),
+            "the batch must ask for a window, not all {} of its photos, got {in_flight}",
+            photos.len()
+        );
+        assert_eq!(
+            app.autotone_window.len(),
+            AUTOTONE_WINDOW,
+            "the batch must ask for exactly one window up front"
+        );
+        assert_eq!(
+            app.autotone_queue.len(),
+            photos.len() - AUTOTONE_WINDOW,
+            "the rest must wait their turn, not be requested"
+        );
+        assert_eq!(
+            app.autotone_total(),
+            photos.len(),
+            "progress must still count the whole batch"
+        );
+
+        // Land one window's thumbnails. The next poll tones what it can inside
+        // its frame budget and refills from the queue, so the window stays
+        // capped however much of the batch is left.
+        for path in app.autotone_window.clone() {
+            app.loader.as_mut().unwrap().insert_thumb_external(
+                path,
+                THUMB_PX,
+                std::sync::Arc::new(crate::image_decode::DecodedImage {
+                    width: 8,
+                    height: 8,
+                    rgba: [32, 32, 32, 255].repeat(64),
+                    pixel_format: crate::image_decode::PixelFormat::Srgb8,
+                }),
+            );
+        }
+        app.poll_auto_tone();
+
+        assert!(app.autotone_done > 0, "the poll must make progress");
+        assert!(
+            app.autotone_window.len() <= AUTOTONE_WINDOW,
+            "the window must stay capped after a refill, got {}",
+            app.autotone_window.len()
+        );
+        assert!(
+            app.loader.as_ref().unwrap().thumbs_in_flight() <= AUTOTONE_WINDOW,
+            "and the loader must still be inside it, got {}",
+            app.loader.as_ref().unwrap().thumbs_in_flight()
+        );
+        assert_eq!(
+            app.autotone_done + app.autotone_queue.len() + app.autotone_window.len(),
+            photos.len(),
+            "every photo must be toned, queued or in the window"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Analysis costs about 8 ms a photo on the UI thread, so a poll that found
+    /// a full window ready and toned all of it would freeze the window for a
+    /// quarter of a second. The budget is what turns that into a progress bar.
+    #[test]
+    fn one_poll_does_not_analyse_a_whole_window_of_photos() {
+        let dir = std::env::temp_dir().join(format!("lp-autotone-budget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photos: Vec<PathBuf> = (0..AUTOTONE_WINDOW)
+            .map(|i| {
+                let p = dir.join(format!("p{i:03}.jpg"));
+                std::fs::write(&p, []).unwrap();
+                p
+            })
+            .collect();
+
+        let mut app = App::new(None);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while app.poll_catalog_load() {
+            assert!(Instant::now() < deadline, "catalog load timed out");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.mode = ViewMode::Grid;
+        app.loader = Some(crate::loader::Loader::new(16384));
+        app.auto_tone_batch(photos.clone(), DeferredAutoToneMode::Replace);
+
+        // Thumbnail-sized, and a gradient rather than a flat fill, so analysis
+        // does the work a real photo costs instead of short-circuiting.
+        let side = 512usize;
+        let mut rgba = Vec::with_capacity(side * side * 4);
+        for y in 0..side {
+            for x in 0..side {
+                let v = ((x + y) % 256) as u8;
+                rgba.extend_from_slice(&[v, v.wrapping_add(64), v.wrapping_add(128), 255]);
+            }
+        }
+        let img = std::sync::Arc::new(crate::image_decode::DecodedImage {
+            width: side as u32,
+            height: side as u32,
+            rgba,
+            pixel_format: crate::image_decode::PixelFormat::Srgb8,
+        });
+        for path in app.autotone_window.clone() {
+            app.loader
+                .as_mut()
+                .unwrap()
+                .insert_thumb_external(path, THUMB_PX, img.clone());
+        }
+
+        app.poll_auto_tone();
+
+        assert!(app.autotone_done > 0, "a poll must make progress");
+        assert!(
+            app.autotone_done < photos.len(),
+            "a poll must stop at its budget, not tone all {} ready photos",
+            photos.len()
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -371,10 +576,10 @@ mod tests {
         app.auto_tone_batch(vec![b.clone()], DeferredAutoToneMode::Replace);
 
         let loader = app.loader.as_mut().unwrap();
-        let (_, arrivals, _, _) = loader.poll_all();
+        loader.poll_all();
         assert!(loader.thumb_failed(&a, THUMB_PX));
         assert!(loader.thumb_failed(&b, THUMB_PX));
-        app.poll_auto_tone(&arrivals);
+        app.poll_auto_tone();
         assert!(app.autotone_pending.is_empty());
         assert_eq!(app.autotone_total(), 0);
         assert!(!app.edits.contains_key(&a));
@@ -424,7 +629,7 @@ mod tests {
         assert_eq!(app.autotone_done, 0);
         assert_eq!(app.autotone_total(), 0);
 
-        app.poll_auto_tone(&[(stale.clone(), THUMB_PX)]);
+        app.poll_auto_tone();
         assert!(
             !app.edits.contains_key(&stale),
             "a late arrival from folder A must not be toned against folder B's catalog"
@@ -546,7 +751,7 @@ mod tests {
                 pixel_format: crate::image_decode::PixelFormat::Srgb8,
             }),
         );
-        app.poll_auto_tone(&[(a.clone(), THUMB_PX)]);
+        app.poll_auto_tone();
 
         assert_eq!(
             app.edits.get(&a).copied(),

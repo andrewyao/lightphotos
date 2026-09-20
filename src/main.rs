@@ -357,7 +357,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.score_arrived_dup_thumbs(&thumbs);
             }
             // Runs even with no arrivals, so Auto Tone notices failed thumbnails.
-            self.poll_auto_tone(&thumbs);
+            self.poll_auto_tone();
             if any {
                 self.try_show();
                 // Prefetch waits until the current photo is on screen, which
@@ -412,7 +412,7 @@ impl ApplicationHandler<UserEvent> for App {
                 self.score_arrived_dup_thumbs(&web_thumbs);
                 // Web thumbnails skip `loader.poll_all()`, so feed them to Auto
                 // Tone here too.
-                self.poll_auto_tone(&web_thumbs);
+                self.poll_auto_tone();
             }
             if self.request_web_thumbs() {
                 self.request_redraw();
