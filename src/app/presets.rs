@@ -1,11 +1,57 @@
 use super::*;
 
 impl App {
-    /// Saves under the suggested name. Both the panel's `+` and `Cmd+Shift+P`
-    /// take this route.
-    pub(super) fn save_preset_suggested(&mut self) {
-        let name = self.suggested_preset_name();
-        self.save_preset_from_shown(&name);
+    /// Opens the name prompt for a new preset, seeded with a suggestion. Both
+    /// the panel's `+` and `Cmd+Shift+P` take this route.
+    pub(super) fn prompt_save_preset(&mut self) {
+        self.preset_name_edit = Some((self.suggested_preset_name(), None));
+        self.request_redraw();
+    }
+
+    /// Opens the name prompt on an existing preset, seeded with its name.
+    pub(super) fn prompt_rename_preset(&mut self, id: u64) {
+        let Some(name) = self.presets.get(id).map(|p| p.name.clone()) else {
+            return;
+        };
+        self.preset_name_edit = Some((name, Some(id)));
+        self.request_redraw();
+    }
+
+    pub(super) fn set_preset_name_text(&mut self, text: String) {
+        if let Some((buffer, _)) = self.preset_name_edit.as_mut() {
+            *buffer = text;
+        }
+        self.request_redraw();
+    }
+
+    /// A blank name leaves the prompt open, so Enter on an empty field is not a
+    /// silent no-op.
+    pub(super) fn commit_preset_name(&mut self) {
+        let Some((name, target)) = self.preset_name_edit.clone() else {
+            return;
+        };
+        if name.trim().is_empty() {
+            return;
+        }
+        self.preset_name_edit = None;
+        match target {
+            None => self.save_preset_from_shown(&name),
+            Some(id) => self.rename_preset(id, &name),
+        }
+    }
+
+    pub(super) fn cancel_preset_name(&mut self) {
+        self.preset_name_edit = None;
+        self.request_redraw();
+    }
+
+    fn rename_preset(&mut self, id: u64, name: &str) {
+        self.presets.rename(id, name);
+        let Some(stored) = self.presets.get(id).map(|p| p.name.clone()) else {
+            return;
+        };
+        self.set_status((crate::i18n::t().renamed_preset)(&stored));
+        self.request_redraw();
     }
 
     /// The first `Preset N` the library does not already have, so a suggestion
@@ -207,6 +253,80 @@ mod tests {
                 .adjustments(&paths[0])
                 .is_identity(),
             "and the sidecar no longer holds the old edit"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_name_prompt_saves_what_was_typed_and_suffixes_a_duplicate() {
+        let (mut app, dir, paths) = folder_app("prompt", 1);
+        app.shown = Shown::Preview(paths[0].clone(), 100, 100);
+        app.apply_adjustments(tone(0.3, 0.0));
+
+        app.prompt_save_preset();
+        assert_eq!(
+            app.preset_name_edit(),
+            Some(("Preset 1".to_string(), false)),
+            "the prompt opens seeded with a suggestion"
+        );
+        app.set_preset_name_text("  Golden Hour  ".to_string());
+        app.commit_preset_name();
+        assert!(app.preset_name_edit().is_none(), "Enter closes the prompt");
+        assert_eq!(app.presets.presets()[0].name, "Golden Hour");
+
+        app.prompt_save_preset();
+        app.set_preset_name_text(String::new());
+        app.commit_preset_name();
+        assert!(
+            app.preset_name_edit().is_some(),
+            "a blank name leaves the prompt open rather than saving nothing"
+        );
+        app.set_preset_name_text("golden hour".to_string());
+        app.commit_preset_name();
+        let names: Vec<&str> = app
+            .presets
+            .presets()
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["Golden Hour", "golden hour 2"]);
+
+        app.prompt_save_preset();
+        app.cancel_preset_name();
+        assert!(app.preset_name_edit().is_none(), "Escape closes the prompt");
+        assert_eq!(app.presets.presets().len(), 2, "cancel saves nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn renaming_through_the_prompt_keeps_the_id_and_reorders_the_row() {
+        let (mut app, dir, _) = folder_app("rename", 1);
+        app.presets.add("Zebra", tone(0.1, 0.0), Vec::new());
+        app.presets.add("Mango", tone(0.2, 0.0), Vec::new());
+        let zebra = app
+            .presets
+            .presets()
+            .iter()
+            .find(|p| p.name == "Zebra")
+            .unwrap()
+            .id;
+
+        app.prompt_rename_preset(zebra);
+        assert_eq!(app.preset_name_edit(), Some(("Zebra".to_string(), true)));
+        app.set_preset_name_text("Alpine".to_string());
+        app.commit_preset_name();
+
+        let names: Vec<&str> = app
+            .presets
+            .presets()
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["Alpine", "Mango"], "the row moved into name order");
+        assert_eq!(
+            app.presets.get(zebra).map(|p| p.adjustments.exposure),
+            Some(0.1),
+            "the same id still carries the same look"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

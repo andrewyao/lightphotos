@@ -69,6 +69,19 @@ impl App {
             return;
         }
 
+        // While the name prompt is open, only Escape and Enter act. egui
+        // swallows keys while the field holds focus, so this is the fallback
+        // for a prompt that lost focus, where `x` would export and a digit
+        // would re-rate.
+        if self.preset_name_edit.is_some() {
+            match code {
+                KeyCode::Escape => self.cancel_preset_name(),
+                KeyCode::Enter | KeyCode::NumpadEnter => self.commit_preset_name(),
+                _ => {}
+            }
+            return;
+        }
+
         // `?` (Shift+/) toggles the shortcut help.
         if shift && code == KeyCode::Slash {
             self.show_help = !self.show_help;
@@ -241,7 +254,7 @@ impl App {
 
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
             KeyCode::KeyC if cmd && shift => self.copy_settings(),
-            KeyCode::KeyP if cmd && shift => self.save_preset_suggested(),
+            KeyCode::KeyP if cmd && shift => self.prompt_save_preset(),
             KeyCode::Delete => self.request_bulk(ui::BulkKind::Delete),
 
             KeyCode::ArrowLeft => self.nav_arrow(-1, 0, shift),

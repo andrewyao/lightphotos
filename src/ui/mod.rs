@@ -44,8 +44,14 @@ pub enum UiAction {
     OpenLoupe(usize),
     /// Copy the primary photo's develop settings to the in-app clipboard.
     CopySettings,
-    /// Save the shown photo's develop settings as a new preset.
-    SavePreset,
+    /// Open the name prompt for a new preset, seeded with a suggestion.
+    SavePresetPrompt,
+    /// Open the name prompt on an existing preset.
+    RenamePresetPrompt(u64),
+    /// The name prompt's field changed.
+    SetPresetNameText(String),
+    CommitPresetName,
+    CancelPresetName,
     /// Apply this preset to the shown photo.
     ApplyPreset(u64),
     /// Ask to delete this preset (opens its own confirm modal).
@@ -152,7 +158,7 @@ mod toolbar;
 use develop_panel::draw_develop_panel;
 use grid::{draw_folders_panel, draw_grid};
 use loupe::draw_loupe;
-use modals::{confirm_modal, delete_preset_modal, help_modal, quit_modal};
+use modals::{confirm_modal, delete_preset_modal, help_modal, preset_name_modal, quit_modal};
 use survey::draw_survey;
 use toolbar::{grid_toolbar, selection_bar};
 
@@ -195,6 +201,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     status_toast(ui, app);
     confirm_modal(ui, app, &mut out);
     delete_preset_modal(ui, app, &mut out);
+    preset_name_modal(ui, app, &mut out);
     quit_modal(ui, app, &mut out);
     help_modal(ui, app, &mut out);
     out

@@ -189,7 +189,7 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("+").on_hover_text(t.save_preset_tip).clicked() {
-                    out.actions.push(UiAction::SavePreset);
+                    out.actions.push(UiAction::SavePresetPrompt);
                 }
                 if app.presets().is_empty() {
                     ui.weak(t.no_presets);
@@ -215,6 +215,11 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     ui.menu_button("\u{22ef}", |ui| {
+                                        if ui.button(t.rename).clicked() {
+                                            out.actions
+                                                .push(UiAction::RenamePresetPrompt(preset.id));
+                                            ui.close();
+                                        }
                                         if ui.button(t.delete).clicked() {
                                             out.actions
                                                 .push(UiAction::RequestDeletePreset(preset.id));
