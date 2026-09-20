@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn a_focused_slider_still_lets_arrows_navigate() {
-        let (mut app, _) = editor_app();
+        let (app, _) = editor_app();
         let mut v = 0.5f32;
         for _ in 0..2 {
             let _ = app.egui_ctx.run_ui(egui::RawInput::default(), |ui| {
