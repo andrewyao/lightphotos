@@ -194,6 +194,10 @@ impl App {
             ui::BulkKind::Rate(s) => (t.confirm_rate)(&"\u{2605}".repeat(s as usize), n),
             ui::BulkKind::Export => (t.confirm_export)(n),
             ui::BulkKind::ApplySettings => (t.confirm_apply_settings)(n),
+            ui::BulkKind::ApplyPreset(id) => {
+                let name = self.presets.get(id).map(|p| p.name.clone());
+                (t.confirm_apply_preset)(name.as_deref().unwrap_or_default(), n)
+            }
             ui::BulkKind::AutoTone => (t.confirm_auto_tone)(n),
             ui::BulkKind::Delete => (t.confirm_delete)(n),
         })
@@ -218,6 +222,7 @@ impl App {
         match kind {
             ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
+            ui::BulkKind::ApplyPreset(id) => self.apply_preset_to_selection(id),
             ui::BulkKind::AutoTone => self.auto_tone_selection(),
             ui::BulkKind::Export => self.export_selection(),
             ui::BulkKind::Delete => self.delete_selection(),
