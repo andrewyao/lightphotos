@@ -57,6 +57,9 @@ pub struct PresetStore {
     /// test built, which must never touch the real library.
     persistent: bool,
     last_error: Option<String>,
+    /// Writes attempted, so a test can hold the batch to one.
+    #[cfg(test)]
+    writes: usize,
 }
 
 impl PresetStore {
@@ -68,6 +71,8 @@ impl PresetStore {
             corrupt: false,
             persistent: false,
             last_error: None,
+            #[cfg(test)]
+            writes: 0,
         }
     }
 
@@ -121,6 +126,37 @@ impl PresetStore {
         adjustments: Adjustments,
         notes: Vec<String>,
     ) -> Option<String> {
+        let stored = self.insert(name, adjustments, notes)?;
+        self.flush();
+        Some(stored)
+    }
+
+    /// Adds several looks in one write. The document is rewritten whole, so one
+    /// flush covers a whole import batch. Returns the stored name of each look
+    /// that landed.
+    ///
+    /// Only the native Lightroom import batches, so the browser build compiles
+    /// this with no caller until a wasm file picker exists.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn add_all(&mut self, looks: Vec<(String, Adjustments, Vec<String>)>) -> Vec<String> {
+        let stored: Vec<String> = looks
+            .into_iter()
+            .filter_map(|(name, adjustments, notes)| self.insert(&name, adjustments, notes))
+            .collect();
+        if !stored.is_empty() {
+            self.flush();
+        }
+        stored
+    }
+
+    /// The in-memory half of [`PresetStore::add`]. Each look it accepts is
+    /// already in the list, so the next one's name is suffixed against it.
+    fn insert(
+        &mut self,
+        name: &str,
+        adjustments: Adjustments,
+        notes: Vec<String>,
+    ) -> Option<String> {
         let name = self.unique_name(name, None)?;
         if !self.writable() {
             return None;
@@ -134,7 +170,6 @@ impl PresetStore {
             notes,
         });
         self.presets.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
-        self.flush();
         Some(name)
     }
 
@@ -213,6 +248,10 @@ impl PresetStore {
     /// Writes the whole document. It is single-digit KB and every mutation is
     /// a single human click, so a full rewrite beats diffing and is idempotent.
     fn flush(&mut self) {
+        #[cfg(test)]
+        {
+            self.writes += 1;
+        }
         if !self.persistent {
             return;
         }
@@ -395,6 +434,32 @@ mod tests {
 
         store.rename(zebra, "Mango");
         assert_eq!(names(&store), ["Alpha", "mango", "Mango 2"]);
+    }
+
+    /// Catches a batch that rewrites the document once per file, and collision
+    /// handling that only looks at what earlier calls stored.
+    #[test]
+    fn a_batch_lands_in_one_write_and_suffixes_inside_itself() {
+        let mut store = PresetStore::in_memory();
+
+        let stored = store.add_all(vec![
+            ("Golden".to_string(), tone(0.1), vec![]),
+            (
+                "golden".to_string(),
+                tone(0.2),
+                vec!["Clarity2012".to_string()],
+            ),
+            ("Moody".to_string(), tone(0.3), vec![]),
+        ]);
+
+        assert_eq!(stored, ["Golden", "golden 2", "Moody"]);
+        assert_eq!(names(&store), ["Golden", "golden 2", "Moody"]);
+        assert_eq!(store.writes, 1, "three looks, one write");
+
+        for name in ["A", "B", "C"] {
+            store.add(name, tone(0.4), vec![]).unwrap();
+        }
+        assert_eq!(store.writes, 4, "a single add still writes once each");
     }
 
     fn names(store: &PresetStore) -> Vec<String> {
