@@ -6,6 +6,7 @@
 //! `set_image` through `App::upload_shown`. `shader.wgsl` draws every image
 //! except `PixelFormat::LinearF16`, which uses `raw_shader.wgsl`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -114,6 +115,11 @@ pub struct Renderer {
     mip_sampler: wgpu::Sampler,
 
     egui_renderer: egui_wgpu::Renderer,
+
+    /// Grid thumbnails handed to egui as user textures. `register_native_texture`
+    /// stores only a bind group, so the texture has to be kept alive here until
+    /// `free_thumb` drops both.
+    thumb_textures: HashMap<egui::TextureId, wgpu::Texture>,
 }
 
 impl Renderer {
@@ -521,6 +527,72 @@ impl Renderer {
             mip_pipeline_linear,
             mip_sampler,
             egui_renderer,
+            thumb_textures: HashMap::new(),
+        }
+    }
+
+    /// Upload one grid thumbnail and return the id egui draws it by.
+    ///
+    /// This exists so the grid never pays for a second copy of the pixels.
+    /// `Context::load_texture` takes an `egui::ColorImage`, which can only be
+    /// built by copying `rgba` into a fresh `Vec<Color32>`; the thumbnail is
+    /// already owned by the loader's cache, so that copy was pure duplication
+    /// (measured at 47% of a session's allocation). Writing the bytes straight
+    /// into a texture skips it, and on wasm32 it keeps them out of a linear
+    /// memory that never shrinks.
+    ///
+    /// `Rgba8Unorm` is what `register_native_texture` requires and what egui
+    /// stores its own images in, so these bytes reach the shader exactly as
+    /// `load_texture` would have delivered them. `rgba` must be tightly packed
+    /// RGBA8, premultiplied, holding the same sRGB-encoded bytes egui expects.
+    pub fn upload_thumb(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<egui::TextureId> {
+        let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+        if width == 0 || height == 0 || rgba.len() != expected {
+            return None;
+        }
+
+        let size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("thumb"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            texture.as_image_copy(),
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            size,
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // LINEAR to match the `TextureOptions::LINEAR` the grid asked for when
+        // these went through `load_texture`.
+        let id = self.egui_renderer.register_native_texture(
+            &self.device,
+            &view,
+            wgpu::FilterMode::Linear,
+        );
+        self.thumb_textures.insert(id, texture);
+        Some(id)
+    }
+
+    /// Release a thumbnail texture. An id that was already freed is ignored.
+    pub fn free_thumb(&mut self, id: egui::TextureId) {
+        if self.thumb_textures.remove(&id).is_some() {
+            self.egui_renderer.free_texture(&id);
         }
     }
 
@@ -1008,3 +1080,4 @@ impl Renderer {
         }
     }
 }
+

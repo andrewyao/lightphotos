@@ -71,7 +71,7 @@ fn survey_member(
             let scale = (MEMBER_CELL / tw as f32).min(MEMBER_CELL / th as f32);
             let (dw, dh) = (tw as f32 * scale, th as f32 * scale);
             let img_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(dw, dh));
-            egui::Image::from_texture((tex.id(), egui::vec2(dw, dh))).paint_at(ui, img_rect);
+            egui::Image::from_texture((tex, egui::vec2(dw, dh))).paint_at(ui, img_rect);
         } else {
             ui.painter().text(
                 rect.center(),

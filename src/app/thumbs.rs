@@ -662,6 +662,13 @@ impl App {
         }
         let wanted = self.working_thumb_keys();
 
+        // Disjoint field borrows, so the loop can read the loader and the edit
+        // mirrors while holding the renderer mutably. Nothing in it may call a
+        // `self` method.
+        let (Some(renderer), Some(loader)) = (self.renderer.as_mut(), self.loader.as_ref()) else {
+            return;
+        };
+
         // Bake edits into the texture so the grid matches the loupe. The
         // cached thumbnail stays unedited, since the loupe applies edits to its
         // placeholder in the shader.
@@ -669,35 +676,38 @@ impl App {
             if self.thumb_tex.contains_key(key) {
                 continue;
             }
-            let Some(img) = self
-                .loader
-                .as_ref()
-                .and_then(|l| l.get_thumb(&key.0, key.1))
-            else {
+            let Some(img) = loader.get_thumb(&key.0, key.1) else {
                 continue;
             };
             let adj = self.edits.get(&key.0).copied().unwrap_or_default();
             let touchups = self.touchups.get(&key.0).map(Vec::as_slice).unwrap_or(&[]);
             let rot = self.rotations.get(&key.0).copied().unwrap_or(0);
-            let color = if adj.is_identity() && touchups.is_empty() && rot % 4 == 0 {
-                egui::ColorImage::from_rgba_premultiplied(
-                    [img.width as usize, img.height as usize],
-                    &img.rgba,
-                )
+            // A quarter turn swaps the axes, so the size has to come from the
+            // branch that ran, not from the source thumbnail.
+            let uploaded = if adj.is_identity() && touchups.is_empty() && rot % 4 == 0 {
+                renderer
+                    .upload_thumb(img.width, img.height, &img.rgba)
+                    .map(|id| (id, img.width, img.height))
             } else {
                 let (w, h, rgba) = image_ops::bake_edited(&img, &adj, touchups, rot);
                 // bake_edited output is opaque, so premultiplied equals straight.
-                egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], &rgba)
+                renderer.upload_thumb(w, h, &rgba).map(|id| (id, w, h))
             };
-            let name = format!("thumb:{}:{}:{:016x}", key.0.display(), key.1, key.2);
-            let handle = self
-                .egui_ctx
-                .load_texture(name, color, egui::TextureOptions::LINEAR);
-            self.thumb_tex.insert(key.clone(), handle);
+            if let Some((id, width, height)) = uploaded {
+                self.thumb_tex
+                    .insert(key.clone(), ThumbTexture { id, width, height });
+            }
         }
 
-        // Also evicts textures with a stale edit signature.
+        // Also evicts textures with a stale edit signature. The renderer holds
+        // the GPU side, so a dropped entry has to be handed back.
         let keep: std::collections::HashSet<(PathBuf, u32, u64)> = wanted.into_iter().collect();
-        self.thumb_tex.retain(|k, _| keep.contains(k));
+        self.thumb_tex.retain(|k, tex| {
+            if keep.contains(k) {
+                return true;
+            }
+            renderer.free_thumb(tex.id);
+            false
+        });
     }
 }

@@ -238,7 +238,7 @@ pub(super) fn thumbnail_cell(
         let dw = tw as f32 * scale;
         let dh = th as f32 * scale;
         let img_rect = egui::Rect::from_center_size(inner.center(), egui::vec2(dw, dh));
-        egui::Image::from_texture((tex.id(), egui::vec2(dw, dh))).paint_at(ui, img_rect);
+        egui::Image::from_texture((tex, egui::vec2(dw, dh))).paint_at(ui, img_rect);
     } else if style.show_placeholder {
         ui.painter().text(
             rect.center(),
