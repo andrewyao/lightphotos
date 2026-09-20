@@ -541,7 +541,8 @@ pub(crate) struct App {
     web_full_pending: Vec<crate::web_worker_pool::PoolResult>,
 
     pub(crate) mode: ViewMode,
-    catalog: Catalog,
+    /// `pub(crate)` because the frame loop drives its write queue directly.
+    pub(crate) catalog: Catalog,
     /// Directory and token of the background sidecar scan in flight, if any.
     /// Cleared only when the result with the matching token lands. A token is
     /// needed because fast A to B to A navigation runs two loads for A, and the
