@@ -43,6 +43,7 @@ impl Cmp {
 /// Indices of `entries` that pass `filter`, in order. `rating_of` returns
 /// 0..=5, with 0 for unset, so unset photos never pass `Gte` or `Eq` with a
 /// positive value.
+#[hotpath::measure]
 pub fn visible_indices(
     entries: &[PathBuf],
     filter: Option<(Cmp, u8)>,
@@ -80,6 +81,7 @@ pub fn group_by_time(times: &[Option<SystemTime>], gap: Duration) -> Vec<u32> {
 }
 
 /// Empty when `dir` can't be read. Skips entries that fail to read.
+#[hotpath::measure]
 fn read_dir_paths(dir: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(dir)
         .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
@@ -96,6 +98,7 @@ pub(crate) fn sort_by_name(entries: &mut [PathBuf]) {
     });
 }
 
+#[hotpath::measure]
 fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = read_dir_paths(dir)
         .into_iter()
@@ -122,6 +125,7 @@ pub fn is_listable_subdir(name: &str) -> bool {
 /// Subfolders of `dir` that pass [`is_listable_subdir`], sorted by name. Empty
 /// on a read error.
 #[cfg(not(target_arch = "wasm32"))]
+#[hotpath::measure]
 pub fn list_subdirs(dir: &Path) -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = read_dir_paths(dir)
         .into_iter()
@@ -186,6 +190,7 @@ impl Playlist {
     /// The images inside `dir`, positioned at index 0. Used when a folder is
     /// opened directly.
     #[cfg(not(target_arch = "wasm32"))]
+    #[hotpath::measure]
     pub fn from_dir(dir: &Path) -> Self {
         let entries = sorted_images_in(dir);
         Self {
@@ -208,6 +213,7 @@ impl Playlist {
     }
 
     /// The images in `current`'s folder, positioned on `current`.
+    #[hotpath::measure]
     pub fn from_file(current: &Path) -> Self {
         let dir = current.parent().unwrap_or_else(|| Path::new("."));
         let mut entries = sorted_images_in(dir);

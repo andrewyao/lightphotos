@@ -105,6 +105,7 @@ pub struct CaptureDate {
 
 /// Open `path` as an ImageIO `CGImageSource`.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, String> {
     let url = coregraphics::file_url(path)?;
 
@@ -116,6 +117,7 @@ pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, Strin
 /// Decode `path` upright, downscaled so neither side exceeds `max_dim`
 /// (the GPU's max texture size, or `u32::MAX` for full resolution).
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let source = open_image_source(path)?;
 
@@ -211,6 +213,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 /// Capture time from EXIF or TIFF, else the file's mtime so grouping always
 /// has something to sort by. `None` only when the mtime is unreadable too.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn capture_time(path: &Path) -> Option<SystemTime> {
     let source = open_image_source(path).ok()?;
     read_capture_time(&source)
@@ -255,6 +258,7 @@ fn read_capture_date(source: &CGImageSource) -> Option<CaptureDate> {
 
 /// Metadata for `path`. An unreadable file gives all `None`.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn read_metadata(path: &Path) -> ImageMetadata {
     let mut meta = ImageMetadata::default();
     let Ok(source) = open_image_source(path) else {
@@ -374,6 +378,7 @@ fn dict_first_u32(dict: &CFDictionary, key: &CFString) -> Option<u32> {
 /// Stored pixel size, before EXIF orientation, read without decoding. Swap
 /// the axes for orientations `5..=8` to get the display size.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
     let source = open_image_source(path).ok()?;
     // SAFETY: index 0 exists for any image the source opened.
@@ -491,6 +496,7 @@ pub(crate) fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> Deco
 /// Draw `image` scaled to `target_w` x `target_h` and return premultiplied
 /// sRGB RGBA8 pixels.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn cgimage_to_rgba(
     image: &CGImage,
     target_w: u32,

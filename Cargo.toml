@@ -68,6 +68,14 @@ serde_json = "1"
 # for ControlFlow::WaitUntil on wasm.
 web-time = "1.1"
 
+# Profiler for the three hot paths (folder load, thumbnail fill, open photo).
+# Not optional on purpose: `#[hotpath::measure]` has to resolve in every build,
+# and with the crate's own features off its macros hand the function body back
+# untouched (`hotpath-macros`' `lib_off`), so the default build links nothing
+# but an empty shim. Turned on by this crate's `hotpath` / `hotpath-alloc`
+# features — see the `[features]` block and `src/profile.rs`.
+hotpath = "0.26"
+
 rawler = { version = "0.7.2", optional = true }
 mozjpeg-rs = { version = "0.9.2", optional = true }
 img-parts = { version = "0.4.0", optional = true }
@@ -91,6 +99,15 @@ kamadak-exif = { version = "0.6.1", optional = true }
 
 [features]
 raw-probe = ["dep:rawler", "dep:mozjpeg-rs", "dep:img-parts", "dep:image", "dep:kamadak-exif"]
+
+# Profiling. Both are off by default and `hotpath`'s own macros expand to the
+# untouched function body when its `hotpath` feature is off, so a default build
+# carries no instrumentation at all — see `src/profile.rs`.
+hotpath = ["hotpath/hotpath"]
+# Per-function allocation totals. Installs hotpath's counting global allocator,
+# which adds a thread-local increment to every alloc/dealloc in the process, so
+# the timings from an alloc run are not comparable with a timing-only run.
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
 # `egui-winit`'s default features include "clipboard" (pulls in `arboard`),
 # which has no working wasm32 backend at this version — see the wasm port
