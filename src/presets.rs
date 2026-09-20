@@ -106,6 +106,10 @@ impl PresetStore {
         &self.presets
     }
 
+    pub fn get(&self, id: u64) -> Option<&Preset> {
+        self.presets.iter().find(|p| p.id == id)
+    }
+
     /// Adds a look under a free name, returning the stored name. `None` when
     /// the name is blank or the library is not writable.
     pub fn add(
