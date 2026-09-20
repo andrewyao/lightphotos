@@ -206,6 +206,21 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
             if let Some(name) = app.copied_settings_name() {
                 ui.weak((t.settings_from)(&name));
             }
+            ui.add_enabled_ui(!app.presets().is_empty(), |ui| {
+                egui::ComboBox::from_id_salt("bulk_preset")
+                    .selected_text(t.preset_menu)
+                    .show_ui(ui, |ui| {
+                        for preset in app.presets() {
+                            if ui.button(&preset.name).clicked() {
+                                out.actions
+                                    .push(UiAction::RequestBulk(BulkKind::ApplyPreset(preset.id)));
+                            }
+                        }
+                    });
+            })
+            .response
+            .on_hover_text(t.apply_preset_selection_tip)
+            .on_disabled_hover_text(t.no_presets);
             ui.separator();
             if ui
                 .button(t.export_jpg)
