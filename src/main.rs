@@ -39,7 +39,11 @@ mod paths;
 mod phash;
 mod prefs;
 mod presets;
-#[cfg(feature = "hotpath")]
+// Profiling drives the real `navigation`, `catalog`, `Loader` and `export`
+// code, none of which the browser build has, and the driver runs from the
+// native `main`. Gating the module the same way keeps `--features hotpath`
+// building for wasm32 instead of failing on APIs that target cannot have.
+#[cfg(all(feature = "hotpath", not(target_arch = "wasm32")))]
 mod profile;
 mod renderer;
 mod segmentation;
