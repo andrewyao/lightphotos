@@ -59,6 +59,7 @@ fn to_srgb_u8(v: f32) -> u8 {
 /// `max_px`. The `decode_probe` golden-hash tests call it by name.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
+#[hotpath::measure]
 pub(crate) fn decode_raw_fast_from_bytes(
     bytes: &[u8],
     max_px: u32,
@@ -72,6 +73,7 @@ pub(crate) fn decode_raw_fast_from_bytes(
 /// larger `Quality` image would suddenly appear zoomed in.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
+#[hotpath::measure]
 pub(crate) fn decode_raw_quality_from_bytes(
     bytes: &[u8],
     max_px: u32,
@@ -82,6 +84,7 @@ pub(crate) fn decode_raw_quality_from_bytes(
 /// Shared body of [`decode_raw_fast_from_bytes`] and
 /// [`decode_raw_quality_from_bytes`].
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[hotpath::measure]
 fn decode_raw_preview_from_bytes(
     bytes: &[u8],
     max_px: u32,
@@ -190,6 +193,7 @@ fn real_orientation(
 /// Demosaics a Bayer mosaic (cpp == 1) or decimates already-RGB data
 /// (cpp == 3, some DNGs), then applies orientation. `None` for any other
 /// layout, such as monochrome.
+#[hotpath::measure]
 fn demosaic_preview(
     raw: &mut rawler::RawImage,
     orientation: rawler::decoders::Orientation,
@@ -261,6 +265,7 @@ fn apply_orientation(
 /// `image` crate cannot resize f16 data. Averaging in linear light is also
 /// more accurate than resizing gamma-encoded values, which darkens edges.
 /// Returns the input unchanged when it already fits.
+#[hotpath::measure]
 fn resize_linear_f16(rgba: &[u8], w: u32, h: u32, max_px: u32) -> (u32, u32, Vec<u8>) {
     let (out_w, out_h) = fit_within(w, h, max_px);
     if (out_w, out_h) == (w, h) {
@@ -299,6 +304,7 @@ fn resize_linear_f16(rgba: &[u8], w: u32, h: u32, max_px: u32) -> (u32, u32, Vec
 
 /// Box-average downsample of linear RGB to `(out_w, out_h)`, using the same
 /// boxes as [`resize_linear_f16`].
+#[hotpath::measure]
 fn box_downsample_rgb(
     pixels: &[[f32; 3]],
     w: usize,
@@ -530,6 +536,7 @@ fn map_xtrans_coord(coord: usize, tile_step: usize) -> usize {
 /// Demosaics a CFA mosaic with rawler's `Demosaic` impls: `Superpixel3Channel`
 /// for `Fast`, `PPGDemosaic` for `Quality`. Returns `None` for layouts that
 /// would panic (see `is_supported_bayer_layout`).
+#[hotpath::measure]
 pub(crate) fn demosaic_cfa(
     raw: &mut rawler::RawImage,
     mode: DemosaicMode,
@@ -720,6 +727,7 @@ pub(crate) fn demosaic_cfa(
 /// `reduction`x`reduction` block of tiles it stands for. Averaging instead of
 /// picking one tile avoids banding. See the TODO on
 /// `is_supported_xtrans_layout` for the edge clamping bug.
+#[hotpath::measure]
 fn downsample_xtrans_mosaic(
     source: &[f32],
     width: usize,
@@ -757,6 +765,7 @@ fn downsample_xtrans_mosaic(
 /// demosaic. `Fast` takes every other pixel; `Quality` box-averages to fit
 /// `max_px`. Applies white balance and the color matrix, plus gamma for
 /// `Fast`.
+#[hotpath::measure]
 fn decimate_linear_rgb(
     raw: &mut rawler::RawImage,
     mode: DemosaicMode,

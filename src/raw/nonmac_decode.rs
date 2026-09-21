@@ -34,6 +34,7 @@ pub(crate) fn is_raw_extension(path: &Path) -> bool {
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 // Unused in the main binary on a mac+raw-probe build.
 #[allow(dead_code)]
+#[hotpath::measure]
 pub(crate) fn decode_raw_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
     rawler::decode_file(path).map_err(|e| e.to_string())
 }
@@ -91,6 +92,7 @@ pub(crate) const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 // On mac, only the raw-probe parity test calls this.
 #[allow(dead_code)]
+#[hotpath::measure]
 pub(crate) fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let raw = decode_raw_via_rawler(path)?;
     // Memory-map instead of `std::fs::read` + `new_from_slice`, which would
@@ -117,6 +119,7 @@ pub(crate) fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImag
 /// produce identical bytes.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
+#[hotpath::measure]
 pub(crate) fn decode_raw_nonmac_from_bytes(
     bytes: &[u8],
     max_dim: u32,
@@ -129,6 +132,7 @@ pub(crate) fn decode_raw_nonmac_from_bytes(
 /// so rawler can use it without a copy. The wasm export worker uses this.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
+#[hotpath::measure]
 pub(crate) fn decode_raw_nonmac_from_shared_vec(
     bytes: std::sync::Arc<Vec<u8>>,
     max_dim: u32,
@@ -138,6 +142,7 @@ pub(crate) fn decode_raw_nonmac_from_shared_vec(
 }
 
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[hotpath::measure]
 fn decode_raw_nonmac_from_source(
     source: rawler::rawsource::RawSource,
     max_dim: u32,
@@ -159,6 +164,7 @@ fn decode_raw_nonmac_from_source(
 /// Develops a decoded RAW to premultiplied sRGB8: `RawDevelop`, display
 /// boost, auto-denoise, `max_dim` downscale, then EXIF orientation.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[hotpath::measure]
 fn develop_raw_image_to_srgb8(
     raw: &rawler::RawImage,
     orientation: u8,
@@ -236,6 +242,7 @@ fn develop_raw_image_to_srgb8(
 /// EXIF orientation like the mac version. RAW goes to [`decode_raw_nonmac`];
 /// everything else goes through the `image` crate.
 #[cfg(not(target_os = "macos"))]
+#[hotpath::measure]
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     if is_raw_extension(path) {
         return decode_raw_nonmac(path, max_dim);
@@ -249,6 +256,7 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
 /// Built under raw-probe so export's round-trip test runs on mac.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
+#[hotpath::measure]
 pub(crate) fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedImage, String> {
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
@@ -285,6 +293,7 @@ pub(crate) fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<Dec
 /// Capture time for `path`. Non-mac reads no EXIF here, so this is the file
 /// mtime, the same fallback the mac version uses.
 #[cfg(not(target_os = "macos"))]
+#[hotpath::measure]
 pub fn capture_time(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
@@ -292,6 +301,7 @@ pub fn capture_time(path: &Path) -> Option<std::time::SystemTime> {
 /// Metadata for `path`. `source_size` is in display orientation (width and
 /// height swapped for EXIF 5..=8), to match [`decode`].
 #[cfg(not(target_os = "macos"))]
+#[hotpath::measure]
 pub fn read_metadata(path: &Path) -> ImageMetadata {
     let mut meta = ImageMetadata::default();
     crate::image_decode::fill_file_facts(&mut meta, path);
@@ -466,6 +476,7 @@ fn non_empty(s: &str) -> Option<String> {
 
 /// Stored pixel dimensions, before EXIF orientation. Reads only the header.
 #[cfg(not(target_os = "macos"))]
+#[hotpath::measure]
 pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
     image::image_dimensions(path).ok()
 }
