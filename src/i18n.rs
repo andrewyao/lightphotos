@@ -118,6 +118,10 @@ fn system_tags() -> Vec<String> {
 pub struct HelpSection {
     pub title: &'static str,
     pub rows: &'static [(&'static str, &'static str)],
+    /// Listing keys that do nothing is worse than listing none, so a section
+    /// that only makes sense with the grouping tools says so here and the
+    /// overlay drops it while `SHOW_GROUPING_TOOLS` is off.
+    pub needs_grouping: bool,
 }
 
 /// Cmd in the native macOS app, Ctrl elsewhere. The three-argument form joins
@@ -518,6 +522,7 @@ pub static EN: Strings = Strings {
                 ("E / G", "Editor / library"),
                 ("I", "Show folders or photo info in the side panel"),
             ],
+            needs_grouping: false,
         },
         HelpSection {
             title: "Select",
@@ -527,6 +532,7 @@ pub static EN: Strings = Strings {
                 (primary!("+Click"), "Toggle individual selection"),
                 ("Shift+arrows", "Extend selection (library)"),
             ],
+            needs_grouping: false,
         },
         HelpSection {
             title: "Rate and label",
@@ -538,6 +544,7 @@ pub static EN: Strings = Strings {
                 ),
                 ("Shift+0", "Clear color label"),
             ],
+            needs_grouping: false,
         },
         HelpSection {
             title: "Zoom and pan (in editor)",
@@ -556,6 +563,7 @@ pub static EN: Strings = Strings {
                 ("Shift+Alt+Scroll", "Trackpad zoom"),
                 ("Space+Drag", "Pan"),
             ],
+            needs_grouping: false,
         },
         HelpSection {
             title: "Edit",
@@ -579,6 +587,7 @@ pub static EN: Strings = Strings {
                     },
                 ),
             ],
+            needs_grouping: false,
         },
         HelpSection {
             title: "Culling",
@@ -590,6 +599,7 @@ pub static EN: Strings = Strings {
                     "Survey the group: \u{2190}/\u{2192} pick, Enter keeps best, Esc closes",
                 ),
             ],
+            needs_grouping: true,
         },
         HelpSection {
             title: "Keyboard focus",
@@ -602,6 +612,7 @@ pub static EN: Strings = Strings {
                 ("?", "Show or hide this help"),
                 ("Alt+= / Alt+-", "Larger / smaller text"),
             ],
+            needs_grouping: false,
         },
     ],
 
@@ -869,6 +880,7 @@ pub static ZH: Strings = Strings {
                 ("E / G", "编辑器 / 图库"),
                 ("I", "在侧栏显示文件夹或照片信息"),
             ],
+            needs_grouping: false,
         },
         HelpSection {
             title: "选择",
@@ -878,6 +890,7 @@ pub static ZH: Strings = Strings {
                 (primary!("+点按"), "逐张加选或取消"),
                 ("Shift+方向键", "扩展选择（图库）"),
             ],
+            needs_grouping: false,
         },
         HelpSection {
             title: "评分和标签",
@@ -889,6 +902,7 @@ pub static ZH: Strings = Strings {
                 ),
                 ("Shift+0", "清除颜色标签"),
             ],
+            needs_grouping: false,
         },
         HelpSection {
             title: "缩放和平移（编辑器中）",
@@ -907,6 +921,7 @@ pub static ZH: Strings = Strings {
                 ("Shift+Alt+滚动", "触控板缩放"),
                 ("Space+拖移", "平移"),
             ],
+            needs_grouping: false,
         },
         HelpSection {
             title: "编辑",
@@ -930,6 +945,7 @@ pub static ZH: Strings = Strings {
                     },
                 ),
             ],
+            needs_grouping: false,
         },
         HelpSection {
             title: "筛片",
@@ -941,6 +957,7 @@ pub static ZH: Strings = Strings {
                     "比较该组：\u{2190}/\u{2192} 挑选，Enter 保留最佳，Esc 关闭",
                 ),
             ],
+            needs_grouping: true,
         },
         HelpSection {
             title: "键盘焦点",
@@ -950,6 +967,7 @@ pub static ZH: Strings = Strings {
                 ("?", "显示或隐藏此帮助"),
                 ("Alt+= / Alt+-", "放大 / 缩小文本"),
             ],
+            needs_grouping: false,
         },
     ],
 

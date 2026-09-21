@@ -145,7 +145,11 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         egui::ScrollArea::vertical()
             .max_height(ui.ctx().content_rect().height() * 0.7)
             .show(ui, |ui| {
-                for (i, section) in t().help.iter().enumerate() {
+                let shown = t()
+                    .help
+                    .iter()
+                    .filter(|s| crate::app::SHOW_GROUPING_TOOLS || !s.needs_grouping);
+                for (i, section) in shown.enumerate() {
                     if i > 0 {
                         ui.add_space(10.0);
                     }

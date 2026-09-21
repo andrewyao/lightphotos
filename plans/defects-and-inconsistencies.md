@@ -44,7 +44,25 @@ tree, except the two marked **UNVERIFIED**, which state what would confirm them.
 
 - [ ] Task 7: The eyes-closed filter is unreachable in a shipped build. Its toolbar button is compiled out by `SHOW_GROUPING_TOOLS = false` (`src/app/mod.rs:40`, `src/ui/toolbar.rs:89`) and `grep -n "eyes\|Eyes" src/app/keys.rs` returns nothing, so no key binding exists either. Decide the feature's fate: give it a binding, ship the button, or delete the filter, `App::eyes_filter`, the `recompute_visible` clause (`src/app/nav.rs:63-71`) and the badge together. Leaving working code with no entry point is the worst of the three (files: src/app/keys.rs, src/ui/toolbar.rs, src/app/nav.rs)
 
-- [ ] Task 8: Bursts and Duplicates ship behind undocumented keys. `SHOW_GROUPING_TOOLS = false` hides the toolbar buttons, and while `docs/KEYBOARD_SHORTCUTS.md` does list `B` and `D`, nothing in the running app does. Commit `d451c80` says the buttons stay out "until the feature earns its place there", which Tasks 4 and 5 are the precondition for. Resolve this after those land, and flip the constant or remove the dead branch rather than leaving it permanently false (files: src/app/mod.rs, src/ui/toolbar.rs)
+- [x] Task 8: Bursts and Duplicates ship behind undocumented keys. `SHOW_GROUPING_TOOLS = false` hides the toolbar buttons, and while `docs/KEYBOARD_SHORTCUTS.md` does list `B` and `D`, nothing in the running app does. Commit `d451c80` says the buttons stay out "until the feature earns its place there", which Tasks 4 and 5 are the precondition for. Resolve this after those land, and flip the constant or remove the dead branch rather than leaving it permanently false (files: src/app/mod.rs, src/ui/toolbar.rs)
+
+  **Done, by turning the feature off rather than on.** Operator decision on
+  2026-09-20. `SHOW_GROUPING_TOOLS` now gates the `B` and `D` keys and the
+  shortcut overlay's Culling section as well as the toolbar buttons, so the
+  grouping tools are wholly absent rather than half-on. The task asked to
+  "flip the constant or remove the dead branch rather than leaving it
+  permanently false", and the third state it was actually in, buttons hidden
+  but keys live, was the worst of the three: a user could press an
+  undocumented key and get a verdict from a threshold nobody has validated.
+
+  `HelpSection` gained a `needs_grouping` flag so the overlay drops that
+  section with the feature, which means flipping the constant restores the
+  keys, the buttons and the help together. `docs/KEYBOARD_SHORTCUTS.md` says
+  the section is off and why. A test asserts the keys and the overlay both
+  track the constant, mutation-checked in both directions.
+
+  This does not resolve Tasks 4 and 5, it just stops shipping their guesses.
+  Flipping the constant on is still gated on validating both thresholds.
 
 - [x] Task 9: `facequality::detect_face_rects` is finished, tested and unused, carrying `#[allow(dead_code)]` (`src/facequality.rs:110`, `:140`) with a note that it is the escape hatch if the landmark pass proves too slow or noisy. `segmentation`'s `Mask::at`, `Mask::resized` and `coverage` are likewise `#[allow(dead_code)]` (`src/segmentation.rs:57`, `:67`, `:105`), used only by tests and `seg_probe`. Either wire each into a real caller or delete it; per **Subtract Before You Add**, do this before building anything new on these modules (files: src/facequality.rs, src/segmentation.rs)
 

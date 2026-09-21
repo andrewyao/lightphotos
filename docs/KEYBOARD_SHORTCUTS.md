@@ -65,6 +65,12 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 
 ## Culling
 
+Turned off in the shipped build. `SHOW_GROUPING_TOOLS` in `src/app/mod.rs`
+gates the toolbar buttons, the two keys below and the in-app overlay's Culling
+section together, so nothing here is reachable until it is flipped on. It is
+off because the thresholds behind the two features, `CLOSED_EYE_RATIO` and
+`DEFAULT_MAX_FEATURE_DISTANCE`, have not been checked against real photos.
+
 | Key | Action |
 | --- | --- |
 | `B` | Best-of-burst badges (library) |

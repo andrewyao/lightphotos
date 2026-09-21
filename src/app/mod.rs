@@ -33,10 +33,18 @@ const MAX_ZOOM: f32 = 64.0;
 /// [`crate::thumbnail::THUMB_PX`] so HiDPI displays get real pixels to draw.
 pub(crate) const GRID_CELL_PT: f32 = 192.0;
 
-/// Whether the Grid toolbar shows the Bursts / Duplicates / Eyes-closed
-/// buttons. The `B` and `D` keys work either way. Both
-/// `ui::toolbar::grid_toolbar` and `App::TOOLBAR_CONTROLS` read this flag, so
-/// the drawn controls and the F6 focus cycle stay in agreement.
+/// Whether the grouping tools are reachable at all: the Grid toolbar's
+/// Bursts / Duplicates / Eyes-closed buttons, the `B` and `D` keys, and the
+/// Culling section of the shortcut overlay. It is off because
+/// `CLOSED_EYE_RATIO` and `DEFAULT_MAX_FEATURE_DISTANCE` are both still
+/// guesses that no real photo set has checked, and a half-on feature that
+/// applies an unvalidated verdict from an undocumented key is worse than one
+/// that is plainly absent.
+///
+/// `ui::toolbar::grid_toolbar` and `App::TOOLBAR_CONTROLS` read it so the
+/// drawn controls and the F6 focus cycle agree, `app::keys` reads it so the
+/// keys match the buttons, and `ui::modals` reads it so the overlay does not
+/// advertise keys that do nothing.
 pub(crate) const SHOW_GROUPING_TOOLS: bool = false;
 
 /// Longest-side bounds for the loupe's screen-fit preview decode. The minimum
