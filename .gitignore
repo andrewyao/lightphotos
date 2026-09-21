@@ -6,5 +6,7 @@
 /.roborev/
 /.claude/
 # rawler RAW-decode crate, materialized + patched per-clone by
-# scripts/setup-vendor-rawler.sh (run it once before any cargo command)
+# scripts/setup-vendor-rawler.sh (run it once before any cargo command).
+# vendor/lightwatch/ is the same arrangement for the lightwatch probe crates,
+# copied from a lightwatch checkout by scripts/setup-vendor-lightwatch.sh.
 /vendor/
