@@ -395,30 +395,48 @@ impl Run {
         );
     }
 
-    /// Opening a photo, then stepping to the next. Two numbers per step,
-    /// because the Loupe shows two things. `first` is the `Speed` pass, often
-    /// the file's embedded preview, which is what the user sees appear.
-    /// `sharp` is when the forced decode-at-size has replaced it and the photo
-    /// stops looking soft. Each step waits for both, so the next step's
-    /// numbers are not the previous escalation still running.
+    /// Opening a photo, then stepping to the next. The Loupe makes the user
+    /// wait twice and the two waits have different causes, so each gets its
+    /// own label. `path/first_pixels` ends when something is on screen,
+    /// because `Loader::get_preview` hands back the `Speed` result, usually
+    /// the file's embedded preview, until the `Preview` decode lands.
+    /// `path/decode_preview` ends when that forced decode-at-size has
+    /// replaced them and the photo stops looking soft. A JPEG whose speed
+    /// pass already meets `target_px` never enqueues a `Preview` job, so its
+    /// second block is near zero. That is the right answer, not a missed
+    /// measurement. Both blocks are per photo rather than per loop, which is
+    /// what gives the report percentiles over the steps. Neither reuses this
+    /// phase's own `path/open_photo` label. `measure_block!` aggregates by
+    /// label string and subtracts nothing for nesting, so sharing a label
+    /// with the enclosing phase would count the same waits twice and wreck
+    /// the average and the percentiles.
     fn open_photos(&self, photos: &[PathBuf]) {
         let mut loader = Loader::new(16384);
         for path in photos.iter().take(self.opens) {
             let t0 = Instant::now();
             loader.request_preview(path.clone(), self.preview_px);
 
-            let mut first = None;
-            while loader.has_pending_image() {
-                loader.poll_all();
-                if first.is_none() && loader.get_preview(path, self.preview_px).is_some() {
-                    first = Some(t0.elapsed());
+            hotpath::measure_block!("path/first_pixels", {
+                while loader.get_preview(path, self.preview_px).is_none()
+                    && loader.has_pending_image()
+                {
+                    loader.poll_all();
+                    std::thread::yield_now();
                 }
-                std::thread::yield_now();
-            }
+            });
+            let first = t0.elapsed();
+
+            hotpath::measure_block!("path/decode_preview", {
+                while loader.has_pending_image() {
+                    loader.poll_all();
+                    std::thread::yield_now();
+                }
+            });
+
             eprintln!(
                 "[profile] open {}: first {:?}, sharp {:?}",
                 path.file_name().unwrap_or_default().to_string_lossy(),
-                first.unwrap_or_default(),
+                first,
                 t0.elapsed(),
             );
         }
