@@ -15,9 +15,26 @@ cargo build --release   # release binary at target/release/lightphotos (opt-leve
 cargo build              # debug build; works but noticeably slower at runtime
 cargo test                # run all unit tests (tests live inline in each module, #[cfg(test)])
 cargo test <name>         # run a single test by name substring, e.g. `cargo test burst::`
+cargo build --bins        # also builds the face_probe/seg_probe harnesses; see below
 ./scripts/bundle.sh       # build release + assemble LightPhotos.app + register with Launch Services (lsregister)
 ./scripts/release.sh      # test, tag origin/main as the next patch (or pass v1.2.3), push the tag → release.yml builds and publishes
 ```
+
+Verify a change with `cargo test && cargo build --release && cargo build --bins`. The
+last one is not redundant. `src/bin/face_probe.rs` and `src/bin/seg_probe.rs` pull
+their dependencies in through `#[path]` includes because the crate has no lib target,
+so adding a `use crate::..` to `facequality.rs` or `segmentation.rs` breaks those two
+binaries while `cargo build` and `cargo test` both stay green. Only `--bins` catches it.
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request. On macOS
+it runs `cargo build --bins`, `cargo test` and clippy. It also builds the wasm target, and
+builds `--bin lightphotos` on Linux and on Windows, which is the only thing that
+typechecks the non-mac branches before a tag. `cargo fmt --check` runs there too but does
+not block, because it fails on the current tree.
+
+Note that the Linux and Windows jobs build `--bin lightphotos`, not `--bins`. The two
+probe harnesses are mac-only and do not compile off macOS. The optimized native build
+stays out of CI, since `release.yml` covers it when a tag is pushed.
 
 The wasm32 (browser) build goes through `trunk`, not bare `cargo` — plain `cargo build --target wasm32-unknown-unknown` misses the wgpu/WebGPU and File System Access bindings, which are gated behind an unstable-apis cfg that `Trunk.toml`'s `rustflags` key does *not* reach cargo with in trunk 0.21.14. Set it in the environment:
 

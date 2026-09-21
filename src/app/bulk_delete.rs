@@ -306,6 +306,7 @@ impl App {
         self.phashes.remove(path);
         self.sharpness.remove(path);
         self.capture_times.remove(path);
+        self.signals.forget(path);
 
         #[cfg(not(target_arch = "wasm32"))]
         self.catalog.remove(path);

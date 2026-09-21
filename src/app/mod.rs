@@ -473,6 +473,12 @@ pub(crate) struct App {
     /// `sync_thumb_textures` hands every pruned id back to `Renderer::free_thumb`.
     thumb_tex: HashMap<(PathBuf, u32, u64), ThumbTexture>,
 
+    /// The folder's derived signals as they were left last session. Seeded
+    /// into the four maps below when a folder opens, and written back as new
+    /// ones are computed. A cache, never user data: see `src/signalcache.rs`
+    /// for why it is not part of `ImageRecord`.
+    pub(crate) signals: crate::signalcache::SignalCache,
+
     /// Burst badges and dimming. Mutually exclusive with the star filter.
     bursts_on: bool,
     /// Capture time per path, from EXIF or mtime. `Some(None)` means the read
@@ -793,6 +799,7 @@ impl App {
             strip_range: (0, 0),
             thumb_tex: HashMap::new(),
             bursts_on: false,
+            signals: crate::signalcache::SignalCache::empty(),
             capture_times: HashMap::new(),
             sharpness: HashMap::new(),
             burst_marks: Vec::new(),
@@ -991,6 +998,7 @@ impl App {
         self.cancel_auto_tone();
         self.cancel_delete();
         self.save_edit();
+        self.adopt_signal_cache(playlist);
         self.request_catalog_load(playlist.dir());
     }
 

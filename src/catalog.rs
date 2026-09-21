@@ -75,12 +75,34 @@ fn is_zero_rot(v: &u8) -> bool {
 impl ImageRecord {
     /// True when there is nothing to persist. An empty record's sidecar is
     /// deleted instead of written.
+    ///
+    /// This restates what the `skip_serializing_if` attributes already say,
+    /// because it runs on every rating keystroke and serializing there would
+    /// cost a `Map` allocation per photo. The debug assertion keeps the two
+    /// honest: a field added to the struct but not to this conjunction fails
+    /// the moment any test sets it.
     pub(crate) fn is_empty(&self) -> bool {
-        self.rating.is_none()
+        let empty = self.rating.is_none()
             && self.label.is_none()
             && self.adjustments.is_identity()
             && self.touchups.is_empty()
-            && self.rotation == 0
+            && self.rotation == 0;
+        debug_assert_eq!(
+            empty,
+            self.serializes_to_nothing(),
+            "ImageRecord::is_empty disagrees with what the sidecar would hold; \
+             a field was added to the struct but not to is_empty"
+        );
+        empty
+    }
+
+    /// Whether this record's sidecar would be `{}`, read off the serde
+    /// attributes rather than a second hand-written list.
+    fn serializes_to_nothing(&self) -> bool {
+        matches!(
+            serde_json::to_value(self),
+            Ok(serde_json::Value::Object(fields)) if fields.is_empty()
+        )
     }
 }
 
@@ -776,6 +798,47 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The defect this guards is a new `ImageRecord` field that `is_empty`
+    /// forgets, which makes a cleared photo keep writing a sidecar instead of
+    /// deleting it. Every field is set through the serialized form, so the
+    /// check is the serde attributes rather than a second hand-written list.
+    #[test]
+    fn every_persisted_field_on_its_own_makes_a_record_non_empty() {
+        let mut populated = ImageRecord::default();
+        populated.rating = Some(3);
+        populated.label = Some(ColorLabel::Red);
+        populated.adjustments.exposure = 0.5;
+        populated.touchups.push(TouchUp {
+            center: [0.4, 0.5],
+            radius: 0.02,
+            source: [0.6, 0.5],
+            feather: 0.5,
+            delta: [0.01, -0.02, 0.0],
+        });
+        populated.rotation = 1;
+
+        let serde_json::Value::Object(fields) = serde_json::to_value(&populated).unwrap() else {
+            panic!("a record serializes to an object");
+        };
+        assert_eq!(
+            fields.len(),
+            5,
+            "set every field of ImageRecord here, got {fields:?}"
+        );
+
+        for name in fields.keys() {
+            let mut only = serde_json::Map::new();
+            only.insert(name.clone(), fields[name].clone());
+            let rec: ImageRecord = serde_json::from_value(serde_json::Value::Object(only)).unwrap();
+            assert!(
+                !rec.is_empty(),
+                "a record holding only {name} must still be written"
+            );
+        }
+
+        assert!(ImageRecord::default().is_empty());
+    }
+
     #[test]
     fn empty_record_deletes_the_sidecar_file() {
         let dir = unique_tmp_dir();
@@ -973,8 +1036,11 @@ mod tests {
             cat.backlog() > 0,
             "the writes must still be outstanding, not already paid for inline"
         );
+        // 20000 inline temp-then-rename sidecar writes measure about 2s on an
+        // idle APFS volume, so this bound still catches the regression with
+        // room to spare on a machine that is busy doing something else.
         assert!(
-            elapsed < std::time::Duration::from_millis(300),
+            elapsed < std::time::Duration::from_secs(1),
             "rating 20000 photos took {elapsed:?}; it must not wait on 20000 sidecar writes"
         );
 

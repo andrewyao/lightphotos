@@ -10,6 +10,7 @@ use crate::develop::{self};
 use crate::featureprint;
 use crate::phash;
 use crate::sharpness;
+use crate::signalcache::Signal;
 use crate::thumbnail::THUMB_PX;
 use crate::{image_decode, image_ops};
 
@@ -307,6 +308,7 @@ impl App {
         }
         if !newly.is_empty() {
             for (p, s) in newly {
+                self.signals.record(&p, Signal::Sharpness(s));
                 self.sharpness.insert(p, s);
             }
             self.recompute_burst_marks();
@@ -354,6 +356,8 @@ impl App {
         if !newly.is_empty() {
             let paths: Vec<PathBuf> = newly.iter().map(|(p, _, _)| p.clone()).collect();
             for (p, h, s) in newly {
+                self.signals.record(&p, Signal::PHash(h));
+                self.signals.record(&p, Signal::Sharpness(s));
                 self.phashes.insert(p.clone(), h);
                 self.sharpness.insert(p, s);
             }
@@ -388,6 +392,8 @@ impl App {
         if !newly.is_empty() {
             let paths: Vec<PathBuf> = newly.iter().map(|(p, _, _)| p.clone()).collect();
             for (p, h, s) in newly {
+                self.signals.record(&p, Signal::PHash(h));
+                self.signals.record(&p, Signal::Sharpness(s));
                 self.phashes.insert(p.clone(), h);
                 self.sharpness.insert(p, s);
             }
@@ -570,6 +576,7 @@ impl App {
             self.face_pending.remove(&o.path);
             match o.result {
                 Ok(q) => {
+                    self.signals.record(&o.path, Signal::Faces(q));
                     self.face_quality.insert(o.path, q);
                     changed = true;
                 }
@@ -595,6 +602,7 @@ impl App {
     /// Cache capture times, then regroup bursts and request their thumbnails.
     pub(crate) fn on_capture_times(&mut self, times: Vec<(PathBuf, Option<SystemTime>)>) {
         for (path, t) in times {
+            self.signals.record(&path, Signal::Capture(t));
             self.capture_times.insert(path, t);
         }
         if self.bursts_on {
@@ -650,6 +658,7 @@ impl App {
         }
         if !newly.is_empty() {
             for (p, s) in newly {
+                self.signals.record(&p, Signal::Sharpness(s));
                 self.sharpness.insert(p, s);
             }
             self.recompute_burst_marks();

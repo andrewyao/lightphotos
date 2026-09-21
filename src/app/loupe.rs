@@ -331,6 +331,13 @@ impl App {
         self.compare
     }
 
+    /// Whether this build has a subject-segmentation backend. Vision ships
+    /// only on macOS, so elsewhere the Loupe leaves the control out instead of
+    /// offering one that can only ever report "No subject".
+    pub(crate) const fn selection_supported() -> bool {
+        cfg!(target_os = "macos")
+    }
+
     pub(crate) fn selection_on(&self) -> bool {
         self.selection_on
     }
@@ -672,5 +679,21 @@ mod tests {
         assert_eq!(bounded_zoom(100.0, 1.1), 100.0);
         assert_eq!(bounded_zoom(100.0, 0.5), 64.0);
         assert_eq!(bounded_zoom(100.0, 2.0), 100.0);
+    }
+
+    /// The control and the backend must appear on the same platforms, so this
+    /// reads the platform off `segment` itself rather than restating the cfg.
+    #[test]
+    fn the_selection_control_is_offered_only_where_segmentation_runs() {
+        let missing = std::env::temp_dir().join("lightphotos_selection_support_probe.jpg");
+        let _ = std::fs::remove_file(&missing);
+        let err =
+            crate::segmentation::segment(&missing).expect_err("a missing file has no subject mask");
+        let has_backend = !err.contains("unsupported on this platform");
+        assert_eq!(
+            App::selection_supported(),
+            has_backend,
+            "segment said: {err}"
+        );
     }
 }

@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Headless driver for the three paths a culling session actually waits on:
-//! listing a folder, filling the grid with thumbnails, and opening one photo
-//! into the Loupe. Compiled only under the `hotpath` feature.
+//! Headless driver for the paths a culling session actually waits on. The
+//! three that every session pays are listing a folder, filling the grid with
+//! thumbnails, and opening one photo into the Loupe. Auto Tone and the Vision
+//! signals run on demand and are driven here too, because both are expensive
+//! enough to decide whether a feature can run unasked. Compiled only under
+//! the `hotpath` feature.
 //!
 //! It exists because a report is only worth acting on if the next person can
 //! reproduce it. Driving the window by hand gives a different scroll depth and
@@ -36,6 +39,10 @@ struct Run {
     opens: usize,
     /// Longest side the Loupe asks for: a 1100pt window on a 2x display.
     preview_px: u32,
+    /// Photos the Vision phase runs feature prints, faces and segmentation
+    /// over. Small by default because every Vision call decodes the file at
+    /// full resolution itself.
+    vision: usize,
     /// Delete this folder's cached thumbnails first, so the grid phase
     /// measures a first visit rather than a revisit.
     cold: bool,
@@ -54,6 +61,7 @@ impl Run {
             thumbs: count("LIGHTPHOTOS_PROFILE_THUMBS", 120),
             opens: count("LIGHTPHOTOS_PROFILE_OPENS", 10),
             preview_px: count("LIGHTPHOTOS_PROFILE_PREVIEW_PX", 2200) as u32,
+            vision: count("LIGHTPHOTOS_PROFILE_VISION", 8),
             cold: std::env::var("LIGHTPHOTOS_PROFILE_COLD").as_deref() == Ok("1"),
         }
     }
@@ -82,7 +90,11 @@ impl Run {
     fn drive(&self) {
         if self.cold {
             let removed = drop_thumb_cache(&self.dir);
-            eprintln!("[profile] cold start: removed {removed} cached thumbnails");
+            let signals = drop_signal_cache(&self.dir);
+            eprintln!(
+                "[profile] cold start: removed {removed} cached thumbnails, \
+                 signal cache present: {signals}"
+            );
         }
 
         let playlist = hotpath::measure_block!("path/folder_load", self.folder_load());
@@ -100,6 +112,7 @@ impl Run {
         hotpath::measure_block!("path/open_photo", self.open_photos(&photos));
         hotpath::measure_block!("path/auto_tone", self.auto_tone(&photos));
         hotpath::measure_block!("path/select_subject", self.select_subject(&photos));
+        hotpath::measure_block!("path/vision_signals", self.vision_signals(&photos));
     }
 
     /// What the Loupe's "Show selection" button costs, and the only path that
@@ -120,6 +133,79 @@ impl Run {
             masks.len(),
             self.opens.min(photos.len()),
         );
+    }
+
+    /// What the grouping features cost per photo. Every call here makes Vision
+    /// decode the file itself at full resolution, which is the reason the
+    /// duplicate and burst tools are gated behind `SHOW_GROUPING_TOOLS`. The
+    /// pairing mirrors `refine_by_feature_print`, which compares each member
+    /// against one group anchor.
+    #[cfg(target_os = "macos")]
+    fn vision_signals(&self, photos: &[PathBuf]) {
+        let wanted: Vec<&PathBuf> = photos.iter().take(self.vision).collect();
+        let Some((anchor, members)) = wanted.split_first() else {
+            return;
+        };
+
+        let t0 = Instant::now();
+        let anchor_print = crate::featureprint::compute(anchor);
+        let mut compared = 0usize;
+        for member in members {
+            let (Ok(a), Ok(m)) = (&anchor_print, crate::featureprint::compute(member)) else {
+                continue;
+            };
+            if crate::featureprint::feature_distance(a, &m).is_ok() {
+                compared += 1;
+            }
+        }
+        eprintln!(
+            "[profile] {compared} feature-print comparisons in {:?}",
+            t0.elapsed()
+        );
+
+        // Through the signal cache, the way `App::request_face_quality` reads
+        // it: a photo whose analysis was seeded from disk is never submitted.
+        // A cold run analyses every photo, a warm one none, which is the whole
+        // claim `signalcache` makes.
+        let mut cache = crate::signalcache::SignalCache::load(&self.dir);
+        let t0 = Instant::now();
+        let (mut hits, mut analysed) = (0usize, 0usize);
+        for p in &wanted {
+            if cache.get(p).and_then(|s| s.faces).is_some() {
+                hits += 1;
+                continue;
+            }
+            if let Ok(q) = crate::facequality::analyze(p) {
+                cache.record(p, crate::signalcache::Signal::Faces(q));
+                analysed += 1;
+            }
+        }
+        cache.flush_blocking(std::time::Duration::from_secs(10));
+        eprintln!(
+            "[profile] {analysed} face analyses, {hits} served from the signal \
+             cache, in {:?}",
+            t0.elapsed()
+        );
+
+        // Segmentation runs for one photo on demand, not over a set, so this
+        // phase reports the single wait the Loupe's overlay makes a user sit
+        // through rather than a throughput number.
+        let t0 = Instant::now();
+        let mask = crate::segmentation::segment(anchor);
+        eprintln!(
+            "[profile] segment {}: {:?} ({})",
+            anchor.file_name().unwrap_or_default().to_string_lossy(),
+            t0.elapsed(),
+            match &mask {
+                Ok(m) => format!("{:?} {}x{}", m.source, m.width, m.height),
+                Err(e) => e.clone(),
+            }
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn vision_signals(&self, _photos: &[PathBuf]) {
+        eprintln!("[profile] Vision signals are macOS only; phase skipped");
     }
 
     /// What an Auto Tone batch costs per photo once its thumbnail is in
@@ -160,13 +246,16 @@ impl Run {
     }
 
     /// What `App::open` does on a folder before the first frame: list the
-    /// images, list the sidebar's subfolders, read the sidecars, and sweep the
-    /// thumbnail cache. The sidecar read and the sweep run on their own thread
-    /// in the app; here they are inline, so the report attributes them.
+    /// images, list the sidebar's subfolders, read the sidecars, load the
+    /// derived-signal cache, and sweep the thumbnail cache. The sidecar read
+    /// and the sweep run on their own thread in the app; here they are inline,
+    /// so the report attributes them. The signal cache load is on the UI
+    /// thread in the app too, which is why its cost belongs in this phase.
     fn folder_load(&self) -> Playlist {
         let playlist = Playlist::from_dir(&self.dir);
         crate::navigation::list_subdirs(&self.dir);
         crate::catalog::load_sidecars(&self.dir);
+        crate::signalcache::SignalCache::load(&self.dir);
         crate::thumbnail::sweep_orphans(&self.dir);
         playlist
     }
@@ -228,6 +317,15 @@ impl Run {
             );
         }
     }
+}
+
+/// Removes `dir`'s derived-signal cache, so the Vision phase measures a first
+/// visit. Reports whether there was one.
+fn drop_signal_cache(dir: &Path) -> bool {
+    let file = dir
+        .join(crate::catalog::SIDECAR_DIR)
+        .join(crate::signalcache::CACHE_FILE);
+    std::fs::remove_file(file).is_ok()
 }
 
 /// Removes `dir`'s cached thumbnails and nothing else. Sidecars carry the

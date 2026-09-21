@@ -282,6 +282,22 @@ pub(super) const STRIP_CELL_STYLE: CellStyle = CellStyle {
     hide_zero_stars: true,
 };
 
+/// Radius of a corner badge, scaled with the UI text size.
+fn badge_radius(style: &egui::Style) -> f32 {
+    font_size::px(style, 9.0)
+}
+
+/// Centre of the corner badge `align` names in a cell of `rect`, inset past the
+/// rounded corner.
+fn badge_center(
+    rect: egui::Rect,
+    style: &CellStyle,
+    badge_r: f32,
+    align: egui::Align2,
+) -> egui::Pos2 {
+    align.pos_in_rect(&rect.shrink(style.corner + badge_r))
+}
+
 /// Thumbnail cell shared by the grid and the filmstrip. `selected` means the
 /// cell is in the multi-selection; `primary` means it is the active cell and
 /// gets a thicker outline.
@@ -325,7 +341,7 @@ pub(super) fn thumbnail_cell(
         );
     }
 
-    let badge_r = font_size::px(ui.style(), 9.0);
+    let badge_r = badge_radius(ui.style());
     // Corners: burst badge top-left, duplicate badge top-right, eyes-closed
     // bottom-right, stars bottom-left. One photo can show all four.
     match app.burst_mark_at(pos) {
@@ -334,7 +350,7 @@ pub(super) fn thumbnail_cell(
                 .rect_filled(rect, style.corner, egui::Color32::from_black_alpha(140));
         }
         Some(BurstMark::Best) => {
-            let c = rect.left_top() + egui::vec2(style.corner + badge_r, style.corner + badge_r);
+            let c = badge_center(rect, style, badge_r, egui::Align2::LEFT_TOP);
             ui.painter()
                 .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
             ui.painter().text(
@@ -354,8 +370,7 @@ pub(super) fn thumbnail_cell(
                 .rect_filled(rect, style.corner, egui::Color32::from_black_alpha(90));
         }
         Some(DuplicateMark::Best) => {
-            let c =
-                rect.right_top() + egui::vec2(-(style.corner + badge_r), style.corner + badge_r);
+            let c = badge_center(rect, style, badge_r, egui::Align2::RIGHT_TOP);
             ui.painter()
                 .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
             ui.painter().text(
@@ -370,8 +385,7 @@ pub(super) fn thumbnail_cell(
     }
 
     if app.eyes_closed_at(pos) {
-        let c =
-            rect.right_bottom() + egui::vec2(-(style.corner + badge_r), -(style.corner + badge_r));
+        let c = badge_center(rect, style, badge_r, egui::Align2::RIGHT_BOTTOM);
         ui.painter()
             .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
         ui.painter().text(
@@ -440,17 +454,18 @@ pub(super) fn grid_cell(
     let selected = app.is_selected(pos);
     let response = thumbnail_cell(ui, app, pos, cell, selected, primary, &GRID_CELL_STYLE);
     if response.clicked() {
-        // A click on the duplicate badge opens Survey Mode. The badge
-        // position must match the one `thumbnail_cell` draws.
+        // A click on the duplicate badge opens Survey Mode.
         if app.dup_mark_at(pos).is_some() {
             if let Some(click_pos) = response.interact_pointer_pos() {
-                let badge_r = font_size::px(ui.style(), 9.0);
-                let badge_center = response.rect.right_top()
-                    + egui::vec2(
-                        -(GRID_CELL_STYLE.corner + badge_r),
-                        GRID_CELL_STYLE.corner + badge_r,
-                    );
-                if click_pos.distance(badge_center) <= badge_r + 1.0 {
+                let badge_r = badge_radius(ui.style());
+                let center = badge_center(
+                    response.rect,
+                    &GRID_CELL_STYLE,
+                    badge_r,
+                    egui::Align2::RIGHT_TOP,
+                );
+                // A hair of slop, so a click at the badge's edge still lands.
+                if click_pos.distance(center) <= badge_r + 1.0 {
                     out.actions.push(UiAction::OpenSurvey(pos));
                     out.actions.push(UiAction::Focus(Region::Grid));
                     return;

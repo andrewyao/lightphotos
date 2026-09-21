@@ -111,24 +111,26 @@ impl Exporter {
             let res_tx = res_tx.clone();
             let spawned = thread::Builder::new()
                 .name(format!("export-worker-{i}"))
-                .spawn(move || loop {
-                    // Hold the lock only while receiving, not during the export.
-                    let job = {
-                        let rx = match job_rx.lock() {
-                            Ok(rx) => rx,
-                            Err(_) => return,
+                .spawn(move || {
+                    loop {
+                        // Hold the lock only while receiving, not during the export.
+                        let job = {
+                            let rx = match job_rx.lock() {
+                                Ok(rx) => rx,
+                                Err(_) => return,
+                            };
+                            match rx.recv() {
+                                Ok(job) => job,
+                                // The Exporter was dropped.
+                                Err(_) => return,
+                            }
                         };
-                        match rx.recv() {
-                            Ok(job) => job,
-                            // The Exporter was dropped.
-                            Err(_) => return,
-                        }
-                    };
 
-                    let src = job.src.clone();
-                    let result = do_export(job);
-                    if res_tx.send(ExportOutcome { src, result }).is_err() {
-                        break;
+                        let src = job.src.clone();
+                        let result = do_export(job);
+                        if res_tx.send(ExportOutcome { src, result }).is_err() {
+                            break;
+                        }
                     }
                 });
             // wasm32 cannot spawn threads. Log and continue instead of
@@ -166,7 +168,11 @@ impl Exporter {
 
 #[cfg(test)]
 mod tests {
+    // Every test below is gated the same way, so on macOS without `raw-probe`
+    // the module is empty and these imports would be unused.
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
     use super::*;
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
     use std::io::Cursor;
 
     /// With no edits, a solid-color source keeps its size and roughly its
