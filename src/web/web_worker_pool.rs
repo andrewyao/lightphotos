@@ -293,7 +293,7 @@ fn worker_assets() -> WorkerAssets {
             return WorkerAssets {
                 dir: String::new(),
                 version: String::new(),
-            }
+            };
         }
     };
     let origin = window.location().origin().unwrap_or_default();
