@@ -251,104 +251,111 @@ impl Loader {
             let dedicated_full = i == 0 && workers > 1;
             let spawned = thread::Builder::new()
                 .name(format!("decode-worker-{i}"))
-                .spawn(move || loop {
-                    // Hold the lock only to take one job, so a slow decode never
-                    // blocks the queue.
-                    let job = {
-                        let mut q = match shared.queue.lock() {
-                            Ok(q) => q,
-                            Err(_) => return,
-                        };
-                        loop {
-                            if q.shutdown {
-                                return;
-                            }
-                            if let Some(j) = q.take_next(dedicated_full) {
-                                break j;
-                            }
-                            q = match shared.ready.wait(q) {
+                .spawn(move || {
+                    loop {
+                        // Hold the lock only to take one job, so a slow decode never
+                        // blocks the queue.
+                        let job = {
+                            let mut q = match shared.queue.lock() {
                                 Ok(q) => q,
                                 Err(_) => return,
                             };
-                        }
-                    };
+                            loop {
+                                if q.shutdown {
+                                    return;
+                                }
+                                if let Some(j) = q.take_next(dedicated_full) {
+                                    break j;
+                                }
+                                q = match shared.ready.wait(q) {
+                                    Ok(q) => q,
+                                    Err(_) => return,
+                                };
+                            }
+                        };
 
-                    // Decoders can panic (for example across the ImageIO FFI).
-                    // Catching it keeps the worker alive and still sends a
-                    // result, so the path leaves the caller's in-flight set.
-                    // AssertUnwindSafe is fine: the closures own no shared state.
-                    let result = match job {
-                        Job::Speed(path, target) => {
-                            let t0 = web_time::Instant::now();
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                crate::thumbnail::decode_at_size(
-                                    &path,
-                                    target,
-                                    crate::thumbnail::EmbeddedPreview::UseIfPresent,
-                                )
-                            }))
-                            .unwrap_or_else(|_| {
-                                Err(format!("speed decode panicked: {}", path.display()))
-                            });
-                            report_decode("speed", &path, target, t0, &r);
-                            JobResult::Speed(path, target, r)
-                        }
-                        Job::Preview(path, target) => {
-                            let t0 = web_time::Instant::now();
-                            // Not `image_decode::decode`: that decodes at full
-                            // size and then shrinks, which is slower than a
-                            // decode at the target size.
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                crate::thumbnail::decode_at_size(
-                                    &path,
-                                    target,
-                                    crate::thumbnail::EmbeddedPreview::Never,
-                                )
-                            }))
-                            .unwrap_or_else(|_| {
-                                Err(format!("preview decode panicked: {}", path.display()))
-                            });
-                            report_decode("preview", &path, target, t0, &r);
-                            JobResult::Preview(path, target, r)
-                        }
-                        Job::Full(path, target) => {
-                            let t0 = web_time::Instant::now();
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                image_decode::decode(&path, target)
-                            }))
-                            .unwrap_or_else(|_| {
-                                Err(format!("decode panicked: {}", path.display()))
-                            });
-                            report_decode("full", &path, target, t0, &r);
-                            JobResult::Full(path, r)
-                        }
-                        Job::Thumb(path, max_px) => {
-                            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                thumbs.get_or_make(&path)
-                            }))
-                            .unwrap_or_else(|_| {
-                                Err(format!("thumbnail panicked: {}", path.display()))
-                            });
-                            JobResult::Thumb(path, max_px, r)
-                        }
-                        Job::Exif(path) => {
-                            let m = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                image_decode::read_metadata(&path)
-                            }))
-                            .unwrap_or_default();
-                            JobResult::Exif(path, m)
-                        }
-                        Job::Meta(path) => {
-                            let t = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                image_decode::capture_time(&path)
-                            }))
-                            .unwrap_or(None);
-                            JobResult::Meta(path, t)
-                        }
-                    };
+                        // Decoders can panic (for example across the ImageIO FFI).
+                        // Catching it keeps the worker alive and still sends a
+                        // result, so the path leaves the caller's in-flight set.
+                        // AssertUnwindSafe is fine: the closures own no shared state.
+                        let result =
+                            match job {
+                                Job::Speed(path, target) => {
+                                    let t0 = web_time::Instant::now();
+                                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                        || {
+                                            crate::thumbnail::decode_at_size(
+                                                &path,
+                                                target,
+                                                crate::thumbnail::EmbeddedPreview::UseIfPresent,
+                                            )
+                                        },
+                                    ))
+                                    .unwrap_or_else(|_| {
+                                        Err(format!("speed decode panicked: {}", path.display()))
+                                    });
+                                    report_decode("speed", &path, target, t0, &r);
+                                    JobResult::Speed(path, target, r)
+                                }
+                                Job::Preview(path, target) => {
+                                    let t0 = web_time::Instant::now();
+                                    // Not `image_decode::decode`: that decodes at full
+                                    // size and then shrinks, which is slower than a
+                                    // decode at the target size.
+                                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                        || {
+                                            crate::thumbnail::decode_at_size(
+                                                &path,
+                                                target,
+                                                crate::thumbnail::EmbeddedPreview::Never,
+                                            )
+                                        },
+                                    ))
+                                    .unwrap_or_else(|_| {
+                                        Err(format!("preview decode panicked: {}", path.display()))
+                                    });
+                                    report_decode("preview", &path, target, t0, &r);
+                                    JobResult::Preview(path, target, r)
+                                }
+                                Job::Full(path, target) => {
+                                    let t0 = web_time::Instant::now();
+                                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                        || image_decode::decode(&path, target),
+                                    ))
+                                    .unwrap_or_else(|_| {
+                                        Err(format!("decode panicked: {}", path.display()))
+                                    });
+                                    report_decode("full", &path, target, t0, &r);
+                                    JobResult::Full(path, r)
+                                }
+                                Job::Thumb(path, max_px) => {
+                                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                        || thumbs.get_or_make(&path),
+                                    ))
+                                    .unwrap_or_else(|_| {
+                                        Err(format!("thumbnail panicked: {}", path.display()))
+                                    });
+                                    JobResult::Thumb(path, max_px, r)
+                                }
+                                Job::Exif(path) => {
+                                    let m = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                        || image_decode::read_metadata(&path),
+                                    ))
+                                    .unwrap_or_default();
+                                    JobResult::Exif(path, m)
+                                }
+                                Job::Meta(path) => {
+                                    let t = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                        || image_decode::capture_time(&path),
+                                    ))
+                                    .unwrap_or(None);
+                                    JobResult::Meta(path, t)
+                                }
+                            };
 
-                    if res_tx.send(result).is_err() {
-                        break;
+                        if res_tx.send(result).is_err() {
+                            break;
+                        }
                     }
                 });
             // Spawning fails on wasm32, which has no OS threads. Log and carry
