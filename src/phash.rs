@@ -10,6 +10,7 @@ const HASH_H: usize = 8;
 
 /// 64-bit difference hash of row-major RGBA8 pixels. `0` for empty input or a
 /// short buffer.
+#[hotpath::measure]
 pub fn dhash(rgba: &[u8], width: u32, height: u32) -> u64 {
     if width == 0 || height == 0 || rgba.len() < (width as usize * height as usize * 4) {
         return 0;

@@ -24,6 +24,7 @@ pub(crate) const EXPORTS_DIR: &str = "Exports";
 /// built only under `raw-probe`, for tests.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
+#[hotpath::measure]
 pub fn bake_jpeg(
     src_bytes: &[u8],
     is_raw: bool,
@@ -38,6 +39,7 @@ pub fn bake_jpeg(
 /// in an `Arc` and passes it to rawler without copying.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
+#[hotpath::measure]
 pub fn bake_jpeg_from_shared_vec(
     src_bytes: std::sync::Arc<Vec<u8>>,
     is_raw: bool,
@@ -258,6 +260,7 @@ impl ExportFs for NativeFs {
 
 /// Decode `src` at full resolution, bake in its edits, and write the JPEG to
 /// `dest`.
+#[hotpath::measure]
 fn do_export(job: ExportJob) -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     {

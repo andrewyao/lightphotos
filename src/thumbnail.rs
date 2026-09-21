@@ -111,6 +111,7 @@ fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage
 /// The EXIF IFD1 thumbnail from file bytes. wasm32 calls this directly
 /// because it has no file path.
 #[cfg(not(target_os = "macos"))]
+#[hotpath::measure]
 pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<DecodedImage> {
     let mut reader = std::io::Cursor::new(bytes);
     let source = exif::Reader::new().read_from_container(&mut reader).ok()?;
@@ -173,6 +174,7 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
 /// different from our RAW develop, so it must not stand in for it.
 /// `catch_unwind` guards against panics inside rawler.
 #[cfg(not(target_os = "macos"))]
+#[hotpath::measure]
 pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<DecodedImage> {
     let run = std::panic::AssertUnwindSafe(|| -> Option<DecodedImage> {
         let source = rawler::rawsource::RawSource::new_from_slice(bytes);
