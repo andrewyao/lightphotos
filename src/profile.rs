@@ -20,6 +20,7 @@
 //! LIGHTPHOTOS_PROFILE_COLD=1 cargo run --release --features hotpath-alloc -- --profile ~/Pictures/Trip
 //! ```
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -85,6 +86,11 @@ const PHASES: &[Phase] = &[
         label: "path/thumbnail_grid",
         key: "grid",
         run: Run::thumbnail_grid,
+    },
+    Phase {
+        label: "path/thumbnail_strip",
+        key: "strip",
+        run: Run::thumbnail_strip,
     },
     Phase {
         label: "path/open_photo",
@@ -347,6 +353,44 @@ impl Run {
         eprintln!(
             "[profile] {} thumbnails in {:?}",
             wanted.len(),
+            t0.elapsed()
+        );
+    }
+
+    /// The filmstrip filling itself while the user steps through the Loupe.
+    /// It asks for the same `THUMB_PX` thumbnails through the same `Loader`
+    /// as the grid, so what this phase measures is not a different decode but
+    /// a different working-set shape. `App::working_positions` hands the
+    /// Loupe a window of `strip_range` plus or minus eight, and that window
+    /// slides by one photo per step, so all but its two new edges are already
+    /// in the cache. One `Loader` spans the whole walk to keep that true, and
+    /// the count on the report line is the number of photos the walk actually
+    /// asked the decode pool for.
+    fn thumbnail_strip(&self, photos: &[PathBuf]) {
+        const MARGIN: usize = 8;
+        let len = photos.len();
+        let steps = self.opens.min(len);
+        let mut loader = Loader::new(16384);
+        let mut fetched: HashSet<PathBuf> = HashSet::new();
+
+        let t0 = Instant::now();
+        for i in 0..steps {
+            let window = &photos[i.saturating_sub(MARGIN)..(i + MARGIN + 1).min(len)];
+            loader.set_thumb_working_set_size(window.len());
+            for path in window {
+                fetched.insert(path.clone());
+                loader.request_thumb(path.clone(), THUMB_PX);
+            }
+            while window.iter().any(|p| {
+                loader.get_thumb(p, THUMB_PX).is_none() && !loader.thumb_failed(p, THUMB_PX)
+            }) {
+                loader.poll_all();
+                std::thread::yield_now();
+            }
+        }
+        eprintln!(
+            "[profile] filmstrip stepped {steps} times over {} thumbnails in {:?}",
+            fetched.len(),
             t0.elapsed()
         );
     }
