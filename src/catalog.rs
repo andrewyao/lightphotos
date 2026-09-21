@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::develop::{Adjustments, TouchUp};
 
 mod writeback;
+pub(crate) use writeback::LoadMark;
 use writeback::{WriteOp, Writeback};
 
 /// Hidden subfolder holding a directory's sidecars and thumbnail cache.
@@ -169,17 +170,29 @@ impl Catalog {
     #[cfg(not(target_arch = "wasm32"))]
     #[hotpath::measure]
     pub fn open_dir(&mut self, dir: &Path) {
-        self.switch_dir(dir);
+        let mark = self.switch_dir(dir);
         let loaded = load_sidecars(dir);
-        self.apply_loaded(dir, loaded);
+        self.apply_loaded(dir, mark, loaded);
     }
 
     /// Make `dir` active and clear the cache without disk I/O, so no lookup
     /// sees the previous directory's records.
-    pub(crate) fn switch_dir(&mut self, dir: &Path) {
+    ///
+    /// Every load starts here, so this is also where a load takes its place in
+    /// the write order. The returned mark must reach [`Catalog::apply_loaded`],
+    /// or [`Catalog::abandon_load`] if the load never runs.
+    #[must_use]
+    pub(crate) fn switch_dir(&mut self, dir: &Path) -> LoadMark {
         self.dir = Some(dir.to_path_buf());
         self.images.clear();
         self.dirty.clear();
+        self.writeback.begin_load()
+    }
+
+    /// Give back a mark whose load was never started, so the write history it
+    /// was holding open can be dropped.
+    pub(crate) fn abandon_load(&mut self) {
+        self.writeback.end_load();
     }
 
     /// Whether `dir` is the directory represented by the in-memory cache.
@@ -189,10 +202,15 @@ impl Catalog {
     }
 
     /// Merge a background load into the cache if `dir` is still active.
-    /// Keys in `dirty` are skipped, because the load's snapshot is older than
-    /// any edit made after `switch_dir`. Unreadable sidecars are reported
-    /// even when the load is stale.
-    pub(crate) fn apply_loaded(&mut self, dir: &Path, loaded: SidecarLoad) {
+    ///
+    /// Two things can make the load's snapshot older than what we know. Keys in
+    /// `dirty` were edited during this visit, so they are skipped. Writes from
+    /// an earlier visit are not in `dirty`, because `switch_dir` clears it, and
+    /// may still have been in flight when this load was requested; `mark` is
+    /// what identifies those, and the write-back queue restores them.
+    /// Unreadable sidecars are reported even when the load is stale.
+    pub(crate) fn apply_loaded(&mut self, dir: &Path, mark: LoadMark, loaded: SidecarLoad) {
+        self.writeback.end_load();
         if loaded.skipped > 0 {
             self.last_error = Some(skipped_message(loaded.skipped));
         }
@@ -204,7 +222,7 @@ impl Catalog {
                 self.images.insert(name, rec);
             }
         }
-        self.writeback.overlay(dir, &mut self.images);
+        self.writeback.overlay(dir, mark, &mut self.images);
     }
 
     /// Take the pending persist error's cause. Each failure is returned once.
@@ -836,12 +854,12 @@ mod tests {
         cat.set(&pa, 5);
         // A background load for `a` was started, but before it lands the
         // active directory switches to `b`.
-        cat.switch_dir(&b);
+        let mark = cat.switch_dir(&b);
         assert_eq!(cat.get(&pa), None, "switching clears the cache immediately");
 
         // The stale `a` load lands and must be ignored.
         let stale = load_sidecars(&a);
-        cat.apply_loaded(&a, stale);
+        cat.apply_loaded(&a, mark, stale);
         assert_eq!(
             cat.get(&pa),
             None,
@@ -865,12 +883,12 @@ mod tests {
         drop(seed);
 
         let mut cat = Catalog::new();
-        cat.switch_dir(&dir);
+        let mark = cat.switch_dir(&dir);
         // A write lands after switch_dir but before the background load,
         // whose snapshot predates the write, returns.
         cat.set(&written, 5);
         let loaded = load_sidecars(&dir); // snapshot predates `written`'s sidecar...
-        cat.apply_loaded(&dir, loaded);
+        cat.apply_loaded(&dir, mark, loaded);
 
         assert_eq!(
             cat.get(&written),
@@ -896,10 +914,10 @@ mod tests {
         Catalog::with_dir(dir.clone()).set(&p, 4);
 
         let mut cat = Catalog::new();
-        cat.switch_dir(&dir);
+        let mark = cat.switch_dir(&dir);
         let loaded = load_sidecars(&dir); // snapshot still carries the rating
         cat.remove(&p); // the user clears it before the load lands
-        cat.apply_loaded(&dir, loaded);
+        cat.apply_loaded(&dir, mark, loaded);
 
         assert_eq!(
             cat.get(&p),
@@ -920,10 +938,10 @@ mod tests {
         std::fs::write(sidecar_for(&a, "bad.jpg"), b"{not valid json").unwrap();
 
         let mut cat = Catalog::new();
-        cat.switch_dir(&a);
+        let mark = cat.switch_dir(&a);
         let loaded = load_sidecars(&a); // has skipped == 1
-        cat.switch_dir(&b); // the user already left `a` before the load lands
-        cat.apply_loaded(&a, loaded);
+        let _ = cat.switch_dir(&b); // the user already left `a` before the load lands
+        cat.apply_loaded(&a, mark, loaded);
 
         assert!(
             cat.take_error().is_some(),
@@ -986,9 +1004,9 @@ mod tests {
         cat.set(&p, 5);
         // The user leaves and comes back while that write is still queued,
         // which clears both the cache and `dirty`.
-        cat.switch_dir(&elsewhere);
-        cat.switch_dir(&dir);
-        cat.apply_loaded(&dir, stale);
+        let _ = cat.switch_dir(&elsewhere);
+        let mark = cat.switch_dir(&dir);
+        cat.apply_loaded(&dir, mark, stale);
 
         assert_eq!(
             cat.get(&p),
@@ -1002,6 +1020,72 @@ mod tests {
             Catalog::with_dir(dir.clone()).get(&p),
             Some(5),
             "the queued write must still land in its own folder after the round trip"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&elsewhere).unwrap();
+    }
+
+    /// The same round trip, but the queued write lands before the stale load
+    /// is applied. Nothing the write left behind at apply time can correct the
+    /// load, so the mark has to: the write was still outstanding when the load
+    /// was requested, so the load's snapshot may be older than it.
+    ///
+    /// This is the ordinary case for a large batch rather than a narrow race.
+    /// The frame loop drains completions before it applies loads, and a 20 000
+    /// photo queue empties in about 2.5 s while a directory scan of 20 000
+    /// sidecars is still running.
+    #[test]
+    fn a_completed_write_is_not_reverted_by_a_load_that_predates_it() {
+        let dir = unique_tmp_dir();
+        let elsewhere = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+
+        Catalog::with_dir(dir.clone()).set(&p, 3);
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        let stale = load_sidecars(&dir);
+        cat.set(&p, 5);
+        let _ = cat.switch_dir(&elsewhere);
+        let mark = cat.switch_dir(&dir);
+        flush(&mut cat);
+        cat.apply_loaded(&dir, mark, stale);
+
+        assert_eq!(
+            cat.get(&p),
+            Some(5),
+            "a load that predates a completed write must not put the old rating back"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&elsewhere).unwrap();
+    }
+
+    /// The mark must not shield a record forever: a sidecar changed outside the
+    /// app between visits has to win on the revisit, which is what
+    /// `reloading_a_folder_drops_values_its_sidecars_no_longer_have` relies on.
+    #[test]
+    fn a_load_requested_after_a_write_landed_still_wins() {
+        let dir = unique_tmp_dir();
+        let elsewhere = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        cat.set(&p, 5);
+        flush(&mut cat);
+
+        // Another tool rewrites the sidecar while the user is elsewhere.
+        Catalog::with_dir(dir.clone()).set(&p, 1);
+
+        let _ = cat.switch_dir(&elsewhere);
+        let mark = cat.switch_dir(&dir);
+        let loaded = load_sidecars(&dir);
+        cat.apply_loaded(&dir, mark, loaded);
+
+        assert_eq!(
+            cat.get(&p),
+            Some(1),
+            "a snapshot taken after our write landed is the newer truth"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();

@@ -11,7 +11,7 @@ impl App {
     /// `switch_dir` clears the cache first, so the old folder's ratings never
     /// show for the new one. `poll_catalog_load` folds in the result.
     pub(super) fn request_catalog_load(&mut self, dir: &Path) {
-        self.catalog.switch_dir(dir);
+        let mark = self.catalog.switch_dir(dir);
         self.catalog_load_token += 1;
         let token = self.catalog_load_token;
         let dir = dir.to_path_buf();
@@ -24,7 +24,7 @@ impl App {
                 .name("catalog-load".into())
                 .spawn(move || {
                     let loaded = crate::catalog::load_sidecars(&for_thread);
-                    let _ = tx.send((for_thread.clone(), token, loaded));
+                    let _ = tx.send((for_thread.clone(), token, mark, loaded));
                     // Sweep after sending, because the UI waits on the catalog
                     // and nothing waits on the sweep.
                     crate::thumbnail::sweep_orphans(&for_thread);
@@ -38,6 +38,7 @@ impl App {
                     // user's edits. Switching folders again retries.
                     self.catalog
                         .note_persist_error(format!("could not load {}: {e}", dir.display()));
+                    self.catalog.abandon_load();
                     self.catalog_load_pending = Some((dir, token));
                 }
             }
@@ -66,12 +67,13 @@ impl App {
                 let reads = self.web_read_inflight.clone();
                 wasm_bindgen_futures::spawn_local(async move {
                     let loaded = crate::web_catalog_fs::load_sidecars(&handle).await;
-                    let _ = tx.send((for_task, token, loaded));
+                    let _ = tx.send((for_task, token, mark, loaded));
                     crate::web_thumb_cache::sweep_orphans(&handle, &live, reads).await;
                 });
                 self.catalog_load_pending = Some((dir, token));
             }
             None => {
+                self.catalog.abandon_load();
                 self.catalog_load_pending = None;
             }
         }
@@ -80,8 +82,8 @@ impl App {
     /// Applies finished catalog loads and refreshes the ratings and edits
     /// mirrors for the open folder. Returns true while a load is still pending.
     pub(crate) fn poll_catalog_load(&mut self) -> bool {
-        while let Ok((dir, token, loaded)) = self.catalog_load_rx.try_recv() {
-            self.catalog.apply_loaded(&dir, loaded);
+        while let Ok((dir, token, mark, loaded)) = self.catalog_load_rx.try_recv() {
+            self.catalog.apply_loaded(&dir, mark, loaded);
             // Match the token too: after A, B, A navigation two loads for A can
             // be in flight, and only the latest clears pending.
             if self.catalog_load_pending.as_ref() == Some(&(dir.clone(), token)) {
