@@ -62,15 +62,6 @@ jobs:
         shell: bash
         run: ./scripts/setup-vendor-rawler.sh
 
-      # The `lightwatch` dependency is a path into gitignored vendor/lightwatch/
-      # and has to resolve here too. This copies from a lightwatch checkout
-      # rather than fetching one, because lightwatch is published nowhere a
-      # runner can reach, so this step is what fails until something publishes
-      # it. See the script's header.
-      - name: Vendor lightwatch
-        shell: bash
-        run: ./scripts/setup-vendor-lightwatch.sh
-
       # Only the shipped binary. The src/bin probes (face_probe, seg_probe) are
       # mac-only dev harnesses: they #[path]-reinclude the decode modules, and
       # the non-mac decode path pulls in crate::develop / crate::coregraphics

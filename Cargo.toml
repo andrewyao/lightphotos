@@ -81,10 +81,12 @@ hotpath = "0.26"
 # for the same reason hotpath above is not: `#[lightwatch::track]` has to
 # resolve in every build, and with `enabled` off the attribute injects a
 # zero-sized field and compiles no transport at all. Turned on by this crate's
-# `lightwatch` feature. The path is gitignored and materialized by
-# scripts/setup-vendor-lightwatch.sh, which has to run before any cargo
-# command, exactly like the rawler one.
-lightwatch = { package = "lightwatch-probe", path = "vendor/lightwatch/lightwatch-probe", default-features = false }
+# `lightwatch` feature. Fetched from git rather than vendored: cargo resolves a
+# path dependency even when the feature that uses it is off, so a path into a
+# sibling checkout would fail every build that did not have one, CI included.
+# Pinned to the branch that carries the `{Ident}Fields` constructor this crate's
+# call sites use; move it to a tag or to main once that lands there.
+lightwatch = { package = "lightwatch-probe", git = "https://github.com/andrewyao/lightwatch", branch = "wave2-census", default-features = false }
 
 rawler = { version = "0.7.2", optional = true }
 mozjpeg-rs = { version = "0.9.2", optional = true }
