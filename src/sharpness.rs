@@ -10,6 +10,7 @@ const TARGET_LONG: u32 = 1024;
 
 /// Relative sharpness of row-major RGBA8 pixels. Higher is sharper. `0.0` for
 /// empty input or a short buffer.
+#[hotpath::measure]
 pub fn sharpness(rgba: &[u8], width: u32, height: u32) -> f64 {
     if width == 0 || height == 0 || rgba.len() < (width as usize * height as usize * 4) {
         return 0.0;

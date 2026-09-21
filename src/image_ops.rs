@@ -23,6 +23,7 @@ fn crop_bounds(crop: Option<Crop>, w: u32, h: u32) -> (u32, u32, u32, u32) {
 
 /// RGBA8 to Rec.601 luma (0..255), box-averaged down to `out_w` x `out_h`.
 /// The output must not be larger than the input. Used by sharpness and dHash.
+#[hotpath::measure]
 pub(crate) fn resize_luma(
     rgba: &[u8],
     width: u32,
@@ -78,6 +79,7 @@ pub(crate) fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
 /// Burn edits into an opaque sRGB8 RGBA buffer: crop, then touch-ups and tone
 /// per pixel, then rotate by `rot` 90-degree clockwise steps. Returns
 /// `(w, h, rgba)`. Tone uses `develop::apply_linear`, which matches the shader.
+#[hotpath::measure]
 pub(crate) fn bake_edited(
     img: &DecodedImage,
     adj: &Adjustments,
@@ -242,6 +244,7 @@ fn apply_touchups(
 
 /// Rotate packed RGBA8 by `steps` 90-degree clockwise turns. Returns the new
 /// `(width, height, rgba)`.
+#[hotpath::measure]
 pub(crate) fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, Vec<u8>) {
     let steps = steps % 4;
     if steps == 0 {
@@ -271,6 +274,7 @@ pub(crate) fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, V
 /// origin. Edges clamp.
 // Only `seg_probe` uses this. The Loupe stretches masks on the GPU.
 #[allow(dead_code)]
+#[hotpath::measure]
 pub(crate) fn resample_bilinear_u8(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < (sw * sh) as usize {
         return Vec::new();
@@ -307,6 +311,7 @@ pub(crate) fn resample_bilinear_u8(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u3
 /// `(width, height, buffer)`. Same mapping as `image_decode`'s
 /// `apply_exif_orientation`.
 #[cfg(any(target_os = "macos", test))]
+#[hotpath::measure]
 pub(crate) fn orient_mask(src: &[u8], w: u32, h: u32, orientation: u8) -> (u32, u32, Vec<u8>) {
     if orientation <= 1 || src.len() < (w * h) as usize {
         return (w, h, src.to_vec());

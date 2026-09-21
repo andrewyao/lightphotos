@@ -625,6 +625,7 @@ fn read_orientation(source: &CGImageSource) -> u8 {
 
 /// Rotate or mirror RGBA8 pixels upright for EXIF orientation `1..=8`.
 /// Orientations `5..=8` swap width and height.
+#[hotpath::measure]
 pub(crate) fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImage {
     if orientation <= 1 {
         return img;

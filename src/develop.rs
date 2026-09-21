@@ -598,6 +598,7 @@ pub(crate) fn denoise_sample_with_strength(
 /// `rawler` RAW decoders (browser, Linux, Windows) call this after demosaic
 /// because rawler doesn't denoise; ImageIO on macOS does its own. Returns a
 /// copy of `buf` when `strength <= 0.0` or the size is bad.
+#[hotpath::measure]
 pub(crate) fn denoise_linear_rgb_buffer(
     strength: f32,
     width: usize,
