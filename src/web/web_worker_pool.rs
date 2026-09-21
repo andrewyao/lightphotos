@@ -20,7 +20,7 @@ use web_sys::{
 const MAX_REPLACEMENT_ATTEMPTS: u8 = 3;
 const WORKER_READY_TIMEOUT_MS: i32 = 10_000;
 
-use crate::image_decode::{DecodedImage, PixelFormat};
+use crate::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
 
 /// What a job is for. `Preview` and `Full` get the full RAW demosaic with
 /// linear output. `Thumb` and `Speed` (the Loupe's quick screen-fit first
@@ -503,12 +503,12 @@ fn handle_worker_message(
         } else {
             PixelFormat::Srgb8
         };
-        Ok(DecodedImage {
+        Ok(DecodedImage::new_tracked(DecodedImageFields {
             width,
             height,
             rgba,
             pixel_format,
-        })
+        }))
     } else {
         Err(get_string(&data, "error").unwrap_or_else(|| "unknown worker error".to_string()))
     };

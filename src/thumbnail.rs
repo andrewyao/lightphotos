@@ -32,6 +32,8 @@ use objc2_image_io::{
 #[cfg(target_os = "macos")]
 use crate::image_decode::cgimage_to_rgba;
 use crate::image_decode::{DecodedImage, PixelFormat};
+#[cfg(not(target_os = "macos"))]
+use crate::image_decode::DecodedImageFields;
 
 /// Whether ImageIO may substitute the file's embedded preview for a real
 /// decode-at-size.
@@ -153,12 +155,12 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
         image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
     };
     Some(crate::image_decode::apply_exif_orientation(
-        DecodedImage {
+        DecodedImage::new_tracked(DecodedImageFields {
             width: nw,
             height: nh,
             rgba,
             pixel_format: PixelFormat::Srgb8,
-        },
+        }),
         orientation,
     ))
 }
@@ -210,12 +212,12 @@ pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<
             image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
         };
         Some(crate::image_decode::apply_exif_orientation(
-            DecodedImage {
+            DecodedImage::new_tracked(DecodedImageFields {
                 width: nw,
                 height: nh,
                 rgba,
                 pixel_format: PixelFormat::Srgb8,
-            },
+            }),
             orientation,
         ))
     });

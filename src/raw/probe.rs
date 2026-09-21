@@ -331,12 +331,12 @@ fn embedded_preview_diag(bytes: &[u8], max_px: u32) -> Option<image_decode::Deco
         image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
     };
     Some(image_decode::apply_exif_orientation(
-        image_decode::DecodedImage {
+        image_decode::DecodedImage::new_tracked(image_decode::DecodedImageFields {
             width: nw,
             height: nh,
             rgba,
             pixel_format: image_decode::PixelFormat::Srgb8,
-        },
+        }),
         orientation,
     ))
 }
@@ -378,12 +378,12 @@ fn rawler_full_image_diag(bytes: &[u8], max_px: u32) -> Option<image_decode::Dec
         image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
     };
     Some(image_decode::apply_exif_orientation(
-        image_decode::DecodedImage {
+        image_decode::DecodedImage::new_tracked(image_decode::DecodedImageFields {
             width: nw,
             height: nh,
             rgba,
             pixel_format: image_decode::PixelFormat::Srgb8,
-        },
+        }),
         orientation,
     ))
 }

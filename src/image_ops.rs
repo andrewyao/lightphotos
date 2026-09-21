@@ -335,6 +335,7 @@ pub(crate) fn orient_mask(src: &[u8], w: u32, h: u32, orientation: u8) -> (u32, 
 mod tests {
     use super::*;
     use crate::develop::Crop;
+    use crate::image_decode::DecodedImageFields;
 
     fn px(v: u8) -> [u8; 4] {
         [v, v, v, 255]
@@ -361,12 +362,12 @@ mod tests {
     fn identity_bake_preserves_opaque_pixels() {
         // Opaque pixels survive the sRGB to linear round trip exactly.
         let src = [px(0), px(64), px(128), px(255)].concat();
-        let img = DecodedImage {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 2,
             height: 2,
             rgba: src.clone(),
             pixel_format: PixelFormat::Srgb8,
-        };
+        });
         let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], 0);
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
@@ -375,12 +376,12 @@ mod tests {
     #[test]
     fn bake_crop_slices_to_the_crop_rect() {
         let src = [px(1), px(2), px(3), px(4)].concat();
-        let img = DecodedImage {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 4,
             height: 1,
             rgba: src,
             pixel_format: PixelFormat::Srgb8,
-        };
+        });
         let mut adj = Adjustments::default();
         adj.crop = Some(Crop {
             left: 0.5,
@@ -397,12 +398,12 @@ mod tests {
     #[test]
     fn bake_denoise_zero_matches_identity_bake() {
         let src = [px(0), px(64), px(128), px(255)].concat();
-        let img = DecodedImage {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 2,
             height: 2,
             rgba: src.clone(),
             pixel_format: PixelFormat::Srgb8,
-        };
+        });
         let adj = Adjustments {
             denoise: 0.0,
             ..Default::default()
@@ -419,12 +420,12 @@ mod tests {
             let v = if i == 4 { 255 } else { 0 };
             src[i * 4..i * 4 + 4].copy_from_slice(&px(v));
         }
-        let img = DecodedImage {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 3,
             height: 3,
             rgba: src,
             pixel_format: PixelFormat::Srgb8,
-        };
+        });
         let (_, _, out0) = bake_edited(&img, &Adjustments::default(), &[], 0);
         let denoised = Adjustments {
             denoise: 100.0,
@@ -446,12 +447,12 @@ mod tests {
             let value = if x == 2 { 255 } else { 0 };
             src[x * 4..x * 4 + 4].copy_from_slice(&px(value));
         }
-        let img = DecodedImage {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 5,
             height: 1,
             rgba: src,
             pixel_format: PixelFormat::Srgb8,
-        };
+        });
         let touchup = TouchUp {
             center: [0.4, 0.0],
             radius: 0.4,
@@ -478,12 +479,12 @@ mod tests {
             px(90),
         ]
         .concat();
-        let img = DecodedImage {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 3,
             height: 3,
             rgba: src,
             pixel_format: PixelFormat::Srgb8,
-        };
+        });
         let adj = Adjustments {
             denoise: 50.0,
             ..Default::default()
