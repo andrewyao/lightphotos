@@ -220,8 +220,14 @@ impl App {
             {
                 self.toggle_left_tab()
             }
-            KeyCode::KeyB if !cmd && !alt => self.toggle_bursts(),
-            KeyCode::KeyD if !cmd && !alt => self.toggle_dupes(),
+            // Gated with the toolbar buttons, so the grouping tools are either
+            // wholly on or wholly off. Their two thresholds are still guesses
+            // that no real photo set has checked, and a key that silently
+            // applies an unvalidated verdict is worse than no key.
+            KeyCode::KeyB if !cmd && !alt && crate::app::SHOW_GROUPING_TOOLS => {
+                self.toggle_bursts()
+            }
+            KeyCode::KeyD if !cmd && !alt && crate::app::SHOW_GROUPING_TOOLS => self.toggle_dupes(),
             KeyCode::KeyE => {
                 if self.mode == ViewMode::Grid {
                     self.enter_loupe();
@@ -443,6 +449,45 @@ mod tests {
         press(&mut app, ModifiersState::empty(), KeyCode::BracketLeft);
         press(&mut app, ModifiersState::empty(), KeyCode::BracketLeft);
         assert_eq!(app.rotations.get(&paths[0]), Some(&3));
+    }
+
+    /// The grouping tools are either wholly reachable or wholly absent. While
+    /// the flag is off the keys must do nothing, and the shortcut overlay must
+    /// not advertise them, or a user presses a documented key and sees no
+    /// change. Flip `SHOW_GROUPING_TOOLS` and this test follows it.
+    #[test]
+    fn the_grouping_keys_and_their_help_agree_with_the_flag() {
+        let (mut app, _paths) = folder_app(2);
+        let before = (app.bursts_on(), app.dupes_on());
+
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyB);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyD);
+
+        if crate::app::SHOW_GROUPING_TOOLS {
+            assert_ne!(
+                (app.bursts_on(), app.dupes_on()),
+                before,
+                "B and D must toggle while the grouping tools are on"
+            );
+        } else {
+            assert_eq!(
+                (app.bursts_on(), app.dupes_on()),
+                before,
+                "B and D must do nothing while the grouping tools are off"
+            );
+        }
+
+        let advertised = crate::i18n::t()
+            .help
+            .iter()
+            .filter(|s| crate::app::SHOW_GROUPING_TOOLS || !s.needs_grouping)
+            .flat_map(|s| s.rows)
+            .any(|(keys, _)| *keys == "B" || *keys == "D");
+        assert_eq!(
+            advertised,
+            crate::app::SHOW_GROUPING_TOOLS,
+            "the overlay must list B and D exactly when they work"
+        );
     }
 
     #[test]
