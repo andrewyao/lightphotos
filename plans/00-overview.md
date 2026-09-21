@@ -18,7 +18,7 @@ Each task below is one whole plan file, executed as a unit. For each task:
 If the plan's own checklist can't be finished, leave this box unchecked and
 mark it `BLOCKED: <reason>` — its sub-checklist keeps the partial progress.
 
-- [x] Task 1: ~~Auto-tone, single photo + bulk selection~~ — **WON'T DO** (user decision, 2026-08-11). Dropped from the roadmap; no plan file, no implementation. Box checked only so plan-runner skips it (files: —)
+- [x] Task 1: Auto-tone, single photo + bulk selection — dropped from the roadmap on 2026-08-11 (user decision), then built anyway on 2026-09-14 outside the roadmap, commit `239af85`. Shipped as `src/autotone.rs` (pure analysis) + `src/app/autotone.rs` (wiring and the batch window); paced through a 32-photo window in `6e50544`. No plan file was ever written (files: —)
 - [x] Task 2: Duplicate grouping + Survey Mode — done, commit `87a8101` (files: plans/plan-c-duplicate-grouping-survey-mode.md)
 - [ ] Task 3: Native Linux/Windows port — Phase 1 (cfg-gate peripheral cluster) + Phase 2 (cross-platform decode/encode backend), verified on macOS only this pass; real Linux/Windows runtime and real-camera RAW fidelity left BLOCKED for the user's own follow-up on real Linux hardware. HEIC stays out of scope for non-mac (files: plans/plan-i-native-linux-windows-port.md)
 - [ ] Task 4: Web/WASM port feasibility gate — memo only, no checklist yet. Run the decode-harness verification described in the memo (sustained decode throughput for HEIC/RAW in-browser) before treating this as a go (files: plans/web-wasm-port-feasibility.md)
@@ -35,6 +35,7 @@ Standalone plans in this folder, not part of the roadmap sequence:
 - [x] Task 12: Zoom/pan support in compare mode — done, commit `2cdbf19` (files: plans/compare-mode-zoom.md)
 - [x] Task 13: Split app.rs and ui.rs into submodules — done, commit `6a917e3` (files: plans/refactor-split-app-ui-modules.md)
 - [ ] Task 14: Fix saved adjustments not applied until compare toggle (files: plans/fix-adjustments-not-applied-on-open.md)
+- [ ] Task 15: Defects and inconsistencies found in the 2026-09-20 Vision/ML audit — 21 items across runtime bugs, unvalidated constants, dead code, efficiency, observability, stale docs, and CI gaps. Its Task 19 corrects two false claims in *this* file, so read that before trusting the Reference section below (files: plans/defects-and-inconsistencies.md)
 
 <!--
 Tips:
