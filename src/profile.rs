@@ -1,23 +1,31 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Headless driver for the paths a culling session actually waits on. The
-//! three that every session pays are listing a folder, filling the grid with
-//! thumbnails, and opening one photo into the Loupe. Auto Tone and the Vision
-//! signals run on demand and are driven here too, because both are expensive
-//! enough to decide whether a feature can run unasked. Compiled only under
-//! the `hotpath` feature.
+//! Headless driver for the paths a culling session actually waits on.
+//! Listing a folder gates the rest and always runs. Seven phases sit behind
+//! it. The grid and the filmstrip both fill thumbnails and differ only in
+//! the shape of their working set. Opening a photo splits into the first
+//! pixels on screen and the preview escalation that sharpens them. The
+//! full-resolution decode is what zooming past the preview costs. Auto Tone,
+//! a batch export and the Vision signals are the jobs a user starts and then
+//! waits out. Compiled only under the `hotpath` feature.
 //!
 //! It exists because a report is only worth acting on if the next person can
 //! reproduce it. Driving the window by hand gives a different scroll depth and
 //! a different cache state every run, so the numbers cannot be compared
 //! before and after a change. This runs the same `navigation`, `catalog`,
-//! `Loader` and `thumbnail` code the window drives, minus egui and the GPU,
-//! over a folder named on the command line, and then returns so the hotpath
-//! guard drops and prints its report.
+//! `Loader`, `thumbnail` and `export` code the window drives, minus egui and
+//! the GPU, over a folder named on the command line, and then returns so the
+//! hotpath guard drops and prints its report.
+//!
+//! `LIGHTPHOTOS_PROFILE_PHASES` narrows a run to a comma-separated list of
+//! phase keys, and unset means every phase. `LIGHTPHOTOS_PROFILE_THUMBS`,
+//! `_OPENS`, `_PREVIEW_PX`, `_FULLS`, `_EXPORTS` and `_VISION` size the
+//! phases. `LIGHTPHOTOS_PROFILE_COLD=1` clears the folder's cached
+//! thumbnails first, so the grid phase measures a first visit.
 //!
 //! ```sh
 //! cargo run --release --features hotpath -- --profile ~/Pictures/Trip
-//! LIGHTPHOTOS_PROFILE_COLD=1 cargo run --release --features hotpath-alloc -- --profile ~/Pictures/Trip
+//! LIGHTPHOTOS_PROFILE_PHASES=full,export cargo run --release --features hotpath-alloc -- --profile ~/Pictures/Trip
 //! ```
 
 use std::collections::HashSet;
@@ -333,11 +341,11 @@ impl Run {
         );
     }
 
-    /// The batch operation the profile never covered, and the only path that
-    /// runs `image_ops::bake_edited` and a JPEG encode. It goes through
-    /// `crate::export::Exporter` the way `App` does, so the worker pool is
-    /// part of what gets measured rather than a private function called on
-    /// this thread.
+    /// The batch a user starts and walks away from, and the only phase that
+    /// bakes edits into a full-resolution decode and encodes a JPEG. It goes
+    /// through `crate::export::Exporter` the way `App` does, so the worker
+    /// pool is part of what gets measured rather than a private function
+    /// called on this thread.
     ///
     /// Every `dest` lands in a scratch directory named after this process,
     /// and the directory goes away when the phase ends. Profiling a folder
@@ -462,7 +470,9 @@ impl Run {
             }
         }
         eprintln!(
-            "[profile] filmstrip stepped {steps} times over {} thumbnails in {:?}",
+            "[profile] filmstrip: {steps} steps, windows of up to {}, {} thumbnails \
+             fetched, in {:?}",
+            (MARGIN * 2 + 1).min(len),
             fetched.len(),
             t0.elapsed()
         );
