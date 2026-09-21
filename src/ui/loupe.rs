@@ -373,47 +373,49 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
 
             // Subject selection is a way of viewing the photo, not an edit, so
             // it lives here rather than in the Develop panel.
-            let sel_size = egui::vec2(190.0, 22.0) * font_size::px(ui.style(), 1.0);
-            let sel_rect = egui::Rect::from_min_size(
-                egui::pos2(rect.right() - pad - sel_size.x, main_y - sel_size.y / 2.0),
-                sel_size,
-            );
-            ui.scope_builder(egui::UiBuilder::new().max_rect(sel_rect), |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let inverted = app.selection_inverted();
-                        if ui
-                            .add_enabled(
-                                app.selection_on(),
-                                egui::Button::selectable(inverted, t().invert),
-                            )
-                            .on_hover_text(t().invert_tip)
-                            .clicked()
-                        {
-                            out.actions.push(UiAction::ToggleSelectionInvert);
-                        }
+            if App::selection_supported() {
+                let sel_size = egui::vec2(190.0, 22.0) * font_size::px(ui.style(), 1.0);
+                let sel_rect = egui::Rect::from_min_size(
+                    egui::pos2(rect.right() - pad - sel_size.x, main_y - sel_size.y / 2.0),
+                    sel_size,
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(sel_rect), |ui| {
+                    ui.horizontal_centered(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let inverted = app.selection_inverted();
+                            if ui
+                                .add_enabled(
+                                    app.selection_on(),
+                                    egui::Button::selectable(inverted, t().invert),
+                                )
+                                .on_hover_text(t().invert_tip)
+                                .clicked()
+                            {
+                                out.actions.push(UiAction::ToggleSelectionInvert);
+                            }
 
-                        // The label shows pending and "no subject" states, which
-                        // would otherwise look like a broken button.
-                        let label = if !app.selection_on() {
-                            t().show_selection
-                        } else if app.selection_pending() {
-                            t().selection_pending
-                        } else if app.current_selection().is_some() {
-                            t().show_selection
-                        } else {
-                            t().no_subject
-                        };
-                        if ui
-                            .add(egui::Button::selectable(app.selection_on(), label))
-                            .on_hover_text(t().show_selection_tip)
-                            .clicked()
-                        {
-                            out.actions.push(UiAction::ToggleSelection);
-                        }
+                            // The label shows pending and "no subject" states, which
+                            // would otherwise look like a broken button.
+                            let label = if !app.selection_on() {
+                                t().show_selection
+                            } else if app.selection_pending() {
+                                t().selection_pending
+                            } else if app.current_selection().is_some() {
+                                t().show_selection
+                            } else {
+                                t().no_subject
+                            };
+                            if ui
+                                .add(egui::Button::selectable(app.selection_on(), label))
+                                .on_hover_text(t().show_selection_tip)
+                                .clicked()
+                            {
+                                out.actions.push(UiAction::ToggleSelection);
+                            }
+                        });
                     });
                 });
-            });
+            }
         });
 }
 

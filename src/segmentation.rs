@@ -8,6 +8,8 @@
 use std::path::Path;
 
 #[cfg(target_os = "macos")]
+use objc2::runtime::AnyClass;
+#[cfg(target_os = "macos")]
 use objc2::ClassType;
 #[cfg(target_os = "macos")]
 use objc2_core_video::{
@@ -64,8 +66,9 @@ impl lightwatch::Measured for Mask {
 
 impl Mask {
     /// Coverage at `(x, y)`, or 0 outside the mask.
-    // Only tests and `seg_probe` use this. The Loupe samples the mask on the GPU.
-    #[allow(dead_code)]
+    // Test-only. The Loupe samples the mask on the GPU and `seg_probe` resizes
+    // the whole plane, so nothing in a shipped build reads a single pixel.
+    #[cfg(test)]
     pub fn at(&self, x: u32, y: u32) -> u8 {
         if x >= self.width || y >= self.height {
             return 0;
@@ -147,6 +150,7 @@ const EMPTY_COVERAGE: f32 = 0.01;
 /// means no selection is available, which is normal for photos with no subject.
 /// Vision ignores EXIF orientation, so we rotate the mask ourselves.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn segment(path: &Path) -> Result<Mask, String> {
     let mask = match segment_person(path) {
         Ok(mask) if mask.solid_coverage() >= EMPTY_COVERAGE => mask,
@@ -161,10 +165,27 @@ pub fn segment(_path: &Path) -> Result<Mask, String> {
     Err("subject segmentation is unsupported on this platform".into())
 }
 
-/// Person segmentation at Accurate quality. It runs on demand for one photo,
-/// so speed matters less than a clean edge.
+/// Both Vision requests below postdate the app's own `LSMinimumSystemVersion`
+/// of 11.0, and `ClassType::new` aborts on a class the runtime never
+/// registered. Ask the runtime by name first so an older system takes the
+/// ordinary error path instead of killing the process.
 #[cfg(target_os = "macos")]
+fn require_class(name: &std::ffi::CStr, needs: &str) -> Result<(), String> {
+    if AnyClass::get(name).is_some() {
+        return Ok(());
+    }
+    Err(format!(
+        "{} needs macOS {needs} or later",
+        name.to_string_lossy()
+    ))
+}
+
+/// Person segmentation at Accurate quality. It runs on demand for one photo,
+/// so speed matters less than a clean edge. macOS 12.0 and later.
+#[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn segment_person(path: &Path) -> Result<Mask, String> {
+    require_class(c"VNGeneratePersonSegmentationRequest", "12.0")?;
     unsafe {
         let request = VNGeneratePersonSegmentationRequest::new();
         request.setQualityLevel(VNGeneratePersonSegmentationRequestQualityLevel::Accurate);
@@ -181,8 +202,11 @@ pub fn segment_person(path: &Path) -> Result<Mask, String> {
 }
 
 /// Foreground-instance segmentation, with every instance merged into one mask.
+/// macOS 14.0 and later.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn segment_foreground(path: &Path) -> Result<Mask, String> {
+    require_class(c"VNGenerateForegroundInstanceMaskRequest", "14.0")?;
     unsafe {
         let request = VNGenerateForegroundInstanceMaskRequest::new();
         vision::perform_request(path, request.as_super().as_super())?;
@@ -294,10 +318,34 @@ mod tests {
         assert_eq!((wide.width, wide.height), (331, 997));
         assert_eq!(wide.alpha.len(), 331 * 997);
     }
+
+    // A typo in either class name would make segmentation return Err forever
+    // and look exactly like "no subject found", so pin both names against the
+    // runtime as well as the absent case the guard exists for.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_availability_guard_names_classes_this_runtime_actually_has() {
+        require_class(c"VNGeneratePersonSegmentationRequest", "12.0")
+            .expect("this machine runs macOS 12 or later");
+        require_class(c"VNGenerateForegroundInstanceMaskRequest", "14.0")
+            .expect("this machine runs macOS 14 or later");
+
+        let missing = require_class(c"VNRequestThatAppleNeverShipped", "99.0")
+            .expect_err("an unregistered class must not reach ClassType::new");
+        assert!(
+            missing.contains("99.0"),
+            "the error should say which macOS the caller needs, got {missing:?}"
+        );
+    }
     use crate::image_encode::encode_jpeg;
 
+    // Per process, because two `cargo test` runs on one machine otherwise
+    // share these fixture names and one truncates a file while the other's
+    // Vision request is still reading it.
     fn write_jpeg(name: &str, w: u32, h: u32, rgba: &[u8]) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(name);
+        let dir = std::env::temp_dir().join(format!("lp-vision-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let path = dir.join(name);
         encode_jpeg(&path, w, h, rgba).expect("encode fixture jpeg");
         path
     }

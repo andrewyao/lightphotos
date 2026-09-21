@@ -12,9 +12,7 @@ use std::thread;
 #[cfg(target_os = "macos")]
 use objc2::ClassType;
 #[cfg(target_os = "macos")]
-use objc2_vision::{
-    VNDetectFaceLandmarksRequest, VNDetectFaceRectanglesRequest, VNFaceLandmarkRegion2D,
-};
+use objc2_vision::{VNDetectFaceLandmarksRequest, VNFaceLandmarkRegion2D};
 
 #[cfg(target_os = "macos")]
 use crate::vision;
@@ -38,6 +36,7 @@ pub struct RawFace {
 /// Faces with eye landmarks for the image at `path`. No faces is `Ok(vec![])`;
 /// `Err` means Vision failed.
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
     unsafe {
         let request = VNDetectFaceLandmarksRequest::new();
@@ -104,45 +103,6 @@ fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
     }
 }
 
-/// Faces without landmarks, a cheaper alternative to [`detect_faces`]. The
-/// eye contours are empty, so [`face_quality`] reports blinks as unknown.
-// Unused for now. Swap it into `analyze` if the landmark pass is too slow or noisy.
-#[allow(dead_code)]
-#[cfg(target_os = "macos")]
-pub fn detect_face_rects(path: &Path) -> Result<Vec<RawFace>, String> {
-    unsafe {
-        let request = VNDetectFaceRectanglesRequest::new();
-        vision::perform_request(path, request.as_super().as_super())?;
-
-        let Some(results) = request.results() else {
-            return Ok(Vec::new());
-        };
-        Ok(results
-            .iter()
-            .map(|obs| {
-                let bb = obs.boundingBox();
-                RawFace {
-                    bounding_box: (
-                        bb.origin.x as f32,
-                        bb.origin.y as f32,
-                        bb.size.width as f32,
-                        bb.size.height as f32,
-                    ),
-                    confidence: obs.confidence(),
-                    left_eye: Vec::new(),
-                    right_eye: Vec::new(),
-                }
-            })
-            .collect())
-    }
-}
-
-#[allow(dead_code)]
-#[cfg(not(target_os = "macos"))]
-pub fn detect_face_rects(_path: &Path) -> Result<Vec<RawFace>, String> {
-    Err("face detection is unsupported on this platform".into())
-}
-
 /// Openness below this counts as a blink. Open eyes run about 0.25 to 0.45 and
 /// closed eyes about 0.05 to 0.10. Not yet checked against real photos; use
 /// `src/bin/face_probe.rs` for that.
@@ -158,7 +118,10 @@ pub enum EyeState {
 }
 
 /// A photo's face-based culling signals.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+///
+/// Serializable because `signalcache` persists it: a Vision face pass costs
+/// 73 ms per photo, so a second visit to a folder must not repeat it.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct FaceQuality {
     pub faces: u32,
     /// The least-open eye in the frame, so one blinker marks a group shot.
@@ -242,6 +205,7 @@ pub fn face_quality(faces: &[RawFace], aspect_wh: f32) -> FaceQuality {
 
 /// Detect and score one photo. Assumes a square image if its size can't be
 /// read, which skews the ratio but keeps the signal.
+#[hotpath::measure]
 pub fn analyze(path: &Path) -> Result<FaceQuality, String> {
     let faces = detect_faces(path)?;
     let aspect_wh = crate::image_decode::pixel_size(path)
@@ -263,17 +227,24 @@ pub struct FacePool {
 }
 
 impl FacePool {
-    pub fn new() -> Self {
-        let (job_tx, job_rx) = std::sync::mpsc::channel::<PathBuf>();
-        let (res_tx, res_rx) = std::sync::mpsc::channel::<FaceOutcome>();
-        let job_rx = Arc::new(Mutex::new(job_rx));
-
+    /// `None` when no worker could start, which is the whole story on targets
+    /// that can't spawn threads. The caller must then hold no pool at all. A
+    /// pool with no workers accepts jobs that never run, and the callers that
+    /// mark those jobs pending would spin the frame loop waiting for them.
+    pub fn new() -> Option<Self> {
         // Only burst and duplicate members are analyzed, so two workers are
         // enough and keep contention for Vision and the Neural Engine low.
         let cores = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let workers = cores.saturating_sub(2).clamp(1, 2);
+        Self::with_workers(cores.saturating_sub(2).clamp(1, 2))
+    }
+
+    fn with_workers(workers: usize) -> Option<Self> {
+        let (job_tx, job_rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (res_tx, res_rx) = std::sync::mpsc::channel::<FaceOutcome>();
+        let job_rx = Arc::new(Mutex::new(job_rx));
+        let mut running = 0usize;
 
         for i in 0..workers {
             let job_rx = Arc::clone(&job_rx);
@@ -296,14 +267,15 @@ impl FacePool {
                         break;
                     }
                 });
-            // Some targets (wasm32) can't spawn threads. Log instead of
-            // crashing at startup.
-            if let Err(e) = spawned {
-                eprintln!("[facequality] could not spawn worker {i}: {e}");
+            match spawned {
+                Ok(_) => running += 1,
+                // Some targets (wasm32) can't spawn threads. Log instead of
+                // crashing at startup.
+                Err(e) => eprintln!("[facequality] could not spawn worker {i}: {e}"),
             }
         }
 
-        Self { job_tx, res_rx }
+        (running > 0).then_some(Self { job_tx, res_rx })
     }
 
     /// Queue an analysis. Ignored if the workers are gone (shutdown).
@@ -326,10 +298,53 @@ mod tests {
     use super::*;
     use crate::image_encode::encode_jpeg;
 
+    // Per process, because two `cargo test` runs on one machine otherwise
+    // share these fixture names and one truncates a file while the other's
+    // Vision request is still reading it.
     fn write_jpeg(name: &str, w: u32, h: u32, rgba: &[u8]) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(name);
+        let dir = std::env::temp_dir().join(format!("lp-vision-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let path = dir.join(name);
         encode_jpeg(&path, w, h, rgba).expect("encode fixture jpeg");
         path
+    }
+
+    #[test]
+    fn a_pool_that_started_no_workers_is_never_handed_to_a_caller() {
+        assert!(
+            FacePool::with_workers(0).is_none(),
+            "a pool with no workers would accept jobs nothing runs"
+        );
+    }
+
+    // The counterpart to the test above: a pool that did start a worker must
+    // still carry a job all the way through Vision and back.
+    #[test]
+    fn a_running_pool_returns_an_analysis_for_a_submitted_photo() {
+        let (w, h) = (64, 64);
+        let flat = vec![128u8; (w * h * 4) as usize];
+        let path = write_jpeg("facequality_pool_blank.jpg", w, h, &flat);
+
+        let pool = FacePool::with_workers(1).expect("one worker should start");
+        pool.submit(path.clone());
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let outcome = loop {
+            if let Some(o) = pool.poll().into_iter().next() {
+                break o;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the worker never returned an outcome"
+            );
+            thread::sleep(std::time::Duration::from_millis(10));
+        };
+
+        assert_eq!(outcome.path, path);
+        let quality = outcome.result.expect("a blank image should analyze");
+        assert_eq!(quality.faces, 0);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     // Runs real Vision on a blank image. "No faces" must be an empty Ok, not an
@@ -484,23 +499,12 @@ mod tests {
         let path = std::env::temp_dir().join("facequality_does_not_exist.jpg");
         let _ = std::fs::remove_file(&path);
         assert!(detect_faces(&path).is_err());
-        assert!(detect_face_rects(&path).is_err());
     }
 
-    // The rectangles request runs, and faces without eye contours score as unknown.
     #[test]
-    fn rectangles_only_detection_runs_and_composes_with_scoring() {
-        let (w, h) = (64, 64);
-        let flat = vec![90u8; (w * h * 4) as usize];
-        let path = write_jpeg("facequality_test_rects.jpg", w, h, &flat);
-
-        let faces = detect_face_rects(&path).expect("Vision face-rect request should run");
-        assert!(faces.is_empty(), "expected no faces, got {}", faces.len());
-
+    fn a_face_with_no_eye_contours_scores_its_blink_as_unknown() {
         let q = face_quality(&[face_with_eyes(Vec::new(), Vec::new())], 1.0);
         assert_eq!(q.faces, 1);
         assert_eq!(q.eye_state(), None);
-
-        let _ = std::fs::remove_file(&path);
     }
 }

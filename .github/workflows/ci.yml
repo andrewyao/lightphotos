@@ -1,0 +1,223 @@
+name: ci
+
+# Runs on every push to main and every pull request. It covers what release.yml
+# leaves unchecked until a tag exists: the test suite, clippy, rustfmt, the
+# probe binaries, the wasm target, and whether the non-mac branches still
+# compile at all. release.yml does build Linux and Windows, but only a pushed
+# tag triggers it, so any break there surfaced at release rather than on the
+# pull request that caused it.
+#
+# Every job runs ./scripts/setup-vendor-rawler.sh before its first cargo
+# command. `[patch.crates-io]` redirects `rawler` to vendor/rawler-0.7.2, which
+# is gitignored, so without that step even `cargo metadata` fails.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# A new push supersedes the run in flight for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Apple Vision is the reason this is macOS and not ubuntu. The tests in
+  # featureprint.rs, facequality.rs and segmentation.rs call real Vision
+  # requests on synthetic JPEGs rather than a stub, so they need a mac and they
+  # are not hermetic across OS versions. A future macOS image can change a
+  # detector's output and turn one of them red without a source change. When
+  # that happens, pin `runs-on` to the previous image rather than loosening the
+  # assertion, and treat the drift as a finding about the model.
+  test:
+    name: test and lint (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins channel = "stable"; this respects it.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache vendored rawler
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+
+      # Ahead of rust-cache, which runs `cargo metadata` of its own.
+      - name: Vendor rawler
+        run: ./scripts/setup-vendor-rawler.sh
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The gate for the probe binaries. face_probe and seg_probe pull their
+      # dependencies in through `#[path]` includes because the crate has no lib
+      # target, so adding a `use crate::..` to facequality.rs or segmentation.rs
+      # breaks this while `cargo build` and `cargo test` both stay green.
+      - name: Build all binaries
+        run: cargo build --bins
+
+      - name: Test
+        run: cargo test
+
+      # `--bins --tests`, not `--all-targets`. The latter builds a test harness
+      # for face_probe despite its `test = false`, and that harness does not
+      # compile (E0432 on crate::image_encode), which is the breakage
+      # Cargo.toml's `test = false` comment describes.
+      #
+      # No `-D warnings` either. The tree still carries clippy warnings, so
+      # denying them would fail every run from the first one. They print in this
+      # step's log regardless. Once they are cleared, append `-- -D warnings`.
+      - name: Clippy
+        run: cargo clippy --bins --tests
+
+  # Nothing else here compiles for a non-Apple target, and the tag-triggered
+  # release.yml is the only thing that ever has. Its last green cross-platform
+  # run was v0.1.6, 49 commits back, so a Linux break would surface at release
+  # time rather than on the pull request that caused it. The platform-gated
+  # branches (the Loupe's subject-selection control, the non-mac decode path)
+  # are exactly the code no mac job can typecheck.
+  #
+  # `--bin lightphotos`, never `--bins`. face_probe and seg_probe are mac-only
+  # dev harnesses whose `#[path]` includes pull in the non-mac decode path
+  # without re-declaring what it needs, so `--bins` cannot compile here. That is
+  # the same reasoning release.yml's Build step already carries.
+  linux:
+    name: build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # winit's link step needs this. rfd's folder dialog goes through the XDG
+      # desktop portal over D-Bus, so no GTK development package is required.
+      - name: Linux deps
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
+      - name: Cache vendored rawler
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+
+      - name: Vendor rawler
+        run: ./scripts/setup-vendor-rawler.sh
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --bin lightphotos
+
+  # Same gap and same reasoning as the Linux job. README.md calls Windows
+  # experimental and says no runtime testing has happened there, which makes the
+  # compile the only claim about Windows anyone can actually check.
+  windows:
+    name: build (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache vendored rawler
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+
+      # The default shell here is pwsh, and this is a /bin/sh script. git-bash
+      # ships on the runner and provides the sh, curl, tar and patch it needs.
+      - name: Vendor rawler
+        shell: bash
+        run: ./scripts/setup-vendor-rawler.sh
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --bin lightphotos
+
+  # Advisory only, because `cargo fmt --check` fails on the tree as it stands.
+  # Blocking it would red every pull request over a debt none of them
+  # introduced. The step still runs, so the diff it wants is in the log.
+  #
+  # To make it blocking once `cargo fmt` has been run across a quiet tree,
+  # delete the `continue-on-error: true` line below. That is the whole change.
+  # No count is quoted here on purpose, because it would rot on the first
+  # formatting commit.
+  fmt:
+    name: rustfmt (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache vendored rawler
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+
+      # `cargo fmt` reads `cargo metadata` to find the targets, so the patched
+      # rawler path has to resolve here too even though nothing is compiled.
+      - name: Vendor rawler
+        run: ./scripts/setup-vendor-rawler.sh
+
+      - name: Format check
+        run: cargo fmt --check
+
+  web:
+    name: wasm build
+    runs-on: ubuntu-latest
+    env:
+      # Trunk.toml sets this in its `rustflags` key, but that key does not reach
+      # cargo in trunk 0.21.14, and without the cfg the wgpu WebGPU and File
+      # System Access bindings are missing. See CLAUDE.md's wasm section.
+      RUSTFLAGS: --cfg=web_sys_unstable_apis
+      # Matched to the version the repo's notes were written against, so a trunk
+      # release cannot change the build's behavior without an edit here.
+      TRUNK_VERSION: 0.21.14
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache vendored rawler
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+
+      - name: Vendor rawler
+        run: ./scripts/setup-vendor-rawler.sh
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      - name: Install trunk
+        run: |
+          # The default shell is `bash -e`, which would let a failed curl pass
+          # its truncated output to tar rather than failing the step here.
+          set -o pipefail
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xzf - -C "$HOME/.local/bin" trunk
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Always --release. A debug wasm build is 10-30x slower at RAW decode and
+      # produces a ~10x larger bg.wasm, so it is not the artifact worth gating.
+      - name: Build
+        run: trunk build --release --config Trunk.toml

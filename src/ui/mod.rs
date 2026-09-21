@@ -163,7 +163,9 @@ mod info_panel;
 mod loupe;
 mod modals;
 mod survey;
-mod toolbar;
+/// `pub(crate)` so `app::nav` can walk `ToolbarControl`, the list the toolbar
+/// row is drawn from.
+pub(crate) mod toolbar;
 
 use develop_panel::draw_develop_panel;
 use grid::{draw_grid, draw_left_panel};
@@ -377,8 +379,8 @@ fn star_string(stars: u8) -> String {
 }
 
 /// Outline `resp` if it is the Toolbar's keyboard-cursor control `idx`, and
-/// move keyboard focus to it on click. `idx` order must match
-/// `App::activate_toolbar_focus`.
+/// move keyboard focus to it on click. `idx` is a position in
+/// `toolbar::ToolbarControl::drawn`.
 fn toolbar_focus_sync(
     ui: &egui::Ui,
     app: &App,

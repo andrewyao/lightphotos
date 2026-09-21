@@ -26,6 +26,10 @@ for full implementation status.
 ## Requirements
 
 - **macOS 11.0 or later** (the app links AppKit / Core Graphics / ImageIO via `objc2`).
+  Two Vision features need more than that and are checked at runtime, so an
+  older system loses the feature rather than the app. Subject selection in the
+  Loupe needs macOS 12.0 for person segmentation and macOS 14.0 for the
+  general foreground fallback.
   Linux, Windows, and wasm32 builds are experimental — see the note above.
 - **Rust stable ≥ 1.92.** The repo pins `channel = "stable"` in
   `rust-toolchain.toml`, so `rustup` selects a compatible toolchain automatically

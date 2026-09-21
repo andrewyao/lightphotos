@@ -6,7 +6,54 @@ use crate::duplicates::DuplicateMark;
 use crate::navigation::Cmp;
 use crate::ui;
 
+/// Bound on how long a folder switch waits for the outgoing folder's signal
+/// cache to reach the disk. One queued snapshot writes in a few milliseconds,
+/// so this is a stuck-volume guard rather than an expected wait.
+#[cfg(not(target_arch = "wasm32"))]
+const SIGNAL_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl App {
+    /// Swaps in `playlist`'s folder's derived-signal cache and copies what it
+    /// holds into the four maps the grouping features read, so a folder
+    /// visited before starts with its capture times, sharpness, hashes and
+    /// face analyses already known.
+    ///
+    /// Seeding those maps is the whole integration. `toggle_bursts` and
+    /// `toggle_dupes` rebuild their marks from the maps directly, and
+    /// `request_face_quality` skips any photo already in `face_quality`, so a
+    /// warm folder submits no Vision work without either of them changing.
+    ///
+    /// Synchronous, unlike the sidecar load, because it is one file read plus
+    /// the directory scan `thumbnail::sweep_orphans` already pays at folder
+    /// open. Loading it in the background would mean reconciling a cache that
+    /// recorded signals while its own load was still in flight, which is the
+    /// machinery `Writeback::overlay` exists for and which a regenerable cache
+    /// does not earn.
+    pub(super) fn adopt_signal_cache(&mut self, playlist: &Playlist) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.signals.flush_blocking(SIGNAL_FLUSH_TIMEOUT);
+        self.signals = crate::signalcache::SignalCache::load(playlist.dir());
+
+        for p in playlist.entries() {
+            let Some(s) = self.signals.get(p) else {
+                continue;
+            };
+            if let Some(capture) = s.capture {
+                self.capture_times
+                    .insert(p.clone(), capture.to_system_time());
+            }
+            if let Some(v) = s.sharpness {
+                self.sharpness.insert(p.clone(), v);
+            }
+            if let Some(v) = s.phash {
+                self.phashes.insert(p.clone(), v);
+            }
+            if let Some(q) = s.faces {
+                self.face_quality.insert(p.clone(), q);
+            }
+        }
+    }
+
     /// Points the catalog at `dir` and reads its sidecars in the background.
     /// `switch_dir` clears the cache first, so the old folder's ratings never
     /// show for the new one. `poll_catalog_load` folds in the result.

@@ -44,6 +44,7 @@ mod profile;
 mod renderer;
 mod segmentation;
 mod sharpness;
+mod signalcache;
 mod thumbnail;
 mod trash;
 mod ui;
@@ -109,8 +110,8 @@ fn finish_window_setup(
     app.renderer = Some(renderer);
     app.loader = Some(loader);
     app.exporter = Some(export::Exporter::new());
-    app.feature_pool = Some(featureprint::DistancePool::new());
-    app.face_pool = Some(facequality::FacePool::new());
+    app.feature_pool = featureprint::DistancePool::new();
+    app.face_pool = facequality::FacePool::new();
     app.egui_state = Some(egui_state);
     #[cfg(target_arch = "wasm32")]
     analytics::started();
@@ -357,6 +358,11 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(not(target_arch = "wasm32"))]
         self.catalog
             .flush_blocking(std::time::Duration::from_secs(10));
+        // Same last chance for the folder's derived signals. Losing them costs
+        // only a recompute, so the bound is shorter than the catalog's.
+        #[cfg(not(target_arch = "wasm32"))]
+        self.signals
+            .flush_blocking(std::time::Duration::from_secs(2));
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -380,6 +386,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Outside the loader block below, because a queued sidecar write has
         // no loader to wait on and can outlive the folder it came from.
         self.catalog.pump();
+        self.signals.flush_if_due();
         self.poll_delete();
 
         // True while web folder picking or listing is in flight. Feeds the poll

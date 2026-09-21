@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use crate::develop::{self};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::navigation::Playlist;
-use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp};
+use crate::navigation::{self, flatten_visible_tree, visible_indices};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::thumbnail::THUMB_PX;
-use crate::ui;
+use crate::ui::toolbar::ToolbarControl;
 
 impl App {
     /// Invalidate in-flight directory listings and any navigation deferred
@@ -747,11 +747,9 @@ impl App {
         self.request_redraw();
     }
 
-    /// Keyboard-focusable controls in the Grid and Survey toolbar. Must match
-    /// the `toolbar_focus_sync` calls in `ui/toolbar.rs` and the index mapping
-    /// in `activate_toolbar_focus`. Bulk actions are excluded because their
-    /// count varies with the selection.
-    const TOOLBAR_CONTROLS: usize = if SHOW_GROUPING_TOOLS { 13 } else { 10 };
+    /// How many controls the F6 cursor walks in the Grid and Survey toolbar,
+    /// taken from the list the toolbar row is drawn from.
+    pub(crate) const TOOLBAR_CONTROLS: usize = ToolbarControl::DRAWN;
 
     pub(super) fn toolbar_move(&mut self, delta: isize) {
         let n = Self::TOOLBAR_CONTROLS as isize;
@@ -759,28 +757,21 @@ impl App {
         self.request_redraw();
     }
 
-    /// Run the focused toolbar control's click action. Index order must match
-    /// the `toolbar_focus_sync` calls in `ui/toolbar.rs`.
+    /// Run the focused toolbar control's click action.
     pub(super) fn activate_toolbar_focus(&mut self) {
-        let action = match self.toolbar_focus {
-            0 => ui::UiAction::SetFilter(None),
-            1 => ui::UiAction::SetFilterCmp(Cmp::Gte),
-            2 => ui::UiAction::SetFilterCmp(Cmp::Eq),
-            3 => ui::UiAction::SetFilterCmp(Cmp::Lte),
-            n @ 4..=8 => {
-                let star = (n - 4 + 1) as u8;
-                ui::UiAction::SetFilter(Some((self.filter_cmp, star)))
-            }
-            9 => {
-                let unrated = matches!(self.filter, Some((Cmp::Eq, 0)));
-                ui::UiAction::SetFilter(if unrated { None } else { Some((Cmp::Eq, 0)) })
-            }
-            10 if SHOW_GROUPING_TOOLS => ui::UiAction::ToggleBursts,
-            11 if SHOW_GROUPING_TOOLS => ui::UiAction::ToggleDupes,
-            12 if SHOW_GROUPING_TOOLS => ui::UiAction::ToggleEyesClosed,
-            _ => return,
+        let Some(control) = ToolbarControl::drawn().nth(self.toolbar_focus) else {
+            return;
         };
+        let action = control.action(self);
         self.apply_ui_actions(vec![action]);
+    }
+
+    /// Put the keyboard cursor on toolbar control `idx`, for `ui::toolbar`'s
+    /// cursor test.
+    #[cfg(test)]
+    pub(crate) fn focus_toolbar_control(&mut self, idx: usize) {
+        self.set_focus(Region::Toolbar, FocusLevel::Entered);
+        self.toolbar_focus = idx;
     }
 
     /// Nudge the focused Develop slider one step in direction `dir` (-1 or +1).
