@@ -40,6 +40,10 @@ struct Run {
     opens: usize,
     /// Longest side the Loupe asks for: a 1100pt window on a 2x display.
     preview_px: u32,
+    /// Photos the full-resolution phase decodes. Small by default, because
+    /// each one is the whole frame in RGBA and the allocation report is the
+    /// reason to run this phase at all.
+    fulls: usize,
     /// Photos the Vision phase runs feature prints, faces and segmentation
     /// over. Small by default because every Vision call decodes the file at
     /// full resolution itself.
@@ -62,6 +66,7 @@ impl Run {
             thumbs: count("LIGHTPHOTOS_PROFILE_THUMBS", 120),
             opens: count("LIGHTPHOTOS_PROFILE_OPENS", 10),
             preview_px: count("LIGHTPHOTOS_PROFILE_PREVIEW_PX", 2200) as u32,
+            fulls: count("LIGHTPHOTOS_PROFILE_FULLS", 5),
             vision: count("LIGHTPHOTOS_PROFILE_VISION", 8),
             cold: std::env::var("LIGHTPHOTOS_PROFILE_COLD").as_deref() == Ok("1"),
         }
@@ -96,6 +101,11 @@ const PHASES: &[Phase] = &[
         label: "path/open_photo",
         key: "open",
         run: Run::open_photos,
+    },
+    Phase {
+        label: "path/decode_full",
+        key: "full",
+        run: Run::decode_full,
     },
     Phase {
         label: "path/auto_tone",
@@ -393,6 +403,33 @@ impl Run {
             fetched.len(),
             t0.elapsed()
         );
+    }
+
+    /// The tier above the preview, which the app reaches only when the user
+    /// zooms past the preview's own pixels (`App::ensure_full_for_zoom`).
+    /// `Loader::new(16384)` sets `full_target` to the renderer's `max_dim`,
+    /// so nothing here downscales and the decode is the whole frame. That
+    /// makes it the phase `hotpath-alloc` says the most about, and the reason
+    /// `LIGHTPHOTOS_PROFILE_FULLS` defaults to five rather than a screenful.
+    fn decode_full(&self, photos: &[PathBuf]) {
+        let mut loader = Loader::new(16384);
+        for path in photos.iter().take(self.fulls) {
+            let t0 = Instant::now();
+            loader.request_full(path.clone());
+            while loader.get_full(path).is_none() && loader.has_pending_image() {
+                loader.poll_all();
+                std::thread::yield_now();
+            }
+            let decoded = match loader.get_full(path) {
+                Some(img) => format!("{}x{}", img.width, img.height),
+                None => "no decode".to_string(),
+            };
+            eprintln!(
+                "[profile] full {}: {decoded} in {:?}",
+                path.file_name().unwrap_or_default().to_string_lossy(),
+                t0.elapsed()
+            );
+        }
     }
 
     /// Opening a photo, then stepping to the next. The Loupe makes the user
