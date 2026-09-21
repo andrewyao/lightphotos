@@ -67,6 +67,70 @@ impl Run {
     }
 }
 
+/// One scripted phase. `label` is the hotpath report label. `key` is the
+/// short name `LIGHTPHOTOS_PROFILE_PHASES` selects the phase by, kept apart
+/// from the label so a run can be narrowed by typing `grid` rather than
+/// `thumbnail_grid`.
+struct Phase {
+    label: &'static str,
+    key: &'static str,
+    run: fn(&Run, &[PathBuf]),
+}
+
+/// Every phase `folder_load` feeds, in the order a session meets them. A
+/// table rather than a run of calls in `drive`, so adding a phase is one row
+/// and the selector has something to filter.
+const PHASES: &[Phase] = &[
+    Phase {
+        label: "path/thumbnail_grid",
+        key: "grid",
+        run: Run::thumbnail_grid,
+    },
+    Phase {
+        label: "path/open_photo",
+        key: "open",
+        run: Run::open_photos,
+    },
+    Phase {
+        label: "path/auto_tone",
+        key: "auto_tone",
+        run: Run::auto_tone,
+    },
+    Phase {
+        label: "path/select_subject",
+        key: "select_subject",
+        run: Run::select_subject,
+    },
+    Phase {
+        label: "path/vision_signals",
+        key: "vision",
+        run: Run::vision_signals,
+    },
+];
+
+/// The phases `LIGHTPHOTOS_PROFILE_PHASES` names, in table order. Unset means
+/// every phase. An unknown key is a typo that would otherwise profile nothing
+/// without saying why, so it is named on stderr and dropped rather than
+/// failing the run.
+fn selected_phases() -> Vec<&'static Phase> {
+    let Ok(list) = std::env::var("LIGHTPHOTOS_PROFILE_PHASES") else {
+        return PHASES.iter().collect();
+    };
+    let mut wanted: Vec<&str> = Vec::new();
+    for key in list.split(',').map(str::trim).filter(|k| !k.is_empty()) {
+        if PHASES.iter().any(|p| p.key == key) {
+            wanted.push(key);
+        } else {
+            let valid: Vec<&str> = PHASES.iter().map(|p| p.key).collect();
+            eprintln!(
+                "[profile] unknown phase {key:?}, skipped. Valid keys: {}",
+                valid.join(", ")
+            );
+        }
+    }
+    PHASES.iter().filter(|p| wanted.contains(&p.key)).collect()
+}
+
 /// Runs the scripted paths when `--profile <dir>` was passed, and reports
 /// whether it did, so `main` can skip opening a window.
 pub fn run_from_args() -> bool {
@@ -108,11 +172,9 @@ impl Run {
             return;
         }
 
-        hotpath::measure_block!("path/thumbnail_grid", self.thumbnail_grid(&photos));
-        hotpath::measure_block!("path/open_photo", self.open_photos(&photos));
-        hotpath::measure_block!("path/auto_tone", self.auto_tone(&photos));
-        hotpath::measure_block!("path/select_subject", self.select_subject(&photos));
-        hotpath::measure_block!("path/vision_signals", self.vision_signals(&photos));
+        for phase in selected_phases() {
+            hotpath::measure_block!(phase.label, (phase.run)(self, &photos));
+        }
     }
 
     /// What the Loupe's "Show selection" button costs, and the only path that
