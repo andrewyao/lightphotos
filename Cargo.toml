@@ -76,6 +76,16 @@ web-time = "1.1"
 # features — see the `[features]` block and `src/profile.rs`.
 hotpath = "0.26"
 
+# Live-object census: how many DecodedImages and Masks exist right now and how
+# many bytes they hold, which a timing profiler cannot answer. Not optional,
+# for the same reason hotpath above is not: `#[lightwatch::track]` has to
+# resolve in every build, and with `enabled` off the attribute injects a
+# zero-sized field and compiles no transport at all. Turned on by this crate's
+# `lightwatch` feature. The path is gitignored and materialized by
+# scripts/setup-vendor-lightwatch.sh, which has to run before any cargo
+# command, exactly like the rawler one.
+lightwatch = { package = "lightwatch-probe", path = "vendor/lightwatch/lightwatch-probe", default-features = false }
+
 rawler = { version = "0.7.2", optional = true }
 mozjpeg-rs = { version = "0.9.2", optional = true }
 img-parts = { version = "0.4.0", optional = true }
@@ -108,6 +118,10 @@ hotpath = ["hotpath/hotpath"]
 # which adds a thread-local increment to every alloc/dealloc in the process, so
 # the timings from an alloc run are not comparable with a timing-only run.
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+
+# Census. Compiles lightwatch's counters and its emit thread in; with it off,
+# every tracked type is the struct it would have been without the attribute.
+lightwatch = ["lightwatch/enabled"]
 
 # `egui-winit`'s default features include "clipboard" (pulls in `arboard`),
 # which has no working wasm32 backend at this version — see the wasm port

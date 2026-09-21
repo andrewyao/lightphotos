@@ -1993,6 +1993,7 @@ dependencies = [
  "img-parts",
  "js-sys",
  "kamadak-exif",
+ "lightwatch-probe",
  "mozjpeg-rs",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
@@ -2016,6 +2017,32 @@ dependencies = [
  "web-time",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "lightwatch-probe"
+version = "0.1.0"
+dependencies = [
+ "lightwatch-probe-macros",
+ "lightwatch-proto",
+]
+
+[[package]]
+name = "lightwatch-probe-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "lightwatch-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
