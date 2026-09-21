@@ -637,6 +637,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A folder change mid-delete is the hazard `cancel_auto_tone` exists for,
+    /// reached by a second route. `Catalog` keys its cache by file name, so a
+    /// late `catalog.remove` for the old folder's `a.jpg` would drop the new
+    /// folder's `a.jpg` record and mark it dirty, and the load that was meant
+    /// to restore it would then skip it.
+    #[test]
+    fn a_folder_change_mid_delete_leaves_the_new_folders_same_named_photo_alone() {
+        let doomed: Vec<String> = (0..30).map(|i| format!("p{i:02}.jpg")).collect();
+        let refs: Vec<&str> = doomed.iter().map(String::as_str).collect();
+        let (mut app, old_dir, old_paths) = app_with_photos(&refs);
+
+        let new_dir = unique_tmp_dir();
+        let survivor = new_dir.join(&doomed[0]);
+        std::fs::write(&survivor, b"").unwrap();
+        crate::catalog::Catalog::with_dir(new_dir.clone()).set(&survivor, 4);
+
+        app.selected = (0..old_paths.len()).collect();
+        app.delete_selection();
+        assert!(
+            app.bulk_delete.is_some(),
+            "the batch must still be running for the folder change to matter"
+        );
+
+        app.load_playlist(Playlist::from_dir(&new_dir), new_dir.clone());
+        assert!(
+            app.bulk_delete.is_none(),
+            "a folder change must abandon the batch before the new folder loads"
+        );
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while app.poll_catalog_load() {
+            assert!(Instant::now() < deadline, "catalog load timed out");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // What the frame loop would do next. A batch that survived the change
+        // would speak for the old folder here.
+        drain(&mut app);
+
+        assert!(survivor.exists(), "the new folder's photo is untouched");
+        assert_eq!(
+            app.catalog.get(&survivor),
+            Some(4),
+            "the new folder's same-named photo must keep its rating"
+        );
+        assert_eq!(app.ratings.get(&survivor), Some(&4));
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        assert_eq!(
+            crate::catalog::Catalog::with_dir(new_dir.clone()).get(&survivor),
+            Some(4),
+            "and must keep it on disk"
+        );
+
+        let _ = std::fs::remove_dir_all(&old_dir);
+        let _ = std::fs::remove_dir_all(&new_dir);
+    }
+
     #[test]
     fn a_second_delete_is_refused_while_one_is_running() {
         let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg", "c.jpg", "d.jpg"]);
