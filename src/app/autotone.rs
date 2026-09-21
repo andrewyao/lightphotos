@@ -321,6 +321,7 @@ impl App {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use crate::image_decode::{DecodedImage, DecodedImageFields};
 
     /// An app showing a real folder of two empty photos in the Grid. Nothing
     /// decodes them, so neither has a thumbnail in memory.
@@ -398,12 +399,12 @@ mod tests {
             app.loader.as_mut().unwrap().insert_thumb_external(
                 path.clone(),
                 THUMB_PX,
-                std::sync::Arc::new(crate::image_decode::DecodedImage {
+                std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
                     width: 8,
                     height: 8,
                     rgba: [32, 32, 32, 255].repeat(64),
                     pixel_format: crate::image_decode::PixelFormat::Srgb8,
-                }),
+                })),
             );
             app.poll_auto_tone();
             assert!(app.edits.contains_key(path), "each request must be toned");
@@ -476,12 +477,12 @@ mod tests {
             app.loader.as_mut().unwrap().insert_thumb_external(
                 path,
                 THUMB_PX,
-                std::sync::Arc::new(crate::image_decode::DecodedImage {
+                std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
                     width: 8,
                     height: 8,
                     rgba: [32, 32, 32, 255].repeat(64),
                     pixel_format: crate::image_decode::PixelFormat::Srgb8,
-                }),
+                })),
             );
         }
         app.poll_auto_tone();
@@ -543,12 +544,12 @@ mod tests {
                 rgba.extend_from_slice(&[v, v.wrapping_add(64), v.wrapping_add(128), 255]);
             }
         }
-        let img = std::sync::Arc::new(crate::image_decode::DecodedImage {
+        let img = std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
             width: side as u32,
             height: side as u32,
             rgba,
             pixel_format: crate::image_decode::PixelFormat::Srgb8,
-        });
+        }));
         for path in app.autotone_window.clone() {
             app.loader
                 .as_mut()
@@ -752,12 +753,12 @@ mod tests {
         app.loader.as_mut().unwrap().insert_thumb_external(
             a.clone(),
             THUMB_PX,
-            std::sync::Arc::new(crate::image_decode::DecodedImage {
+            std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
                 width: 8,
                 height: 8,
                 rgba: [32, 32, 32, 255].repeat(64),
                 pixel_format: crate::image_decode::PixelFormat::Srgb8,
-            }),
+            })),
         );
         app.poll_auto_tone();
 
@@ -787,12 +788,12 @@ mod tests {
         app.loader.as_mut().unwrap().insert_thumb_external(
             a.clone(),
             THUMB_PX,
-            std::sync::Arc::new(crate::image_decode::DecodedImage {
+            std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
                 width: 8,
                 height: 8,
                 rgba: [32, 32, 32, 255].repeat(64),
                 pixel_format: crate::image_decode::PixelFormat::Srgb8,
-            }),
+            })),
         );
         app.poll_auto_tone();
 

@@ -52,6 +52,7 @@ pub enum PixelFormat {
     LinearF16,
 }
 
+#[lightwatch::track(manual_measured)]
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
@@ -61,6 +62,15 @@ pub struct DecodedImage {
     /// platforms.
     pub rgba: Vec<u8>,
     pub pixel_format: PixelFormat,
+}
+
+// The generated `Measured` would report `size_of::<Self>()`, about 40 bytes for
+// an image whose pixels are megabytes. The census would then be a histogram of
+// 40s and would answer nothing.
+impl lightwatch::Measured for DecodedImage {
+    fn bytes(&self) -> usize {
+        size_of::<Self>() + self.rgba.capacity()
+    }
 }
 
 // CoreFoundation type IDs, used to check a value's type before casting it.
@@ -485,12 +495,12 @@ pub(crate) fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> Deco
             dst[d..d + 4].copy_from_slice(&img.rgba[s..s + 4]);
         }
     }
-    DecodedImage {
+    DecodedImage::new_tracked(DecodedImageFields {
         width: nw,
         height: nh,
         rgba: dst,
         pixel_format: img.pixel_format,
-    }
+    })
 }
 
 /// Draw `image` scaled to `target_w` x `target_h` and return premultiplied
@@ -528,12 +538,12 @@ pub fn cgimage_to_rgba(
     };
     CGContext::draw_image(Some(&ctx), rect, Some(image));
 
-    Ok(DecodedImage {
+    Ok(DecodedImage::new_tracked(DecodedImageFields {
         width: target_w,
         height: target_h,
         rgba: buffer,
         pixel_format: PixelFormat::Srgb8,
-    })
+    }))
 }
 
 /// Scale `(w, h)` down, keeping aspect ratio, so neither side exceeds
@@ -551,6 +561,26 @@ pub(crate) fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 997 and 331 are deliberately unrelated. Every construction of this type
+    // now routes its two adjacent `u32` dimensions through `DecodedImageFields`,
+    // and a square or a round number would let a transposed pair pass.
+    #[test]
+    fn width_and_height_land_in_their_own_fields() {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
+            width: 997,
+            height: 331,
+            rgba: vec![9; 997 * 331 * 4],
+            pixel_format: PixelFormat::Srgb8,
+        });
+        assert_eq!((img.width, img.height), (997, 331));
+
+        // Orientation 6 swaps them, so this pins the constructor inside
+        // `apply_exif_orientation` too.
+        let rotated = apply_exif_orientation(img, 6);
+        assert_eq!((rotated.width, rotated.height), (331, 997));
+        assert_eq!(rotated.rgba.len(), 997 * 331 * 4);
+    }
 
     #[test]
     fn parse_exif_datetime_unix_epoch_anchor() {
@@ -619,12 +649,12 @@ mod tests {
 
     #[test]
     fn orientation_1_is_identity() {
-        let img = DecodedImage {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 2,
             height: 1,
             rgba: [px(10), px(20)].concat(),
             pixel_format: PixelFormat::Srgb8,
-        };
+        });
         let out = apply_exif_orientation(img, 1);
         assert_eq!((out.width, out.height), (2, 1));
         assert_eq!(&out.rgba[0..4], &px(10));
@@ -634,12 +664,12 @@ mod tests {
     #[test]
     fn orientation_6_rotates_90cw_and_swaps_dims() {
         // 2x1 [A, B] rotated 90° CW is a 1x2 column, A over B.
-        let img = DecodedImage {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 2,
             height: 1,
             rgba: [px(10), px(20)].concat(),
             pixel_format: PixelFormat::Srgb8,
-        };
+        });
         let out = apply_exif_orientation(img, 6);
         assert_eq!((out.width, out.height), (1, 2));
         assert_eq!(&out.rgba[0..4], &px(10)); // top
@@ -648,12 +678,12 @@ mod tests {
 
     #[test]
     fn orientation_8_rotates_270cw() {
-        let img = DecodedImage {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 2,
             height: 1,
             rgba: [px(10), px(20)].concat(),
             pixel_format: PixelFormat::Srgb8,
-        };
+        });
         let cw = apply_exif_orientation(img, 6);
         let back = apply_exif_orientation(cw, 8);
         assert_eq!((back.width, back.height), (2, 1));
@@ -663,12 +693,12 @@ mod tests {
 
     #[test]
     fn orientation_2_mirrors_horizontally_keeping_dims() {
-        let img = DecodedImage {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
             width: 2,
             height: 1,
             rgba: [px(10), px(20)].concat(),
             pixel_format: PixelFormat::Srgb8,
-        };
+        });
         let out = apply_exif_orientation(img, 2);
         assert_eq!((out.width, out.height), (2, 1));
         assert_eq!(&out.rgba[0..4], &px(20)); // columns swapped

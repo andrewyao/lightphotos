@@ -522,6 +522,12 @@ fn print_usage_and_exit(code: i32) -> ! {
 fn main() {
     loader::start_clock();
 
+    // Native only: `start_named` spawns the emit thread, and
+    // wasm32-unknown-unknown has no thread to spawn, so on that target the
+    // call panics rather than degrading.
+    #[cfg(all(feature = "lightwatch", not(target_arch = "wasm32")))]
+    lightwatch::start_named("lightphotos");
+
     // Returning rather than exiting: that drops the hotpath guard, which is
     // what prints the report.
     #[cfg(feature = "hotpath")]

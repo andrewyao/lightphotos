@@ -99,6 +99,27 @@ impl Run {
         hotpath::measure_block!("path/thumbnail_grid", self.thumbnail_grid(&photos));
         hotpath::measure_block!("path/open_photo", self.open_photos(&photos));
         hotpath::measure_block!("path/auto_tone", self.auto_tone(&photos));
+        hotpath::measure_block!("path/select_subject", self.select_subject(&photos));
+    }
+
+    /// What the Loupe's "Show selection" button costs, and the only path that
+    /// builds a `segmentation::Mask`. `App::request_selection_mask` runs this
+    /// same call on a worker thread, one photo per click.
+    ///
+    /// The masks are held until the phase ends rather than dropped one by one,
+    /// because the Loupe holds one for as long as the photo is on screen and a
+    /// live-object census of a mask discarded immediately would read zero.
+    fn select_subject(&self, photos: &[PathBuf]) {
+        let wanted = photos.iter().take(self.opens);
+        let masks: Vec<_> = wanted
+            .filter_map(|path| crate::segmentation::segment(path).ok())
+            .collect();
+        let pixels: usize = masks.iter().map(|m| m.alpha.len()).sum();
+        eprintln!(
+            "[profile] {} of {} photos have a subject, {pixels} mask pixels held",
+            masks.len(),
+            self.opens.min(photos.len()),
+        );
     }
 
     /// What an Auto Tone batch costs per photo once its thumbnail is in
