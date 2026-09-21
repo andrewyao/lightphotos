@@ -197,7 +197,7 @@ Triggered by: File → Export, for one photo or a batch.
 ```mermaid
 flowchart TD
     exportbtn["User exports one or more photos"]
-    exportbtn --> submit["app/export.rs submits one ExportJob per photo\n(native only — wasm32's start_export is a no-op stub)"]
+    exportbtn --> submit["app/export.rs submits one ExportJob per photo\n(native; wasm32 has its own start_export that bakes on the\nWeb Worker pool and writes via File System Access)"]
     submit --> pool["Exporter's worker pool, export.rs\n(same shape as loader.rs's pool)"]
     pool --> decode["image_decode::decode(src, u32::MAX)\nfull-resolution decode\nImageIO on macOS, image/rawler on Linux/Windows"]
     decode --> bake["image_ops::bake_edited\ncrop -> develop::apply_linear (tone) -> rotate"]
@@ -229,13 +229,13 @@ flowchart TD
 | `raw/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `rawler`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
 | `raw/preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | wasm32 (also reachable from a mac dev build via `--features raw-probe`) |
 | `raw/render.rs` | Builds the GPU tonemap pipeline for `PixelFormat::LinearF16` images | all (only ever fed a linear image on wasm32) |
-| `thumbnail.rs` | Decode-at-size for both the Loupe's screen-fit preview and Grid thumbnails, plus the on-disk `.tw` cache | macOS (ImageIO) + Linux/Windows (`kamadak-exif`/`rawler`); disk cache is native-only |
+| `thumbnail.rs` | Decode-at-size for both the Loupe's screen-fit preview and Grid thumbnails, plus the on-disk `.thumb.jpg` cache in `.lightphotos/` | macOS (ImageIO) + Linux/Windows (`kamadak-exif`/`rawler`); wasm32 keeps the same entry naming through `web/web_thumb_cache.rs` |
 | `image_encode.rs` | JPEG write for export | macOS (ImageIO) / Linux/Windows (`mozjpeg-rs`) |
 | `coregraphics.rs` | Shared CFURL/bitmap-context setup for `image_decode.rs`/`image_encode.rs` | macOS |
 | `renderer.rs` | GPU upload + draw of the currently-shown image | all (wgpu → Metal / Vulkan-GL / WebGPU) |
 | `develop.rs` | The tone pipeline (`apply_linear`), shared by the GPU shader and the CPU histogram/bake path | all |
 | `image_ops.rs` | Pure pixel math (crop/rotate/bake) shared by export and thumbnail baking | all |
-| `export.rs` | Worker pool that decodes, bakes, and encodes a full-resolution JPEG | native only (wasm32 stubbed) |
+| `export.rs` | Worker pool that decodes, bakes, and encodes a full-resolution JPEG; `bake_jpeg` and the `ExportFs` seam are shared | native pool is native-only, wasm32 runs the same bake on the Web Worker pool |
 | `web/wasm_worker.rs` | The Web Worker binary that actually decodes bytes off the main thread | wasm32 |
 | `web/web_worker_pool.rs` | Main-thread side of the Web Worker pool: job dispatch + result routing | wasm32 |
 | `web/web_canvas.rs` | Attaches winit's canvas into the DOM at the right backing-store resolution | wasm32 |

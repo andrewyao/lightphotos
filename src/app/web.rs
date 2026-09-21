@@ -9,10 +9,12 @@ use crate::thumbnail::THUMB_PX;
 use crate::web_fs;
 use crate::web_worker_pool::JobKind;
 
-/// Cap on concurrent file reads from the picked folder, shared by thumbnails
-/// and the loupe. Chrome throws `NotReadableError` when too many reads run at
-/// once. 2 is known safe. If folder loads stall, lower it; retries with
-/// backoff keep a too-high value from losing files.
+/// Cap on concurrent file reads from the picked folder, shared by thumbnails,
+/// the loupe, and the cache sweep. Chrome throws `NotReadableError` when too
+/// many reads run at once. 2 is the highest value observed never to trip it;
+/// 4 is used anyway, because the retry backoff below recovers a read that does
+/// fail and the extra concurrency is worth more than those retries cost. If
+/// folder loads stall, lower it.
 const MAX_CONCURRENT_READS: u32 = 4;
 
 /// Failures a key tolerates before it is marked failed for good. Chrome's
