@@ -44,6 +44,10 @@ struct Run {
     /// each one is the whole frame in RGBA and the allocation report is the
     /// reason to run this phase at all.
     fulls: usize,
+    /// Photos the export phase writes out. Each one is a full-resolution
+    /// decode, a bake and a JPEG encode, so a handful is already a minute's
+    /// work on a folder of RAWs.
+    exports: usize,
     /// Photos the Vision phase runs feature prints, faces and segmentation
     /// over. Small by default because every Vision call decodes the file at
     /// full resolution itself.
@@ -67,6 +71,7 @@ impl Run {
             opens: count("LIGHTPHOTOS_PROFILE_OPENS", 10),
             preview_px: count("LIGHTPHOTOS_PROFILE_PREVIEW_PX", 2200) as u32,
             fulls: count("LIGHTPHOTOS_PROFILE_FULLS", 5),
+            exports: count("LIGHTPHOTOS_PROFILE_EXPORTS", 5),
             vision: count("LIGHTPHOTOS_PROFILE_VISION", 8),
             cold: std::env::var("LIGHTPHOTOS_PROFILE_COLD").as_deref() == Ok("1"),
         }
@@ -111,6 +116,11 @@ const PHASES: &[Phase] = &[
         label: "path/auto_tone",
         key: "auto_tone",
         run: Run::auto_tone,
+    },
+    Phase {
+        label: "path/export",
+        key: "export",
+        run: Run::export,
     },
     Phase {
         label: "path/select_subject",
@@ -321,6 +331,59 @@ impl Run {
             "[profile] auto tone analysed {analysed} in {:?}",
             t0.elapsed()
         );
+    }
+
+    /// The batch operation the profile never covered, and the only path that
+    /// runs `image_ops::bake_edited` and a JPEG encode. It goes through
+    /// `crate::export::Exporter` the way `App` does, so the worker pool is
+    /// part of what gets measured rather than a private function called on
+    /// this thread.
+    ///
+    /// Every `dest` lands in a scratch directory named after this process,
+    /// and the directory goes away when the phase ends. Profiling a folder
+    /// must not leave JPEGs in it.
+    fn export(&self, photos: &[PathBuf]) {
+        let wanted: Vec<&PathBuf> = photos.iter().take(self.exports).collect();
+        let dir =
+            std::env::temp_dir().join(format!("lightphotos-profile-export-{}", std::process::id()));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("[profile] no export scratch dir at {}: {e}", dir.display());
+            return;
+        }
+
+        let exporter = crate::export::Exporter::new();
+        let t0 = Instant::now();
+        for (i, src) in wanted.iter().enumerate() {
+            exporter.submit(crate::export::ExportJob {
+                src: (*src).clone(),
+                dest: dir.join(format!("{i:04}.jpg")),
+                adj: crate::develop::Adjustments::default(),
+                touchups: Vec::new(),
+                rot: 0,
+            });
+        }
+
+        let (mut written, mut failed) = (0usize, 0usize);
+        while written + failed < wanted.len() {
+            for outcome in exporter.poll() {
+                match outcome.result {
+                    Ok(_) => written += 1,
+                    Err(e) => {
+                        failed += 1;
+                        eprintln!("[profile] export {}: {e}", outcome.src.display());
+                    }
+                }
+            }
+            std::thread::yield_now();
+        }
+        eprintln!(
+            "[profile] exported {written}, failed {failed}, in {:?}",
+            t0.elapsed()
+        );
+
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            eprintln!("[profile] left {} behind: {e}", dir.display());
+        }
     }
 
     /// What `App::open` does on a folder before the first frame: list the
