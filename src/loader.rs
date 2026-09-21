@@ -864,6 +864,7 @@ impl Drop for Loader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::image_decode::DecodedImageFields;
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(format!("/nonexistent/{name}.jpg"))
@@ -932,12 +933,12 @@ mod tests {
     }
 
     fn image(w: u32, h: u32) -> Arc<DecodedImage> {
-        Arc::new(DecodedImage {
+        Arc::new(DecodedImage::new_tracked(DecodedImageFields {
             width: w,
             height: h,
             rgba: vec![0; (w * h * 4) as usize],
             pixel_format: image_decode::PixelFormat::Srgb8,
-        })
+        }))
     }
 
     #[test]

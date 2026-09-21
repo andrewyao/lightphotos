@@ -10,7 +10,9 @@
 use std::path::Path;
 
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-use crate::image_decode::{apply_exif_orientation, fit_within, DecodedImage, PixelFormat};
+use crate::image_decode::{
+    apply_exif_orientation, fit_within, DecodedImage, DecodedImageFields, PixelFormat,
+};
 
 /// True for camera RAW extensions, which the `image` crate cannot decode.
 /// Mirrors the RAW subset of `navigation.rs`'s `IMAGE_EXTS`.
@@ -219,12 +221,12 @@ fn develop_raw_image_to_srgb8(
     }
 
     Ok(apply_exif_orientation(
-        DecodedImage {
+        DecodedImage::new_tracked(DecodedImageFields {
             width: w,
             height: h,
             rgba: img.into_raw(),
             pixel_format: PixelFormat::Srgb8,
-        },
+        }),
         orientation,
     ))
 }
@@ -271,12 +273,12 @@ pub(crate) fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<Dec
     } else {
         image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3).into_raw()
     };
-    Ok(DecodedImage {
+    Ok(DecodedImage::new_tracked(DecodedImageFields {
         width: w,
         height: h,
         rgba,
         pixel_format: PixelFormat::Srgb8,
-    })
+    }))
 }
 
 /// Capture time for `path`. Non-mac reads no EXIF here, so this is the file

@@ -42,6 +42,9 @@ pub enum MaskSource {
 
 /// A coverage mask at Vision's resolution. `0` is background, `255` is fully
 /// foreground, values between are soft edges.
+// Before the derives: `track` injects the census field, and `Clone` and
+// `PartialEq` have to be generated for the struct that has it.
+#[lightwatch::track(manual_measured)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Mask {
     pub width: u32,
@@ -49,6 +52,14 @@ pub struct Mask {
     /// `width * height` bytes with no row padding.
     pub alpha: Vec<u8>,
     pub source: MaskSource,
+}
+
+// See `DecodedImage`: the generated `Measured` counts the struct, not the
+// `width * height` bytes hanging off it.
+impl lightwatch::Measured for Mask {
+    fn bytes(&self) -> usize {
+        size_of::<Self>() + self.alpha.capacity()
+    }
 }
 
 impl Mask {
@@ -69,7 +80,7 @@ impl Mask {
         if (width, height) == (self.width, self.height) {
             return self.clone();
         }
-        Mask {
+        Mask::new_tracked(MaskFields {
             width,
             height,
             alpha: crate::image_ops::resample_bilinear_u8(
@@ -80,7 +91,7 @@ impl Mask {
                 height,
             ),
             source: self.source,
-        }
+        })
     }
 
     /// This mask rotated or flipped by an EXIF orientation (`1..=8`) so it lines
@@ -92,12 +103,12 @@ impl Mask {
         }
         let (width, height, alpha) =
             crate::image_ops::orient_mask(&self.alpha, self.width, self.height, orientation);
-        Mask {
+        Mask::new_tracked(MaskFields {
             width,
             height,
             alpha,
             source: self.source,
-        }
+        })
     }
 
     /// Mean coverage, 0.0..=1.0.
@@ -223,12 +234,12 @@ fn pixel_buffer_to_mask(buffer: &CVPixelBuffer, source: MaskSource) -> Result<Ma
         };
         CVPixelBufferUnlockBaseAddress(buffer, CVPixelBufferLockFlags::ReadOnly);
 
-        Ok(Mask {
+        Ok(Mask::new_tracked(MaskFields {
             width: width as u32,
             height: height as u32,
             alpha: result?,
             source,
-        })
+        }))
     }
 }
 
@@ -264,6 +275,25 @@ unsafe fn copy_f32_rows(base: *const f32, width: usize, height: usize, stride: u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 997 and 331 are deliberately unrelated: see the matching test in
+    // `image_decode`. `resized` and `oriented` both rebuild a `Mask` through
+    // `MaskFields`, and both swap the pair, so a silent transposition in
+    // either constructor fails here.
+    #[test]
+    fn width_and_height_land_in_their_own_fields() {
+        let tall = Mask::new_tracked(MaskFields {
+            width: 997,
+            height: 331,
+            alpha: vec![255; 997 * 331],
+            source: MaskSource::Person,
+        });
+        assert_eq!((tall.width, tall.height), (997, 331));
+
+        let wide = tall.resized(331, 997);
+        assert_eq!((wide.width, wide.height), (331, 997));
+        assert_eq!(wide.alpha.len(), 331 * 997);
+    }
     use crate::image_encode::encode_jpeg;
 
     fn write_jpeg(name: &str, w: u32, h: u32, rgba: &[u8]) -> std::path::PathBuf {
@@ -274,18 +304,20 @@ mod tests {
 
     #[test]
     fn coverage_reads_the_fraction_of_the_mask_that_is_filled() {
-        let half = Mask {
+        let half = Mask::new_tracked(MaskFields {
             width: 2,
             height: 2,
             alpha: vec![255, 255, 0, 0],
             source: MaskSource::Person,
-        };
+        });
         assert!((half.coverage() - 0.5).abs() < 1e-6);
 
-        let empty = Mask {
+        let empty = Mask::new_tracked(MaskFields {
             alpha: vec![0; 4],
-            ..half.clone()
-        };
+            width: half.width,
+            height: half.height,
+            source: half.source,
+        });
         assert_eq!(empty.coverage(), 0.0);
         assert!(
             empty.solid_coverage() < EMPTY_COVERAGE,
@@ -297,12 +329,12 @@ mod tests {
     // emptiness test must use solid coverage.
     #[test]
     fn a_low_confidence_smear_is_not_mistaken_for_a_subject() {
-        let smear = Mask {
+        let smear = Mask::new_tracked(MaskFields {
             width: 10,
             height: 10,
             alpha: vec![70; 100],
             source: MaskSource::Person,
-        };
+        });
         assert!(
             smear.coverage() > EMPTY_COVERAGE,
             "mean alone would be fooled"
@@ -311,10 +343,12 @@ mod tests {
 
         let mut small_subject = vec![0u8; 100];
         small_subject[..8].fill(250);
-        let subject = Mask {
+        let subject = Mask::new_tracked(MaskFields {
             alpha: small_subject,
-            ..smear.clone()
-        };
+            width: smear.width,
+            height: smear.height,
+            source: smear.source,
+        });
         assert!(
             subject.solid_coverage() >= EMPTY_COVERAGE,
             "a small but confident subject must stay on the person path"
@@ -327,12 +361,12 @@ mod tests {
 
     #[test]
     fn resizing_stretches_the_mask_to_display_size() {
-        let small = Mask {
+        let small = Mask::new_tracked(MaskFields {
             width: 2,
             height: 2,
             alpha: vec![0, 255, 255, 0],
             source: MaskSource::ForegroundInstance,
-        };
+        });
 
         let same = small.resized(2, 2);
         assert_eq!(same, small, "a no-op resize must not disturb the mask");
@@ -354,12 +388,12 @@ mod tests {
 
     #[test]
     fn sampling_outside_the_mask_reads_as_background() {
-        let m = Mask {
+        let m = Mask::new_tracked(MaskFields {
             width: 2,
             height: 1,
             alpha: vec![10, 20],
             source: MaskSource::Person,
-        };
+        });
         assert_eq!(m.at(0, 0), 10);
         assert_eq!(m.at(1, 0), 20);
         assert_eq!(m.at(2, 0), 0);

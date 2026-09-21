@@ -14,7 +14,7 @@
 //! The bytes entry points are also built under `raw-probe` so the
 //! `decode_probe` binary (`raw/probe.rs`) can test them on macOS.
 
-use crate::image_decode::{fit_within, DecodedImage, PixelFormat};
+use crate::image_decode::{fit_within, DecodedImage, DecodedImageFields, PixelFormat};
 
 /// `Fast` is rawler's `Superpixel3Channel` (quarter-res 2x2 bin) with
 /// `Srgb8` output. `Quality` is rawler's `PPGDemosaic` (full-res,
@@ -130,20 +130,20 @@ fn decode_raw_preview_from_bytes(
 
     if mode == DemosaicMode::Quality && raw.cpp != 3 {
         let (nw, nh, rgba) = resize_linear_f16(&rgba, w, h, max_px);
-        return Ok(DecodedImage {
+        return Ok(DecodedImage::new_tracked(DecodedImageFields {
             width: nw,
             height: nh,
             rgba,
             pixel_format: PixelFormat::LinearF16,
-        });
+        }));
     }
     if mode == DemosaicMode::Quality {
-        return Ok(DecodedImage {
+        return Ok(DecodedImage::new_tracked(DecodedImageFields {
             width: w,
             height: h,
             rgba,
             pixel_format: PixelFormat::LinearF16,
-        });
+        }));
     }
 
     let (nw, nh) = fit_within(w, h, max_px);
@@ -154,12 +154,12 @@ fn decode_raw_preview_from_bytes(
             .ok_or_else(|| "fast preview buffer size mismatch".to_string())?;
         image::imageops::resize(&buf, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
     };
-    Ok(DecodedImage {
+    Ok(DecodedImage::new_tracked(DecodedImageFields {
         width: nw,
         height: nh,
         rgba,
         pixel_format: PixelFormat::Srgb8,
-    })
+    }))
 }
 
 /// Short label for error messages. The `Debug` output of the `Cfa` case
