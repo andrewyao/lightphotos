@@ -28,17 +28,26 @@ pub(super) enum WriteOp {
     Delete,
 }
 
-/// A photo whose sidecar work has not reached the disk yet.
-struct Pending {
-    /// Queued or in-flight operations, counted so the entry retires only when
-    /// the last of them reports.
-    inflight: u32,
-    /// The newest snapshot for this path.
-    latest: WriteOp,
+/// Where a background sidecar load sits in the write order.
+///
+/// A load reads the disk on another thread, so its snapshot can be older than
+/// a write we have already issued. The mark names the point below which every
+/// write had reached the disk when the load was requested, so anything we
+/// wrote at or after it is a record the load may have missed.
+/// [`Catalog::switch_dir`](super::Catalog::switch_dir) issues one and
+/// [`Catalog::apply_loaded`](super::Catalog::apply_loaded) hands it back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LoadMark(u64);
+
+/// The most recent mutation we issued for one photo, and its place in the
+/// write order.
+struct Authored {
+    seq: u64,
+    op: WriteOp,
 }
 
-/// A finished operation: the path it was for, and why it failed.
-type Done = (PathBuf, Option<String>);
+/// A finished operation: the path and sequence it was for, and why it failed.
+type Done = (PathBuf, u64, Option<String>);
 
 /// Concurrent File System Access writes.
 ///
@@ -49,8 +58,9 @@ type Done = (PathBuf, Option<String>);
 #[cfg(target_arch = "wasm32")]
 const WEB_WRITE_WINDOW: usize = 32;
 
-/// Sidecar writes and deletes that have left [`Catalog`](super::Catalog) but
-/// not yet reached the disk.
+/// Sidecar writes and deletes that have left [`Catalog`](super::Catalog), plus
+/// enough history to tell a background load's snapshot from a newer write of
+/// our own.
 ///
 /// # Invariants
 ///
@@ -60,23 +70,37 @@ const WEB_WRITE_WINDOW: usize = 32;
 ///   not.
 /// - Operations on one path complete in submission order. Native gets that
 ///   from a single FIFO worker, wasm from admitting at most one task per path.
-/// - `pending` is exact: a path is in it from `enqueue` until its completion
-///   is drained, which is what makes [`Writeback::overlay`] correct.
+/// - `outstanding` holds every issued sequence that has not reported, so its
+///   smallest member is the first write a concurrent load might not see. Every
+///   sequence below it reached the disk before the load was requested.
+/// - `authored` holds the newest op per path for as long as a load could
+///   contradict it. It is trimmed to the still-queued writes whenever no load
+///   is in flight, so a session that never leaves its folder keeps nothing
+///   beyond the queue itself.
 pub(super) struct Writeback {
-    pending: HashMap<PathBuf, Pending>,
+    /// Queued or in-flight operations per path, counted so a path leaves only
+    /// when the last of them reports. Drives [`Writeback::backlog`].
+    pending: HashMap<PathBuf, u32>,
+    /// Bumped once per enqueue. Orders writes against load requests.
+    writes: u64,
+    outstanding: std::collections::BTreeSet<u64>,
+    authored: HashMap<PathBuf, Authored>,
+    /// Loads requested and not yet applied or abandoned.
+    loads: usize,
+
     done_tx: Sender<Done>,
     done_rx: Receiver<Done>,
 
     /// `None` until the first write. Browsing a folder spawns no thread.
     #[cfg(not(target_arch = "wasm32"))]
-    tx: Option<Sender<(PathBuf, WriteOp)>>,
+    tx: Option<Sender<(PathBuf, u64, WriteOp)>>,
     #[cfg(not(target_arch = "wasm32"))]
     worker: Option<std::thread::JoinHandle<()>>,
 
     /// Accepted but not yet spawned. wasm has no worker thread, so `pump` is
     /// the scheduler.
     #[cfg(target_arch = "wasm32")]
-    queue: std::collections::VecDeque<(PathBuf, WriteOp, web_sys::FileSystemDirectoryHandle)>,
+    queue: std::collections::VecDeque<(PathBuf, u64, WriteOp, web_sys::FileSystemDirectoryHandle)>,
     #[cfg(target_arch = "wasm32")]
     in_flight: std::collections::HashSet<PathBuf>,
 }
@@ -86,6 +110,10 @@ impl Writeback {
         let (done_tx, done_rx) = channel();
         Writeback {
             pending: HashMap::new(),
+            writes: 0,
+            outstanding: std::collections::BTreeSet::new(),
+            authored: HashMap::new(),
+            loads: 0,
             done_tx,
             done_rx,
             #[cfg(not(target_arch = "wasm32"))]
@@ -104,22 +132,59 @@ impl Writeback {
         self.pending.len()
     }
 
-    /// Serve the newest queued snapshot for every path under `dir` on top of
-    /// `images`.
+    /// Register a background load that is about to read the disk, and return
+    /// the mark its result must be applied with.
     ///
-    /// A background load's snapshot predates anything still queued here, so
-    /// without this a folder round-trip during a long flush would put the
-    /// pre-edit record back into the cache, and `reconcile_catalog_mirrors`
-    /// would then drop the user's change from the grid.
-    pub(super) fn overlay(&self, dir: &Path, images: &mut HashMap<OsString, ImageRecord>) {
-        for (path, pending) in &self.pending {
-            if path.parent() != Some(dir) {
+    /// The mark is the oldest write that has not reported yet, because that is
+    /// the first one the load's snapshot may be taken before. With nothing
+    /// queued it is one past the last write, so only writes issued after this
+    /// call outrank the load.
+    pub(super) fn begin_load(&mut self) -> LoadMark {
+        self.loads += 1;
+        LoadMark(self.outstanding.first().copied().unwrap_or(self.writes + 1))
+    }
+
+    /// Retire a load, whether its result arrived or it was never started.
+    pub(super) fn end_load(&mut self) {
+        self.loads = self.loads.saturating_sub(1);
+        if self.loads == 0 {
+            // No surviving load can disagree with the disk about a write that
+            // already landed, so only the queue itself is worth remembering.
+            self.authored
+                .retain(|path, _| self.pending.contains_key(path));
+        }
+    }
+
+    /// Replace every record in `images` that the load carrying `mark` may have
+    /// read before one of our own writes reached the disk.
+    ///
+    /// `Catalog::switch_dir` clears the cache, so a folder round-trip during a
+    /// flush leaves nothing else to correct the load with. Without this the
+    /// pre-edit record goes back into the cache and `reconcile_catalog_mirrors`
+    /// drops the user's change from the grid. A record we wrote before the load
+    /// was requested is left alone, so an edit made outside the app still wins
+    /// on a revisit.
+    ///
+    /// Keys here are `dir.join(name)` for the same `dir` the load carries, and
+    /// `Path` compares by component, so a trailing separator, a doubled one or
+    /// a `.` in either spelling cannot make the parent test miss. A spelling
+    /// that could, such as `./photos` against `photos`, also fails the
+    /// active-directory test in `apply_loaded`, which returns before reaching
+    /// here.
+    pub(super) fn overlay(
+        &self,
+        dir: &Path,
+        mark: LoadMark,
+        images: &mut HashMap<OsString, ImageRecord>,
+    ) {
+        for (path, authored) in &self.authored {
+            if authored.seq < mark.0 || path.parent() != Some(dir) {
                 continue;
             }
             let Some(name) = path.file_name() else {
                 continue;
             };
-            match &pending.latest {
+            match &authored.op {
                 WriteOp::Put(rec) => {
                     images.insert(name.to_os_string(), rec.clone());
                 }
@@ -130,38 +195,40 @@ impl Writeback {
         }
     }
 
-    fn accept(&mut self, path: &Path, op: &WriteOp) {
-        match self.pending.get_mut(path) {
-            Some(entry) => {
-                entry.inflight += 1;
-                entry.latest = op.clone();
-            }
-            None => {
-                self.pending.insert(
-                    path.to_path_buf(),
-                    Pending {
-                        inflight: 1,
-                        latest: op.clone(),
-                    },
-                );
-            }
-        }
+    /// Take the next sequence number and record the op against `path`.
+    fn accept(&mut self, path: &Path, op: &WriteOp) -> u64 {
+        self.writes += 1;
+        let seq = self.writes;
+        self.outstanding.insert(seq);
+        *self.pending.entry(path.to_path_buf()).or_insert(0) += 1;
+        self.authored.insert(
+            path.to_path_buf(),
+            Authored {
+                seq,
+                op: op.clone(),
+            },
+        );
+        seq
     }
 
-    fn retire(&mut self, path: &Path) {
-        if let Some(entry) = self.pending.get_mut(path) {
-            entry.inflight -= 1;
-            if entry.inflight == 0 {
+    fn retire(&mut self, path: &Path, seq: u64) {
+        self.outstanding.remove(&seq);
+        if let Some(inflight) = self.pending.get_mut(path) {
+            *inflight -= 1;
+            if *inflight == 0 {
                 self.pending.remove(path);
+                if self.loads == 0 {
+                    self.authored.remove(path);
+                }
             }
         }
     }
 
     fn drain_completions(&mut self, errors: &mut Vec<String>) {
-        while let Ok((path, err)) = self.done_rx.try_recv() {
+        while let Ok((path, seq, err)) = self.done_rx.try_recv() {
             #[cfg(target_arch = "wasm32")]
             self.in_flight.remove(&path);
-            self.retire(&path);
+            self.retire(&path, seq);
             if let Some(e) = err {
                 errors.push(e);
             }
@@ -172,30 +239,30 @@ impl Writeback {
 #[cfg(not(target_arch = "wasm32"))]
 impl Writeback {
     pub(super) fn enqueue(&mut self, path: &Path, op: WriteOp) {
-        self.accept(path, &op);
+        let seq = self.accept(path, &op);
         match self.sender() {
             Some(tx) => {
-                let _ = tx.send((path.to_path_buf(), op));
+                let _ = tx.send((path.to_path_buf(), seq, op));
             }
             // Without a worker the write still has to happen, or the edit is
             // lost with no way for the user to find out.
             None => {
                 let err = perform(path, &op).err();
-                let _ = self.done_tx.send((path.to_path_buf(), err));
+                let _ = self.done_tx.send((path.to_path_buf(), seq, err));
             }
         }
     }
 
-    fn sender(&mut self) -> Option<&Sender<(PathBuf, WriteOp)>> {
+    fn sender(&mut self) -> Option<&Sender<(PathBuf, u64, WriteOp)>> {
         if self.tx.is_none() {
-            let (tx, rx) = channel::<(PathBuf, WriteOp)>();
+            let (tx, rx) = channel::<(PathBuf, u64, WriteOp)>();
             let done_tx = self.done_tx.clone();
             let spawned = std::thread::Builder::new()
                 .name("catalog-write".into())
                 .spawn(move || {
-                    while let Ok((path, op)) = rx.recv() {
+                    while let Ok((path, seq, op)) = rx.recv() {
                         let err = perform(&path, &op).err();
-                        let _ = done_tx.send((path, err));
+                        let _ = done_tx.send((path, seq, err));
                     }
                 });
             match spawned {
@@ -229,8 +296,8 @@ impl Writeback {
                 break;
             };
             match self.done_rx.recv_timeout(left) {
-                Ok((path, err)) => {
-                    self.retire(&path);
+                Ok((path, seq, err)) => {
+                    self.retire(&path, seq);
                     if let Some(e) = err {
                         errors.push(e);
                     }
@@ -246,7 +313,11 @@ impl Writeback {
 impl Drop for Writeback {
     fn drop(&mut self) {
         // Closing the channel makes the worker finish what is queued and then
-        // exit, so dropping a `Catalog` never loses an edit.
+        // exit, so dropping a `Catalog` never loses an edit. The join is
+        // deliberately unbounded, unlike the one on quit: an edit is worth more
+        // than a prompt shutdown. The cost is that on an unresponsive volume
+        // this hangs with the window already gone and nothing on screen to say
+        // why.
         self.tx = None;
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
@@ -316,8 +387,9 @@ impl Writeback {
         op: WriteOp,
         dir_handle: web_sys::FileSystemDirectoryHandle,
     ) {
-        self.accept(path, &op);
-        self.queue.push_back((path.to_path_buf(), op, dir_handle));
+        let seq = self.accept(path, &op);
+        self.queue
+            .push_back((path.to_path_buf(), seq, op, dir_handle));
         self.admit();
     }
 
@@ -335,24 +407,24 @@ impl Writeback {
     /// what keeps two writes to one photo in submission order.
     fn admit(&mut self) {
         while self.in_flight.len() < WEB_WRITE_WINDOW {
-            let Some((path, _, _)) = self.queue.front() else {
+            let Some((path, _, _, _)) = self.queue.front() else {
                 return;
             };
             if self.in_flight.contains(path) {
                 return;
             }
-            let (path, op, dir_handle) = self.queue.pop_front().unwrap();
+            let (path, seq, op, dir_handle) = self.queue.pop_front().unwrap();
             let Some(name) = path.file_name().map(std::ffi::OsString::from) else {
                 let _ = self
                     .done_tx
-                    .send((path, Some("path has no file name".to_string())));
+                    .send((path, seq, Some("path has no file name".to_string())));
                 continue;
             };
             let body = match &op {
                 WriteOp::Put(rec) => match serde_json::to_vec_pretty(rec) {
                     Ok(bytes) => Some(bytes),
                     Err(e) => {
-                        let _ = self.done_tx.send((path, Some(e.to_string())));
+                        let _ = self.done_tx.send((path, seq, Some(e.to_string())));
                         continue;
                     }
                 },
@@ -370,7 +442,7 @@ impl Writeback {
                 let err = result
                     .err()
                     .map(|e| format!("could not save {}: {e}", name.to_string_lossy()));
-                let _ = done_tx.send((path, err));
+                let _ = done_tx.send((path, seq, err));
             });
         }
     }
@@ -384,6 +456,7 @@ mod tests {
     #[test]
     fn a_later_write_to_one_path_supersedes_an_earlier_one_in_the_overlay() {
         let mut wb = Writeback::new();
+        let mark = wb.begin_load();
         let path = PathBuf::from("/photos/a.jpg");
         wb.enqueue(
             &path,
@@ -401,7 +474,7 @@ mod tests {
         );
 
         let mut images = HashMap::new();
-        wb.overlay(Path::new("/photos"), &mut images);
+        wb.overlay(Path::new("/photos"), mark, &mut images);
         assert_eq!(
             images
                 .get(std::ffi::OsStr::new("a.jpg"))
@@ -414,6 +487,7 @@ mod tests {
     #[test]
     fn the_overlay_leaves_other_folders_alone() {
         let mut wb = Writeback::new();
+        let mark = wb.begin_load();
         wb.enqueue(
             Path::new("/photos/a/x.jpg"),
             WriteOp::Put(ImageRecord {
@@ -423,7 +497,7 @@ mod tests {
         );
 
         let mut images = HashMap::new();
-        wb.overlay(Path::new("/photos/b"), &mut images);
+        wb.overlay(Path::new("/photos/b"), mark, &mut images);
         assert!(
             images.is_empty(),
             "a queued write for one folder must not appear in another folder's cache"
@@ -433,6 +507,7 @@ mod tests {
     #[test]
     fn a_queued_delete_removes_a_loaded_record_from_the_overlay() {
         let mut wb = Writeback::new();
+        let mark = wb.begin_load();
         wb.enqueue(Path::new("/photos/a.jpg"), WriteOp::Delete);
 
         let mut images = HashMap::new();
@@ -443,10 +518,65 @@ mod tests {
                 ..Default::default()
             },
         );
-        wb.overlay(Path::new("/photos"), &mut images);
+        wb.overlay(Path::new("/photos"), mark, &mut images);
         assert!(
             images.is_empty(),
             "a record whose deletion is still queued must not come back from a stale load"
         );
+    }
+
+    /// The mark is what separates a load whose snapshot predates one of our
+    /// writes from a later load whose snapshot already carries it. Both sides
+    /// matter: shield too little and an edit is reverted, shield too much and
+    /// a sidecar changed outside the app is ignored forever.
+    #[test]
+    fn the_mark_decides_which_loads_a_landed_write_shields() {
+        let dir =
+            std::env::temp_dir().join(format!("lightphotos-writeback-test-{}", std::process::id()));
+        let path = dir.join("a.jpg");
+        let mut wb = Writeback::new();
+        // An unapplied load keeps the write history alive for both marks.
+        let older = wb.begin_load();
+        wb.enqueue(
+            &path,
+            WriteOp::Put(ImageRecord {
+                rating: Some(2),
+                ..Default::default()
+            }),
+        );
+        wb.flush_blocking(std::time::Duration::from_secs(10));
+        let newer = wb.begin_load();
+
+        let mut images = HashMap::new();
+        wb.overlay(&dir, newer, &mut images);
+        assert!(
+            images.is_empty(),
+            "a load requested after the write landed reads it off the disk, so \
+             the overlay must stand aside and let an outside edit win"
+        );
+
+        let mut images = HashMap::new();
+        wb.overlay(&dir, older, &mut images);
+        assert_eq!(
+            images
+                .get(std::ffi::OsStr::new("a.jpg"))
+                .and_then(|r| r.rating),
+            Some(2),
+            "a load requested before the write landed may have missed it"
+        );
+
+        // The same directory spelled with a trailing separator, which is what
+        // the parent test in `overlay` has to see through.
+        let mut images = HashMap::new();
+        wb.overlay(&dir.join(""), older, &mut images);
+        assert_eq!(
+            images
+                .get(std::ffi::OsStr::new("a.jpg"))
+                .and_then(|r| r.rating),
+            Some(2),
+            "a trailing separator must not silently skip the overlay"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

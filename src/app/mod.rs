@@ -375,6 +375,15 @@ pub(crate) struct ThumbTexture {
     pub height: u32,
 }
 
+/// A finished background sidecar load: its directory, the navigation token it
+/// was requested under, its place in the sidecar write order, and the records.
+pub(crate) type CatalogLoadResult = (
+    PathBuf,
+    u64,
+    crate::catalog::LoadMark,
+    crate::catalog::SidecarLoad,
+);
+
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
@@ -533,8 +542,8 @@ pub(crate) struct App {
     catalog_load_pending: Option<(PathBuf, u64)>,
     /// One per `request_catalog_load` call.
     catalog_load_token: u64,
-    catalog_load_tx: Sender<(PathBuf, u64, crate::catalog::SidecarLoad)>,
-    catalog_load_rx: Receiver<(PathBuf, u64, crate::catalog::SidecarLoad)>,
+    catalog_load_tx: Sender<CatalogLoadResult>,
+    catalog_load_rx: Receiver<CatalogLoadResult>,
     ratings: HashMap<PathBuf, u8>,
     /// Per-image develop edits. Holds only non-identity edits.
     edits: HashMap<PathBuf, Adjustments>,
