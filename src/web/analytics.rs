@@ -40,6 +40,7 @@ struct State {
     first_photo: bool,
     frame_photo: bool,
     failed: HashSet<PathBuf>,
+    reasons: HashSet<&'static str>,
 }
 thread_local! { static STATE: RefCell<State> = RefCell::new(State::default()); }
 
@@ -59,7 +60,10 @@ pub fn started() {
     }
 }
 pub fn folder_opened(count: usize) {
-    STATE.with_borrow_mut(|s| s.failed.clear());
+    STATE.with_borrow_mut(|s| {
+        s.failed.clear();
+        s.reasons.clear();
+    });
     property(
         "folder_opened",
         "photo_count_bucket",
@@ -72,7 +76,12 @@ pub fn folder_opened(count: usize) {
     );
 }
 pub fn decode_failed(path: &Path, reason: &'static str) {
-    let send = STATE.with_borrow_mut(|s| s.failed.insert(path.to_path_buf()));
+    let send = STATE.with_borrow_mut(|s| {
+        // One report per photo, however many stages it fails at, and then one
+        // per stage per folder. A folder of a format this build can't read
+        // would otherwise send an event per file, all of them identical.
+        s.failed.insert(path.to_path_buf()) && s.reasons.insert(reason)
+    });
     if send {
         property("decode_error", "reason", reason);
     }
@@ -148,6 +157,27 @@ mod tests {
             ["app_started", "first_photo_rendered", "first_render_ms"]
         );
     }
+    #[test]
+    fn a_folder_of_unreadable_photos_reports_each_stage_once_not_each_file() {
+        reset();
+        folder_opened(1000);
+        for i in 0..500 {
+            decode_failed(&PathBuf::from(format!("/photos/{i}.raw")), "thumbnail");
+        }
+        // One per stage, however many files fail at it.
+        assert_eq!(names(), ["folder_opened", "decode_error"]);
+        decode_failed(Path::new("/photos/other.raw"), "full");
+        assert_eq!(
+            names(),
+            ["folder_opened", "decode_error", "decode_error"],
+            "a different stage is still worth one report"
+        );
+        // A new folder starts the budget over.
+        folder_opened(1);
+        decode_failed(Path::new("/photos/0.raw"), "thumbnail");
+        assert_eq!(names().len(), 5);
+    }
+
     #[test]
     fn decode_errors_dedupe_across_stages_until_a_folder_load_without_sending_paths() {
         reset();

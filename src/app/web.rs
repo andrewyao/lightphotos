@@ -371,8 +371,8 @@ impl App {
                             .into(),
                         );
                         self.web_thumb_retries.remove(&(path.clone(), target));
+                        crate::analytics::decode_failed(&path, "thumbnail");
                         if let Some(loader) = &mut self.loader {
-                            crate::analytics::decode_failed(&path, "thumbnail");
                             loader.mark_thumb_failed_external(path.clone(), target);
                         }
                         arrived.push((path, target));
