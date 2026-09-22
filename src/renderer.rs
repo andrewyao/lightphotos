@@ -615,6 +615,13 @@ impl Renderer {
         self.config.format
     }
 
+    /// The size the surface is configured at, which is what every pass
+    /// draws into. On wasm this can differ by a pixel from
+    /// `window.inner_size()`, which rounds the canvas size its own way.
+    pub fn surface_size(&self) -> [u32; 2] {
+        [self.config.width, self.config.height]
+    }
+
     pub fn resize(&mut self, w: u32, h: u32) {
         if w == 0 || h == 0 {
             return;
