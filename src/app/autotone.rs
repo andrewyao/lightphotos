@@ -289,6 +289,10 @@ impl App {
             self.edits.insert(path.to_path_buf(), merged);
         }
         self.catalog.set_adjustments(path, &merged);
+        #[cfg(target_arch = "wasm32")]
+        if merged != base {
+            crate::analytics::property("develop_edit_applied", "edit_kind", "auto_tone");
+        }
         self.autotone_done += 1;
         if self.shown.path() == Some(path) {
             self.push_adjustments();
@@ -303,10 +307,6 @@ impl App {
             return;
         }
         if self.autotone_pending.is_empty() {
-            #[cfg(target_arch = "wasm32")]
-            if done > 0 {
-                crate::analytics::property("develop_edit_applied", "edit_kind", "auto_tone");
-            }
             // Cmd+U lands here for one photo when its thumbnail had to load.
             let t = crate::i18n::t();
             self.set_status(if done == 1 {
