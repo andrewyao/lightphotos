@@ -387,6 +387,10 @@ pub(crate) type CatalogLoadResult = (
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
+    /// Last adjustments handed to the GPU. Tests run without a renderer, so
+    /// this is the only way to assert what the loupe would actually show.
+    #[cfg(test)]
+    pub(crate) pushed_adj: Option<Adjustments>,
     pub(crate) loader: Option<Loader>,
     /// `None` until the window is created.
     pub(crate) exporter: Option<Exporter>,
@@ -804,6 +808,8 @@ impl App {
         Self {
             window: None,
             renderer: None,
+            #[cfg(test)]
+            pushed_adj: None,
             loader: None,
             exporter: None,
             feature_pool: None,

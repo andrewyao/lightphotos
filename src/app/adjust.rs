@@ -57,7 +57,12 @@ impl App {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
         };
+        // Nothing to record, but the GPU can still hold a preview value that
+        // differs from the stored edit: crop mode pushes `crop: None` so the
+        // full frame shows under the overlay, and committing an unchanged crop
+        // lands here. Resync before leaving, or the loupe keeps the preview.
         if self.current_adjustments() == adj {
+            self.push_adjustments();
             return;
         }
         if adj.is_identity() {
@@ -99,6 +104,10 @@ impl App {
     /// Push the current image's adjustments to the renderer. Call it whenever
     /// the shown image or its edits change.
     pub(super) fn push_adjustments(&mut self) {
+        #[cfg(test)]
+        {
+            self.pushed_adj = Some(self.current_adjustments());
+        }
         let gpu = self.gpu_adjust(&self.current_adjustments());
         let gpu_touchups: Vec<GpuTouchUp> = self
             .current_touchups()

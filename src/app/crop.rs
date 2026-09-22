@@ -37,6 +37,10 @@ impl App {
     pub(super) fn push_crop_preview(&mut self) {
         let mut adj = self.current_adjustments();
         adj.crop = None;
+        #[cfg(test)]
+        {
+            self.pushed_adj = Some(adj);
+        }
         let gpu = self.gpu_adjust(&adj);
         if let Some(r) = &mut self.renderer {
             r.set_adjustments(gpu);
@@ -155,6 +159,38 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committing_an_untouched_crop_restores_the_cropped_view() {
+        let photo = PathBuf::from("/photos/a.jpg");
+        let crop = Crop {
+            left: 0.1,
+            top: 0.1,
+            right: 0.9,
+            bottom: 0.9,
+        };
+        let mut app = App::new(None);
+        app.mode = ViewMode::Loupe;
+        app.shown = Shown::Preview(photo.clone(), 1024, 1024);
+        app.edits.insert(
+            photo,
+            Adjustments {
+                crop: Some(crop),
+                ..Default::default()
+            },
+        );
+
+        // Crop mode shows the whole frame under the overlay.
+        app.enter_crop();
+        assert_eq!(app.pushed_adj.unwrap().crop, None);
+
+        // Committing without touching a handle stores the same crop it started
+        // from, so nothing changes -- but the GPU still holds the full frame
+        // and has to be put back, or the loupe keeps showing it uncropped.
+        app.commit_crop();
+        assert_eq!(app.current_adjustments().crop, Some(crop));
+        assert_eq!(app.pushed_adj.unwrap().crop, Some(crop));
+    }
 
     #[test]
     fn cropping_turns_off_the_other_loupe_tools() {
