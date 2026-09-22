@@ -49,6 +49,17 @@ Turning `hotpath` on instruments the windowed app too. There the report prints w
 
 Requires macOS 11+ and Rust stable ≥ 1.92 (pinned via `rust-toolchain.toml`; egui 0.34 needs it for wgpu 29 compatibility). No lint config (clippy.toml/rustfmt.toml) beyond cargo defaults.
 
+## Live view (lightwatch)
+
+`hotpath` reports after the fact. [lightwatch](https://github.com/andrewyao/lightwatch) shows the same run live, in a browser, while you cull. One script brings the whole session up and another takes it down:
+
+```sh
+./scripts/lightwatch-up.sh /path/to/a/folder   # daemon + bridge + instrumented app, opens http://127.0.0.1:7700
+./scripts/lightwatch-down.sh                   # stops all three and clears the ingest socket
+```
+
+Three processes, because lightphotos emits only half the picture by itself. The daemon ingests and serves both the API and the UI; `lightwatch-hotpath` polls the app's hotpath server on `:6770` and re-emits function calls and timings; the app's own `lightwatch-probe` emits the live-object census that `#[lightwatch::track]` collects (`DecodedImage`, `Mask`). The daemon joins the two emitters into one session at `GET /api/sessions`. `LIGHTWATCH_REPO` points at the lightwatch checkout (default `../lightwatch`), `LIGHTWATCH_PORT` moves the UI, and pids and logs live under `$TMPDIR/lightphotos-lightwatch`.
+
 ## Architecture
 
 See [docs/PROJECT_LAYOUT.md](docs/PROJECT_LAYOUT.md).
