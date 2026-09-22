@@ -234,6 +234,15 @@ mod tests {
         (app, dir, paths)
     }
 
+    /// Sidecar writes are queued behind `Catalog`'s write-back worker, so a
+    /// test that reads the disk waits here first. A timeout rather than an
+    /// unbounded wait, so a stuck writer fails the assertion instead of
+    /// hanging the suite.
+    fn flush(app: &mut App) {
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+    }
+
     fn tone(exposure: f32, contrast: f32) -> Adjustments {
         Adjustments {
             exposure,
@@ -281,6 +290,7 @@ mod tests {
         app.apply_preset(id);
 
         assert_eq!(app.edits.get(&paths[0]), Some(&tone(0.5, 10.0)));
+        flush(&mut app);
         assert_eq!(
             Catalog::with_dir(dir.clone()).adjustments(&paths[0]),
             tone(0.5, 10.0),
@@ -308,6 +318,7 @@ mod tests {
 
         app.apply_settings_to_selection();
 
+        flush(&mut app);
         let catalog = Catalog::with_dir(dir.clone());
         for path in &paths {
             let edit = app.edits.get(path).copied().unwrap();
@@ -341,6 +352,7 @@ mod tests {
             app.edits.get(&paths[0]).is_none(),
             "an identity merge removes the entry rather than storing a no-op"
         );
+        flush(&mut app);
         assert!(
             Catalog::with_dir(dir.clone())
                 .adjustments(&paths[0])
@@ -446,6 +458,7 @@ mod tests {
 
         app.run_bulk(crate::ui::BulkKind::ApplyPreset(id));
 
+        flush(&mut app);
         let catalog = Catalog::with_dir(dir.clone());
         for path in &paths {
             assert_eq!(app.edits.get(path).unwrap().exposure, 0.4);
