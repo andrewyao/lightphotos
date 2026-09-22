@@ -140,7 +140,11 @@ impl Renderer {
                 force_fallback_adapter: false,
             })
             .await
-            .expect("no adapter");
+            .unwrap_or_else(|e| {
+                #[cfg(target_arch = "wasm32")]
+                crate::analytics::property("webgpu_unsupported", "reason", "adapter_unavailable");
+                panic!("no adapter: {e}");
+            });
 
         // Request the adapter's real limits; the defaults cap textures at 8192.
         let limits = adapter.limits();
@@ -994,6 +998,8 @@ impl Renderer {
                     pass.set_bind_group(2, adj, &[]);
                     pass.set_bind_group(3, &self.touch_bind, &[]);
                     pass.draw(0..6, 0..1);
+                    #[cfg(target_arch = "wasm32")]
+                    crate::analytics::photo_drawn();
 
                     if let Some(overlay) = overlay_bind {
                         pass.set_pipeline(overlay_pipeline);
@@ -1054,6 +1060,8 @@ impl Renderer {
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+        #[cfg(target_arch = "wasm32")]
+        crate::analytics::presented();
         if crate::loader::timing_enabled() {
             // Only the first frames matter: time to first pixels, then time
             // to the sharp photo.

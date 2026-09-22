@@ -143,6 +143,10 @@ impl App {
         let Some(path) = self.selected_path() else {
             return;
         };
+        #[cfg(target_arch = "wasm32")]
+        if self.rating_of(&path) != stars {
+            crate::analytics::event("photo_rated");
+        }
         if stars == 0 {
             self.ratings.remove(&path);
         } else {
@@ -272,18 +276,28 @@ impl App {
         if paths.is_empty() {
             return 0;
         }
+        #[cfg(target_arch = "wasm32")]
+        let mut changed = false;
         for path in paths {
             let existing = self.edits.get(path).copied().unwrap_or_default();
             let merged = Adjustments {
                 crop: existing.crop,
                 ..tone
             };
+            #[cfg(target_arch = "wasm32")]
+            {
+                changed |= merged != existing;
+            }
             if merged.is_identity() {
                 self.edits.remove(path);
             } else {
                 self.edits.insert(path.clone(), merged);
             }
             self.catalog.set_adjustments(path, &merged);
+        }
+        #[cfg(target_arch = "wasm32")]
+        if changed {
+            crate::analytics::property("develop_edit_applied", "edit_kind", "adjustment");
         }
         if let Some(shown) = self.shown.path().map(Path::to_path_buf) {
             if paths.contains(&shown) {
@@ -309,6 +323,10 @@ impl App {
         let paths = self.selected_paths();
         if paths.is_empty() {
             return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if paths.iter().any(|p| self.rating_of(p) != stars) {
+            crate::analytics::event("photo_rated");
         }
         for path in &paths {
             if stars == 0 {
@@ -479,6 +497,14 @@ impl App {
             self.burst_marks.clear();
         }
         let want_idx = self.selected_index();
+        #[cfg(target_arch = "wasm32")]
+        if self.filter != filter {
+            crate::analytics::property(
+                "filter_used",
+                "filter_kind",
+                if filter.is_some() { "rating" } else { "clear" },
+            );
+        }
         self.filter = filter;
         self.recompute_visible();
         if let Some(idx) = want_idx {

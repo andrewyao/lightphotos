@@ -233,9 +233,15 @@ impl App {
         for ExportOutcome { src, result } in outcomes {
             prog.done += 1;
             match result {
-                Ok(out) => eprintln!("[lightphotos] exported {}", out.display()),
+                Ok(out) => {
+                    eprintln!("[lightphotos] exported {}", out.display());
+                    #[cfg(target_arch = "wasm32")]
+                    crate::analytics::event("photo_exported");
+                }
                 Err(e) => {
                     eprintln!("[lightphotos] export failed for {}: {e}", src.display());
+                    #[cfg(target_arch = "wasm32")]
+                    crate::analytics::property("export_failed", "reason", "export_pipeline");
                     prog.errors += 1;
                     prog.last_err = Some(e);
                 }

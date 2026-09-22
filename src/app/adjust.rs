@@ -50,9 +50,16 @@ impl App {
     /// Save `adj` for the shown image and push it to the GPU. Identity edits are
     /// removed from the edits map rather than stored.
     pub(super) fn apply_adjustments(&mut self, adj: Adjustments) {
+        self.apply_adjustments_kind(adj, "adjustment");
+    }
+
+    pub(super) fn apply_adjustments_kind(&mut self, adj: Adjustments, _kind: &'static str) {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
         };
+        if self.current_adjustments() == adj {
+            return;
+        }
         if adj.is_identity() {
             self.edits.remove(&path);
         } else {
@@ -60,6 +67,10 @@ impl App {
         }
         if self.unsaved_edit.as_ref().is_some_and(|p| *p != path) {
             self.save_edit();
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.unsaved_edit_kind = _kind;
         }
         self.unsaved_edit = Some(path);
         self.save_edit_unless_dragging();
@@ -80,6 +91,8 @@ impl App {
         if let Some(path) = self.unsaved_edit.take() {
             let adj = self.edits.get(&path).copied().unwrap_or_default();
             self.catalog.set_adjustments(&path, &adj);
+            #[cfg(target_arch = "wasm32")]
+            crate::analytics::property("develop_edit_applied", "edit_kind", self.unsaved_edit_kind);
         }
     }
 
@@ -118,12 +131,18 @@ impl App {
             self.set_status(crate::i18n::t().touch_up_limit.into());
             return;
         }
+        #[cfg(target_arch = "wasm32")]
+        let changed = self.current_touchups() != touchups.as_slice();
         if touchups.is_empty() {
             self.touchups.remove(&path);
         } else {
             self.touchups.insert(path.clone(), touchups.clone());
         }
         self.catalog.set_touchups(&path, &touchups);
+        #[cfg(target_arch = "wasm32")]
+        if changed {
+            crate::analytics::property("develop_edit_applied", "edit_kind", "touch_up");
+        }
         self.touchup_selected = None;
         self.push_adjustments();
         self.hist_dirty = true;
@@ -290,6 +309,32 @@ mod tests {
         let mut app = App::new(None);
         app.shown = Shown::Preview(photo.clone(), 1024, 1024);
         (app, dir, photo)
+    }
+
+    #[test]
+    fn showing_fractional_catalog_edits_does_not_emit_an_edit_action() {
+        let (mut app, dir, photo) = one_photo("display-only");
+        app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
+        app.mode = ViewMode::Loupe;
+        app.develop_open = true;
+        let adj = Adjustments {
+            exposure: 0.12345,
+            contrast: 12.345,
+            ..Default::default()
+        };
+        app.edits.insert(photo, adj);
+        let ctx = app.egui_ctx.clone();
+        for _ in 0..2 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let out = crate::ui::draw(ui, &mut app);
+                assert!(!out
+                    .actions
+                    .iter()
+                    .any(|action| matches!(action, crate::ui::UiAction::SetAdjustments(_))));
+            });
+        }
+        assert_eq!(app.current_adjustments(), adj);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

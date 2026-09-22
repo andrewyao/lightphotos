@@ -103,6 +103,10 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                 ui.spacing_mut().slider_width = (ui.available_width() - 56.0).max(80.0);
                 let resp = ui.add(
                     egui::Slider::new(field, range)
+                        // Preserve fractional Auto Tone/catalog values on
+                        // display. Default clamping rounds them on first draw,
+                        // producing an edit without any user interaction.
+                        .clamping(egui::SliderClamping::Edits)
                         .max_decimals(decimals)
                         .show_value(true),
                 );

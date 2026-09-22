@@ -63,7 +63,7 @@ impl App {
         }
         let auto = autotone::analyze(&self.hist_sample, self.hist_pixel_format);
         let merged = autotone::merge(&self.current_adjustments(), &auto);
-        self.apply_adjustments(merged);
+        self.apply_adjustments_kind(merged, "auto_tone");
         self.set_status(crate::i18n::t().auto_tone_applied.into());
     }
 
@@ -303,6 +303,10 @@ impl App {
             return;
         }
         if self.autotone_pending.is_empty() {
+            #[cfg(target_arch = "wasm32")]
+            if done > 0 {
+                crate::analytics::property("develop_edit_applied", "edit_kind", "auto_tone");
+            }
             // Cmd+U lands here for one photo when its thumbnail had to load.
             let t = crate::i18n::t();
             self.set_status(if done == 1 {

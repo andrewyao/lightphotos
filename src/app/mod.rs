@@ -569,6 +569,8 @@ pub(crate) struct App {
     /// Photo whose edit is not yet written to its sidecar. See
     /// `save_edit_unless_dragging`.
     unsaved_edit: Option<PathBuf>,
+    #[cfg(target_arch = "wasm32")]
+    unsaved_edit_kind: &'static str,
     /// Active star filter. `None` shows all.
     filter: Option<(Cmp, u8)>,
     /// Comparator used when a star level is clicked. Stays set across "All".
@@ -895,6 +897,8 @@ impl App {
             histogram: None,
             hist_dirty: false,
             unsaved_edit: None,
+            #[cfg(target_arch = "wasm32")]
+            unsaved_edit_kind: "adjustment",
             filter: None,
             filter_cmp: Cmp::Gte,
             visible: Vec::new(),
@@ -1125,6 +1129,8 @@ impl App {
     /// `load_folder` for an already-built playlist. The web build builds its
     /// playlist from directory handles, since it can't call `read_dir`.
     fn load_playlist(&mut self, playlist: Playlist, dir: PathBuf) {
+        #[cfg(target_arch = "wasm32")]
+        crate::analytics::folder_opened(playlist.entries().len());
         self.teardown_loupe_state();
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
@@ -1188,6 +1194,8 @@ impl App {
             )
         });
 
+        #[cfg(target_arch = "wasm32")]
+        crate::analytics::begin_frame();
         let mut out = ui::FrameOutput::default();
         let full_output = self.egui_ctx.clone().run_ui(raw_input, |ui| {
             out = ui::draw(ui, self);
@@ -1450,6 +1458,16 @@ impl App {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else {
                         continue;
                     };
+                    #[cfg(target_arch = "wasm32")]
+                    if !self.current_adjustments().is_identity()
+                        || !self.current_touchups().is_empty()
+                    {
+                        crate::analytics::property(
+                            "develop_edit_applied",
+                            "edit_kind",
+                            "adjustment",
+                        );
+                    }
                     self.edits.remove(&path);
                     self.touchups.remove(&path);
                     self.catalog.set_adjustments(&path, &Adjustments::default());
