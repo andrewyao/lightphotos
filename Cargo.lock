@@ -2022,7 +2022,7 @@ dependencies = [
 [[package]]
 name = "lightwatch-probe"
 version = "0.1.0"
-source = "git+https://github.com/andrewyao/lightwatch?branch=wave2-census#aec7c7c3955a4268fb567484adf909495115aef7"
+source = "git+https://github.com/andrewyao/lightwatch#aec7c7c3955a4268fb567484adf909495115aef7"
 dependencies = [
  "lightwatch-probe-macros",
  "lightwatch-proto",
@@ -2031,7 +2031,7 @@ dependencies = [
 [[package]]
 name = "lightwatch-probe-macros"
 version = "0.1.0"
-source = "git+https://github.com/andrewyao/lightwatch?branch=wave2-census#aec7c7c3955a4268fb567484adf909495115aef7"
+source = "git+https://github.com/andrewyao/lightwatch#aec7c7c3955a4268fb567484adf909495115aef7"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2042,7 +2042,7 @@ dependencies = [
 [[package]]
 name = "lightwatch-proto"
 version = "0.1.0"
-source = "git+https://github.com/andrewyao/lightwatch?branch=wave2-census#aec7c7c3955a4268fb567484adf909495115aef7"
+source = "git+https://github.com/andrewyao/lightwatch#aec7c7c3955a4268fb567484adf909495115aef7"
 dependencies = [
  "serde",
  "serde_json",
