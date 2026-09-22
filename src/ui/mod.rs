@@ -236,6 +236,18 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             if resp.clicked() {
                 out.actions.push(UiAction::PickFolder);
             }
+            // Web only: picking a folder hands the browser a File System
+            // Access permission, so say up front which button to press.
+            let allow_note = t().landing_allow_note;
+            if !allow_note.is_empty() {
+                ui.add_space(8.0);
+                ui.scope(|ui| {
+                    ui.set_max_width(420.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new(allow_note).small().weak());
+                    });
+                });
+            }
         });
     });
     status_toast(ui, app);
