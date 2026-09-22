@@ -1159,6 +1159,11 @@ impl App {
     /// Paint one frame: run egui for the chrome, then submit the loupe image
     /// and egui paint jobs to the renderer in one wgpu submission.
     pub(crate) fn redraw(&mut self) {
+        // Ahead of every path that can reach `present()`, including the
+        // early return below: `presented` reads this frame's flag, and a
+        // frame that never cleared it would report the last frame's photo.
+        #[cfg(target_arch = "wasm32")]
+        crate::analytics::begin_frame();
         // Upload thumbnails before egui references them.
         self.sync_thumb_textures();
 
@@ -1200,8 +1205,6 @@ impl App {
             )
         });
 
-        #[cfg(target_arch = "wasm32")]
-        crate::analytics::begin_frame();
         let mut out = ui::FrameOutput::default();
         let full_output = self.egui_ctx.clone().run_ui(raw_input, |ui| {
             out = ui::draw(ui, self);
