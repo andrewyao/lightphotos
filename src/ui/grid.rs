@@ -239,6 +239,10 @@ pub(super) fn thumbnail_cell(
         let dh = th as f32 * scale;
         let img_rect = egui::Rect::from_center_size(inner.center(), egui::vec2(dw, dh));
         egui::Image::from_texture((tex, egui::vec2(dw, dh))).paint_at(ui, img_rect);
+        #[cfg(target_arch = "wasm32")]
+        if ui.is_rect_visible(img_rect) {
+            crate::analytics::photo_drawn();
+        }
     } else if style.show_placeholder {
         ui.painter().text(
             rect.center(),

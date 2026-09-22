@@ -117,6 +117,8 @@ impl App {
             self.rotations.insert(path.clone(), step);
         }
         self.catalog.set_rotation(&path, step);
+        #[cfg(target_arch = "wasm32")]
+        crate::analytics::property("develop_edit_applied", "edit_kind", "adjustment");
         if self.fitted {
             self.fit_to_window();
         } else {

@@ -4,6 +4,9 @@
 //! crate root owns `main()` and the winit event loop, which turns window events
 //! into `App` calls. Viewer state and behavior live in [`app`].
 
+#[cfg(any(target_arch = "wasm32", test))]
+#[path = "web/analytics.rs"]
+mod analytics;
 mod app;
 mod autotone;
 mod burst;
@@ -106,6 +109,8 @@ fn finish_window_setup(
     app.feature_pool = Some(featureprint::DistancePool::new());
     app.face_pool = Some(facequality::FacePool::new());
     app.egui_state = Some(egui_state);
+    #[cfg(target_arch = "wasm32")]
+    analytics::started();
 
     if let Some(path) = app.pending_initial.take() {
         loader::mark("opening initial path");
@@ -578,6 +583,7 @@ fn main() {
 /// the browser main thread must return to the browser's event loop.
 #[cfg(target_arch = "wasm32")]
 fn main() {
+    analytics::start();
     console_error_panic_hook::set_once();
     loader::start_clock();
 

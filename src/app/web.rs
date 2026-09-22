@@ -372,6 +372,7 @@ impl App {
                         );
                         self.web_thumb_retries.remove(&(path.clone(), target));
                         if let Some(loader) = &mut self.loader {
+                            crate::analytics::decode_failed(&path, "thumbnail");
                             loader.mark_thumb_failed_external(path.clone(), target);
                         }
                         arrived.push((path, target));
@@ -535,6 +536,9 @@ impl App {
                                     .into(),
                                 );
                                 self.web_speed_retries.remove(&key);
+                                if self.want.as_deref() == Some(path.as_path()) {
+                                    crate::analytics::decode_failed(&path, "speed");
+                                }
                                 self.web_speed_failed.insert(key);
                             }
                         }
@@ -597,6 +601,9 @@ impl App {
                             .into(),
                         );
                         self.web_preview_retries.remove(&key);
+                        if self.want.as_deref() == Some(path.as_path()) {
+                            crate::analytics::decode_failed(&path, "preview");
+                        }
                         self.web_preview_failed.insert(key);
                         self.set_status((crate::i18n::t().preview_failed)(
                             &path.display().to_string(),
@@ -729,6 +736,9 @@ impl App {
                             .into(),
                         );
                         self.web_full_retries.remove(&key);
+                        if self.want.as_deref() == Some(path.as_path()) {
+                            crate::analytics::decode_failed(&path, "full");
+                        }
                         self.web_full_failed.insert(key);
                     }
                 }
