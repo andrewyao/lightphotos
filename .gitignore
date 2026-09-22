@@ -8,3 +8,9 @@
 # rawler RAW-decode crate, materialized + patched per-clone by
 # scripts/setup-vendor-rawler.sh (run it once before any cargo command).
 /vendor/
+
+# seg_probe writes `<stem>.mask.jpg` and `<stem>.overlay.jpg` beside itself in
+# the working directory (see src/bin/seg_probe.rs). They are photo-derived
+# debug output, so they must never be committed.
+*.mask.jpg
+*.overlay.jpg
