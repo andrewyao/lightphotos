@@ -153,6 +153,9 @@ pub struct Strings {
     pub open_folder_tip: &'static str,
     pub help_tip: &'static str,
     pub landing_prompt: &'static str,
+    /// Web only: the File System Access permission the browser shows once a
+    /// folder is picked. Empty off the web, where the picker is native.
+    pub landing_allow_note: &'static str,
     pub opening: &'static str,
     pub choose_folder: &'static str,
     pub picker_title: &'static str,
@@ -377,6 +380,12 @@ pub static EN: Strings = Strings {
     open_folder_tip: "Open a different folder (Cmd+O)",
     help_tip: "Keyboard shortcuts (?)",
     landing_prompt: "Choose a folder of photos to get started",
+    landing_allow_note: if WEB {
+        "When the browser asks \u{201C}Allow this site to edit files? \u{2026}\u{201D}, \
+         click Allow \u{2014} LightPhotos needs it to read your photos and save ratings."
+    } else {
+        ""
+    },
     opening: "Opening\u{2026}",
     choose_folder: "Choose Folder",
     picker_title: "Choose a folder of photos",
@@ -689,6 +698,12 @@ pub static ZH: Strings = Strings {
     open_folder_tip: "打开其他文件夹 (Cmd+O)",
     help_tip: "键盘快捷键 (?)",
     landing_prompt: "选择一个照片文件夹开始",
+    landing_allow_note: if WEB {
+        "当浏览器提示\u{201C}Allow this site to edit files? \u{2026}\u{201D}时，\
+         请点击允许 \u{2014} LightPhotos 需要它来读取照片并保存评分。"
+    } else {
+        ""
+    },
     opening: "正在打开\u{2026}",
     choose_folder: "选择文件夹",
     picker_title: "选择照片文件夹",
