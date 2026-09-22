@@ -47,7 +47,8 @@ See `00-overview.md` for shared context and execution order. **This plan is not 
 | `IncrementalTemperature`, `IncrementalTint` | `temp`, `tint` | exact; both relative -100..100. Written when the preset leaves white balance As Shot, the common case |
 | `Temperature`, `Tint` (absolute) | — | **dropped and reported.** Kelvin against one camera's as-shot reference, while `temp` here is a relative nudge. Any conversion would mis-white-balance every photo while looking like it worked |
 | `ConvertToGrayscale="True"` | `saturation = -100` | approximate; our closest monochrome. Overrides a mapped `Saturation`, as Lightroom's B&W mode does |
-| `LuminanceSmoothing`, `ColorNoiseReduction` | `denoise` | approximate; different algorithm, same 0..100 intent, the larger of the two wins. Pinned by a test |
+| `LuminanceSmoothing` | `denoise` | approximate; different algorithm, same 0..100 intent. Pinned by a test |
+| `ColorNoiseReduction` | — | **dropped, and reported once moved off its default.** Camera Raw writes 25 into every preset that carries the Detail panel, so reading it would denoise imports nobody asked to denoise |
 | `Clarity2012`, `Dehaze`, 24 `HueAdjustment*`/`SaturationAdjustment*`/`LuminanceAdjustment*`, `ToneCurvePV2012*`, `Sharpness`, `CropAngle` | — | **dropped and reported.** No slider exists yet; Plans E/F/G/H add them, and re-importing the file afterwards picks them up. A field Lightroom left at its default is not reported, so the note never cries wolf |
 
 **`.lrtemplate` is out of scope.** It is a Lua table, a second parser for a format Lightroom stopped writing in 7.3 (2018) and can re-export as `.xmp` from its own Presets panel.
