@@ -1468,11 +1468,7 @@ impl App {
                     if !self.current_adjustments().is_identity()
                         || !self.current_touchups().is_empty()
                     {
-                        crate::analytics::property(
-                            "develop_edit_applied",
-                            "edit_kind",
-                            "adjustment",
-                        );
+                        crate::analytics::property("develop_edit_applied", "edit_kind", "reset");
                     }
                     self.edits.remove(&path);
                     self.touchups.remove(&path);
