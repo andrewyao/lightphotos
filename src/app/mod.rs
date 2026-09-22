@@ -1229,9 +1229,18 @@ impl App {
             .egui_ctx
             .tessellate(full_output.shapes, pixels_per_point);
 
-        let size = window.inner_size();
+        // egui sets scissor rects from this size, so it has to be the
+        // surface's own size: a scissor one pixel past it is a WebGPU
+        // validation error that drops the whole frame.
+        let size = match &self.renderer {
+            Some(r) => r.surface_size(),
+            None => {
+                let s = window.inner_size();
+                [s.width, s.height]
+            }
+        };
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [size.width.max(1), size.height.max(1)],
+            size_in_pixels: [size[0].max(1), size[1].max(1)],
             pixels_per_point,
         };
 
