@@ -131,7 +131,13 @@ impl Renderer {
     /// makes every render pass fail WebGPU's scissor-rect validation.
     pub async fn new(window: Arc<Window>, size: winit::dpi::PhysicalSize<u32>) -> Self {
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window).expect("create surface");
+        // A browser with no WebGPU at all fails here, before `request_adapter`
+        // is ever reached, so this is the report that covers "can't run".
+        let surface = instance.create_surface(window).unwrap_or_else(|e| {
+            #[cfg(target_arch = "wasm32")]
+            crate::analytics::property("webgpu_unsupported", "reason", "surface_unavailable");
+            panic!("create surface: {e}");
+        });
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -160,7 +166,11 @@ impl Renderer {
                 trace: wgpu::Trace::Off,
             })
             .await
-            .expect("request device");
+            .unwrap_or_else(|e| {
+                #[cfg(target_arch = "wasm32")]
+                crate::analytics::property("webgpu_unsupported", "reason", "device_unavailable");
+                panic!("request device: {e}");
+            });
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps
