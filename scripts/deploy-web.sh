@@ -42,17 +42,10 @@ OLD_HASH="$(grep -o 'lightphotos-[0-9a-f]*' "$SITE_PUBLIC/app.html" | head -1 | 
 echo "==> Old hash: $OLD_HASH"
 echo "==> New hash: $NEW_HASH"
 
-mkdir -p "$SITE_PUBLIC/app"
-
-echo "==> Removing stale hashed files from $SITE_PUBLIC/app"
-rm -f "$SITE_PUBLIC"/app/lightphotos-*.js "$SITE_PUBLIC"/app/lightphotos-*_bg.wasm
-
-echo "==> Copying build output into $SITE_PUBLIC/app"
-cp "$NEW_JS" "$NEW_WASM" "$SITE_PUBLIC/app/"
-cp "$DIST/wasm_worker.js" "$DIST/wasm_worker_bg.wasm" "$SITE_PUBLIC/app/"
-
 # The icons go to the site root rather than app/, so every page on the site
 # can link them, and iOS finds /apple-touch-icon.png without being told.
+# This runs before the hashed files are swapped: if it fails, public/app/ and
+# the URLs in app.html still agree.
 echo "==> Copying icons into $SITE_PUBLIC"
 cp "$ROOT/assets/icon/favicon.png" "$ROOT/assets/icon/apple-touch-icon.png" "$SITE_PUBLIC/"
 if ! grep -q 'rel="icon"' "$SITE_PUBLIC/app.html"; then
@@ -62,6 +55,15 @@ if ! grep -q 'rel="icon"' "$SITE_PUBLIC/app.html"; then
   grep -q 'rel="icon"' "$SITE_PUBLIC/app.html" \
     || { echo "error: no viewport <meta> in public/app.html to put the icon links after" >&2; exit 1; }
 fi
+
+mkdir -p "$SITE_PUBLIC/app"
+
+echo "==> Removing stale hashed files from $SITE_PUBLIC/app"
+rm -f "$SITE_PUBLIC"/app/lightphotos-*.js "$SITE_PUBLIC"/app/lightphotos-*_bg.wasm
+
+echo "==> Copying build output into $SITE_PUBLIC/app"
+cp "$NEW_JS" "$NEW_WASM" "$SITE_PUBLIC/app/"
+cp "$DIST/wasm_worker.js" "$DIST/wasm_worker_bg.wasm" "$SITE_PUBLIC/app/"
 
 if [[ -n "$OLD_HASH" && "$OLD_HASH" != "$NEW_HASH" ]]; then
   echo "==> Updating hashed URLs in public/app.html"
