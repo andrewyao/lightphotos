@@ -355,7 +355,6 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 
 /// When a photo was taken, as its EXIF recorded it, so an export can carry the
 /// date forward and an upload can send the right instant.
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct CaptureStamp {
     /// `YYYY:MM:DD HH:MM:SS` on the camera's clock.
@@ -365,7 +364,6 @@ pub struct CaptureStamp {
     pub offset: Option<String>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl CaptureStamp {
     /// Validates both fields, so a malformed tag is dropped rather than
     /// written into an export.
@@ -382,7 +380,9 @@ impl CaptureStamp {
     }
 
     /// The moment this names. Needs the offset: a camera clock reading
-    /// without one could be in any time zone.
+    /// without one could be in any time zone. Only uploads need it, and the
+    /// browser can't upload.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn instant(&self) -> Option<SystemTime> {
         let as_if_utc = parse_exif_datetime(&self.local)?;
         let offset = offset_seconds(self.offset.as_deref()?)?;
@@ -395,7 +395,6 @@ impl CaptureStamp {
 }
 
 /// Seconds east of UTC for an EXIF offset such as `+09:00` or `-05:30`.
-#[cfg(not(target_arch = "wasm32"))]
 fn offset_seconds(s: &str) -> Option<i64> {
     let (sign, rest) = match s.as_bytes().first()? {
         b'+' => (1, &s[1..]),
