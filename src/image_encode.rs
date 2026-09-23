@@ -95,6 +95,119 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
     std::fs::write(out, jpeg_data).map_err(|e| e.to_string())
 }
 
+/// `jpeg` with its EXIF block replaced by one this app writes: sRGB, the pixel
+/// size, and the capture date when `taken` has one. The pixels are already
+/// upright, so there is no orientation tag, and nothing else from the source
+/// carries over. Without the date an export would lose it, and Immich would
+/// file an upload under the day it was exported.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn with_exif(
+    jpeg: &[u8],
+    width: u32,
+    height: u32,
+    taken: Option<&crate::image_decode::CaptureStamp>,
+) -> Vec<u8> {
+    const ASCII: u16 = 2;
+    const SHORT: u16 = 3;
+    const LONG: u16 = 4;
+    const UNDEFINED: u16 = 7;
+    let ascii = |s: &str| {
+        let mut v = s.as_bytes().to_vec();
+        v.push(0);
+        v
+    };
+    // Sorted by tag, as TIFF requires. The offset tags are EXIF 2.31.
+    let mut exif_ifd: Vec<(u16, u16, Vec<u8>)> = vec![(0x9000, UNDEFINED, b"0231".to_vec())];
+    if let Some(stamp) = taken {
+        exif_ifd.push((0x9003, ASCII, ascii(&stamp.local)));
+        if let Some(offset) = &stamp.offset {
+            exif_ifd.push((0x9011, ASCII, ascii(offset)));
+        }
+    }
+    exif_ifd.push((0xA001, SHORT, 1u16.to_be_bytes().to_vec()));
+    exif_ifd.push((0xA002, LONG, width.to_be_bytes().to_vec()));
+    exif_ifd.push((0xA003, LONG, height.to_be_bytes().to_vec()));
+
+    // Big-endian TIFF: header, IFD0 holding only the pointer to the EXIF IFD,
+    // then the EXIF IFD and the values too long to sit in an entry.
+    const EXIF_IFD_AT: u32 = 8 + 2 + 12 + 4;
+    let mut tiff = b"MM\0\x2a\0\0\0\x08\0\x01".to_vec();
+    tiff.extend_from_slice(&0x8769u16.to_be_bytes());
+    tiff.extend_from_slice(&LONG.to_be_bytes());
+    tiff.extend_from_slice(&1u32.to_be_bytes());
+    tiff.extend_from_slice(&EXIF_IFD_AT.to_be_bytes());
+    tiff.extend_from_slice(&0u32.to_be_bytes());
+
+    let mut data_at = EXIF_IFD_AT + 2 + 12 * exif_ifd.len() as u32 + 4;
+    let mut data = Vec::new();
+    tiff.extend_from_slice(&(exif_ifd.len() as u16).to_be_bytes());
+    for (tag, kind, value) in &exif_ifd {
+        let unit = match *kind {
+            SHORT => 2,
+            LONG => 4,
+            _ => 1,
+        };
+        tiff.extend_from_slice(&tag.to_be_bytes());
+        tiff.extend_from_slice(&kind.to_be_bytes());
+        tiff.extend_from_slice(&((value.len() / unit) as u32).to_be_bytes());
+        if value.len() <= 4 {
+            let mut inline = value.clone();
+            inline.resize(4, 0);
+            tiff.extend_from_slice(&inline);
+        } else {
+            tiff.extend_from_slice(&data_at.to_be_bytes());
+            data.extend_from_slice(value);
+            if value.len() % 2 == 1 {
+                data.push(0);
+            }
+            data_at = EXIF_IFD_AT + 2 + 12 * exif_ifd.len() as u32 + 4 + data.len() as u32;
+        }
+    }
+    tiff.extend_from_slice(&0u32.to_be_bytes());
+    tiff.extend_from_slice(&data);
+
+    let mut app1 = vec![0xFF, 0xE1];
+    app1.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
+    app1.extend_from_slice(b"Exif\0\0");
+    app1.extend_from_slice(&tiff);
+    splice_app1(jpeg, &app1)
+}
+
+/// Put `app1` after SOI (and after a JFIF APP0, which by convention comes
+/// first), dropping any EXIF APP1 already there. Returns `jpeg` unchanged if
+/// its header doesn't parse.
+#[cfg(not(target_arch = "wasm32"))]
+fn splice_app1(jpeg: &[u8], app1: &[u8]) -> Vec<u8> {
+    if !jpeg.starts_with(&[0xFF, 0xD8]) {
+        return jpeg.to_vec();
+    }
+    let mut head = vec![0xFF, 0xD8];
+    let mut placed = false;
+    let mut i = 2;
+    // Walk the APPn segments; the first other marker ends the header.
+    while i + 4 <= jpeg.len() && jpeg[i] == 0xFF && (0xE0..=0xEF).contains(&jpeg[i + 1]) {
+        let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+        let Some(segment) = jpeg.get(i..i + 2 + len) else {
+            return jpeg.to_vec();
+        };
+        let is_jfif = jpeg[i + 1] == 0xE0 && segment[4..].starts_with(b"JFIF\0");
+        let is_exif = jpeg[i + 1] == 0xE1 && segment[4..].starts_with(b"Exif\0\0");
+        if !is_jfif && !placed {
+            head.extend_from_slice(app1);
+            placed = true;
+        }
+        if !is_exif {
+            head.extend_from_slice(segment);
+        }
+        i += 2 + len;
+    }
+    if !placed {
+        head.extend_from_slice(app1);
+    }
+    head.extend_from_slice(&jpeg[i..]);
+    head
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +280,58 @@ mod tests {
         assert!(g < 100 && b < 100, "green/blue should be low, got {g},{b}");
 
         std::fs::remove_file(&out).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn exif_blocks(jpeg: &[u8]) -> usize {
+        jpeg.windows(6).filter(|w| w == b"Exif\0\0").count()
+    }
+
+    /// Read back through the app's own EXIF reader, which is ImageIO on macOS
+    /// and kamadak-exif elsewhere, not through code in this file.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_export_carries_its_capture_date_in_exif() {
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos-with-exif-test-{}.jpg",
+            std::process::id()
+        ));
+        encode_jpeg(&path, 12, 8, &[90u8; 12 * 8 * 4]).unwrap();
+        let plain = std::fs::read(&path).unwrap();
+
+        for stamp in [
+            image_decode::CaptureStamp::new("2024:06:01 18:04:05", Some("-07:00")).unwrap(),
+            image_decode::CaptureStamp::new("2023:12:31 23:59:59", None).unwrap(),
+        ] {
+            let tagged = with_exif(&plain, 12, 8, Some(&stamp));
+            assert_eq!(
+                exif_blocks(&tagged),
+                1,
+                "the encoder's EXIF is replaced, not doubled"
+            );
+            std::fs::write(&path, &tagged).unwrap();
+            assert_eq!(image_decode::capture_stamp(&path), Some(stamp));
+            let img = image_decode::decode(&path, u32::MAX).expect("still a valid JPEG");
+            assert_eq!((img.width, img.height), (12, 8));
+        }
+
+        std::fs::write(&path, with_exif(&plain, 12, 8, None)).unwrap();
+        assert_eq!(image_decode::capture_stamp(&path), None);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn exif_goes_after_jfif_and_bytes_that_are_not_a_jpeg_pass_through() {
+        let jfif = [0xFF, 0xE0, 0x00, 0x07, b'J', b'F', b'I', b'F', 0x00];
+        let mut jpeg = vec![0xFF, 0xD8];
+        jpeg.extend_from_slice(&jfif);
+        jpeg.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x02, 0xFF, 0xD9]);
+        let out = with_exif(&jpeg, 1, 1, None);
+        assert_eq!(&out[2..11], &jfif, "JFIF stays first");
+        assert_eq!(&out[11..13], &[0xFF, 0xE1], "EXIF follows it");
+        assert!(out.ends_with(&[0xFF, 0xDB, 0x00, 0x02, 0xFF, 0xD9]));
+
+        assert_eq!(with_exif(b"not a jpeg", 1, 1, None), b"not a jpeg");
     }
 }

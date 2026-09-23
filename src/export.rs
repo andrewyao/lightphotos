@@ -9,13 +9,13 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 #[cfg(not(target_arch = "wasm32"))]
-use std::time::SystemTime;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::Sender;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use crate::develop::{Adjustments, TouchUp};
 use crate::{image_decode, image_encode};
@@ -148,9 +148,6 @@ pub enum ExportDest {
     Immich {
         server: Arc<crate::immich::ImmichServer>,
         filename: String,
-        /// Sent as the asset's date, which Immich falls back on because the
-        /// exported JPEG carries no EXIF.
-        taken: SystemTime,
         /// 0 leaves the asset unrated.
         stars: u8,
     },
@@ -177,6 +174,8 @@ pub enum ExportLanding {
         id: String,
         /// The server already had these exact bytes and kept its copy.
         duplicate: bool,
+        /// Why the star rating couldn't be set on an asset that did upload.
+        rating_error: Option<String>,
     },
 }
 
@@ -381,7 +380,11 @@ mod tests {
 
         assert!(matches!(landing, ExportLanding::File(ref p) if *p == dest));
         let out = image_decode::decode(&dest, u32::MAX).unwrap();
-        assert_eq!((out.width, out.height), (50, 50), "200x200 crop, rotated, fit to 50");
+        assert_eq!(
+            (out.width, out.height),
+            (50, 50),
+            "200x200 crop, rotated, fit to 50"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -473,16 +476,20 @@ impl ExportFs for NativeFs {
     }
 
     async fn write_atomic(&self, dest: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-        // Write a temp sibling, then rename. The rename is atomic on one
-        // volume, so a crash cannot leave a truncated `.jpg`.
-        let tmp = dest.with_extension("jpg.tmp");
-        std::fs::write(&tmp, bytes).map_err(|e| format!("write: {e}"))?;
-        if let Err(e) = std::fs::rename(&tmp, dest) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!("rename: {e}"));
-        }
-        Ok(())
+        write_file_atomic(dest, bytes)
     }
+}
+
+/// Write a temp sibling, then rename. The rename is atomic on one volume, so a
+/// crash cannot leave a truncated `.jpg`.
+fn write_file_atomic(dest: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    let tmp = dest.with_extension("jpg.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| format!("write: {e}"))?;
+    if let Err(e) = std::fs::rename(&tmp, dest) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("rename: {e}"));
+    }
+    Ok(())
 }
 
 /// Decode `job.src` at full resolution, bake in its edits and size, and
@@ -491,25 +498,37 @@ impl ExportFs for NativeFs {
 #[hotpath::measure]
 fn do_export(job: ExportJob) -> Result<ExportLanding, String> {
     let (w, h, rgba) = bake_job(&job)?;
+    let stamp = image_decode::capture_stamp(&job.src);
+    let jpeg = image_encode::with_exif(&jpeg_bytes(w, h, &rgba)?, w, h, stamp.as_ref());
     match job.dest {
         ExportDest::Folder(dest) => {
-            write_jpeg(&dest, w, h, &rgba)?;
+            write_file_atomic(&dest, &jpeg)?;
             Ok(ExportLanding::File(dest))
         }
         ExportDest::Immich {
             server,
             filename,
-            taken,
             stars,
         } => {
-            let jpeg = jpeg_bytes(w, h, &rgba)?;
+            // Immich dates an asset by its EXIF, which now carries the
+            // camera's clock. This is the fallback it uses when that is
+            // missing, so it has to be a real instant: the capture time when
+            // the camera recorded its offset, else when the file was written.
+            let taken = stamp
+                .and_then(|s| s.instant())
+                .or_else(|| std::fs::metadata(&job.src).and_then(|m| m.modified()).ok())
+                .unwrap_or_else(SystemTime::now);
             let asset = server.upload(&jpeg, &filename, taken)?;
-            if (1..=5).contains(&stars) {
-                server.set_rating(&asset.id, stars)?;
-            }
+            // The photo is on the server either way, so a rating the key
+            // isn't allowed to set is a warning, not a failed export.
+            let rating_error = (1..=5)
+                .contains(&stars)
+                .then(|| server.set_rating(&asset.id, stars).err())
+                .flatten();
             Ok(ExportLanding::Asset {
                 id: asset.id,
                 duplicate: asset.duplicate,
+                rating_error,
             })
         }
     }
@@ -518,7 +537,13 @@ fn do_export(job: ExportJob) -> Result<ExportLanding, String> {
 #[cfg(target_os = "macos")]
 fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
     let img = image_decode::decode(&job.src, u32::MAX)?;
-    Ok(bake_sized(&img, &job.adj, &job.touchups, job.rot, job.max_px))
+    Ok(bake_sized(
+        &img,
+        &job.adj,
+        &job.touchups,
+        job.rot,
+        job.max_px,
+    ))
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
@@ -531,25 +556,13 @@ fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
         let bytes = pollster::block_on(NativeFs.read_source(&job.src))?;
         image_decode::decode_nonraw_from_bytes(&bytes, u32::MAX)?
     };
-    Ok(bake_sized(&img, &job.adj, &job.touchups, job.rot, job.max_px))
-}
-
-#[cfg(target_os = "macos")]
-fn write_jpeg(dest: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
-    // Temp file then rename, as in `NativeFs::write_atomic`.
-    let tmp = dest.with_extension("jpg.tmp");
-    image_encode::encode_jpeg(&tmp, w, h, rgba)?;
-    if let Err(e) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("rename: {e}"));
-    }
-    Ok(())
-}
-
-#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-fn write_jpeg(dest: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
-    let jpeg = image_encode::encode_jpeg_to_vec(w, h, rgba)?;
-    pollster::block_on(NativeFs.write_atomic(dest, &jpeg))
+    Ok(bake_sized(
+        &img,
+        &job.adj,
+        &job.touchups,
+        job.rot,
+        job.max_px,
+    ))
 }
 
 /// The macOS encoder only writes to a path, so bake to a staging file, read it

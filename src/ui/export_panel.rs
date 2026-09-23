@@ -105,11 +105,7 @@ fn folder_rows(
     {
         let t = t();
         let subfolder = *choice == FolderChoice::ExportsSubfolder;
-        if ui
-            .radio(subfolder, t.export_exports_subfolder)
-            .clicked()
-            && !subfolder
-        {
+        if ui.radio(subfolder, t.export_exports_subfolder).clicked() && !subfolder {
             *next = Some(ExportSettings {
                 target: ExportTarget::default(),
                 ..settings.clone()
@@ -165,8 +161,7 @@ fn immich_rows(ui: &mut egui::Ui, app: &App, actions: &mut Vec<UiAction>) {
                 actions.push(UiAction::SetImmichKey(key_text));
             }
             let ready = !url.trim().is_empty() && !key.trim().is_empty();
-            let entered =
-                key_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let entered = key_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.add_space(4.0);
             if ui
                 .add_enabled(ready, egui::Button::new(t.immich_connect))

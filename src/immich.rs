@@ -47,10 +47,14 @@ impl ImmichServer {
         if key.is_empty() {
             return Err("an API key is required".into());
         }
+        // No overall limit: sending a photo can take minutes on a slow uplink.
+        // `upload` sets a sending budget sized to the photo instead.
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_global(Some(Duration::from_secs(300)))
+            .timeout_send_body(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(120)))
+            .timeout_recv_body(Some(Duration::from_secs(60)))
             .build()
             .into();
 
@@ -123,6 +127,9 @@ impl ImmichServer {
                 "content-type",
                 format!("multipart/form-data; boundary={boundary}"),
             )
+            .config()
+            .timeout_send_body(Some(send_budget(body.len())))
+            .build()
             .send(&body[..])
             .map_err(|e| format!("upload {filename}: {e}"))?;
         parse_upload(&checked(resp)?)
@@ -139,6 +146,15 @@ impl ImmichServer {
             .map_err(|e| format!("set rating: {e}"))?;
         checked(resp).map(|_| ())
     }
+}
+
+/// How long sending `bytes` may take. ureq has no idle timeout, only a budget
+/// for the whole body, so the budget assumes a floor rate: 16 KiB/s is a
+/// 1 Mbit/s uplink shared by eight export workers. A 25 MB photo gets about 27
+/// minutes; a connection that stalls outright still ends.
+fn send_budget(bytes: usize) -> Duration {
+    const FLOOR_BYTES_PER_SEC: u64 = 16 * 1024;
+    Duration::from_secs(60 + bytes as u64 / FLOOR_BYTES_PER_SEC)
 }
 
 fn read_body(mut resp: ureq::http::Response<ureq::Body>) -> Result<String, String> {
@@ -318,7 +334,10 @@ mod tests {
             "https://photos.example.com/immich/api"
         );
         assert_eq!(
-            api_endpoint(origin, Some(r#"{"api":{"endpoint":"https://api.example.com/v1"}}"#)),
+            api_endpoint(
+                origin,
+                Some(r#"{"api":{"endpoint":"https://api.example.com/v1"}}"#)
+            ),
             "https://api.example.com/v1"
         );
         assert_eq!(api_endpoint(origin, None), "https://photos.example.com/api");
@@ -372,6 +391,15 @@ mod tests {
             Some(r#"["rating must be ≥ 1"]"#)
         );
         assert_eq!(error_message("gateway timeout"), None);
+    }
+
+    /// The case the review raised: eight 25 MB uploads sharing a 5 Mbit/s
+    /// uplink take about 320 s each, which a fixed five-minute limit failed.
+    #[test]
+    fn the_send_budget_grows_with_the_photo() {
+        let shared_uplink_secs = 8 * 25_000_000 * 8 / 5_000_000;
+        assert!(send_budget(25_000_000) > Duration::from_secs(shared_uplink_secs));
+        assert_eq!(send_budget(0), Duration::from_secs(60));
     }
 
     #[test]
