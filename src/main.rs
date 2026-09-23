@@ -28,6 +28,8 @@ mod i18n;
 mod image_decode;
 mod image_encode;
 mod image_ops;
+#[cfg(not(target_arch = "wasm32"))]
+mod immich;
 mod loader;
 // The importer is native-only, so the browser build compiles the parser with
 // no caller until a wasm file picker exists.
@@ -46,6 +48,8 @@ mod presets;
 #[cfg(all(feature = "hotpath", not(target_arch = "wasm32")))]
 mod profile;
 mod renderer;
+#[cfg(not(target_arch = "wasm32"))]
+mod secret;
 mod segmentation;
 mod sharpness;
 mod signalcache;
@@ -431,6 +435,10 @@ impl ApplicationHandler<UserEvent> for App {
         let catalog_load_pending = self.poll_signal_load() || catalog_load_pending;
 
         let outcomes = self.exporter.as_ref().map(|e| e.poll()).unwrap_or_default();
+        #[cfg(not(target_arch = "wasm32"))]
+        let immich_connecting = self.poll_immich_connect();
+        #[cfg(target_arch = "wasm32")]
+        let immich_connecting = false;
         if !outcomes.is_empty() {
             self.on_export_outcomes(outcomes);
             self.request_redraw();
@@ -449,7 +457,10 @@ impl ApplicationHandler<UserEvent> for App {
         // toast needs refreshing.
         let poll_delay = if image_pending || self.bulk_delete_running() {
             Some(16)
-        } else if self.export_progress.is_some() || self.catalog.backlog() > 0 {
+        } else if self.export_progress.is_some()
+            || self.catalog.backlog() > 0
+            || immich_connecting
+        {
             Some(if cfg!(target_arch = "wasm32") {
                 16
             } else {
@@ -515,7 +526,7 @@ impl ApplicationHandler<UserEvent> for App {
                             let result = crate::web_export_fs::WebFs::new(folder, file_handles)
                                 .write_atomic(&dest, &jpeg)
                                 .await
-                                .map(|()| dest.clone());
+                                .map(|()| crate::export::ExportLanding::File(dest.clone()));
                             let _ = tx.send(crate::export::ExportOutcome { src: path, result });
                         });
                     }

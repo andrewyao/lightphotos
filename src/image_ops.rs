@@ -149,6 +149,58 @@ pub(crate) fn bake_edited(
     rotate_rgba(&cropped, cw, ch, rot)
 }
 
+/// Shrink opaque sRGB8 RGBA so its long side is at most `max_px`, averaging
+/// each output pixel's whole source box in linear light. Averaging the whole
+/// box rather than sampling it is what keeps fine detail from aliasing at the
+/// 3-6x reductions an export sees, and averaging in linear keeps fine
+/// light-dark texture from darkening. Returns the input untouched when it
+/// already fits. Never upscales.
+pub(crate) fn fit_long_edge(w: u32, h: u32, rgba: Vec<u8>, max_px: u32) -> (u32, u32, Vec<u8>) {
+    if w.max(h) <= max_px || max_px == 0 || rgba.len() < (w as usize * h as usize * 4) {
+        return (w, h, rgba);
+    }
+    let scale = max_px as f64 / w.max(h) as f64;
+    let dw = ((w as f64 * scale).round() as u32).clamp(1, max_px);
+    let dh = ((h as f64 * scale).round() as u32).clamp(1, max_px);
+
+    let mut to_linear = [0f32; 256];
+    for (i, v) in to_linear.iter_mut().enumerate() {
+        *v = (i as f32 / 255.0).powf(2.2);
+    }
+    let encode = |v: f32| (v.max(0.0).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
+    // Source span `[start, end)` covered by output index `o` of `d` over `s`.
+    let span = |o: u32, d: u32, s: u32| {
+        let start = (o as u64 * s as u64 / d as u64) as usize;
+        let end = ((o as u64 + 1) * s as u64).div_ceil(d as u64) as usize;
+        (start, end.max(start + 1).min(s as usize))
+    };
+    let xspans: Vec<(usize, usize)> = (0..dw).map(|x| span(x, dw, w)).collect();
+
+    let mut out = vec![0u8; dw as usize * dh as usize * 4];
+    for yo in 0..dh {
+        let (y0, y1) = span(yo, dh, h);
+        for (xo, &(x0, x1)) in xspans.iter().enumerate() {
+            let mut sum = [0f32; 3];
+            for y in y0..y1 {
+                let row = y * w as usize * 4;
+                for x in x0..x1 {
+                    let i = row + x * 4;
+                    sum[0] += to_linear[rgba[i] as usize];
+                    sum[1] += to_linear[rgba[i + 1] as usize];
+                    sum[2] += to_linear[rgba[i + 2] as usize];
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as f32;
+            let d = (yo as usize * dw as usize + xo) * 4;
+            out[d] = encode(sum[0] / n);
+            out[d + 1] = encode(sum[1] / n);
+            out[d + 2] = encode(sum[2] / n);
+            out[d + 3] = 255;
+        }
+    }
+    (dw, dh, out)
+}
+
 /// Strided downsample of `img` to linear RGB with about `target` samples on
 /// the long side. Returns `(grid, w, h)`, or an empty grid for a bad image.
 /// The histogram and Auto Tone both use this so they see the same pixels.
@@ -341,6 +393,39 @@ mod tests {
     use super::*;
     use crate::develop::Crop;
     use crate::image_decode::DecodedImageFields;
+
+    #[test]
+    fn fit_long_edge_scales_the_long_side_and_keeps_the_aspect() {
+        let (w, h) = (400, 300);
+        let (dw, dh, out) = fit_long_edge(w, h, vec![128; (w * h * 4) as usize], 205);
+        assert_eq!((dw, dh), (205, 154));
+        assert_eq!(out.len(), (dw * dh * 4) as usize);
+        assert!(out.chunks(4).all(|p| p == [128, 128, 128, 255]), "flat gray stays flat");
+    }
+
+    #[test]
+    fn fit_long_edge_never_upscales() {
+        let rgba = vec![7u8; 30 * 20 * 4];
+        let (w, h, out) = fit_long_edge(30, 20, rgba.clone(), 2048);
+        assert_eq!((w, h), (30, 20));
+        assert_eq!(out, rgba);
+    }
+
+    /// A one-pixel black/white checkerboard halved is 50% light, which is
+    /// about 186 in 2.2 gamma, not the 128 a gamma-space average would give.
+    #[test]
+    fn fit_long_edge_averages_in_linear_light() {
+        let (w, h) = (64u32, 64u32);
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+                rgba.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let (_, _, out) = fit_long_edge(w, h, rgba, 32);
+        assert!(out.chunks(4).all(|p| (184..=188).contains(&p[0])), "got {}", out[0]);
+    }
 
     fn px(v: u8) -> [u8; 4] {
         [v, v, v, 255]

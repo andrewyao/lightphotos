@@ -877,6 +877,7 @@ impl WorkerPoolHandle {
         adj_json: String,
         touchups_json: String,
         rot: u8,
+        max_px: u32,
     ) {
         {
             let mut inner_mut = self.0.borrow_mut();
@@ -897,7 +898,9 @@ impl WorkerPoolHandle {
             inner_mut.export_backlog.push_back(QueuedJob {
                 id,
                 bytes,
-                max_px: u32::MAX,
+                // Exports decode at full size either way. The worker reads
+                // this as the long-edge limit for the finished JPEG.
+                max_px,
                 is_raw,
                 quality: true,
                 encode_jpeg: false,

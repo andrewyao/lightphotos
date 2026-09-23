@@ -112,6 +112,7 @@ mod wasm {
         data: &JsValue,
         bytes: Vec<u8>,
         is_raw: bool,
+        max_px: u32,
     ) {
         let adj_json = Reflect::get(data, &JsValue::from_str("adjustments"))
             .ok()
@@ -128,7 +129,14 @@ mod wasm {
                 .map_err(|e| format!("bad adjustments json: {e}"))?;
             let touchups: Vec<crate::develop::TouchUp> = serde_json::from_str(&touchups_json)
                 .map_err(|e| format!("bad touchups json: {e}"))?;
-            crate::export::bake_jpeg_from_shared_vec(Arc::new(bytes), is_raw, &adj, &touchups, rot)
+            crate::export::bake_jpeg_from_shared_vec(
+                Arc::new(bytes),
+                is_raw,
+                &adj,
+                &touchups,
+                rot,
+                max_px,
+            )
         })();
 
         match baked {
@@ -187,7 +195,7 @@ mod wasm {
             let _ = Reflect::set(&result, &JsValue::from_str("id"), &JsValue::from_f64(id));
 
             if get_bool(&data, "export") {
-                handle_export(&scope_for_closure, &result, &data, bytes, is_raw);
+                handle_export(&scope_for_closure, &result, &data, bytes, is_raw, max_px);
                 return;
             }
 

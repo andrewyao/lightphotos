@@ -66,6 +66,21 @@ pub enum UiAction {
     ToggleHelp,
     ConfirmQuit,
     CancelQuit,
+    /// Open the export form, or close it if it is showing.
+    ToggleExportForm,
+    SetExportSettings(crate::export::ExportSettings),
+    /// Export the selection with the form's settings.
+    RunExport,
+    #[cfg(not(target_arch = "wasm32"))]
+    ChooseExportFolder,
+    #[cfg(not(target_arch = "wasm32"))]
+    SetImmichUrl(String),
+    #[cfg(not(target_arch = "wasm32"))]
+    SetImmichKey(String),
+    #[cfg(not(target_arch = "wasm32"))]
+    ConnectImmich,
+    #[cfg(not(target_arch = "wasm32"))]
+    DisconnectImmich,
     /// Ask to run a bulk action on the current selection (opens a confirm modal).
     RequestBulk(BulkKind),
     ConfirmBulk,
@@ -136,8 +151,6 @@ pub enum UiAction {
 pub enum BulkKind {
     /// 0 clears the rating.
     Rate(u8),
-    /// Export as JPG with develop settings applied.
-    Export,
     /// Apply the copied develop settings.
     ApplySettings,
     /// Apply this saved preset.
@@ -157,6 +170,7 @@ pub struct FrameOutput {
 }
 
 mod develop_panel;
+mod export_panel;
 pub mod font_size;
 mod grid;
 mod info_panel;
@@ -168,6 +182,7 @@ mod survey;
 pub(crate) mod toolbar;
 
 use develop_panel::draw_develop_panel;
+use export_panel::draw_export_panel;
 use grid::{draw_grid, draw_left_panel};
 use loupe::draw_loupe;
 use modals::{confirm_modal, delete_preset_modal, help_modal, preset_name_modal, quit_modal};
@@ -195,7 +210,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     if mode == ViewMode::Grid || mode == ViewMode::Loupe {
         draw_left_panel(ui, app, &mut out);
     }
-    if mode == ViewMode::Loupe && app.develop_visible() {
+    if app.export_form_open() {
+        draw_export_panel(ui, app, &mut out);
+    } else if mode == ViewMode::Loupe && app.develop_visible() {
         draw_develop_panel(ui, app, &mut out);
     }
 

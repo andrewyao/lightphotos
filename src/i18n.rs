@@ -249,7 +249,6 @@ pub struct Strings {
     // Bulk confirmations.
     pub confirm_clear_rating: fn(usize) -> String,
     pub confirm_rate: fn(&str, usize) -> String,
-    pub confirm_export: fn(usize) -> String,
     pub confirm_apply_settings: fn(usize) -> String,
     /// (preset name, photo count)
     pub confirm_apply_preset: fn(&str, usize) -> String,
@@ -348,7 +347,28 @@ pub struct Strings {
     pub cleared_rating: fn(usize) -> String,
     pub rated: fn(usize, u8) -> String,
     pub kept_best: fn(usize) -> String,
-    pub export_no_image: &'static str,
+    pub export_title: fn(usize) -> String,
+    pub export_destination: &'static str,
+    pub export_to_folder: &'static str,
+    pub export_to_immich: &'static str,
+    pub export_exports_subfolder: &'static str,
+    pub export_chosen_folder: &'static str,
+    pub export_choose_folder: &'static str,
+    pub export_size: &'static str,
+    pub export_size_full: &'static str,
+    pub export_size_long_edge: fn(u32) -> String,
+    pub export_run: &'static str,
+    pub export_needs_immich: &'static str,
+    pub immich_server_url: &'static str,
+    pub immich_api_key: &'static str,
+    pub immich_connect: &'static str,
+    pub immich_connecting: &'static str,
+    pub immich_connected_as: fn(&str) -> String,
+    pub immich_disconnect: &'static str,
+    pub immich_key_storage: &'static str,
+    pub uploading: fn(usize, usize) -> String,
+    pub uploaded: fn(usize, usize) -> String,
+    pub uploaded_partial: fn(usize, usize, &str) -> String,
     pub export_nothing_selected: &'static str,
     pub export_in_progress: &'static str,
     pub export_catalog_loading: &'static str,
@@ -494,7 +514,7 @@ pub static EN: Strings = Strings {
     apply_preset_selection_tip: "Apply a saved preset to the selection",
     settings_from: |name| format!("from {name}"),
     export_jpg: "Export JPG",
-    export_jpg_tip: "Export each selected photo as a baked JPG",
+    export_jpg_tip: "Choose where and at what size, then export the selection as JPGs (X)",
     delete: "Delete",
     delete_selection_tip: if WEB {
         "Permanently delete selected photos; cannot be undone (Delete)"
@@ -577,7 +597,7 @@ pub static EN: Strings = Strings {
                 (primary!("+Shift+C"), "Copy develop settings"),
                 (primary!("+Shift+Y"), "Apply settings to selection"),
                 (primary!("+Shift+P"), "Save settings as a preset"),
-                ("X", "Export selected as JPG"),
+                ("X", "Open or close the export form"),
                 (
                     "Delete",
                     if WEB {
@@ -618,7 +638,6 @@ pub static EN: Strings = Strings {
 
     confirm_clear_rating: |n| format!("Clear the rating on {n} photo(s)?"),
     confirm_rate: |stars, n| format!("Apply {stars} to {n} photo(s)?"),
-    confirm_export: |n| format!("Export {n} photo(s) as JPG?"),
     confirm_apply_settings: |n| format!("Apply the copied settings to {n} photo(s)?"),
     confirm_apply_preset: |name, n| format!("Apply {name} to {n} photo(s)?"),
     confirm_auto_tone: |n| format!("Auto Tone {n} photo(s)?"),
@@ -738,7 +757,41 @@ pub static EN: Strings = Strings {
     cleared_rating: |n| format!("Cleared rating on {n} photo(s)"),
     rated: |n, stars| format!("Rated {n} photo(s) \u{2605}{stars}"),
     kept_best: |n| format!("Kept best, rated {n} sibling(s) \u{2605}1"),
-    export_no_image: "Export: no image selected",
+    export_title: |n| {
+        if n == 1 {
+            "Export 1 photo".into()
+        } else {
+            format!("Export {n} photos")
+        }
+    },
+    export_destination: "Destination",
+    export_to_folder: "Folder",
+    export_to_immich: "Immich",
+    export_exports_subfolder: "Exports subfolder",
+    export_chosen_folder: "Another folder",
+    export_choose_folder: "Choose\u{2026}",
+    export_size: "Size",
+    export_size_full: "Full resolution",
+    export_size_long_edge: |px| format!("{px} px long edge"),
+    export_run: "Export",
+    export_needs_immich: "Connect to an Immich server first",
+    immich_server_url: "Server URL",
+    immich_api_key: "API key",
+    immich_connect: "Connect",
+    immich_connecting: "Connecting\u{2026}",
+    immich_connected_as: |name| format!("Connected as {name}"),
+    immich_disconnect: "Disconnect",
+    immich_key_storage: if cfg!(target_os = "macos") {
+        "The key is kept in your Keychain."
+    } else {
+        "The key is kept in a file only you can read."
+    },
+    uploading: |done, total| format!("Uploading {done}/{total}\u{2026}"),
+    uploaded: |n, dup| match dup {
+        0 => format!("Uploaded {n} photo(s)"),
+        _ => format!("Uploaded {n} photo(s), {dup} already on the server"),
+    },
+    uploaded_partial: |ok, total, e| format!("Uploaded {ok}/{total} \u{2014} last error: {e}"),
     export_nothing_selected: "Export: nothing selected",
     export_in_progress: "Export already in progress\u{2026}",
     export_catalog_loading: "Export: catalog still loading, try again in a moment\u{2026}",
@@ -852,7 +905,7 @@ pub static ZH: Strings = Strings {
     apply_preset_selection_tip: "将已保存的预设应用到所选照片",
     settings_from: |name| format!("来自 {name}"),
     export_jpg: "导出 JPG",
-    export_jpg_tip: "将每张所选照片连同调整导出为 JPG",
+    export_jpg_tip: "选择位置和尺寸，然后将所选照片导出为 JPG（X）",
     delete: "删除",
     delete_selection_tip: if WEB {
         "永久删除所选照片，无法撤销 (Delete)"
@@ -935,7 +988,7 @@ pub static ZH: Strings = Strings {
                 (primary!("+Shift+C"), "拷贝调整设置"),
                 (primary!("+Shift+Y"), "将设置应用到所选照片"),
                 (primary!("+Shift+P"), "将设置保存为预设"),
-                ("X", "将所选照片导出为 JPG"),
+                ("X", "打开或关闭导出表单"),
                 (
                     "Delete",
                     if WEB {
@@ -973,7 +1026,6 @@ pub static ZH: Strings = Strings {
 
     confirm_clear_rating: |n| format!("清除 {n} 张照片的评分？"),
     confirm_rate: |stars, n| format!("将 {n} 张照片评为 {stars}？"),
-    confirm_export: |n| format!("将 {n} 张照片导出为 JPG？"),
     confirm_apply_settings: |n| format!("将拷贝的设置应用到 {n} 张照片？"),
     confirm_apply_preset: |name, n| format!("将 {name} 应用到 {n} 张照片？"),
     confirm_auto_tone: |n| format!("对 {n} 张照片应用自动色调？"),
@@ -1079,7 +1131,35 @@ pub static ZH: Strings = Strings {
     cleared_rating: |n| format!("已清除 {n} 张照片的评分"),
     rated: |n, stars| format!("已将 {n} 张照片评为 \u{2605}{stars}"),
     kept_best: |n| format!("已保留最佳，其余 {n} 张评为 \u{2605}1"),
-    export_no_image: "导出：没有选择图像",
+    export_title: |n| format!("导出 {n} 张照片"),
+    export_destination: "目标",
+    export_to_folder: "文件夹",
+    export_to_immich: "Immich",
+    export_exports_subfolder: "Exports 子文件夹",
+    export_chosen_folder: "其他文件夹",
+    export_choose_folder: "选择\u{2026}",
+    export_size: "尺寸",
+    export_size_full: "原始分辨率",
+    export_size_long_edge: |px| format!("长边 {px} 像素"),
+    export_run: "导出",
+    export_needs_immich: "请先连接 Immich 服务器",
+    immich_server_url: "服务器地址",
+    immich_api_key: "API 密钥",
+    immich_connect: "连接",
+    immich_connecting: "正在连接\u{2026}",
+    immich_connected_as: |name| format!("已连接为 {name}"),
+    immich_disconnect: "断开连接",
+    immich_key_storage: if cfg!(target_os = "macos") {
+        "密钥保存在你的钥匙串中。"
+    } else {
+        "密钥保存在只有你能读取的文件中。"
+    },
+    uploading: |done, total| format!("正在上传 {done}/{total}\u{2026}"),
+    uploaded: |n, dup| match dup {
+        0 => format!("已上传 {n} 张照片"),
+        _ => format!("已上传 {n} 张照片，其中 {dup} 张已在服务器上"),
+    },
+    uploaded_partial: |ok, total, e| format!("已上传 {ok}/{total} 张 \u{2014} 最后的错误：{e}"),
     export_nothing_selected: "导出：没有选择任何照片",
     export_in_progress: "导出正在进行\u{2026}",
     export_catalog_loading: "导出：目录仍在加载，请稍后再试\u{2026}",
