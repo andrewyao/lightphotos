@@ -199,6 +199,10 @@ pub(crate) struct ExportProgress {
     total: usize,
     errors: usize,
     last_err: Option<String>,
+    /// The batch goes to an Immich server, so the toast says "Uploading".
+    uploading: bool,
+    /// Uploads the server already had.
+    duplicates: usize,
 }
 
 /// A finished subject-segmentation run: the path it was computed for, and the
@@ -268,6 +272,18 @@ pub(crate) struct App {
     pub(crate) feature_pool: Option<crate::featureprint::DistancePool>,
     pub(crate) face_pool: Option<crate::facequality::FacePool>,
     pub(crate) export_progress: Option<ExportProgress>,
+    /// What the export form is set to, remembered across launches.
+    export_settings: crate::export::ExportSettings,
+    /// The export form is showing in the right-hand panel.
+    export_form_open: bool,
+    /// The Immich server export uploads to, and the form's sign-in fields.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) immich: export::ImmichLink,
+    /// Whether the saved API key has been looked up yet. The lookup waits for
+    /// the first time the form shows Immich, so someone who never uses it never
+    /// sees a Keychain prompt.
+    #[cfg(not(target_arch = "wasm32"))]
+    immich_key_looked_up: bool,
     /// The running bulk delete, if any. `pub(crate)` because the frame loop
     /// polls it.
     pub(crate) bulk_delete: Option<bulk_delete::BulkDelete>,
@@ -673,6 +689,8 @@ mod catalog;
 mod crop;
 mod export;
 mod fonts;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use export::ImmichLink;
 mod histogram;
 mod keys;
 mod loupe;
@@ -711,6 +729,23 @@ impl App {
             feature_pool: None,
             face_pool: None,
             export_progress: None,
+            // A test must never read the developer's own settings.
+            #[cfg(test)]
+            export_settings: Default::default(),
+            #[cfg(not(test))]
+            export_settings: export::load_export_settings(),
+            export_form_open: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            immich: export::ImmichLink::Disconnected {
+                #[cfg(test)]
+                url: String::new(),
+                #[cfg(not(test))]
+                url: crate::prefs::load(export::IMMICH_SERVER_PREF).unwrap_or_default(),
+                key: String::new(),
+                error: None,
+            },
+            #[cfg(not(target_arch = "wasm32"))]
+            immich_key_looked_up: cfg!(test),
             bulk_delete: None,
             playlist: None,
             want: None,
@@ -1287,6 +1322,19 @@ impl App {
                     self.pending_quit = false;
                     self.request_redraw();
                 }
+                ui::UiAction::ToggleExportForm => self.toggle_export_form(),
+                ui::UiAction::SetExportSettings(settings) => self.set_export_settings(settings),
+                ui::UiAction::RunExport => self.run_export_form(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::ChooseExportFolder => self.choose_export_folder(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::SetImmichUrl(url) => self.set_immich_fields(Some(url), None),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::SetImmichKey(key) => self.set_immich_fields(None, Some(key)),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::ConnectImmich => self.connect_immich(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::DisconnectImmich => self.disconnect_immich(),
                 ui::UiAction::RequestBulk(kind) => self.request_bulk(kind),
                 ui::UiAction::ConfirmBulk => {
                     if let Some(kind) = self.pending_bulk.take() {

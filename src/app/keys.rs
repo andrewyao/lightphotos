@@ -51,7 +51,7 @@ impl App {
             match code {
                 KeyCode::KeyC | KeyCode::Enter | KeyCode::NumpadEnter => self.commit_crop(),
                 KeyCode::Escape => self.cancel_crop(),
-                KeyCode::KeyX if !cmd && !alt => self.export_selected(),
+                KeyCode::KeyX if !cmd && !alt => self.toggle_export_form(),
                 _ => {}
             }
             return;
@@ -96,6 +96,16 @@ impl App {
                 _ => {}
             }
             return;
+        }
+
+        // While the export form is open, Enter runs it and Escape closes it.
+        // Other keys still act, so the selection can change under the form.
+        if self.export_form_open() {
+            match code {
+                KeyCode::Escape => return self.close_export_form(),
+                KeyCode::Enter | KeyCode::NumpadEnter => return self.run_export_form(),
+                _ => {}
+            }
         }
 
         // `?` (Shift+/) toggles the shortcut help.
@@ -234,7 +244,7 @@ impl App {
                 }
             }
             KeyCode::KeyC if !cmd && !alt => self.enter_crop(),
-            KeyCode::KeyX if !cmd && !alt => self.export_selected(),
+            KeyCode::KeyX if !cmd && !alt => self.toggle_export_form(),
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
             // Cmd+Shift+U tones the selection. It must come before plain Cmd+U.
             KeyCode::KeyU if cmd && shift => self.request_bulk(ui::BulkKind::AutoTone),
@@ -561,6 +571,28 @@ mod tests {
 
         press(&mut app, ModifiersState::empty(), KeyCode::Escape);
         assert!(app.preset_name_edit().is_none(), "Escape closes it");
+    }
+
+    /// Escape and Enter belong to the form while it is open. Without the
+    /// guard, Escape would back the Grid out to Folders and drop the selection
+    /// being exported, and Enter would open the Loupe.
+    #[test]
+    fn x_opens_the_export_form_and_it_owns_escape_and_enter() {
+        let (mut app, _) = folder_app(2);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
+        assert!(app.export_form_open(), "X opens the form");
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        assert_eq!(app.mode, ViewMode::Grid, "Enter did not open the Loupe");
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.export_form_open(), "Escape closes the form");
+        assert_eq!(app.focus, Region::Grid, "and only the form");
+        assert_eq!(app.sel, Some(0), "the selection survives");
+
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
+        assert!(!app.export_form_open(), "X again closes it");
     }
 
     #[test]

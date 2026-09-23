@@ -60,7 +60,7 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 | `Cmd`+`Shift`+`U` | Auto Tone the selection (after a confirm) |
 | `Cmd`+`Shift`+`C` | Copy develop settings |
 | `Cmd`+`Shift`+`Y` | Apply settings to the selection (after a confirm) |
-| `X` | Export the selection as JPG into the folder's `Exports/` subfolder (edits baked in, never overwrites) |
+| `X` | Open or close the export form: a folder (`Exports/` by default) or an Immich server, and an output size. `Enter` exports, `Esc` closes. Edits are baked in and files are never overwritten |
 | `Delete` | Move the selection to the Trash, after a confirm; in the browser, deletes permanently |
 
 ## Culling
@@ -103,4 +103,4 @@ edit.
 | `Cmd`+`Z` | Delete the selected touch-up, or the last one if none is selected |
 
 While cropping, drag the edges to resize, hold `Shift` to keep the ratio, and
-press `X` to export.
+press `X` to open the export form.

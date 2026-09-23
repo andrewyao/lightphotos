@@ -11,7 +11,7 @@ pub fn normalize(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn export_stem(src: &Path) -> String {
+pub(crate) fn export_stem(src: &Path) -> String {
     src.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "export".into())

@@ -149,8 +149,15 @@ egui-winit = "0.34"
 # target_os = "linux"-gated inside rfd, so macOS/Windows builds never compile
 # it. wasm has its own picker (`web_fs::pick_and_list_folder`).
 rfd = "0.15"
+# Blocking HTTP for the Immich export destination (`immich.rs`). Blocking fits:
+# uploads run on the export pool's OS threads, and it keeps an async runtime
+# out of a crate whose only executor is `pollster`. The browser can't reach an
+# Immich server (no CORS), so wasm32 never needs it.
+ureq = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# The Immich API key lives in the login Keychain (`secret.rs`).
+security-framework = "3"
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSObject", "NSThread", "NSFileManager", "NSError", "NSLocale"] }
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSResponder"] }

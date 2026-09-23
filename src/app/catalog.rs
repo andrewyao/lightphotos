@@ -310,7 +310,6 @@ impl App {
         Some(match kind {
             ui::BulkKind::Rate(0) => (t.confirm_clear_rating)(n),
             ui::BulkKind::Rate(s) => (t.confirm_rate)(&"\u{2605}".repeat(s as usize), n),
-            ui::BulkKind::Export => (t.confirm_export)(n),
             ui::BulkKind::ApplySettings => (t.confirm_apply_settings)(n),
             ui::BulkKind::ApplyPreset(id) => {
                 let name = self.presets.get(id).map(|p| p.name.clone());
@@ -342,7 +341,6 @@ impl App {
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
             ui::BulkKind::ApplyPreset(id) => self.apply_preset_to_selection(id),
             ui::BulkKind::AutoTone => self.auto_tone_selection(),
-            ui::BulkKind::Export => self.export_selection(),
             ui::BulkKind::Delete => self.delete_selection(),
         }
     }

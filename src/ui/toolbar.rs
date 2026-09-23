@@ -279,7 +279,7 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
                 .on_hover_text(t.export_jpg_tip)
                 .clicked()
             {
-                out.actions.push(UiAction::RequestBulk(BulkKind::Export));
+                out.actions.push(UiAction::ToggleExportForm);
             }
 
             // Destructive, so it sits apart from the others at the far right.
