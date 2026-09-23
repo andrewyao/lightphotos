@@ -100,7 +100,6 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
 /// upright, so there is no orientation tag, and nothing else from the source
 /// carries over. Without the date an export would lose it, and Immich would
 /// file an upload under the day it was exported.
-#[cfg(not(target_arch = "wasm32"))]
 pub fn with_exif(
     jpeg: &[u8],
     width: u32,
@@ -176,7 +175,6 @@ pub fn with_exif(
 /// Put `app1` after SOI (and after a JFIF APP0, which by convention comes
 /// first), dropping any EXIF APP1 already there. Returns `jpeg` unchanged if
 /// its header doesn't parse.
-#[cfg(not(target_arch = "wasm32"))]
 fn splice_app1(jpeg: &[u8], app1: &[u8]) -> Vec<u8> {
     if !jpeg.starts_with(&[0xFF, 0xD8]) {
         return jpeg.to_vec();
@@ -282,7 +280,6 @@ mod tests {
         std::fs::remove_file(&out).ok();
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn exif_blocks(jpeg: &[u8]) -> usize {
         jpeg.windows(6).filter(|w| w == b"Exif\0\0").count()
     }
@@ -333,5 +330,33 @@ mod tests {
         assert!(out.ends_with(&[0xFF, 0xDB, 0x00, 0x02, 0xFF, 0xD9]));
 
         assert_eq!(with_exif(b"not a jpeg", 1, 1, None), b"not a jpeg");
+    }
+
+    /// The browser's export path: its worker holds only the source bytes, so
+    /// the date it writes has to come from them.
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[test]
+    fn a_baked_export_carries_the_capture_date_of_its_source_bytes() {
+        let stamp = image_decode::CaptureStamp::new("2024:06:01 18:04:05", Some("+09:00")).unwrap();
+        let plain = encode_jpeg_to_vec(16, 8, &[120u8; 16 * 8 * 4]).unwrap();
+        let tagged = with_exif(&plain, 16, 8, Some(&stamp));
+        let bake = |src: Vec<u8>| {
+            crate::export::bake_jpeg_from_shared_vec(
+                std::sync::Arc::new(src),
+                false,
+                &Default::default(),
+                &[],
+                0,
+                8,
+            )
+            .unwrap()
+        };
+
+        let out = bake(tagged);
+        assert_eq!(image_decode::capture_stamp_from_bytes(&out), Some(stamp));
+        assert_eq!(exif_blocks(&out), 1);
+
+        let out = bake(plain);
+        assert_eq!(image_decode::capture_stamp_from_bytes(&out), None, "no date is invented");
     }
 }

@@ -306,6 +306,19 @@ pub fn capture_stamp(path: &Path) -> Option<crate::image_decode::CaptureStamp> {
     let exif = exif::Reader::new()
         .read_from_container(&mut std::io::BufReader::new(file))
         .ok()?;
+    stamp_from_exif(&exif)
+}
+
+/// [`capture_stamp`] for a source the caller already holds in memory, which is
+/// how the browser's export worker gets its photos.
+pub fn capture_stamp_from_bytes(bytes: &[u8]) -> Option<crate::image_decode::CaptureStamp> {
+    let exif = exif::Reader::new()
+        .read_from_container(&mut std::io::Cursor::new(bytes))
+        .ok()?;
+    stamp_from_exif(&exif)
+}
+
+fn stamp_from_exif(exif: &exif::Exif) -> Option<crate::image_decode::CaptureStamp> {
     let ascii = |tag| {
         let field = exif.get_field(tag, exif::In::PRIMARY)?;
         match &field.value {

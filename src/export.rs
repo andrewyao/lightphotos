@@ -98,11 +98,14 @@ pub fn bake_jpeg(
         image_decode::decode_nonraw_from_bytes(src_bytes, u32::MAX)?
     };
     let (w, h, rgba) = bake_sized(&img, adj, touchups, rot, max_px);
-    image_encode::encode_jpeg_to_vec(w, h, &rgba)
+    let jpeg = image_encode::encode_jpeg_to_vec(w, h, &rgba)?;
+    let stamp = image_decode::capture_stamp_from_bytes(src_bytes);
+    Ok(image_encode::with_exif(&jpeg, w, h, stamp.as_ref()))
 }
 
 /// [`bake_jpeg`] for the wasm32 export worker, which already owns the bytes
-/// in an `Arc` and passes it to rawler without copying.
+/// in an `Arc` and passes it to rawler without copying. Like the desktop
+/// exporter, it writes the source's capture date into the export's EXIF.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
 #[hotpath::measure]
@@ -120,7 +123,9 @@ pub fn bake_jpeg_from_shared_vec(
         image_decode::decode_nonraw_from_bytes(src_bytes.as_slice(), u32::MAX)?
     };
     let (w, h, rgba) = bake_sized(&img, adj, touchups, rot, max_px);
-    image_encode::encode_jpeg_to_vec(w, h, &rgba)
+    let jpeg = image_encode::encode_jpeg_to_vec(w, h, &rgba)?;
+    let stamp = image_decode::capture_stamp_from_bytes(&src_bytes);
+    Ok(image_encode::with_exif(&jpeg, w, h, stamp.as_ref()))
 }
 
 /// Bake the edits into a full-resolution decode, then shrink the result to
