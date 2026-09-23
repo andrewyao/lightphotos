@@ -5,7 +5,8 @@
 # site repo's public/ (its Astro build copies public/ straight into dist/),
 # automating the manual steps documented in that repo's public/app.html
 # comment: build, copy the four asset files into public/app/ (deleting
-# stale hashed ones), update the two hashed URLs in public/app.html. Does
+# stale hashed ones), update the two hashed URLs in public/app.html. Also
+# copies the app icons to public/ and links them from app.html. Does
 # NOT commit or push in the site repo — review the diff there and do that
 # yourself.
 
@@ -49,6 +50,18 @@ rm -f "$SITE_PUBLIC"/app/lightphotos-*.js "$SITE_PUBLIC"/app/lightphotos-*_bg.wa
 echo "==> Copying build output into $SITE_PUBLIC/app"
 cp "$NEW_JS" "$NEW_WASM" "$SITE_PUBLIC/app/"
 cp "$DIST/wasm_worker.js" "$DIST/wasm_worker_bg.wasm" "$SITE_PUBLIC/app/"
+
+# The icons go to the site root rather than app/, so every page on the site
+# can link them, and iOS finds /apple-touch-icon.png without being told.
+echo "==> Copying icons into $SITE_PUBLIC"
+cp "$ROOT/assets/icon/favicon.png" "$ROOT/assets/icon/apple-touch-icon.png" "$SITE_PUBLIC/"
+if ! grep -q 'rel="icon"' "$SITE_PUBLIC/app.html"; then
+  echo "==> Linking icons from public/app.html"
+  perl -0pi -e 's{(<meta name="viewport"[^>]*>\n)}{$1  <link rel="icon" type="image/png" href="/favicon.png" />\n  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />\n}' \
+    "$SITE_PUBLIC/app.html"
+  grep -q 'rel="icon"' "$SITE_PUBLIC/app.html" \
+    || { echo "error: no viewport <meta> in public/app.html to put the icon links after" >&2; exit 1; }
+fi
 
 if [[ -n "$OLD_HASH" && "$OLD_HASH" != "$NEW_HASH" ]]; then
   echo "==> Updating hashed URLs in public/app.html"
