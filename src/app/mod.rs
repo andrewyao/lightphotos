@@ -203,6 +203,9 @@ pub(crate) struct ExportProgress {
     uploading: bool,
     /// Uploads the server already had.
     duplicates: usize,
+    /// Uploads whose star rating the server refused, and why the last one was.
+    unrated: usize,
+    last_rating_err: Option<String>,
 }
 
 /// A finished subject-segmentation run: the path it was computed for, and the

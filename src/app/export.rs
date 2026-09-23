@@ -325,6 +325,8 @@ impl App {
             last_err: None,
             uploading: false,
             duplicates: 0,
+            unrated: 0,
+            last_rating_err: None,
         });
         self.set_status((crate::i18n::t().exporting)(0, total));
         self.request_redraw();
@@ -443,18 +445,9 @@ impl App {
                     return;
                 };
                 for src in paths {
-                    let filename = format!("{}.jpg", paths::export_stem(&src));
-                    let taken = self
-                        .capture_times
-                        .get(&src)
-                        .copied()
-                        .flatten()
-                        .or_else(|| std::fs::metadata(&src).and_then(|m| m.modified()).ok())
-                        .unwrap_or_else(std::time::SystemTime::now);
                     let dest = ExportDest::Immich {
                         server: Arc::clone(server),
-                        filename,
-                        taken,
+                        filename: format!("{}.jpg", paths::export_stem(&src)),
                         stars: self.rating_of(&src),
                     };
                     exporter.submit(job(src, dest));
@@ -470,6 +463,8 @@ impl App {
             last_err: None,
             uploading,
             duplicates: 0,
+            unrated: 0,
+            last_rating_err: None,
         });
         self.set_status(Self::progress_text(uploading, 0, total));
         self.request_redraw();
@@ -499,9 +494,18 @@ impl App {
                             eprintln!("[lightphotos] exported {}", out.display())
                         }
                         #[cfg(not(target_arch = "wasm32"))]
-                        ExportLanding::Asset { id, duplicate } => {
+                        ExportLanding::Asset {
+                            id,
+                            duplicate,
+                            rating_error,
+                        } => {
                             prog.duplicates += usize::from(duplicate);
                             eprintln!("[lightphotos] uploaded {} as {id}", src.display());
+                            if let Some(e) = rating_error {
+                                eprintln!("[lightphotos] rating not set on {id}: {e}");
+                                prog.unrated += 1;
+                                prog.last_rating_err = Some(e);
+                            }
                         }
                     }
                     #[cfg(target_arch = "wasm32")]
@@ -519,11 +523,15 @@ impl App {
         if prog.done >= prog.total {
             let ok = prog.total - prog.errors;
             let t = crate::i18n::t();
-            self.set_status(match (prog.last_err, prog.uploading) {
+            let summary = match (prog.last_err, prog.uploading) {
                 (None, false) => (t.exported)(ok),
                 (None, true) => (t.uploaded)(ok, prog.duplicates),
                 (Some(e), false) => (t.exported_partial)(ok, prog.total, &e),
                 (Some(e), true) => (t.uploaded_partial)(ok, prog.total, &e),
+            };
+            self.set_status(match prog.last_rating_err {
+                Some(e) => (t.ratings_not_set)(&summary, prog.unrated, &e),
+                None => summary,
             });
         } else {
             self.set_status(Self::progress_text(prog.uploading, prog.done, prog.total));
@@ -611,6 +619,12 @@ mod status_tests {
                 .collect();
             crate::image_encode::encode_jpeg(&dir.join(name), 300, 200, &rgba).unwrap();
         }
+        // A camera time in UTC-7: the server should see 2024-06-02T01:00Z.
+        let a = dir.join("a.jpg");
+        let stamp = crate::image_decode::CaptureStamp::new("2024:06:01 18:00:00", Some("-07:00"));
+        let tagged =
+            crate::image_encode::with_exif(&std::fs::read(&a).unwrap(), 300, 200, stamp.as_ref());
+        std::fs::write(&a, tagged).unwrap();
 
         let mut app = App::new(None);
         app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
@@ -635,7 +649,10 @@ mod status_tests {
         let run = |app: &mut App| {
             app.toggle_export_form();
             app.run_export_form();
-            assert!(!app.export_form_open(), "the form closes once the batch runs");
+            assert!(
+                !app.export_form_open(),
+                "the form closes once the batch runs"
+            );
             let deadline = Instant::now() + std::time::Duration::from_secs(120);
             while app.export_progress.is_some() {
                 assert!(Instant::now() < deadline, "the batch finished in time");

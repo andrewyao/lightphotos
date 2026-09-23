@@ -298,6 +298,28 @@ pub fn capture_time(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
+/// EXIF `DateTimeOriginal` with `OffsetTimeOriginal`, else `DateTime` with
+/// `OffsetTime`. Reads JPEG and TIFF-based RAW containers.
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+pub fn capture_stamp(path: &Path) -> Option<crate::image_decode::CaptureStamp> {
+    let file = std::fs::File::open(path).ok()?;
+    let exif = exif::Reader::new()
+        .read_from_container(&mut std::io::BufReader::new(file))
+        .ok()?;
+    let ascii = |tag| {
+        let field = exif.get_field(tag, exif::In::PRIMARY)?;
+        match &field.value {
+            exif::Value::Ascii(v) => v.first().map(|b| String::from_utf8_lossy(b).into_owned()),
+            _ => None,
+        }
+    };
+    let stamp = |time, offset| {
+        crate::image_decode::CaptureStamp::new(&ascii(time)?, ascii(offset).as_deref())
+    };
+    stamp(exif::Tag::DateTimeOriginal, exif::Tag::OffsetTimeOriginal)
+        .or_else(|| stamp(exif::Tag::DateTime, exif::Tag::OffsetTime))
+}
+
 /// Metadata for `path`. `source_size` is in display orientation (width and
 /// height swapped for EXIF 5..=8), to match [`decode`].
 #[cfg(not(target_os = "macos"))]

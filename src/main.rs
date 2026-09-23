@@ -457,9 +457,7 @@ impl ApplicationHandler<UserEvent> for App {
         // toast needs refreshing.
         let poll_delay = if image_pending || self.bulk_delete_running() {
             Some(16)
-        } else if self.export_progress.is_some()
-            || self.catalog.backlog() > 0
-            || immich_connecting
+        } else if self.export_progress.is_some() || self.catalog.backlog() > 0 || immich_connecting
         {
             Some(if cfg!(target_arch = "wasm32") {
                 16

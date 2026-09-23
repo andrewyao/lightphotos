@@ -167,7 +167,11 @@ pub(crate) fn fit_long_edge(w: u32, h: u32, rgba: Vec<u8>, max_px: u32) -> (u32,
     for (i, v) in to_linear.iter_mut().enumerate() {
         *v = (i as f32 / 255.0).powf(2.2);
     }
-    let encode = |v: f32| (v.max(0.0).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0) as u8;
+    let encode = |v: f32| {
+        (v.max(0.0).powf(1.0 / 2.2) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
     // Source span `[start, end)` covered by output index `o` of `d` over `s`.
     let span = |o: u32, d: u32, s: u32| {
         let start = (o as u64 * s as u64 / d as u64) as usize;
@@ -400,7 +404,10 @@ mod tests {
         let (dw, dh, out) = fit_long_edge(w, h, vec![128; (w * h * 4) as usize], 205);
         assert_eq!((dw, dh), (205, 154));
         assert_eq!(out.len(), (dw * dh * 4) as usize);
-        assert!(out.chunks(4).all(|p| p == [128, 128, 128, 255]), "flat gray stays flat");
+        assert!(
+            out.chunks(4).all(|p| p == [128, 128, 128, 255]),
+            "flat gray stays flat"
+        );
     }
 
     #[test]
@@ -424,7 +431,11 @@ mod tests {
             }
         }
         let (_, _, out) = fit_long_edge(w, h, rgba, 32);
-        assert!(out.chunks(4).all(|p| (184..=188).contains(&p[0])), "got {}", out[0]);
+        assert!(
+            out.chunks(4).all(|p| (184..=188).contains(&p[0])),
+            "got {}",
+            out[0]
+        );
     }
 
     fn px(v: u8) -> [u8; 4] {

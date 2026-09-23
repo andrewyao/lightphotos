@@ -7,7 +7,7 @@
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
 use std::path::Path;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -23,6 +23,7 @@ use objc2_image_io::{
     kCGImagePropertyExifExposureBiasValue, kCGImagePropertyExifExposureTime,
     kCGImagePropertyExifFNumber, kCGImagePropertyExifFlash, kCGImagePropertyExifFocalLength,
     kCGImagePropertyExifISOSpeedRatings, kCGImagePropertyExifLensModel,
+    kCGImagePropertyExifOffsetTime, kCGImagePropertyExifOffsetTimeOriginal,
     kCGImagePropertyExifWhiteBalance, kCGImagePropertyGPSAltitude, kCGImagePropertyGPSAltitudeRef,
     kCGImagePropertyGPSDictionary, kCGImagePropertyGPSLatitude, kCGImagePropertyGPSLatitudeRef,
     kCGImagePropertyGPSLongitude, kCGImagePropertyGPSLongitudeRef, kCGImagePropertyOrientation,
@@ -321,7 +322,7 @@ fn parse_exif_datetime_parts(s: &str) -> Option<DateTimeParts> {
 
 /// Parse an EXIF datetime as UTC. EXIF has no time zone, and burst grouping
 /// only needs times to be consistent with each other.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(not(target_arch = "wasm32"))]
 fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
     let p = parse_exif_datetime_parts(s)?;
     let secs = days_from_civil(p.y, p.mo, p.da) * 86_400 + (p.h * 3600 + p.mi * 60 + p.se) as i64;
@@ -341,7 +342,7 @@ pub(crate) fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
 
 /// Days since the Unix epoch for a Gregorian date (Howard Hinnant's
 /// `days_from_civil`). Expects `m` in 1..=12 and `d` in 1..=31.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(not(target_arch = "wasm32"))]
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = (if y >= 0 { y } else { y - 399 }) / 400;
@@ -350,6 +351,60 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1; // [0, 365]
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
     era * 146097 + doe - 719468
+}
+
+/// When a photo was taken, as its EXIF recorded it, so an export can carry the
+/// date forward and an upload can send the right instant.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaptureStamp {
+    /// `YYYY:MM:DD HH:MM:SS` on the camera's clock.
+    pub local: String,
+    /// `+HH:MM` or `-HH:MM` from `OffsetTimeOriginal`, when the camera
+    /// recorded one.
+    pub offset: Option<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl CaptureStamp {
+    /// Validates both fields, so a malformed tag is dropped rather than
+    /// written into an export.
+    pub fn new(local: &str, offset: Option<&str>) -> Option<Self> {
+        let local = local.trim();
+        parse_exif_datetime_parts(local)?;
+        Some(Self {
+            local: local.to_string(),
+            offset: offset
+                .map(str::trim)
+                .filter(|o| offset_seconds(o).is_some())
+                .map(str::to_string),
+        })
+    }
+
+    /// The moment this names. Needs the offset: a camera clock reading
+    /// without one could be in any time zone.
+    pub fn instant(&self) -> Option<SystemTime> {
+        let as_if_utc = parse_exif_datetime(&self.local)?;
+        let offset = offset_seconds(self.offset.as_deref()?)?;
+        if offset >= 0 {
+            as_if_utc.checked_sub(Duration::from_secs(offset as u64))
+        } else {
+            as_if_utc.checked_add(Duration::from_secs(offset.unsigned_abs()))
+        }
+    }
+}
+
+/// Seconds east of UTC for an EXIF offset such as `+09:00` or `-05:30`.
+#[cfg(not(target_arch = "wasm32"))]
+fn offset_seconds(s: &str) -> Option<i64> {
+    let (sign, rest) = match s.as_bytes().first()? {
+        b'+' => (1, &s[1..]),
+        b'-' => (-1, &s[1..]),
+        _ => return None,
+    };
+    let (h, m) = rest.split_once(':')?;
+    let (h, m): (i64, i64) = (h.parse().ok()?, m.parse().ok()?);
+    (h <= 14 && m < 60 && rest.len() == 5).then_some(sign * (h * 3600 + m * 60))
 }
 
 /// Capture time from EXIF or TIFF, else the file's mtime so grouping always
@@ -379,6 +434,31 @@ fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
     dict_dictionary(&props, unsafe { kCGImagePropertyTIFFDictionary })
         .and_then(|tiff| dict_string(tiff, unsafe { kCGImagePropertyTIFFDateTime }))
         .and_then(|s| parse_exif_datetime(&s))
+}
+
+/// EXIF `DateTimeOriginal` with `OffsetTimeOriginal`, else TIFF `DateTime`
+/// with `OffsetTime`. No mtime fallback: an export's EXIF should only claim a
+/// date the camera recorded.
+#[cfg(target_os = "macos")]
+pub fn capture_stamp(path: &Path) -> Option<CaptureStamp> {
+    let source = open_image_source(path).ok()?;
+    // SAFETY: index 0 exists and no options are passed.
+    let props = unsafe { source.properties_at_index(0, None) }?;
+    let exif = dict_dictionary(&props, unsafe { kCGImagePropertyExifDictionary });
+    let exif_str = |key| exif.and_then(|e| dict_string(e, key));
+    if let Some(stamp) = exif_str(unsafe { kCGImagePropertyExifDateTimeOriginal }).and_then(|t| {
+        CaptureStamp::new(
+            &t,
+            exif_str(unsafe { kCGImagePropertyExifOffsetTimeOriginal }).as_deref(),
+        )
+    }) {
+        return Some(stamp);
+    }
+    let t = dict_string(&props, unsafe { kCGImagePropertyTIFFDateTime })?;
+    CaptureStamp::new(
+        &t,
+        exif_str(unsafe { kCGImagePropertyExifOffsetTime }).as_deref(),
+    )
 }
 
 /// Like `read_capture_time`, but for display. No mtime fallback, because an
@@ -739,6 +819,27 @@ mod tests {
         let rotated = apply_exif_orientation(img, 6);
         assert_eq!((rotated.width, rotated.height), (331, 997));
         assert_eq!(rotated.rgba.len(), 997 * 331 * 4);
+    }
+
+    #[test]
+    fn a_capture_stamp_names_an_instant_only_with_its_offset() {
+        let tokyo = CaptureStamp::new("2024:06:01 18:00:00", Some("+09:00")).unwrap();
+        let utc = parse_exif_datetime("2024:06:01 09:00:00").unwrap();
+        assert_eq!(tokyo.instant(), Some(utc));
+
+        let pacific = CaptureStamp::new("2024:06:01 02:00:00", Some("-07:00")).unwrap();
+        assert_eq!(pacific.instant(), Some(utc));
+
+        let bare = CaptureStamp::new("2024:06:01 18:00:00", None).unwrap();
+        assert_eq!(bare.instant(), None, "a bare clock time could be any zone");
+    }
+
+    #[test]
+    fn malformed_capture_tags_are_dropped() {
+        assert_eq!(CaptureStamp::new("0000:00:00 00:00:00", None), None);
+        let stamp = CaptureStamp::new(" 2024:06:01 18:00:00 ", Some("+9")).unwrap();
+        assert_eq!(stamp.local, "2024:06:01 18:00:00");
+        assert_eq!(stamp.offset, None, "an offset that isn't ±HH:MM is dropped");
     }
 
     #[test]
