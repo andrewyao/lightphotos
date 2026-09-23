@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-# LightPhotos
+<h1><img src="assets/icon/wordmark.svg" alt="LightPhotos" width="420"></h1>
 
 A fast macOS Lightroom-lite photo culling & develop tool, written in Rust.
 

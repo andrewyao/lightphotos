@@ -22,7 +22,8 @@ cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/target/release/$BIN_NAME" "$APP/Contents/MacOS/$BIN_NAME"
 chmod +x "$APP/Contents/MacOS/$BIN_NAME"
 
-# Optional icon (drop an AppIcon.icns into Resources and uncomment in Info.plist).
+# Rendered from assets/icon/lightphotos.svg by scripts/make-icons.sh.
+cp "$ROOT/assets/icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 echo "==> Registering with Launch Services"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
