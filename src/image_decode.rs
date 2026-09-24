@@ -9,7 +9,6 @@ use std::ffi::c_void;
 use std::path::Path;
 #[cfg(any(target_os = "macos", test))]
 use std::time::Duration;
-#[cfg(any(target_os = "macos", test))]
 use std::time::SystemTime;
 
 #[cfg(target_os = "macos")]
@@ -21,11 +20,14 @@ use objc2_core_graphics::{CGContext, CGImage};
 #[cfg(target_os = "macos")]
 use objc2_image_io::{
     kCGImagePropertyExifDateTimeOriginal, kCGImagePropertyExifDictionary,
-    kCGImagePropertyExifExposureTime, kCGImagePropertyExifFNumber, kCGImagePropertyExifFocalLength,
+    kCGImagePropertyExifExposureBiasValue, kCGImagePropertyExifExposureTime,
+    kCGImagePropertyExifFNumber, kCGImagePropertyExifFlash, kCGImagePropertyExifFocalLength,
     kCGImagePropertyExifISOSpeedRatings, kCGImagePropertyExifLensModel,
-    kCGImagePropertyOrientation, kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
-    kCGImagePropertyTIFFDateTime, kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel,
-    CGImageSource,
+    kCGImagePropertyExifWhiteBalance, kCGImagePropertyGPSAltitude, kCGImagePropertyGPSAltitudeRef,
+    kCGImagePropertyGPSDictionary, kCGImagePropertyGPSLatitude, kCGImagePropertyGPSLatitudeRef,
+    kCGImagePropertyGPSLongitude, kCGImagePropertyGPSLongitudeRef, kCGImagePropertyOrientation,
+    kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth, kCGImagePropertyTIFFDateTime,
+    kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel, CGImageSource,
 };
 
 #[cfg(target_os = "macos")]
@@ -84,10 +86,16 @@ extern "C" {
     fn CFArrayGetTypeID() -> core::ffi::c_ulong;
 }
 
-/// Camera, lens, exposure, and capture date for display. Read from the file
+/// File facts, camera, lens, exposure, capture date, and location for
+/// display. Every platform's reader fills this one struct. Read from the file
 /// each time and never stored in the catalog. Missing fields are `None`.
 #[derive(Default)]
 pub struct ImageMetadata {
+    pub file_size: Option<u64>,
+    /// Local wall-clock time of the file's last modification.
+    pub modified: Option<CaptureDate>,
+    /// Short format name from the extension, such as `JPEG` or `CR3`.
+    pub format: Option<String>,
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
     pub lens_model: Option<String>,
@@ -95,6 +103,11 @@ pub struct ImageMetadata {
     pub exposure_time: Option<f64>,
     pub iso: Option<u32>,
     pub focal_length: Option<f64>,
+    /// Exposure compensation in EV.
+    pub exposure_bias: Option<f64>,
+    pub flash: Option<Flash>,
+    pub white_balance: Option<WhiteBalance>,
+    pub gps: Option<Gps>,
     pub capture_date: Option<CaptureDate>,
     /// Full-resolution size in display orientation, as [`decode`] would
     /// return it. Read from the header without decoding, so the Loupe knows
@@ -102,15 +115,136 @@ pub struct ImageMetadata {
     pub source_size: Option<(u32, u32)>,
 }
 
-/// Capture time as the camera's wall clock recorded it. EXIF has no time
-/// zone, so this is shown as-is instead of going through `SystemTime`.
-#[derive(Clone, Copy)]
+/// A wall-clock time for display. For a capture date this is the camera's
+/// clock as recorded, since EXIF has no time zone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CaptureDate {
     pub year: i32,
     pub month: u32,
     pub day: u32,
     pub hour: u32,
     pub minute: u32,
+}
+
+/// `t` in the local time zone.
+pub(crate) fn local_date(t: SystemTime) -> CaptureDate {
+    use chrono::{Datelike, Timelike};
+    let d: chrono::DateTime<chrono::Local> = t.into();
+    CaptureDate {
+        year: d.year(),
+        month: d.month(),
+        day: d.day(),
+        hour: d.hour(),
+        minute: d.minute(),
+    }
+}
+
+/// Whether the flash fired. `None` when the camera has no flash.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flash {
+    Fired,
+    DidNotFire,
+}
+
+impl Flash {
+    /// Bit 0 of the EXIF `Flash` bitfield is "fired" and bit 5 is "no flash
+    /// function". The other bits describe the mode and return light.
+    pub(crate) fn from_exif(bits: u32) -> Option<Flash> {
+        if bits & 0x01 != 0 {
+            Some(Flash::Fired)
+        } else if bits & 0x20 != 0 {
+            None
+        } else {
+            Some(Flash::DidNotFire)
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhiteBalance {
+    Auto,
+    Manual,
+}
+
+impl WhiteBalance {
+    /// EXIF `WhiteBalance`: 0 is auto and 1 is manual.
+    pub(crate) fn from_exif(value: u32) -> Option<WhiteBalance> {
+        match value {
+            0 => Some(WhiteBalance::Auto),
+            1 => Some(WhiteBalance::Manual),
+            _ => None,
+        }
+    }
+}
+
+/// Signed decimal degrees: north and east are positive. Altitude in meters,
+/// negative below sea level.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gps {
+    pub lat: f64,
+    pub lon: f64,
+    pub alt: Option<f64>,
+}
+
+impl Gps {
+    /// EXIF stores unsigned magnitudes and puts the sign in the Ref tags:
+    /// `S` and `W` are negative, and an altitude ref of 1 is below sea level.
+    /// `None` for coordinates off the globe.
+    pub(crate) fn from_exif(
+        lat: f64,
+        lat_ref: Option<&str>,
+        lon: f64,
+        lon_ref: Option<&str>,
+        alt: Option<f64>,
+        alt_below_sea_level: bool,
+    ) -> Option<Gps> {
+        let negative = |r: Option<&str>, neg: char| {
+            r.and_then(|r| r.trim().chars().next())
+                .is_some_and(|c| c.eq_ignore_ascii_case(&neg))
+        };
+        let lat = if negative(lat_ref, 'S') {
+            -lat.abs()
+        } else {
+            lat.abs()
+        };
+        let lon = if negative(lon_ref, 'W') {
+            -lon.abs()
+        } else {
+            lon.abs()
+        };
+        if !(lat.is_finite() && lon.is_finite() && lat.abs() <= 90.0 && lon.abs() <= 180.0) {
+            return None;
+        }
+        let alt = alt.filter(|a| a.is_finite()).map(|a| {
+            if alt_below_sea_level {
+                -a.abs()
+            } else {
+                a.abs()
+            }
+        });
+        Some(Gps { lat, lon, alt })
+    }
+}
+
+/// Short format name from the file extension, such as `JPEG` or `CR3`.
+pub(crate) fn format_name(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_ascii_uppercase();
+    Some(match ext.as_str() {
+        "JPG" | "JPE" => "JPEG".to_string(),
+        "TIF" => "TIFF".to_string(),
+        _ => ext,
+    })
+}
+
+/// Size, modified time, and format: the facts that come from the file
+/// system rather than the image.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn fill_file_facts(meta: &mut ImageMetadata, path: &Path) {
+    meta.format = format_name(path);
+    if let Ok(fs_meta) = std::fs::metadata(path) {
+        meta.file_size = Some(fs_meta.len());
+        meta.modified = fs_meta.modified().ok().map(local_date);
+    }
 }
 
 /// Open `path` as an ImageIO `CGImageSource`.
@@ -271,6 +405,7 @@ fn read_capture_date(source: &CGImageSource) -> Option<CaptureDate> {
 #[hotpath::measure]
 pub fn read_metadata(path: &Path) -> ImageMetadata {
     let mut meta = ImageMetadata::default();
+    fill_file_facts(&mut meta, path);
     let Ok(source) = open_image_source(path) else {
         return meta;
     };
@@ -304,6 +439,27 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
         meta.exposure_time = dict_f64(exif, unsafe { kCGImagePropertyExifExposureTime });
         meta.focal_length = dict_f64(exif, unsafe { kCGImagePropertyExifFocalLength });
         meta.iso = dict_first_u32(exif, unsafe { kCGImagePropertyExifISOSpeedRatings });
+        meta.exposure_bias = dict_f64(exif, unsafe { kCGImagePropertyExifExposureBiasValue });
+        meta.flash = dict_f64(exif, unsafe { kCGImagePropertyExifFlash })
+            .and_then(|v| Flash::from_exif(v as u32));
+        meta.white_balance = dict_f64(exif, unsafe { kCGImagePropertyExifWhiteBalance })
+            .and_then(|v| WhiteBalance::from_exif(v as u32));
+    }
+
+    if let Some(gps) = dict_dictionary(&props, unsafe { kCGImagePropertyGPSDictionary }) {
+        if let (Some(lat), Some(lon)) = (
+            dict_f64(gps, unsafe { kCGImagePropertyGPSLatitude }),
+            dict_f64(gps, unsafe { kCGImagePropertyGPSLongitude }),
+        ) {
+            meta.gps = Gps::from_exif(
+                lat,
+                dict_string(gps, unsafe { kCGImagePropertyGPSLatitudeRef }).as_deref(),
+                lon,
+                dict_string(gps, unsafe { kCGImagePropertyGPSLongitudeRef }).as_deref(),
+                dict_f64(gps, unsafe { kCGImagePropertyGPSAltitude }),
+                dict_f64(gps, unsafe { kCGImagePropertyGPSAltitudeRef }) == Some(1.0),
+            );
+        }
     }
 
     meta
@@ -641,6 +797,73 @@ mod tests {
         let opaque = img.rgba.chunks_exact(4).all(|p| p[3] == 255);
         assert!(any_color, "decoded pixels are all black -> draw failed");
         assert!(opaque, "expected opaque alpha for a solid-color image");
+    }
+
+    #[test]
+    fn flash_reads_the_fired_bit_and_hides_cameras_without_one() {
+        assert_eq!(Flash::from_exif(0x00), Some(Flash::DidNotFire));
+        assert_eq!(Flash::from_exif(0x01), Some(Flash::Fired));
+        // Auto mode, fired, return light detected.
+        assert_eq!(Flash::from_exif(0x1F), Some(Flash::Fired));
+        // Compulsory off and auto did-not-fire both set mode bits only.
+        assert_eq!(Flash::from_exif(0x10), Some(Flash::DidNotFire));
+        assert_eq!(Flash::from_exif(0x18), Some(Flash::DidNotFire));
+        assert_eq!(Flash::from_exif(0x20), None, "no flash function");
+    }
+
+    #[test]
+    fn white_balance_maps_auto_and_manual_only() {
+        assert_eq!(WhiteBalance::from_exif(0), Some(WhiteBalance::Auto));
+        assert_eq!(WhiteBalance::from_exif(1), Some(WhiteBalance::Manual));
+        assert_eq!(WhiteBalance::from_exif(2), None);
+    }
+
+    #[test]
+    fn gps_applies_the_hemisphere_and_sea_level_refs() {
+        let north_east = Gps::from_exif(37.5, Some("N"), 122.25, Some("E"), Some(12.0), false);
+        assert_eq!(
+            north_east,
+            Some(Gps {
+                lat: 37.5,
+                lon: 122.25,
+                alt: Some(12.0)
+            })
+        );
+        let south_west = Gps::from_exif(33.9, Some("S"), 151.2, Some("w"), Some(30.0), true);
+        assert_eq!(
+            south_west,
+            Some(Gps {
+                lat: -33.9,
+                lon: -151.2,
+                alt: Some(-30.0)
+            })
+        );
+        let no_refs = Gps::from_exif(1.0, None, 2.0, None, None, false).unwrap();
+        assert_eq!((no_refs.lat, no_refs.lon, no_refs.alt), (1.0, 2.0, None));
+    }
+
+    #[test]
+    fn gps_rejects_coordinates_off_the_globe() {
+        assert_eq!(
+            Gps::from_exif(91.0, Some("N"), 0.0, Some("E"), None, false),
+            None
+        );
+        assert_eq!(
+            Gps::from_exif(0.0, Some("N"), 181.0, Some("E"), None, false),
+            None
+        );
+        assert_eq!(Gps::from_exif(f64::NAN, None, 0.0, None, None, false), None);
+    }
+
+    #[test]
+    fn format_name_normalizes_common_extensions() {
+        assert_eq!(
+            format_name(Path::new("a/IMG_1.jpg")).as_deref(),
+            Some("JPEG")
+        );
+        assert_eq!(format_name(Path::new("b.tif")).as_deref(), Some("TIFF"));
+        assert_eq!(format_name(Path::new("c.cr3")).as_deref(), Some("CR3"));
+        assert_eq!(format_name(Path::new("noext")), None);
     }
 
     fn px(v: u8) -> [u8; 4] {
