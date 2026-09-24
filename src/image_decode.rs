@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Decode images to RGBA8 and read their metadata. macOS uses ImageIO for
-//! every format, RAW included. Other targets use the `image` crate and
-//! `rawler`, in `raw/nonmac_decode.rs`, and read almost no EXIF metadata.
+//! every format, RAW included. Other targets use the `image` crate,
+//! `rawler`, and `kamadak-exif`, in `raw/nonmac_decode.rs`.
 
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
@@ -282,21 +282,20 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     Ok(apply_exif_orientation(decoded, read_orientation(&source)))
 }
 
-/// Validated fields of an EXIF datetime. Only the macOS EXIF readers and
-/// tests use the parsing helpers, hence their `any(macos, test)` gate.
-#[cfg(any(target_os = "macos", test))]
+/// Validated fields of an EXIF datetime.
 struct DateTimeParts {
     y: i64,
     mo: u32,
     da: u32,
     h: u64,
     mi: u64,
+    /// Read only by the macOS burst clock; display stops at minutes.
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     se: u64,
 }
 
 /// Parse an EXIF datetime string (`"YYYY:MM:DD HH:MM:SS"`) into validated
 /// components. Returns `None` for empty, zeroed, or malformed values.
-#[cfg(any(target_os = "macos", test))]
 fn parse_exif_datetime_parts(s: &str) -> Option<DateTimeParts> {
     let (date, time) = s.trim().split_once(' ')?;
     let mut d = date.split(':');
@@ -329,8 +328,7 @@ fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
     (secs >= 0).then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64))
 }
 
-#[cfg(any(target_os = "macos", test))]
-fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
+pub(crate) fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
     let p = parse_exif_datetime_parts(s)?;
     Some(CaptureDate {
         year: p.y as i32,
