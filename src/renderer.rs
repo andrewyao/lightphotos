@@ -198,7 +198,9 @@ impl Renderer {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(include_str!("loupe_common.wgsl"), include_str!("shader.wgsl")).into(),
+            ),
         });
 
         let tex_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -266,7 +268,7 @@ impl Renderer {
         });
 
         // Overlay bindings start at 1 so they never overlap the touch-up
-        // buffer at group 3 binding 0. See shader.wgsl.
+        // buffer at group 3 binding 0. See loupe_common.wgsl.
         let overlay_bind_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("overlay_bgl"),

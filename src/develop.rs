@@ -350,7 +350,7 @@ impl From<&Adjustments> for GpuAdjust {
 /// is a plain gain, which recovers RAW values above white. Adapted from
 /// RapidRAW's `apply_filmic_exposure`.
 ///
-/// Must match `filmicExposure` in shader.wgsl and raw_shader.wgsl.
+/// Must match `filmicExposure` in loupe_common.wgsl.
 fn filmic_exposure(rgb: [f32; 3], stops: f32) -> [f32; 3] {
     // Share of the change that goes through the curve. The rest is plain gain.
     const MIX: f32 = 0.95;
@@ -545,7 +545,7 @@ pub fn neutralize_gray(rgb: [f32; 3]) -> Option<(f32, f32)> {
 pub(crate) const DENOISE_RADIUS: i32 = 2;
 
 /// Gaussian (sigma 1) weight by squared tap distance, precomputed.
-/// Must match `spatialWeight` in shader.wgsl.
+/// Must match `spatialWeight` in loupe_common.wgsl.
 fn spatial_weight(dx: i32, dy: i32) -> f32 {
     match dx * dx + dy * dy {
         0 => 1.0,
