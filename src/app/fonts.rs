@@ -1,8 +1,9 @@
 //! The UI font stack. Each platform adds what it can read: macOS leads with
 //! its own UI font, Windows and Linux add a system Chinese font behind egui's
-//! built-ins, and the browser, which can't read system fonts, gets a small
-//! subset of Noto Sans SC covering the UI's own Chinese text, plus the full
-//! font once a name needs it.
+//! built-ins, and the browser fetches the full Noto Sans SC once a name needs
+//! it. Everywhere but macOS, a small subset of Noto Sans SC covering the UI's
+//! own Chinese text comes last, so the UI never draws boxes when no Chinese
+//! font is installed.
 
 use std::sync::Arc;
 
@@ -30,7 +31,8 @@ pub(crate) fn configure(ctx: &egui::Context, full_cjk: Option<Vec<u8>>) {
         });
     }
     // Built by `scripts/subset-cjk-font.sh` from the CJK text in `i18n.rs`.
-    #[cfg(target_arch = "wasm32")]
+    // macOS always has Hiragino, so it skips the copy.
+    #[cfg(not(target_os = "macos"))]
     trailing.push(Face {
         name: "noto-sans-sc-ui-subset",
         bytes: include_bytes!("../../assets/fonts/NotoSansSC-ui-subset.otf").to_vec(),
@@ -134,8 +136,7 @@ fn system_faces() -> (Vec<Face>, Vec<Face>) {
             .join("Fonts");
     let chinese = ["msyh.ttc", "simsun.ttc"]
         .into_iter()
-        .find_map(|file| read_face("system-cjk", &fonts.join(file), 0))
-        .filter(draws_chinese);
+        .find_map(|file| read_face("system-cjk", &fonts.join(file), 0).filter(draws_chinese));
     (Vec::new(), chinese.into_iter().collect())
 }
 
@@ -192,8 +193,15 @@ const FULL_CJK_FILE: &str = "NotoSansSC-Regular.otf";
 /// Fetch the full Noto Sans SC and reinstall the font stack with it. It is
 /// 8 MB, so only a session that lists a Chinese name the UI subset lacks pays
 /// for it, and the browser's HTTP cache keeps it for the next visit.
+///
+/// `requested` is cleared if the fetch fails, so the next listing that needs
+/// the font tries again.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn fetch_full_cjk(ctx: egui::Context, window: Option<Arc<winit::window::Window>>) {
+pub(crate) fn fetch_full_cjk(
+    ctx: egui::Context,
+    window: Option<Arc<winit::window::Window>>,
+    requested: Arc<std::sync::atomic::AtomicBool>,
+) {
     use wasm_bindgen::JsCast as _;
     use wasm_bindgen_futures::JsFuture;
 
@@ -222,7 +230,10 @@ pub(crate) fn fetch_full_cjk(ctx: egui::Context, window: Option<Arc<winit::windo
                     window.request_redraw();
                 }
             }
-            Err(e) => web_sys::console::warn_1(&format!("{url}: {e}").into()),
+            Err(e) => {
+                web_sys::console::warn_1(&format!("{url}: {e}").into());
+                requested.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     });
 }

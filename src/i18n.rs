@@ -1042,8 +1042,9 @@ mod tests {
         matches!(c as u32, 0x2E80..=0x9FFF | 0xFF00..=0xFFEF)
     }
 
-    /// The web build draws the UI's Chinese from the bundled subset, so a
-    /// character it lacks renders as a box there.
+    /// Outside macOS the UI's Chinese can come only from the bundled subset
+    /// (no system Chinese font, or the web before the full font arrives), so
+    /// a character it lacks renders as a box there.
     #[test]
     fn bundled_font_covers_every_cjk_character() {
         use skrifa::MetadataProvider as _;

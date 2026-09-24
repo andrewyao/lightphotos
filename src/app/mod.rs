@@ -7,8 +7,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 use std::time::SystemTime;
 // std::time::Instant panics on wasm32, which has no OS clock.
 use web_time::Instant;
@@ -268,9 +268,10 @@ pub(crate) struct App {
     /// the landing page's "Choose Folder" button so a second picker can't open.
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_folder_pending: bool,
-    /// Set once `fonts::fetch_full_cjk` has started. It runs at most once a session.
+    /// Set while `fonts::fetch_full_cjk` is running or once it has succeeded,
+    /// so the font downloads at most once a session. A failed fetch clears it.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) web_full_cjk_requested: bool,
+    pub(crate) web_full_cjk_requested: Arc<std::sync::atomic::AtomicBool>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_folder_tx: Sender<Result<crate::web_fs::PickedFolder, String>>,
     #[cfg(target_arch = "wasm32")]
@@ -673,7 +674,7 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             web_folder_pending: false,
             #[cfg(target_arch = "wasm32")]
-            web_full_cjk_requested: false,
+            web_full_cjk_requested: Default::default(),
             #[cfg(target_arch = "wasm32")]
             web_folder_tx,
             #[cfg(target_arch = "wasm32")]
