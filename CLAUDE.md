@@ -26,6 +26,8 @@ RUSTFLAGS="--cfg=web_sys_unstable_apis" trunk build --release --config Trunk.tom
 ./scripts/deploy-web.sh   # the above + vendor setup + sync into the lightphotos.app site repo
 ```
 
+`index.html` copies the full Noto Sans SC (8 MB, not committed) into the build, so run `./scripts/fetch-cjk-font.sh` once per clone before `trunk build`/`trunk serve`; `deploy-web.sh` runs it for you. The app fetches that file only when a listed file or folder name has Chinese characters the bundled UI subset can't draw.
+
 Always `--release` for wasm: debug wasm is 10-30x slower at RAW decode/demosaic and the `bg.wasm` is ~10x larger.
 
 Run the binary directly against a path (no bundling needed for dev iteration):

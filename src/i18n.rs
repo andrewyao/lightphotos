@@ -1042,8 +1042,8 @@ mod tests {
         matches!(c as u32, 0x2E80..=0x9FFF | 0xFF00..=0xFFEF)
     }
 
-    /// The web, Linux, and Windows builds draw Chinese only from the bundled
-    /// subset, so a character it lacks renders as a box there.
+    /// The web build draws the UI's Chinese from the bundled subset, so a
+    /// character it lacks renders as a box there.
     #[test]
     fn bundled_font_covers_every_cjk_character() {
         use skrifa::MetadataProvider as _;
