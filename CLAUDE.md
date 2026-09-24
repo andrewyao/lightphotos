@@ -16,6 +16,7 @@ cargo build              # debug build; works but noticeably slower at runtime
 cargo test                # run all unit tests (tests live inline in each module, #[cfg(test)])
 cargo test <name>         # run a single test by name substring, e.g. `cargo test burst::`
 ./scripts/bundle.sh       # build release + assemble LightPhotos.app + register with Launch Services (lsregister)
+./scripts/release.sh      # test, tag origin/main as the next patch (or pass v1.2.3), push the tag → release.yml builds and publishes
 ```
 
 The wasm32 (browser) build goes through `trunk`, not bare `cargo` — plain `cargo build --target wasm32-unknown-unknown` misses the wgpu/WebGPU and File System Access bindings, which are gated behind an unstable-apis cfg that `Trunk.toml`'s `rustflags` key does *not* reach cargo with in trunk 0.21.14. Set it in the environment:
