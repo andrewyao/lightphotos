@@ -61,10 +61,11 @@ pub struct EguiPaint {
     pub screen_descriptor: egui_wgpu::ScreenDescriptor,
 }
 
+/// sRGB-encoded, since the surface does no encoding of its own.
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
-    r: 0.07,
-    g: 0.07,
-    b: 0.08,
+    r: 0.2934,
+    g: 0.2934,
+    b: 0.3133,
     a: 1.0,
 };
 
@@ -172,12 +173,15 @@ impl Renderer {
                 panic!("request device: {e}");
             });
 
+        // A plain, non-sRGB surface on every platform, because WebGPU canvases
+        // never offer an sRGB one. Every shader therefore writes sRGB-encoded
+        // values itself, and egui switches to its gamma-space path.
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
             .iter()
             .copied()
-            .find(|f| f.is_srgb())
+            .find(|f| !f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
