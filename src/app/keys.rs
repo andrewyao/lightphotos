@@ -552,4 +552,13 @@ mod tests {
         app.on_scroll(0.0, 30.0);
         assert!(app.zoom() > 1.0, "Shift+Alt+scroll zooms");
     }
+
+    #[test]
+    fn image_overflows_only_when_zoomed_past_the_window() {
+        let (mut app, _) = editor_app();
+        app.fit_to_window();
+        assert!(!app.image_overflows(), "a fitted image has nothing to pan");
+        app.zoom_by(3.0);
+        assert!(app.image_overflows(), "3x fit is larger than the window");
+    }
 }

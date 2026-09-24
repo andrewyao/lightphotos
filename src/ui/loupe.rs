@@ -117,6 +117,10 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     } else if app.compare() {
         loupe_compare_overlay(ui, central);
     }
+
+    if app.dragging {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
 }
 
 pub(super) fn loupe_touchup_overlay(
