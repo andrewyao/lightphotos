@@ -368,6 +368,18 @@ impl App {
         }
     }
 
+    /// The focused photo, when something on screen shows its metadata and it
+    /// is not cached yet: the Loupe's info bar, or the Grid's Info tab.
+    pub(super) fn metadata_to_read(&self) -> Option<PathBuf> {
+        let shown = match self.mode {
+            ViewMode::Loupe => true,
+            ViewMode::Grid => self.left_tab == LeftTab::Info,
+            ViewMode::Survey => false,
+        };
+        let path = self.selected_path().filter(|_| shown)?;
+        (!self.exif_cache.contains_key(&path)).then_some(path)
+    }
+
     pub(super) fn toggle_left_tab(&mut self) {
         self.set_left_tab(match self.left_tab {
             LeftTab::Folders => LeftTab::Info,
