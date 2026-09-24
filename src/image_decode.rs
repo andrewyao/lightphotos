@@ -27,7 +27,8 @@ use objc2_image_io::{
     kCGImagePropertyGPSDictionary, kCGImagePropertyGPSLatitude, kCGImagePropertyGPSLatitudeRef,
     kCGImagePropertyGPSLongitude, kCGImagePropertyGPSLongitudeRef, kCGImagePropertyOrientation,
     kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth, kCGImagePropertyTIFFDateTime,
-    kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel, CGImageSource,
+    kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel,
+    CGImageSource,
 };
 
 #[cfg(target_os = "macos")]
@@ -376,7 +377,8 @@ fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
         }
     }
 
-    dict_string(&props, unsafe { kCGImagePropertyTIFFDateTime })
+    dict_dictionary(&props, unsafe { kCGImagePropertyTIFFDictionary })
+        .and_then(|tiff| dict_string(tiff, unsafe { kCGImagePropertyTIFFDateTime }))
         .and_then(|s| parse_exif_datetime(&s))
 }
 
@@ -394,7 +396,8 @@ fn read_capture_date(source: &CGImageSource) -> Option<CaptureDate> {
         }
     }
 
-    dict_string(&props, unsafe { kCGImagePropertyTIFFDateTime })
+    dict_dictionary(&props, unsafe { kCGImagePropertyTIFFDictionary })
+        .and_then(|tiff| dict_string(tiff, unsafe { kCGImagePropertyTIFFDateTime }))
         .and_then(|s| parse_exif_datetime_display(&s))
 }
 
@@ -413,8 +416,10 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
         return meta;
     };
 
-    meta.camera_make = dict_string(&props, unsafe { kCGImagePropertyTIFFMake });
-    meta.camera_model = dict_string(&props, unsafe { kCGImagePropertyTIFFModel });
+    if let Some(tiff) = dict_dictionary(&props, unsafe { kCGImagePropertyTIFFDictionary }) {
+        meta.camera_make = dict_string(tiff, unsafe { kCGImagePropertyTIFFMake });
+        meta.camera_model = dict_string(tiff, unsafe { kCGImagePropertyTIFFModel });
+    }
 
     // Swap to display orientation for EXIF 5..=8, matching `decode`.
     if let (Some(w), Some(h)) = (
