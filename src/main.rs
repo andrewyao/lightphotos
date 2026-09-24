@@ -427,6 +427,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
         }
         let catalog_load_pending = self.poll_catalog_load();
+        #[cfg(not(target_arch = "wasm32"))]
+        let catalog_load_pending = self.poll_signal_load() || catalog_load_pending;
 
         let outcomes = self.exporter.as_ref().map(|e| e.poll()).unwrap_or_default();
         if !outcomes.is_empty() {

@@ -6,12 +6,6 @@ use crate::duplicates::DuplicateMark;
 use crate::navigation::Cmp;
 use crate::ui;
 
-/// Bound on how long a folder switch waits for the outgoing folder's signal
-/// cache to reach the disk. One queued snapshot writes in a few milliseconds,
-/// so this is a stuck-volume guard rather than an expected wait.
-#[cfg(not(target_arch = "wasm32"))]
-const SIGNAL_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
 impl App {
     /// Swaps in `playlist`'s folder's derived-signal cache and copies what it
     /// holds into the four maps the grouping features read, so a folder
@@ -23,35 +17,108 @@ impl App {
     /// `request_face_quality` skips any photo already in `face_quality`, so a
     /// warm folder submits no Vision work without either of them changing.
     ///
-    /// Synchronous, unlike the sidecar load, because it is one file read plus
-    /// the directory scan `thumbnail::sweep_orphans` already pays at folder
-    /// open. Loading it in the background would mean reconciling a cache that
-    /// recorded signals while its own load was still in flight, which is the
-    /// machinery `Writeback::overlay` exists for and which a regenerable cache
-    /// does not earn.
+    /// On native the swap runs on its own thread. Checking an entry against
+    /// its file is one `stat`, a folder of thousands of photos on a network
+    /// volume takes seconds of them, and writing out the outgoing folder's
+    /// cache can block on a stuck volume too. Until `poll_signal_load` lands
+    /// the result, `signals` is a detached cache that keeps whatever the
+    /// workers record in the meantime, and `request_face_quality` holds its
+    /// Vision work so a warm folder is not analysed twice. A quit in that
+    /// window loses the outgoing folder's unwritten signals, which costs a
+    /// recompute and nothing else.
     pub(super) fn adopt_signal_cache(&mut self, playlist: &Playlist) {
-        #[cfg(not(target_arch = "wasm32"))]
-        self.signals.flush_blocking(SIGNAL_FLUSH_TIMEOUT);
-        self.signals = crate::signalcache::SignalCache::load(playlist.dir());
+        let dir = playlist.dir();
+        // The maps are keyed by full path and never cleared, so a folder
+        // already adopted this session has nothing new to seed.
+        if self.signals.dir() == Some(dir) {
+            return;
+        }
 
-        for p in playlist.entries() {
-            let Some(s) = self.signals.get(p) else {
-                continue;
-            };
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Nothing persists on wasm, so there is no file to read.
+            self.signals = crate::signalcache::SignalCache::load(dir);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let old = std::mem::replace(
+                &mut self.signals,
+                crate::signalcache::SignalCache::detached(dir),
+            );
+            let (tx, rx) = std::sync::mpsc::channel();
+            let dir = dir.to_path_buf();
+            let entries = playlist.entries().to_vec();
+            let spawned = std::thread::Builder::new()
+                .name("signalcache-load".into())
+                .spawn(move || {
+                    // Before the load, so a folder left and re-entered reads
+                    // what it just wrote.
+                    drop(old);
+                    let cache = crate::signalcache::SignalCache::load(&dir);
+                    let seeds = entries
+                        .into_iter()
+                        .filter_map(|p| cache.get(&p).copied().map(|s| (p, s)))
+                        .collect();
+                    // A later folder switch drops the receiver, and this
+                    // result with it.
+                    let _ = tx.send((cache, seeds));
+                });
+            // Without a thread the detached cache stays, so this folder's
+            // signals are computed but never persisted, like a read-only one.
+            self.signal_load_rx = spawned.is_ok().then_some(rx);
+        }
+    }
+
+    /// Installs the loaded signal cache and seeds the maps from it. Returns
+    /// true while the load is still in flight.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn poll_signal_load(&mut self) -> bool {
+        let Some(rx) = &self.signal_load_rx else {
+            return false;
+        };
+        let (mut cache, seeds) = match rx.try_recv() {
+            Ok(loaded) => loaded,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.signal_load_rx = None;
+                return false;
+            }
+        };
+        self.signal_load_rx = None;
+        let recorded =
+            std::mem::replace(&mut self.signals, crate::signalcache::SignalCache::empty());
+        cache.absorb(recorded);
+        self.signals = cache;
+
+        // A value computed during the load is at least as fresh as the file's.
+        for (p, s) in seeds {
             if let Some(capture) = s.capture {
                 self.capture_times
-                    .insert(p.clone(), capture.to_system_time());
+                    .entry(p.clone())
+                    .or_insert(capture.to_system_time());
             }
             if let Some(v) = s.sharpness {
-                self.sharpness.insert(p.clone(), v);
+                self.sharpness.entry(p.clone()).or_insert(v);
             }
             if let Some(v) = s.phash {
-                self.phashes.insert(p.clone(), v);
+                self.phashes.entry(p.clone()).or_insert(v);
             }
             if let Some(q) = s.faces {
-                self.face_quality.insert(p.clone(), q);
+                self.face_quality.entry(p).or_insert(q);
             }
         }
+        if self.bursts_on {
+            self.recompute_burst_marks();
+        }
+        if self.dupes_on {
+            self.recompute_dup_marks();
+        }
+        if self.eyes_filter_on() {
+            self.recompute_visible();
+        }
+        self.request_redraw();
+        false
     }
 
     /// Points the catalog at `dir` and reads its sidecars in the background.
@@ -623,6 +690,75 @@ mod tests {
         assert_eq!(app.rotations.get(&photo), None);
         assert_eq!(app.edits.get(&photo), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Drive the signal cache load to completion the way the frame loop does.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn finish_signal_load(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.poll_signal_load() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "signal load timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// The load runs off the UI thread, so a folder's cached signals arrive a
+    /// few frames after it opens. They must still be seeded, what workers
+    /// record in the meantime must not be lost, and no Vision work may start
+    /// before the cache has had its say.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_folder_opened_while_its_signals_load_keeps_both_old_and_new() {
+        use crate::facequality::FaceQuality;
+        use crate::signalcache::{Signal, SignalCache};
+
+        let dir = unique_tmp_dir();
+        let other = unique_tmp_dir();
+        let a = dir.join("a.jpg");
+        let b = dir.join("b.jpg");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let blink = FaceQuality {
+            faces: 1,
+            min_eye_openness: Some(0.1),
+        };
+        {
+            let mut cache = SignalCache::load(&dir);
+            cache.record(&a, Signal::Faces(blink));
+            cache.flush_blocking(std::time::Duration::from_secs(5));
+        }
+
+        let mut app = App::new(None);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        app.bursts_on = true;
+        assert!(
+            app.request_face_quality() && app.face_pending.is_empty(),
+            "Vision work waits for the cache and submits nothing"
+        );
+        app.bursts_on = false;
+        app.signals.record(&b, Signal::Sharpness(42.0));
+
+        finish_signal_load(&mut app);
+        assert_eq!(app.face_quality.get(&a), Some(&blink), "seeded from disk");
+        assert_eq!(
+            app.signals.get(&b).and_then(|s| s.sharpness),
+            Some(42.0),
+            "recorded during the load"
+        );
+
+        app.load_playlist(Playlist::from_dir(&other), other.clone());
+        finish_signal_load(&mut app);
+        assert_eq!(
+            SignalCache::load(&dir).get(&b).and_then(|s| s.sharpness),
+            Some(42.0),
+            "leaving the folder writes what was recorded during its load"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     fn unique_tmp_dir() -> PathBuf {

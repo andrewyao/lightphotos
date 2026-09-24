@@ -247,6 +247,14 @@ pub(crate) type CatalogLoadResult = (
     crate::catalog::SidecarLoad,
 );
 
+/// A folder's signal cache as loaded off the UI thread, with what it knows
+/// about each playlist photo whose file has not changed since.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) type SignalLoad = (
+    crate::signalcache::SignalCache,
+    Vec<(PathBuf, crate::signalcache::PhotoSignals)>,
+);
+
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
@@ -486,6 +494,11 @@ pub(crate) struct App {
     /// ones are computed. A cache, never user data: see `src/signalcache.rs`
     /// for why it is not part of `ImageRecord`.
     pub(crate) signals: crate::signalcache::SignalCache,
+    /// The folder's cache file loading on another thread, with the entries it
+    /// holds for the playlist already checked against the files. While this is
+    /// `Some`, `signals` is a detached stand-in. See `adopt_signal_cache`.
+    #[cfg(not(target_arch = "wasm32"))]
+    signal_load_rx: Option<Receiver<SignalLoad>>,
 
     /// Burst badges and dimming. Mutually exclusive with the star filter.
     bursts_on: bool,
@@ -808,6 +821,8 @@ impl App {
             thumb_tex: HashMap::new(),
             bursts_on: false,
             signals: crate::signalcache::SignalCache::empty(),
+            #[cfg(not(target_arch = "wasm32"))]
+            signal_load_rx: None,
             capture_times: HashMap::new(),
             sharpness: HashMap::new(),
             burst_marks: Vec::new(),

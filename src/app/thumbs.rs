@@ -519,6 +519,12 @@ impl App {
         if !self.bursts_on && !self.dupes_on {
             return false;
         }
+        // The folder's cached analyses are still loading, and each one found
+        // there is a Vision pass saved.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.signal_load_rx.is_some() {
+            return true;
+        }
         let Some(pl) = &self.playlist else {
             return false;
         };
