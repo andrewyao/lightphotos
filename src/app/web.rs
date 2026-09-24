@@ -475,6 +475,64 @@ impl App {
         true
     }
 
+    /// Read `path`'s metadata: size and modified time from the browser's
+    /// `File`, the rest parsed from its bytes. The parse runs here rather than
+    /// on a worker because reading EXIF is cheap next to the read itself. A
+    /// failed read still caches the file facts, so the photo is not re-read
+    /// every frame.
+    pub(crate) fn request_web_exif(&mut self, path: PathBuf) {
+        if self.web_exif_inflight.contains(&path)
+            || self.web_read_inflight.get() >= MAX_CONCURRENT_READS
+        {
+            return;
+        }
+        let Some(handle) = self.web_file_handles.get(&path).cloned() else {
+            return;
+        };
+        self.web_exif_inflight.insert(path.clone());
+        self.web_read_inflight.set(self.web_read_inflight.get() + 1);
+        let read_inflight = self.web_read_inflight.clone();
+        let done = self.web_exif_done.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let mut meta = image_decode::ImageMetadata {
+                format: image_decode::format_name(&path),
+                ..Default::default()
+            };
+            if let Ok(file) = web_fs::stat(&handle).await {
+                meta.file_size = Some(file.size() as u64);
+                let modified = std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_millis(file.last_modified() as u64);
+                meta.modified = Some(image_decode::local_date(modified));
+            }
+            match web_fs::read_bytes(&handle).await {
+                Ok(bytes) => image_decode::fill_metadata_from_bytes(
+                    &mut meta,
+                    &bytes,
+                    image_decode::is_raw_extension(&path),
+                ),
+                Err(e) => web_sys::console::warn_1(
+                    &format!("[web] metadata read failed for {}: {e}", path.display()).into(),
+                ),
+            }
+            read_inflight.set(read_inflight.get().saturating_sub(1));
+            done.borrow_mut().push((path, meta));
+        });
+    }
+
+    /// Hands finished `request_web_exif` reads to `on_exif_info`. Returns true
+    /// if any arrived.
+    pub(crate) fn poll_web_exif(&mut self) -> bool {
+        let results = std::mem::take(&mut *self.web_exif_done.borrow_mut());
+        if results.is_empty() {
+            return false;
+        }
+        for (path, _) in &results {
+            self.web_exif_inflight.remove(path);
+        }
+        self.on_exif_info(results);
+        true
+    }
+
     /// Handles the `Preview` and `Speed` results `poll_web_thumbs` set aside.
     /// `Preview` goes into `loader.rs`'s preview cache. `Speed` skips the
     /// cache and is uploaded only if nothing is shown for the photo yet,
@@ -555,9 +613,9 @@ impl App {
             self.web_preview_inflight.remove(&key);
             match result {
                 Ok(img) => {
-                    // EXIF reads never complete on wasm32, so take the source
-                    // size from the decode and re-fit, as `on_exif_info` does
-                    // natively.
+                    // Web metadata reads carry no pixel size, so take the
+                    // source size from the decode and re-fit, as
+                    // `on_exif_info` does natively.
                     let real_size = Some((img.width, img.height));
                     if self.want.as_deref() == Some(path.as_path()) && self.source_size != real_size
                     {

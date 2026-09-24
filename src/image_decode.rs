@@ -239,7 +239,6 @@ pub(crate) fn format_name(path: &Path) -> Option<String> {
 
 /// Size, modified time, and format: the facts that come from the file
 /// system rather than the image.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn fill_file_facts(meta: &mut ImageMetadata, path: &Path) {
     meta.format = format_name(path);
     if let Ok(fs_meta) = std::fs::metadata(path) {
