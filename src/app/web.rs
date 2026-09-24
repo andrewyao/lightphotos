@@ -897,7 +897,8 @@ impl App {
     /// characters the loaded fonts can't draw. Every name the UI shows reaches
     /// it through a listing first.
     fn fetch_cjk_font_for<'a>(&mut self, paths: impl IntoIterator<Item = &'a PathBuf>) {
-        if self.web_full_cjk_requested {
+        use std::sync::atomic::Ordering;
+        if self.web_full_cjk_requested.load(Ordering::Relaxed) {
             return;
         }
         let font = egui::FontId::proportional(14.0);
@@ -909,8 +910,12 @@ impl App {
             })
         });
         if missing {
-            self.web_full_cjk_requested = true;
-            super::fonts::fetch_full_cjk(self.egui_ctx.clone(), self.window.clone());
+            self.web_full_cjk_requested.store(true, Ordering::Relaxed);
+            super::fonts::fetch_full_cjk(
+                self.egui_ctx.clone(),
+                self.window.clone(),
+                self.web_full_cjk_requested.clone(),
+            );
         }
     }
 

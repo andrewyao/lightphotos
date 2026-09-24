@@ -6,9 +6,9 @@
 # automating the manual steps documented in that repo's public/app.html
 # comment: build, copy the four asset files and the full Chinese font into
 # public/app/ (deleting stale hashed ones), update the two hashed URLs in
-# public/app.html. Also copies the app icons to public/ and links them from app.html. Does
-# NOT commit or push in the site repo — review the diff there and do that
-# yourself.
+# public/app.html. Also copies the app icons to public/ and links them from
+# app.html. Does NOT commit or push in the site repo — review the diff there
+# and do that yourself.
 
 set -euo pipefail
 
