@@ -399,8 +399,8 @@ impl Run {
     /// images, list the sidebar's subfolders, read the sidecars, load the
     /// derived-signal cache, and sweep the thumbnail cache. The sidecar read
     /// and the sweep run on their own thread in the app; here they are inline,
-    /// so the report attributes them. The signal cache load is on the UI
-    /// thread in the app too, which is why its cost belongs in this phase.
+    /// so the report attributes them. So does the signal cache load, which
+    /// the app also runs on its own thread.
     fn folder_load(&self) -> Playlist {
         let playlist = Playlist::from_dir(&self.dir);
         crate::navigation::list_subdirs(&self.dir);

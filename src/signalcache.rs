@@ -64,6 +64,7 @@ impl CaptureTime {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn to_system_time(self) -> Option<SystemTime> {
         match self {
             CaptureTime::Unreadable => None,
@@ -196,8 +197,42 @@ impl SignalCache {
         cache
     }
 
+    /// A cache for `dir` that records in memory and never touches the disk.
+    /// It stands in while `dir`'s file loads on another thread, and
+    /// [`absorb`](Self::absorb) hands what it recorded to the loaded cache.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn detached(dir: &Path) -> SignalCache {
+        let mut cache = SignalCache::empty();
+        cache.dir = Some(dir.to_path_buf());
+        cache
+    }
+
+    /// The folder this cache belongs to.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
+    /// Take `newer`'s entries on top of this cache's. A field `newer` has wins,
+    /// and an entry for different bytes replaces the old one outright.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn absorb(&mut self, newer: SignalCache) {
+        for (name, n) in &newer.entries {
+            let entry = self.entries.entry(name.clone()).or_default();
+            if entry.key != n.key {
+                *entry = *n;
+            } else {
+                entry.capture = n.capture.or(entry.capture);
+                entry.sharpness = n.sharpness.or(entry.sharpness);
+                entry.phash = n.phash.or(entry.phash);
+                entry.faces = n.faces.or(entry.faces);
+            }
+            self.dirty = true;
+        }
+    }
+
     /// What is known about `path`, or `None` when nothing is, or when the file
     /// changed since the signals were computed.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn get(&self, path: &Path) -> Option<&PhotoSignals> {
         let entry = self.entries.get(path.file_name()?)?;
         (current_key(path)? == entry.key).then_some(entry)
@@ -274,6 +309,9 @@ impl SignalCache {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn queue_write(&mut self) {
+        if self.writer.is_none() {
+            return;
+        }
         self.sweep_orphans();
         let (Some(dir), Some(writer)) = (&self.dir, &self.writer) else {
             return;
@@ -586,6 +624,46 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&here);
         let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
+    /// Signals computed while the folder's file was still loading must reach
+    /// the loaded cache, and must win over what the file held for them.
+    #[test]
+    fn a_detached_cache_hands_its_records_to_the_loaded_one() {
+        let dir = unique_dir("absorb");
+        let a = write_photo(&dir, "a.jpg", b"pixels");
+        let b = write_photo(&dir, "b.jpg", b"other pixels");
+        {
+            let mut cache = SignalCache::load(&dir);
+            cache.record(&a, Signal::Sharpness(1.0));
+            cache.record(&a, Signal::PHash(7));
+            cache.flush_blocking(Duration::from_secs(5));
+        }
+
+        let mut pending = SignalCache::detached(&dir);
+        pending.record(&a, Signal::Sharpness(2.0));
+        pending.record(&b, Signal::Sharpness(3.0));
+        pending.flush_blocking(Duration::from_secs(5));
+        assert!(
+            SignalCache::load(&dir).get(&b).is_none(),
+            "a detached cache never writes, so it cannot race the load"
+        );
+
+        let mut loaded = SignalCache::load(&dir);
+        loaded.absorb(pending);
+        let sa = loaded.get(&a).expect("a is known");
+        assert_eq!(sa.sharpness, Some(2.0), "the newer value wins");
+        assert_eq!(sa.phash, Some(7), "a field only the file had survives");
+        assert_eq!(loaded.get(&b).and_then(|s| s.sharpness), Some(3.0));
+
+        loaded.flush_blocking(Duration::from_secs(5));
+        assert_eq!(
+            SignalCache::load(&dir).get(&b).and_then(|s| s.sharpness),
+            Some(3.0),
+            "the absorbed records are written with the next flush"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
