@@ -238,7 +238,7 @@ mod tests {
         );
         assert_eq!(
             location.link.as_deref(),
-            Some("https://maps.apple.com/?ll=37.500000,-122.250000")
+            Some("https://www.google.com/maps/search/?api=1&query=37.500000,-122.250000")
         );
 
         let no_alt = ImageMetadata {

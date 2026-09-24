@@ -537,7 +537,10 @@ pub(super) fn format_altitude(m: f64) -> String {
 }
 
 pub(super) fn maps_url(gps: &image_decode::Gps) -> String {
-    format!("https://maps.apple.com/?ll={:.6},{:.6}", gps.lat, gps.lon)
+    format!(
+        "https://www.google.com/maps/search/?api=1&query={:.6},{:.6}",
+        gps.lat, gps.lon
+    )
 }
 
 /// The crop overlay and its drag handling. The crop rect is in texture space.
