@@ -160,6 +160,11 @@ pub struct Strings {
     pub choose_folder: &'static str,
     pub picker_title: &'static str,
 
+    // Left panel.
+    pub folders_tab_tip: &'static str,
+    pub info_tab_tip: &'static str,
+    pub info_no_selection: &'static str,
+
     // Toolbar.
     pub rating_filter: &'static str,
     pub all: &'static str,
@@ -379,6 +384,9 @@ pub static EN: Strings = Strings {
     open_folder: "Open\u{2026}",
     open_folder_tip: "Open a different folder (Cmd+O)",
     help_tip: "Keyboard shortcuts (?)",
+    folders_tab_tip: "Folders (I)",
+    info_tab_tip: "Info (I)",
+    info_no_selection: "No photo selected",
     landing_prompt: "Choose a folder of photos to get started",
     landing_allow_note: if WEB {
         "When the browser asks \u{201C}Allow this site to edit files? \u{2026}\u{201D}, \
@@ -450,6 +458,7 @@ pub static EN: Strings = Strings {
                     "Move selection in library grid",
                 ),
                 ("E / G", "Editor / library"),
+                ("I", "Show folders or photo info in the side panel"),
             ],
         },
         HelpSection {
@@ -698,6 +707,9 @@ pub static ZH: Strings = Strings {
     open_folder: "打开\u{2026}",
     open_folder_tip: "打开其他文件夹 (Cmd+O)",
     help_tip: "键盘快捷键 (?)",
+    folders_tab_tip: "文件夹 (I)",
+    info_tab_tip: "信息 (I)",
+    info_no_selection: "未选择照片",
     landing_prompt: "选择一个照片文件夹开始",
     landing_allow_note: if WEB {
         "当浏览器提示\u{201C}Allow this site to edit files? \u{2026}\u{201D}时，\
@@ -768,6 +780,7 @@ pub static ZH: Strings = Strings {
                     "在图库网格中移动选择",
                 ),
                 ("E / G", "编辑器 / 图库"),
+                ("I", "在侧栏显示文件夹或照片信息"),
             ],
         },
         HelpSection {

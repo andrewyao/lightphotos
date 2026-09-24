@@ -215,6 +215,11 @@ impl App {
             KeyCode::KeyO if cmd && !alt => self.open_folder_picker(),
 
             KeyCode::KeyG => self.enter_grid(),
+            KeyCode::KeyI
+                if !cmd && !alt && matches!(self.mode, ViewMode::Grid | ViewMode::Loupe) =>
+            {
+                self.toggle_left_tab()
+            }
             KeyCode::KeyB if !cmd && !alt => self.toggle_bursts(),
             KeyCode::KeyD if !cmd && !alt => self.toggle_dupes(),
             KeyCode::KeyE => {
@@ -249,7 +254,10 @@ impl App {
                     self.mode = ViewMode::Grid;
                     self.update_window_title();
                     self.normalize_focus();
-                } else if self.focus == Region::Grid && self.focus_level == FocusLevel::Selected {
+                } else if self.focus == Region::Grid
+                    && self.focus_level == FocusLevel::Selected
+                    && self.region_available(Region::Folders)
+                {
                     self.focus = Region::Folders;
                     self.focus_level = FocusLevel::Selected;
                     self.on_focus_changed();
@@ -551,6 +559,54 @@ mod tests {
         app.modifiers = ModifiersState::SHIFT | ModifiersState::ALT;
         app.on_scroll(0.0, 30.0);
         assert!(app.zoom() > 1.0, "Shift+Alt+scroll zooms");
+    }
+
+    #[test]
+    fn i_toggles_the_left_panel_tab_in_the_library_and_the_editor() {
+        let (mut app, _) = folder_app(2);
+        assert_eq!(app.left_tab(), LeftTab::Folders);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        assert_eq!(app.left_tab(), LeftTab::Info);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        assert_eq!(app.left_tab(), LeftTab::Folders);
+
+        press(&mut app, CMD, KeyCode::KeyI);
+        press(&mut app, ModifiersState::ALT, KeyCode::KeyI);
+        assert_eq!(
+            app.left_tab(),
+            LeftTab::Folders,
+            "modified I is not the toggle"
+        );
+
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        assert_eq!(app.left_tab(), LeftTab::Info);
+    }
+
+    #[test]
+    fn the_info_tab_takes_the_folder_tree_out_of_keyboard_focus() {
+        let (mut app, _) = folder_app(2);
+        app.set_focus(Region::Folders, FocusLevel::Selected);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        assert_eq!(app.focus, Region::Grid, "focus leaves the hidden tree");
+
+        for _ in 0..4 {
+            press(&mut app, ModifiersState::empty(), KeyCode::F6);
+            assert_ne!(
+                app.focus,
+                Region::Folders,
+                "F6 never lands on the hidden tree"
+            );
+        }
+
+        app.set_focus(Region::Grid, FocusLevel::Selected);
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert_ne!(
+            app.focus,
+            Region::Folders,
+            "Escape does not back into the hidden tree"
+        );
+        assert_eq!(app.sel, Some(0), "and so keeps the selection");
     }
 
     #[test]

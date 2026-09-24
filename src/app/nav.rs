@@ -356,8 +356,23 @@ impl App {
         }
     }
 
-    pub(crate) fn folders_visible(&self) -> bool {
-        true
+    pub(crate) fn left_tab(&self) -> LeftTab {
+        self.left_tab
+    }
+
+    pub(super) fn set_left_tab(&mut self, tab: LeftTab) {
+        if self.left_tab != tab {
+            self.left_tab = tab;
+            self.normalize_focus();
+            self.request_redraw();
+        }
+    }
+
+    pub(super) fn toggle_left_tab(&mut self) {
+        self.set_left_tab(match self.left_tab {
+            LeftTab::Folders => LeftTab::Info,
+            LeftTab::Info => LeftTab::Folders,
+        });
     }
 
     pub(crate) fn develop_visible(&self) -> bool {
@@ -380,7 +395,7 @@ impl App {
             Region::Grid => self.mode == ViewMode::Grid,
             Region::Detail => self.mode == ViewMode::Loupe,
             Region::Filmstrip => self.mode == ViewMode::Loupe,
-            Region::Folders => self.folders_visible(),
+            Region::Folders => self.left_tab == LeftTab::Folders,
             Region::Develop => self.mode == ViewMode::Loupe && self.develop_visible(),
         }
     }
