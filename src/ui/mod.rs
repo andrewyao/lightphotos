@@ -419,7 +419,62 @@ fn region_focus_marker(ui: &egui::Ui, app: &App, region: Region) {
 
 #[cfg(test)]
 mod tests {
-    use super::loupe::format_shutter;
+    use super::loupe::*;
+    use crate::image_decode::Gps;
+
+    #[test]
+    fn file_sizes_use_decimal_units() {
+        assert_eq!(format_file_size(512), "512 B");
+        assert_eq!(format_file_size(45_300), "45.3 KB");
+        assert_eq!(format_file_size(3_738_709), "3.7 MB");
+        assert_eq!(
+            format_file_size(999_990),
+            "1.0 MB",
+            "rounding carries up a unit"
+        );
+        assert_eq!(format_file_size(52_000_000_000), "52.0 GB");
+    }
+
+    #[test]
+    fn dimensions_show_megapixels() {
+        assert_eq!(format_dimensions(4032, 3024), "4032 \u{d7} 3024 (12.2 MP)");
+    }
+
+    #[test]
+    fn focal_length_keeps_a_decimal_only_when_it_has_one() {
+        assert_eq!(format_focal_length(50.0), "50 mm");
+        assert_eq!(format_focal_length(4.2), "4.2 mm");
+    }
+
+    #[test]
+    fn exposure_bias_is_signed_and_zero_is_bare() {
+        assert_eq!(format_exposure_bias(4.0 / 3.0), "+1.3 EV");
+        assert_eq!(format_exposure_bias(-2.0 / 3.0), "-0.7 EV");
+        assert_eq!(format_exposure_bias(0.0), "0 EV");
+        assert_eq!(format_exposure_bias(-0.0), "0 EV");
+    }
+
+    #[test]
+    fn coordinates_show_the_hemisphere_instead_of_a_sign() {
+        assert_eq!(format_latitude(37.5385117), "37.53851\u{b0} N");
+        assert_eq!(format_latitude(-33.86), "33.86000\u{b0} S");
+        assert_eq!(format_longitude(-122.2409883), "122.24099\u{b0} W");
+        assert_eq!(format_longitude(151.2), "151.20000\u{b0} E");
+        assert_eq!(format_altitude(-12.5), "-12 m");
+    }
+
+    #[test]
+    fn maps_link_keeps_the_signs() {
+        let gps = Gps {
+            lat: -33.86,
+            lon: 151.2,
+            alt: None,
+        };
+        assert_eq!(
+            maps_url(&gps),
+            "https://maps.apple.com/?ll=-33.860000,151.200000"
+        );
+    }
 
     #[test]
     fn format_shutter_sub_second_is_a_fraction() {

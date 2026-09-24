@@ -471,6 +471,75 @@ pub(super) fn format_shutter(seconds: f64) -> String {
     }
 }
 
+/// Decimal units, as Finder shows them: `3.7 MB`.
+pub(super) fn format_file_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["KB", "MB", "GB", "TB"];
+    if bytes < 1000 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64 / 1000.0;
+    let mut unit = 0;
+    while value >= 999.95 && unit < UNITS.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+/// `4032 × 3024 (12.2 MP)`.
+pub(super) fn format_dimensions(w: u32, h: u32) -> String {
+    let mp = w as f64 * h as f64 / 1_000_000.0;
+    format!("{w} \u{d7} {h} ({mp:.1} MP)")
+}
+
+pub(super) fn format_aperture(f_number: f64) -> String {
+    format!("f/{f_number:.1}")
+}
+
+/// Whole millimeters stay whole (`50 mm`), phone lenses keep a decimal
+/// (`4.2 mm`).
+pub(super) fn format_focal_length(mm: f64) -> String {
+    if (mm - mm.round()).abs() < 0.05 {
+        format!("{mm:.0} mm")
+    } else {
+        format!("{mm:.1} mm")
+    }
+}
+
+/// `+1.3 EV`, `-0.7 EV`, and a plain `0 EV` with no sign.
+pub(super) fn format_exposure_bias(ev: f64) -> String {
+    if ev.abs() < 0.05 {
+        "0 EV".to_string()
+    } else {
+        format!("{ev:+.1} EV")
+    }
+}
+
+/// Five decimals is about a meter, finer than phone GPS.
+pub(super) fn format_latitude(lat: f64) -> String {
+    format!(
+        "{:.5}\u{b0} {}",
+        lat.abs(),
+        if lat < 0.0 { 'S' } else { 'N' }
+    )
+}
+
+pub(super) fn format_longitude(lon: f64) -> String {
+    format!(
+        "{:.5}\u{b0} {}",
+        lon.abs(),
+        if lon < 0.0 { 'W' } else { 'E' }
+    )
+}
+
+pub(super) fn format_altitude(m: f64) -> String {
+    format!("{m:.0} m")
+}
+
+pub(super) fn maps_url(gps: &image_decode::Gps) -> String {
+    format!("https://maps.apple.com/?ll={:.6},{:.6}", gps.lat, gps.lon)
+}
+
 /// The crop overlay and its drag handling. The crop rect is in texture space.
 /// `App::loupe_tex_to_screen` maps it to screen, accounting for zoom, pan, and
 /// rotation.
