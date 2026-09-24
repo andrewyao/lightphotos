@@ -98,6 +98,11 @@ pub struct Exporter {
 
 impl Exporter {
     pub fn new() -> Self {
+        Self::with_runner(do_export)
+    }
+
+    /// `new`, with the per-photo work swapped out so a test can make it panic.
+    fn with_runner(run: fn(ExportJob) -> Result<PathBuf, String>) -> Self {
         let (job_tx, job_rx) = std::sync::mpsc::channel::<ExportJob>();
         let (res_tx, res_rx) = std::sync::mpsc::channel::<ExportOutcome>();
         // Workers share one receiver, so whichever is idle takes the next job.
@@ -129,7 +134,7 @@ impl Exporter {
                         };
 
                         let src = job.src.clone();
-                        let result = do_export(job);
+                        let result = run(job);
                         if res_tx.send(ExportOutcome { src, result }).is_err() {
                             break;
                         }
@@ -170,6 +175,49 @@ impl Exporter {
 
 #[cfg(test)]
 mod tests {
+    /// Callers count outcomes to know a batch is done, so a photo that panics
+    /// the exporter must still produce one, and the worker must live on.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_panicking_export_still_reports_and_the_worker_survives() {
+        use super::{ExportJob, Exporter};
+        use std::path::PathBuf;
+        use std::time::{Duration, Instant};
+
+        fn panics_on_bad(job: ExportJob) -> Result<PathBuf, String> {
+            if job.src.ends_with("bad.raw") {
+                panic!("malformed file");
+            }
+            Ok(job.dest)
+        }
+        let job = |name: &str| ExportJob {
+            src: PathBuf::from(name),
+            dest: PathBuf::from("out.jpg"),
+            adj: Default::default(),
+            touchups: Vec::new(),
+            rot: 0,
+        };
+
+        let exporter = Exporter::with_runner(panics_on_bad);
+        // More jobs than any machine has workers, so a dead worker would strand one.
+        let names: Vec<String> = (0..64)
+            .map(|i| if i % 2 == 0 { "bad.raw".into() } else { format!("{i}.jpg") })
+            .collect();
+        for n in &names {
+            exporter.submit(job(n));
+        }
+
+        let mut outcomes = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while outcomes.len() < names.len() && Instant::now() < deadline {
+            outcomes.extend(exporter.poll());
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(outcomes.len(), names.len(), "every job reports an outcome");
+        let failed = outcomes.iter().filter(|o| o.result.is_err()).count();
+        assert_eq!(failed, 32, "each panic is reported as a failure");
+    }
+
     // Every test below is gated the same way, so on macOS without `raw-probe`
     // the module is empty and these imports would be unused.
     #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
