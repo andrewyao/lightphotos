@@ -138,6 +138,15 @@ impl App {
         self.pan = ((ww - iw * z) / 2.0, (wh - ih * z) / 2.0);
     }
 
+    /// Whether the image is larger than the loupe area on either axis, so a
+    /// plain drag has something to pan.
+    pub(crate) fn image_overflows(&self) -> bool {
+        let (iw, ih) = self.display_size();
+        let (ww, wh) = self.loupe_area();
+        let z = self.zoom();
+        iw * z > ww + 0.5 || ih * z > wh + 0.5
+    }
+
     /// Zoom by `factor`, keeping the image point under `(cx, cy)` fixed. The
     /// point is in pixels from the loupe area's top-left.
     pub(crate) fn zoom_at(&mut self, factor: f32, cx: f32, cy: f32) {

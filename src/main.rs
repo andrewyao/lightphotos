@@ -193,6 +193,21 @@ impl ApplicationHandler<UserEvent> for App {
             } else {
                 false
             };
+        // End a pan even when egui consumes the release (a release over a
+        // panel), or the drag and its grab cursor would stick.
+        if self.dragging
+            && matches!(
+                event,
+                WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    button: MouseButton::Left,
+                    ..
+                }
+            )
+        {
+            self.dragging = false;
+            self.request_redraw();
+        }
         if consumed {
             // Navigation keys may still reach the app. See
             // `nav_key_should_fall_through`.
@@ -269,12 +284,21 @@ impl ApplicationHandler<UserEvent> for App {
                 button: MouseButton::Left,
                 ..
             } => match state {
-                ElementState::Pressed if self.space_down && self.mode == ViewMode::Loupe => {
+                // A press reaches here only over the bare image; egui consumes
+                // presses on its panels and the crop/touch-up/picker overlays.
+                // A plain drag pans only a zoomed-in image; Space+drag always pans.
+                ElementState::Pressed
+                    if self.mode == ViewMode::Loupe
+                        && (self.space_down || self.image_overflows()) =>
+                {
                     self.dragging = true;
-                    self.space_panned = true;
+                    if self.space_down {
+                        self.space_panned = true;
+                    }
                     self.last_drag = self.cursor;
+                    // Redraw so the grab cursor shows before the first move.
+                    self.request_redraw();
                 }
-                ElementState::Released => self.dragging = false,
                 _ => {}
             },
 
