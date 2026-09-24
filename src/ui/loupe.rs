@@ -228,7 +228,7 @@ pub(super) fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     );
     // Shadowed text so labels read over any image.
     let label = |p: egui::Pos2, align: egui::Align2, text: &str| {
-        let font = egui::FontId::proportional(13.0);
+        let font = egui::FontId::proportional(font_size::px(ui.style(), 13.0));
         painter.text(
             p + egui::vec2(1.0, 1.0),
             align,
@@ -255,7 +255,7 @@ pub(super) fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
 /// centered, then the selection controls. Bottom row: camera, lens, and date.
 /// EXIF fields the file lacks are omitted.
 pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let bar_h = 54.0;
+    let bar_h = font_size::px(ui.style(), 54.0);
     egui::Panel::bottom("loupe_info_bar")
         .exact_size(bar_h)
         .show_inside(ui, |ui| {
@@ -270,13 +270,13 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                 .unwrap_or_default();
 
             let painter = ui.painter();
-            let main_font = egui::FontId::proportional(13.0);
-            let sub_font = egui::FontId::proportional(11.0);
+            let main_font = egui::FontId::proportional(font_size::px(ui.style(), 13.0));
+            let sub_font = egui::FontId::proportional(font_size::px(ui.style(), 11.0));
             let text_color = egui::Color32::from_gray(220);
             let dim_color = egui::Color32::from_gray(140);
             let main_y = rect.top() + bar_h * 0.36;
             let sub_y = rect.top() + bar_h * 0.72;
-            let pad = 14.0;
+            let pad = font_size::px(ui.style(), 14.0);
 
             if !exposure.is_empty() {
                 painter.text(
@@ -298,9 +298,9 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
             }
 
             // Center the filename and stars as one group.
-            let star_w = 20.0;
+            let star_w = font_size::px(ui.style(), 20.0);
             let stars_total_w = star_w * 5.0;
-            let group_gap = 10.0;
+            let group_gap = font_size::px(ui.style(), 10.0);
             let filename_w = if filename.is_empty() {
                 0.0
             } else {
@@ -346,7 +346,7 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                             r.center(),
                             egui::Align2::CENTER_CENTER,
                             glyph,
-                            egui::FontId::proportional(18.0),
+                            egui::FontId::proportional(font_size::px(ui.style(), 18.0)),
                             color,
                         );
                         if resp.clicked() {
@@ -361,18 +361,18 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
 
             if let Some(label) = app.selected_label() {
                 ui.painter().circle_filled(
-                    egui::pos2(stars_rect.right() + 10.0, main_y),
-                    5.0,
+                    egui::pos2(stars_rect.right() + group_gap, main_y),
+                    font_size::px(ui.style(), 5.0),
                     label_color(label),
                 );
             }
 
             // Subject selection is a way of viewing the photo, not an edit, so
             // it lives here rather than in the Develop panel.
-            let sel_w = 190.0;
+            let sel_size = egui::vec2(190.0, 22.0) * font_size::px(ui.style(), 1.0);
             let sel_rect = egui::Rect::from_min_size(
-                egui::pos2(rect.right() - pad - sel_w, main_y - 11.0),
-                egui::vec2(sel_w, 22.0),
+                egui::pos2(rect.right() - pad - sel_size.x, main_y - sel_size.y / 2.0),
+                sel_size,
             );
             ui.scope_builder(egui::UiBuilder::new().max_rect(sel_rect), |ui| {
                 ui.horizontal_centered(|ui| {
