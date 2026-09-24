@@ -109,6 +109,9 @@ image = { version = "0.25", optional = true, default-features = false, features 
 # that module on mac under `raw-probe` too, so `half` has to be reachable
 # there as well, not just in the plain non-mac build.
 half = "2"
+# Local wall-clock fields for a file's modified time. Already in the tree via
+# rawler and trash; `wasmbind` reads the browser's time zone.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
 # Same dual-declaration reasoning again: `decode_probe.rs` reads a RAW file's
 # embedded EXIF thumbnail directly (a standalone diagnostic, not shared with
 # `thumbnail.rs`'s own copy) to compare its brightness against ImageIO —
