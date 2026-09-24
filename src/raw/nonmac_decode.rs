@@ -11,7 +11,8 @@ use std::path::Path;
 
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 use crate::image_decode::{
-    apply_exif_orientation, fit_within, DecodedImage, DecodedImageFields, PixelFormat,
+    apply_exif_orientation, fit_within, DecodedImage, DecodedImageFields, Flash, Gps,
+    ImageMetadata, PixelFormat, WhiteBalance,
 };
 
 /// True for camera RAW extensions, which the `image` crate cannot decode.
@@ -288,21 +289,179 @@ pub fn capture_time(path: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
-/// Metadata for `path`. Non-mac fills only `source_size`, in display
-/// orientation (width and height swapped for EXIF 5..=8), to match [`decode`].
+/// Metadata for `path`. `source_size` is in display orientation (width and
+/// height swapped for EXIF 5..=8), to match [`decode`].
 #[cfg(not(target_os = "macos"))]
-pub fn read_metadata(path: &Path) -> crate::image_decode::ImageMetadata {
-    let source_size = pixel_size(path).map(|(w, h)| {
+pub fn read_metadata(path: &Path) -> ImageMetadata {
+    let mut meta = ImageMetadata::default();
+    crate::image_decode::fill_file_facts(&mut meta, path);
+    meta.source_size = pixel_size(path).map(|(w, h)| {
         if matches!(orientation_of(path), 5..=8) {
             (h, w)
         } else {
             (w, h)
         }
     });
-    crate::image_decode::ImageMetadata {
-        source_size,
-        ..crate::image_decode::ImageMetadata::default()
+    if is_raw_extension(path) {
+        if let Ok(source) = rawler::rawsource::RawSource::new(path) {
+            fill_from_raw_source(&mut meta, &source);
+        }
+    } else if let Ok(file) = std::fs::File::open(path) {
+        if let Ok(exif) =
+            exif::Reader::new().read_from_container(&mut std::io::BufReader::new(file))
+        {
+            fill_from_exif(&mut meta, &exif);
+        }
     }
+    meta
+}
+
+/// Camera, exposure, date, and GPS fields from a whole file in memory. The
+/// browser has bytes, not a path. File facts and `source_size` are left to
+/// the caller.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[allow(dead_code)]
+pub(crate) fn fill_metadata_from_bytes(meta: &mut ImageMetadata, bytes: &[u8], raw: bool) {
+    if raw {
+        fill_from_raw_source(meta, &rawler::rawsource::RawSource::new_from_slice(bytes));
+    } else if let Ok(exif) =
+        exif::Reader::new().read_from_container(&mut std::io::Cursor::new(bytes))
+    {
+        fill_from_exif(meta, &exif);
+    }
+}
+
+/// `catch_unwind` because rawler panics on some malformed files, and a
+/// metadata read must not take its worker thread down.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+fn fill_from_raw_source(meta: &mut ImageMetadata, source: &rawler::rawsource::RawSource) {
+    let read = std::panic::AssertUnwindSafe(|| {
+        let params = rawler::decoders::RawDecodeParams::default();
+        rawler::get_decoder(source)
+            .ok()?
+            .raw_metadata(source, &params)
+            .ok()
+    });
+    if let Some(raw_meta) = std::panic::catch_unwind(read).ok().flatten() {
+        fill_from_rawler(meta, &raw_meta);
+    }
+}
+
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+fn fill_from_rawler(meta: &mut ImageMetadata, raw: &rawler::decoders::RawMetadata) {
+    use rawler::formats::tiff::{Rational, SRational};
+    let ratio = |r: &Rational| finite(r.n as f64 / r.d as f64);
+    let sratio = |r: &SRational| finite(r.n as f64 / r.d as f64);
+    let exif = &raw.exif;
+    meta.camera_make = non_empty(&raw.make);
+    meta.camera_model = non_empty(&raw.model);
+    meta.lens_model = exif
+        .lens_model
+        .as_deref()
+        .and_then(non_empty)
+        .or_else(|| raw.lens.as_ref().and_then(|l| non_empty(&l.lens_model)));
+    meta.f_number = exif.fnumber.as_ref().and_then(ratio);
+    meta.exposure_time = exif.exposure_time.as_ref().and_then(ratio);
+    meta.iso = exif
+        .iso_speed_ratings
+        .map(u32::from)
+        .or(exif.iso_speed)
+        .filter(|&iso| iso > 0);
+    meta.focal_length = exif.focal_length.as_ref().and_then(ratio);
+    meta.exposure_bias = exif.exposure_bias.as_ref().and_then(sratio);
+    meta.flash = exif.flash.and_then(|f| Flash::from_exif(f.into()));
+    meta.white_balance = exif
+        .white_balance
+        .and_then(|w| WhiteBalance::from_exif(w.into()));
+    meta.capture_date = exif
+        .date_time_original
+        .as_deref()
+        .or(exif.create_date.as_deref())
+        .and_then(crate::image_decode::parse_exif_datetime_display);
+    meta.gps = exif.gps.as_ref().and_then(|gps| {
+        let dms = |v: &[Rational; 3]| {
+            finite(dms_to_degrees(
+                v[0].n as f64 / v[0].d as f64,
+                v[1].n as f64 / v[1].d as f64,
+                v[2].n as f64 / v[2].d as f64,
+            ))
+        };
+        Gps::from_exif(
+            gps.gps_latitude.as_ref().and_then(dms)?,
+            gps.gps_latitude_ref.as_deref(),
+            gps.gps_longitude.as_ref().and_then(dms)?,
+            gps.gps_longitude_ref.as_deref(),
+            gps.gps_altitude.as_ref().and_then(ratio),
+            gps.gps_altitude_ref == Some(1),
+        )
+    });
+}
+
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+fn fill_from_exif(meta: &mut ImageMetadata, exif: &exif::Exif) {
+    use exif::{In, Tag, Value};
+    let field = |tag| exif.get_field(tag, In::PRIMARY).map(|f| &f.value);
+    let text = |tag| match field(tag)? {
+        Value::Ascii(parts) => {
+            let s = String::from_utf8_lossy(parts.first()?);
+            non_empty(s.trim_end_matches('\0'))
+        }
+        _ => None,
+    };
+    let number = |tag| match field(tag)? {
+        Value::Rational(r) => finite(r.first()?.to_f64()),
+        Value::SRational(r) => finite(r.first()?.to_f64()),
+        v => v.get_uint(0).map(f64::from),
+    };
+    let degrees = |tag| match field(tag)? {
+        Value::Rational(r) if r.len() >= 3 => {
+            finite(dms_to_degrees(r[0].to_f64(), r[1].to_f64(), r[2].to_f64()))
+        }
+        _ => None,
+    };
+    let uint = |tag| field(tag)?.get_uint(0);
+
+    meta.camera_make = text(Tag::Make);
+    meta.camera_model = text(Tag::Model);
+    meta.lens_model = text(Tag::LensModel);
+    meta.f_number = number(Tag::FNumber);
+    meta.exposure_time = number(Tag::ExposureTime);
+    meta.iso = uint(Tag::PhotographicSensitivity).filter(|&iso| iso > 0);
+    meta.focal_length = number(Tag::FocalLength);
+    meta.exposure_bias = number(Tag::ExposureBiasValue);
+    meta.flash = uint(Tag::Flash).and_then(Flash::from_exif);
+    meta.white_balance = uint(Tag::WhiteBalance).and_then(WhiteBalance::from_exif);
+    meta.capture_date = text(Tag::DateTimeOriginal)
+        .or_else(|| text(Tag::DateTime))
+        .and_then(|s| crate::image_decode::parse_exif_datetime_display(&s));
+    if let (Some(lat), Some(lon)) = (degrees(Tag::GPSLatitude), degrees(Tag::GPSLongitude)) {
+        meta.gps = Gps::from_exif(
+            lat,
+            text(Tag::GPSLatitudeRef).as_deref(),
+            lon,
+            text(Tag::GPSLongitudeRef).as_deref(),
+            number(Tag::GPSAltitude),
+            uint(Tag::GPSAltitudeRef) == Some(1),
+        );
+    }
+}
+
+/// EXIF stores a coordinate as degrees, minutes, and seconds.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+fn dms_to_degrees(d: f64, m: f64, s: f64) -> f64 {
+    d + m / 60.0 + s / 3600.0
+}
+
+/// A zero denominator gives infinity or NaN, which means "unknown" here.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+fn finite(v: f64) -> Option<f64> {
+    v.is_finite().then_some(v)
+}
+
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+fn non_empty(s: &str) -> Option<String> {
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
 }
 
 /// Stored pixel dimensions, before EXIF orientation. Reads only the header.
@@ -345,5 +504,127 @@ mod tests {
 
         let mid = apply_raw_preview_boost(0.5);
         assert!(mid > 0.5, "expected midtone brightening, got {mid}");
+    }
+
+    /// A 16x8 JPEG carrying an APP1 EXIF segment with the given fields,
+    /// built the way a camera lays it out: SOI, APP1, then the image.
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    fn jpeg_with_exif(fields: &[exif::Field]) -> Vec<u8> {
+        let mut writer = exif::experimental::Writer::new();
+        for f in fields {
+            writer.push_field(f);
+        }
+        let mut tiff = std::io::Cursor::new(Vec::new());
+        writer.write(&mut tiff, false).unwrap();
+        let tiff = tiff.into_inner();
+
+        let jpeg = plain_jpeg();
+        let mut app1 = vec![0xFF, 0xE1];
+        app1.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+        app1.extend_from_slice(b"Exif\0\0");
+        app1.extend_from_slice(&tiff);
+        let mut out = jpeg[..2].to_vec();
+        out.extend_from_slice(&app1);
+        out.extend_from_slice(&jpeg[2..]);
+        out
+    }
+
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    fn plain_jpeg() -> Vec<u8> {
+        let mut jpeg = Vec::new();
+        image::RgbImage::new(16, 8)
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        jpeg
+    }
+
+    #[test]
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    fn a_jpegs_exif_fills_camera_exposure_date_and_signed_gps() {
+        use exif::{Field, In, Rational, SRational, Tag, Value};
+        let f = |tag, value| Field {
+            tag,
+            ifd_num: In::PRIMARY,
+            value,
+        };
+        let r = |num, denom| Rational { num, denom };
+        let ascii = |s: &str| Value::Ascii(vec![s.as_bytes().to_vec()]);
+        let fields = [
+            f(Tag::Make, ascii("Canon")),
+            f(Tag::Model, ascii("Canon EOS R5")),
+            f(Tag::LensModel, ascii("RF24-70mm F2.8 L IS USM")),
+            f(Tag::FNumber, Value::Rational(vec![r(28, 10)])),
+            f(Tag::ExposureTime, Value::Rational(vec![r(1, 250)])),
+            f(Tag::PhotographicSensitivity, Value::Short(vec![400])),
+            f(Tag::FocalLength, Value::Rational(vec![r(50, 1)])),
+            f(
+                Tag::ExposureBiasValue,
+                Value::SRational(vec![SRational { num: -2, denom: 3 }]),
+            ),
+            f(Tag::Flash, Value::Short(vec![0x19])),
+            f(Tag::WhiteBalance, Value::Short(vec![1])),
+            f(Tag::DateTimeOriginal, ascii("2026:07:14 15:42:09")),
+            f(Tag::GPSLatitudeRef, ascii("S")),
+            f(
+                Tag::GPSLatitude,
+                Value::Rational(vec![r(33, 1), r(51, 1), r(36, 1)]),
+            ),
+            f(Tag::GPSLongitudeRef, ascii("E")),
+            f(
+                Tag::GPSLongitude,
+                Value::Rational(vec![r(151, 1), r(12, 1), r(0, 1)]),
+            ),
+            f(Tag::GPSAltitudeRef, Value::Byte(vec![1])),
+            f(Tag::GPSAltitude, Value::Rational(vec![r(25, 2)])),
+        ];
+        let bytes = jpeg_with_exif(&fields);
+
+        let mut meta = ImageMetadata::default();
+        fill_metadata_from_bytes(&mut meta, &bytes, false);
+
+        assert_eq!(meta.camera_make.as_deref(), Some("Canon"));
+        assert_eq!(meta.camera_model.as_deref(), Some("Canon EOS R5"));
+        assert_eq!(meta.lens_model.as_deref(), Some("RF24-70mm F2.8 L IS USM"));
+        assert_eq!(meta.f_number, Some(2.8));
+        assert_eq!(meta.exposure_time, Some(1.0 / 250.0));
+        assert_eq!(meta.iso, Some(400));
+        assert_eq!(meta.focal_length, Some(50.0));
+        assert_eq!(meta.exposure_bias, Some(-2.0 / 3.0));
+        assert_eq!(meta.flash, Some(Flash::Fired));
+        assert_eq!(meta.white_balance, Some(WhiteBalance::Manual));
+        assert_eq!(
+            meta.capture_date,
+            Some(crate::image_decode::CaptureDate {
+                year: 2026,
+                month: 7,
+                day: 14,
+                hour: 15,
+                minute: 42,
+            })
+        );
+        let gps = meta.gps.expect("GPS read");
+        assert!(
+            (gps.lat - -33.86).abs() < 1e-9,
+            "south is negative: {}",
+            gps.lat
+        );
+        assert!((gps.lon - 151.2).abs() < 1e-9, "{}", gps.lon);
+        assert_eq!(gps.alt, Some(-12.5), "ref 1 is below sea level");
+
+        // The JPEG is still a JPEG the decoder reads.
+        let decoded = decode_nonraw_from_bytes(&bytes, 64).unwrap();
+        assert_eq!((decoded.width, decoded.height), (16, 8));
+    }
+
+    #[test]
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    fn a_jpeg_without_exif_leaves_every_field_empty() {
+        let mut meta = ImageMetadata::default();
+        fill_metadata_from_bytes(&mut meta, &plain_jpeg(), false);
+        assert!(meta.camera_make.is_none() && meta.gps.is_none() && meta.flash.is_none());
+        assert!(meta.capture_date.is_none() && meta.f_number.is_none());
     }
 }
