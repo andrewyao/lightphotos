@@ -134,7 +134,15 @@ impl Exporter {
                         };
 
                         let src = job.src.clone();
-                        let result = run(job);
+                        // rawler panics on some malformed files. Callers count
+                        // outcomes to know a batch is done, so a panic must
+                        // still send one, and the worker stays alive for the
+                        // rest of the batch.
+                        let result =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(job)))
+                                .unwrap_or_else(|_| {
+                                    Err(format!("export panicked: {}", src.display()))
+                                });
                         if res_tx.send(ExportOutcome { src, result }).is_err() {
                             break;
                         }
@@ -201,7 +209,13 @@ mod tests {
         let exporter = Exporter::with_runner(panics_on_bad);
         // More jobs than any machine has workers, so a dead worker would strand one.
         let names: Vec<String> = (0..64)
-            .map(|i| if i % 2 == 0 { "bad.raw".into() } else { format!("{i}.jpg") })
+            .map(|i| {
+                if i % 2 == 0 {
+                    "bad.raw".into()
+                } else {
+                    format!("{i}.jpg")
+                }
+            })
             .collect();
         for n in &names {
             exporter.submit(job(n));
