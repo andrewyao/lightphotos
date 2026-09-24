@@ -216,6 +216,12 @@ half = "2"
 [target.'cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
 trash = "5"
 
+# Release builds run as GUI apps with no console of their own (see
+# `windows_subsystem` in main.rs); `AttachConsole` borrows the terminal's when
+# launched from one, so `--help`, `--profile` and diagnostics still print.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 egui-winit = { version = "0.34", default-features = false, features = ["links"] }
 wasm-bindgen = "0.2"
