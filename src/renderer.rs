@@ -199,7 +199,11 @@ impl Renderer {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shader"),
             source: wgpu::ShaderSource::Wgsl(
-                concat!(include_str!("loupe_common.wgsl"), include_str!("shader.wgsl")).into(),
+                concat!(
+                    include_str!("loupe_common.wgsl"),
+                    include_str!("shader.wgsl")
+                )
+                .into(),
             ),
         });
 
@@ -565,8 +569,15 @@ impl Renderer {
     /// stores its own images in, so these bytes reach the shader exactly as
     /// `load_texture` would have delivered them. `rgba` must be tightly packed
     /// RGBA8, premultiplied, holding the same sRGB-encoded bytes egui expects.
-    pub fn upload_thumb(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<egui::TextureId> {
-        let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    pub fn upload_thumb(
+        &mut self,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> Option<egui::TextureId> {
+        let expected = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
         if width == 0 || height == 0 || rgba.len() != expected {
             return None;
         }
@@ -1111,4 +1122,3 @@ impl Renderer {
         }
     }
 }
-

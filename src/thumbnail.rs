@@ -31,9 +31,9 @@ use objc2_image_io::{
 
 #[cfg(target_os = "macos")]
 use crate::image_decode::cgimage_to_rgba;
-use crate::image_decode::{DecodedImage, PixelFormat};
 #[cfg(not(target_os = "macos"))]
 use crate::image_decode::DecodedImageFields;
+use crate::image_decode::{DecodedImage, PixelFormat};
 
 /// Whether ImageIO may substitute the file's embedded preview for a real
 /// decode-at-size.

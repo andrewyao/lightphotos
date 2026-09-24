@@ -23,7 +23,11 @@ pub(crate) fn create_raw_pipeline(
     let raw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("raw_shader"),
         source: wgpu::ShaderSource::Wgsl(
-            concat!(include_str!("../loupe_common.wgsl"), include_str!("raw_shader.wgsl")).into(),
+            concat!(
+                include_str!("../loupe_common.wgsl"),
+                include_str!("raw_shader.wgsl")
+            )
+            .into(),
         ),
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

@@ -26,11 +26,7 @@ pub struct Slider {
     pub step: f32,
 }
 
-const fn tone(
-    section: Section,
-    id: SliderId,
-    field: fn(&mut Adjustments) -> &mut f32,
-) -> Slider {
+const fn tone(section: Section, id: SliderId, field: fn(&mut Adjustments) -> &mut f32) -> Slider {
     Slider {
         section,
         id,
@@ -81,7 +77,9 @@ pub const SLIDERS: [Slider; 11] = [
     tone(Section::Tone, SliderId::Whites, |a| &mut a.whites),
     tone(Section::Tone, SliderId::Blacks, |a| &mut a.blacks),
     tone(Section::Presence, SliderId::Vibrance, |a| &mut a.vibrance),
-    tone(Section::Presence, SliderId::Saturation, |a| &mut a.saturation),
+    tone(Section::Presence, SliderId::Saturation, |a| {
+        &mut a.saturation
+    }),
     Slider {
         section: Section::Detail,
         id: SliderId::Denoise,
@@ -703,7 +701,12 @@ mod tests {
         assert_eq!(filmic_exposure(px, 0.0), px);
         let out = apply_linear(&Adjustments::default(), px);
         for i in 0..3 {
-            assert!((out[i] - px[i]).abs() < 1e-5, "channel {i}: {} vs {}", out[i], px[i]);
+            assert!(
+                (out[i] - px[i]).abs() < 1e-5,
+                "channel {i}: {} vs {}",
+                out[i],
+                px[i]
+            );
         }
     }
 
@@ -713,8 +716,10 @@ mod tests {
             for stops in [-1e-4, -1e-5, 1e-5, 1e-4] {
                 let out = filmic_exposure(px, stops);
                 for i in 0..3 {
-                    assert!((out[i] - px[i]).abs() < 10.0 * stops.abs(),
-                        "discontinuity for {px:?} at {stops}: {out:?}");
+                    assert!(
+                        (out[i] - px[i]).abs() < 10.0 * stops.abs(),
+                        "discontinuity for {px:?} at {stops}: {out:?}"
+                    );
                 }
             }
         }
@@ -738,8 +743,10 @@ mod tests {
                     assert!((out[0] - out[2]).abs() < 1e-6);
                     previous = out[0];
                 }
-                assert!(previous > 0.0 && previous < 0.9,
-                    "highlight {level} failed to recover at -5 stops: {previous}");
+                assert!(
+                    previous > 0.0 && previous < 0.9,
+                    "highlight {level} failed to recover at -5 stops: {previous}"
+                );
             }
         }
     }
@@ -750,7 +757,10 @@ mod tests {
         let mut prev = f32::NEG_INFINITY;
         for stops in [-5.0, -3.0, -1.0, 0.0, 1.0, 3.0, 5.0] {
             let out = luma709(filmic_exposure(px, stops));
-            assert!(out > prev, "luma fell going to {stops} stops: {out} after {prev}");
+            assert!(
+                out > prev,
+                "luma fell going to {stops} stops: {out} after {prev}"
+            );
             prev = out;
         }
     }
@@ -787,7 +797,12 @@ mod tests {
     fn filmic_exposure_is_finite_at_the_edges() {
         // Guards the `powf` NaN case: black, near-anchor white, and a pure
         // single-channel colour.
-        for px in [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 0.0], [2.0, 2.0, 2.0]] {
+        for px in [
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 2.0, 2.0],
+        ] {
             for stops in [-5.0, -1.0, 0.0, 1.0, 5.0] {
                 let out = filmic_exposure(px, stops);
                 assert!(
@@ -802,17 +817,45 @@ mod tests {
     fn whites_brightens_the_top_end() {
         // Lightroom's direction: positive Whites brightens, negative recovers.
         let bright = [0.8, 0.8, 0.8];
-        let up = apply_linear(&Adjustments { whites: 60.0, ..Default::default() }, bright);
-        let down = apply_linear(&Adjustments { whites: -60.0, ..Default::default() }, bright);
+        let up = apply_linear(
+            &Adjustments {
+                whites: 60.0,
+                ..Default::default()
+            },
+            bright,
+        );
+        let down = apply_linear(
+            &Adjustments {
+                whites: -60.0,
+                ..Default::default()
+            },
+            bright,
+        );
         assert!(up[0] > bright[0], "whites +60 should brighten: {}", up[0]);
-        assert!(down[0] < bright[0], "whites -60 should recover: {}", down[0]);
+        assert!(
+            down[0] < bright[0],
+            "whites -60 should recover: {}",
+            down[0]
+        );
     }
 
     #[test]
     fn blacks_lifts_the_floor() {
         let dark = [0.03, 0.03, 0.03];
-        let up = apply_linear(&Adjustments { blacks: 60.0, ..Default::default() }, dark);
-        let down = apply_linear(&Adjustments { blacks: -60.0, ..Default::default() }, dark);
+        let up = apply_linear(
+            &Adjustments {
+                blacks: 60.0,
+                ..Default::default()
+            },
+            dark,
+        );
+        let down = apply_linear(
+            &Adjustments {
+                blacks: -60.0,
+                ..Default::default()
+            },
+            dark,
+        );
         assert!(up[0] > dark[0], "blacks +60 should lift: {}", up[0]);
         assert!(down[0] < dark[0], "blacks -60 should crush: {}", down[0]);
     }

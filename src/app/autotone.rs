@@ -149,8 +149,10 @@ impl App {
             }
             // Record the edits now, so a hand edit made while the photo waits
             // its turn can be detected later.
-            self.autotone_base
-                .insert(path.clone(), self.edits.get(&path).copied().unwrap_or_default());
+            self.autotone_base.insert(
+                path.clone(),
+                self.edits.get(&path).copied().unwrap_or_default(),
+            );
             self.autotone_pending.insert(path.clone());
             self.autotone_queue.push_back(path);
         }
@@ -746,7 +748,10 @@ mod tests {
     fn a_photo_dropped_while_its_thumbnail_loaded_is_not_toned() {
         let (mut app, dir, a, b) = grid_with_two_photos("autotone-dropped");
         app.auto_tone_batch(vec![a.clone(), b.clone()], DeferredAutoToneMode::Replace);
-        assert!(app.autotone_pending.contains(&a), "thumbnail not resident yet");
+        assert!(
+            app.autotone_pending.contains(&a),
+            "thumbnail not resident yet"
+        );
 
         // What `forget_photo` does when the trash call for `a` lands. Its
         // thumbnail request is already in the window.
@@ -780,7 +785,10 @@ mod tests {
     fn manual_edit_made_while_pending_survives_the_batch() {
         let (mut app, dir, a, _b) = grid_with_two_photos("autotone-manual-edit-race");
         app.auto_tone_batch(vec![a.clone()], DeferredAutoToneMode::Replace);
-        assert!(app.autotone_pending.contains(&a), "thumbnail not resident yet");
+        assert!(
+            app.autotone_pending.contains(&a),
+            "thumbnail not resident yet"
+        );
 
         let manual = crate::develop::Adjustments {
             exposure: 1.23,

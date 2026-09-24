@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::develop::{self};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::navigation::Playlist;
-use crate::navigation::{self, Cmp, flatten_visible_tree, visible_indices};
+use crate::navigation::{self, flatten_visible_tree, visible_indices, Cmp};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::thumbnail::THUMB_PX;
 use crate::ui;
