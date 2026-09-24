@@ -472,7 +472,7 @@ mod tests {
         };
         assert_eq!(
             maps_url(&gps),
-            "https://maps.apple.com/?ll=-33.860000,151.200000"
+            "https://www.google.com/maps/search/?api=1&query=-33.860000,151.200000"
         );
     }
 
