@@ -643,6 +643,7 @@ impl App {
         let catalog = Catalog::new();
         let egui_ctx = egui::Context::default();
         fonts::configure(&egui_ctx, None);
+        crate::ui::font_size::init(&egui_ctx);
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         let (catalog_load_tx, catalog_load_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]

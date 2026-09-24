@@ -156,6 +156,7 @@ pub struct FrameOutput {
 }
 
 mod develop_panel;
+pub mod font_size;
 mod grid;
 mod loupe;
 mod modals;
@@ -218,20 +219,25 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::CentralPanel::default().show_inside(ui, |ui| {
         ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.4);
-            ui.heading("LightPhotos");
-            ui.add_space(4.0);
-            ui.label(t().landing_prompt);
-            ui.add_space(12.0);
+            ui.add_space(ui.available_height() * 0.35);
+            ui.label(
+                egui::RichText::new(t().landing_prompt)
+                    .size(font_size::px(ui.style(), 32.0))
+                    .strong(),
+            );
+            ui.add_space(24.0);
             let pending = app.folder_pick_pending();
             let resp = ui.add_enabled(
                 !pending,
-                egui::Button::new(if pending {
-                    t().opening
-                } else {
-                    t().choose_folder
-                })
-                .min_size(egui::vec2(160.0, 32.0)),
+                egui::Button::new(
+                    egui::RichText::new(if pending {
+                        t().opening
+                    } else {
+                        t().choose_folder
+                    })
+                    .size(font_size::px(ui.style(), 20.0)),
+                )
+                .min_size(egui::vec2(220.0, 48.0)),
             );
             if resp.clicked() {
                 out.actions.push(UiAction::PickFolder);
@@ -240,11 +246,13 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             // Access permission, so say up front which button to press.
             let allow_note = t().landing_allow_note;
             if !allow_note.is_empty() {
-                ui.add_space(8.0);
+                ui.add_space(24.0);
                 ui.scope(|ui| {
-                    ui.set_max_width(420.0);
+                    ui.set_max_width(640.0);
                     ui.vertical_centered(|ui| {
-                        ui.label(egui::RichText::new(allow_note).small().weak());
+                        ui.label(
+                            egui::RichText::new(allow_note).size(font_size::px(ui.style(), 22.0)),
+                        );
                     });
                 });
             }

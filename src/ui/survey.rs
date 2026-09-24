@@ -77,19 +77,22 @@ fn survey_member(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 "\u{2026}",
-                egui::FontId::proportional(18.0),
+                egui::FontId::proportional(font_size::px(ui.style(), 18.0)),
                 egui::Color32::GRAY,
             );
         }
         if is_best {
             let c = rect.left_top() + egui::vec2(20.0, 20.0);
-            ui.painter()
-                .circle_filled(c, 9.0, egui::Color32::from_black_alpha(170));
+            ui.painter().circle_filled(
+                c,
+                font_size::px(ui.style(), 9.0),
+                egui::Color32::from_black_alpha(170),
+            );
             ui.painter().text(
                 c,
                 egui::Align2::CENTER_CENTER,
                 "\u{2605}",
-                egui::FontId::proportional(13.0),
+                egui::FontId::proportional(font_size::px(ui.style(), 13.0)),
                 theme::BURST_BADGE,
             );
         }

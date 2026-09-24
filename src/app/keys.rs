@@ -31,6 +31,20 @@ impl App {
         let cmd = self.modifiers.control_key();
         let alt = self.modifiers.alt_key();
 
+        // Alt+= and Alt+- size all text, in any mode. Shift is allowed so `+` works.
+        if alt && !cmd {
+            let steps = match code {
+                KeyCode::Equal | KeyCode::NumpadAdd => 1,
+                KeyCode::Minus | KeyCode::NumpadSubtract => -1,
+                _ => 0,
+            };
+            if steps != 0 {
+                ui::font_size::step(&self.egui_ctx, steps);
+                self.request_redraw();
+                return;
+            }
+        }
+
         // While cropping, other keys do nothing, so a stray arrow or digit
         // can't move the selection out from under the crop.
         if self.crop_edit.is_some() {

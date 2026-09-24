@@ -52,7 +52,8 @@ pub(super) fn folder_content_width(
             .size()
             .x
     });
-    let own_width = depth as f32 * 14.0 + DISCLOSURE_W + ui.spacing().item_spacing.x + text_width;
+    let step = disclosure_w(ui.style());
+    let own_width = depth as f32 * step + step + ui.spacing().item_spacing.x + text_width;
     if app.is_expanded(path) {
         app.subdirs(path)
             .iter()
@@ -104,18 +105,21 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
     });
 }
 
-const DISCLOSURE_W: f32 = 14.0;
+/// The disclosure triangle's width, which is also one level of folder indent.
+fn disclosure_w(style: &egui::Style) -> f32 {
+    font_size::px(style, 14.0)
+}
 
 /// Paint the folder row's disclosure triangle. It is drawn, not text, because
 /// egui's built-in fonts have no ▼ glyph, and fonts that do have it place it
 /// off the folder name's baseline.
 fn disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(DISCLOSURE_W, ui.spacing().interact_size.y),
+        egui::vec2(disclosure_w(ui.style()), ui.spacing().interact_size.y),
         egui::Sense::click(),
     );
     let c = rect.center();
-    let r = 4.0;
+    let r = font_size::px(ui.style(), 4.0);
     let points = if expanded {
         vec![
             egui::pos2(c.x - r, c.y - r * 0.6),
@@ -147,7 +151,7 @@ pub(super) fn folder_node(
 ) {
     let selected = app.folder_sel().as_deref() == Some(path);
     let row = ui.horizontal(|ui| {
-        ui.add_space(depth as f32 * 14.0);
+        ui.add_space(depth as f32 * disclosure_w(ui.style()));
         let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -248,11 +252,12 @@ pub(super) fn thumbnail_cell(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             "\u{2026}",
-            egui::FontId::proportional(18.0),
+            egui::FontId::proportional(font_size::px(ui.style(), 18.0)),
             egui::Color32::GRAY,
         );
     }
 
+    let badge_r = font_size::px(ui.style(), 9.0);
     // Corners: burst badge top-left, duplicate badge top-right, eyes-closed
     // bottom-right, stars bottom-left. One photo can show all four.
     match app.burst_mark_at(pos) {
@@ -261,14 +266,14 @@ pub(super) fn thumbnail_cell(
                 .rect_filled(rect, style.corner, egui::Color32::from_black_alpha(140));
         }
         Some(BurstMark::Best) => {
-            let c = rect.left_top() + egui::vec2(style.corner + 9.0, style.corner + 9.0);
+            let c = rect.left_top() + egui::vec2(style.corner + badge_r, style.corner + badge_r);
             ui.painter()
-                .circle_filled(c, 9.0, egui::Color32::from_black_alpha(170));
+                .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
             ui.painter().text(
                 c,
                 egui::Align2::CENTER_CENTER,
                 "\u{2605}",
-                egui::FontId::proportional(13.0),
+                egui::FontId::proportional(font_size::px(ui.style(), 13.0)),
                 theme::BURST_BADGE,
             );
         }
@@ -281,14 +286,15 @@ pub(super) fn thumbnail_cell(
                 .rect_filled(rect, style.corner, egui::Color32::from_black_alpha(90));
         }
         Some(DuplicateMark::Best) => {
-            let c = rect.right_top() + egui::vec2(-(style.corner + 9.0), style.corner + 9.0);
+            let c =
+                rect.right_top() + egui::vec2(-(style.corner + badge_r), style.corner + badge_r);
             ui.painter()
-                .circle_filled(c, 9.0, egui::Color32::from_black_alpha(170));
+                .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
             ui.painter().text(
                 c,
                 egui::Align2::CENTER_CENTER,
                 "D",
-                egui::FontId::proportional(12.0),
+                egui::FontId::proportional(font_size::px(ui.style(), 12.0)),
                 theme::DUP_BADGE,
             );
         }
@@ -296,15 +302,16 @@ pub(super) fn thumbnail_cell(
     }
 
     if app.eyes_closed_at(pos) {
-        let c = rect.right_bottom() + egui::vec2(-(style.corner + 9.0), -(style.corner + 9.0));
+        let c =
+            rect.right_bottom() + egui::vec2(-(style.corner + badge_r), -(style.corner + badge_r));
         ui.painter()
-            .circle_filled(c, 9.0, egui::Color32::from_black_alpha(170));
+            .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
         ui.painter().text(
             c,
             egui::Align2::CENTER_CENTER,
             // An arc, read as a closed eyelid.
             "\u{2312}",
-            egui::FontId::proportional(13.0),
+            egui::FontId::proportional(font_size::px(ui.style(), 13.0)),
             theme::EYES_BADGE,
         );
     }
@@ -329,10 +336,13 @@ pub(super) fn thumbnail_cell(
     let stars = app.rating_at(pos);
     if !(style.hide_zero_stars && stars == 0) {
         ui.painter().text(
-            egui::pos2(rect.left() + style.star_dx, rect.bottom() + style.star_dy),
+            egui::pos2(
+                rect.left() + font_size::px(ui.style(), style.star_dx),
+                rect.bottom() + font_size::px(ui.style(), style.star_dy),
+            ),
             egui::Align2::LEFT_CENTER,
             star_string(stars),
-            egui::FontId::proportional(style.star_size),
+            egui::FontId::proportional(font_size::px(ui.style(), style.star_size)),
             theme::STAR_GOLD,
         );
     }
@@ -366,12 +376,13 @@ pub(super) fn grid_cell(
         // position must match the one `thumbnail_cell` draws.
         if app.dup_mark_at(pos).is_some() {
             if let Some(click_pos) = response.interact_pointer_pos() {
+                let badge_r = font_size::px(ui.style(), 9.0);
                 let badge_center = response.rect.right_top()
                     + egui::vec2(
-                        -(GRID_CELL_STYLE.corner + 9.0),
-                        GRID_CELL_STYLE.corner + 9.0,
+                        -(GRID_CELL_STYLE.corner + badge_r),
+                        GRID_CELL_STYLE.corner + badge_r,
                     );
-                if click_pos.distance(badge_center) <= 10.0 {
+                if click_pos.distance(badge_center) <= badge_r + 1.0 {
                     out.actions.push(UiAction::OpenSurvey(pos));
                     out.actions.push(UiAction::Focus(Region::Grid));
                     return;
