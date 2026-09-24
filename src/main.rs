@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+// A console-subsystem program gets a console window of its own when launched
+// from Explorer. Debug builds keep it for their log output.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 //! LightPhotos, a fast Lightroom-lite photo culling and develop tool. This
 //! crate root owns `main()` and the winit event loop, which turns window events
@@ -531,6 +534,15 @@ fn print_usage_and_exit(code: i32) -> ! {
 #[cfg(not(target_arch = "wasm32"))]
 #[hotpath::main(percentiles = [50, 95, 99])]
 fn main() {
+    // A GUI-subsystem program has nowhere to print. Launched from a terminal,
+    // print to it; launched from Explorer, there is no parent console and the
+    // call fails harmlessly.
+    #[cfg(all(windows, not(debug_assertions)))]
+    unsafe {
+        windows_sys::Win32::System::Console::AttachConsole(
+            windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+        );
+    }
     loader::start_clock();
 
     // Native only: `start_named` spawns the emit thread, and
