@@ -127,6 +127,7 @@ pub enum UiAction {
     /// Focus the Develop panel with the keyboard cursor on this slider index.
     FocusDevelop(usize),
     SetLanguage(Lang),
+    SetLeftTab(crate::app::LeftTab),
 }
 
 /// A bulk action requested from the toolbar, run against the current
@@ -158,13 +159,14 @@ pub struct FrameOutput {
 mod develop_panel;
 pub mod font_size;
 mod grid;
+mod info_panel;
 mod loupe;
 mod modals;
 mod survey;
 mod toolbar;
 
 use develop_panel::draw_develop_panel;
-use grid::{draw_folders_panel, draw_grid};
+use grid::{draw_grid, draw_left_panel};
 use loupe::draw_loupe;
 use modals::{confirm_modal, delete_preset_modal, help_modal, preset_name_modal, quit_modal};
 use survey::draw_survey;
@@ -189,7 +191,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     // the toolbar gives them full window height and keeps the toolbar in the
     // middle column. Survey mode has no side panels.
     if mode == ViewMode::Grid || mode == ViewMode::Loupe {
-        draw_folders_panel(ui, app, &mut out);
+        draw_left_panel(ui, app, &mut out);
     }
     if mode == ViewMode::Loupe && app.develop_visible() {
         draw_develop_panel(ui, app, &mut out);

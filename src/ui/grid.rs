@@ -1,16 +1,15 @@
 use super::*;
 use std::path::Path;
 
+use super::info_panel::draw_info_panel;
 use crate::app::GRID_CELL_PT;
-use crate::app::{App, Region};
+use crate::app::{App, LeftTab, Region};
 use crate::burst::BurstMark;
 use crate::duplicates::DuplicateMark;
 
-/// Left folder-tree sidebar, rooted at the opened folder.
-pub(super) fn draw_folders_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    if !app.folders_visible() {
-        return;
-    }
+/// The left sidebar. A footer strip picks its tab: the folder tree, rooted at
+/// the opened folder, or the focused photo's metadata.
+pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let content_width = app
         .folder_root()
@@ -23,14 +22,83 @@ pub(super) fn draw_folders_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
         .resizable(false)
         .exact_size(panel_width)
         .show_inside(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if let Some(root) = app.folder_root() {
-                        folder_node(ui, app, &root, 0, out);
+            egui::Panel::bottom("left_tabs").show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for tab in [LeftTab::Folders, LeftTab::Info] {
+                        let resp = tab_icon(ui, tab, app.left_tab() == tab);
+                        if resp.clicked() && app.left_tab() != tab {
+                            out.actions.push(UiAction::SetLeftTab(tab));
+                        }
                     }
                 });
+            });
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match app.left_tab() {
+                    LeftTab::Folders => {
+                        if let Some(root) = app.folder_root() {
+                            folder_node(ui, app, &root, 0, out);
+                        }
+                    }
+                    LeftTab::Info => draw_info_panel(ui, app),
+                });
         });
+}
+
+/// One footer tab button, painted as an outline icon: a folder for the tree,
+/// a page with a folded corner for the photo's info.
+fn tab_icon(ui: &mut egui::Ui, tab: LeftTab, active: bool) -> egui::Response {
+    let side = font_size::px(ui.style(), 26.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    let visuals = ui.visuals();
+    let color = if active {
+        visuals.strong_text_color()
+    } else if response.hovered() {
+        visuals.text_color()
+    } else {
+        visuals.weak_text_color()
+    };
+    if active {
+        ui.painter()
+            .rect_filled(rect, 4.0, visuals.selection.bg_fill.gamma_multiply(0.6));
+    } else if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
+    }
+    let stroke = egui::Stroke::new(font_size::px(ui.style(), 1.3), color);
+    let u = font_size::px(ui.style(), 1.0);
+    let c = rect.center();
+    let p = |x: f32, y: f32| egui::pos2(c.x + x * u, c.y + y * u);
+    let outline = match tab {
+        LeftTab::Folders => vec![
+            p(-8.0, -5.5),
+            p(-3.0, -5.5),
+            p(-1.5, -3.5),
+            p(8.0, -3.5),
+            p(8.0, 6.0),
+            p(-8.0, 6.0),
+        ],
+        LeftTab::Info => vec![
+            p(-6.0, -8.0),
+            p(2.5, -8.0),
+            p(6.0, -4.5),
+            p(6.0, 8.0),
+            p(-6.0, 8.0),
+        ],
+    };
+    ui.painter().add(egui::Shape::closed_line(outline, stroke));
+    if tab == LeftTab::Info {
+        ui.painter()
+            .line(vec![p(2.5, -8.0), p(2.5, -4.5), p(6.0, -4.5)], stroke);
+        for y in [0.0, 3.5] {
+            ui.painter().line_segment([p(-3.0, y), p(3.0, y)], stroke);
+        }
+    }
+    let tip = match tab {
+        LeftTab::Folders => t().folders_tab_tip,
+        LeftTab::Info => t().info_tab_tip,
+    };
+    response.on_hover_text(tip)
 }
 
 /// Width of the widest visible folder row, measured in the body font that

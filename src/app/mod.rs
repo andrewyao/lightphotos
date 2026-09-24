@@ -121,6 +121,15 @@ pub enum Region {
     Develop,
 }
 
+/// Which view fills the left panel. Session only; every launch starts on
+/// `Folders`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum LeftTab {
+    #[default]
+    Folders,
+    Info,
+}
+
 /// Chrome regions F6 steps through before wrapping back to the main region.
 const CHROME_ORDER: [Region; 2] = [Region::Toolbar, Region::Filmstrip];
 
@@ -580,6 +589,7 @@ pub(crate) struct App {
     preset_name_edit: Option<(String, Option<u64>)>,
 
     show_help: bool,
+    left_tab: LeftTab,
 
     pending_quit: bool,
     /// `main.rs` exits the event loop when this is set.
@@ -826,6 +836,7 @@ impl App {
             pending_preset_delete: None,
             preset_name_edit: None,
             show_help: false,
+            left_tab: LeftTab::Folders,
             pending_quit: false,
             quit_requested: false,
             status: None,
@@ -1225,6 +1236,7 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::ImportLrPresets => self.import_lr_presets(),
+                ui::UiAction::SetLeftTab(tab) => self.set_left_tab(tab),
                 ui::UiAction::ToggleHelp => {
                     self.show_help = !self.show_help;
                     self.request_redraw();
