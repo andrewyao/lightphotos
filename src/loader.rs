@@ -579,6 +579,9 @@ impl Loader {
     /// Requests `path`'s camera, lens, and exposure metadata. The result arrives
     /// in the fourth list returned by [`poll_all`](Self::poll_all). Call it for
     /// the viewed photo only; exif jobs outrank thumbnails.
+    // wasm32 reads metadata in `app/web.rs`, because this queue has no
+    // workers there.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn request_exif(&mut self, path: PathBuf) {
         if self.exif_inflight.contains(&path) {
             return;
