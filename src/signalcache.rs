@@ -205,8 +205,12 @@ impl SignalCache {
 
     /// Remember one signal. A photo whose bytes changed since the last visit
     /// starts a fresh entry rather than mixing old signals with new.
+    ///
+    /// Entries are keyed by file name, so a photo outside this folder is
+    /// dropped. Workers are not cancelled on a folder switch, and their late
+    /// results would otherwise land on a same-named photo here.
     pub fn record(&mut self, path: &Path, signal: Signal) {
-        if self.dir.is_none() {
+        if self.dir.as_deref() != path.parent() {
             return;
         }
         let (Some(name), Some(key)) = (path.file_name(), current_key(path)) else {
