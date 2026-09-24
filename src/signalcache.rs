@@ -563,6 +563,27 @@ mod tests {
         assert_eq!(CaptureTime::Unreadable.to_system_time(), None);
     }
 
+    /// A face analysis submitted in the previous folder can finish after the
+    /// switch. Camera folders reuse names like `IMG_0001.JPG`, so keying by
+    /// name alone would file it under this folder's photo of the same name.
+    #[test]
+    fn a_signal_for_a_photo_in_another_folder_is_ignored() {
+        let here = unique_dir("here");
+        let elsewhere = unique_dir("elsewhere");
+        let ours = write_photo(&here, "IMG_0001.JPG", b"ours");
+        let theirs = write_photo(&elsewhere, "IMG_0001.JPG", b"a different photo");
+
+        let mut cache = SignalCache::load(&here);
+        cache.record(&ours, Signal::Sharpness(1.0));
+        cache.record(&theirs, Signal::Sharpness(99.0));
+
+        let s = cache.get(&ours).expect("our photo's entry survives");
+        assert_eq!(s.sharpness, Some(1.0));
+
+        let _ = std::fs::remove_dir_all(&here);
+        let _ = std::fs::remove_dir_all(&elsewhere);
+    }
+
     #[test]
     fn a_cache_attached_to_no_folder_records_nothing() {
         let dir = unique_dir("empty");
