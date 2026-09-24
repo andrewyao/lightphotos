@@ -13,9 +13,9 @@
 // 1. The working gamma is the real sRGB curve plus the display boost, not
 //    `pow(x, 1/2.2)`. With every slider at default the output equals the
 //    plain gamma + boost result.
-// 2. No conversion back to linear at the end. WebGPU canvases never offer an
-//    sRGB surface format, so nothing re-encodes on store and this output is
-//    already display-ready.
+// 2. No conversion back to linear at the end. The renderer configures a
+//    non-sRGB surface on every platform, so this output is already
+//    display-ready.
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -186,11 +186,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Outside the image (UV beyond 0..1): draw the neutral background.
     if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
-        return vec4<f32>(0.12, 0.12, 0.13, 1.0);
+        return vec4<f32>(0.3811, 0.3811, 0.3959, 1.0);
     }
     // Outside the crop rectangle.
     if (in.uv.x < adj.crop_l || in.uv.x > adj.crop_r || in.uv.y < adj.crop_t || in.uv.y > adj.crop_b) {
-        return vec4<f32>(0.12, 0.12, 0.13, 1.0);
+        return vec4<f32>(0.3811, 0.3811, 0.3959, 1.0);
     }
 
     var r = texel.r;

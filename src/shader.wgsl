@@ -193,6 +193,16 @@ fn spatialWeight(d2: i32) -> f32 {
     return 0.0;
 }
 
+// Linear to sRGB-encoded, for the non-sRGB surface. Must match
+// `linear_to_srgb` in raw_shader.wgsl.
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let cutoff = vec3<f32>(0.0031308);
+    let a = vec3<f32>(0.055);
+    let higher = (1.0 + a) * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - a;
+    let lower = c * 12.92;
+    return select(higher, lower, c <= cutoff);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Sample before any early return. WebGPU requires `textureSample` under
@@ -206,10 +216,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Outside the image or the crop: the neutral background.
     if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
-        return vec4<f32>(0.12, 0.12, 0.13, 1.0);
+        return vec4<f32>(0.3811, 0.3811, 0.3959, 1.0);
     }
     if (in.uv.x < adj.crop_l || in.uv.x > adj.crop_r || in.uv.y < adj.crop_t || in.uv.y > adj.crop_b) {
-        return vec4<f32>(0.12, 0.12, 0.13, 1.0);
+        return vec4<f32>(0.3811, 0.3811, 0.3959, 1.0);
     }
 
     var r = texel.r;
@@ -306,12 +316,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = luma + (g - luma) * total;
     b = luma + (b - luma) * total;
 
-    // 5. Back to linear.
-    r = pow(max(r, 0.0), 2.2);
-    g = pow(max(g, 0.0), 2.2);
-    b = pow(max(b, 0.0), 2.2);
-
-    return vec4<f32>(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), texel.a);
+    // 5. Back to linear, then sRGB-encode for the surface.
+    let lin = clamp(pow(max(vec3<f32>(r, g, b), vec3<f32>(0.0)), vec3<f32>(2.2)), vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(linear_to_srgb(lin), texel.a);
 }
 
 // Subject-selection overlay, drawn as a second pass blended over the image.
@@ -333,5 +340,5 @@ fn fs_overlay(in: VsOut) -> @location(0) vec4<f32> {
         coverage = 1.0 - coverage;
     }
 
-    return vec4<f32>(overlay.tint.rgb, coverage * overlay.strength);
+    return vec4<f32>(linear_to_srgb(overlay.tint.rgb), coverage * overlay.strength);
 }
