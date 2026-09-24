@@ -49,6 +49,11 @@ winit = "0.30.13"
 wgpu = "29.0.3"
 pollster = "0.4"
 bytemuck = { version = "1.25", features = ["derive"] }
+# Reads each font face's vertical metrics so `app::fonts` can put every
+# fallback face's baseline on the primary UI font's. Deliberately the same
+# crate (and version) epaint parses fonts with, so the metrics we correct
+# against are the ones it actually lays glyphs out with.
+skrifa = "0.40"
 
 # egui chrome (grid/filmstrip/overlays); reuses the project's wgpu 29 + winit 0.30.
 egui = "0.34"
@@ -133,12 +138,6 @@ lightwatch = ["lightwatch/enabled"]
 # "clipboard" (and the Linux-only "wayland"/"x11", inert there anyway).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 egui-winit = "0.34"
-# Reads a system font's vertical metrics at load time so `configure_system_fonts`
-# can put every fallback face's baseline on the primary UI font's. Deliberately
-# the same crate (and version) epaint parses fonts with, so the metrics we
-# correct against are the ones it actually lays glyphs out with. wasm32 has no
-# readable system fonts, so it never needs this.
-skrifa = "0.40"
 # Native "choose a folder" dialog for the landing page / Cmd+O. Per-OS native
 # picker: Cocoa NSOpenPanel via objc2 on macOS (same objc2 stack as the deps
 # above — no new system libs), the Win32 dialog on Windows, and the XDG
@@ -249,6 +248,7 @@ web-sys = { version = "0.3", features = [
     "FileSystemGetFileOptions",
     "FileSystemWritableFileStream",
     "Storage",
+    "Response",
 ] }
 js-sys = "0.3"
 console_error_panic_hook = "0.1"

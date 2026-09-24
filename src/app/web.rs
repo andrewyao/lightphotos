@@ -73,6 +73,7 @@ impl App {
                     // navigation, and thumbnail decodes using the old handles.
                     self.supersede_web_pending_nav();
                     self.invalidate_web_thumb_handles();
+                    self.fetch_cjk_font_for(picked.handles.keys().chain(picked.dir_handles.keys()));
                     self.web_file_handles = picked.handles;
                     self.web_dir_handles = picked.dir_handles;
                     self.web_thumb_cleanup.clear();
@@ -843,6 +844,9 @@ impl App {
                         subdir_paths.push(path.clone());
                         self.web_dir_handles.insert(path, handle);
                     }
+                    self.fetch_cjk_font_for(
+                        listing.images.iter().map(|(p, _)| p).chain(&subdir_paths),
+                    );
                     for (path, handle) in listing.images {
                         self.web_file_handles.insert(path, handle);
                     }
@@ -887,6 +891,27 @@ impl App {
             self.request_redraw();
         }
         !self.web_dirlist_inflight.is_empty()
+    }
+
+    /// Fetch the full Chinese font the first time a listed name has Chinese
+    /// characters the loaded fonts can't draw. Every name the UI shows reaches
+    /// it through a listing first.
+    fn fetch_cjk_font_for<'a>(&mut self, paths: impl IntoIterator<Item = &'a PathBuf>) {
+        if self.web_full_cjk_requested {
+            return;
+        }
+        let font = egui::FontId::proportional(14.0);
+        let missing = self.egui_ctx.fonts_mut(|fonts| {
+            paths.into_iter().any(|path| {
+                path.to_string_lossy()
+                    .chars()
+                    .any(|c| super::fonts::is_cjk(c) && !fonts.has_glyph(&font, c))
+            })
+        });
+        if missing {
+            self.web_full_cjk_requested = true;
+            super::fonts::fetch_full_cjk(self.egui_ctx.clone(), self.window.clone());
+        }
     }
 
     /// The wasm32 end of `open_folder`: toggles the folder's expansion, and if

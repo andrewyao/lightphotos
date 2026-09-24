@@ -53,160 +53,6 @@ pub(crate) const TOUCHUP_MAX_RADIUS: f32 = 0.15;
 /// Fraction of the patch radius used to blend the correction into its edges.
 const TOUCHUP_FEATHER: f32 = 1.0;
 
-/// One font face's vertical metrics, in ems, already multiplied by the
-/// `FontTweak::scale` epaint draws that face at.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Copy)]
-struct FaceMetrics {
-    ascent: f32,
-    /// Ascent + descent + line gap.
-    row_height: f32,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn face_metrics(bytes: &[u8], index: u32, scale: f32) -> Option<FaceMetrics> {
-    use skrifa::MetadataProvider as _;
-    let font = skrifa::FontRef::from_index(bytes, index).ok()?;
-    let metrics = font.metrics(
-        skrifa::instance::Size::unscaled(),
-        skrifa::instance::LocationRef::default(),
-    );
-    let upem = metrics.units_per_em as f32;
-    if upem <= 0.0 {
-        return None;
-    }
-    let ascent = metrics.ascent / upem * scale;
-    // Descent is negative (it points below the baseline), hence the subtraction.
-    let descent = metrics.descent / upem * scale;
-    let leading = metrics.leading / upem * scale;
-    Some(FaceMetrics {
-        ascent,
-        row_height: ascent - descent + leading,
-    })
-}
-
-/// The `FontTweak::y_offset_factor` that lands `face`'s baseline on `primary`'s.
-///
-/// egui takes a row's metrics from the family's first face, then places each
-/// glyph at `face.ascent + (primary.row_height - face.row_height) / 2`. A
-/// fallback face with a different ascent-to-line-height ratio sits off the
-/// baseline. Hiragino's large line gap puts CJK text about a quarter em too
-/// high. epaint multiplies the factor by the face's `scale`, so we divide it out.
-#[cfg(not(target_arch = "wasm32"))]
-fn baseline_correction(primary: FaceMetrics, face: FaceMetrics, scale: f32) -> f32 {
-    let drawn_baseline = face.ascent + 0.5 * (primary.row_height - face.row_height);
-    (primary.ascent - drawn_baseline) / scale
-}
-
-/// Load macOS system fonts at runtime so the binary doesn't embed a large
-/// Unicode font. egui's built-in fonts stay as fallbacks. Every face gets a
-/// baseline correction against the first, so mixed-script text sits on one line.
-#[cfg(not(target_arch = "wasm32"))]
-fn add_system_fonts(definitions: &mut egui::FontDefinitions) {
-    let candidates = [
-        ("macos-ui", "/System/Library/Fonts/SFNS.ttf", 0u32),
-        // CJK coverage SFNS lacks. Index 0 of these TTCs is the regular face.
-        ("macos-cjk", "/System/Library/Fonts/Hiragino Sans GB.ttc", 0),
-        (
-            "macos-cjk-fallback",
-            "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-            0,
-        ),
-    ];
-
-    let mut loaded = Vec::new();
-    for (name, path, index) in candidates {
-        let Ok(bytes) = std::fs::read(path) else {
-            continue;
-        };
-        let Some(metrics) = face_metrics(&bytes, index, 1.0) else {
-            continue;
-        };
-        loaded.push((name.to_owned(), bytes, index, metrics));
-    }
-
-    // The first loaded face is the primary that every other face aligns to.
-    let Some(primary) = loaded.first().map(|entry| entry.3) else {
-        return;
-    };
-
-    let mut names = Vec::new();
-    for (name, bytes, index, metrics) in loaded {
-        definitions.font_data.insert(
-            name.clone(),
-            Arc::new(egui::FontData {
-                font: std::borrow::Cow::Owned(bytes),
-                index,
-                tweak: egui::FontTweak {
-                    y_offset_factor: baseline_correction(primary, metrics, 1.0),
-                    ..Default::default()
-                },
-            }),
-        );
-        names.push(name);
-    }
-
-    // egui's built-in faces need the same correction against the new primary.
-    // This runs before the system fonts join the family list, so it clones only
-    // egui's static font data, not the megabytes just read from disk.
-    let builtins = definitions
-        .families
-        .get(&egui::FontFamily::Proportional)
-        .cloned()
-        .unwrap_or_default();
-    for name in builtins {
-        let Some(data) = definitions.font_data.get(&name) else {
-            continue;
-        };
-        let scale = data.tweak.scale;
-        let Some(metrics) = face_metrics(data.font.as_ref(), data.index, scale) else {
-            continue;
-        };
-        let mut data = (**data).clone();
-        data.tweak.y_offset_factor = baseline_correction(primary, metrics, scale);
-        definitions.font_data.insert(name, Arc::new(data));
-    }
-
-    if let Some(fonts) = definitions
-        .families
-        .get_mut(&egui::FontFamily::Proportional)
-    {
-        for name in names.iter().rev() {
-            fonts.insert(0, name.clone());
-        }
-    }
-    // Monospace keeps Hack first and uses these only for glyphs Hack lacks.
-    // Prepending them would make monospace text proportional.
-    if let Some(fonts) = definitions.families.get_mut(&egui::FontFamily::Monospace) {
-        fonts.extend(names.iter().cloned());
-    }
-}
-
-/// System fonts where the platform has them, then the Chinese UI glyphs as a
-/// last resort. The browser can't read system fonts, and Linux and Windows
-/// have no known font paths here, so without the bundled subset those builds
-/// would draw Chinese as boxes.
-fn configure_fonts(ctx: &egui::Context) {
-    let mut definitions = egui::FontDefinitions::default();
-    #[cfg(not(target_arch = "wasm32"))]
-    add_system_fonts(&mut definitions);
-
-    // Built by `scripts/subset-cjk-font.sh` from the CJK text in `i18n.rs`.
-    const CJK: &str = "noto-sans-sc-ui-subset";
-    definitions.font_data.insert(
-        CJK.to_owned(),
-        Arc::new(egui::FontData::from_static(include_bytes!(
-            "../../assets/fonts/NotoSansSC-ui-subset.otf"
-        ))),
-    );
-    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        if let Some(fonts) = definitions.families.get_mut(&family) {
-            fonts.push(CJK.to_owned());
-        }
-    }
-    ctx.set_fonts(definitions);
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ViewMode {
     Grid,
@@ -422,6 +268,9 @@ pub(crate) struct App {
     /// the landing page's "Choose Folder" button so a second picker can't open.
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_folder_pending: bool,
+    /// Set once `fonts::fetch_full_cjk` has started. It runs at most once a session.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_full_cjk_requested: bool,
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_folder_tx: Sender<Result<crate::web_fs::PickedFolder, String>>,
     #[cfg(target_arch = "wasm32")]
@@ -778,6 +627,7 @@ mod bulk_delete;
 mod catalog;
 mod crop;
 mod export;
+mod fonts;
 mod histogram;
 mod keys;
 mod loupe;
@@ -791,7 +641,7 @@ impl App {
     pub(crate) fn new(initial: Option<PathBuf>) -> Self {
         let catalog = Catalog::new();
         let egui_ctx = egui::Context::default();
-        configure_fonts(&egui_ctx);
+        fonts::configure(&egui_ctx, None);
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         let (catalog_load_tx, catalog_load_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
@@ -822,6 +672,8 @@ impl App {
             pending_initial: initial,
             #[cfg(target_arch = "wasm32")]
             web_folder_pending: false,
+            #[cfg(target_arch = "wasm32")]
+            web_full_cjk_requested: false,
             #[cfg(target_arch = "wasm32")]
             web_folder_tx,
             #[cfg(target_arch = "wasm32")]
@@ -1544,54 +1396,6 @@ mod tests {
 
     fn set(items: &[usize]) -> BTreeSet<usize> {
         items.iter().copied().collect()
-    }
-
-    /// The primary face defines the baseline, so it is never shifted.
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn the_primary_face_needs_no_baseline_correction() {
-        let sf = FaceMetrics {
-            ascent: 0.9668,
-            row_height: 1.1777,
-        };
-        assert_eq!(baseline_correction(sf, sf, 1.0), 0.0);
-    }
-
-    /// Hiragino's half-em line gap draws its baseline a quarter em above San
-    /// Francisco's. The correction must push it down, so it is positive.
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn a_cjk_face_with_a_large_line_gap_is_pushed_back_down() {
-        let sf = FaceMetrics {
-            ascent: 0.9668,
-            row_height: 1.1777,
-        };
-        let hiragino = FaceMetrics {
-            ascent: 0.88,
-            row_height: 1.5,
-        };
-        let factor = baseline_correction(sf, hiragino, 1.0);
-        assert!(
-            (factor - 0.2479).abs() < 1e-3,
-            "expected ~0.248 em down, got {factor}"
-        );
-    }
-
-    /// epaint multiplies `y_offset_factor` by the face's `scale`, so a shrunk
-    /// face (egui's emoji fonts) needs a larger factor for the same shift.
-    #[test]
-    #[cfg(not(target_arch = "wasm32"))]
-    fn a_scaled_down_face_gets_its_scale_divided_out() {
-        let primary = FaceMetrics {
-            ascent: 1.0,
-            row_height: 1.2,
-        };
-        let face = FaceMetrics {
-            ascent: 0.8,
-            row_height: 1.2,
-        };
-        assert!((baseline_correction(primary, face, 1.0) - 0.2).abs() < 1e-6);
-        assert!((baseline_correction(primary, face, 0.5) - 0.4).abs() < 1e-6);
     }
 
     #[test]

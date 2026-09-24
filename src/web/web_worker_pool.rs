@@ -281,6 +281,11 @@ struct WorkerAssets {
     version: String,
 }
 
+/// The URL directory the app's own wasm was served from, with no trailing slash.
+pub(crate) fn asset_dir() -> String {
+    worker_assets().dir
+}
+
 fn worker_assets() -> WorkerAssets {
     let window = match web_sys::window() {
         Some(w) => w,
