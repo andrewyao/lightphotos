@@ -7,7 +7,8 @@
 //! pixels on screen and the preview escalation that sharpens them. The
 //! full-resolution decode is what zooming past the preview costs. Auto Tone,
 //! a batch export and the Vision signals are the jobs a user starts and then
-//! waits out. Compiled only under the `hotpath` feature.
+//! waits out. Subject selection is the wait behind the Loupe's "Show
+//! selection" button. Compiled only under the `hotpath` feature.
 //!
 //! It exists because a report is only worth acting on if the next person can
 //! reproduce it. Driving the window by hand gives a different scroll depth and
