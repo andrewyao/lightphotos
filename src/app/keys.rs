@@ -584,6 +584,34 @@ mod tests {
     }
 
     #[test]
+    fn the_grid_reads_metadata_only_while_the_info_tab_shows_it() {
+        let (mut app, paths) = folder_app(2);
+        assert_eq!(
+            app.metadata_to_read(),
+            None,
+            "the folder tree shows no metadata"
+        );
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        assert_eq!(app.metadata_to_read(), Some(paths[0].clone()));
+
+        app.on_exif_info(vec![(paths[0].clone(), Default::default())]);
+        assert_eq!(
+            app.metadata_to_read(),
+            None,
+            "a cached photo is not read again"
+        );
+
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        app.enter_loupe();
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowRight);
+        assert_eq!(
+            app.metadata_to_read(),
+            Some(paths[1].clone()),
+            "the Loupe's info bar reads on either tab"
+        );
+    }
+
+    #[test]
     fn the_info_tab_takes_the_folder_tree_out_of_keyboard_focus() {
         let (mut app, _) = folder_app(2);
         app.set_focus(Region::Folders, FocusLevel::Selected);

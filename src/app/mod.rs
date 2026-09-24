@@ -1048,17 +1048,13 @@ impl App {
         }
 
         // Both readers dedupe in-flight requests, so asking every frame is cheap.
-        if self.mode == ViewMode::Loupe {
-            if let Some(path) = self.selected_path() {
-                if !self.exif_cache.contains_key(&path) {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    if let Some(loader) = &mut self.loader {
-                        loader.request_exif(path);
-                    }
-                    #[cfg(target_arch = "wasm32")]
-                    self.request_web_exif(path);
-                }
+        if let Some(path) = self.metadata_to_read() {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(loader) = &mut self.loader {
+                loader.request_exif(path);
             }
+            #[cfg(target_arch = "wasm32")]
+            self.request_web_exif(path);
         }
 
         let (Some(window), Some(mut state)) = (self.window.clone(), self.egui_state.take()) else {
