@@ -195,6 +195,32 @@ impl DistancePool {
     }
 }
 
+/// Whether Vision can run a model on this machine. GitHub's macOS runners are
+/// VMs with no GPU or Neural Engine, and there every feature-print and face
+/// request fails ("Could not create inference context"). Tests that need a
+/// model return early when this is false. Any other error counts as able, so
+/// a real regression still fails the test that hits it.
+#[cfg(test)]
+pub(crate) fn vision_can_infer() -> bool {
+    static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CAN.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("lp-vision-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let path = dir.join("vision_can_infer.jpg");
+        crate::image_encode::encode_jpeg(&path, 64, 64, &[128u8; 64 * 64 * 4])
+            .expect("encode fixture jpeg");
+        let result = compute(&path);
+        let _ = std::fs::remove_file(&path);
+        match result {
+            Err(e) if e.contains("Could not create inference context") => {
+                eprintln!("skipping: Vision cannot run a model here ({e})");
+                false
+            }
+            _ => true,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +270,9 @@ mod tests {
     /// most of a second wasted on a group of ten.
     #[test]
     fn one_anchor_is_computed_once_however_many_members_compare_against_it() {
+        if !vision_can_infer() {
+            return;
+        }
         let (w, h) = (64, 64);
         let anchor = write_jpeg("featureprint_cache_anchor.jpg", w, h, &checkerboard(w, h));
         let other = write_jpeg("featureprint_cache_other.jpg", w, h, &gradient(w, h));
@@ -304,6 +333,9 @@ mod tests {
     // still carry a job all the way through Vision and back.
     #[test]
     fn a_running_pool_returns_a_distance_for_a_submitted_pair() {
+        if !vision_can_infer() {
+            return;
+        }
         let (w, h) = (64, 64);
         let anchor = write_jpeg("featureprint_pool_anchor.jpg", w, h, &checkerboard(w, h));
         let member = write_jpeg("featureprint_pool_member.jpg", w, h, &checkerboard(w, h));
@@ -337,6 +369,9 @@ mod tests {
     // Runs real Vision end to end and checks that the distance ordering is sane.
     #[test]
     fn identical_images_are_closer_than_different_ones() {
+        if !vision_can_infer() {
+            return;
+        }
         let (w, h) = (64, 64);
         let a_path = write_jpeg("featureprint_test_a.jpg", w, h, &checkerboard(w, h));
         let b_path = write_jpeg("featureprint_test_b.jpg", w, h, &checkerboard(w, h));
