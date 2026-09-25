@@ -357,6 +357,10 @@ mod tests {
         assert_eq!(exif_blocks(&out), 1);
 
         let out = bake(plain);
-        assert_eq!(image_decode::capture_stamp_from_bytes(&out), None, "no date is invented");
+        assert_eq!(
+            image_decode::capture_stamp_from_bytes(&out),
+            None,
+            "no date is invented"
+        );
     }
 }
