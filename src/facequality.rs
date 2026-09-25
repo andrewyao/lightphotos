@@ -321,6 +321,9 @@ mod tests {
     // still carry a job all the way through Vision and back.
     #[test]
     fn a_running_pool_returns_an_analysis_for_a_submitted_photo() {
+        if !crate::featureprint::vision_can_infer() {
+            return;
+        }
         let (w, h) = (64, 64);
         let flat = vec![128u8; (w * h * 4) as usize];
         let path = write_jpeg("facequality_pool_blank.jpg", w, h, &flat);
@@ -351,6 +354,9 @@ mod tests {
     // error. Landmark quality needs real portraits; see `src/bin/face_probe.rs`.
     #[test]
     fn detect_faces_runs_and_finds_none_in_a_blank_image() {
+        if !crate::featureprint::vision_can_infer() {
+            return;
+        }
         let (w, h) = (64, 64);
         let flat = vec![128u8; (w * h * 4) as usize];
         let path = write_jpeg("facequality_test_blank.jpg", w, h, &flat);
