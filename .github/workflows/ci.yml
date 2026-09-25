@@ -217,6 +217,11 @@ jobs:
             | tar -xzf - -C "$HOME/.local/bin" trunk
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      # index.html has trunk copy the full Noto Sans SC into the build, and the
+      # 8 MB file is not committed, so trunk fails without it.
+      - name: Fetch CJK font
+        run: ./scripts/fetch-cjk-font.sh
+
       # Always --release. A debug wasm build is 10-30x slower at RAW decode and
       # produces a ~10x larger bg.wasm, so it is not the artifact worth gating.
       - name: Build
