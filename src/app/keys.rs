@@ -1113,6 +1113,20 @@ mod tests {
     }
 
     #[test]
+    fn shift_wheel_does_not_pan_while_touch_up_is_armed() {
+        let (mut app, _) = editor_app();
+        app.set_develop_tab(DevelopTab::Masks);
+        app.tool = LoupeTool::TouchUp;
+        app.modifiers = ModifiersState::SHIFT;
+        app.on_scroll(0.0, 120.0);
+        assert_eq!(app.pan, (0.0, 0.0), "Shift+wheel feathers instead");
+
+        app.tool = LoupeTool::None;
+        app.on_scroll(0.0, 120.0);
+        assert_ne!(app.pan, (0.0, 0.0), "Shift+wheel pans once Touch Up is off");
+    }
+
+    #[test]
     fn keyboard_slider_steps_bring_the_sliders_tab_forward() {
         let (mut app, _) = editor_app();
         app.set_develop_tab(DevelopTab::Masks);

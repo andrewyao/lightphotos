@@ -457,7 +457,7 @@ mod tests {
     /// widget tree with the presets module's pointer harness.
     mod develop_tabs {
         use super::super::*;
-        use crate::app::presets::tests::{click, folder_app, frame, settled};
+        use crate::app::presets::tests::{click, folder_app, frame, frame_with_modifiers, settled};
         use crate::ui::UiAction;
 
         fn loupe(tag: &str) -> App {
@@ -528,6 +528,40 @@ mod tests {
             }
             let grew = grew.expect("the wheel resizes the brush");
             assert!(grew > before, "{grew} > {before}");
+        }
+
+        #[test]
+        fn shift_wheel_over_the_image_changes_the_feather_not_the_size() {
+            let mut app = loupe("shift-wheel");
+            app.set_develop_tab(DevelopTab::Masks);
+            app.tool = LoupeTool::TouchUp;
+            app.set_touchup_feather(0.5);
+            let _ = settled(&mut app);
+
+            let over_image = egui::pos2(480.0, 300.0);
+            let _ = frame(&mut app, vec![egui::Event::PointerMoved(over_image)]);
+            let mut feathers = |dy: f32| {
+                let wheel = egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, dy),
+                    phase: egui::TouchPhase::Move,
+                    modifiers: egui::Modifiers::SHIFT,
+                };
+                let mut feather = None;
+                for events in [vec![wheel], Vec::new(), Vec::new(), Vec::new()] {
+                    let (actions, _) = frame_with_modifiers(&mut app, events, egui::Modifiers::SHIFT);
+                    for a in actions {
+                        match a {
+                            UiAction::SetTouchUpFeather(f) => feather = Some(f),
+                            UiAction::SetTouchUpRadius(_) => panic!("Shift+wheel resized the brush"),
+                            _ => {}
+                        }
+                    }
+                }
+                feather.expect("Shift+wheel changes the feather")
+            };
+            assert!(feathers(40.0) > 0.5, "wheel up softens the brush");
+            assert!(feathers(-40.0) < 0.5, "wheel down hardens the brush");
         }
 
         fn spot(u: f32) -> TouchUp {
