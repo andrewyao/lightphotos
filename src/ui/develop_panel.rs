@@ -121,7 +121,7 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 out.actions.push(UiAction::ResetAdjustments);
                 out.actions.push(UiAction::Focus(Region::Develop));
             }
-            if ui.button(t.auto).on_hover_text(t.auto_tone_tip).clicked() {
+            if ui.button(t.auto_tone).on_hover_text(t.auto_tone_tip).clicked() {
                 out.actions.push(UiAction::AutoTone);
                 out.actions.push(UiAction::Focus(Region::Develop));
             }
@@ -189,15 +189,17 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         if section != Some(s.section) {
             if section.is_some() {
                 ui.add_space(6.0);
+                ui.separator();
             }
             section = Some(s.section);
-            let title = t.section(s.section);
+            let title = egui::RichText::new(t.section(s.section))
+                .size(font_size::px(ui.style(), 16.0))
+                .strong();
             if s.section == crate::develop::Section::WhiteBalance {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(title).strong());
+                    ui.label(title);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .selectable_label(app.wb_picker_active(), t.pick_gray)
+                        if eyedropper_button(ui, app.wb_picker_active())
                             .on_hover_text(t.pick_gray_tip)
                             .clicked()
                         {
@@ -206,7 +208,7 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     });
                 });
             } else {
-                ui.label(egui::RichText::new(title).strong());
+                ui.label(title);
             }
         }
         let field = (s.field)(&mut adj);
@@ -230,6 +232,36 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     if let Some(idx) = interacted_idx {
         out.actions.push(UiAction::FocusDevelop(idx));
     }
+}
+
+/// The white-balance picker's toggle: an eyedropper, painted so it can't fall
+/// back to a tofu box the way an emoji glyph would. Highlighted while armed.
+fn eyedropper_button(ui: &mut egui::Ui, active: bool) -> egui::Response {
+    let side = font_size::px(ui.style(), 22.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, t().pick_gray)
+    });
+    let visuals = ui.visuals();
+    if active {
+        ui.painter().rect_filled(rect, 4.0, visuals.selection.bg_fill);
+    } else if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
+    }
+    let color = if active {
+        visuals.selection.stroke.color
+    } else {
+        visuals.text_color()
+    };
+    let u = font_size::px(ui.style(), 1.0);
+    let c = rect.center();
+    let p = |x: f32, y: f32| egui::pos2(c.x + x * u, c.y + y * u);
+    let painter = ui.painter();
+    painter.line_segment([p(-6.5, 6.5), p(2.0, -2.0)], egui::Stroke::new(2.0 * u, color));
+    painter.line_segment([p(-1.0, -4.5), p(4.5, 1.0)], egui::Stroke::new(1.6 * u, color));
+    painter.circle_filled(p(4.0, -4.0), 3.2 * u, color);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// An on/off switch: a pill with a knob that slides right when `on`.

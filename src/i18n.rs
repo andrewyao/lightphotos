@@ -165,6 +165,7 @@ pub struct Strings {
     // Header and landing page.
     pub open_folder: &'static str,
     pub open_folder_tip: &'static str,
+    pub back_to_grid_tip: &'static str,
     pub help_tip: &'static str,
     pub landing_prompt: &'static str,
     /// One line under the prompt saying what the app is for.
@@ -301,7 +302,6 @@ pub struct Strings {
     pub preset_default_name: fn(usize) -> String,
     pub confirm_delete_preset: fn(&str) -> String,
     pub reset: &'static str,
-    pub auto: &'static str,
     pub auto_tone_tip: &'static str,
     pub touch_up: &'static str,
     pub brush_size: &'static str,
@@ -486,6 +486,7 @@ pub static EN: Strings = Strings {
 
     open_folder: "Open\u{2026}",
     open_folder_tip: "Open a different folder (Cmd+O)",
+    back_to_grid_tip: "Back to the grid (G)",
     help_tip: "Keyboard shortcuts (?)",
     folders_tab_tip: "Folders (I)",
     info_tab_tip: "Info (I)",
@@ -725,7 +726,6 @@ pub static EN: Strings = Strings {
     preset_default_name: |n| format!("Preset {n}"),
     confirm_delete_preset: |name| format!("Delete the preset {name}?"),
     reset: "Reset",
-    auto: "Auto",
     auto_tone_tip: "Set the tone sliders from this photo's own histogram",
     touch_up: "Touch Up",
     brush_size: "Size",
@@ -911,6 +911,7 @@ pub static ZH: Strings = Strings {
 
     open_folder: "打开\u{2026}",
     open_folder_tip: "打开其他文件夹 (Cmd+O)",
+    back_to_grid_tip: "返回网格 (G)",
     help_tip: "键盘快捷键 (?)",
     folders_tab_tip: "文件夹 (I)",
     info_tab_tip: "信息 (I)",
@@ -1139,7 +1140,6 @@ pub static ZH: Strings = Strings {
     preset_default_name: |n| format!("预设 {n}"),
     confirm_delete_preset: |name| format!("删除预设 {name}？"),
     reset: "复位",
-    auto: "自动",
     auto_tone_tip: "根据这张照片自身的直方图设置色调滑块",
     touch_up: "修补",
     brush_size: "大小",
