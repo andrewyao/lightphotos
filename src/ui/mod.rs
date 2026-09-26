@@ -92,6 +92,8 @@ pub enum UiAction {
     OpenFolder(std::path::PathBuf),
     /// Open the folder picker (`App::open_folder_picker`).
     PickFolder,
+    /// Leave the Loupe for the Grid, as the G key does.
+    EnterGrid,
     CropGrab(CropEdge),
     /// Begin moving the whole crop rectangle, anchored at this texture coordinate.
     CropGrabMove(f32, f32),
@@ -205,6 +207,9 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 
     // The Loupe has no toolbar. Changing the filter while a photo is open
     // could drop that photo out of the Grid's selection and break rating it.
+    if mode == ViewMode::Grid || mode == ViewMode::Loupe {
+        folder_title_bar(ui, app, &mut out);
+    }
     if mode != ViewMode::Loupe {
         grid_toolbar(ui, app, &mut out);
         selection_bar(ui, app, &mut out);
@@ -599,6 +604,37 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     }
                 });
             }
+        });
+        ui.add_space(4.0);
+    });
+}
+
+/// The shown folder's name above the Grid or Loupe, with a back arrow to the
+/// Grid while in the Loupe.
+fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let name = app
+        .folder_sel()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    egui::Panel::top("folder_title").show_inside(ui, |ui| {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if app.mode() == ViewMode::Loupe
+                && ui
+                    .add(egui::Button::new(
+                        egui::RichText::new("\u{2190}").size(font_size::px(ui.style(), 18.0)),
+                    ))
+                    .on_hover_text(t().back_to_grid_tip)
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+            {
+                out.actions.push(UiAction::EnterGrid);
+            }
+            ui.label(
+                egui::RichText::new(name)
+                    .size(font_size::px(ui.style(), 18.0))
+                    .strong(),
+            );
         });
         ui.add_space(4.0);
     });

@@ -401,7 +401,7 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
 
             // Subject selection is a way of viewing the photo, not an edit, so
             // it lives here rather than in the Develop panel.
-            if App::selection_supported() {
+            if crate::app::SHOW_SELECTION_BUTTONS && App::selection_supported() {
                 let sel_size = egui::vec2(190.0, 22.0) * font_size::px(ui.style(), 1.0);
                 let sel_rect = egui::Rect::from_min_size(
                     egui::pos2(rect.right() - pad - sel_size.x, main_y - sel_size.y / 2.0),

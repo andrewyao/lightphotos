@@ -56,6 +56,10 @@ pub(crate) const SHOW_PRESETS: bool = false;
 /// is built. The C key's crop overlay works either way.
 pub(crate) const SHOW_CROP_TAB: bool = false;
 
+/// Whether the Loupe's info bar shows Show Selection and Invert. The O keys
+/// work either way.
+pub(crate) const SHOW_SELECTION_BUTTONS: bool = false;
+
 /// Longest-side bounds for the loupe's screen-fit preview decode. The minimum
 /// keeps it sharper than a thumbnail. The maximum stops a 5K display from
 /// asking for a decode nearly as costly as the full image.
@@ -1450,6 +1454,7 @@ impl App {
                     self.open_folder(p);
                 }
                 ui::UiAction::PickFolder => self.open_folder_picker(),
+                ui::UiAction::EnterGrid => self.enter_grid(),
                 ui::UiAction::Focus(region) => {
                     self.focus = region;
                     self.focus_level = FocusLevel::Entered;

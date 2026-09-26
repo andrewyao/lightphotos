@@ -794,6 +794,35 @@ impl App {
 mod tests {
     use super::*;
 
+    /// The Loupe names its folder, and the arrow beside the name goes back to
+    /// the Grid.
+    #[test]
+    fn the_loupe_back_arrow_returns_to_the_grid() {
+        use crate::app::presets::tests::{click, settled};
+        use crate::ui::UiAction;
+
+        let dir = std::env::temp_dir().join(format!("lp-nav-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.jpg"), []).unwrap();
+        let name = dir.file_name().unwrap().to_str().unwrap().to_owned();
+        let mut app = App::new(None);
+        app.open(dir.clone());
+        app.sel = Some(0);
+        app.enter_loupe();
+        assert_eq!(app.mode, ViewMode::Loupe);
+
+        let painted = settled(&mut app);
+        assert!(painted.texts().contains(&name.as_str()));
+        let (actions, _) = click(&mut app, painted.pos_of("\u{2190}"));
+        assert_eq!(actions, vec![UiAction::EnterGrid]);
+        app.apply_ui_actions(actions);
+        assert_eq!(app.mode, ViewMode::Grid);
+        let painted = settled(&mut app);
+        assert!(painted.texts().contains(&name.as_str()));
+        assert!(!painted.texts().contains(&"\u{2190}"));
+    }
+
     #[test]
     fn keyboard_nudges_follow_the_develop_panel_order() {
         let mut app = App::new(None);
