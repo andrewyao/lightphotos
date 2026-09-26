@@ -33,8 +33,18 @@ fn retry_backoff(attempt: u8) -> std::time::Duration {
     std::time::Duration::from_millis(jittered_ms as u64)
 }
 
+/// True in a browser on a Mac, where Cmd rather than Ctrl is the command key.
+fn browser_is_mac() -> bool {
+    thread_local! {
+        static MAC: bool = web_sys::window()
+            .and_then(|w| w.navigator().platform().ok())
+            .is_some_and(|p| p.starts_with("Mac"));
+    }
+    MAC.with(|mac| *mac)
+}
+
 /// Puts text that egui copied or cut on the browser clipboard. egui_winit's
-/// clipboard is an in-app string on the web build, so without this Cmd+C
+/// clipboard is an in-app string on the web build, so without this a copy
 /// reaches nothing outside the page.
 pub(crate) fn write_web_clipboard(commands: &[egui::OutputCommand]) {
     let Some(window) = web_sys::window() else {
@@ -53,9 +63,29 @@ pub(crate) fn write_web_clipboard(commands: &[egui::OutputCommand]) {
 }
 
 impl App {
-    /// Reads the browser clipboard for a Cmd/Ctrl+V. The read is async, so the
-    /// text reaches egui a frame later through `web_paste_rx`.
-    pub(crate) fn request_web_paste(&mut self) {
+    /// Makes Cmd egui's command key in a Mac browser. egui_winit picks the
+    /// command key at compile time and wasm is never `target_os = "macos"`, so
+    /// it takes Ctrl: Cmd+C didn't copy and Cmd+V typed a "v". Call after
+    /// egui_winit handles `ModifiersChanged`, which overwrites these fields.
+    pub(crate) fn use_mac_command_key(modifiers: &mut egui::Modifiers, held: ModifiersState) {
+        if browser_is_mac() {
+            modifiers.mac_cmd = held.super_key();
+            modifiers.command = held.super_key();
+        }
+    }
+
+    /// Reads the browser clipboard on Cmd/Ctrl+V. egui_winit's paste carries
+    /// only its in-app clipboard on wasm. The read is async, so the text
+    /// reaches egui a frame later through `web_paste_rx`.
+    pub(crate) fn request_web_paste(&mut self, code: KeyCode) {
+        let command = if browser_is_mac() {
+            self.modifiers.super_key()
+        } else {
+            self.modifiers.control_key()
+        };
+        if code != KeyCode::KeyV || !command {
+            return;
+        }
         let Some(browser) = web_sys::window() else {
             return;
         };
@@ -73,7 +103,9 @@ impl App {
                         }
                     }
                 }
-                Err(e) => web_sys::console::warn_1(&format!("clipboard read failed: {e:?}").into()),
+                Err(e) => {
+                    web_sys::console::warn_1(&format!("clipboard read failed: {e:?}").into())
+                }
             }
         });
     }
