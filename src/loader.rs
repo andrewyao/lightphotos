@@ -646,7 +646,7 @@ impl Loader {
 
     /// Inserts a wasm32 zoom-triggered full decode (from `poll_web_full`) into
     /// the full-resolution tier.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     pub fn insert_full_external(&mut self, path: PathBuf, img: Arc<DecodedImage>) {
         self.insert(path, img);
     }

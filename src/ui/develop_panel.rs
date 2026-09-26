@@ -259,7 +259,7 @@ fn toggle_switch(ui: &mut egui::Ui, on: bool) -> egui::Response {
     response
 }
 
-/// Touch Up: the tool toggle, brush size, and the list of spots.
+/// Touch Up: the tool toggle, brush size and feather, and the list of spots.
 fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let active = app.touchup_active();
@@ -267,22 +267,6 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         ui.label(t.touch_up);
         if toggle_switch(ui, active).clicked() {
             out.actions.push(UiAction::ToggleTouchUp);
-        }
-        // The brush only matters while the tool is armed.
-        ui.add_enabled(active, egui::Label::new(t.brush_size));
-        let mut radius = app.touchup_radius();
-        if ui
-            .add_enabled(
-                active,
-                egui::Slider::new(
-                    &mut radius,
-                    app.touchup_radius_min()..=crate::app::TOUCHUP_MAX_RADIUS,
-                )
-                .show_value(false),
-            )
-            .changed()
-        {
-            out.actions.push(UiAction::SetTouchUpRadius(radius));
         }
         if ui
             .add_enabled(app.can_undo_touchup(), egui::Button::new(t.undo))
@@ -299,6 +283,43 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         {
             out.actions.push(UiAction::DeleteTouchUp);
         }
+    });
+    // Size and Feather each get a row, their sliders lined up in a grid.
+    // Size and Feather each get a row, their sliders lined up. The brush
+    // only matters while the tool is armed.
+    egui::Grid::new("touchup_brush").show(ui, |ui| {
+        ui.add_enabled(active, egui::Label::new(t.brush_size))
+            .on_hover_text(t.brush_size_tip);
+        let mut radius = app.touchup_radius();
+        if ui
+            .add_enabled(
+                active,
+                egui::Slider::new(
+                    &mut radius,
+                    app.touchup_radius_min()..=crate::app::TOUCHUP_MAX_RADIUS,
+                )
+                .show_value(false),
+            )
+            .changed()
+        {
+            out.actions.push(UiAction::SetTouchUpRadius(radius));
+        }
+        ui.end_row();
+
+        ui.add_enabled(active, egui::Label::new(t.feather))
+            .on_hover_text(t.feather_tip);
+        let mut feather = app.touchup_feather();
+        if ui
+            .add_enabled(
+                active,
+                egui::Slider::new(&mut feather, crate::app::TOUCHUP_MIN_FEATHER..=1.0)
+                    .show_value(false),
+            )
+            .changed()
+        {
+            out.actions.push(UiAction::SetTouchUpFeather(feather));
+        }
+        ui.end_row();
     });
     if !app.current_touchups().is_empty() {
         ui.horizontal_wrapped(|ui| {

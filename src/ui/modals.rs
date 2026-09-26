@@ -168,6 +168,10 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
                         .striped(true)
                         .show(ui, |ui| {
                             for (key, desc) in section.rows {
+                                // The subject overlay is macOS-only, so its keys do nothing elsewhere.
+                                if !App::selection_supported() && matches!(*key, "O" | "Shift+O") {
+                                    continue;
+                                }
                                 ui.label(egui::RichText::new(*key).strong());
                                 ui.label(*desc);
                                 ui.end_row();
