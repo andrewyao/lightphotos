@@ -188,6 +188,22 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Checked before egui, which consumes the key while a text field has focus.
+        #[cfg(target_arch = "wasm32")]
+        if let WindowEvent::KeyboardInput {
+            event:
+                winit::event::KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::KeyV),
+                    ..
+                },
+            ..
+        } = event
+        {
+            if self.modifiers.super_key() || self.modifiers.control_key() {
+                self.request_web_paste();
+            }
+        }
         // egui sees each event first. Events it consumes skip the app.
         let consumed =
             if let (Some(window), Some(state)) = (self.window.clone(), self.egui_state.as_mut()) {

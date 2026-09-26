@@ -33,7 +33,51 @@ fn retry_backoff(attempt: u8) -> std::time::Duration {
     std::time::Duration::from_millis(jittered_ms as u64)
 }
 
+/// Puts text that egui copied or cut on the browser clipboard. egui_winit's
+/// clipboard is an in-app string on the web build, so without this Cmd+C
+/// reaches nothing outside the page.
+pub(crate) fn write_web_clipboard(commands: &[egui::OutputCommand]) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    for command in commands {
+        if let egui::OutputCommand::CopyText(text) = command {
+            let promise = window.navigator().clipboard().write_text(text);
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(e) = wasm_bindgen_futures::JsFuture::from(promise).await {
+                    web_sys::console::warn_1(&format!("clipboard write failed: {e:?}").into());
+                }
+            });
+        }
+    }
+}
+
 impl App {
+    /// Reads the browser clipboard for a Cmd/Ctrl+V. The read is async, so the
+    /// text reaches egui a frame later through `web_paste_rx`.
+    pub(crate) fn request_web_paste(&mut self) {
+        let Some(browser) = web_sys::window() else {
+            return;
+        };
+        let promise = browser.navigator().clipboard().read_text();
+        let tx = self.web_paste_tx.clone();
+        let window = self.window.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match wasm_bindgen_futures::JsFuture::from(promise).await {
+                Ok(text) => {
+                    let text = text.as_string().unwrap_or_default().replace("\r\n", "\n");
+                    if !text.is_empty() {
+                        let _ = tx.send(text);
+                        if let Some(w) = window {
+                            w.request_redraw();
+                        }
+                    }
+                }
+                Err(e) => web_sys::console::warn_1(&format!("clipboard read failed: {e:?}").into()),
+            }
+        });
+    }
+
     /// Sizes the thumbnail cache for the visible grid plus pending Auto Tone
     /// photos, so an Auto Tone thumbnail is not evicted before
     /// `poll_auto_tone` reads it. Call before draining worker results.

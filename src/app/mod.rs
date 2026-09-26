@@ -381,6 +381,12 @@ pub(crate) struct App {
     pub(crate) web_export_tx: Sender<crate::export::ExportOutcome>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_export_rx: Receiver<crate::export::ExportOutcome>,
+    /// Text read from the browser clipboard on Cmd/Ctrl+V, fed to egui as a
+    /// paste on the next frame. See `request_web_paste`.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_paste_tx: Sender<String>,
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_paste_rx: Receiver<String>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_pending_nav: Option<WebPendingNav>,
     /// Bumped on every tree action. A listing may apply only the navigation
@@ -761,6 +767,8 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let (web_export_tx, web_export_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
+        let (web_paste_tx, web_paste_rx) = std::sync::mpsc::channel();
+        #[cfg(target_arch = "wasm32")]
         let web_worker_pool =
             crate::web_worker_pool::WorkerPool::new(crate::web_worker_pool::worker_count());
         Self {
@@ -821,6 +829,10 @@ impl App {
             web_export_tx,
             #[cfg(target_arch = "wasm32")]
             web_export_rx,
+            #[cfg(target_arch = "wasm32")]
+            web_paste_tx,
+            #[cfg(target_arch = "wasm32")]
+            web_paste_rx,
             #[cfg(target_arch = "wasm32")]
             web_pending_nav: None,
             #[cfg(target_arch = "wasm32")]
@@ -1196,12 +1208,26 @@ impl App {
                 }
             )
         });
+        // The web build has no system clipboard in egui_winit, so its paste
+        // carries only text copied inside the app. The browser's clipboard
+        // arrives through `request_web_paste` instead.
+        #[cfg(target_arch = "wasm32")]
+        {
+            raw_input
+                .events
+                .retain(|e| !matches!(e, egui::Event::Paste(_)));
+            raw_input.events.extend(
+                std::iter::from_fn(|| self.web_paste_rx.try_recv().ok()).map(egui::Event::Paste),
+            );
+        }
 
         let mut out = ui::FrameOutput::default();
         let full_output = self.egui_ctx.clone().run_ui(raw_input, |ui| {
             out = ui::draw(ui, self);
         });
 
+        #[cfg(target_arch = "wasm32")]
+        web::write_web_clipboard(&full_output.platform_output.commands);
         state.handle_platform_output(&*window, full_output.platform_output);
         self.egui_state = Some(state);
 
