@@ -114,7 +114,12 @@ fn system_tags() -> Vec<String> {
     tags
 }
 
+/// The subject overlay is macOS-only, so elsewhere its keys do nothing and
+/// the overlay leaves their section out.
+const SUBJECT_KEYS: bool = crate::app::App::selection_supported();
+
 /// One group of rows in the keyboard-shortcut overlay: (keys, description).
+/// A section with no rows is not shown.
 pub struct HelpSection {
     pub title: &'static str,
     pub rows: &'static [(&'static str, &'static str)],
@@ -640,17 +645,8 @@ pub static EN: Strings = Strings {
         HelpSection {
             title: "Edit",
             rows: &[
-                ("[", "Rotate image -90 degrees (outside Touch Up)"),
-                ("]", "Rotate image +90 degrees (outside Touch Up)"),
-                ("K", "Masks tab"),
-                ("Q", "Touch Up on / off"),
-                ("[ / ]", "Brush size (in Touch Up)"),
-                ("Shift+[ / ]", "Brush feather (in Touch Up)"),
-                ("O", "Show or hide the subject selection"),
-                ("Shift+O", "Invert the subject selection"),
-                ("O (Touch Up)", "Show or hide the spots"),
-                ("Shift+O (Touch Up)", "Select the next spot"),
-                (primary!("+Z (Touch Up)"), "Undo the last spot"),
+                ("[", "Rotate image -90 degrees"),
+                ("]", "Rotate image +90 degrees"),
                 ("C", "Crop"),
                 ("Y", "Before / after compare"),
                 ("X", "Open or close the export form"),
@@ -662,6 +658,33 @@ pub static EN: Strings = Strings {
                         "Move to Trash"
                     },
                 ),
+            ],
+        },
+        HelpSection {
+            title: "Subject selection",
+            rows: if SUBJECT_KEYS {
+                &[
+                    ("O", "Show or hide the subject selection"),
+                    ("Shift+O", "Invert the subject selection"),
+                ]
+            } else {
+                &[]
+            },
+        },
+        HelpSection {
+            title: "Touch Up",
+            rows: &[
+                ("K", "Open the Masks tab"),
+                ("Q", "Touch Up on / off"),
+                ("[ / ]", "Brush size"),
+                ("Scroll", "Brush size"),
+                ("Shift+[ / ]", "Brush feather"),
+                ("Shift+Scroll", "Brush feather"),
+                ("O", "Show or hide the spots"),
+                ("Shift+O", "Select the next spot"),
+                ("Delete", "Delete the selected spot"),
+                (primary!("+Z"), "Undo the last spot"),
+                ("Esc", "Leave Touch Up"),
             ],
         },
     ],
@@ -1037,17 +1060,8 @@ pub static ZH: Strings = Strings {
         HelpSection {
             title: "编辑",
             rows: &[
-                ("[", "向左旋转 90 度（修补外）"),
-                ("]", "向右旋转 90 度（修补外）"),
-                ("K", "蒙版"),
-                ("Q", "开启 / 关闭修补"),
-                ("[ / ]", "画笔大小（修补中）"),
-                ("Shift+[ / ]", "画笔羽化（修补中）"),
-                ("O", "显示或隐藏主体"),
-                ("Shift+O", "反选主体"),
-                ("O（修补中）", "显示或隐藏修补点"),
-                ("Shift+O（修补中）", "下一修补点"),
-                (primary!("+Z（修补中）"), "撤销修补点"),
+                ("[", "向左旋转 90 度"),
+                ("]", "向右旋转 90 度"),
                 ("C", "裁剪"),
                 ("Y", "调整前 / 调整后对比"),
                 ("X", "打开或关闭导出表单"),
@@ -1059,6 +1073,30 @@ pub static ZH: Strings = Strings {
                         "移到废纸篓"
                     },
                 ),
+            ],
+        },
+        HelpSection {
+            title: "主体",
+            rows: if SUBJECT_KEYS {
+                &[("O", "显示或隐藏主体"), ("Shift+O", "反选主体")]
+            } else {
+                &[]
+            },
+        },
+        HelpSection {
+            title: "修补",
+            rows: &[
+                ("K", "打开蒙版"),
+                ("Q", "开启 / 关闭修补"),
+                ("[ / ]", "画笔大小"),
+                ("滚轮", "画笔大小"),
+                ("Shift+[ / ]", "画笔羽化"),
+                ("Shift+滚轮", "画笔羽化"),
+                ("O", "显示或隐藏修补点"),
+                ("Shift+O", "下一修补点"),
+                ("Delete", "删除选中的修补点"),
+                (primary!("+Z"), "撤销修补点"),
+                ("Esc", "关闭修补"),
             ],
         },
     ],

@@ -155,7 +155,8 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         egui::ScrollArea::vertical()
             .max_height(ui.ctx().content_rect().height() * 0.7)
             .show(ui, |ui| {
-                for (i, section) in t().help.iter().enumerate() {
+                let sections = t().help.iter().filter(|s| !s.rows.is_empty());
+                for (i, section) in sections.enumerate() {
                     if i > 0 {
                         ui.add_space(10.0);
                     }
@@ -168,10 +169,6 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
                         .striped(true)
                         .show(ui, |ui| {
                             for (key, desc) in section.rows {
-                                // The subject overlay is macOS-only, so its keys do nothing elsewhere.
-                                if !App::selection_supported() && matches!(*key, "O" | "Shift+O") {
-                                    continue;
-                                }
                                 ui.label(egui::RichText::new(*key).strong());
                                 ui.label(*desc);
                                 ui.end_row();
