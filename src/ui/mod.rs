@@ -216,61 +216,270 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     out
 }
 
-/// Shown when no folder is open.
+/// Shown when no folder is open: the prompt and Choose Folder button, three
+/// cards on what the app does, and a tip on how edits are stored.
 fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    const MAX_COLUMN: f32 = 760.0;
+    const GUTTER: f32 = 16.0;
+    let pal = theme::colors(ui.ctx());
+    let card_fill = pal.panel.lerp_to_gamma(pal.value, 0.05);
+    let card_stroke = egui::Stroke::new(1.0, pal.panel.lerp_to_gamma(pal.value, 0.14));
+
     egui::CentralPanel::default().show_inside(ui, |ui| {
-        ui.vertical_centered(|ui| {
-            ui.add_space(ui.available_height() * 0.35);
-            ui.label(
-                egui::RichText::new(t().landing_prompt)
-                    .size(font_size::px(ui.style(), 32.0))
-                    .strong(),
-            );
-            ui.add_space(24.0);
-            let pending = app.folder_pick_pending();
-            let resp = ui.add_enabled(
-                !pending,
-                egui::Button::new(
-                    egui::RichText::new(if pending {
-                        t().opening
-                    } else {
-                        t().choose_folder
-                    })
-                    .size(font_size::px(ui.style(), 20.0)),
-                )
-                .min_size(egui::vec2(220.0, 48.0)),
-            );
-            if resp.clicked() {
-                out.actions.push(UiAction::PickFolder);
-            }
-            ui.add_space(24.0);
-            ui.scope(|ui| {
-                ui.set_max_width(640.0);
-                ui.vertical_centered(|ui| {
+        let top = (ui.available_height() * 0.10).max(24.0);
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let full = ui.available_rect_before_wrap();
+                let col_w = (full.width() - 2.0 * GUTTER).clamp(200.0, MAX_COLUMN);
+                let column = egui::Rect::from_min_size(
+                    egui::pos2(full.center().x - col_w / 2.0, full.top()),
+                    egui::vec2(col_w, full.height()),
+                );
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(column)
+                        .layout(egui::Layout::top_down(egui::Align::Center)),
+                    |ui| {
+                        ui.add_space(top);
+                        ui.label(
+                            egui::RichText::new(t().landing_prompt)
+                                .size(font_size::px(ui.style(), 32.0))
+                                .color(pal.value)
+                                .strong(),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            egui::RichText::new(t().landing_tagline)
+                                .size(font_size::px(ui.style(), 18.0))
+                                .color(pal.label),
+                        );
+                        ui.add_space(28.0);
+                        choose_folder_button(ui, app, out);
+
+                        // Web only: picking a folder hands the browser a File
+                        // System Access permission, so say up front which
+                        // button to press.
+                        let allow_note = t().landing_allow_note;
+                        if !allow_note.is_empty() {
+                            ui.add_space(20.0);
+                            egui::Frame::new()
+                                .fill(theme::BRAND_BLUE.linear_multiply(0.10))
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    theme::BRAND_BLUE.linear_multiply(0.6),
+                                ))
+                                .corner_radius(10.0)
+                                .inner_margin(egui::Margin::symmetric(18, 12))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        egui::RichText::new(allow_note)
+                                            .size(font_size::px(ui.style(), 18.0))
+                                            .color(pal.value),
+                                    );
+                                });
+                        }
+
+                        ui.add_space(40.0);
+                        landing_steps(ui, col_w, card_fill, card_stroke, &pal);
+                        ui.add_space(20.0);
+                        landing_tip(ui, col_w, &pal);
+                        ui.add_space(20.0);
+                        ui.label(
+                            egui::RichText::new(t().landing_shortcuts_hint)
+                                .size(font_size::px(ui.style(), 14.0))
+                                .color(pal.label),
+                        );
+                        ui.add_space(32.0);
+                    },
+                );
+            });
+    });
+    status_toast(ui, app);
+}
+
+/// The landing page's one call to action, filled in the brand blue so it reads
+/// as the thing to press.
+fn choose_folder_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let pending = app.folder_pick_pending();
+    let label = if pending {
+        t().opening
+    } else {
+        t().choose_folder
+    };
+    let resp = ui.add_enabled(
+        !pending,
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(font_size::px(ui.style(), 20.0))
+                .color(egui::Color32::WHITE)
+                .strong(),
+        )
+        .fill(theme::BRAND_BLUE)
+        .corner_radius(10.0)
+        .min_size(egui::vec2(240.0, 52.0)),
+    );
+    if resp.hovered() && !pending {
+        // A fixed fill gives no hover feedback of its own.
+        ui.painter().rect_stroke(
+            resp.rect.expand(2.0),
+            12.0,
+            egui::Stroke::new(2.0, theme::BRAND_BLUE.linear_multiply(0.5)),
+            egui::StrokeKind::Outside,
+        );
+    }
+    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        out.actions.push(UiAction::PickFolder);
+    }
+}
+
+/// Three numbered cards, Browse / Rate / Develop: side by side when the column
+/// is wide enough, stacked otherwise.
+fn landing_steps(
+    ui: &mut egui::Ui,
+    col_w: f32,
+    fill: egui::Color32,
+    stroke: egui::Stroke,
+    pal: &theme::Palette,
+) {
+    const GAP: f32 = 12.0;
+    const MARGIN: i8 = 16;
+    let side_by_side = col_w >= 600.0;
+    let card_w = if side_by_side {
+        (col_w - 2.0 * GAP) / 3.0
+    } else {
+        col_w
+    };
+    let inner_w = card_w - 2.0 * MARGIN as f32 - 2.0 * stroke.width;
+    let min_h = font_size::px(ui.style(), 96.0);
+
+    let card = |ui: &mut egui::Ui, n: usize, (title, body): (&str, &str)| {
+        egui::Frame::new()
+            .fill(fill)
+            .stroke(stroke)
+            .corner_radius(12.0)
+            .inner_margin(egui::Margin::same(MARGIN))
+            .show(ui, |ui| {
+                ui.set_width(inner_w);
+                if side_by_side {
+                    ui.set_min_height(min_h);
+                }
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.horizontal(|ui| {
+                        number_badge(ui, n);
+                        ui.label(
+                            egui::RichText::new(title)
+                                .size(font_size::px(ui.style(), 18.0))
+                                .color(pal.value)
+                                .strong(),
+                        );
+                    });
+                    ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new(t().landing_help)
-                            .size(font_size::px(ui.style(), 18.0))
-                            .weak(),
+                        egui::RichText::new(body)
+                            .size(font_size::px(ui.style(), 15.0))
+                            .color(pal.label),
                     );
                 });
             });
-            // Web only: picking a folder hands the browser a File System
-            // Access permission, so say up front which button to press.
-            let allow_note = t().landing_allow_note;
-            if !allow_note.is_empty() {
-                ui.add_space(24.0);
-                ui.scope(|ui| {
-                    ui.set_max_width(640.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            egui::RichText::new(allow_note).size(font_size::px(ui.style(), 22.0)),
-                        );
-                    });
-                });
+    };
+
+    let steps = t().landing_steps;
+    if side_by_side {
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            for (i, step) in steps.into_iter().enumerate() {
+                card(ui, i + 1, step);
             }
         });
-    });
-    status_toast(ui, app);
+    } else {
+        for (i, step) in steps.into_iter().enumerate() {
+            if i > 0 {
+                ui.add_space(GAP);
+            }
+            card(ui, i + 1, step);
+        }
+    }
+}
+
+/// A small brand-blue disc with a white step number in it.
+fn number_badge(ui: &mut egui::Ui, n: usize) {
+    let d = font_size::px(ui.style(), 22.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), d / 2.0, theme::BRAND_BLUE);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        n.to_string(),
+        egui::FontId::proportional(font_size::px(ui.style(), 13.0)),
+        egui::Color32::WHITE,
+    );
+}
+
+/// The storage tip: left-aligned text in a blue-tinted box with an accent bar
+/// down its left edge, the way docs sites set off a note.
+fn landing_tip(ui: &mut egui::Ui, col_w: f32, pal: &theme::Palette) {
+    const BAR: f32 = 4.0;
+    const RADIUS: u8 = 10;
+    let resp = egui::Frame::new()
+        .fill(theme::BRAND_BLUE.linear_multiply(0.10))
+        .stroke(egui::Stroke::new(1.0, theme::BRAND_BLUE.linear_multiply(0.35)))
+        .corner_radius(RADIUS)
+        .inner_margin(egui::Margin {
+            left: 20,
+            right: 18,
+            top: 14,
+            bottom: 14,
+        })
+        .show(ui, |ui| {
+            ui.set_width(col_w - 40.0);
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.horizontal(|ui| {
+                    info_icon(ui);
+                    ui.label(
+                        egui::RichText::new(t().landing_tip_title)
+                            .size(font_size::px(ui.style(), 16.0))
+                            .color(theme::BRAND_BLUE)
+                            .strong(),
+                    );
+                });
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(t().landing_help)
+                        .size(font_size::px(ui.style(), 15.0))
+                        .color(pal.value),
+                );
+            });
+        })
+        .response;
+    let r = resp.rect;
+    ui.painter().rect_filled(
+        egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + BAR, r.max.y)),
+        egui::CornerRadius {
+            nw: RADIUS,
+            sw: RADIUS,
+            ne: 0,
+            se: 0,
+        },
+        theme::BRAND_BLUE,
+    );
+}
+
+/// An "i" in a brand-blue disc, painted so it can't fall back to a tofu box
+/// the way an emoji glyph would.
+fn info_icon(ui: &mut egui::Ui) {
+    let d = font_size::px(ui.style(), 18.0);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), d / 2.0, theme::BRAND_BLUE);
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "i",
+        egui::FontId::proportional(font_size::px(ui.style(), 12.0)),
+        egui::Color32::WHITE,
+    );
 }
 
 /// The "LightPhotos" wordmark and the Open button. The wordmark copies the
