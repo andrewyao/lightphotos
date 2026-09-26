@@ -268,6 +268,9 @@ pub struct Strings {
 
     // Develop panel.
     pub develop: &'static str,
+    pub tab_sliders: &'static str,
+    pub tab_crop: &'static str,
+    pub tab_masks: &'static str,
     pub presets: &'static str,
     pub save_preset_tip: &'static str,
     pub import_lr_presets: &'static str,
@@ -551,7 +554,7 @@ pub static EN: Strings = Strings {
     preset_menu: "Preset",
     apply_preset_selection_tip: "Apply a saved preset to the selection",
     settings_from: |name| format!("from {name}"),
-    export_jpg: "Export JPG",
+    export_jpg: "Export",
     export_jpg_tip: "Choose where and at what size, then export the selection as JPGs (X)",
     delete: "Delete",
     delete_selection_tip: if WEB {
@@ -639,6 +642,9 @@ pub static EN: Strings = Strings {
     },
 
     develop: "Develop",
+    tab_sliders: "Sliders",
+    tab_crop: "Crop",
+    tab_masks: "Masks",
     presets: "Presets",
     save_preset_tip: "Save these settings as a preset",
     import_lr_presets: "Import from Lightroom",
@@ -920,7 +926,7 @@ pub static ZH: Strings = Strings {
     preset_menu: "预设",
     apply_preset_selection_tip: "将已保存的预设应用到所选照片",
     settings_from: |name| format!("来自 {name}"),
-    export_jpg: "导出 JPG",
+    export_jpg: "导出",
     export_jpg_tip: "选择位置和尺寸，然后将所选照片导出为 JPG（X）",
     delete: "删除",
     delete_selection_tip: if WEB {
@@ -1008,6 +1014,9 @@ pub static ZH: Strings = Strings {
     },
 
     develop: "调整",
+    tab_sliders: "调整",
+    tab_crop: "裁剪",
+    tab_masks: "蒙版",
     presets: "预设",
     save_preset_tip: "将当前设置保存为预设",
     import_lr_presets: "从 Lightroom 导入",

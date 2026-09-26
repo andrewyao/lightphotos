@@ -75,12 +75,7 @@ impl App {
                     self.request_redraw();
                 }
                 KeyCode::Delete | KeyCode::Backspace => self.delete_selected_touchup(),
-                KeyCode::KeyZ if cmd => {
-                    if self.touchup_selected.is_none() && !self.current_touchups().is_empty() {
-                        self.touchup_selected = Some(self.current_touchups().len() - 1);
-                    }
-                    self.delete_selected_touchup();
-                }
+                KeyCode::KeyZ if cmd => self.undo_touchup(),
                 _ => {}
             }
             return;
@@ -281,7 +276,7 @@ impl App {
 
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
             KeyCode::KeyC if cmd && shift => self.copy_settings(),
-            KeyCode::KeyP if cmd && shift => self.prompt_save_preset(),
+            KeyCode::KeyP if cmd && shift && crate::app::SHOW_PRESETS => self.prompt_save_preset(),
             KeyCode::Delete => self.request_bulk(ui::BulkKind::Delete),
 
             KeyCode::ArrowLeft => self.nav_arrow(-1, 0, shift),
@@ -536,6 +531,13 @@ mod tests {
     fn the_save_preset_shortcut_opens_the_name_prompt() {
         let (mut app, _) = editor_app();
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyP);
+        if !crate::app::SHOW_PRESETS {
+            assert!(
+                app.preset_name_edit().is_none(),
+                "Cmd+Shift+P does nothing while presets are hidden"
+            );
+            return;
+        }
         assert!(
             app.preset_name_edit().is_some(),
             "Cmd+Shift+P opens the prompt"
@@ -699,5 +701,29 @@ mod tests {
         assert!(!app.image_overflows(), "a fitted image has nothing to pan");
         app.zoom_by(3.0);
         assert!(app.image_overflows(), "3x fit is larger than the window");
+    }
+
+    #[test]
+    fn the_wheel_does_not_zoom_while_touch_up_is_armed() {
+        let (mut app, _) = editor_app();
+        app.set_develop_tab(DevelopTab::Masks);
+        app.tool = LoupeTool::TouchUp;
+        app.on_scroll(0.0, 120.0);
+        assert_zoom(&app, 0.5);
+
+        app.tool = LoupeTool::None;
+        app.on_scroll(0.0, 120.0);
+        assert!(
+            app.zoom() > 0.5,
+            "the wheel zooms again once Touch Up is off"
+        );
+    }
+
+    #[test]
+    fn keyboard_slider_steps_bring_the_sliders_tab_forward() {
+        let (mut app, _) = editor_app();
+        app.set_develop_tab(DevelopTab::Masks);
+        app.develop_move(1);
+        assert_eq!(app.develop_tab(), DevelopTab::Sliders);
     }
 }

@@ -61,6 +61,10 @@ impl App {
         self.develop_focus
     }
 
+    pub(crate) fn develop_tab(&self) -> DevelopTab {
+        self.develop_tab
+    }
+
     pub(crate) fn toolbar_focus(&self) -> usize {
         self.toolbar_focus
     }

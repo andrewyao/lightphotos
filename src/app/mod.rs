@@ -47,6 +47,15 @@ pub(crate) const GRID_CELL_PT: f32 = 192.0;
 /// advertise keys that do nothing.
 pub(crate) const SHOW_GROUPING_TOOLS: bool = false;
 
+/// Whether presets are reachable: the Develop panel's Presets block, the
+/// selection bar's Preset dropdown, and Cmd+Shift+P. Off until the feature is
+/// ready. Saved presets stay on disk either way.
+pub(crate) const SHOW_PRESETS: bool = false;
+
+/// Whether the Develop panel shows its Crop tab. Off until the crop module
+/// is built. The C key's crop overlay works either way.
+pub(crate) const SHOW_CROP_TAB: bool = false;
+
 /// Longest-side bounds for the loupe's screen-fit preview decode. The minimum
 /// keeps it sharper than a thumbnail. The maximum stops a 5K display from
 /// asking for a decode nearly as costly as the full image.
@@ -223,6 +232,17 @@ pub(crate) enum WebPendingNav {
     Open(PathBuf),
     Load(PathBuf),
     LoadAfterOpen(PathBuf),
+}
+
+/// Which module the Develop panel shows under the histogram.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DevelopTab {
+    /// Tone, color, and detail sliders.
+    Sliders,
+    /// Hidden while `SHOW_CROP_TAB` is off.
+    Crop,
+    /// Touch Up and future local adjustments.
+    Masks,
 }
 
 /// What a click on the Loupe image does, besides panning.
@@ -457,7 +477,11 @@ pub(crate) struct App {
     tool: LoupeTool,
     touchup_radius: f32,
     touchup_selected: Option<usize>,
+    /// Per-image spot lists as they were before each Touch Up add or delete,
+    /// newest last, so Undo can step back through both.
+    touchup_undo: HashMap<PathBuf, Vec<Vec<TouchUp>>>,
     develop_open: bool,
+    develop_tab: DevelopTab,
     /// Small row-major grid (`hist_dw` x `hist_dh`) of the shown image in
     /// linear-light RGB, so the histogram recomputes cheaply as edits change.
     /// A real 2D grid so denoise can read neighbors and crop can drop cells.
@@ -836,7 +860,9 @@ impl App {
             // Clamped up to TOUCHUP_MIN_PIXELS once an image is loaded.
             touchup_radius: 0.001,
             touchup_selected: None,
+            touchup_undo: HashMap::new(),
             develop_open: true,
+            develop_tab: DevelopTab::Sliders,
             hist_sample: Vec::new(),
             hist_pixel_format: image_decode::PixelFormat::Srgb8,
             hist_dw: 0,
@@ -1418,6 +1444,7 @@ impl App {
                     };
                     self.request_redraw();
                 }
+                ui::UiAction::SetDevelopTab(tab) => self.set_develop_tab(tab),
                 ui::UiAction::SetTouchUpRadius(r) => {
                     self.set_touchup_radius(r);
                     self.request_redraw();
@@ -1430,12 +1457,7 @@ impl App {
                     self.request_redraw();
                 }
                 ui::UiAction::DeleteTouchUp => self.delete_selected_touchup(),
-                ui::UiAction::UndoTouchUp => {
-                    if self.touchup_selected.is_none() && !self.current_touchups().is_empty() {
-                        self.touchup_selected = Some(self.current_touchups().len() - 1);
-                    }
-                    self.delete_selected_touchup();
-                }
+                ui::UiAction::UndoTouchUp => self.undo_touchup(),
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
                 ui::UiAction::AutoTone => self.auto_tone_shown(),
                 ui::UiAction::ResetAdjustments => {

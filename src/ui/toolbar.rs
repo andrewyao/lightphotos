@@ -21,6 +21,7 @@ pub(crate) enum ToolbarControl {
 impl ToolbarControl {
     const ALL: &'static [Self] = &[
         Self::AnyRating,
+        Self::Unrated,
         Self::FilterCmp(Cmp::Gte),
         Self::FilterCmp(Cmp::Eq),
         Self::FilterCmp(Cmp::Lte),
@@ -29,7 +30,6 @@ impl ToolbarControl {
         Self::Star(3),
         Self::Star(4),
         Self::Star(5),
-        Self::Unrated,
         Self::Bursts,
         Self::Dupes,
         Self::EyesClosed,
@@ -66,7 +66,7 @@ impl ToolbarControl {
     fn starts_group(self) -> bool {
         matches!(
             self,
-            Self::FilterCmp(Cmp::Gte) | Self::Star(1) | Self::Unrated | Self::Bursts
+            Self::FilterCmp(Cmp::Gte) | Self::Star(1) | Self::Bursts
         )
     }
 
@@ -259,6 +259,9 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
                 ui.weak((t.settings_from)(&name));
             }
             ui.add_enabled_ui(!app.presets().is_empty(), |ui| {
+                if !crate::app::SHOW_PRESETS {
+                    return;
+                }
                 egui::ComboBox::from_id_salt("bulk_preset")
                     .selected_text(t.preset_menu)
                     .show_ui(ui, |ui| {

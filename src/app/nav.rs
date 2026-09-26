@@ -742,6 +742,8 @@ impl App {
     }
 
     pub(super) fn develop_move(&mut self, delta: isize) {
+        // The cursor walks the sliders, so show them.
+        self.set_develop_tab(DevelopTab::Sliders);
         let max = develop::SLIDERS.len() as isize - 1;
         self.develop_focus = (self.develop_focus as isize + delta).clamp(0, max) as usize;
         self.request_redraw();
@@ -776,6 +778,7 @@ impl App {
 
     /// Nudge the focused Develop slider one step in direction `dir` (-1 or +1).
     pub(super) fn develop_adjust(&mut self, dir: isize) {
+        self.set_develop_tab(DevelopTab::Sliders);
         let Some(slider) = develop::SLIDERS.get(self.develop_focus) else {
             return;
         };
