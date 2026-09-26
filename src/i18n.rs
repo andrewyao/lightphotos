@@ -118,10 +118,6 @@ fn system_tags() -> Vec<String> {
 pub struct HelpSection {
     pub title: &'static str,
     pub rows: &'static [(&'static str, &'static str)],
-    /// Listing keys that do nothing is worse than listing none, so a section
-    /// that only makes sense with the grouping tools says so here and the
-    /// overlay drops it while `SHOW_GROUPING_TOOLS` is off.
-    pub needs_grouping: bool,
 }
 
 /// Cmd in the native macOS app, Ctrl elsewhere. The three-argument form joins
@@ -541,10 +537,9 @@ pub static EN: Strings = Strings {
                     "\u{2190} \u{2192} \u{2191} \u{2193}",
                     "Move selection in library grid",
                 ),
-                ("E / G", "Editor / library"),
                 ("I", "Show folders or photo info in the side panel"),
+                ("?", "Show or hide this help"),
             ],
-            needs_grouping: false,
         },
         HelpSection {
             title: "Select",
@@ -554,51 +549,31 @@ pub static EN: Strings = Strings {
                 (primary!("+Click"), "Toggle individual selection"),
                 ("Shift+arrows", "Extend selection (library)"),
             ],
-            needs_grouping: false,
         },
         HelpSection {
-            title: "Rate and label",
-            rows: &[
-                ("0 1 2 3 4 5", "Set star rating 0\u{2013}5"),
-                (
-                    "Shift+1 \u{2013} 5",
-                    "Set color label (red / yellow / green / blue / purple)",
-                ),
-                ("Shift+0", "Clear color label"),
-            ],
-            needs_grouping: false,
+            title: "Rate",
+            rows: &[("0 1 2 3 4 5", "Set star rating 0-5")],
         },
         HelpSection {
             title: "Zoom and pan (in editor)",
             rows: &[
-                (
-                    "Space",
-                    "Cycle zoom: fit \u{2192} 2\u{d7} fit \u{2192} 100%",
-                ),
+                ("Space", "Cycle zoom: fit, 2x fit, 100%"),
                 (primary!("+0", " or ", "+)"), "Fit to window"),
                 (primary!("+1", " or ", "+!"), "100% (1:1 pixel)"),
                 (primary!("++", " or ", "+="), "Zoom in (20% step)"),
-                (primary!("+\u{2212}"), "Zoom out (20% step)"),
+                (primary!("+-"), "Zoom out (20% step)"),
                 ("\u{2191} / \u{2193}", "Zoom in / out (10% step)"),
-                ("Shift+Scroll", "Pan horizontally"),
-                ("Alt+Scroll", "Pan vertically"),
-                ("Shift+Alt+Scroll", "Trackpad zoom"),
+                ("Drag", "Pan"),
                 ("Space+Drag", "Pan"),
             ],
-            needs_grouping: false,
         },
         HelpSection {
             title: "Edit",
             rows: &[
-                ("[", "Rotate image \u{2212}90\u{b0}"),
-                ("]", "Rotate image +90\u{b0}"),
+                ("[", "Rotate image -90 degrees"),
+                ("]", "Rotate image +90 degrees"),
                 ("C", "Crop"),
                 ("Y", "Before / after compare"),
-                (primary!("+U"), "Auto Tone this photo"),
-                (primary!("+Shift+U"), "Auto Tone the selection"),
-                (primary!("+Shift+C"), "Copy develop settings"),
-                (primary!("+Shift+Y"), "Apply settings to selection"),
-                (primary!("+Shift+P"), "Save settings as a preset"),
                 ("X", "Open or close the export form"),
                 (
                     "Delete",
@@ -609,32 +584,6 @@ pub static EN: Strings = Strings {
                     },
                 ),
             ],
-            needs_grouping: false,
-        },
-        HelpSection {
-            title: "Culling",
-            rows: &[
-                ("B", "Best-of-burst badges (library)"),
-                ("D", "Duplicate-group badges (library)"),
-                (
-                    "Click badge",
-                    "Survey the group: \u{2190}/\u{2192} pick, Enter keeps best, Esc closes",
-                ),
-            ],
-            needs_grouping: true,
-        },
-        HelpSection {
-            title: "Keyboard focus",
-            rows: &[
-                ("F6 / Shift+F6", "Cycle focus between regions"),
-                (
-                    "Tab / Shift+Tab",
-                    "Next / previous item in the focused region",
-                ),
-                ("?", "Show or hide this help"),
-                ("Alt+= / Alt+-", "Larger / smaller text"),
-            ],
-            needs_grouping: false,
         },
     ],
 
@@ -933,10 +882,9 @@ pub static ZH: Strings = Strings {
                     "\u{2190} \u{2192} \u{2191} \u{2193}",
                     "在图库网格中移动选择",
                 ),
-                ("E / G", "编辑器 / 图库"),
                 ("I", "在侧栏显示文件夹或照片信息"),
+                ("?", "显示或隐藏此帮助"),
             ],
-            needs_grouping: false,
         },
         HelpSection {
             title: "选择",
@@ -946,51 +894,31 @@ pub static ZH: Strings = Strings {
                 (primary!("+点按"), "逐张加选或取消"),
                 ("Shift+方向键", "扩展选择（图库）"),
             ],
-            needs_grouping: false,
         },
         HelpSection {
-            title: "评分和标签",
-            rows: &[
-                ("0 1 2 3 4 5", "设置星级 0\u{2013}5"),
-                (
-                    "Shift+1 \u{2013} 5",
-                    "设置颜色标签（红 / 黄 / 绿 / 蓝 / 紫）",
-                ),
-                ("Shift+0", "清除颜色标签"),
-            ],
-            needs_grouping: false,
+            title: "评分",
+            rows: &[("0 1 2 3 4 5", "设置星级 0-5")],
         },
         HelpSection {
             title: "缩放和平移（编辑器中）",
             rows: &[
-                (
-                    "Space",
-                    "循环缩放：适合 \u{2192} 2\u{d7} 适合 \u{2192} 100%",
-                ),
+                ("Space", "循环缩放：适合、2x 适合、100%"),
                 (primary!("+0", " 或 ", "+)"), "适合窗口"),
                 (primary!("+1", " 或 ", "+!"), "100%（1:1 像素）"),
                 (primary!("++", " 或 ", "+="), "放大（每次 20%）"),
-                (primary!("+\u{2212}"), "缩小（每次 20%）"),
+                (primary!("+-"), "缩小（每次 20%）"),
                 ("\u{2191} / \u{2193}", "放大 / 缩小（每次 10%）"),
-                ("Shift+滚动", "水平平移"),
-                ("Alt+滚动", "垂直平移"),
-                ("Shift+Alt+滚动", "触控板缩放"),
+                ("拖移", "平移"),
                 ("Space+拖移", "平移"),
             ],
-            needs_grouping: false,
         },
         HelpSection {
             title: "编辑",
             rows: &[
-                ("[", "向左旋转 90\u{b0}"),
-                ("]", "向右旋转 90\u{b0}"),
+                ("[", "向左旋转 90 度"),
+                ("]", "向右旋转 90 度"),
                 ("C", "裁剪"),
                 ("Y", "调整前 / 调整后对比"),
-                (primary!("+U"), "对这张照片应用自动色调"),
-                (primary!("+Shift+U"), "对所选照片应用自动色调"),
-                (primary!("+Shift+C"), "拷贝调整设置"),
-                (primary!("+Shift+Y"), "将设置应用到所选照片"),
-                (primary!("+Shift+P"), "将设置保存为预设"),
                 ("X", "打开或关闭导出表单"),
                 (
                     "Delete",
@@ -1001,29 +929,6 @@ pub static ZH: Strings = Strings {
                     },
                 ),
             ],
-            needs_grouping: false,
-        },
-        HelpSection {
-            title: "筛片",
-            rows: &[
-                ("B", "连拍最佳标记（图库）"),
-                ("D", "重复组标记（图库）"),
-                (
-                    "点按标记",
-                    "比较该组：\u{2190}/\u{2192} 挑选，Enter 保留最佳，Esc 关闭",
-                ),
-            ],
-            needs_grouping: true,
-        },
-        HelpSection {
-            title: "键盘焦点",
-            rows: &[
-                ("F6 / Shift+F6", "在各区域之间切换焦点"),
-                ("Tab / Shift+Tab", "当前区域的下一项 / 上一项"),
-                ("?", "显示或隐藏此帮助"),
-                ("Alt+= / Alt+-", "放大 / 缩小文本"),
-            ],
-            needs_grouping: false,
         },
     ],
 
