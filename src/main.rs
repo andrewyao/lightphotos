@@ -194,20 +194,22 @@ impl ApplicationHandler<UserEvent> for App {
             event:
                 winit::event::KeyEvent {
                     state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::KeyV),
+                    physical_key: PhysicalKey::Code(code),
                     ..
                 },
             ..
         } = event
         {
-            if self.modifiers.super_key() || self.modifiers.control_key() {
-                self.request_web_paste();
-            }
+            self.request_web_paste(code);
         }
         // egui sees each event first. Events it consumes skip the app.
         let consumed =
             if let (Some(window), Some(state)) = (self.window.clone(), self.egui_state.as_mut()) {
                 let response = state.on_window_event(&*window, &event);
+                #[cfg(target_arch = "wasm32")]
+                if let WindowEvent::ModifiersChanged(m) = &event {
+                    App::use_mac_command_key(&mut state.egui_input_mut().modifiers, m.state());
+                }
                 // egui_winit asks for a repaint on `RedrawRequested` itself.
                 // Honoring that would redraw forever and `ControlFlow::Wait`
                 // would never wait.

@@ -381,8 +381,8 @@ pub(crate) struct App {
     pub(crate) web_export_tx: Sender<crate::export::ExportOutcome>,
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_export_rx: Receiver<crate::export::ExportOutcome>,
-    /// Text read from the browser clipboard on Cmd/Ctrl+V, fed to egui as a
-    /// paste on the next frame. See `request_web_paste`.
+    /// Text read from the browser clipboard, fed to egui as a paste on the
+    /// next frame. See `request_web_paste`.
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_paste_tx: Sender<String>,
     #[cfg(target_arch = "wasm32")]
