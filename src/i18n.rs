@@ -158,8 +158,16 @@ pub struct Strings {
     pub open_folder_tip: &'static str,
     pub help_tip: &'static str,
     pub landing_prompt: &'static str,
+    /// One line under the prompt saying what the app is for.
+    pub landing_tagline: &'static str,
+    /// The three "how it works" cards: (title, body).
+    pub landing_steps: [(&'static str, &'static str); 3],
+    /// Heading of the tip box that holds `landing_help`.
+    pub landing_tip_title: &'static str,
     /// How LightPhotos stores things: photos untouched, edits in sidecars.
     pub landing_help: &'static str,
+    /// Footer pointing at the shortcut overlay.
+    pub landing_shortcuts_hint: &'static str,
     /// Web only: the File System Access permission the browser shows once a
     /// folder is picked. Empty off the web, where the picker is native.
     pub landing_allow_note: &'static str,
@@ -479,6 +487,23 @@ pub static EN: Strings = Strings {
     wb_auto: "Auto",
     wb_manual: "Manual",
     landing_prompt: "Choose a folder of photos to get started",
+    landing_tagline: "Cull, rate and develop your photos, fast.",
+    landing_steps: [
+        (
+            "Browse",
+            "See every photo in the folder as a thumbnail. Press Enter to open one full size.",
+        ),
+        (
+            "Rate",
+            "Press 0-5 to give stars, then filter the library down to your keepers.",
+        ),
+        (
+            "Develop",
+            "Adjust tone and color, crop and rotate, then press X to export JPEGs.",
+        ),
+    ],
+    landing_tip_title: "Tip",
+    landing_shortcuts_hint: "Press ? at any time to see every keyboard shortcut.",
     landing_help: "LightPhotos never modifies your original photos. Your edits are saved in \
                    small files in a .lightphotos subfolder, so when you move a folder, its \
                    edits move with it. Don't rename your photos, though: edits are matched \
@@ -833,6 +858,23 @@ pub static ZH: Strings = Strings {
     wb_auto: "自动",
     wb_manual: "手动",
     landing_prompt: "选择一个照片文件夹开始",
+    landing_tagline: "快速筛选、评分和冲印你的照片。",
+    landing_steps: [
+        (
+            "浏览",
+            "以缩略图查看文件夹中的每张照片。按 Enter 打开大图。",
+        ),
+        (
+            "评分",
+            "按 0-5 打星，然后筛选图库，只留下你的精选。",
+        ),
+        (
+            "冲印",
+            "调整影调和色彩，裁剪和旋转，然后按 X 导出 JPEG。",
+        ),
+    ],
+    landing_tip_title: "提示",
+    landing_shortcuts_hint: "随时按 ? 查看所有键盘快捷键。",
     landing_help: "LightPhotos 从不修改你的原始照片。你的编辑保存在 .lightphotos 子文件夹中的\
                    小文件里，因此移动文件夹时，编辑也会随之移动。但请不要重命名照片：编辑按\
                    文件名与照片对应，照片重命名后会丢失编辑。",
