@@ -61,15 +61,10 @@ pub struct EguiPaint {
     pub screen_descriptor: egui_wgpu::ScreenDescriptor,
 }
 
-/// sRGB-encoded, since the surface does no encoding of its own.
-const CLEAR_COLOR: wgpu::Color = wgpu::Color {
-    r: 0.2934,
-    g: 0.2934,
-    b: 0.3133,
-    a: 1.0,
-};
-
 pub struct Renderer {
+    /// The loupe backdrop, sRGB-encoded since the surface does no encoding of
+    /// its own. The theme sets it.
+    clear_color: wgpu::Color,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -523,6 +518,7 @@ impl Renderer {
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
 
         Self {
+            clear_color: wgpu::Color::BLACK,
             surface,
             device,
             queue,
@@ -938,6 +934,16 @@ impl Renderer {
     /// Returns `false` when the surface wasn't presentable (occluded, timeout,
     /// outdated). The caller must retry, or a window that opens occluded stays
     /// blank.
+    pub fn set_clear_color(&mut self, c: egui::Color32) {
+        let v = |x: u8| x as f64 / 255.0;
+        self.clear_color = wgpu::Color {
+            r: v(c.r()),
+            g: v(c.g()),
+            b: v(c.b()),
+            a: 1.0,
+        };
+    }
+
     pub fn render(
         &mut self,
         image_viewport: Option<(u32, u32, u32, u32)>,
@@ -992,7 +998,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                        load: wgpu::LoadOp::Clear(self.clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,

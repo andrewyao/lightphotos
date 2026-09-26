@@ -172,7 +172,11 @@ fn immich_rows(ui: &mut egui::Ui, app: &App, actions: &mut Vec<UiAction>) {
             }
             ui.label(egui::RichText::new(t.immich_key_storage).small().weak());
             if let Some(e) = error {
-                ui.label(egui::RichText::new(e).small().color(theme::DANGER_RED));
+                ui.label(
+                    egui::RichText::new(e)
+                        .small()
+                        .color(theme::colors(ui.ctx()).danger),
+                );
             }
         }
         ImmichLink::Connecting { url, .. } => {

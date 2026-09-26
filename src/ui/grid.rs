@@ -235,7 +235,7 @@ pub(super) fn folder_node(
         ui.painter().rect_stroke(
             row.response.rect,
             2.0,
-            egui::Stroke::new(2.0f32, theme::CURSOR_AMBER),
+            egui::Stroke::new(2.0f32, theme::colors(ui.ctx()).cursor),
             egui::StrokeKind::Inside,
         );
     }
@@ -251,7 +251,8 @@ pub(super) fn folder_node(
 pub(super) struct CellStyle {
     /// Corner radius, also used as the thumbnail inset.
     corner: f32,
-    bg_gray: u8,
+    /// The filmstrip's cells sit a shade darker than the grid's.
+    strip: bool,
     /// Star label offset from the cell's bottom-left corner.
     star_dx: f32,
     star_dy: f32,
@@ -264,7 +265,7 @@ pub(super) struct CellStyle {
 
 pub(super) const GRID_CELL_STYLE: CellStyle = CellStyle {
     corner: 4.0,
-    bg_gray: 28,
+    strip: false,
     star_dx: 6.0,
     star_dy: -14.0,
     star_size: 13.0,
@@ -274,7 +275,7 @@ pub(super) const GRID_CELL_STYLE: CellStyle = CellStyle {
 
 pub(super) const STRIP_CELL_STYLE: CellStyle = CellStyle {
     corner: 3.0,
-    bg_gray: 24,
+    strip: true,
     star_dx: 4.0,
     star_dy: -8.0,
     star_size: 10.0,
@@ -313,10 +314,13 @@ pub(super) fn thumbnail_cell(
     let size = egui::vec2(cell, cell);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
+    let colors = theme::colors(ui.ctx());
     let bg = if selected || primary {
-        theme::SELECTION_BG
+        colors.selection_bg
+    } else if style.strip {
+        colors.strip_cell
     } else {
-        egui::Color32::from_gray(style.bg_gray)
+        colors.grid_cell
     };
     ui.painter().rect_filled(rect, style.corner, bg);
 
@@ -337,7 +341,7 @@ pub(super) fn thumbnail_cell(
             egui::Align2::CENTER_CENTER,
             "\u{2026}",
             egui::FontId::proportional(font_size::px(ui.style(), 18.0)),
-            egui::Color32::GRAY,
+            colors.label,
         );
     }
 
@@ -425,7 +429,7 @@ pub(super) fn thumbnail_cell(
             egui::Align2::LEFT_CENTER,
             star_string(stars),
             egui::FontId::proportional(font_size::px(ui.style(), style.star_size)),
-            theme::STAR_GOLD,
+            colors.star,
         );
     }
 
@@ -434,7 +438,7 @@ pub(super) fn thumbnail_cell(
         ui.painter().rect_stroke(
             rect,
             style.corner,
-            egui::Stroke::new(width, theme::SELECTION_BLUE),
+            egui::Stroke::new(width, colors.selection),
             egui::StrokeKind::Inside,
         );
     }

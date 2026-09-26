@@ -66,7 +66,7 @@ fn survey_member(
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(MEMBER_CELL, MEMBER_CELL), egui::Sense::click());
         ui.painter()
-            .rect_filled(rect, 4.0, egui::Color32::from_gray(28));
+            .rect_filled(rect, 4.0, theme::colors(ui.ctx()).grid_cell);
         if let Some((tex, tw, th)) = app.thumb_texture_for_path(path) {
             let scale = (MEMBER_CELL / tw as f32).min(MEMBER_CELL / th as f32);
             let (dw, dh) = (tw as f32 * scale, th as f32 * scale);
@@ -78,7 +78,7 @@ fn survey_member(
                 egui::Align2::CENTER_CENTER,
                 "\u{2026}",
                 egui::FontId::proportional(font_size::px(ui.style(), 18.0)),
-                egui::Color32::GRAY,
+                theme::colors(ui.ctx()).label,
             );
         }
         if is_best {
@@ -102,9 +102,9 @@ fn survey_member(
             egui::Stroke::new(
                 if focused { 3.0f32 } else { 1.0f32 },
                 if focused {
-                    theme::CURSOR_AMBER
+                    theme::colors(ui.ctx()).cursor
                 } else {
-                    egui::Color32::from_gray(70)
+                    theme::colors(ui.ctx()).divider
                 },
             ),
             egui::StrokeKind::Inside,

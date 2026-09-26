@@ -103,7 +103,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
         ui.painter_at(central).rect_stroke(
             central.shrink(2.0),
             2.0,
-            egui::Stroke::new(1.0f32, theme::CURSOR_AMBER),
+            egui::Stroke::new(1.0f32, theme::colors(ui.ctx()).cursor),
             egui::StrokeKind::Outside,
         );
     }
@@ -144,7 +144,7 @@ pub(super) fn loupe_touchup_overlay(
             egui::Stroke::new(
                 if selected { 2.5_f32 } else { 1.2_f32 },
                 if selected {
-                    theme::CURSOR_AMBER
+                    theme::colors(ui.ctx()).cursor
                 } else {
                     egui::Color32::from_white_alpha(190)
                 },
@@ -154,7 +154,7 @@ pub(super) fn loupe_touchup_overlay(
             c,
             3.0,
             if selected {
-                theme::CURSOR_AMBER
+                theme::colors(ui.ctx()).cursor
             } else {
                 egui::Color32::WHITE
             },
@@ -228,7 +228,7 @@ pub(super) fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
             egui::pos2(mid_x, central.min.y),
             egui::pos2(mid_x, central.max.y),
         ],
-        egui::Stroke::new(1.0f32, egui::Color32::from_gray(90)),
+        egui::Stroke::new(1.0f32, theme::colors(ui.ctx()).divider),
     );
     // Shadowed text so labels read over any image.
     let label = |p: egui::Pos2, align: egui::Align2, text: &str| {
@@ -276,8 +276,9 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
             let painter = ui.painter();
             let main_font = egui::FontId::proportional(font_size::px(ui.style(), 13.0));
             let sub_font = egui::FontId::proportional(font_size::px(ui.style(), 11.0));
-            let text_color = egui::Color32::from_gray(220);
-            let dim_color = egui::Color32::from_gray(140);
+            let colors = theme::colors(ui.ctx());
+            let text_color = colors.value;
+            let dim_color = colors.label;
             let main_y = rect.top() + bar_h * 0.36;
             let sub_y = rect.top() + bar_h * 0.72;
             let pad = font_size::px(ui.style(), 14.0);
@@ -342,9 +343,9 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
                         let filled = (i + 1) <= current;
                         let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
                         let color = if filled {
-                            theme::STAR_GOLD
+                            theme::colors(ui.ctx()).star
                         } else {
-                            egui::Color32::from_gray(160)
+                            theme::colors(ui.ctx()).label
                         };
                         ui.painter().text(
                             r.center(),

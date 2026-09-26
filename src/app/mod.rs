@@ -709,6 +709,7 @@ impl App {
         let egui_ctx = egui::Context::default();
         fonts::configure(&egui_ctx, None);
         crate::ui::font_size::init(&egui_ctx);
+        crate::ui::theme::init(&egui_ctx);
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         let (catalog_load_tx, catalog_load_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
@@ -1249,9 +1250,11 @@ impl App {
             compare_vp = None;
         }
 
+        let loupe_bg = ui::theme::colors(&self.egui_ctx).loupe_bg;
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
+        renderer.set_clear_color(loupe_bg);
         let egui_paint = EguiPaint {
             textures_delta: full_output.textures_delta,
             paint_jobs,
@@ -1394,6 +1397,11 @@ impl App {
                 ui::UiAction::SetLanguage(lang) => {
                     crate::i18n::choose(lang);
                     self.update_window_title();
+                    self.request_redraw();
+                }
+                ui::UiAction::CycleTheme => {
+                    let next = ui::theme::current(&self.egui_ctx).next();
+                    ui::theme::set(&self.egui_ctx, next);
                     self.request_redraw();
                 }
                 ui::UiAction::CropGrab(edge) => self.crop_grab(edge),
