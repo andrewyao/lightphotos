@@ -187,17 +187,22 @@ pub(super) fn loupe_touchup_overlay(
                 }
                 painter.circle_filled(p, 1.5, egui::Color32::WHITE);
 
-                // The wheel sizes the brush instead of zooming. Shift and Alt
-                // still pan through `App::on_scroll`.
-                let (dy, pan) = ui.input(|i| {
-                    (
-                        i.smooth_scroll_delta.y,
-                        i.modifiers.shift || i.modifiers.alt,
-                    )
+                // The wheel sizes the brush instead of zooming, and Shift+wheel
+                // feathers it. Alt still pans through `App::on_scroll`.
+                let (delta, shift, alt) = ui.input(|i| {
+                    (i.smooth_scroll_delta, i.modifiers.shift, i.modifiers.alt)
                 });
-                if dy != 0.0 && !pan {
+                if !alt && shift {
+                    // macOS turns a Shift+wheel into horizontal scrolling.
+                    let d = if delta.y != 0.0 { delta.y } else { delta.x };
+                    if d != 0.0 {
+                        out.actions.push(UiAction::SetTouchUpFeather(
+                            app.touchup_feather() + d * 0.0025,
+                        ));
+                    }
+                } else if !alt && delta.y != 0.0 {
                     out.actions.push(UiAction::SetTouchUpRadius(
-                        app.touchup_radius() * (dy * 0.0025).exp(),
+                        app.touchup_radius() * (delta.y * 0.0025).exp(),
                     ));
                 }
             }

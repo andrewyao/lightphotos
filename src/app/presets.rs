@@ -475,6 +475,15 @@ pub(in crate::app) mod tests {
         app: &mut App,
         events: Vec<egui::Event>,
     ) -> (Vec<crate::ui::UiAction>, Painted) {
+        frame_with_modifiers(app, events, egui::Modifiers::NONE)
+    }
+
+    /// A frame with `modifiers` held down.
+    pub(in crate::app) fn frame_with_modifiers(
+        app: &mut App,
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+    ) -> (Vec<crate::ui::UiAction>, Painted) {
         let ctx = app.egui_ctx.clone();
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -482,6 +491,7 @@ pub(in crate::app) mod tests {
                 egui::vec2(1100.0, 800.0),
             )),
             events,
+            modifiers,
             ..Default::default()
         };
         let mut actions = Vec::new();
