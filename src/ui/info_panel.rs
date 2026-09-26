@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use super::form::Form;
 use super::loupe::{
     format_altitude, format_aperture, format_dimensions, format_exposure_bias, format_file_size,
     format_focal_length, format_latitude, format_longitude, format_shutter, maps_url,
@@ -138,44 +139,24 @@ pub(super) fn draw_info_panel(ui: &mut egui::Ui, app: &App) {
     let meta = app.current_metadata();
     let groups = info_groups(&path, meta);
 
-    let body = egui::TextStyle::Body.resolve(ui.style());
-    let label_w = groups
+    let labels: Vec<&str> = groups
         .iter()
-        .flat_map(|g| g.rows.iter())
-        .map(|(label, _)| {
-            ui.fonts_mut(|f| {
-                f.layout_no_wrap(label.to_string(), body.clone(), egui::Color32::WHITE)
-                    .size()
-                    .x
-            })
-        })
-        .fold(0.0, f32::max)
-        + ui.spacing().item_spacing.x * 2.0;
-
-    for (i, group) in groups.iter().enumerate() {
-        if i > 0 {
-            ui.add_space(font_size::px(ui.style(), 8.0));
-        }
-        ui.label(egui::RichText::new(group.title).small().strong());
-        ui.separator();
-        for (label, value) in &group.rows {
-            ui.horizontal_top(|ui| {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(label_w, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(label_w);
-                        ui.label(egui::RichText::new(*label).weak());
-                    },
-                );
-                ui.vertical(|ui| {
+        .flat_map(|g| g.rows.iter().map(|(label, _)| *label))
+        .collect();
+    let form = Form::new(ui, &labels);
+    for group in &groups {
+        form.section(ui, group.title, |ui| {
+            for (label, value) in &group.rows {
+                form.row(ui, label, |ui| {
                     ui.add(egui::Label::new(value.as_str()).selectable(true).wrap());
                 });
-            });
-        }
-        if let Some(url) = &group.link {
-            ui.hyperlink_to(t().info_open_in_maps, url);
-        }
+            }
+            if let Some(url) = &group.link {
+                form.row(ui, "", |ui| {
+                    ui.hyperlink_to(t().info_open_in_maps, url);
+                });
+            }
+        });
     }
 }
 

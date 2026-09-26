@@ -30,6 +30,13 @@ pub struct Account {
     pub email: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize, serde::Serialize)]
+pub struct Album {
+    pub id: String,
+    #[serde(rename = "albumName")]
+    pub name: String,
+}
+
 #[derive(Debug, PartialEq)]
 pub struct UploadedAsset {
     pub id: String,
@@ -100,6 +107,17 @@ impl ImmichServer {
         normalize_origin(url)
     }
 
+    /// A server that was never reached, for tests of what surrounds one.
+    #[cfg(test)]
+    pub fn offline(origin: &str) -> Self {
+        ImmichServer {
+            origin: origin.into(),
+            api: format!("{origin}/api"),
+            key: String::new(),
+            agent: ureq::Agent::new_with_defaults(),
+        }
+    }
+
     pub fn origin(&self) -> &str {
         &self.origin
     }
@@ -145,6 +163,45 @@ impl ImmichServer {
             .send(format!(r#"{{"rating":{stars}}}"#))
             .map_err(|e| format!("set rating: {e}"))?;
         checked(resp).map(|_| ())
+    }
+
+    /// Every album the key's owner can see, by name.
+    pub fn albums(&self) -> Result<Vec<Album>, String> {
+        let resp = self
+            .agent
+            .get(format!("{}/albums", self.api))
+            .header("x-api-key", &self.key)
+            .header("accept", "application/json")
+            .call()
+            .map_err(|e| format!("list albums: {e}"))?;
+        parse_albums(&checked(resp)?)
+    }
+
+    pub fn create_album(&self, name: &str) -> Result<Album, String> {
+        let resp = self
+            .agent
+            .post(format!("{}/albums", self.api))
+            .header("x-api-key", &self.key)
+            .header("accept", "application/json")
+            .header("content-type", "application/json")
+            .send(serde_json::json!({ "albumName": name }).to_string())
+            .map_err(|e| format!("create album: {e}"))?;
+        serde_json::from_str(&checked(resp)?)
+            .map_err(|e| format!("unexpected create-album reply: {e}"))
+    }
+
+    /// Adds `ids` to the album. An asset already in it counts as added, so a
+    /// re-run batch converges.
+    pub fn add_to_album(&self, album_id: &str, ids: &[String]) -> Result<(), String> {
+        let resp = self
+            .agent
+            .put(format!("{}/albums/{album_id}/assets", self.api))
+            .header("x-api-key", &self.key)
+            .header("accept", "application/json")
+            .header("content-type", "application/json")
+            .send(serde_json::json!({ "ids": ids }).to_string())
+            .map_err(|e| format!("add to album: {e}"))?;
+        parse_album_add(&checked(resp)?)
     }
 }
 
@@ -271,6 +328,34 @@ fn parse_upload(body: &str) -> Result<UploadedAsset, String> {
         duplicate: reply.status == "duplicate",
         id: reply.id,
     })
+}
+
+fn parse_albums(body: &str) -> Result<Vec<Album>, String> {
+    let mut albums: Vec<Album> =
+        serde_json::from_str(body).map_err(|e| format!("unexpected albums reply: {e}"))?;
+    albums.sort_by_key(|a| a.name.to_lowercase());
+    Ok(albums)
+}
+
+/// The add reply lists `{id, success, error}` per asset. `duplicate` means
+/// the asset was in the album already.
+fn parse_album_add(body: &str) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Row {
+        success: bool,
+        error: Option<String>,
+    }
+    let rows: Vec<Row> =
+        serde_json::from_str(body).map_err(|e| format!("unexpected add-to-album reply: {e}"))?;
+    let failed: Vec<String> = rows
+        .into_iter()
+        .filter(|r| !r.success && r.error.as_deref() != Some("duplicate"))
+        .map(|r| r.error.unwrap_or_else(|| "unknown".into()))
+        .collect();
+    match failed.first() {
+        None => Ok(()),
+        Some(e) => Err(format!("{} not added to the album: {e}", failed.len())),
+    }
 }
 
 /// UTC ISO 8601 with milliseconds, e.g. `2024-02-29T13:05:09.250Z`.
@@ -400,6 +485,30 @@ mod tests {
         let shared_uplink_secs = 8 * 25_000_000 * 8 / 5_000_000;
         assert!(send_budget(25_000_000) > Duration::from_secs(shared_uplink_secs));
         assert_eq!(send_budget(0), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn albums_parse_sorted_by_name() {
+        let body =
+            r#"[{"id":"b","albumName":"zoo","assetCount":3},{"id":"a","albumName":"Beach"}]"#;
+        let names: Vec<_> = parse_albums(body)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert_eq!(names, ["Beach", "zoo"]);
+    }
+
+    #[test]
+    fn an_album_add_counts_duplicates_as_added_and_reports_real_failures() {
+        let ok = r#"[{"id":"1","success":true},{"id":"2","success":false,"error":"duplicate"}]"#;
+        assert_eq!(parse_album_add(ok), Ok(()));
+        let bad =
+            r#"[{"id":"1","success":false,"error":"no_permission"},{"id":"2","success":true}]"#;
+        assert_eq!(
+            parse_album_add(bad),
+            Err("1 not added to the album: no_permission".into())
+        );
     }
 
     #[test]

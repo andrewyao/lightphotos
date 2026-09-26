@@ -154,11 +154,13 @@ pub struct FrameOutput {
 mod develop_panel;
 mod export_panel;
 pub mod font_size;
+mod form;
 mod grid;
 mod info_panel;
 mod loupe;
 mod modals;
 mod survey;
+mod tabs;
 pub mod theme;
 /// `pub(crate)` so `app::nav` can walk `ToolbarControl`, the list the toolbar
 /// row is drawn from.

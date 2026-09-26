@@ -215,6 +215,11 @@ pub(crate) struct ExportProgress {
     /// Uploads whose star rating the server refused, and why the last one was.
     unrated: usize,
     last_rating_err: Option<String>,
+    /// The album the batch goes into, and the assets it uploaded so far.
+    #[cfg(not(target_arch = "wasm32"))]
+    album: crate::export::AlbumChoice,
+    #[cfg(not(target_arch = "wasm32"))]
+    asset_ids: Vec<String>,
 }
 
 /// A finished subject-segmentation run: the path it was computed for, and the
@@ -307,6 +312,10 @@ pub(crate) struct App {
     /// sees a Keychain prompt.
     #[cfg(not(target_arch = "wasm32"))]
     immich_key_looked_up: bool,
+    /// The album add that ends an Immich batch, with the batch's summary to
+    /// finish the toast with.
+    #[cfg(not(target_arch = "wasm32"))]
+    album_add: Option<(Receiver<Result<crate::immich::Album, String>>, String)>,
     /// The running bulk delete, if any. `pub(crate)` because the frame loop
     /// polls it.
     pub(crate) bulk_delete: Option<bulk_delete::BulkDelete>,
@@ -775,6 +784,8 @@ impl App {
             },
             #[cfg(not(target_arch = "wasm32"))]
             immich_key_looked_up: cfg!(test),
+            #[cfg(not(target_arch = "wasm32"))]
+            album_add: None,
             bulk_delete: None,
             playlist: None,
             want: None,

@@ -28,14 +28,30 @@ pub(crate) const EXPORTS_DIR: &str = "Exports";
 pub struct ExportSettings {
     pub target: ExportTarget,
     pub size: ExportSize,
+    /// Where an Immich upload lands. Ignored for a folder export; kept apart
+    /// from `target` so settings saved before albums existed still load.
+    #[serde(default)]
+    pub album: AlbumChoice,
+}
+
+/// The Immich album an upload goes into.
+#[derive(Clone, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum AlbumChoice {
+    #[default]
+    None,
+    Existing {
+        id: String,
+        name: String,
+    },
+    /// Created when the batch finishes, then remembered as `Existing`.
+    New(String),
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ExportTarget {
     Folder(FolderChoice),
-    /// The server `App` is connected to. The browser can't reach one: Immich
-    /// sends no CORS headers.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// The server `App` is connected to. The browser build offers it only to
+    /// say it can't: Immich sends no CORS headers, so a page can't reach one.
     Immich,
 }
 

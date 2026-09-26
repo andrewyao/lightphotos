@@ -438,6 +438,195 @@ mod tests {
         assert_eq!(actions, vec![UiAction::CloseSettings]);
     }
 
+    /// Settings follows the form layout: a section header over rows whose
+    /// labels share one column and whose values start level with them.
+    #[test]
+    fn settings_lays_out_as_a_form() {
+        use crate::app::presets::tests::settled;
+        use crate::i18n::t;
+
+        let mut app = App::new(None);
+        app.apply_ui_actions(vec![crate::ui::UiAction::ToggleSettings]);
+        let painted = settled(&mut app);
+        let header = painted.pos_of(t().form_general);
+        let theme = painted.pos_of(t().settings_theme);
+        let language = painted.pos_of(t().settings_language);
+        let dark = painted.pos_of(t().theme_dark);
+
+        assert!(header.y < theme.y, "the section header sits above its rows");
+        assert_eq!(theme.x, language.x, "labels share one column");
+        assert!(dark.x > theme.x, "the value is right of its label");
+        assert!(
+            (dark.y - theme.y).abs() < 3.0,
+            "the first value is level with its label"
+        );
+        assert!(
+            language.y > painted.pos_of(t().theme_medium).y,
+            "rows are top aligned, not centered"
+        );
+    }
+
+    /// Export's two sections, Destination and Output, share one label column.
+    #[test]
+    fn export_lays_out_as_a_form() {
+        use crate::app::presets::tests::settled;
+        use crate::i18n::t;
+
+        let (mut app, _) = folder_app(2);
+        app.export_form_open = true;
+        let painted = settled(&mut app);
+        let destination = painted.pos_of(t().export_destination);
+        let output = painted.pos_of(t().export_output);
+        let size = painted.pos_of(t().export_size);
+        let folder = painted.pos_of(t().export_folder);
+
+        assert!(destination.y < folder.y && folder.y < output.y && output.y < size.y);
+        assert_eq!(folder.x, size.x, "labels in both sections share one column");
+        let folder_tab = painted.pos_of(t().export_to_folder);
+        assert!(
+            destination.y < folder_tab.y && folder_tab.y < folder.y,
+            "the Folder/Immich tabs sit between the header and the rows"
+        );
+    }
+
+    /// Typing a server URL and an API key into the Immich rows enables
+    /// Connect, and clicking it asks to connect.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn immich_connect_enables_once_both_fields_are_typed() {
+        use crate::app::presets::tests::{click, frame, settled};
+        use crate::export::ExportTarget;
+        use crate::i18n::t;
+        use crate::ui::UiAction;
+
+        let (mut app, _) = folder_app(2);
+        app.sel = Some(0);
+        app.export_form_open = true;
+        app.export_settings.target = ExportTarget::Immich;
+        let painted = settled(&mut app);
+        let connect = painted.pos_of(t().immich_connect);
+        let (actions, _) = click(&mut app, connect);
+        assert!(
+            actions.is_empty(),
+            "Connect is disabled while both fields are empty"
+        );
+
+        let mut type_into = |app: &mut App, at: egui::Pos2, text: &str| {
+            let (actions, _) = click(app, at);
+            app.apply_ui_actions(actions);
+            let (actions, _) = frame(app, vec![egui::Event::Text(text.into())]);
+            app.apply_ui_actions(actions);
+            settled(app)
+        };
+        let field_x = painted.pos_of(t().immich_url_example).x + 20.0;
+        let url_at = egui::pos2(field_x, painted.pos_of(t().immich_server_url).y);
+        let key_at = egui::pos2(field_x, painted.pos_of(t().immich_api_key).y);
+        let example = painted.pos_of(t().immich_url_example).y;
+        assert!(
+            url_at.y < example && example < key_at.y,
+            "the example sits under the URL field"
+        );
+        let painted = type_into(&mut app, url_at, "https://example.org");
+        let painted = type_into(&mut app, key_at, "secret");
+        match app.immich() {
+            super::export::ImmichLink::Disconnected { url, key, .. } => {
+                assert_eq!(
+                    (url.as_str(), key.as_str()),
+                    ("https://example.org", "secret")
+                )
+            }
+            _ => panic!("still disconnected"),
+        }
+        let (actions, _) = click(&mut app, painted.pos_of(t().immich_connect));
+        assert_eq!(actions, vec![UiAction::ConnectImmich]);
+    }
+
+    /// Once connected, the Album dropdown lists the account's albums after
+    /// "No album" and "New album", and picking New asks for its name.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_album_dropdown_lists_albums_and_new_asks_for_a_name() {
+        use crate::app::presets::tests::{click, settled};
+        use crate::export::{AlbumChoice, ExportTarget};
+        use crate::i18n::t;
+        use crate::immich::{Account, Album, ImmichServer};
+        use crate::ui::UiAction;
+
+        let (mut app, _) = folder_app(2);
+        app.sel = Some(0);
+        app.export_form_open = true;
+        app.export_settings.target = ExportTarget::Immich;
+        let album = |id: &str, name: &str| Album {
+            id: id.into(),
+            name: name.into(),
+        };
+        app.immich = super::export::ImmichLink::Connected {
+            server: std::sync::Arc::new(ImmichServer::offline("https://immich.test")),
+            account: Account {
+                name: "Ada".into(),
+                email: "ada@example.com".into(),
+            },
+            albums: Ok(vec![album("1", "Beach"), album("2", "Wedding")]),
+        };
+        let painted = settled(&mut app);
+        let (_, painted) = click(&mut app, painted.pos_of(t().album_none));
+        assert!(
+            painted.has("Beach") && painted.has("Wedding"),
+            "{:?}",
+            painted.texts()
+        );
+
+        let (actions, _) = click(&mut app, painted.pos_of("Wedding"));
+        let [UiAction::SetExportSettings(picked)] = &actions[..] else {
+            panic!("{actions:?}");
+        };
+        assert_eq!(
+            picked.album,
+            AlbumChoice::Existing {
+                id: "2".into(),
+                name: "Wedding".into()
+            }
+        );
+
+        app.export_settings.album = AlbumChoice::New(String::new());
+        let painted = settled(&mut app);
+        assert!(painted.has(t().album_name), "{:?}", painted.texts());
+        assert_eq!(app.export_blocker(), Some(t().album_name_needed));
+        assert!(
+            painted.has(t().album_name_needed),
+            "the blocker shows under Export"
+        );
+    }
+
+    /// The Info panel's File group is a form section: its header above rows
+    /// whose labels share one column, with values level beside them.
+    #[test]
+    fn info_panel_lays_out_as_a_form() {
+        use crate::app::presets::tests::settled;
+        use crate::i18n::t;
+
+        let (mut app, _) = folder_app(2);
+        app.sel = Some(0);
+        app.left_tab = LeftTab::Info;
+        let painted = settled(&mut app);
+        let header = painted.pos_of(t().info_file);
+        let name = painted.pos_of(t().info_name);
+        let value = painted.pos_of(
+            &app.selected_path()
+                .unwrap()
+                .file_name()
+                .unwrap()
+                .to_string_lossy(),
+        );
+
+        assert!(header.y < name.y, "the group title heads its rows");
+        assert!(value.x > name.x, "the value is right of its label");
+        assert!(
+            (value.y - name.y).abs() < 1.0,
+            "the value is level with its label"
+        );
+    }
+
     #[test]
     fn the_header_offers_settings_once_a_folder_is_open() {
         use crate::app::presets::tests::{click, settled};
