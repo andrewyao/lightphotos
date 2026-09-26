@@ -174,3 +174,56 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         out.actions.push(UiAction::ToggleHelp);
     }
 }
+
+/// Theme and language, each a set of radio buttons. Opened from the landing
+/// page, the header, or Cmd+,; Close, Esc, or a backdrop click dismisses it.
+pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    if !app.show_settings() {
+        return;
+    }
+    let resp = egui::Modal::new(egui::Id::new("settings_overlay")).show(ui.ctx(), |ui| {
+        let t = t();
+        ui.set_width(360.0);
+        ui.heading(t.settings_title);
+        ui.add_space(10.0);
+        let current = theme::current(ui.ctx());
+        let lang = crate::i18n::lang();
+        egui::Grid::new("settings_grid")
+            .num_columns(2)
+            .spacing([24.0, 8.0])
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new(t.settings_theme).strong());
+                ui.vertical(|ui| {
+                    for (choice, name) in [
+                        (theme::Theme::Dark, t.theme_dark),
+                        (theme::Theme::Light, t.theme_light),
+                        (theme::Theme::Medium, t.theme_medium),
+                    ] {
+                        if ui.radio(current == choice, name).clicked() && current != choice {
+                            out.actions.push(UiAction::SetTheme(choice));
+                        }
+                    }
+                });
+                ui.end_row();
+
+                ui.label(egui::RichText::new(t.settings_language).strong());
+                ui.vertical(|ui| {
+                    // Each language is named in itself, so a reader of either
+                    // can find their own.
+                    for (choice, name) in [(Lang::En, t.lang_english), (Lang::Zh, t.lang_chinese)] {
+                        if ui.radio(lang == choice, name).clicked() && lang != choice {
+                            out.actions.push(UiAction::SetLanguage(choice));
+                        }
+                    }
+                });
+                ui.end_row();
+            });
+        ui.add_space(12.0);
+        if ui.button(t.close).clicked() {
+            out.actions.push(UiAction::CloseSettings);
+        }
+    });
+    if resp.should_close() {
+        out.actions.push(UiAction::CloseSettings);
+    }
+}

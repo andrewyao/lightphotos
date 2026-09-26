@@ -104,6 +104,21 @@ impl App {
             }
         }
 
+        // Cmd+, toggles Settings. While it is open, Esc closes it and every
+        // other key waits, so a digit can't re-rate the photo behind it.
+        if cmd && code == KeyCode::Comma {
+            self.show_settings = !self.show_settings;
+            self.request_redraw();
+            return;
+        }
+        if self.show_settings {
+            if code == KeyCode::Escape {
+                self.show_settings = false;
+                self.request_redraw();
+            }
+            return;
+        }
+
         // `?` (Shift+/) toggles the shortcut help.
         if shift && code == KeyCode::Slash {
             self.show_help = !self.show_help;
@@ -366,6 +381,99 @@ mod tests {
         let (mut app, _) = folder_app(2);
         press(&mut app, ModifiersState::empty(), KeyCode::Space);
         assert_eq!(app.mode, ViewMode::Loupe);
+    }
+
+    #[test]
+    fn cmd_comma_opens_settings_and_holds_other_keys_until_esc() {
+        let (mut app, _) = folder_app(2);
+        press(&mut app, CMD, KeyCode::Comma);
+        assert!(app.show_settings());
+        press(&mut app, ModifiersState::empty(), KeyCode::Space);
+        assert_eq!(
+            app.mode,
+            ViewMode::Grid,
+            "Space waits while Settings is open"
+        );
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.show_settings());
+        press(&mut app, CMD, KeyCode::Comma);
+        press(&mut app, CMD, KeyCode::Comma);
+        assert!(!app.show_settings(), "Cmd+, closes it again");
+    }
+
+    /// Real clicks through the whole UI: the landing page's Settings button
+    /// opens the dialog, and its radios ask for a theme and a language. The
+    /// theme and language actions are checked, not applied, because applying
+    /// them would write the user's saved preferences.
+    #[test]
+    fn settings_opens_from_the_landing_page_and_its_radios_ask_for_changes() {
+        use crate::app::presets::tests::{click, settled};
+        use crate::i18n::{t, Lang};
+        use crate::ui::{theme::Theme, UiAction};
+
+        let mut app = App::new(None);
+        let painted = settled(&mut app);
+        let (actions, _) = click(&mut app, painted.pos_of(t().settings));
+        assert_eq!(actions, vec![UiAction::ToggleSettings]);
+        app.apply_ui_actions(actions);
+        assert!(app.show_settings());
+
+        let painted = settled(&mut app);
+        assert!(
+            painted.has(t().settings_theme) && painted.has(t().settings_language),
+            "{:?}",
+            painted.texts()
+        );
+        let (actions, painted) = click(&mut app, painted.pos_of(t().theme_light));
+        assert_eq!(actions, vec![UiAction::SetTheme(Theme::Light)]);
+
+        let (other, name) = match crate::i18n::lang() {
+            Lang::En => (Lang::Zh, t().lang_chinese),
+            Lang::Zh => (Lang::En, t().lang_english),
+        };
+        let (actions, painted) = click(&mut app, painted.pos_of(name));
+        assert_eq!(actions, vec![UiAction::SetLanguage(other)]);
+
+        let (actions, _) = click(&mut app, painted.pos_of(t().close));
+        assert_eq!(actions, vec![UiAction::CloseSettings]);
+    }
+
+    #[test]
+    fn the_header_offers_settings_once_a_folder_is_open() {
+        use crate::app::presets::tests::{click, settled};
+        use crate::i18n::t;
+
+        let (mut app, _) = folder_app(2);
+        let painted = settled(&mut app);
+        let (actions, _) = click(&mut app, painted.pos_of(t().settings));
+        assert_eq!(actions, vec![crate::ui::UiAction::ToggleSettings]);
+    }
+
+    #[test]
+    fn the_filmstrip_shows_one_dot_per_star() {
+        use crate::app::presets::tests::settled;
+
+        let (mut app, _) = editor_app();
+        assert!(app.filmstrip_visible());
+        let star = crate::ui::theme::colors(&app.egui_ctx).star;
+        let dots = |app: &mut App| settled(app).circles_filled(star);
+
+        assert!(dots(&mut app).is_empty(), "unrated photos show no dots");
+
+        app.set_rating(3);
+        let first = dots(&mut app);
+        assert_eq!(first.len(), 3);
+
+        app.sel = Some(1);
+        app.set_rating(5);
+        let both = dots(&mut app);
+        assert_eq!(both.len(), 8);
+        let first_right = first.iter().map(|p| p.x).fold(f32::MIN, f32::max);
+        assert_eq!(
+            both.iter().filter(|p| p.x > first_right).count(),
+            5,
+            "the second cell's dots sit right of the first's"
+        );
     }
 
     #[test]

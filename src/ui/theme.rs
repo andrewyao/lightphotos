@@ -40,15 +40,6 @@ pub enum Theme {
 }
 
 impl Theme {
-    /// The theme the toolbar button switches to.
-    pub fn next(self) -> Self {
-        match self {
-            Theme::Dark => Theme::Medium,
-            Theme::Medium => Theme::Light,
-            Theme::Light => Theme::Dark,
-        }
-    }
-
     fn as_str(self) -> &'static str {
         match self {
             Theme::Dark => "dark",
@@ -386,8 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn the_button_cycles_through_all_three_and_names_round_trip() {
-        assert_eq!(Theme::Dark.next().next().next(), Theme::Dark);
+    fn names_round_trip() {
         for theme in ALL {
             assert_eq!(Theme::parse(theme.as_str()), Some(theme));
         }

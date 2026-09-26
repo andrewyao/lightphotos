@@ -142,16 +142,19 @@ macro_rules! primary {
 const WEB: bool = cfg!(target_arch = "wasm32");
 
 pub struct Strings {
-    /// Label of the button that switches to the other language, written in
-    /// that language so a reader of either can find it.
-    pub other_language: &'static str,
-    pub other_language_tip: &'static str,
-    /// The theme button's caption for each theme, and its tooltip.
+    // Settings dialog.
+    pub settings: &'static str,
+    pub settings_tip: &'static str,
+    pub settings_title: &'static str,
+    pub settings_theme: &'static str,
+    pub settings_language: &'static str,
     pub theme_dark: &'static str,
     pub theme_medium: &'static str,
     pub theme_light: &'static str,
-    pub theme_tip: &'static str,
-    pub other: Lang,
+    /// Each language's name, written in that language so a reader of either
+    /// can find their own. The same in both catalogs.
+    pub lang_english: &'static str,
+    pub lang_chinese: &'static str,
 
     // Header and landing page.
     pub open_folder: &'static str,
@@ -446,13 +449,16 @@ impl Strings {
 }
 
 pub static EN: Strings = Strings {
-    other_language: "中文",
-    other_language_tip: "切换到中文",
+    settings: "Settings",
+    settings_tip: "Theme and language (Cmd+,)",
+    settings_title: "Settings",
+    settings_theme: "Theme",
+    settings_language: "Language",
     theme_dark: "Dark",
     theme_medium: "Medium",
     theme_light: "Light",
-    theme_tip: "Switch theme: Dark, Medium, Light",
-    other: Lang::Zh,
+    lang_english: "English",
+    lang_chinese: "中文",
 
     open_folder: "Open\u{2026}",
     open_folder_tip: "Open a different folder (Cmd+O)",
@@ -582,6 +588,7 @@ pub static EN: Strings = Strings {
                 ),
                 ("I", "Show folders or photo info in the side panel"),
                 ("?", "Show or hide this help"),
+                (primary!("+,"), "Settings: theme and language"),
             ],
         },
         HelpSection {
@@ -820,13 +827,16 @@ pub static EN: Strings = Strings {
 };
 
 pub static ZH: Strings = Strings {
-    other_language: "English",
-    other_language_tip: "Switch to English",
+    settings: "设置",
+    settings_tip: "主题和语言 (Cmd+,)",
+    settings_title: "设置",
+    settings_theme: "主题",
+    settings_language: "语言",
     theme_dark: "深色",
     theme_medium: "中灰",
     theme_light: "浅色",
-    theme_tip: "切换主题：深色、中灰、浅色",
-    other: Lang::En,
+    lang_english: "English",
+    lang_chinese: "中文",
 
     open_folder: "打开\u{2026}",
     open_folder_tip: "打开其他文件夹 (Cmd+O)",
@@ -870,14 +880,8 @@ pub static ZH: Strings = Strings {
             "浏览",
             "以缩略图查看文件夹中的每张照片。按 Enter 打开大图。",
         ),
-        (
-            "评分",
-            "按 0-5 打星，然后筛选图库，只留下你的精选。",
-        ),
-        (
-            "冲印",
-            "调整影调和色彩，裁剪和旋转，然后按 X 导出 JPEG。",
-        ),
+        ("评分", "按 0-5 打星，然后筛选图库，只留下你的精选。"),
+        ("冲印", "调整影调和色彩，裁剪和旋转，然后按 X 导出 JPEG。"),
     ],
     landing_tip_title: "提示",
     landing_shortcuts_hint: "随时按 ? 查看所有键盘快捷键。",
@@ -954,6 +958,7 @@ pub static ZH: Strings = Strings {
                 ),
                 ("I", "在侧栏显示文件夹或照片信息"),
                 ("?", "显示或隐藏此帮助"),
+                (primary!("+,"), "设置：主题和语言"),
             ],
         },
         HelpSection {
@@ -1199,9 +1204,9 @@ mod tests {
     }
 
     #[test]
-    fn each_language_offers_the_other() {
-        assert_eq!(EN.other, Lang::Zh);
-        assert_eq!(ZH.other, Lang::En);
+    fn language_names_are_the_same_in_both_catalogs() {
+        assert_eq!(EN.lang_english, ZH.lang_english);
+        assert_eq!(EN.lang_chinese, ZH.lang_chinese);
     }
 
     #[test]

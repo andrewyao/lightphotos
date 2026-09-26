@@ -666,6 +666,7 @@ pub(crate) struct App {
     preset_name_edit: Option<(String, Option<u64>)>,
 
     show_help: bool,
+    show_settings: bool,
     left_tab: LeftTab,
 
     pending_quit: bool,
@@ -942,6 +943,7 @@ impl App {
             pending_preset_delete: None,
             preset_name_edit: None,
             show_help: false,
+            show_settings: false,
             left_tab: LeftTab::Folders,
             pending_quit: false,
             quit_requested: false,
@@ -1425,9 +1427,16 @@ impl App {
                     self.update_window_title();
                     self.request_redraw();
                 }
-                ui::UiAction::CycleTheme => {
-                    let next = ui::theme::current(&self.egui_ctx).next();
-                    ui::theme::set(&self.egui_ctx, next);
+                ui::UiAction::SetTheme(theme) => {
+                    ui::theme::set(&self.egui_ctx, theme);
+                    self.request_redraw();
+                }
+                ui::UiAction::ToggleSettings => {
+                    self.show_settings = !self.show_settings;
+                    self.request_redraw();
+                }
+                ui::UiAction::CloseSettings => {
+                    self.show_settings = false;
                     self.request_redraw();
                 }
                 ui::UiAction::CropGrab(edge) => self.crop_grab(edge),

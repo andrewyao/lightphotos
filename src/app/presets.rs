@@ -488,21 +488,22 @@ pub(in crate::app) mod tests {
         let output = ctx.run_ui(input, |ui| {
             actions = crate::ui::draw(ui, app).actions;
         });
-        let painted = output
-            .shapes
-            .iter()
-            .filter_map(|clipped| match &clipped.shape {
-                egui::Shape::Text(text) => Some((
+        let mut texts = Vec::new();
+        let mut circles = Vec::new();
+        for clipped in &output.shapes {
+            match &clipped.shape {
+                egui::Shape::Text(text) => texts.push((
                     text.galley.text().to_string(),
                     text.pos + egui::vec2(4.0, text.galley.size().y / 2.0),
                 )),
-                _ => None,
-            })
-            .collect();
-        (actions, Painted(painted))
+                egui::Shape::Circle(circle) => circles.push(*circle),
+                _ => {}
+            }
+        }
+        (actions, Painted(texts, circles))
     }
 
-    pub(in crate::app) struct Painted(Vec<(String, egui::Pos2)>);
+    pub(in crate::app) struct Painted(Vec<(String, egui::Pos2)>, Vec<egui::epaint::CircleShape>);
 
     impl Painted {
         pub(in crate::app) fn has(&self, text: &str) -> bool {
@@ -535,6 +536,15 @@ pub(in crate::app) mod tests {
 
         pub(in crate::app) fn texts(&self) -> Vec<&str> {
             self.0.iter().map(|(t, _)| t.as_str()).collect()
+        }
+
+        /// Every circle painted in `fill`.
+        pub(in crate::app) fn circles_filled(&self, fill: egui::Color32) -> Vec<egui::Pos2> {
+            self.1
+                .iter()
+                .filter(|c| c.fill == fill)
+                .map(|c| c.center)
+                .collect()
         }
     }
 
