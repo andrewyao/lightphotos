@@ -136,7 +136,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     b = b * (1.0 - t * 0.3);
 
     // 2. Exposure.
-    let exposed = filmicExposure(vec3<f32>(r, g, b), adj.exposure);
+    let exposed = exposureCurve(vec3<f32>(r, g, b), adj.exposure);
     r = exposed.r;
     g = exposed.g;
     b = exposed.b;

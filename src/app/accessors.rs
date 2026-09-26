@@ -105,6 +105,10 @@ impl App {
         self.show_settings
     }
 
+    pub(crate) fn autotone_centering(&self) -> crate::autotone::Centering {
+        self.autotone_centering
+    }
+
     pub(crate) fn pending_quit(&self) -> bool {
         self.pending_quit
     }

@@ -426,6 +426,7 @@ mod tests {
     #[test]
     fn settings_opens_from_the_landing_page_and_its_radios_ask_for_changes() {
         use crate::app::presets::tests::{click, settled};
+        use crate::autotone::Centering;
         use crate::i18n::{t, Lang};
         use crate::ui::{theme::Theme, UiAction};
 
@@ -451,6 +452,11 @@ mod tests {
         };
         let (actions, painted) = click(&mut app, painted.pos_of(name));
         assert_eq!(actions, vec![UiAction::SetLanguage(other)]);
+
+        let (actions, painted) = click(&mut app, painted.pos_of(t().autotone_center_median));
+        assert_eq!(actions, vec![UiAction::SetAutoToneCentering(Centering::Median)]);
+        app.apply_ui_actions(actions);
+        assert_eq!(app.autotone_centering(), Centering::Median);
 
         let (actions, _) = click(&mut app, painted.pos_of(t().close));
         assert_eq!(actions, vec![UiAction::CloseSettings]);

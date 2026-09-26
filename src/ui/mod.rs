@@ -126,6 +126,7 @@ pub enum UiAction {
     FocusDevelop(usize),
     SetLanguage(Lang),
     SetTheme(theme::Theme),
+    SetAutoToneCentering(crate::autotone::Centering),
     /// Open the Settings dialog, or close it if it is showing.
     ToggleSettings,
     CloseSettings,

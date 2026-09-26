@@ -61,7 +61,7 @@ impl App {
             self.set_status(StatusKind::Error, crate::i18n::t().auto_tone_needs_load.into());
             return;
         }
-        let auto = autotone::analyze(&self.hist_sample, self.hist_pixel_format);
+        let auto = autotone::analyze(&self.hist_sample, self.hist_pixel_format, self.autotone_centering);
         let merged = autotone::merge(&self.current_adjustments(), &auto);
         self.apply_adjustments_kind(merged, "auto_tone");
         self.set_status(StatusKind::Success, crate::i18n::t().auto_tone_applied.into());
@@ -143,7 +143,7 @@ impl App {
             }
             // The shown photo's histogram sample needs no decode.
             if self.shown.path() == Some(path.as_path()) && !self.hist_sample.is_empty() {
-                let auto = autotone::analyze(&self.hist_sample, self.hist_pixel_format);
+                let auto = autotone::analyze(&self.hist_sample, self.hist_pixel_format, self.autotone_centering);
                 self.tone_one(&path, &auto);
                 continue;
             }
@@ -226,7 +226,8 @@ impl App {
                 dropped.insert(path);
                 continue;
             }
-            toned.push((path, autotone::analyze(&grid, img.pixel_format)));
+            let auto = autotone::analyze(&grid, img.pixel_format, self.autotone_centering);
+            toned.push((path, auto));
             spent = Instant::now() >= deadline;
         }
         self.autotone_window = waiting;
