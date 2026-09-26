@@ -253,34 +253,37 @@ pub(super) struct CellStyle {
     corner: f32,
     /// The filmstrip's cells sit a shade darker than the grid's.
     strip: bool,
-    /// Star label offset from the cell's bottom-left corner.
-    star_dx: f32,
-    star_dy: f32,
-    star_size: f32,
+    rating: RatingMark,
     /// Draw a "…" placeholder while the thumbnail decodes (grid only).
     show_placeholder: bool,
-    /// Omit the star label entirely when the rating is 0 (filmstrip only).
-    hide_zero_stars: bool,
+}
+
+/// How a cell shows its star rating.
+enum RatingMark {
+    /// A "★★★☆☆" label, shown even at 0, offset from the cell's bottom-left
+    /// corner.
+    Stars { dx: f32, dy: f32, size: f32 },
+    /// One dot per star, sized with the cell and absent at 0. Star glyphs are
+    /// illegible at filmstrip size.
+    Dots,
 }
 
 pub(super) const GRID_CELL_STYLE: CellStyle = CellStyle {
     corner: 4.0,
     strip: false,
-    star_dx: 6.0,
-    star_dy: -14.0,
-    star_size: 13.0,
+    rating: RatingMark::Stars {
+        dx: 6.0,
+        dy: -14.0,
+        size: 13.0,
+    },
     show_placeholder: true,
-    hide_zero_stars: false,
 };
 
 pub(super) const STRIP_CELL_STYLE: CellStyle = CellStyle {
     corner: 3.0,
     strip: true,
-    star_dx: 4.0,
-    star_dy: -8.0,
-    star_size: 10.0,
+    rating: RatingMark::Dots,
     show_placeholder: false,
-    hide_zero_stars: true,
 };
 
 /// Radius of a corner badge, scaled with the UI text size.
@@ -420,17 +423,33 @@ pub(super) fn thumbnail_cell(
     }
 
     let stars = app.rating_at(pos);
-    if !(style.hide_zero_stars && stars == 0) {
-        ui.painter().text(
-            egui::pos2(
-                rect.left() + font_size::px(ui.style(), style.star_dx),
-                rect.bottom() + font_size::px(ui.style(), style.star_dy),
-            ),
-            egui::Align2::LEFT_CENTER,
-            star_string(stars),
-            egui::FontId::proportional(font_size::px(ui.style(), style.star_size)),
-            colors.star,
-        );
+    match style.rating {
+        RatingMark::Stars { dx, dy, size } => {
+            ui.painter().text(
+                egui::pos2(
+                    rect.left() + font_size::px(ui.style(), dx),
+                    rect.bottom() + font_size::px(ui.style(), dy),
+                ),
+                egui::Align2::LEFT_CENTER,
+                star_string(stars),
+                egui::FontId::proportional(font_size::px(ui.style(), size)),
+                colors.star,
+            );
+        }
+        RatingMark::Dots => {
+            let r = (cell * 0.028).max(2.0);
+            let step = r * 2.8;
+            let first =
+                rect.left_bottom() + egui::vec2(style.corner + r + 1.0, -(style.corner + r + 1.0));
+            for i in 0..stars {
+                ui.painter().circle(
+                    first + egui::vec2(i as f32 * step, 0.0),
+                    r,
+                    colors.star,
+                    egui::Stroke::new(1.0, egui::Color32::from_black_alpha(160)),
+                );
+            }
+        }
     }
 
     if selected || primary {

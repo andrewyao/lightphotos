@@ -101,6 +101,10 @@ impl App {
         self.show_help
     }
 
+    pub(crate) fn show_settings(&self) -> bool {
+        self.show_settings
+    }
+
     pub(crate) fn pending_quit(&self) -> bool {
         self.pending_quit
     }

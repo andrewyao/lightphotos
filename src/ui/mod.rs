@@ -120,8 +120,10 @@ pub enum UiAction {
     /// Focus the Develop panel with the keyboard cursor on this slider index.
     FocusDevelop(usize),
     SetLanguage(Lang),
-    /// Switch to the next color theme.
-    CycleTheme,
+    SetTheme(theme::Theme),
+    /// Open the Settings dialog, or close it if it is showing.
+    ToggleSettings,
+    CloseSettings,
     SetLeftTab(crate::app::LeftTab),
 }
 
@@ -166,7 +168,9 @@ use develop_panel::draw_develop_panel;
 use export_panel::draw_export_panel;
 use grid::{draw_grid, draw_left_panel};
 use loupe::draw_loupe;
-use modals::{confirm_modal, delete_preset_modal, help_modal, preset_name_modal, quit_modal};
+use modals::{
+    confirm_modal, delete_preset_modal, help_modal, preset_name_modal, quit_modal, settings_modal,
+};
 use survey::draw_survey;
 use toolbar::{grid_toolbar, selection_bar};
 
@@ -214,6 +218,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     preset_name_modal(ui, app, &mut out);
     quit_modal(ui, app, &mut out);
     help_modal(ui, app, &mut out);
+    settings_modal(ui, app, &mut out);
     out
 }
 
@@ -256,7 +261,7 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                                 .color(pal.label),
                         );
                         ui.add_space(28.0);
-                        choose_folder_button(ui, app, out);
+                        landing_buttons(ui, app, out);
 
                         // Web only: picking a folder hands the browser a File
                         // System Access permission, so say up front which
@@ -297,6 +302,36 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             });
     });
     status_toast(ui, app);
+    settings_modal(ui, app, out);
+}
+
+/// Choose Folder with a quieter Settings button beside it, centred as a pair.
+fn landing_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    const GAP: f32 = 12.0;
+    let settings_w = font_size::px(ui.style(), 120.0);
+    let row_w = 240.0 + GAP + settings_w;
+    ui.allocate_ui_with_layout(
+        egui::vec2(row_w, 52.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.spacing_mut().item_spacing.x = GAP;
+            choose_folder_button(ui, app, out);
+            let resp = ui.add(
+                egui::Button::new(
+                    egui::RichText::new(t().settings).size(font_size::px(ui.style(), 18.0)),
+                )
+                .corner_radius(10.0)
+                .min_size(egui::vec2(settings_w, 52.0)),
+            );
+            if resp
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(t().settings_tip)
+                .clicked()
+            {
+                out.actions.push(UiAction::ToggleSettings);
+            }
+        },
+    );
 }
 
 /// The landing page's one call to action, filled in the brand blue so it reads
@@ -329,7 +364,10 @@ fn choose_folder_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             egui::StrokeKind::Outside,
         );
     }
-    if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+    if resp
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
         out.actions.push(UiAction::PickFolder);
     }
 }
@@ -425,7 +463,10 @@ fn landing_tip(ui: &mut egui::Ui, col_w: f32, pal: &theme::Palette) {
     const RADIUS: u8 = 10;
     let resp = egui::Frame::new()
         .fill(theme::BRAND_BLUE.linear_multiply(0.10))
-        .stroke(egui::Stroke::new(1.0, theme::BRAND_BLUE.linear_multiply(0.35)))
+        .stroke(egui::Stroke::new(
+            1.0,
+            theme::BRAND_BLUE.linear_multiply(0.35),
+        ))
         .corner_radius(RADIUS)
         .inner_margin(egui::Margin {
             left: 20,
@@ -483,7 +524,8 @@ fn info_icon(ui: &mut egui::Ui) {
     );
 }
 
-/// The "LightPhotos" wordmark and the Open button. The wordmark copies the
+/// The "LightPhotos" wordmark, the Open and help buttons, and Settings at the
+/// right. The wordmark copies the
 /// lightphotos.app site's `.lp-wordmark` style: "Light" in the default text
 /// color, "Photos" in italic brand blue. The web canvas fills the viewport, so
 /// the site's HTML header can't wrap it; native draws the same header.
@@ -531,27 +573,19 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 if ui.button("?").on_hover_text(t().help_tip).clicked() {
                     out.actions.push(UiAction::ToggleHelp);
                 }
+                // The landing page has its own Settings button beside Choose
+                // Folder.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(8.0);
+                    if ui
+                        .button(t().settings)
+                        .on_hover_text(t().settings_tip)
+                        .clicked()
+                    {
+                        out.actions.push(UiAction::ToggleSettings);
+                    }
+                });
             }
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                let t = t();
-                if ui
-                    .button(t.other_language)
-                    .on_hover_text(t.other_language_tip)
-                    .clicked()
-                {
-                    out.actions.push(UiAction::SetLanguage(t.other));
-                }
-                let theme_name = match theme::current(ui.ctx()) {
-                    theme::Theme::Dark => t.theme_dark,
-                    theme::Theme::Medium => t.theme_medium,
-                    theme::Theme::Light => t.theme_light,
-                };
-                if ui.button(theme_name).on_hover_text(t.theme_tip).clicked() {
-                    out.actions.push(UiAction::CycleTheme);
-                }
-            });
         });
         ui.add_space(4.0);
     });
@@ -730,7 +764,10 @@ mod tests {
             focal_length: Some(55.0),
             ..Default::default()
         };
-        assert_eq!(exposure_parts(&meta), ["ISO 200", "55 mm", "f/2.8", "1/125 s"]);
+        assert_eq!(
+            exposure_parts(&meta),
+            ["ISO 200", "55 mm", "f/2.8", "1/125 s"]
+        );
     }
 
     #[test]
