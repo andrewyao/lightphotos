@@ -132,11 +132,7 @@ pub(super) fn loupe_touchup_overlay(
     let painter = ui.painter_at(central);
     for (i, t) in app.current_touchups().iter().enumerate() {
         let c = app.loupe_tex_to_screen(central, t.center[0], t.center[1]);
-        let (radius_u, radius_v) = app.touchup_uv_radii(t.radius);
-        let edge_u = app.loupe_tex_to_screen(central, t.center[0] + radius_u, t.center[1]);
-        let edge_v = app.loupe_tex_to_screen(central, t.center[0], t.center[1] + radius_v);
-        let radius = ((edge_u - c).length() + (edge_v - c).length()) * 0.5;
-        let radius = radius.max(3.0);
+        let radius = touchup_screen_radius(app, central, t.center, t.radius).max(3.0);
         let selected = app.touchup_selected() == Some(i);
         painter.circle_stroke(
             c,
@@ -165,8 +161,35 @@ pub(super) fn loupe_touchup_overlay(
         .fixed_pos(central.min)
         .show(ui.ctx(), |ui| {
             let (_id, resp) = ui.allocate_exact_size(central.size(), egui::Sense::click());
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            if let Some(p) = resp.hover_pos() {
+                // The brush itself is the cursor: a circle the size of the
+                // spot a click would add.
+                ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+                let (u, v) = app.loupe_screen_to_tex(central, p);
+                let r = touchup_screen_radius(app, central, [u, v], app.touchup_radius()).max(3.0);
+                let painter = ui.painter_at(central);
+                // Dark under light, so the ring reads on bright and dark photos.
+                painter.circle_stroke(
+                    p,
+                    r,
+                    egui::Stroke::new(2.5_f32, egui::Color32::from_black_alpha(160)),
+                );
+                painter.circle_stroke(p, r, egui::Stroke::new(1.2_f32, egui::Color32::WHITE));
+                painter.circle_filled(p, 1.5, egui::Color32::WHITE);
+
+                // The wheel sizes the brush instead of zooming. Shift and Alt
+                // still pan through `App::on_scroll`.
+                let (dy, pan) = ui.input(|i| {
+                    (
+                        i.smooth_scroll_delta.y,
+                        i.modifiers.shift || i.modifiers.alt,
+                    )
+                });
+                if dy != 0.0 && !pan {
+                    out.actions.push(UiAction::SetTouchUpRadius(
+                        app.touchup_radius() * (dy * 0.0025).exp(),
+                    ));
+                }
             }
             if resp.clicked() {
                 if let Some(p) = resp.interact_pointer_pos() {
@@ -189,6 +212,17 @@ pub(super) fn loupe_touchup_overlay(
                 }
             }
         });
+}
+
+/// On-screen radius of a touch-up of `radius` centered at texture `center`,
+/// averaged across the two axes since the stored radius is relative to the
+/// image's shorter side.
+fn touchup_screen_radius(app: &App, central: egui::Rect, center: [f32; 2], radius: f32) -> f32 {
+    let c = app.loupe_tex_to_screen(central, center[0], center[1]);
+    let (radius_u, radius_v) = app.touchup_uv_radii(radius);
+    let edge_u = app.loupe_tex_to_screen(central, center[0] + radius_u, center[1]);
+    let edge_v = app.loupe_tex_to_screen(central, center[0], center[1] + radius_v);
+    ((edge_u - c).length() + (edge_v - c).length()) * 0.5
 }
 
 /// A transparent click-catcher over the image while the WB picker is armed.
@@ -255,19 +289,14 @@ pub(super) fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     );
 }
 
-/// The info bar below the image. Top row: exposure, then filename and rating
-/// centered, then the selection controls. Bottom row: camera, lens, and date.
-/// EXIF fields the file lacks are omitted.
+/// The info bar below the image: filename and rating centered, then the
+/// selection controls. Exposure sits under the Develop panel's histogram.
 pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let bar_h = font_size::px(ui.style(), 54.0);
+    let bar_h = font_size::px(ui.style(), 36.0);
     egui::Panel::bottom("loupe_info_bar")
         .exact_size(bar_h)
         .show_inside(ui, |ui| {
             let rect = ui.max_rect();
-            let meta = app.current_metadata();
-
-            let exposure = meta.map(exposure_text).unwrap_or_default();
-            let secondary = meta.map(secondary_text).unwrap_or_default();
             let filename = app
                 .selected_path()
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -275,32 +304,10 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
 
             let painter = ui.painter();
             let main_font = egui::FontId::proportional(font_size::px(ui.style(), 13.0));
-            let sub_font = egui::FontId::proportional(font_size::px(ui.style(), 11.0));
             let colors = theme::colors(ui.ctx());
             let text_color = colors.value;
-            let dim_color = colors.label;
-            let main_y = rect.top() + bar_h * 0.36;
-            let sub_y = rect.top() + bar_h * 0.72;
+            let main_y = rect.center().y;
             let pad = font_size::px(ui.style(), 14.0);
-
-            if !exposure.is_empty() {
-                painter.text(
-                    egui::pos2(rect.left() + pad, main_y),
-                    egui::Align2::LEFT_CENTER,
-                    &exposure,
-                    main_font.clone(),
-                    text_color,
-                );
-            }
-            if !secondary.is_empty() {
-                painter.text(
-                    egui::pos2(rect.right() - pad, sub_y),
-                    egui::Align2::RIGHT_CENTER,
-                    &secondary,
-                    sub_font,
-                    dim_color,
-                );
-            }
 
             // Center the filename and stars as one group.
             let star_w = font_size::px(ui.style(), 20.0);
@@ -420,43 +427,26 @@ pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameO
         });
 }
 
-/// For example `f/2.8  ISO 200  1/125s  55mm`. Missing fields are omitted.
-pub(super) fn exposure_text(meta: &image_decode::ImageMetadata) -> String {
+/// The exposure readout under the histogram, Lightroom's order:
+/// `ISO 200`, `55 mm`, `f/2.8`, `1/125 s`. Missing fields are omitted.
+pub(super) fn exposure_parts(meta: &image_decode::ImageMetadata) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(f) = meta.f_number {
-        parts.push(format!("f/{f:.1}"));
-    }
     if let Some(iso) = meta.iso {
         parts.push(format!("ISO {iso}"));
     }
-    if let Some(t) = meta.exposure_time {
-        parts.push(format_shutter(t));
-    }
     if let Some(fl) = meta.focal_length {
-        parts.push(format!("{}mm", fl.round() as i64));
+        parts.push(format!("{} mm", fl.round() as i64));
     }
-    parts.join("  ")
-}
-
-pub(super) fn secondary_text(meta: &image_decode::ImageMetadata) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    let camera = match (&meta.camera_make, &meta.camera_model) {
-        (Some(make), Some(model)) if model.starts_with(make.as_str()) => Some(model.clone()),
-        (Some(make), Some(model)) => Some(format!("{make} {model}")),
-        (None, Some(model)) => Some(model.clone()),
-        (Some(make), None) => Some(make.clone()),
-        (None, None) => None,
-    };
-    match (camera, &meta.lens_model) {
-        (Some(cam), Some(lens)) => parts.push(format!("{cam} \u{b7} {lens}")),
-        (Some(cam), None) => parts.push(cam),
-        (None, Some(lens)) => parts.push(lens.clone()),
-        (None, None) => {}
+    if let Some(f) = meta.f_number {
+        parts.push(format!("f/{f:.1}"));
     }
-    if let Some(d) = meta.capture_date {
-        parts.push((t().capture_date)(d.year, d.month, d.day, d.hour, d.minute));
+    if let Some(t) = meta.exposure_time {
+        let shutter = format_shutter(t);
+        if let Some(value) = shutter.strip_suffix('s') {
+            parts.push(format!("{value} s"));
+        }
     }
-    parts.join("   \u{b7}   ")
+    parts
 }
 
 /// A fraction below one second (`1/250s`), otherwise whole or one-decimal

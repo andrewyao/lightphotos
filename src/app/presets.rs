@@ -181,8 +181,9 @@ impl App {
     }
 }
 
+/// Also the pointer-driven UI harness other `app` tests reuse.
 #[cfg(test)]
-mod tests {
+pub(in crate::app) mod tests {
     use super::*;
     use crate::catalog::Catalog;
     use crate::develop::Crop;
@@ -215,7 +216,7 @@ mod tests {
 
     /// A real `App` over a temp folder of empty files, the shape
     /// `app::keys::tests::folder_app` uses. No window and no GPU.
-    fn folder_app(tag: &str, photos: usize) -> (App, PathBuf, Vec<PathBuf>) {
+    pub(in crate::app) fn folder_app(tag: &str, photos: usize) -> (App, PathBuf, Vec<PathBuf>) {
         let dir = std::env::temp_dir().join(format!("lp-presets-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -470,7 +471,10 @@ mod tests {
     /// One real frame of the whole UI. Returns the actions it pushed and every
     /// string it painted with where it landed, so a test can aim a click at a
     /// widget it cannot see.
-    fn frame(app: &mut App, events: Vec<egui::Event>) -> (Vec<crate::ui::UiAction>, Painted) {
+    pub(in crate::app) fn frame(
+        app: &mut App,
+        events: Vec<egui::Event>,
+    ) -> (Vec<crate::ui::UiAction>, Painted) {
         let ctx = app.egui_ctx.clone();
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -498,10 +502,10 @@ mod tests {
         (actions, Painted(painted))
     }
 
-    struct Painted(Vec<(String, egui::Pos2)>);
+    pub(in crate::app) struct Painted(Vec<(String, egui::Pos2)>);
 
     impl Painted {
-        fn has(&self, text: &str) -> bool {
+        pub(in crate::app) fn has(&self, text: &str) -> bool {
             self.0.iter().any(|(t, _)| t == text)
         }
 
@@ -509,7 +513,7 @@ mod tests {
             self.0.iter().any(|(t, _)| t.contains(needle))
         }
 
-        fn pos_of(&self, text: &str) -> egui::Pos2 {
+        pub(in crate::app) fn pos_of(&self, text: &str) -> egui::Pos2 {
             self.0
                 .iter()
                 .find(|(t, _)| t == text)
@@ -529,7 +533,7 @@ mod tests {
                 .1
         }
 
-        fn texts(&self) -> Vec<&str> {
+        pub(in crate::app) fn texts(&self) -> Vec<&str> {
             self.0.iter().map(|(t, _)| t.as_str()).collect()
         }
     }
@@ -537,7 +541,7 @@ mod tests {
     /// What the UI paints once it has settled. A modal is an `egui::Area`,
     /// which egui sizes on one frame and paints on the next, so one frame is
     /// not enough to see one.
-    fn settled(app: &mut App) -> Painted {
+    pub(in crate::app) fn settled(app: &mut App) -> Painted {
         let _ = frame(app, Vec::new());
         frame(app, Vec::new()).1
     }
@@ -545,7 +549,10 @@ mod tests {
     /// Presses at `pos` in one frame and releases in the next, which is when
     /// egui reports the click. Returns that frame's actions, and what the UI
     /// paints once it has settled afterwards.
-    fn click(app: &mut App, pos: egui::Pos2) -> (Vec<crate::ui::UiAction>, Painted) {
+    pub(in crate::app) fn click(
+        app: &mut App,
+        pos: egui::Pos2,
+    ) -> (Vec<crate::ui::UiAction>, Painted) {
         let button = |pressed| egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
@@ -563,6 +570,9 @@ mod tests {
     /// action would not show up anywhere else.
     #[test]
     fn clicking_a_preset_row_applies_it_to_the_shown_photo() {
+        if !crate::app::SHOW_PRESETS {
+            return;
+        }
         let (mut app, dir, paths) = folder_app("click", 2);
         app.presets.add("Golden", tone(0.4, 0.0), Vec::new());
         app.presets.add("Moody", tone(-0.4, 0.0), Vec::new());
@@ -631,6 +641,9 @@ mod tests {
     /// panel only draws in the Loupe and the selection bar only outside it.
     #[test]
     fn the_selection_bar_dropdown_asks_to_apply_across_the_selection() {
+        if !crate::app::SHOW_PRESETS {
+            return;
+        }
         let (mut app, dir, _) = folder_app("dropdown", 3);
         app.presets.add("Golden", tone(0.4, 0.0), Vec::new());
         app.mode = ViewMode::Grid;
@@ -765,6 +778,9 @@ mod tests {
     /// and a button wired to the wrong action would show up nowhere else.
     #[test]
     fn the_import_button_asks_to_open_the_lightroom_picker() {
+        if !crate::app::SHOW_PRESETS {
+            return;
+        }
         let (mut app, dir, paths) = folder_app("lr-button", 1);
         app.mode = ViewMode::Loupe;
         app.shown = Shown::Preview(paths[0].clone(), 100, 100);

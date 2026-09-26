@@ -103,6 +103,7 @@ pub enum UiAction {
     ToggleWbPicker,
     /// The WB picker's armed click landed at this normalized texture coordinate.
     PickWhiteBalance(f32, f32),
+    SetDevelopTab(crate::app::DevelopTab),
     ToggleTouchUp,
     SetTouchUpRadius(f32),
     TouchUpClick(f32, f32),
@@ -718,5 +719,26 @@ mod tests {
     #[test]
     fn format_shutter_fractional_seconds_keeps_one_decimal() {
         assert_eq!(format_shutter(1.6), "1.6s");
+    }
+
+    #[test]
+    fn exposure_parts_follow_lightroom_order() {
+        let meta = crate::image_decode::ImageMetadata {
+            f_number: Some(2.8),
+            iso: Some(200),
+            exposure_time: Some(1.0 / 125.0),
+            focal_length: Some(55.0),
+            ..Default::default()
+        };
+        assert_eq!(exposure_parts(&meta), ["ISO 200", "55 mm", "f/2.8", "1/125 s"]);
+    }
+
+    #[test]
+    fn exposure_parts_omit_missing_fields() {
+        let meta = crate::image_decode::ImageMetadata {
+            exposure_time: Some(2.0),
+            ..Default::default()
+        };
+        assert_eq!(exposure_parts(&meta), ["2 s"]);
     }
 }

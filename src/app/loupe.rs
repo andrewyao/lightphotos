@@ -178,7 +178,8 @@ impl App {
 
     /// A scroll of `(dx, dy)` physical pixels over the loupe. Shift pans
     /// horizontally, Alt pans vertically, and plain or Shift+Alt zooms at the
-    /// cursor.
+    /// cursor, except under Touch Up, where the Loupe's overlay turns the
+    /// plain wheel into brush size.
     pub(crate) fn on_scroll(&mut self, dx: f32, dy: f32) {
         let shift = self.modifiers.shift_key();
         let alt = self.modifiers.alt_key();
@@ -190,6 +191,7 @@ impl App {
         match (shift, alt) {
             (true, false) => self.pan_by(s, 0.0),
             (false, true) => self.pan_by(0.0, s),
+            _ if self.touchup_active() => {}
             _ => {
                 let (cx, cy) = self.cursor_in_loupe();
                 self.zoom_at((s * 0.0025).exp(), cx, cy);

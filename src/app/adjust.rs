@@ -22,6 +22,17 @@ impl App {
             .unwrap_or(&[])
     }
 
+    /// Switch the Develop panel's tab. Touch Up's controls live on Masks, so
+    /// leaving it disarms the tool rather than leave it armed out of sight.
+    pub(crate) fn set_develop_tab(&mut self, tab: DevelopTab) {
+        if tab != DevelopTab::Masks && self.tool == LoupeTool::TouchUp {
+            self.tool = LoupeTool::None;
+            self.touchup_selected = None;
+        }
+        self.develop_tab = tab;
+        self.request_redraw();
+    }
+
     pub(crate) fn touchup_active(&self) -> bool {
         self.tool == LoupeTool::TouchUp
     }
@@ -232,8 +243,9 @@ impl App {
         let mut all = self.current_touchups().to_vec();
         all.push(t);
         let new_index = all.len() - 1;
-        self.apply_touchups(all);
-        self.touchup_selected = Some(new_index);
+        if self.edit_touchups(all) {
+            self.touchup_selected = Some(new_index);
+        }
     }
 
     pub(super) fn delete_selected_touchup(&mut self) {
@@ -243,8 +255,41 @@ impl App {
         let mut all = self.current_touchups().to_vec();
         if i < all.len() {
             all.remove(i);
+            self.edit_touchups(all);
         }
-        self.apply_touchups(all);
+    }
+
+    /// Applies a Touch Up add or delete, remembering the spots it replaced for
+    /// Undo. False when the change was refused (the 64-spot limit).
+    fn edit_touchups(&mut self, touchups: Vec<TouchUp>) -> bool {
+        let Some(path) = self.shown.path().map(Path::to_path_buf) else {
+            return false;
+        };
+        let before = self.current_touchups().to_vec();
+        self.apply_touchups(touchups);
+        if self.current_touchups() == before.as_slice() {
+            return false;
+        }
+        self.touchup_undo.entry(path).or_default().push(before);
+        true
+    }
+
+    pub(crate) fn can_undo_touchup(&self) -> bool {
+        self.shown
+            .path()
+            .and_then(|p| self.touchup_undo.get(p))
+            .is_some_and(|h| !h.is_empty())
+    }
+
+    /// Steps the shown image's spots back to before the last add or delete.
+    pub(super) fn undo_touchup(&mut self) {
+        let Some(path) = self.shown.path().map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(before) = self.touchup_undo.get_mut(&path).and_then(Vec::pop) else {
+            return;
+        };
+        self.apply_touchups(before);
     }
 
     /// True while the next Loupe click samples a pixel for white balance.
@@ -382,5 +427,193 @@ mod tests {
             .flush_blocking(std::time::Duration::from_secs(10));
         assert!(dir.join(".lightphotos").join("a.jpg.xmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Develop panel's tabs and Touch Up's brush, driven through the real
+    /// widget tree with the presets module's pointer harness.
+    mod develop_tabs {
+        use super::super::*;
+        use crate::app::presets::tests::{click, folder_app, frame, settled};
+        use crate::ui::UiAction;
+
+        fn loupe(tag: &str) -> App {
+            let (mut app, _dir, paths) = folder_app(tag, 1);
+            app.mode = ViewMode::Loupe;
+            app.shown = Shown::Preview(paths[0].clone(), 4000, 3000);
+            app.source_size = Some((4000, 3000));
+            app.develop_open = true;
+            app
+        }
+
+        #[test]
+        fn the_panel_opens_on_sliders_and_touch_up_lives_on_masks() {
+            let mut app = loupe("tabs");
+            let t = crate::i18n::t();
+            let painted = settled(&mut app);
+            assert!(painted.has(t.tab_sliders) && painted.has(t.tab_masks));
+            assert!(
+                !painted.has(t.touch_up),
+                "Touch Up is not on the Sliders tab: {:?}",
+                painted.texts()
+            );
+            assert_eq!(painted.has(t.tab_crop), SHOW_CROP_TAB);
+
+            let (actions, _) = click(&mut app, painted.pos_of(t.tab_masks));
+            let tab = actions.into_iter().find_map(|a| match a {
+                UiAction::SetDevelopTab(tab) => Some(tab),
+                _ => None,
+            });
+            assert_eq!(tab, Some(DevelopTab::Masks));
+            app.set_develop_tab(DevelopTab::Masks);
+            assert!(settled(&mut app).has(t.touch_up));
+        }
+
+        #[test]
+        fn leaving_masks_disarms_touch_up() {
+            let mut app = loupe("disarm");
+            app.set_develop_tab(DevelopTab::Masks);
+            app.tool = LoupeTool::TouchUp;
+            app.set_develop_tab(DevelopTab::Sliders);
+            assert!(!app.touchup_active());
+        }
+
+        #[test]
+        fn the_wheel_over_the_image_grows_the_brush() {
+            let mut app = loupe("wheel");
+            app.set_develop_tab(DevelopTab::Masks);
+            app.tool = LoupeTool::TouchUp;
+            let _ = settled(&mut app);
+            let before = app.touchup_radius();
+
+            let over_image = egui::pos2(480.0, 300.0);
+            let wheel = egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, 40.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            };
+            let _ = frame(&mut app, vec![egui::Event::PointerMoved(over_image)]);
+            let mut grew = None;
+            // egui spreads a wheel step over a few frames.
+            for events in [vec![wheel], Vec::new(), Vec::new(), Vec::new()] {
+                let (actions, _) = frame(&mut app, events);
+                grew = grew.or(actions.into_iter().find_map(|a| match a {
+                    UiAction::SetTouchUpRadius(r) => Some(r),
+                    _ => None,
+                }));
+            }
+            let grew = grew.expect("the wheel resizes the brush");
+            assert!(grew > before, "{grew} > {before}");
+        }
+
+        fn spot(u: f32) -> TouchUp {
+            TouchUp {
+                center: [u, 0.5],
+                radius: 0.02,
+                source: [u, 0.3],
+                feather: TOUCHUP_FEATHER,
+                delta: [0.0; 3],
+            }
+        }
+
+        fn centers(app: &App) -> Vec<f32> {
+            app.current_touchups().iter().map(|s| s.center[0]).collect()
+        }
+
+        /// Clicks a Masks-tab button and applies whatever it emitted. Returns
+        /// whether it emitted anything, which a disabled button does not.
+        fn press(app: &mut App, label: &str) -> bool {
+            let painted = settled(app);
+            let (actions, _) = click(app, painted.pos_of(label));
+            let emitted = !actions.is_empty();
+            app.apply_ui_actions(actions);
+            emitted
+        }
+
+        #[test]
+        fn undo_reverses_adds_and_deletes() {
+            let mut app = loupe("undo");
+            app.set_develop_tab(DevelopTab::Masks);
+            app.tool = LoupeTool::TouchUp;
+            let t = crate::i18n::t();
+            for u in [0.2, 0.4, 0.6] {
+                let mut all = app.current_touchups().to_vec();
+                all.push(spot(u));
+                assert!(app.edit_touchups(all));
+            }
+
+            app.touchup_selected = Some(0);
+            press(&mut app, t.delete);
+            assert_eq!(centers(&app), [0.4, 0.6]);
+
+            press(&mut app, t.undo);
+            assert_eq!(
+                centers(&app),
+                [0.2, 0.4, 0.6],
+                "Undo brings the deleted spot back"
+            );
+            press(&mut app, t.undo);
+            assert_eq!(
+                centers(&app),
+                [0.2, 0.4],
+                "then steps back through the adds"
+            );
+            press(&mut app, t.undo);
+            press(&mut app, t.undo);
+            assert!(centers(&app).is_empty());
+            assert!(!press(&mut app, t.undo), "Undo is disabled with no history");
+        }
+
+        #[test]
+        fn the_switch_arms_touch_up_and_unlocks_the_brush_size() {
+            let mut app = loupe("switch");
+            app.set_develop_tab(DevelopTab::Masks);
+            let t = crate::i18n::t();
+            let painted = settled(&mut app);
+            let brush = painted.pos_of(t.brush_size);
+            // The switch sits just left of the Brush size label; the slider
+            // between that label and Undo.
+            let switch = brush - egui::vec2(30.0, 0.0);
+            let slider = egui::pos2((brush.x + painted.pos_of(t.undo).x) / 2.0, brush.y);
+            let resizes = |actions: &[UiAction]| {
+                actions
+                    .iter()
+                    .any(|a| matches!(a, UiAction::SetTouchUpRadius(_)))
+            };
+
+            let (actions, _) = click(&mut app, slider);
+            assert!(
+                !resizes(&actions),
+                "the brush size is locked while Touch Up is off"
+            );
+
+            let (actions, _) = click(&mut app, switch);
+            assert!(actions.iter().any(|a| matches!(a, UiAction::ToggleTouchUp)));
+            app.apply_ui_actions(actions);
+            assert!(app.touchup_active());
+
+            let _ = settled(&mut app);
+            let (actions, _) = click(&mut app, slider);
+            assert!(
+                resizes(&actions),
+                "the brush size is live once Touch Up is on"
+            );
+        }
+
+        #[test]
+        fn delete_is_disabled_until_a_spot_is_selected() {
+            let mut app = loupe("delete");
+            app.set_develop_tab(DevelopTab::Masks);
+            app.tool = LoupeTool::TouchUp;
+            let t = crate::i18n::t();
+            assert!(app.edit_touchups(vec![spot(0.2), spot(0.4)]));
+            assert_eq!(app.touchup_selected(), None);
+            assert!(!press(&mut app, t.delete));
+            assert_eq!(centers(&app), [0.2, 0.4]);
+
+            app.touchup_selected = Some(1);
+            press(&mut app, t.delete);
+            assert_eq!(centers(&app), [0.2]);
+        }
     }
 }
