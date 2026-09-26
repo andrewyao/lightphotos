@@ -25,6 +25,23 @@
        needed. This tag doesn't render anything itself; trunk just needs it
        present to know to build and emit the worker bundle. -->
   <link data-trunk rel="rust" data-bin="wasm_worker" data-type="worker" />
+  <script>
+    // Cmd/Ctrl with +, = or - zooms the photo, and Cmd/Ctrl with the wheel or
+    // a trackpad pinch zooms it at the cursor. Left alone the browser reads
+    // both as page zoom instead and scales the whole UI, text included, so
+    // they are swallowed here and left for the canvas to handle.
+    const zoomKeys = new Set(['+', '=', '-', '_']);
+    window.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && zoomKeys.has(e.key)) {
+        e.preventDefault();
+      }
+    }, { passive: false });
+    window.addEventListener('wheel', (e) => {
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+      }
+    }, { passive: false });
+  </script>
 </head>
 <body>
 </body>

@@ -19,6 +19,11 @@ struct Face {
 /// Install the font stack. `full_cjk` is the complete Noto Sans SC, which only
 /// the web build has, once [`fetch_full_cjk`] lands it.
 pub(crate) fn configure(ctx: &egui::Context, full_cjk: Option<Vec<u8>>) {
+    ctx.set_fonts(build(full_cjk));
+}
+
+/// The font stack `configure` installs, split out so a test can inspect it.
+fn build(full_cjk: Option<Vec<u8>>) -> FontDefinitions {
     let mut definitions = FontDefinitions::default();
     let builtins = definitions.families[&FontFamily::Proportional].clone();
 
@@ -41,10 +46,21 @@ pub(crate) fn configure(ctx: &egui::Context, full_cjk: Option<Vec<u8>>) {
     let leading = install(&mut definitions, leading);
     let trailing = install(&mut definitions, trailing);
 
+    // egui's built-in proportional faces have no arrows (U+2190-2193) or
+    // U+2212, which the shortcut overlay draws. Hack has them, so it goes last
+    // in the family as a glyph-of-last-resort; being last it never changes the
+    // look of ordinary text.
+    let last_resort: Vec<String> = definitions
+        .families
+        .get(&FontFamily::Monospace)
+        .and_then(|family| family.first().cloned())
+        .into_iter()
+        .collect();
     let proportional: Vec<String> = leading
         .iter()
         .chain(&builtins)
         .chain(&trailing)
+        .chain(&last_resort)
         .cloned()
         .collect();
     // Monospace keeps Hack first and uses the rest only for glyphs Hack lacks.
@@ -56,7 +72,7 @@ pub(crate) fn configure(ctx: &egui::Context, full_cjk: Option<Vec<u8>>) {
     definitions
         .families
         .insert(FontFamily::Proportional, proportional);
-    ctx.set_fonts(definitions);
+    definitions
 }
 
 /// Add each face that parses to `definitions` and return the names added.
@@ -283,6 +299,28 @@ fn baseline_correction(primary: FaceMetrics, face: FaceMetrics, scale: f32) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The shortcut overlay names the arrow keys with their glyphs. egui's
+    /// own proportional faces have none of them, so before Hack joined the
+    /// family they drew as boxes wherever no system face supplied them.
+    #[test]
+    fn the_proportional_family_covers_the_arrow_glyphs() {
+        use skrifa::MetadataProvider as _;
+
+        let definitions = build(None);
+        let family = &definitions.families[&FontFamily::Proportional];
+        for arrow in ['\u{2190}', '\u{2192}', '\u{2191}', '\u{2193}', '\u{2212}'] {
+            let covered = family.iter().any(|name| {
+                let Some(data) = definitions.font_data.get(name) else {
+                    return false;
+                };
+                skrifa::FontRef::from_index(data.font.as_ref(), data.index)
+                    .map(|font| font.charmap().map(arrow).is_some())
+                    .unwrap_or(false)
+            });
+            assert!(covered, "no face in the family draws {arrow:?}");
+        }
+    }
 
     /// The primary face defines the baseline, so it is never shifted.
     #[test]

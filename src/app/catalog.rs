@@ -281,6 +281,8 @@ impl App {
     }
 
     /// Labels the selected photo; `None` clears the label.
+    /// No key sets a color label yet; kept for the label UI still to come.
+    #[allow(dead_code)]
     pub(super) fn set_label(&mut self, label: Option<crate::catalog::ColorLabel>) {
         let Some(path) = self.selected_path() else {
             return;
