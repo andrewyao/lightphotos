@@ -91,25 +91,27 @@ unit) matter a lot for decode/render throughput.
 
 ### Web build (experimental)
 
-A wasm32 build runs in the browser via [trunk](https://trunkrs.dev) (after the
-`rawler` vendor step above). Install `trunk` and the wasm target once per
-machine:
+A wasm32 build runs in the browser via [trunk](https://trunkrs.dev). Install
+`trunk` once per machine, then build:
 
 ```sh
 brew install trunk                      # or: cargo install --locked trunk
-rustup target add wasm32-unknown-unknown
+./scripts/build-web.sh                  # output in dist/
 ```
 
-Then build:
+`scripts/build-web.sh` does the per-clone setup first: it adds the
+`wasm32-unknown-unknown` target to the toolchain `rust-toolchain.toml`
+selects, runs the `rawler` vendor step, and fetches the full CJK font
+(8 MB, not committed) that `index.html` copies into the build. Each step is a
+no-op once done. It then runs `trunk build --release` with the `RUSTFLAGS`
+the WebGPU and File System Access bindings need; extra arguments go to
+`trunk build`. See the script's header comment for why those flags live
+there and why it always builds `--release`.
 
-```sh
-RUSTFLAGS="--cfg=web_sys_unstable_apis" trunk build --release
-```
-
-`scripts/deploy-web.sh` wraps this and syncs the output into the companion site
-repo. The browser build reads folders through the File System Access API and
-decodes on a hand-rolled Web Worker pool; it has none of the macOS-only
-features (no HEIC, no Vision-backed scoring).
+`scripts/deploy-web.sh` runs `build-web.sh`, then syncs the output into the
+companion site repo. The browser build reads folders through the File System
+Access API and decodes on a hand-rolled Web Worker pool; it has none of the
+macOS-only features (no HEIC, no Vision-backed scoring).
 
 ## Package as `LightPhotos.app`
 

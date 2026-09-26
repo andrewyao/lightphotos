@@ -39,11 +39,12 @@ stays out of CI, since `release.yml` covers it when a tag is pushed.
 The wasm32 (browser) build goes through `trunk`, not bare `cargo` — plain `cargo build --target wasm32-unknown-unknown` misses the wgpu/WebGPU and File System Access bindings, which are gated behind an unstable-apis cfg that `Trunk.toml`'s `rustflags` key does *not* reach cargo with in trunk 0.21.14. Set it in the environment:
 
 ```sh
+./scripts/build-web.sh    # wasm target + vendor setup + CJK font + the trunk build below
 RUSTFLAGS="--cfg=web_sys_unstable_apis" trunk build --release --config Trunk.toml
-./scripts/deploy-web.sh   # the above + vendor setup + sync into the lightphotos.app site repo
+./scripts/deploy-web.sh   # build-web.sh + sync into the lightphotos.app site repo
 ```
 
-`index.html` copies the full Noto Sans SC (8 MB, not committed) into the build, so run `./scripts/fetch-cjk-font.sh` once per clone before `trunk build`/`trunk serve`; `deploy-web.sh` runs it for you. The app fetches that file only when a listed file or folder name has Chinese characters the bundled UI subset can't draw.
+`index.html` copies the full Noto Sans SC (8 MB, not committed) into the build, so run `./scripts/fetch-cjk-font.sh` once per clone before a bare `trunk build`/`trunk serve`; `build-web.sh` runs it for you. The app fetches that file only when a listed file or folder name has Chinese characters the bundled UI subset can't draw.
 
 Always `--release` for wasm: debug wasm is 10-30x slower at RAW decode/demosaic and the `bg.wasm` is ~10x larger.
 
