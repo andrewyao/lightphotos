@@ -414,6 +414,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.catalog.pump();
         self.signals.flush_if_due();
         self.poll_delete();
+        self.save_session_if_changed();
 
         // True while web folder picking or listing is in flight. Feeds the poll
         // interval below.

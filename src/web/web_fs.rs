@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{
@@ -45,7 +46,32 @@ pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
     .await
     .map_err(|e| js_error_string(&e))?
     .unchecked_into();
+    // Reopen Session needs this handle after a reload. Losing it costs only
+    // that button, so it doesn't fail the pick.
+    if let Err(e) = JsFuture::from(save_root_handle(&handle)).await {
+        web_sys::console::warn_1(
+            &format!(
+                "[web] could not keep the folder for Reopen Session: {}",
+                js_error_string(&e)
+            )
+            .into(),
+        );
+    }
+    list_root(handle).await
+}
 
+/// List the last picked folder again, asking for `readwrite` access if the
+/// browser has dropped it. Fails when no folder was kept, access is denied,
+/// or the listing fails.
+pub async fn reopen_saved_folder() -> Result<PickedFolder, String> {
+    let handle: FileSystemDirectoryHandle = JsFuture::from(saved_root_handle())
+        .await
+        .map_err(|e| js_error_string(&e))?
+        .unchecked_into();
+    list_root(handle).await
+}
+
+async fn list_root(handle: FileSystemDirectoryHandle) -> Result<PickedFolder, String> {
     let root = PathBuf::from(handle.name());
     let listing = list_dir(&root, &handle).await?;
 
@@ -68,6 +94,59 @@ pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
         handles,
         dir_handles,
     })
+}
+
+// A directory handle survives a reload only in IndexedDB, which stores it by
+// structured clone. `localStorage` holds only strings.
+#[wasm_bindgen(inline_js = r#"
+const STORE = "handles";
+function openDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("lightphotos-folders", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+export async function saveRootHandle(handle) {
+  const db = await openDb();
+  try {
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, "readwrite");
+      tx.objectStore(STORE).put(handle, "root");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    db.close();
+  }
+}
+export async function savedRootHandle() {
+  const db = await openDb();
+  let handle;
+  try {
+    handle = await new Promise((resolve, reject) => {
+      const req = db.transaction(STORE).objectStore(STORE).get("root");
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    db.close();
+  }
+  if (!handle) throw new Error("no saved folder");
+  const mode = { mode: "readwrite" };
+  if ((await handle.queryPermission(mode)) !== "granted"
+      && (await handle.requestPermission(mode)) !== "granted") {
+    throw new Error("folder access denied");
+  }
+  return handle;
+}
+"#)]
+extern "C" {
+    #[wasm_bindgen(js_name = saveRootHandle)]
+    fn save_root_handle(handle: &FileSystemDirectoryHandle) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = savedRootHandle)]
+    fn saved_root_handle() -> js_sys::Promise;
 }
 
 /// The image files and immediate subdirectories of one directory handle.

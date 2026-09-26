@@ -92,6 +92,9 @@ pub enum UiAction {
     OpenFolder(std::path::PathBuf),
     /// Open the folder picker (`App::open_folder_picker`).
     PickFolder,
+    /// Reopen where the user left off, or the folder picker when that folder
+    /// is gone (`App::reopen_session`).
+    ReopenSession,
     /// Leave the Loupe for the Grid, as the G key does.
     EnterGrid,
     CropGrab(CropEdge),
@@ -306,26 +309,38 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     settings_modal(ui, app, out);
 }
 
-/// Choose Folder with a quieter Settings button beside it, centred as a pair.
+/// Choose Folder with quieter Reopen Session and Settings buttons beside it,
+/// centred as a row. Reopen Session shows only once a folder has been opened.
 fn landing_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     const GAP: f32 = 12.0;
+    let session = app.saved_session();
+    let reopen_w = font_size::px(ui.style(), 170.0);
     let settings_w = font_size::px(ui.style(), 120.0);
-    let row_w = 240.0 + GAP + settings_w;
+    let row_w = 240.0 + GAP + settings_w + if session.is_some() { GAP + reopen_w } else { 0.0 };
+    let secondary = |ui: &mut egui::Ui, label: &str, width: f32, enabled: bool| {
+        ui.add_enabled(
+            enabled,
+            egui::Button::new(egui::RichText::new(label).size(font_size::px(ui.style(), 18.0)))
+                .corner_radius(10.0)
+                .min_size(egui::vec2(width, 52.0)),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+    };
     ui.allocate_ui_with_layout(
         egui::vec2(row_w, 52.0),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing.x = GAP;
             choose_folder_button(ui, app, out);
-            let resp = ui.add(
-                egui::Button::new(
-                    egui::RichText::new(t().settings).size(font_size::px(ui.style(), 18.0)),
-                )
-                .corner_radius(10.0)
-                .min_size(egui::vec2(settings_w, 52.0)),
-            );
-            if resp
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
+            if let Some(session) = session {
+                if secondary(ui, t().reopen_session, reopen_w, !app.folder_pick_pending())
+                    .on_hover_text((t().reopen_session_tip)(&session.root.display().to_string()))
+                    .clicked()
+                {
+                    out.actions.push(UiAction::ReopenSession);
+                }
+            }
+            if secondary(ui, t().settings, settings_w, true)
                 .on_hover_text(t().settings_tip)
                 .clicked()
             {

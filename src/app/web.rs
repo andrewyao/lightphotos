@@ -130,9 +130,36 @@ impl App {
             return;
         }
         self.web_folder_pending = true;
+        self.web_session_restore = None;
         let tx = self.web_folder_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let result = web_fs::pick_and_list_folder().await;
+            let _ = tx.send(result);
+        });
+        self.request_redraw();
+    }
+
+    /// Reopen Session: list the last picked folder again, or show the picker
+    /// if it can't be. `poll_folder_pick` restores the rest of `session`.
+    /// Must run inside the click's user activation, which the browser's
+    /// permission prompt and the fallback picker both need.
+    pub(crate) fn request_session_reopen(&mut self, session: super::session::Session) {
+        if self.web_folder_pending {
+            return;
+        }
+        self.web_folder_pending = true;
+        self.web_session_restore = Some(session);
+        let tx = self.web_folder_tx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let result = match web_fs::reopen_saved_folder().await {
+                Ok(picked) => Ok(picked),
+                Err(e) => {
+                    web_sys::console::warn_1(
+                        &format!("[web] Reopen Session falls back to the picker: {e}").into(),
+                    );
+                    web_fs::pick_and_list_folder().await
+                }
+            };
             let _ = tx.send(result);
         });
         self.request_redraw();
@@ -143,6 +170,7 @@ impl App {
     pub(crate) fn poll_folder_pick(&mut self) -> bool {
         if let Ok(result) = self.web_folder_rx.try_recv() {
             self.web_folder_pending = false;
+            let restore = self.web_session_restore.take();
             match result {
                 Ok(picked) => {
                     // A new folder invalidates pending listings, deferred
@@ -175,6 +203,10 @@ impl App {
                     self.folder_root = Some(root.clone());
                     self.expanded = std::collections::HashSet::from([root.clone()]);
                     self.mode = ViewMode::Grid;
+                    // The picker fallback may have opened a different folder.
+                    if let Some(session) = restore.filter(|s| s.root == root) {
+                        self.restore_session_view(&session);
+                    }
                 }
                 Err(e) => {
                     // Usually a cancelled picker, but a permission or listing
