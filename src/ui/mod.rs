@@ -10,29 +10,6 @@ use crate::develop::Adjustments;
 use crate::i18n::{t, Lang};
 use crate::navigation::Cmp;
 
-/// Colors shared by the grid, filmstrip, and panels.
-mod theme {
-    use egui::Color32;
-    pub const STAR_GOLD: Color32 = Color32::from_rgb(255, 210, 80);
-    /// Mouse selection outline on a thumbnail cell.
-    pub const SELECTION_BLUE: Color32 = Color32::from_rgb(90, 160, 255);
-    pub const SELECTION_BG: Color32 = Color32::from_rgb(40, 80, 140);
-    /// Keyboard cursor outline, kept distinct from the blue mouse selection.
-    pub const CURSOR_AMBER: Color32 = Color32::from_rgb(255, 190, 90);
-    /// The badge colors differ from each other and from the stars because one
-    /// photo can carry several badges at once. Eyes-closed is the only cool
-    /// color because it marks a defect, not a keeper.
-    pub const BURST_BADGE: Color32 = Color32::from_rgb(120, 230, 160);
-    pub const DUP_BADGE: Color32 = Color32::from_rgb(255, 150, 90);
-    pub const EYES_BADGE: Color32 = Color32::from_rgb(150, 190, 255);
-    /// The wordmark's "Photos" color. Matches `--lp-accent` in lightphotos.app's
-    /// `lp.css`. The site uses a gradient that egui can't draw, so this is its
-    /// dominant color. Update it if `lp.css` changes.
-    pub const BRAND_BLUE: Color32 = Color32::from_rgb(79, 140, 255);
-    /// Text of the destructive Delete action.
-    pub const DANGER_RED: Color32 = Color32::from_rgb(235, 95, 95);
-}
-
 /// An action the UI wants `App` to perform after the frame is built. Positions
 /// are indices into the *visible* list (same space as `App::sel`).
 #[derive(Debug, PartialEq)]
@@ -142,6 +119,8 @@ pub enum UiAction {
     /// Focus the Develop panel with the keyboard cursor on this slider index.
     FocusDevelop(usize),
     SetLanguage(Lang),
+    /// Switch to the next color theme.
+    CycleTheme,
     SetLeftTab(crate::app::LeftTab),
 }
 
@@ -177,6 +156,7 @@ mod info_panel;
 mod loupe;
 mod modals;
 mod survey;
+pub mod theme;
 /// `pub(crate)` so `app::nav` can walk `ToolbarControl`, the list the toolbar
 /// row is drawn from.
 pub(crate) mod toolbar;
@@ -342,6 +322,14 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 {
                     out.actions.push(UiAction::SetLanguage(t.other));
                 }
+                let theme_name = match theme::current(ui.ctx()) {
+                    theme::Theme::Dark => t.theme_dark,
+                    theme::Theme::Medium => t.theme_medium,
+                    theme::Theme::Light => t.theme_light,
+                };
+                if ui.button(theme_name).on_hover_text(t.theme_tip).clicked() {
+                    out.actions.push(UiAction::CycleTheme);
+                }
             });
         });
         ui.add_space(4.0);
@@ -412,7 +400,7 @@ fn toolbar_focus_sync(
         ui.painter().rect_stroke(
             resp.rect.expand(2.0),
             2.0,
-            egui::Stroke::new(2.0f32, theme::CURSOR_AMBER),
+            egui::Stroke::new(2.0f32, theme::colors(ui.ctx()).cursor),
             egui::StrokeKind::Outside,
         );
     }
@@ -430,7 +418,7 @@ fn region_focus_marker(ui: &egui::Ui, app: &App, region: Region) {
         ui.painter().rect_stroke(
             ui.min_rect().expand(1.0),
             2.0,
-            egui::Stroke::new(1.0f32, theme::CURSOR_AMBER),
+            egui::Stroke::new(1.0f32, theme::colors(ui.ctx()).cursor),
             egui::StrokeKind::Outside,
         );
     }

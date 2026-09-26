@@ -113,9 +113,9 @@ impl ToolbarControl {
                 };
                 let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
                 let color = if filled {
-                    theme::STAR_GOLD
+                    theme::colors(ui.ctx()).star
                 } else {
-                    egui::Color32::from_gray(160)
+                    theme::colors(ui.ctx()).label
                 };
                 let star = egui::Label::new(egui::RichText::new(glyph).size(20.0).color(color))
                     .sense(egui::Sense::click());
@@ -285,7 +285,7 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
             // Destructive, so it sits apart from the others at the far right.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button(egui::RichText::new(t.delete).color(theme::DANGER_RED))
+                    .button(egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger))
                     .on_hover_text(t.delete_selection_tip)
                     .clicked()
                 {
@@ -317,7 +317,9 @@ mod tests {
             .shapes
             .into_iter()
             .filter_map(|clipped| match clipped.shape {
-                egui::Shape::Rect(shape) if shape.stroke.color == theme::CURSOR_AMBER => {
+                egui::Shape::Rect(shape)
+                    if shape.stroke.color == theme::palette(theme::Theme::Dark).cursor =>
+                {
                     Some(shape.rect)
                 }
                 _ => None,

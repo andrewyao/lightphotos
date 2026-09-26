@@ -129,7 +129,7 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                             ui.painter().rect_stroke(
                                 resp.rect.expand(1.0),
                                 2.0,
-                                egui::Stroke::new(2.0f32, theme::CURSOR_AMBER),
+                                egui::Stroke::new(2.0f32, theme::colors(ui.ctx()).cursor),
                                 egui::StrokeKind::Outside,
                             );
                         }
@@ -262,11 +262,12 @@ pub(super) fn draw_histogram(ui: &mut egui::Ui, app: &App) {
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
     let painter = ui.painter_at(rect);
 
-    painter.rect_filled(rect, 3.0, egui::Color32::from_gray(16));
+    let colors = theme::colors(ui.ctx());
+    painter.rect_filled(rect, 3.0, colors.histogram_bg);
     painter.rect_stroke(
         rect,
         3.0,
-        egui::Stroke::new(1.0f32, egui::Color32::from_gray(48)),
+        egui::Stroke::new(1.0f32, colors.histogram_border),
         egui::StrokeKind::Inside,
     );
 
