@@ -2,7 +2,6 @@ use super::*;
 
 use winit::keyboard::KeyCode;
 
-use crate::catalog::ColorLabel;
 use crate::ui;
 
 impl App {
@@ -23,12 +22,14 @@ impl App {
     /// Handle a key press per the Lightroom key-binding table.
     pub(crate) fn handle_key(&mut self, code: KeyCode) {
         let shift = self.modifiers.shift_key();
-        #[cfg(target_arch = "wasm32")]
+        // Either modifier works as the accelerator everywhere. Only Cmd is
+        // idiomatic on a Mac and only Ctrl on Windows and Linux, but a browser
+        // window can be either, so both are accepted and no binding here means
+        // anything different under one of them. macOS also reads Ctrl+A/E/K as
+        // emacs caret motions, but those only apply inside a text field, and
+        // egui consumes every key while one has focus, so `main.rs` returns
+        // before this runs.
         let cmd = self.modifiers.super_key() || self.modifiers.control_key();
-        #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
-        let cmd = self.modifiers.super_key();
-        #[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
-        let cmd = self.modifiers.control_key();
         let alt = self.modifiers.alt_key();
 
         // Alt+= and Alt+- size all text, in any mode. Shift is allowed so `+` works.
@@ -155,20 +156,6 @@ impl App {
                     return;
                 }
                 _ => {}
-            }
-        }
-
-        // Shift+1..5 set a color label and Shift+0 clears it.
-        if shift && !cmd && !alt {
-            if let Some(n) = digit_of(code) {
-                if n == 0 {
-                    self.set_label(None);
-                    return;
-                }
-                if let Some(label) = ColorLabel::from_digit(n) {
-                    self.set_label(Some(label));
-                    return;
-                }
             }
         }
 
@@ -317,7 +304,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{Catalog, ColorLabel};
     use crate::navigation::Playlist;
     use std::sync::atomic::{AtomicU64, Ordering};
     use winit::keyboard::ModifiersState;
@@ -490,38 +476,30 @@ mod tests {
         let advertised = crate::i18n::t()
             .help
             .iter()
-            .filter(|s| crate::app::SHOW_GROUPING_TOOLS || !s.needs_grouping)
             .flat_map(|s| s.rows)
             .any(|(keys, _)| *keys == "B" || *keys == "D");
-        assert_eq!(
-            advertised,
-            crate::app::SHOW_GROUPING_TOOLS,
-            "the overlay must list B and D exactly when they work"
+        assert!(
+            !advertised,
+            "the grouping tools are unfinished, so the overlay must not list B or D"
         );
     }
 
+    /// Color labels have no UI yet, so the keys that used to set them are
+    /// gone and the overlay does not mention them.
     #[test]
-    fn shift_digits_set_and_clear_the_color_label() {
-        let (mut app, paths) = folder_app(1);
-        let dir = paths[0].parent().unwrap().to_path_buf();
+    fn shift_digits_do_nothing() {
+        let (mut app, _) = folder_app(1);
         press(&mut app, ModifiersState::SHIFT, KeyCode::Digit2);
-        assert_eq!(app.selected_label(), Some(ColorLabel::Yellow));
-        app.catalog
-            .flush_blocking(std::time::Duration::from_secs(10));
-        assert_eq!(
-            Catalog::with_dir(dir.clone()).label(&paths[0]),
-            Some(ColorLabel::Yellow),
-            "label persisted to the sidecar"
-        );
-        assert!(app.filter.is_none(), "Shift+digit no longer filters");
-
-        press(&mut app, ModifiersState::SHIFT, KeyCode::Digit5);
-        assert_eq!(app.selected_label(), Some(ColorLabel::Purple));
-        press(&mut app, ModifiersState::SHIFT, KeyCode::Digit0);
         assert_eq!(app.selected_label(), None);
-        app.catalog
-            .flush_blocking(std::time::Duration::from_secs(10));
-        assert_eq!(Catalog::with_dir(dir).label(&paths[0]), None);
+        assert_eq!(app.selected_rating(), 0, "Shift+digit is not a rating");
+        assert!(app.filter.is_none(), "Shift+digit does not filter");
+
+        let advertised = crate::i18n::t()
+            .help
+            .iter()
+            .flat_map(|s| s.rows)
+            .any(|(keys, _)| keys.starts_with("Shift+0") || keys.starts_with("Shift+1"));
+        assert!(!advertised, "the overlay must not list the color labels");
     }
 
     #[test]
