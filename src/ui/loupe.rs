@@ -175,6 +175,16 @@ pub(super) fn loupe_touchup_overlay(
                     egui::Stroke::new(2.5_f32, egui::Color32::from_black_alpha(160)),
                 );
                 painter.circle_stroke(p, r, egui::Stroke::new(1.2_f32, egui::Color32::WHITE));
+                // The inner ring is where the feather ends and the fix is at
+                // full strength.
+                let feather = app.touchup_feather();
+                if feather < 1.0 {
+                    painter.circle_stroke(
+                        p,
+                        r * (1.0 - feather),
+                        egui::Stroke::new(1.0_f32, egui::Color32::from_white_alpha(170)),
+                    );
+                }
                 painter.circle_filled(p, 1.5, egui::Color32::WHITE);
 
                 // The wheel sizes the brush instead of zooming. Shift and Alt

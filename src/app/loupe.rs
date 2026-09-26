@@ -379,6 +379,21 @@ impl App {
         self.request_redraw();
     }
 
+    /// O shows or hides the overlay. Shift+O swaps subject and background,
+    /// showing the overlay first if it is hidden.
+    pub(super) fn selection_key(&mut self, shift: bool) {
+        if !Self::selection_supported() {
+            return;
+        }
+        if !shift {
+            return self.toggle_selection();
+        }
+        if !self.selection_on {
+            self.toggle_selection();
+        }
+        self.toggle_selection_invert();
+    }
+
     /// Push the current mask, or its absence, to the renderer. The mask stays
     /// at Vision's resolution. The shader samples it by image UV, so it needs
     /// no update on zoom or pan.

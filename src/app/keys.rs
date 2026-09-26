@@ -76,6 +76,17 @@ impl App {
                 }
                 KeyCode::Delete | KeyCode::Backspace => self.delete_selected_touchup(),
                 KeyCode::KeyZ if cmd => self.undo_touchup(),
+                // Brackets size the brush here instead of rotating.
+                KeyCode::BracketLeft | KeyCode::BracketRight if !cmd && !alt => {
+                    let up = code == KeyCode::BracketRight;
+                    if shift {
+                        self.step_touchup_feather(if up { 0.1 } else { -0.1 });
+                    } else {
+                        self.step_touchup_radius(up);
+                    }
+                }
+                KeyCode::KeyQ if !cmd && !alt => self.toggle_touchup(),
+                KeyCode::KeyO if !cmd && !alt => self.selection_key(shift),
                 _ => {}
             }
             return;
@@ -220,6 +231,12 @@ impl App {
             }
 
             KeyCode::KeyO if cmd && !alt => self.open_folder_picker(),
+            KeyCode::KeyO if loupe && !cmd && !alt => self.selection_key(shift),
+            KeyCode::KeyK if loupe && !cmd && !alt => self.set_develop_tab(DevelopTab::Masks),
+            KeyCode::KeyQ if loupe && !cmd && !alt => {
+                self.set_develop_tab(DevelopTab::Masks);
+                self.toggle_touchup();
+            }
 
             KeyCode::KeyG => self.enter_grid(),
             KeyCode::KeyI
@@ -737,6 +754,85 @@ mod tests {
         press(&mut app, ModifiersState::empty(), KeyCode::BracketLeft);
         press(&mut app, ModifiersState::empty(), KeyCode::BracketLeft);
         assert_eq!(app.rotations.get(&paths[0]), Some(&3));
+    }
+
+    #[test]
+    fn q_arms_touch_up_on_the_masks_tab_and_q_again_disarms() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyQ);
+        assert!(app.touchup_active());
+        assert_eq!(app.develop_tab(), DevelopTab::Masks);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyQ);
+        assert!(!app.touchup_active());
+        assert_eq!(app.develop_tab(), DevelopTab::Masks);
+    }
+
+    #[test]
+    fn k_opens_masks_without_arming_touch_up() {
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyK);
+        assert_eq!(app.develop_tab(), DevelopTab::Masks);
+        assert!(!app.touchup_active());
+    }
+
+    #[test]
+    fn brackets_size_the_brush_while_touch_up_is_armed_and_rotate_after() {
+        let (mut app, paths) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyQ);
+        let start = app.touchup_radius();
+        press(&mut app, ModifiersState::empty(), KeyCode::BracketRight);
+        let grown = app.touchup_radius();
+        assert!(grown > start, "{grown} > {start}");
+        press(&mut app, ModifiersState::empty(), KeyCode::BracketLeft);
+        assert!(app.touchup_radius() < grown);
+        assert_eq!(app.rotations.get(&paths[0]), None, "no rotation while armed");
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        press(&mut app, ModifiersState::empty(), KeyCode::BracketRight);
+        assert_eq!(app.rotations.get(&paths[0]), Some(&1));
+    }
+
+    #[test]
+    fn shift_brackets_move_the_feather_within_its_range() {
+        let (mut app, paths) = editor_app();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyQ);
+        let radius = app.touchup_radius();
+        assert_eq!(app.touchup_feather(), 1.0);
+        press(&mut app, ModifiersState::SHIFT, KeyCode::BracketRight);
+        assert_eq!(app.touchup_feather(), 1.0, "clamps at 1.0");
+        press(&mut app, ModifiersState::SHIFT, KeyCode::BracketLeft);
+        assert!((app.touchup_feather() - 0.9).abs() < 1e-5);
+        for _ in 0..20 {
+            press(&mut app, ModifiersState::SHIFT, KeyCode::BracketLeft);
+        }
+        assert_eq!(app.touchup_feather(), TOUCHUP_MIN_FEATHER);
+        assert_eq!(app.touchup_radius(), radius, "feather keys leave the size");
+        assert_eq!(app.rotations.get(&paths[0]), None);
+    }
+
+    #[test]
+    fn o_shows_the_subject_overlay_and_shift_o_swaps_subject_and_background() {
+        let (mut app, _) = editor_app();
+        let supported = App::selection_supported();
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyO);
+        assert_eq!(app.selection_on(), supported);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyO);
+        assert!(!app.selection_on());
+
+        press(&mut app, ModifiersState::SHIFT, KeyCode::KeyO);
+        assert_eq!(
+            (app.selection_on(), app.selection_inverted()),
+            (supported, supported),
+            "Shift+O shows the overlay on the background"
+        );
+
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyQ);
+        press(&mut app, ModifiersState::SHIFT, KeyCode::KeyO);
+        assert_eq!(
+            (app.selection_on(), app.selection_inverted()),
+            (supported, false),
+            "and swaps back while Touch Up is armed"
+        );
     }
 
     /// The grouping tools are either wholly reachable or wholly absent. While

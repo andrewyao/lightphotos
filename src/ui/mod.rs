@@ -106,6 +106,7 @@ pub enum UiAction {
     SetDevelopTab(crate::app::DevelopTab),
     ToggleTouchUp,
     SetTouchUpRadius(f32),
+    SetTouchUpFeather(f32),
     TouchUpClick(f32, f32),
     SelectTouchUp(usize),
     DeleteTouchUp,

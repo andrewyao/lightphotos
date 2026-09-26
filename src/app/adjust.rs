@@ -36,6 +36,14 @@ impl App {
     pub(crate) fn touchup_active(&self) -> bool {
         self.tool == LoupeTool::TouchUp
     }
+    pub(crate) fn toggle_touchup(&mut self) {
+        self.tool = if self.tool == LoupeTool::TouchUp {
+            LoupeTool::None
+        } else {
+            LoupeTool::TouchUp
+        };
+        self.request_redraw();
+    }
     pub(crate) fn touchup_radius(&self) -> f32 {
         self.touchup_radius.max(self.touchup_radius_min())
     }
@@ -44,6 +52,22 @@ impl App {
     }
     pub(crate) fn set_touchup_radius(&mut self, radius: f32) {
         self.touchup_radius = radius.clamp(self.touchup_radius_min(), TOUCHUP_MAX_RADIUS);
+    }
+    /// Multiplicative, so each press is the same visible step at any size.
+    pub(crate) fn step_touchup_radius(&mut self, grow: bool) {
+        let factor = if grow { 1.15 } else { 1.0 / 1.15 };
+        self.set_touchup_radius(self.touchup_radius() * factor);
+        self.request_redraw();
+    }
+    pub(crate) fn touchup_feather(&self) -> f32 {
+        self.touchup_feather
+    }
+    pub(crate) fn set_touchup_feather(&mut self, feather: f32) {
+        self.touchup_feather = feather.clamp(TOUCHUP_MIN_FEATHER, 1.0);
+    }
+    pub(crate) fn step_touchup_feather(&mut self, delta: f32) {
+        self.set_touchup_feather(self.touchup_feather + delta);
+        self.request_redraw();
     }
     pub(crate) fn touchup_radius_min(&self) -> f32 {
         let (w, h) = self.image_size();
@@ -226,7 +250,7 @@ impl App {
             center: [u.clamp(0.0, 1.0), v.clamp(0.0, 1.0)],
             radius,
             source: [su, sv],
-            feather: TOUCHUP_FEATHER,
+            feather: self.touchup_feather,
             delta: [
                 target_ring[0] - source_ring[0],
                 target_ring[1] - source_ring[1],
@@ -570,11 +594,10 @@ mod tests {
             app.set_develop_tab(DevelopTab::Masks);
             let t = crate::i18n::t();
             let painted = settled(&mut app);
-            let brush = painted.pos_of(t.brush_size);
-            // The switch sits just left of the Brush size label; the slider
-            // between that label and Undo.
-            let switch = brush - egui::vec2(30.0, 0.0);
-            let slider = egui::pos2((brush.x + painted.pos_of(t.undo).x) / 2.0, brush.y);
+            // The switch sits just left of Undo; the Size slider right of its
+            // label, on the row below.
+            let switch = painted.pos_of(t.undo) - egui::vec2(20.0, 0.0);
+            let slider = painted.pos_of(t.brush_size) + egui::vec2(100.0, 0.0);
             let resizes = |actions: &[UiAction]| {
                 actions
                     .iter()
@@ -598,6 +621,65 @@ mod tests {
                 resizes(&actions),
                 "the brush size is live once Touch Up is on"
             );
+        }
+
+        #[test]
+        fn the_feather_slider_is_live_only_while_touch_up_is_armed() {
+            let mut app = loupe("feather-slider");
+            app.set_develop_tab(DevelopTab::Masks);
+            let t = crate::i18n::t();
+            let painted = settled(&mut app);
+            let feather = painted.pos_of(t.feather);
+            assert!(
+                feather.y > painted.pos_of(t.brush_size).y,
+                "Feather sits on its own row below Size"
+            );
+            let slider = feather + egui::vec2(100.0, 0.0);
+            let feathered = |actions: &[UiAction]| {
+                actions.iter().find_map(|a| match a {
+                    UiAction::SetTouchUpFeather(f) => Some(*f),
+                    _ => None,
+                })
+            };
+
+            let (actions, _) = click(&mut app, slider);
+            assert_eq!(feathered(&actions), None, "locked while Touch Up is off");
+
+            app.toggle_touchup();
+            let _ = settled(&mut app);
+            let (actions, _) = click(&mut app, slider);
+            let f = feathered(&actions).expect("live once Touch Up is on");
+            assert!(f < 1.0, "a click mid-track lowers the feather from 1.0: {f}");
+            app.apply_ui_actions(actions);
+            assert_eq!(app.touchup_feather(), f);
+        }
+
+        #[test]
+        fn a_new_spot_takes_the_brush_feather() {
+            let mut app = loupe("feather-spot");
+            let path = app.shown.path().unwrap().to_path_buf();
+            let (w, h) = (400, 300);
+            app.shown = Shown::Preview(path.clone(), w, h);
+            app.source_size = Some((w, h));
+            let mut loader = crate::loader::Loader::new(16384);
+            loader.insert_full_external(
+                path,
+                std::sync::Arc::new(crate::image_decode::DecodedImage::new_tracked(
+                    crate::image_decode::DecodedImageFields {
+                        width: w,
+                        height: h,
+                        rgba: vec![128; (w * h * 4) as usize],
+                        pixel_format: Default::default(),
+                    },
+                )),
+            );
+            app.loader = Some(loader);
+
+            app.set_touchup_feather(0.3);
+            app.add_touchup(0.5, 0.5);
+            let spots = app.current_touchups();
+            assert_eq!(spots.len(), 1);
+            assert_eq!(spots[0].feather, 0.3);
         }
 
         #[test]

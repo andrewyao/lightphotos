@@ -67,8 +67,11 @@ const PREVIEW_QUANTUM: u32 = 512;
 /// Smallest touch-up radius in source-image pixels.
 pub(crate) const TOUCHUP_MIN_PIXELS: f32 = 3.0;
 pub(crate) const TOUCHUP_MAX_RADIUS: f32 = 0.15;
-/// Fraction of the patch radius used to blend the correction into its edges.
+/// Default brush feather: the fraction of the patch radius used to blend the
+/// correction into its edges.
 const TOUCHUP_FEATHER: f32 = 1.0;
+/// Both renderers clamp feather to this, so the brush stops here too.
+pub(crate) const TOUCHUP_MIN_FEATHER: f32 = 0.02;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ViewMode {
@@ -485,6 +488,7 @@ pub(crate) struct App {
     /// Loupe click tool. Crop mode (`crop_edit`) turns it off.
     tool: LoupeTool,
     touchup_radius: f32,
+    touchup_feather: f32,
     touchup_selected: Option<usize>,
     /// Per-image spot lists as they were before each Touch Up add or delete,
     /// newest last, so Undo can step back through both.
@@ -871,6 +875,7 @@ impl App {
             tool: LoupeTool::None,
             // Clamped up to TOUCHUP_MIN_PIXELS once an image is loaded.
             touchup_radius: 0.001,
+            touchup_feather: TOUCHUP_FEATHER,
             touchup_selected: None,
             touchup_undo: HashMap::new(),
             develop_open: true,
@@ -1456,17 +1461,14 @@ impl App {
                 ui::UiAction::CropRelease => self.crop_release(),
                 ui::UiAction::ToggleWbPicker => self.toggle_wb_picker(),
                 ui::UiAction::PickWhiteBalance(u, v) => self.pick_white_balance(u, v),
-                ui::UiAction::ToggleTouchUp => {
-                    self.tool = if self.tool == LoupeTool::TouchUp {
-                        LoupeTool::None
-                    } else {
-                        LoupeTool::TouchUp
-                    };
-                    self.request_redraw();
-                }
+                ui::UiAction::ToggleTouchUp => self.toggle_touchup(),
                 ui::UiAction::SetDevelopTab(tab) => self.set_develop_tab(tab),
                 ui::UiAction::SetTouchUpRadius(r) => {
                     self.set_touchup_radius(r);
+                    self.request_redraw();
+                }
+                ui::UiAction::SetTouchUpFeather(f) => {
+                    self.set_touchup_feather(f);
                     self.request_redraw();
                 }
                 ui::UiAction::TouchUpClick(u, v) => self.add_touchup(u, v),
