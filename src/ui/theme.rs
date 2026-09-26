@@ -6,6 +6,7 @@
 //! Every theme has two text tiers: a label color for names and captions, and a
 //! value color with more contrast for the data they name.
 
+use crate::app::StatusKind;
 use egui::{Color32, Stroke};
 
 /// Colors that read on every theme's panels, or that sit on a photo.
@@ -86,6 +87,41 @@ pub struct Palette {
     /// Text field backgrounds.
     field: Color32,
     dark_base: bool,
+}
+
+/// A status toast's colors. The fill carries the kind, the text reads on the
+/// fill, and the border separates the toast from whatever is behind it.
+pub struct ToastColors {
+    pub fill: Color32,
+    pub text: Color32,
+    pub stroke: Color32,
+}
+
+impl Palette {
+    /// Deep fills with pale text on a dark theme, pale fills with deep text on
+    /// a light one, so a toast never looks like a hole in the app.
+    pub fn toast(&self, kind: StatusKind) -> ToastColors {
+        let rgb = Color32::from_rgb;
+        let (fill, text, stroke) = match (kind, self.dark_base) {
+            (StatusKind::Success, true) => (rgb(20, 83, 45), rgb(220, 252, 231), rgb(187, 247, 208)),
+            (StatusKind::Error, true) => (rgb(127, 29, 29), rgb(254, 226, 226), rgb(254, 202, 202)),
+            (StatusKind::Progress, true) => (rgb(30, 58, 138), rgb(219, 234, 254), rgb(191, 219, 254)),
+            (StatusKind::Info, true) => (
+                Color32::from_gray(50),
+                Color32::from_gray(245),
+                Color32::from_gray(225),
+            ),
+            (StatusKind::Success, false) => (rgb(220, 252, 231), rgb(20, 83, 45), rgb(21, 128, 61)),
+            (StatusKind::Error, false) => (rgb(254, 226, 226), rgb(127, 29, 29), rgb(185, 28, 28)),
+            (StatusKind::Progress, false) => (rgb(219, 234, 254), rgb(30, 58, 138), rgb(29, 78, 216)),
+            (StatusKind::Info, false) => (
+                Color32::from_gray(252),
+                Color32::from_gray(20),
+                Color32::from_gray(110),
+            ),
+        };
+        ToastColors { fill, text, stroke }
+    }
 }
 
 /// Which way text should go on a background: light text on the darker half of
@@ -336,6 +372,23 @@ mod tests {
             }
             let ratio = contrast_ratio(p.danger, Color32::from_gray(p.widget[0]));
             assert!(ratio >= 3.0, "{theme:?} danger {ratio:.2}:1");
+        }
+    }
+
+    #[test]
+    fn toasts_read_on_their_fill_and_stand_out_from_the_app() {
+        use StatusKind::*;
+        for theme in ALL {
+            let p = palette(theme);
+            for kind in [Success, Error, Progress, Info] {
+                let c = p.toast(kind);
+                let text = contrast_ratio(c.text, c.fill);
+                assert!(text >= 7.0, "{theme:?} {kind:?} text {text:.2}:1");
+                for bg in [p.panel, p.window, p.loupe_bg, p.grid_cell] {
+                    let edge = contrast_ratio(c.stroke, bg);
+                    assert!(edge >= 3.0, "{theme:?} {kind:?} border {edge:.2}:1");
+                }
+            }
         }
     }
 

@@ -643,19 +643,30 @@ fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// A status message (such as an export result) shown bottom-center for a few
 /// seconds.
 fn status_toast(ui: &egui::Ui, app: &App) {
-    let Some(text) = app.status_text() else {
+    let Some((kind, text)) = app.status() else {
         return;
     };
+    let colors = theme::colors(ui.ctx()).toast(kind);
     let screen = ui.ctx().content_rect();
     egui::Area::new(egui::Id::new("status_toast"))
         .order(egui::Order::Foreground)
         .fixed_pos(egui::pos2(screen.center().x, screen.max.y - 48.0))
         .pivot(egui::Align2::CENTER_CENTER)
+        // The toast repaints only every 250 ms, which stretches egui's fade-in
+        // into a washed-out first half second.
+        .fade_in(false)
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style())
-                .fill(egui::Color32::from_black_alpha(210))
+                .fill(colors.fill)
+                .stroke(egui::Stroke::new(1.5, colors.stroke))
+                .corner_radius(8)
+                .inner_margin(egui::Margin::symmetric(16, 10))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new(text).color(egui::Color32::WHITE));
+                    // One line: a wrapped toast reads as two messages.
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text).color(colors.text).strong())
+                            .extend(),
+                    );
                 });
         });
     // Keep repainting until the toast expires so it clears on its own.

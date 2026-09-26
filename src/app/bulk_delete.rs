@@ -141,7 +141,7 @@ impl App {
             return;
         }
         if self.bulk_delete.is_some() || self.export_progress.is_some() {
-            self.set_status(crate::i18n::t().delete_in_progress.to_string());
+            self.set_status(StatusKind::Error, crate::i18n::t().delete_in_progress.to_string());
             return;
         }
         let total = paths.len();
@@ -151,7 +151,7 @@ impl App {
         let (origin_dir, origin_handle) = {
             let dir = paths[0].parent().unwrap_or(Path::new("")).to_path_buf();
             let Some(handle) = self.web_dir_handles.get(&dir).cloned() else {
-                self.set_status((crate::i18n::t().delete_no_handle)(
+                self.set_status(StatusKind::Error, (crate::i18n::t().delete_no_handle)(
                     &dir.display().to_string(),
                 ));
                 return;
@@ -251,7 +251,7 @@ impl App {
             self.prune_deleted(d);
         } else {
             let d = self.bulk_delete.as_ref().unwrap();
-            self.set_status((crate::i18n::t().deleting)(d.done(), d.total));
+            self.set_status(StatusKind::Progress, (crate::i18n::t().deleting)(d.done(), d.total));
         }
         self.request_redraw();
     }
@@ -367,10 +367,10 @@ impl App {
             return;
         }
         let t = crate::i18n::t();
-        self.set_status(match d.last_err {
-            None => (t.deleted)(n),
-            Some(e) => (t.deleted_partial)(n, d.total, &e),
-        });
+        match d.last_err {
+            None => self.set_status(StatusKind::Success, (t.deleted)(n)),
+            Some(e) => self.set_status(StatusKind::Error, (t.deleted_partial)(n, d.total, &e)),
+        }
     }
 
     /// Keep the Loupe on a photo that still exists after `visible` shrank, and

@@ -233,6 +233,16 @@ pub(crate) struct ExportProgress {
 /// mask or the reason there isn't one.
 pub(crate) type SelectionOutcome = (PathBuf, Result<crate::segmentation::Mask, String>);
 
+/// What a status toast reports, which sets its colors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StatusKind {
+    Success,
+    Error,
+    Progress,
+    /// Neither a result nor progress, such as a batch the user stopped.
+    Info,
+}
+
 /// A wasm32 folder navigation waiting on its async subfolder listing.
 /// `Open` toggles expansion and, for a folder with subfolders but no photos,
 /// skips to its first child, like native `open_folder`. `Load` swaps the grid,
@@ -322,7 +332,7 @@ pub(crate) struct App {
     /// The album add that ends an Immich batch, with the batch's summary to
     /// finish the toast with.
     #[cfg(not(target_arch = "wasm32"))]
-    album_add: Option<(Receiver<Result<crate::immich::Album, String>>, String)>,
+    album_add: Option<(Receiver<Result<crate::immich::Album, String>>, String, StatusKind)>,
     /// The running bulk delete, if any. `pub(crate)` because the frame loop
     /// polls it.
     pub(crate) bulk_delete: Option<bulk_delete::BulkDelete>,
@@ -699,7 +709,7 @@ pub(crate) struct App {
     pub(crate) quit_requested: bool,
 
     /// Toast message and when it was set.
-    status: Option<(String, Instant)>,
+    status: Option<(StatusKind, String, Instant)>,
 
     /// Redraw retries pause while the window is hidden or minimized.
     pub(crate) occluded: bool,
@@ -1240,10 +1250,10 @@ impl App {
 
         // Show catalog write failures, or the user loses the change silently.
         if let Some(cause) = self.catalog.take_error() {
-            self.set_status((crate::i18n::t().catalog_save_failed)(&cause));
+            self.set_status(StatusKind::Error, (crate::i18n::t().catalog_save_failed)(&cause));
         }
         if let Some(message) = self.presets.take_error() {
-            self.set_status(message);
+            self.set_status(StatusKind::Error, message);
         }
 
         let pixels_per_point = self.egui_ctx.pixels_per_point();

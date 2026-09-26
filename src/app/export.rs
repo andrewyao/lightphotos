@@ -162,7 +162,7 @@ impl App {
     /// form closes once the batch is running, and the toast takes over.
     pub(super) fn run_export_form(&mut self) {
         if let Some(why) = self.export_blocker() {
-            self.set_status(why.into());
+            self.set_status(StatusKind::Error, why.into());
             self.request_redraw();
             return;
         }
@@ -323,7 +323,7 @@ impl App {
 
         let folder = self.folder_sel.clone().unwrap_or_default();
         let Some(folder_handle) = self.web_dir_handles.get(&folder).cloned() else {
-            self.set_status(crate::i18n::t().export_no_handle.into());
+            self.set_status(StatusKind::Error, crate::i18n::t().export_no_handle.into());
             self.request_redraw();
             return;
         };
@@ -359,7 +359,7 @@ impl App {
             unrated: 0,
             last_rating_err: None,
         });
-        self.set_status((crate::i18n::t().exporting)(0, total));
+        self.set_status(StatusKind::Progress, (crate::i18n::t().exporting)(0, total));
         self.request_redraw();
 
         let pool = self.web_worker_pool.handle();
@@ -458,7 +458,7 @@ impl App {
                     return;
                 };
                 if let Err(e) = std::fs::create_dir_all(&dir) {
-                    self.set_status((crate::i18n::t().export_no_folder)(&e.to_string()));
+                    self.set_status(StatusKind::Error, (crate::i18n::t().export_no_folder)(&e.to_string()));
                     self.request_redraw();
                     return;
                 }
@@ -503,7 +503,7 @@ impl App {
             album,
             asset_ids: Vec::new(),
         });
-        self.set_status(Self::progress_text(uploading, 0, total));
+        self.set_status(StatusKind::Progress, Self::progress_text(uploading, 0, total));
         self.request_redraw();
     }
 
@@ -561,6 +561,11 @@ impl App {
         if prog.done >= prog.total {
             let ok = prog.total - prog.errors;
             let t = crate::i18n::t();
+            let kind = if prog.last_err.is_some() || prog.last_rating_err.is_some() {
+                StatusKind::Error
+            } else {
+                StatusKind::Success
+            };
             let summary = match (prog.last_err, prog.uploading) {
                 (None, false) => (t.exported)(ok),
                 (None, true) => (t.uploaded)(ok, prog.duplicates),
@@ -572,13 +577,13 @@ impl App {
                 None => summary,
             };
             #[cfg(not(target_arch = "wasm32"))]
-            let summary = match self.start_album_add(prog.album, prog.asset_ids, summary) {
-                Ok(adding) => adding,
-                Err(summary) => summary,
+            let (kind, summary) = match self.start_album_add(prog.album, prog.asset_ids, summary, kind) {
+                Ok(adding) => (StatusKind::Progress, adding),
+                Err(summary) => (kind, summary),
             };
-            self.set_status(summary);
+            self.set_status(kind, summary);
         } else {
-            self.set_status(Self::progress_text(prog.uploading, prog.done, prog.total));
+            self.set_status(StatusKind::Progress, Self::progress_text(prog.uploading, prog.done, prog.total));
             self.export_progress = Some(prog);
         }
     }
@@ -592,6 +597,7 @@ impl App {
         album: AlbumChoice,
         ids: Vec<String>,
         summary: String,
+        kind: StatusKind,
     ) -> Result<String, String> {
         let ImmichLink::Connected { server, .. } = &self.immich else {
             return Err(summary);
@@ -618,7 +624,7 @@ impl App {
             return Err((crate::i18n::t().album_failed)(&summary, &e.to_string()));
         }
         let adding = (crate::i18n::t().adding_to_album)(&summary, &name);
-        self.album_add = Some((rx, summary));
+        self.album_add = Some((rx, summary, kind));
         Ok(adding)
     }
 
@@ -627,7 +633,7 @@ impl App {
     /// into the same album rather than a second one of the same name.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn poll_album_add(&mut self) -> bool {
-        let Some((rx, _)) = &self.album_add else {
+        let Some((rx, ..)) = &self.album_add else {
             return false;
         };
         let result = match rx.try_recv() {
@@ -635,12 +641,12 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Empty) => return true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the album add stopped".into()),
         };
-        let Some((_, summary)) = self.album_add.take() else {
+        let Some((_, summary, export_kind)) = self.album_add.take() else {
             return false;
         };
         let summary = &summary;
         let t = crate::i18n::t();
-        let status = match result {
+        let (kind, status) = match result {
             Ok(album) => {
                 if let ImmichLink::Connected {
                     albums: Ok(list), ..
@@ -660,17 +666,17 @@ impl App {
                         ..self.export_settings.clone()
                     });
                 }
-                (t.added_to_album)(summary, &album.name)
+                (export_kind, (t.added_to_album)(summary, &album.name))
             }
-            Err(e) => (t.album_failed)(summary, &e),
+            Err(e) => (StatusKind::Error, (t.album_failed)(summary, &e)),
         };
-        self.set_status(status);
+        self.set_status(kind, status);
         self.request_redraw();
         false
     }
 
-    pub(super) fn set_status(&mut self, msg: String) {
-        self.status = Some((msg, Instant::now()));
+    pub(super) fn set_status(&mut self, kind: StatusKind, msg: String) {
+        self.status = Some((kind, msg, Instant::now()));
     }
 
     /// True while a long operation owns the status line. One predicate rather
@@ -687,15 +693,17 @@ impl App {
             || self.catalog.backlog() > 0
     }
 
-    /// The current status message. It expires after 3 seconds, except while a
-    /// batch is running, so a slow decode can't blank the progress toast.
+    /// The current status message and its kind. It expires after 3 seconds,
+    /// except while a batch is running, so a slow decode can't blank the
+    /// progress toast.
+    pub(crate) fn status(&self) -> Option<(StatusKind, &str)> {
+        let (kind, text, at) = self.status.as_ref()?;
+        (self.batch_running() || at.elapsed().as_secs_f32() < 3.0).then_some((*kind, text.as_str()))
+    }
+
+    #[cfg(test)]
     pub(crate) fn status_text(&self) -> Option<&str> {
-        if self.batch_running() {
-            return self.status.as_ref().map(|(s, _)| s.as_str());
-        }
-        self.status
-            .as_ref()
-            .and_then(|(s, t)| (t.elapsed().as_secs_f32() < 3.0).then_some(s.as_str()))
+        self.status().map(|(_, text)| text)
     }
 }
 
@@ -721,9 +729,9 @@ mod status_tests {
     /// An App whose status was set longer ago than the 3-second expiry.
     fn app_with_a_stale_status() -> App {
         let mut app = App::new(None);
-        app.set_status("Rated 20000 photos".to_string());
-        let (msg, _) = app.status.take().unwrap();
-        app.status = Some((msg, Instant::now() - std::time::Duration::from_secs(4)));
+        app.set_status(StatusKind::Success, "Rated 20000 photos".to_string());
+        let (kind, msg, _) = app.status.take().unwrap();
+        app.status = Some((kind, msg, Instant::now() - std::time::Duration::from_secs(4)));
         app
     }
 
@@ -800,7 +808,7 @@ mod status_tests {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
-            let status = app.status.as_ref().unwrap().0.clone();
+            let status = app.status.as_ref().unwrap().1.clone();
             eprintln!("{status}");
             status
         };
@@ -857,8 +865,9 @@ mod status_tests {
         app.selected.insert(0);
         app.delete_selection();
         // `delete_selection` sets its own progress toast; age it past expiry.
-        let (msg, _) = app.status.take().unwrap();
+        let (kind, msg, _) = app.status.take().unwrap();
         app.status = Some((
+            kind,
             msg.clone(),
             Instant::now() - std::time::Duration::from_secs(4),
         ));
@@ -892,7 +901,7 @@ mod status_tests {
         app.export_settings.target = ExportTarget::Immich;
         app.export_settings.album = AlbumChoice::New("Trip".into());
         let (tx, rx) = std::sync::mpsc::channel();
-        app.album_add = Some((rx, "Uploaded 2".into()));
+        app.album_add = Some((rx, "Uploaded 2".into(), StatusKind::Success));
         assert!(app.poll_album_add(), "still waiting before a reply");
         assert!(
             app.batch_running(),
@@ -941,7 +950,7 @@ mod status_tests {
         assert_eq!(app.export_blocker(), None);
 
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.album_add = Some((rx, "Uploaded 1".into()));
+        app.album_add = Some((rx, "Uploaded 1".into(), StatusKind::Success));
         assert_eq!(
             app.export_blocker(),
             Some(crate::i18n::t().export_in_progress),
@@ -950,14 +959,38 @@ mod status_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A failed export stays red after its album add succeeds, and a failed
+    /// album add turns a clean export red.
+    #[test]
+    fn an_album_add_keeps_or_raises_the_export_error() {
+        let mut app = App::new(None);
+        app.immich = connected(vec![]);
+        let album = || Album {
+            id: "a1".into(),
+            name: "Trip".into(),
+        };
+        let cases = [
+            (StatusKind::Success, Ok(album()), StatusKind::Success),
+            (StatusKind::Error, Ok(album()), StatusKind::Error),
+            (StatusKind::Success, Err("offline".to_string()), StatusKind::Error),
+        ];
+        for (export_kind, result, expected) in cases {
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.album_add = Some((rx, "Uploaded 1".into(), export_kind));
+            tx.send(result).unwrap();
+            assert!(!app.poll_album_add());
+            assert_eq!(app.status().map(|(kind, _)| kind), Some(expected));
+        }
+    }
+
     /// Nothing to add, or no album chosen, leaves the summary as it was.
     #[test]
     fn an_album_add_starts_only_with_an_album_and_uploads() {
         let mut app = App::new(None);
         app.immich = connected(vec![]);
-        let none = app.start_album_add(AlbumChoice::None, vec!["x".into()], "s".into());
+        let none = app.start_album_add(AlbumChoice::None, vec!["x".into()], "s".into(), StatusKind::Success);
         assert_eq!(none, Err("s".into()));
-        let empty = app.start_album_add(AlbumChoice::New("Trip".into()), vec![], "s".into());
+        let empty = app.start_album_add(AlbumChoice::New("Trip".into()), vec![], "s".into(), StatusKind::Success);
         assert_eq!(empty, Err("s".into()));
         assert!(app.album_add.is_none());
     }
