@@ -130,7 +130,12 @@ pub(super) fn loupe_touchup_overlay(
     out: &mut FrameOutput,
 ) {
     let painter = ui.painter_at(central);
-    for (i, t) in app.current_touchups().iter().enumerate() {
+    let spots: &[crate::develop::TouchUp] = if app.touchup_spots_shown() {
+        app.current_touchups()
+    } else {
+        &[]
+    };
+    for (i, t) in spots.iter().enumerate() {
         let c = app.loupe_tex_to_screen(central, t.center[0], t.center[1]);
         let radius = touchup_screen_radius(app, central, t.center, t.radius).max(3.0);
         let selected = app.touchup_selected() == Some(i);
@@ -210,7 +215,7 @@ pub(super) fn loupe_touchup_overlay(
                 if let Some(p) = resp.interact_pointer_pos() {
                     let (u, v) = app.loupe_screen_to_tex(central, p);
                     let mut hit = None;
-                    for (i, t) in app.current_touchups().iter().enumerate() {
+                    for (i, t) in spots.iter().enumerate() {
                         let (radius_u, radius_v) = app.touchup_uv_radii(t.radius);
                         let dx = (u - t.center[0]) / radius_u;
                         let dy = (v - t.center[1]) / radius_v;
