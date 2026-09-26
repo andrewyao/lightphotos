@@ -269,12 +269,6 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             out.actions.push(UiAction::ToggleTouchUp);
         }
         if ui
-            .add_enabled(app.can_undo_touchup(), egui::Button::new(t.undo))
-            .clicked()
-        {
-            out.actions.push(UiAction::UndoTouchUp);
-        }
-        if ui
             .add_enabled(
                 app.touchup_selected().is_some(),
                 egui::Button::new(t.delete),

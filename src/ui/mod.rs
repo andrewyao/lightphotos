@@ -110,7 +110,6 @@ pub enum UiAction {
     TouchUpClick(f32, f32),
     SelectTouchUp(usize),
     DeleteTouchUp,
-    UndoTouchUp,
     SetAdjustments(Adjustments),
     ResetAdjustments,
     /// Pick develop settings for the loupe image from its own histogram.
