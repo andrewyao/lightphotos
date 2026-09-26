@@ -494,11 +494,11 @@ fn landing_tip(ui: &mut egui::Ui, col_w: f32, pal: &theme::Palette) {
             ui.set_width(col_w - 40.0);
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.horizontal(|ui| {
-                    info_icon(ui);
+                    info_icon(ui, pal);
                     ui.label(
                         egui::RichText::new(t().landing_tip_title)
                             .size(font_size::px(ui.style(), 16.0))
-                            .color(theme::BRAND_BLUE)
+                            .color(pal.value)
                             .strong(),
                     );
                 });
@@ -541,19 +541,18 @@ fn bullet(ui: &mut egui::Ui, color: egui::Color32) {
         .circle_filled(rect.center(), font_size::px(ui.style(), 2.5), color);
 }
 
-/// An "i" in a brand-blue disc, painted so it can't fall back to a tofu box
-/// the way an emoji glyph would.
-fn info_icon(ui: &mut egui::Ui) {
+/// An "i" in a disc of the text color, painted so it can't fall back to a
+/// tofu box the way an emoji glyph would.
+fn info_icon(ui: &mut egui::Ui, pal: &theme::Palette) {
     let d = font_size::px(ui.style(), 18.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
-    ui.painter()
-        .circle_filled(rect.center(), d / 2.0, theme::BRAND_BLUE);
+    ui.painter().circle_filled(rect.center(), d / 2.0, pal.value);
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         "i",
         egui::FontId::proportional(font_size::px(ui.style(), 12.0)),
-        egui::Color32::WHITE,
+        pal.window,
     );
 }
 
