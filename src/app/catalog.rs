@@ -364,7 +364,7 @@ impl App {
             .tone_only();
         let name = file_label(&path);
         self.copied_settings = Some((path, tone));
-        self.set_status((crate::i18n::t().copied_settings_from)(&name));
+        self.set_status(StatusKind::Success, (crate::i18n::t().copied_settings_from)(&name));
         self.request_redraw();
     }
 
@@ -377,7 +377,7 @@ impl App {
         if n == 0 {
             return;
         }
-        self.set_status((crate::i18n::t().applied_settings)(n));
+        self.set_status(StatusKind::Success, (crate::i18n::t().applied_settings)(n));
     }
 
     /// Writes one look onto every path, keeping each photo's own crop, and
@@ -455,7 +455,7 @@ impl App {
             self.resync_loupe_selection();
         }
         let n = paths.len();
-        self.set_status(if stars == 0 {
+        self.set_status(StatusKind::Success, if stars == 0 {
             (crate::i18n::t().cleared_rating)(n)
         } else {
             (crate::i18n::t().rated)(n, stars)
@@ -577,7 +577,7 @@ impl App {
             self.recompute_visible();
         }
         let n = self.survey_members.len();
-        self.set_status((crate::i18n::t().kept_best)(n.saturating_sub(1)));
+        self.set_status(StatusKind::Success, (crate::i18n::t().kept_best)(n.saturating_sub(1)));
         self.request_redraw();
     }
 

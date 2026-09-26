@@ -173,13 +173,13 @@ impl App {
                     self.load_playlist(playlist, root.clone());
                     // Show the folder tree only once the playlist is loaded.
                     self.folder_root = Some(root.clone());
-                    self.expanded = std::collections::HashSet::from([root]);
+                    self.expanded = std::collections::HashSet::from([root.clone()]);
                     self.mode = ViewMode::Grid;
                 }
                 Err(e) => {
                     // Usually a cancelled picker, but a permission or listing
                     // failure lands here too, so always show it.
-                    self.set_status((crate::i18n::t().open_folder_failed)(&e.to_string()));
+                    self.set_status(StatusKind::Error, (crate::i18n::t().open_folder_failed)(&e.to_string()));
                 }
             }
             self.request_redraw();
@@ -740,7 +740,7 @@ impl App {
                             crate::analytics::decode_failed(&path, "preview");
                         }
                         self.web_preview_failed.insert(key);
-                        self.set_status((crate::i18n::t().preview_failed)(
+                        self.set_status(StatusKind::Error, (crate::i18n::t().preview_failed)(
                             &path.display().to_string(),
                         ));
                     }
@@ -940,7 +940,7 @@ impl App {
                 &format!("[web] no directory handle for {}", dir.display()).into(),
             );
             self.subdirs.insert(dir.clone(), Vec::new());
-            self.set_status((crate::i18n::t().folder_handle_missing)(
+            self.set_status(StatusKind::Error, (crate::i18n::t().folder_handle_missing)(
                 &dir.display().to_string(),
             ));
             // No result will arrive, so a navigation waiting on this listing
@@ -987,7 +987,7 @@ impl App {
                     self.subdirs.insert(dir.clone(), subdir_paths);
                 }
                 Err(e) => {
-                    self.set_status((crate::i18n::t().list_folder_failed)(
+                    self.set_status(StatusKind::Error, (crate::i18n::t().list_folder_failed)(
                         &dir.display().to_string(),
                         &e.to_string(),
                     ));

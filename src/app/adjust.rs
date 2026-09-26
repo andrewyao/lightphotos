@@ -190,7 +190,7 @@ impl App {
             return;
         };
         if touchups.len() > 64 {
-            self.set_status(crate::i18n::t().touch_up_limit.into());
+            self.set_status(StatusKind::Error, crate::i18n::t().touch_up_limit.into());
             return;
         }
         #[cfg(target_arch = "wasm32")]
@@ -279,7 +279,7 @@ impl App {
 
     pub(super) fn add_touchup(&mut self, u: f32, v: f32) {
         let Some(t) = self.choose_touchup(u, v) else {
-            self.set_status(crate::i18n::t().touch_up_needs_full.into());
+            self.set_status(StatusKind::Error, crate::i18n::t().touch_up_needs_full.into());
             return;
         };
         let mut all = self.current_touchups().to_vec();
@@ -348,7 +348,7 @@ impl App {
         self.tool = LoupeTool::None;
         self.request_redraw();
         if self.hist_dw == 0 || self.hist_dh == 0 {
-            self.set_status(crate::i18n::t().wb_no_image.into());
+            self.set_status(StatusKind::Error, crate::i18n::t().wb_no_image.into());
             return;
         }
         let gx = ((u * self.hist_dw as f32) as usize).min(self.hist_dw - 1);
@@ -362,7 +362,7 @@ impl App {
                 self.apply_adjustments(adj);
             }
             None => {
-                self.set_status(crate::i18n::t().wb_pick_brighter.into());
+                self.set_status(StatusKind::Error, crate::i18n::t().wb_pick_brighter.into());
             }
         }
     }
