@@ -50,6 +50,24 @@ impl App {
     pub(crate) fn touchup_selected(&self) -> Option<usize> {
         self.touchup_selected
     }
+    pub(crate) fn touchup_spots_shown(&self) -> bool {
+        !self.touchup_spots_hidden
+    }
+    pub(super) fn toggle_touchup_spots(&mut self) {
+        self.touchup_spots_hidden = !self.touchup_spots_hidden;
+        self.request_redraw();
+    }
+    /// Select the spot after the selected one, wrapping, and show the spots so
+    /// the selection can be seen.
+    pub(super) fn select_next_touchup(&mut self) {
+        let n = self.current_touchups().len();
+        if n == 0 {
+            return;
+        }
+        self.touchup_selected = Some(self.touchup_selected.map_or(0, |i| (i + 1) % n));
+        self.touchup_spots_hidden = false;
+        self.request_redraw();
+    }
     pub(crate) fn set_touchup_radius(&mut self, radius: f32) {
         self.touchup_radius = radius.clamp(self.touchup_radius_min(), TOUCHUP_MAX_RADIUS);
     }

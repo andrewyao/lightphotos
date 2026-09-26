@@ -490,6 +490,8 @@ pub(crate) struct App {
     touchup_radius: f32,
     touchup_feather: f32,
     touchup_selected: Option<usize>,
+    /// O hides the spot circles in Touch Up to judge the fix unobstructed.
+    touchup_spots_hidden: bool,
     /// Per-image spot lists as they were before each Touch Up add or delete,
     /// newest last, so Undo can step back through both.
     touchup_undo: HashMap<PathBuf, Vec<Vec<TouchUp>>>,
@@ -877,6 +879,7 @@ impl App {
             touchup_radius: 0.001,
             touchup_feather: TOUCHUP_FEATHER,
             touchup_selected: None,
+            touchup_spots_hidden: false,
             touchup_undo: HashMap::new(),
             develop_open: true,
             develop_tab: DevelopTab::Sliders,

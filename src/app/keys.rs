@@ -86,7 +86,8 @@ impl App {
                     }
                 }
                 KeyCode::KeyQ if !cmd && !alt => self.toggle_touchup(),
-                KeyCode::KeyO if !cmd && !alt => self.selection_key(shift),
+                KeyCode::KeyO if !cmd && !alt && shift => self.select_next_touchup(),
+                KeyCode::KeyO if !cmd && !alt => self.toggle_touchup_spots(),
                 _ => {}
             }
             return;
@@ -825,14 +826,35 @@ mod tests {
             (supported, supported),
             "Shift+O shows the overlay on the background"
         );
+    }
 
+    #[test]
+    fn in_touch_up_o_hides_the_spots_and_shift_o_steps_through_them() {
+        let (mut app, _) = editor_app();
+        let spot = |u: f32| crate::develop::TouchUp {
+            center: [u, 0.5],
+            radius: 0.02,
+            source: [u, 0.3],
+            feather: 1.0,
+            delta: [0.0; 3],
+        };
+        app.apply_touchups(vec![spot(0.2), spot(0.5), spot(0.8)]);
         press(&mut app, ModifiersState::empty(), KeyCode::KeyQ);
-        press(&mut app, ModifiersState::SHIFT, KeyCode::KeyO);
-        assert_eq!(
-            (app.selection_on(), app.selection_inverted()),
-            (supported, false),
-            "and swaps back while Touch Up is armed"
-        );
+
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyO);
+        assert!(!app.touchup_spots_shown());
+        assert!(!app.selection_on(), "O leaves the subject overlay alone in Touch Up");
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyO);
+        assert!(app.touchup_spots_shown());
+
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyO);
+        let mut picked = Vec::new();
+        for _ in 0..4 {
+            press(&mut app, ModifiersState::SHIFT, KeyCode::KeyO);
+            picked.push(app.touchup_selected());
+        }
+        assert_eq!(picked, [Some(0), Some(1), Some(2), Some(0)], "wraps after the last");
+        assert!(app.touchup_spots_shown(), "stepping shows the spots again");
     }
 
     /// The grouping tools are either wholly reachable or wholly absent. While
