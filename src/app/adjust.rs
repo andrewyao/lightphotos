@@ -316,13 +316,6 @@ impl App {
         true
     }
 
-    pub(crate) fn can_undo_touchup(&self) -> bool {
-        self.shown
-            .path()
-            .and_then(|p| self.touchup_undo.get(p))
-            .is_some_and(|h| !h.is_empty())
-    }
-
     /// Steps the shown image's spots back to before the last add or delete.
     pub(super) fn undo_touchup(&mut self) {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
@@ -618,26 +611,33 @@ mod tests {
                 assert!(app.edit_touchups(all));
             }
 
+            let painted = settled(&mut app);
+            assert!(
+                !painted.texts().contains(&"Undo"),
+                "Undo is Cmd+Z only, with no button"
+            );
+
             app.touchup_selected = Some(0);
             press(&mut app, t.delete);
             assert_eq!(centers(&app), [0.4, 0.6]);
 
-            press(&mut app, t.undo);
+            app.undo_touchup();
             assert_eq!(
                 centers(&app),
                 [0.2, 0.4, 0.6],
                 "Undo brings the deleted spot back"
             );
-            press(&mut app, t.undo);
+            app.undo_touchup();
             assert_eq!(
                 centers(&app),
                 [0.2, 0.4],
                 "then steps back through the adds"
             );
-            press(&mut app, t.undo);
-            press(&mut app, t.undo);
+            app.undo_touchup();
+            app.undo_touchup();
             assert!(centers(&app).is_empty());
-            assert!(!press(&mut app, t.undo), "Undo is disabled with no history");
+            app.undo_touchup();
+            assert!(centers(&app).is_empty(), "Undo with no history does nothing");
         }
 
         #[test]
@@ -646,9 +646,9 @@ mod tests {
             app.set_develop_tab(DevelopTab::Masks);
             let t = crate::i18n::t();
             let painted = settled(&mut app);
-            // The switch sits just left of Undo; the Size slider right of its
+            // The switch sits just left of Delete; the Size slider right of its
             // label, on the row below.
-            let switch = painted.pos_of(t.undo) - egui::vec2(20.0, 0.0);
+            let switch = painted.pos_of(t.delete) - egui::vec2(20.0, 0.0);
             let slider = painted.pos_of(t.brush_size) + egui::vec2(100.0, 0.0);
             let resizes = |actions: &[UiAction]| {
                 actions

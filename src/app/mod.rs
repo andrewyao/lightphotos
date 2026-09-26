@@ -1482,7 +1482,6 @@ impl App {
                     self.request_redraw();
                 }
                 ui::UiAction::DeleteTouchUp => self.delete_selected_touchup(),
-                ui::UiAction::UndoTouchUp => self.undo_touchup(),
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
                 ui::UiAction::AutoTone => self.auto_tone_shown(),
                 ui::UiAction::ResetAdjustments => {
