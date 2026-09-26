@@ -243,6 +243,17 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             if resp.clicked() {
                 out.actions.push(UiAction::PickFolder);
             }
+            ui.add_space(24.0);
+            ui.scope(|ui| {
+                ui.set_max_width(640.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(
+                        egui::RichText::new(t().landing_help)
+                            .size(font_size::px(ui.style(), 18.0))
+                            .weak(),
+                    );
+                });
+            });
             // Web only: picking a folder hands the browser a File System
             // Access permission, so say up front which button to press.
             let allow_note = t().landing_allow_note;
