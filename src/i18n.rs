@@ -182,6 +182,9 @@ pub struct Strings {
     pub landing_allow_note: &'static str,
     pub opening: &'static str,
     pub choose_folder: &'static str,
+    pub reopen_session: &'static str,
+    /// The folder Reopen Session will open.
+    pub reopen_session_tip: fn(&str) -> String,
     pub picker_title: &'static str,
 
     // Left panel.
@@ -552,6 +555,8 @@ pub static EN: Strings = Strings {
     },
     opening: "Opening\u{2026}",
     choose_folder: "Choose Folder",
+    reopen_session: "Reopen Session",
+    reopen_session_tip: |folder| format!("Pick up where you left off in {folder}"),
     picker_title: "Choose a folder of photos",
 
     rating_filter: "Rating:",
@@ -970,6 +975,8 @@ pub static ZH: Strings = Strings {
     },
     opening: "正在打开\u{2026}",
     choose_folder: "选择文件夹",
+    reopen_session: "打开上次的文件夹",
+    reopen_session_tip: |folder| format!("回到上次在 {folder} 的位置"),
     picker_title: "选择照片文件夹",
 
     rating_filter: "评分：",

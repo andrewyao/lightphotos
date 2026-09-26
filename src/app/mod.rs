@@ -353,6 +353,12 @@ pub(crate) struct App {
     shown: Shown,
     /// A file or folder requested before the window and renderer existed.
     pub(crate) pending_initial: Option<PathBuf>,
+    /// The last session saved, which the landing page's Reopen Session
+    /// button restores.
+    session: Option<session::Session>,
+    /// A Reopen Session waiting on its folder's listing.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) web_session_restore: Option<session::Session>,
 
     /// True while `showDirectoryPicker` and its listing are in flight. Disables
     /// the landing page's "Choose Folder" button so a second picker can't open.
@@ -759,6 +765,7 @@ mod keys;
 mod loupe;
 mod nav;
 mod presets;
+mod session;
 mod thumbs;
 #[cfg(target_arch = "wasm32")]
 mod web;
@@ -819,6 +826,13 @@ impl App {
             want: None,
             shown: Shown::Nothing,
             pending_initial: initial,
+            // A test must never read the developer's own session.
+            #[cfg(test)]
+            session: None,
+            #[cfg(not(test))]
+            session: session::Session::load(),
+            #[cfg(target_arch = "wasm32")]
+            web_session_restore: None,
             #[cfg(target_arch = "wasm32")]
             web_folder_pending: false,
             #[cfg(target_arch = "wasm32")]
@@ -1464,6 +1478,7 @@ impl App {
                     self.open_folder(p);
                 }
                 ui::UiAction::PickFolder => self.open_folder_picker(),
+                ui::UiAction::ReopenSession => self.reopen_session(),
                 ui::UiAction::EnterGrid => self.enter_grid(),
                 ui::UiAction::Focus(region) => {
                     self.focus = region;
