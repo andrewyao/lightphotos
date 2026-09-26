@@ -292,12 +292,6 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         landing_steps(ui, col_w, card_fill, card_stroke, &pal);
                         ui.add_space(20.0);
                         landing_tip(ui, col_w, &pal);
-                        ui.add_space(20.0);
-                        ui.label(
-                            egui::RichText::new(t().landing_shortcuts_hint)
-                                .size(font_size::px(ui.style(), 14.0))
-                                .color(pal.label),
-                        );
                         ui.add_space(32.0);
                     },
                 );
@@ -488,12 +482,20 @@ fn landing_tip(ui: &mut egui::Ui, col_w: f32, pal: &theme::Palette) {
                             .strong(),
                     );
                 });
-                ui.add_space(4.0);
-                ui.label(
-                    egui::RichText::new(t().landing_help)
-                        .size(font_size::px(ui.style(), 15.0))
-                        .color(pal.value),
-                );
+                for line in t().landing_help {
+                    ui.add_space(4.0);
+                    ui.horizontal_top(|ui| {
+                        bullet(ui, pal.value);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(line)
+                                    .size(font_size::px(ui.style(), 15.0))
+                                    .color(pal.value),
+                            )
+                            .wrap(),
+                        );
+                    });
+                }
             });
         })
         .response;
@@ -508,6 +510,15 @@ fn landing_tip(ui: &mut egui::Ui, col_w: f32, pal: &theme::Palette) {
         },
         theme::BRAND_BLUE,
     );
+}
+
+/// A list bullet sized to sit on the first line of 15px text, painted
+/// rather than drawn as a glyph for the same reason as `info_icon`.
+fn bullet(ui: &mut egui::Ui, color: egui::Color32) {
+    let line = font_size::px(ui.style(), 15.0) * 1.2;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(line * 0.6, line), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), font_size::px(ui.style(), 2.5), color);
 }
 
 /// An "i" in a brand-blue disc, painted so it can't fall back to a tofu box
