@@ -8,10 +8,10 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::export::{ExportDest, ExportJob, ExportTarget, FolderChoice};
+use crate::export::{AlbumChoice, ExportDest, ExportJob, ExportTarget, FolderChoice};
 use crate::export::{ExportLanding, ExportOutcome, ExportSettings};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::immich::{Account, ImmichServer};
+use crate::immich::{Account, Album, ImmichServer};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::paths;
 
@@ -42,6 +42,10 @@ pub(super) fn load_export_settings() -> ExportSettings {
 }
 
 fn save_export_settings(settings: &ExportSettings) {
+    // A test must never write the developer's own settings.
+    if cfg!(test) {
+        return;
+    }
     let saved = serde_json::to_string(settings)
         .map_err(|e| e.to_string())
         .and_then(|json| crate::prefs::save(EXPORT_SETTINGS_PREF, &json));
@@ -49,6 +53,10 @@ fn save_export_settings(settings: &ExportSettings) {
         eprintln!("[export] could not save export settings: {e}");
     }
 }
+
+/// A checked server, its account, and the account's albums.
+#[cfg(not(target_arch = "wasm32"))]
+type Connection = (ImmichServer, Account, Result<Vec<Album>, String>);
 
 /// Where the app stands with an Immich server.
 #[cfg(not(target_arch = "wasm32"))]
@@ -65,11 +73,14 @@ pub(crate) enum ImmichLink {
     Connecting {
         url: String,
         key: String,
-        rx: Receiver<Result<(ImmichServer, Account), String>>,
+        rx: Receiver<Result<Connection, String>>,
     },
     Connected {
         server: Arc<ImmichServer>,
         account: Account,
+        /// The account's albums, or why they couldn't be listed. A failed
+        /// listing still leaves "No album" and "New album" to pick.
+        albums: Result<Vec<Album>, String>,
     },
 }
 
@@ -117,6 +128,12 @@ impl App {
         if self.export_progress.is_some() {
             return Some(t.export_in_progress);
         }
+        // The album add that ends an Immich batch counts as part of it: a
+        // batch started meanwhile would create a second new album.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.album_add.is_some() {
+            return Some(t.export_in_progress);
+        }
         // The edit maps read below fill in only after the background catalog
         // load finishes. Exporting earlier would silently drop edits.
         if self.catalog_load_pending.is_some() {
@@ -127,6 +144,16 @@ impl App {
             && !matches!(self.immich, ImmichLink::Connected { .. })
         {
             return Some(t.export_needs_immich);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.export_settings.target == ExportTarget::Immich
+            && matches!(&self.export_settings.album, AlbumChoice::New(name) if name.trim().is_empty())
+        {
+            return Some(t.album_name_needed);
+        }
+        #[cfg(target_arch = "wasm32")]
+        if self.export_settings.target == crate::export::ExportTarget::Immich {
+            return Some(t.immich_native_only);
         }
         None
     }
@@ -219,7 +246,10 @@ impl App {
         let spawned = std::thread::Builder::new()
             .name("immich-connect".into())
             .spawn(move || {
-                let _ = tx.send(ImmichServer::connect(&u, &k));
+                let _ = tx.send(ImmichServer::connect(&u, &k).map(|(server, account)| {
+                    let albums = server.albums();
+                    (server, account, albums)
+                }));
             });
         self.immich = match spawned {
             Ok(_) => ImmichLink::Connecting { url, key, rx },
@@ -261,7 +291,7 @@ impl App {
             }
         };
         self.immich = match result {
-            Ok((server, account)) => {
+            Ok((server, account, albums)) => {
                 if let Err(e) = crate::prefs::save(IMMICH_SERVER_PREF, server.origin()) {
                     eprintln!("[immich] could not save the server URL: {e}");
                 }
@@ -271,6 +301,7 @@ impl App {
                 ImmichLink::Connected {
                     server: Arc::new(server),
                     account,
+                    albums,
                 }
             }
             Err(e) => ImmichLink::Disconnected {
@@ -456,6 +487,10 @@ impl App {
         }
 
         let uploading = !matches!(settings.target, ExportTarget::Folder(_));
+        let album = match uploading {
+            true => settings.album.clone(),
+            false => AlbumChoice::None,
+        };
         self.export_progress = Some(ExportProgress {
             done: 0,
             total,
@@ -465,6 +500,8 @@ impl App {
             duplicates: 0,
             unrated: 0,
             last_rating_err: None,
+            album,
+            asset_ids: Vec::new(),
         });
         self.set_status(Self::progress_text(uploading, 0, total));
         self.request_redraw();
@@ -500,6 +537,7 @@ impl App {
                             rating_error,
                         } => {
                             prog.duplicates += usize::from(duplicate);
+                            prog.asset_ids.push(id.clone());
                             eprintln!("[lightphotos] uploaded {} as {id}", src.display());
                             if let Some(e) = rating_error {
                                 eprintln!("[lightphotos] rating not set on {id}: {e}");
@@ -529,14 +567,106 @@ impl App {
                 (Some(e), false) => (t.exported_partial)(ok, prog.total, &e),
                 (Some(e), true) => (t.uploaded_partial)(ok, prog.total, &e),
             };
-            self.set_status(match prog.last_rating_err {
+            let summary = match prog.last_rating_err {
                 Some(e) => (t.ratings_not_set)(&summary, prog.unrated, &e),
                 None => summary,
-            });
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let summary = match self.start_album_add(prog.album, prog.asset_ids, summary) {
+                Ok(adding) => adding,
+                Err(summary) => summary,
+            };
+            self.set_status(summary);
         } else {
             self.set_status(Self::progress_text(prog.uploading, prog.done, prog.total));
             self.export_progress = Some(prog);
         }
+    }
+
+    /// Put a finished batch's uploads into its album, off the UI thread,
+    /// creating the album first when it is new. Returns the toast to show
+    /// meanwhile, or hands `summary` back when there is nothing to add.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_album_add(
+        &mut self,
+        album: AlbumChoice,
+        ids: Vec<String>,
+        summary: String,
+    ) -> Result<String, String> {
+        let ImmichLink::Connected { server, .. } = &self.immich else {
+            return Err(summary);
+        };
+        let name = match &album {
+            AlbumChoice::None => return Err(summary),
+            _ if ids.is_empty() => return Err(summary),
+            AlbumChoice::Existing { name, .. } | AlbumChoice::New(name) => name.clone(),
+        };
+        let server = Arc::clone(server);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new()
+            .name("immich-album".into())
+            .spawn(move || {
+                let result = match album {
+                    AlbumChoice::Existing { id, name } => Ok(Album { id, name }),
+                    AlbumChoice::New(name) => server.create_album(name.trim()),
+                    AlbumChoice::None => unreachable!("returned above"),
+                }
+                .and_then(|album| server.add_to_album(&album.id, &ids).map(|()| album));
+                let _ = tx.send(result);
+            });
+        if let Err(e) = spawned {
+            return Err((crate::i18n::t().album_failed)(&summary, &e.to_string()));
+        }
+        let adding = (crate::i18n::t().adding_to_album)(&summary, &name);
+        self.album_add = Some((rx, summary));
+        Ok(adding)
+    }
+
+    /// Take a finished album add. Returns true while one is still running. A
+    /// new album becomes the form's `Existing` choice, so the next batch goes
+    /// into the same album rather than a second one of the same name.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn poll_album_add(&mut self) -> bool {
+        let Some((rx, _)) = &self.album_add else {
+            return false;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the album add stopped".into()),
+        };
+        let Some((_, summary)) = self.album_add.take() else {
+            return false;
+        };
+        let summary = &summary;
+        let t = crate::i18n::t();
+        let status = match result {
+            Ok(album) => {
+                if let ImmichLink::Connected {
+                    albums: Ok(list), ..
+                } = &mut self.immich
+                {
+                    if !list.iter().any(|a| a.id == album.id) {
+                        list.push(album.clone());
+                        list.sort_by_key(|a| a.name.to_lowercase());
+                    }
+                }
+                if matches!(self.export_settings.album, AlbumChoice::New(_)) {
+                    self.set_export_settings(ExportSettings {
+                        album: AlbumChoice::Existing {
+                            id: album.id,
+                            name: album.name.clone(),
+                        },
+                        ..self.export_settings.clone()
+                    });
+                }
+                (t.added_to_album)(summary, &album.name)
+            }
+            Err(e) => (t.album_failed)(summary, &e),
+        };
+        self.set_status(status);
+        self.request_redraw();
+        false
     }
 
     pub(super) fn set_status(&mut self, msg: String) {
@@ -546,7 +676,12 @@ impl App {
     /// True while a long operation owns the status line. One predicate rather
     /// than a condition that grows an `||` per feature.
     pub(crate) fn batch_running(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        let adding_to_album = self.album_add.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let adding_to_album = false;
         self.export_progress.is_some()
+            || adding_to_album
             || self.bulk_delete.is_some()
             || !self.autotone_pending.is_empty()
             || self.catalog.backlog() > 0
@@ -636,14 +771,17 @@ mod status_tests {
         app.export_settings = ExportSettings {
             target: ExportTarget::Immich,
             size: ExportSize::LongEdge(120),
+            album: AlbumChoice::None,
         };
         // Connected directly: `connect_immich` would save the key to the
         // developer's own Keychain.
         let (server, account) = ImmichServer::connect(&url, &key).expect("connect");
         eprintln!("connected as {} <{}>", account.name, account.email);
+        let albums = server.albums();
         app.immich = ImmichLink::Connected {
             server: Arc::new(server),
             account,
+            albums,
         };
 
         let run = |app: &mut App| {
@@ -732,5 +870,95 @@ mod status_tests {
             "a running delete must keep its progress toast on screen"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn connected(albums: Vec<Album>) -> ImmichLink {
+        ImmichLink::Connected {
+            server: Arc::new(ImmichServer::offline("https://immich.test")),
+            account: Account {
+                name: "Ada".into(),
+                email: "ada@example.com".into(),
+            },
+            albums: Ok(albums),
+        }
+    }
+
+    /// A batch into a new album ends with the album in the list and chosen
+    /// as `Existing`, so the next batch doesn't create a second one.
+    #[test]
+    fn a_created_album_becomes_the_remembered_choice() {
+        let mut app = App::new(None);
+        app.immich = connected(vec![]);
+        app.export_settings.target = ExportTarget::Immich;
+        app.export_settings.album = AlbumChoice::New("Trip".into());
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.album_add = Some((rx, "Uploaded 2".into()));
+        assert!(app.poll_album_add(), "still waiting before a reply");
+        assert!(
+            app.batch_running(),
+            "the toast stays up while the album add runs"
+        );
+
+        let album = Album {
+            id: "a1".into(),
+            name: "Trip".into(),
+        };
+        tx.send(Ok(album.clone())).unwrap();
+        assert!(!app.poll_album_add());
+        assert_eq!(
+            app.export_settings.album,
+            AlbumChoice::Existing {
+                id: "a1".into(),
+                name: "Trip".into()
+            }
+        );
+        let ImmichLink::Connected { albums, .. } = &app.immich else {
+            panic!("still connected");
+        };
+        assert_eq!(albums.as_ref().unwrap(), &vec![album]);
+        assert_eq!(
+            app.status_text(),
+            Some((crate::i18n::t().added_to_album)("Uploaded 2", "Trip").as_str())
+        );
+    }
+
+    #[test]
+    fn a_new_album_needs_a_name_before_export() {
+        let dir = unique_tmp_dir();
+        std::fs::write(dir.join("a.jpg"), b"").unwrap();
+        let mut app = App::new(None);
+        app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
+        app.recompute_visible();
+        app.selected.insert(0);
+        app.immich = connected(vec![]);
+        app.export_settings.target = ExportTarget::Immich;
+        app.export_settings.album = AlbumChoice::New("  ".into());
+        assert_eq!(
+            app.export_blocker(),
+            Some(crate::i18n::t().album_name_needed)
+        );
+        app.export_settings.album = AlbumChoice::New("Trip".into());
+        assert_eq!(app.export_blocker(), None);
+
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.album_add = Some((rx, "Uploaded 1".into()));
+        assert_eq!(
+            app.export_blocker(),
+            Some(crate::i18n::t().export_in_progress),
+            "the last batch's album add must finish first"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing to add, or no album chosen, leaves the summary as it was.
+    #[test]
+    fn an_album_add_starts_only_with_an_album_and_uploads() {
+        let mut app = App::new(None);
+        app.immich = connected(vec![]);
+        let none = app.start_album_add(AlbumChoice::None, vec!["x".into()], "s".into());
+        assert_eq!(none, Err("s".into()));
+        let empty = app.start_album_add(AlbumChoice::New("Trip".into()), vec![], "s".into());
+        assert_eq!(empty, Err("s".into()));
+        assert!(app.album_add.is_none());
     }
 }

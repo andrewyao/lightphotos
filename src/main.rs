@@ -436,7 +436,7 @@ impl ApplicationHandler<UserEvent> for App {
 
         let outcomes = self.exporter.as_ref().map(|e| e.poll()).unwrap_or_default();
         #[cfg(not(target_arch = "wasm32"))]
-        let immich_connecting = self.poll_immich_connect();
+        let immich_connecting = self.poll_immich_connect() | self.poll_album_add();
         #[cfg(target_arch = "wasm32")]
         let immich_connecting = false;
         if !outcomes.is_empty() {

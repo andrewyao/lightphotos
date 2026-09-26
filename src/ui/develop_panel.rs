@@ -21,7 +21,6 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                     draw_exposure_row(ui, app);
                     ui.add_space(6.0);
                     draw_tab_row(ui, app, out);
-                    ui.separator();
                     match app.develop_tab() {
                         DevelopTab::Sliders => draw_sliders_tab(ui, app, out),
                         DevelopTab::Crop => {
@@ -97,25 +96,17 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// Sliders | Crop | Masks. Crop is left out while `SHOW_CROP_TAB` is off.
 fn draw_tab_row(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    ui.horizontal(|ui| {
-        let tabs = [
-            (DevelopTab::Sliders, t.tab_sliders),
-            (DevelopTab::Crop, t.tab_crop),
-            (DevelopTab::Masks, t.tab_masks),
-        ];
-        for (tab, label) in tabs {
-            if tab == DevelopTab::Crop && !SHOW_CROP_TAB {
-                continue;
-            }
-            if ui
-                .selectable_label(app.develop_tab() == tab, label)
-                .clicked()
-                && app.develop_tab() != tab
-            {
-                out.actions.push(UiAction::SetDevelopTab(tab));
-            }
-        }
-    });
+    let tabs: Vec<_> = [
+        (DevelopTab::Sliders, t.tab_sliders),
+        (DevelopTab::Crop, t.tab_crop),
+        (DevelopTab::Masks, t.tab_masks),
+    ]
+    .into_iter()
+    .filter(|&(tab, _)| tab != DevelopTab::Crop || SHOW_CROP_TAB)
+    .collect();
+    if let Some(tab) = super::tabs::bar(ui, &tabs, app.develop_tab()) {
+        out.actions.push(UiAction::SetDevelopTab(tab));
+    }
 }
 
 /// The Develop header with Auto and Reset, presets, and every tone, color,
