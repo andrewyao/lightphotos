@@ -332,7 +332,7 @@ impl Run {
             };
             let (grid, _, _) = crate::image_ops::downsample_linear(&img, 256);
             if !grid.is_empty() {
-                crate::autotone::analyze(&grid, img.pixel_format);
+                crate::autotone::analyze(&grid, img.pixel_format, Default::default());
                 analysed += 1;
             }
         }

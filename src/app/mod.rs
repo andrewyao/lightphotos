@@ -708,6 +708,8 @@ pub(crate) struct App {
 
     show_help: bool,
     show_settings: bool,
+    /// How Auto Tone centers a normal photo, from Settings.
+    autotone_centering: crate::autotone::Centering,
     left_tab: LeftTab,
 
     pending_quit: bool,
@@ -1003,6 +1005,11 @@ impl App {
             preset_name_edit: None,
             show_help: false,
             show_settings: false,
+            // A test must never read the developer's own settings.
+            #[cfg(test)]
+            autotone_centering: Default::default(),
+            #[cfg(not(test))]
+            autotone_centering: crate::autotone::Centering::load(),
             left_tab: LeftTab::Folders,
             pending_quit: false,
             quit_requested: false,
@@ -1504,6 +1511,11 @@ impl App {
                 }
                 ui::UiAction::SetTheme(theme) => {
                     ui::theme::set(&self.egui_ctx, theme);
+                    self.request_redraw();
+                }
+                ui::UiAction::SetAutoToneCentering(centering) => {
+                    self.autotone_centering = centering;
+                    centering.save();
                     self.request_redraw();
                 }
                 ui::UiAction::ToggleSettings => {

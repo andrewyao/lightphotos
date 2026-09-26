@@ -44,56 +44,23 @@ struct VsOut {
     @location(0) uv: vec2<f32>,
 };
 
-// Must match `filmic_exposure` in develop.rs. MIX is the share of the
-// adjustment that goes through the curve, MIDTONE is how hard it bends per
-// stop, and ANCHOR is the curve's fixed point. ANCHOR sits just above white so
-// a 1.0 pixel still moves instead of being pinned.
-const FILMIC_MIX: f32 = 0.95;
-const FILMIC_MIDTONE: f32 = 1.2;
-const FILMIC_ANCHOR: f32 = 1.06;
-
-// Exposure in linear light. Positive stops bend luma through a curve that
-// rolls into white instead of clipping, and colors fade toward white as they
-// brighten. Must match `filmic_exposure` in develop.rs.
-fn filmicExposure(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
-    if (stops == 0.0) {
-        return rgb;
+// The Exposure slider in linear light. Darkening is a plain gain, which
+// recovers above-white RAW highlights. Brightening maps luma through the
+// standard rational tone curve x*g / (1 + x*(g - 1)), which keeps black at
+// black and white at white, and colors keep 1 / (1 + x*(g - 1)) of their
+// chroma relative to luma. Must match `exposure_curve` in develop.rs.
+fn exposureCurve(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
+    let gain = exp2(stops);
+    if (stops <= 0.0) {
+        return rgb * gain;
     }
-
-    // Negative stops are a plain gain, which recovers above-white RAW
-    // highlights.
-    if (stops < 0.0) {
-        return rgb * exp2(stops);
-    }
-
     // Rec.709 luma weights for linear light. The gamma-space vibrance block
     // uses different weights.
     let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    if (abs(luma) < 1e-5) {
-        return rgb;
-    }
-
-    let scale = exp2(stops * (1.0 - FILMIC_MIX));
-    // Curve strength: k == 1 is the identity, k < 1 lifts, k > 1 drops.
-    let k = exp2(-stops * FILMIC_MIX * FILMIC_MIDTONE);
-
-    // Past the anchor the curve tiles, so RAW values above white keep being
-    // shaped instead of saturating. Srgb8 input never gets there.
-    let la = abs(luma);
-    let base = floor(la / FILMIC_ANCHOR) * FILMIC_ANCHOR;
-    let norm = (la - base) / FILMIC_ANCHOR;
-    let shaped = norm / (norm + (1.0 - norm) * k);
-    let newLuma = sign(luma) * (base + shaped * FILMIC_ANCHOR) * scale;
-
-    // Chroma grows more slowly than luma, and slower still near white.
-    let lumaScale = max(newLuma / luma, 0.0);
-    let w = clamp(newLuma, 0.0, 2.0) * 0.5;
-    let dynExp = mix(0.95, 0.65, w);
-    // Fade in highlight desaturation continuously from the identity at zero.
-    let rolloff = 1.0 / (1.0 + max(newLuma - 0.9, 0.0) * 2.0 * min(stops, 1.0));
-    let chromaScale = pow(lumaScale, dynExp) * rolloff;
-
-    return vec3<f32>(newLuma) + (rgb - vec3<f32>(luma)) * chromaScale;
+    let d = 1.0 + max(luma, 0.0) * (gain - 1.0);
+    let newLuma = luma * gain / d;
+    let chroma = gain / (d * d);
+    return vec3<f32>(newLuma) + (rgb - vec3<f32>(luma)) * chroma;
 }
 
 // Gamma-space tone ops, per channel. Must match the `tone` closure in
