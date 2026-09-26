@@ -22,14 +22,7 @@ if [[ ! -f "$SITE_PUBLIC/app.html" ]]; then
   exit 1
 fi
 
-echo "==> Ensuring vendored rawler is present"
-"$ROOT/scripts/setup-vendor-rawler.sh"
-
-echo "==> Ensuring the full Chinese font is present"
-"$ROOT/scripts/fetch-cjk-font.sh"
-
-echo "==> Building (trunk build --release)"
-RUSTFLAGS="--cfg=web_sys_unstable_apis" trunk build --release --config "$ROOT/Trunk.toml"
+"$ROOT/scripts/build-web.sh"
 
 DIST="$ROOT/dist"
 NEW_JS="$(find "$DIST" -maxdepth 1 -name 'lightphotos-*.js' -not -name '*_bg.wasm' | head -1)"
