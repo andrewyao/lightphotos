@@ -146,6 +146,11 @@ pub struct Strings {
     /// that language so a reader of either can find it.
     pub other_language: &'static str,
     pub other_language_tip: &'static str,
+    /// The theme button's caption for each theme, and its tooltip.
+    pub theme_dark: &'static str,
+    pub theme_medium: &'static str,
+    pub theme_light: &'static str,
+    pub theme_tip: &'static str,
     pub other: Lang,
 
     // Header and landing page.
@@ -430,6 +435,10 @@ impl Strings {
 pub static EN: Strings = Strings {
     other_language: "中文",
     other_language_tip: "切换到中文",
+    theme_dark: "Dark",
+    theme_medium: "Medium",
+    theme_light: "Light",
+    theme_tip: "Switch theme: Dark, Medium, Light",
     other: Lang::Zh,
 
     open_folder: "Open\u{2026}",
@@ -776,6 +785,10 @@ pub static EN: Strings = Strings {
 pub static ZH: Strings = Strings {
     other_language: "English",
     other_language_tip: "Switch to English",
+    theme_dark: "深色",
+    theme_medium: "中灰",
+    theme_light: "浅色",
+    theme_tip: "切换主题：深色、中灰、浅色",
     other: Lang::En,
 
     open_folder: "打开\u{2026}",
