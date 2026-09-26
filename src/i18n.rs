@@ -174,9 +174,9 @@ pub struct Strings {
     pub landing_steps: [(&'static str, &'static str); 3],
     /// Heading of the tip box that holds `landing_help`.
     pub landing_tip_title: &'static str,
-    /// The tip's bullets: photos untouched with edits in sidecars, the rename
-    /// caveat, and where the shortcut overlay lives.
-    pub landing_help: [&'static str; 3],
+    /// The tip's bullets: photos untouched with edits in sidecars, edits
+    /// moving with the folder, the rename caveat, and the shortcut overlay.
+    pub landing_help: [&'static str; 4],
     /// Web only: the File System Access permission the browser shows once a
     /// folder is picked. Empty off the web, where the picker is native.
     pub landing_allow_note: &'static str,
@@ -521,7 +521,7 @@ pub static EN: Strings = Strings {
     wb_auto: "Auto",
     wb_manual: "Manual",
     landing_prompt: "Choose a folder of photos to get started",
-    landing_tagline: "Cull, rate and develop your photos, fast.",
+    landing_tagline: "Cull, rate and develop your raw photos, fast.",
     landing_steps: [
         (
             "Browse",
@@ -538,10 +538,10 @@ pub static EN: Strings = Strings {
     ],
     landing_tip_title: "Tip",
     landing_help: [
-        "LightPhotos never modifies your original photos. Your edits are saved in small \
-         files in a .lightphotos subfolder, so when you move a folder, its edits move with it.",
-        "Don't rename your photos, though: edits are matched to photos by file name, so a \
-         renamed photo loses its edits.",
+        "Your original photos are never modified. Your edits are saved in small files in a \
+         .lightphotos subfolder.",
+        "When you move a folder of photos, the edits move with it.",
+        "Don't rename your photos. Edits are matched to photos by file name.",
         "Press ? in the application to see all the keyboard shortcuts.",
     ],
     landing_allow_note: if WEB {
@@ -946,7 +946,7 @@ pub static ZH: Strings = Strings {
     wb_auto: "自动",
     wb_manual: "手动",
     landing_prompt: "选择一个照片文件夹开始",
-    landing_tagline: "快速筛选、评分和冲印你的照片。",
+    landing_tagline: "快速筛选、评分和冲印你的 RAW 照片。",
     landing_steps: [
         (
             "浏览",
@@ -957,9 +957,9 @@ pub static ZH: Strings = Strings {
     ],
     landing_tip_title: "提示",
     landing_help: [
-        "LightPhotos 从不修改你的原始照片。你的编辑保存在 .lightphotos 子文件夹中的\
-         小文件里，因此移动文件夹时，编辑也会随之移动。",
-        "但请不要重命名照片：编辑按文件名与照片对应，照片重命名后会丢失编辑。",
+        "LightPhotos 从不修改你的原始照片。你的编辑保存在 .lightphotos 子文件夹中的小文件里。",
+        "移动照片文件夹时，编辑也会随之移动。",
+        "请不要重命名照片。编辑按文件名与照片对应。",
         "在应用中按 ? 查看所有键盘快捷键。",
     ],
     landing_allow_note: if WEB {
