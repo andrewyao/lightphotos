@@ -19,6 +19,7 @@ impl App {
     pub(crate) fn supersede_web_pending_nav(&mut self) {
         self.web_nav_generation = self.web_nav_generation.wrapping_add(1);
         self.web_pending_nav = None;
+        self.web_session_restore = None;
     }
 
     /// Invalidate thumbnail work after a pick replaces the handle maps.

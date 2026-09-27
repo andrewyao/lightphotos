@@ -202,9 +202,8 @@ impl App {
                     self.expanded = std::collections::HashSet::from([root.clone()]);
                     self.mode = ViewMode::Grid;
                     // The picker fallback may have opened a different folder.
-                    if let Some(session) = restore.filter(|s| s.root == root) {
-                        self.restore_session_view(&session);
-                    }
+                    self.web_session_restore = restore.filter(|s| s.root == root);
+                    self.continue_web_session_restore();
                 }
                 Err(e) => {
                     // Usually a cancelled picker, but a permission or listing
@@ -1060,9 +1059,35 @@ impl App {
                 }
                 _ => {}
             }
+            if listing_succeeded {
+                self.continue_web_session_restore();
+            } else {
+                self.web_session_restore = None;
+            }
             self.request_redraw();
         }
         !self.web_dirlist_inflight.is_empty()
+    }
+
+    /// Walk a reopened session down to its subfolder, one listing at a time,
+    /// then select its photo. `poll_dir_listing` calls back as each listing
+    /// lands. A tree action or a failed listing drops the rest of the restore.
+    fn continue_web_session_restore(&mut self) {
+        let Some(session) = self.web_session_restore.clone() else {
+            return;
+        };
+        let chain = session.folder_chain();
+        if let Some(unlisted) = chain.iter().find(|d| !self.subdirs.contains_key(*d)) {
+            self.request_dir_listing(&unlisted.clone());
+            return;
+        }
+        self.web_session_restore = None;
+        let dir = chain.last().expect("the chain starts at the root").clone();
+        if chain.len() > 1 {
+            self.expanded.extend(chain);
+            self.apply_web_load_folder(dir);
+        }
+        self.restore_session_view(&session);
     }
 
     /// Fetch the full Chinese font the first time a listed name has Chinese

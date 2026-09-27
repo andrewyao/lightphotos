@@ -16,13 +16,17 @@ pub(crate) enum SessionView {
     Loupe,
 }
 
-/// The folder the user last chose, and where they were in it. Browsing into
-/// a subfolder doesn't change it. On the web every path is relative to the
-/// picked folder, whose name is `root`.
+/// The folder the user last chose, and where they were in it: the subfolder
+/// showing, the selected photo, and whether it is open in the Loupe. On the
+/// web every path is relative to the picked folder, whose name is `root`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Session {
     /// The chosen folder: a full path natively, the folder's name on the web.
     pub(crate) root: PathBuf,
+    /// The subfolder of `root` showing, or `None` for `root` itself. Absent
+    /// from sessions saved before subfolders were remembered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dir: Option<PathBuf>,
     pub(crate) photo: Option<PathBuf>,
     pub(crate) view: SessionView,
 }
@@ -46,22 +50,39 @@ impl Session {
             eprintln!("[session] could not save the session: {e}");
         }
     }
+
+    /// `root`, then each folder below it down to the one showing. Just `root`
+    /// when `dir` isn't inside it.
+    pub(crate) fn folder_chain(&self) -> Vec<PathBuf> {
+        let Some(dir) = self.dir.as_deref().filter(|d| d.starts_with(&self.root)) else {
+            return vec![self.root.clone()];
+        };
+        let mut chain: Vec<PathBuf> = dir
+            .ancestors()
+            .take_while(|a| a.starts_with(&self.root))
+            .map(Path::to_path_buf)
+            .collect();
+        chain.reverse();
+        chain
+    }
 }
 
 impl App {
-    /// The session as it stands, or `None` on the landing page and while a
-    /// subfolder of the chosen folder is showing.
+    /// The session as it stands, or `None` on the landing page.
     pub(crate) fn current_session(&self) -> Option<Session> {
         let root = self.folder_root.clone()?;
-        if self.playlist.as_ref()?.dir() != root {
+        let dir = self.playlist.as_ref()?.dir();
+        if !dir.starts_with(&root) {
             return None;
         }
+        let dir = (dir != root).then(|| dir.to_path_buf());
         let view = match self.mode {
             ViewMode::Loupe => SessionView::Loupe,
             ViewMode::Grid | ViewMode::Survey => SessionView::Grid,
         };
         Some(Session {
             root,
+            dir,
             photo: self.selected_path(),
             view,
         })
@@ -101,11 +122,20 @@ impl App {
         self.request_session_reopen(session);
     }
 
-    /// Open `session.root` like `open`, then its photo and view. A missing
-    /// photo leaves the grid with nothing selected.
+    /// Open `session.root` like `open`, then its subfolder, photo and view.
+    /// A missing subfolder falls back to `root`, and a missing photo leaves
+    /// the grid with nothing selected.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn restore_session(&mut self, session: &Session) {
         self.open(session.root.clone());
+        let chain = session.folder_chain();
+        if let Some(dir) = chain.last().filter(|d| chain.len() > 1 && d.is_dir()) {
+            for folder in &chain {
+                self.ensure_subdirs(folder);
+                self.expanded.insert(folder.clone());
+            }
+            self.load_folder(dir.clone());
+        }
         self.restore_session_view(session);
     }
 
@@ -148,6 +178,9 @@ mod tests {
     fn session(root: &Path, photo: Option<&str>, view: SessionView) -> Session {
         Session {
             root: root.to_path_buf(),
+            dir: photo
+                .map(|p| root.join(p).parent().unwrap().to_path_buf())
+                .filter(|d| d != root),
             photo: photo.map(|p| root.join(p)),
             view,
         }
@@ -177,20 +210,76 @@ mod tests {
     }
 
     #[test]
-    fn browsing_into_a_subfolder_keeps_the_chosen_folder() {
+    fn browsing_into_a_subfolder_records_it_under_the_chosen_folder() {
         let root = tree("subfolder");
         let mut app = App::new(None);
         app.open(root.clone());
         app.select_single(0);
         app.save_session_if_changed();
-        let chosen = session(&root, Some("a.jpg"), SessionView::Grid);
-        assert_eq!(app.saved_session(), Some(&chosen));
+        assert_eq!(
+            app.saved_session(),
+            Some(&session(&root, Some("a.jpg"), SessionView::Grid))
+        );
 
         app.open_folder(root.join("sub"));
         app.select_single(1);
         app.enter_loupe();
         app.save_session_if_changed();
-        assert_eq!(app.saved_session(), Some(&chosen));
+        assert_eq!(
+            app.saved_session(),
+            Some(&session(&root, Some("sub/d.jpg"), SessionView::Loupe))
+        );
+    }
+
+    #[test]
+    fn reopening_restores_the_subfolder_photo_and_loupe() {
+        let root = tree("restore-sub");
+        let saved = session(&root, Some("sub/d.jpg"), SessionView::Loupe);
+        let mut app = App::new(None);
+        app.session = Some(saved.clone());
+        app.reopen_session();
+
+        assert_eq!(app.folder_root.as_deref(), Some(root.as_path()));
+        assert_eq!(app.folder_sel.as_deref(), Some(root.join("sub").as_path()));
+        assert!(app.expanded.contains(&root));
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert_eq!(app.current_session(), Some(saved));
+    }
+
+    #[test]
+    fn a_missing_subfolder_reopens_the_chosen_folder() {
+        let root = tree("sub-gone");
+        let mut saved = session(&root, Some("sub/d.jpg"), SessionView::Loupe);
+        saved.dir = Some(root.join("gone"));
+        saved.photo = Some(root.join("gone/d.jpg"));
+        let mut app = App::new(None);
+        app.restore_session(&saved);
+        assert_eq!(
+            app.current_session(),
+            Some(session(&root, None, SessionView::Grid))
+        );
+    }
+
+    #[test]
+    fn a_session_saved_before_subfolders_were_remembered_still_loads() {
+        let old = r#"{"root":"/photos","photo":"/photos/a.jpg","view":"Loupe"}"#;
+        let parsed: Session = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.dir, None);
+        assert_eq!(parsed.folder_chain(), vec![PathBuf::from("/photos")]);
+    }
+
+    #[test]
+    fn the_folder_chain_runs_from_the_root_down_to_the_subfolder() {
+        let s = Session {
+            root: PathBuf::from("/photos"),
+            dir: Some(PathBuf::from("/photos/2024/june")),
+            photo: None,
+            view: SessionView::Grid,
+        };
+        assert_eq!(
+            s.folder_chain(),
+            ["/photos", "/photos/2024", "/photos/2024/june"].map(PathBuf::from)
+        );
     }
 
     #[test]
