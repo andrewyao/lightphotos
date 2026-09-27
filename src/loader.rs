@@ -93,12 +93,21 @@ enum JobResult {
 }
 
 /// The shared job queue. Workers take jobs in this priority order:
-/// speed, preview, full, exif, thumbnails, meta.
+/// speed, preview, full, exif, viewport thumbnails, background thumbnails,
+/// meta.
 ///
 /// The loupe image comes first because the user is waiting on it, and
 /// thumbnails arrive by the hundreds. Previews outrank full-resolution decodes
 /// so that stepping to the next photo does not wait behind the previous
 /// photo's multi-second full decode.
+///
+/// Thumbnails come in two classes. `thumbs_viewport` is what the grid or the
+/// filmstrip shows right now: `set_viewport_thumbs` replaces the whole list
+/// every frame, and a queued job that scrolled off is dropped, so a new
+/// viewport never waits behind the cells passed on the way to it. `thumbs` is
+/// the background work (burst scoring, duplicate hashing, Auto Tone) that
+/// must finish wherever the user scrolls, so it is plain FIFO and never
+/// pruned.
 ///
 /// Priority only applies to jobs still in the queue. A thumbnail already
 /// running on a worker cannot be preempted, so worker 0 is reserved and never
@@ -108,6 +117,7 @@ struct Queue {
     speed: VecDeque<Job>,
     preview: VecDeque<Job>,
     full: VecDeque<Job>,
+    thumbs_viewport: VecDeque<Job>,
     thumbs: VecDeque<Job>,
     exif: VecDeque<Job>,
     meta: VecDeque<Job>,
@@ -128,7 +138,9 @@ impl Queue {
                 if dedicated {
                     None
                 } else {
-                    self.thumbs.pop_front()
+                    self.thumbs_viewport
+                        .pop_front()
+                        .or_else(|| self.thumbs.pop_front())
                 }
             })
             .or_else(|| self.meta.pop_front())
@@ -208,7 +220,14 @@ pub struct Loader {
 
     thumb_cache: HashMap<(PathBuf, u32), Arc<DecodedImage>>,
     thumb_order: VecDeque<(PathBuf, u32)>,
+    /// Background thumbnails asked for and not yet answered.
     thumb_inflight: HashSet<(PathBuf, u32)>,
+    /// Viewport thumbnails queued or running. Kept apart from
+    /// `thumb_inflight` so pruning a viewport job can never lose a background
+    /// request, and a viewport request never waits behind a folder-wide
+    /// background backlog. The price is that a thumbnail wanted by both can
+    /// be decoded twice, the second time from the on-disk cache.
+    viewport_inflight: HashSet<(PathBuf, u32)>,
     /// Failed thumbnail keys, so callers stop re-requesting them every frame.
     thumb_failed: HashSet<(PathBuf, u32)>,
     thumb_capacity: usize,
@@ -384,6 +403,7 @@ impl Loader {
             thumb_cache: HashMap::new(),
             thumb_order: VecDeque::new(),
             thumb_inflight: HashSet::new(),
+            viewport_inflight: HashSet::new(),
             thumb_failed: HashSet::new(),
             thumb_capacity: THUMB_CAPACITY,
             meta_inflight: HashSet::new(),
@@ -548,12 +568,79 @@ impl Loader {
         }
     }
 
-    /// Thumbnails asked for and not yet answered. Callers that batch over a
-    /// whole folder are expected to keep this bounded, because each one in
-    /// flight becomes a decoded thumbnail the cache has to hold.
+    /// Replaces the viewport's thumbnail request with `paths`, in the order
+    /// they should load. Queued viewport jobs not in `paths` are dropped;
+    /// one a worker already took runs to completion and still lands in the
+    /// cache. Cached, failed, and already requested paths are skipped, so
+    /// calling this every frame with the same list enqueues nothing.
+    pub fn set_viewport_thumbs(&mut self, paths: &[PathBuf], max_px: u32) {
+        if self.workers == 0 {
+            return;
+        }
+        let wanted: Vec<(PathBuf, u32)> = paths
+            .iter()
+            .map(|p| (p.clone(), max_px))
+            .filter(|k| !self.thumb_cache.contains_key(k) && !self.thumb_failed.contains(k))
+            .collect();
+        let Ok(mut q) = self.shared.queue.lock() else {
+            // Poison is permanent and workers exit on it, so report every
+            // pending thumbnail as failed rather than loading forever.
+            self.thumb_failed.extend(wanted);
+            self.thumb_failed.extend(self.viewport_inflight.drain());
+            return;
+        };
+        let keep: HashSet<&(PathBuf, u32)> = wanted.iter().collect();
+        q.thumbs_viewport.retain(|job| {
+            let Job::Thumb(path, px) = job else {
+                return true;
+            };
+            let key = (path.clone(), *px);
+            if keep.contains(&key) {
+                return true;
+            }
+            self.viewport_inflight.remove(&key);
+            false
+        });
+        let mut pushed = false;
+        for key in wanted {
+            if self.viewport_inflight.insert(key.clone()) {
+                q.thumbs_viewport.push_back(Job::Thumb(key.0, key.1));
+                pushed = true;
+            }
+        }
+        if pushed {
+            self.shared.ready.notify_all();
+        }
+    }
+
+    /// Background thumbnails asked for and not yet answered. Callers that
+    /// batch over a whole folder are expected to keep this bounded, because
+    /// each one in flight becomes a decoded thumbnail the cache has to hold.
     #[cfg(test)]
     pub(crate) fn thumbs_in_flight(&self) -> usize {
         self.thumb_inflight.len()
+    }
+
+    /// Viewport thumbnail keys still queued, in queue order.
+    #[cfg(test)]
+    pub(crate) fn queued_viewport_thumbs(&self) -> Vec<(PathBuf, u32)> {
+        let q = self.shared.queue.lock().unwrap();
+        q.thumbs_viewport
+            .iter()
+            .filter_map(|job| match job {
+                Job::Thumb(path, px) => Some((path.clone(), *px)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Reports one worker but spawns none, so enqueued jobs stay queued and
+    /// tests can inspect them.
+    #[cfg(test)]
+    pub(crate) fn queue_only_for_test() -> Self {
+        let mut loader = Self::with_workers(16384, 0);
+        loader.workers = 1;
+        loader
     }
 
     #[cfg(test)]
@@ -705,6 +792,7 @@ impl Loader {
                 self.speed_inflight.remove(&key);
             }
             self.thumb_failed.extend(self.thumb_inflight.drain());
+            self.thumb_failed.extend(self.viewport_inflight.drain());
             self.meta_inflight.clear();
             self.exif_inflight.clear();
         }
@@ -768,6 +856,7 @@ impl Loader {
                 JobResult::Thumb(path, max_px, r) => {
                     let key = (path.clone(), max_px);
                     self.thumb_inflight.remove(&key);
+                    self.viewport_inflight.remove(&key);
                     match r {
                         Ok(img) => {
                             self.insert_thumb(key.clone(), img);
@@ -929,6 +1018,83 @@ mod tests {
     }
 
     #[test]
+    fn viewport_thumbnails_outrank_background_ones_and_the_dedicated_worker_takes_neither() {
+        let mut q = Queue::default();
+        q.thumbs.push_back(Job::Thumb(path("background"), 192));
+        q.thumbs_viewport
+            .push_back(Job::Thumb(path("viewport"), 192));
+        assert!(q.take_next(true).is_none());
+        let names: Vec<PathBuf> = std::iter::from_fn(|| q.take_next(false))
+            .map(|job| match job {
+                Job::Thumb(p, _) => p,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(names, [path("viewport"), path("background")]);
+    }
+
+    fn keys(names: &[&str]) -> Vec<(PathBuf, u32)> {
+        names.iter().map(|n| (path(n), 192)).collect()
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(|n| path(n)).collect()
+    }
+
+    #[test]
+    fn a_new_viewport_drops_the_queued_jobs_that_scrolled_off() {
+        let mut loader = Loader::queue_only_for_test();
+        loader.set_viewport_thumbs(&paths(&["a", "b", "c"]), 192);
+        loader.set_viewport_thumbs(&paths(&["c", "d"]), 192);
+        assert_eq!(loader.queued_viewport_thumbs(), keys(&["c", "d"]));
+        assert_eq!(
+            loader.viewport_inflight,
+            keys(&["c", "d"]).into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn the_same_viewport_every_frame_enqueues_nothing_new() {
+        let mut loader = Loader::queue_only_for_test();
+        loader.set_viewport_thumbs(&paths(&["a", "b"]), 192);
+        loader.set_viewport_thumbs(&paths(&["a", "b"]), 192);
+        assert_eq!(loader.queued_viewport_thumbs(), keys(&["a", "b"]));
+    }
+
+    #[test]
+    fn a_viewport_job_a_worker_took_keeps_its_marker_and_is_not_requeued() {
+        let mut loader = Loader::queue_only_for_test();
+        loader.set_viewport_thumbs(&paths(&["a"]), 192);
+        let taken = loader.shared.queue.lock().unwrap().take_next(false);
+        assert!(matches!(taken, Some(Job::Thumb(..))));
+        loader.set_viewport_thumbs(&paths(&["b"]), 192);
+        assert!(loader.viewport_inflight.contains(&(path("a"), 192)));
+        loader.set_viewport_thumbs(&paths(&["a", "b"]), 192);
+        assert_eq!(loader.queued_viewport_thumbs(), keys(&["b"]));
+    }
+
+    #[test]
+    fn a_background_request_survives_a_viewport_that_scrolled_past_it() {
+        // The Auto Tone guarantee: it asks once and waits for the result.
+        let mut loader = Loader::queue_only_for_test();
+        loader.request_thumb(path("x"), 192);
+        loader.set_viewport_thumbs(&paths(&["a"]), 192);
+        loader.set_viewport_thumbs(&paths(&["b"]), 192);
+        assert_eq!(loader.thumbs_in_flight(), 1);
+        let q = loader.shared.queue.lock().unwrap();
+        assert!(matches!(q.thumbs.front(), Some(Job::Thumb(p, 192)) if *p == path("x")));
+    }
+
+    #[test]
+    fn a_poisoned_queue_fails_viewport_requests_instead_of_loading_forever() {
+        let mut loader = Loader::new(16384);
+        loader.poison_thumb_queue_for_test(path("a"), 192);
+        loader.set_viewport_thumbs(&paths(&["b"]), 192);
+        assert!(loader.thumb_failed(&path("b"), 192));
+        assert!(loader.viewport_inflight.is_empty());
+    }
+
+    #[test]
     fn a_preview_outranks_a_full_decode_already_queued() {
         let mut q = Queue::default();
         q.full.push_back(Job::Full(path("previous"), 16384));
@@ -1066,10 +1232,12 @@ mod tests {
         loader.request_exif(path("a"));
         loader.request_meta(path("a"));
         loader.request_thumb(path("a"), 192);
+        loader.set_viewport_thumbs(&paths(&["a"]), 192);
         assert!(!loader.has_pending_image());
         assert!(loader.exif_inflight.is_empty());
         assert!(loader.meta_inflight.is_empty());
         assert!(loader.thumb_inflight.is_empty());
+        assert!(loader.viewport_inflight.is_empty());
         assert!(!loader.thumb_failed(&path("a"), 192));
     }
 

@@ -163,27 +163,22 @@ impl App {
             return 0..0;
         }
         match self.mode {
-            ViewMode::Grid => {
-                let margin = self.grid_cols.saturating_mul(3).max(1);
-                let start = self.grid_range.0.saturating_sub(margin);
-                let end = (self.grid_range.1 + margin).min(len);
-                start..end.max(start)
-            }
-            ViewMode::Loupe => {
-                // Include the selection, so its thumbnail loads before the
-                // strip reports a range.
-                let margin = 8;
-                let mut start = self.strip_range.0.saturating_sub(margin);
-                let mut end = (self.strip_range.1 + margin).min(len);
-                if let Some(s) = self.sel {
-                    start = start.min(s);
-                    end = end.max((s + 1).min(len));
-                }
-                start..end.max(start)
-            }
+            ViewMode::Grid => grid_working_range(self.grid_range, self.grid_cols, len),
+            ViewMode::Loupe => strip_working_range(self.strip_range, self.sel, len),
             // Survey members aren't a contiguous range; `working_thumb_keys`
             // adds them.
             ViewMode::Survey => 0..0,
+        }
+    }
+
+    /// `working_positions` in the order their thumbnails should load: the
+    /// selection, then what is on screen, then the margin.
+    fn working_positions_ordered(&self) -> Vec<usize> {
+        let working = self.working_positions();
+        match self.mode {
+            ViewMode::Grid => load_order(working, self.grid_range, None),
+            ViewMode::Loupe => load_order(working, self.strip_range, self.sel),
+            ViewMode::Survey => Vec::new(),
         }
     }
 
@@ -224,32 +219,37 @@ impl App {
         keys
     }
 
-    /// Request thumbnails for the working set. Returns true while any is
-    /// missing, so the caller keeps redrawing.
+    /// Request thumbnails for the working set, on-screen cells first. Returns
+    /// true while any is missing, so the caller keeps redrawing.
     #[hotpath::measure]
     pub(crate) fn request_working_thumbs(&mut self) -> bool {
         let px = THUMB_PX;
-        let paths: Vec<PathBuf> = self
-            .working_thumb_keys()
+        let Some(pl) = &self.playlist else {
+            return false;
+        };
+        let mut paths: Vec<PathBuf> = self
+            .working_positions_ordered()
             .into_iter()
-            .map(|(p, _, _)| p)
+            .filter_map(|pos| self.visible.get(pos).copied())
+            .filter_map(|i| pl.entry(i))
+            .map(Path::to_path_buf)
             .collect();
+        if self.mode == ViewMode::Survey {
+            paths.extend(self.survey_members.iter().cloned());
+        }
 
         // Auto Tone's window shares this cache, so it has to be counted in or
         // its thumbnails can be evicted before `poll_auto_tone` reads them.
         let reserved = paths.len() + self.autotone_window.len();
-        let mut any_missing = false;
-        if let Some(loader) = &mut self.loader {
-            loader.set_thumb_working_set_size(reserved);
-            for p in &paths {
-                // Skip failed decodes, or the redraw loop would spin on them.
-                if loader.get_thumb(p, px).is_none() && !loader.thumb_failed(p, px) {
-                    loader.request_thumb(p.clone(), px);
-                    any_missing = true;
-                }
-            }
-        }
-        any_missing
+        let Some(loader) = &mut self.loader else {
+            return false;
+        };
+        loader.set_thumb_working_set_size(reserved);
+        loader.set_viewport_thumbs(&paths, px);
+        // Failed decodes don't count, or the redraw loop would spin on them.
+        paths
+            .iter()
+            .any(|p| loader.get_thumb(p, px).is_none() && !loader.thumb_failed(p, px))
     }
 
     /// Score sharpness for every burst member, requesting thumbnails as needed,
@@ -727,5 +727,160 @@ impl App {
             renderer.free_thumb(tex.id);
             false
         });
+    }
+}
+
+/// The grid's working set: `grid_range` plus three rows either side.
+pub(crate) fn grid_working_range(
+    grid_range: (usize, usize),
+    cols: usize,
+    len: usize,
+) -> std::ops::Range<usize> {
+    let margin = cols.saturating_mul(3).max(1);
+    let start = grid_range.0.saturating_sub(margin);
+    let end = (grid_range.1 + margin).min(len);
+    start..end.max(start)
+}
+
+/// The filmstrip's working set: `strip_range` plus eight either side, widened
+/// to include the selection so its thumbnail loads before the strip reports
+/// a range.
+pub(crate) fn strip_working_range(
+    strip_range: (usize, usize),
+    sel: Option<usize>,
+    len: usize,
+) -> std::ops::Range<usize> {
+    let margin = 8;
+    let mut start = strip_range.0.saturating_sub(margin);
+    let mut end = (strip_range.1 + margin).min(len);
+    if let Some(s) = sel {
+        start = start.min(s);
+        end = end.max((s + 1).min(len));
+    }
+    start..end.max(start)
+}
+
+/// `working` in the order its thumbnails should load: `sel` first, then
+/// `visible` top to bottom, then the margin after it, then the margin before
+/// it nearest first. Every position of `working` appears exactly once.
+pub(crate) fn load_order(
+    working: std::ops::Range<usize>,
+    visible: (usize, usize),
+    sel: Option<usize>,
+) -> Vec<usize> {
+    let start = visible.0.clamp(working.start, working.end);
+    let on_screen = start..visible.1.clamp(start, working.end);
+    let sel = sel.filter(|s| working.contains(s));
+    let mut order = Vec::with_capacity(working.len());
+    order.extend(sel);
+    order.extend(on_screen.clone().filter(|p| Some(*p) != sel));
+    order.extend((on_screen.end..working.end).filter(|p| Some(*p) != sel));
+    order.extend(
+        (working.start..on_screen.start)
+            .rev()
+            .filter(|p| Some(*p) != sel),
+    );
+    order
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{grid_working_range, load_order, strip_working_range};
+    use crate::loader::Loader;
+    use std::path::PathBuf;
+
+    fn sorted(mut v: Vec<usize>) -> Vec<usize> {
+        v.sort_unstable();
+        v
+    }
+
+    #[test]
+    fn the_grid_loads_the_screen_first_then_the_rows_below_then_the_rows_above() {
+        let working = grid_working_range((12, 42), 6, 100);
+        assert_eq!(working, 0..60);
+        let order = load_order(working.clone(), (12, 42), None);
+        let mut expected: Vec<usize> = (12..42).collect();
+        expected.extend(42..60);
+        expected.extend((0..12).rev());
+        assert_eq!(order, expected);
+        assert_eq!(sorted(order), working.collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_strip_loads_the_selection_first_then_the_strip_then_the_margin() {
+        let working = strip_working_range((20, 29), Some(24), 100);
+        assert_eq!(working, 12..37);
+        let order = load_order(working.clone(), (20, 29), Some(24));
+        let mut expected = vec![24];
+        expected.extend((20..29).filter(|p| *p != 24));
+        expected.extend(29..37);
+        expected.extend((12..20).rev());
+        assert_eq!(order, expected);
+        assert_eq!(sorted(order), working.collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_selection_outside_the_strip_range_still_comes_first_and_only_once() {
+        // Right after a jump, before the strip has reported a range around it.
+        let working = strip_working_range((20, 29), Some(50), 100);
+        assert_eq!(working, 12..51);
+        let order = load_order(working.clone(), (20, 29), Some(50));
+        assert_eq!(order[0], 50);
+        assert_eq!(order.iter().filter(|p| **p == 50).count(), 1);
+        assert_eq!(sorted(order), working.collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_viewport_past_the_end_of_the_folder_is_clamped() {
+        let working = grid_working_range((90, 120), 6, 100);
+        assert_eq!(working, 72..100);
+        assert_eq!(
+            load_order(working, (90, 120), None),
+            (90..100).chain((72..90).rev()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_stale_viewport_beyond_the_working_set_adds_no_positions_outside_it() {
+        // A filter shrank the folder before the grid reported its new range.
+        let working = grid_working_range((90, 120), 6, 40);
+        assert_eq!(
+            sorted(load_order(working.clone(), (90, 120), None)),
+            working.collect::<Vec<_>>()
+        );
+        let working = strip_working_range((90, 99), Some(3), 40);
+        assert_eq!(working, 3..40);
+        let order = load_order(working.clone(), (90, 99), Some(3));
+        assert_eq!(order[0], 3);
+        assert_eq!(sorted(order), working.collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn flicking_the_strip_to_a_far_photo_drops_the_windows_passed_on_the_way() {
+        let photos: Vec<PathBuf> = (0..600)
+            .map(|i| PathBuf::from(format!("/p/{i}.jpg")))
+            .collect();
+        let request = |loader: &mut Loader, sel: usize| {
+            let strip = (sel.saturating_sub(4), (sel + 5).min(photos.len()));
+            let working = strip_working_range(strip, Some(sel), photos.len());
+            let paths: Vec<PathBuf> = load_order(working, strip, Some(sel))
+                .into_iter()
+                .map(|p| photos[p].clone())
+                .collect();
+            loader.set_viewport_thumbs(&paths, 512);
+        };
+        let mut loader = Loader::queue_only_for_test();
+        for sel in (100..400).step_by(20) {
+            request(&mut loader, sel);
+        }
+        request(&mut loader, 550);
+        let queued: Vec<PathBuf> = loader
+            .queued_viewport_thumbs()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(queued[0], photos[550]);
+        assert_eq!(queued.len(), 25);
+        assert!(queued.iter().all(|p| photos[538..563].contains(p)));
     }
 }
