@@ -68,6 +68,10 @@ pub struct Palette {
     pub loupe_bg: Color32,
     pub grid_cell: Color32,
     pub strip_cell: Color32,
+    /// A selected cell, a step off its unselected color: lighter on the dark
+    /// themes, darker on the light one.
+    pub grid_cell_selected: Color32,
+    pub strip_cell_selected: Color32,
     /// Names and captions: "ISO", the camera line, empty stars.
     pub label: Color32,
     /// The data a label names: its value, the filename, the exposure.
@@ -177,6 +181,8 @@ pub fn palette(theme: Theme) -> Palette {
             loupe_bg: Color32::from_gray(38),
             grid_cell: Color32::from_gray(30),
             strip_cell: Color32::from_gray(24),
+            grid_cell_selected: Color32::from_gray(44),
+            strip_cell_selected: Color32::from_gray(38),
             label: Color32::from_gray(200),
             value: Color32::from_gray(245),
             divider: Color32::from_gray(90),
@@ -199,6 +205,8 @@ pub fn palette(theme: Theme) -> Palette {
             loupe_bg: Color32::from_gray(214),
             grid_cell: Color32::from_gray(222),
             strip_cell: Color32::from_gray(214),
+            grid_cell_selected: Color32::from_gray(210),
+            strip_cell_selected: Color32::from_gray(208),
             label: Color32::from_gray(72),
             value: Color32::from_gray(20),
             divider: Color32::from_gray(170),
@@ -229,6 +237,8 @@ fn medium(panel: Color32) -> Palette {
         loupe_bg: gray(14),
         grid_cell: gray(-8),
         strip_cell: gray(-14),
+        grid_cell_selected: gray(6),
+        strip_cell_selected: gray(0),
         label: Color32::PLACEHOLDER,
         value: Color32::PLACEHOLDER,
         divider: gray(44),
@@ -258,6 +268,8 @@ fn medium(panel: Color32) -> Palette {
             cursor: Color32::from_rgb(150, 80, 0),
             selection: Color32::from_rgb(20, 70, 170),
             selection_bg: Color32::from_rgb(150, 180, 225),
+            grid_cell_selected: gray(-22),
+            strip_cell_selected: gray(-28),
             danger: Color32::from_rgb(150, 20, 20),
             widget: [shift(24), shift(32), shift(40), shift(16)],
             divider: gray(-44),
@@ -370,7 +382,13 @@ mod tests {
     fn stars_cursor_and_danger_stand_out_from_panels_and_cells() {
         for theme in ALL {
             let p = palette(theme);
-            for bg in [p.panel, p.grid_cell, p.strip_cell] {
+            for bg in [
+                p.panel,
+                p.grid_cell,
+                p.strip_cell,
+                p.grid_cell_selected,
+                p.strip_cell_selected,
+            ] {
                 for (name, c) in [("star", p.star), ("cursor", p.cursor)] {
                     let ratio = contrast_ratio(c, bg);
                     assert!(ratio >= 3.0, "{theme:?} {name} {ratio:.2}:1");
