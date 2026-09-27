@@ -458,7 +458,10 @@ impl App {
                     return;
                 };
                 if let Err(e) = std::fs::create_dir_all(&dir) {
-                    self.set_status(StatusKind::Error, (crate::i18n::t().export_no_folder)(&e.to_string()));
+                    self.set_status(
+                        StatusKind::Error,
+                        (crate::i18n::t().export_no_folder)(&e.to_string()),
+                    );
                     self.request_redraw();
                     return;
                 }
@@ -503,7 +506,10 @@ impl App {
             album,
             asset_ids: Vec::new(),
         });
-        self.set_status(StatusKind::Progress, Self::progress_text(uploading, 0, total));
+        self.set_status(
+            StatusKind::Progress,
+            Self::progress_text(uploading, 0, total),
+        );
         self.request_redraw();
     }
 
@@ -577,13 +583,17 @@ impl App {
                 None => summary,
             };
             #[cfg(not(target_arch = "wasm32"))]
-            let (kind, summary) = match self.start_album_add(prog.album, prog.asset_ids, summary, kind) {
-                Ok(adding) => (StatusKind::Progress, adding),
-                Err(summary) => (kind, summary),
-            };
+            let (kind, summary) =
+                match self.start_album_add(prog.album, prog.asset_ids, summary, kind) {
+                    Ok(adding) => (StatusKind::Progress, adding),
+                    Err(summary) => (kind, summary),
+                };
             self.set_status(kind, summary);
         } else {
-            self.set_status(StatusKind::Progress, Self::progress_text(prog.uploading, prog.done, prog.total));
+            self.set_status(
+                StatusKind::Progress,
+                Self::progress_text(prog.uploading, prog.done, prog.total),
+            );
             self.export_progress = Some(prog);
         }
     }
@@ -731,7 +741,11 @@ mod status_tests {
         let mut app = App::new(None);
         app.set_status(StatusKind::Success, "Rated 20000 photos".to_string());
         let (kind, msg, _) = app.status.take().unwrap();
-        app.status = Some((kind, msg, Instant::now() - std::time::Duration::from_secs(4)));
+        app.status = Some((
+            kind,
+            msg,
+            Instant::now() - std::time::Duration::from_secs(4),
+        ));
         app
     }
 
@@ -972,7 +986,11 @@ mod status_tests {
         let cases = [
             (StatusKind::Success, Ok(album()), StatusKind::Success),
             (StatusKind::Error, Ok(album()), StatusKind::Error),
-            (StatusKind::Success, Err("offline".to_string()), StatusKind::Error),
+            (
+                StatusKind::Success,
+                Err("offline".to_string()),
+                StatusKind::Error,
+            ),
         ];
         for (export_kind, result, expected) in cases {
             let (tx, rx) = std::sync::mpsc::channel();
@@ -988,9 +1006,19 @@ mod status_tests {
     fn an_album_add_starts_only_with_an_album_and_uploads() {
         let mut app = App::new(None);
         app.immich = connected(vec![]);
-        let none = app.start_album_add(AlbumChoice::None, vec!["x".into()], "s".into(), StatusKind::Success);
+        let none = app.start_album_add(
+            AlbumChoice::None,
+            vec!["x".into()],
+            "s".into(),
+            StatusKind::Success,
+        );
         assert_eq!(none, Err("s".into()));
-        let empty = app.start_album_add(AlbumChoice::New("Trip".into()), vec![], "s".into(), StatusKind::Success);
+        let empty = app.start_album_add(
+            AlbumChoice::New("Trip".into()),
+            vec![],
+            "s".into(),
+            StatusKind::Success,
+        );
         assert_eq!(empty, Err("s".into()));
         assert!(app.album_add.is_none());
     }

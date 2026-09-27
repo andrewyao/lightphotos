@@ -198,7 +198,11 @@ mod tests {
         let (first, second) = (tree("first"), tree("second"));
         let mut app = App::new(None);
         app.save_session_if_changed();
-        assert_eq!(app.saved_session(), None, "nothing to save on the landing page");
+        assert_eq!(
+            app.saved_session(),
+            None,
+            "nothing to save on the landing page"
+        );
 
         app.open(first.clone());
         app.save_session_if_changed();

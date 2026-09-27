@@ -58,13 +58,23 @@ impl App {
             return;
         }
         if self.hist_sample.is_empty() {
-            self.set_status(StatusKind::Error, crate::i18n::t().auto_tone_needs_load.into());
+            self.set_status(
+                StatusKind::Error,
+                crate::i18n::t().auto_tone_needs_load.into(),
+            );
             return;
         }
-        let auto = autotone::analyze(&self.hist_sample, self.hist_pixel_format, self.autotone_centering);
+        let auto = autotone::analyze(
+            &self.hist_sample,
+            self.hist_pixel_format,
+            self.autotone_centering,
+        );
         let merged = autotone::merge(&self.current_adjustments(), &auto);
         self.apply_adjustments_kind(merged, "auto_tone");
-        self.set_status(StatusKind::Success, crate::i18n::t().auto_tone_applied.into());
+        self.set_status(
+            StatusKind::Success,
+            crate::i18n::t().auto_tone_applied.into(),
+        );
     }
 
     /// Auto Tone the selected photo (Cmd+U). Target the selection, not
@@ -118,7 +128,10 @@ impl App {
                     }
                 }
             }
-            self.set_status(StatusKind::Error, crate::i18n::t().auto_tone_waits_for_catalog.into());
+            self.set_status(
+                StatusKind::Error,
+                crate::i18n::t().auto_tone_waits_for_catalog.into(),
+            );
             self.request_redraw();
             return;
         }
@@ -143,7 +156,11 @@ impl App {
             }
             // The shown photo's histogram sample needs no decode.
             if self.shown.path() == Some(path.as_path()) && !self.hist_sample.is_empty() {
-                let auto = autotone::analyze(&self.hist_sample, self.hist_pixel_format, self.autotone_centering);
+                let auto = autotone::analyze(
+                    &self.hist_sample,
+                    self.hist_pixel_format,
+                    self.autotone_centering,
+                );
                 self.tone_one(&path, &auto);
                 continue;
             }
@@ -271,7 +288,10 @@ impl App {
         self.autotone_base.clear();
         self.autotone_deferred = None;
         self.autotone_done = 0;
-        self.set_status(StatusKind::Info, (crate::i18n::t().auto_tone_stopped)(done, total));
+        self.set_status(
+            StatusKind::Info,
+            (crate::i18n::t().auto_tone_stopped)(done, total),
+        );
     }
 
     /// Batch size: photos toned plus photos waiting. Dropped or skipped photos
@@ -312,14 +332,20 @@ impl App {
         if self.autotone_pending.is_empty() {
             // Cmd+U lands here for one photo when its thumbnail had to load.
             let t = crate::i18n::t();
-            self.set_status(StatusKind::Success, if done == 1 {
-                t.auto_tone_applied.to_string()
-            } else {
-                (t.auto_tone_applied_n)(done)
-            });
+            self.set_status(
+                StatusKind::Success,
+                if done == 1 {
+                    t.auto_tone_applied.to_string()
+                } else {
+                    (t.auto_tone_applied_n)(done)
+                },
+            );
             self.autotone_done = 0;
         } else {
-            self.set_status(StatusKind::Progress, (crate::i18n::t().auto_tone_progress)(done, total));
+            self.set_status(
+                StatusKind::Progress,
+                (crate::i18n::t().auto_tone_progress)(done, total),
+            );
         }
     }
 }

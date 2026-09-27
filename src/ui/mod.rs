@@ -317,7 +317,14 @@ fn landing_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let session = app.saved_session();
     let reopen_w = font_size::px(ui.style(), 170.0);
     let settings_w = font_size::px(ui.style(), 120.0);
-    let row_w = 240.0 + GAP + settings_w + if session.is_some() { GAP + reopen_w } else { 0.0 };
+    let row_w = 240.0
+        + GAP
+        + settings_w
+        + if session.is_some() {
+            GAP + reopen_w
+        } else {
+            0.0
+        };
     let secondary = |ui: &mut egui::Ui, label: &str, width: f32, enabled: bool| {
         ui.add_enabled(
             enabled,
@@ -335,7 +342,9 @@ fn landing_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             choose_folder_button(ui, app, out);
             if let Some(session) = session {
                 if secondary(ui, t().reopen_session, reopen_w, !app.folder_pick_pending())
-                    .on_hover_text((t().reopen_session_tip)(&session.root.display().to_string()))
+                    .on_hover_text((t().reopen_session_tip)(
+                        &session.root.display().to_string(),
+                    ))
                     .clicked()
                 {
                     out.actions.push(UiAction::ReopenSession);
@@ -547,7 +556,8 @@ fn bullet(ui: &mut egui::Ui, color: egui::Color32) {
 fn info_icon(ui: &mut egui::Ui, pal: &theme::Palette) {
     let d = font_size::px(ui.style(), 18.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), d / 2.0, pal.value);
+    ui.painter()
+        .circle_filled(rect.center(), d / 2.0, pal.value);
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,

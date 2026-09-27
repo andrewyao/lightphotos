@@ -103,9 +103,13 @@ impl Palette {
     pub fn toast(&self, kind: StatusKind) -> ToastColors {
         let rgb = Color32::from_rgb;
         let (fill, text, stroke) = match (kind, self.dark_base) {
-            (StatusKind::Success, true) => (rgb(20, 83, 45), rgb(220, 252, 231), rgb(187, 247, 208)),
+            (StatusKind::Success, true) => {
+                (rgb(20, 83, 45), rgb(220, 252, 231), rgb(187, 247, 208))
+            }
             (StatusKind::Error, true) => (rgb(127, 29, 29), rgb(254, 226, 226), rgb(254, 202, 202)),
-            (StatusKind::Progress, true) => (rgb(30, 58, 138), rgb(219, 234, 254), rgb(191, 219, 254)),
+            (StatusKind::Progress, true) => {
+                (rgb(30, 58, 138), rgb(219, 234, 254), rgb(191, 219, 254))
+            }
             (StatusKind::Info, true) => (
                 Color32::from_gray(50),
                 Color32::from_gray(245),
@@ -113,7 +117,9 @@ impl Palette {
             ),
             (StatusKind::Success, false) => (rgb(220, 252, 231), rgb(20, 83, 45), rgb(21, 128, 61)),
             (StatusKind::Error, false) => (rgb(254, 226, 226), rgb(127, 29, 29), rgb(185, 28, 28)),
-            (StatusKind::Progress, false) => (rgb(219, 234, 254), rgb(30, 58, 138), rgb(29, 78, 216)),
+            (StatusKind::Progress, false) => {
+                (rgb(219, 234, 254), rgb(30, 58, 138), rgb(29, 78, 216))
+            }
             (StatusKind::Info, false) => (
                 Color32::from_gray(252),
                 Color32::from_gray(20),
