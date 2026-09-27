@@ -477,17 +477,27 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
     let dir = file.parent().ok_or("cache entry has no parent")?;
     fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
-    // Append `.tmp` to the full name so `sweep_orphans` can parse it.
-    let mut tmp = file.as_os_str().to_os_string();
-    tmp.push(".tmp");
-    let tmp = PathBuf::from(tmp);
-
-    crate::image_encode::encode_jpeg(&tmp, img.width, img.height, &img.rgba)?;
-    if let Err(e) = fs::rename(&tmp, file) {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("rename: {e}"));
+    #[cfg(not(target_os = "macos"))]
+    {
+        let jpeg = crate::image_encode::encode_jpeg_to_vec(img.width, img.height, &img.rgba)?;
+        crate::paths::write_atomic(file, &jpeg).map_err(|e| format!("write: {e}"))
     }
-    Ok(())
+    // ImageIO writes the file itself and replaces a symlink rather than
+    // following it. Append `.tmp` to the full name so `sweep_orphans` can
+    // parse it.
+    #[cfg(target_os = "macos")]
+    {
+        let mut tmp = file.as_os_str().to_os_string();
+        tmp.push(".tmp");
+        let tmp = PathBuf::from(tmp);
+
+        crate::image_encode::encode_jpeg(&tmp, img.width, img.height, &img.rgba)?;
+        if let Err(e) = fs::rename(&tmp, file) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("rename: {e}"));
+        }
+        Ok(())
+    }
 }
 
 /// Age after which a `.tmp` entry is abandoned. A live write takes seconds.
@@ -511,6 +521,7 @@ pub(crate) fn sweep_orphans(dir: &Path) {
         };
         if let Some(stem) = name.strip_suffix(".tmp") {
             // The age check avoids deleting a temp file a worker is writing.
+            let stem = crate::paths::atomic_tmp_target(stem);
             if parse_cache_name(OsStr::new(stem)).is_some() && is_older_than(&entry, TMP_REAP_AFTER)
             {
                 let _ = fs::remove_file(entry.path());
@@ -682,6 +693,7 @@ mod tests {
         let orphan = cache.join(cache_name(OsStr::new("GONE.JPG"), key));
         let interrupted = cache.join("IMG_0001.ARW.0123456789abcdef.thumb.jpg.tmp");
         let abandoned = cache.join("IMG_0002.ARW.fedcba9876543210.thumb.jpg.tmp");
+        let abandoned_atomic = cache.join("IMG_0003.ARW.fedcba9876543210.thumb.jpg.77-3.tmp");
         let sidecar = cache.join("IMG_0001.ARW.xmp");
         for f in [
             &current,
@@ -689,16 +701,19 @@ mod tests {
             &orphan,
             &interrupted,
             &abandoned,
+            &abandoned_atomic,
             &sidecar,
         ] {
             fs::write(f, b"x").unwrap();
         }
-        fs::File::options()
-            .write(true)
-            .open(&abandoned)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - TMP_REAP_AFTER * 2)
-            .unwrap();
+        for old in [&abandoned, &abandoned_atomic] {
+            fs::File::options()
+                .write(true)
+                .open(old)
+                .unwrap()
+                .set_modified(std::time::SystemTime::now() - TMP_REAP_AFTER * 2)
+                .unwrap();
+        }
 
         let malformed = [
             "reference.thumb.jpg",
@@ -727,6 +742,10 @@ mod tests {
         assert!(
             !abandoned.exists(),
             "a temp file older than any live write must go"
+        );
+        assert!(
+            !abandoned_atomic.exists(),
+            "an abandoned write_atomic temp file must go"
         );
 
         let _ = fs::remove_dir_all(&dir);

@@ -358,8 +358,7 @@ fn sidecar_path(path: &Path) -> Option<PathBuf> {
     Some(dir.join(super::SIDECAR_DIR).join(sidecar_name))
 }
 
-/// Write `rec` as JSON to `sidecar` through a `.tmp` sibling and rename, so a
-/// crash never leaves a partial file.
+/// Write `rec` as JSON to `sidecar`, atomically.
 #[cfg(not(target_arch = "wasm32"))]
 fn write_sidecar_file(sidecar: &Path, rec: &ImageRecord) -> Result<(), String> {
     let parent = sidecar
@@ -367,13 +366,7 @@ fn write_sidecar_file(sidecar: &Path, rec: &ImageRecord) -> Result<(), String> {
         .ok_or_else(|| "sidecar path has no parent".to_string())?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let bytes = serde_json::to_vec_pretty(rec).map_err(|e| e.to_string())?;
-    let tmp = sidecar.with_extension(format!("{}.tmp", super::SIDECAR_EXT));
-    std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
-    if let Err(e) = std::fs::rename(&tmp, sidecar) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.to_string());
-    }
-    Ok(())
+    crate::paths::write_atomic(sidecar, &bytes).map_err(|e| e.to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
