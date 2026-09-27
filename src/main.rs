@@ -419,6 +419,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Outside the loader block below, because a queued sidecar write has
         // no loader to wait on and can outlive the folder it came from.
         self.catalog.pump();
+        self.keep_status_alive();
         self.signals.flush_if_due();
         self.poll_delete();
         self.save_session_if_changed();

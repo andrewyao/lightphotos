@@ -22,6 +22,9 @@ pub(crate) const IMMICH_SERVER_PREF: &str = "immich_server";
 /// `prefs` key for the export form's settings.
 const EXPORT_SETTINGS_PREF: &str = "export_settings";
 
+/// How long a status toast shows after it was set or last kept alive.
+const STATUS_SECS: f32 = 3.0;
+
 /// The saved export settings, or the defaults (full size into `Exports/`,
 /// which is what export did before it had settings). A chosen folder that has
 /// since gone away falls back to `Exports/` here rather than failing the next
@@ -703,12 +706,25 @@ impl App {
             || self.catalog.backlog() > 0
     }
 
-    /// The current status message and its kind. It expires after 3 seconds,
-    /// except while a batch is running, so a slow decode can't blank the
-    /// progress toast.
+    /// Restart a showing toast's 3-second clock while a batch runs, so a slow
+    /// decode can't blank the progress toast. Called once per event-loop turn.
+    /// A toast that already expired stays expired: a slider drag queues a
+    /// sidecar write too, and must not bring back an old "Auto Tone applied".
+    pub(crate) fn keep_status_alive(&mut self) {
+        if !self.batch_running() {
+            return;
+        }
+        if let Some((_, _, at)) = self.status.as_mut() {
+            if at.elapsed().as_secs_f32() < STATUS_SECS {
+                *at = Instant::now();
+            }
+        }
+    }
+
+    /// The current status message and its kind, until it expires.
     pub(crate) fn status(&self) -> Option<(StatusKind, &str)> {
         let (kind, text, at) = self.status.as_ref()?;
-        (self.batch_running() || at.elapsed().as_secs_f32() < 3.0).then_some((*kind, text.as_str()))
+        (at.elapsed().as_secs_f32() < STATUS_SECS).then_some((*kind, text.as_str()))
     }
 
     #[cfg(test)]
@@ -841,17 +857,28 @@ mod status_tests {
         assert_eq!(app.status_text(), None);
     }
 
+    /// Move the toast's clock back, as if `secs` had passed.
+    fn age_status(app: &mut App, secs: u64) {
+        let (_, _, at) = app.status.as_mut().unwrap();
+        *at -= std::time::Duration::from_secs(secs);
+    }
+
     /// A batch that outlives the 3-second expiry would otherwise watch its own
     /// progress toast blank out halfway through.
     #[test]
-    fn a_stale_status_survives_while_sidecars_are_still_being_written() {
+    fn a_status_survives_while_sidecars_are_still_being_written() {
         let dir = unique_tmp_dir();
-        let mut app = app_with_a_stale_status();
+        let mut app = App::new(None);
         app.catalog.open_dir(&dir);
+        app.set_status(StatusKind::Success, "Rated 20000 photos".to_string());
         for i in 0..64 {
             app.catalog.set(&dir.join(format!("p{i}.jpg")), 3);
         }
         assert!(app.catalog.backlog() > 0);
+        for _ in 0..3 {
+            age_status(&mut app, 2);
+            app.keep_status_alive();
+        }
         assert_eq!(
             app.status_text(),
             Some("Rated 20000 photos"),
@@ -861,6 +888,8 @@ mod status_tests {
         app.catalog
             .flush_blocking(std::time::Duration::from_secs(10));
         assert_eq!(app.catalog.backlog(), 0);
+        age_status(&mut app, 4);
+        app.keep_status_alive();
         assert_eq!(
             app.status_text(),
             None,
@@ -869,23 +898,39 @@ mod status_tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A slider edit queues a sidecar write. That must not bring back a toast
+    /// that already expired, such as an earlier "Auto Tone applied".
     #[test]
-    fn a_stale_status_survives_while_a_delete_is_running() {
+    fn a_later_write_does_not_revive_an_expired_status() {
+        let dir = unique_tmp_dir();
+        let mut app = app_with_a_stale_status();
+        app.catalog.open_dir(&dir);
+        app.catalog.set(&dir.join("p.jpg"), 3);
+        assert!(app.catalog.backlog() > 0);
+        app.keep_status_alive();
+        assert_eq!(app.status_text(), None);
+
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_status_survives_while_a_delete_is_running() {
         let dir = unique_tmp_dir();
         std::fs::write(dir.join("a.jpg"), b"").unwrap();
 
-        let mut app = app_with_a_stale_status();
+        let mut app = App::new(None);
         app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
         app.recompute_visible();
         app.selected.insert(0);
         app.delete_selection();
-        // `delete_selection` sets its own progress toast; age it past expiry.
-        let (kind, msg, _) = app.status.take().unwrap();
-        app.status = Some((
-            kind,
-            msg.clone(),
-            Instant::now() - std::time::Duration::from_secs(4),
-        ));
+        // `delete_selection` sets its own progress toast; run it past expiry.
+        let msg = app.status_text().unwrap().to_string();
+        for _ in 0..3 {
+            age_status(&mut app, 2);
+            app.keep_status_alive();
+        }
 
         assert!(app.bulk_delete.is_some());
         assert_eq!(
