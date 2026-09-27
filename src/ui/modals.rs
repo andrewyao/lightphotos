@@ -4,28 +4,42 @@ use super::form::Form;
 use crate::app::App;
 use crate::autotone::Centering;
 
-/// Confirms a pending bulk action. Cancel, Esc, or a backdrop click dismisses it.
+/// Confirms a pending bulk action, titled and buttoned with the action itself.
+/// Cancel, Esc, or a backdrop click dismisses it.
 pub(super) fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
-    let Some(prompt) = app.pending_bulk_prompt() else {
+    let Some((kind, prompt)) = app.pending_bulk_prompt() else {
         return;
     };
+    let t = t();
+    let action = match kind {
+        BulkKind::Rate(0) => t.clear_rating,
+        BulkKind::Rate(_) => t.bulk_rate,
+        BulkKind::ApplySettings => t.apply_settings,
+        BulkKind::ApplyPreset(_) => t.bulk_apply_preset,
+        BulkKind::AutoTone => t.auto_tone,
+        BulkKind::Delete => t.bulk_delete,
+    };
+    let mut confirm = egui::RichText::new(action);
+    if kind == BulkKind::Delete {
+        confirm = confirm.color(theme::colors(ui.ctx()).danger);
+    }
     let resp = egui::Modal::new(egui::Id::new("bulk_confirm")).show(ui.ctx(), |ui| {
         ui.set_width(300.0);
-        ui.heading(t().confirm);
+        ui.heading(action);
         ui.add_space(6.0);
         ui.label(prompt);
         ui.add_space(12.0);
         ui.horizontal(|ui| {
-            if ui.button(t().cancel).clicked() {
-                out.actions.push(UiAction::CancelBulk);
+            if ui.button(t.cancel).clicked() {
+                out.actions.push(UiAction::CancelPending);
             }
-            if ui.button(t().confirm).clicked() {
-                out.actions.push(UiAction::ConfirmBulk);
+            if ui.button(confirm).clicked() {
+                out.actions.push(UiAction::ConfirmPending);
             }
         });
     });
     if resp.should_close() {
-        out.actions.push(UiAction::CancelBulk);
+        out.actions.push(UiAction::CancelPending);
     }
 }
 
@@ -44,15 +58,16 @@ pub(super) fn delete_preset_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutpu
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui.button(t().cancel).clicked() {
-                out.actions.push(UiAction::CancelDeletePreset);
+                out.actions.push(UiAction::CancelPending);
             }
-            if ui.button(t().delete).clicked() {
-                out.actions.push(UiAction::ConfirmDeletePreset);
+            let delete = egui::RichText::new(t().delete).color(theme::colors(ui.ctx()).danger);
+            if ui.button(delete).clicked() {
+                out.actions.push(UiAction::ConfirmPending);
             }
         });
     });
     if resp.should_close() {
-        out.actions.push(UiAction::CancelDeletePreset);
+        out.actions.push(UiAction::CancelPending);
     }
 }
 

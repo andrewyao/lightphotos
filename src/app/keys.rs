@@ -46,6 +46,18 @@ impl App {
             }
         }
 
+        // A confirm dialog sits over every tool, so it owns the keyboard ahead
+        // of them. Handling Esc here clears the dialog before its next frame,
+        // so the modal's own Esc check never runs and nothing cancels twice.
+        if self.confirm_open() {
+            match code {
+                KeyCode::Escape => self.cancel_pending(),
+                KeyCode::Enter | KeyCode::NumpadEnter => self.confirm_pending(),
+                _ => {}
+            }
+            return;
+        }
+
         // While cropping, other keys do nothing, so a stray arrow or digit
         // can't move the selection out from under the crop.
         if self.crop_edit.is_some() {
@@ -392,6 +404,74 @@ mod tests {
         assert_eq!(app.mode, ViewMode::Grid);
         assert_eq!(app.focus, Region::Folders);
         assert_eq!(app.focus_level, FocusLevel::Selected);
+    }
+
+    #[test]
+    fn an_open_delete_confirm_swallows_keys_until_esc_cancels_it() {
+        let (mut app, paths) = folder_app(3);
+        press(&mut app, CMD, KeyCode::KeyA);
+        press(&mut app, ModifiersState::empty(), KeyCode::Delete);
+        assert!(app.confirm_open(), "Delete asks first");
+        let painted = crate::app::presets::tests::settled(&mut app);
+        let t = crate::i18n::t();
+        assert!(
+            painted.has(t.bulk_delete) && !painted.has(t.confirm),
+            "the dialog names its action, not a generic Confirm: {:?}",
+            painted.texts()
+        );
+
+        for code in [KeyCode::Digit2, KeyCode::KeyG, KeyCode::ArrowRight] {
+            press(&mut app, ModifiersState::empty(), code);
+        }
+        assert!(app.confirm_open(), "the dialog is still open");
+        assert!(
+            paths.iter().all(|p| app.rating_of(p) == 0),
+            "2 did not rate the photos behind the dialog"
+        );
+        assert_eq!(app.sel, Some(0), "the arrow did not move the selection");
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.confirm_open(), "Esc cancels");
+        assert_eq!(
+            (app.focus, app.selection_count()),
+            (Region::Grid, 3),
+            "and does nothing else, so focus and the selection stay"
+        );
+        assert!(paths.iter().all(|p| p.exists()), "nothing was deleted");
+    }
+
+    #[test]
+    fn enter_runs_the_pending_bulk_action() {
+        let (mut app, paths) = folder_app(3);
+        press(&mut app, CMD, KeyCode::KeyA);
+        app.request_bulk(ui::BulkKind::Rate(4));
+        press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        assert!(!app.confirm_open());
+        assert!(
+            paths.iter().all(|p| app.rating_of(p) == 4),
+            "every photo is rated"
+        );
+        assert_eq!(
+            app.mode,
+            ViewMode::Grid,
+            "Enter did not also open the Loupe"
+        );
+    }
+
+    #[test]
+    fn esc_cancels_a_preset_delete_and_enter_confirms_it() {
+        let (mut app, _) = editor_app();
+        app.presets.add("Golden", Default::default(), Vec::new());
+        let id = app.presets.presets()[0].id;
+        app.apply_ui_actions(vec![ui::UiAction::RequestDeletePreset(id)]);
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit3);
+        assert_eq!(app.selected_rating(), 0);
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert!(!app.confirm_open() && app.presets.get(id).is_some());
+
+        app.apply_ui_actions(vec![ui::UiAction::RequestDeletePreset(id)]);
+        press(&mut app, ModifiersState::empty(), KeyCode::NumpadEnter);
+        assert!(!app.confirm_open() && app.presets.get(id).is_none());
     }
 
     #[test]

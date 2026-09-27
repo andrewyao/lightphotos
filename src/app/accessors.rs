@@ -44,9 +44,10 @@ impl App {
 
     /// Name of the preset awaiting delete confirmation, if any.
     pub(crate) fn pending_preset_delete_name(&self) -> Option<String> {
-        self.presets
-            .get(self.pending_preset_delete?)
-            .map(|p| p.name.clone())
+        let Some(PendingConfirm::DeletePreset(id)) = self.pending_confirm else {
+            return None;
+        };
+        self.presets.get(id).map(|p| p.name.clone())
     }
 
     pub(crate) fn focus(&self) -> Region {

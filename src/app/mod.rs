@@ -233,6 +233,14 @@ pub(crate) struct ExportProgress {
 /// mask or the reason there isn't one.
 pub(crate) type SelectionOutcome = (PathBuf, Result<crate::segmentation::Mask, String>);
 
+/// An action waiting on its confirm dialog. While one is open it owns the
+/// keyboard, and only one can be open at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingConfirm {
+    Bulk(ui::BulkKind),
+    DeletePreset(u64),
+}
+
 /// What a status toast reports, which sets its colors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StatusKind {
@@ -696,16 +704,13 @@ pub(crate) struct App {
     /// Read from image properties by `on_exif_info`; `None` until then.
     source_size: Option<(u32, u32)>,
 
-    /// A bulk action awaiting confirmation in the modal.
-    pending_bulk: Option<ui::BulkKind>,
+    pending_confirm: Option<PendingConfirm>,
 
     /// Copied tone settings (no crop) and the path they came from.
     copied_settings: Option<(PathBuf, Adjustments)>,
 
     /// The named-look library, global to the app rather than per folder.
     presets: crate::presets::PresetStore,
-    /// A preset awaiting delete confirmation in its own modal.
-    pending_preset_delete: Option<u64>,
     /// Open name prompt: the edit buffer, and which preset it renames (`None`
     /// is a new one).
     preset_name_edit: Option<(String, Option<u64>)>,
@@ -1001,14 +1006,13 @@ impl App {
             compare: false,
             exif_cache: HashMap::new(),
             source_size: None,
-            pending_bulk: None,
+            pending_confirm: None,
             copied_settings: None,
             // A test must never write the developer's own preset library.
             #[cfg(test)]
             presets: crate::presets::PresetStore::in_memory(),
             #[cfg(not(test))]
             presets: crate::presets::PresetStore::load(),
-            pending_preset_delete: None,
             preset_name_edit: None,
             show_help: false,
             show_settings: false,
@@ -1425,17 +1429,7 @@ impl App {
                 ui::UiAction::CancelPresetName => self.cancel_preset_name(),
                 ui::UiAction::ApplyPreset(id) => self.apply_preset(id),
                 ui::UiAction::RequestDeletePreset(id) => {
-                    self.pending_preset_delete = Some(id);
-                    self.request_redraw();
-                }
-                ui::UiAction::ConfirmDeletePreset => {
-                    if let Some(id) = self.pending_preset_delete.take() {
-                        self.delete_preset(id);
-                    }
-                    self.request_redraw();
-                }
-                ui::UiAction::CancelDeletePreset => {
-                    self.pending_preset_delete = None;
+                    self.pending_confirm = Some(PendingConfirm::DeletePreset(id));
                     self.request_redraw();
                 }
                 #[cfg(not(target_arch = "wasm32"))]
@@ -1459,16 +1453,8 @@ impl App {
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::DisconnectImmich => self.disconnect_immich(),
                 ui::UiAction::RequestBulk(kind) => self.request_bulk(kind),
-                ui::UiAction::ConfirmBulk => {
-                    if let Some(kind) = self.pending_bulk.take() {
-                        self.run_bulk(kind);
-                    }
-                    self.request_redraw();
-                }
-                ui::UiAction::CancelBulk => {
-                    self.pending_bulk = None;
-                    self.request_redraw();
-                }
+                ui::UiAction::ConfirmPending => self.confirm_pending(),
+                ui::UiAction::CancelPending => self.cancel_pending(),
                 ui::UiAction::OpenLoupe(pos) => {
                     if pos < self.visible.len() {
                         self.select_single(pos);
