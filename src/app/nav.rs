@@ -387,6 +387,17 @@ impl App {
         });
     }
 
+    /// The Grid always has the left panel. The Loupe gives its width to the
+    /// photo and shows the panel only for its Metadata tab, so `I` opens and
+    /// closes it there.
+    pub(crate) fn left_panel_visible(&self) -> bool {
+        match self.mode {
+            ViewMode::Grid => true,
+            ViewMode::Loupe => self.left_tab == LeftTab::Info,
+            ViewMode::Survey => false,
+        }
+    }
+
     pub(crate) fn develop_visible(&self) -> bool {
         self.develop_open
     }
@@ -407,7 +418,7 @@ impl App {
             Region::Grid => self.mode == ViewMode::Grid,
             Region::Detail => self.mode == ViewMode::Loupe,
             Region::Filmstrip => self.mode == ViewMode::Loupe,
-            Region::Folders => self.left_tab == LeftTab::Folders,
+            Region::Folders => self.left_panel_visible() && self.left_tab == LeftTab::Folders,
             Region::Develop => self.mode == ViewMode::Loupe && self.develop_visible(),
         }
     }
