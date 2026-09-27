@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Headless driver for the paths a culling session actually waits on.
-//! Listing a folder gates the rest and always runs. Seven phases sit behind
+//! Listing a folder gates the rest and always runs. Eight phases sit behind
 //! it. The grid and the filmstrip both fill thumbnails and differ only in
-//! the shape of their working set. Opening a photo splits into the first
+//! the shape of their working set, and the scroll phase is the grid's working
+//! set on the move, which is where a stale backlog shows. Opening a photo splits into the first
 //! pixels on screen and the preview escalation that sharpens them. The
 //! full-resolution decode is what zooming past the preview costs. Auto Tone,
 //! a batch export and the Vision signals are the jobs a user starts and then
@@ -21,7 +22,8 @@
 //! `LIGHTPHOTOS_PROFILE_PHASES` narrows a run to a comma-separated list of
 //! phase keys, and unset means every phase. `LIGHTPHOTOS_PROFILE_THUMBS`,
 //! `_OPENS`, `_PREVIEW_PX`, `_FULLS`, `_EXPORTS` and `_VISION` size the
-//! phases. `LIGHTPHOTOS_PROFILE_COLD=1` clears the folder's cached
+//! phases. `_SCROLL_ROWS`, `_SCROLL_COLS` and `_STEP_MS` shape the scroll
+//! and the filmstrip walk. `LIGHTPHOTOS_PROFILE_COLD=1` clears the folder's cached
 //! thumbnails first, so the grid phase measures a first visit.
 //!
 //! ```sh
@@ -31,8 +33,9 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use crate::app::{grid_working_range, load_order, strip_working_range};
 use crate::loader::Loader;
 use crate::navigation::Playlist;
 use crate::thumbnail::THUMB_PX;
@@ -43,8 +46,14 @@ use crate::thumbnail::THUMB_PX;
 struct Run {
     dir: PathBuf,
     /// Photos whose thumbnail the grid phase fills. Two screenfuls at the
-    /// default window size.
+    /// default window size. Also how far the scroll phase scrolls.
     thumbs: usize,
+    /// The scroll phase's simulated viewport.
+    scroll_rows: usize,
+    scroll_cols: usize,
+    /// Time between two scroll rows or two filmstrip steps. 16 ms is a fast
+    /// wheel flick, or an arrow key held down.
+    step: Duration,
     /// Photos the Loupe phase opens, stepping like next / next / next.
     opens: usize,
     /// Longest side the Loupe asks for: a 1100pt window on a 2x display.
@@ -77,6 +86,9 @@ impl Run {
         Run {
             dir,
             thumbs: count("LIGHTPHOTOS_PROFILE_THUMBS", 120),
+            scroll_rows: count("LIGHTPHOTOS_PROFILE_SCROLL_ROWS", 5),
+            scroll_cols: count("LIGHTPHOTOS_PROFILE_SCROLL_COLS", 6),
+            step: Duration::from_millis(count("LIGHTPHOTOS_PROFILE_STEP_MS", 16) as u64),
             opens: count("LIGHTPHOTOS_PROFILE_OPENS", 10),
             preview_px: count("LIGHTPHOTOS_PROFILE_PREVIEW_PX", 2200) as u32,
             fulls: count("LIGHTPHOTOS_PROFILE_FULLS", 5),
@@ -110,6 +122,11 @@ const PHASES: &[Phase] = &[
         label: "path/thumbnail_strip",
         key: "strip",
         run: Run::thumbnail_strip,
+    },
+    Phase {
+        label: "path/scroll_grid",
+        key: "scroll",
+        run: Run::scroll_grid,
     },
     Phase {
         label: "path/open_photo",
@@ -316,13 +333,7 @@ impl Run {
         for path in &wanted {
             loader.request_thumb(path.clone(), THUMB_PX);
         }
-        while wanted
-            .iter()
-            .any(|p| loader.get_thumb(p, THUMB_PX).is_none() && !loader.thumb_failed(p, THUMB_PX))
-        {
-            loader.poll_all();
-            std::thread::yield_now();
-        }
+        wait_for_thumbs(&mut loader, &wanted);
 
         let t0 = Instant::now();
         let mut analysed = 0usize;
@@ -365,10 +376,11 @@ impl Run {
         for (i, src) in wanted.iter().enumerate() {
             exporter.submit(crate::export::ExportJob {
                 src: (*src).clone(),
-                dest: dir.join(format!("{i:04}.jpg")),
+                dest: crate::export::ExportDest::Folder(dir.join(format!("{i:04}.jpg"))),
                 adj: crate::develop::Adjustments::default(),
                 touchups: Vec::new(),
                 rot: 0,
+                max_px: u32::MAX,
             });
         }
 
@@ -439,44 +451,111 @@ impl Run {
         );
     }
 
-    /// The filmstrip filling itself while the user steps through the Loupe.
-    /// It asks for the same `THUMB_PX` thumbnails through the same `Loader`
-    /// as the grid, so what this phase measures is not a different decode but
-    /// a different working-set shape. `App::working_positions` hands the
-    /// Loupe a window of `strip_range` plus or minus eight, and that window
-    /// slides by one photo per step, so all but its two new edges are already
-    /// in the cache. One `Loader` spans the whole walk to keep that true, and
-    /// the count on the report line is the number of photos the walk actually
-    /// asked the decode pool for.
+    /// The filmstrip filling itself while the user holds the arrow key in the
+    /// Loupe. It asks for the same `THUMB_PX` thumbnails through the same
+    /// `Loader` as the grid, so what this phase measures is not a different
+    /// decode but a different working-set shape: nine thumbnails around the
+    /// selection on screen, and `App::working_positions`' margin of eight
+    /// either side, asked for the way `App::request_working_thumbs` asks. The
+    /// strip advances one photo per `step` without waiting, so the number
+    /// that matters is how long the strip around the landing photo takes to
+    /// fill once the key is released.
     fn thumbnail_strip(&self, photos: &[PathBuf]) {
-        const MARGIN: usize = 8;
+        const HALF_VISIBLE: usize = 4;
         let len = photos.len();
         let steps = self.opens.min(len);
+        if steps == 0 {
+            return;
+        }
         let mut loader = Loader::new(16384);
         let mut fetched: HashSet<PathBuf> = HashSet::new();
 
         let t0 = Instant::now();
+        let mut visible = 0..0;
         for i in 0..steps {
-            let window = &photos[i.saturating_sub(MARGIN)..(i + MARGIN + 1).min(len)];
-            loader.set_thumb_working_set_size(window.len());
-            for path in window {
-                fetched.insert(path.clone());
-                loader.request_thumb(path.clone(), THUMB_PX);
-            }
-            while window.iter().any(|p| {
-                loader.get_thumb(p, THUMB_PX).is_none() && !loader.thumb_failed(p, THUMB_PX)
-            }) {
-                loader.poll_all();
-                std::thread::yield_now();
+            visible = i.saturating_sub(HALF_VISIBLE)..(i + HALF_VISIBLE + 1).min(len);
+            let strip = (visible.start, visible.end);
+            let working = strip_working_range(strip, Some(i), len);
+            let paths: Vec<PathBuf> = load_order(working, strip, Some(i))
+                .into_iter()
+                .map(|pos| photos[pos].clone())
+                .collect();
+            fetched.extend(paths.iter().cloned());
+            loader.set_thumb_working_set_size(paths.len());
+            loader.set_viewport_thumbs(&paths, THUMB_PX);
+            if i + 1 < steps {
+                self.poll_until_next_step(&mut loader);
             }
         }
+        let released = Instant::now();
+        wait_for_thumbs(&mut loader, &photos[visible]);
         eprintln!(
-            "[profile] filmstrip: {steps} steps, windows of up to {}, {} thumbnails \
-             fetched, in {:?}",
-            (MARGIN * 2 + 1).min(len),
+            "[profile] filmstrip: {steps} steps every {:?}, {} thumbnails asked for, \
+             landing strip filled {:?} after the last step, {:?} in all",
+            self.step,
             fetched.len(),
+            released.elapsed(),
             t0.elapsed()
         );
+    }
+
+    /// A wheel flick down a big grid. The viewport moves one row per `step`
+    /// over the first `thumbs` photos and asks for its working set every tick
+    /// the way `App::request_working_thumbs` does, without waiting. The
+    /// number that matters is how long the last viewport takes to fill once
+    /// the scroll stops, and (from the report's `get_or_make` count) how many
+    /// thumbnails the pool decoded to get there.
+    fn scroll_grid(&self, photos: &[PathBuf]) {
+        let (rows, cols) = (self.scroll_rows.max(1), self.scroll_cols.max(1));
+        let len = self.thumbs.min(photos.len());
+        if len == 0 {
+            return;
+        }
+        let mut loader = Loader::new(16384);
+        let mut fetched: HashSet<PathBuf> = HashSet::new();
+
+        let t0 = Instant::now();
+        let mut ticks = 0usize;
+        let mut top = 0usize;
+        let visible = loop {
+            let visible = top..(top + rows * cols).min(len);
+            let grid = (visible.start, visible.end);
+            let working = grid_working_range(grid, cols, len);
+            let paths: Vec<PathBuf> = load_order(working, grid, None)
+                .into_iter()
+                .map(|pos| photos[pos].clone())
+                .collect();
+            fetched.extend(paths.iter().cloned());
+            loader.set_thumb_working_set_size(paths.len());
+            loader.set_viewport_thumbs(&paths, THUMB_PX);
+            ticks += 1;
+            if visible.end >= len {
+                break visible;
+            }
+            self.poll_until_next_step(&mut loader);
+            top += cols;
+        };
+        let stopped = Instant::now();
+        wait_for_thumbs(&mut loader, &photos[visible]);
+        eprintln!(
+            "[profile] scroll: {rows}x{cols} viewport, {ticks} rows every {:?} over {len} \
+             photos, {} thumbnails asked for, last viewport filled {:?} after the scroll \
+             stopped, {:?} in all",
+            self.step,
+            fetched.len(),
+            stopped.elapsed(),
+            t0.elapsed()
+        );
+    }
+
+    /// The frame loop between two input events: drain results until the next
+    /// step is due.
+    fn poll_until_next_step(&self, loader: &mut Loader) {
+        let due = Instant::now() + self.step;
+        while Instant::now() < due {
+            loader.poll_all();
+            std::thread::yield_now();
+        }
     }
 
     /// The tier above the preview, which the app reaches only when the user
@@ -551,6 +630,17 @@ impl Run {
                 t0.elapsed(),
             );
         }
+    }
+}
+
+/// Polls until every one of `photos` has a thumbnail or has failed.
+fn wait_for_thumbs(loader: &mut Loader, photos: &[PathBuf]) {
+    while photos
+        .iter()
+        .any(|p| loader.get_thumb(p, THUMB_PX).is_none() && !loader.thumb_failed(p, THUMB_PX))
+    {
+        loader.poll_all();
+        std::thread::yield_now();
     }
 }
 

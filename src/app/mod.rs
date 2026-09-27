@@ -772,6 +772,9 @@ mod thumbs;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
+#[cfg(all(feature = "hotpath", not(target_arch = "wasm32")))]
+pub(crate) use thumbs::{grid_working_range, load_order, strip_working_range};
+
 impl App {
     pub(crate) fn new(initial: Option<PathBuf>) -> Self {
         let catalog = Catalog::new();
