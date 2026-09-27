@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use crate::app::SHOW_GROUPING_TOOLS;
 use crate::develop::{Section, SliderId};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -676,15 +677,22 @@ pub static EN: Strings = Strings {
             title: "Navigate",
             rows: &[
                 ("Enter or Space", "Open selected photo (in library)"),
+                ("E", "Open selected photo (in library)"),
+                ("G", "Back to the library grid"),
                 ("Esc", "Back to library (in editor)"),
                 ("\u{2190} / \u{2192}", "Previous / next photo (in editor)"),
+                ("Page Up / Page Down", "Previous / next photo (in editor)"),
                 (
                     "\u{2190} \u{2192} \u{2191} \u{2193}",
                     "Move selection in library grid",
                 ),
                 ("I", "Show folders or photo info in the side panel"),
+                ("F6 / Shift+F6", "Next region, or next control inside an entered one"),
+                ("Tab / Shift+Tab", "Move between items in the focused region"),
+                (primary!("+O"), "Open a folder"),
                 ("?", "Show or hide this help"),
-                (primary!("+,"), "Settings: theme and language"),
+                (primary!("+,"), "Settings: theme, language and Auto Tone"),
+                ("Alt+= / Alt+-", "Bigger / smaller text"),
             ],
         },
         HelpSection {
@@ -721,6 +729,11 @@ pub static EN: Strings = Strings {
                 ("C", "Crop"),
                 ("Y", "Before / after compare"),
                 ("X", "Open or close the export form"),
+                (primary!("+U"), "Auto Tone this photo"),
+                (primary!("+Shift+U"), "Auto Tone the selection"),
+                (primary!("+Shift+C"), "Copy this photo's settings"),
+                (primary!("+Shift+Y"), "Paste settings onto the selection"),
+                ("Double-click slider", "Reset the slider"),
                 (
                     "Delete",
                     if WEB {
@@ -730,6 +743,17 @@ pub static EN: Strings = Strings {
                     },
                 ),
             ],
+        },
+        HelpSection {
+            title: "Group",
+            rows: if SHOW_GROUPING_TOOLS {
+                &[
+                    ("B", "Show or hide burst groups"),
+                    ("D", "Show or hide duplicate groups"),
+                ]
+            } else {
+                &[]
+            },
         },
         HelpSection {
             title: "Subject selection",
@@ -1147,15 +1171,22 @@ pub static ZH: Strings = Strings {
             title: "浏览",
             rows: &[
                 ("Enter 或 Space", "打开所选照片（图库中）"),
+                ("E", "打开所选照片（图库中）"),
+                ("G", "返回图库网格"),
                 ("Esc", "返回图库（编辑器中）"),
                 ("\u{2190} / \u{2192}", "上一张 / 下一张照片（编辑器中）"),
+                ("Page Up / Page Down", "上一张 / 下一张照片（编辑器中）"),
                 (
                     "\u{2190} \u{2192} \u{2191} \u{2193}",
                     "在图库网格中移动选择",
                 ),
                 ("I", "在侧栏显示文件夹或照片信息"),
+                ("F6 / Shift+F6", "下一个区域，或已进入区域内的下一个控件"),
+                ("Tab / Shift+Tab", "在当前区域内的项目间移动"),
+                (primary!("+O"), "打开文件夹"),
                 ("?", "显示或隐藏此帮助"),
-                (primary!("+,"), "设置：主题和语言"),
+                (primary!("+,"), "设置：主题、语言和自动色调"),
+                ("Alt+= / Alt+-", "增大 / 减小文字"),
             ],
         },
         HelpSection {
@@ -1192,6 +1223,11 @@ pub static ZH: Strings = Strings {
                 ("C", "裁剪"),
                 ("Y", "调整前 / 调整后对比"),
                 ("X", "打开或关闭导出表单"),
+                (primary!("+U"), "对此照片自动色调"),
+                (primary!("+Shift+U"), "对所选照片自动色调"),
+                (primary!("+Shift+C"), "拷贝此照片的设置"),
+                (primary!("+Shift+Y"), "将设置粘贴到所选照片"),
+                ("双击滑块", "重置滑块"),
                 (
                     "Delete",
                     if WEB {
@@ -1201,6 +1237,14 @@ pub static ZH: Strings = Strings {
                     },
                 ),
             ],
+        },
+        HelpSection {
+            title: "分组",
+            rows: if SHOW_GROUPING_TOOLS {
+                &[("B", "显示或隐藏连拍分组"), ("D", "显示或隐藏重复分组")]
+            } else {
+                &[]
+            },
         },
         HelpSection {
             title: "主体",
@@ -1643,6 +1687,78 @@ mod tests {
             untranslated("x.rs", src),
             ["x.rs: .button(\"Keep\"", "x.rs: set_status(\"Moved {n}\"",]
         );
+    }
+
+    /// Whether the help's key column `keys` names `key` as whole tokens, so
+    /// "E" doesn't match inside "Esc".
+    fn names_key(keys: &str, key: &str) -> bool {
+        let tokens: Vec<&str> = keys.split([' ', '/']).filter(|t| !t.is_empty()).collect();
+        let want: Vec<&str> = key.split(' ').collect();
+        tokens.windows(want.len()).any(|w| w == want.as_slice())
+    }
+
+    /// Every key `App::handle_key` binds, as the overlay writes it. A binding
+    /// behind a `SHOW_*` flag is listed only while the flag is on.
+    #[test]
+    fn help_lists_every_key_binding() {
+        let mut bound = vec![
+            "Enter",
+            "Space",
+            "E",
+            "G",
+            "Esc",
+            "I",
+            "?",
+            "F6",
+            "Tab",
+            "Page Up",
+            "Page Down",
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "[",
+            "]",
+            "C",
+            "Y",
+            "X",
+            "Delete",
+            "K",
+            "Q",
+            "Alt+=",
+            "Alt+-",
+            primary!("+O"),
+            primary!("+,"),
+            primary!("+A"),
+            primary!("+0"),
+            primary!("+1"),
+            primary!("+="),
+            primary!("+-"),
+            primary!("+U"),
+            primary!("+Shift+U"),
+            primary!("+Shift+C"),
+            primary!("+Shift+Y"),
+            primary!("+Z"),
+        ];
+        if SUBJECT_KEYS {
+            bound.extend(["O", "Shift+O"]);
+        }
+        if SHOW_GROUPING_TOOLS {
+            bound.extend(["B", "D"]);
+        }
+        let missing: Vec<&str> = bound
+            .into_iter()
+            .filter(|key| {
+                !EN.help
+                    .iter()
+                    .flat_map(|s| s.rows)
+                    .any(|(keys, _)| names_key(keys, key))
+            })
+            .collect();
+        assert!(missing.is_empty(), "the help overlay leaves out {missing:?}");
+        assert!(!names_key("Esc", "E"));
     }
 
     /// Both languages list the same shortcuts in the same order, so the
