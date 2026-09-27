@@ -725,6 +725,10 @@ pub(crate) struct App {
 
     /// Redraw retries pause while the window is hidden or minimized.
     pub(crate) occluded: bool,
+    /// When egui next wants a frame, from the last frame's repaint delay.
+    /// `about_to_wait` redraws once it passes, so an animation (a modal's
+    /// fade, a collapsing header) finishes with no input to wake the loop.
+    pub(crate) repaint_at: Option<Instant>,
 
     /// Top of the folder tree: the opened folder, or an opened file's parent.
     folder_root: Option<PathBuf>,
@@ -1022,6 +1026,7 @@ impl App {
             quit_requested: false,
             status: None,
             occluded: false,
+            repaint_at: None,
             folder_root: None,
             folder_sel: None,
             expanded: HashSet::new(),
@@ -1267,6 +1272,11 @@ impl App {
         let full_output = self.egui_ctx.clone().run_ui(raw_input, |ui| {
             out = ui::draw(ui, self);
         });
+
+        self.repaint_at = full_output
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .and_then(|v| Instant::now().checked_add(v.repaint_delay));
 
         #[cfg(target_arch = "wasm32")]
         web::write_web_clipboard(&full_output.platform_output.commands);

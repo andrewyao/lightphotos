@@ -486,10 +486,16 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             None
         };
-        match poll_delay {
-            Some(ms) => event_loop.set_control_flow(ControlFlow::WaitUntil(
-                web_time::Instant::now() + std::time::Duration::from_millis(ms),
-            )),
+        let now = web_time::Instant::now();
+        if self.repaint_at.is_some_and(|at| at <= now) {
+            // Cleared here rather than left for `redraw` to replace, so a
+            // frame skipped while occluded can't spin this loop.
+            self.repaint_at = None;
+            self.request_redraw();
+        }
+        let poll_at = poll_delay.map(|ms| now + std::time::Duration::from_millis(ms));
+        match poll_at.into_iter().chain(self.repaint_at).min() {
+            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
             None => event_loop.set_control_flow(ControlFlow::Wait),
         }
 
