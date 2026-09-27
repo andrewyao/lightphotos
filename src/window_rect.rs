@@ -14,8 +14,8 @@ const DEFAULT: (f64, f64) = (1440.0, 900.0);
 /// title bar stay clear of the screen's.
 const MAX_SHARE: f64 = 0.9;
 
-/// A rectangle in logical points. For the window, `x` and `y` place its outer
-/// frame and `w` and `h` size its content, the pair winit takes back.
+/// A rectangle in logical points. For the window, `x` and `y` are what winit's
+/// `with_position` takes and `w` and `h` size its content.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Rect {
     x: f64,
@@ -95,11 +95,16 @@ pub(crate) fn save(window: &Window) {
     if window.fullscreen().is_some() || window.is_minimized() == Some(true) {
         return;
     }
-    let Ok(pos) = window.outer_position() else {
-        return;
+    // `with_position` places the content on macOS and the frame elsewhere,
+    // so save the same corner it restores. Wayland reports no position and
+    // ignores one, so its size is still worth saving.
+    let pos = if cfg!(target_os = "macos") {
+        window.inner_position()
+    } else {
+        window.outer_position()
     };
     let scale = window.scale_factor();
-    let pos = pos.to_logical::<f64>(scale);
+    let pos = pos.unwrap_or_default().to_logical::<f64>(scale);
     let size = window.inner_size().to_logical::<f64>(scale);
     let rect = Rect {
         x: pos.x,
