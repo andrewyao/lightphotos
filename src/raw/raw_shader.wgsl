@@ -3,7 +3,7 @@
 // Fragment shader for linear-light RAW images (`PixelFormat::LinearF16`, the
 // wasm32 Loupe path). The CPU demosaics to linear camera RGB and this shader
 // does the rest: sRGB gamma, the RAW display boost, and the Develop sliders.
-// `apply_raw_preview_boost` in `raw/nonmac_decode.rs` is the CPU twin that
+// `apply_raw_preview_boost` in `develop.rs` is the CPU twin that
 // every other RAW path bakes into u8 sRGB at decode time.
 //
 // Order: denoise -> touch-ups -> WB -> exposure -> sRGB gamma + boost ->
@@ -18,7 +18,7 @@
 //    display-ready.
 
 // RAW display look curve, fitted to Apple ImageIO's render. Knots must match
-// `RAW_LOOK_KNOTS` in raw/nonmac_decode.rs.
+// `RAW_LOOK_KNOTS` in develop.rs.
 const RAW_LOOK_KNOTS = array<f32, 17>(
     0.000, 0.027, 0.122, 0.220, 0.337, 0.463, 0.576, 0.678, 0.757, 0.824, 0.878, 0.918, 0.949,
     0.976, 0.992, 1.000, 1.000,

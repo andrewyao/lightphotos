@@ -364,6 +364,27 @@ fn exposure_curve(rgb: [f32; 3], stops: f32) -> [f32; 3] {
     rgb.map(|v| new_luma + (v - luma) * chroma)
 }
 
+/// The look curve for every RAW display rendering, so non-mac RAW matches
+/// what Apple ImageIO shows on macOS. Without it, a plain linear-to-sRGB
+/// conversion renders about 1.45x darker. The input is already sRGB-encoded,
+/// not linear.
+///
+/// The knots are evenly spaced over 0..=1 and were fitted with
+/// `decode_probe --fit-look` over 148 Sony ARW files. `raw_shader.wgsl` has a
+/// WGSL twin with the same knots, and [`apply_raw_display`] runs this same
+/// function, so the histogram and Auto Tone measure what the shader draws.
+pub(crate) const RAW_LOOK_KNOTS: [f32; 17] = [
+    0.000, 0.027, 0.122, 0.220, 0.337, 0.463, 0.576, 0.678, 0.757, 0.824, 0.878, 0.918, 0.949,
+    0.976, 0.992, 1.000, 1.000,
+];
+
+pub(crate) fn apply_raw_preview_boost(srgb: f32) -> f32 {
+    let x = srgb.clamp(0.0, 1.0) * (RAW_LOOK_KNOTS.len() - 1) as f32;
+    let i = (x as usize).min(RAW_LOOK_KNOTS.len() - 2);
+    let t = x - i as f32;
+    RAW_LOOK_KNOTS[i] + (RAW_LOOK_KNOTS[i + 1] - RAW_LOOK_KNOTS[i]) * t
+}
+
 /// Apply every edit to one linear-light pixel. Input may exceed 1.0; output is
 /// linear RGB clamped to 0..1.
 ///
@@ -405,9 +426,7 @@ fn apply_linear_impl(adj: &Adjustments, rgb: [f32; 3], raw_display: bool) -> [f3
             } else {
                 1.055 * x.max(0.0).powf(1.0 / 2.4) - 0.055
             };
-            let brightened = srgb.clamp(0.0, 1.0).powf(1.0 / 1.1);
-            let contrast_curve = brightened * brightened * (3.0 - 2.0 * brightened);
-            (brightened + (contrast_curve - brightened) * 0.75).clamp(0.0, 1.0)
+            apply_raw_preview_boost(srgb)
         } else {
             x.max(0.0).powf(1.0 / 2.2)
         }
@@ -589,6 +608,54 @@ pub(crate) fn denoise_linear_rgb_buffer(
 mod tests {
     use super::*;
 
+    /// 0 and 1 stay fixed, so the boost never clips or crushes, and mid-gray
+    /// comes out brighter.
+    #[test]
+    fn raw_preview_boost_is_identity_at_endpoints_and_brightens_midtones() {
+        assert_eq!(apply_raw_preview_boost(0.0), 0.0);
+        assert!((apply_raw_preview_boost(1.0) - 1.0).abs() < 1e-6);
+
+        let mid = apply_raw_preview_boost(0.5);
+        assert!(mid > 0.5, "expected midtone brightening, got {mid}");
+    }
+
+    #[test]
+    fn raw_shader_look_knots_match_cpu() {
+        let wgsl = include_str!("raw/raw_shader.wgsl");
+        let body = wgsl
+            .split("const RAW_LOOK_KNOTS = array<f32, 17>(")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("RAW_LOOK_KNOTS in raw_shader.wgsl");
+        let shader: Vec<f32> = body
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse().expect("knot literal"))
+            .collect();
+        assert_eq!(shader, RAW_LOOK_KNOTS);
+    }
+
+    /// At the identity edit, the CPU RAW pipeline must land exactly on the
+    /// shader's curve: sRGB-encode, then the look curve.
+    #[test]
+    fn raw_display_at_identity_follows_the_look_curve() {
+        let adj = Adjustments::default();
+        for linear in [0.0, 0.002, 0.01, 0.05, 0.18, 0.4, 0.7, 1.0] {
+            let srgb = if linear <= 0.0031308 {
+                linear * 12.92
+            } else {
+                1.055 * f32::powf(linear, 1.0 / 2.4) - 0.055
+            };
+            let want = apply_raw_preview_boost(srgb);
+            let got = apply_raw_display(&adj, [linear; 3])[0];
+            assert!(
+                (got - want).abs() < 1e-4,
+                "linear {linear}: got {got}, want {want}"
+            );
+        }
+    }
+
     fn crop(l: f32, t: f32, r: f32, b: f32) -> Crop {
         Crop {
             left: l,
@@ -708,11 +775,24 @@ mod tests {
                     assert!((out[0] - out[2]).abs() < 1e-6);
                     previous = out[0];
                 }
-                assert!(
-                    previous > 0.0 && previous < 0.9,
-                    "highlight {level} failed to recover at -5 stops: {previous}"
-                );
+                assert!(previous > 0.0, "highlight {level} went black");
             }
+        }
+        // Both pipelines share the exposure step, so at -5 stops RAW must
+        // show the look curve of the linear pipeline's recovered value.
+        let adj = Adjustments {
+            exposure: -5.0,
+            ..Default::default()
+        };
+        for level in [1.06, 2.12, 4.24, 8.0, 16.0] {
+            let linear = apply_linear(&adj, [level; 3])[0];
+            assert!(
+                linear < 0.9,
+                "highlight {level} failed to recover at -5 stops: {linear}"
+            );
+            let srgb = 1.055 * linear.powf(1.0 / 2.4) - 0.055;
+            let raw = apply_raw_display(&adj, [level; 3])[0];
+            assert!((raw - apply_raw_preview_boost(srgb)).abs() < 1e-4);
         }
     }
 

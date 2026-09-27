@@ -58,27 +58,8 @@ pub(crate) fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
     }
 }
 
-/// The look curve for every RAW display rendering, so non-mac RAW matches
-/// what Apple ImageIO shows on macOS. Without it, a plain linear-to-sRGB
-/// conversion renders about 1.45x darker. The input is already sRGB-encoded,
-/// not linear.
-///
-/// The knots are evenly spaced over 0..=1 and were fitted with
-/// `decode_probe --fit-look` over 148 Sony ARW files. `raw_shader.wgsl` has a
-/// WGSL twin with the same knots.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-const RAW_LOOK_KNOTS: [f32; 17] = [
-    0.000, 0.027, 0.122, 0.220, 0.337, 0.463, 0.576, 0.678, 0.757, 0.824, 0.878, 0.918, 0.949,
-    0.976, 0.992, 1.000, 1.000,
-];
-
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-pub(crate) fn apply_raw_preview_boost(srgb: f32) -> f32 {
-    let x = srgb.clamp(0.0, 1.0) * (RAW_LOOK_KNOTS.len() - 1) as f32;
-    let i = (x as usize).min(RAW_LOOK_KNOTS.len() - 2);
-    let t = x - i as f32;
-    RAW_LOOK_KNOTS[i] + (RAW_LOOK_KNOTS[i + 1] - RAW_LOOK_KNOTS[i]) * t
-}
+pub(crate) use crate::develop::apply_raw_preview_boost;
 
 /// Strength (0..=100, the Denoise slider's scale) of the always-on denoise
 /// applied when decoding RAW. It stands in for the noise reduction ImageIO
@@ -543,36 +524,6 @@ pub fn orientation_of(path: &Path) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 0 and 1 stay fixed, so the boost never clips or crushes, and mid-gray
-    /// comes out brighter.
-    #[test]
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-    fn raw_preview_boost_is_identity_at_endpoints_and_brightens_midtones() {
-        assert_eq!(apply_raw_preview_boost(0.0), 0.0);
-        assert!((apply_raw_preview_boost(1.0) - 1.0).abs() < 1e-6);
-
-        let mid = apply_raw_preview_boost(0.5);
-        assert!(mid > 0.5, "expected midtone brightening, got {mid}");
-    }
-
-    #[test]
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-    fn raw_shader_look_knots_match_cpu() {
-        let wgsl = include_str!("raw_shader.wgsl");
-        let body = wgsl
-            .split("const RAW_LOOK_KNOTS = array<f32, 17>(")
-            .nth(1)
-            .and_then(|rest| rest.split(')').next())
-            .expect("RAW_LOOK_KNOTS in raw_shader.wgsl");
-        let shader: Vec<f32> = body
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(|s| s.parse().expect("knot literal"))
-            .collect();
-        assert_eq!(shader, RAW_LOOK_KNOTS);
-    }
 
     /// A 16x8 JPEG carrying an APP1 EXIF segment with the given fields,
     /// built the way a camera lays it out: SOI, APP1, then the image.
