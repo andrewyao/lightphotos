@@ -1178,14 +1178,6 @@ impl App {
         self.load_playlist(Playlist::from_dir(&dir), dir);
     }
 
-    #[cfg(target_arch = "wasm32")]
-    fn load_folder(&mut self, _dir: PathBuf) {
-        debug_assert!(
-            false,
-            "load_folder must not run on wasm32 — use nav_to_folder / the async open path"
-        );
-    }
-
     /// `load_folder` for an already-built playlist. The web build builds its
     /// playlist from directory handles, since it can't call `read_dir`.
     fn load_playlist(&mut self, playlist: Playlist, dir: PathBuf) {

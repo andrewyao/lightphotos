@@ -474,35 +474,9 @@ mod tests {
     }
 }
 
-/// File access for non-mac export. `NativeFs` uses `std::fs`, and wasm32's
-/// `web_export_fs::WebFs` uses the File System Access API. `NativeFs` never
-/// awaits, so worker threads can `pollster::block_on` it at no cost.
-#[cfg(not(target_os = "macos"))]
-#[allow(async_fn_in_trait)] // crate-internal; no Send bound needed
-pub(crate) trait ExportFs {
-    /// Full source-file bytes for `src` (an absolute path natively, a
-    /// picked-folder-relative key on wasm32).
-    async fn read_source(&self, src: &std::path::Path) -> Result<Vec<u8>, String>;
-    /// Write `bytes` to `dest` so no reader ever sees a partial file.
-    async fn write_atomic(&self, dest: &std::path::Path, bytes: &[u8]) -> Result<(), String>;
-}
-
-#[cfg(not(target_os = "macos"))]
-pub(crate) struct NativeFs;
-
-#[cfg(not(target_os = "macos"))]
-impl ExportFs for NativeFs {
-    async fn read_source(&self, src: &std::path::Path) -> Result<Vec<u8>, String> {
-        std::fs::read(src).map_err(|e| e.to_string())
-    }
-
-    async fn write_atomic(&self, dest: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-        write_file_atomic(dest, bytes)
-    }
-}
-
 /// Write a temp sibling, then rename. The rename is atomic on one volume, so a
 /// crash cannot leave a truncated `.jpg`.
+#[cfg(not(target_arch = "wasm32"))]
 fn write_file_atomic(dest: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = dest.with_extension("jpg.tmp");
     std::fs::write(&tmp, bytes).map_err(|e| format!("write: {e}"))?;
@@ -574,7 +548,7 @@ fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
         // reading the whole RAW into a Vec first.
         image_decode::decode_raw_nonmac(&job.src, u32::MAX)?
     } else {
-        let bytes = pollster::block_on(NativeFs.read_source(&job.src))?;
+        let bytes = std::fs::read(&job.src).map_err(|e| e.to_string())?;
         image_decode::decode_nonraw_from_bytes(&bytes, u32::MAX)?
     };
     Ok(bake_sized(

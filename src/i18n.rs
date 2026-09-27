@@ -152,6 +152,9 @@ pub fn command_is_cmd() -> bool {
 
 const WEB: bool = cfg!(target_arch = "wasm32");
 
+// wasm32 lacks the folder picker, Lightroom preset import, and Immich export,
+// so their strings go unread there.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub struct Strings {
     // Settings dialog.
     pub settings: &'static str,

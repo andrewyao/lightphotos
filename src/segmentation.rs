@@ -37,6 +37,7 @@ const ONE_COMPONENT_32F: u32 = u32::from_be_bytes(*b"L00f");
 /// Which Vision request produced a mask. The two behave differently enough
 /// that debugging a mask starts here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub enum MaskSource {
     Person,
     ForegroundInstance,

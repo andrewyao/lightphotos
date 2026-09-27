@@ -28,6 +28,7 @@ use winit::event_loop::EventLoopProxy;
 #[derive(Debug, Clone)]
 pub enum UserEvent {
     /// Finder (or CLI) asked us to open this image file.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     OpenFile(PathBuf),
     /// The user chose a command from the menu bar.
     #[cfg(target_os = "macos")]

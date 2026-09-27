@@ -652,26 +652,6 @@ pub fn orientation_of(path: &Path) -> u8 {
         .unwrap_or(1)
 }
 
-/// EXIF orientation `1..=8` of `path` via the `image` crate. `1` for RAW
-/// files, PNGs, and anything unreadable.
-#[cfg(not(target_os = "macos"))]
-pub fn orientation_of(path: &Path) -> u8 {
-    let Ok(reader) = image::ImageReader::open(path) else {
-        return 1;
-    };
-    let Ok(reader) = reader.with_guessed_format() else {
-        return 1;
-    };
-    let Ok(mut decoder) = reader.into_decoder() else {
-        return 1;
-    };
-    use image::ImageDecoder;
-    decoder
-        .orientation()
-        .unwrap_or(image::metadata::Orientation::NoTransforms)
-        .to_exif()
-}
-
 /// EXIF orientation `1..=8`, or `1` when absent or invalid.
 #[cfg(target_os = "macos")]
 fn read_orientation(source: &CGImageSource) -> u8 {
