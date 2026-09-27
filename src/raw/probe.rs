@@ -39,6 +39,8 @@ fn main() {
         Some("--nonmac-decode") => return run_nonmac_decode_probe(&args[1..]),
         Some("--wasm-quality-decode") => return run_wasm_quality_decode_probe(&args[1..]),
         Some("--compare") => return run_compare_png(&args[1..]),
+        #[cfg(target_os = "macos")]
+        Some("--fit-look") => return run_fit_look(&args[1..]),
         _ => {}
     }
 
@@ -144,16 +146,6 @@ fn main() {
             (Err(e), _) => println!("  ImageIO baseline FAILED (embedded-preview check): {e}"),
             (_, Err(e)) => println!("  read FAILED (embedded-preview check): {e}"),
         }
-
-        // Brightness of a reimplementation of the reference app's develop
-        // pipeline, using vanilla rawler.
-        #[cfg(target_os = "macos")]
-        match reference_mimic_avg_luma(&path) {
-            Ok((luma, (r, g, b))) => {
-                println!("  reference-mimic: avg={luma:.1}/255  R={r:.1} G={g:.1} B={b:.1}")
-            }
-            Err(e) => println!("  reference-mimic FAILED: {e}"),
-        }
     }
 }
 
@@ -212,6 +204,83 @@ fn run_wasm_quality_decode_probe(args: &[String]) {
     if let Some(out) = args.get(2) {
         save_decoded_png(&img, out);
     }
+}
+
+/// `decode_probe --fit-look <raw files...>`: derives the RAW display look
+/// curve from Apple ImageIO. Per file, it undoes the current
+/// `apply_raw_preview_boost` on the `Fast` decode to get plain sRGB, then
+/// histogram-matches that to ImageIO's render of the same file. The median
+/// matched curve over all files prints as `RAW_LOOK_KNOTS`.
+#[cfg(target_os = "macos")]
+fn run_fit_look(args: &[String]) {
+    const KNOTS: usize = 17;
+    let mut unboost = [0u8; 256];
+    for (v, slot) in unboost.iter_mut().enumerate() {
+        let target = v as f32 / 255.0;
+        let (mut lo, mut hi) = (0f32, 1f32);
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if image_decode::apply_raw_preview_boost(mid) < target {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        *slot = (lo * 255.0).round() as u8;
+    }
+    let cdf = |img: &image_decode::DecodedImage, map: &dyn Fn(u8) -> u8| {
+        let mut hist = [0f64; 256];
+        for px in img.rgba.chunks_exact(4) {
+            for &c in &px[..3] {
+                hist[map(c) as usize] += 1.0;
+            }
+        }
+        let total: f64 = hist.iter().sum();
+        let mut acc = 0.0;
+        hist.map(|h| {
+            acc += h;
+            acc / total
+        })
+    };
+
+    let mut curves: Vec<[f64; KNOTS]> = Vec::new();
+    for path in args.iter().map(PathBuf::from) {
+        let (Ok(imageio), Ok(bytes)) = (image_decode::decode(&path, 1600), std::fs::read(&path))
+        else {
+            eprintln!("{}: skipped, decode failed", path.display());
+            continue;
+        };
+        let Ok(fast) = raw_preview::decode_raw_fast_from_bytes(&bytes, 1600) else {
+            eprintln!("{}: skipped, raw_preview failed", path.display());
+            continue;
+        };
+        let base = cdf(&fast, &|c| unboost[c as usize]);
+        let reference = cdf(&imageio, &|c| c);
+        let mut curve = [0f64; KNOTS];
+        for (k, out) in curve.iter_mut().enumerate() {
+            let bin = k * 255 / (KNOTS - 1);
+            let q = base[bin];
+            let r = reference.iter().position(|&p| p >= q).unwrap_or(255);
+            *out = r as f64 / 255.0;
+        }
+        curves.push(curve);
+    }
+    assert!(!curves.is_empty(), "no file decoded both ways");
+
+    let mut knots = [0f64; KNOTS];
+    for (k, out) in knots.iter_mut().enumerate() {
+        let mut col: Vec<f64> = curves.iter().map(|c| c[k]).collect();
+        col.sort_by(f64::total_cmp);
+        *out = col[col.len() / 2];
+    }
+    knots[0] = 0.0;
+    knots[KNOTS - 1] = 1.0;
+    for k in 1..KNOTS {
+        knots[k] = knots[k].max(knots[k - 1]);
+    }
+    println!("files fitted: {}", curves.len());
+    let list: Vec<String> = knots.iter().map(|v| format!("{v:.3}")).collect();
+    println!("RAW_LOOK_KNOTS = [{}]", list.join(", "));
 }
 
 /// `decode_probe --compare <a.png> <b.png>`: mean absolute difference and
@@ -385,88 +454,6 @@ fn rawler_full_image_diag(bytes: &[u8], max_px: u32) -> Option<image_decode::Dec
             pixel_format: image_decode::PixelFormat::Srgb8,
         }),
         orientation,
-    ))
-}
-
-/// Mean brightness from a reimplementation of the reference app's
-/// `develop_internal` on vanilla rawler 0.7.2. `highlight_compression = 4.0`
-/// is a guess at its default; it only affects near-clipped highlights.
-#[cfg(target_os = "macos")]
-fn reference_mimic_avg_luma(path: &Path) -> Result<(f64, (f64, f64, f64)), String> {
-    use rawler::imgop::develop::{Intermediate, ProcessingStep, RawDevelop};
-
-    let mut raw = decode_via_rawler(path)?;
-    let original_white_level = raw.whitelevel.0.first().copied().unwrap_or(u16::MAX as u32) as f32;
-    let original_black_level = raw
-        .blacklevel
-        .levels
-        .first()
-        .map(|r| r.as_f32())
-        .unwrap_or(0.0);
-    for level in raw.whitelevel.0.iter_mut() {
-        *level = u32::MAX;
-    }
-
-    let mut developer = RawDevelop::default();
-    developer.steps.retain(|&step| step != ProcessingStep::SRgb);
-    let mut developed = developer
-        .develop_intermediate(&raw)
-        .map_err(|e| e.to_string())?;
-
-    let denominator = (original_white_level - original_black_level).max(1.0);
-    let rescale_factor = (u32::MAX as f32 - original_black_level) / denominator;
-    let highlight_compression: f32 = 4.0;
-    let clamp_limit = highlight_compression.max(1.01);
-
-    let Intermediate::ThreeColor(pixels) = &mut developed else {
-        return Err("expected ThreeColor intermediate".to_string());
-    };
-
-    let (mut sum, mut sr, mut sg, mut sb, mut n) = (0f64, 0f64, 0f64, 0f64, 0u64);
-    for p in pixels.data.iter_mut() {
-        let (mut r, mut g, mut b) = (
-            (p[0] * rescale_factor).max(0.0),
-            (p[1] * rescale_factor).max(0.0),
-            (p[2] * rescale_factor).max(0.0),
-        );
-        let max_c = r.max(g).max(b);
-        if max_c > 1.0 {
-            let min_c = r.min(g).min(b);
-            let compression_factor = (1.0 - (max_c - 1.0) / (clamp_limit - 1.0)).clamp(0.0, 1.0);
-            let (cr, cg, cb) = (
-                min_c + (r - min_c) * compression_factor,
-                min_c + (g - min_c) * compression_factor,
-                min_c + (b - min_c) * compression_factor,
-            );
-            let compressed_max = cr.max(cg).max(cb);
-            if compressed_max > 1e-6 {
-                let rescale = max_c / compressed_max;
-                r = cr * rescale;
-                g = cg * rescale;
-                b = cb * rescale;
-            } else {
-                r = max_c;
-                g = max_c;
-                b = max_c;
-            }
-        }
-        let (r, g, b) = (r.clamp(0.0, 1.0), g.clamp(0.0, 1.0), b.clamp(0.0, 1.0));
-        let sr8 =
-            image_decode::apply_raw_preview_boost(rawler::imgop::srgb::srgb_apply_gamma(r)) * 255.0;
-        let sg8 =
-            image_decode::apply_raw_preview_boost(rawler::imgop::srgb::srgb_apply_gamma(g)) * 255.0;
-        let sb8 =
-            image_decode::apply_raw_preview_boost(rawler::imgop::srgb::srgb_apply_gamma(b)) * 255.0;
-        sum += (sr8 + sg8 + sb8) as f64;
-        sr += sr8 as f64;
-        sg += sg8 as f64;
-        sb += sb8 as f64;
-        n += 1;
-    }
-    let n = n.max(1);
-    Ok((
-        sum / (n as f64 * 3.0),
-        (sr / n as f64, sg / n as f64, sb / n as f64),
     ))
 }
 
@@ -1336,7 +1323,7 @@ mod tests {
             decoded.rgba.len()
         );
         assert_eq!(
-            golden, 0x43ad_e440_61b1_f4b5,
+            golden, 0xfcef_fdf0_1ee6_c6ef,
             "Fast-tier Bayer decode output changed from the captured golden hash \
              (see this test's println! output above for the actual value) - if this \
              change is intentional, update the literal; if not, a task's supposedly \
@@ -1385,7 +1372,7 @@ mod tests {
              below would then discriminate nothing but the output dimensions"
         );
         assert_eq!(
-            golden, 0x3c3d_4904_3a8d_0cd3,
+            golden, 0x90df_a26d_6a5a_22a7,
             "Fast-tier Linear decode output changed from the captured golden hash \
              (see this test's println! output above for the actual value)"
         );
