@@ -175,10 +175,40 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
         let mut grid_scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .id_salt("grid_scroll");
+        // Last frame's scroll offset and viewport height, for keeping a newly
+        // selected photo in view.
+        let viewport_id = egui::Id::new("grid_viewport");
+        let (mut offset, view_h) = ui
+            .ctx()
+            .data(|d| d.get_temp::<(f32, f32)>(viewport_id))
+            .unwrap_or((0.0, 0.0));
         if reset_scroll {
+            offset = 0.0;
             grid_scroll = grid_scroll.scroll_offset(egui::vec2(0.0, 0.0));
         }
-        grid_scroll.show_rows(ui, cell, rows, |ui, row_range| {
+        // Scroll only when the selection changes, and only as far as brings
+        // its row into view, so it doesn't fight manual scrolling.
+        if let Some(sel) = sel.filter(|_| view_h > 0.0) {
+            let last_sel_id = egui::Id::new("grid_last_sel");
+            let prev_sel = ui.ctx().data(|d| d.get_temp::<usize>(last_sel_id));
+            ui.ctx().data_mut(|d| d.insert_temp(last_sel_id, sel));
+            if prev_sel != Some(sel) {
+                let row_h = cell + ui.spacing().item_spacing.y;
+                let top = (sel / cols) as f32 * row_h;
+                let bottom = top + cell;
+                let target = if top < offset {
+                    Some(top)
+                } else if bottom > offset + view_h {
+                    Some(bottom - view_h)
+                } else {
+                    None
+                };
+                if let Some(target) = target {
+                    grid_scroll = grid_scroll.scroll_offset(egui::vec2(0.0, target.max(0.0)));
+                }
+            }
+        }
+        let output = grid_scroll.show_rows(ui, cell, rows, |ui, row_range| {
             let start = row_range.start * cols;
             let end = (row_range.end * cols).min(len);
             app.set_visible_grid_range(start, end);
@@ -192,6 +222,12 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
                     }
                 });
             }
+        });
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(
+                viewport_id,
+                (output.state.offset.y, output.inner_rect.height()),
+            )
         });
     });
 }
