@@ -1064,6 +1064,8 @@ mod tests {
         let dark = raw_saturated(0.002, 0.30, 512);
         let adj = analyze(&dark, PixelFormat::LinearF16, Centering::Range);
         assert!(adj.exposure > 0.5, "expected a lift, got {}", adj.exposure);
+        // Only Median promises the middle pixel lands at 50%.
+        let adj = analyze(&dark, PixelFormat::LinearF16, Centering::Median);
         let median = raw_percentile_under(&dark, &adj, 0.50);
         assert!((median - TARGET_MIDDLE).abs() < 0.06, "median {median}");
     }
