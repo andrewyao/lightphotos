@@ -29,6 +29,9 @@ use winit::event_loop::EventLoopProxy;
 pub enum UserEvent {
     /// Finder (or CLI) asked us to open this image file.
     OpenFile(PathBuf),
+    /// The user chose a command from the menu bar.
+    #[cfg(target_os = "macos")]
+    Menu(crate::menu::MenuCommand),
 }
 
 /// Set once in `main`; read by the injected Objective-C method.
