@@ -716,10 +716,6 @@ pub(crate) struct App {
     autotone_centering: crate::autotone::Centering,
     left_tab: LeftTab,
 
-    pending_quit: bool,
-    /// `main.rs` exits the event loop when this is set.
-    pub(crate) quit_requested: bool,
-
     /// Toast message and when it was set.
     status: Option<(StatusKind, String, Instant)>,
 
@@ -1022,8 +1018,6 @@ impl App {
             #[cfg(not(test))]
             autotone_centering: crate::autotone::Centering::load(),
             left_tab: LeftTab::Folders,
-            pending_quit: false,
-            quit_requested: false,
             status: None,
             occluded: false,
             repaint_at: None,
@@ -1449,11 +1443,6 @@ impl App {
                 ui::UiAction::SetLeftTab(tab) => self.set_left_tab(tab),
                 ui::UiAction::ToggleHelp => {
                     self.show_help = !self.show_help;
-                    self.request_redraw();
-                }
-                ui::UiAction::ConfirmQuit => self.quit_requested = true,
-                ui::UiAction::CancelQuit => {
-                    self.pending_quit = false;
                     self.request_redraw();
                 }
                 ui::UiAction::ToggleExportForm => self.toggle_export_form(),

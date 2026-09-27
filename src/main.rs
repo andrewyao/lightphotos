@@ -392,13 +392,6 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Exit the loop rather than `process::exit`, so loader and exporter
-        // `Drop`s run.
-        if self.quit_requested {
-            event_loop.exit();
-            return;
-        }
-
         // Finish wasm window setup once the async renderer init lands.
         #[cfg(target_arch = "wasm32")]
         if let Ok((renderer, size)) = self.renderer_init_rx.try_recv() {

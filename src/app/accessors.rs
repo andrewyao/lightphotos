@@ -109,10 +109,6 @@ impl App {
         self.autotone_centering
     }
 
-    pub(crate) fn pending_quit(&self) -> bool {
-        self.pending_quit
-    }
-
     /// Longest-side size in pixels for the loupe's screen-fit preview decode.
     /// `win_size` is already in physical pixels, so don't scale it by the DPI
     /// factor again.
