@@ -28,6 +28,7 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                         }
                         DevelopTab::Masks => draw_masks_tab(ui, app, out),
                     }
+                    draw_export_button(ui, out);
                 });
 
             region_focus_marker(ui, app, Region::Develop);
@@ -109,8 +110,8 @@ fn draw_tab_row(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
-/// The Develop header with Auto and Reset, presets, and every tone, color,
-/// and detail slider in Lightroom's order.
+/// The Develop header with Reset, presets, and every tone, color, and detail
+/// slider in Lightroom's order, with Auto Tone on the Tone header.
 fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let mut adj = app.current_adjustments();
@@ -119,14 +120,6 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button(t.reset).clicked() {
                 out.actions.push(UiAction::ResetAdjustments);
-                out.actions.push(UiAction::Focus(Region::Develop));
-            }
-            if ui
-                .button(t.auto_tone)
-                .on_hover_text(t.auto_tone_tip)
-                .clicked()
-            {
-                out.actions.push(UiAction::AutoTone);
                 out.actions.push(UiAction::Focus(Region::Develop));
             }
         });
@@ -211,6 +204,20 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         }
                     });
                 });
+            } else if s.section == crate::develop::Section::Tone {
+                ui.horizontal(|ui| {
+                    ui.label(title);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(t.auto_tone)
+                            .on_hover_text(t.auto_tone_tip)
+                            .clicked()
+                        {
+                            out.actions.push(UiAction::AutoTone);
+                            out.actions.push(UiAction::Focus(Region::Develop));
+                        }
+                    });
+                });
             } else {
                 ui.label(title);
             }
@@ -235,6 +242,17 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     }
     if let Some(idx) = interacted_idx {
         out.actions.push(UiAction::FocusDevelop(idx));
+    }
+}
+
+/// Opens the Export form, which takes the panel's place. Under every tab, so
+/// it is there whichever one the edit ended on.
+fn draw_export_button(ui: &mut egui::Ui, out: &mut FrameOutput) {
+    let t = t();
+    ui.add_space(6.0);
+    ui.separator();
+    if ui.button(t.export_jpg).on_hover_text(t.export_jpg_tip).clicked() {
+        out.actions.push(UiAction::ToggleExportForm);
     }
 }
 
