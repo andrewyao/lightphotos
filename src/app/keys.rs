@@ -765,6 +765,20 @@ mod tests {
         );
     }
 
+    /// Clicking a toolbar control focuses the Toolbar, which has no use for
+    /// arrows, so they go back to the Grid rather than doing nothing.
+    #[test]
+    fn arrows_move_in_the_grid_after_a_toolbar_click() {
+        let (mut app, _) = folder_app(3);
+        app.apply_ui_actions(vec![ui::UiAction::FocusToolbar(0)]);
+        assert_eq!(app.focus, Region::Toolbar);
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowRight);
+        assert_eq!(app.sel, Some(1));
+        assert_eq!(app.focus, Region::Grid);
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowLeft);
+        assert_eq!(app.sel, Some(0));
+    }
+
     #[test]
     fn left_and_right_step_photos_in_the_editor() {
         let (mut app, _) = editor_app();

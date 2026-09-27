@@ -738,8 +738,13 @@ impl App {
     }
 
     /// Route an arrow key to the focused region. Arrows enter every region but
-    /// the Grid, so one Escape still leaves the Grid.
+    /// the Grid, so one Escape still leaves the Grid. The Toolbar's cursor
+    /// moves on Tab and F6, so arrows there go to the Grid it sits over, which
+    /// is where a click on a toolbar control would otherwise strand them.
     pub(super) fn nav_arrow(&mut self, dx: isize, dy: isize, shift: bool) {
+        if self.focus == Region::Toolbar {
+            self.set_focus(Region::Grid, FocusLevel::Selected);
+        }
         if self.focus != Region::Grid {
             self.focus_level = FocusLevel::Entered;
         }
