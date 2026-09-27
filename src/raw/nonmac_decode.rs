@@ -58,22 +58,26 @@ pub(crate) fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
     }
 }
 
-/// Brightness and contrast boost for every RAW display rendering. A plain
-/// linear-to-sRGB RAW conversion looks flatter and darker than a camera JPEG;
-/// this is the extra look transform on top. The input is already
-/// sRGB-encoded, not linear.
+/// The look curve for every RAW display rendering, so non-mac RAW matches
+/// what Apple ImageIO shows on macOS. Without it, a plain linear-to-sRGB
+/// conversion renders about 1.45x darker. The input is already sRGB-encoded,
+/// not linear.
 ///
-/// `raw_shader.wgsl` has a WGSL twin with the same formula and constants.
+/// The knots are evenly spaced over 0..=1 and were fitted with
+/// `decode_probe --fit-look` over 148 Sony ARW files. `raw_shader.wgsl` has a
+/// WGSL twin with the same knots.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-const RAW_PREVIEW_BRIGHTNESS_GAMMA: f32 = 1.1;
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-const RAW_PREVIEW_CONTRAST_MIX: f32 = 0.75;
+const RAW_LOOK_KNOTS: [f32; 17] = [
+    0.000, 0.027, 0.122, 0.220, 0.337, 0.463, 0.576, 0.678, 0.757, 0.824, 0.878, 0.918, 0.949,
+    0.976, 0.992, 1.000, 1.000,
+];
 
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 pub(crate) fn apply_raw_preview_boost(srgb: f32) -> f32 {
-    let brightened = srgb.powf(1.0 / RAW_PREVIEW_BRIGHTNESS_GAMMA);
-    let contrast_curve = brightened * brightened * (3.0 - 2.0 * brightened);
-    (brightened + (contrast_curve - brightened) * RAW_PREVIEW_CONTRAST_MIX).clamp(0.0, 1.0)
+    let x = srgb.clamp(0.0, 1.0) * (RAW_LOOK_KNOTS.len() - 1) as f32;
+    let i = (x as usize).min(RAW_LOOK_KNOTS.len() - 2);
+    let t = x - i as f32;
+    RAW_LOOK_KNOTS[i] + (RAW_LOOK_KNOTS[i + 1] - RAW_LOOK_KNOTS[i]) * t
 }
 
 /// Strength (0..=100, the Denoise slider's scale) of the always-on denoise
@@ -550,6 +554,24 @@ mod tests {
 
         let mid = apply_raw_preview_boost(0.5);
         assert!(mid > 0.5, "expected midtone brightening, got {mid}");
+    }
+
+    #[test]
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    fn raw_shader_look_knots_match_cpu() {
+        let wgsl = include_str!("raw_shader.wgsl");
+        let body = wgsl
+            .split("const RAW_LOOK_KNOTS = array<f32, 17>(")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .expect("RAW_LOOK_KNOTS in raw_shader.wgsl");
+        let shader: Vec<f32> = body
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse().expect("knot literal"))
+            .collect();
+        assert_eq!(shader, RAW_LOOK_KNOTS);
     }
 
     /// A 16x8 JPEG carrying an APP1 EXIF segment with the given fields,

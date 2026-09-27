@@ -17,16 +17,19 @@
 //    non-sRGB surface on every platform, so this output is already
 //    display-ready.
 
-// RAW display boost: brightens and adds contrast on top of the sRGB curve so
-// RAW files look less flat. Formula and constants must match
-// `apply_raw_preview_boost` in raw/nonmac_decode.rs.
-const RAW_PREVIEW_BRIGHTNESS_GAMMA: f32 = 1.1;
-const RAW_PREVIEW_CONTRAST_MIX: f32 = 0.75;
+// RAW display look curve, fitted to Apple ImageIO's render. Knots must match
+// `RAW_LOOK_KNOTS` in raw/nonmac_decode.rs.
+const RAW_LOOK_KNOTS = array<f32, 17>(
+    0.000, 0.027, 0.122, 0.220, 0.337, 0.463, 0.576, 0.678, 0.757, 0.824, 0.878, 0.918, 0.949,
+    0.976, 0.992, 1.000, 1.000,
+);
 
 fn apply_raw_preview_boost(v: f32) -> f32 {
-    let brightened = pow(clamp(v, 0.0, 1.0), 1.0 / RAW_PREVIEW_BRIGHTNESS_GAMMA);
-    let contrast_curve = brightened * brightened * (3.0 - 2.0 * brightened);
-    return clamp(brightened + (contrast_curve - brightened) * RAW_PREVIEW_CONTRAST_MIX, 0.0, 1.0);
+    let x = clamp(v, 0.0, 1.0) * 16.0;
+    let i = min(u32(x), 15u);
+    let t = x - f32(i);
+    var knots = RAW_LOOK_KNOTS;
+    return mix(knots[i], knots[i + 1u], t);
 }
 
 @fragment

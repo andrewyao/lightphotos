@@ -53,6 +53,10 @@ pub enum PixelFormat {
     #[default]
     Srgb8,
     /// Linear-light RGBA as `half::f16`, 8 bytes per pixel. Alpha is always 1.
+    #[cfg_attr(
+        target_os = "macos",
+        allow(dead_code, reason = "only the non-mac RAW decoders construct it")
+    )]
     LinearF16,
 }
 
