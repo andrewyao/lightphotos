@@ -36,7 +36,11 @@ pub struct ImageRecord {
     pub label: Option<ColorLabel>,
     #[serde(default, skip_serializing_if = "Adjustments::is_identity")]
     pub adjustments: Adjustments,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "at_most_max_touchups"
+    )]
     pub touchups: Vec<TouchUp>,
     /// Manual rotation in 90° clockwise steps, `0..=3`.
     #[serde(default, skip_serializing_if = "is_zero_rot")]
@@ -68,6 +72,18 @@ impl ColorLabel {
             _ => return None,
         })
     }
+}
+
+/// A sidecar comes from whoever supplied the folder, and past
+/// [`crate::develop::MAX_TOUCHUPS`] the renderer's buffer overflows, so extra
+/// spots are dropped on load.
+fn at_most_max_touchups<'de, D>(deserializer: D) -> Result<Vec<TouchUp>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut touchups = Vec::<TouchUp>::deserialize(deserializer)?;
+    touchups.truncate(crate::develop::MAX_TOUCHUPS);
+    Ok(touchups)
 }
 
 fn is_zero_rot(v: &u8) -> bool {
@@ -917,6 +933,17 @@ mod tests {
 
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    #[test]
+    fn a_sidecar_loads_at_most_max_touchups() {
+        let spot =
+            r#"{"center":[0.5,0.5],"radius":0.1,"source":[0.2,0.2],"feather":0.5,"delta":[0,0,0]}"#;
+        let spots = vec![spot; crate::develop::MAX_TOUCHUPS + 36].join(",");
+        let rec: ImageRecord =
+            serde_json::from_str(&format!(r#"{{"rating":2,"touchups":[{spots}]}}"#)).unwrap();
+        assert_eq!(rec.touchups.len(), crate::develop::MAX_TOUCHUPS);
+        assert_eq!(rec.rating, Some(2));
     }
 
     #[test]
