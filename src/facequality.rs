@@ -237,10 +237,13 @@ impl FacePool {
         let cores = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        Self::with_workers(cores.saturating_sub(2).clamp(1, 2))
+        Self::with_workers(cores.saturating_sub(2).clamp(1, 2), analyze)
     }
 
-    fn with_workers(workers: usize) -> Option<Self> {
+    fn with_workers(
+        workers: usize,
+        analyze: fn(&Path) -> Result<FaceQuality, String>,
+    ) -> Option<Self> {
         let (job_tx, job_rx) = std::sync::mpsc::channel::<PathBuf>();
         let (res_tx, res_rx) = std::sync::mpsc::channel::<FaceOutcome>();
         let job_rx = Arc::new(Mutex::new(job_rx));
@@ -262,7 +265,10 @@ impl FacePool {
                             Err(_) => return,
                         }
                     };
-                    let result = analyze(&path);
+                    // Callers hold the path as pending until its outcome
+                    // arrives, so a panic must still send one.
+                    let result = std::panic::catch_unwind(|| analyze(&path))
+                        .unwrap_or_else(|_| Err("face analysis panicked".into()));
                     if res_tx.send(FaceOutcome { path, result }).is_err() {
                         break;
                     }
@@ -312,9 +318,42 @@ mod tests {
     #[test]
     fn a_pool_that_started_no_workers_is_never_handed_to_a_caller() {
         assert!(
-            FacePool::with_workers(0).is_none(),
+            FacePool::with_workers(0, analyze).is_none(),
             "a pool with no workers would accept jobs nothing runs"
         );
+    }
+
+    #[test]
+    fn a_panicking_analysis_still_reports_and_the_worker_keeps_going() {
+        fn panics_on_boom(path: &Path) -> Result<FaceQuality, String> {
+            if path.ends_with("boom.jpg") {
+                panic!("simulated Vision crash");
+            }
+            Ok(FaceQuality {
+                faces: 0,
+                min_eye_openness: None,
+            })
+        }
+        let pool = FacePool::with_workers(1, panics_on_boom).expect("one worker should start");
+        pool.submit(PathBuf::from("boom.jpg"));
+        pool.submit(PathBuf::from("fine.jpg"));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut outcomes = Vec::new();
+        while outcomes.len() < 2 {
+            outcomes.extend(pool.poll());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only {} of 2 outcomes arrived",
+                outcomes.len()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            outcomes[0].result.is_err(),
+            "the panic reports as a failure"
+        );
+        assert!(outcomes[1].result.is_ok(), "the worker survived the panic");
     }
 
     // The counterpart to the test above: a pool that did start a worker must
@@ -328,7 +367,7 @@ mod tests {
         let flat = vec![128u8; (w * h * 4) as usize];
         let path = write_jpeg("facequality_pool_blank.jpg", w, h, &flat);
 
-        let pool = FacePool::with_workers(1).expect("one worker should start");
+        let pool = FacePool::with_workers(1, analyze).expect("one worker should start");
         pool.submit(path.clone());
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);

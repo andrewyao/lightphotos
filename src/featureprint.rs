@@ -4,6 +4,7 @@
 //! from similar shots better than dHash. It only runs on photos dHash already
 //! flagged, which keeps the cost bounded. macOS only.
 
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -127,10 +128,13 @@ impl DistancePool {
         let cores = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        Self::with_workers(cores.saturating_sub(2).clamp(1, 2))
+        Self::with_workers(cores.saturating_sub(2).clamp(1, 2), compute)
     }
 
-    fn with_workers(workers: usize) -> Option<Self> {
+    fn with_workers(
+        workers: usize,
+        compute: fn(&Path) -> Result<FeaturePrint, String>,
+    ) -> Option<Self> {
         let (job_tx, job_rx) = std::sync::mpsc::channel::<DistanceJob>();
         let (res_tx, res_rx) = std::sync::mpsc::channel::<DistanceOutcome>();
         let job_rx = Arc::new(Mutex::new(job_rx));
@@ -154,11 +158,17 @@ impl DistancePool {
                                 Err(_) => return,
                             }
                         };
-                        let result = (|| {
+                        // Callers hold the pair as pending until its outcome
+                        // arrives, so a panic must still send one.
+                        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
                             let member_fp = compute(&job.member)?;
                             let anchor_fp = anchors.get_or_compute(&job.anchor, compute)?;
                             feature_distance(anchor_fp, &member_fp)
-                        })();
+                        }))
+                        .unwrap_or_else(|_| {
+                            anchors = AnchorCache::new();
+                            Err("feature-print comparison panicked".into())
+                        });
                         let outcome = DistanceOutcome {
                             anchor: job.anchor,
                             member: job.member,
@@ -324,9 +334,44 @@ mod tests {
     #[test]
     fn a_pool_that_started_no_workers_is_never_handed_to_a_caller() {
         assert!(
-            DistancePool::with_workers(0).is_none(),
+            DistancePool::with_workers(0, compute).is_none(),
             "a pool with no workers would accept jobs nothing runs"
         );
+    }
+
+    #[test]
+    fn a_panicking_comparison_still_reports_and_the_worker_keeps_going() {
+        fn panics_on_boom(path: &Path) -> Result<FeaturePrint, String> {
+            if path.ends_with("boom.jpg") {
+                panic!("simulated Vision crash");
+            }
+            Err("no print".into())
+        }
+        let pool = DistancePool::with_workers(1, panics_on_boom).expect("one worker should start");
+        for member in ["boom.jpg", "fine.jpg"] {
+            pool.submit(DistanceJob {
+                member: PathBuf::from(member),
+                anchor: PathBuf::from("anchor.jpg"),
+            });
+        }
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut outcomes = Vec::new();
+        while outcomes.len() < 2 {
+            outcomes.extend(pool.poll());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "only {} of 2 outcomes arrived",
+                outcomes.len()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(outcomes[0].member, PathBuf::from("boom.jpg"));
+        assert_eq!(
+            outcomes[0].result,
+            Err("feature-print comparison panicked".to_string())
+        );
+        assert_eq!(outcomes[1].result, Err("no print".to_string()));
     }
 
     // The counterpart to the test above: a pool that did start a worker must
@@ -340,7 +385,7 @@ mod tests {
         let anchor = write_jpeg("featureprint_pool_anchor.jpg", w, h, &checkerboard(w, h));
         let member = write_jpeg("featureprint_pool_member.jpg", w, h, &checkerboard(w, h));
 
-        let pool = DistancePool::with_workers(1).expect("one worker should start");
+        let pool = DistancePool::with_workers(1, compute).expect("one worker should start");
         pool.submit(DistanceJob {
             member: member.clone(),
             anchor: anchor.clone(),
