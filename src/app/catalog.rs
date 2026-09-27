@@ -364,7 +364,10 @@ impl App {
             .tone_only();
         let name = file_label(&path);
         self.copied_settings = Some((path, tone));
-        self.set_status(StatusKind::Success, (crate::i18n::t().copied_settings_from)(&name));
+        self.set_status(
+            StatusKind::Success,
+            (crate::i18n::t().copied_settings_from)(&name),
+        );
         self.request_redraw();
     }
 
@@ -455,11 +458,14 @@ impl App {
             self.resync_loupe_selection();
         }
         let n = paths.len();
-        self.set_status(StatusKind::Success, if stars == 0 {
-            (crate::i18n::t().cleared_rating)(n)
-        } else {
-            (crate::i18n::t().rated)(n, stars)
-        });
+        self.set_status(
+            StatusKind::Success,
+            if stars == 0 {
+                (crate::i18n::t().cleared_rating)(n)
+            } else {
+                (crate::i18n::t().rated)(n, stars)
+            },
+        );
         self.request_redraw();
     }
 
@@ -577,7 +583,10 @@ impl App {
             self.recompute_visible();
         }
         let n = self.survey_members.len();
-        self.set_status(StatusKind::Success, (crate::i18n::t().kept_best)(n.saturating_sub(1)));
+        self.set_status(
+            StatusKind::Success,
+            (crate::i18n::t().kept_best)(n.saturating_sub(1)),
+        );
         self.request_redraw();
     }
 

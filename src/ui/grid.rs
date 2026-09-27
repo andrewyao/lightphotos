@@ -75,11 +75,19 @@ fn tab_button(ui: &mut egui::Ui, tab: LeftTab, active: bool) -> egui::Response {
         egui::TextStyle::Body.resolve(ui.style()),
         egui::Color32::PLACEHOLDER,
     );
-    let pad = egui::vec2(font_size::px(ui.style(), 12.0), font_size::px(ui.style(), 5.0));
+    let pad = egui::vec2(
+        font_size::px(ui.style(), 12.0),
+        font_size::px(ui.style(), 5.0),
+    );
     let size = galley.size() + 2.0 * pad;
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let r = font_size::px(ui.style(), 5.0).round() as u8;
-    let corners = egui::CornerRadius { nw: 0, ne: 0, sw: r, se: r };
+    let corners = egui::CornerRadius {
+        nw: 0,
+        ne: 0,
+        sw: r,
+        se: r,
+    };
     let text_color = if active {
         visuals.strong_text_color()
     } else if response.hovered() {
@@ -95,7 +103,10 @@ fn tab_button(ui: &mut egui::Ui, tab: LeftTab, active: bool) -> egui::Response {
         let stroke = visuals.widgets.noninteractive.bg_stroke;
         let open_top = egui::Rect::from_min_max(rect.min - egui::vec2(0.0, 4.0), rect.max);
         painter
-            .with_clip_rect(rect.expand2(egui::vec2(2.0, 0.0)).translate(egui::vec2(0.0, 1.0)))
+            .with_clip_rect(
+                rect.expand2(egui::vec2(2.0, 0.0))
+                    .translate(egui::vec2(0.0, 1.0)),
+            )
             .rect_stroke(open_top, corners, stroke, egui::StrokeKind::Inside);
     } else if response.hovered() {
         let inset = egui::Rect::from_min_max(rect.min + egui::vec2(0.0, 1.0), rect.max);

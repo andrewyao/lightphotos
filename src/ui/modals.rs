@@ -200,7 +200,10 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         ui.add_space(10.0);
         let current = theme::current(ui.ctx());
         let lang = crate::i18n::lang();
-        let form = Form::new(ui, &[t.settings_theme, t.settings_language, t.settings_auto_tone]);
+        let form = Form::new(
+            ui,
+            &[t.settings_theme, t.settings_language, t.settings_auto_tone],
+        );
         form.section(ui, t.form_general, |ui| {
             form.row(ui, t.settings_theme, |ui| {
                 for (choice, name) in [
@@ -227,8 +230,16 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
             form.row(ui, t.settings_auto_tone, |ui| {
                 let centering = app.autotone_centering();
                 for (choice, name, tip) in [
-                    (Centering::Range, t.autotone_center_range, t.autotone_center_range_tip),
-                    (Centering::Median, t.autotone_center_median, t.autotone_center_median_tip),
+                    (
+                        Centering::Range,
+                        t.autotone_center_range,
+                        t.autotone_center_range_tip,
+                    ),
+                    (
+                        Centering::Median,
+                        t.autotone_center_median,
+                        t.autotone_center_median_tip,
+                    ),
                 ] {
                     let radio = ui.radio(centering == choice, name).on_hover_text(tip);
                     if radio.clicked() && centering != choice {

@@ -50,7 +50,10 @@ impl App {
         let Some(stored) = self.presets.get(id).map(|p| p.name.clone()) else {
             return;
         };
-        self.set_status(StatusKind::Success, (crate::i18n::t().renamed_preset)(&stored));
+        self.set_status(
+            StatusKind::Success,
+            (crate::i18n::t().renamed_preset)(&stored),
+        );
         self.request_redraw();
     }
 
@@ -77,7 +80,10 @@ impl App {
         let Some(stored) = self.presets.add(name, tone, Vec::new()) else {
             return;
         };
-        self.set_status(StatusKind::Success, (crate::i18n::t().saved_preset)(&stored));
+        self.set_status(
+            StatusKind::Success,
+            (crate::i18n::t().saved_preset)(&stored),
+        );
         self.request_redraw();
     }
 
@@ -93,7 +99,10 @@ impl App {
             return;
         };
         let n = self.apply_tone_to(tone, &[path]);
-        self.set_status(StatusKind::Success, (crate::i18n::t().applied_preset)(&name, n));
+        self.set_status(
+            StatusKind::Success,
+            (crate::i18n::t().applied_preset)(&name, n),
+        );
     }
 
     /// Applies one preset across the grid selection. This is a bulk action, so
@@ -109,7 +118,10 @@ impl App {
         if n == 0 {
             return;
         }
-        self.set_status(StatusKind::Success, (crate::i18n::t().applied_preset)(&name, n));
+        self.set_status(
+            StatusKind::Success,
+            (crate::i18n::t().applied_preset)(&name, n),
+        );
     }
 
     /// Opens the Lightroom preset picker and imports what the user chose.
@@ -168,11 +180,14 @@ impl App {
         } else {
             StatusKind::Error
         };
-        self.set_status(kind, (t.lr_import_status)(
-            stored.len(),
-            failures.len(),
-            failures.first().map_or("", String::as_str),
-        ));
+        self.set_status(
+            kind,
+            (t.lr_import_status)(
+                stored.len(),
+                failures.len(),
+                failures.first().map_or("", String::as_str),
+            ),
+        );
         self.request_redraw();
     }
 
@@ -181,7 +196,10 @@ impl App {
             return;
         };
         self.presets.remove(id);
-        self.set_status(StatusKind::Success, (crate::i18n::t().deleted_preset)(&name));
+        self.set_status(
+            StatusKind::Success,
+            (crate::i18n::t().deleted_preset)(&name),
+        );
         self.request_redraw();
     }
 }

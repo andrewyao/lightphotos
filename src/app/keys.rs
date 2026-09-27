@@ -454,7 +454,10 @@ mod tests {
         assert_eq!(actions, vec![UiAction::SetLanguage(other)]);
 
         let (actions, painted) = click(&mut app, painted.pos_of(t().autotone_center_median));
-        assert_eq!(actions, vec![UiAction::SetAutoToneCentering(Centering::Median)]);
+        assert_eq!(
+            actions,
+            vec![UiAction::SetAutoToneCentering(Centering::Median)]
+        );
         app.apply_ui_actions(actions);
         assert_eq!(app.autotone_centering(), Centering::Median);
 
@@ -792,7 +795,11 @@ mod tests {
         assert!(grown > start, "{grown} > {start}");
         press(&mut app, ModifiersState::empty(), KeyCode::BracketLeft);
         assert!(app.touchup_radius() < grown);
-        assert_eq!(app.rotations.get(&paths[0]), None, "no rotation while armed");
+        assert_eq!(
+            app.rotations.get(&paths[0]),
+            None,
+            "no rotation while armed"
+        );
 
         press(&mut app, ModifiersState::empty(), KeyCode::Escape);
         press(&mut app, ModifiersState::empty(), KeyCode::BracketRight);
@@ -849,7 +856,10 @@ mod tests {
 
         press(&mut app, ModifiersState::empty(), KeyCode::KeyO);
         assert!(!app.touchup_spots_shown());
-        assert!(!app.selection_on(), "O leaves the subject overlay alone in Touch Up");
+        assert!(
+            !app.selection_on(),
+            "O leaves the subject overlay alone in Touch Up"
+        );
         press(&mut app, ModifiersState::empty(), KeyCode::KeyO);
         assert!(app.touchup_spots_shown());
 
@@ -859,7 +869,11 @@ mod tests {
             press(&mut app, ModifiersState::SHIFT, KeyCode::KeyO);
             picked.push(app.touchup_selected());
         }
-        assert_eq!(picked, [Some(0), Some(1), Some(2), Some(0)], "wraps after the last");
+        assert_eq!(
+            picked,
+            [Some(0), Some(1), Some(2), Some(0)],
+            "wraps after the last"
+        );
         assert!(app.touchup_spots_shown(), "stepping shows the spots again");
     }
 

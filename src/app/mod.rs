@@ -332,7 +332,11 @@ pub(crate) struct App {
     /// The album add that ends an Immich batch, with the batch's summary to
     /// finish the toast with.
     #[cfg(not(target_arch = "wasm32"))]
-    album_add: Option<(Receiver<Result<crate::immich::Album, String>>, String, StatusKind)>,
+    album_add: Option<(
+        Receiver<Result<crate::immich::Album, String>>,
+        String,
+        StatusKind,
+    )>,
     /// The running bulk delete, if any. `pub(crate)` because the frame loop
     /// polls it.
     pub(crate) bulk_delete: Option<bulk_delete::BulkDelete>,
@@ -1274,7 +1278,10 @@ impl App {
 
         // Show catalog write failures, or the user loses the change silently.
         if let Some(cause) = self.catalog.take_error() {
-            self.set_status(StatusKind::Error, (crate::i18n::t().catalog_save_failed)(&cause));
+            self.set_status(
+                StatusKind::Error,
+                (crate::i18n::t().catalog_save_failed)(&cause),
+            );
         }
         if let Some(message) = self.presets.take_error() {
             self.set_status(StatusKind::Error, message);

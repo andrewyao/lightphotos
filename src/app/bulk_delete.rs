@@ -141,7 +141,10 @@ impl App {
             return;
         }
         if self.bulk_delete.is_some() || self.export_progress.is_some() {
-            self.set_status(StatusKind::Error, crate::i18n::t().delete_in_progress.to_string());
+            self.set_status(
+                StatusKind::Error,
+                crate::i18n::t().delete_in_progress.to_string(),
+            );
             return;
         }
         let total = paths.len();
@@ -151,9 +154,10 @@ impl App {
         let (origin_dir, origin_handle) = {
             let dir = paths[0].parent().unwrap_or(Path::new("")).to_path_buf();
             let Some(handle) = self.web_dir_handles.get(&dir).cloned() else {
-                self.set_status(StatusKind::Error, (crate::i18n::t().delete_no_handle)(
-                    &dir.display().to_string(),
-                ));
+                self.set_status(
+                    StatusKind::Error,
+                    (crate::i18n::t().delete_no_handle)(&dir.display().to_string()),
+                );
                 return;
             };
             (dir, handle)
@@ -251,7 +255,10 @@ impl App {
             self.prune_deleted(d);
         } else {
             let d = self.bulk_delete.as_ref().unwrap();
-            self.set_status(StatusKind::Progress, (crate::i18n::t().deleting)(d.done(), d.total));
+            self.set_status(
+                StatusKind::Progress,
+                (crate::i18n::t().deleting)(d.done(), d.total),
+            );
         }
         self.request_redraw();
     }

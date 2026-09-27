@@ -194,9 +194,8 @@ pub(super) fn loupe_touchup_overlay(
 
                 // The wheel sizes the brush instead of zooming, and Shift+wheel
                 // feathers it. Alt still pans through `App::on_scroll`.
-                let (delta, shift, alt) = ui.input(|i| {
-                    (i.smooth_scroll_delta, i.modifiers.shift, i.modifiers.alt)
-                });
+                let (delta, shift, alt) =
+                    ui.input(|i| (i.smooth_scroll_delta, i.modifiers.shift, i.modifiers.alt));
                 if !alt && shift {
                     // macOS turns a Shift+wheel into horizontal scrolling.
                     let d = if delta.y != 0.0 { delta.y } else { delta.x };

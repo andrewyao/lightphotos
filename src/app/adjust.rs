@@ -279,7 +279,10 @@ impl App {
 
     pub(super) fn add_touchup(&mut self, u: f32, v: f32) {
         let Some(t) = self.choose_touchup(u, v) else {
-            self.set_status(StatusKind::Error, crate::i18n::t().touch_up_needs_full.into());
+            self.set_status(
+                StatusKind::Error,
+                crate::i18n::t().touch_up_needs_full.into(),
+            );
             return;
         };
         let mut all = self.current_touchups().to_vec();
@@ -560,11 +563,14 @@ mod tests {
                 };
                 let mut feather = None;
                 for events in [vec![wheel], Vec::new(), Vec::new(), Vec::new()] {
-                    let (actions, _) = frame_with_modifiers(&mut app, events, egui::Modifiers::SHIFT);
+                    let (actions, _) =
+                        frame_with_modifiers(&mut app, events, egui::Modifiers::SHIFT);
                     for a in actions {
                         match a {
                             UiAction::SetTouchUpFeather(f) => feather = Some(f),
-                            UiAction::SetTouchUpRadius(_) => panic!("Shift+wheel resized the brush"),
+                            UiAction::SetTouchUpRadius(_) => {
+                                panic!("Shift+wheel resized the brush")
+                            }
                             _ => {}
                         }
                     }
@@ -637,7 +643,10 @@ mod tests {
             app.undo_touchup();
             assert!(centers(&app).is_empty());
             app.undo_touchup();
-            assert!(centers(&app).is_empty(), "Undo with no history does nothing");
+            assert!(
+                centers(&app).is_empty(),
+                "Undo with no history does nothing"
+            );
         }
 
         #[test]
@@ -701,7 +710,10 @@ mod tests {
             let _ = settled(&mut app);
             let (actions, _) = click(&mut app, slider);
             let f = feathered(&actions).expect("live once Touch Up is on");
-            assert!(f < 1.0, "a click mid-track lowers the feather from 1.0: {f}");
+            assert!(
+                f < 1.0,
+                "a click mid-track lowers the feather from 1.0: {f}"
+            );
             app.apply_ui_actions(actions);
             assert_eq!(app.touchup_feather(), f);
         }

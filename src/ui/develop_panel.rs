@@ -121,7 +121,11 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 out.actions.push(UiAction::ResetAdjustments);
                 out.actions.push(UiAction::Focus(Region::Develop));
             }
-            if ui.button(t.auto_tone).on_hover_text(t.auto_tone_tip).clicked() {
+            if ui
+                .button(t.auto_tone)
+                .on_hover_text(t.auto_tone_tip)
+                .clicked()
+            {
                 out.actions.push(UiAction::AutoTone);
                 out.actions.push(UiAction::Focus(Region::Develop));
             }
@@ -240,11 +244,17 @@ fn eyedropper_button(ui: &mut egui::Ui, active: bool) -> egui::Response {
     let side = font_size::px(ui.style(), 22.0);
     let (rect, response) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
     response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, t().pick_gray)
+        egui::WidgetInfo::selected(
+            egui::WidgetType::Button,
+            ui.is_enabled(),
+            active,
+            t().pick_gray,
+        )
     });
     let visuals = ui.visuals();
     if active {
-        ui.painter().rect_filled(rect, 4.0, visuals.selection.bg_fill);
+        ui.painter()
+            .rect_filled(rect, 4.0, visuals.selection.bg_fill);
     } else if response.hovered() {
         ui.painter()
             .rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
@@ -258,8 +268,14 @@ fn eyedropper_button(ui: &mut egui::Ui, active: bool) -> egui::Response {
     let c = rect.center();
     let p = |x: f32, y: f32| egui::pos2(c.x + x * u, c.y + y * u);
     let painter = ui.painter();
-    painter.line_segment([p(-6.5, 6.5), p(2.0, -2.0)], egui::Stroke::new(2.0 * u, color));
-    painter.line_segment([p(-1.0, -4.5), p(4.5, 1.0)], egui::Stroke::new(1.6 * u, color));
+    painter.line_segment(
+        [p(-6.5, 6.5), p(2.0, -2.0)],
+        egui::Stroke::new(2.0 * u, color),
+    );
+    painter.line_segment(
+        [p(-1.0, -4.5), p(4.5, 1.0)],
+        egui::Stroke::new(1.6 * u, color),
+    );
     painter.circle_filled(p(4.0, -4.0), 3.2 * u, color);
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
