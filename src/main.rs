@@ -469,46 +469,13 @@ impl ApplicationHandler<UserEvent> for App {
             self.on_export_outcomes(outcomes);
             self.request_redraw();
         }
-        // Worker threads don't wake winit, so poll on a timer while work is
-        // pending. `WaitUntil` re-polls without redrawing every vsync. A loupe
-        // decode polls every 16 ms because the user is waiting on it; an export
-        // only updates a toast, so 100 ms is enough.
         let image_pending = self.loader.as_ref().is_some_and(|l| l.has_pending_image())
             || self.selection_pending()
             || catalog_load_pending;
         #[cfg(target_arch = "wasm32")]
         let image_pending = image_pending || web_folder_pending || self.web_decode_pending();
-        // A write backlog needs the tight interval on wasm, where `pump` is
-        // the scheduler; on native the worker drains on its own and only the
-        // toast needs refreshing.
-        let poll_delay = if image_pending || self.bulk_delete_running() {
-            Some(16)
-        } else if self.export_progress.is_some() || self.catalog.backlog() > 0 || immich_connecting
-        {
-            Some(if cfg!(target_arch = "wasm32") {
-                16
-            } else {
-                100
-            })
-        } else {
-            None
-        };
-        let now = web_time::Instant::now();
-        if self.repaint_at.is_some_and(|at| at <= now) {
-            // Cleared here rather than left for `redraw` to replace, so a
-            // frame skipped while occluded can't spin this loop.
-            self.repaint_at = None;
-            self.request_redraw();
-        }
-        let poll_at = poll_delay.map(|ms| now + std::time::Duration::from_millis(ms));
-        match poll_at.into_iter().chain(self.repaint_at).min() {
-            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
-        }
 
-        if self.request_working_thumbs() {
-            self.request_redraw();
-        }
+        let thumbs_pending = self.request_working_thumbs();
         // The loader has no workers on wasm, so web decodes are polled here.
         #[cfg(target_arch = "wasm32")]
         {
@@ -576,27 +543,54 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         // Each `request_*` below returns true while background work is still
-        // outstanding. Worker completions don't wake the loop, so keep redrawing.
-        if self.request_burst_thumbs() {
-            self.request_redraw();
-        }
-
-        if self.request_dup_thumbs() {
-            self.request_redraw();
-        }
+        // outstanding. Arrivals redraw when they land, so these only set the
+        // poll interval below.
+        let thumbs_pending = self.request_burst_thumbs() | thumbs_pending;
+        let thumbs_pending = self.request_dup_thumbs() | thumbs_pending;
 
         self.poll_feature_prints();
-        if self.request_feature_prints() {
-            self.request_redraw();
-        }
-
+        let vision_pending = self.request_feature_prints();
         self.poll_face_quality();
-        if self.request_face_quality() {
-            self.request_redraw();
-        }
+        let vision_pending = self.request_face_quality() | vision_pending;
 
         // Segmentation starts from user actions, so it has no `request_*` call.
         self.poll_selection_mask();
+
+        // Worker threads don't wake winit, so poll on a timer while work is
+        // pending. `WaitUntil` re-polls without redrawing every vsync. A loupe
+        // decode or a thumbnail polls every 16 ms because the user is waiting
+        // on it. An export only updates a toast, and a Vision pass takes longer
+        // than 100 ms per photo, so 100 ms is enough for those. A write backlog
+        // needs the tight interval on wasm, where `pump` is the scheduler; on
+        // native the worker drains on its own and only the toast needs
+        // refreshing.
+        let poll_delay = if image_pending || thumbs_pending || self.bulk_delete_running() {
+            Some(16)
+        } else if self.export_progress.is_some()
+            || self.catalog.backlog() > 0
+            || immich_connecting
+            || vision_pending
+        {
+            Some(if cfg!(target_arch = "wasm32") {
+                16
+            } else {
+                100
+            })
+        } else {
+            None
+        };
+        let now = web_time::Instant::now();
+        if self.repaint_at.is_some_and(|at| at <= now) {
+            // Cleared here rather than left for `redraw` to replace, so a
+            // frame skipped while occluded can't spin this loop.
+            self.repaint_at = None;
+            self.request_redraw();
+        }
+        let poll_at = poll_delay.map(|ms| now + std::time::Duration::from_millis(ms));
+        match poll_at.into_iter().chain(self.repaint_at).min() {
+            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
+        }
     }
 }
 
