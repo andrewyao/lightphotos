@@ -345,7 +345,7 @@ fn landing_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 }
             }
             if secondary(ui, t().settings, settings_w, true)
-                .on_hover_text(t().settings_tip)
+                .on_hover_text(crate::i18n::keys(t().settings_tip))
                 .clicked()
             {
                 out.actions.push(UiAction::ToggleSettings);
@@ -602,7 +602,7 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 ui.add_space(12.0);
                 if ui
                     .button(t().open_folder)
-                    .on_hover_text(t().open_folder_tip)
+                    .on_hover_text(crate::i18n::keys(t().open_folder_tip))
                     .clicked()
                 {
                     out.actions.push(UiAction::PickFolder);
@@ -616,7 +616,7 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     ui.add_space(8.0);
                     if ui
                         .button(t().settings)
-                        .on_hover_text(t().settings_tip)
+                        .on_hover_text(crate::i18n::keys(t().settings_tip))
                         .clicked()
                     {
                         out.actions.push(UiAction::ToggleSettings);

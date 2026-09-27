@@ -212,7 +212,7 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
             // Buttons are taller than a label; keep the row one height.
             ui.set_min_height(ui.spacing().interact_size.y);
             if n == 0 {
-                ui.weak(t.no_selection);
+                ui.weak(crate::i18n::keys(t.no_selection));
                 return;
             }
             ui.strong((t.n_selected)(n));
@@ -231,7 +231,7 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
                 });
             if ui
                 .button(t.auto_tone)
-                .on_hover_text(t.auto_tone_selection_tip)
+                .on_hover_text(crate::i18n::keys(t.auto_tone_selection_tip))
                 .clicked()
             {
                 out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));
@@ -239,7 +239,7 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
             ui.separator();
             if ui
                 .add_enabled(n == 1, egui::Button::new(t.copy_settings))
-                .on_hover_text(t.copy_settings_tip)
+                .on_hover_text(crate::i18n::keys(t.copy_settings_tip))
                 .on_disabled_hover_text(t.copy_settings_needs_one)
                 .clicked()
             {

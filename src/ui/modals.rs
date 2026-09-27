@@ -157,7 +157,7 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
                         .striped(true)
                         .show(ui, |ui| {
                             for (key, desc) in section.rows {
-                                ui.label(egui::RichText::new(*key).strong());
+                                ui.label(egui::RichText::new(crate::i18n::keys(key)).strong());
                                 ui.label(*desc);
                                 ui.end_row();
                             }
