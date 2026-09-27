@@ -368,7 +368,8 @@ pub(crate) struct App {
     /// The last session saved, which the landing page's Reopen Session
     /// button restores.
     session: Option<session::Session>,
-    /// A Reopen Session waiting on its folder's listing.
+    /// A Reopen Session waiting on its folder's listing, then on each
+    /// listing down to its subfolder.
     #[cfg(target_arch = "wasm32")]
     pub(crate) web_session_restore: Option<session::Session>,
 
