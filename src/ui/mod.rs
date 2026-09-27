@@ -283,18 +283,21 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                                 .corner_radius(10.0)
                                 .inner_margin(egui::Margin::symmetric(18, 12))
                                 .show(ui, |ui| {
-                                    ui.label(
-                                        egui::RichText::new(allow_note)
-                                            .size(font_size::px(ui.style(), 18.0))
-                                            .color(pal.value),
+                                    ui.with_layout(
+                                        egui::Layout::top_down(egui::Align::Min),
+                                        |ui| {
+                                            ui.label(
+                                                egui::RichText::new(allow_note)
+                                                    .size(font_size::px(ui.style(), 18.0))
+                                                    .color(pal.value),
+                                            );
+                                        },
                                     );
                                 });
                         }
 
                         ui.add_space(40.0);
                         landing_steps(ui, col_w, card_fill, card_stroke, &pal);
-                        ui.add_space(20.0);
-                        landing_tip(ui, col_w, &pal);
                         ui.add_space(32.0);
                     },
                 );
@@ -473,91 +476,6 @@ fn number_badge(ui: &mut egui::Ui, n: usize) {
         n.to_string(),
         egui::FontId::proportional(font_size::px(ui.style(), 13.0)),
         egui::Color32::WHITE,
-    );
-}
-
-/// The storage tip: left-aligned text in a blue-tinted box with an accent bar
-/// down its left edge, the way docs sites set off a note.
-fn landing_tip(ui: &mut egui::Ui, col_w: f32, pal: &theme::Palette) {
-    const BAR: f32 = 4.0;
-    const RADIUS: u8 = 10;
-    let resp = egui::Frame::new()
-        .fill(theme::BRAND_BLUE.linear_multiply(0.10))
-        .stroke(egui::Stroke::new(
-            1.0,
-            theme::BRAND_BLUE.linear_multiply(0.35),
-        ))
-        .corner_radius(RADIUS)
-        .inner_margin(egui::Margin {
-            left: 20,
-            right: 18,
-            top: 14,
-            bottom: 14,
-        })
-        .show(ui, |ui| {
-            ui.set_width(col_w - 40.0);
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                ui.horizontal(|ui| {
-                    info_icon(ui, pal);
-                    ui.label(
-                        egui::RichText::new(t().landing_tip_title)
-                            .size(font_size::px(ui.style(), 16.0))
-                            .color(pal.value)
-                            .strong(),
-                    );
-                });
-                for line in t().landing_help {
-                    ui.add_space(4.0);
-                    ui.horizontal_top(|ui| {
-                        bullet(ui, pal.value);
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(line)
-                                    .size(font_size::px(ui.style(), 15.0))
-                                    .color(pal.value),
-                            )
-                            .wrap(),
-                        );
-                    });
-                }
-            });
-        })
-        .response;
-    let r = resp.rect;
-    ui.painter().rect_filled(
-        egui::Rect::from_min_max(r.min, egui::pos2(r.min.x + BAR, r.max.y)),
-        egui::CornerRadius {
-            nw: RADIUS,
-            sw: RADIUS,
-            ne: 0,
-            se: 0,
-        },
-        theme::BRAND_BLUE,
-    );
-}
-
-/// A list bullet sized to sit on the first line of 15px text, painted
-/// rather than drawn as a glyph for the same reason as `info_icon`.
-fn bullet(ui: &mut egui::Ui, color: egui::Color32) {
-    let line = font_size::px(ui.style(), 15.0) * 1.2;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(line * 0.6, line), egui::Sense::hover());
-    ui.painter()
-        .circle_filled(rect.center(), font_size::px(ui.style(), 2.5), color);
-}
-
-/// An "i" in a disc of the text color, painted so it can't fall back to a
-/// tofu box the way an emoji glyph would.
-fn info_icon(ui: &mut egui::Ui, pal: &theme::Palette) {
-    let d = font_size::px(ui.style(), 18.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
-    ui.painter()
-        .circle_filled(rect.center(), d / 2.0, pal.value);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        "i",
-        egui::FontId::proportional(font_size::px(ui.style(), 12.0)),
-        pal.window,
     );
 }
 
