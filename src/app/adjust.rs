@@ -508,6 +508,30 @@ mod tests {
         }
 
         #[test]
+        fn export_sits_under_both_tabs_and_auto_tone_under_tone() {
+            let mut app = loupe("export");
+            let t = crate::i18n::t();
+            let painted = settled(&mut app);
+            assert!(painted.has(t.auto_tone), "{:?}", painted.texts());
+            let tone = painted.pos_of(t.section(crate::develop::Section::Tone));
+            let auto = painted.pos_of(t.auto_tone);
+            assert!(
+                (auto.y - tone.y).abs() < 4.0,
+                "Auto Tone shares the Tone header's row: {tone:?} vs {auto:?}"
+            );
+
+            for tab in [DevelopTab::Sliders, DevelopTab::Masks] {
+                app.set_develop_tab(tab);
+                let painted = settled(&mut app);
+                let (actions, _) = click(&mut app, painted.pos_of(t.export_jpg));
+                assert!(
+                    actions.iter().any(|a| matches!(a, UiAction::ToggleExportForm)),
+                    "Export on {tab:?} opens the Export form"
+                );
+            }
+        }
+
+        #[test]
         fn leaving_masks_disarms_touch_up() {
             let mut app = loupe("disarm");
             app.set_develop_tab(DevelopTab::Masks);
