@@ -186,11 +186,6 @@ pub struct Strings {
     pub landing_tagline: &'static str,
     /// The three "how it works" cards: (title, body).
     pub landing_steps: [(&'static str, &'static str); 3],
-    /// Heading of the tip box that holds `landing_help`.
-    pub landing_tip_title: &'static str,
-    /// The tip's bullets: photos untouched with edits in sidecars, edits
-    /// moving with the folder, the rename caveat, and the shortcut overlay.
-    pub landing_help: [&'static str; 4],
     /// Web only: the File System Access permission the browser shows once a
     /// folder is picked. Empty off the web, where the picker is native.
     pub landing_allow_note: &'static str,
@@ -619,17 +614,10 @@ pub static EN: Strings = Strings {
             "Adjust tone and color, crop and rotate, then press X to export JPEGs.",
         ),
     ],
-    landing_tip_title: "Tip",
-    landing_help: [
-        "Your original photos are never modified. Your edits are saved in small files in a \
-         .lightphotos subfolder.",
-        "When you move a folder of photos, the edits move with it.",
-        "Don't rename your photos. Edits are matched to photos by file name.",
-        "Press ? in the application to see all the keyboard shortcuts.",
-    ],
     landing_allow_note: if WEB {
-        "When the browser asks \u{201C}Allow this site to edit files? \u{2026}\u{201D}, \
-         click Allow \u{2014} LightPhotos needs it to read your photos and save ratings."
+        "When the browser asks \u{201C}Allow this site to edit files? \u{2026}\u{201D}, click Allow.\n\
+         This allows the application to save ratings and edits in a .lightphotos subfolder.\n\
+         Your original photos are never modified."
     } else {
         ""
     },
@@ -1118,16 +1106,10 @@ pub static ZH: Strings = Strings {
         ("评分", "按 0-5 打星，然后筛选图库，只留下你的精选。"),
         ("冲印", "调整影调和色彩，裁剪和旋转，然后按 X 导出 JPEG。"),
     ],
-    landing_tip_title: "提示",
-    landing_help: [
-        "LightPhotos 从不修改你的原始照片。你的编辑保存在 .lightphotos 子文件夹中的小文件里。",
-        "移动照片文件夹时，编辑也会随之移动。",
-        "请不要重命名照片。编辑按文件名与照片对应。",
-        "在应用中按 ? 查看所有键盘快捷键。",
-    ],
     landing_allow_note: if WEB {
-        "当浏览器提示\u{201C}Allow this site to edit files? \u{2026}\u{201D}时，\
-         请点击允许 \u{2014} LightPhotos 需要它来读取照片并保存评分。"
+        "当浏览器提示\u{201C}Allow this site to edit files? \u{2026}\u{201D}时，请点击允许。\n\
+         这样应用才能把评分和编辑保存在 .lightphotos 子文件夹中。\n\
+         LightPhotos 从不修改你的原始照片。"
     } else {
         ""
     },
