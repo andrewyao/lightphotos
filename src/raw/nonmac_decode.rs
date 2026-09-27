@@ -155,6 +155,8 @@ fn develop_raw_image_to_srgb8(
     orientation: u8,
     max_dim: u32,
 ) -> Result<DecodedImage, String> {
+    let side = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    super::check_decode_size(side(raw.width), side(raw.height))?;
     let developed = rawler::imgop::develop::RawDevelop::default()
         .develop_intermediate(raw)
         .map_err(|e| e.to_string())?;

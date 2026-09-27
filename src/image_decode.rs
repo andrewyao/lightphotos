@@ -737,6 +737,7 @@ pub fn cgimage_to_rgba(
     if target_w == 0 || target_h == 0 {
         return Err("target dimensions must be non-zero".into());
     }
+    check_decode_size(target_w, target_h)?;
 
     let bytes_per_row = (target_w as usize) * 4;
     let mut buffer = vec![0u8; bytes_per_row * (target_h as usize)];
@@ -768,6 +769,22 @@ pub fn cgimage_to_rgba(
     }))
 }
 
+/// The most pixels any decode allocates: 500 MP, 2 GB as RGBA8. That is above
+/// every camera and most stitched panoramas, and low enough that `w * h * 8`
+/// fits in a u32, so pixel index math never wraps. The size comes from the
+/// file's header, and a tiny crafted file can claim 65535x65535.
+pub(crate) const MAX_DECODE_PIXELS: u64 = 500_000_000;
+
+pub(crate) fn check_decode_size(w: u32, h: u32) -> Result<(), String> {
+    if w as u64 * h as u64 > MAX_DECODE_PIXELS {
+        return Err(format!(
+            "{w}x{h} is over the {} megapixel limit",
+            MAX_DECODE_PIXELS / 1_000_000
+        ));
+    }
+    Ok(())
+}
+
 /// Scale `(w, h)` down, keeping aspect ratio, so neither side exceeds
 /// `max_dim`.
 pub(crate) fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
@@ -783,6 +800,33 @@ pub(crate) fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_decode_budget_admits_big_panoramas_and_refuses_bombs() {
+        assert!(check_decode_size(20_000, 25_000).is_ok());
+        assert!(check_decode_size(65_535, 65_535).is_err());
+        assert!(check_decode_size(u32::MAX, 1).is_err());
+        assert!(MAX_DECODE_PIXELS * 8 <= u32::MAX as u64);
+    }
+
+    /// ImageIO itself refuses a tiny file that claims a huge size, so the
+    /// budget is checked here, where the pixel buffer is allocated.
+    // decode_probe mounts this file without `image_encode`.
+    #[cfg(all(target_os = "macos", not(feature = "raw-probe")))]
+    #[test]
+    fn the_bitmap_draw_refuses_a_size_over_budget_before_allocating() {
+        let path = std::env::temp_dir().join(format!("lp-budget-{}.jpg", std::process::id()));
+        crate::image_encode::encode_jpeg(&path, 16, 16, &[128u8; 16 * 16 * 4]).unwrap();
+        let source = open_image_source(&path).unwrap();
+        let image = unsafe { source.image_at_index(0, None) }.unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let err = cgimage_to_rgba(&image, 25_000, 25_000)
+            .err()
+            .expect("625 megapixels is over budget");
+        assert!(err.contains("megapixel limit"), "{err}");
+        assert!(cgimage_to_rgba(&image, 64, 64).is_ok());
+    }
 
     // 997 and 331 are deliberately unrelated. Every construction of this type
     // now routes its two adjacent `u32` dimensions through `DecodedImageFields`,
