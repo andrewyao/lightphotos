@@ -611,7 +611,7 @@ mod tests {
             "Connect is disabled while both fields are empty"
         );
 
-        let mut type_into = |app: &mut App, at: egui::Pos2, text: &str| {
+        let type_into = |app: &mut App, at: egui::Pos2, text: &str| {
             let (actions, _) = click(app, at);
             app.apply_ui_actions(actions);
             let (actions, _) = frame(app, vec![egui::Event::Text(text.into())]);
@@ -626,7 +626,7 @@ mod tests {
             url_at.y < example && example < key_at.y,
             "the example sits under the URL field"
         );
-        let painted = type_into(&mut app, url_at, "https://example.org");
+        type_into(&mut app, url_at, "https://example.org");
         let painted = type_into(&mut app, key_at, "secret");
         match app.immich() {
             super::export::ImmichLink::Disconnected { url, key, .. } => {

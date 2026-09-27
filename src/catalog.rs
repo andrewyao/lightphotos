@@ -321,6 +321,7 @@ impl Catalog {
 
     /// Delete the record and sidecar for `path`, when its photo is deleted.
     /// The sidecar skips the Trash, since it is useless apart from its photo.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn remove(&mut self, path: &Path) {
         if let Some(name) = path.file_name() {
             self.images.remove(name);

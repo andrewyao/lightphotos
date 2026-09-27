@@ -24,9 +24,13 @@
 //! `dataRepresentation` is the right follow-up.
 
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+#[cfg(not(target_arch = "wasm32"))]
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -34,10 +38,12 @@ use crate::facequality::FaceQuality;
 
 /// Cache file name, inside `<photo dir>/.lightphotos/`. Neither `.xmp` nor
 /// `.thumb.jpg`, so the sidecar scan and the thumbnail sweep both skip it.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const CACHE_FILE: &str = "signals.json";
 
 /// How long a `record` may leave new signals unwritten. A crash loses at most
 /// this much recomputation, and the folder switch flushes anyway.
+#[cfg(not(target_arch = "wasm32"))]
 const WRITE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// A photo's capture time as stored. `Unreadable` is a real answer, not a
@@ -104,6 +110,7 @@ pub struct PhotoSignals {
 }
 
 impl PhotoSignals {
+    #[cfg(not(target_arch = "wasm32"))]
     fn is_empty(&self) -> bool {
         self.capture.is_none()
             && self.sharpness.is_none()
@@ -115,6 +122,7 @@ impl PhotoSignals {
 /// Validity key from the source's mtime and length, the same shape as
 /// [`crate::thumbnail::cache_key`]. The path is not hashed, so moving a folder
 /// keeps its cache valid. Bump the version string to discard every entry.
+#[cfg(not(target_arch = "wasm32"))]
 fn signal_key(mtime_ms: u64, len: u64) -> u64 {
     let mut h = crate::hash::Fnv1a::new();
     h.write(b"lightphotos-signals-v1");
@@ -144,6 +152,7 @@ fn current_key(_photo: &Path) -> Option<u64> {
 
 /// The file as it sits on disk. A struct rather than a bare map so a later
 /// version can add fields beside `entries` without a migration.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Serialize, Deserialize, Default)]
 struct CacheFile {
     entries: HashMap<String, PhotoSignals>,

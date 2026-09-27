@@ -552,7 +552,6 @@ impl ApplicationHandler<UserEvent> for App {
                         let file_handles = self.web_file_handles.clone();
                         let dest = dest_dir.join(&filename);
                         wasm_bindgen_futures::spawn_local(async move {
-                            use crate::export::ExportFs;
                             let result = crate::web_export_fs::WebFs::new(folder, file_handles)
                                 .write_atomic(&dest, &jpeg)
                                 .await

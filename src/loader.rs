@@ -65,6 +65,7 @@ enum Job {
     /// Full-resolution decode, capped at the GPU's max texture size. Requested
     /// only when the user zooms past the preview, because it costs seconds and
     /// hundreds of megabytes.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Full(PathBuf, u32),
     /// Thumbnail whose longest side is at most the carried size.
     #[allow(dead_code)]
@@ -195,6 +196,7 @@ pub struct Loader {
 
     /// The GPU's max texture dimension, so full decodes only downscale images
     /// too large to upload.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     full_target: u32,
 
     // Full-resolution tier. `order` is insertion order for LRU eviction.
@@ -507,6 +509,7 @@ impl Loader {
 
     /// Requests the full-resolution decode of `path`. Call only when the user
     /// zooms past the preview, because this is the expensive tier.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn request_full(&mut self, path: PathBuf) {
         if self.cache.contains_key(&path) || self.inflight.contains(&path) {
             return;

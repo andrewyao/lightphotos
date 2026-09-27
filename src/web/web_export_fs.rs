@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! wasm32-only: the File System Access implementation of `export::ExportFs`.
+//! wasm32-only: export file access through the File System Access API.
 //! Sources are read through file handles. JPEGs are written through a
 //! writable stream, which swaps the file in atomically on `close()`, the
 //! same guarantee native export gets from write-to-temp plus rename.
@@ -15,7 +15,7 @@ use web_sys::{
     FileSystemGetFileOptions, FileSystemWritableFileStream,
 };
 
-use crate::export::{ExportFs, EXPORTS_DIR};
+use crate::export::EXPORTS_DIR;
 
 /// Built fresh for each export batch, so `file_handles` is a snapshot of
 /// `App::web_file_handles` at that moment.
@@ -82,16 +82,9 @@ impl WebFs {
     }
 }
 
-impl ExportFs for WebFs {
-    async fn read_source(&self, src: &Path) -> Result<Vec<u8>, String> {
-        let handle = self
-            .file_handles
-            .get(src)
-            .ok_or_else(|| format!("no file handle for {}", src.display()))?;
-        crate::web_fs::read_bytes(handle).await
-    }
-
-    async fn write_atomic(&self, dest: &Path, bytes: &[u8]) -> Result<(), String> {
+impl WebFs {
+    /// Write `bytes` to `dest` so no reader ever sees a partial file.
+    pub(crate) async fn write_atomic(&self, dest: &Path, bytes: &[u8]) -> Result<(), String> {
         let filename = dest
             .file_name()
             .and_then(|n| n.to_str())
