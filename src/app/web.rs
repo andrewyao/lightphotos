@@ -34,7 +34,7 @@ fn retry_backoff(attempt: u8) -> std::time::Duration {
 }
 
 /// True in a browser on a Mac, where Cmd rather than Ctrl is the command key.
-fn browser_is_mac() -> bool {
+pub(crate) fn browser_is_mac() -> bool {
     thread_local! {
         static MAC: bool = web_sys::window()
             .and_then(|w| w.navigator().platform().ok())

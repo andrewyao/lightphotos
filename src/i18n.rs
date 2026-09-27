@@ -126,23 +126,28 @@ pub struct HelpSection {
     pub rows: &'static [(&'static str, &'static str)],
 }
 
-/// Cmd in the native macOS app, Ctrl elsewhere. The three-argument form joins
-/// two alternatives with the given word.
-macro_rules! primary {
-    ($keys:literal) => {
-        if cfg!(all(not(target_arch = "wasm32"), target_os = "macos")) {
-            concat!("Cmd", $keys)
-        } else {
-            concat!("Ctrl", $keys)
-        }
-    };
-    ($a:literal, $or:literal, $b:literal) => {
-        if cfg!(all(not(target_arch = "wasm32"), target_os = "macos")) {
-            concat!("Cmd", $a, $or, "Cmd", $b)
-        } else {
-            concat!("Ctrl", $a, $or, "Ctrl", $b)
-        }
-    };
+/// The help and tooltips write the command key as "Cmd". `keys` swaps it
+/// for "Ctrl" where Ctrl is the command key, at draw time, because a browser
+/// learns whether it runs on a Mac only at runtime.
+pub fn keys(text: &str) -> std::borrow::Cow<'_, str> {
+    if command_is_cmd() || !text.contains("Cmd+") {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        std::borrow::Cow::Owned(text.replace("Cmd+", "Ctrl+"))
+    }
+}
+
+/// Whether the command key is Cmd: in the macOS app, and in a browser on a
+/// Mac. `App::handle_key` accepts either key everywhere.
+pub fn command_is_cmd() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        crate::app::browser_is_mac()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        cfg!(target_os = "macos")
+    }
 }
 
 const WEB: bool = cfg!(target_arch = "wasm32");
@@ -247,6 +252,11 @@ pub struct Strings {
     pub eyes_closed_tip: &'static str,
     pub eyes_closed_needs_grouping: &'static str,
     pub n_photos: fn(usize) -> String,
+    /// The grid's message when the filters hide every photo.
+    pub no_filter_matches: &'static str,
+    pub show_all_photos: &'static str,
+    /// The grid cell's label for a photo whose thumbnail failed to decode.
+    pub thumb_unreadable: &'static str,
 
     // Selection bar.
     pub no_selection: &'static str,
@@ -643,6 +653,9 @@ pub static EN: Strings = Strings {
     eyes_closed_tip: "Show only photos where someone blinked",
     eyes_closed_needs_grouping: "Turn on Bursts or Duplicates to detect blinks",
     n_photos: |n| format!("{n} photos"),
+    no_filter_matches: "No photos match the filter",
+    show_all_photos: "Show All Photos",
+    thumb_unreadable: "Can't read",
 
     no_selection: "No selection \u{2014} click a photo, or Cmd+A to select all",
     n_selected: |n| format!("{n} selected"),
@@ -689,18 +702,18 @@ pub static EN: Strings = Strings {
                 ("I", "Show folders or photo info in the side panel"),
                 ("F6 / Shift+F6", "Next region, or next control inside an entered one"),
                 ("Tab / Shift+Tab", "Move between items in the focused region"),
-                (primary!("+O"), "Open a folder"),
+                ("Cmd+O", "Open a folder"),
                 ("?", "Show or hide this help"),
-                (primary!("+,"), "Settings: theme, language and Auto Tone"),
+                ("Cmd+,", "Settings: theme, language and Auto Tone"),
                 ("Alt+= / Alt+-", "Bigger / smaller text"),
             ],
         },
         HelpSection {
             title: "Select",
             rows: &[
-                (primary!("+A"), "Select all in current folder"),
+                ("Cmd+A", "Select all in current folder"),
                 ("Shift+Click", "Range-select"),
-                (primary!("+Click"), "Toggle individual selection"),
+                ("Cmd+Click", "Toggle individual selection"),
                 ("Shift+arrows", "Extend selection (library)"),
             ],
         },
@@ -712,10 +725,10 @@ pub static EN: Strings = Strings {
             title: "Zoom and pan (in editor)",
             rows: &[
                 ("Space", "Cycle zoom: fit, 2x fit, 100%"),
-                (primary!("+0", " or ", "+)"), "Fit to window"),
-                (primary!("+1", " or ", "+!"), "100% (1:1 pixel)"),
-                (primary!("++", " or ", "+="), "Zoom in (20% step)"),
-                (primary!("+-"), "Zoom out (20% step)"),
+                ("Cmd+0 or Cmd+)", "Fit to window"),
+                ("Cmd+1 or Cmd+!", "100% (1:1 pixel)"),
+                ("Cmd++ or Cmd+=", "Zoom in (20% step)"),
+                ("Cmd+-", "Zoom out (20% step)"),
                 ("\u{2191} / \u{2193}", "Zoom in / out (10% step)"),
                 ("Drag", "Pan"),
                 ("Space+Drag", "Pan"),
@@ -729,10 +742,10 @@ pub static EN: Strings = Strings {
                 ("C", "Crop"),
                 ("Y", "Before / after compare"),
                 ("X", "Open or close the export form"),
-                (primary!("+U"), "Auto Tone this photo"),
-                (primary!("+Shift+U"), "Auto Tone the selection"),
-                (primary!("+Shift+C"), "Copy this photo's settings"),
-                (primary!("+Shift+Y"), "Paste settings onto the selection"),
+                ("Cmd+U", "Auto Tone this photo"),
+                ("Cmd+Shift+U", "Auto Tone the selection"),
+                ("Cmd+Shift+C", "Copy this photo's settings"),
+                ("Cmd+Shift+Y", "Paste settings onto the selection"),
                 ("Double-click slider", "Reset the slider"),
                 (
                     "Delete",
@@ -778,7 +791,7 @@ pub static EN: Strings = Strings {
                 ("O", "Show or hide the spots"),
                 ("Shift+O", "Select the next spot"),
                 ("Delete", "Delete the selected spot"),
-                (primary!("+Z"), "Undo the last spot"),
+                ("Cmd+Z", "Undo the last spot"),
                 ("Esc", "Leave Touch Up"),
             ],
         },
@@ -1138,6 +1151,9 @@ pub static ZH: Strings = Strings {
     eyes_closed_tip: "只显示有人闭眼的照片",
     eyes_closed_needs_grouping: "打开连拍或重复后才能检测闭眼",
     n_photos: |n| format!("{n} 张照片"),
+    no_filter_matches: "筛选后没有照片",
+    show_all_photos: "显示全部照片",
+    thumb_unreadable: "无法读取",
 
     no_selection: "未选择 \u{2014} 点击照片，或按 Cmd+A 全选",
     n_selected: |n| format!("已选 {n} 张"),
@@ -1183,18 +1199,18 @@ pub static ZH: Strings = Strings {
                 ("I", "在侧栏显示文件夹或照片信息"),
                 ("F6 / Shift+F6", "下一个区域，或已进入区域内的下一个控件"),
                 ("Tab / Shift+Tab", "在当前区域内的项目间移动"),
-                (primary!("+O"), "打开文件夹"),
+                ("Cmd+O", "打开文件夹"),
                 ("?", "显示或隐藏此帮助"),
-                (primary!("+,"), "设置：主题、语言和自动色调"),
+                ("Cmd+,", "设置：主题、语言和自动色调"),
                 ("Alt+= / Alt+-", "增大 / 减小文字"),
             ],
         },
         HelpSection {
             title: "选择",
             rows: &[
-                (primary!("+A"), "全选当前文件夹"),
+                ("Cmd+A", "全选当前文件夹"),
                 ("Shift+点按", "连续选择"),
-                (primary!("+点按"), "逐张加选或取消"),
+                ("Cmd+点按", "逐张加选或取消"),
                 ("Shift+方向键", "扩展选择（图库）"),
             ],
         },
@@ -1206,10 +1222,10 @@ pub static ZH: Strings = Strings {
             title: "缩放和平移（编辑器中）",
             rows: &[
                 ("Space", "循环缩放：适合、2x 适合、100%"),
-                (primary!("+0", " 或 ", "+)"), "适合窗口"),
-                (primary!("+1", " 或 ", "+!"), "100%（1:1 像素）"),
-                (primary!("++", " 或 ", "+="), "放大（每次 20%）"),
-                (primary!("+-"), "缩小（每次 20%）"),
+                ("Cmd+0 或 Cmd+)", "适合窗口"),
+                ("Cmd+1 或 Cmd+!", "100%（1:1 像素）"),
+                ("Cmd++ 或 Cmd+=", "放大（每次 20%）"),
+                ("Cmd+-", "缩小（每次 20%）"),
                 ("\u{2191} / \u{2193}", "放大 / 缩小（每次 10%）"),
                 ("拖移", "平移"),
                 ("Space+拖移", "平移"),
@@ -1223,10 +1239,10 @@ pub static ZH: Strings = Strings {
                 ("C", "裁剪"),
                 ("Y", "调整前 / 调整后对比"),
                 ("X", "打开或关闭导出表单"),
-                (primary!("+U"), "对此照片自动色调"),
-                (primary!("+Shift+U"), "对所选照片自动色调"),
-                (primary!("+Shift+C"), "拷贝此照片的设置"),
-                (primary!("+Shift+Y"), "将设置粘贴到所选照片"),
+                ("Cmd+U", "对此照片自动色调"),
+                ("Cmd+Shift+U", "对所选照片自动色调"),
+                ("Cmd+Shift+C", "拷贝此照片的设置"),
+                ("Cmd+Shift+Y", "将设置粘贴到所选照片"),
                 ("双击滑块", "重置滑块"),
                 (
                     "Delete",
@@ -1266,7 +1282,7 @@ pub static ZH: Strings = Strings {
                 ("O", "显示或隐藏修补点"),
                 ("Shift+O", "下一修补点"),
                 ("Delete", "删除选中的修补点"),
-                (primary!("+Z"), "撤销修补点"),
+                ("Cmd+Z", "撤销修补点"),
                 ("Esc", "关闭修补"),
             ],
         },
@@ -1689,6 +1705,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn keys_names_the_command_key_this_keyboard_has() {
+        let shown = keys("Cmd+0 or Cmd+)");
+        if command_is_cmd() {
+            assert_eq!(shown, "Cmd+0 or Cmd+)");
+        } else {
+            assert_eq!(shown, "Ctrl+0 or Ctrl+)");
+        }
+        assert_eq!(keys("Alt+="), "Alt+=");
+    }
+
     /// Whether the help's key column `keys` names `key` as whole tokens, so
     /// "E" doesn't match inside "Esc".
     fn names_key(keys: &str, key: &str) -> bool {
@@ -1729,18 +1756,18 @@ mod tests {
             "Q",
             "Alt+=",
             "Alt+-",
-            primary!("+O"),
-            primary!("+,"),
-            primary!("+A"),
-            primary!("+0"),
-            primary!("+1"),
-            primary!("+="),
-            primary!("+-"),
-            primary!("+U"),
-            primary!("+Shift+U"),
-            primary!("+Shift+C"),
-            primary!("+Shift+Y"),
-            primary!("+Z"),
+            "Cmd+O",
+            "Cmd+,",
+            "Cmd+A",
+            "Cmd+0",
+            "Cmd+1",
+            "Cmd+=",
+            "Cmd+-",
+            "Cmd+U",
+            "Cmd+Shift+U",
+            "Cmd+Shift+C",
+            "Cmd+Shift+Y",
+            "Cmd+Z",
         ];
         if SUBJECT_KEYS {
             bound.extend(["O", "Shift+O"]);

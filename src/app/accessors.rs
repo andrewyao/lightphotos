@@ -385,6 +385,21 @@ impl App {
         self.thumb_texture_for_path(path)
     }
 
+    /// Whether the thumbnail for the visible cell at `pos` failed to decode
+    /// for good, as opposed to still loading.
+    pub(crate) fn thumb_failed_at(&self, pos: usize) -> bool {
+        let Some(path) = self
+            .visible
+            .get(pos)
+            .and_then(|&i| self.playlist.as_ref()?.entry(i))
+        else {
+            return false;
+        };
+        self.loader
+            .as_ref()
+            .is_some_and(|l| l.thumb_failed(path, THUMB_PX))
+    }
+
     pub(crate) fn thumb_texture_for_path(
         &self,
         path: &Path,
@@ -407,6 +422,27 @@ pub(crate) fn preview_target_px(longest_physical: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The grid tells a failed thumbnail from one still loading.
+    #[test]
+    fn a_failed_thumbnail_is_not_reported_as_loading() {
+        let dir = std::env::temp_dir().join(format!("lp-thumb-failed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["a.jpg", "b.jpg"] {
+            std::fs::write(dir.join(n), []).unwrap();
+        }
+        let mut app = App::new(None);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        let mut loader = crate::loader::Loader::new(16384);
+        loader.mark_thumb_failed_external(dir.join("b.jpg"), THUMB_PX);
+        app.loader = Some(loader);
+
+        assert!(!app.thumb_failed_at(0), "a.jpg is still loading");
+        assert!(app.thumb_failed_at(1));
+        assert!(!app.thumb_failed_at(2), "past the end");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn hashes_added_in_batches_match_a_full_recompute() {

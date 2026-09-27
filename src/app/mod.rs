@@ -782,6 +782,8 @@ mod session;
 mod thumbs;
 #[cfg(target_arch = "wasm32")]
 mod web;
+#[cfg(target_arch = "wasm32")]
+pub(crate) use web::browser_is_mac;
 
 #[cfg(all(feature = "hotpath", not(target_arch = "wasm32")))]
 pub(crate) use thumbs::{grid_working_range, load_order, strip_working_range};

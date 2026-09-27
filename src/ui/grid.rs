@@ -164,6 +164,10 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
         app.set_grid_cols(cols);
 
         let len = app.visible_len();
+        if len == 0 && (app.filter().is_some() || app.eyes_filter_on()) {
+            no_matches(ui, app, out);
+            return;
+        }
         let rows = len.div_ceil(cols);
         // Build only the rows in view. Loading every thumbnail of a large
         // folder runs out of memory.
@@ -189,6 +193,23 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
                 });
             }
         });
+    });
+}
+
+/// Stands in for a grid the filters emptied, so it doesn't read as a folder
+/// with no photos.
+fn no_matches(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = crate::i18n::t();
+    ui.vertical_centered(|ui| {
+        ui.add_space(ui.available_height() * 0.35);
+        ui.label(egui::RichText::new(t.no_filter_matches).size(font_size::px(ui.style(), 16.0)));
+        ui.add_space(8.0);
+        if ui.button(t.show_all_photos).clicked() {
+            out.actions.push(UiAction::SetFilter(None));
+            if app.eyes_filter_on() {
+                out.actions.push(UiAction::ToggleEyesClosed);
+            }
+        }
     });
 }
 
@@ -358,12 +379,18 @@ pub(super) fn thumbnail_cell(
             crate::analytics::photo_drawn();
         }
     } else if style.show_placeholder {
+        // A failed decode must not look like one still loading.
+        let (text, size, color) = if app.thumb_failed_at(pos) {
+            (crate::i18n::t().thumb_unreadable, 12.0, colors.danger)
+        } else {
+            ("\u{2026}", 18.0, colors.label)
+        };
         ui.painter().text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "\u{2026}",
-            egui::FontId::proportional(font_size::px(ui.style(), 18.0)),
-            colors.label,
+            text,
+            egui::FontId::proportional(font_size::px(ui.style(), size)),
+            color,
         );
     }
 

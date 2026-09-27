@@ -88,6 +88,8 @@ impl App {
         }
         self.selected = remap_positions(&sel_pl, &self.visible);
         self.anchor = anchor_pl.and_then(|i| self.visible.iter().position(|&v| v == i));
+        // The title carries the visible count.
+        self.update_window_title();
     }
 
     /// Playlist index of the current selection. `None` when nothing is selected.

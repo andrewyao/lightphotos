@@ -711,7 +711,7 @@ impl Loader {
 
     /// Records a failed external thumbnail decode. Clears `thumb_inflight` for
     /// the same reason as `insert_thumb_external`.
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     pub fn mark_thumb_failed_external(&mut self, path: PathBuf, max_px: u32) {
         let key = (path, max_px);
         self.thumb_inflight.remove(&key);
