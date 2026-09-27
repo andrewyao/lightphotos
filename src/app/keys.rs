@@ -143,20 +143,6 @@ impl App {
             return;
         }
 
-        // In the quit prompt, Escape confirms and Enter cancels. Repeated Escape
-        // backs out of the app one step at a time, and Enter always goes deeper in.
-        if self.pending_quit {
-            match code {
-                KeyCode::Escape => self.quit_requested = true,
-                KeyCode::Enter | KeyCode::NumpadEnter => {
-                    self.pending_quit = false;
-                    self.request_redraw();
-                }
-                _ => {}
-            }
-            return;
-        }
-
         // In Survey, Left/Right pick which photo the rating keys apply to.
         // Digits fall through to the shared rating code below.
         if self.mode == ViewMode::Survey {
@@ -270,8 +256,8 @@ impl App {
                 self.request_bulk(ui::BulkKind::ApplySettings)
             }
             KeyCode::KeyY if self.mode == ViewMode::Loupe && !cmd => self.toggle_compare(),
-            // Escape undoes Enter one step per press, ending at the quit
-            // prompt. Leaving the Grid for Folders also clears the selection.
+            // Escape undoes Enter one step per press and stops at the Grid
+            // or Folders. Leaving the Grid for Folders also clears the selection.
             KeyCode::Escape => {
                 if CHROME_ORDER.contains(&self.focus) {
                     self.focus = self.main_focus;
@@ -297,12 +283,6 @@ impl App {
                     self.anchor = None;
                 } else if self.focus_level == FocusLevel::Entered {
                     self.focus_level = FocusLevel::Selected;
-                } else {
-                    // A browser tab can't quit, so the web build does nothing.
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        self.pending_quit = true;
-                    }
                 }
                 self.request_redraw();
             }
@@ -399,6 +379,19 @@ mod tests {
         let (mut app, _) = folder_app(2);
         press(&mut app, ModifiersState::empty(), KeyCode::Space);
         assert_eq!(app.mode, ViewMode::Loupe);
+    }
+
+    /// Esc used to walk out of the app and end at a quit prompt that a
+    /// further Esc confirmed. Now the chain stops at Folders and stays there.
+    #[test]
+    fn esc_from_a_fresh_grid_never_leaves_the_library() {
+        let (mut app, _) = folder_app(2);
+        for _ in 0..5 {
+            press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        }
+        assert_eq!(app.mode, ViewMode::Grid);
+        assert_eq!(app.focus, Region::Folders);
+        assert_eq!(app.focus_level, FocusLevel::Selected);
     }
 
     #[test]

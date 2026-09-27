@@ -41,8 +41,6 @@ pub enum UiAction {
     #[cfg(not(target_arch = "wasm32"))]
     ImportLrPresets,
     ToggleHelp,
-    ConfirmQuit,
-    CancelQuit,
     /// Open the export form, or close it if it is showing.
     ToggleExportForm,
     SetExportSettings(crate::export::ExportSettings),
@@ -177,7 +175,7 @@ use export_panel::draw_export_panel;
 use grid::{draw_grid, draw_left_panel};
 use loupe::draw_loupe;
 use modals::{
-    confirm_modal, delete_preset_modal, help_modal, preset_name_modal, quit_modal, settings_modal,
+    confirm_modal, delete_preset_modal, help_modal, preset_name_modal, settings_modal,
 };
 use survey::draw_survey;
 use toolbar::{grid_toolbar, selection_bar};
@@ -227,7 +225,6 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     confirm_modal(ui, app, &mut out);
     delete_preset_modal(ui, app, &mut out);
     preset_name_modal(ui, app, &mut out);
-    quit_modal(ui, app, &mut out);
     help_modal(ui, app, &mut out);
     settings_modal(ui, app, &mut out);
     out

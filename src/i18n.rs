@@ -270,8 +270,6 @@ pub struct Strings {
     // Modals.
     pub confirm: &'static str,
     pub cancel: &'static str,
-    pub quit_title: &'static str,
-    pub quit: &'static str,
     pub shortcuts_title: &'static str,
     pub close: &'static str,
     pub help: &'static [HelpSection],
@@ -617,8 +615,6 @@ pub static EN: Strings = Strings {
 
     confirm: "Confirm",
     cancel: "Cancel",
-    quit_title: "Quit LightPhotos?",
-    quit: "Quit",
     shortcuts_title: "Keyboard shortcuts",
     close: "Close",
     help: &[
@@ -1043,8 +1039,6 @@ pub static ZH: Strings = Strings {
 
     confirm: "确认",
     cancel: "取消",
-    quit_title: "退出 LightPhotos？",
-    quit: "退出",
     shortcuts_title: "键盘快捷键",
     close: "关闭",
     help: &[

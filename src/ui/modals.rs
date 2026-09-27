@@ -116,34 +116,6 @@ pub(super) fn preset_name_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput)
     }
 }
 
-/// Confirms quit, opened by Esc in the grid.
-pub(super) fn quit_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
-    if !app.pending_quit() {
-        return;
-    }
-    let resp = egui::Modal::new(egui::Id::new("quit_confirm")).show(ui.ctx(), |ui| {
-        ui.set_width(300.0);
-        ui.heading(t().quit_title);
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            if ui.button(t().cancel).clicked() {
-                out.actions.push(UiAction::CancelQuit);
-            }
-            if ui.button(t().quit).clicked() {
-                out.actions.push(UiAction::ConfirmQuit);
-            }
-        });
-    });
-    // A backdrop click cancels. A second Esc quits, matching `App::handle_key`.
-    if resp.should_close() {
-        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            out.actions.push(UiAction::ConfirmQuit);
-        } else {
-            out.actions.push(UiAction::CancelQuit);
-        }
-    }
-}
-
 /// The keyboard-shortcut list, toggled by `?`.
 pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.show_help() {
