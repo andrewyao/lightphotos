@@ -220,7 +220,7 @@ impl App {
     }
 
     /// Request thumbnails for the working set, on-screen cells first. Returns
-    /// true while any is missing, so the caller keeps redrawing.
+    /// true while any is missing, so the caller keeps polling.
     #[hotpath::measure]
     pub(crate) fn request_working_thumbs(&mut self) -> bool {
         let px = THUMB_PX;
@@ -255,7 +255,7 @@ impl App {
     /// Score sharpness for every burst member, requesting thumbnails as needed,
     /// so each burst's winner is chosen from all its frames, not just those on
     /// screen. Returns true while the capture-time scan or any scoring is
-    /// unfinished. The event loop polls this each frame, since worker
+    /// unfinished. The event loop polls this on a timer, since worker
     /// completions don't wake it.
     pub(crate) fn request_burst_thumbs(&mut self) -> bool {
         if !self.bursts_on {
@@ -312,6 +312,7 @@ impl App {
                 self.sharpness.insert(p, s);
             }
             self.recompute_burst_marks();
+            self.request_redraw();
         }
         scan_pending || still_unscored
     }
@@ -362,6 +363,7 @@ impl App {
                 self.sharpness.insert(p, s);
             }
             self.add_dup_hashes(&paths);
+            self.request_redraw();
         }
         still_unhashed
     }
