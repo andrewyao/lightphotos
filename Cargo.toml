@@ -159,6 +159,8 @@ ureq = "3"
 # The Immich API key lives in the login Keychain (`secret.rs`).
 security-framework = "3"
 objc2 = "0.6.4"
+# Native menu bar (`menu.rs`).
+muda = { version = "0.20", default-features = false }
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSObject", "NSThread", "NSFileManager", "NSError", "NSLocale"] }
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSResponder"] }
 objc2-core-graphics = "0.3.2"

@@ -774,6 +774,8 @@ pub(crate) use export::ImmichLink;
 mod histogram;
 mod keys;
 mod loupe;
+#[cfg(target_os = "macos")]
+mod menu;
 mod nav;
 mod presets;
 mod session;

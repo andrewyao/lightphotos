@@ -36,6 +36,8 @@ mod loader;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 mod lr_preset;
 mod macos_delegate;
+#[cfg(target_os = "macos")]
+mod menu;
 mod navigation;
 mod paths;
 mod phash;
@@ -187,6 +189,8 @@ impl ApplicationHandler<UserEvent> for App {
                     self.pending_initial = Some(path);
                 }
             }
+            #[cfg(target_os = "macos")]
+            UserEvent::Menu(cmd) => self.run_menu_command(cmd),
         }
     }
 
@@ -399,6 +403,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "macos")]
+        menu::refresh(self);
+
         // Finish wasm window setup once the async renderer init lands.
         #[cfg(target_arch = "wasm32")]
         if let Ok((renderer, size)) = self.renderer_init_rx.try_recv() {
@@ -648,12 +655,18 @@ fn main() {
         None => None,
     };
 
-    let event_loop = EventLoop::<UserEvent>::with_user_event()
-        .build()
-        .expect("build event loop");
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut builder = EventLoop::<UserEvent>::with_user_event();
+    // winit installs its default menu when the app finishes launching, which
+    // would replace `menu::install`'s.
+    #[cfg(target_os = "macos")]
+    winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut builder, false);
+    let event_loop = builder.build().expect("build event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
     macos_delegate::set_proxy(event_loop.create_proxy());
+    #[cfg(target_os = "macos")]
+    menu::install(event_loop.create_proxy());
     if !macos_delegate::install_open_handler() {
         eprintln!("[lightphotos] warning: could not install Finder open handler");
     }
