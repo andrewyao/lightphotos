@@ -847,6 +847,7 @@ mod status_tests {
     fn a_stale_status_survives_while_sidecars_are_still_being_written() {
         let dir = unique_tmp_dir();
         let mut app = app_with_a_stale_status();
+        app.catalog.open_dir(&dir);
         for i in 0..64 {
             app.catalog.set(&dir.join(format!("p{i}.jpg")), 3);
         }

@@ -10,7 +10,7 @@
 //! sidecar path from the photo's own path.
 
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -109,7 +109,8 @@ impl ImageRecord {
 }
 
 /// Records for the active directory, backed by its sidecar files. `images`
-/// is a read cache keyed by filename.
+/// is a read cache keyed by filename, so it answers only for photos in the
+/// active directory. See [`Catalog::cache_key`].
 pub struct Catalog {
     images: HashMap<OsString, ImageRecord>,
     /// Filenames written or removed since [`Catalog::switch_dir`]. A
@@ -260,10 +261,22 @@ impl Catalog {
         self.last_error = Some(e.to_string());
     }
 
+    /// The cache key for `path`: its filename, when `path` is in the active
+    /// directory. Camera filenames repeat across folders, so a photo elsewhere
+    /// must never read or overwrite the active directory's same-named record.
+    fn cache_key<'p>(&self, path: &'p Path) -> Option<&'p OsStr> {
+        match self.dir.as_deref() {
+            Some(dir) if path.parent() == Some(dir) => path.file_name(),
+            _ => None,
+        }
+    }
+
+    fn record(&self, path: &Path) -> Option<&ImageRecord> {
+        self.cache_key(path).and_then(|n| self.images.get(n))
+    }
+
     pub fn get(&self, path: &Path) -> Option<u8> {
-        path.file_name()
-            .and_then(|n| self.images.get(n))
-            .and_then(|r| r.rating)
+        self.record(path).and_then(|r| r.rating)
     }
 
     /// Set the rating, clamped to `0..=5`. `0` clears it.
@@ -274,9 +287,7 @@ impl Catalog {
     }
 
     pub fn label(&self, path: &Path) -> Option<ColorLabel> {
-        path.file_name()
-            .and_then(|n| self.images.get(n))
-            .and_then(|r| r.label)
+        self.record(path).and_then(|r| r.label)
     }
 
     pub fn set_label(&mut self, path: &Path, label: Option<ColorLabel>) {
@@ -284,10 +295,7 @@ impl Catalog {
     }
 
     pub fn adjustments(&self, path: &Path) -> Adjustments {
-        path.file_name()
-            .and_then(|n| self.images.get(n))
-            .map(|r| r.adjustments)
-            .unwrap_or_default()
+        self.record(path).map(|r| r.adjustments).unwrap_or_default()
     }
 
     pub fn set_adjustments(&mut self, path: &Path, adj: &Adjustments) {
@@ -296,8 +304,7 @@ impl Catalog {
     }
 
     pub fn touchups(&self, path: &Path) -> Vec<TouchUp> {
-        path.file_name()
-            .and_then(|n| self.images.get(n))
+        self.record(path)
             .map(|r| r.touchups.clone())
             .unwrap_or_default()
     }
@@ -308,10 +315,7 @@ impl Catalog {
     }
 
     pub fn rotation(&self, path: &Path) -> u8 {
-        path.file_name()
-            .and_then(|n| self.images.get(n))
-            .map(|r| r.rotation)
-            .unwrap_or(0)
+        self.record(path).map(|r| r.rotation).unwrap_or(0)
     }
 
     pub fn set_rotation(&mut self, path: &Path, rotation: u8) {
@@ -323,7 +327,7 @@ impl Catalog {
     /// The sidecar skips the Trash, since it is useless apart from its photo.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn remove(&mut self, path: &Path) {
-        if let Some(name) = path.file_name() {
+        if let Some(name) = self.cache_key(path) {
             self.images.remove(name);
             self.dirty.insert(name.to_os_string());
         }
@@ -332,8 +336,13 @@ impl Catalog {
 
     /// Apply `mutate` to the record for `path`, then queue its sidecar write,
     /// or its deletion if the record became empty.
+    ///
+    /// Refused for a photo outside the active directory. The cache holds no
+    /// record for it to start from, so writing would replace its sidecar with
+    /// only this one field.
     fn update(&mut self, path: &Path, mutate: impl FnOnce(&mut ImageRecord)) {
-        let Some(name) = path.file_name().map(|n| n.to_os_string()) else {
+        let Some(name) = self.cache_key(path).map(OsStr::to_os_string) else {
+            self.note_persist_error(format!("{} is not in the open folder", path.display()));
             return;
         };
         self.dirty.insert(name.clone());
@@ -390,7 +399,7 @@ impl Catalog {
         path: &Path,
         dir_handle: &web_sys::FileSystemDirectoryHandle,
     ) {
-        if let Some(name) = path.file_name() {
+        if let Some(name) = self.cache_key(path) {
             self.images.remove(name);
             self.dirty.insert(name.to_os_string());
         }
@@ -905,6 +914,55 @@ mod tests {
             Some(5),
             "switching back to a must restore a's persisted rating"
         );
+
+        std::fs::remove_dir_all(&a).unwrap();
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    #[test]
+    fn a_photo_outside_the_active_directory_never_sees_its_records() {
+        let a = unique_tmp_dir();
+        let b = unique_tmp_dir();
+        let pa = a.join("IMG_0001.JPG");
+        let pb = b.join("IMG_0001.JPG");
+
+        let mut cat = Catalog::with_dir(a.clone());
+        cat.set(&pa, 4);
+        cat.set_rotation(&pa, 1);
+        cat.set_touchups(
+            &pa,
+            &[TouchUp {
+                center: [0.5, 0.5],
+                radius: 0.1,
+                source: [0.2, 0.2],
+                feather: 0.5,
+                delta: [0.0; 3],
+            }],
+        );
+        let adj = Adjustments {
+            exposure: 1.0,
+            ..Default::default()
+        };
+        cat.set_adjustments(&pa, &adj);
+
+        assert_eq!(cat.get(&pb), None);
+        assert_eq!(cat.label(&pb), None);
+        assert_eq!(cat.rotation(&pb), 0);
+        assert!(cat.touchups(&pb).is_empty());
+        assert_eq!(cat.adjustments(&pb), Adjustments::default());
+
+        cat.set(&pb, 1);
+        assert!(
+            cat.take_error().is_some(),
+            "an off-folder write is reported"
+        );
+        cat.remove(&pb);
+        assert_eq!(cat.get(&pa), Some(4), "a's record survives b's writes");
+        assert_eq!(cat.adjustments(&pa), adj);
+
+        flush(&mut cat);
+        assert!(!sidecar_for(&b, "IMG_0001.JPG").exists());
+        assert_eq!(Catalog::with_dir(a.clone()).get(&pa), Some(4));
 
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();

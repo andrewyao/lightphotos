@@ -399,6 +399,7 @@ mod tests {
         let photo = dir.join("a.jpg");
         std::fs::write(&photo, []).unwrap();
         let mut app = App::new(None);
+        app.catalog.open_dir(&dir);
         app.shown = Shown::Preview(photo.clone(), 1024, 1024);
         (app, dir, photo)
     }
