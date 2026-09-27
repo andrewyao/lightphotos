@@ -492,10 +492,9 @@ impl Renderer {
             }],
         });
 
-        const MAX_TOUCHUPS: u64 = 64;
         let touch_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("touchups"),
-            size: MAX_TOUCHUPS * std::mem::size_of::<GpuTouchUp>() as u64,
+            size: (crate::develop::MAX_TOUCHUPS * std::mem::size_of::<GpuTouchUp>()) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });

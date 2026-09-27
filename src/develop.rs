@@ -90,6 +90,9 @@ pub const SLIDERS: [Slider; 11] = [
     },
 ];
 
+/// The most touch-ups one photo can hold: the GPU buffer's size.
+pub const MAX_TOUCHUPS: usize = 64;
+
 /// One spot-heal: copy a soft circle from `source` onto `center`. Coordinates
 /// are 0..1 of the unrotated image, so the edit works at any size or rotation.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug)]

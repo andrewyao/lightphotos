@@ -189,7 +189,7 @@ impl App {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
         };
-        if touchups.len() > 64 {
+        if touchups.len() > crate::develop::MAX_TOUCHUPS {
             self.set_status(StatusKind::Error, crate::i18n::t().touch_up_limit.into());
             return;
         }
