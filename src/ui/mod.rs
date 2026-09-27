@@ -117,7 +117,8 @@ pub enum UiAction {
     /// Pick develop settings for the loupe image from its own histogram.
     AutoTone,
     Focus(Region),
-    /// Focus the Toolbar with the keyboard cursor on this control index.
+    /// Move the Toolbar's keyboard cursor to this control index, without
+    /// focusing the Toolbar.
     FocusToolbar(usize),
     /// Focus the Develop panel with the keyboard cursor on this slider index.
     FocusDevelop(usize),

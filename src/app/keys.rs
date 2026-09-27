@@ -1099,6 +1099,15 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_toolbar_control_leaves_the_arrows_on_the_grid() {
+        let (mut app, _) = folder_app(3);
+        app.apply_ui_actions(vec![ui::UiAction::FocusToolbar(1)]);
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowRight);
+        assert_eq!(app.sel, Some(1), "Right must still step the Grid after a toolbar click");
+        assert_eq!(app.toolbar_focus, 1, "the F6 cursor still follows the click");
+    }
+
+    #[test]
     fn modified_scroll_pans_or_zooms() {
         let (mut app, _) = editor_app();
         press(&mut app, CMD, KeyCode::Digit1);

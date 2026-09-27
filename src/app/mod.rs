@@ -1486,8 +1486,9 @@ impl App {
                     self.on_focus_changed();
                     self.request_redraw();
                 }
+                // A click leaves keyboard focus where it was. The Toolbar's
+                // arrows do nothing, so taking focus would strand them.
                 ui::UiAction::FocusToolbar(idx) => {
-                    self.set_focus(Region::Toolbar, FocusLevel::Entered);
                     self.toolbar_focus = idx;
                     self.request_redraw();
                 }
