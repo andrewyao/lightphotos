@@ -56,8 +56,11 @@ impl ImmichServer {
         }
         // No overall limit: sending a photo can take minutes on a slow uplink.
         // `upload` sets a sending budget sized to the photo instead.
+        // No redirects: the key rides in `x-api-key`, which ureq re-sends to
+        // wherever a redirect points, plain HTTP included.
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            .max_redirects(0)
             .timeout_connect(Some(Duration::from_secs(10)))
             .timeout_send_body(Some(Duration::from_secs(30)))
             .timeout_recv_response(Some(Duration::from_secs(120)))
@@ -268,7 +271,9 @@ fn normalize_origin(url: &str) -> Result<String, String> {
 }
 
 /// The API base from a `/.well-known/immich` body, which is how Immich's own
-/// apps accept a bare server URL. Falls back to `<origin>/api`.
+/// apps accept a bare server URL. Falls back to `<origin>/api`, including when
+/// the body names another scheme or host, since the key goes wherever this
+/// points.
 fn api_endpoint(origin: &str, well_known: Option<&str>) -> String {
     #[derive(Deserialize)]
     struct WellKnown {
@@ -284,7 +289,18 @@ fn api_endpoint(origin: &str, well_known: Option<&str>) -> String {
         .unwrap_or_else(|| "/api".into());
     let endpoint = endpoint.trim_end_matches('/');
     if endpoint.contains("://") {
-        endpoint.to_string()
+        let authority_end = origin
+            .find("://")
+            .and_then(|i| origin[i + 3..].find('/').map(|j| i + 3 + j))
+            .unwrap_or(origin.len());
+        let authority = &origin[..authority_end];
+        match endpoint
+            .strip_prefix(authority)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        {
+            true => endpoint.to_string(),
+            false => format!("{origin}/api"),
+        }
     } else {
         format!("{origin}/{}", endpoint.trim_start_matches('/'))
     }
@@ -421,10 +437,23 @@ mod tests {
         assert_eq!(
             api_endpoint(
                 origin,
-                Some(r#"{"api":{"endpoint":"https://api.example.com/v1"}}"#)
+                Some(r#"{"api":{"endpoint":"https://photos.example.com/v1"}}"#)
             ),
-            "https://api.example.com/v1"
+            "https://photos.example.com/v1"
         );
+        for elsewhere in [
+            "https://api.example.com/v1",
+            "http://photos.example.com/api",
+            "https://photos.example.com.evil.net/api",
+            "https://photos.example.com:8443/api",
+        ] {
+            let body = format!(r#"{{"api":{{"endpoint":"{elsewhere}"}}}}"#);
+            assert_eq!(
+                api_endpoint(origin, Some(&body)),
+                "https://photos.example.com/api",
+                "{elsewhere} must not receive the key"
+            );
+        }
         assert_eq!(api_endpoint(origin, None), "https://photos.example.com/api");
         assert_eq!(
             api_endpoint(origin, Some("<html>not found</html>")),
