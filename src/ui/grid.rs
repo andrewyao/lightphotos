@@ -394,17 +394,25 @@ pub(super) fn thumbnail_cell(
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
     let colors = theme::colors(ui.ctx());
-    let bg = if selected || primary {
-        colors.selection_bg
-    } else if style.strip {
-        colors.strip_cell
-    } else {
-        colors.grid_cell
+    let marked = selected || primary;
+    let bg = match (style.strip, marked) {
+        (true, false) => colors.strip_cell,
+        (true, true) => colors.strip_cell_selected,
+        (false, false) => colors.grid_cell,
+        (false, true) => colors.grid_cell_selected,
     };
     ui.painter().rect_filled(rect, style.corner, bg);
 
+    // A selected photo steps back from the cell edge, leaving a margin inside
+    // its outline.
+    let margin = if marked {
+        font_size::px(ui.style(), 5.0)
+    } else {
+        0.0
+    };
+
     if let Some((tex, tw, th)) = app.thumb_texture_for(pos) {
-        let inner = rect.shrink(style.corner);
+        let inner = rect.shrink(style.corner + margin);
         let scale = (inner.width() / tw as f32).min(inner.height() / th as f32);
         let dw = tw as f32 * scale;
         let dh = th as f32 * scale;
@@ -439,7 +447,11 @@ pub(super) fn thumbnail_cell(
                 .rect_filled(rect, style.corner, egui::Color32::from_black_alpha(140));
         }
         Some(BurstMark::Best) => {
-            let c = badge_center(rect, style, badge_r, egui::Align2::LEFT_TOP);
+            let mut c = badge_center(rect, style, badge_r, egui::Align2::LEFT_TOP);
+            // The selection check owns the corner; the burst badge sits beside it.
+            if marked && !style.strip {
+                c.x += badge_r * 1.7 + 2.0;
+            }
             ui.painter()
                 .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
             ui.painter().text(
@@ -534,17 +546,40 @@ pub(super) fn thumbnail_cell(
         }
     }
 
-    if selected || primary {
-        let width = if primary { 3.0f32 } else { 2.0f32 };
+    if marked {
+        let width = if primary { 1.5f32 } else { 1.0f32 };
         ui.painter().rect_stroke(
             rect,
             style.corner,
             egui::Stroke::new(width, colors.selection),
             egui::StrokeKind::Inside,
         );
+        // Filmstrip cells are too small to carry a check as well.
+        if !style.strip {
+            let check_r = badge_r * 0.7;
+            selection_check(
+                ui,
+                badge_center(rect, style, check_r, egui::Align2::LEFT_TOP),
+                check_r,
+                colors.selection,
+            );
+        }
     }
 
     response
+}
+
+/// A blue disc with a white check, drawn as strokes so it needs no glyph from
+/// the bundled fonts.
+fn selection_check(ui: &egui::Ui, c: egui::Pos2, r: f32, fill: egui::Color32) {
+    let painter = ui.painter();
+    painter.circle(c, r, fill, egui::Stroke::new(1.0, egui::Color32::WHITE));
+    let stroke = egui::Stroke::new((r * 0.24).max(1.2), egui::Color32::WHITE);
+    let a = c + egui::vec2(-0.45 * r, 0.02 * r);
+    let b = c + egui::vec2(-0.12 * r, 0.35 * r);
+    let d = c + egui::vec2(0.45 * r, -0.3 * r);
+    painter.line_segment([a, b], stroke);
+    painter.line_segment([b, d], stroke);
 }
 
 pub(super) fn grid_cell(
