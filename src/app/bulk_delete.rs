@@ -466,6 +466,26 @@ mod tests {
         (app, dir, paths)
     }
 
+    /// The count follows the filters and Delete follows Export, rather than
+    /// each sitting alone at the window's right edge.
+    #[test]
+    fn the_count_and_delete_sit_beside_their_rows() {
+        use crate::app::presets::tests::{folder_app, settled};
+        let t = crate::i18n::t();
+        let (mut app, dir, _) = folder_app("toolbar-rows", 3);
+        app.select_single(0);
+        let painted = settled(&mut app);
+        let export = painted.pos_of(t.export_jpg);
+        let delete = painted.pos_of(t.delete);
+        let count = painted.pos_of(&(t.n_photos)(3));
+        assert!(
+            delete.x > export.x && delete.x - export.x < 120.0,
+            "Delete follows Export: {export:?} vs {delete:?}"
+        );
+        assert!(count.x < 800.0, "the count follows the filters: {count:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Drive the batch to completion the way the frame loop does.
     fn drain(app: &mut App) -> usize {
         let deadline = Instant::now() + Duration::from_secs(20);

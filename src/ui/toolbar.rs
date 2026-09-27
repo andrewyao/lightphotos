@@ -189,9 +189,8 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
 
             // Survey's own header already counts its photos.
             if app.mode() == ViewMode::Grid {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak((t.n_photos)(app.visible_len()));
-                });
+                ui.separator();
+                ui.weak((t.n_photos)(app.visible_len()));
             }
 
             region_focus_marker(ui, app, Region::Toolbar);
@@ -285,16 +284,15 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
                 out.actions.push(UiAction::ToggleExportForm);
             }
 
-            // Destructive, so it sits apart from the others at the far right.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger))
-                    .on_hover_text(t.delete_selection_tip)
-                    .clicked()
-                {
-                    out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
-                }
-            });
+            // Destructive, so it sits last, in its own group.
+            ui.separator();
+            if ui
+                .button(egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger))
+                .on_hover_text(t.delete_selection_tip)
+                .clicked()
+            {
+                out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
+            }
         });
     });
 }
