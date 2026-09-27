@@ -195,7 +195,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     // egui panels claim space in call order. Drawing the side panels before
     // the toolbar gives them full window height and keeps the toolbar in the
     // middle column. Survey mode has no side panels.
-    if mode == ViewMode::Grid || mode == ViewMode::Loupe {
+    if app.left_panel_visible() {
         draw_left_panel(ui, app, &mut out);
     }
     if app.export_form_open() {

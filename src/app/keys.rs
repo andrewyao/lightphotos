@@ -1144,8 +1144,39 @@ mod tests {
         );
 
         let (mut app, _) = editor_app();
+        assert!(
+            !app.left_panel_visible(),
+            "the Loupe opens without the panel"
+        );
         press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
         assert_eq!(app.left_tab(), LeftTab::Info);
+        assert!(app.left_panel_visible(), "I shows Metadata in the Loupe");
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        assert!(!app.left_panel_visible(), "and I again hides it");
+    }
+
+    #[test]
+    fn the_loupe_draws_no_folders_panel() {
+        use crate::app::presets::tests::settled;
+        use crate::i18n::t;
+
+        let (mut app, _) = folder_app(2);
+        assert!(settled(&mut app).has(t().browse_tab), "the Grid has it");
+
+        let (mut app, _) = editor_app();
+        let painted = settled(&mut app);
+        assert!(
+            !painted.has(t().browse_tab) && !painted.has(t().metadata_tab),
+            "{:?}",
+            painted.texts()
+        );
+        for _ in 0..4 {
+            press(&mut app, ModifiersState::empty(), KeyCode::F6);
+            assert_ne!(app.focus, Region::Folders, "F6 skips the hidden tree");
+        }
+
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        assert!(settled(&mut app).has(t().metadata_tab));
     }
 
     #[test]
