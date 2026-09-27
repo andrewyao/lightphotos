@@ -76,13 +76,14 @@ mod web_thumb_cache;
 #[cfg(target_arch = "wasm32")]
 #[path = "web/web_worker_pool.rs"]
 mod web_worker_pool;
+#[cfg(not(target_arch = "wasm32"))]
+mod window_rect;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
@@ -136,9 +137,11 @@ impl ApplicationHandler<UserEvent> for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes()
-            .with_title("LightPhotos")
-            .with_inner_size(LogicalSize::new(1100.0, 800.0));
+        let attrs = Window::default_attributes().with_title("LightPhotos");
+        #[cfg(not(target_arch = "wasm32"))]
+        let attrs = window_rect::apply(attrs, event_loop);
+        #[cfg(target_arch = "wasm32")]
+        let attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(1100.0, 800.0));
         // Create the window hidden and show it once the renderer is ready. wgpu
         // setup blocks this thread, and under a software rasterizer (llvmpipe)
         // it takes seconds. A visible X11/Wayland window that stops pumping
@@ -374,6 +377,10 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(window) = &self.window {
+            window_rect::save(window);
+        }
         self.save_edit();
         // AppKit delivers this from `applicationWillTerminate:` and then calls
         // `exit()` itself, so `main`'s return is never reached on Cmd+Q and
