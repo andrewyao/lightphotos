@@ -282,6 +282,10 @@ pub struct Strings {
     pub confirm_apply_preset: fn(&str, usize) -> String,
     pub confirm_auto_tone: fn(usize) -> String,
     pub confirm_delete: fn(usize) -> String,
+    /// Titles and confirm buttons of the bulk dialogs that no toolbar label fits.
+    pub bulk_rate: &'static str,
+    pub bulk_apply_preset: &'static str,
+    pub bulk_delete: &'static str,
 
     // Develop panel.
     pub develop: &'static str,
@@ -716,6 +720,9 @@ pub static EN: Strings = Strings {
     } else {
         |n| format!("Move {n} photo(s) to the Trash?")
     },
+    bulk_rate: "Rate",
+    bulk_apply_preset: "Apply Preset",
+    bulk_delete: if WEB { "Delete Photos" } else { "Move to Trash" },
 
     develop: "Develop",
     tab_sliders: "Sliders",
@@ -1136,6 +1143,13 @@ pub static ZH: Strings = Strings {
         |n| format!("永久删除 {n} 张照片？此操作无法撤销。")
     } else {
         |n| format!("将 {n} 张照片移到废纸篓？")
+    },
+    bulk_rate: "评分",
+    bulk_apply_preset: "应用预设",
+    bulk_delete: if WEB {
+        "删除照片"
+    } else {
+        "移到废纸篓"
     },
 
     develop: "调整",

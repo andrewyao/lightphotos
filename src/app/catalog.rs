@@ -303,13 +303,15 @@ impl App {
         }
     }
 
-    /// The confirm-modal text for the pending bulk action, or `None` when no
-    /// confirmation is open.
-    pub(crate) fn pending_bulk_prompt(&self) -> Option<String> {
-        let kind = self.pending_bulk?;
+    /// The pending bulk action and its confirm-modal text, or `None` when no
+    /// bulk confirmation is open.
+    pub(crate) fn pending_bulk_prompt(&self) -> Option<(ui::BulkKind, String)> {
+        let Some(PendingConfirm::Bulk(kind)) = self.pending_confirm else {
+            return None;
+        };
         let n = self.selection_count();
         let t = crate::i18n::t();
-        Some(match kind {
+        let prompt = match kind {
             ui::BulkKind::Rate(0) => (t.confirm_clear_rating)(n),
             ui::BulkKind::Rate(s) => (t.confirm_rate)(&"\u{2605}".repeat(s as usize), n),
             ui::BulkKind::ApplySettings => (t.confirm_apply_settings)(n),
@@ -319,7 +321,26 @@ impl App {
             }
             ui::BulkKind::AutoTone => (t.confirm_auto_tone)(n),
             ui::BulkKind::Delete => (t.confirm_delete)(n),
-        })
+        };
+        Some((kind, prompt))
+    }
+
+    pub(crate) fn confirm_open(&self) -> bool {
+        self.pending_confirm.is_some()
+    }
+
+    pub(super) fn confirm_pending(&mut self) {
+        match self.pending_confirm.take() {
+            Some(PendingConfirm::Bulk(kind)) => self.run_bulk(kind),
+            Some(PendingConfirm::DeletePreset(id)) => self.delete_preset(id),
+            None => {}
+        }
+        self.request_redraw();
+    }
+
+    pub(super) fn cancel_pending(&mut self) {
+        self.pending_confirm = None;
+        self.request_redraw();
     }
 
     fn bulk_available(&self) -> bool {
@@ -332,7 +353,7 @@ impl App {
             return;
         }
         if self.bulk_available() {
-            self.pending_bulk = Some(kind);
+            self.pending_confirm = Some(PendingConfirm::Bulk(kind));
             self.request_redraw();
         }
     }

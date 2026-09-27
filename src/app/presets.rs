@@ -468,7 +468,7 @@ pub(in crate::app) mod tests {
         app.selected = (0..3).collect();
 
         app.request_bulk(crate::ui::BulkKind::ApplyPreset(id));
-        let prompt = app.pending_bulk_prompt().expect("the confirm modal opens");
+        let (_, prompt) = app.pending_bulk_prompt().expect("the confirm modal opens");
         assert!(
             prompt.contains("Golden") && prompt.contains('3'),
             "the prompt names the preset and the photo count: {prompt}"
@@ -745,7 +745,7 @@ pub(in crate::app) mod tests {
         );
 
         app.cancel_preset_name();
-        app.pending_preset_delete = Some(app.presets.presets()[0].id);
+        app.pending_confirm = Some(PendingConfirm::DeletePreset(app.presets.presets()[0].id));
         let confirm = settled(&mut app);
         assert!(
             confirm.any_containing("Golden"),

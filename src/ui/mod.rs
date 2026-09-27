@@ -34,8 +34,6 @@ pub enum UiAction {
     ApplyPreset(u64),
     /// Ask to delete this preset (opens its own confirm modal).
     RequestDeletePreset(u64),
-    ConfirmDeletePreset,
-    CancelDeletePreset,
     /// Open the Lightroom preset picker. Native only; the browser has no
     /// multi-file picker wired up yet.
     #[cfg(not(target_arch = "wasm32"))]
@@ -58,8 +56,9 @@ pub enum UiAction {
     DisconnectImmich,
     /// Ask to run a bulk action on the current selection (opens a confirm modal).
     RequestBulk(BulkKind),
-    ConfirmBulk,
-    CancelBulk,
+    /// Run the action the open confirm dialog asks about.
+    ConfirmPending,
+    CancelPending,
     /// `None` clears the star filter.
     SetFilter(Option<(Cmp, u8)>),
     /// Change the toolbar comparator applied to star-level clicks (≥ / = / ≤).
@@ -174,9 +173,7 @@ use develop_panel::draw_develop_panel;
 use export_panel::draw_export_panel;
 use grid::{draw_grid, draw_left_panel};
 use loupe::draw_loupe;
-use modals::{
-    confirm_modal, delete_preset_modal, help_modal, preset_name_modal, settings_modal,
-};
+use modals::{confirm_modal, delete_preset_modal, help_modal, preset_name_modal, settings_modal};
 use survey::draw_survey;
 use toolbar::{grid_toolbar, selection_bar};
 
