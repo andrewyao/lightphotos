@@ -456,21 +456,14 @@ mod writer {
     /// Temp file then rename, so a crash mid-write leaves the previous cache
     /// intact rather than a truncated one. Best effort throughout: a
     /// read-only folder just recomputes next session.
-    fn write_atomically(path: &PathBuf, bytes: &[u8]) {
+    fn write_atomically(path: &std::path::Path, bytes: &[u8]) {
         let Some(dir) = path.parent() else {
             return;
         };
         if std::fs::create_dir_all(dir).is_err() {
             return;
         }
-        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
-        if std::fs::write(&tmp, bytes).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-            return;
-        }
-        if std::fs::rename(&tmp, path).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
+        let _ = crate::paths::write_atomic(path, bytes);
     }
 }
 

@@ -474,19 +474,6 @@ mod tests {
     }
 }
 
-/// Write a temp sibling, then rename. The rename is atomic on one volume, so a
-/// crash cannot leave a truncated `.jpg`.
-#[cfg(not(target_arch = "wasm32"))]
-fn write_file_atomic(dest: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = dest.with_extension("jpg.tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("write: {e}"))?;
-    if let Err(e) = std::fs::rename(&tmp, dest) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("rename: {e}"));
-    }
-    Ok(())
-}
-
 /// Decode `job.src` at full resolution, bake in its edits and size, and
 /// deliver the JPEG to `job.dest`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -497,7 +484,7 @@ fn do_export(job: ExportJob) -> Result<ExportLanding, String> {
     let jpeg = image_encode::with_exif(&jpeg_bytes(w, h, &rgba)?, w, h, stamp.as_ref());
     match job.dest {
         ExportDest::Folder(dest) => {
-            write_file_atomic(&dest, &jpeg)?;
+            crate::paths::write_atomic(&dest, &jpeg).map_err(|e| format!("write: {e}"))?;
             Ok(ExportLanding::File(dest))
         }
         ExportDest::Immich {
