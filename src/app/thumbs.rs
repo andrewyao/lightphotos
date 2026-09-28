@@ -12,7 +12,7 @@ use crate::phash;
 use crate::sharpness;
 use crate::signalcache::Signal;
 use crate::thumbnail::THUMB_PX;
-use crate::{image_decode, image_ops};
+use crate::image_decode;
 
 impl App {
     pub(crate) fn request_redraw(&self) {
@@ -685,45 +685,72 @@ impl App {
         // Disjoint field borrows, so the loop can read the loader and the edit
         // mirrors while holding the renderer mutably. Nothing in it may call a
         // `self` method.
-        let (Some(renderer), Some(loader)) = (self.renderer.as_mut(), self.loader.as_ref()) else {
+        let (Some(renderer), Some(loader)) = (self.renderer.as_mut(), self.loader.as_mut()) else {
             return;
         };
+        let wanted_sig: HashMap<(PathBuf, u32), u64> = wanted
+            .iter()
+            .map(|(p, px, sig)| ((p.clone(), *px), *sig))
+            .collect();
 
         // Bake edits into the texture so the grid matches the loupe. The
         // cached thumbnail stays unedited, since the loupe applies edits to its
-        // placeholder in the shader.
-        for key in &wanted {
-            if self.thumb_tex.contains_key(key) {
+        // placeholder in the shader. The bake runs on a decode worker; until it
+        // lands, a cell keeps the texture it had, stale edit and all.
+        for (path, px, sig) in &wanted {
+            let key = (path.clone(), *px);
+            if self.thumb_tex.get(&key).is_some_and(|t| t.sig == *sig) {
                 continue;
             }
-            let Some(img) = loader.get_thumb(&key.0, key.1) else {
+            let Some(img) = loader.get_thumb(path, *px) else {
                 continue;
             };
-            let adj = self.edits.get(&key.0).copied().unwrap_or_default();
-            let touchups = self.touchups.get(&key.0).map(Vec::as_slice).unwrap_or(&[]);
-            let rot = self.rotations.get(&key.0).copied().unwrap_or(0);
-            // A quarter turn swaps the axes, so the size has to come from the
-            // branch that ran, not from the source thumbnail.
-            let uploaded = if adj.is_identity() && touchups.is_empty() && rot % 4 == 0 {
-                renderer
-                    .upload_thumb(img.width, img.height, &img.rgba)
-                    .map(|id| (id, img.width, img.height))
+            let adj = self.edits.get(path).copied().unwrap_or_default();
+            let touchups = self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]);
+            let rot = self.rotations.get(path).copied().unwrap_or(0);
+            if adj.is_identity() && touchups.is_empty() && rot % 4 == 0 {
+                if let Some(id) = renderer.upload_thumb(img.width, img.height, &img.rgba) {
+                    let tex = ThumbTexture {
+                        id,
+                        width: img.width,
+                        height: img.height,
+                        sig: *sig,
+                    };
+                    if let Some(old) = self.thumb_tex.insert(key, tex) {
+                        renderer.free_thumb(old.id);
+                    }
+                }
             } else {
-                let (w, h, rgba) = image_ops::bake_edited(&img, &adj, touchups, rot);
-                // bake_edited output is opaque, so premultiplied equals straight.
-                renderer.upload_thumb(w, h, &rgba).map(|id| (id, w, h))
-            };
-            if let Some((id, width, height)) = uploaded {
-                self.thumb_tex
-                    .insert(key.clone(), ThumbTexture { id, width, height });
+                loader.request_bake(path, *px, *sig, img, adj, touchups, rot);
             }
         }
 
-        // Also evicts textures with a stale edit signature. The renderer holds
-        // the GPU side, so a dropped entry has to be handed back.
-        let keep: std::collections::HashSet<(PathBuf, u32, u64)> = wanted.into_iter().collect();
+        // After the requests, so a bake that ran inline (no workers) shows
+        // this frame. One the user has edited again since is dropped.
+        for baked in loader.take_baked() {
+            let key = (baked.path, baked.px);
+            if wanted_sig.get(&key) != Some(&baked.sig) {
+                continue;
+            }
+            // A quarter turn swaps the axes, so the size comes from the bake.
+            if let Some(id) = renderer.upload_thumb(baked.width, baked.height, &baked.rgba) {
+                let tex = ThumbTexture {
+                    id,
+                    width: baked.width,
+                    height: baked.height,
+                    sig: baked.sig,
+                };
+                if let Some(old) = self.thumb_tex.insert(key, tex) {
+                    renderer.free_thumb(old.id);
+                }
+            }
+        }
+        loader.retain_bakes(|k| wanted_sig.contains_key(k));
+
+        // The renderer holds the GPU side, so a dropped entry has to be
+        // handed back.
         self.thumb_tex.retain(|k, tex| {
-            if keep.contains(k) {
+            if wanted_sig.contains_key(k) {
                 return true;
             }
             renderer.free_thumb(tex.id);

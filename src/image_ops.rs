@@ -55,6 +55,45 @@ pub(crate) fn resize_luma(
     out
 }
 
+/// `(c / 255)^2.2` for every 8-bit `c`: the same floats the `powf` gives,
+/// computed once. A 512px edited thumbnail makes half a million of these.
+fn srgb8_to_linear_lut() -> &'static [f32; 256] {
+    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| std::array::from_fn(|c| (c as f32 / 255.0).powf(2.2)))
+}
+
+/// Linear light to an sRGB8 channel with the 2.2 gamma, rounded. Bit for bit
+/// what `(v.max(0.0).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0)`
+/// gives, found by a search over the 255 inputs where that output steps up
+/// rather than a `powf` per channel.
+pub(crate) fn linear_to_srgb8(v: f32) -> u8 {
+    static STEPS: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
+    let steps = STEPS.get_or_init(|| {
+        // Positive floats order the same as their bit patterns, so each step
+        // is a bisection over bits for the smallest input reaching `k`.
+        std::array::from_fn(|i| {
+            let k = i as u8 + 1;
+            let (mut lo, mut hi) = (0u32, 1.0f32.to_bits());
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if encode_srgb8_powf(f32::from_bits(mid)) >= k {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            f32::from_bits(lo)
+        })
+    });
+    steps.partition_point(|&step| step <= v) as u8
+}
+
+fn encode_srgb8_powf(v: f32) -> u8 {
+    (v.max(0.0).powf(1.0 / 2.2) * 255.0)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
 /// Premultiplied sRGB8 pixel (as decoded) to linear RGB, using the 2.2 gamma
 /// that `develop::apply_linear` assumes. Every CPU reader of decoded pixels
 /// goes through this so they all see the same values.
@@ -72,6 +111,10 @@ pub(crate) fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
             (b as f32 * inv).min(255.0),
         )
     };
+    if a == 255 {
+        let lut = srgb8_to_linear_lut();
+        return [lut[px[0] as usize], lut[px[1] as usize], lut[px[2] as usize]];
+    }
     let srgb_to_linear = |c: f32| (c / 255.0).powf(2.2);
     [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b)]
 }
@@ -93,12 +136,7 @@ pub(crate) fn bake_edited(
 
     let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
     let (cw, ch) = (x1 - x0, y1 - y0);
-
-    let encode = |v: f32| {
-        (v.max(0.0).powf(1.0 / 2.2) * 255.0)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
+    let encode = linear_to_srgb8;
 
     // Denoise reads 25 neighbors per pixel, so convert the whole image to
     // linear once. Neighbors come from the full image, clamped at its edges,
@@ -601,6 +639,27 @@ mod tests {
         assert!((out[0] - 1.0).abs() < 1e-6);
         assert!((out[1] - 0.0).abs() < 1e-6);
         assert!((out[2] - (128.0f32 / 255.0).powf(2.2)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_srgb8_lookups_match_the_powf_they_replace_bit_for_bit() {
+        for c in 0..=255u8 {
+            let lin = unpremul_to_linear([c, c, c, 255])[0];
+            assert_eq!(lin.to_bits(), (c as f32 / 255.0).powf(2.2).to_bits(), "decode {c}");
+        }
+        // Every float from just below zero to past one, stepped finely enough
+        // to land on both sides of every rounding boundary, plus each
+        // boundary's neighbours.
+        let mut probes: Vec<f32> = (-1000..=1_100_000).map(|i| i as f32 / 1_000_000.0).collect();
+        for k in 0..=255u32 {
+            let edge = ((k as f32 - 0.5) / 255.0).max(0.0).powf(2.2);
+            let bits = edge.to_bits();
+            probes.extend((bits.saturating_sub(4)..bits + 4).map(f32::from_bits));
+        }
+        probes.extend([f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0]);
+        for v in probes {
+            assert_eq!(linear_to_srgb8(v), encode_srgb8_powf(v), "encode {v:e}");
+        }
     }
 
     #[test]

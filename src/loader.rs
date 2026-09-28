@@ -17,6 +17,8 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::SystemTime;
 
+use crate::cache_limits::CacheLimits;
+use crate::develop::{Adjustments, TouchUp};
 use crate::image_decode::{self, DecodedImage, ImageMetadata};
 use crate::thumbnail::ThumbCache;
 
@@ -74,6 +76,47 @@ enum Job {
     Exif(PathBuf),
     /// Capture time (EXIF, else mtime) for burst grouping.
     Meta(PathBuf),
+    /// A cached thumbnail with its photo's edits baked in, for the grid.
+    Bake(Box<BakeJob>),
+}
+
+/// Everything a worker needs to bake one edited thumbnail, owned so the
+/// worker never reads app state.
+struct BakeJob {
+    path: PathBuf,
+    px: u32,
+    sig: u64,
+    img: Arc<DecodedImage>,
+    adj: Adjustments,
+    touchups: Vec<TouchUp>,
+    rot: u8,
+}
+
+impl BakeJob {
+    fn run(self) -> BakedThumb {
+        let (width, height, rgba) =
+            crate::image_ops::bake_edited(&self.img, &self.adj, &self.touchups, self.rot);
+        BakedThumb {
+            path: self.path,
+            px: self.px,
+            sig: self.sig,
+            width,
+            height,
+            rgba,
+        }
+    }
+}
+
+/// An edited thumbnail ready to upload. `sig` is the edit signature it was
+/// baked from, so the caller can drop one the user has since edited again.
+/// Opaque, so premultiplied and straight alpha are the same bytes.
+pub struct BakedThumb {
+    pub path: PathBuf,
+    pub px: u32,
+    pub sig: u64,
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -91,11 +134,13 @@ enum JobResult {
     Thumb(PathBuf, u32, Result<Arc<DecodedImage>, String>),
     Exif(PathBuf, ImageMetadata),
     Meta(PathBuf, Option<SystemTime>),
+    /// `None` when the bake panicked.
+    Baked(PathBuf, u32, u64, Option<BakedThumb>),
 }
 
 /// The shared job queue. Workers take jobs in this priority order:
-/// speed, preview, full, exif, viewport thumbnails, background thumbnails,
-/// meta.
+/// speed, preview, full, exif, edit bakes, viewport thumbnails, background
+/// thumbnails, meta.
 ///
 /// The loupe image comes first because the user is waiting on it, and
 /// thumbnails arrive by the hundreds. Previews outrank full-resolution decodes
@@ -110,6 +155,10 @@ enum JobResult {
 /// must finish wherever the user scrolls, so it is plain FIFO and never
 /// pruned.
 ///
+/// An edit bake is an on-screen cell whose thumbnail already decoded, so it
+/// goes ahead of the thumbnails still to decode. It is 10-20 ms of CPU per
+/// 512px thumbnail, which is why it runs here and not on the frame.
+///
 /// Priority only applies to jobs still in the queue. A thumbnail already
 /// running on a worker cannot be preempted, so worker 0 is reserved and never
 /// takes thumbnails (see `Loader::new`).
@@ -121,6 +170,7 @@ struct Queue {
     thumbs_viewport: VecDeque<Job>,
     thumbs: VecDeque<Job>,
     exif: VecDeque<Job>,
+    bake: VecDeque<Job>,
     meta: VecDeque<Job>,
     /// Set when the `Loader` is dropped so idle workers wake and exit.
     shutdown: bool,
@@ -128,7 +178,7 @@ struct Queue {
 
 impl Queue {
     /// Pops the highest-priority job this worker may run. `dedicated` marks
-    /// the reserved worker, which skips thumbnails.
+    /// the reserved worker, which skips thumbnails and bakes.
     fn take_next(&mut self, dedicated: bool) -> Option<Job> {
         self.speed
             .pop_front()
@@ -139,8 +189,9 @@ impl Queue {
                 if dedicated {
                     None
                 } else {
-                    self.thumbs_viewport
+                    self.bake
                         .pop_front()
+                        .or_else(|| self.thumbs_viewport.pop_front())
                         .or_else(|| self.thumbs.pop_front())
                 }
             })
@@ -179,17 +230,6 @@ struct Shared {
     ready: Condvar,
 }
 
-/// Kept tiny because one entry is a whole RGBA8 image (about 180 MB for
-/// 45 MP), and full decodes only happen on zoom, so extra entries do not help
-/// navigation.
-const FULL_CAPACITY: usize = 3;
-/// About 5 MB each: the current photo plus a few neighbors either way.
-const PREVIEW_CAPACITY: usize = 8;
-/// About 700 KB each (512px RGBA8). wasm32 fills this cache too, and a 32-bit
-/// address space cannot hold hundreds of megabytes of thumbnails. This is the
-/// floor; `set_thumb_working_set_size` raises it for large grids.
-const THUMB_CAPACITY: usize = 256;
-
 pub struct Loader {
     shared: Arc<Shared>,
     res_rx: Receiver<JobResult>,
@@ -199,18 +239,18 @@ pub struct Loader {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     full_target: u32,
 
+    limits: CacheLimits,
+
     // Full-resolution tier. `order` is insertion order for LRU eviction.
     cache: HashMap<PathBuf, Arc<DecodedImage>>,
     order: VecDeque<PathBuf>,
     inflight: HashSet<PathBuf>,
-    capacity: usize,
 
     // Preview tier, keyed by `(path, target_px)` so a window resize does not
     // serve a smaller stale decode.
     preview_cache: HashMap<(PathBuf, u32), Arc<DecodedImage>>,
     preview_order: VecDeque<(PathBuf, u32)>,
     preview_inflight: HashSet<(PathBuf, u32)>,
-    preview_capacity: usize,
 
     // `Speed` results, same key as the preview tier. A separate map lets a
     // short speed result show at once and be replaced when the preview lands.
@@ -238,20 +278,29 @@ pub struct Loader {
 
     exif_inflight: HashSet<PathBuf>,
 
+    /// The edit signature each queued or running bake was asked for. One
+    /// per thumbnail: a newer edit replaces a queued older bake.
+    bake_inflight: HashMap<(PathBuf, u32), u64>,
+    /// Bakes that produced nothing, so a bad thumbnail is not re-queued
+    /// every frame. Keyed with the signature, so the next edit retries.
+    bake_failed: HashSet<(PathBuf, u32, u64)>,
+    /// Finished bakes not yet taken by `take_baked`.
+    baked: Vec<BakedThumb>,
+
     /// Worker threads that actually started. Zero on wasm32, where spawning
     /// fails and the browser's Web Worker pool decodes instead.
     workers: usize,
 }
 
 impl Loader {
-    pub fn new(max_dim: u32) -> Self {
+    pub fn new(max_dim: u32, limits: CacheLimits) -> Self {
         let cores = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        Self::with_workers(max_dim, cores.saturating_sub(2).max(1))
+        Self::with_workers(max_dim, cores.saturating_sub(2).max(1), limits)
     }
 
-    fn with_workers(max_dim: u32, workers: usize) -> Self {
+    fn with_workers(max_dim: u32, workers: usize, limits: CacheLimits) -> Self {
         let (res_tx, res_rx) = std::sync::mpsc::channel::<JobResult>();
 
         let shared = Arc::new(Shared {
@@ -372,6 +421,14 @@ impl Loader {
                                     .unwrap_or(None);
                                     JobResult::Meta(path, t)
                                 }
+                                Job::Bake(job) => {
+                                    let (path, px, sig) = (job.path.clone(), job.px, job.sig);
+                                    let baked = std::panic::catch_unwind(
+                                        std::panic::AssertUnwindSafe(|| job.run()),
+                                    )
+                                    .ok();
+                                    JobResult::Baked(path, px, sig, baked)
+                                }
                             };
 
                         if res_tx.send(result).is_err() {
@@ -391,14 +448,13 @@ impl Loader {
             shared,
             res_rx,
             full_target: max_dim,
+            limits,
             cache: HashMap::new(),
             order: VecDeque::new(),
             inflight: HashSet::new(),
-            capacity: FULL_CAPACITY,
             preview_cache: HashMap::new(),
             preview_order: VecDeque::new(),
             preview_inflight: HashSet::new(),
-            preview_capacity: PREVIEW_CAPACITY,
             speed_cache: HashMap::new(),
             speed_inflight: HashSet::new(),
             escalation_wanted: HashSet::new(),
@@ -407,9 +463,12 @@ impl Loader {
             thumb_inflight: HashSet::new(),
             viewport_inflight: HashSet::new(),
             thumb_failed: HashSet::new(),
-            thumb_capacity: THUMB_CAPACITY,
+            thumb_capacity: limits.thumbs,
             meta_inflight: HashSet::new(),
             exif_inflight: HashSet::new(),
+            bake_inflight: HashMap::new(),
+            bake_failed: HashSet::new(),
+            baked: Vec::new(),
             workers: started,
         }
     }
@@ -472,6 +531,7 @@ impl Loader {
             Job::Thumb(..) => &mut q.thumbs,
             Job::Exif(..) => &mut q.exif,
             Job::Meta(..) => &mut q.meta,
+            Job::Bake(..) => &mut q.bake,
         };
         lane.push_back(job);
         // notify_all because notify_one might wake only the reserved worker,
@@ -641,7 +701,7 @@ impl Loader {
     /// tests can inspect them.
     #[cfg(test)]
     pub(crate) fn queue_only_for_test() -> Self {
-        let mut loader = Self::with_workers(16384, 0);
+        let mut loader = Self::with_workers(16384, 0, CacheLimits::PLATFORM);
         loader.workers = 1;
         loader
     }
@@ -689,6 +749,108 @@ impl Loader {
     }
 
     #[allow(dead_code)]
+    /// Bake `img` with these edits off the frame. The result comes back
+    /// through [`take_baked`](Self::take_baked). A bake already queued for an
+    /// older `sig` of the same thumbnail is replaced, so a slider drag leaves
+    /// at most one bake per thumbnail behind it. With no workers (wasm32) it
+    /// bakes inline, as the frame did before there was a lane for it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_bake(
+        &mut self,
+        path: &Path,
+        px: u32,
+        sig: u64,
+        img: Arc<DecodedImage>,
+        adj: Adjustments,
+        touchups: &[TouchUp],
+        rot: u8,
+    ) {
+        let key = (path.to_path_buf(), px);
+        if self.bake_inflight.get(&key) == Some(&sig)
+            || self.bake_failed.contains(&(key.0.clone(), px, sig))
+        {
+            return;
+        }
+        let job = BakeJob {
+            path: key.0.clone(),
+            px,
+            sig,
+            img,
+            adj,
+            touchups: touchups.to_vec(),
+            rot,
+        };
+        if self.workers == 0 {
+            let baked = job.run();
+            self.land_bake(key.0, px, sig, Some(baked));
+            return;
+        }
+        if self.bake_inflight.contains_key(&key) {
+            self.drop_queued_bakes(|k| k == &key);
+        }
+        if self.enqueue(Job::Bake(Box::new(job))) == Enqueued::Yes {
+            self.bake_inflight.insert(key, sig);
+        }
+    }
+
+    /// Drop queued bakes whose thumbnail `keep` rejects, for cells that
+    /// scrolled away before their bake ran. A bake already running finishes.
+    pub fn retain_bakes(&mut self, keep: impl Fn(&(PathBuf, u32)) -> bool) {
+        if self.bake_inflight.keys().all(&keep) {
+            return;
+        }
+        self.drop_queued_bakes(|k| !keep(k));
+    }
+
+    fn drop_queued_bakes(&mut self, drop: impl Fn(&(PathBuf, u32)) -> bool) {
+        let Ok(mut q) = self.shared.queue.lock() else {
+            return;
+        };
+        q.bake.retain(|job| match job {
+            Job::Bake(b) => {
+                let key = (b.path.clone(), b.px);
+                if drop(&key) {
+                    self.bake_inflight.remove(&key);
+                    false
+                } else {
+                    true
+                }
+            }
+            _ => true,
+        });
+    }
+
+    fn land_bake(&mut self, path: PathBuf, px: u32, sig: u64, baked: Option<BakedThumb>) {
+        let key = (path, px);
+        if self.bake_inflight.get(&key) == Some(&sig) {
+            self.bake_inflight.remove(&key);
+        }
+        match baked {
+            Some(b) if b.width > 0 && b.height > 0 => self.baked.push(b),
+            _ => {
+                self.bake_failed.insert((key.0, px, sig));
+            }
+        }
+    }
+
+    /// Finished bakes since the last call, oldest first. The caller checks
+    /// each `sig` against the edit it wants now.
+    pub fn take_baked(&mut self) -> Vec<BakedThumb> {
+        std::mem::take(&mut self.baked)
+    }
+
+    /// True while a bake is queued or running, or finished and not yet taken,
+    /// so the frame loop keeps polling for it.
+    pub fn bakes_pending(&self) -> bool {
+        !self.bake_inflight.is_empty() || self.has_baked()
+    }
+
+    /// True when a finished bake is waiting for `take_baked`, which only a
+    /// redraw calls.
+    pub fn has_baked(&self) -> bool {
+        !self.baked.is_empty()
+    }
+
     pub fn get_thumb(&self, path: &Path, max_px: u32) -> Option<Arc<DecodedImage>> {
         self.thumb_cache.get(&(path.to_path_buf(), max_px)).cloned()
     }
@@ -798,6 +960,7 @@ impl Loader {
             self.thumb_failed.extend(self.viewport_inflight.drain());
             self.meta_inflight.clear();
             self.exif_inflight.clear();
+            self.bake_inflight.clear();
         }
         arrivals
     }
@@ -879,6 +1042,7 @@ impl Loader {
                     self.meta_inflight.remove(&path);
                     metas.push((path, t));
                 }
+                JobResult::Baked(path, px, sig, baked) => self.land_bake(path, px, sig, baked),
             }
         }
         (full, thumbs, metas, exifs)
@@ -889,7 +1053,7 @@ impl Loader {
             self.order.push_back(path.clone());
         }
         self.cache.insert(path, img);
-        while self.order.len() > self.capacity {
+        while self.order.len() > self.limits.fulls {
             if let Some(old) = self.order.pop_front() {
                 self.cache.remove(&old);
             }
@@ -921,7 +1085,7 @@ impl Loader {
     }
 
     fn evict_previews(&mut self) {
-        while self.preview_order.len() > self.preview_capacity {
+        while self.preview_order.len() > self.limits.previews {
             if let Some(old) = self.preview_order.pop_front() {
                 self.preview_cache.remove(&old);
                 self.speed_cache.remove(&old);
@@ -930,10 +1094,10 @@ impl Loader {
     }
 
     /// Sets the thumbnail cache capacity to `len` (never below
-    /// `THUMB_CAPACITY`), so a visible grid plus its prefetch rows never evicts
+    /// `CacheLimits::thumbs`), so a visible grid plus its prefetch rows never evicts
     /// itself. Shrinking evicts the oldest entries at once.
     pub fn set_thumb_working_set_size(&mut self, len: usize) {
-        self.thumb_capacity = THUMB_CAPACITY.max(len);
+        self.thumb_capacity = self.limits.thumbs.max(len);
         self.trim_thumbs();
     }
 
@@ -980,7 +1144,31 @@ mod tests {
             Job::Exif(_) => "exif",
             Job::Thumb(..) => "thumb",
             Job::Meta(_) => "meta",
+            Job::Bake(_) => "bake",
         }
+    }
+
+    fn bake_job(name: &str, sig: u64) -> Job {
+        Job::Bake(Box::new(BakeJob {
+            path: path(name),
+            px: 512,
+            sig,
+            img: image(2, 2),
+            adj: Adjustments::default(),
+            touchups: Vec::new(),
+            rot: 0,
+        }))
+    }
+
+    fn queued_bakes(loader: &Loader) -> Vec<(PathBuf, u64)> {
+        let q = loader.shared.queue.lock().unwrap();
+        q.bake
+            .iter()
+            .map(|job| match job {
+                Job::Bake(b) => (b.path.clone(), b.sig),
+                _ => unreachable!(),
+            })
+            .collect()
     }
 
     /// One job of each kind, pushed in reverse priority order so a queue that
@@ -989,6 +1177,7 @@ mod tests {
         let mut q = Queue::default();
         q.meta.push_back(Job::Meta(path("m")));
         q.thumbs.push_back(Job::Thumb(path("t"), 192));
+        q.bake.push_back(bake_job("b", 1));
         q.exif.push_back(Job::Exif(path("e")));
         q.full.push_back(Job::Full(path("f"), 16384));
         q.preview.push_back(Job::Preview(path("p"), 2048));
@@ -1008,16 +1197,66 @@ mod tests {
     fn a_general_worker_serves_every_tier_in_priority_order() {
         assert_eq!(
             drain_labels(&mut every_kind(), false),
-            ["speed", "preview", "full", "exif", "thumb", "meta"]
+            ["speed", "preview", "full", "exif", "bake", "thumb", "meta"]
         );
     }
 
     #[test]
-    fn the_dedicated_worker_skips_thumbnails_entirely() {
+    fn the_dedicated_worker_skips_thumbnails_and_bakes_entirely() {
         assert_eq!(
             drain_labels(&mut every_kind(), true),
             ["speed", "preview", "full", "exif", "meta"]
         );
+    }
+
+    #[test]
+    fn a_newer_edit_replaces_the_queued_bake_for_that_thumbnail() {
+        let mut loader = Loader::queue_only_for_test();
+        let a = path("a");
+        loader.request_bake(&a, 512, 1, image(2, 2), Adjustments::default(), &[], 1);
+        loader.request_bake(&a, 512, 2, image(2, 2), Adjustments::default(), &[], 1);
+        loader.request_bake(&a, 512, 2, image(2, 2), Adjustments::default(), &[], 1);
+        assert_eq!(queued_bakes(&loader), [(a, 2)]);
+    }
+
+    #[test]
+    fn a_cell_that_scrolled_away_loses_its_queued_bake() {
+        let mut loader = Loader::queue_only_for_test();
+        let (gone, kept) = (path("gone"), path("kept"));
+        loader.request_bake(&gone, 512, 1, image(2, 2), Adjustments::default(), &[], 1);
+        loader.request_bake(&kept, 512, 1, image(2, 2), Adjustments::default(), &[], 1);
+        loader.retain_bakes(|(p, _)| p == &kept);
+        assert_eq!(queued_bakes(&loader), [(kept, 1)]);
+        // Its marker went with it, so scrolling back queues it again.
+        loader.request_bake(&gone, 512, 1, image(2, 2), Adjustments::default(), &[], 1);
+        assert_eq!(queued_bakes(&loader).len(), 2);
+    }
+
+    #[test]
+    fn without_workers_a_bake_runs_inline_with_its_rotation() {
+        let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
+        loader.request_bake(&path("a"), 512, 7, image(4, 2), Adjustments::default(), &[], 1);
+        let baked = loader.take_baked();
+        assert_eq!(baked.len(), 1);
+        assert_eq!((baked[0].sig, baked[0].width, baked[0].height), (7, 2, 4));
+        assert!(!loader.bakes_pending());
+    }
+
+    #[test]
+    fn a_bake_that_yields_nothing_is_not_queued_again_until_the_edit_changes() {
+        let mut loader = Loader::queue_only_for_test();
+        let a = path("a");
+        loader.request_bake(&a, 512, 1, image(0, 0), Adjustments::default(), &[], 1);
+        let job = loader.shared.queue.lock().unwrap().bake.pop_front().unwrap();
+        let Job::Bake(job) = job else { unreachable!() };
+        loader.land_bake(a.clone(), 512, 1, Some(job.run()));
+        assert!(loader.take_baked().is_empty());
+        assert!(!loader.bakes_pending());
+
+        loader.request_bake(&a, 512, 1, image(0, 0), Adjustments::default(), &[], 1);
+        assert!(queued_bakes(&loader).is_empty());
+        loader.request_bake(&a, 512, 2, image(0, 0), Adjustments::default(), &[], 1);
+        assert_eq!(queued_bakes(&loader), [(a, 2)]);
     }
 
     #[test]
@@ -1090,7 +1329,7 @@ mod tests {
 
     #[test]
     fn a_poisoned_queue_fails_viewport_requests_instead_of_loading_forever() {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.poison_thumb_queue_for_test(path("a"), 192);
         loader.set_viewport_thumbs(&paths(&["b"]), 192);
         assert!(loader.thumb_failed(&path("b"), 192));
@@ -1122,8 +1361,8 @@ mod tests {
 
     #[test]
     fn speed_and_preview_results_share_one_budget() {
-        let mut loader = Loader::with_workers(16384, 0);
-        for i in 0..PREVIEW_CAPACITY {
+        let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
+        for i in 0..CacheLimits::PLATFORM.previews {
             loader.insert_speed((path(&i.to_string()), 2560), image(2, 2));
         }
         // The sharper preview replaces its own speed result.
@@ -1131,20 +1370,20 @@ mod tests {
         assert_eq!(loader.get_preview(&path("0"), 2560).unwrap().width, 4);
         assert_eq!(
             loader.speed_cache.len() + loader.preview_cache.len(),
-            PREVIEW_CAPACITY
+            CacheLimits::PLATFORM.previews
         );
         // A new arrival evicts the oldest entry across both maps.
         loader.insert_preview((path("new"), 2560), image(4, 4));
         assert_eq!(
             loader.speed_cache.len() + loader.preview_cache.len(),
-            PREVIEW_CAPACITY
+            CacheLimits::PLATFORM.previews
         );
         assert!(loader.get_preview(&path("0"), 2560).is_none());
     }
 
     #[test]
     fn thumbnail_cache_retains_large_grid_and_shrinks_after_resize() {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         let px = crate::thumbnail::THUMB_PX;
         // 18 columns, 10 visible rows, and three prefetch rows on either side.
         let working_set = 18 * (10 + 6);
@@ -1160,8 +1399,8 @@ mod tests {
             }
         }
         loader.set_thumb_working_set_size(0);
-        assert_eq!(loader.thumb_cache.len(), THUMB_CAPACITY);
-        assert_eq!(loader.thumb_order.len(), THUMB_CAPACITY);
+        assert_eq!(loader.thumb_cache.len(), CacheLimits::PLATFORM.thumbs);
+        assert_eq!(loader.thumb_order.len(), CacheLimits::PLATFORM.thumbs);
         assert!(loader.get_thumb(&path("0"), px).is_none());
         assert!(loader
             .get_thumb(&path(&(working_set - 1).to_string()), px)
@@ -1170,21 +1409,21 @@ mod tests {
 
     #[test]
     fn the_full_tier_evicts_oldest_first_at_capacity() {
-        let mut loader = Loader::new(16384);
-        for i in 0..FULL_CAPACITY + 2 {
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
+        for i in 0..CacheLimits::PLATFORM.fulls + 2 {
             loader.insert(path(&i.to_string()), image(1, 1));
         }
-        assert_eq!(loader.cache.len(), FULL_CAPACITY);
+        assert_eq!(loader.cache.len(), CacheLimits::PLATFORM.fulls);
         assert!(loader.get_full(&path("0")).is_none());
         assert!(loader.get_full(&path("1")).is_none());
         assert!(loader
-            .get_full(&path(&(FULL_CAPACITY + 1).to_string()))
+            .get_full(&path(&(CacheLimits::PLATFORM.fulls + 1).to_string()))
             .is_some());
     }
 
     #[test]
     fn the_preview_tier_keys_on_target_so_a_resize_does_not_serve_a_stale_size() {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.insert_preview((path("a"), 2048), image(2048, 1365));
         assert!(loader.get_preview(&path("a"), 2048).is_some());
         assert!(loader.get_preview(&path("a"), 2560).is_none());
@@ -1192,7 +1431,7 @@ mod tests {
 
     #[test]
     fn get_best_prefers_full_resolution_over_the_preview() {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.insert_preview((path("a"), 2048), image(2048, 1365));
         assert_eq!(loader.get_best(&path("a"), 2048).unwrap().width, 2048);
         loader.insert(path("a"), image(8192, 5464));
@@ -1209,7 +1448,7 @@ mod tests {
     #[test]
     fn a_speed_pass_that_already_hit_the_target_costs_only_one_decode() {
         // The JPEG case: the speed pass already decoded at the target size.
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.escalate_if_short(&path("a"), 2560, 2560);
         assert_eq!(queued_previews(&loader), 0);
         loader.escalate_if_short(&path("b"), 2560, 4096);
@@ -1219,7 +1458,7 @@ mod tests {
     #[test]
     fn a_short_speed_pass_queues_the_forced_decode_behind_it() {
         // The RAW case: a 1616px embedded preview, then the 2560px decode.
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.escalate_if_short(&path("a"), 2560, 1616);
         assert_eq!(queued_previews(&loader), 1);
         assert!(loader.has_pending_image());
@@ -1229,7 +1468,7 @@ mod tests {
     fn without_workers_requests_leave_nothing_pending() {
         // wasm32 has no decode threads. A request that marks itself in flight
         // there is never cleared, and the frame loop polls forever.
-        let mut loader = Loader::with_workers(16384, 0);
+        let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
         loader.prefetch_preview(path("a"), 2560);
         loader.request_full(path("a"));
         loader.request_exif(path("a"));
@@ -1246,14 +1485,14 @@ mod tests {
 
     #[test]
     fn a_failed_speed_pass_still_falls_through_to_the_forced_decode() {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.escalate_if_short(&path("a"), 2560, 0);
         assert_eq!(queued_previews(&loader), 1);
     }
 
     #[test]
     fn escalation_does_not_pile_up_duplicate_jobs() {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.escalate_if_short(&path("a"), 2560, 1616);
         loader.escalate_if_short(&path("a"), 2560, 1616);
         loader.escalate_if_short(&path("a"), 2560, 1616);
@@ -1263,7 +1502,7 @@ mod tests {
     #[test]
     fn a_prefetched_neighbor_stops_at_the_cheap_pass() {
         // Escalating prefetches would compete with the viewed photo's decode.
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.prefetch_preview(path("neighbor"), 2560);
         loader.insert_speed((path("neighbor"), 2560), image(1616, 1080));
         loader.escalate_from_speed(&path("neighbor"), 2560, 1616);
@@ -1272,7 +1511,7 @@ mod tests {
 
     #[test]
     fn navigating_onto_a_prefetched_photo_escalates_it_after_all() {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.prefetch_preview(path("a"), 2560);
         loader.insert_speed((path("a"), 2560), image(1616, 1080));
         loader.request_preview(path("a"), 2560);
@@ -1282,7 +1521,7 @@ mod tests {
     #[test]
     fn viewing_a_photo_whose_prefetch_is_still_running_does_not_lose_the_escalation() {
         // The user views a photo while its prefetch speed pass is still running.
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.prefetch_preview(path("a"), 2560);
         loader.request_preview(path("a"), 2560); // still in flight
         loader.speed_inflight.remove(&(path("a"), 2560));
@@ -1293,7 +1532,7 @@ mod tests {
 
     #[test]
     fn the_preview_getter_prefers_the_forced_decode_over_the_speed_pass() {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.insert_speed((path("a"), 2560), image(1616, 1080));
         assert_eq!(loader.get_preview(&path("a"), 2560).unwrap().width, 1616);
         loader.insert_preview((path("a"), 2560), image(2560, 1707));
@@ -1302,7 +1541,7 @@ mod tests {
 
     #[test]
     fn requesting_a_preview_that_is_already_answered_enqueues_nothing() {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.insert_speed((path("a"), 2560), image(2560, 1707));
         loader.request_preview(path("a"), 2560);
         assert!(!loader.has_pending_image());
@@ -1310,7 +1549,7 @@ mod tests {
 
     #[test]
     fn pending_image_tracks_both_loupe_tiers_and_ignores_the_others() {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         assert!(!loader.has_pending_image());
 
         // Thumbnail and metadata work must not keep the frame loop awake.

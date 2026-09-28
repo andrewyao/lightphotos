@@ -317,6 +317,7 @@ impl SignalCache {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    #[hotpath::measure]
     fn queue_write(&mut self) {
         if self.writer.is_none() {
             return;

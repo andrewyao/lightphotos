@@ -750,7 +750,7 @@ mod tests {
             let (w, h) = (400, 300);
             app.shown = Shown::Preview(path.clone(), w, h);
             app.source_size = Some((w, h));
-            let mut loader = crate::loader::Loader::new(16384);
+            let mut loader = crate::loader::Loader::new(16384, crate::cache_limits::CacheLimits::PLATFORM);
             loader.insert_full_external(
                 path,
                 std::sync::Arc::new(crate::image_decode::DecodedImage::new_tracked(
