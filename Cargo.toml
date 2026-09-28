@@ -34,16 +34,6 @@ path = "src/raw/probe.rs"
 test = true
 required-features = ["raw-probe"]
 
-# The wasm32 Web Worker pool's decode entry point (M4 of the wasm port plan).
-# Loaded by trunk as `data-type="worker"` — its own doc comment explains why
-# this must be a *separate binary* rather than a branch inside `main.rs`. On
-# every other target this bin compiles to an empty stub (see the file's own
-# `#[cfg]` gating) so `cargo build`/`cargo test` are unaffected.
-[[bin]]
-name = "wasm_worker"
-path = "src/web/wasm_worker.rs"
-test = false
-
 [dependencies]
 winit = "0.30.13"
 wgpu = "29.0.3"
@@ -270,6 +260,10 @@ web-sys = { version = "0.3", features = [
     "Clipboard",
 ] }
 js-sys = "0.3"
+wasm_thread = "0.3"
+# Already in the graph through rawler. Named here so each wasm decode thread
+# can give rawler a rayon pool of its own; see `Worker::run` in loader.rs.
+rayon = "1"
 console_error_panic_hook = "0.1"
 # `uuid` (pulled in transitively by both egui/accesskit and rawler) needs an
 # explicit randomness source on wasm32 — same fix already proven in the

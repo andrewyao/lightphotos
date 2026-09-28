@@ -446,7 +446,7 @@ pub(crate) struct App {
     /// keys stay in `web_thumb_inflight` so normal requests don't retry the
     /// corrupt cache.
     #[cfg(target_arch = "wasm32")]
-    web_thumb_recovery_pending: Vec<crate::web_worker_pool::PoolResult>,
+    web_thumb_recovery_pending: Vec<crate::web_decode::PoolResult>,
     /// `get_file()` reads in flight across all decode tiers. Chrome throws
     /// `NotReadableError` when too many reads are open against one folder, so
     /// `MAX_CONCURRENT_READS` caps this. A key that can't start this frame
@@ -496,20 +496,18 @@ pub(crate) struct App {
     #[cfg(target_arch = "wasm32")]
     web_exif_done: std::rc::Rc<std::cell::RefCell<Vec<(PathBuf, image_decode::ImageMetadata)>>>,
 
-    /// A hand-rolled `web_sys::Worker` pool for parallel decode.
-    /// `wasm-bindgen-rayon` needs a JS-driven init that doesn't fit a binary
-    /// crate, and nightly Rust. File bytes are still read on the main thread,
-    /// since `FileSystemFileHandle` reads are async there, then sent to a worker.
+    /// Where each running export's JPEG goes. The loader's threads bake it;
+    /// the destination folder handle cannot leave the main thread.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) web_worker_pool: crate::web_worker_pool::WorkerPool,
+    pub(crate) web_exports: crate::web_exports::WebExports,
     /// `Preview` and `Speed` results that `poll_web_thumbs` pulled off the
     /// pool's single shared channel. `poll_web_preview` consumes them in the
     /// same frame.
     #[cfg(target_arch = "wasm32")]
-    web_preview_pending: Vec<crate::web_worker_pool::PoolResult>,
+    web_preview_pending: Vec<crate::web_decode::PoolResult>,
     /// `Full` results set aside the same way, for `poll_web_full`.
     #[cfg(target_arch = "wasm32")]
-    web_full_pending: Vec<crate::web_worker_pool::PoolResult>,
+    web_full_pending: Vec<crate::web_decode::PoolResult>,
 
     pub(crate) mode: ViewMode,
     /// `pub(crate)` because the frame loop drives its write queue directly.
@@ -812,9 +810,6 @@ impl App {
         let (web_export_tx, web_export_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
         let (web_paste_tx, web_paste_rx) = std::sync::mpsc::channel();
-        #[cfg(target_arch = "wasm32")]
-        let web_worker_pool =
-            crate::web_worker_pool::WorkerPool::new(crate::web_worker_pool::worker_count());
         Self {
             window: None,
             renderer: None,
@@ -923,7 +918,7 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             web_exif_done: Default::default(),
             #[cfg(target_arch = "wasm32")]
-            web_worker_pool,
+            web_exports: Default::default(),
             #[cfg(target_arch = "wasm32")]
             web_preview_pending: Vec::new(),
             #[cfg(target_arch = "wasm32")]

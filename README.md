@@ -7,7 +7,7 @@ A fast macOS Lightroom-lite photo culling & develop tool, written in Rust.
 Open a folder to browse thumbnails in a Grid; open a single image to jump
 straight into the Loupe. Decoding runs on background threads (Apple ImageIO
 on macOS; `image` / `rawler` / `mozjpeg-rs` / `kamadak-exif` crates on other
-platforms — including a Web Worker pool on wasm32) and images live as GPU
+platforms — as wasm threads over shared memory on wasm32) and images live as GPU
 textures, so zoom and pan only update a small transform uniform — never a
 re-decode. egui draws all the chrome (grid, filmstrip, filter bar, rating
 overlays); a hand-rolled wgpu renderer draws the loupe image.
@@ -110,7 +110,7 @@ there and why it always builds `--release`.
 
 `scripts/deploy-web.sh` runs `build-web.sh`, then syncs the output into the
 companion site repo. The browser build reads folders through the File System
-Access API and decodes on a hand-rolled Web Worker pool; it has none of the
+Access API and decodes on wasm threads; it has none of the
 macOS-only features (no HEIC, no Vision-backed scoring).
 
 ## Package as `LightPhotos.app`

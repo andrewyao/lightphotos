@@ -36,11 +36,11 @@ Note that the Linux and Windows jobs build `--bin lightphotos`, not `--bins`. Th
 probe harnesses are mac-only and do not compile off macOS. The optimized native build
 stays out of CI, since `release.yml` covers it when a tag is pushed.
 
-The wasm32 (browser) build goes through `trunk`, not bare `cargo` — plain `cargo build --target wasm32-unknown-unknown` misses the wgpu/WebGPU and File System Access bindings, which are gated behind an unstable-apis cfg that `Trunk.toml`'s `rustflags` key does *not* reach cargo with in trunk 0.21.14. Set it in the environment:
+The wasm32 (browser) build goes through `trunk`, on a dated nightly, with its environment in `scripts/web-env.sh`. The decode workers run as wasm threads over one shared memory, which needs std rebuilt with atomics (`-Z build-std`), hence the nightly; native stays on stable. The same file sets the unstable-apis cfg for the wgpu/WebGPU and File System Access bindings, which `Trunk.toml`'s `rustflags` key does *not* reach cargo with in trunk 0.21.14, and the shared-memory link arguments. The page must be cross-origin isolated (COOP/COEP) for `SharedArrayBuffer`: `trunk serve` sends the headers from `Trunk.toml`, and `deploy-web.sh` writes them into the site's `public/_headers`. Move the pinned nightly on purpose and rerun `tools/web-bench` after.
 
 ```sh
-./scripts/build-web.sh    # wasm target + vendor setup + CJK font + the trunk build below
-RUSTFLAGS="--cfg=web_sys_unstable_apis" trunk build --release --config Trunk.toml
+./scripts/build-web.sh    # pinned nightly + rust-src + wasm target, vendor setup, CJK font, trunk build
+source scripts/web-env.sh && trunk serve --release --config Trunk.toml
 ./scripts/deploy-web.sh   # build-web.sh + sync into the lightphotos.app site repo
 ```
 
