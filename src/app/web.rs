@@ -7,7 +7,7 @@ use super::*;
 use crate::navigation::Playlist;
 use crate::thumbnail::THUMB_PX;
 use crate::web_fs;
-use crate::web_worker_pool::JobKind;
+use crate::web_decode::JobKind;
 
 /// Cap on concurrent file reads from the picked folder, shared by thumbnails,
 /// the loupe, and the cache sweep. Chrome throws `NotReadableError` when too
@@ -16,6 +16,13 @@ use crate::web_worker_pool::JobKind;
 /// fail and the extra concurrency is worth more than those retries cost. If
 /// folder loads stall, lower it.
 const MAX_CONCURRENT_READS: u32 = 4;
+
+/// Thumbnails read but not yet decoded, per decode thread. The read cap above
+/// does not bound this: an OPFS read takes milliseconds, so without it every
+/// missing cell's whole file sat in the queue at once, 25 MB a RAW, and the
+/// shared 4 GB wasm heap ran out and killed decode threads. Wasm memory never
+/// shrinks, so the high-water mark is what counts.
+const THUMBS_IN_FLIGHT_PER_THREAD: usize = 1;
 
 /// Failures a key tolerates before it is marked failed for good. Chrome's
 /// read failures are transient and can last longer than a few seconds.
@@ -234,7 +241,21 @@ impl App {
         // visible grid so the grid reads first.
         keys.extend(self.autotone_pending.iter().cloned());
         self.prepare_web_thumb_cache();
+        let Some(decoder) = self.loader.as_ref().map(|l| l.web_decoder()) else {
+            return false;
+        };
 
+        // A queued thumbnail whose cell scrolled away would still decode
+        // ahead of the cells now on screen, so it leaves the queue and its
+        // key goes back to missing.
+        let wanted: std::collections::HashSet<&Path> = keys.iter().map(PathBuf::as_path).collect();
+        if let Some(loader) = &mut self.loader {
+            for key in loader.retain_web_thumbs(|p| wanted.contains(p)) {
+                self.web_thumb_inflight.remove(&key);
+            }
+        }
+
+        let max_in_flight = decoder.threads() * THUMBS_IN_FLIGHT_PER_THREAD + 2;
         let mut any_missing = false;
         for path in keys {
             let key = (path.clone(), px);
@@ -253,9 +274,12 @@ impl App {
             {
                 continue;
             }
-            // Out of read slots. The key stays off `web_thumb_inflight`, so
-            // next frame tries it again.
-            if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
+            // Out of read slots, or enough bytes already waiting on the
+            // threads. The key stays off `web_thumb_inflight`, so a later
+            // frame tries it again, and in on-screen order.
+            if self.web_read_inflight.get() >= MAX_CONCURRENT_READS
+                || self.web_thumb_inflight.len() >= max_in_flight
+            {
                 continue;
             }
             let Some(handle) = self.web_file_handles.get(&path).cloned() else {
@@ -276,7 +300,7 @@ impl App {
             self.web_thumb_inflight.insert(key);
             self.web_read_inflight.set(self.web_read_inflight.get() + 1);
             let read_inflight = self.web_read_inflight.clone();
-            let pool = self.web_worker_pool.handle();
+            let pool = decoder.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let is_raw = crate::image_decode::is_raw_extension(&path);
 
@@ -314,7 +338,7 @@ impl App {
                             &format!("[web] reading bytes failed for {}: {e}", path.display())
                                 .into(),
                         );
-                        // Report through the pool so `poll_web_thumbs` clears
+                        // Report through the decoder so `poll_web_thumbs` clears
                         // the in-flight key like any decode failure.
                         pool.fail(path, px, JobKind::Thumb, Some(generation), e);
                     }
@@ -362,7 +386,12 @@ impl App {
     pub(crate) fn poll_web_thumbs(&mut self) -> Vec<(PathBuf, u32)> {
         let mut arrived = Vec::new();
         let pending = std::mem::take(&mut self.web_thumb_recovery_pending);
-        for r in pending.into_iter().chain(self.web_worker_pool.poll()) {
+        let landed = self
+            .loader
+            .as_mut()
+            .map(|l| l.take_web_results())
+            .unwrap_or_default();
+        for r in pending.into_iter().chain(landed) {
             if r.kind == JobKind::Full {
                 self.web_full_pending.push(r);
                 continue;
@@ -384,7 +413,7 @@ impl App {
                 self.web_thumb_recovery_pending.push(r);
                 continue;
             }
-            let crate::web_worker_pool::PoolResult {
+            let crate::web_decode::PoolResult {
                 path,
                 target,
                 result,
@@ -398,8 +427,10 @@ impl App {
             // using a retry. With no file handle this falls through to the
             // failure arm, whose retry limit eventually marks it failed.
             if recover_source {
-                if let Some(handle) = self.web_file_handles.get(&path).cloned() {
-                    let pool = self.web_worker_pool.handle();
+                if let (Some(handle), Some(pool)) = (
+                    self.web_file_handles.get(&path).cloned(),
+                    self.loader.as_ref().map(|l| l.web_decoder()),
+                ) {
                     let read_inflight = self.web_read_inflight.clone();
                     read_inflight.set(read_inflight.get() + 1);
                     wasm_bindgen_futures::spawn_local(async move {
@@ -541,6 +572,9 @@ impl App {
         let Some(handle) = self.web_file_handles.get(&path).cloned() else {
             return false;
         };
+        let Some(pool) = self.loader.as_ref().map(|l| l.web_decoder()) else {
+            return false;
+        };
         if quality_needed {
             self.web_preview_inflight.insert(key.clone());
         }
@@ -549,17 +583,13 @@ impl App {
         }
         self.web_read_inflight.set(self.web_read_inflight.get() + 1);
         let read_inflight = self.web_read_inflight.clone();
-        let pool = self.web_worker_pool.handle();
         wasm_bindgen_futures::spawn_local(async move {
             let result = web_fs::read_array_buffer(&handle).await;
             read_inflight.set(read_inflight.get().saturating_sub(1));
             match result {
                 Ok(bytes) => {
                     if quality_needed && speed_needed {
-                        // `submit` transfers the buffer, which detaches it, so
-                        // the second worker needs its own copy.
-                        let speed_bytes = bytes.slice(0);
-                        pool.submit(path.clone(), target, speed_bytes, is_raw, JobKind::Speed);
+                        pool.submit(path.clone(), target, bytes.clone(), is_raw, JobKind::Speed);
                         pool.submit(path, target, bytes, is_raw, JobKind::Preview);
                     } else if quality_needed {
                         pool.submit(path, target, bytes, is_raw, JobKind::Preview);
@@ -649,7 +679,7 @@ impl App {
     pub(crate) fn poll_web_preview(&mut self) -> bool {
         let mut landed = false;
         let pending = std::mem::take(&mut self.web_preview_pending);
-        for crate::web_worker_pool::PoolResult {
+        for crate::web_decode::PoolResult {
             kind,
             path,
             target,
@@ -712,10 +742,8 @@ impl App {
                     }
                     continue;
                 }
-                // `Full` goes to `poll_web_full`, and exports come back on
-                // `poll_exports`, so neither reaches here.
+                // `Full` goes to `poll_web_full`, so it never reaches here.
                 JobKind::Full => continue,
-                JobKind::Export => continue,
                 JobKind::Preview | JobKind::Thumb => {}
             }
             self.web_preview_inflight.remove(&key);
@@ -823,10 +851,12 @@ impl App {
         let Some(handle) = self.web_file_handles.get(&path).cloned() else {
             return false;
         };
+        let Some(pool) = self.loader.as_ref().map(|l| l.web_decoder()) else {
+            return false;
+        };
         self.web_full_inflight.insert(key);
         self.web_read_inflight.set(self.web_read_inflight.get() + 1);
         let read_inflight = self.web_read_inflight.clone();
-        let pool = self.web_worker_pool.handle();
         wasm_bindgen_futures::spawn_local(async move {
             let is_raw = crate::image_decode::is_raw_extension(&path);
             let result = web_fs::read_array_buffer(&handle).await;
@@ -849,7 +879,7 @@ impl App {
     pub(crate) fn poll_web_full(&mut self) -> bool {
         let mut landed = false;
         let pending = std::mem::take(&mut self.web_full_pending);
-        for crate::web_worker_pool::PoolResult {
+        for crate::web_decode::PoolResult {
             path,
             target,
             result,

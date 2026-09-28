@@ -19,9 +19,8 @@ rustflags = ["--cfg=web_sys_unstable_apis"]
 
 [serve]
 # Cross-origin isolation (COOP/COEP) is required for SharedArrayBuffer, which
-# the wasm port plan's M4 (Web Worker decode pool) depends on. Not used by
-# anything yet at M0, but set up now so M4 doesn't need a separate serve-config
-# change later.
+# is what the decode threads' shared wasm memory is. Without it the app cannot
+# start.
 [serve.headers]
 "Cross-Origin-Opener-Policy" = "same-origin"
 "Cross-Origin-Embedder-Policy" = "require-corp"

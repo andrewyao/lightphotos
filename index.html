@@ -13,18 +13,22 @@
   <style>
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #1e1e1e; }
   </style>
-  <!-- data-bin picks the "lightphotos" bin target out of this crate's five
-       (lightphotos, face_probe, seg_probe, decode_probe, wasm_worker) —
+  <!-- data-bin picks the "lightphotos" bin target out of this crate's four
+       (lightphotos, face_probe, seg_probe, decode_probe) —
        trunk can't infer which one to build for web on its own. -->
   <link data-trunk rel="rust" data-bin="lightphotos" data-type="main" />
-  <!-- The Web Worker pool's decode entry point (wasm port plan's M4,
-       web_worker_pool.rs). data-type="worker" builds this as a *separate*
-       wasm-bindgen target with a stable, non-content-hashed output filename
-       (wasm_worker.js / wasm_worker_bg.wasm) — web_worker_pool.rs's
-       spawn_worker() constructs that URL directly, no build-hash lookup
-       needed. This tag doesn't render anything itself; trunk just needs it
-       present to know to build and emit the worker bundle. -->
-  <link data-trunk rel="rust" data-bin="wasm_worker" data-type="worker" />
+  <script>
+    // The decode workers are wasm threads over a SharedArrayBuffer, which the
+    // browser only allows on a cross-origin isolated page. Say so rather than
+    // leave a blank page when the server did not send COOP/COEP.
+    if (!self.crossOriginIsolated) {
+      addEventListener('DOMContentLoaded', () => {
+        document.body.style.cssText = 'color:#ddd;font:15px system-ui;padding:2em';
+        document.body.textContent =
+          'LightPhotos needs a cross-origin isolated page (COOP/COEP headers) to run its decode threads.';
+      });
+    }
+  </script>
   <script>
     // Cmd/Ctrl with +, = or - zooms the photo, and Cmd/Ctrl with the wheel or
     // a trackpad pinch zooms it at the cursor. Left alone the browser reads

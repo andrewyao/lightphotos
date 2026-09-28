@@ -6,14 +6,17 @@
 //! a small full-resolution cache used once the loupe zooms in.
 //!
 //! All tiers share one priority queue (see `Queue`) and one results channel
-//! that `poll_all` drains. On wasm32 there are no OS threads, so
-//! `web/web_worker_pool.rs` decodes in Web Workers and feeds the same caches
-//! through the `*_external` methods.
+//! that `poll_all` drains. On wasm32 the workers are wasm threads over the
+//! app's shared memory. They cannot open files by path, so the browser reads
+//! each file on the main thread and submits its bytes through `WebDecoder`,
+//! and `app/web.rs` moves the results into the same caches through the
+//! `*_external` methods.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
 use std::time::SystemTime;
 
@@ -78,6 +81,13 @@ enum Job {
     Meta(PathBuf),
     /// A cached thumbnail with its photo's edits baked in, for the grid.
     Bake(Box<BakeJob>),
+    /// wasm32: a decode of bytes the main thread already read, since a
+    /// thread cannot open a File System Access handle by path.
+    #[cfg(target_arch = "wasm32")]
+    Web(Box<crate::web_decode::WebJob>),
+    /// wasm32: a batch export. Native exports run on `export.rs`'s own pool.
+    #[cfg(target_arch = "wasm32")]
+    WebExport(Box<crate::web_decode::WebExportJob>),
 }
 
 /// Everything a worker needs to bake one edited thumbnail, owned so the
@@ -136,6 +146,11 @@ enum JobResult {
     Meta(PathBuf, Option<SystemTime>),
     /// `None` when the bake panicked.
     Baked(PathBuf, u32, u64, Option<BakedThumb>),
+    #[cfg(target_arch = "wasm32")]
+    Web(Box<crate::web_decode::PoolResult>),
+    /// The export's id, its source, and the JPEG.
+    #[cfg(target_arch = "wasm32")]
+    WebExport(u64, PathBuf, Result<Vec<u8>, String>),
 }
 
 /// The shared job queue. Workers take jobs in this priority order:
@@ -171,9 +186,60 @@ struct Queue {
     thumbs: VecDeque<Job>,
     exif: VecDeque<Job>,
     bake: VecDeque<Job>,
+    /// wasm32 exports: a batch the user walks away from, so it runs after
+    /// every thumbnail and never on the reserved worker.
+    export: VecDeque<Job>,
     meta: VecDeque<Job>,
     /// Set when the `Loader` is dropped so idle workers wake and exit.
     shutdown: bool,
+}
+
+/// Takes the queue lock from the app's own thread. On wasm32 that is the
+/// browser's main thread, where a contended `Mutex::lock` would wait with
+/// `Atomics.wait` and throw, so it spins on `try_lock` instead. Workers only
+/// hold the lock to push or pop one job, so the spin is short.
+fn lock_queue(shared: &Shared) -> std::sync::LockResult<std::sync::MutexGuard<'_, Queue>> {
+    #[cfg(target_arch = "wasm32")]
+    loop {
+        match shared.queue.try_lock() {
+            Ok(q) => return Ok(q),
+            Err(std::sync::TryLockError::Poisoned(e)) => return Err(e),
+            Err(std::sync::TryLockError::WouldBlock) => std::hint::spin_loop(),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    shared.queue.lock()
+}
+
+fn push_job(shared: &Shared, job: Job) -> Enqueued {
+    let Ok(mut q) = lock_queue(shared) else {
+        return Enqueued::Poisoned;
+    };
+    let lane = match &job {
+        Job::Speed(..) => &mut q.speed,
+        Job::Preview(..) => &mut q.preview,
+        Job::Full(..) => &mut q.full,
+        Job::Thumb(..) => &mut q.thumbs,
+        Job::Exif(..) => &mut q.exif,
+        Job::Meta(..) => &mut q.meta,
+        Job::Bake(..) => &mut q.bake,
+        // A browser thumbnail is always an on-screen or Auto Tone request,
+        // and `retain_web_thumbs` prunes the ones that scroll away.
+        #[cfg(target_arch = "wasm32")]
+        Job::Web(web) => match web.kind {
+            crate::web_decode::JobKind::Speed => &mut q.speed,
+            crate::web_decode::JobKind::Preview => &mut q.preview,
+            crate::web_decode::JobKind::Full => &mut q.full,
+            crate::web_decode::JobKind::Thumb => &mut q.thumbs_viewport,
+        },
+        #[cfg(target_arch = "wasm32")]
+        Job::WebExport(..) => &mut q.export,
+    };
+    lane.push_back(job);
+    // notify_all because notify_one might wake only the reserved worker,
+    // which skips thumbnails and would leave them queued.
+    shared.ready.notify_all();
+    Enqueued::Yes
 }
 
 impl Queue {
@@ -193,11 +259,347 @@ impl Queue {
                         .pop_front()
                         .or_else(|| self.thumbs_viewport.pop_front())
                         .or_else(|| self.thumbs.pop_front())
+                        .or_else(|| self.export.pop_front())
                 }
             })
             .or_else(|| self.meta.pop_front())
     }
 }
+
+/// wasm32: submits the browser's decodes onto the loader's threads from
+/// `spawn_local` futures. Cheap to clone. Results come back through
+/// `Loader::take_web_results`, failures included, so the caller clears its
+/// in-flight markers in one place.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+pub struct WebDecoder {
+    shared: Arc<Shared>,
+    res_tx: std::sync::mpsc::Sender<JobResult>,
+    workers: usize,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl WebDecoder {
+    /// Decode `bytes` for a thumbnail. `from_cache` marks bytes read from
+    /// the disk cache rather than the source, which also skips encoding a
+    /// new cache JPEG.
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_thumb(
+        &self,
+        path: PathBuf,
+        px: u32,
+        bytes: js_sys::ArrayBuffer,
+        is_raw: bool,
+        cache_name: Option<String>,
+        generation: u64,
+        from_cache: bool,
+    ) {
+        self.push(crate::web_decode::WebJob {
+            kind: crate::web_decode::JobKind::Thumb,
+            path,
+            target: px,
+            bytes: js_sys::Uint8Array::new(&bytes).to_vec(),
+            is_raw,
+            cache_name,
+            generation: Some(generation),
+            from_cache,
+        });
+    }
+
+    /// Decode `bytes` for the Loupe: `Speed`, `Preview` or `Full`.
+    pub fn submit(
+        &self,
+        path: PathBuf,
+        target: u32,
+        bytes: js_sys::ArrayBuffer,
+        is_raw: bool,
+        kind: crate::web_decode::JobKind,
+    ) {
+        self.push(crate::web_decode::WebJob {
+            kind,
+            path,
+            target,
+            bytes: js_sys::Uint8Array::new(&bytes).to_vec(),
+            is_raw,
+            cache_name: None,
+            generation: None,
+            from_cache: false,
+        });
+    }
+
+    /// Queue an export. Its JPEG comes back through
+    /// `Loader::take_web_exports` under `job.id`.
+    pub fn submit_export(&self, job: crate::web_decode::WebExportJob) {
+        let (id, path) = (job.id, job.path.clone());
+        if self.workers == 0
+            || push_job(&self.shared, Job::WebExport(Box::new(job))) != Enqueued::Yes
+        {
+            let _ = self.res_tx.send(JobResult::WebExport(
+                id,
+                path,
+                Err("no decode thread can take the export".to_string()),
+            ));
+        }
+    }
+
+    /// How many threads can decode, so a batch can size how much it keeps
+    /// in flight.
+    pub fn threads(&self) -> usize {
+        self.workers
+    }
+
+    /// Report a job that failed before it could be queued, such as a file
+    /// read error, so it clears like any decode failure.
+    pub fn fail(
+        &self,
+        path: PathBuf,
+        target: u32,
+        kind: crate::web_decode::JobKind,
+        generation: Option<u64>,
+        error: String,
+    ) {
+        let job = crate::web_decode::WebJob {
+            kind,
+            path,
+            target,
+            bytes: Vec::new(),
+            is_raw: false,
+            cache_name: None,
+            generation,
+            from_cache: false,
+        };
+        let _ = self.res_tx.send(JobResult::Web(Box::new(job.failed(&error))));
+    }
+
+    fn push(&self, job: crate::web_decode::WebJob) {
+        let failed = (self.workers == 0).then(|| job.failed("no decode threads started"));
+        if let Some(failed) = failed {
+            let _ = self.res_tx.send(JobResult::Web(Box::new(failed)));
+            return;
+        }
+        let failed = job.failed("the decode queue is poisoned");
+        if push_job(&self.shared, Job::Web(Box::new(job))) != Enqueued::Yes {
+            let _ = self.res_tx.send(JobResult::Web(Box::new(failed)));
+        }
+    }
+}
+
+/// One decode thread and what it needs to run or replace itself.
+#[derive(Clone)]
+struct Worker {
+    index: usize,
+    dedicated_full: bool,
+    shared: Arc<Shared>,
+    res_tx: std::sync::mpsc::Sender<JobResult>,
+    thumbs: Arc<ThumbCache>,
+}
+
+impl Worker {
+    /// Starts the thread. On wasm32 it is a Web Worker over the app's shared
+    /// memory.
+    fn spawn(self) -> std::io::Result<()> {
+        #[cfg(target_arch = "wasm32")]
+        let builder = wasm_thread::Builder::new();
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = thread::Builder::new();
+        builder
+            .name(format!("decode-worker-{}", self.index))
+            .spawn(move || self.run())
+            .map(drop)
+    }
+
+    fn run(self) {
+        #[cfg(target_arch = "wasm32")]
+        panic_recovery::enter(&self);
+        // rayon cannot start threads of its own on wasm32, so its global
+        // pool falls back to one worker: whichever thread used rayon first.
+        // Every other thread's rawler decode then queues on that one thread,
+        // and the decodes run one at a time. A one-thread pool that is this
+        // thread runs this thread's rayon work inline instead.
+        #[cfg(target_arch = "wasm32")]
+        let _rayon = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .use_current_thread()
+            .build()
+            .ok();
+        loop {
+            // Hold the lock only to take one job, so a slow decode never
+            // blocks the queue.
+            let job = {
+                let mut q = match self.shared.queue.lock() {
+                    Ok(q) => q,
+                    Err(_) => return,
+                };
+                loop {
+                    if q.shutdown {
+                        return;
+                    }
+                    if let Some(j) = q.take_next(self.dedicated_full) {
+                        break j;
+                    }
+                    q = match self.shared.ready.wait(q) {
+                        Ok(q) => q,
+                        Err(_) => return,
+                    };
+                }
+            };
+            #[cfg(target_arch = "wasm32")]
+            panic_recovery::start(&job);
+            let result = run_job(job, &self.thumbs);
+            #[cfg(target_arch = "wasm32")]
+            panic_recovery::finish();
+            if self.res_tx.send(result).is_err() {
+                break;
+            }
+        }
+    }
+}
+
+/// Runs one job to its result. Decoders can panic (for example across the
+/// ImageIO FFI). Catching it still sends a result, so the path leaves the
+/// caller's in-flight set. AssertUnwindSafe is fine: the closures own no
+/// shared state. wasm32 aborts on panic instead, see `panic_recovery`.
+fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
+    match job {
+        Job::Speed(path, target) => {
+            let t0 = web_time::Instant::now();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::thumbnail::decode_at_size(
+                    &path,
+                    target,
+                    crate::thumbnail::EmbeddedPreview::UseIfPresent,
+                )
+            }))
+            .unwrap_or_else(|_| Err(format!("speed decode panicked: {}", path.display())));
+            report_decode("speed", &path, target, t0, &r);
+            JobResult::Speed(path, target, r)
+        }
+        Job::Preview(path, target) => {
+            let t0 = web_time::Instant::now();
+            // Not `image_decode::decode`: that decodes at full size and then
+            // shrinks, which is slower than a decode at the target size.
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::thumbnail::decode_at_size(
+                    &path,
+                    target,
+                    crate::thumbnail::EmbeddedPreview::Never,
+                )
+            }))
+            .unwrap_or_else(|_| Err(format!("preview decode panicked: {}", path.display())));
+            report_decode("preview", &path, target, t0, &r);
+            JobResult::Preview(path, target, r)
+        }
+        Job::Full(path, target) => {
+            let t0 = web_time::Instant::now();
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                image_decode::decode(&path, target)
+            }))
+            .unwrap_or_else(|_| Err(format!("decode panicked: {}", path.display())));
+            report_decode("full", &path, target, t0, &r);
+            JobResult::Full(path, r)
+        }
+        Job::Thumb(path, max_px) => {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                thumbs.get_or_make(&path)
+            }))
+            .unwrap_or_else(|_| Err(format!("thumbnail panicked: {}", path.display())));
+            JobResult::Thumb(path, max_px, r)
+        }
+        Job::Exif(path) => {
+            let m = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                image_decode::read_metadata(&path)
+            }))
+            .unwrap_or_default();
+            JobResult::Exif(path, m)
+        }
+        Job::Meta(path) => {
+            let t = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                image_decode::capture_time(&path)
+            }))
+            .unwrap_or(None);
+            JobResult::Meta(path, t)
+        }
+        Job::Bake(job) => {
+            let (path, px, sig) = (job.path.clone(), job.px, job.sig);
+            let baked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run())).ok();
+            JobResult::Baked(path, px, sig, baked)
+        }
+        #[cfg(target_arch = "wasm32")]
+        Job::Web(job) => JobResult::Web(Box::new(job.run())),
+        #[cfg(target_arch = "wasm32")]
+        Job::WebExport(job) => {
+            let (id, path) = (job.id, job.path.clone());
+            JobResult::WebExport(id, path, job.run())
+        }
+    }
+}
+
+/// wasm32 builds std with `panic = "abort"`, so a panicking decode kills its
+/// thread and `catch_unwind` never returns. A decoder panic still runs the
+/// panic hook first, on the dying thread, and the hook uses that moment to
+/// send the job's failure, so the caller stops waiting, and to start a
+/// replacement thread, so the pool does not shrink one panic at a time.
+#[cfg(target_arch = "wasm32")]
+mod panic_recovery {
+    use super::{Job, JobResult, Worker};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static WORKER: RefCell<Option<Worker>> = const { RefCell::new(None) };
+        static FAILURE: RefCell<Option<JobResult>> = const { RefCell::new(None) };
+    }
+
+    /// Chains onto the panic hook in place. Called once, from `main`, after
+    /// the console hook is set.
+    pub(crate) fn install() {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            previous(info);
+            on_panic();
+        }));
+    }
+
+    pub(super) fn enter(worker: &Worker) {
+        WORKER.with(|w| *w.borrow_mut() = Some(worker.clone()));
+    }
+
+    /// Records what to report if `job` never finishes.
+    pub(super) fn start(job: &Job) {
+        let failure = match job {
+            Job::Web(j) => Some(JobResult::Web(Box::new(j.failed("decoder panicked")))),
+            Job::Bake(b) => Some(JobResult::Baked(b.path.clone(), b.px, b.sig, None)),
+            Job::WebExport(e) => Some(JobResult::WebExport(
+                e.id,
+                e.path.clone(),
+                Err("export panicked".to_string()),
+            )),
+            _ => None,
+        };
+        FAILURE.with(|f| *f.borrow_mut() = failure);
+    }
+
+    pub(super) fn finish() {
+        FAILURE.with(|f| f.borrow_mut().take());
+    }
+
+    fn on_panic() {
+        let Some(worker) = WORKER.with(|w| w.borrow_mut().take()) else {
+            return;
+        };
+        if let Some(failure) = FAILURE.with(|f| f.borrow_mut().take()) {
+            let _ = worker.res_tx.send(failure);
+        }
+        let index = worker.index;
+        if let Err(e) = worker.spawn() {
+            web_sys::console::error_1(
+                &format!("[loader] could not replace decode worker {index}: {e}").into(),
+            );
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) use panic_recovery::install as install_panic_recovery;
 
 fn report_decode(
     tier: &str,
@@ -286,6 +688,15 @@ pub struct Loader {
     bake_failed: HashSet<(PathBuf, u32, u64)>,
     /// Finished bakes not yet taken by `take_baked`.
     baked: Vec<BakedThumb>,
+    /// wasm32: finished browser decodes not yet taken by `take_web_results`.
+    #[cfg(target_arch = "wasm32")]
+    web_results: Vec<crate::web_decode::PoolResult>,
+    /// wasm32: finished exports not yet taken by `take_web_exports`.
+    #[cfg(target_arch = "wasm32")]
+    web_exports: Vec<(u64, PathBuf, Result<Vec<u8>, String>)>,
+    /// Kept so `web_decoder` can hand async readers a way to submit.
+    #[cfg(target_arch = "wasm32")]
+    res_tx: std::sync::mpsc::Sender<JobResult>,
 
     /// Worker threads that actually started. Zero on wasm32, where spawning
     /// fails and the browser's Web Worker pool decodes instead.
@@ -294,10 +705,14 @@ pub struct Loader {
 
 impl Loader {
     pub fn new(max_dim: u32, limits: CacheLimits) -> Self {
-        let cores = thread::available_parallelism()
-            .map(|n| n.get())
+        #[cfg(target_arch = "wasm32")]
+        let cores = wasm_thread::available_parallelism().map(|n| n.get());
+        #[cfg(not(target_arch = "wasm32"))]
+        let cores = thread::available_parallelism().map(|n| n.get());
+        let cores = cores
             .unwrap_or(4);
-        Self::with_workers(max_dim, cores.saturating_sub(2).max(1), limits)
+        let workers = cores.saturating_sub(2).clamp(1, limits.decode_threads.max(1));
+        Self::with_workers(max_dim, workers, limits)
     }
 
     fn with_workers(max_dim: u32, workers: usize, limits: CacheLimits) -> Self {
@@ -311,135 +726,20 @@ impl Loader {
 
         let mut started = 0;
         for i in 0..workers {
-            let shared = Arc::clone(&shared);
-            let res_tx = res_tx.clone();
-            let thumbs = Arc::clone(&thumbs);
             // Worker reservation: worker 0 never takes thumbnails, so a loupe
             // decode always has a free worker even when every other worker is
             // busy with thumbnails. With only one worker, reserving it would
             // starve thumbnails, so there is no reservation.
             let dedicated_full = i == 0 && workers > 1;
-            let spawned = thread::Builder::new()
-                .name(format!("decode-worker-{i}"))
-                .spawn(move || {
-                    loop {
-                        // Hold the lock only to take one job, so a slow decode never
-                        // blocks the queue.
-                        let job = {
-                            let mut q = match shared.queue.lock() {
-                                Ok(q) => q,
-                                Err(_) => return,
-                            };
-                            loop {
-                                if q.shutdown {
-                                    return;
-                                }
-                                if let Some(j) = q.take_next(dedicated_full) {
-                                    break j;
-                                }
-                                q = match shared.ready.wait(q) {
-                                    Ok(q) => q,
-                                    Err(_) => return,
-                                };
-                            }
-                        };
-
-                        // Decoders can panic (for example across the ImageIO FFI).
-                        // Catching it keeps the worker alive and still sends a
-                        // result, so the path leaves the caller's in-flight set.
-                        // AssertUnwindSafe is fine: the closures own no shared state.
-                        let result =
-                            match job {
-                                Job::Speed(path, target) => {
-                                    let t0 = web_time::Instant::now();
-                                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                        || {
-                                            crate::thumbnail::decode_at_size(
-                                                &path,
-                                                target,
-                                                crate::thumbnail::EmbeddedPreview::UseIfPresent,
-                                            )
-                                        },
-                                    ))
-                                    .unwrap_or_else(|_| {
-                                        Err(format!("speed decode panicked: {}", path.display()))
-                                    });
-                                    report_decode("speed", &path, target, t0, &r);
-                                    JobResult::Speed(path, target, r)
-                                }
-                                Job::Preview(path, target) => {
-                                    let t0 = web_time::Instant::now();
-                                    // Not `image_decode::decode`: that decodes at full
-                                    // size and then shrinks, which is slower than a
-                                    // decode at the target size.
-                                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                        || {
-                                            crate::thumbnail::decode_at_size(
-                                                &path,
-                                                target,
-                                                crate::thumbnail::EmbeddedPreview::Never,
-                                            )
-                                        },
-                                    ))
-                                    .unwrap_or_else(|_| {
-                                        Err(format!("preview decode panicked: {}", path.display()))
-                                    });
-                                    report_decode("preview", &path, target, t0, &r);
-                                    JobResult::Preview(path, target, r)
-                                }
-                                Job::Full(path, target) => {
-                                    let t0 = web_time::Instant::now();
-                                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                        || image_decode::decode(&path, target),
-                                    ))
-                                    .unwrap_or_else(|_| {
-                                        Err(format!("decode panicked: {}", path.display()))
-                                    });
-                                    report_decode("full", &path, target, t0, &r);
-                                    JobResult::Full(path, r)
-                                }
-                                Job::Thumb(path, max_px) => {
-                                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                        || thumbs.get_or_make(&path),
-                                    ))
-                                    .unwrap_or_else(|_| {
-                                        Err(format!("thumbnail panicked: {}", path.display()))
-                                    });
-                                    JobResult::Thumb(path, max_px, r)
-                                }
-                                Job::Exif(path) => {
-                                    let m = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                        || image_decode::read_metadata(&path),
-                                    ))
-                                    .unwrap_or_default();
-                                    JobResult::Exif(path, m)
-                                }
-                                Job::Meta(path) => {
-                                    let t = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                        || image_decode::capture_time(&path),
-                                    ))
-                                    .unwrap_or(None);
-                                    JobResult::Meta(path, t)
-                                }
-                                Job::Bake(job) => {
-                                    let (path, px, sig) = (job.path.clone(), job.px, job.sig);
-                                    let baked = std::panic::catch_unwind(
-                                        std::panic::AssertUnwindSafe(|| job.run()),
-                                    )
-                                    .ok();
-                                    JobResult::Baked(path, px, sig, baked)
-                                }
-                            };
-
-                        if res_tx.send(result).is_err() {
-                            break;
-                        }
-                    }
-                });
-            // Spawning fails on wasm32, which has no OS threads. Log and carry
-            // on; queued jobs then go unserviced.
-            match spawned {
-                Ok(_) => started += 1,
+            let worker = Worker {
+                index: i,
+                dedicated_full,
+                shared: Arc::clone(&shared),
+                res_tx: res_tx.clone(),
+                thumbs: Arc::clone(&thumbs),
+            };
+            match worker.spawn() {
+                Ok(()) => started += 1,
                 Err(e) => eprintln!("[loader] could not spawn decode worker {i}: {e}"),
             }
         }
@@ -469,6 +769,12 @@ impl Loader {
             bake_inflight: HashMap::new(),
             bake_failed: HashSet::new(),
             baked: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_results: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_exports: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            res_tx,
             workers: started,
         }
     }
@@ -515,29 +821,21 @@ impl Loader {
     }
 
     /// Hands `job` to the workers. Callers mark a job in flight only on
-    /// `Yes`: with no workers (wasm32) or a poisoned queue nothing would ever
-    /// clear the marker, and the frame loop would poll forever.
+    /// `Yes`: with no workers, a path-only job on wasm32, or a poisoned queue
+    /// nothing would ever clear the marker, and the frame loop would poll
+    /// forever.
     fn enqueue(&self, job: Job) -> Enqueued {
         if self.workers == 0 {
             return Enqueued::NoWorkers;
         }
-        let Ok(mut q) = self.shared.queue.lock() else {
-            return Enqueued::Poisoned;
-        };
-        let lane = match &job {
-            Job::Speed(..) => &mut q.speed,
-            Job::Preview(..) => &mut q.preview,
-            Job::Full(..) => &mut q.full,
-            Job::Thumb(..) => &mut q.thumbs,
-            Job::Exif(..) => &mut q.exif,
-            Job::Meta(..) => &mut q.meta,
-            Job::Bake(..) => &mut q.bake,
-        };
-        lane.push_back(job);
-        // notify_all because notify_one might wake only the reserved worker,
-        // which skips thumbnails and would leave them queued.
-        self.shared.ready.notify_all();
-        Enqueued::Yes
+        // On wasm32 the threads cannot open files by path, so a path-only
+        // decode has nothing to run on. The browser reads the bytes and
+        // submits `Job::Web` through `WebDecoder` instead.
+        #[cfg(target_arch = "wasm32")]
+        if !matches!(job, Job::Bake(_) | Job::Web(_) | Job::WebExport(_)) {
+            return Enqueued::NoWorkers;
+        }
+        push_job(&self.shared, job)
     }
 
     /// Queues the `Preview` decode for a landed `Speed` result, but only if the
@@ -637,7 +935,8 @@ impl Loader {
     /// cache. Cached, failed, and already requested paths are skipped, so
     /// calling this every frame with the same list enqueues nothing.
     pub fn set_viewport_thumbs(&mut self, paths: &[PathBuf], max_px: u32) {
-        if self.workers == 0 {
+        // wasm32 threads run bakes only for now, see `enqueue`.
+        if self.workers == 0 || cfg!(target_arch = "wasm32") {
             return;
         }
         let wanted: Vec<(PathBuf, u32)> = paths
@@ -645,7 +944,7 @@ impl Loader {
             .map(|p| (p.clone(), max_px))
             .filter(|k| !self.thumb_cache.contains_key(k) && !self.thumb_failed.contains(k))
             .collect();
-        let Ok(mut q) = self.shared.queue.lock() else {
+        let Ok(mut q) = lock_queue(&self.shared) else {
             // Poison is permanent and workers exit on it, so report every
             // pending thumbnail as failed rather than loading forever.
             self.thumb_failed.extend(wanted);
@@ -749,10 +1048,55 @@ impl Loader {
     }
 
     #[allow(dead_code)]
+    /// wasm32: a handle the browser's async file reads submit decodes
+    /// through, since a `spawn_local` future cannot borrow the `Loader`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn web_decoder(&self) -> WebDecoder {
+        WebDecoder {
+            shared: Arc::clone(&self.shared),
+            res_tx: self.res_tx.clone(),
+            workers: self.workers,
+        }
+    }
+
+    /// wasm32: finished browser decodes since the last call. Filled by
+    /// `poll_all`, so call it after that.
+    #[cfg(target_arch = "wasm32")]
+    pub fn take_web_results(&mut self) -> Vec<crate::web_decode::PoolResult> {
+        std::mem::take(&mut self.web_results)
+    }
+
+    /// wasm32: finished exports since the last call, as `(id, source,
+    /// JPEG)`. Filled by `poll_all`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn take_web_exports(&mut self) -> Vec<(u64, PathBuf, Result<Vec<u8>, String>)> {
+        std::mem::take(&mut self.web_exports)
+    }
+
+    /// wasm32: drops queued browser thumbnails whose photo `keep` rejects,
+    /// for cells that scrolled away before a thread took them, and returns
+    /// their keys so the caller clears its in-flight markers. A decode
+    /// already running finishes and still lands.
+    #[cfg(target_arch = "wasm32")]
+    pub fn retain_web_thumbs(&mut self, keep: impl Fn(&Path) -> bool) -> Vec<(PathBuf, u32)> {
+        let Ok(mut q) = lock_queue(&self.shared) else {
+            return Vec::new();
+        };
+        let mut dropped = Vec::new();
+        q.thumbs_viewport.retain(|job| match job {
+            Job::Web(w) if w.kind == crate::web_decode::JobKind::Thumb && !keep(&w.path) => {
+                dropped.push((w.path.clone(), w.target));
+                false
+            }
+            _ => true,
+        });
+        dropped
+    }
+
     /// Bake `img` with these edits off the frame. The result comes back
     /// through [`take_baked`](Self::take_baked). A bake already queued for an
     /// older `sig` of the same thumbnail is replaced, so a slider drag leaves
-    /// at most one bake per thumbnail behind it. With no workers (wasm32) it
+    /// at most one bake per thumbnail behind it. If no worker thread started it
     /// bakes inline, as the frame did before there was a lane for it.
     #[allow(clippy::too_many_arguments)]
     pub fn request_bake(
@@ -803,7 +1147,7 @@ impl Loader {
     }
 
     fn drop_queued_bakes(&mut self, drop: impl Fn(&(PathBuf, u32)) -> bool) {
-        let Ok(mut q) = self.shared.queue.lock() else {
+        let Ok(mut q) = lock_queue(&self.shared) else {
             return;
         };
         q.bake.retain(|job| match job {
@@ -923,7 +1267,7 @@ impl Loader {
             // Queued image jobs will never run, so clear their markers. Jobs
             // already running keep their markers until their results drain.
             let (queued_full, queued_preview, queued_speed) = {
-                let queue = match self.shared.queue.lock() {
+                let queue = match lock_queue(&self.shared) {
                     Ok(queue) => queue,
                     Err(poisoned) => poisoned.into_inner(),
                 };
@@ -1043,6 +1387,10 @@ impl Loader {
                     metas.push((path, t));
                 }
                 JobResult::Baked(path, px, sig, baked) => self.land_bake(path, px, sig, baked),
+                #[cfg(target_arch = "wasm32")]
+                JobResult::Web(r) => self.web_results.push(*r),
+                #[cfg(target_arch = "wasm32")]
+                JobResult::WebExport(id, path, r) => self.web_exports.push((id, path, r)),
             }
         }
         (full, thumbs, metas, exifs)
@@ -1120,7 +1468,7 @@ impl Loader {
 
 impl Drop for Loader {
     fn drop(&mut self) {
-        if let Ok(mut q) = self.shared.queue.lock() {
+        if let Ok(mut q) = lock_queue(&self.shared) {
             q.shutdown = true;
         }
         self.shared.ready.notify_all();

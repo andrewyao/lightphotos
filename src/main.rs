@@ -77,8 +77,14 @@ mod web_fs;
 #[path = "web/web_thumb_cache.rs"]
 mod web_thumb_cache;
 #[cfg(target_arch = "wasm32")]
-#[path = "web/web_worker_pool.rs"]
-mod web_worker_pool;
+#[path = "web/web_decode.rs"]
+mod web_decode;
+#[cfg(target_arch = "wasm32")]
+#[path = "web/web_exports.rs"]
+mod web_exports;
+#[cfg(target_arch = "wasm32")]
+#[path = "raw/preview.rs"]
+mod raw_preview;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_rect;
 
@@ -508,10 +514,15 @@ impl ApplicationHandler<UserEvent> for App {
                 self.request_redraw();
             }
 
-            // Write each JPEG a Web Worker finished baking, then report the
-            // completed writes.
-            for r in self.web_worker_pool.poll_exports() {
-                let crate::web_worker_pool::ExportPoolResult {
+            // Write each JPEG a decode thread finished baking, then report
+            // the completed writes.
+            let baked = self
+                .loader
+                .as_mut()
+                .map(|l| l.take_web_exports())
+                .unwrap_or_default();
+            for r in self.web_exports.land(baked) {
+                let crate::web_exports::ExportResult {
                     path,
                     folder,
                     dest_dir,
@@ -684,6 +695,7 @@ fn main() {
 fn main() {
     analytics::start();
     console_error_panic_hook::set_once();
+    loader::install_panic_recovery();
     loader::start_clock();
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()

@@ -52,6 +52,25 @@ if ! grep -q 'rel="icon"' "$SITE_PUBLIC/app.html"; then
     || { echo "error: no viewport <meta> in public/app.html to put the icon links after" >&2; exit 1; }
 fi
 
+# The app runs its decode workers as wasm threads over a SharedArrayBuffer,
+# which a browser only hands to a cross-origin isolated page. Cloudflare
+# Pages reads response headers from public/_headers. Without these the app
+# page fails to load at all rather than running slower.
+if ! grep -q "Cross-Origin-Embedder-Policy" "$SITE_PUBLIC/_headers" 2>/dev/null; then
+  echo "==> Adding cross-origin isolation headers to public/_headers"
+  cat >> "$SITE_PUBLIC/_headers" <<'HEADERS'
+/app
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+/app.html
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+/app/*
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+HEADERS
+fi
+
 mkdir -p "$SITE_PUBLIC/app"
 
 echo "==> Removing stale hashed files from $SITE_PUBLIC/app"
@@ -59,7 +78,9 @@ rm -f "$SITE_PUBLIC"/app/lightphotos-*.js "$SITE_PUBLIC"/app/lightphotos-*_bg.wa
 
 echo "==> Copying build output into $SITE_PUBLIC/app"
 cp "$NEW_JS" "$NEW_WASM" "$SITE_PUBLIC/app/"
-cp "$DIST/wasm_worker.js" "$DIST/wasm_worker_bg.wasm" "$DIST/NotoSansSC-Regular.otf" "$SITE_PUBLIC/app/"
+cp "$DIST/NotoSansSC-Regular.otf" "$SITE_PUBLIC/app/"
+# The Web Worker pool's bundle is gone; decodes run as wasm threads now.
+rm -f "$SITE_PUBLIC/app/wasm_worker.js" "$SITE_PUBLIC/app/wasm_worker_bg.wasm"
 # wasm-bindgen `inline_js` blocks land in snippets/, and the JS glue imports
 # them as modules. Missing, they 404 and the whole app fails to load.
 rm -rf "$SITE_PUBLIC/app/snippets"

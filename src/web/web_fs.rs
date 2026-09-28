@@ -36,6 +36,13 @@ pub struct PickedFolder {
 /// A cancelled picker and a listing failure both return `Err`.
 pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
     let window = web_sys::window().ok_or("no window")?;
+    // tools/web-bench hands over an OPFS folder here, since an automated
+    // browser cannot drive the native picker.
+    if let Ok(root) = js_sys::Reflect::get(&window, &"__lpTestRoot".into()) {
+        if !root.is_undefined() {
+            return list_root(root.unchecked_into()).await;
+        }
+    }
     let opts = DirectoryPickerOptions::new();
     opts.set_mode(FileSystemPermissionMode::Readwrite);
     let handle: FileSystemDirectoryHandle = JsFuture::from(
@@ -253,4 +260,23 @@ fn js_error_string(e: &JsValue) -> String {
         .ok()
         .and_then(|v| v.as_string())
         .unwrap_or_else(|| format!("{e:?}"))
+}
+
+/// The URL directory the app's own wasm was served from, with no trailing
+/// slash. The site serves the app under `/app/`, so the origin alone is
+/// wrong. It comes from the `<link rel="modulepreload">` trunk emits, and
+/// falls back to the origin.
+pub(crate) fn asset_dir() -> String {
+    let Some(window) = web_sys::window() else {
+        return String::new();
+    };
+    let origin = window.location().origin().unwrap_or_default();
+    let href = window
+        .document()
+        .and_then(|d| d.query_selector("link[rel=modulepreload]").ok().flatten())
+        .and_then(|el| el.get_attribute("href"));
+    match href.as_deref().and_then(|h| h.rfind('/').map(|i| &h[..i])) {
+        Some(dir) => format!("{origin}{dir}"),
+        None => origin,
+    }
 }

@@ -222,7 +222,7 @@ pub(crate) fn fetch_full_cjk(
     use wasm_bindgen_futures::JsFuture;
 
     wasm_bindgen_futures::spawn_local(async move {
-        let url = format!("{}/{FULL_CJK_FILE}", crate::web_worker_pool::asset_dir());
+        let url = format!("{}/{FULL_CJK_FILE}", crate::web_fs::asset_dir());
         let bytes = async {
             let window = web_sys::window().ok_or("no window")?;
             let response: web_sys::Response = JsFuture::from(window.fetch_with_str(&url))

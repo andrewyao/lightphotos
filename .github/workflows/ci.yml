@@ -180,19 +180,15 @@ jobs:
     name: wasm build
     runs-on: ubuntu-latest
     env:
-      # Trunk.toml sets this in its `rustflags` key, but that key does not reach
-      # cargo in trunk 0.21.14, and without the cfg the wgpu WebGPU and File
-      # System Access bindings are missing. See CLAUDE.md's wasm section.
-      RUSTFLAGS: --cfg=web_sys_unstable_apis
       # Matched to the version the repo's notes were written against, so a trunk
       # release cannot change the build's behavior without an edit here.
       TRUNK_VERSION: 0.21.14
     steps:
       - uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      # No toolchain action: build-web.sh installs the dated nightly that
+      # scripts/web-env.sh pins, with rust-src and the wasm target, through the
+      # runner's own rustup.
 
       - name: Cache vendored rawler
         uses: actions/cache@v4
@@ -225,4 +221,4 @@ jobs:
       # Always --release. A debug wasm build is 10-30x slower at RAW decode and
       # produces a ~10x larger bg.wasm, so it is not the artifact worth gating.
       - name: Build
-        run: trunk build --release --config Trunk.toml
+        run: ./scripts/build-web.sh

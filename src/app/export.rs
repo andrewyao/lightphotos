@@ -317,8 +317,8 @@ impl App {
         false
     }
 
-    /// Web export. Runs the native `bake_jpeg` pipeline on the Web Worker pool
-    /// and writes each JPEG through the File System Access API. Reading sources
+    /// Web export. Runs the native `bake_jpeg` pipeline on the loader's decode
+    /// threads and writes each JPEG through the File System Access API. Reading sources
     /// and listing `Exports/` are async, so the batch setup runs in `spawn_local`.
     #[cfg(target_arch = "wasm32")]
     pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
@@ -333,19 +333,18 @@ impl App {
         let dest_dir = folder.join(crate::export::EXPORTS_DIR);
         let output_folder = folder_handle.clone();
 
-        // Workers receive each photo's edits as JSON.
-        let jobs: Vec<(PathBuf, bool, String, String, u8)> = paths
+        let Some(decoder) = self.loader.as_ref().map(|l| l.web_decoder()) else {
+            return;
+        };
+        let jobs: Vec<(PathBuf, bool, crate::develop::Adjustments, Vec<crate::develop::TouchUp>, u8)> = paths
             .iter()
             .map(|src| {
-                let adj = self.edits.get(src).copied().unwrap_or_default();
-                let touchups = self.touchups.get(src).cloned().unwrap_or_default();
-                let rot = self.rotations.get(src).copied().unwrap_or(0);
                 (
                     src.clone(),
                     crate::image_decode::is_raw_extension(src),
-                    serde_json::to_string(&adj).unwrap_or_default(),
-                    serde_json::to_string(&touchups).unwrap_or_default(),
-                    rot,
+                    self.edits.get(src).copied().unwrap_or_default(),
+                    self.touchups.get(src).cloned().unwrap_or_default(),
+                    self.rotations.get(src).copied().unwrap_or(0),
                 )
             })
             .collect();
@@ -365,14 +364,14 @@ impl App {
         self.set_status(StatusKind::Progress, (crate::i18n::t().exporting)(0, total));
         self.request_redraw();
 
-        let pool = self.web_worker_pool.handle();
+        let pool = self.web_exports.clone();
         let fs = crate::web_export_fs::WebFs::new(folder_handle, self.web_file_handles.clone());
         wasm_bindgen_futures::spawn_local(async move {
             let existing = match fs.existing_export_names().await {
                 Ok(existing) => existing,
                 Err(e) => {
                     for (src, ..) in jobs {
-                        pool.fail_export(
+                        pool.fail(
                             src,
                             output_folder.clone(),
                             dest_dir.clone(),
@@ -384,36 +383,31 @@ impl App {
                 }
             };
             let mut taken: HashSet<String> = HashSet::new();
-            for (src, is_raw, adj_json, touchups_json, rot) in jobs {
-                // Capacity counts ready workers and can drop to zero while
-                // workers restart. Still allow one job in flight then, so the
-                // pool either runs it later or fails it and the batch finishes.
-                loop {
-                    let in_flight = pool.export_in_flight();
-                    let capacity = pool.export_capacity();
-                    if in_flight == 0 || (capacity > 0 && in_flight < capacity) {
-                        break;
-                    }
+            for (src, is_raw, adj, touchups, rot) in jobs {
+                // Each export in flight holds its source's bytes and a
+                // full-resolution decode in the one shared heap.
+                while pool.in_flight() >= pool.capacity(&decoder) {
                     Self::wait_for_export_capacity().await;
                 }
                 let filename = crate::paths::jpg_export_name(&src, &existing, &taken);
                 taken.insert(filename.clone());
                 match fs.read_source_array_buffer(&src).await {
-                    Ok(bytes) => pool.submit_export(
-                        src,
-                        output_folder.clone(),
-                        dest_dir.clone(),
-                        filename,
-                        bytes,
-                        is_raw,
-                        adj_json,
-                        touchups_json,
-                        rot,
-                        max_px,
+                    Ok(bytes) => pool.submit(
+                        &decoder,
+                        crate::web_exports::Export {
+                            path: src,
+                            folder: output_folder.clone(),
+                            dest_dir: dest_dir.clone(),
+                            filename,
+                            bytes,
+                            is_raw,
+                            adj,
+                            touchups,
+                            rot,
+                            max_px,
+                        },
                     ),
-                    Err(e) => {
-                        pool.fail_export(src, output_folder.clone(), dest_dir.clone(), filename, e)
-                    }
+                    Err(e) => pool.fail(src, output_folder.clone(), dest_dir.clone(), filename, e),
                 }
             }
         });

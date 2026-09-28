@@ -20,6 +20,10 @@ pub struct CacheLimits {
     /// 45 MP). They only happen on zoom, so extra entries do not help
     /// navigation.
     pub fulls: usize,
+    /// Most decode threads the loader starts, below its default of every
+    /// core but two. On wasm32 every thread's decode scratch comes out of one
+    /// shared heap of at most 4 GB, which never shrinks.
+    pub decode_threads: usize,
 }
 
 impl CacheLimits {
@@ -28,6 +32,7 @@ impl CacheLimits {
         thumbs: 256,
         previews: 8,
         fulls: 3,
+        decode_threads: usize::MAX,
     };
 
     #[cfg(target_os = "windows")]
@@ -35,6 +40,7 @@ impl CacheLimits {
         thumbs: 256,
         previews: 8,
         fulls: 3,
+        decode_threads: usize::MAX,
     };
 
     #[cfg(all(
@@ -46,6 +52,7 @@ impl CacheLimits {
         thumbs: 256,
         previews: 8,
         fulls: 3,
+        decode_threads: usize::MAX,
     };
 
     /// The same as native today, and the first arm to lower: a 32-bit address
@@ -56,6 +63,7 @@ impl CacheLimits {
         thumbs: 256,
         previews: 8,
         fulls: 3,
+        decode_threads: 6,
     };
 
     /// This target's defaults, with any `LIGHTPHOTOS_CACHE_*` override applied.
@@ -76,6 +84,7 @@ impl CacheLimits {
             thumbs: pick("LIGHTPHOTOS_CACHE_THUMBS", self.thumbs),
             previews: pick("LIGHTPHOTOS_CACHE_PREVIEWS", self.previews),
             fulls: pick("LIGHTPHOTOS_CACHE_FULLS", self.fulls),
+            decode_threads: pick("LIGHTPHOTOS_DECODE_THREADS", self.decode_threads),
         }
     }
 }

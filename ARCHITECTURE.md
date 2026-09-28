@@ -35,13 +35,15 @@ trees. Two independent `cfg` axes combine into three realized cases
 
 What that means in practice:
 
-- "Non-mac" in a doc comment usually means "Linux, Windows, *and* wasm32
-  before its own worker pool takes over."
+- "Non-mac" in a doc comment usually means "Linux, Windows, *and* wasm32."
 - wasm32 reuses the non-mac decode *functions* (`raw/nonmac_decode.rs`,
-  `raw/preview.rs`) but drives them from Web Workers instead of native
-  threads.
-- wasm32 feeds results into `loader.rs`'s caches through a side door
-  (`insert_*_external`) instead of through its normal job queue.
+  `raw/preview.rs`) and runs them on `loader.rs`'s own worker threads, which
+  are wasm threads over one shared memory there. A thread cannot open a File
+  System Access handle, so the main thread reads each file and queues its
+  bytes (`Job::Web`, through `WebDecoder`).
+- wasm32 feeds those results into `loader.rs`'s caches through a side door
+  (`insert_*_external`), because `app/web.rs` owns their retries and disk
+  cache.
 
 ---
 
@@ -72,7 +74,7 @@ flowchart TD
 
     subgraph web["wasm32 (browser)"]
         direction TB
-        wt["request_web_preview, app/web.rs\n-> JobKind::Speed"] --> wtd["wasm_worker.rs -> raw_preview\nquarter-res Fast tier, sRGB8 output\n(shown first — this is the Loupe's placeholder)"]
+        wt["request_web_preview, app/web.rs\n-> JobKind::Speed"] --> wtd["web_decode.rs on a loader thread -> raw_preview\nquarter-res Fast tier, sRGB8 output\n(shown first — this is the Loupe's placeholder)"]
         wtd --> wp["JobKind::Preview\nraw_preview::decode_raw_quality_from_bytes\nfull PPG demosaic, LinearF16 output"]
         wp -.->|user zooms past the preview's resolution| wf["request_web_full, app/web.rs\n-> JobKind::Full, full-resolution decode"]
     end
@@ -145,7 +147,7 @@ flowchart TD
         nativeq --> othct["ThumbCache::get_or_make\n-> thumbnail::decode_at_size(EmbeddedPreview::UseIfPresent)\n(kamadak-exif embedded preview,\nfallback: full image_decode::decode)"]
     end
     subgraph web2["wasm32"]
-        webq --> webct["wasm_worker.rs:\nembedded_preview_from_bytes, then\nrawler_full_image_from_bytes, then\nraw_preview (Fast tier)"]
+        webq --> webct["web_decode.rs on a loader thread:\nembedded_preview_from_bytes, then\nrawler_full_image_from_bytes, then\nraw_preview (Fast tier)"]
     end
 
     mact --> disk["on-disk JPEG cache\n<photo dir>/.lightphotos/<photo>.<key>.thumb.jpg\nThumbCache (native) / web_thumb_cache.rs (wasm32)"]
@@ -197,7 +199,7 @@ Triggered by: File → Export, for one photo or a batch.
 ```mermaid
 flowchart TD
     exportbtn["User exports one or more photos"]
-    exportbtn --> submit["app/export.rs submits one ExportJob per photo\n(native; wasm32 has its own start_export that bakes on the\nWeb Worker pool and writes via File System Access)"]
+    exportbtn --> submit["app/export.rs submits one ExportJob per photo\n(native; wasm32 has its own start_export that bakes on the\nloader's threads and writes via File System Access)"]
     submit --> pool["Exporter's worker pool, export.rs\n(same shape as loader.rs's pool)"]
     pool --> decode["image_decode::decode(src, u32::MAX)\nfull-resolution decode\nImageIO on macOS, image/rawler on Linux/Windows"]
     decode --> bake["image_ops::bake_edited\ncrop -> develop::apply_linear (tone) -> rotate"]
@@ -306,9 +308,9 @@ happens on wasm32, and `App` then holds no pool to submit to.
 | `renderer.rs` | GPU upload + draw of the currently-shown image | all (wgpu → Metal / Vulkan-GL / WebGPU) |
 | `develop.rs` | The tone pipeline (`apply_linear`), shared by the GPU shader and the CPU histogram/bake path | all |
 | `image_ops.rs` | Pure pixel math (crop/rotate/bake) shared by export and thumbnail baking | all |
-| `export.rs` | Worker pool that decodes, bakes, and encodes a full-resolution JPEG; `bake_jpeg` and the `ExportFs` seam are shared | native pool is native-only, wasm32 runs the same bake on the Web Worker pool |
-| `web/wasm_worker.rs` | The Web Worker binary that actually decodes bytes off the main thread | wasm32 |
-| `web/web_worker_pool.rs` | Main-thread side of the Web Worker pool: job dispatch + result routing | wasm32 |
+| `export.rs` | Worker pool that decodes, bakes, and encodes a full-resolution JPEG; `bake_jpeg` and the `ExportFs` seam are shared | native pool is native-only, wasm32 runs the same bake on the loader's threads |
+| `web/web_decode.rs` | Decode and export jobs over a file's bytes, run on the loader's threads | wasm32 |
+| `web/web_exports.rs` | Main-thread side of a batch export: each JPEG's destination folder handle, by job id | wasm32 |
 | `web/web_canvas.rs` | Attaches winit's canvas into the DOM at the right backing-store resolution | wasm32 |
 | `web/web_fs.rs` | File System Access folder picking/listing/byte reads | wasm32 |
 | `web/web_catalog_fs.rs` | File System Access counterpart of `catalog.rs`'s sidecar I/O | wasm32 |
