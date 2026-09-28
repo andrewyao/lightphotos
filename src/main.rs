@@ -13,6 +13,7 @@ mod analytics;
 mod app;
 mod autotone;
 mod burst;
+mod cache_limits;
 mod catalog;
 #[cfg(target_os = "macos")]
 mod coregraphics;
@@ -105,7 +106,7 @@ fn finish_window_setup(
     renderer: Renderer,
     size: winit::dpi::PhysicalSize<u32>,
 ) {
-    let loader = Loader::new(renderer.max_dim);
+    let loader = Loader::new(renderer.max_dim, cache_limits::CacheLimits::from_env());
 
     let egui_state = egui_winit::State::new(
         app.egui_ctx.clone(),
@@ -435,8 +436,11 @@ impl ApplicationHandler<UserEvent> for App {
 
         if let Some(loader) = &mut self.loader {
             let (full, thumbs, metas, exifs) = loader.poll_all();
-            let any =
-                !full.is_empty() || !thumbs.is_empty() || !metas.is_empty() || !exifs.is_empty();
+            let any = !full.is_empty()
+                || !thumbs.is_empty()
+                || !metas.is_empty()
+                || !exifs.is_empty()
+                || loader.has_baked();
             if !metas.is_empty() {
                 self.on_capture_times(metas);
             }
@@ -548,6 +552,8 @@ impl ApplicationHandler<UserEvent> for App {
         // poll interval below.
         let thumbs_pending = self.request_burst_thumbs() | thumbs_pending;
         let thumbs_pending = self.request_dup_thumbs() | thumbs_pending;
+        let thumbs_pending =
+            self.loader.as_ref().is_some_and(|l| l.bakes_pending()) || thumbs_pending;
 
         self.poll_feature_prints();
         let vision_pending = self.request_feature_prints();

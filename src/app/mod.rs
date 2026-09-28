@@ -293,6 +293,9 @@ pub(crate) struct ThumbTexture {
     pub id: egui::TextureId,
     pub width: u32,
     pub height: u32,
+    /// The edit signature baked into it. A cell keeps drawing a texture
+    /// whose edit is out of date until the new bake replaces it.
+    pub sig: u64,
 }
 
 /// A finished background sidecar load: its directory, the navigation token it
@@ -578,13 +581,14 @@ pub(crate) struct App {
     grid_scroll_reset: bool,
     /// The filmstrip's equivalent of `grid_range`.
     strip_range: (usize, usize),
-    /// Thumbnail textures keyed by (path, THUMB_PX, edit signature). An edit
-    /// changes the signature, so the stale texture drops and re-bakes. Pruned
-    /// to the working set each frame.
+    /// Thumbnail textures keyed by (path, THUMB_PX), each carrying the edit
+    /// signature baked into it. An edit changes the signature, which queues a
+    /// re-bake; the stale texture stays on screen until the bake replaces it.
+    /// Pruned to the working set each frame.
     ///
     /// The renderer owns the GPU side, so dropping an entry here is not enough;
     /// `sync_thumb_textures` hands every pruned id back to `Renderer::free_thumb`.
-    thumb_tex: HashMap<(PathBuf, u32, u64), ThumbTexture>,
+    thumb_tex: HashMap<(PathBuf, u32), ThumbTexture>,
 
     /// The folder's derived signals as they were left last session. Seeded
     /// into the four maps below when a folder opens, and written back as new

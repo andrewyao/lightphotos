@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Headless driver for the paths a culling session actually waits on.
-//! Listing a folder gates the rest and always runs. Eight phases sit behind
+//! Listing a folder gates the rest and always runs. Ten phases sit behind
 //! it. The grid and the filmstrip both fill thumbnails and differ only in
 //! the shape of their working set, and the scroll phase is the grid's working
 //! set on the move, which is where a stale backlog shows. Opening a photo splits into the first
@@ -73,6 +73,9 @@ struct Run {
     /// Delete this folder's cached thumbnails first, so the grid phase
     /// measures a first visit rather than a revisit.
     cold: bool,
+    /// The loader's cache sizes, `LIGHTPHOTOS_CACHE_*` overrides included, so
+    /// a tuning run profiles the limits it names.
+    limits: crate::cache_limits::CacheLimits,
 }
 
 impl Run {
@@ -95,6 +98,7 @@ impl Run {
             exports: count("LIGHTPHOTOS_PROFILE_EXPORTS", 5),
             vision: count("LIGHTPHOTOS_PROFILE_VISION", 8),
             cold: std::env::var("LIGHTPHOTOS_PROFILE_COLD").as_deref() == Ok("1"),
+            limits: crate::cache_limits::CacheLimits::from_env(),
         }
     }
 }
@@ -127,6 +131,11 @@ const PHASES: &[Phase] = &[
         label: "path/scroll_grid",
         key: "scroll",
         run: Run::scroll_grid,
+    },
+    Phase {
+        label: "path/ui_frame",
+        key: "frame",
+        run: Run::ui_frame,
     },
     Phase {
         label: "path/open_photo",
@@ -204,6 +213,7 @@ pub fn run_from_args() -> bool {
 
 impl Run {
     fn drive(&self) {
+        eprintln!("[profile] {:?}", self.limits);
         if self.cold {
             let removed = drop_thumb_cache(&self.dir);
             let signals = drop_signal_cache(&self.dir);
@@ -328,7 +338,7 @@ impl Run {
     /// `App::analyze_thumb`.
     fn auto_tone(&self, photos: &[PathBuf]) {
         let wanted: Vec<PathBuf> = photos.iter().take(self.thumbs).cloned().collect();
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, self.limits);
         loader.set_thumb_working_set_size(wanted.len());
         for path in &wanted {
             loader.request_thumb(path.clone(), THUMB_PX);
@@ -351,6 +361,118 @@ impl Run {
             "[profile] auto tone analysed {analysed} in {:?}",
             t0.elapsed()
         );
+    }
+
+    /// What a grid frame pays on the UI thread once thumbnails have landed,
+    /// which the decode pool cannot absorb. `App::sync_thumb_textures` bakes
+    /// an edited photo's thumbnail inline before uploading it, so a viewport
+    /// of edited photos arriving together is one frame's bake. The signal
+    /// cache's periodic write lists the folder and serializes every entry on
+    /// the same thread, after `on_capture_times` has stat'ed each photo.
+    fn ui_frame(&self, photos: &[PathBuf]) {
+        let wanted: Vec<PathBuf> = photos.iter().take(self.thumbs).cloned().collect();
+        let mut loader = Loader::new(16384, self.limits);
+        loader.set_thumb_working_set_size(wanted.len());
+        for path in &wanted {
+            loader.request_thumb(path.clone(), THUMB_PX);
+        }
+        wait_for_thumbs(&mut loader, &wanted);
+
+        let adj = crate::develop::Adjustments {
+            exposure: 0.5,
+            contrast: 20.0,
+            ..Default::default()
+        };
+        let mut bakes: Vec<Duration> = Vec::new();
+        for path in &wanted {
+            let Some(img) = loader.get_thumb(path, THUMB_PX) else {
+                continue;
+            };
+            let t0 = Instant::now();
+            let baked = crate::image_ops::bake_edited(&img, &adj, &[], 0);
+            bakes.push(t0.elapsed());
+            std::hint::black_box(baked);
+        }
+        let viewport = self.scroll_rows * self.scroll_cols;
+        let mut sorted = bakes.clone();
+        sorted.sort();
+        if let Some(max) = sorted.last() {
+            let worst_viewport = bakes
+                .windows(viewport.min(bakes.len()).max(1))
+                .map(|w| w.iter().sum::<Duration>())
+                .max()
+                .unwrap_or_default();
+            eprintln!(
+                "[profile] bake_edited per {THUMB_PX}px thumb: p50 {:?}, max {max:?}; \
+                 worst {viewport}-cell viewport landing in one frame: {worst_viewport:?}",
+                sorted[sorted.len() / 2],
+            );
+        }
+
+        // The same viewport the way `sync_thumb_textures` hands it over now:
+        // the frame only queues each bake and later takes the results, and
+        // the decode workers do the baking.
+        let cells: Vec<&PathBuf> = wanted.iter().take(viewport).collect();
+        let mut frame = Duration::ZERO;
+        let t0 = Instant::now();
+        for (sig, path) in cells.iter().enumerate() {
+            let Some(img) = loader.get_thumb(path, THUMB_PX) else {
+                continue;
+            };
+            let t = Instant::now();
+            loader.request_bake(path, THUMB_PX, sig as u64 + 1, img, adj, &[], 0);
+            frame += t.elapsed();
+        }
+        let mut landed = 0usize;
+        while loader.bakes_pending() {
+            loader.poll_all();
+            let t = Instant::now();
+            landed += loader.take_baked().len();
+            frame += t.elapsed();
+            std::thread::yield_now();
+        }
+        eprintln!(
+            "[profile] worker bakes for a {}-cell viewport: UI thread {frame:?} in total, \
+             all {landed} landed after {:?}",
+            cells.len(),
+            t0.elapsed(),
+        );
+
+        // A scratch folder of empty files with the same names, so the sweep
+        // lists as many entries as the real folder and the made-up capture
+        // times never reach the real folder's signal cache.
+        let scratch =
+            std::env::temp_dir().join(format!("lightphotos-profile-signals-{}", std::process::id()));
+        if let Err(e) = std::fs::create_dir_all(&scratch) {
+            eprintln!("[profile] no signal scratch dir at {}: {e}", scratch.display());
+            return;
+        }
+        let stand_ins: Vec<PathBuf> = photos
+            .iter()
+            .filter_map(|p| p.file_name())
+            .map(|name| scratch.join(name))
+            .filter(|p| std::fs::write(p, []).is_ok())
+            .collect();
+        {
+            let mut cache = crate::signalcache::SignalCache::load(&scratch);
+            let now = std::time::SystemTime::now();
+            let t0 = Instant::now();
+            for p in &stand_ins {
+                cache.record(p, crate::signalcache::Signal::Capture(Some(now)));
+            }
+            let recorded = t0.elapsed();
+            let t0 = Instant::now();
+            cache.flush_blocking(Duration::from_secs(30));
+            eprintln!(
+                "[profile] signal cache over {} photos: record {recorded:?} (a stat each), \
+                 flush {:?}; queue_write in the report is the UI-thread share",
+                stand_ins.len(),
+                t0.elapsed(),
+            );
+        }
+        if let Err(e) = std::fs::remove_dir_all(&scratch) {
+            eprintln!("[profile] left {} behind: {e}", scratch.display());
+        }
     }
 
     /// The batch a user starts and walks away from, and the only phase that
@@ -426,7 +548,7 @@ impl Run {
     /// the decode pool to answer.
     fn thumbnail_grid(&self, photos: &[PathBuf]) {
         let wanted: Vec<PathBuf> = photos.iter().take(self.thumbs).cloned().collect();
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, self.limits);
         loader.set_thumb_working_set_size(wanted.len());
 
         let t0 = Instant::now();
@@ -467,7 +589,7 @@ impl Run {
         if steps == 0 {
             return;
         }
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, self.limits);
         let mut fetched: HashSet<PathBuf> = HashSet::new();
 
         let t0 = Instant::now();
@@ -511,7 +633,7 @@ impl Run {
         if len == 0 {
             return;
         }
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, self.limits);
         let mut fetched: HashSet<PathBuf> = HashSet::new();
 
         let t0 = Instant::now();
@@ -560,12 +682,12 @@ impl Run {
 
     /// The tier above the preview, which the app reaches only when the user
     /// zooms past the preview's own pixels (`App::ensure_full_for_zoom`).
-    /// `Loader::new(16384)` sets `full_target` to the renderer's `max_dim`,
+    /// `Loader::new(16384, _)` sets `full_target` to the renderer's `max_dim`,
     /// so nothing here downscales and the decode is the whole frame. That
     /// makes it the phase `hotpath-alloc` says the most about, and the reason
     /// `LIGHTPHOTOS_PROFILE_FULLS` defaults to five rather than a screenful.
     fn decode_full(&self, photos: &[PathBuf]) {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, self.limits);
         for path in photos.iter().take(self.fulls) {
             let t0 = Instant::now();
             loader.request_full(path.clone());
@@ -601,7 +723,7 @@ impl Run {
     /// with the enclosing phase would count the same waits twice and wreck
     /// the average and the percentiles.
     fn open_photos(&self, photos: &[PathBuf]) {
-        let mut loader = Loader::new(16384);
+        let mut loader = Loader::new(16384, self.limits);
         for path in photos.iter().take(self.opens) {
             let t0 = Instant::now();
             loader.request_preview(path.clone(), self.preview_px);

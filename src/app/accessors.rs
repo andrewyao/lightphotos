@@ -404,8 +404,7 @@ impl App {
         &self,
         path: &Path,
     ) -> Option<(egui::TextureId, u32, u32)> {
-        let key = (path.to_path_buf(), THUMB_PX, self.edit_sig_for(path));
-        let tex = self.thumb_tex.get(&key)?;
+        let tex = self.thumb_tex.get(&(path.to_path_buf(), THUMB_PX))?;
         Some((tex.id, tex.width, tex.height))
     }
 }
@@ -434,7 +433,7 @@ mod tests {
         }
         let mut app = App::new(None);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        let mut loader = crate::loader::Loader::new(16384);
+        let mut loader = crate::loader::Loader::new(16384, crate::cache_limits::CacheLimits::PLATFORM);
         loader.mark_thumb_failed_external(dir.join("b.jpg"), THUMB_PX);
         app.loader = Some(loader);
 
