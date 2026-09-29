@@ -82,30 +82,36 @@ pub(super) fn draw_export_panel(
             }
         });
 
-        form.section(ui, t.export_output, |ui| {
-            form.row(ui, t.export_size, |ui| {
-                let size_label = |size: ExportSize| match size {
-                    ExportSize::Full => t.export_size_full.to_string(),
-                    ExportSize::LongEdge(px) => (t.export_size_long_edge)(px),
-                };
-                egui::ComboBox::from_id_salt("export_size")
-                    .selected_text(size_label(settings.size))
-                    .width(ui.available_width())
-                    .show_ui(ui, |ui| {
-                        for size in ExportSize::CHOICES {
-                            if ui
-                                .selectable_label(settings.size == size, size_label(size))
-                                .clicked()
-                            {
-                                next = Some(ExportSettings {
-                                    size,
-                                    ..settings.clone()
-                                });
+        // The browser can't reach an Immich server. The notice above says so,
+        // and there is nothing left to set or explain below it.
+        let immich_unavailable =
+            cfg!(target_arch = "wasm32") && settings.target == ExportTarget::Immich;
+        if !immich_unavailable {
+            form.section(ui, t.export_output, |ui| {
+                form.row(ui, t.export_size, |ui| {
+                    let size_label = |size: ExportSize| match size {
+                        ExportSize::Full => t.export_size_full.to_string(),
+                        ExportSize::LongEdge(px) => (t.export_size_long_edge)(px),
+                    };
+                    egui::ComboBox::from_id_salt("export_size")
+                        .selected_text(size_label(settings.size))
+                        .width(ui.available_width())
+                        .show_ui(ui, |ui| {
+                            for size in ExportSize::CHOICES {
+                                if ui
+                                    .selectable_label(settings.size == size, size_label(size))
+                                    .clicked()
+                                {
+                                    next = Some(ExportSettings {
+                                        size,
+                                        ..settings.clone()
+                                    });
+                                }
                             }
-                        }
-                    });
+                        });
+                });
             });
-        });
+        }
 
         ui.add_space(14.0);
         let blocker = app.export_blocker();
@@ -120,7 +126,7 @@ pub(super) fn draw_export_panel(
                 out.actions.push(UiAction::ToggleExportForm);
             }
         });
-        if let Some(why) = blocker {
+        if let Some(why) = blocker.filter(|_| !immich_unavailable) {
             ui.add_space(4.0);
             ui.label(egui::RichText::new(why).small().weak());
         }
@@ -161,12 +167,8 @@ fn folder_rows(
     #[cfg(target_arch = "wasm32")]
     let _ = (choice, settings, next, actions);
     if let Some(dir) = app.export_folder() {
-        ui.label(
-            egui::RichText::new(dir.display().to_string())
-                .small()
-                .weak(),
-        )
-        .on_hover_text(dir.display().to_string());
+        ui.label(egui::RichText::new(dir.display().to_string()).weak())
+            .on_hover_text(dir.display().to_string());
     }
 }
 
