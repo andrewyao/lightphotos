@@ -20,6 +20,7 @@ const FOOTER_GAP: f32 = 20.0;
 const BUTTON_MIN_WIDTH: f32 = 84.0;
 const BUTTON_PAD: egui::Vec2 = egui::vec2(12.0, 5.0);
 const BUTTON_GAP: f32 = 8.0;
+const SEGMENT_ROW_GAP: f32 = 4.0;
 const DIALOG_MARGIN: f32 = 20.0;
 
 /// Confirms, prompts and Settings.
@@ -237,9 +238,11 @@ pub(super) fn button(ui: &mut egui::Ui, b: &Button) -> egui::Response {
     .inner
 }
 
-/// A short single choice as one bar of equal segments filling the row, each
-/// `(value, label, tooltip)`, with `current` filled. Returns the segment
-/// clicked, if it isn't `current` already.
+/// A single choice as a bar of equal segments filling the row, each
+/// `(value, label, tooltip)`, with `current` filled. Segments too narrow for
+/// the widest label wrap onto more rows of the same columns, so five aspect ratios still take
+/// one click in a narrow panel. Returns the segment clicked, `current`
+/// included, so a caller can treat a second click as a request of its own.
 pub(super) fn segmented<T: Copy + PartialEq>(
     ui: &mut egui::Ui,
     choices: &[(T, &str, Option<&str>)],
@@ -250,49 +253,89 @@ pub(super) fn segmented<T: Copy + PartialEq>(
     // way it does with a combo box or a text field.
     let height = ui.spacing().interact_size.y;
     let width = ui.available_width();
-    let (row, bar) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    let segment_w = width / choices.len() as f32;
+    let widest = choices
+        .iter()
+        .map(|(_, label, _)| {
+            ui.fonts_mut(|f| {
+                f.layout_no_wrap(label.to_string(), font.clone(), egui::Color32::WHITE)
+                    .size()
+                    .x
+            })
+        })
+        .fold(0.0, f32::max);
+    let min_w = widest + 2.0 * font_size::px(ui.style(), BUTTON_PAD.x);
+    let per_row = row_sizes(choices.len(), width, min_w);
+    let gap = font_size::px(ui.style(), SEGMENT_ROW_GAP);
+    let total_h = per_row.len() as f32 * height + (per_row.len() - 1) as f32 * gap;
+    let (bar, bar_resp) =
+        ui.allocate_exact_size(egui::vec2(width, total_h), egui::Sense::hover());
     let colors = theme::colors(ui.ctx());
     let visuals = ui.visuals().clone();
     let radius = visuals.widgets.inactive.corner_radius;
-    ui.painter()
-        .rect_filled(row, radius, visuals.widgets.inactive.weak_bg_fill);
     let mut picked = None;
-    for (i, &(value, label, tip)) in choices.iter().enumerate() {
-        let rect = egui::Rect::from_min_size(
-            row.min + egui::vec2(segment_w * i as f32, 0.0),
-            egui::vec2(segment_w, height),
+    let mut i = 0;
+    // Every row shares the first row's columns, so wrapped segments line up
+    // in a grid instead of stretching to fill a shorter row.
+    let segment_w = width / per_row[0] as f32;
+    for (r, &count) in per_row.iter().enumerate() {
+        let row = egui::Rect::from_min_size(
+            bar.min + egui::vec2(0.0, r as f32 * (height + gap)),
+            egui::vec2(segment_w * count as f32, height),
         );
-        let mut resp = ui.interact(rect, bar.id.with(i), egui::Sense::click());
-        let selected = value == current;
-        resp.widget_info(|| {
-            egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, label)
-        });
-        let text = if selected {
-            ui.painter().rect_filled(rect, radius, colors.primary_fill);
-            colors.primary_text
-        } else {
-            if resp.hovered() {
-                ui.painter()
-                    .rect_filled(rect, radius, visuals.widgets.hovered.weak_bg_fill);
+        ui.painter()
+            .rect_filled(row, radius, visuals.widgets.inactive.weak_bg_fill);
+        for (k, &(value, label, tip)) in choices[i..i + count].iter().enumerate() {
+            let rect = egui::Rect::from_min_size(
+                row.min + egui::vec2(segment_w * k as f32, 0.0),
+                egui::vec2(segment_w, height),
+            );
+            let mut resp = ui.interact(rect, bar_resp.id.with(i + k), egui::Sense::click());
+            let selected = value == current;
+            resp.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Button,
+                    ui.is_enabled(),
+                    selected,
+                    label,
+                )
+            });
+            let text = if selected {
+                ui.painter().rect_filled(rect, radius, colors.primary_fill);
+                colors.primary_text
+            } else {
+                if resp.hovered() {
+                    ui.painter()
+                        .rect_filled(rect, radius, visuals.widgets.hovered.weak_bg_fill);
+                }
+                visuals.text_color()
+            };
+            ui.painter_at(rect).text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                font.clone(),
+                text,
+            );
+            if let Some(tip) = tip {
+                resp = resp.on_hover_text(tip);
             }
-            visuals.text_color()
-        };
-        ui.painter_at(rect).text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            label,
-            font.clone(),
-            text,
-        );
-        if let Some(tip) = tip {
-            resp = resp.on_hover_text(tip);
+            if resp.clicked() {
+                picked = Some(value);
+            }
         }
-        if resp.clicked() && !selected {
-            picked = Some(value);
-        }
+        i += count;
     }
     picked
+}
+
+/// How many of `n` segments at least `min_w` wide go on each row of `width`:
+/// as few rows as fit, with the counts as even as they can be, larger first.
+fn row_sizes(n: usize, width: f32, min_w: f32) -> Vec<usize> {
+    let fit = ((width / min_w).floor() as usize).clamp(1, n.max(1));
+    let rows = n.div_ceil(fit).max(1);
+    (0..rows)
+        .map(|r| n / rows + usize::from(r < n % rows))
+        .collect()
 }
 
 #[cfg(test)]
@@ -509,6 +552,19 @@ mod tests {
         assert_eq!(click(draw, at(0.66)), Some(1), "just short of two thirds");
         assert_eq!(click(draw, at(0.68)), Some(2), "just past two thirds");
         assert_eq!(click(draw, at(0.995)), Some(2), "the last reaches the edge");
-        assert_eq!(click(draw, at(0.1)), None, "the current segment");
+        assert_eq!(
+            click(draw, at(0.1)),
+            Some(0),
+            "the current segment reports its click too"
+        );
+    }
+
+    #[test]
+    fn segments_wrap_into_balanced_rows_only_when_they_do_not_fit() {
+        assert_eq!(row_sizes(5, 400.0, 60.0), vec![5]);
+        assert_eq!(row_sizes(5, 240.0, 60.0), vec![3, 2]);
+        assert_eq!(row_sizes(5, 100.0, 60.0), vec![1, 1, 1, 1, 1]);
+        assert_eq!(row_sizes(4, 200.0, 60.0), vec![2, 2]);
+        assert_eq!(row_sizes(2, 10.0, 60.0), vec![1, 1]);
     }
 }

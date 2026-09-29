@@ -57,7 +57,8 @@ pub(super) fn draw_export_panel(
                     (false, t.export_to_folder, None),
                     (true, t.export_to_immich, None),
                 ];
-                if let Some(to_immich) = form::segmented(ui, &choices, immich) {
+                let picked = form::segmented(ui, &choices, immich);
+                if let Some(to_immich) = picked.filter(|&to| to != immich) {
                     next = Some(ExportSettings {
                         target: if to_immich {
                             ExportTarget::Immich
