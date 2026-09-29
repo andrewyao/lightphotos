@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use crate::image_decode::{self, DecodedImage};
+use crate::image_decode::{self, DecodedImage, ImageMetadata};
 use crate::thumbnail;
 
 /// What a decode is for. `Preview` and `Full` get the full RAW demosaic with
@@ -105,6 +105,35 @@ impl WebJob {
             generation: self.generation,
             from_cache: self.from_cache,
         }
+    }
+}
+
+/// One metadata read. `meta` arrives holding the file facts the main thread
+/// got from the `File`; the parse fills in the rest. It runs here and not on
+/// the main thread because rawler builds its camera and lens tables on first
+/// use behind a `Once`, and a main thread that finds a decode thread inside
+/// that `Once` waits with `Atomics.wait`, which throws there.
+pub struct WebExifJob {
+    pub path: PathBuf,
+    pub bytes: Vec<u8>,
+    pub is_raw: bool,
+    pub meta: ImageMetadata,
+}
+
+impl WebExifJob {
+    /// The file facts alone, for a job that never finishes.
+    pub fn failed(&self) -> ImageMetadata {
+        ImageMetadata {
+            file_size: self.meta.file_size,
+            modified: self.meta.modified,
+            format: self.meta.format.clone(),
+            ..Default::default()
+        }
+    }
+
+    pub fn run(mut self) -> ImageMetadata {
+        image_decode::fill_metadata_from_bytes(&mut self.meta, &self.bytes, self.is_raw);
+        self.meta
     }
 }
 

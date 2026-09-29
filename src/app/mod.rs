@@ -488,13 +488,6 @@ pub(crate) struct App {
     web_full_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
     #[cfg(target_arch = "wasm32")]
     web_full_failed: HashSet<(PathBuf, u32)>,
-    /// Metadata reads in flight. `loader.rs`'s EXIF jobs have no workers on
-    /// wasm32, so `request_web_exif` reads and parses on the main thread and
-    /// its task pushes into `web_exif_done`, which `poll_web_exif` drains.
-    #[cfg(target_arch = "wasm32")]
-    web_exif_inflight: HashSet<PathBuf>,
-    #[cfg(target_arch = "wasm32")]
-    web_exif_done: std::rc::Rc<std::cell::RefCell<Vec<(PathBuf, image_decode::ImageMetadata)>>>,
 
     /// Where each running export's JPEG goes. The loader's threads bake it;
     /// the destination folder handle cannot leave the main thread.
@@ -913,10 +906,6 @@ impl App {
             web_full_retries: HashMap::new(),
             #[cfg(target_arch = "wasm32")]
             web_full_failed: HashSet::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_exif_inflight: HashSet::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_exif_done: Default::default(),
             #[cfg(target_arch = "wasm32")]
             web_exports: Default::default(),
             #[cfg(target_arch = "wasm32")]
