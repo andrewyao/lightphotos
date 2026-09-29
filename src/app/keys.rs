@@ -495,11 +495,11 @@ mod tests {
     }
 
     /// Real clicks through the whole UI: the landing page's Settings button
-    /// opens the dialog, and its radios ask for a theme and a language. The
+    /// opens the dialog, and its choices ask for a theme and a language. The
     /// theme and language actions are checked, not applied, because applying
     /// them would write the user's saved preferences.
     #[test]
-    fn settings_opens_from_the_landing_page_and_its_radios_ask_for_changes() {
+    fn settings_opens_from_the_landing_page_and_its_choices_ask_for_changes() {
         use crate::app::presets::tests::{click, settled};
         use crate::autotone::Centering;
         use crate::i18n::{t, Lang};

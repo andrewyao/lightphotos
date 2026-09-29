@@ -1,6 +1,6 @@
 use super::*;
 
-use super::form::Form;
+use super::form::{self, Button, Form, Role};
 use crate::app::App;
 use crate::autotone::Centering;
 
@@ -19,24 +19,23 @@ pub(super) fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         BulkKind::AutoTone => t.auto_tone,
         BulkKind::Delete => t.bulk_delete,
     };
-    let mut confirm = egui::RichText::new(action);
-    if kind == BulkKind::Delete {
-        confirm = confirm.color(theme::colors(ui.ctx()).danger);
-    }
-    let resp = egui::Modal::new(egui::Id::new("bulk_confirm")).show(ui.ctx(), |ui| {
-        ui.set_width(300.0);
-        ui.heading(action);
-        ui.add_space(6.0);
+    let role = if kind == BulkKind::Delete {
+        Role::Danger
+    } else {
+        Role::Primary
+    };
+    let resp = form::dialog(ui.ctx(), "bulk_confirm", form::DIALOG_WIDTH, |ui| {
+        form::title(ui, action);
         ui.label(prompt);
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            if ui.button(t.cancel).clicked() {
-                out.actions.push(UiAction::CancelPending);
-            }
-            if ui.button(confirm).clicked() {
-                out.actions.push(UiAction::ConfirmPending);
-            }
-        });
+        let buttons = [
+            Button::new(t.cancel, Role::Cancel),
+            Button::new(action, role),
+        ];
+        match form::footer(ui, &buttons) {
+            Some(Role::Cancel) => out.actions.push(UiAction::CancelPending),
+            Some(_) => out.actions.push(UiAction::ConfirmPending),
+            None => {}
+        }
     });
     if resp.should_close() {
         out.actions.push(UiAction::CancelPending);
@@ -50,22 +49,25 @@ pub(super) fn delete_preset_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutpu
     let Some(name) = app.pending_preset_delete_name() else {
         return;
     };
-    let resp = egui::Modal::new(egui::Id::new("preset_delete_confirm")).show(ui.ctx(), |ui| {
-        ui.set_width(300.0);
-        ui.heading(t().confirm);
-        ui.add_space(6.0);
-        ui.label((t().confirm_delete_preset)(&name));
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            if ui.button(t().cancel).clicked() {
-                out.actions.push(UiAction::CancelPending);
+    let t = t();
+    let resp = form::dialog(
+        ui.ctx(),
+        "preset_delete_confirm",
+        form::DIALOG_WIDTH,
+        |ui| {
+            form::title(ui, t.confirm);
+            ui.label((t.confirm_delete_preset)(&name));
+            let buttons = [
+                Button::new(t.cancel, Role::Cancel),
+                Button::new(t.delete, Role::Danger),
+            ];
+            match form::footer(ui, &buttons) {
+                Some(Role::Cancel) => out.actions.push(UiAction::CancelPending),
+                Some(_) => out.actions.push(UiAction::ConfirmPending),
+                None => {}
             }
-            let delete = egui::RichText::new(t().delete).color(theme::colors(ui.ctx()).danger);
-            if ui.button(delete).clicked() {
-                out.actions.push(UiAction::ConfirmPending);
-            }
-        });
-    });
+        },
+    );
     if resp.should_close() {
         out.actions.push(UiAction::CancelPending);
     }
@@ -78,23 +80,25 @@ pub(super) fn preset_name_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput)
     let Some((name, renaming)) = app.preset_name_edit() else {
         return;
     };
+    let t = t();
     let mut text = name;
-    let resp = egui::Modal::new(egui::Id::new("preset_name")).show(ui.ctx(), |ui| {
-        ui.set_width(300.0);
-        ui.heading(if renaming {
-            t().rename_preset_title
-        } else {
-            t().save_preset_title
-        });
-        ui.add_space(10.0);
-        let form = Form::new(ui, &[t().preset_name_label]);
+    let resp = form::dialog(ui.ctx(), "preset_name", form::DIALOG_WIDTH, |ui| {
+        form::title(
+            ui,
+            if renaming {
+                t.rename_preset_title
+            } else {
+                t.save_preset_title
+            },
+        );
+        let form = Form::new(ui, &[t.preset_name_label]);
         let mut field = None;
         form.section(ui, "", |ui| {
-            form.row(ui, t().preset_name_label, |ui| {
+            form.row(ui, t.preset_name_label, |ui| {
                 field = Some(
                     ui.add(
                         egui::TextEdit::singleline(&mut text)
-                            .hint_text(t().preset_name_hint)
+                            .hint_text(t.preset_name_hint)
                             .desired_width(f32::INFINITY),
                     ),
                 );
@@ -115,16 +119,17 @@ pub(super) fn preset_name_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput)
         if !entered && !field.has_focus() {
             field.request_focus();
         }
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            if ui.button(t().cancel).clicked() {
-                out.actions.push(UiAction::CancelPresetName);
-            }
-            let save = if renaming { t().rename } else { t().save };
-            if ui.button(save).clicked() || entered {
-                out.actions.push(UiAction::CommitPresetName);
-            }
-        });
+        let save = if renaming { t.rename } else { t.save };
+        let buttons = [
+            Button::new(t.cancel, Role::Cancel),
+            Button::new(save, Role::Primary),
+        ];
+        match form::footer(ui, &buttons) {
+            Some(Role::Cancel) => out.actions.push(UiAction::CancelPresetName),
+            Some(_) => out.actions.push(UiAction::CommitPresetName),
+            None if entered => out.actions.push(UiAction::CommitPresetName),
+            None => {}
+        }
     });
     if resp.should_close() {
         out.actions.push(UiAction::CancelPresetName);
@@ -136,10 +141,9 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.show_help() {
         return;
     }
-    let resp = egui::Modal::new(egui::Id::new("help_overlay")).show(ui.ctx(), |ui| {
-        ui.set_width(460.0);
-        ui.heading(t().shortcuts_title);
-        ui.add_space(6.0);
+    // A reference sheet of two columns, wider than a form.
+    let resp = form::dialog(ui.ctx(), "help_overlay", 460.0, |ui| {
+        form::title(ui, t().shortcuts_title);
         egui::ScrollArea::vertical()
             .max_height(ui.ctx().content_rect().height() * 0.7)
             .show(ui, |ui| {
@@ -164,8 +168,7 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
                         });
                 }
             });
-        ui.add_space(10.0);
-        if ui.button(t().close).clicked() {
+        if form::footer(ui, &[Button::new(t().close, Role::Primary)]).is_some() {
             out.actions.push(UiAction::ToggleHelp);
         }
     });
@@ -174,69 +177,63 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
-/// Theme, language and Auto Tone's centering, each a set of radio buttons. Opened from the landing
-/// page, the header, or Cmd+,; Close, Esc, or a backdrop click dismisses it.
+/// Theme, language and Auto Tone's centering, each a segmented choice. Opened
+/// from the landing page, the header, or Cmd+,; Close, Esc, or a backdrop click
+/// dismisses it.
 pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.show_settings() {
         return;
     }
-    let resp = egui::Modal::new(egui::Id::new("settings_overlay")).show(ui.ctx(), |ui| {
-        let t = t();
-        ui.set_width(360.0);
-        ui.heading(t.settings_title);
-        ui.add_space(10.0);
-        let current = theme::current(ui.ctx());
-        let lang = crate::i18n::lang();
+    let t = t();
+    let resp = form::dialog(ui.ctx(), "settings_overlay", form::DIALOG_WIDTH, |ui| {
+        form::title(ui, t.settings_title);
         let form = Form::new(
             ui,
             &[t.settings_theme, t.settings_language, t.settings_auto_tone],
         );
         form.section(ui, t.form_general, |ui| {
             form.row(ui, t.settings_theme, |ui| {
-                for (choice, name) in [
-                    (theme::Theme::Dark, t.theme_dark),
-                    (theme::Theme::Light, t.theme_light),
-                    (theme::Theme::Medium, t.theme_medium),
-                ] {
-                    if ui.radio(current == choice, name).clicked() && current != choice {
-                        out.actions.push(UiAction::SetTheme(choice));
-                    }
+                let themes = [
+                    (theme::Theme::Dark, t.theme_dark, None),
+                    (theme::Theme::Light, t.theme_light, None),
+                    (theme::Theme::Medium, t.theme_medium, None),
+                ];
+                if let Some(choice) = form::segmented(ui, &themes, theme::current(ui.ctx())) {
+                    out.actions.push(UiAction::SetTheme(choice));
                 }
             });
             form.row(ui, t.settings_language, |ui| {
                 // Each language is named in itself, so a reader of either
                 // can find their own.
-                for (choice, name) in [(Lang::En, t.lang_english), (Lang::Zh, t.lang_chinese)] {
-                    if ui.radio(lang == choice, name).clicked() && lang != choice {
-                        out.actions.push(UiAction::SetLanguage(choice));
-                    }
+                let langs = [
+                    (Lang::En, t.lang_english, None),
+                    (Lang::Zh, t.lang_chinese, None),
+                ];
+                if let Some(choice) = form::segmented(ui, &langs, crate::i18n::lang()) {
+                    out.actions.push(UiAction::SetLanguage(choice));
                 }
             });
         });
         form.section(ui, t.develop, |ui| {
             form.row(ui, t.settings_auto_tone, |ui| {
-                let centering = app.autotone_centering();
-                for (choice, name, tip) in [
+                let centerings = [
                     (
                         Centering::Range,
                         t.autotone_center_range,
-                        t.autotone_center_range_tip,
+                        Some(t.autotone_center_range_tip),
                     ),
                     (
                         Centering::Median,
                         t.autotone_center_median,
-                        t.autotone_center_median_tip,
+                        Some(t.autotone_center_median_tip),
                     ),
-                ] {
-                    let radio = ui.radio(centering == choice, name).on_hover_text(tip);
-                    if radio.clicked() && centering != choice {
-                        out.actions.push(UiAction::SetAutoToneCentering(choice));
-                    }
+                ];
+                if let Some(choice) = form::segmented(ui, &centerings, app.autotone_centering()) {
+                    out.actions.push(UiAction::SetAutoToneCentering(choice));
                 }
             });
         });
-        ui.add_space(12.0);
-        if ui.button(t.close).clicked() {
+        if form::footer(ui, &[Button::new(t.close, Role::Primary)]).is_some() {
             out.actions.push(UiAction::CloseSettings);
         }
     });
