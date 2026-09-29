@@ -234,7 +234,7 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     const GUTTER: f32 = 16.0;
     let pal = theme::colors(ui.ctx());
     let card_fill = pal.panel.lerp_to_gamma(pal.value, 0.05);
-    let card_stroke = egui::Stroke::new(1.0, pal.panel.lerp_to_gamma(pal.value, 0.14));
+    let card_stroke = egui::Stroke::new(1.0_f32, pal.panel.lerp_to_gamma(pal.value, 0.14));
 
     egui::CentralPanel::default().show_inside(ui, |ui| {
         let top = (ui.available_height() * 0.10).max(24.0);
@@ -277,7 +277,7 @@ fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                             egui::Frame::new()
                                 .fill(theme::BRAND_BLUE.linear_multiply(0.10))
                                 .stroke(egui::Stroke::new(
-                                    1.0,
+                                    1.0_f32,
                                     theme::BRAND_BLUE.linear_multiply(0.6),
                                 ))
                                 .corner_radius(10.0)
@@ -383,7 +383,7 @@ fn choose_folder_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         ui.painter().rect_stroke(
             resp.rect.expand(2.0),
             12.0,
-            egui::Stroke::new(2.0, theme::BRAND_BLUE.linear_multiply(0.5)),
+            egui::Stroke::new(2.0_f32, theme::BRAND_BLUE.linear_multiply(0.5)),
             egui::StrokeKind::Outside,
         );
     }
@@ -595,7 +595,7 @@ fn status_toast(ui: &egui::Ui, app: &App) {
         .show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style())
                 .fill(colors.fill)
-                .stroke(egui::Stroke::new(1.5, colors.stroke))
+                .stroke(egui::Stroke::new(1.5_f32, colors.stroke))
                 .corner_radius(8)
                 .inner_margin(egui::Margin::symmetric(16, 10))
                 .show(ui, |ui| {

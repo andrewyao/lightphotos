@@ -326,7 +326,7 @@ fn apply(ctx: &egui::Context, theme: Theme) {
     w.noninteractive.bg_fill = p.panel;
     w.noninteractive.weak_bg_fill = p.panel;
     w.noninteractive.bg_stroke.color = p.separator;
-    w.noninteractive.fg_stroke = Stroke::new(1.0, p.value);
+    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.value);
     for (visuals, gray) in [
         (&mut w.inactive, p.widget[0]),
         (&mut w.hovered, p.widget[1]),

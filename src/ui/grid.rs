@@ -540,7 +540,7 @@ pub(super) fn thumbnail_cell(
                     first + egui::vec2(i as f32 * step, 0.0),
                     r,
                     colors.star,
-                    egui::Stroke::new(1.0, egui::Color32::from_black_alpha(160)),
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(160)),
                 );
             }
         }
@@ -573,7 +573,7 @@ pub(super) fn thumbnail_cell(
 /// the bundled fonts.
 fn selection_check(ui: &egui::Ui, c: egui::Pos2, r: f32, fill: egui::Color32) {
     let painter = ui.painter();
-    painter.circle(c, r, fill, egui::Stroke::new(1.0, egui::Color32::WHITE));
+    painter.circle(c, r, fill, egui::Stroke::new(1.0_f32, egui::Color32::WHITE));
     let stroke = egui::Stroke::new((r * 0.24).max(1.2), egui::Color32::WHITE);
     let a = c + egui::vec2(-0.45 * r, 0.02 * r);
     let b = c + egui::vec2(-0.12 * r, 0.35 * r);

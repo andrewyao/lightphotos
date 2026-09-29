@@ -22,7 +22,7 @@ pub(super) fn bar<T: Copy + PartialEq>(
         font_size::px(ui.style(), PAD_Y),
     );
     let font = egui::TextStyle::Body.resolve(ui.style());
-    let stroke = egui::Stroke::new(1.0, theme::colors(ui.ctx()).divider);
+    let stroke = egui::Stroke::new(1.0_f32, theme::colors(ui.ctx()).divider);
     let mut picked = None;
     let mut active_x = None;
 
