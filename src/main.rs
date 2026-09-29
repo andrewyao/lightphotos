@@ -510,9 +510,6 @@ impl ApplicationHandler<UserEvent> for App {
             if self.request_web_full() {
                 self.request_redraw();
             }
-            if self.poll_web_exif() {
-                self.request_redraw();
-            }
 
             // Write each JPEG a decode thread finished baking, then report
             // the completed writes.

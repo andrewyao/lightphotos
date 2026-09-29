@@ -88,6 +88,9 @@ enum Job {
     /// wasm32: a batch export. Native exports run on `export.rs`'s own pool.
     #[cfg(target_arch = "wasm32")]
     WebExport(Box<crate::web_decode::WebExportJob>),
+    /// wasm32: `Exif` over bytes the main thread already read.
+    #[cfg(target_arch = "wasm32")]
+    WebExif(Box<crate::web_decode::WebExifJob>),
 }
 
 /// Everything a worker needs to bake one edited thumbnail, owned so the
@@ -234,6 +237,8 @@ fn push_job(shared: &Shared, job: Job) -> Enqueued {
         },
         #[cfg(target_arch = "wasm32")]
         Job::WebExport(..) => &mut q.export,
+        #[cfg(target_arch = "wasm32")]
+        Job::WebExif(..) => &mut q.exif,
     };
     lane.push_back(job);
     // notify_all because notify_one might wake only the reserved worker,
@@ -342,6 +347,22 @@ impl WebDecoder {
                 Err("no decode thread can take the export".to_string()),
             ));
         }
+    }
+
+    /// Parse `job`'s bytes for the info panel on a decode thread. With no
+    /// thread to take it, the file facts it already holds are the result.
+    pub fn submit_exif(&self, job: crate::web_decode::WebExifJob) {
+        let (path, failed) = (job.path.clone(), job.failed());
+        if self.workers == 0 || push_job(&self.shared, Job::WebExif(Box::new(job))) != Enqueued::Yes
+        {
+            self.finish_exif(path, failed);
+        }
+    }
+
+    /// Report metadata that needs no parse, such as the file facts of a
+    /// file that could not be read.
+    pub fn finish_exif(&self, path: PathBuf, meta: ImageMetadata) {
+        let _ = self.res_tx.send(JobResult::Exif(path, meta));
     }
 
     /// How many threads can decode, so a batch can size how much it keeps
@@ -542,6 +563,8 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
             let (id, path) = (job.id, job.path.clone());
             JobResult::WebExport(id, path, job.run())
         }
+        #[cfg(target_arch = "wasm32")]
+        Job::WebExif(job) => JobResult::Exif(job.path.clone(), job.run()),
     }
 }
 
@@ -584,6 +607,7 @@ mod panic_recovery {
                 e.path.clone(),
                 Err("export panicked".to_string()),
             )),
+            Job::WebExif(e) => Some(JobResult::Exif(e.path.clone(), e.failed())),
             _ => None,
         };
         FAILURE.with(|f| *f.borrow_mut() = failure);
@@ -1046,8 +1070,8 @@ impl Loader {
     /// Requests `path`'s camera, lens, and exposure metadata. The result arrives
     /// in the fourth list returned by [`poll_all`](Self::poll_all). Call it for
     /// the viewed photo only; exif jobs outrank thumbnails.
-    // wasm32 reads metadata in `app/web.rs`, because this queue has no
-    // workers there.
+    // wasm32 goes through `begin_web_exif`, because a thread there cannot
+    // open the file by path.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn request_exif(&mut self, path: PathBuf) {
         if self.exif_inflight.contains(&path) {
@@ -1056,6 +1080,15 @@ impl Loader {
         if self.enqueue(Job::Exif(path.clone())) == Enqueued::Yes {
             self.exif_inflight.insert(path);
         }
+    }
+
+    /// wasm32: marks `path`'s metadata in flight and returns true, or false
+    /// if it already is. The caller then reads the file and hands the bytes
+    /// to [`WebDecoder::submit_exif`], whose result arrives through
+    /// [`poll_all`](Self::poll_all) like a native `Exif` job.
+    #[cfg(target_arch = "wasm32")]
+    pub fn begin_web_exif(&mut self, path: &Path) -> bool {
+        self.exif_inflight.insert(path.to_path_buf())
     }
 
     #[allow(dead_code)]
