@@ -89,6 +89,16 @@ Three processes, because lightphotos emits only half the picture by itself. The 
 
 See [docs/PROJECT_LAYOUT.md](docs/PROJECT_LAYOUT.md).
 
+## Forms
+
+Every form is built from `src/ui/form.rs`. That covers the modals, the right-panel Export form, and Develop's Crop and Masks tabs. `Form::new`, `section` and `row` lay out label and value rows. `form::title` heads a dialog and `form::panel_title` heads a side panel. `form::segmented` is the control for a short single choice of two or three options. Past that, use a ComboBox, as Export Size and crop Aspect do. `form::hint` and `form::error` set helper and error text under a value. `form::dialog` opens a modal at `form::DIALOG_WIDTH` with the shared margin.
+
+Buttons go through `form::footer`, never laid out by hand. A footer is a table of `form::Button { label, role, enabled }`, each with a `Role` of `Cancel`, `Primary` or `Danger`, and `footer` returns the role clicked. It sits against the right edge and orders the buttons for the platform: Cancel then the primary on macOS, the web and Linux, the primary then Cancel on Windows. Its buttons share a minimum width. A destructive confirm uses `Danger`. An action that belongs to one row, such as Immich's Connect, uses `form::button` with the same roles.
+
+Spacing comes from the constants in `form.rs` through `font_size::px`, never from literal `add_space` numbers, so Alt+= and Alt+- scale it. The filled button colors are `primary_fill`, `primary_text`, `danger_fill` and `danger_text` in `theme::Palette`, and a test holds every theme to their contrast. A new fill needs a matching test.
+
+`tabs::bar` is for a real page switch, such as Develop's Sliders, Crop and Masks. It is not for a choice inside a form. New strings go in both the English and the Chinese table in `src/i18n.rs`.
+
 ## Commit messages
 
 Do not add a `Co-Authored-By` (or similar co-author) trailer to commit messages or PR descriptions in this repo.
