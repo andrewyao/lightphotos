@@ -85,6 +85,12 @@ pub struct Palette {
     pub selection: Color32,
     pub selection_bg: Color32,
     pub danger: Color32,
+    /// A form's primary button, filled so it reads as the way forward.
+    pub primary_fill: Color32,
+    pub primary_text: Color32,
+    /// A destructive primary, such as Move to Trash.
+    pub danger_fill: Color32,
+    pub danger_text: Color32,
     /// Button backgrounds: idle, hovered, pressed, open menu.
     widget: [u8; 4],
     separator: Color32,
@@ -193,6 +199,10 @@ pub fn palette(theme: Theme) -> Palette {
             selection: SELECTION_BLUE,
             selection_bg: SELECTION_BG,
             danger: DANGER_RED,
+            primary_fill: Color32::from_rgb(40, 105, 215),
+            primary_text: Color32::WHITE,
+            danger_fill: Color32::from_rgb(205, 55, 55),
+            danger_text: Color32::WHITE,
             widget: [60, 70, 55, 45],
             separator: Color32::from_gray(60),
             field: Color32::from_gray(10),
@@ -217,6 +227,10 @@ pub fn palette(theme: Theme) -> Palette {
             selection: Color32::from_rgb(30, 100, 220),
             selection_bg: Color32::from_rgb(185, 210, 245),
             danger: Color32::from_rgb(190, 40, 40),
+            primary_fill: Color32::from_rgb(30, 95, 210),
+            primary_text: Color32::WHITE,
+            danger_fill: Color32::from_rgb(185, 35, 35),
+            danger_text: Color32::WHITE,
             widget: [214, 204, 190, 212],
             separator: Color32::from_gray(190),
             field: Color32::from_gray(255),
@@ -249,6 +263,10 @@ fn medium(panel: Color32) -> Palette {
         selection: SELECTION_BLUE,
         selection_bg: SELECTION_BG,
         danger: DANGER_RED,
+        primary_fill: Color32::PLACEHOLDER,
+        primary_text: Color32::PLACEHOLDER,
+        danger_fill: Color32::PLACEHOLDER,
+        danger_text: Color32::PLACEHOLDER,
         widget: [shift(-24), shift(-32), shift(-40), shift(-16)],
         separator: gray(32),
         field: gray(-32),
@@ -259,6 +277,11 @@ fn medium(panel: Color32) -> Palette {
             label: Color32::from_gray(228),
             value: Color32::WHITE,
             danger: Color32::from_rgb(255, 140, 140),
+            // Only a pale fill stands out from a mid gray on its dark side.
+            primary_fill: Color32::from_rgb(150, 190, 255),
+            primary_text: Color32::BLACK,
+            danger_fill: Color32::from_rgb(255, 160, 160),
+            danger_text: Color32::BLACK,
             ..base
         },
         Polarity::DarkText => Palette {
@@ -271,6 +294,10 @@ fn medium(panel: Color32) -> Palette {
             grid_cell_selected: gray(-22),
             strip_cell_selected: gray(-28),
             danger: Color32::from_rgb(150, 20, 20),
+            primary_fill: Color32::from_rgb(20, 60, 150),
+            primary_text: Color32::WHITE,
+            danger_fill: Color32::from_rgb(135, 20, 20),
+            danger_text: Color32::WHITE,
             widget: [shift(24), shift(32), shift(40), shift(16)],
             divider: gray(-44),
             separator: gray(-32),
@@ -396,6 +423,34 @@ mod tests {
             }
             let ratio = contrast_ratio(p.danger, Color32::from_gray(p.widget[0]));
             assert!(ratio >= 3.0, "{theme:?} danger {ratio:.2}:1");
+        }
+    }
+
+    /// Every theme plus Medium on the light side of the middle, where its
+    /// text flips dark.
+    fn every_palette() -> Vec<(String, Palette)> {
+        let mut all: Vec<_> = ALL
+            .iter()
+            .map(|t| (format!("{t:?}"), palette(*t)))
+            .collect();
+        all.push(("Medium 150".into(), medium(Color32::from_gray(150))));
+        all
+    }
+
+    #[test]
+    fn filled_buttons_read_and_stand_out_from_their_panels() {
+        for (name, p) in every_palette() {
+            for (role, fill, text) in [
+                ("primary", p.primary_fill, p.primary_text),
+                ("danger", p.danger_fill, p.danger_text),
+            ] {
+                let ratio = contrast_ratio(text, fill);
+                assert!(ratio >= 4.5, "{name} {role} text {ratio:.2}:1");
+                for bg in [p.panel, p.window] {
+                    let edge = contrast_ratio(fill, bg);
+                    assert!(edge >= 3.0, "{name} {role} fill {edge:.2}:1");
+                }
+            }
         }
     }
 
