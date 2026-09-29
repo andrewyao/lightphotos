@@ -1,5 +1,6 @@
 use super::*;
 
+use super::form::{self, Button, Form, Role};
 use crate::app::{App, CropAspect, CropOrientation, DevelopTab, FocusLevel, Region};
 
 /// The right-hand Develop panel, with sliders in Lightroom's order. Pushes one
@@ -110,62 +111,79 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let (Some(aspect), Some(orientation)) = (app.crop_aspect(), app.crop_orientation()) else {
         return;
     };
-    ui.horizontal(|ui| {
-        if ui.button(t.menu.rotate_left).clicked() {
-            out.actions.push(UiAction::Rotate(false));
-        }
-        if ui.button(t.menu.rotate_right).clicked() {
-            out.actions.push(UiAction::Rotate(true));
-        }
-    });
-    ui.add_space(6.0);
-
-    ui.label(egui::RichText::new(t.crop_aspect).strong());
-    ui.horizontal_wrapped(|ui| {
-        for (choice, label) in [
-            (CropAspect::Original, t.crop_original),
-            (CropAspect::Custom, t.crop_custom),
-            (CropAspect::R4x3, "4:3"),
-            (CropAspect::R16x9, "16:9"),
-            (CropAspect::Square, "1:1"),
-        ] {
-            // Clicking the current ratio again re-centers its box.
-            if ui.radio(aspect == choice, label).clicked() {
-                out.actions.push(UiAction::SetCropAspect(choice));
-            }
-        }
-    });
-    ui.add_space(6.0);
-
-    ui.label(egui::RichText::new(t.crop_orientation).strong());
-    let orientable = !matches!(aspect, CropAspect::Custom | CropAspect::Square);
-    ui.add_enabled_ui(orientable, |ui| {
-        ui.horizontal(|ui| {
-            for (choice, label) in [
-                (CropOrientation::Horizontal, t.crop_horizontal),
-                (CropOrientation::Vertical, t.crop_vertical),
-            ] {
-                if ui.radio(orientation == choice, label).clicked() && orientation != choice {
+    let form = Form::new(
+        ui,
+        &[
+            t.crop_rotate,
+            t.crop_aspect,
+            t.crop_orientation,
+            t.crop_size,
+        ],
+    );
+    form.section(ui, "", |ui| {
+        form.row(ui, t.crop_rotate, |ui| {
+            ui.horizontal(|ui| {
+                for (label, tip, clockwise) in [
+                    (t.crop_left, t.menu.rotate_left, false),
+                    (t.crop_right, t.menu.rotate_right, true),
+                ] {
+                    if ui.button(label).on_hover_text(tip).clicked() {
+                        out.actions.push(UiAction::Rotate(clockwise));
+                    }
+                }
+            });
+        });
+        form.row(ui, t.crop_aspect, |ui| {
+            let aspects = [
+                (CropAspect::Original, t.crop_original),
+                (CropAspect::Custom, t.crop_custom),
+                (CropAspect::R4x3, "4:3"),
+                (CropAspect::R16x9, "16:9"),
+                (CropAspect::Square, "1:1"),
+            ];
+            let current = aspects
+                .iter()
+                .find(|(choice, _)| *choice == aspect)
+                .map_or("", |(_, label)| *label);
+            egui::ComboBox::from_id_salt("crop_aspect")
+                .selected_text(current)
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    for (choice, label) in aspects {
+                        // Picking the current ratio again re-centers its box.
+                        if ui.selectable_label(aspect == choice, label).clicked() {
+                            out.actions.push(UiAction::SetCropAspect(choice));
+                        }
+                    }
+                });
+        });
+        form.row(ui, t.crop_orientation, |ui| {
+            let orientable = !matches!(aspect, CropAspect::Custom | CropAspect::Square);
+            ui.add_enabled_ui(orientable, |ui| {
+                let choices = [
+                    (CropOrientation::Horizontal, t.crop_horizontal, None),
+                    (CropOrientation::Vertical, t.crop_vertical, None),
+                ];
+                if let Some(choice) = form::segmented(ui, &choices, orientation) {
                     out.actions.push(UiAction::SetCropOrientation(choice));
                 }
-            }
+            });
         });
-    });
-    ui.add_space(6.0);
-
-    ui.horizontal(|ui| {
         if let Some((w, h)) = app.crop_pixel_size() {
-            ui.weak(format!("{w} \u{d7} {h}"));
+            form.row(ui, t.crop_size, |ui| {
+                ui.label(format!("{w} \u{d7} {h}"));
+            });
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button(t.done).clicked() {
-                out.actions.push(UiAction::CommitCrop);
-            }
-            if ui.button(t.cancel).clicked() {
-                out.actions.push(UiAction::CancelCrop);
-            }
-        });
     });
+    let buttons = [
+        Button::new(t.cancel, Role::Cancel),
+        Button::new(t.done, Role::Primary),
+    ];
+    match form::footer(ui, &buttons) {
+        Some(Role::Cancel) => out.actions.push(UiAction::CancelCrop),
+        Some(_) => out.actions.push(UiAction::CommitCrop),
+        None => {}
+    }
 }
 
 /// The Develop header with Reset, presets, and every tone, color, and detail
@@ -248,7 +266,7 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             }
             section = Some(s.section);
             let title = egui::RichText::new(t.section(s.section))
-                .size(font_size::px(ui.style(), 16.0))
+                .size(font_size::px(ui.style(), form::HEADER))
                 .strong();
             if s.section == crate::develop::Section::WhiteBalance {
                 ui.horizontal(|ui| {
@@ -385,76 +403,69 @@ fn toggle_switch(ui: &mut egui::Ui, on: bool) -> egui::Response {
 }
 
 /// Touch Up: the tool toggle, brush size and feather, and the list of spots.
+/// The brush only matters while the tool is armed.
 fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let active = app.touchup_active();
-    ui.horizontal(|ui| {
-        ui.label(t.touch_up);
-        if toggle_switch(ui, active).clicked() {
-            out.actions.push(UiAction::ToggleTouchUp);
-        }
-        if ui
-            .add_enabled(
-                app.touchup_selected().is_some(),
-                egui::Button::new(t.delete),
-            )
-            .clicked()
-        {
-            out.actions.push(UiAction::DeleteTouchUp);
-        }
-    });
-    // Size and Feather each get a row, their sliders lined up in a grid.
-    // Size and Feather each get a row, their sliders lined up. The brush
-    // only matters while the tool is armed.
-    egui::Grid::new("touchup_brush").show(ui, |ui| {
-        ui.add_enabled(active, egui::Label::new(t.brush_size))
-            .on_hover_text(t.brush_size_tip);
-        let mut radius = app.touchup_radius();
-        if ui
-            .add_enabled(
-                active,
-                egui::Slider::new(
-                    &mut radius,
-                    app.touchup_radius_min()..=crate::app::TOUCHUP_MAX_RADIUS,
-                )
-                .show_value(false),
-            )
-            .changed()
-        {
-            out.actions.push(UiAction::SetTouchUpRadius(radius));
-        }
-        ui.end_row();
-
-        ui.add_enabled(active, egui::Label::new(t.feather))
-            .on_hover_text(t.feather_tip);
-        let mut feather = app.touchup_feather();
-        if ui
-            .add_enabled(
-                active,
-                egui::Slider::new(&mut feather, crate::app::TOUCHUP_MIN_FEATHER..=1.0)
-                    .show_value(false),
-            )
-            .changed()
-        {
-            out.actions.push(UiAction::SetTouchUpFeather(feather));
-        }
-        ui.end_row();
-    });
-    if !app.current_touchups().is_empty() {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(t.spots);
-            for i in 0..app.current_touchups().len() {
-                let label = format!("{}", i + 1);
-                if ui
-                    .selectable_label(app.touchup_selected() == Some(i), label)
-                    .clicked()
-                {
-                    out.actions.push(UiAction::SelectTouchUp(i));
-                }
+    let form = Form::new(ui, &[t.touch_up, t.brush_size, t.feather, t.spots]);
+    form.section(ui, "", |ui| {
+        form.row(ui, t.touch_up, |ui| {
+            if toggle_switch(ui, active).clicked() {
+                out.actions.push(UiAction::ToggleTouchUp);
             }
         });
-    }
-    ui.add_space(4.0);
+        form.row(ui, t.brush_size, |ui| {
+            let mut radius = app.touchup_radius();
+            let range = app.touchup_radius_min()..=crate::app::TOUCHUP_MAX_RADIUS;
+            if full_width_slider(ui, active, &mut radius, range) {
+                out.actions.push(UiAction::SetTouchUpRadius(radius));
+            }
+        })
+        .on_hover_text(t.brush_size_tip);
+        form.row(ui, t.feather, |ui| {
+            let mut feather = app.touchup_feather();
+            let range = crate::app::TOUCHUP_MIN_FEATHER..=1.0;
+            if full_width_slider(ui, active, &mut feather, range) {
+                out.actions.push(UiAction::SetTouchUpFeather(feather));
+            }
+        })
+        .on_hover_text(t.feather_tip);
+        if !app.current_touchups().is_empty() {
+            form.row(ui, t.spots, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for i in 0..app.current_touchups().len() {
+                        let label = format!("{}", i + 1);
+                        if ui
+                            .selectable_label(app.touchup_selected() == Some(i), label)
+                            .clicked()
+                        {
+                            out.actions.push(UiAction::SelectTouchUp(i));
+                        }
+                    }
+                    let delete =
+                        egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger);
+                    if ui
+                        .add_enabled(app.touchup_selected().is_some(), egui::Button::new(delete))
+                        .clicked()
+                    {
+                        out.actions.push(UiAction::DeleteTouchUp);
+                    }
+                });
+            });
+        }
+    });
+}
+
+/// A slider without a value box, filling its row's value column.
+fn full_width_slider(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> bool {
+    ui.spacing_mut().slider_width = ui.available_width();
+    ui.add_enabled(enabled, egui::Slider::new(value, range).show_value(false))
+        .changed()
 }
 
 /// ISO, focal length, aperture and shutter spread across the histogram's
