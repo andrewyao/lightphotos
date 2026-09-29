@@ -1,4 +1,4 @@
-use super::form::Form;
+use super::form::{self, Button, Form, Role};
 use super::*;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,11 +37,7 @@ pub(super) fn draw_export_panel(
         if develop_tab {
             super::develop_panel::right_tabs(ui, app, out);
         }
-        ui.add_space(6.0);
-        ui.heading((t.export_title)(app.selection_count()));
-        ui.separator();
-
-        ui.add_space(6.0);
+        form::panel_title(ui, &(t.export_title)(app.selection_count()));
         let form = Form::new(
             ui,
             &[
@@ -56,17 +52,22 @@ pub(super) fn draw_export_panel(
         );
         form.section(ui, t.export_destination, |ui| {
             let immich = settings.target == ExportTarget::Immich;
-            let tabs = [(false, t.export_to_folder), (true, t.export_to_immich)];
-            if let Some(to_immich) = super::tabs::bar(ui, &tabs, immich) {
-                next = Some(ExportSettings {
-                    target: if to_immich {
-                        ExportTarget::Immich
-                    } else {
-                        ExportTarget::default()
-                    },
-                    ..settings.clone()
-                });
-            }
+            form.row(ui, "", |ui| {
+                let choices = [
+                    (false, t.export_to_folder, None),
+                    (true, t.export_to_immich, None),
+                ];
+                if let Some(to_immich) = form::segmented(ui, &choices, immich) {
+                    next = Some(ExportSettings {
+                        target: if to_immich {
+                            ExportTarget::Immich
+                        } else {
+                            ExportTarget::default()
+                        },
+                        ..settings.clone()
+                    });
+                }
+            });
             match &settings.target {
                 ExportTarget::Folder(choice) => {
                     form.row(ui, t.export_folder, |ui| {
@@ -113,22 +114,24 @@ pub(super) fn draw_export_panel(
             });
         }
 
-        ui.add_space(14.0);
         let blocker = app.export_blocker();
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(blocker.is_none(), egui::Button::new(t.export_run))
-                .clicked()
-            {
-                out.actions.push(UiAction::RunExport);
-            }
-            if ui.button(t.cancel).clicked() {
-                out.actions.push(UiAction::ToggleExportForm);
-            }
-        });
+        let buttons = [
+            Button::new(t.cancel, Role::Cancel),
+            Button {
+                enabled: blocker.is_none(),
+                ..Button::new(t.export_run, Role::Primary)
+            },
+        ];
+        match form::footer(ui, &buttons) {
+            Some(Role::Cancel) => out.actions.push(UiAction::ToggleExportForm),
+            Some(_) => out.actions.push(UiAction::RunExport),
+            None => {}
+        }
+        // Under the buttons, because it says why Export is off.
         if let Some(why) = blocker.filter(|_| !immich_unavailable) {
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(why).small().weak());
+            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                form::hint(ui, why)
+            });
         }
     });
     if let Some(changed) = next {
@@ -192,7 +195,7 @@ fn immich_rows(
                 {
                     actions.push(UiAction::SetImmichUrl(url_text));
                 }
-                ui.label(egui::RichText::new(t.immich_url_example).small().weak());
+                form::hint(ui, t.immich_url_example);
             });
             let mut entered = false;
             form.row(ui, t.immich_api_key, |ui| {
@@ -209,20 +212,16 @@ fn immich_rows(
             });
             form.row(ui, "", |ui| {
                 let ready = !url.trim().is_empty() && !key.trim().is_empty();
-                if ui
-                    .add_enabled(ready, egui::Button::new(t.immich_connect))
-                    .clicked()
-                    || (ready && entered)
-                {
+                let connect = Button {
+                    enabled: ready,
+                    ..Button::new(t.immich_connect, Role::Primary)
+                };
+                if form::button(ui, &connect).clicked() || (ready && entered) {
                     actions.push(UiAction::ConnectImmich);
                 }
-                ui.label(egui::RichText::new(t.immich_key_storage).small().weak());
+                form::hint(ui, t.immich_key_storage);
                 if let Some(e) = error {
-                    ui.label(
-                        egui::RichText::new(e)
-                            .small()
-                            .color(theme::colors(ui.ctx()).danger),
-                    );
+                    form::error(ui, e);
                 }
             });
         }
@@ -232,7 +231,7 @@ fn immich_rows(
                     ui.spinner();
                     ui.label(t.immich_connecting);
                 });
-                ui.label(egui::RichText::new(url).small().weak());
+                form::hint(ui, url);
             });
         }
         ImmichLink::Connected {
@@ -242,11 +241,7 @@ fn immich_rows(
         } => {
             form.row(ui, t.immich_account, |ui| {
                 ui.label((t.immich_connected_as)(&account.name));
-                ui.label(
-                    egui::RichText::new(format!("{} \u{b7} {}", account.email, server.origin()))
-                        .small()
-                        .weak(),
-                );
+                form::hint(ui, &format!("{} \u{b7} {}", account.email, server.origin()));
                 if ui.button(t.immich_disconnect).clicked() {
                     actions.push(UiAction::DisconnectImmich);
                 }
@@ -306,11 +301,7 @@ fn album_rows(
                 }
             });
         if let Err(e) = albums {
-            ui.label(
-                egui::RichText::new((t.albums_failed)(e))
-                    .small()
-                    .color(theme::colors(ui.ctx()).danger),
-            );
+            form::error(ui, &(t.albums_failed)(e));
         }
     });
     if let AlbumChoice::New(name) = &settings.album {
