@@ -237,8 +237,10 @@ fn push_job(shared: &Shared, job: Job) -> Enqueued {
         },
         #[cfg(target_arch = "wasm32")]
         Job::WebExport(..) => &mut q.export,
+        // The thread that runs the Loupe's `Preview` decodes also parses
+        // its metadata, see `WebExifJob`.
         #[cfg(target_arch = "wasm32")]
-        Job::WebExif(..) => &mut q.exif,
+        Job::WebExif(..) => &mut q.preview,
     };
     lane.push_back(job);
     // notify_all because notify_one might wake only the reserved worker,
@@ -305,7 +307,7 @@ impl WebDecoder {
             kind: crate::web_decode::JobKind::Thumb,
             path,
             target: px,
-            bytes: js_sys::Uint8Array::new(&bytes).to_vec(),
+            bytes: Arc::new(js_sys::Uint8Array::new(&bytes).to_vec()),
             is_raw,
             cache_name,
             generation: Some(generation),
@@ -318,7 +320,7 @@ impl WebDecoder {
         &self,
         path: PathBuf,
         target: u32,
-        bytes: js_sys::ArrayBuffer,
+        bytes: Arc<Vec<u8>>,
         is_raw: bool,
         kind: crate::web_decode::JobKind,
     ) {
@@ -326,7 +328,7 @@ impl WebDecoder {
             kind,
             path,
             target,
-            bytes: js_sys::Uint8Array::new(&bytes).to_vec(),
+            bytes,
             is_raw,
             cache_name: None,
             generation: None,
@@ -349,8 +351,10 @@ impl WebDecoder {
         }
     }
 
-    /// Parse `job`'s bytes for the info panel on a decode thread. With no
-    /// thread to take it, the file facts it already holds are the result.
+    /// Parse `job`'s bytes for the info panel on the thread that runs
+    /// `Preview` decodes. Submit it before the photo's `Preview`, which it
+    /// then runs ahead of. With no thread to take it, the file facts it
+    /// already holds are the result.
     pub fn submit_exif(&self, job: crate::web_decode::WebExifJob) {
         let (path, failed) = (job.path.clone(), job.failed());
         if self.workers == 0 || push_job(&self.shared, Job::WebExif(Box::new(job))) != Enqueued::Yes
@@ -385,7 +389,7 @@ impl WebDecoder {
             kind,
             path,
             target,
-            bytes: Vec::new(),
+            bytes: Default::default(),
             is_raw: false,
             cache_name: None,
             generation,
@@ -1138,11 +1142,13 @@ impl Loader {
     }
 
     /// wasm32: drops queued browser Loupe decodes (`Speed` and `Preview`)
-    /// whose photo `keep` rejects, and returns their kinds and keys so the
-    /// caller clears its in-flight markers. Arrowing through RAWs queues a
-    /// `Preview` per photo, and only one thread runs them (see
+    /// and metadata parses whose photo `keep` rejects. Returns the decodes'
+    /// kinds and keys so the caller clears its in-flight markers, and clears
+    /// the metadata markers itself. Arrowing through RAWs queues a `Preview`
+    /// per photo, and only one thread runs them (see
     /// `Worker::takes_previews`), so without this the photo the user stops
     /// on waits behind every photo passed on the way: 11 s after 19 ARWs.
+    /// Each queued job also holds its photo's whole file.
     #[cfg(target_arch = "wasm32")]
     pub fn retain_web_loupe(
         &mut self,
@@ -1152,15 +1158,23 @@ impl Loader {
             return Vec::new();
         };
         let mut dropped = Vec::new();
+        let mut dropped_exif = Vec::new();
         let mut prune = |job: &Job| match job {
             Job::Web(w) if !keep(&w.path) => {
                 dropped.push((w.kind, w.path.clone(), w.target));
+                false
+            }
+            Job::WebExif(e) if !keep(&e.path) => {
+                dropped_exif.push(e.path.clone());
                 false
             }
             _ => true,
         };
         q.speed.retain(&mut prune);
         q.preview.retain(&mut prune);
+        for path in dropped_exif {
+            self.exif_inflight.remove(&path);
+        }
         dropped
     }
 

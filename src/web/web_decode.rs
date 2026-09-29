@@ -5,6 +5,7 @@
 //! handle by path. The loader's threads run these jobs.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::image_decode::{self, DecodedImage, ImageMetadata};
 use crate::thumbnail;
@@ -52,12 +53,13 @@ impl PoolResult {
     }
 }
 
-/// One decode: the bytes and everything the result has to carry back.
+/// One decode: the bytes and everything the result has to carry back. The
+/// Loupe's jobs for one photo share one copy of its bytes.
 pub struct WebJob {
     pub kind: JobKind,
     pub path: PathBuf,
     pub target: u32,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<Vec<u8>>,
     pub is_raw: bool,
     pub cache_name: Option<String>,
     pub generation: Option<u64>,
@@ -112,10 +114,12 @@ impl WebJob {
 /// got from the `File`; the parse fills in the rest. It runs here and not on
 /// the main thread because rawler builds its camera and lens tables on first
 /// use behind a `Once`, and a main thread that finds a decode thread inside
-/// that `Once` waits with `Atomics.wait`, which throws there.
+/// that `Once` waits with `Atomics.wait`, which throws there. It runs on the
+/// thread that runs `Preview` decodes, ahead of the photo's own `Preview`
+/// and over the same bytes, so the info panel does not wait on the demosaic.
 pub struct WebExifJob {
     pub path: PathBuf,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<Vec<u8>>,
     pub is_raw: bool,
     pub meta: ImageMetadata,
 }

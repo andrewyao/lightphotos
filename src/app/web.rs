@@ -69,6 +69,25 @@ pub(crate) fn write_web_clipboard(commands: &[egui::OutputCommand]) {
     }
 }
 
+/// The metadata the browser's `File` gives without reading the bytes: size,
+/// modified time, and the format from the extension.
+async fn file_facts(
+    path: &Path,
+    handle: &web_sys::FileSystemFileHandle,
+) -> image_decode::ImageMetadata {
+    let mut meta = image_decode::ImageMetadata {
+        format: image_decode::format_name(path),
+        ..Default::default()
+    };
+    if let Ok(file) = web_fs::stat(handle).await {
+        meta.file_size = Some(file.size() as u64);
+        let modified = std::time::SystemTime::UNIX_EPOCH
+            + std::time::Duration::from_millis(file.last_modified() as u64);
+        meta.modified = Some(image_decode::local_date(modified));
+    }
+    meta
+}
+
 impl App {
     /// Makes Cmd egui's command key in a Mac browser. egui_winit picks the
     /// command key at compile time and wasm is never `target_os = "macos"`, so
@@ -531,14 +550,19 @@ impl App {
     ///
     /// For RAW it also sends a fast `Speed` decode of the same bytes, unless
     /// something is already shown for this photo. Whichever lands first
-    /// paints, and the `Preview` replaces a `Speed` result. Returns true if a
-    /// read started.
+    /// paints, and the `Preview` replaces a `Speed` result. The same read also
+    /// parses the photo's metadata if it is missing, see `WebExifJob`.
+    /// Returns true if a read started.
     pub(crate) fn request_web_preview(&mut self) -> bool {
         let Some(path) = self.want.clone() else {
             return false;
         };
+        // The grid's selection is kept too: its metadata read for the info
+        // panel is not a stale Loupe decode.
+        let selected = self.selected_path();
         if let Some(loader) = &mut self.loader {
-            for (kind, p, t) in loader.retain_web_loupe(|p| p == path) {
+            let keep = |p: &Path| p == path || selected.as_deref() == Some(p);
+            for (kind, p, t) in loader.retain_web_loupe(keep) {
                 match kind {
                     JobKind::Speed => self.web_speed_inflight.remove(&(p, t)),
                     _ => self.web_preview_inflight.remove(&(p, t)),
@@ -548,28 +572,7 @@ impl App {
         let target = self.preview_px();
         let key = (path.clone(), target);
         let is_raw = crate::image_decode::is_raw_extension(&path);
-
-        let already_have = self
-            .loader
-            .as_ref()
-            .is_some_and(|l| l.get_full(&path).is_some() || l.get_preview(&path, target).is_some());
-        let quality_needed = !already_have
-            && !self.web_preview_inflight.contains(&key)
-            && !self.web_preview_failed.contains(&key)
-            && !self
-                .web_preview_retries
-                .get(&key)
-                .is_some_and(|(_, retry_at)| Instant::now() < *retry_at);
-
-        let speed_needed = is_raw
-            && self.shown.path() != Some(path.as_path())
-            && !self.web_speed_inflight.contains(&key)
-            && !self.web_speed_failed.contains(&key)
-            && !self
-                .web_speed_retries
-                .get(&key)
-                .is_some_and(|(_, retry_at)| Instant::now() < *retry_at);
-
+        let (quality_needed, speed_needed) = self.web_loupe_reads(&path);
         if !quality_needed && !speed_needed {
             return false;
         }
@@ -580,35 +583,52 @@ impl App {
         let Some(handle) = self.web_file_handles.get(&path).cloned() else {
             return false;
         };
-        let Some(pool) = self.loader.as_ref().map(|l| l.web_decoder()) else {
+        let Some(loader) = self.loader.as_mut() else {
             return false;
         };
+        let pool = loader.web_decoder();
+        let exif_needed = !self.exif_cache.contains_key(&path) && loader.begin_web_exif(&path);
         if quality_needed {
             self.web_preview_inflight.insert(key.clone());
         }
         if speed_needed {
-            self.web_speed_inflight.insert(key.clone());
+            self.web_speed_inflight.insert(key);
         }
         self.web_read_inflight.set(self.web_read_inflight.get() + 1);
         let read_inflight = self.web_read_inflight.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = web_fs::read_array_buffer(&handle).await;
+            let meta = if exif_needed {
+                Some(file_facts(&path, &handle).await)
+            } else {
+                None
+            };
+            let result = web_fs::read_bytes(&handle).await;
             read_inflight.set(read_inflight.get().saturating_sub(1));
             match result {
                 Ok(bytes) => {
-                    if quality_needed && speed_needed {
+                    let bytes = std::sync::Arc::new(bytes);
+                    if let Some(meta) = meta {
+                        pool.submit_exif(crate::web_decode::WebExifJob {
+                            path: path.clone(),
+                            bytes: bytes.clone(),
+                            is_raw,
+                            meta,
+                        });
+                    }
+                    if speed_needed {
                         pool.submit(path.clone(), target, bytes.clone(), is_raw, JobKind::Speed);
+                    }
+                    if quality_needed {
                         pool.submit(path, target, bytes, is_raw, JobKind::Preview);
-                    } else if quality_needed {
-                        pool.submit(path, target, bytes, is_raw, JobKind::Preview);
-                    } else {
-                        pool.submit(path, target, bytes, is_raw, JobKind::Speed);
                     }
                 }
                 Err(e) => {
                     web_sys::console::error_1(
                         &format!("[web] reading bytes failed for {}: {e}", path.display()).into(),
                     );
+                    if let Some(meta) = meta {
+                        pool.finish_exif(path.clone(), meta);
+                    }
                     if quality_needed {
                         pool.fail(path.clone(), target, JobKind::Preview, None, e.clone());
                     }
@@ -621,12 +641,48 @@ impl App {
         true
     }
 
+    /// Which of the `Preview` and `Speed` decodes `path` still needs, as
+    /// `(preview, speed)`, once `request_web_preview` can start a read.
+    fn web_loupe_reads(&self, path: &Path) -> (bool, bool) {
+        let target = self.preview_px();
+        let key = (path.to_path_buf(), target);
+        let is_raw = crate::image_decode::is_raw_extension(path);
+        let already_have = self
+            .loader
+            .as_ref()
+            .is_some_and(|l| l.get_full(path).is_some() || l.get_preview(path, target).is_some());
+        let quality_needed = !already_have
+            && !self.web_preview_inflight.contains(&key)
+            && !self.web_preview_failed.contains(&key)
+            && !self
+                .web_preview_retries
+                .get(&key)
+                .is_some_and(|(_, retry_at)| Instant::now() < *retry_at);
+
+        let speed_needed = is_raw
+            && self.shown.path() != Some(path)
+            && !self.web_speed_inflight.contains(&key)
+            && !self.web_speed_failed.contains(&key)
+            && !self
+                .web_speed_retries
+                .get(&key)
+                .is_some_and(|(_, retry_at)| Instant::now() < *retry_at);
+        (quality_needed, speed_needed)
+    }
+
     /// Read `path`'s metadata: size and modified time from the browser's
     /// `File`, the rest parsed from its bytes on a decode thread (see
     /// `WebExifJob`). The result arrives through `Loader::poll_all`. A
     /// failed read still reports the file facts, so the photo is not re-read
-    /// every frame.
+    /// every frame. For the Loupe's photo, `request_web_preview`'s read
+    /// carries the parse instead, so it rides with the photo's decode.
     pub(crate) fn request_web_exif(&mut self, path: PathBuf) {
+        if self.want.as_ref() == Some(&path) {
+            let (quality, speed) = self.web_loupe_reads(&path);
+            if quality || speed {
+                return;
+            }
+        }
         if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
             return;
         }
@@ -643,23 +699,14 @@ impl App {
         self.web_read_inflight.set(self.web_read_inflight.get() + 1);
         let read_inflight = self.web_read_inflight.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let mut meta = image_decode::ImageMetadata {
-                format: image_decode::format_name(&path),
-                ..Default::default()
-            };
-            if let Ok(file) = web_fs::stat(&handle).await {
-                meta.file_size = Some(file.size() as u64);
-                let modified = std::time::SystemTime::UNIX_EPOCH
-                    + std::time::Duration::from_millis(file.last_modified() as u64);
-                meta.modified = Some(image_decode::local_date(modified));
-            }
+            let meta = file_facts(&path, &handle).await;
             let read = web_fs::read_bytes(&handle).await;
             read_inflight.set(read_inflight.get().saturating_sub(1));
             match read {
                 Ok(bytes) => decoder.submit_exif(crate::web_decode::WebExifJob {
                     is_raw: image_decode::is_raw_extension(&path),
                     path,
-                    bytes,
+                    bytes: std::sync::Arc::new(bytes),
                     meta,
                 }),
                 Err(e) => {
@@ -861,10 +908,12 @@ impl App {
         let read_inflight = self.web_read_inflight.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let is_raw = crate::image_decode::is_raw_extension(&path);
-            let result = web_fs::read_array_buffer(&handle).await;
+            let result = web_fs::read_bytes(&handle).await;
             read_inflight.set(read_inflight.get().saturating_sub(1));
             match result {
-                Ok(bytes) => pool.submit(path, target, bytes, is_raw, JobKind::Full),
+                Ok(bytes) => {
+                    pool.submit(path, target, std::sync::Arc::new(bytes), is_raw, JobKind::Full)
+                }
                 Err(e) => {
                     web_sys::console::error_1(
                         &format!("[web] reading bytes failed for {}: {e}", path.display()).into(),
