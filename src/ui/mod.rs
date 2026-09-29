@@ -100,6 +100,12 @@ pub enum UiAction {
     /// Move the active crop drag to this normalized texture coordinate.
     CropDragTo(f32, f32),
     CropRelease,
+    SetCropAspect(crate::app::CropAspect),
+    SetCropOrientation(crate::app::CropOrientation),
+    /// Rotate the shown photo 90 degrees, clockwise if true.
+    Rotate(bool),
+    CommitCrop,
+    CancelCrop,
     /// While armed, the next Loupe click samples a pixel and solves temp and
     /// tint to make it neutral gray.
     ToggleWbPicker,

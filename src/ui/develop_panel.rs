@@ -1,13 +1,11 @@
 use super::*;
 
-use crate::app::{App, DevelopTab, FocusLevel, Region, SHOW_CROP_TAB};
+use crate::app::{App, CropAspect, CropOrientation, DevelopTab, FocusLevel, Region};
 
 /// The right-hand Develop panel, with sliders in Lightroom's order. Pushes one
 /// `SetAdjustments` only on frames where a slider changed. Double-clicking a
 /// slider resets it to 0.
 pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let t = t();
-
     egui::Panel::right("develop")
         .resizable(true)
         .default_size(340.0)
@@ -24,9 +22,7 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                     draw_tab_row(ui, app, out);
                     match app.develop_tab() {
                         DevelopTab::Sliders => draw_sliders_tab(ui, app, out),
-                        DevelopTab::Crop => {
-                            ui.weak(t.tab_crop);
-                        }
+                        DevelopTab::Crop => draw_crop_tab(ui, app, out),
                         DevelopTab::Masks => draw_masks_tab(ui, app, out),
                     }
                 });
@@ -94,20 +90,82 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     ui.add_space(6.0);
 }
 
-/// Sliders | Crop | Masks. Crop is left out while `SHOW_CROP_TAB` is off.
+/// Sliders | Crop | Masks.
 fn draw_tab_row(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    let tabs: Vec<_> = [
+    let tabs = [
         (DevelopTab::Sliders, t.tab_sliders),
         (DevelopTab::Crop, t.tab_crop),
         (DevelopTab::Masks, t.tab_masks),
-    ]
-    .into_iter()
-    .filter(|&(tab, _)| tab != DevelopTab::Crop || SHOW_CROP_TAB)
-    .collect();
+    ];
     if let Some(tab) = super::tabs::bar(ui, &tabs, app.develop_tab()) {
         out.actions.push(UiAction::SetDevelopTab(tab));
     }
+}
+
+/// Crop mode's controls: rotation, the ratio and its orientation, the crop's
+/// size in pixels, and Done and Cancel.
+fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = t();
+    let (Some(aspect), Some(orientation)) = (app.crop_aspect(), app.crop_orientation()) else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        if ui.button(t.menu.rotate_left).clicked() {
+            out.actions.push(UiAction::Rotate(false));
+        }
+        if ui.button(t.menu.rotate_right).clicked() {
+            out.actions.push(UiAction::Rotate(true));
+        }
+    });
+    ui.add_space(6.0);
+
+    ui.label(egui::RichText::new(t.crop_aspect).strong());
+    ui.horizontal_wrapped(|ui| {
+        for (choice, label) in [
+            (CropAspect::Original, t.crop_original),
+            (CropAspect::Custom, t.crop_custom),
+            (CropAspect::R4x3, "4:3"),
+            (CropAspect::R16x9, "16:9"),
+            (CropAspect::Square, "1:1"),
+        ] {
+            // Clicking the current ratio again re-centers its box.
+            if ui.radio(aspect == choice, label).clicked() {
+                out.actions.push(UiAction::SetCropAspect(choice));
+            }
+        }
+    });
+    ui.add_space(6.0);
+
+    ui.label(egui::RichText::new(t.crop_orientation).strong());
+    let orientable = !matches!(aspect, CropAspect::Custom | CropAspect::Square);
+    ui.add_enabled_ui(orientable, |ui| {
+        ui.horizontal(|ui| {
+            for (choice, label) in [
+                (CropOrientation::Horizontal, t.crop_horizontal),
+                (CropOrientation::Vertical, t.crop_vertical),
+            ] {
+                if ui.radio(orientation == choice, label).clicked() && orientation != choice {
+                    out.actions.push(UiAction::SetCropOrientation(choice));
+                }
+            }
+        });
+    });
+    ui.add_space(6.0);
+
+    ui.horizontal(|ui| {
+        if let Some((w, h)) = app.crop_pixel_size() {
+            ui.weak(format!("{w} \u{d7} {h}"));
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button(t.done).clicked() {
+                out.actions.push(UiAction::CommitCrop);
+            }
+            if ui.button(t.cancel).clicked() {
+                out.actions.push(UiAction::CancelCrop);
+            }
+        });
+    });
 }
 
 /// The Develop header with Reset, presets, and every tone, color, and detail

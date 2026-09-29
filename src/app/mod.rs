@@ -52,10 +52,6 @@ pub(crate) const SHOW_GROUPING_TOOLS: bool = false;
 /// ready. Saved presets stay on disk either way.
 pub(crate) const SHOW_PRESETS: bool = false;
 
-/// Whether the Develop panel shows its Crop tab. Off until the crop module
-/// is built. The C key's crop overlay works either way.
-pub(crate) const SHOW_CROP_TAB: bool = false;
-
 /// Whether the Loupe's info bar shows Show Selection and Invert. The O keys
 /// work either way.
 pub(crate) const SHOW_SELECTION_BUTTONS: bool = false;
@@ -275,7 +271,7 @@ pub(crate) enum WebPendingNav {
 pub(crate) enum DevelopTab {
     /// Tone, color, and detail sliders.
     Sliders,
-    /// Hidden while `SHOW_CROP_TAB` is off.
+    /// Crop mode: the tab shows exactly while `crop_edit` is set.
     Crop,
     /// Touch Up and future local adjustments.
     Masks,
@@ -1519,6 +1515,11 @@ impl App {
                 ui::UiAction::CropGrabMove(u, v) => self.crop_grab_move(u, v),
                 ui::UiAction::CropDragTo(u, v) => self.crop_drag_to(u, v),
                 ui::UiAction::CropRelease => self.crop_release(),
+                ui::UiAction::SetCropAspect(aspect) => self.set_crop_aspect(aspect),
+                ui::UiAction::SetCropOrientation(o) => self.set_crop_orientation(o),
+                ui::UiAction::Rotate(cw) => self.rotate(cw),
+                ui::UiAction::CommitCrop => self.commit_crop(),
+                ui::UiAction::CancelCrop => self.cancel_crop(),
                 ui::UiAction::ToggleWbPicker => self.toggle_wb_picker(),
                 ui::UiAction::PickWhiteBalance(u, v) => self.pick_white_balance(u, v),
                 ui::UiAction::ToggleTouchUp => self.toggle_touchup(),

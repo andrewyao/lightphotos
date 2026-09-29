@@ -504,7 +504,11 @@ mod tests {
                 "Touch Up is not on the Sliders tab: {:?}",
                 painted.texts()
             );
-            assert_eq!(painted.has(t.tab_crop), SHOW_CROP_TAB);
+            let xs = [t.tab_sliders, t.tab_crop, t.tab_masks].map(|tab| painted.pos_of(tab).x);
+            assert!(
+                xs[0] < xs[1] && xs[1] < xs[2],
+                "the tabs read Sliders, Crop, Masks: {xs:?}"
+            );
 
             let (actions, _) = click(&mut app, painted.pos_of(t.tab_masks));
             let tab = actions.into_iter().find_map(|a| match a {
@@ -552,6 +556,66 @@ mod tests {
                 actions.iter().any(|a| matches!(a, UiAction::ToggleExportForm)),
                 "Develop on the Export form goes back to the sliders"
             );
+        }
+
+        #[test]
+        fn the_crop_tab_picks_a_ratio_and_commits() {
+            let mut app = loupe("crop");
+            let t = crate::i18n::t();
+            let painted = settled(&mut app);
+            let (actions, _) = click(&mut app, painted.pos_of(t.tab_crop));
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, UiAction::SetDevelopTab(DevelopTab::Crop))),
+                "{actions:?}"
+            );
+            app.apply_ui_actions(actions);
+            assert!(app.crop_rect().is_some(), "the Crop tab is crop mode");
+
+            let painted = settled(&mut app);
+            assert!(painted.has("4000 \u{d7} 3000"), "{:?}", painted.texts());
+            let (actions, _) = click(&mut app, painted.pos_of(t.crop_custom));
+            app.apply_ui_actions(actions);
+            let (actions, painted) = click(&mut app, painted.pos_of(t.crop_vertical));
+            assert!(
+                !actions
+                    .iter()
+                    .any(|a| matches!(a, UiAction::SetCropOrientation(_))),
+                "Custom has no orientation to pick: {actions:?}"
+            );
+            let (actions, _) = click(&mut app, painted.pos_of("16:9"));
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    UiAction::SetCropAspect(crate::app::CropAspect::R16x9)
+                )),
+                "{actions:?}"
+            );
+            app.apply_ui_actions(actions);
+            let painted = settled(&mut app);
+            assert!(painted.has("4000 \u{d7} 2250"), "{:?}", painted.texts());
+
+            let (actions, _) = click(&mut app, painted.pos_of(t.crop_vertical));
+            app.apply_ui_actions(actions);
+            let painted = settled(&mut app);
+            assert!(painted.has("1688 \u{d7} 3000"), "{:?}", painted.texts());
+
+            let (actions, _) = click(&mut app, painted.pos_of(t.menu.rotate_right));
+            app.apply_ui_actions(actions);
+            let painted = settled(&mut app);
+            assert!(
+                painted.has("3000 \u{d7} 1688"),
+                "Rotate Right turns the photo and the box with it: {:?}",
+                painted.texts()
+            );
+            assert_eq!(app.current_rotation(), 1, "a quarter turn clockwise");
+
+            let (actions, _) = click(&mut app, painted.pos_of(t.done));
+            app.apply_ui_actions(actions);
+            assert!(app.crop_rect().is_none(), "Done leaves crop mode");
+            assert!(app.current_adjustments().crop.is_some(), "Done commits");
+            assert_eq!(app.develop_tab(), DevelopTab::Sliders);
         }
 
         #[test]
