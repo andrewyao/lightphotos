@@ -573,18 +573,27 @@ mod tests {
             app.apply_ui_actions(actions);
             assert!(app.crop_rect().is_some(), "the Crop tab is crop mode");
 
+            // The ratio is a combo box: click its current value to open it,
+            // then the choice in the list, which opens below the box.
+            let pick = |app: &mut App, current: &str, choice: &str| {
+                let combo = settled(app).pos_of(current);
+                let (_, open) = click(app, combo);
+                let below = open.pos_of(current) + egui::vec2(0.0, 1000.0);
+                click(app, open.pos_of_near(choice, below)).0
+            };
             let painted = settled(&mut app);
             assert!(painted.has("4000 \u{d7} 3000"), "{:?}", painted.texts());
-            let (actions, _) = click(&mut app, painted.pos_of(t.crop_custom));
+            let actions = pick(&mut app, t.crop_original, t.crop_custom);
             app.apply_ui_actions(actions);
-            let (actions, painted) = click(&mut app, painted.pos_of(t.crop_vertical));
+            let painted = settled(&mut app);
+            let (actions, _) = click(&mut app, painted.pos_of(t.crop_vertical));
             assert!(
                 !actions
                     .iter()
                     .any(|a| matches!(a, UiAction::SetCropOrientation(_))),
                 "Custom has no orientation to pick: {actions:?}"
             );
-            let (actions, _) = click(&mut app, painted.pos_of("16:9"));
+            let actions = pick(&mut app, t.crop_custom, "16:9");
             assert!(
                 actions.iter().any(|a| matches!(
                     a,
@@ -595,13 +604,21 @@ mod tests {
             app.apply_ui_actions(actions);
             let painted = settled(&mut app);
             assert!(painted.has("4000 \u{d7} 2250"), "{:?}", painted.texts());
+            let actions = pick(&mut app, "16:9", "16:9");
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    UiAction::SetCropAspect(crate::app::CropAspect::R16x9)
+                )),
+                "picking the current ratio again asks to re-center it: {actions:?}"
+            );
 
             let (actions, _) = click(&mut app, painted.pos_of(t.crop_vertical));
             app.apply_ui_actions(actions);
             let painted = settled(&mut app);
             assert!(painted.has("1688 \u{d7} 3000"), "{:?}", painted.texts());
 
-            let (actions, _) = click(&mut app, painted.pos_of(t.menu.rotate_right));
+            let (actions, _) = click(&mut app, painted.pos_of(t.crop_right));
             app.apply_ui_actions(actions);
             let painted = settled(&mut app);
             assert!(
@@ -767,9 +784,15 @@ mod tests {
             app.set_develop_tab(DevelopTab::Masks);
             let t = crate::i18n::t();
             let painted = settled(&mut app);
-            // The switch sits just left of Delete; the Size slider right of its
-            // label, on the row below.
-            let switch = painted.pos_of(t.delete) - egui::vec2(20.0, 0.0);
+            // The switch is the knob on the Touch Up row; the Size slider right
+            // of its label, on the row below.
+            let knob = app.egui_ctx.global_style().visuals.widgets.inactive.bg_fill;
+            let row = painted.pos_of(t.touch_up).y;
+            let switch = *painted
+                .circles_filled(knob)
+                .iter()
+                .find(|c| (c.y - row).abs() < 8.0)
+                .expect("a switch knob on the Touch Up row");
             let slider = painted.pos_of(t.brush_size) + egui::vec2(100.0, 0.0);
             let resizes = |actions: &[UiAction]| {
                 actions

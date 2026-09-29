@@ -558,7 +558,7 @@ pub(in crate::app) mod tests {
         /// The `text` nearest `anchor`, for a label the window paints more than
         /// once. Touch Up has its own Delete button, so the row menu's has to be
         /// picked by where it opened.
-        fn pos_of_near(&self, text: &str, anchor: egui::Pos2) -> egui::Pos2 {
+        pub(in crate::app) fn pos_of_near(&self, text: &str, anchor: egui::Pos2) -> egui::Pos2 {
             self.0
                 .iter()
                 .filter(|(t, _)| t == text)
