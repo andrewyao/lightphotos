@@ -587,7 +587,7 @@ mod tests {
         let folder_tab = painted.pos_of(t().export_to_folder);
         assert!(
             destination.y < folder_tab.y && folder_tab.y < folder.y,
-            "the Folder/Immich tabs sit between the header and the rows"
+            "the Folder/Immich choice sits between the header and the rows"
         );
     }
 

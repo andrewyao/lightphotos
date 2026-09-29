@@ -125,6 +125,12 @@ pub(super) fn title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(font_size::px(ui.style(), TITLE_GAP));
 }
 
+/// A side panel's title. A panel, unlike a dialog, has no margin above it.
+pub(super) fn panel_title(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(font_size::px(ui.style(), TITLE_GAP));
+    title(ui, text);
+}
+
 /// Help for a value, set under it.
 pub(super) fn hint(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).small().weak());
@@ -195,32 +201,40 @@ fn order(roles: &[Role], platform: Platform) -> Vec<usize> {
 pub(super) fn footer(ui: &mut egui::Ui, buttons: &[Button]) -> Option<Role> {
     ui.add_space(font_size::px(ui.style(), FOOTER_GAP));
     let roles: Vec<Role> = buttons.iter().map(|b| b.role).collect();
-    let colors = theme::colors(ui.ctx());
     let mut clicked = None;
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
         ui.spacing_mut().item_spacing.x = font_size::px(ui.style(), BUTTON_GAP);
-        ui.spacing_mut().button_padding = BUTTON_PAD * font_size::px(ui.style(), 1.0);
-        let min = egui::vec2(font_size::px(ui.style(), BUTTON_MIN_WIDTH), 0.0);
         // A right-to-left layout places the rightmost button first.
         for i in order(&roles, Platform::CURRENT).into_iter().rev() {
-            let b = &buttons[i];
-            let filled = match b.role {
-                Role::Cancel => None,
-                Role::Primary => Some((colors.primary_fill, colors.primary_text)),
-                Role::Danger => Some((colors.danger_fill, colors.danger_text)),
-            };
-            let button = match filled {
-                Some((fill, text)) => {
-                    egui::Button::new(egui::RichText::new(b.label).color(text)).fill(fill)
-                }
-                None => egui::Button::new(b.label),
-            };
-            if ui.add_enabled(b.enabled, button.min_size(min)).clicked() {
-                clicked = Some(b.role);
+            if button(ui, &buttons[i]).clicked() {
+                clicked = Some(buttons[i].role);
             }
         }
     });
     clicked
+}
+
+/// One footer-style button, for an action that belongs to a row rather than
+/// to the whole form, such as Connect.
+pub(super) fn button(ui: &mut egui::Ui, b: &Button) -> egui::Response {
+    let colors = theme::colors(ui.ctx());
+    let filled = match b.role {
+        Role::Cancel => None,
+        Role::Primary => Some((colors.primary_fill, colors.primary_text)),
+        Role::Danger => Some((colors.danger_fill, colors.danger_text)),
+    };
+    let widget = match filled {
+        Some((fill, text)) => {
+            egui::Button::new(egui::RichText::new(b.label).color(text)).fill(fill)
+        }
+        None => egui::Button::new(b.label),
+    };
+    let min = egui::vec2(font_size::px(ui.style(), BUTTON_MIN_WIDTH), 0.0);
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = BUTTON_PAD * font_size::px(ui.style(), 1.0);
+        ui.add_enabled(b.enabled, widget.min_size(min))
+    })
+    .inner
 }
 
 /// A short single choice as one bar of equal segments filling the row, each
