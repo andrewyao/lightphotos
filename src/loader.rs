@@ -244,11 +244,13 @@ fn push_job(shared: &Shared, job: Job) -> Enqueued {
 
 impl Queue {
     /// Pops the highest-priority job this worker may run. `dedicated` marks
-    /// the reserved worker, which skips thumbnails and bakes.
-    fn take_next(&mut self, dedicated: bool) -> Option<Job> {
+    /// the reserved worker, which skips thumbnails and bakes. `previews` is
+    /// false for a worker that skips the `Preview` lane, see
+    /// `Worker::takes_previews`.
+    fn take_next(&mut self, dedicated: bool, previews: bool) -> Option<Job> {
         self.speed
             .pop_front()
-            .or_else(|| self.preview.pop_front())
+            .or_else(|| previews.then(|| self.preview.pop_front()).flatten())
             .or_else(|| self.full.pop_front())
             .or_else(|| self.exif.pop_front())
             .or_else(|| {
@@ -395,6 +397,15 @@ struct Worker {
 }
 
 impl Worker {
+    /// On wasm32 only worker 0 runs `Preview` decodes. A RAW `Preview` is a
+    /// full demosaic and denoise with hundreds of MB of scratch, and every
+    /// thread shares one heap of at most 4 GB. Arrowing through RAWs had each
+    /// thread take the `Preview` of a photo already left behind, and the heap
+    /// ran out within a dozen presses. Natively every worker takes them.
+    fn takes_previews(&self) -> bool {
+        !cfg!(target_arch = "wasm32") || self.index == 0
+    }
+
     /// Starts the thread. On wasm32 it is a Web Worker over the app's shared
     /// memory.
     fn spawn(self) -> std::io::Result<()> {
@@ -434,7 +445,7 @@ impl Worker {
                     if q.shutdown {
                         return;
                     }
-                    if let Some(j) = q.take_next(self.dedicated_full) {
+                    if let Some(j) = q.take_next(self.dedicated_full, self.takes_previews()) {
                         break j;
                     }
                     q = match self.shared.ready.wait(q) {
@@ -1093,6 +1104,33 @@ impl Loader {
         dropped
     }
 
+    /// wasm32: drops queued browser Loupe decodes (`Speed` and `Preview`)
+    /// whose photo `keep` rejects, and returns their kinds and keys so the
+    /// caller clears its in-flight markers. Arrowing through RAWs queues a
+    /// `Preview` per photo, and only one thread runs them (see
+    /// `Worker::takes_previews`), so without this the photo the user stops
+    /// on waits behind every photo passed on the way: 11 s after 19 ARWs.
+    #[cfg(target_arch = "wasm32")]
+    pub fn retain_web_loupe(
+        &mut self,
+        keep: impl Fn(&Path) -> bool,
+    ) -> Vec<(crate::web_decode::JobKind, PathBuf, u32)> {
+        let Ok(mut q) = lock_queue(&self.shared) else {
+            return Vec::new();
+        };
+        let mut dropped = Vec::new();
+        let mut prune = |job: &Job| match job {
+            Job::Web(w) if !keep(&w.path) => {
+                dropped.push((w.kind, w.path.clone(), w.target));
+                false
+            }
+            _ => true,
+        };
+        q.speed.retain(&mut prune);
+        q.preview.retain(&mut prune);
+        dropped
+    }
+
     /// Bake `img` with these edits off the frame. The result comes back
     /// through [`take_baked`](Self::take_baked). A bake already queued for an
     /// older `sig` of the same thumbnail is replaced, so a slider drag leaves
@@ -1535,7 +1573,7 @@ mod tests {
 
     fn drain_labels(q: &mut Queue, dedicated: bool) -> Vec<&'static str> {
         let mut out = vec![];
-        while let Some(job) = q.take_next(dedicated) {
+        while let Some(job) = q.take_next(dedicated, true) {
             out.push(label(&job));
         }
         out
@@ -1555,6 +1593,17 @@ mod tests {
             drain_labels(&mut every_kind(), true),
             ["speed", "preview", "full", "exif", "meta"]
         );
+    }
+
+    #[test]
+    fn a_worker_that_skips_previews_leaves_them_queued() {
+        let mut q = every_kind();
+        let mut out = vec![];
+        while let Some(job) = q.take_next(false, false) {
+            out.push(label(&job));
+        }
+        assert_eq!(out, ["speed", "full", "exif", "bake", "thumb", "meta"]);
+        assert_eq!(drain_labels(&mut q, true), ["preview"]);
     }
 
     #[test]
@@ -1613,8 +1662,8 @@ mod tests {
         q.thumbs.push_back(Job::Thumb(path("background"), 192));
         q.thumbs_viewport
             .push_back(Job::Thumb(path("viewport"), 192));
-        assert!(q.take_next(true).is_none());
-        let names: Vec<PathBuf> = std::iter::from_fn(|| q.take_next(false))
+        assert!(q.take_next(true, true).is_none());
+        let names: Vec<PathBuf> = std::iter::from_fn(|| q.take_next(false, true))
             .map(|job| match job {
                 Job::Thumb(p, _) => p,
                 _ => unreachable!(),
@@ -1655,7 +1704,7 @@ mod tests {
     fn a_viewport_job_a_worker_took_keeps_its_marker_and_is_not_requeued() {
         let mut loader = Loader::queue_only_for_test();
         loader.set_viewport_thumbs(&paths(&["a"]), 192);
-        let taken = loader.shared.queue.lock().unwrap().take_next(false);
+        let taken = loader.shared.queue.lock().unwrap().take_next(false, true);
         assert!(matches!(taken, Some(Job::Thumb(..))));
         loader.set_viewport_thumbs(&paths(&["b"]), 192);
         assert!(loader.viewport_inflight.contains(&(path("a"), 192)));
@@ -1694,8 +1743,8 @@ mod tests {
 
     #[test]
     fn an_empty_queue_yields_nothing() {
-        assert!(Queue::default().take_next(false).is_none());
-        assert!(Queue::default().take_next(true).is_none());
+        assert!(Queue::default().take_next(false, true).is_none());
+        assert!(Queue::default().take_next(true, true).is_none());
     }
 
     fn image(w: u32, h: u32) -> Arc<DecodedImage> {
