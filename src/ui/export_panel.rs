@@ -311,7 +311,7 @@ fn album_rows(
 #[cfg(target_arch = "wasm32")]
 fn native_only_notice(ui: &mut egui::Ui) {
     egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0, theme::colors(ui.ctx()).divider))
+        .stroke(egui::Stroke::new(1.0_f32, theme::colors(ui.ctx()).divider))
         .corner_radius(4)
         .inner_margin(8)
         .show(ui, |ui| {
