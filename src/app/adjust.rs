@@ -508,7 +508,7 @@ mod tests {
         }
 
         #[test]
-        fn export_sits_under_both_tabs_and_auto_tone_under_tone() {
+        fn export_tab_sits_at_the_panel_foot_and_auto_tone_under_tone() {
             let mut app = loupe("export");
             let t = crate::i18n::t();
             let painted = settled(&mut app);
@@ -523,12 +523,26 @@ mod tests {
             for tab in [DevelopTab::Sliders, DevelopTab::Masks] {
                 app.set_develop_tab(tab);
                 let painted = settled(&mut app);
-                let (actions, _) = click(&mut app, painted.pos_of(t.export_jpg));
+                let export = painted.pos_of(t.export_jpg);
+                assert!(
+                    export.y > painted.pos_of(t.tab_masks).y + 100.0,
+                    "the Export tab sits below the panel's content"
+                );
+                let (actions, _) = click(&mut app, export);
                 assert!(
                     actions.iter().any(|a| matches!(a, UiAction::ToggleExportForm)),
                     "Export on {tab:?} opens the Export form"
                 );
             }
+
+            app.toggle_export_form();
+            let painted = settled(&mut app);
+            assert!(painted.has(t.export_run), "{:?}", painted.texts());
+            let (actions, _) = click(&mut app, painted.pos_of(t.develop));
+            assert!(
+                actions.iter().any(|a| matches!(a, UiAction::ToggleExportForm)),
+                "Develop on the Export form goes back to the sliders"
+            );
         }
 
         #[test]

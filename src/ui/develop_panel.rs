@@ -12,6 +12,7 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
         .resizable(true)
         .default_size(340.0)
         .show_inside(ui, |ui| {
+            right_tabs(ui, app, out);
             // Scroll rather than overflow, which would push the Loupe's bottom
             // panels off the window when the rows outgrow its height.
             egui::ScrollArea::vertical()
@@ -21,7 +22,6 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
                     draw_exposure_row(ui, app);
                     ui.add_space(6.0);
                     draw_tab_row(ui, app, out);
-                    draw_export_button(ui, out);
                     match app.develop_tab() {
                         DevelopTab::Sliders => draw_sliders_tab(ui, app, out),
                         DevelopTab::Crop => {
@@ -245,15 +245,16 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
-/// Opens the Export form, which takes the panel's place. Right under the tab
-/// row, so it is there whichever tab the edit ended on and no tab's rows can
-/// scroll it out of view.
-fn draw_export_button(ui: &mut egui::Ui, out: &mut FrameOutput) {
+/// The right-hand panel's footer: Develop, or the Export form in its place.
+pub(super) fn right_tabs(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    if ui.button(t.export_jpg).on_hover_text(t.export_jpg_tip).clicked() {
+    let tabs = [
+        (false, t.develop, t.develop_tab_tip),
+        (true, t.export_jpg, t.export_jpg_tip),
+    ];
+    if super::tabs::footer(ui, "right_tabs", &tabs, app.export_form_open()).is_some() {
         out.actions.push(UiAction::ToggleExportForm);
     }
-    ui.separator();
 }
 
 /// The white-balance picker's toggle: an eyedropper, painted so it can't fall
@@ -399,8 +400,16 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 }
 
 /// ISO, focal length, aperture and shutter spread across the histogram's
-/// width, as Lightroom shows them. Nothing is drawn without EXIF exposure.
+/// width, as Lightroom shows them. The row keeps its height without EXIF
+/// exposure, so the panel below doesn't jump while metadata loads or between
+/// photos that have it and photos that don't.
 fn draw_exposure_row(ui: &mut egui::Ui, app: &App) {
+    let font = egui::FontId::proportional(font_size::px(ui.style(), 12.0));
+    let height = ui.fonts_mut(|f| f.row_height(&font)) + 6.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::hover(),
+    );
     let parts = app
         .current_metadata()
         .map(super::loupe::exposure_parts)
@@ -408,12 +417,6 @@ fn draw_exposure_row(ui: &mut egui::Ui, app: &App) {
     if parts.is_empty() {
         return;
     }
-    let font = egui::FontId::proportional(font_size::px(ui.style(), 12.0));
-    let height = ui.fonts_mut(|f| f.row_height(&font)) + 6.0;
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), height),
-        egui::Sense::hover(),
-    );
     let painter = ui.painter_at(rect);
     let color = theme::colors(ui.ctx()).value;
     let inset = 4.0;

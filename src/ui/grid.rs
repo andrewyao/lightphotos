@@ -22,33 +22,14 @@ pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutpu
         .resizable(false)
         .exact_size(panel_width)
         .show_inside(ui, |ui| {
-            let tab_frame = egui::Frame::side_top_panel(ui.style()).inner_margin(egui::Margin {
-                left: 8,
-                right: 8,
-                top: 0,
-                bottom: 6,
-            });
-            egui::Panel::bottom("left_tabs")
-                .show_separator_line(false)
-                .frame(tab_frame)
-                .show_inside(ui, |ui| {
-                    let strip = ui.max_rect();
-                    let line = ui.visuals().widgets.noninteractive.bg_stroke;
-                    ui.painter().hline(
-                        (strip.left() - 8.0)..=(strip.right() + 8.0),
-                        strip.top(),
-                        line,
-                    );
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 2.0;
-                        for tab in [LeftTab::Folders, LeftTab::Info] {
-                            let resp = tab_button(ui, tab, app.left_tab() == tab);
-                            if resp.clicked() && app.left_tab() != tab {
-                                out.actions.push(UiAction::SetLeftTab(tab));
-                            }
-                        }
-                    });
-                });
+            let t = t();
+            let tabs = [
+                (LeftTab::Folders, t.browse_tab, t.folders_tab_tip),
+                (LeftTab::Info, t.metadata_tab, t.info_tab_tip),
+            ];
+            if let Some(tab) = super::tabs::footer(ui, "left_tabs", &tabs, app.left_tab()) {
+                out.actions.push(UiAction::SetLeftTab(tab));
+            }
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match app.left_tab() {
@@ -60,64 +41,6 @@ pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutpu
                     LeftTab::Info => draw_info_panel(ui, app),
                 });
         });
-}
-
-/// One footer tab, hanging from the strip's top rule and opening upward into
-/// the panel. The active tab breaks the rule so it joins the content above.
-fn tab_button(ui: &mut egui::Ui, tab: LeftTab, active: bool) -> egui::Response {
-    let label = match tab {
-        LeftTab::Folders => t().browse_tab,
-        LeftTab::Info => t().metadata_tab,
-    };
-    let visuals = ui.visuals().clone();
-    let galley = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        egui::TextStyle::Body.resolve(ui.style()),
-        egui::Color32::PLACEHOLDER,
-    );
-    let pad = egui::vec2(
-        font_size::px(ui.style(), 12.0),
-        font_size::px(ui.style(), 5.0),
-    );
-    let size = galley.size() + 2.0 * pad;
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let r = font_size::px(ui.style(), 5.0).round() as u8;
-    let corners = egui::CornerRadius {
-        nw: 0,
-        ne: 0,
-        sw: r,
-        se: r,
-    };
-    let text_color = if active {
-        visuals.strong_text_color()
-    } else if response.hovered() {
-        visuals.text_color()
-    } else {
-        visuals.weak_text_color()
-    };
-    let painter = ui.painter();
-    if active {
-        // Cover the rule, then outline the sides and bottom only.
-        let covered = egui::Rect::from_min_max(rect.min - egui::vec2(0.0, 1.0), rect.max);
-        painter.rect_filled(covered, corners, visuals.panel_fill);
-        let stroke = visuals.widgets.noninteractive.bg_stroke;
-        let open_top = egui::Rect::from_min_max(rect.min - egui::vec2(0.0, 4.0), rect.max);
-        painter
-            .with_clip_rect(
-                rect.expand2(egui::vec2(2.0, 0.0))
-                    .translate(egui::vec2(0.0, 1.0)),
-            )
-            .rect_stroke(open_top, corners, stroke, egui::StrokeKind::Inside);
-    } else if response.hovered() {
-        let inset = egui::Rect::from_min_max(rect.min + egui::vec2(0.0, 1.0), rect.max);
-        painter.rect_filled(inset, corners, visuals.widgets.hovered.weak_bg_fill);
-    }
-    painter.galley(rect.min + pad, galley, text_color);
-    let tip = match tab {
-        LeftTab::Folders => t().folders_tab_tip,
-        LeftTab::Info => t().info_tab_tip,
-    };
-    response.on_hover_text(tip)
 }
 
 /// Width of the widest visible folder row, measured in the body font that

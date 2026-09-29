@@ -198,9 +198,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     if app.left_panel_visible() {
         draw_left_panel(ui, app, &mut out);
     }
+    // In the Loupe, Develop and Export are two tabs of one right-hand panel.
+    let develop_here = mode == ViewMode::Loupe && app.develop_visible();
     if app.export_form_open() {
-        draw_export_panel(ui, app, &mut out);
-    } else if mode == ViewMode::Loupe && app.develop_visible() {
+        draw_export_panel(ui, app, develop_here, &mut out);
+    } else if develop_here {
         draw_develop_panel(ui, app, &mut out);
     }
 

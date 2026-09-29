@@ -273,6 +273,7 @@ pub struct Strings {
     pub settings_from: fn(&str) -> String,
     pub export_jpg: &'static str,
     pub export_jpg_tip: &'static str,
+    pub develop_tab_tip: &'static str,
     pub delete: &'static str,
     pub delete_selection_tip: &'static str,
 
@@ -665,6 +666,7 @@ pub static EN: Strings = Strings {
     settings_from: |name| format!("from {name}"),
     export_jpg: "Export",
     export_jpg_tip: "Choose where and at what size, then export the selection as JPGs (X)",
+    develop_tab_tip: "Adjust the photo with sliders and masks",
     delete: "Delete",
     delete_selection_tip: if WEB {
         "Permanently delete selected photos; cannot be undone (Delete)"
@@ -1156,6 +1158,7 @@ pub static ZH: Strings = Strings {
     settings_from: |name| format!("来自 {name}"),
     export_jpg: "导出",
     export_jpg_tip: "选择位置和尺寸，然后将所选照片导出为 JPG（X）",
+    develop_tab_tip: "用滑块和蒙版调整照片",
     delete: "删除",
     delete_selection_tip: if WEB {
         "永久删除所选照片，无法撤销 (Delete)"
