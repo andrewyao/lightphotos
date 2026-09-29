@@ -22,9 +22,18 @@ impl App {
             .unwrap_or(&[])
     }
 
-    /// Switch the Develop panel's tab. Touch Up's controls live on Masks, so
-    /// leaving it disarms the tool rather than leave it armed out of sight.
+    /// Switch the Develop panel's tab. The Crop tab is crop mode, so picking
+    /// it enters crop mode and leaving it commits the crop, as Lightroom does.
+    /// Touch Up's controls live on Masks, so leaving it disarms the tool
+    /// rather than leave it armed out of sight.
     pub(crate) fn set_develop_tab(&mut self, tab: DevelopTab) {
+        if tab == DevelopTab::Crop {
+            if self.crop_edit.is_none() {
+                self.enter_crop();
+            }
+            return;
+        }
+        self.commit_crop();
         if tab != DevelopTab::Masks && self.tool == LoupeTool::TouchUp {
             self.tool = LoupeTool::None;
             self.touchup_selected = None;

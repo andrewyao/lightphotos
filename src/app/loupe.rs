@@ -119,8 +119,17 @@ impl App {
         self.catalog.set_rotation(&path, step);
         #[cfg(target_arch = "wasm32")]
         crate::analytics::property("develop_edit_applied", "edit_kind", "adjustment");
+        if let Some(d) = self.crop_edit.as_mut() {
+            // The texture rect stays on the same content, which now lies the
+            // other way on screen.
+            d.orientation = d.orientation.flipped();
+        }
         if self.fitted {
-            self.fit_to_window();
+            if self.crop_edit.is_some() {
+                self.fit_for_crop();
+            } else {
+                self.fit_to_window();
+            }
         } else {
             let fs = self.fit_scale();
             if fs > 0.0 {
@@ -271,12 +280,7 @@ impl App {
 
     /// The display-UV to texture-UV rotation matrix for the current rotation.
     pub(super) fn rot_matrix(&self) -> [f32; 4] {
-        match self.current_rotation() {
-            1 => [0.0, 1.0, -1.0, 0.0],
-            2 => [-1.0, 0.0, 0.0, -1.0],
-            3 => [0.0, -1.0, 1.0, 0.0],
-            _ => [1.0, 0.0, 0.0, 1.0],
-        }
+        rot_matrix_of(self.current_rotation())
     }
 
     /// Set up the renderer for before/after compare. "Before" keeps only the
@@ -522,6 +526,17 @@ impl App {
         let u = rot[0] * (dx - 0.5) + rot[1] * (dy - 0.5) + 0.5;
         let v = rot[2] * (dx - 0.5) + rot[3] * (dy - 0.5) + 0.5;
         (u, v)
+    }
+}
+
+/// The display-UV to texture-UV rotation matrix for `rot` quarter turns
+/// clockwise, row-major: uv = R·(d − 0.5) + 0.5.
+pub(super) fn rot_matrix_of(rot: u8) -> [f32; 4] {
+    match rot {
+        1 => [0.0, 1.0, -1.0, 0.0],
+        2 => [-1.0, 0.0, 0.0, -1.0],
+        3 => [0.0, -1.0, 1.0, 0.0],
+        _ => [1.0, 0.0, 0.0, 1.0],
     }
 }
 

@@ -32,7 +32,9 @@ impl App {
             PasteSettings => free && selected > 0 && self.has_copied_settings(),
             Loupe => free && self.mode == ViewMode::Grid,
             InfoPanel => free && matches!(self.mode, ViewMode::Grid | ViewMode::Loupe),
-            RotateLeft | RotateRight | BeforeAfter | ZoomToFit | ActualSize | ZoomIn | ZoomOut => {
+            // [ and ] still rotate while cropping.
+            RotateLeft | RotateRight => tool_free && !self.show_settings && loupe,
+            BeforeAfter | ZoomToFit | ActualSize | ZoomIn | ZoomOut => {
                 free && loupe
             }
         }

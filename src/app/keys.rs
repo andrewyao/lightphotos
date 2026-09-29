@@ -64,6 +64,8 @@ impl App {
             match code {
                 KeyCode::KeyC | KeyCode::Enter | KeyCode::NumpadEnter => self.commit_crop(),
                 KeyCode::Escape => self.cancel_crop(),
+                KeyCode::BracketLeft if !cmd && !alt => self.rotate(false),
+                KeyCode::BracketRight if !cmd && !alt => self.rotate(true),
                 KeyCode::KeyX if !cmd && !alt => self.toggle_export_form(),
                 _ => {}
             }
