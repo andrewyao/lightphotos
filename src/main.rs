@@ -480,7 +480,10 @@ impl ApplicationHandler<UserEvent> for App {
             self.on_export_outcomes(outcomes);
             self.request_redraw();
         }
-        let image_pending = self.loader.as_ref().is_some_and(|l| l.has_pending_image())
+        let image_pending = self
+            .loader
+            .as_ref()
+            .is_some_and(|l| l.has_pending_image() || l.has_pending_exif())
             || self.selection_pending()
             || catalog_load_pending;
         #[cfg(target_arch = "wasm32")]

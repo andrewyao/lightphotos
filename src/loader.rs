@@ -925,6 +925,13 @@ impl Loader {
             || !self.speed_inflight.is_empty()
     }
 
+    /// True while a metadata read has not reported back. Workers don't wake
+    /// the event loop, so without polling for it the info panel stays blank
+    /// until the next input.
+    pub fn has_pending_exif(&self) -> bool {
+        !self.exif_inflight.is_empty()
+    }
+
     pub fn get_full(&self, path: &Path) -> Option<Arc<DecodedImage>> {
         self.cache.get(path).cloned()
     }
@@ -1897,6 +1904,21 @@ mod tests {
         assert_eq!(queued_previews(&loader), 0);
         loader.escalate_if_short(&path("b"), 2560, 4096);
         assert_eq!(queued_previews(&loader), 0);
+    }
+
+    #[test]
+    fn a_metadata_read_is_pending_until_its_result_drains() {
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
+        loader.request_exif(path("missing.jpg"));
+        assert!(loader.has_pending_exif());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut exifs = Vec::new();
+        while exifs.is_empty() && std::time::Instant::now() < deadline {
+            exifs = loader.poll_all().3;
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(exifs.len(), 1, "the worker reported the read");
+        assert!(!loader.has_pending_exif());
     }
 
     #[test]
