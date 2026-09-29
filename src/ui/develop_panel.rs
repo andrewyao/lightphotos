@@ -135,27 +135,16 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         });
         form.row(ui, t.crop_aspect, |ui| {
             let aspects = [
-                (CropAspect::Original, t.crop_original),
-                (CropAspect::Custom, t.crop_custom),
-                (CropAspect::R4x3, "4:3"),
-                (CropAspect::R16x9, "16:9"),
-                (CropAspect::Square, "1:1"),
+                (CropAspect::Original, t.crop_original, None),
+                (CropAspect::Custom, t.crop_custom, None),
+                (CropAspect::R4x3, "4:3", None),
+                (CropAspect::R16x9, "16:9", None),
+                (CropAspect::Square, "1:1", None),
             ];
-            let current = aspects
-                .iter()
-                .find(|(choice, _)| *choice == aspect)
-                .map_or("", |(_, label)| *label);
-            egui::ComboBox::from_id_salt("crop_aspect")
-                .selected_text(current)
-                .width(ui.available_width())
-                .show_ui(ui, |ui| {
-                    for (choice, label) in aspects {
-                        // Picking the current ratio again re-centers its box.
-                        if ui.selectable_label(aspect == choice, label).clicked() {
-                            out.actions.push(UiAction::SetCropAspect(choice));
-                        }
-                    }
-                });
+            // Picking the current ratio again re-centers its box.
+            if let Some(choice) = form::segmented(ui, &aspects, aspect) {
+                out.actions.push(UiAction::SetCropAspect(choice));
+            }
         });
         form.row(ui, t.crop_orientation, |ui| {
             let orientable = !matches!(aspect, CropAspect::Custom | CropAspect::Square);
@@ -164,7 +153,8 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     (CropOrientation::Horizontal, t.crop_horizontal, None),
                     (CropOrientation::Vertical, t.crop_vertical, None),
                 ];
-                if let Some(choice) = form::segmented(ui, &choices, orientation) {
+                let picked = form::segmented(ui, &choices, orientation);
+                if let Some(choice) = picked.filter(|&c| c != orientation) {
                     out.actions.push(UiAction::SetCropOrientation(choice));
                 }
             });
@@ -420,6 +410,7 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             if full_width_slider(ui, active, &mut radius, range) {
                 out.actions.push(UiAction::SetTouchUpRadius(radius));
             }
+            form::hint(ui, t.brush_size_hint);
         })
         .on_hover_text(t.brush_size_tip);
         form.row(ui, t.feather, |ui| {
@@ -428,6 +419,7 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             if full_width_slider(ui, active, &mut feather, range) {
                 out.actions.push(UiAction::SetTouchUpFeather(feather));
             }
+            form::hint(ui, t.feather_hint);
         })
         .on_hover_text(t.feather_tip);
         if !app.current_touchups().is_empty() {

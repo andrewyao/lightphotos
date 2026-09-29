@@ -177,7 +177,7 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
-/// Theme, language and Auto Tone's centering, each a segmented choice. Opened
+/// Theme as a segmented choice and language as a list of radios. Opened
 /// from the landing page, the header, or Cmd+,; Close, Esc, or a backdrop click
 /// dismisses it.
 pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
@@ -187,10 +187,11 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let resp = form::dialog(ui.ctx(), "settings_overlay", form::DIALOG_WIDTH, |ui| {
         form::title(ui, t.settings_title);
-        let form = Form::new(
-            ui,
-            &[t.settings_theme, t.settings_language, t.settings_auto_tone],
-        );
+        let mut labels = vec![t.settings_theme, t.settings_language];
+        if crate::app::SHOW_AUTOTONE_CENTERING {
+            labels.push(t.settings_auto_tone);
+        }
+        let form = Form::new(ui, &labels);
         form.section(ui, t.form_general, |ui| {
             form.row(ui, t.settings_theme, |ui| {
                 let themes = [
@@ -198,41 +199,47 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
                     (theme::Theme::Light, t.theme_light, None),
                     (theme::Theme::Medium, t.theme_medium, None),
                 ];
-                if let Some(choice) = form::segmented(ui, &themes, theme::current(ui.ctx())) {
+                let current = theme::current(ui.ctx());
+                let picked = form::segmented(ui, &themes, current);
+                if let Some(choice) = picked.filter(|&c| c != current) {
                     out.actions.push(UiAction::SetTheme(choice));
                 }
             });
             form.row(ui, t.settings_language, |ui| {
-                // Each language is named in itself, so a reader of either
-                // can find their own.
-                let langs = [
-                    (Lang::En, t.lang_english, None),
-                    (Lang::Zh, t.lang_chinese, None),
-                ];
-                if let Some(choice) = form::segmented(ui, &langs, crate::i18n::lang()) {
-                    out.actions.push(UiAction::SetLanguage(choice));
+                // Each language is named in itself, so a reader of any of
+                // them can find their own. A list, not a bar, because more
+                // languages are coming.
+                let lang = crate::i18n::lang();
+                for (choice, name) in [(Lang::En, t.lang_english), (Lang::Zh, t.lang_chinese)] {
+                    if ui.radio(lang == choice, name).clicked() && lang != choice {
+                        out.actions.push(UiAction::SetLanguage(choice));
+                    }
                 }
             });
         });
-        form.section(ui, t.develop, |ui| {
-            form.row(ui, t.settings_auto_tone, |ui| {
-                let centerings = [
-                    (
-                        Centering::Range,
-                        t.autotone_center_range,
-                        Some(t.autotone_center_range_tip),
-                    ),
-                    (
-                        Centering::Median,
-                        t.autotone_center_median,
-                        Some(t.autotone_center_median_tip),
-                    ),
-                ];
-                if let Some(choice) = form::segmented(ui, &centerings, app.autotone_centering()) {
-                    out.actions.push(UiAction::SetAutoToneCentering(choice));
-                }
+        if crate::app::SHOW_AUTOTONE_CENTERING {
+            form.section(ui, t.develop, |ui| {
+                form.row(ui, t.settings_auto_tone, |ui| {
+                    let centerings = [
+                        (
+                            Centering::Range,
+                            t.autotone_center_range,
+                            Some(t.autotone_center_range_tip),
+                        ),
+                        (
+                            Centering::Median,
+                            t.autotone_center_median,
+                            Some(t.autotone_center_median_tip),
+                        ),
+                    ];
+                    let current = app.autotone_centering();
+                    let picked = form::segmented(ui, &centerings, current);
+                    if let Some(choice) = picked.filter(|&c| c != current) {
+                        out.actions.push(UiAction::SetAutoToneCentering(choice));
+                    }
+                });
             });
-        });
+        }
         if form::footer(ui, &[Button::new(t.close, Role::Primary)]).is_some() {
             out.actions.push(UiAction::CloseSettings);
         }

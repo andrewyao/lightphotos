@@ -517,7 +517,15 @@ mod tests {
             });
             assert_eq!(tab, Some(DevelopTab::Masks));
             app.set_develop_tab(DevelopTab::Masks);
-            assert!(settled(&mut app).has(t.touch_up));
+            let painted = settled(&mut app);
+            assert!(painted.has(t.touch_up));
+            for (slider, hint) in [(t.brush_size, t.brush_size_hint), (t.feather, t.feather_hint)] {
+                assert!(
+                    painted.pos_of(hint).y > painted.pos_of(slider).y,
+                    "{slider}'s mouse shortcut shows under it: {:?}",
+                    painted.texts()
+                );
+            }
         }
 
         #[test]
@@ -573,17 +581,14 @@ mod tests {
             app.apply_ui_actions(actions);
             assert!(app.crop_rect().is_some(), "the Crop tab is crop mode");
 
-            // The ratio is a combo box: click its current value to open it,
-            // then the choice in the list, which opens below the box.
-            let pick = |app: &mut App, current: &str, choice: &str| {
-                let combo = settled(app).pos_of(current);
-                let (_, open) = click(app, combo);
-                let below = open.pos_of(current) + egui::vec2(0.0, 1000.0);
-                click(app, open.pos_of_near(choice, below)).0
+            // Every ratio is one click away.
+            let pick = |app: &mut App, choice: &str| {
+                let at = settled(app).pos_of(choice);
+                click(app, at).0
             };
             let painted = settled(&mut app);
             assert!(painted.has("4000 \u{d7} 3000"), "{:?}", painted.texts());
-            let actions = pick(&mut app, t.crop_original, t.crop_custom);
+            let actions = pick(&mut app, t.crop_custom);
             app.apply_ui_actions(actions);
             let painted = settled(&mut app);
             let (actions, _) = click(&mut app, painted.pos_of(t.crop_vertical));
@@ -593,7 +598,7 @@ mod tests {
                     .any(|a| matches!(a, UiAction::SetCropOrientation(_))),
                 "Custom has no orientation to pick: {actions:?}"
             );
-            let actions = pick(&mut app, t.crop_custom, "16:9");
+            let actions = pick(&mut app, "16:9");
             assert!(
                 actions.iter().any(|a| matches!(
                     a,
@@ -604,7 +609,7 @@ mod tests {
             app.apply_ui_actions(actions);
             let painted = settled(&mut app);
             assert!(painted.has("4000 \u{d7} 2250"), "{:?}", painted.texts());
-            let actions = pick(&mut app, "16:9", "16:9");
+            let actions = pick(&mut app, "16:9");
             assert!(
                 actions.iter().any(|a| matches!(
                     a,

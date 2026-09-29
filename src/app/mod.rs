@@ -52,6 +52,10 @@ pub(crate) const SHOW_GROUPING_TOOLS: bool = false;
 /// ready. Saved presets stay on disk either way.
 pub(crate) const SHOW_PRESETS: bool = false;
 
+/// Whether Settings shows Auto Tone's centering choice. Hidden for now; the
+/// saved choice still applies.
+pub(crate) const SHOW_AUTOTONE_CENTERING: bool = false;
+
 /// Whether the Loupe's info bar shows Show Selection and Invert. The O keys
 /// work either way.
 pub(crate) const SHOW_SELECTION_BUTTONS: bool = false;
