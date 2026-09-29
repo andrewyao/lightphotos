@@ -116,8 +116,14 @@ pub struct CropDraft {
     rect: Crop,
     /// `None` when no drag is in progress.
     grab: Option<CropGrab>,
-    /// Pixel aspect ratio (w/h) captured at grab time, for Shift-lock.
-    aspect: f32,
+    /// Texture-space pixel aspect ratio (w/h) captured at grab time, for
+    /// Shift-lock under `CropAspect::Custom`.
+    grab_aspect: f32,
+    aspect: CropAspect,
+    /// The draft's shape on screen. Only fixed, non-square ratios read it.
+    orientation: CropOrientation,
+    /// The Develop tab to go back to when crop mode ends.
+    return_tab: DevelopTab,
 }
 
 const FULL_CROP: Crop = Crop {
@@ -763,6 +769,7 @@ mod autotone;
 mod bulk_delete;
 mod catalog;
 mod crop;
+pub(crate) use crop::{CropAspect, CropOrientation};
 mod export;
 mod fonts;
 #[cfg(not(target_arch = "wasm32"))]
@@ -1127,7 +1134,9 @@ impl App {
     /// Leave any Loupe editing mode. Call before navigating, so input isn't
     /// captured by a mode meant for the previous image.
     fn teardown_loupe_state(&mut self) {
-        self.crop_edit = None;
+        if let Some(draft) = self.crop_edit.take() {
+            self.develop_tab = draft.return_tab;
+        }
         self.tool = LoupeTool::None;
         self.touchup_selected = None;
     }
