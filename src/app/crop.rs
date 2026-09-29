@@ -70,29 +70,24 @@ impl CropAspect {
     }
 }
 
-/// The largest box of display-space ratio `w_over_h`, centered in a
-/// `disp_w x disp_h` frame, in normalized texture space for rotation `rot`
-/// (quarter turns clockwise).
-pub(super) fn centered_box(disp_w: f32, disp_h: f32, w_over_h: f32, rot: u8) -> Crop {
-    let (bw, bh) = if disp_w / disp_h > w_over_h {
-        (w_over_h * disp_h / disp_w, 1.0)
-    } else {
-        (1.0, (disp_w / w_over_h / disp_h).min(1.0))
+/// A box of pixel ratio `w_over_h` with `r`'s center and area, in a
+/// `w x h` pixel frame. It shrinks to fit the frame, then slides back inside
+/// it, so an uncropped frame gives the largest centered box.
+fn reshaped(r: Crop, w_over_h: f32, w: f32, h: f32) -> Crop {
+    let area = (r.right - r.left) * w * (r.bottom - r.top) * h;
+    let (bw, bh) = ((area * w_over_h).sqrt(), (area / w_over_h).sqrt());
+    let fit = (w / bw).min(h / bh).min(1.0);
+    let span = |lo: f32, hi: f32, len: f32| {
+        let start = ((lo + hi - len) / 2.0).clamp(0.0, 1.0 - len);
+        (start, start + len)
     };
-    let m = super::loupe::rot_matrix_of(rot);
-    let to_tex = |dx: f32, dy: f32| {
-        (
-            m[0] * (dx - 0.5) + m[1] * (dy - 0.5) + 0.5,
-            m[2] * (dx - 0.5) + m[3] * (dy - 0.5) + 0.5,
-        )
-    };
-    let (u0, v0) = to_tex(0.5 - bw / 2.0, 0.5 - bh / 2.0);
-    let (u1, v1) = to_tex(0.5 + bw / 2.0, 0.5 + bh / 2.0);
+    let (left, right) = span(r.left, r.right, bw * fit / w);
+    let (top, bottom) = span(r.top, r.bottom, bh * fit / h);
     Crop {
-        left: u0.min(u1),
-        top: v0.min(v1),
-        right: u0.max(u1),
-        bottom: v0.max(v1),
+        left,
+        top,
+        right,
+        bottom,
     }
 }
 
@@ -237,17 +232,17 @@ impl App {
         self.snap_crop_to_aspect();
     }
 
-    /// Replace the draft with the largest centered box of its fixed ratio.
+    /// Reshape the draft to its fixed ratio, keeping its center and area.
     /// Custom keeps the rect as it is.
     fn snap_crop_to_aspect(&mut self) {
-        let (img_w, img_h) = self.image_size();
-        let (disp_w, disp_h) = self.display_size();
-        let rot = self.current_rotation();
+        let (w, h) = self.image_size();
+        let quarter_turned = self.current_rotation() % 2 == 1;
         let Some(d) = self.crop_edit.as_mut() else {
             return;
         };
-        if let Some(r) = d.aspect.w_over_h(d.orientation, img_w, img_h) {
-            d.rect = centered_box(disp_w, disp_h, r, rot);
+        if let Some(r) = d.aspect.w_over_h(d.orientation, w, h) {
+            let texture_ratio = if quarter_turned { 1.0 / r } else { r };
+            d.rect = reshaped(d.rect, texture_ratio, w, h);
         }
         self.request_redraw();
     }
@@ -456,29 +451,87 @@ mod tests {
     }
 
     #[test]
-    fn a_fixed_ratio_snaps_to_the_largest_centered_box() {
-        let mut app = photo_app(0, None);
+    fn an_uncropped_photo_snaps_to_the_largest_centered_box() {
+        let snapped = |aspect, orientation| {
+            let mut app = photo_app(0, None);
+            app.enter_crop();
+            app.set_crop_aspect(aspect);
+            app.set_crop_orientation(orientation);
+            (app.crop_rect().unwrap(), app.crop_pixel_size().unwrap())
+        };
+        use CropAspect::*;
+        use CropOrientation::*;
+
+        let (r, px) = snapped(R16x9, Horizontal);
+        assert_rect(r, (0.0, 0.125, 1.0, 0.875));
+        assert_eq!(px, (4000, 2250));
+
+        let (r, px) = snapped(R4x3, Vertical);
+        assert_rect(r, (0.21875, 0.0, 0.78125, 1.0));
+        assert_eq!(px, (2250, 3000));
+
+        let (r, _) = snapped(Original, Horizontal);
+        assert_rect(r, (0.0, 0.0, 1.0, 1.0));
+
+        let (r, px) = snapped(Square, Horizontal);
+        assert_rect(r, (0.125, 0.0, 0.875, 1.0));
+        assert_eq!(px, (3000, 3000));
+
+        let (r, _) = snapped(Custom, Horizontal);
+        assert_rect(r, (0.0, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn a_new_ratio_keeps_an_existing_crops_center_and_size() {
+        // 1600x1200 px, centered at (1200, 600) px.
+        let saved = Crop {
+            left: 0.1,
+            top: 0.0,
+            right: 0.5,
+            bottom: 0.4,
+        };
+        let mut app = photo_app(0, Some(saved));
         app.enter_crop();
-
         app.set_crop_aspect(CropAspect::R16x9);
-        assert_rect(app.crop_rect().unwrap(), (0.0, 0.125, 1.0, 0.875));
-        assert_eq!(app.crop_pixel_size(), Some((4000, 2250)));
+        let r = app.crop_rect().unwrap();
+        assert!((pixel_ratio(r) - 16.0 / 9.0).abs() < 1e-3, "{r:?}");
+        let center = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        assert!(
+            (center.0 - 0.3).abs() < 1e-4 && (center.1 - 0.2).abs() < 1e-4,
+            "the center stays put: {center:?}"
+        );
+        let area = (r.right - r.left) * 4000.0 * (r.bottom - r.top) * 3000.0;
+        assert!(
+            (area / (1600.0 * 1200.0) - 1.0).abs() < 1e-3,
+            "the size stays put: {area}"
+        );
 
-        app.set_crop_aspect(CropAspect::R4x3);
+        // A crop in the corner turned tall would cross the top edge, so it
+        // slides down rather than shrink, and keeps its size.
         app.set_crop_orientation(CropOrientation::Vertical);
-        assert_eq!(app.crop_pixel_size(), Some((2250, 3000)));
-        assert_rect(app.crop_rect().unwrap(), (0.21875, 0.0, 0.78125, 1.0));
+        let r = app.crop_rect().unwrap();
+        assert!(in_frame(r), "{r:?}");
+        assert!((pixel_ratio(r) - 9.0 / 16.0).abs() < 1e-3, "{r:?}");
+        let area = (r.right - r.left) * 4000.0 * (r.bottom - r.top) * 3000.0;
+        assert!((area / (1600.0 * 1200.0) - 1.0).abs() < 1e-3, "{area}");
+        assert!(r.top.abs() < 1e-5, "slid to the top edge: {r:?}");
 
-        app.set_crop_aspect(CropAspect::Original);
-        app.set_crop_orientation(CropOrientation::Horizontal);
-        assert_rect(app.crop_rect().unwrap(), (0.0, 0.0, 1.0, 1.0));
-
-        app.set_crop_aspect(CropAspect::Square);
-        assert_eq!(app.crop_pixel_size(), Some((3000, 3000)));
-        assert_rect(app.crop_rect().unwrap(), (0.125, 0.0, 0.875, 1.0));
-
-        app.set_crop_aspect(CropAspect::Custom);
-        assert_rect(app.crop_rect().unwrap(), (0.125, 0.0, 0.875, 1.0));
+        // Too big for the frame at the new shape, it shrinks to fit.
+        let mut app = photo_app(
+            0,
+            Some(Crop {
+                left: 0.05,
+                top: 0.05,
+                right: 0.95,
+                bottom: 0.95,
+            }),
+        );
+        app.enter_crop();
+        app.set_crop_aspect(CropAspect::R16x9);
+        app.set_crop_orientation(CropOrientation::Vertical);
+        let r = app.crop_rect().unwrap();
+        assert!(in_frame(r), "{r:?}");
+        assert_eq!(app.crop_pixel_size().map(|(_, h)| h), Some(3000));
     }
 
     /// The box is fitted on screen and mapped back to texture space, so the
@@ -544,6 +597,8 @@ mod tests {
         assert_rect(r, (0.25, 0.0, 1.0, 0.75));
 
         // 16:9 at full width cannot grow taller at all.
+        let mut app = photo_app(0, None);
+        app.enter_crop();
         app.set_crop_aspect(CropAspect::R16x9);
         app.crop_grab(CropEdge::Top);
         app.crop_drag_to(0.5, 0.0);
@@ -583,7 +638,11 @@ mod tests {
 
         app.handle_key(KeyCode::BracketRight);
         assert_eq!(app.current_rotation(), 1, "] turns clockwise");
-        assert_eq!(app.crop_rect(), Some(rect), "the box stays on the same content");
+        assert_eq!(
+            app.crop_rect(),
+            Some(rect),
+            "the box stays on the same content"
+        );
         assert_eq!(app.crop_orientation(), Some(CropOrientation::Vertical));
         assert_eq!(app.crop_pixel_size(), Some((2250, 4000)));
         assert!(
@@ -624,7 +683,9 @@ mod tests {
         assert!(app.crop_edit.is_none());
         assert_eq!(app.develop_tab(), DevelopTab::Masks);
         assert_rect(
-            app.current_adjustments().crop.expect("leaving the tab commits"),
+            app.current_adjustments()
+                .crop
+                .expect("leaving the tab commits"),
             (0.125, 0.0, 0.875, 1.0),
         );
 
@@ -632,7 +693,10 @@ mod tests {
         app.set_crop_aspect(CropAspect::R16x9);
         app.handle_key(KeyCode::Escape);
         assert_eq!(app.develop_tab(), DevelopTab::Masks, "Esc goes back");
-        assert_rect(app.current_adjustments().crop.unwrap(), (0.125, 0.0, 0.875, 1.0));
+        assert_rect(
+            app.current_adjustments().crop.unwrap(),
+            (0.125, 0.0, 0.875, 1.0),
+        );
 
         app.handle_key(KeyCode::KeyC);
         app.teardown_loupe_state();
@@ -646,10 +710,26 @@ mod tests {
     #[test]
     fn reopening_a_saved_crop_selects_its_ratio() {
         let cases = [
-            ((0.0, 0.125, 1.0, 0.875), CropAspect::R16x9, CropOrientation::Horizontal),
-            ((0.21875, 0.0, 0.78125, 1.0), CropAspect::Original, CropOrientation::Vertical),
-            ((0.125, 0.0, 0.875, 1.0), CropAspect::Square, CropOrientation::Horizontal),
-            ((0.1, 0.1, 0.9, 0.5), CropAspect::Custom, CropOrientation::Horizontal),
+            (
+                (0.0, 0.125, 1.0, 0.875),
+                CropAspect::R16x9,
+                CropOrientation::Horizontal,
+            ),
+            (
+                (0.21875, 0.0, 0.78125, 1.0),
+                CropAspect::Original,
+                CropOrientation::Vertical,
+            ),
+            (
+                (0.125, 0.0, 0.875, 1.0),
+                CropAspect::Square,
+                CropOrientation::Horizontal,
+            ),
+            (
+                (0.1, 0.1, 0.9, 0.5),
+                CropAspect::Custom,
+                CropOrientation::Horizontal,
+            ),
         ];
         for ((left, top, right, bottom), aspect, orientation) in cases {
             let saved = Crop {

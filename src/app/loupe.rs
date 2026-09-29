@@ -280,7 +280,12 @@ impl App {
 
     /// The display-UV to texture-UV rotation matrix for the current rotation.
     pub(super) fn rot_matrix(&self) -> [f32; 4] {
-        rot_matrix_of(self.current_rotation())
+        match self.current_rotation() {
+            1 => [0.0, 1.0, -1.0, 0.0],
+            2 => [-1.0, 0.0, 0.0, -1.0],
+            3 => [0.0, -1.0, 1.0, 0.0],
+            _ => [1.0, 0.0, 0.0, 1.0],
+        }
     }
 
     /// Set up the renderer for before/after compare. "Before" keeps only the
@@ -526,17 +531,6 @@ impl App {
         let u = rot[0] * (dx - 0.5) + rot[1] * (dy - 0.5) + 0.5;
         let v = rot[2] * (dx - 0.5) + rot[3] * (dy - 0.5) + 0.5;
         (u, v)
-    }
-}
-
-/// The display-UV to texture-UV rotation matrix for `rot` quarter turns
-/// clockwise, row-major: uv = R·(d − 0.5) + 0.5.
-pub(super) fn rot_matrix_of(rot: u8) -> [f32; 4] {
-    match rot {
-        1 => [0.0, 1.0, -1.0, 0.0],
-        2 => [-1.0, 0.0, 0.0, -1.0],
-        3 => [0.0, -1.0, 1.0, 0.0],
-        _ => [1.0, 0.0, 0.0, 1.0],
     }
 }
 
