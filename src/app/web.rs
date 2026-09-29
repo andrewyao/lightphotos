@@ -537,6 +537,14 @@ impl App {
         let Some(path) = self.want.clone() else {
             return false;
         };
+        if let Some(loader) = &mut self.loader {
+            for (kind, p, t) in loader.retain_web_loupe(|p| p == path) {
+                match kind {
+                    JobKind::Speed => self.web_speed_inflight.remove(&(p, t)),
+                    _ => self.web_preview_inflight.remove(&(p, t)),
+                };
+            }
+        }
         let target = self.preview_px();
         let key = (path.clone(), target);
         let is_raw = crate::image_decode::is_raw_extension(&path);

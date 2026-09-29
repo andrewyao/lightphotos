@@ -25,3 +25,8 @@ Then run a script as a Playwright `run_code` against
 and serve each on its own port. Each port is its own origin, so each gets its
 own OPFS copy. `serve.py` sends COOP/COEP, which the build's shared memory
 needs.
+
+`loupe-arrows.js` wants 20 Sony ARWs. It opens the first in the Loupe and
+arrows through the strip four times at 60 ms a press, reporting the wasm
+heap after each pass and any `unreachable` trap. Before the Loupe lanes were
+pruned and capped, the heap reached the 4 GB ceiling within one pass.
