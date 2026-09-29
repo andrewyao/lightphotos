@@ -139,14 +139,14 @@ pub(super) fn footer<T: Copy + PartialEq>(
 /// the panel. The active tab breaks the rule so it joins the content above.
 fn footer_tab(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {
     let visuals = ui.visuals().clone();
-    let galley = ui.painter().layout_no_wrap(
-        label.to_owned(),
-        egui::TextStyle::Body.resolve(ui.style()),
-        egui::Color32::PLACEHOLDER,
-    );
+    let mut font = egui::TextStyle::Body.resolve(ui.style());
+    font.size += font_size::px(ui.style(), 1.0);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), font, egui::Color32::PLACEHOLDER);
     let pad = egui::vec2(
-        font_size::px(ui.style(), 12.0),
-        font_size::px(ui.style(), 5.0),
+        font_size::px(ui.style(), 16.0),
+        font_size::px(ui.style(), 7.0),
     );
     let size = galley.size() + 2.0 * pad;
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
