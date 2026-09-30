@@ -1098,8 +1098,10 @@ mod tests {
         (app, dir, paths)
     }
 
+    use crate::app::presets::tests::settled;
+
     fn click_button(app: &mut App, label: &str) {
-        use crate::app::presets::tests::{click, settled};
+        use crate::app::presets::tests::click;
         let at = settled(app).pos_of(label);
         let (actions, _) = click(app, at);
         app.apply_ui_actions(actions);
@@ -1149,6 +1151,105 @@ mod tests {
         assert!(paths.iter().all(|p| p.exists()));
         assert_eq!(group_names(&app).len(), 1);
         assert_eq!(app.selection_count(), 2, "the selection stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Delete Group button the keyboard cursor outlines, if any.
+    fn focused_button(app: &mut App, trash: &str) -> Option<(String, f32)> {
+        let t = crate::i18n::t();
+        let painted = settled(app);
+        let cursor = crate::ui::theme::colors(&app.egui_ctx).cursor;
+        let rings = painted.outlined(cursor);
+        let focused: Vec<(String, f32)> = [t.cancel, t.remove_group, trash]
+            .into_iter()
+            .map(|label| (label, painted.pos_of(label)))
+            .filter(|(_, at)| rings.iter().any(|r| r.contains(*at)))
+            .map(|(label, at)| (label.to_string(), at.x))
+            .collect();
+        assert!(focused.len() <= 1, "one button at a time: {focused:?}");
+        focused.into_iter().next()
+    }
+
+    fn tab(app: &mut App, back: bool) {
+        app.modifiers = if back {
+            ModifiersState::SHIFT
+        } else {
+            ModifiersState::empty()
+        };
+        app.handle_key(winit::keyboard::KeyCode::Tab);
+        app.modifiers = ModifiersState::empty();
+    }
+
+    #[test]
+    fn tab_walks_the_delete_group_buttons_left_to_right_and_wraps() {
+        let trash = (crate::i18n::t().trash_group_photos)(6);
+        let (mut app, dir, _) = delete_group_open();
+        assert_eq!(focused_button(&mut app, &trash), None, "nothing at first");
+        let mut forward = Vec::new();
+        for _ in 0..3 {
+            tab(&mut app, false);
+            forward.push(focused_button(&mut app, &trash).expect("Tab focuses a button"));
+        }
+        let xs: Vec<f32> = forward.iter().map(|(_, x)| *x).collect();
+        assert!(
+            xs.windows(2).all(|w| w[0] < w[1]),
+            "left to right: {forward:?}"
+        );
+        tab(&mut app, false);
+        assert_eq!(focused_button(&mut app, &trash), Some(forward[0].clone()));
+
+        let mut backward = Vec::new();
+        for _ in 0..3 {
+            tab(&mut app, true);
+            backward.push(focused_button(&mut app, &trash).unwrap());
+        }
+        let expected: Vec<_> = [2, 1, 0].map(|i| forward[i].clone()).into();
+        assert_eq!(backward, expected, "Shift+Tab wraps and walks back");
+        assert!(app.bulk_delete.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Opens Delete Group, tabs to `label`, and presses Enter.
+    fn enter_on(label: &str) -> (App, PathBuf, Vec<PathBuf>) {
+        let trash = (crate::i18n::t().trash_group_photos)(6);
+        let (mut app, dir, paths) = delete_group_open();
+        for _ in 0..3 {
+            tab(&mut app, false);
+            if focused_button(&mut app, &trash).is_some_and(|(l, _)| l == label) {
+                app.handle_key(winit::keyboard::KeyCode::Enter);
+                return (app, dir, paths);
+            }
+        }
+        panic!("Tab never reached {label}");
+    }
+
+    #[test]
+    fn enter_presses_the_focused_delete_group_button() {
+        let t = crate::i18n::t();
+        let (app, dir, paths) = enter_on(t.cancel);
+        assert!(!app.confirm_open(), "Cancel closes it");
+        assert!(app.bulk_delete.is_none());
+        assert!(paths.iter().all(|p| p.exists()));
+        assert_eq!(group_names(&app).len(), 1, "the group stays");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (app, dir, paths) = enter_on(t.remove_group);
+        assert!(!app.confirm_open());
+        assert!(app.bulk_delete.is_none());
+        assert!(paths.iter().all(|p| p.exists()));
+        assert!(app.catalog.groups().unwrap().is_empty());
+        assert_eq!(visible_names(&app).len(), 8, "every member is a single");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (mut app, dir, paths) = enter_on(&(t.trash_group_photos)(6));
+        assert!(!app.confirm_open());
+        drain(&mut app);
+        let exists: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
+        assert_eq!(
+            exists,
+            [true, false, false, false, false, false, false, true]
+        );
+        assert!(app.catalog.groups().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -523,6 +523,7 @@ pub(in crate::app) mod tests {
         });
         let mut texts = Vec::new();
         let mut circles = Vec::new();
+        let mut rects = Vec::new();
         for clipped in &output.shapes {
             match &clipped.shape {
                 egui::Shape::Text(text) => texts.push((
@@ -530,13 +531,18 @@ pub(in crate::app) mod tests {
                     text.pos + egui::vec2(4.0, text.galley.size().y / 2.0),
                 )),
                 egui::Shape::Circle(circle) => circles.push(*circle),
+                egui::Shape::Rect(rect) => rects.push((rect.rect, rect.stroke.color)),
                 _ => {}
             }
         }
-        (actions, Painted(texts, circles))
+        (actions, Painted(texts, circles, rects))
     }
 
-    pub(in crate::app) struct Painted(Vec<(String, egui::Pos2)>, Vec<egui::epaint::CircleShape>);
+    pub(in crate::app) struct Painted(
+        Vec<(String, egui::Pos2)>,
+        Vec<egui::epaint::CircleShape>,
+        Vec<(egui::Rect, egui::Color32)>,
+    );
 
     impl Painted {
         pub(in crate::app) fn has(&self, text: &str) -> bool {
@@ -569,6 +575,20 @@ pub(in crate::app) mod tests {
 
         pub(in crate::app) fn texts(&self) -> Vec<&str> {
             self.0.iter().map(|(t, _)| t.as_str()).collect()
+        }
+
+        /// Every rect outlined in `stroke`, at any opacity, since a modal
+        /// fading in paints everything in it translucent.
+        pub(in crate::app) fn outlined(&self, stroke: egui::Color32) -> Vec<egui::Rect> {
+            let near = |c: egui::Color32| {
+                let (a, b) = (c.to_opaque().to_array(), stroke.to_array());
+                a.iter().zip(b).all(|(&x, y)| x.abs_diff(y) <= 2)
+            };
+            self.2
+                .iter()
+                .filter(|(_, color)| color.a() > 0 && near(*color))
+                .map(|(rect, _)| *rect)
+                .collect()
         }
 
         /// Every circle painted in `fill`.

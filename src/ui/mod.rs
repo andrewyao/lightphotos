@@ -169,8 +169,10 @@ pub(crate) mod toolbar;
 
 use develop_panel::draw_develop_panel;
 use export_panel::draw_export_panel;
+pub(crate) use form::Role;
 use grid::{draw_grid, draw_left_panel};
 use loupe::draw_loupe;
+pub(crate) use modals::delete_group_tab_order;
 use modals::{
     confirm_modal, delete_group_modal, delete_preset_modal, help_modal, preset_name_modal,
     settings_modal,

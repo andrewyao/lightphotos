@@ -48,12 +48,13 @@ pub(super) fn delete_group_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput
     let Some((photos, groups)) = app.pending_group_delete() else {
         return;
     };
+    let focus = app.group_delete_focus();
     let t = t();
     let trash = (t.trash_group_photos)(photos);
     let resp = form::dialog(ui.ctx(), "delete_group", form::DIALOG_WIDTH, |ui| {
         form::title(ui, t.delete_group_title);
         ui.label((t.delete_group_prompt)(photos, groups));
-        match form::footer(ui, &delete_group_buttons(t, &trash)) {
+        match form::footer_with_focus(ui, &delete_group_buttons(t, &trash), focus) {
             Some(Role::Cancel) => out.actions.push(UiAction::CancelPending),
             Some(Role::Primary) => out.actions.push(UiAction::RemoveGroups),
             Some(Role::Danger) => out.actions.push(UiAction::TrashGroups),
@@ -65,14 +66,29 @@ pub(super) fn delete_group_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput
     }
 }
 
-/// Remove Group is listed last so it, not the trash, takes the right edge
-/// where macOS puts a dialog's default.
+/// Delete Group's roles as passed to its footer. Remove Group is listed last
+/// so it, not the trash, takes the right edge where macOS puts a dialog's
+/// default.
+const DELETE_GROUP_ROLES: [Role; 3] = [Role::Cancel, Role::Danger, Role::Primary];
+
 fn delete_group_buttons<'a>(t: &'a crate::i18n::Strings, trash: &'a str) -> [Button<'a>; 3] {
-    [
-        Button::new(t.cancel, Role::Cancel),
-        Button::new(trash, Role::Danger),
-        Button::new(t.remove_group, Role::Primary),
-    ]
+    DELETE_GROUP_ROLES.map(|role| {
+        let label = match role {
+            Role::Cancel => t.cancel,
+            Role::Primary => t.remove_group,
+            Role::Danger => trash,
+        };
+        Button::new(label, role)
+    })
+}
+
+/// Delete Group's buttons left to right on this platform, the order Tab
+/// walks them.
+pub(crate) fn delete_group_tab_order() -> Vec<Role> {
+    form::order(&DELETE_GROUP_ROLES, form::Platform::CURRENT)
+        .into_iter()
+        .map(|i| DELETE_GROUP_ROLES[i])
+        .collect()
 }
 
 /// Confirms deleting one preset. This can't go through `confirm_modal`, whose
