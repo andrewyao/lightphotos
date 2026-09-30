@@ -2,12 +2,32 @@ use super::*;
 use std::path::{Path, PathBuf};
 
 use crate::burst;
+use crate::groups::{Group, GroupId};
 use crate::navigation::Cmp;
 use crate::thumbnail::THUMB_PX;
 
 impl App {
     pub(crate) fn mode(&self) -> ViewMode {
         self.mode
+    }
+
+    /// The group whose stack is the cell at `pos`. `None` for a single, and
+    /// for a cell whose photo is not its group's representative, which a
+    /// rebuilt view never shows.
+    pub(crate) fn group_at(&self, pos: usize) -> Option<(&GroupId, &Group)> {
+        let idx = *self.visible.get(pos)?;
+        let name = self.playlist.as_ref()?.entry(idx)?.file_name()?;
+        let groups = self.catalog.groups()?;
+        let id = groups.group_of(name)?;
+        let group = groups.get(id)?;
+        (group.rep() == name).then_some((id, group))
+    }
+
+    /// Whether any selected cell is a stack.
+    pub(crate) fn selection_has_group(&self) -> bool {
+        self.selected_cells()
+            .into_iter()
+            .any(|p| self.group_at(p).is_some())
     }
 
     /// Whether a folder or file is open. `false` means the landing page shows.

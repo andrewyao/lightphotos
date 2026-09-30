@@ -1,7 +1,9 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+use crate::catalog::GroupWriteRefused;
 use crate::develop::Adjustments;
+use crate::groups::{self, GroupWrite};
 use crate::navigation::Cmp;
 use crate::ui;
 
@@ -270,6 +272,126 @@ impl App {
         if self.filter.is_some() {
             self.recompute_visible();
             self.resync_loupe_selection();
+        }
+        self.request_redraw();
+    }
+
+    /// The only door from the app to the catalog's group writes. The view is
+    /// rebuilt in the same call, so no member ever shows alone, and the writes
+    /// are applied in the call that computed them, so they never cross a
+    /// folder switch. A refusal changes nothing and says why. Returns whether
+    /// the writes landed.
+    fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) -> bool {
+        match self.catalog.apply_group_writes(writes) {
+            Ok(()) => {
+                self.recompute_visible();
+                self.resync_loupe_selection();
+                self.request_redraw();
+                true
+            }
+            Err(e) => {
+                eprintln!("[lightphotos] group change refused: {e}");
+                let t = crate::i18n::t();
+                let msg = match e {
+                    GroupWriteRefused::NoFolder | GroupWriteRefused::LoadPending => {
+                        t.group_refused_loading
+                    }
+                    GroupWriteRefused::Unsupported => t.group_refused_browser,
+                };
+                self.set_status(StatusKind::Error, msg.to_string());
+                self.request_redraw();
+                false
+            }
+        }
+    }
+
+    /// The file name of the photo in the cell at `pos`.
+    fn cell_name(&self, pos: usize) -> Option<std::ffi::OsString> {
+        let idx = *self.visible.get(pos)?;
+        let path = self.playlist.as_ref()?.entry(idx)?;
+        path.file_name().map(std::ffi::OsStr::to_os_string)
+    }
+
+    /// Cmd+G: group two or more selected cells. A stack brings all its
+    /// members, and the primary cell's photo becomes the representative. The
+    /// rebuild puts every selected member on the new stack's cell, so the
+    /// selection becomes that cell with no code here.
+    pub(super) fn group_selected(&mut self) {
+        let cells = self.selected_cells();
+        if cells.len() < 2 {
+            return;
+        }
+        let t = crate::i18n::t();
+        let Some(groups) = self.catalog.groups() else {
+            self.set_status(StatusKind::Error, t.group_refused_loading.to_string());
+            self.request_redraw();
+            return;
+        };
+        let primary = self.sel.filter(|s| cells.contains(s)).unwrap_or(cells[0]);
+        let photos: Vec<Vec<std::ffi::OsString>> = cells
+            .iter()
+            .map(|&p| match self.group_at(p) {
+                Some((_, g)) => g.members().to_vec(),
+                None => self.cell_name(p).into_iter().collect(),
+            })
+            .collect();
+        let slices: Vec<&[std::ffi::OsString]> = photos.iter().map(Vec::as_slice).collect();
+        let merged = self
+            .cell_name(primary)
+            .and_then(|rep| groups::merge_selection(&slices, &rep));
+        let Some(group) = merged else {
+            self.set_status(StatusKind::Error, t.group_name_unsaveable.to_string());
+            self.request_redraw();
+            return;
+        };
+        let writes = groups.create(group, std::time::SystemTime::now());
+        self.apply_group_writes(writes);
+    }
+
+    /// Cmd+Shift+G: dissolve every selected stack without asking. Its members
+    /// come back selected, with the old representative as the cursor, so
+    /// Cmd+G right after rebuilds the same group.
+    pub(super) fn ungroup_selected(&mut self) {
+        let cells = self.selected_cells();
+        let primary = self
+            .sel
+            .filter(|s| cells.contains(s) && self.group_at(*s).is_some());
+        let targets: Vec<(crate::groups::GroupId, crate::groups::Group)> = primary
+            .into_iter()
+            .chain(cells.iter().copied())
+            .filter_map(|p| self.group_at(p))
+            .map(|(id, g)| (id.clone(), g.clone()))
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        let targets: Vec<_> = targets
+            .into_iter()
+            .filter(|(id, _)| seen.insert(id.clone()))
+            .collect();
+        let Some(groups) = self.catalog.groups() else {
+            return;
+        };
+        let writes: Vec<GroupWrite> = targets
+            .iter()
+            .flat_map(|(id, _)| groups.dissolve(id))
+            .collect();
+        if targets.is_empty() || !self.apply_group_writes(writes) {
+            return;
+        }
+        let Some(pl) = self.playlist.as_ref() else {
+            return;
+        };
+        let place =
+            |name: &std::ffi::OsStr| pl.index_of(name).and_then(|i| self.place_of(i).cell());
+        let freed: Vec<usize> = targets
+            .iter()
+            .flat_map(|(_, g)| g.members())
+            .filter_map(|m| place(m))
+            .collect();
+        let cursor = place(targets[0].1.rep());
+        self.selected.extend(freed);
+        if cursor.is_some() {
+            self.sel = cursor;
+            self.anchor = cursor;
         }
         self.request_redraw();
     }

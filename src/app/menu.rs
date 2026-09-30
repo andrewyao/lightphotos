@@ -27,6 +27,8 @@ impl App {
             Export => tool_free && !self.show_settings,
             OpenFolder | AutoTone | Rate(_) | Grid | KeyboardShortcuts => free,
             AutoToneSelection | MoveToTrash => free && selected > 0,
+            GroupSelected => free && self.selected_cells().len() >= 2,
+            Ungroup => free && self.selection_has_group(),
             CopySettings => free && selected == 1,
             PasteSettings => free && selected > 0 && self.has_copied_settings(),
             Loupe => free && self.mode == ViewMode::Grid,
