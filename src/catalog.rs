@@ -1428,14 +1428,14 @@ mod tests {
         photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
         let missing =
             r#"{"v":1,"members":["gone.jpg","a.jpg","b.jpg"],"representative":"gone.jpg"}"#;
-        let missing_file = write_group_file(&dir, "g-1", missing);
+        let missing_file = write_group_file(&dir, "g-2", missing);
         let rival = r#"{"v":1,"members":["b.jpg","c.jpg"],"representative":"b.jpg"}"#;
-        let rival_file = write_group_file(&dir, "g-2", rival);
+        let rival_file = write_group_file(&dir, "g-1", rival);
 
         let mut cat = Catalog::with_dir(dir.clone());
         assert_eq!(cat.take_error(), None);
         let (id, group) = only_group(&cat);
-        assert_eq!(id.to_string(), "g-1");
+        assert_eq!(id.to_string(), "g-2");
         assert_eq!(group.members(), ["a.jpg", "b.jpg"]);
         assert_eq!(
             group.rep(),

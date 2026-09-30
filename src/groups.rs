@@ -7,43 +7,56 @@
 //! writes change the index, so memory and disk go through the same values.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::time::SystemTime;
 
 use crate::hash::Fnv1a;
 
-/// A group's name, which is also its sidecar's file stem, for example
-/// `g-5f3a9c10e2`. Ordered as a string, which is what decides a photo two
-/// sidecars both claim.
+/// A group's name, which is also its sidecar's file stem. The order of ids
+/// is the order groups were created in, and it decides a photo two sidecars
+/// both claim: the newest group keeps it. A minted id,
+/// `g-<ms since the epoch, 12 hex digits>-<6 hex digits>`, orders by its
+/// time. Any other id, such as the fixture script's `g-fixture00001` or a
+/// hand-written one, counts as older than every minted id and orders by name
+/// among its kind.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GroupId(String);
+pub struct GroupId {
+    minted_ms: Option<u64>,
+    name: String,
+}
 
 impl GroupId {
     /// Only ASCII letters, digits, `-` and `_`, so an id joined into a path
     /// can never leave `groups/`.
-    pub fn from_stem(stem: &std::ffi::OsStr) -> Option<GroupId> {
-        let s = stem.to_str()?;
-        let safe = !s.is_empty()
-            && s.bytes()
+    pub fn from_stem(stem: &OsStr) -> Option<GroupId> {
+        let name = stem.to_str()?;
+        let safe = !name.is_empty()
+            && name
+                .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-        safe.then(|| GroupId(s.to_owned()))
+        safe.then(|| GroupId {
+            minted_ms: minted_ms(name),
+            name: name.to_owned(),
+        })
     }
 
     #[allow(dead_code)] // only called from #[cfg(test)] today
     fn mint(group: &Group, at: SystemTime, taken: impl Fn(&GroupId) -> bool) -> GroupId {
-        let nanos = at
+        let ms = at
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+            .min(MAX_MINTED_MS);
         for salt in 0u32.. {
             let mut h = Fnv1a::new();
-            h.write(&nanos.to_le_bytes());
             for m in &group.members {
                 h.write(m.as_encoded_bytes());
                 h.write(&[0]);
             }
             h.write(&salt.to_le_bytes());
-            let id = GroupId(format!("g-{:010x}", h.finish() & 0xff_ffff_ffff));
+            let id = GroupId {
+                minted_ms: Some(ms),
+                name: format!("g-{ms:012x}-{:06x}", h.finish() & 0xff_ffff),
+            };
             if !taken(&id) {
                 return id;
             }
@@ -52,15 +65,32 @@ impl GroupId {
     }
 }
 
+/// The largest time 12 hex digits hold, some 8 900 years after 1970.
+const MAX_MINTED_MS: u64 = 0xffff_ffff_ffff;
+
+/// The time in a stem shaped like a minted id, `g-` then 12 and 6 lowercase
+/// hex digits.
+fn minted_ms(name: &str) -> Option<u64> {
+    let (ms, hash) = name.strip_prefix("g-")?.split_once('-')?;
+    let hex = |s: &str, len: usize| {
+        s.len() == len && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    };
+    if !(hex(ms, 12) && hex(hash, 6)) {
+        return None;
+    }
+    u64::from_str_radix(ms, 16).ok()
+}
+
 impl std::fmt::Display for GroupId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.name)
     }
 }
 
-/// Two or more distinct photos, by file name in folder order, and the one
-/// that stands for them. [`Group::new`] is the only constructor, so a group
-/// of one or a representative from outside the group cannot exist.
+/// Two or more distinct photos, sorted by file name the way the folder
+/// lists them, and the one that stands for them. [`Group::new`] is the only
+/// constructor, so a group of one, a representative from outside the group,
+/// or a member name a sidecar cannot hold cannot exist.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group {
     members: Vec<OsString>,
@@ -68,11 +98,15 @@ pub struct Group {
 }
 
 impl Group {
-    pub fn new(members: Vec<OsString>, rep: OsString) -> Option<Group> {
-        let distinct: HashSet<&OsString> = members.iter().collect();
-        let valid =
-            members.len() >= 2 && distinct.len() == members.len() && distinct.contains(&rep);
-        valid.then_some(Group { members, rep })
+    /// `None` also for a member name that is not UTF-8, since the sidecar's
+    /// JSON strings cannot hold it.
+    pub fn new(mut members: Vec<OsString>, rep: OsString) -> Option<Group> {
+        if members.len() < 2 || members.iter().any(|m| m.to_str().is_none()) {
+            return None;
+        }
+        members.sort_by_cached_key(|m| (m.to_string_lossy().to_lowercase(), m.clone()));
+        let distinct = members.windows(2).all(|w| w[0] != w[1]);
+        (distinct && members.contains(&rep)).then_some(Group { members, rep })
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser saves no groups yet
@@ -94,12 +128,6 @@ impl Group {
         };
         Group::new(members, rep)
     }
-
-    #[allow(dead_code)] // only called from #[cfg(test)] today
-    fn same_members(&self, other: &Group) -> bool {
-        self.members.len() == other.members.len()
-            && self.members.iter().all(|m| other.members.contains(m))
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,7 +147,7 @@ pub struct Groups {
 impl Groups {
     /// The groups a folder's sidecars describe, reconciled against the
     /// folder's `listing` of file names. A member whose file is gone is
-    /// dropped, a photo two sidecars claim stays with the lower id, a group
+    /// dropped, the newer id keeps a photo two sidecars claim, a group
     /// left under two members is ignored, and a missing representative moves
     /// to the first member. Nothing here writes, so opening a folder never
     /// changes it, and the next mutation of a repaired group rewrites its file.
@@ -130,7 +158,7 @@ impl Groups {
     ) -> Groups {
         let sorted: BTreeMap<GroupId, Group> = files.into_iter().collect();
         let mut groups = Groups::default();
-        for (id, group) in sorted {
+        for (id, group) in sorted.into_iter().rev() {
             let kept = group.retain(|m| listing.contains(m) && !groups.of.contains_key(m));
             if let Some(kept) = kept {
                 groups.insert(id, kept);
@@ -165,19 +193,22 @@ impl Groups {
     }
 
     /// Save `group`. Its members leave any group they were in, and a group
-    /// that drops under two members is deleted. Creating a group whose
-    /// members already form one only moves that group's representative, so
-    /// repeating a create changes nothing.
+    /// that drops under two members is deleted. The new group's write comes
+    /// first and its id is the newest, so a crash partway through still
+    /// loads with the photos in the new group. Creating a group whose members
+    /// already form one only moves that group's representative, so repeating
+    /// a create changes nothing.
     #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn create(&self, group: Group, at: SystemTime) -> Vec<GroupWrite> {
         if let Some(id) = self.group_of(&group.rep) {
-            if self.by_id[id].same_members(&group) {
+            if self.by_id[id].members == group.members {
                 return self.set_rep(id, &group.rep);
             }
         }
-        let mut writes = self.forget(&group.members);
         let id = GroupId::mint(&group, at, |id| self.by_id.contains_key(id));
-        writes.push(GroupWrite::Put(id, group));
+        let absorbed = self.forget(&group.members);
+        let mut writes = vec![GroupWrite::Put(id, group)];
+        writes.extend(absorbed);
         writes
     }
 
@@ -267,11 +298,15 @@ mod tests {
     }
 
     fn id(s: &str) -> GroupId {
-        GroupId(s.to_owned())
+        GroupId::from_stem(s.as_ref()).expect("a valid id")
     }
 
-    fn at(secs: u64) -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_secs(secs)
+    fn minted(ms: u64) -> GroupId {
+        id(&format!("g-{ms:012x}-000000"))
+    }
+
+    fn at(ms: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + Duration::from_millis(ms)
     }
 
     fn listing(ns: &[&str]) -> HashSet<OsString> {
@@ -288,11 +323,7 @@ mod tests {
     fn shape_ignoring_ids(groups: &Groups) -> Vec<(Vec<OsString>, OsString)> {
         let mut out: Vec<_> = groups
             .iter()
-            .map(|(_, g)| {
-                let mut m = g.members().to_vec();
-                m.sort();
-                (m, g.rep().clone())
-            })
+            .map(|(_, g)| (g.members().to_vec(), g.rep().clone()))
             .collect();
         out.sort();
         out
@@ -329,8 +360,31 @@ mod tests {
         assert!(Group::new(names(&["a", "b"]), "b".into()).is_some());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn creating_over_two_groups_merges_them_and_deletes_the_emptied_files() {
+    fn a_member_name_a_sidecar_cannot_hold_is_refused() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = OsString::from_vec(vec![b'a', 0xff]);
+        assert!(Group::new(vec![bad.clone(), "b".into()], "b".into()).is_none());
+        assert!(Group::new(vec!["b".into(), bad.clone()], bad).is_none());
+    }
+
+    #[test]
+    fn members_sort_by_name_the_way_the_folder_lists_them() {
+        let g = group(&["IMG_3.JPG", "img_1.jpg", "IMG_2.JPG"], "IMG_3.JPG");
+        assert_eq!(g.members(), names(&["img_1.jpg", "IMG_2.JPG", "IMG_3.JPG"]));
+        assert_eq!(
+            g,
+            group(&["IMG_2.JPG", "IMG_3.JPG", "img_1.jpg"], "IMG_3.JPG")
+        );
+        assert!(
+            Group::new(names(&["a", "A", "a"]), "a".into()).is_none(),
+            "a duplicate that sorts apart from its twin"
+        );
+    }
+
+    #[test]
+    fn creating_over_two_groups_puts_the_new_group_first_then_deletes_the_old() {
         let loaded = Groups::from_loaded(
             [
                 (id("g-1"), group(&["a", "b"], "a")),
@@ -340,16 +394,14 @@ mod tests {
         );
         let writes = loaded.create(group(&["a", "b", "c", "d", "e"], "c"), at(1));
 
-        assert!(writes.contains(&GroupWrite::Delete(id("g-1"))));
-        assert!(writes.contains(&GroupWrite::Delete(id("g-2"))));
-        let puts: Vec<&Group> = writes
-            .iter()
-            .filter_map(|w| match w {
-                GroupWrite::Put(_, g) => Some(g),
-                GroupWrite::Delete(_) => None,
-            })
-            .collect();
-        assert_eq!(puts, vec![&group(&["a", "b", "c", "d", "e"], "c")]);
+        assert!(
+            matches!(&writes[0], GroupWrite::Put(_, g) if *g == group(&["a", "b", "c", "d", "e"], "c")),
+            "the new group is written first: {writes:?}"
+        );
+        assert_eq!(
+            writes[1..],
+            [GroupWrite::Delete(id("g-1")), GroupWrite::Delete(id("g-2"))]
+        );
 
         let after = applied(loaded, &writes);
         assert_eq!(after.len(), 1);
@@ -364,7 +416,7 @@ mod tests {
         );
         let writes = loaded.create(group(&["a", "d"], "d"), at(1));
         assert_eq!(
-            writes[0],
+            writes[1],
             GroupWrite::Put(id("g-1"), group(&["b", "c"], "b"))
         );
         let after = applied(loaded, &writes);
@@ -403,23 +455,69 @@ mod tests {
         assert_eq!(after.group_of("b".as_ref()), None);
     }
 
+    /// Only the first write of a merge reached the disk before a crash. The
+    /// next load must side with the new group, the user's latest action.
     #[test]
-    fn two_sidecars_claiming_one_photo_resolve_to_the_lower_id() {
+    fn a_merge_cut_short_after_its_first_write_loads_as_the_new_group() {
+        let old = minted(1_000);
+        let files = [(old.clone(), group(&["a", "b", "c"], "a"))];
+        let photos = listing(&["a", "b", "c", "d"]);
+        let before = Groups::from_loaded(files.clone(), &photos);
+        let writes = before.create(group(&["b", "c", "d"], "d"), at(2_000));
+        let GroupWrite::Put(new, new_group) = &writes[0] else {
+            panic!("the new group comes first: {writes:?}");
+        };
+
+        let [old_file] = files;
+        let reloaded = Groups::from_loaded([old_file, (new.clone(), new_group.clone())], &photos);
+        assert_eq!(reloaded.get(new), Some(new_group));
+        assert_eq!(reloaded.get(&old), None, "the old group keeps only a");
+        assert_indexed(&reloaded);
+    }
+
+    #[test]
+    fn two_sidecars_claiming_one_photo_resolve_to_the_newest_id() {
+        let (older, newer) = (minted(1_000), minted(2_000));
         let groups = Groups::from_loaded(
             [
-                (id("g-b"), group(&["x", "c", "d"], "x")),
-                (id("g-a"), group(&["a", "x"], "x")),
+                (newer.clone(), group(&["a", "x"], "x")),
+                (older.clone(), group(&["x", "c", "d"], "x")),
             ],
             &listing(&["a", "c", "d", "x"]),
         );
-        assert_eq!(groups.group_of("x".as_ref()), Some(&id("g-a")));
-        assert_eq!(groups.get(&id("g-a")), Some(&group(&["a", "x"], "x")));
+        assert_eq!(groups.group_of("x".as_ref()), Some(&newer));
+        assert_eq!(groups.get(&newer), Some(&group(&["a", "x"], "x")));
         assert_eq!(
-            groups.get(&id("g-b")),
+            groups.get(&older),
             Some(&group(&["c", "d"], "c")),
-            "the higher id loses the photo and its representative moves"
+            "the older group loses the photo and its representative moves"
         );
         assert_indexed(&groups);
+    }
+
+    #[test]
+    fn ids_order_by_creation_time_after_every_unminted_id() {
+        let fixture = id("g-fixture00002");
+        assert!(id("g-fixture00001") < fixture, "unminted ids order by name");
+        assert!(id("zzz") < minted(0), "a minted id is newer than any other");
+        assert!(minted(0xff) < minted(0x100));
+        let early = GroupId::mint(&group(&["y", "z"], "y"), at(5), |_| false);
+        let late = GroupId::mint(&group(&["a", "b"], "a"), at(6), |_| false);
+        assert!(early < late, "{early} < {late}");
+        assert_eq!(
+            id(&late.to_string()),
+            late,
+            "a minted id reads back as minted"
+        );
+
+        let groups = Groups::from_loaded(
+            [
+                (id("g-fixture00001"), group(&["a", "b"], "a")),
+                (fixture.clone(), group(&["b", "c"], "b")),
+            ],
+            &listing(&["a", "b", "c"]),
+        );
+        assert_eq!(groups.group_of("b".as_ref()), Some(&fixture));
     }
 
     #[test]
@@ -511,7 +609,10 @@ mod tests {
             assert_eq!(GroupId::from_stem(bad.as_ref()), None, "{bad:?}");
         }
         for good in ["g-5f3a9c10e2", "g-fixture00001", "g-1", "My_Group"] {
-            assert_eq!(GroupId::from_stem(good.as_ref()), Some(id(good)));
+            assert_eq!(
+                GroupId::from_stem(good.as_ref()).map(|id| id.to_string()),
+                Some(good.to_string())
+            );
         }
         let minted = GroupId::mint(&group(&["a", "b"], "a"), at(3), |_| false);
         assert_eq!(
@@ -525,7 +626,10 @@ mod tests {
         let g = group(&["a", "b"], "a");
         let first = GroupId::mint(&g, at(7), |_| false);
         let name = first.to_string();
-        assert!(name.starts_with("g-") && name.len() == 12, "{name}");
+        assert!(
+            name.starts_with("g-000000000007-") && name.len() == 21,
+            "{name}"
+        );
         let second = GroupId::mint(&g, at(7), |id| *id == first);
         assert_ne!(first, second);
     }

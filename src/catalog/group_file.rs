@@ -41,19 +41,15 @@ fn parse(bytes: &[u8]) -> Result<Group, String> {
     })
 }
 
-/// The sidecar body for `group`. JSON strings are UTF-8, so a member whose
-/// name is not fails the write instead of being saved under a lossy name.
+/// The sidecar body for `group`. `Group::new` admits only UTF-8 names, so
+/// the conversion to JSON strings loses nothing.
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn to_bytes(group: &Group) -> Result<Vec<u8>, String> {
-    let name = |n: &std::ffi::OsString| {
-        n.to_str()
-            .map(str::to_owned)
-            .ok_or_else(|| format!("{} is not a UTF-8 file name", n.to_string_lossy()))
-    };
+    let name = |n: &std::ffi::OsString| n.to_string_lossy().into_owned();
     let file = GroupFile {
         v: FORMAT,
-        members: group.members().iter().map(name).collect::<Result<_, _>>()?,
-        representative: name(group.rep())?,
+        members: group.members().iter().map(name).collect(),
+        representative: name(group.rep()),
     };
     serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())
 }
