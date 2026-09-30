@@ -550,9 +550,12 @@ impl Driver {
 
     fn resize(&mut self, el: &ActiveEventLoop, w: u32, h: u32) {
         let window = self.window().clone();
-        if let Some(size) = window.request_inner_size(LogicalSize::new(w, h)) {
-            self.window_event(el, WindowEvent::Resized(size));
-        }
+        // A hidden macOS window applies the size without returning it, and no
+        // Resized event reaches a script, so forward the size it now has.
+        let size = window
+            .request_inner_size(LogicalSize::new(w, h))
+            .unwrap_or_else(|| window.inner_size());
+        self.window_event(el, WindowEvent::Resized(size));
     }
 
     /// Mirrors `egui_winit::State::on_keyboard_input`: a `Key` event, a
