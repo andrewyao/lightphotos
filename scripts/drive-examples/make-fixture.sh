@@ -8,6 +8,12 @@ set -eu
 
 dir=${1:?usage: make-fixture.sh <dir> [count]}
 count=${2:-12}
+# IMG_0001.jpg would overwrite a camera's IMG_0001.JPG on a case-insensitive
+# volume, so only an empty or new folder is written.
+if [ -d "$dir" ] && [ -n "$(ls -A "$dir")" ]; then
+    echo "make-fixture.sh: $dir is not empty; refusing to write into it" >&2
+    exit 1
+fi
 mkdir -p "$dir"
 
 swift - "$dir" "$count" <<'EOF'
