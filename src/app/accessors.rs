@@ -24,6 +24,7 @@ impl App {
     }
 
     /// Whether any selected cell is a stack.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))] // only the macOS menu asks
     pub(crate) fn selection_has_group(&self) -> bool {
         self.selected_cells()
             .into_iter()
