@@ -930,16 +930,6 @@ mod tests {
         eprintln!("delete frame, {N} singles: {base:?}");
         eprintln!("delete frame, one {N}-photo stack: {grouped:?}");
         eprintln!("medians: singles {:?}, stack {:?}", base[2], grouped[2]);
-        let t = Instant::now();
-        let paths = stack.delete_paths();
-        let t_paths = t.elapsed();
-        let t = Instant::now();
-        let whole = stack.whole_groups(&paths).whole;
-        eprintln!(
-            "split: delete_paths {t_paths:?}, whole_groups {:?} ({})",
-            t.elapsed(),
-            whole.len()
-        );
         let _ = std::fs::remove_dir_all(&dir_a);
         let _ = std::fs::remove_dir_all(&dir_b);
     }
