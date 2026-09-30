@@ -177,7 +177,11 @@ impl App {
 
     /// Begin trashing `paths`. Refused while another delete or an export is
     /// running: the export reads bytes from files this batch would remove.
-    pub(super) fn start_delete(&mut self, paths: Vec<PathBuf>) {
+    pub(super) fn start_delete(&mut self, mut paths: Vec<PathBuf>) {
+        // A path queued twice would count twice toward its group being
+        // whole, and its second trash call would fail on a file already gone.
+        let mut seen = HashSet::new();
+        paths.retain(|p| seen.insert(p.clone()));
         if paths.is_empty() {
             return;
         }
@@ -1075,6 +1079,41 @@ mod tests {
         let groups_dir = dir.join(crate::catalog::SIDECAR_DIR).join("groups");
         let left = std::fs::read_dir(&groups_dir).map_or(0, |d| d.count());
         assert_eq!(left, 0, "the group's sidecar is deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_path_queued_twice_is_trashed_once_and_its_group_goes_in_one_step() {
+        use crate::app::nav::tests::group_photos;
+        let (mut app, dir, paths) = grouped_app(&["a.jpg", "b.jpg", "c.jpg", "d.jpg"]);
+        group_photos(&mut app, &[1, 2, 3], 1);
+        let queued = [1, 2, 2, 3].map(|i| paths[i].clone()).to_vec();
+        app.start_delete(queued);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while app.bulk_delete.is_some() {
+            assert!(Instant::now() < deadline, "the delete batch never finished");
+            let sizes: Vec<usize> = app
+                .catalog
+                .groups()
+                .unwrap()
+                .iter()
+                .map(|(_, g)| g.members().len())
+                .collect();
+            assert!(
+                sizes.is_empty() || sizes == [3],
+                "the group shrank mid-batch: {sizes:?}"
+            );
+            app.poll_delete();
+        }
+        let exists: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
+        assert_eq!(exists, [true, false, false, false]);
+        assert!(app.catalog.groups().unwrap().is_empty());
+        let (kind, msg, _) = app.status.clone().expect("a delete reports");
+        assert_eq!(
+            (kind, msg),
+            (StatusKind::Success, (crate::i18n::t().deleted)(3)),
+            "three photos trashed, no second call failing on c"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
