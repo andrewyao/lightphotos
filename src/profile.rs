@@ -441,10 +441,15 @@ impl Run {
         // A scratch folder of empty files with the same names, so the sweep
         // lists as many entries as the real folder and the made-up capture
         // times never reach the real folder's signal cache.
-        let scratch =
-            std::env::temp_dir().join(format!("lightphotos-profile-signals-{}", std::process::id()));
+        let scratch = std::env::temp_dir().join(format!(
+            "lightphotos-profile-signals-{}",
+            std::process::id()
+        ));
         if let Err(e) = std::fs::create_dir_all(&scratch) {
-            eprintln!("[profile] no signal scratch dir at {}: {e}", scratch.display());
+            eprintln!(
+                "[profile] no signal scratch dir at {}: {e}",
+                scratch.display()
+            );
             return;
         }
         let stand_ins: Vec<PathBuf> = photos

@@ -6,8 +6,8 @@
 use super::*;
 use crate::navigation::Playlist;
 use crate::thumbnail::THUMB_PX;
-use crate::web_fs;
 use crate::web_decode::JobKind;
+use crate::web_fs;
 
 /// Cap on concurrent file reads from the picked folder, shared by thumbnails,
 /// the loupe, and the cache sweep. Chrome throws `NotReadableError` when too
@@ -711,8 +711,7 @@ impl App {
                 }),
                 Err(e) => {
                     web_sys::console::warn_1(
-                        &format!("[web] metadata read failed for {}: {e}", path.display())
-                            .into(),
+                        &format!("[web] metadata read failed for {}: {e}", path.display()).into(),
                     );
                     decoder.finish_exif(path, meta);
                 }
@@ -911,9 +910,13 @@ impl App {
             let result = web_fs::read_bytes(&handle).await;
             read_inflight.set(read_inflight.get().saturating_sub(1));
             match result {
-                Ok(bytes) => {
-                    pool.submit(path, target, std::sync::Arc::new(bytes), is_raw, JobKind::Full)
-                }
+                Ok(bytes) => pool.submit(
+                    path,
+                    target,
+                    std::sync::Arc::new(bytes),
+                    is_raw,
+                    JobKind::Full,
+                ),
                 Err(e) => {
                     web_sys::console::error_1(
                         &format!("[web] reading bytes failed for {}: {e}", path.display()).into(),

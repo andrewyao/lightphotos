@@ -20,7 +20,7 @@ cargo build --bins        # also builds the face_probe/seg_probe harnesses; see 
 ./scripts/release.sh      # test, tag origin/main as the next patch (or pass v1.2.3), push the tag → release.yml builds and publishes
 ```
 
-Verify a change with `cargo test && cargo build --release && cargo build --bins`. The
+Verify a change with `cargo fmt --check && cargo test && cargo build --release && cargo build --bins`. The
 last one is not redundant. `src/bin/face_probe.rs` and `src/bin/seg_probe.rs` pull
 their dependencies in through `#[path]` includes because the crate has no lib target,
 so adding a `use crate::..` to `facequality.rs` or `segmentation.rs` breaks those two
@@ -29,8 +29,8 @@ binaries while `cargo build` and `cargo test` both stay green. Only `--bins` cat
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request. On macOS
 it runs `cargo build --bins`, `cargo test` and clippy. It also builds the wasm target, and
 builds `--bin lightphotos` on Linux and on Windows, which is the only thing that
-typechecks the non-mac branches before a tag. `cargo fmt --check` runs there too but does
-not block, because it fails on the current tree.
+typechecks the non-mac branches before a tag. `cargo fmt --check` runs there too and
+blocks, so run `cargo fmt` before committing.
 
 Note that the Linux and Windows jobs build `--bin lightphotos`, not `--bins`. The two
 probe harnesses are mac-only and do not compile off macOS. The optimized native build

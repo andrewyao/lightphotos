@@ -102,7 +102,11 @@ fn locked_spans(
 ) -> ((f32, f32), (f32, f32)) {
     let room = if moving_lo { hi } else { 1.0 - lo };
     let len = (hi - lo).clamp(MIN_CROP / k, 1.0 / k).min(room);
-    let span = if moving_lo { (hi - len, hi) } else { (lo, lo + len) };
+    let span = if moving_lo {
+        (hi - len, hi)
+    } else {
+        (lo, lo + len)
+    };
     let plen = len * k;
     let start = ((plo + phi - plen) / 2.0).min(1.0 - plen).max(0.0);
     (span, (start, start + plen))

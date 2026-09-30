@@ -395,7 +395,9 @@ impl WebDecoder {
             generation,
             from_cache: false,
         };
-        let _ = self.res_tx.send(JobResult::Web(Box::new(job.failed(&error))));
+        let _ = self
+            .res_tx
+            .send(JobResult::Web(Box::new(job.failed(&error))));
     }
 
     fn push(&self, job: crate::web_decode::WebJob) {
@@ -748,9 +750,10 @@ impl Loader {
         let cores = wasm_thread::available_parallelism().map(|n| n.get());
         #[cfg(not(target_arch = "wasm32"))]
         let cores = thread::available_parallelism().map(|n| n.get());
-        let cores = cores
-            .unwrap_or(4);
-        let workers = cores.saturating_sub(2).clamp(1, limits.decode_threads.max(1));
+        let cores = cores.unwrap_or(4);
+        let workers = cores
+            .saturating_sub(2)
+            .clamp(1, limits.decode_threads.max(1));
         Self::with_workers(max_dim, workers, limits)
     }
 
@@ -1686,7 +1689,15 @@ mod tests {
     #[test]
     fn without_workers_a_bake_runs_inline_with_its_rotation() {
         let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
-        loader.request_bake(&path("a"), 512, 7, image(4, 2), Adjustments::default(), &[], 1);
+        loader.request_bake(
+            &path("a"),
+            512,
+            7,
+            image(4, 2),
+            Adjustments::default(),
+            &[],
+            1,
+        );
         let baked = loader.take_baked();
         assert_eq!(baked.len(), 1);
         assert_eq!((baked[0].sig, baked[0].width, baked[0].height), (7, 2, 4));
@@ -1698,7 +1709,14 @@ mod tests {
         let mut loader = Loader::queue_only_for_test();
         let a = path("a");
         loader.request_bake(&a, 512, 1, image(0, 0), Adjustments::default(), &[], 1);
-        let job = loader.shared.queue.lock().unwrap().bake.pop_front().unwrap();
+        let job = loader
+            .shared
+            .queue
+            .lock()
+            .unwrap()
+            .bake
+            .pop_front()
+            .unwrap();
         let Job::Bake(job) = job else { unreachable!() };
         loader.land_bake(a.clone(), 512, 1, Some(job.run()));
         assert!(loader.take_baked().is_empty());

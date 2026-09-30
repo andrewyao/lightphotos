@@ -336,7 +336,13 @@ impl App {
         let Some(decoder) = self.loader.as_ref().map(|l| l.web_decoder()) else {
             return;
         };
-        let jobs: Vec<(PathBuf, bool, crate::develop::Adjustments, Vec<crate::develop::TouchUp>, u8)> = paths
+        let jobs: Vec<(
+            PathBuf,
+            bool,
+            crate::develop::Adjustments,
+            Vec<crate::develop::TouchUp>,
+            u8,
+        )> = paths
             .iter()
             .map(|src| {
                 (

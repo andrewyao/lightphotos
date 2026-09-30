@@ -143,18 +143,9 @@ jobs:
       - name: Build
         run: cargo build --bin lightphotos
 
-  # Advisory only, because `cargo fmt --check` fails on the tree as it stands.
-  # Blocking it would red every pull request over a debt none of them
-  # introduced. The step still runs, so the diff it wants is in the log.
-  #
-  # To make it blocking once `cargo fmt` has been run across a quiet tree,
-  # delete the `continue-on-error: true` line below. That is the whole change.
-  # No count is quoted here on purpose, because it would rot on the first
-  # formatting commit.
   fmt:
-    name: rustfmt (advisory)
+    name: rustfmt
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
