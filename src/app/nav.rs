@@ -210,6 +210,45 @@ impl App {
             .collect()
     }
 
+    /// What Delete trashes: `selected_paths` with each selected stack
+    /// expanded to every member still in the playlist. The confirm counts
+    /// this list and `start_delete` receives it, so the two cannot disagree.
+    pub(crate) fn delete_paths(&self) -> Vec<PathBuf> {
+        let cells = self.selected_cells();
+        if cells.is_empty() {
+            return self.selected_paths();
+        }
+        let Some(pl) = self.playlist.as_ref() else {
+            return Vec::new();
+        };
+        let mut paths = Vec::new();
+        for p in cells {
+            match self.group_at(p) {
+                Some((_, g)) => paths.extend(self.member_paths(g)),
+                None => paths.extend(
+                    self.visible
+                        .get(p)
+                        .and_then(|&i| pl.entry(i))
+                        .map(Path::to_path_buf),
+                ),
+            }
+        }
+        paths
+    }
+
+    /// The paths of `group`'s members that are still in the playlist.
+    pub(super) fn member_paths(&self, group: &crate::groups::Group) -> Vec<PathBuf> {
+        let Some(pl) = self.playlist.as_ref() else {
+            return Vec::new();
+        };
+        group
+            .members()
+            .iter()
+            .filter_map(|m| pl.index_of(m).and_then(|i| pl.entry(i)))
+            .map(Path::to_path_buf)
+            .collect()
+    }
+
     pub(super) fn selected_cells(&self) -> Vec<usize> {
         if self.selected.is_empty() {
             self.sel.into_iter().collect()
