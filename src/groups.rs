@@ -116,7 +116,6 @@ pub struct Groups {
     of: HashMap<OsString, GroupId>,
 }
 
-#[allow(dead_code)] // only called from #[cfg(test)] today
 impl Groups {
     /// The groups a folder's sidecars describe, reconciled against the
     /// folder's `listing` of file names. A member whose file is gone is
@@ -124,6 +123,7 @@ impl Groups {
     /// left under two members is ignored, and a missing representative moves
     /// to the first member. Nothing here writes, so opening a folder never
     /// changes it, and the next mutation of a repaired group rewrites its file.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser loads no groups yet
     pub fn from_loaded(
         files: impl IntoIterator<Item = (GroupId, Group)>,
         listing: &HashSet<OsString>,
@@ -139,22 +139,27 @@ impl Groups {
         groups
     }
 
+    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn get(&self, id: &GroupId) -> Option<&Group> {
         self.by_id.get(id)
     }
 
+    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn group_of(&self, name: &std::ffi::OsStr) -> Option<&GroupId> {
         self.of.get(name)
     }
 
+    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn iter(&self) -> impl Iterator<Item = (&GroupId, &Group)> {
         self.by_id.iter()
     }
 
+    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
 
+    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }
@@ -163,6 +168,7 @@ impl Groups {
     /// that drops under two members is deleted. Creating a group whose
     /// members already form one only moves that group's representative, so
     /// repeating a create changes nothing.
+    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn create(&self, group: Group, at: SystemTime) -> Vec<GroupWrite> {
         if let Some(id) = self.group_of(&group.rep) {
             if self.by_id[id].same_members(&group) {
@@ -177,6 +183,7 @@ impl Groups {
 
     /// Make `rep` the representative of group `id`. Nothing for a photo
     /// outside the group or the current representative.
+    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn set_rep(&self, id: &GroupId, rep: &OsString) -> Vec<GroupWrite> {
         let Some(group) = self.by_id.get(id) else {
             return Vec::new();
@@ -190,6 +197,7 @@ impl Groups {
         }
     }
 
+    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn dissolve(&self, id: &GroupId) -> Vec<GroupWrite> {
         if self.by_id.contains_key(id) {
             vec![GroupWrite::Delete(id.clone())]

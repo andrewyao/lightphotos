@@ -16,10 +16,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::develop::{Adjustments, TouchUp};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::groups::Group;
-use crate::groups::{GroupId, GroupWrite, Groups};
+use crate::groups::{GroupWrite, Groups};
 
+mod group_file;
 mod writeback;
 pub(crate) use writeback::LoadMark;
 use writeback::{WriteOp, Writeback};
@@ -28,53 +27,6 @@ use writeback::{WriteOp, Writeback};
 pub(crate) const SIDECAR_DIR: &str = ".lightphotos";
 /// Sidecar file extension. Cosmetic; see the module docs.
 pub(crate) const SIDECAR_EXT: &str = "xmp";
-pub(crate) const GROUPS_DIR: &str = "groups";
-const GROUP_EXT: &str = "json";
-#[cfg(not(target_arch = "wasm32"))]
-const GROUP_FORMAT: u32 = 1;
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Serialize, Deserialize)]
-struct GroupFile {
-    v: u32,
-    members: Vec<String>,
-    representative: String,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn parse_group(bytes: &[u8]) -> Result<Group, String> {
-    let file: GroupFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-    if file.v != GROUP_FORMAT {
-        return Err(format!("unknown group format version {}", file.v));
-    }
-    let members = file.members.into_iter().map(OsString::from).collect();
-    Group::new(members, file.representative.into()).ok_or_else(|| {
-        "a group needs two or more distinct members, one of them the representative".to_string()
-    })
-}
-
-/// The sidecar body for `group`. JSON strings are UTF-8, so a member whose
-/// name is not fails the write instead of being saved under a lossy name.
-#[cfg(not(target_arch = "wasm32"))]
-fn group_bytes(group: &Group) -> Result<Vec<u8>, String> {
-    let name = |n: &OsString| {
-        n.to_str()
-            .map(str::to_owned)
-            .ok_or_else(|| format!("{} is not a UTF-8 file name", n.to_string_lossy()))
-    };
-    let file = GroupFile {
-        v: GROUP_FORMAT,
-        members: group.members().iter().map(name).collect::<Result<_, _>>()?,
-        representative: name(group.rep())?,
-    };
-    serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())
-}
-
-fn group_sidecar(dir: &Path, id: &GroupId) -> PathBuf {
-    dir.join(SIDECAR_DIR)
-        .join(GROUPS_DIR)
-        .join(format!("{id}.{GROUP_EXT}"))
-}
 
 /// Persisted state for one photo. Default fields are skipped on write, so a
 /// rated but unedited photo's sidecar stays small.
@@ -341,7 +293,7 @@ impl Catalog {
                 GroupWrite::Put(id, group) => (id, WriteOp::PutGroup(group)),
                 GroupWrite::Delete(id) => (id, WriteOp::DeleteGroup),
             };
-            self.enqueue(&group_sidecar(&dir, &id), op);
+            self.enqueue(&group_file::path(&dir, &id), op);
         }
     }
 
@@ -565,48 +517,12 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
         }
     }
 
-    let groups = load_groups(dir, &mut skipped);
+    let groups = group_file::load(dir, &mut skipped);
     SidecarLoad {
         images,
         groups,
         skipped,
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn load_groups(dir: &Path, skipped: &mut usize) -> Groups {
-    let Ok(entries) = std::fs::read_dir(dir.join(SIDECAR_DIR).join(GROUPS_DIR)) else {
-        return Groups::default();
-    };
-    let mut files = Vec::new();
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.extension() != Some(OsStr::new(GROUP_EXT))
-            || !entry.file_type().is_ok_and(|t| t.is_file())
-        {
-            continue;
-        }
-        let Some(id) = path.file_stem().and_then(GroupId::from_stem) else {
-            continue;
-        };
-        let parsed = std::fs::read(&path)
-            .map_err(|e| e.to_string())
-            .and_then(|bytes| parse_group(&bytes));
-        match parsed {
-            Ok(group) => files.push((id, group)),
-            Err(e) => {
-                eprintln!("[catalog] unreadable group {}: {e}", path.display());
-                *skipped += 1;
-            }
-        }
-    }
-    if files.is_empty() {
-        return Groups::default();
-    }
-    let listing: HashSet<OsString> = std::fs::read_dir(dir)
-        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
-        .unwrap_or_default();
-    Groups::from_loaded(files, &listing)
 }
 
 fn skipped_message(skipped: usize) -> String {
@@ -620,6 +536,7 @@ fn skipped_message(skipped: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::groups::{Group, GroupId};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1427,7 +1344,7 @@ mod tests {
     }
 
     fn groups_dir(dir: &Path) -> PathBuf {
-        dir.join(SIDECAR_DIR).join(GROUPS_DIR)
+        dir.join(SIDECAR_DIR).join(group_file::GROUPS_DIR)
     }
 
     fn write_group_file(dir: &Path, stem: &str, body: &str) -> PathBuf {
@@ -1458,7 +1375,7 @@ mod tests {
         assert_eq!(cat.take_error(), None);
         let (id, _) = only_group(&cat);
 
-        let file = group_sidecar(&dir, &id);
+        let file = group_file::path(&dir, &id);
         let body: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(
