@@ -311,6 +311,9 @@ pub(crate) type SignalLoad = (
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
+    /// SPIKE: (path, mipped tex, plain tex, w, h) for the right-pane tiles.
+    pub(crate) spike_tex: Option<(PathBuf, egui::TextureId, egui::TextureId, u32, u32)>,
+    pub(crate) spike_frames: Vec<f32>,
     /// Last adjustments handed to the GPU. Tests run without a renderer, so
     /// this is the only way to assert what the loupe would actually show.
     #[cfg(test)]
@@ -945,6 +948,8 @@ impl App {
             fitted: false,
             rotations: HashMap::new(),
             loupe_viewport: None,
+            spike_tex: None,
+            spike_frames: Vec::new(),
             crop_edit: None,
             compare: false,
             exif_cache: HashMap::new(),
@@ -1154,6 +1159,8 @@ impl App {
         crate::analytics::begin_frame();
         // Upload thumbnails before egui references them.
         self.sync_thumb_textures();
+        let spike_t0 = Instant::now();
+        self.spike_sync();
 
         if self.hist_dirty && self.develop_open {
             self.recompute_histogram();
@@ -1323,12 +1330,62 @@ impl App {
             paint_jobs,
             screen_descriptor,
         };
+        let spike_t1 = Instant::now();
         let presented = renderer.render(primary_vp, compare_vp, Some(egui_paint));
+        if spike_on() {
+            // Pairs of (egui run + tessellate, render submit + present) per frame.
+            self.spike_frames
+                .push((spike_t1 - spike_t0).as_secs_f32() * 1000.0);
+            self.spike_frames
+                .push(spike_t1.elapsed().as_secs_f32() * 1000.0);
+            if self.spike_frames.len() == 240 {
+                let v = std::mem::take(&mut self.spike_frames);
+                let mut ui_ms: Vec<f32> = v.iter().step_by(2).copied().collect();
+                let mut render_ms: Vec<f32> = v.iter().skip(1).step_by(2).copied().collect();
+                ui_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                render_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                eprintln!(
+                    "spike: 120 frames ui ms p50={:.2} p95={:.2} max={:.2} | render(submit+present) ms p50={:.2} p95={:.2} max={:.2}",
+                    ui_ms[60], ui_ms[114], ui_ms[119], render_ms[60], render_ms[114], render_ms[119]
+                );
+            }
+        }
         // Retry an unpresentable surface so it draws once revealed. If winit
         // reports it occluded, wait for Occluded(false) instead of spinning.
         if !presented && !self.occluded {
             self.request_redraw();
         }
+    }
+
+    /// SPIKE: keep one mipped and one plain egui texture of the shown preview.
+    fn spike_sync(&mut self) {
+        if !spike_on() || self.mode != ViewMode::Loupe {
+            return;
+        }
+        let Some(path) = self.selected_path() else {
+            return;
+        };
+        if self.spike_tex.as_ref().is_some_and(|t| t.0 == path) {
+            return;
+        }
+        let px = self.preview_px();
+        let Some(img) = self.loader.as_ref().and_then(|l| l.get_preview(&path, px)) else {
+            return;
+        };
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+        if let Some((_, a, b, _, _)) = self.spike_tex.take() {
+            r.free_thumb(a);
+            r.free_thumb(b);
+        }
+        let (Some(a), Some(b)) = (
+            r.upload_image_spike(&img, true),
+            r.upload_image_spike(&img, false),
+        ) else {
+            return;
+        };
+        self.spike_tex = Some((path, a, b, img.width, img.height));
     }
 
     fn apply_ui_actions(&mut self, actions: Vec<ui::UiAction>) {
@@ -1556,4 +1613,9 @@ mod tests {
         assert_eq!(range_set(5, 2), set(&[2, 3, 4, 5])); // same range, anchor after
         assert_eq!(range_set(3, 3), set(&[3])); // single cell
     }
+}
+
+/// SPIKE: `LIGHTPHOTOS_SPIKE=1` turns on the split Loupe and the tile pane.
+pub(crate) fn spike_on() -> bool {
+    std::env::var_os("LIGHTPHOTOS_SPIKE").is_some()
 }

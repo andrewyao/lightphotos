@@ -94,7 +94,13 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     // Not a CentralPanel. egui treats the root UI's unused rect as "not over
     // egui" (`is_pointer_over_egui`), so zoom, pan, and clicks there reach the
     // app. A CentralPanel would claim that input.
-    let central = ui.available_rect_before_wrap();
+    let mut central = ui.available_rect_before_wrap();
+    if crate::app::spike_on() {
+        let whole = central;
+        central = egui::Rect::from_min_max(whole.min, egui::pos2(whole.center().x, whole.max.y));
+        let right = egui::Rect::from_min_max(egui::pos2(whole.center().x, whole.min.y), whole.max);
+        spike_tiles(ui, app, right);
+    }
     out.loupe_rect = Some(central);
 
     // `region_focus_marker` uses `ui.min_rect()`, which doesn't cover this
@@ -706,4 +712,99 @@ fn filmstrip_cell(
         out.actions.push(UiAction::Focus(Region::Filmstrip));
     }
     response
+}
+
+/// SPIKE: an opaque egui pane of six tiles sampling uv sub-rects of the
+/// shown preview. Top row reads the mipmapped texture, bottom the plain one.
+fn spike_tiles(ui: &mut egui::Ui, app: &App, right: egui::Rect) {
+    let colors = theme::colors(ui.ctx());
+    let painter = ui.painter_at(right);
+    painter.rect_filled(right, 0.0, colors.panel);
+    painter.line_segment(
+        [right.left_top(), right.left_bottom()],
+        egui::Stroke::new(2.0, colors.selection),
+    );
+    let font = egui::FontId::proportional(font_size::px(ui.style(), 13.0));
+    let Some((path, mipped, plain, w, h)) = app.spike_tex.as_ref() else {
+        painter.text(
+            right.center(),
+            egui::Align2::CENTER_CENTER,
+            "spike: no preview yet",
+            font,
+            colors.divider,
+        );
+        return;
+    };
+    let uvs = [
+        (
+            "uv 100%",
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        ),
+        (
+            "uv 25%",
+            egui::Rect::from_center_size(egui::pos2(0.5, 0.5), egui::vec2(0.25, 0.25)),
+        ),
+        (
+            "uv 5%",
+            egui::Rect::from_center_size(egui::pos2(0.5, 0.5), egui::vec2(0.05, 0.05)),
+        ),
+    ];
+    let pad = 12.0;
+    let cols = 3.0;
+    let tile_w = (right.width() - pad * (cols + 1.0)) / cols;
+    let tile_h = (right.height() - pad * 3.0 - 40.0) / 2.0;
+    for (row, (id, label)) in [(mipped, "mipmapped"), (plain, "no mips")]
+        .into_iter()
+        .enumerate()
+    {
+        for (col, (uv_label, uv)) in uvs.iter().enumerate() {
+            let x = right.min.x + pad + col as f32 * (tile_w + pad);
+            let y = right.min.y + pad + 20.0 + row as f32 * (tile_h + pad);
+            let cell = egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(tile_w, tile_h));
+            // Keep the region's aspect inside the cell.
+            let aspect = (uv.width() * *w as f32) / (uv.height() * *h as f32);
+            let mut size = cell.size();
+            if size.x / size.y > aspect {
+                size.x = size.y * aspect
+            } else {
+                size.y = size.x / aspect
+            }
+            let rect = egui::Rect::from_center_size(cell.center(), size);
+            painter.image(*id, rect, *uv, egui::Color32::WHITE);
+            painter.rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(
+                    if row == 0 && col == 0 { 3.0 } else { 1.0 },
+                    if row == 0 && col == 0 {
+                        colors.selection
+                    } else {
+                        colors.divider
+                    },
+                ),
+                egui::StrokeKind::Outside,
+            );
+            painter.text(
+                rect.left_top() + egui::vec2(4.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                format!("{label} {uv_label}"),
+                font.clone(),
+                egui::Color32::YELLOW,
+            );
+        }
+    }
+    painter.text(
+        right.left_top() + egui::vec2(pad, 4.0),
+        egui::Align2::LEFT_TOP,
+        format!(
+            "SPIKE right pane (egui) {}x{} {}",
+            w,
+            h,
+            path.file_name()
+                .map(|s| s.to_string_lossy())
+                .unwrap_or_default()
+        ),
+        font,
+        colors.divider,
+    );
 }

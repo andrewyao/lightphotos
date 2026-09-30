@@ -817,6 +817,40 @@ impl Renderer {
             },
         );
 
+        self.build_mips(&texture, mip_count, mip_pipeline);
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("image_bg"),
+            layout: &self.tex_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        self.image_bind = Some(bind);
+        self.image_size = (w, h);
+
+        // The user feels this UI-thread span as a freeze.
+        crate::loader::mark(&format!(
+            "set_image {w}x{h} ({mip_count} mips): took {:?}",
+            t0.elapsed()
+        ));
+    }
+
+    /// Render each mip level from the one above with `mip_pipeline`.
+    fn build_mips(
+        &self,
+        texture: &wgpu::Texture,
+        mip_count: u32,
+        mip_pipeline: &wgpu::RenderPipeline,
+    ) {
         // Each level n is drawn by sampling level n-1. One view per level lets
         // a pass read n-1 while writing n without aliasing.
         if mip_count > 1 {
@@ -873,30 +907,104 @@ impl Renderer {
             }
             self.queue.submit(std::iter::once(encoder.finish()));
         }
+    }
 
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("image_bg"),
-            layout: &self.tex_bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
+    /// SPIKE: upload an Srgb8 image as an egui user texture. `mipped` builds
+    /// the mip chain through `mipgen.wgsl` and registers a sampler that reads
+    /// it; otherwise level 0 only with the plain linear sampler.
+    pub fn upload_image_spike(
+        &mut self,
+        img: &DecodedImage,
+        mipped: bool,
+    ) -> Option<egui::TextureId> {
+        if img.pixel_format != PixelFormat::Srgb8 {
+            return None;
+        }
+        let (w, h) = (img.width, img.height);
+        let mip_count = if mipped {
+            (32 - (w.max(h)).leading_zeros()).max(1)
+        } else {
+            1
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("spike_image"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: mip_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: IMAGE_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            // egui samples raw bytes, so it gets a non-sRGB view of the same texels.
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
         });
-        self.image_bind = Some(bind);
-        self.image_size = (w, h);
-
-        // The user feels this UI-thread span as a freeze.
-        crate::loader::mark(&format!(
-            "set_image {w}x{h} ({mip_count} mips): took {:?}",
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let row = 4 * w;
+        let padded_row = row.div_ceil(align) * align;
+        let level0: std::borrow::Cow<[u8]> = if padded_row == row {
+            std::borrow::Cow::Borrowed(&img.rgba)
+        } else {
+            let mut padded = vec![0u8; (padded_row * h) as usize];
+            for y in 0..h as usize {
+                let src = y * row as usize;
+                let dst = y * padded_row as usize;
+                padded[dst..dst + row as usize].copy_from_slice(&img.rgba[src..src + row as usize]);
+            }
+            std::borrow::Cow::Owned(padded)
+        };
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &level0,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_row),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        let t0 = web_time::Instant::now();
+        self.build_mips(&texture, mip_count, &self.mip_pipeline);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor {
+            format: Some(wgpu::TextureFormat::Rgba8Unorm),
+            ..Default::default()
+        });
+        let id = self
+            .egui_renderer
+            .register_native_texture_with_sampler_options(
+                &self.device,
+                &view,
+                wgpu::SamplerDescriptor {
+                    label: Some("spike_sampler"),
+                    mag_filter: wgpu::FilterMode::Linear,
+                    min_filter: wgpu::FilterMode::Linear,
+                    mipmap_filter: if mipped {
+                        wgpu::MipmapFilterMode::Linear
+                    } else {
+                        wgpu::MipmapFilterMode::Nearest
+                    },
+                    ..Default::default()
+                },
+            );
+        eprintln!(
+            "spike: upload {w}x{h} mipped={mipped} mips={mip_count} took {:?}",
             t0.elapsed()
-        ));
+        );
+        self.thumb_textures.insert(id, texture);
+        Some(id)
     }
 
     pub fn set_transform(&mut self, scale: [f32; 2], offset: [f32; 2], rot: [f32; 4]) {
