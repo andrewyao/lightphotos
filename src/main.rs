@@ -22,6 +22,7 @@ mod develop;
 mod dialog;
 mod export;
 mod facequality;
+mod groups;
 mod hash;
 mod i18n;
 mod image_decode;

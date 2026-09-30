@@ -16,6 +16,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::develop::{Adjustments, TouchUp};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::groups::Group;
+use crate::groups::{GroupId, GroupWrite, Groups};
 
 mod writeback;
 pub(crate) use writeback::LoadMark;
@@ -25,6 +28,53 @@ use writeback::{WriteOp, Writeback};
 pub(crate) const SIDECAR_DIR: &str = ".lightphotos";
 /// Sidecar file extension. Cosmetic; see the module docs.
 pub(crate) const SIDECAR_EXT: &str = "xmp";
+pub(crate) const GROUPS_DIR: &str = "groups";
+const GROUP_EXT: &str = "json";
+#[cfg(not(target_arch = "wasm32"))]
+const GROUP_FORMAT: u32 = 1;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Serialize, Deserialize)]
+struct GroupFile {
+    v: u32,
+    members: Vec<String>,
+    representative: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_group(bytes: &[u8]) -> Result<Group, String> {
+    let file: GroupFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    if file.v != GROUP_FORMAT {
+        return Err(format!("unknown group format version {}", file.v));
+    }
+    let members = file.members.into_iter().map(OsString::from).collect();
+    Group::new(members, file.representative.into()).ok_or_else(|| {
+        "a group needs two or more distinct members, one of them the representative".to_string()
+    })
+}
+
+/// The sidecar body for `group`. JSON strings are UTF-8, so a member whose
+/// name is not fails the write instead of being saved under a lossy name.
+#[cfg(not(target_arch = "wasm32"))]
+fn group_bytes(group: &Group) -> Result<Vec<u8>, String> {
+    let name = |n: &OsString| {
+        n.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| format!("{} is not a UTF-8 file name", n.to_string_lossy()))
+    };
+    let file = GroupFile {
+        v: GROUP_FORMAT,
+        members: group.members().iter().map(name).collect::<Result<_, _>>()?,
+        representative: name(group.rep())?,
+    };
+    serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())
+}
+
+fn group_sidecar(dir: &Path, id: &GroupId) -> PathBuf {
+    dir.join(SIDECAR_DIR)
+        .join(GROUPS_DIR)
+        .join(format!("{id}.{GROUP_EXT}"))
+}
 
 /// Persisted state for one photo. Default fields are skipped on write, so a
 /// rated but unedited photo's sidecar stays small.
@@ -129,6 +179,7 @@ impl ImageRecord {
 /// active directory. See [`Catalog::cache_key`].
 pub struct Catalog {
     images: HashMap<OsString, ImageRecord>,
+    groups: Groups,
     /// Filenames written or removed since [`Catalog::switch_dir`]. A
     /// background load must not overwrite these. It covers removals, which
     /// look the same as "not loaded yet" in `images`.
@@ -153,6 +204,7 @@ impl Catalog {
     pub fn new() -> Catalog {
         Catalog {
             images: HashMap::new(),
+            groups: Groups::default(),
             dirty: HashSet::new(),
             dir: None,
             last_error: None,
@@ -226,6 +278,7 @@ impl Catalog {
     pub(crate) fn switch_dir(&mut self, dir: &Path) -> LoadMark {
         self.dir = Some(dir.to_path_buf());
         self.images.clear();
+        self.groups = Groups::default();
         self.dirty.clear();
         self.writeback.begin_load()
     }
@@ -250,20 +303,46 @@ impl Catalog {
     /// may still have been in flight when this load was requested; `mark` is
     /// what identifies those, and the write-back queue restores them.
     /// Unreadable sidecars are reported even when the load is stale.
+    ///
+    /// The load retires after the overlay, because retiring the last load
+    /// drops the history of writes that landed, and groups have no `dirty`
+    /// set to fall back on.
     pub(crate) fn apply_loaded(&mut self, dir: &Path, mark: LoadMark, loaded: SidecarLoad) {
-        self.writeback.end_load();
         if loaded.skipped > 0 {
             self.last_error = Some(skipped_message(loaded.skipped));
         }
-        if self.dir.as_deref() != Some(dir) {
-            return;
-        }
-        for (name, rec) in loaded.images {
-            if !self.dirty.contains(&name) {
-                self.images.insert(name, rec);
+        if self.dir.as_deref() == Some(dir) {
+            for (name, rec) in loaded.images {
+                if !self.dirty.contains(&name) {
+                    self.images.insert(name, rec);
+                }
             }
+            self.groups = loaded.groups;
+            self.writeback
+                .overlay(dir, mark, &mut self.images, &mut self.groups);
         }
-        self.writeback.overlay(dir, mark, &mut self.images);
+        self.writeback.end_load();
+    }
+
+    #[allow(dead_code)] // only called from #[cfg(test)] today
+    pub(crate) fn groups(&self) -> &Groups {
+        &self.groups
+    }
+
+    #[allow(dead_code)] // only called from #[cfg(test)] today
+    pub(crate) fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) {
+        let Some(dir) = self.dir.clone() else {
+            self.note_persist_error("no folder is open for these groups");
+            return;
+        };
+        for write in writes {
+            self.groups.apply(&write);
+            let (id, op) = match write {
+                GroupWrite::Put(id, group) => (id, WriteOp::PutGroup(group)),
+                GroupWrite::Delete(id) => (id, WriteOp::DeleteGroup),
+            };
+            self.enqueue(&group_sidecar(&dir, &id), op);
+        }
     }
 
     /// Take the pending persist error's cause. Each failure is returned once.
@@ -387,7 +466,7 @@ impl Catalog {
             // Without a handle nothing was ever written, so a deletion has
             // nothing to undo, but an edit the user made is being lost.
             None => {
-                if matches!(op, WriteOp::Put(_)) {
+                if matches!(op, WriteOp::Put(_) | WriteOp::PutGroup(_)) {
                     self.note_persist_error("no folder handle for this photo's directory");
                 }
             }
@@ -432,11 +511,13 @@ impl Default for Catalog {
 /// The sidecars read from one directory, plus a count of unreadable ones.
 pub(crate) struct SidecarLoad {
     pub images: HashMap<OsString, ImageRecord>,
+    pub groups: Groups,
     pub skipped: usize,
 }
 
-/// Read every sidecar in `dir/.lightphotos/`. Needs no `Catalog`, so it can
-/// run on a background thread. A missing folder gives an empty result.
+/// Read every sidecar in `dir/.lightphotos/` and its `groups/`. Needs no
+/// `Catalog`, so it can run on a background thread. A missing folder gives
+/// an empty result.
 #[cfg(not(target_arch = "wasm32"))]
 #[hotpath::measure]
 pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
@@ -445,7 +526,13 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
 
     let entries = match std::fs::read_dir(dir.join(SIDECAR_DIR)) {
         Ok(rd) => rd,
-        Err(_) => return SidecarLoad { images, skipped },
+        Err(_) => {
+            return SidecarLoad {
+                images,
+                groups: Groups::default(),
+                skipped,
+            }
+        }
     };
 
     for entry in entries.filter_map(|e| e.ok()) {
@@ -478,7 +565,48 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
         }
     }
 
-    SidecarLoad { images, skipped }
+    let groups = load_groups(dir, &mut skipped);
+    SidecarLoad {
+        images,
+        groups,
+        skipped,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_groups(dir: &Path, skipped: &mut usize) -> Groups {
+    let Ok(entries) = std::fs::read_dir(dir.join(SIDECAR_DIR).join(GROUPS_DIR)) else {
+        return Groups::default();
+    };
+    let mut files = Vec::new();
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension() != Some(OsStr::new(GROUP_EXT))
+            || !entry.file_type().is_ok_and(|t| t.is_file())
+        {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(GroupId::from_stem) else {
+            continue;
+        };
+        let parsed = std::fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| parse_group(&bytes));
+        match parsed {
+            Ok(group) => files.push((id, group)),
+            Err(e) => {
+                eprintln!("[catalog] unreadable group {}: {e}", path.display());
+                *skipped += 1;
+            }
+        }
+    }
+    if files.is_empty() {
+        return Groups::default();
+    }
+    let listing: HashSet<OsString> = std::fs::read_dir(dir)
+        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    Groups::from_loaded(files, &listing)
 }
 
 fn skipped_message(skipped: usize) -> String {
@@ -1263,5 +1391,172 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn photos(dir: &Path, names: &[&str]) -> Vec<OsString> {
+        for n in names {
+            std::fs::write(dir.join(n), b"jpeg").unwrap();
+        }
+        names.iter().map(OsString::from).collect()
+    }
+
+    fn groups_dir(dir: &Path) -> PathBuf {
+        dir.join(SIDECAR_DIR).join(GROUPS_DIR)
+    }
+
+    fn write_group_file(dir: &Path, stem: &str, body: &str) -> PathBuf {
+        std::fs::create_dir_all(groups_dir(dir)).unwrap();
+        let path = groups_dir(dir).join(format!("{stem}.json"));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn only_group(cat: &Catalog) -> (GroupId, Group) {
+        let all: Vec<_> = cat.groups().iter().collect();
+        assert_eq!(all.len(), 1, "expected one group, got {all:?}");
+        (all[0].0.clone(), all[0].1.clone())
+    }
+
+    #[test]
+    fn a_group_round_trips_through_writeback_and_reload() {
+        let dir = unique_tmp_dir();
+        let members = photos(&dir, &["IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG"]);
+        let group = Group::new(members, "IMG_0002.JPG".into()).unwrap();
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        let writes = cat
+            .groups()
+            .create(group.clone(), std::time::SystemTime::now());
+        cat.apply_group_writes(writes);
+        flush(&mut cat);
+        assert_eq!(cat.take_error(), None);
+        let (id, _) = only_group(&cat);
+
+        let file = group_sidecar(&dir, &id);
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "v": 1,
+                "members": ["IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG"],
+                "representative": "IMG_0002.JPG",
+            })
+        );
+        assert_eq!(
+            only_group(&Catalog::with_dir(dir.clone())),
+            (id.clone(), group)
+        );
+
+        let writes = cat.groups().dissolve(&id);
+        cat.apply_group_writes(writes);
+        flush(&mut cat);
+        assert!(!file.exists(), "dissolving deletes the sidecar");
+        assert!(Catalog::with_dir(dir.clone()).groups().is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_load_without_groups_creates_no_directory() {
+        let dir = unique_tmp_dir();
+        photos(&dir, &["a.jpg", "b.jpg"]);
+        let cat = Catalog::with_dir(dir.clone());
+        assert!(cat.groups().is_empty());
+        assert!(
+            !dir.join(SIDECAR_DIR).exists(),
+            "loading a pristine folder must not create .lightphotos"
+        );
+
+        Catalog::with_dir(dir.clone()).set(&dir.join("a.jpg"), 3);
+        let cat = Catalog::with_dir(dir.clone());
+        assert!(cat.groups().is_empty());
+        assert!(
+            !groups_dir(&dir).exists(),
+            "loading a folder with photo sidecars must not create groups/"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn loading_repairs_groups_in_memory_and_leaves_their_files_alone() {
+        let dir = unique_tmp_dir();
+        photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
+        let missing =
+            r#"{"v":1,"members":["gone.jpg","a.jpg","b.jpg"],"representative":"gone.jpg"}"#;
+        let missing_file = write_group_file(&dir, "g-1", missing);
+        let rival = r#"{"v":1,"members":["b.jpg","c.jpg"],"representative":"b.jpg"}"#;
+        let rival_file = write_group_file(&dir, "g-2", rival);
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        assert_eq!(cat.take_error(), None);
+        let (id, group) = only_group(&cat);
+        assert_eq!(id.to_string(), "g-1");
+        assert_eq!(group.members(), ["a.jpg", "b.jpg"]);
+        assert_eq!(
+            group.rep(),
+            "a.jpg",
+            "a missing representative moves to the first member"
+        );
+        flush(&mut cat);
+        assert_eq!(std::fs::read_to_string(&missing_file).unwrap(), missing);
+        assert_eq!(std::fs::read_to_string(&rival_file).unwrap(), rival);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_unreadable_group_is_counted_and_the_rest_still_load() {
+        let dir = unique_tmp_dir();
+        photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
+        write_group_file(&dir, "g-bad", "{not json");
+        write_group_file(
+            &dir,
+            "g-one",
+            r#"{"v":1,"members":["c.jpg"],"representative":"c.jpg"}"#,
+        );
+        write_group_file(
+            &dir,
+            "g-v2",
+            r#"{"v":2,"members":["a.jpg","c.jpg"],"representative":"a.jpg"}"#,
+        );
+        write_group_file(
+            &dir,
+            "g-ok",
+            r#"{"v":1,"members":["a.jpg","b.jpg"],"representative":"b.jpg"}"#,
+        );
+
+        let loaded = load_sidecars(&dir);
+        assert_eq!(loaded.skipped, 3);
+        let ids: Vec<String> = loaded.groups.iter().map(|(id, _)| id.to_string()).collect();
+        assert_eq!(ids, ["g-ok"]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_load_that_predates_a_group_write_keeps_the_group() {
+        let dir = unique_tmp_dir();
+        let elsewhere = unique_tmp_dir();
+        let members = photos(&dir, &["a.jpg", "b.jpg"]);
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        let stale = load_sidecars(&dir);
+        let group = Group::new(members, "b.jpg".into()).unwrap();
+        let writes = cat
+            .groups()
+            .create(group.clone(), std::time::SystemTime::now());
+        cat.apply_group_writes(writes);
+        let _ = cat.switch_dir(&elsewhere);
+        cat.abandon_load();
+        let mark = cat.switch_dir(&dir);
+        flush(&mut cat);
+        cat.apply_loaded(&dir, mark, stale);
+
+        assert_eq!(only_group(&cat).1, group);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&elsewhere).unwrap();
     }
 }
