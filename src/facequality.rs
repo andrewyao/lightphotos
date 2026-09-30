@@ -314,10 +314,11 @@ mod tests {
     }
 
     /// Whether Vision can run a model on this machine. GitHub's macOS runners
-    /// are VMs with no GPU or Neural Engine, and there every face request fails
-    /// ("Could not create inference context"). Tests that need a model return
-    /// early when this is false. Any other error counts as able, so a real
-    /// regression still fails the test that hits it.
+    /// are VMs with no GPU or Neural Engine, and there a face request fails
+    /// with "Unspecified error" (a feature-print request says "Could not
+    /// create inference context"). Tests that need a model return early when
+    /// this is false. Any other error counts as able, so a real regression
+    /// still fails the test that hits it.
     fn vision_can_infer() -> bool {
         static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *CAN.get_or_init(|| {
@@ -325,7 +326,10 @@ mod tests {
             let result = detect_faces(&path);
             let _ = std::fs::remove_file(&path);
             match result {
-                Err(e) if e.contains("Could not create inference context") => {
+                Err(e)
+                    if e.contains("Could not create inference context")
+                        || e.contains("Unspecified error") =>
+                {
                     eprintln!("skipping: Vision cannot run a model here ({e})");
                     false
                 }
