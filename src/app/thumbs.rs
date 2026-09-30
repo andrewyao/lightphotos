@@ -8,11 +8,11 @@ use std::time::SystemTime;
 
 use crate::develop::{self};
 use crate::featureprint;
+use crate::image_decode;
 use crate::phash;
 use crate::sharpness;
 use crate::signalcache::Signal;
 use crate::thumbnail::THUMB_PX;
-use crate::image_decode;
 
 impl App {
     pub(crate) fn request_redraw(&self) {

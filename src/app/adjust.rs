@@ -519,7 +519,10 @@ mod tests {
             app.set_develop_tab(DevelopTab::Masks);
             let painted = settled(&mut app);
             assert!(painted.has(t.touch_up));
-            for (slider, hint) in [(t.brush_size, t.brush_size_hint), (t.feather, t.feather_hint)] {
+            for (slider, hint) in [
+                (t.brush_size, t.brush_size_hint),
+                (t.feather, t.feather_hint),
+            ] {
                 assert!(
                     painted.pos_of(hint).y > painted.pos_of(slider).y,
                     "{slider}'s mouse shortcut shows under it: {:?}",
@@ -551,7 +554,9 @@ mod tests {
                 );
                 let (actions, _) = click(&mut app, export);
                 assert!(
-                    actions.iter().any(|a| matches!(a, UiAction::ToggleExportForm)),
+                    actions
+                        .iter()
+                        .any(|a| matches!(a, UiAction::ToggleExportForm)),
                     "Export on {tab:?} opens the Export form"
                 );
             }
@@ -561,7 +566,9 @@ mod tests {
             assert!(painted.has(t.export_run), "{:?}", painted.texts());
             let (actions, _) = click(&mut app, painted.pos_of(t.develop));
             assert!(
-                actions.iter().any(|a| matches!(a, UiAction::ToggleExportForm)),
+                actions
+                    .iter()
+                    .any(|a| matches!(a, UiAction::ToggleExportForm)),
                 "Develop on the Export form goes back to the sliders"
             );
         }
@@ -600,10 +607,9 @@ mod tests {
             );
             let actions = pick(&mut app, "16:9");
             assert!(
-                actions.iter().any(|a| matches!(
-                    a,
-                    UiAction::SetCropAspect(crate::app::CropAspect::R16x9)
-                )),
+                actions
+                    .iter()
+                    .any(|a| matches!(a, UiAction::SetCropAspect(crate::app::CropAspect::R16x9))),
                 "{actions:?}"
             );
             app.apply_ui_actions(actions);
@@ -611,10 +617,9 @@ mod tests {
             assert!(painted.has("4000 \u{d7} 2250"), "{:?}", painted.texts());
             let actions = pick(&mut app, "16:9");
             assert!(
-                actions.iter().any(|a| matches!(
-                    a,
-                    UiAction::SetCropAspect(crate::app::CropAspect::R16x9)
-                )),
+                actions
+                    .iter()
+                    .any(|a| matches!(a, UiAction::SetCropAspect(crate::app::CropAspect::R16x9))),
                 "picking the current ratio again asks to re-center it: {actions:?}"
             );
 
@@ -865,7 +870,8 @@ mod tests {
             let (w, h) = (400, 300);
             app.shown = Shown::Preview(path.clone(), w, h);
             app.source_size = Some((w, h));
-            let mut loader = crate::loader::Loader::new(16384, crate::cache_limits::CacheLimits::PLATFORM);
+            let mut loader =
+                crate::loader::Loader::new(16384, crate::cache_limits::CacheLimits::PLATFORM);
             loader.insert_full_external(
                 path,
                 std::sync::Arc::new(crate::image_decode::DecodedImage::new_tracked(

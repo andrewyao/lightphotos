@@ -1812,7 +1812,10 @@ mod tests {
                     .any(|(keys, _)| names_key(keys, key))
             })
             .collect();
-        assert!(missing.is_empty(), "the help overlay leaves out {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "the help overlay leaves out {missing:?}"
+        );
         assert!(!names_key("Esc", "E"));
     }
 

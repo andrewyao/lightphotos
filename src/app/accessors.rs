@@ -433,7 +433,8 @@ mod tests {
         }
         let mut app = App::new(None);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        let mut loader = crate::loader::Loader::new(16384, crate::cache_limits::CacheLimits::PLATFORM);
+        let mut loader =
+            crate::loader::Loader::new(16384, crate::cache_limits::CacheLimits::PLATFORM);
         loader.mark_thumb_failed_external(dir.join("b.jpg"), THUMB_PX);
         app.loader = Some(loader);
 

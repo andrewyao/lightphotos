@@ -112,7 +112,10 @@ impl WebExports {
 
     /// Pairs the loader's finished exports with their destinations, plus
     /// any that failed before submit.
-    pub fn land(&self, finished: Vec<(u64, PathBuf, Result<Vec<u8>, String>)>) -> Vec<ExportResult> {
+    pub fn land(
+        &self,
+        finished: Vec<(u64, PathBuf, Result<Vec<u8>, String>)>,
+    ) -> Vec<ExportResult> {
         let mut out = std::mem::take(&mut *self.failed.borrow_mut());
         let mut dests = self.dests.borrow_mut();
         for (id, path, result) in finished {

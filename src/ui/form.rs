@@ -269,8 +269,7 @@ pub(super) fn segmented<T: Copy + PartialEq>(
     let per_row = row_sizes(choices.len(), width, min_w);
     let gap = font_size::px(ui.style(), SEGMENT_ROW_GAP);
     let total_h = per_row.len() as f32 * height + (per_row.len() - 1) as f32 * gap;
-    let (bar, bar_resp) =
-        ui.allocate_exact_size(egui::vec2(width, total_h), egui::Sense::hover());
+    let (bar, bar_resp) = ui.allocate_exact_size(egui::vec2(width, total_h), egui::Sense::hover());
     let colors = theme::colors(ui.ctx());
     let visuals = ui.visuals().clone();
     let radius = visuals.widgets.inactive.corner_radius;

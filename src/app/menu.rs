@@ -13,9 +13,8 @@ impl App {
         let typing = self.egui_ctx.text_edit_focused();
         // Crop, the WB picker, Touch Up, the preset-name prompt and a confirm
         // dialog each hold the keyboard. Settings holds it too, except for Cmd+,.
-        let tool_free = self.tool == LoupeTool::None
-            && self.preset_name_edit.is_none()
-            && !self.confirm_open();
+        let tool_free =
+            self.tool == LoupeTool::None && self.preset_name_edit.is_none() && !self.confirm_open();
         let free = tool_free && self.crop_edit.is_none() && !self.show_settings;
         let loupe = self.mode == ViewMode::Loupe;
         let selected = self.selection_count();
@@ -34,9 +33,7 @@ impl App {
             InfoPanel => free && matches!(self.mode, ViewMode::Grid | ViewMode::Loupe),
             // [ and ] still rotate while cropping.
             RotateLeft | RotateRight => tool_free && !self.show_settings && loupe,
-            BeforeAfter | ZoomToFit | ActualSize | ZoomIn | ZoomOut => {
-                free && loupe
-            }
+            BeforeAfter | ZoomToFit | ActualSize | ZoomIn | ZoomOut => free && loupe,
         }
     }
 
@@ -70,13 +67,15 @@ impl App {
             MenuCommand::Undo => egui::Key::Z,
             _ => return None,
         };
-        self.egui_ctx.text_edit_focused().then_some(egui::Event::Key {
-            key,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND,
-        })
+        self.egui_ctx
+            .text_edit_focused()
+            .then_some(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::MAC_CMD | egui::Modifiers::COMMAND,
+            })
     }
 
     fn can_undo_touchup(&self) -> bool {

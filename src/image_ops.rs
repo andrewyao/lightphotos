@@ -113,7 +113,11 @@ pub(crate) fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
     };
     if a == 255 {
         let lut = srgb8_to_linear_lut();
-        return [lut[px[0] as usize], lut[px[1] as usize], lut[px[2] as usize]];
+        return [
+            lut[px[0] as usize],
+            lut[px[1] as usize],
+            lut[px[2] as usize],
+        ];
     }
     let srgb_to_linear = |c: f32| (c / 255.0).powf(2.2);
     [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b)]
@@ -645,12 +649,18 @@ mod tests {
     fn the_srgb8_lookups_match_the_powf_they_replace_bit_for_bit() {
         for c in 0..=255u8 {
             let lin = unpremul_to_linear([c, c, c, 255])[0];
-            assert_eq!(lin.to_bits(), (c as f32 / 255.0).powf(2.2).to_bits(), "decode {c}");
+            assert_eq!(
+                lin.to_bits(),
+                (c as f32 / 255.0).powf(2.2).to_bits(),
+                "decode {c}"
+            );
         }
         // Every float from just below zero to past one, stepped finely enough
         // to land on both sides of every rounding boundary, plus each
         // boundary's neighbours.
-        let mut probes: Vec<f32> = (-1000..=1_100_000).map(|i| i as f32 / 1_000_000.0).collect();
+        let mut probes: Vec<f32> = (-1000..=1_100_000)
+            .map(|i| i as f32 / 1_000_000.0)
+            .collect();
         for k in 0..=255u32 {
             let edge = ((k as f32 - 0.5) / 255.0).max(0.0).powf(2.2);
             let bits = edge.to_bits();

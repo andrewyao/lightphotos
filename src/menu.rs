@@ -418,7 +418,11 @@ mod tests {
     fn menu_ids_name_one_command_each() {
         let all = commands();
         for cmd in &all {
-            assert_eq!(all.iter().filter(|c| c.id() == cmd.id()).count(), 1, "{cmd:?}");
+            assert_eq!(
+                all.iter().filter(|c| c.id() == cmd.id()).count(),
+                1,
+                "{cmd:?}"
+            );
         }
     }
 }

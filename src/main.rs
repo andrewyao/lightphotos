@@ -50,6 +50,9 @@ mod presets;
 // building for wasm32 instead of failing on APIs that target cannot have.
 #[cfg(all(feature = "hotpath", not(target_arch = "wasm32")))]
 mod profile;
+#[cfg(target_arch = "wasm32")]
+#[path = "raw/preview.rs"]
+mod raw_preview;
 mod renderer;
 #[cfg(not(target_arch = "wasm32"))]
 mod secret;
@@ -68,23 +71,20 @@ mod web_canvas;
 #[path = "web/web_catalog_fs.rs"]
 mod web_catalog_fs;
 #[cfg(target_arch = "wasm32")]
+#[path = "web/web_decode.rs"]
+mod web_decode;
+#[cfg(target_arch = "wasm32")]
 #[path = "web/web_export_fs.rs"]
 mod web_export_fs;
+#[cfg(target_arch = "wasm32")]
+#[path = "web/web_exports.rs"]
+mod web_exports;
 #[cfg(target_arch = "wasm32")]
 #[path = "web/web_fs.rs"]
 mod web_fs;
 #[cfg(target_arch = "wasm32")]
 #[path = "web/web_thumb_cache.rs"]
 mod web_thumb_cache;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_decode.rs"]
-mod web_decode;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_exports.rs"]
-mod web_exports;
-#[cfg(target_arch = "wasm32")]
-#[path = "raw/preview.rs"]
-mod raw_preview;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_rect;
 
