@@ -159,20 +159,28 @@ impl App {
             n => self.sel.map(|s| s.min(n - 1)),
         };
         let mut placer = Placer::new(self);
-        let selected = selected_pl
-            .iter()
-            .filter_map(|&i| placer.place(i).cell())
-            .collect();
-        let anchor = anchor_pl.and_then(|i| placer.place(i).cell());
-        let sel = match sel_pl.map(|i| placer.place(i)) {
-            Some(Place::Cell(p)) => Some(p),
-            Some(Place::Hidden(_)) if self.mode == ViewMode::Loupe => None,
-            Some(Place::Hidden(p)) => Some(p),
-            Some(Place::Gone) | None => clamped,
-        };
+        let cursor = sel_pl.map(|i| placer.place(i));
+        // The Loupe keeps a hidden member on screen, and with no cell of its
+        // own every action falls back to that photo, so no cell may stay
+        // selected for a bulk action to reach instead.
+        let (sel, selected, anchor) =
+            if self.mode == ViewMode::Loupe && matches!(cursor, Some(Place::Hidden(_))) {
+                (None, BTreeSet::new(), None)
+            } else {
+                let selected = selected_pl
+                    .iter()
+                    .filter_map(|&i| placer.place(i).cell())
+                    .collect();
+                let anchor = anchor_pl.and_then(|i| placer.place(i).cell());
+                let sel = match cursor {
+                    Some(Place::Cell(p) | Place::Hidden(p)) => Some(p),
+                    Some(Place::Gone) | None => clamped,
+                };
+                (sel, selected, anchor)
+            };
+        self.sel = sel;
         self.selected = selected;
         self.anchor = anchor;
-        self.sel = sel;
         self.faces_unscanned = true;
         // The title carries the visible count.
         self.update_window_title();
@@ -1022,6 +1030,12 @@ pub(in crate::app) mod tests {
         assert_eq!(app.sel, None);
         assert_eq!(app.want.as_deref(), Some(opened.as_path()));
         assert_eq!(app.selected_path().as_deref(), Some(opened.as_path()));
+        assert_eq!(
+            app.selected_paths(),
+            vec![opened.clone()],
+            "Delete and Export act on the photo on screen, not its group's cover"
+        );
+        assert_eq!(app.selection_count(), 1);
 
         app.step_loupe(true);
         assert_eq!(app.want, Some(dir.join("4.jpg")), "one step past the group");
