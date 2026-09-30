@@ -1,15 +1,78 @@
 use super::bulk_delete::BulkDelete;
 use super::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::develop::{self};
+use crate::groups::GroupId;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::navigation::Playlist;
 use crate::navigation::{self, flatten_visible_tree, visible_indices};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::thumbnail::THUMB_PX;
 use crate::ui::toolbar::ToolbarControl;
+
+/// Where a photo, given by playlist index, sits in `visible`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Place {
+    /// It has its own cell at this position: a single or a representative.
+    Cell(usize),
+    /// A group member without a cell of its own. Its group's cell is here.
+    Hidden(usize),
+    /// Filtered out, being trashed, or in a group whose cell is filtered out.
+    Gone,
+}
+
+impl Place {
+    /// The cell that shows the photo, its own or its group's.
+    pub(super) fn cell(self) -> Option<usize> {
+        match self {
+            Place::Cell(p) | Place::Hidden(p) => Some(p),
+            Place::Gone => None,
+        }
+    }
+}
+
+/// Answers [`Place`] for many photos against one `visible`, looking up each
+/// group's cell once. Groups name their representative by file name, so that
+/// lookup is a binary search of the playlist and worth sharing when a whole
+/// selection lands on a few groups.
+struct Placer<'a> {
+    app: &'a App,
+    group_cells: HashMap<&'a GroupId, Option<usize>>,
+}
+
+impl<'a> Placer<'a> {
+    fn new(app: &'a App) -> Self {
+        Placer {
+            app,
+            group_cells: HashMap::new(),
+        }
+    }
+
+    fn place(&mut self, idx: usize) -> Place {
+        let visible = &self.app.visible;
+        if let Ok(p) = visible.binary_search(&idx) {
+            return Place::Cell(p);
+        }
+        let (Some(pl), Some(groups)) = (self.app.playlist.as_ref(), self.app.catalog.groups())
+        else {
+            return Place::Gone;
+        };
+        let Some(id) = pl
+            .entry(idx)
+            .and_then(Path::file_name)
+            .and_then(|n| groups.group_of(n))
+        else {
+            return Place::Gone;
+        };
+        let cell = *self.group_cells.entry(id).or_insert_with(|| {
+            let rep = pl.index_of(groups.get(id)?.rep())?;
+            visible.binary_search(&rep).ok()
+        });
+        cell.map_or(Place::Gone, Place::Hidden)
+    }
+}
 
 impl App {
     /// Invalidate in-flight directory listings and any navigation deferred
@@ -39,16 +102,25 @@ impl App {
         self.web_pending_nav = Some(nav);
     }
 
-    /// Recompute `visible` from the filters, keeping the same photos selected.
+    /// Recompute `visible` from the groups and the filters, keeping the same
+    /// photos selected. A group is one cell, its representative's, and every
+    /// group change must be followed by this call so no member shows alone.
+    ///
+    /// A selected photo that joined a group lands on its group's cell. The
+    /// cursor does too, except in the Loupe, where it goes to `None` so the
+    /// photo on screen stays put. A cursor whose photo left the view keeps
+    /// its position, clamped, so it lands on a neighbor.
+    #[hotpath::measure]
     pub(super) fn recompute_visible(&mut self) {
-        // Positions in `visible` shift when the filter changes, so remember the
-        // selection as playlist indices.
-        let sel_pl: Vec<usize> = self
+        // Positions in `visible` shift, so remember the selection as playlist
+        // indices.
+        let selected_pl: Vec<usize> = self
             .selected
             .iter()
             .filter_map(|&p| self.visible.get(p).copied())
             .collect();
         let anchor_pl = self.anchor.and_then(|p| self.visible.get(p).copied());
+        let sel_pl = self.selected_index();
 
         let Some(pl) = &self.playlist else {
             self.visible.clear();
@@ -59,7 +131,9 @@ impl App {
         };
         let ratings = &self.ratings;
         let entries = pl.entries();
-        self.visible = visible_indices(entries, self.filter, |p| {
+        let groups = self.catalog.groups();
+        let cells = navigation::collapse_groups(entries, |n| groups.is_some_and(|g| g.hides(n)));
+        self.visible = visible_indices(entries, cells, self.filter, |p| {
             ratings.get(p).copied().unwrap_or(0)
         });
         if self.eyes_filter {
@@ -80,17 +154,42 @@ impl App {
                     .retain(|&i| entries.get(i).is_none_or(|p| !gone.contains(p)));
             }
         }
-        if self.visible.is_empty() {
-            self.sel = None;
-        } else if let Some(s) = self.sel {
-            if s >= self.visible.len() {
-                self.sel = Some(self.visible.len() - 1);
-            }
-        }
-        self.selected = remap_positions(&sel_pl, &self.visible);
-        self.anchor = anchor_pl.and_then(|i| self.visible.iter().position(|&v| v == i));
+        let clamped = match self.visible.len() {
+            0 => None,
+            n => self.sel.map(|s| s.min(n - 1)),
+        };
+        let mut placer = Placer::new(self);
+        let selected = selected_pl
+            .iter()
+            .filter_map(|&i| placer.place(i).cell())
+            .collect();
+        let anchor = anchor_pl.and_then(|i| placer.place(i).cell());
+        let sel = match sel_pl.map(|i| placer.place(i)) {
+            Some(Place::Cell(p)) => Some(p),
+            Some(Place::Hidden(_)) if self.mode == ViewMode::Loupe => None,
+            Some(Place::Hidden(p)) => Some(p),
+            Some(Place::Gone) | None => clamped,
+        };
+        self.selected = selected;
+        self.anchor = anchor;
+        self.sel = sel;
         // The title carries the visible count.
         self.update_window_title();
+    }
+
+    /// See [`Place`].
+    pub(super) fn place_of(&self, idx: usize) -> Place {
+        Placer::new(self).place(idx)
+    }
+
+    /// The cell showing the Loupe's photo, its own or its group's.
+    fn want_cell(&self) -> Option<usize> {
+        let want = self.want.as_deref()?;
+        let pl = self.playlist.as_ref()?;
+        let idx = pl.index_of(want.file_name()?)?;
+        (pl.entry(idx) == Some(want))
+            .then(|| self.place_of(idx).cell())
+            .flatten()
     }
 
     /// Playlist index of the current selection. `None` when nothing is selected.
@@ -294,7 +393,8 @@ impl App {
             return;
         }
         let n = self.visible.len();
-        let cur = self.sel.unwrap_or(0);
+        // A hidden member open in the Loupe steps from its group's cell.
+        let cur = self.sel.or_else(|| self.want_cell()).unwrap_or(0);
         self.sel = Some(if forward {
             (cur + 1) % n
         } else {
@@ -800,8 +900,175 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::app) mod tests {
     use super::*;
+    use crate::app::presets::tests::folder_app;
+    use crate::groups::Group;
+    use crate::navigation::Cmp;
+
+    /// The playlist indices `visible` shows, for asserting a whole Grid.
+    pub(in crate::app) fn cells(app: &App) -> Vec<usize> {
+        app.visible.clone()
+    }
+
+    fn name(app: &App, idx: usize) -> std::ffi::OsString {
+        let pl = app.playlist.as_ref().unwrap();
+        pl.entry(idx).unwrap().file_name().unwrap().to_os_string()
+    }
+
+    /// Save a group of the photos at playlist indices `members`, straight
+    /// through the catalog, then rebuild the view.
+    pub(in crate::app) fn group_photos(app: &mut App, members: &[usize], rep: usize) {
+        let names = members.iter().map(|&i| name(app, i)).collect();
+        let group = Group::new(names, name(app, rep)).unwrap();
+        let groups = app.catalog.groups().expect("the folder's groups loaded");
+        let writes = groups.create(group, std::time::SystemTime::now());
+        app.catalog.apply_group_writes(writes).unwrap();
+        app.recompute_visible();
+    }
+
+    fn drain_catalog_load(app: &mut App) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while app.poll_catalog_load() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "catalog load timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// A folder whose `groups/` already holds a group of `members` with
+    /// representative `rep`, written by a catalog of its own.
+    fn folder_with_saved_group(tag: &str, n: usize, members: &[usize], rep: usize) -> PathBuf {
+        let (mut app, dir, _) = folder_app(tag, n);
+        group_photos(&mut app, members, rep);
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        dir
+    }
+
+    #[test]
+    fn a_group_collapses_to_its_representative() {
+        let (mut app, dir, _) = folder_app("nav-collapse", 6);
+        group_photos(&mut app, &[1, 2, 3], 2);
+        assert_eq!(cells(&app), vec![0, 2, 4, 5]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 3+ filter hides a group whose representative is unrated even with a
+    /// member at 5, and shows a group whose representative is 4 while its
+    /// members are unrated.
+    #[test]
+    fn a_filter_judges_the_representative_alone() {
+        let (mut app, dir, paths) = folder_app("nav-filter", 6);
+        group_photos(&mut app, &[1, 2], 1);
+        group_photos(&mut app, &[3, 4], 4);
+        app.ratings.insert(paths[2].clone(), 5);
+        app.ratings.insert(paths[4].clone(), 4);
+        app.set_filter(Some((Cmp::Gte, 3)));
+        assert_eq!(cells(&app), vec![4]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Selected members land on their group's cell, and the cursor follows
+    /// its photo, not its position.
+    #[test]
+    fn selection_survives_a_collapse() {
+        let (mut app, dir, _) = folder_app("nav-sel", 8);
+        app.selected = BTreeSet::from([0, 1, 3, 5]);
+        app.anchor = Some(3);
+        app.sel = Some(5);
+        group_photos(&mut app, &[1, 2, 3], 2);
+        assert_eq!(cells(&app), vec![0, 2, 4, 5, 6, 7]);
+        assert_eq!(app.selected, BTreeSet::from([0, 1, 3]));
+        assert_eq!(app.anchor, Some(1), "the anchor lands on its group's cell");
+        assert_eq!(app.sel, Some(3), "the cursor stays on photo 5");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Groups load after the first paint. The Grid must collapse when they
+    /// land, with the cursor still on the same photo.
+    #[test]
+    fn groups_landing_after_first_paint_collapse_the_grid() {
+        let dir = folder_with_saved_group("nav-late", 6, &[1, 2, 3], 1);
+        let mut app = App::new(None);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        assert_eq!(cells(&app), vec![0, 1, 2, 3, 4, 5], "no groups yet");
+        app.select_single(4);
+        drain_catalog_load(&mut app);
+        assert_eq!(cells(&app), vec![0, 1, 4, 5]);
+        assert_eq!(app.sel, Some(2), "the cursor stays on photo 4");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A photo opened from Finder that turns out to be a hidden member stays
+    /// on screen when the groups land. Stepping then leaves its group's cell.
+    #[test]
+    fn the_loupe_keeps_a_hidden_member_on_screen_when_groups_load() {
+        let dir = folder_with_saved_group("nav-hidden", 5, &[1, 2, 3], 1);
+        let opened = dir.join("2.jpg");
+        let mut app = App::new(None);
+        app.open(opened.clone());
+        drain_catalog_load(&mut app);
+        assert_eq!(cells(&app), vec![0, 1, 4]);
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert_eq!(app.sel, None);
+        assert_eq!(app.want.as_deref(), Some(opened.as_path()));
+        assert_eq!(app.selected_path().as_deref(), Some(opened.as_path()));
+
+        app.step_loupe(true);
+        assert_eq!(app.want, Some(dir.join("4.jpg")), "one step past the group");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A group costs one step in the Loupe.
+    #[test]
+    fn stepping_the_loupe_across_a_group_costs_one_step() {
+        let (mut app, dir, paths) = folder_app("nav-step", 6);
+        group_photos(&mut app, &[1, 2, 3], 1);
+        app.select_single(0);
+        app.enter_loupe();
+        app.step_loupe(true);
+        assert_eq!(app.want.as_ref(), Some(&paths[1]));
+        app.step_loupe(true);
+        assert_eq!(app.want.as_ref(), Some(&paths[4]));
+        app.step_loupe(false);
+        assert_eq!(app.want.as_ref(), Some(&paths[1]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A member shows through its group's cell only while the representative
+    /// passes the filters.
+    #[test]
+    fn a_member_whose_representative_is_filtered_out_is_gone() {
+        let (mut app, dir, paths) = folder_app("nav-gone", 4);
+        group_photos(&mut app, &[1, 2], 1);
+        assert_eq!(app.place_of(2), Place::Hidden(1));
+        assert_eq!(app.place_of(1), Place::Cell(1));
+        app.ratings.insert(paths[2].clone(), 5);
+        app.set_filter(Some((Cmp::Gte, 3)));
+        assert_eq!(app.place_of(2), Place::Gone);
+        assert_eq!(app.place_of(1), Place::Gone);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Rating a photo out of the filter leaves the cursor on its neighbor.
+    #[test]
+    fn rating_a_photo_out_of_the_filter_moves_to_its_neighbor() {
+        let (mut app, dir, paths) = folder_app("nav-rate", 4);
+        for p in &paths {
+            app.ratings.insert(p.clone(), 3);
+        }
+        app.set_filter(Some((Cmp::Gte, 3)));
+        app.select_single(1);
+        app.set_rating(1);
+        assert_eq!(cells(&app), vec![0, 2, 3]);
+        assert_eq!(app.selected_path().as_ref(), Some(&paths[2]));
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The Loupe names its folder, and the arrow beside the name goes back to
     /// the Grid.
