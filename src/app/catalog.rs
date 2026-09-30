@@ -433,14 +433,17 @@ impl App {
     }
 
     pub(super) fn confirm_pending(&mut self) {
+        if matches!(
+            self.pending_confirm,
+            Some(PendingConfirm::DeleteGroup { focus: None })
+        ) {
+            return;
+        }
         match self.pending_confirm.take() {
             Some(PendingConfirm::Bulk(kind)) => self.run_bulk(kind),
             Some(PendingConfirm::DeletePreset(id)) => self.delete_preset(id),
-            // Neither of Delete Group's actions is a default, so Enter
-            // presses only the button Tab focused.
             Some(PendingConfirm::DeleteGroup { focus }) => match focus {
-                None => self.pending_confirm = Some(PendingConfirm::DeleteGroup { focus }),
-                Some(ui::Role::Cancel) => {}
+                None | Some(ui::Role::Cancel) => {}
                 Some(ui::Role::Primary) => self.remove_selected_groups(),
                 Some(ui::Role::Danger) => self.trash_selected_groups(),
             },
@@ -473,7 +476,6 @@ impl App {
         }
     }
 
-    /// Opens Delete Group over every selected stack.
     pub(crate) fn request_delete_group(&mut self) {
         if self.delete_available() && self.selection_has_group() {
             self.pending_confirm = Some(PendingConfirm::DeleteGroup { focus: None });
@@ -481,7 +483,6 @@ impl App {
         }
     }
 
-    /// The open Delete Group dialog's photo and group counts.
     pub(crate) fn pending_group_delete(&self) -> Option<(usize, usize)> {
         if !matches!(
             self.pending_confirm,
@@ -490,11 +491,13 @@ impl App {
             return None;
         }
         let groups = self.selected_groups();
-        let photos = groups.iter().map(|(_, g)| self.member_paths(g).len()).sum();
+        let photos = groups
+            .iter()
+            .map(|(_, g)| self.present_member_paths(g).len())
+            .sum();
         Some((photos, groups.len()))
     }
 
-    /// The Delete Group button Tab has focused.
     pub(crate) fn group_delete_focus(&self) -> Option<ui::Role> {
         match self.pending_confirm {
             Some(PendingConfirm::DeleteGroup { focus }) => focus,
@@ -502,8 +505,6 @@ impl App {
         }
     }
 
-    /// Tab and Shift+Tab through Delete Group's buttons in their on-screen
-    /// order, wrapping at either end.
     pub(super) fn step_group_delete_focus(&mut self, back: bool) {
         let Some(PendingConfirm::DeleteGroup { focus }) = &mut self.pending_confirm else {
             return;
@@ -530,7 +531,7 @@ impl App {
         let paths = self
             .selected_groups()
             .iter()
-            .flat_map(|(_, g)| self.member_paths(g))
+            .flat_map(|(_, g)| self.present_member_paths(g))
             .collect();
         self.start_delete(paths);
     }

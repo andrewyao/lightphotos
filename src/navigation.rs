@@ -110,8 +110,6 @@ fn name_key(name: Option<&OsStr>) -> Option<String> {
     name.map(|s| s.to_string_lossy().to_lowercase())
 }
 
-/// `name_key(name).as_deref().cmp(&key)` without allocating for an ASCII
-/// name, whose lowercase is its ASCII lowercase.
 fn cmp_name_key(name: Option<&OsStr>, key: Option<&str>) -> std::cmp::Ordering {
     match (name.map(OsStr::to_string_lossy), key) {
         (Some(n), Some(k)) if n.is_ascii() => {
@@ -364,6 +362,31 @@ mod tests {
         }
         assert_eq!(pl.index_of(OsStr::new("img.jpg")), None);
         assert_eq!(pl.index_of(OsStr::new("c.jpg")), None);
+    }
+
+    #[test]
+    fn cmp_name_key_orders_exactly_like_name_key() {
+        let names = [
+            None,
+            Some("a.jpg"),
+            Some("B.JPG"),
+            Some("img_0001.JPG"),
+            Some("IMG_0001.jpg"),
+            Some("Été.jpg"),
+            Some("été.JPG"),
+            Some("ÄRGER.png"),
+            Some("z.jpg"),
+        ];
+        for a in names {
+            for b in names {
+                let key = name_key(b.map(OsStr::new));
+                assert_eq!(
+                    cmp_name_key(a.map(OsStr::new), key.as_deref()),
+                    name_key(a.map(OsStr::new)).cmp(&key),
+                    "{a:?} vs {b:?}"
+                );
+            }
+        }
     }
 
     #[test]
