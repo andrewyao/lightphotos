@@ -23,6 +23,17 @@ impl App {
         (group.rep() == name).then_some((id, group))
     }
 
+    /// Each selected stack's group once, in selection order.
+    pub(crate) fn selected_groups(&self) -> Vec<(GroupId, Group)> {
+        let mut seen = std::collections::HashSet::new();
+        self.selected_cells()
+            .into_iter()
+            .filter_map(|p| self.group_at(p))
+            .filter(|(id, _)| seen.insert(*id))
+            .map(|(id, g)| (id.clone(), g.clone()))
+            .collect()
+    }
+
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn selection_has_group(&self) -> bool {
         self.selected_cells()

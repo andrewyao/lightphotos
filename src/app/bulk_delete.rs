@@ -16,7 +16,9 @@
 //! by playlist position stays valid.
 
 use super::*;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use crate::groups::GroupId;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -45,6 +47,13 @@ pub(crate) struct BulkDelete {
     gone: HashSet<PathBuf>,
     /// Set when `gone` grew since the last `recompute_visible`.
     view_dirty: bool,
+    /// The photos of each group this batch trashes whole, by group.
+    whole: HashMap<PathBuf, GroupId>,
+    /// Those groups' photos that landed before the group's last one did.
+    /// The catalog forgets a whole group in one step, so the group goes in
+    /// one sidecar delete rather than in a rewrite per landed member, and no
+    /// member is promoted to representative on the way.
+    held: HashMap<GroupId, Held>,
     total: usize,
     errors: usize,
     last_err: Option<String>,
@@ -69,6 +78,13 @@ pub(crate) struct BulkDelete {
     origin_handle: web_sys::FileSystemDirectoryHandle,
 }
 
+#[derive(Default)]
+struct Held {
+    /// Queued photos of the group with no result yet.
+    pending: usize,
+    trashed: Vec<PathBuf>,
+}
+
 impl BulkDelete {
     /// Trashed but not yet dropped from the playlist. `recompute_visible` is
     /// the only reader.
@@ -86,6 +102,27 @@ impl BulkDelete {
 
     fn take_result(&self) -> Option<DeleteResult> {
         self.done_rx.try_recv().ok()
+    }
+
+    /// The photos the catalog can forget now that `path` has its result.
+    fn release(&mut self, path: PathBuf, trashed: bool) -> Vec<PathBuf> {
+        let Some(held) = self.whole.get(&path).and_then(|id| self.held.get_mut(id)) else {
+            return if trashed { vec![path] } else { Vec::new() };
+        };
+        held.pending -= 1;
+        if trashed {
+            held.trashed.push(path);
+        }
+        if held.pending > 0 {
+            return Vec::new();
+        }
+        std::mem::take(&mut held.trashed)
+    }
+
+    /// Everything still held, for a batch that ends before its groups'
+    /// last photos land.
+    fn release_all(&mut self) -> Vec<PathBuf> {
+        self.held.drain().flat_map(|(_, h)| h.trashed).collect()
     }
 
     /// Hand the worker everything it will take right now.
@@ -130,7 +167,7 @@ impl BulkDelete {
 
 impl App {
     pub(super) fn delete_selection(&mut self) {
-        self.start_delete(self.selected_paths());
+        self.start_delete(self.delete_paths());
     }
 
     /// Begin trashing `paths`. Refused while another delete or an export is
@@ -147,6 +184,11 @@ impl App {
             return;
         }
         let total = paths.len();
+        let whole = self.whole_groups(&paths);
+        let mut held: HashMap<GroupId, Held> = HashMap::new();
+        for id in whole.values() {
+            held.entry(id.clone()).or_default().pending += 1;
+        }
         let (done_tx, done_rx) = channel();
 
         #[cfg(target_arch = "wasm32")]
@@ -175,6 +217,8 @@ impl App {
             in_flight: HashSet::new(),
             gone: HashSet::new(),
             view_dirty: false,
+            whole,
+            held,
             total,
             errors: 0,
             last_err: None,
@@ -214,23 +258,30 @@ impl App {
         };
 
         let mut trashed: Vec<PathBuf> = Vec::new();
+        let mut forget: Vec<PathBuf> = Vec::new();
         {
             let d = self.bulk_delete.as_mut().unwrap();
             d.admit();
             while let Some((path, result)) = d.take_result() {
                 d.in_flight.remove(&path);
-                match result {
+                let ok = match result {
                     Ok(()) => {
                         d.gone.insert(path.clone());
                         d.view_dirty = true;
-                        trashed.push(path);
+                        trashed.push(path.clone());
+                        true
                     }
                     Err(e) => {
                         eprintln!("[lightphotos] trash failed for {}: {e}", path.display());
                         d.errors += 1;
                         d.last_err = Some(e);
+                        false
                     }
-                }
+                };
+                forget.extend(d.release(path, ok));
+            }
+            if d.finished() {
+                forget.extend(d.release_all());
             }
         }
         for path in &trashed {
@@ -243,8 +294,8 @@ impl App {
             );
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if !trashed.is_empty() {
-            self.catalog.forget_photos(&trashed);
+        if !forget.is_empty() {
+            self.catalog.forget_photos(&forget);
         }
 
         let view_dirty = std::mem::take(&mut self.bulk_delete.as_mut().unwrap().view_dirty);
@@ -291,6 +342,29 @@ impl App {
         }
         d.in_flight.clear();
         self.poll_delete();
+    }
+
+    /// Each path of `paths` whose group has every present member in `paths`,
+    /// with that group.
+    fn whole_groups(&self, paths: &[PathBuf]) -> HashMap<PathBuf, GroupId> {
+        let Some(groups) = self.catalog.groups() else {
+            return HashMap::new();
+        };
+        let mut queued: HashMap<&GroupId, Vec<&PathBuf>> = HashMap::new();
+        for path in paths {
+            if let Some(id) = path.file_name().and_then(|n| groups.group_of(n)) {
+                queued.entry(id).or_default().push(path);
+            }
+        }
+        queued
+            .into_iter()
+            .filter(|(id, ps)| {
+                groups
+                    .get(id)
+                    .is_some_and(|g| self.member_paths(g).len() == ps.len())
+            })
+            .flat_map(|(id, ps)| ps.into_iter().map(move |p| (p.clone(), id.clone())))
+            .collect()
     }
 
     /// Whether a bulk delete is still running.
@@ -780,14 +854,13 @@ mod tests {
     }
 
     #[test]
-    fn trashing_a_representative_in_the_loupe_promotes_the_next_member() {
+    fn trashing_a_representative_alone_in_the_loupe_promotes_the_next_member() {
         use crate::app::nav::tests::group_photos;
         let (mut app, dir, paths) = grouped_app(&["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"]);
         group_photos(&mut app, &[1, 2, 3], 1);
         app.select_single(1);
         app.enter_loupe();
-        app.request_bulk(crate::ui::BulkKind::Delete);
-        app.confirm_pending();
+        app.start_delete(vec![paths[1].clone()]);
         drain(&mut app);
 
         assert!(!paths[1].exists());
@@ -842,6 +915,100 @@ mod tests {
         }
         assert_eq!(app.visible.len(), 1);
         assert!(app.catalog.groups().unwrap().is_empty(), "p01 is alone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn visible_names(app: &App) -> Vec<String> {
+        let pl = app.playlist.as_ref().unwrap();
+        app.visible
+            .iter()
+            .map(|&i| {
+                pl.entries()[i]
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    /// Photos b, c and d stacked under b, then the stack and e selected.
+    fn stack_and_single() -> (App, PathBuf, Vec<PathBuf>) {
+        use crate::app::nav::tests::group_photos;
+        let (mut app, dir, paths) =
+            grouped_app(&["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg"]);
+        group_photos(&mut app, &[1, 2, 3], 1);
+        assert_eq!(visible_names(&app), ["a.jpg", "b.jpg", "e.jpg", "f.jpg"]);
+        app.selected = BTreeSet::from([1, 2]);
+        app.sel = Some(1);
+        (app, dir, paths)
+    }
+
+    #[test]
+    fn delete_on_a_stack_and_a_single_trashes_every_member_and_the_single() {
+        let (mut app, dir, paths) = stack_and_single();
+        app.request_bulk(crate::ui::BulkKind::Delete);
+        app.confirm_pending();
+        drain(&mut app);
+        let exists: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
+        assert_eq!(exists, [true, false, false, false, false, true]);
+        assert_eq!(visible_names(&app), ["a.jpg", "f.jpg"]);
+        assert!(app.catalog.groups().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_delete_confirm_counts_every_member_and_names_the_groups() {
+        let t = crate::i18n::t();
+        let (mut app, dir, _) = stack_and_single();
+        app.request_bulk(crate::ui::BulkKind::Delete);
+        let (_, prompt) = app.pending_bulk_prompt().unwrap();
+        assert_eq!(prompt, (t.confirm_delete_groups)(4, 1));
+
+        app.cancel_pending();
+        app.selected = BTreeSet::from([0, 2]);
+        app.request_bulk(crate::ui::BulkKind::Delete);
+        let (_, prompt) = app.pending_bulk_prompt().unwrap();
+        assert_eq!(prompt, (t.confirm_delete)(2), "no group, the old wording");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every member landing in its own frame would otherwise rewrite the
+    /// group's sidecar once per member and promote each survivor in turn.
+    #[test]
+    fn trashing_a_whole_group_removes_it_in_one_step() {
+        use crate::app::nav::tests::group_photos;
+        let names: Vec<String> = (0..40).map(|i| format!("p{i:02}.jpg")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (mut app, dir, paths) = grouped_app(&refs);
+        let members: Vec<usize> = (0..40).collect();
+        group_photos(&mut app, &members, 0);
+        app.catalog.flush_blocking(Duration::from_secs(10));
+        app.select_single(0);
+        app.request_bulk(crate::ui::BulkKind::Delete);
+        app.confirm_pending();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while app.bulk_delete.is_some() {
+            assert!(Instant::now() < deadline, "the delete batch never finished");
+            let sizes: Vec<usize> = app
+                .catalog
+                .groups()
+                .unwrap()
+                .iter()
+                .map(|(_, g)| g.members().len())
+                .collect();
+            assert!(
+                sizes.is_empty() || sizes == [40],
+                "the group shrank mid-batch: {sizes:?}"
+            );
+            app.poll_delete();
+        }
+        assert!(paths.iter().all(|p| !p.exists()));
+        assert!(app.catalog.groups().unwrap().is_empty());
+        app.catalog.flush_blocking(Duration::from_secs(10));
+        let groups_dir = dir.join(crate::catalog::SIDECAR_DIR).join("groups");
+        let left = std::fs::read_dir(&groups_dir).map_or(0, |d| d.count());
+        assert_eq!(left, 0, "the group's sidecar is deleted");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
