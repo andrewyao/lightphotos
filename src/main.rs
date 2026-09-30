@@ -400,11 +400,8 @@ impl ApplicationHandler<UserEvent> for App {
 }
 
 impl App {
-    /// The app's half of a key event. `consumed` is egui's verdict on it.
-    pub(crate) fn key_input(&mut self, code: KeyCode, state: ElementState, consumed: bool) {
-        if consumed {
-            // Navigation keys may still reach the app. See
-            // `nav_key_should_fall_through`.
+    pub(crate) fn key_input(&mut self, code: KeyCode, state: ElementState, egui_consumed: bool) {
+        if egui_consumed {
             let nav_key = state == ElementState::Pressed
                 && matches!(
                     code,
@@ -422,8 +419,6 @@ impl App {
             }
         }
         match code {
-            // Holding Space and dragging pans the loupe, so Space acts
-            // only on a release that didn't pan.
             KeyCode::Space => match state {
                 ElementState::Pressed if !self.space_down => {
                     self.space_down = true;
@@ -442,8 +437,6 @@ impl App {
         }
     }
 
-    /// One turn of background bookkeeping. Returns how soon to look again,
-    /// or `None` when nothing is outstanding.
     pub(crate) fn pump(&mut self) -> Option<std::time::Duration> {
         // Outside the loader block below, because a queued sidecar write has
         // no loader to wait on and can outlive the folder it came from.
