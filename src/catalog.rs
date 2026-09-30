@@ -1513,6 +1513,11 @@ mod tests {
         write_group_file(&dir, "g-bad", "{not json");
         write_group_file(
             &dir,
+            "My Group",
+            r#"{"v":1,"members":["a.jpg","b.jpg"],"representative":"a.jpg"}"#,
+        );
+        write_group_file(
+            &dir,
             "g-txt",
             r#"{"v":1,"members":["d.jpg","notes.txt"],"representative":"d.jpg"}"#,
         );
@@ -1533,7 +1538,10 @@ mod tests {
         );
 
         let loaded = load_sidecars(&dir);
-        assert_eq!(loaded.skipped, 2, "only bad JSON and an unknown version");
+        assert_eq!(
+            loaded.skipped, 3,
+            "bad JSON, an unknown version, and a name that is not a group id"
+        );
 
         let mut cat = Catalog::with_dir(dir.clone());
         assert!(cat.take_error().is_some());

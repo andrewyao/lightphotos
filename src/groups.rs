@@ -40,11 +40,20 @@ impl GroupId {
         })
     }
 
+    /// A new id that sorts after `newest`, the latest minted time in the
+    /// folder, even when the clock reads the same millisecond or earlier.
     #[allow(dead_code)] // only called from #[cfg(test)] today
-    fn mint(group: &Group, at: SystemTime, taken: impl Fn(&GroupId) -> bool) -> GroupId {
-        let ms = at
+    fn mint(
+        group: &Group,
+        at: SystemTime,
+        newest: Option<u64>,
+        taken: impl Fn(&GroupId) -> bool,
+    ) -> GroupId {
+        let now = at
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        let ms = newest
+            .map_or(now, |n| now.max(n.saturating_add(1)))
             .min(MAX_MINTED_MS);
         for salt in 0u32.. {
             let mut h = Fnv1a::new();
@@ -254,7 +263,13 @@ impl Groups {
                 return self.set_rep(id, &group.rep);
             }
         }
-        let id = GroupId::mint(&group, at, |id| {
+        let newest = self
+            .by_id
+            .keys()
+            .chain(self.repairs.keys())
+            .filter_map(|id| id.minted_ms)
+            .max();
+        let id = GroupId::mint(&group, at, newest, |id| {
             self.by_id.contains_key(id) || self.repairs.contains_key(id)
         });
         let absorbed = self.forget(&group.members);
@@ -559,6 +574,29 @@ mod tests {
     }
 
     #[test]
+    fn a_merge_in_the_same_millisecond_or_after_the_clock_steps_back_still_wins() {
+        let photos = ["a", "b", "c", "d"];
+        for clock in [1_000, 500] {
+            let old = minted(1_000);
+            let before = load(vec![(old.clone(), saved(&["a", "b", "c"], "a"))], &photos);
+            let writes = before.create(group(&["b", "c", "d"], "d"), at(clock));
+            let GroupWrite::Put(new, new_group) = &writes[0] else {
+                panic!("the new group comes first: {writes:?}");
+            };
+            assert!(old < *new, "clock {clock}: {old} < {new}");
+
+            let reloaded = load(
+                vec![
+                    (old.clone(), saved(&["a", "b", "c"], "a")),
+                    (new.clone(), saved(&["b", "c", "d"], "d")),
+                ],
+                &photos,
+            );
+            assert_eq!(reloaded.get(new), Some(new_group), "clock {clock}");
+        }
+    }
+
+    #[test]
     fn two_sidecars_claiming_one_photo_resolve_to_the_newest_id() {
         let (older, newer) = (minted(1_000), minted(2_000));
         let groups = load(
@@ -584,8 +622,8 @@ mod tests {
         assert!(id("g-fixture00001") < fixture, "unminted ids order by name");
         assert!(id("zzz") < minted(0), "a minted id is newer than any other");
         assert!(minted(0xff) < minted(0x100));
-        let early = GroupId::mint(&group(&["y", "z"], "y"), at(5), |_| false);
-        let late = GroupId::mint(&group(&["a", "b"], "a"), at(6), |_| false);
+        let early = GroupId::mint(&group(&["y", "z"], "y"), at(5), None, |_| false);
+        let late = GroupId::mint(&group(&["a", "b"], "a"), at(6), None, |_| false);
         assert!(early < late, "{early} < {late}");
         assert_eq!(
             id(&late.to_string()),
@@ -783,7 +821,7 @@ mod tests {
                 Some(good.to_string())
             );
         }
-        let minted = GroupId::mint(&group(&["a", "b"], "a"), at(3), |_| false);
+        let minted = GroupId::mint(&group(&["a", "b"], "a"), at(3), None, |_| false);
         assert_eq!(
             GroupId::from_stem(minted.to_string().as_ref()),
             Some(minted)
@@ -793,13 +831,13 @@ mod tests {
     #[test]
     fn minted_ids_avoid_ids_already_taken() {
         let g = group(&["a", "b"], "a");
-        let first = GroupId::mint(&g, at(7), |_| false);
+        let first = GroupId::mint(&g, at(7), None, |_| false);
         let name = first.to_string();
         assert!(
             name.starts_with("g-000000000007-") && name.len() == 21,
             "{name}"
         );
-        let second = GroupId::mint(&g, at(7), |id| *id == first);
+        let second = GroupId::mint(&g, at(7), None, |id| *id == first);
         assert_ne!(first, second);
     }
 }
