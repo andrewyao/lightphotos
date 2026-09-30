@@ -129,6 +129,7 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
                 }
             }
         }
+        app.clear_grid_cells();
         let output = grid_scroll.show_rows(ui, cell, rows, |ui, row_range| {
             let start = row_range.start * cols;
             let end = (row_range.end * cols).min(len);
@@ -459,7 +460,7 @@ fn selection_check(ui: &egui::Ui, c: egui::Pos2, r: f32, fill: egui::Color32) {
 
 pub(super) fn grid_cell(
     ui: &mut egui::Ui,
-    app: &App,
+    app: &mut App,
     pos: usize,
     cell: f32,
     sel: Option<usize>,
@@ -468,6 +469,7 @@ pub(super) fn grid_cell(
     let primary = sel == Some(pos);
     let selected = app.is_selected(pos);
     let response = thumbnail_cell(ui, app, pos, cell, selected, primary, &GRID_CELL_STYLE);
+    app.record_grid_cell(pos, response.rect);
     if response.clicked() {
         let mods = ui.input(|i| i.modifiers);
         let action = if mods.shift {
