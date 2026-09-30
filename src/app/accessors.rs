@@ -135,6 +135,7 @@ impl App {
         self.grid_range = (start, end);
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn grid_range(&self) -> (usize, usize) {
         self.grid_range
     }
@@ -147,6 +148,7 @@ impl App {
         self.grid_cell_rects.push((pos, rect));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn grid_cell_rect(&self, pos: usize) -> Option<egui::Rect> {
         self.grid_cell_rects
             .iter()
@@ -154,10 +156,12 @@ impl App {
             .map(|(_, r)| *r)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn selected_positions(&self) -> Vec<usize> {
         self.selected.iter().copied().collect()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn zoom_rel(&self) -> f32 {
         self.zoom_rel
     }
