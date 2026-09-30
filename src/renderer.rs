@@ -54,7 +54,6 @@ struct Transform {
     rot: [f32; 4],
 }
 
-/// One rendered frame read back from the GPU as tightly packed RGB rows.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct RgbFrame {
     pub width: u32,
@@ -579,11 +578,8 @@ impl Renderer {
         }));
     }
 
-    /// Blocks until the GPU has finished the last frame. `None` when
-    /// `render_offscreen` is off or the surface format is not 8-bit BGRA or
-    /// RGBA.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn read_offscreen(&self) -> Option<RgbFrame> {
+    pub fn read_offscreen_blocking(&self) -> Option<RgbFrame> {
         let texture = self.offscreen.as_ref()?;
         let swap_rb = match self.config.format {
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => true,

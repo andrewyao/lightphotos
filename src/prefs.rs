@@ -41,9 +41,6 @@ impl Layout {
 #[cfg(not(target_arch = "wasm32"))]
 static CONFIG_DIR_OVERRIDE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
-/// Route every later `load` and `save` to `dir`. The headless driver gives
-/// each run its own, so parallel runs and the person's own settings never
-/// share a file.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn override_config_dir(dir: PathBuf) {
     let _ = CONFIG_DIR_OVERRIDE.set(dir);
