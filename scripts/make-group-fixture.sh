@@ -18,6 +18,10 @@
 # to .lightphotos/groups/g-fixtureNNNNN.json, representative the sharp frame.
 # Without it there are 4 bursts and no sidecars.
 #
+# The script writes only into a new or empty <dir>, or one it built before,
+# which it marks with a .lightphotos-fixture file. Pointed at any other
+# folder, such as real camera files named IMG_0001.JPG, it exits untouched.
+#
 # Rerunning converges on the same folder: unchanged files are not rewritten,
 # mtimes are reset, and IMG_*.JPG or g-fixture*.json files the layout no
 # longer names are removed. Nothing else in <dir> is touched. Large counts
@@ -45,7 +49,13 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$count" =~ ^[0-9]+$ && "$groups" =~ ^[0-9]+$ ]] || usage
 
+marker="$dir/.lightphotos-fixture"
+if [[ -d "$dir" && ! -f "$marker" && -n "$(ls -A "$dir")" ]]; then
+  echo "error: $dir is not empty and was not built by this script; refusing to touch it" >&2
+  exit 1
+fi
 mkdir -p "$dir"
+[[ -f "$marker" ]] || : > "$marker"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
