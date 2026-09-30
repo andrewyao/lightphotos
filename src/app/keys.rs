@@ -215,8 +215,6 @@ impl App {
                 self.toggle_touchup();
             }
 
-            // Both always take the chord, even when they do nothing, since a
-            // disabled menu item passes it through and plain G leaves the Loupe.
             KeyCode::KeyG if cmd && shift => self.ungroup_selected(),
             KeyCode::KeyG if cmd => self.group_selected(),
             KeyCode::KeyG => self.enter_grid(),
@@ -1243,7 +1241,6 @@ mod tests {
         assert_eq!(app.mode, ViewMode::Grid);
     }
 
-    /// Plain G leaves the Loupe, so both chords must be taken before it.
     #[test]
     fn cmd_g_in_the_loupe_stays_in_the_loupe() {
         let (mut app, _) = folder_app(3);
@@ -1272,8 +1269,6 @@ mod tests {
         assert_eq!(app.visible, vec![2, 5]);
     }
 
-    /// The primary cell's photo stands for the group, and the selection
-    /// becomes the new stack's cell.
     #[test]
     fn cmd_g_takes_the_primary_cells_photo_and_selects_the_new_cell() {
         let (mut app, _) = folder_app(5);
@@ -1314,8 +1309,6 @@ mod tests {
         assert_eq!(app.visible, vec![0, 3, 4]);
     }
 
-    /// Right after a folder opens its groups are still loading. Cmd+G then
-    /// changes nothing, in memory or on disk, and says why.
     #[test]
     fn cmd_g_while_groups_load_changes_nothing() {
         let (mut app, paths) = folder_app(3);
