@@ -135,6 +135,33 @@ impl App {
         self.grid_range = (start, end);
     }
 
+    pub(crate) fn grid_range(&self) -> (usize, usize) {
+        self.grid_range
+    }
+
+    pub(crate) fn clear_grid_cells(&mut self) {
+        self.grid_cell_rects.clear();
+    }
+
+    pub(crate) fn record_grid_cell(&mut self, pos: usize, rect: egui::Rect) {
+        self.grid_cell_rects.push((pos, rect));
+    }
+
+    pub(crate) fn grid_cell_rect(&self, pos: usize) -> Option<egui::Rect> {
+        self.grid_cell_rects
+            .iter()
+            .find(|(p, _)| *p == pos)
+            .map(|(_, r)| *r)
+    }
+
+    pub(crate) fn selected_positions(&self) -> Vec<usize> {
+        self.selected.iter().copied().collect()
+    }
+
+    pub(crate) fn zoom_rel(&self) -> f32 {
+        self.zoom_rel
+    }
+
     pub(crate) fn take_grid_scroll_reset(&mut self) -> bool {
         std::mem::take(&mut self.grid_scroll_reset)
     }

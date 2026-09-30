@@ -1,0 +1,7 @@
+# The sidecar lands in <folder>/.lightphotos/<file>.xmp once idle returns.
+size 1200 800
+click-cell 1
+key 4
+idle
+state
+shot rated
