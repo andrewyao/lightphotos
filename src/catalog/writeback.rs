@@ -14,18 +14,26 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use super::ImageRecord;
+use crate::groups::{Group, GroupId, GroupWrite, Groups};
 
-/// One queued sidecar mutation for one photo.
+/// One queued sidecar mutation.
 ///
 /// The payload is a whole-record snapshot rather than a delta, because a
 /// `Catalog` mutation is already a read-modify-write of the entire
-/// [`ImageRecord`]. A later entry for a path therefore supersedes every
-/// earlier one, which is what lets [`Writeback::overlay`] answer a read with a
-/// single value and lets wasm admit one task per path without losing a field.
+/// [`ImageRecord`] or [`Group`]. A later entry for a path therefore supersedes
+/// every earlier one, which is what lets [`Writeback::overlay`] answer a read
+/// with a single value and lets wasm admit one task per path without losing a
+/// field.
+///
+/// `Put` and `Delete` are queued under the photo's own path and derive its
+/// sidecar from it. `PutGroup` and `DeleteGroup` are queued under the group
+/// sidecar's path, since a group has no photo of its own.
 #[derive(Clone)]
 pub(super) enum WriteOp {
     Put(ImageRecord),
     Delete,
+    PutGroup(Group),
+    DeleteGroup,
 }
 
 /// Where a background sidecar load sits in the write order.
@@ -155,8 +163,9 @@ impl Writeback {
         }
     }
 
-    /// Replace every record in `images` that the load carrying `mark` may have
-    /// read before one of our own writes reached the disk.
+    /// Replace every record in `images`, and every group in `groups`, that
+    /// the load carrying `mark` may have read before one of our own writes
+    /// reached the disk.
     ///
     /// `Catalog::switch_dir` clears the cache, so a folder round-trip during a
     /// flush leaves nothing else to correct the load with. Without this the
@@ -171,27 +180,51 @@ impl Writeback {
     /// that could, such as `./photos` against `photos`, also fails the
     /// active-directory test in `apply_loaded`, which returns before reaching
     /// here.
+    ///
+    /// A group write can move photos between groups, so group writes replay
+    /// in the order they were issued.
     pub(super) fn overlay(
         &self,
         dir: &Path,
         mark: LoadMark,
         images: &mut HashMap<OsString, ImageRecord>,
+        groups: &mut Groups,
     ) {
+        let groups_dir = dir.join(super::SIDECAR_DIR).join(super::GROUPS_DIR);
+        let mut group_writes = Vec::new();
         for (path, authored) in &self.authored {
-            if authored.seq < mark.0 || path.parent() != Some(dir) {
+            if authored.seq < mark.0 {
                 continue;
             }
-            let Some(name) = path.file_name() else {
-                continue;
-            };
             match &authored.op {
+                WriteOp::Put(_) | WriteOp::Delete if path.parent() != Some(dir) => {}
                 WriteOp::Put(rec) => {
-                    images.insert(name.to_os_string(), rec.clone());
+                    if let Some(name) = path.file_name() {
+                        images.insert(name.to_os_string(), rec.clone());
+                    }
                 }
                 WriteOp::Delete => {
-                    images.remove(name);
+                    if let Some(name) = path.file_name() {
+                        images.remove(name);
+                    }
+                }
+                WriteOp::PutGroup(_) | WriteOp::DeleteGroup
+                    if path.parent() != Some(groups_dir.as_path()) => {}
+                WriteOp::PutGroup(group) => {
+                    if let Some(id) = path.file_stem().and_then(GroupId::from_stem) {
+                        group_writes.push((authored.seq, GroupWrite::Put(id, group.clone())));
+                    }
+                }
+                WriteOp::DeleteGroup => {
+                    if let Some(id) = path.file_stem().and_then(GroupId::from_stem) {
+                        group_writes.push((authored.seq, GroupWrite::Delete(id)));
+                    }
                 }
             }
+        }
+        group_writes.sort_by_key(|(seq, _)| *seq);
+        for (_, write) in &group_writes {
+            groups.apply(write);
         }
     }
 
@@ -333,16 +366,21 @@ fn perform(path: &Path, op: &WriteOp) -> Result<(), String> {
                 sidecar_path(path).ok_or_else(|| "cannot determine sidecar path".to_string())?;
             write_sidecar_file(&sidecar, rec)
         }
-        WriteOp::Delete => {
-            let Some(sidecar) = sidecar_path(path) else {
-                return Ok(());
-            };
-            match std::fs::remove_file(&sidecar) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e.to_string()),
-            }
-        }
+        WriteOp::Delete => match sidecar_path(path) {
+            Some(sidecar) => remove_if_present(&sidecar),
+            None => Ok(()),
+        },
+        WriteOp::PutGroup(group) => write_atomic_in_dir(path, &super::group_bytes(group)?),
+        WriteOp::DeleteGroup => remove_if_present(path),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn remove_if_present(file: &Path) -> Result<(), String> {
+    match std::fs::remove_file(file) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -361,12 +399,18 @@ fn sidecar_path(path: &Path) -> Option<PathBuf> {
 /// Write `rec` as JSON to `sidecar`, atomically.
 #[cfg(not(target_arch = "wasm32"))]
 fn write_sidecar_file(sidecar: &Path, rec: &ImageRecord) -> Result<(), String> {
-    let parent = sidecar
+    let bytes = serde_json::to_vec_pretty(rec).map_err(|e| e.to_string())?;
+    write_atomic_in_dir(sidecar, &bytes)
+}
+
+/// Write `bytes` to `file` atomically, creating its directory first.
+#[cfg(not(target_arch = "wasm32"))]
+fn write_atomic_in_dir(file: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = file
         .parent()
         .ok_or_else(|| "sidecar path has no parent".to_string())?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let bytes = serde_json::to_vec_pretty(rec).map_err(|e| e.to_string())?;
-    crate::paths::write_atomic(sidecar, &bytes).map_err(|e| e.to_string())
+    crate::paths::write_atomic(file, bytes).map_err(|e| e.to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -422,6 +466,11 @@ impl Writeback {
                     }
                 },
                 WriteOp::Delete => None,
+                WriteOp::PutGroup(_) | WriteOp::DeleteGroup => {
+                    let err = "photo groups are not saved in the browser yet".to_string();
+                    let _ = self.done_tx.send((path, seq, Some(err)));
+                    continue;
+                }
             };
             self.in_flight.insert(path.clone());
             let done_tx = self.done_tx.clone();
@@ -467,7 +516,12 @@ mod tests {
         );
 
         let mut images = HashMap::new();
-        wb.overlay(Path::new("/photos"), mark, &mut images);
+        wb.overlay(
+            Path::new("/photos"),
+            mark,
+            &mut images,
+            &mut Groups::default(),
+        );
         assert_eq!(
             images
                 .get(std::ffi::OsStr::new("a.jpg"))
@@ -490,7 +544,12 @@ mod tests {
         );
 
         let mut images = HashMap::new();
-        wb.overlay(Path::new("/photos/b"), mark, &mut images);
+        wb.overlay(
+            Path::new("/photos/b"),
+            mark,
+            &mut images,
+            &mut Groups::default(),
+        );
         assert!(
             images.is_empty(),
             "a queued write for one folder must not appear in another folder's cache"
@@ -511,7 +570,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        wb.overlay(Path::new("/photos"), mark, &mut images);
+        wb.overlay(
+            Path::new("/photos"),
+            mark,
+            &mut images,
+            &mut Groups::default(),
+        );
         assert!(
             images.is_empty(),
             "a record whose deletion is still queued must not come back from a stale load"
@@ -541,7 +605,7 @@ mod tests {
         let newer = wb.begin_load();
 
         let mut images = HashMap::new();
-        wb.overlay(&dir, newer, &mut images);
+        wb.overlay(&dir, newer, &mut images, &mut Groups::default());
         assert!(
             images.is_empty(),
             "a load requested after the write landed reads it off the disk, so \
@@ -549,7 +613,7 @@ mod tests {
         );
 
         let mut images = HashMap::new();
-        wb.overlay(&dir, older, &mut images);
+        wb.overlay(&dir, older, &mut images, &mut Groups::default());
         assert_eq!(
             images
                 .get(std::ffi::OsStr::new("a.jpg"))
@@ -561,7 +625,7 @@ mod tests {
         // The same directory spelled with a trailing separator, which is what
         // the parent test in `overlay` has to see through.
         let mut images = HashMap::new();
-        wb.overlay(&dir.join(""), older, &mut images);
+        wb.overlay(&dir.join(""), older, &mut images, &mut Groups::default());
         assert_eq!(
             images
                 .get(std::ffi::OsStr::new("a.jpg"))
