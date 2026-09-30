@@ -26,7 +26,8 @@ impl App {
             // X still opens the export form while cropping.
             Export => tool_free && !self.show_settings,
             OpenFolder | AutoTone | Rate(_) | Grid | KeyboardShortcuts => free,
-            AutoToneSelection | MoveToTrash => free && selected > 0,
+            AutoToneSelection => free && selected > 0,
+            MoveToTrash => free && selected > 0 && self.delete_available(),
             GroupSelected => free && self.selected_cells().len() >= 2,
             Ungroup => free && self.selection_has_group(),
             CopySettings => free && selected == 1,

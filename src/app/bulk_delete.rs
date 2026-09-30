@@ -242,6 +242,13 @@ impl App {
                 &origin.1,
             );
         }
+        // Batched per poll, before the rebuild below, so a trashed
+        // representative's group shows its next member in this same frame
+        // instead of vanishing until the batch ends.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !trashed.is_empty() {
+            self.catalog.forget_photos(&trashed);
+        }
 
         let view_dirty = std::mem::take(&mut self.bulk_delete.as_mut().unwrap().view_dirty);
         if view_dirty {
@@ -311,8 +318,6 @@ impl App {
         self.capture_times.remove(path);
         self.signals.forget(path);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        self.catalog.remove(path);
         #[cfg(target_arch = "wasm32")]
         {
             if self.catalog.is_active_dir(origin_dir) {
@@ -734,6 +739,112 @@ mod tests {
                 "a photo keeps its rating exactly while it is still on disk"
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `app_with_photos` with the folder's catalog loaded, so it has groups.
+    fn grouped_app(names: &[&str]) -> (App, PathBuf, Vec<PathBuf>) {
+        let (mut app, dir, paths) = app_with_photos(names);
+        app.catalog.open_dir(&dir);
+        app.recompute_visible();
+        (app, dir, paths)
+    }
+
+    fn group_names(app: &App) -> Vec<(Vec<String>, String)> {
+        let s = |n: &std::ffi::OsString| n.to_string_lossy().into_owned();
+        app.catalog
+            .groups()
+            .unwrap()
+            .iter()
+            .map(|(_, g)| (g.members().iter().map(s).collect(), s(g.rep())))
+            .collect()
+    }
+
+    /// Trash the representative from the filmstrip Loupe: the next member
+    /// takes its place, in the group, on disk and on screen.
+    #[test]
+    fn trashing_a_representative_in_the_loupe_promotes_the_next_member() {
+        use crate::app::nav::tests::group_photos;
+        let (mut app, dir, paths) = grouped_app(&["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"]);
+        group_photos(&mut app, &[1, 2, 3], 1);
+        app.select_single(1);
+        app.enter_loupe();
+        app.request_bulk(crate::ui::BulkKind::Delete);
+        app.confirm_pending();
+        drain(&mut app);
+
+        assert!(!paths[1].exists());
+        let promoted = (
+            vec!["c.jpg".to_string(), "d.jpg".to_string()],
+            "c.jpg".to_string(),
+        );
+        assert_eq!(group_names(&app), vec![promoted.clone()]);
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert_eq!(app.want.as_ref(), Some(&paths[2]), "the Loupe shows c");
+        let names = |app: &App| -> Vec<PathBuf> {
+            let pl = app.playlist.as_ref().unwrap();
+            app.visible
+                .iter()
+                .map(|&i| pl.entries()[i].clone())
+                .collect()
+        };
+        assert_eq!(
+            names(&app),
+            vec![paths[0].clone(), paths[2].clone(), paths[4].clone()]
+        );
+
+        app.catalog.flush_blocking(Duration::from_secs(10));
+        let reloaded = crate::catalog::Catalog::with_dir(dir.clone());
+        let on_disk: Vec<_> = reloaded
+            .groups()
+            .unwrap()
+            .iter()
+            .map(|(_, g)| (g.members().len(), g.rep().clone()))
+            .collect();
+        assert_eq!(on_disk, vec![(2, "c.jpg".into())]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// While a long batch runs, a group whose representative was trashed
+    /// keeps a cell, its promoted member's, in every frame.
+    #[test]
+    fn a_group_stays_visible_while_its_representative_is_trashed() {
+        use crate::app::nav::tests::group_photos;
+        let names: Vec<String> = (0..30).map(|i| format!("p{i:02}.jpg")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (mut app, dir, paths) = grouped_app(&refs);
+        group_photos(&mut app, &[0, 1], 0);
+        let rest: Vec<PathBuf> = paths[..1].iter().chain(&paths[2..]).cloned().collect();
+        app.start_delete(rest);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while app.bulk_delete.is_some() {
+            assert!(Instant::now() < deadline, "the delete batch never finished");
+            assert!(
+                app.visible.contains(&0) || app.visible.contains(&1),
+                "the group lost its cell mid-batch"
+            );
+            app.poll_delete();
+        }
+        assert_eq!(app.visible.len(), 1);
+        assert!(app.catalog.groups().unwrap().is_empty(), "p01 is alone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Delete right after a folder opens would outrun the groups' load,
+    /// which would then keep a group naming a trashed photo. It waits.
+    #[test]
+    fn delete_while_the_folder_loads_is_refused_and_trashes_nothing() {
+        let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg"]);
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        assert!(app.catalog_load_pending.is_some());
+        app.select_single(0);
+        app.request_bulk(crate::ui::BulkKind::Delete);
+        assert!(app.pending_confirm.is_none(), "no confirm is offered");
+        #[cfg(target_os = "macos")]
+        assert!(!app.menu_enabled(crate::menu::MenuCommand::MoveToTrash));
+        app.confirm_pending();
+        assert!(app.bulk_delete.is_none());
+        assert!(paths.iter().all(|p| p.exists()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

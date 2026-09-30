@@ -397,15 +397,33 @@ impl Catalog {
         self.update(path, |rec| rec.rotation = rotation);
     }
 
-    /// Delete the record and sidecar for `path`, when its photo is deleted.
-    /// The sidecar skips the Trash, since it is useless apart from its photo.
+    /// The one entry point for photos that left the folder, such as trashed
+    /// ones. Each loses its record and its sidecar, which skips the Trash
+    /// since it is useless apart from its photo, and leaves its group. A
+    /// group that loses its representative promotes its first survivor, and
+    /// one left with a single photo is deleted with its file.
+    ///
+    /// While the folder's groups are still loading the group part is skipped.
+    /// The load that lands next drops the missing photos and records the
+    /// repair, so no group is left naming them.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn remove(&mut self, path: &Path) {
-        if let Some(name) = self.cache_key(path) {
-            self.images.remove(name);
-            self.dirty.insert(name.to_os_string());
+    pub fn forget_photos(&mut self, paths: &[PathBuf]) {
+        let mut names = Vec::new();
+        for path in paths {
+            if let Some(name) = self.cache_key(path) {
+                self.images.remove(name);
+                self.dirty.insert(name.to_os_string());
+                names.push(name.to_os_string());
+            }
+            self.enqueue(path, WriteOp::Delete);
         }
-        self.enqueue(path, WriteOp::Delete);
+        let Some(groups) = &self.groups else {
+            return;
+        };
+        let writes = groups.forget(&names);
+        if let Err(e) = self.apply_group_writes(writes) {
+            self.note_persist_error(e);
+        }
     }
 
     /// Apply `mutate` to the record for `path`, then queue its sidecar write,
@@ -975,19 +993,19 @@ mod tests {
     }
 
     #[test]
-    fn remove_deletes_sidecar_file() {
+    fn forgetting_a_photo_deletes_its_sidecar_file() {
         let dir = unique_tmp_dir();
         let p = dir.join("photo.jpg");
         let mut cat = Catalog::with_dir(dir.clone());
         cat.set(&p, 4);
         flush(&mut cat);
         assert!(sidecar_for(&dir, "photo.jpg").exists());
-        cat.remove(&p);
+        cat.forget_photos(std::slice::from_ref(&p));
         flush(&mut cat);
         assert_eq!(cat.get(&p), None);
         assert!(!sidecar_for(&dir, "photo.jpg").exists());
         // Removing again is a no-op.
-        cat.remove(&p);
+        cat.forget_photos(std::slice::from_ref(&p));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1072,7 +1090,7 @@ mod tests {
             cat.take_error().is_some(),
             "an off-folder write is reported"
         );
-        cat.remove(&pb);
+        cat.forget_photos(std::slice::from_ref(&pb));
         assert_eq!(cat.get(&pa), Some(4), "a's record survives b's writes");
         assert_eq!(cat.adjustments(&pa), adj);
 
@@ -1156,7 +1174,7 @@ mod tests {
         let mut cat = Catalog::new();
         let mark = cat.switch_dir(&dir);
         let loaded = load_sidecars(&dir); // snapshot still carries the rating
-        cat.remove(&p); // the user clears it before the load lands
+        cat.forget_photos(std::slice::from_ref(&p)); // the user clears it before the load lands
         cat.apply_loaded(&dir, mark, loaded, &images_in(&dir));
 
         assert_eq!(
