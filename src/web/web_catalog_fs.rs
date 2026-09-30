@@ -55,7 +55,7 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
         Ok(None) => {
             return SidecarLoad {
                 images,
-                groups: crate::groups::Groups::default(),
+                groups: Vec::new(),
                 skipped,
             }
         }
@@ -63,7 +63,7 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
             web_sys::console::error_1(&format!("[web] listing .lightphotos failed: {e}").into());
             return SidecarLoad {
                 images,
-                groups: crate::groups::Groups::default(),
+                groups: Vec::new(),
                 skipped,
             };
         }
@@ -121,7 +121,7 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
 
     SidecarLoad {
         images,
-        groups: crate::groups::Groups::default(),
+        groups: Vec::new(),
         skipped,
     }
 }
