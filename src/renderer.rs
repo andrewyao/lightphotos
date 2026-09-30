@@ -55,6 +55,7 @@ struct Transform {
 }
 
 /// One rendered frame read back from the GPU as tightly packed RGB rows.
+#[cfg(not(target_arch = "wasm32"))]
 pub struct RgbFrame {
     pub width: u32,
     pub height: u32,
