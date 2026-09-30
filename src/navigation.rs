@@ -106,8 +106,6 @@ pub(crate) fn sort_by_name(entries: &mut [PathBuf]) {
     entries.sort_by_key(|p| name_key(p.file_name()));
 }
 
-/// The key [`sort_by_name`] orders by, shared with [`Playlist::index_of`] so
-/// the two can never disagree.
 fn name_key(name: Option<&OsStr>) -> Option<String> {
     name.map(|s| s.to_string_lossy().to_lowercase())
 }
@@ -272,8 +270,7 @@ impl Playlist {
 
     /// The index of the entry named `name`. A binary search on
     /// [`sort_by_name`]'s key finds the run of case-insensitive twins, and a
-    /// scan of that run finds the exact name. Groups name their photos by
-    /// file name, so this is how a group's representative finds its cell.
+    /// scan of that run finds the exact name.
     pub fn index_of(&self, name: &OsStr) -> Option<usize> {
         let key = name_key(Some(name));
         let start = self
@@ -328,8 +325,6 @@ mod tests {
         assert_eq!(visible_indices(&e, all(&e), None, |_| 0), vec![0, 1, 2]);
     }
 
-    /// A group shows as its representative, in the representative's place,
-    /// and every other photo keeps its own cell in folder order.
     #[test]
     fn collapse_keeps_representatives_and_singles_in_order() {
         let e = paths(&["a", "b", "c", "d", "e"]);
@@ -348,8 +343,6 @@ mod tests {
         }
     }
 
-    /// Case twins sort together in listing order, so the exact name has to be
-    /// found inside the run, not at its start.
     #[test]
     fn index_of_finds_the_exact_name_among_case_ties() {
         let pl = playlist(&["b.jpg", "IMG.jpg", "a.jpg", "img.JPG", "Img.jpg"]);
@@ -361,7 +354,6 @@ mod tests {
         assert_eq!(pl.index_of(OsStr::new("c.jpg")), None);
     }
 
-    /// Every entry of a sorted listing is found at its own index.
     #[test]
     fn index_of_finds_every_entry_of_a_sorted_listing() {
         let names: Vec<String> = (0..300)

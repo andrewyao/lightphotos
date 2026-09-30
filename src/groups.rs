@@ -253,12 +253,11 @@ impl Groups {
             .is_some_and(|id| self.by_id[id].rep != name)
     }
 
-    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn iter(&self) -> impl Iterator<Item = (&GroupId, &Group)> {
         self.by_id.iter()
     }
 
-    #[allow(dead_code)] // only called from #[cfg(test)] today
+    #[cfg_attr(not(feature = "hotpath"), allow(dead_code))]
     pub fn len(&self) -> usize {
         self.by_id.len()
     }
@@ -449,8 +448,6 @@ mod tests {
         }
     }
 
-    /// A stack brings every member, the singles bring themselves, and the
-    /// primary cell's photo stands for the result.
     #[test]
     fn merging_a_stack_and_two_singles_makes_one_group_of_all() {
         let stack = names(&["b", "c", "d"]);

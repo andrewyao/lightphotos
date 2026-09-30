@@ -1174,7 +1174,7 @@ mod tests {
         let mut cat = Catalog::new();
         let mark = cat.switch_dir(&dir);
         let loaded = load_sidecars(&dir); // snapshot still carries the rating
-        cat.forget_photos(std::slice::from_ref(&p)); // the user clears it before the load lands
+        cat.forget_photos(std::slice::from_ref(&p));
         cat.apply_loaded(&dir, mark, loaded, &images_in(&dir));
 
         assert_eq!(

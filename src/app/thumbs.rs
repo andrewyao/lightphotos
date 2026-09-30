@@ -251,8 +251,6 @@ impl App {
         !self.face_pending.is_empty()
     }
 
-    /// Every grouped photo not yet analysed, asked for or given up on. Later
-    /// group tools rank a group's members by their eyes.
     fn face_candidates(&self) -> Vec<PathBuf> {
         let (Some(pl), Some(groups)) = (self.playlist.as_ref(), self.catalog.groups()) else {
             return Vec::new();
@@ -562,8 +560,6 @@ mod tests {
         assert!(queued.iter().all(|p| photos[538..563].contains(p)));
     }
 
-    /// The face pass covers every grouped photo, on screen or not, and skips
-    /// the ones already analysed.
     #[test]
     fn face_quality_candidates_are_every_grouped_photo() {
         use crate::app::nav::tests::group_photos;
@@ -592,7 +588,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The scan runs once per view rebuild, not once per frame.
     #[test]
     fn grouped_photos_are_scanned_once_per_rebuild() {
         use crate::app::presets::tests::folder_app;

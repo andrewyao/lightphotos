@@ -12,19 +12,14 @@ use crate::navigation::{self, flatten_visible_tree, visible_indices};
 use crate::thumbnail::THUMB_PX;
 use crate::ui::toolbar::ToolbarControl;
 
-/// Where a photo, given by playlist index, sits in `visible`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Place {
-    /// It has its own cell at this position: a single or a representative.
     Cell(usize),
-    /// A group member without a cell of its own. Its group's cell is here.
     Hidden(usize),
-    /// Filtered out, being trashed, or in a group whose cell is filtered out.
     Gone,
 }
 
 impl Place {
-    /// The cell that shows the photo, its own or its group's.
     pub(super) fn cell(self) -> Option<usize> {
         match self {
             Place::Cell(p) | Place::Hidden(p) => Some(p),
@@ -33,10 +28,6 @@ impl Place {
     }
 }
 
-/// Answers [`Place`] for many photos against one `visible`, looking up each
-/// group's cell once. Groups name their representative by file name, so that
-/// lookup is a binary search of the playlist and worth sharing when a whole
-/// selection lands on a few groups.
 struct Placer<'a> {
     app: &'a App,
     group_cells: HashMap<&'a GroupId, Option<usize>>,
@@ -102,18 +93,8 @@ impl App {
         self.web_pending_nav = Some(nav);
     }
 
-    /// Recompute `visible` from the groups and the filters, keeping the same
-    /// photos selected. A group is one cell, its representative's, and every
-    /// group change must be followed by this call so no member shows alone.
-    ///
-    /// A selected photo that joined a group lands on its group's cell. The
-    /// cursor does too, except in the Loupe, where it goes to `None` so the
-    /// photo on screen stays put. A cursor whose photo left the view keeps
-    /// its position, clamped, so it lands on a neighbor.
     #[hotpath::measure]
     pub(super) fn recompute_visible(&mut self) {
-        // Positions in `visible` shift, so remember the selection as playlist
-        // indices.
         let selected_pl: Vec<usize> = self
             .selected
             .iter()
@@ -160,9 +141,6 @@ impl App {
         };
         let mut placer = Placer::new(self);
         let cursor = sel_pl.map(|i| placer.place(i));
-        // The Loupe keeps a hidden member on screen, and with no cell of its
-        // own every action falls back to that photo, so no cell may stay
-        // selected for a bulk action to reach instead.
         let (sel, selected, anchor) =
             if self.mode == ViewMode::Loupe && matches!(cursor, Some(Place::Hidden(_))) {
                 (None, BTreeSet::new(), None)
@@ -186,12 +164,10 @@ impl App {
         self.update_window_title();
     }
 
-    /// See [`Place`].
     pub(super) fn place_of(&self, idx: usize) -> Place {
         Placer::new(self).place(idx)
     }
 
-    /// The cell showing the Loupe's photo, its own or its group's.
     fn want_cell(&self) -> Option<usize> {
         let want = self.want.as_deref()?;
         let pl = self.playlist.as_ref()?;
@@ -234,8 +210,6 @@ impl App {
             .collect()
     }
 
-    /// The selected cells in order, or the cursor's cell alone when nothing
-    /// is multi-selected.
     pub(super) fn selected_cells(&self) -> Vec<usize> {
         if self.selected.is_empty() {
             self.sel.into_iter().collect()
@@ -407,7 +381,6 @@ impl App {
             return;
         }
         let n = self.visible.len();
-        // A hidden member open in the Loupe steps from its group's cell.
         let cur = self.sel.or_else(|| self.want_cell()).unwrap_or(0);
         self.sel = Some(if forward {
             (cur + 1) % n
@@ -920,7 +893,6 @@ pub(in crate::app) mod tests {
     use crate::groups::Group;
     use crate::navigation::Cmp;
 
-    /// The playlist indices `visible` shows, for asserting a whole Grid.
     pub(in crate::app) fn cells(app: &App) -> Vec<usize> {
         app.visible.clone()
     }
@@ -930,8 +902,6 @@ pub(in crate::app) mod tests {
         pl.entry(idx).unwrap().file_name().unwrap().to_os_string()
     }
 
-    /// Save a group of the photos at playlist indices `members`, straight
-    /// through the catalog, then rebuild the view.
     pub(in crate::app) fn group_photos(app: &mut App, members: &[usize], rep: usize) {
         let names = members.iter().map(|&i| name(app, i)).collect();
         let group = Group::new(names, name(app, rep)).unwrap();
@@ -952,8 +922,6 @@ pub(in crate::app) mod tests {
         }
     }
 
-    /// A folder whose `groups/` already holds a group of `members` with
-    /// representative `rep`, written by a catalog of its own.
     fn folder_with_saved_group(tag: &str, n: usize, members: &[usize], rep: usize) -> PathBuf {
         let (mut app, dir, _) = folder_app(tag, n);
         group_photos(&mut app, members, rep);
@@ -970,9 +938,6 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A 3+ filter hides a group whose representative is unrated even with a
-    /// member at 5, and shows a group whose representative is 4 while its
-    /// members are unrated.
     #[test]
     fn a_filter_judges_the_representative_alone() {
         let (mut app, dir, paths) = folder_app("nav-filter", 6);
@@ -985,8 +950,6 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Selected members land on their group's cell, and the cursor follows
-    /// its photo, not its position.
     #[test]
     fn selection_survives_a_collapse() {
         let (mut app, dir, _) = folder_app("nav-sel", 8);
@@ -1001,8 +964,6 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Groups load after the first paint. The Grid must collapse when they
-    /// land, with the cursor still on the same photo.
     #[test]
     fn groups_landing_after_first_paint_collapse_the_grid() {
         let dir = folder_with_saved_group("nav-late", 6, &[1, 2, 3], 1);
@@ -1016,8 +977,6 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A photo opened from Finder that turns out to be a hidden member stays
-    /// on screen when the groups land. Stepping then leaves its group's cell.
     #[test]
     fn the_loupe_keeps_a_hidden_member_on_screen_when_groups_load() {
         let dir = folder_with_saved_group("nav-hidden", 5, &[1, 2, 3], 1);
@@ -1042,7 +1001,6 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A group costs one step in the Loupe.
     #[test]
     fn stepping_the_loupe_across_a_group_costs_one_step() {
         let (mut app, dir, paths) = folder_app("nav-step", 6);
@@ -1058,8 +1016,6 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A member shows through its group's cell only while the representative
-    /// passes the filters.
     #[test]
     fn a_member_whose_representative_is_filtered_out_is_gone() {
         let (mut app, dir, paths) = folder_app("nav-gone", 4);
@@ -1073,7 +1029,6 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Rating a photo out of the filter leaves the cursor on its neighbor.
     #[test]
     fn rating_a_photo_out_of_the_filter_moves_to_its_neighbor() {
         let (mut app, dir, paths) = folder_app("nav-rate", 4);
@@ -1090,8 +1045,6 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A stack paints its member count inside its own cell in the Grid, and
-    /// in the filmstrip too.
     #[test]
     fn a_group_cell_paints_its_member_count_inside_the_cell() {
         use crate::app::presets::tests::settled;

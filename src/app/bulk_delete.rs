@@ -242,9 +242,6 @@ impl App {
                 &origin.1,
             );
         }
-        // Batched per poll, before the rebuild below, so a trashed
-        // representative's group shows its next member in this same frame
-        // instead of vanishing until the batch ends.
         #[cfg(not(target_arch = "wasm32"))]
         if !trashed.is_empty() {
             self.catalog.forget_photos(&trashed);
@@ -341,9 +338,6 @@ impl App {
         if !gone.is_empty() {
             if let Some(pl) = self.playlist.as_mut() {
                 let removed = pl.remove_matching(|p| gone.contains(p));
-                // `visible` holds playlist indices, and the rebuild below
-                // reads the cursor's photo from it, so it must name the same
-                // photos in the shrunken playlist.
                 self.visible = self
                     .visible
                     .iter()
@@ -356,8 +350,6 @@ impl App {
                     self.autotone_deferred = None;
                 }
             }
-            // The cursor already moved to a neighbor when its photo left the
-            // grid mid-batch, and the rebuild keeps it there.
             self.selected.clear();
             self.anchor = None;
             self.recompute_visible();
@@ -538,11 +530,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The grid has to shrink while a long delete runs, or the user watches a
-    /// toast climb over a grid full of photos that are already in the Trash.
-    /// Trashing b out of a..e lands the cursor on c, its neighbor, in the
-    /// Grid and in the Loupe, rather than skipping a photo for each trashed
-    /// one before it when the playlist shrinks.
     #[test]
     fn the_cursor_lands_on_the_next_photo_after_a_trash() {
         for loupe in [false, true] {
@@ -563,6 +550,8 @@ mod tests {
         }
     }
 
+    /// The grid has to shrink while a long delete runs, or the user watches a
+    /// toast climb over a grid full of photos that are already in the Trash.
     #[test]
     fn trashed_photos_leave_the_grid_without_touching_the_playlist() {
         let names = ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg"];
@@ -773,7 +762,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// `app_with_photos` with the folder's catalog loaded, so it has groups.
     fn grouped_app(names: &[&str]) -> (App, PathBuf, Vec<PathBuf>) {
         let (mut app, dir, paths) = app_with_photos(names);
         app.catalog.open_dir(&dir);
@@ -791,8 +779,6 @@ mod tests {
             .collect()
     }
 
-    /// Trash the representative from the filmstrip Loupe: the next member
-    /// takes its place, in the group, on disk and on screen.
     #[test]
     fn trashing_a_representative_in_the_loupe_promotes_the_next_member() {
         use crate::app::nav::tests::group_photos;
@@ -836,8 +822,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// While a long batch runs, a group whose representative was trashed
-    /// keeps a cell, its promoted member's, in every frame.
     #[test]
     fn a_group_stays_visible_while_its_representative_is_trashed() {
         use crate::app::nav::tests::group_photos;
@@ -861,8 +845,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Delete right after a folder opens would outrun the groups' load,
-    /// which would then keep a group naming a trashed photo. It waits.
     #[test]
     fn delete_while_the_folder_loads_is_refused_and_trashes_nothing() {
         let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg"]);
