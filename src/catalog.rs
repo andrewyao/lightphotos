@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::develop::{Adjustments, TouchUp};
-use crate::groups::{GroupWrite, Groups};
+use crate::groups::{GroupId, GroupWrite, Groups, SavedGroup};
 
 mod group_file;
 mod writeback;
@@ -217,7 +217,8 @@ impl Catalog {
     pub fn open_dir(&mut self, dir: &Path) {
         let mark = self.switch_dir(dir);
         let loaded = load_sidecars(dir);
-        self.apply_loaded(dir, mark, loaded);
+        let photos = crate::navigation::Playlist::from_dir(dir);
+        self.apply_loaded(dir, mark, loaded, photos.entries());
     }
 
     /// Make `dir` active and clear the cache without disk I/O, so no lookup
@@ -256,10 +257,19 @@ impl Catalog {
     /// what identifies those, and the write-back queue restores them.
     /// Unreadable sidecars are reported even when the load is stale.
     ///
+    /// `photos` are the folder's images, the playlist's entries. A group
+    /// member that is not one of them is dropped.
+    ///
     /// The load retires after the overlay, because retiring the last load
     /// drops the history of writes that landed, and groups have no `dirty`
     /// set to fall back on.
-    pub(crate) fn apply_loaded(&mut self, dir: &Path, mark: LoadMark, loaded: SidecarLoad) {
+    pub(crate) fn apply_loaded(
+        &mut self,
+        dir: &Path,
+        mark: LoadMark,
+        loaded: SidecarLoad,
+        photos: &[PathBuf],
+    ) {
         if loaded.skipped > 0 {
             self.last_error = Some(skipped_message(loaded.skipped));
         }
@@ -269,7 +279,12 @@ impl Catalog {
                     self.images.insert(name, rec);
                 }
             }
-            self.groups = loaded.groups;
+            let names: HashSet<&OsStr> = if loaded.groups.is_empty() {
+                HashSet::new()
+            } else {
+                photos.iter().filter_map(|p| p.file_name()).collect()
+            };
+            self.groups = Groups::from_loaded(loaded.groups, |n| names.contains(n));
             self.writeback
                 .overlay(dir, mark, &mut self.images, &mut self.groups);
         }
@@ -287,8 +302,14 @@ impl Catalog {
             self.note_persist_error("no folder is open for these groups");
             return;
         };
-        for write in writes {
-            self.groups.apply(&write);
+        if writes.is_empty() {
+            return;
+        }
+        for write in &writes {
+            self.groups.apply(write);
+        }
+        let repairs = self.groups.take_repairs();
+        for write in writes.into_iter().chain(repairs) {
             let (id, op) = match write {
                 GroupWrite::Put(id, group) => (id, WriteOp::PutGroup(group)),
                 GroupWrite::Delete(id) => (id, WriteOp::DeleteGroup),
@@ -463,7 +484,7 @@ impl Default for Catalog {
 /// The sidecars read from one directory, plus a count of unreadable ones.
 pub(crate) struct SidecarLoad {
     pub images: HashMap<OsString, ImageRecord>,
-    pub groups: Groups,
+    pub groups: Vec<(GroupId, SavedGroup)>,
     pub skipped: usize,
 }
 
@@ -481,7 +502,7 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
         Err(_) => {
             return SidecarLoad {
                 images,
-                groups: Groups::default(),
+                groups: Vec::new(),
                 skipped,
             }
         }
@@ -1055,7 +1076,7 @@ mod tests {
 
         // The stale `a` load lands and must be ignored.
         let stale = load_sidecars(&a);
-        cat.apply_loaded(&a, mark, stale);
+        cat.apply_loaded(&a, mark, stale, &images_in(&a));
         assert_eq!(
             cat.get(&pa),
             None,
@@ -1084,7 +1105,7 @@ mod tests {
         // whose snapshot predates the write, returns.
         cat.set(&written, 5);
         let loaded = load_sidecars(&dir); // snapshot predates `written`'s sidecar...
-        cat.apply_loaded(&dir, mark, loaded);
+        cat.apply_loaded(&dir, mark, loaded, &images_in(&dir));
 
         assert_eq!(
             cat.get(&written),
@@ -1113,7 +1134,7 @@ mod tests {
         let mark = cat.switch_dir(&dir);
         let loaded = load_sidecars(&dir); // snapshot still carries the rating
         cat.remove(&p); // the user clears it before the load lands
-        cat.apply_loaded(&dir, mark, loaded);
+        cat.apply_loaded(&dir, mark, loaded, &images_in(&dir));
 
         assert_eq!(
             cat.get(&p),
@@ -1137,7 +1158,7 @@ mod tests {
         let mark = cat.switch_dir(&a);
         let loaded = load_sidecars(&a); // has skipped == 1
         let _ = cat.switch_dir(&b); // the user already left `a` before the load lands
-        cat.apply_loaded(&a, mark, loaded);
+        cat.apply_loaded(&a, mark, loaded, &images_in(&a));
 
         assert!(
             cat.take_error().is_some(),
@@ -1205,7 +1226,7 @@ mod tests {
         // which clears both the cache and `dirty`.
         let _ = cat.switch_dir(&elsewhere);
         let mark = cat.switch_dir(&dir);
-        cat.apply_loaded(&dir, mark, stale);
+        cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
 
         assert_eq!(
             cat.get(&p),
@@ -1248,7 +1269,7 @@ mod tests {
         let _ = cat.switch_dir(&elsewhere);
         let mark = cat.switch_dir(&dir);
         flush(&mut cat);
-        cat.apply_loaded(&dir, mark, stale);
+        cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
 
         assert_eq!(
             cat.get(&p),
@@ -1278,7 +1299,7 @@ mod tests {
         cat.abandon_load();
         let mark = cat.switch_dir(&dir);
         flush(&mut cat);
-        cat.apply_loaded(&dir, mark, stale);
+        cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
 
         assert_eq!(cat.get(&p), Some(5));
 
@@ -1305,7 +1326,7 @@ mod tests {
         let _ = cat.switch_dir(&elsewhere);
         let mark = cat.switch_dir(&dir);
         let loaded = load_sidecars(&dir);
-        cat.apply_loaded(&dir, mark, loaded);
+        cat.apply_loaded(&dir, mark, loaded, &images_in(&dir));
 
         assert_eq!(
             cat.get(&p),
@@ -1334,6 +1355,16 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn images_in(dir: &Path) -> Vec<PathBuf> {
+        crate::navigation::Playlist::from_dir(dir)
+            .entries()
+            .to_vec()
+    }
+
+    fn names(ns: &[&str]) -> Vec<OsString> {
+        ns.iter().map(OsString::from).collect()
     }
 
     fn photos(dir: &Path, names: &[&str]) -> Vec<OsString> {
@@ -1452,8 +1483,13 @@ mod tests {
     #[test]
     fn an_unreadable_group_is_counted_and_the_rest_still_load() {
         let dir = unique_tmp_dir();
-        photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
+        photos(&dir, &["a.jpg", "b.jpg", "c.jpg", "d.jpg", "notes.txt"]);
         write_group_file(&dir, "g-bad", "{not json");
+        write_group_file(
+            &dir,
+            "g-txt",
+            r#"{"v":1,"members":["d.jpg","notes.txt"],"representative":"d.jpg"}"#,
+        );
         write_group_file(
             &dir,
             "g-one",
@@ -1471,9 +1507,91 @@ mod tests {
         );
 
         let loaded = load_sidecars(&dir);
-        assert_eq!(loaded.skipped, 3);
-        let ids: Vec<String> = loaded.groups.iter().map(|(id, _)| id.to_string()).collect();
-        assert_eq!(ids, ["g-ok"]);
+        assert_eq!(loaded.skipped, 2, "only bad JSON and an unknown version");
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        assert!(cat.take_error().is_some());
+        let (id, _) = only_group(&cat);
+        assert_eq!(
+            id.to_string(),
+            "g-ok",
+            "a one-member file and a group kept up only by a file that is not a photo are dropped"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn group_ids_on_disk(dir: &Path) -> Vec<String> {
+        let mut ids: Vec<String> = std::fs::read_dir(groups_dir(dir))
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn ungrouping_the_winner_does_not_bring_the_loser_back() {
+        let dir = unique_tmp_dir();
+        photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
+        write_group_file(
+            &dir,
+            "g-000000000001-000000",
+            r#"{"v":1,"members":["a.jpg","b.jpg","c.jpg"],"representative":"a.jpg"}"#,
+        );
+        write_group_file(
+            &dir,
+            "g-000000000002-000000",
+            r#"{"v":1,"members":["b.jpg","c.jpg"],"representative":"b.jpg"}"#,
+        );
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        let (winner, _) = only_group(&cat);
+        assert_eq!(winner.to_string(), "g-000000000002-000000");
+        let writes = cat.groups().dissolve(&winner);
+        cat.apply_group_writes(writes);
+        flush(&mut cat);
+
+        assert!(Catalog::with_dir(dir.clone()).groups().is_empty());
+        assert_eq!(group_ids_on_disk(&dir), Vec::<String>::new());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_group_dropped_for_a_missing_photo_stays_dropped_when_it_returns() {
+        let dir = unique_tmp_dir();
+        photos(&dir, &["a.jpg", "c.jpg", "d.jpg"]);
+        let dropped = write_group_file(
+            &dir,
+            "g-1",
+            r#"{"v":1,"members":["a.jpg","b.jpg"],"representative":"a.jpg"}"#,
+        );
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        assert!(cat.groups().is_empty());
+        flush(&mut cat);
+        assert!(dropped.exists(), "loading never writes");
+
+        let unrelated = Group::new(names(&["c.jpg", "d.jpg"]), "c.jpg".into()).unwrap();
+        let writes = cat.groups().create(unrelated, std::time::SystemTime::now());
+        cat.apply_group_writes(writes);
+        flush(&mut cat);
+        assert!(
+            !dropped.exists(),
+            "the first mutation deletes the dropped file"
+        );
+
+        photos(&dir, &["b.jpg"]);
+        let cat = Catalog::with_dir(dir.clone());
+        assert_eq!(
+            only_group(&cat).1.members(),
+            ["c.jpg", "d.jpg"],
+            "g-1 must not come back with b.jpg"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1495,7 +1613,7 @@ mod tests {
         cat.abandon_load();
         let mark = cat.switch_dir(&dir);
         flush(&mut cat);
-        cat.apply_loaded(&dir, mark, stale);
+        cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
 
         assert_eq!(only_group(&cat).1, group);
 

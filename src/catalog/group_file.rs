@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::groups::GroupId;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::groups::{Group, Groups};
+use crate::groups::{Group, SavedGroup};
 
 pub(super) const GROUPS_DIR: &str = "groups";
 const EXT: &str = "json";
@@ -29,15 +29,17 @@ pub(super) fn path(dir: &Path, id: &GroupId) -> PathBuf {
         .join(format!("{id}.{EXT}"))
 }
 
+/// Only malformed JSON or an unknown version fails. What the members say is
+/// checked against the folder later, by `Groups::from_loaded`.
 #[cfg(not(target_arch = "wasm32"))]
-fn parse(bytes: &[u8]) -> Result<Group, String> {
+fn parse(bytes: &[u8]) -> Result<SavedGroup, String> {
     let file: GroupFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if file.v != FORMAT {
         return Err(format!("unknown group format version {}", file.v));
     }
-    let members = file.members.into_iter().map(Into::into).collect();
-    Group::new(members, file.representative.into()).ok_or_else(|| {
-        "a group needs two or more distinct members, one of them the representative".to_string()
+    Ok(SavedGroup {
+        members: file.members.into_iter().map(Into::into).collect(),
+        rep: file.representative.into(),
     })
 }
 
@@ -54,12 +56,14 @@ pub(super) fn to_bytes(group: &Group) -> Result<Vec<u8>, String> {
     serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())
 }
 
+/// Every parseable group sidecar in `dir`. `skipped` counts the rest. A
+/// missing `groups/` gives nothing.
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn load(dir: &Path, skipped: &mut usize) -> Groups {
-    let Ok(entries) = std::fs::read_dir(dir.join(super::SIDECAR_DIR).join(GROUPS_DIR)) else {
-        return Groups::default();
-    };
+pub(super) fn load(dir: &Path, skipped: &mut usize) -> Vec<(GroupId, SavedGroup)> {
     let mut files = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir.join(super::SIDECAR_DIR).join(GROUPS_DIR)) else {
+        return files;
+    };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.extension() != Some(std::ffi::OsStr::new(EXT))
@@ -74,18 +78,12 @@ pub(super) fn load(dir: &Path, skipped: &mut usize) -> Groups {
             .map_err(|e| e.to_string())
             .and_then(|bytes| parse(&bytes));
         match parsed {
-            Ok(group) => files.push((id, group)),
+            Ok(saved) => files.push((id, saved)),
             Err(e) => {
                 eprintln!("[catalog] unreadable group {}: {e}", path.display());
                 *skipped += 1;
             }
         }
     }
-    if files.is_empty() {
-        return Groups::default();
-    }
-    let listing: std::collections::HashSet<std::ffi::OsString> = std::fs::read_dir(dir)
-        .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
-        .unwrap_or_default();
-    Groups::from_loaded(files, &listing)
+    files
 }
