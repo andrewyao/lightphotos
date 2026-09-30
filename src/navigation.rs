@@ -286,13 +286,27 @@ impl Playlist {
             .map(|i| start + i)
     }
 
-    /// Drop entries where `remove` is true, such as trashed files. This shifts
-    /// indices, so the caller must rebuild derived views (`recompute_visible`).
-    pub fn remove_matching(&mut self, remove: impl Fn(&Path) -> bool) {
+    /// Drop entries where `remove` is true, such as trashed files, and return
+    /// the old indices of the dropped entries, ascending. Every later index
+    /// shifts down, so indices held elsewhere go through [`shift_index`].
+    pub fn remove_matching(&mut self, remove: impl Fn(&Path) -> bool) -> Vec<usize> {
+        let removed: Vec<usize> = (0..self.entries.len())
+            .filter(|&i| remove(&self.entries[i]))
+            .collect();
         self.entries.retain(|p| !remove(p.as_path()));
         if self.index >= self.entries.len() {
             self.index = self.entries.len().saturating_sub(1);
         }
+        removed
+    }
+}
+
+/// Where old index `i` sits after the entries at `removed` (ascending) were
+/// dropped, or `None` if `i` was one of them.
+pub fn shift_index(i: usize, removed: &[usize]) -> Option<usize> {
+    match removed.binary_search(&i) {
+        Ok(_) => None,
+        Err(before) => Some(i - before),
     }
 }
 
