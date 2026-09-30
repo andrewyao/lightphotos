@@ -65,7 +65,8 @@ const TOUCHUP_FEATHER: f32 = 1.0;
 /// Both renderers clamp feather to this, so the brush stops here too.
 pub(crate) const TOUCHUP_MIN_FEATHER: f32 = 0.02;
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ViewMode {
     Grid,
     Loupe,
@@ -125,7 +126,8 @@ const MIN_CROP: f32 = 0.02;
 /// > `Develop`) is walked with Enter and Escape. `Detail` is the Loupe with the
 /// Develop panel closed. Region cycling uses F6, not Tab, because egui_winit
 /// always consumes Tab for its own widget focus.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Region {
     Toolbar,
     Folders,
@@ -559,6 +561,7 @@ pub(crate) struct App {
     /// load thumbnails, so huge folders stay cheap.
     grid_range: (usize, usize),
     grid_scroll_reset: bool,
+    grid_cell_rects: Vec<(usize, egui::Rect)>,
     /// The filmstrip's equivalent of `grid_range`.
     strip_range: (usize, usize),
     /// Thumbnail textures keyed by (path, THUMB_PX), each carrying the edit
@@ -903,6 +906,7 @@ impl App {
             filmstrip_scroll_accum: 0.0,
             grid_cols: 1,
             grid_range: (0, 0),
+            grid_cell_rects: Vec::new(),
             grid_scroll_reset: true,
             strip_range: (0, 0),
             thumb_tex: HashMap::new(),
