@@ -322,7 +322,7 @@ impl Groups {
     /// Take `names` out of their groups, for photos that were trashed or
     /// absorbed into another group. A group losing its representative moves
     /// it to the first surviving member, and one left under two is deleted.
-    fn forget(&self, names: &[OsString]) -> Vec<GroupWrite> {
+    pub fn forget(&self, names: &[OsString]) -> Vec<GroupWrite> {
         let gone: HashSet<&OsString> = names.iter().collect();
         let touched: BTreeSet<&GroupId> = names.iter().filter_map(|n| self.of.get(n)).collect();
         touched
