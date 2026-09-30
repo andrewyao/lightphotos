@@ -110,6 +110,17 @@ fn name_key(name: Option<&OsStr>) -> Option<String> {
     name.map(|s| s.to_string_lossy().to_lowercase())
 }
 
+/// `name_key(name).as_deref().cmp(&key)` without allocating for an ASCII
+/// name, whose lowercase is its ASCII lowercase.
+fn cmp_name_key(name: Option<&OsStr>, key: Option<&str>) -> std::cmp::Ordering {
+    match (name.map(OsStr::to_string_lossy), key) {
+        (Some(n), Some(k)) if n.is_ascii() => {
+            n.bytes().map(|b| b.to_ascii_lowercase()).cmp(k.bytes())
+        }
+        (n, k) => n.map(|n| n.to_lowercase()).as_deref().cmp(&k),
+    }
+}
+
 #[hotpath::measure]
 fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = read_dir_paths(dir)
@@ -273,12 +284,13 @@ impl Playlist {
     /// scan of that run finds the exact name.
     pub fn index_of(&self, name: &OsStr) -> Option<usize> {
         let key = name_key(Some(name));
+        let key = key.as_deref();
         let start = self
             .entries
-            .partition_point(|p| name_key(p.file_name()) < key);
+            .partition_point(|p| cmp_name_key(p.file_name(), key).is_lt());
         self.entries[start..]
             .iter()
-            .take_while(|p| name_key(p.file_name()) == key)
+            .take_while(|p| cmp_name_key(p.file_name(), key).is_eq())
             .position(|p| p.file_name() == Some(name))
             .map(|i| start + i)
     }

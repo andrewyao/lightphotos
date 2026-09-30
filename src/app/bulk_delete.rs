@@ -47,13 +47,14 @@ pub(crate) struct BulkDelete {
     gone: HashSet<PathBuf>,
     /// Set when `gone` grew since the last `recompute_visible`.
     view_dirty: bool,
-    /// The photos of each group this batch trashes whole, by group.
-    whole: HashMap<PathBuf, GroupId>,
+    /// The photos of each group this batch trashes whole, by file name, as
+    /// an index into `held`.
+    whole: HashMap<std::ffi::OsString, usize>,
     /// Those groups' photos that landed before the group's last one did.
     /// The catalog forgets a whole group in one step, so the group goes in
     /// one sidecar delete rather than in a rewrite per landed member, and no
     /// member is promoted to representative on the way.
-    held: HashMap<GroupId, Held>,
+    held: Vec<Held>,
     total: usize,
     errors: usize,
     last_err: Option<String>,
@@ -106,7 +107,8 @@ impl BulkDelete {
 
     /// The photos the catalog can forget now that `path` has its result.
     fn release(&mut self, path: PathBuf, trashed: bool) -> Vec<PathBuf> {
-        let Some(held) = self.whole.get(&path).and_then(|id| self.held.get_mut(id)) else {
+        let slot = path.file_name().and_then(|n| self.whole.get(n)).copied();
+        let Some(held) = slot.and_then(|i| self.held.get_mut(i)) else {
             return if trashed { vec![path] } else { Vec::new() };
         };
         held.pending -= 1;
@@ -122,7 +124,10 @@ impl BulkDelete {
     /// Everything still held, for a batch that ends before its groups'
     /// last photos land.
     fn release_all(&mut self) -> Vec<PathBuf> {
-        self.held.drain().flat_map(|(_, h)| h.trashed).collect()
+        self.held
+            .iter_mut()
+            .flat_map(|h| std::mem::take(&mut h.trashed))
+            .collect()
     }
 
     /// Hand the worker everything it will take right now.
@@ -184,11 +189,7 @@ impl App {
             return;
         }
         let total = paths.len();
-        let whole = self.whole_groups(&paths);
-        let mut held: HashMap<GroupId, Held> = HashMap::new();
-        for id in whole.values() {
-            held.entry(id.clone()).or_default().pending += 1;
-        }
+        let (whole, held) = self.whole_groups(&paths);
         let (done_tx, done_rx) = channel();
 
         #[cfg(target_arch = "wasm32")]
@@ -346,25 +347,33 @@ impl App {
 
     /// Each path of `paths` whose group has every present member in `paths`,
     /// with that group.
-    fn whole_groups(&self, paths: &[PathBuf]) -> HashMap<PathBuf, GroupId> {
+    fn whole_groups(&self, paths: &[PathBuf]) -> (HashMap<std::ffi::OsString, usize>, Vec<Held>) {
         let Some(groups) = self.catalog.groups() else {
-            return HashMap::new();
+            return Default::default();
         };
-        let mut queued: HashMap<&GroupId, Vec<&PathBuf>> = HashMap::new();
-        for path in paths {
-            if let Some(id) = path.file_name().and_then(|n| groups.group_of(n)) {
-                queued.entry(id).or_default().push(path);
+        let mut queued: HashMap<&GroupId, Vec<&std::ffi::OsStr>> = HashMap::new();
+        for name in paths.iter().filter_map(|p| p.file_name()) {
+            if let Some(id) = groups.group_of(name) {
+                queued.entry(id).or_default().push(name);
             }
         }
-        queued
-            .into_iter()
-            .filter(|(id, ps)| {
-                groups
-                    .get(id)
-                    .is_some_and(|g| self.member_paths(g).len() == ps.len())
-            })
-            .flat_map(|(id, ps)| ps.into_iter().map(move |p| (p.clone(), id.clone())))
-            .collect()
+        let mut whole = HashMap::new();
+        let mut held = Vec::new();
+        for (id, names) in queued {
+            if groups
+                .get(id)
+                .is_some_and(|g| g.members().len() == names.len())
+            {
+                held.push(Held {
+                    pending: names.len(),
+                    trashed: Vec::new(),
+                });
+                for name in names {
+                    whole.insert(name.to_os_string(), held.len() - 1);
+                }
+            }
+        }
+        (whole, held)
     }
 
     /// Whether a bulk delete is still running.
@@ -841,6 +850,57 @@ mod tests {
         app.catalog.open_dir(&dir);
         app.recompute_visible();
         (app, dir, paths)
+    }
+
+    /// The plan's G3 perf probe: the Delete frame's own work (the confirm's
+    /// count and `start_delete`'s group bookkeeping) for one 2 000-photo stack
+    /// against 2 000 selected singles. It stops short of `start_delete`, whose
+    /// remaining work is the same for both and would move 2 000 real files to
+    /// the Trash. Run with `cargo test --release delete_frame_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn delete_frame_bench() {
+        use crate::app::nav::tests::group_photos;
+        const N: usize = 2000;
+        let names: Vec<String> = (0..N).map(|i| format!("IMG_{i:05}.JPG")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let time = |app: &App| {
+            let mut runs: Vec<Duration> = (0..5)
+                .map(|_| {
+                    let t = Instant::now();
+                    let paths = app.delete_paths();
+                    let (whole, _) = app.whole_groups(&paths);
+                    std::hint::black_box((paths.len(), whole.len()));
+                    t.elapsed()
+                })
+                .collect();
+            runs.sort();
+            runs
+        };
+
+        let (mut singles, dir_a, _) = grouped_app(&refs);
+        singles.select_all();
+        let base = time(&singles);
+        let (mut stack, dir_b, _) = grouped_app(&refs);
+        group_photos(&mut stack, &(0..N).collect::<Vec<_>>(), 0);
+        stack.select_single(0);
+        assert_eq!(stack.delete_paths().len(), N);
+        let grouped = time(&stack);
+        eprintln!("delete frame, {N} singles: {base:?}");
+        eprintln!("delete frame, one {N}-photo stack: {grouped:?}");
+        eprintln!("medians: singles {:?}, stack {:?}", base[2], grouped[2]);
+        let t = Instant::now();
+        let paths = stack.delete_paths();
+        let t_paths = t.elapsed();
+        let t = Instant::now();
+        let (whole, _) = stack.whole_groups(&paths);
+        eprintln!(
+            "split: delete_paths {t_paths:?}, whole_groups {:?} ({})",
+            t.elapsed(),
+            whole.len()
+        );
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 
     fn group_names(app: &App) -> Vec<(Vec<String>, String)> {
