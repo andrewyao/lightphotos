@@ -8,10 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static HEADLESS: AtomicBool = AtomicBool::new(false);
 
-/// Answer every picker as cancelled from now on. A drive run has no one to
-/// answer a native panel, which would otherwise show on the desktop and block
-/// the script.
-pub(crate) fn go_headless() {
+pub(crate) fn cancel_all_pickers() {
     HEADLESS.store(true, Ordering::Relaxed);
 }
 

@@ -1,9 +1,5 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
-#
-# Each photo is a flat colour with its number drawn large, so a screenshot
-# shows which photo a cell or the Loupe holds. macOS only: it draws with
-# CoreGraphics through the swift interpreter the command line tools ship.
 set -eu
 
 dir=${1:?usage: make-fixture.sh <dir> [count]}
