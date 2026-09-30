@@ -54,7 +54,8 @@ pub(super) fn delete_group_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput
     let resp = form::dialog(ui.ctx(), "delete_group", form::DIALOG_WIDTH, |ui| {
         form::title(ui, t.delete_group_title);
         ui.label((t.delete_group_prompt)(photos, groups));
-        match form::footer_with_focus(ui, &delete_group_buttons(t, &trash), focus) {
+        let buttons = delete_group_buttons(t, &trash, form::Platform::CURRENT);
+        match form::footer_with_focus(ui, &buttons, focus) {
             Some(Role::Cancel) => out.actions.push(UiAction::CancelPending),
             Some(Role::Primary) => out.actions.push(UiAction::RemoveGroups),
             Some(Role::Danger) => out.actions.push(UiAction::TrashGroups),
@@ -66,13 +67,23 @@ pub(super) fn delete_group_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput
     }
 }
 
-/// Delete Group's roles as passed to its footer. Remove Group is listed last
-/// so it, not the trash, takes the right edge where macOS puts a dialog's
-/// default.
-const DELETE_GROUP_ROLES: [Role; 3] = [Role::Cancel, Role::Danger, Role::Primary];
+/// Delete Group's roles as passed to its footer on `platform`. Remove Group,
+/// not the trash, takes the default's place: the right edge on macOS, Linux
+/// and the web, the left edge on Windows. The trash sits between it and
+/// Cancel on both.
+fn delete_group_roles(platform: form::Platform) -> [Role; 3] {
+    match platform {
+        form::Platform::Mac => [Role::Cancel, Role::Danger, Role::Primary],
+        form::Platform::Windows => [Role::Primary, Role::Danger, Role::Cancel],
+    }
+}
 
-fn delete_group_buttons<'a>(t: &'a crate::i18n::Strings, trash: &'a str) -> [Button<'a>; 3] {
-    DELETE_GROUP_ROLES.map(|role| {
+fn delete_group_buttons<'a>(
+    t: &'a crate::i18n::Strings,
+    trash: &'a str,
+    platform: form::Platform,
+) -> [Button<'a>; 3] {
+    delete_group_roles(platform).map(|role| {
         let label = match role {
             Role::Cancel => t.cancel,
             Role::Primary => t.remove_group,
@@ -85,9 +96,10 @@ fn delete_group_buttons<'a>(t: &'a crate::i18n::Strings, trash: &'a str) -> [But
 /// Delete Group's buttons left to right on this platform, the order Tab
 /// walks them.
 pub(crate) fn delete_group_tab_order() -> Vec<Role> {
-    form::order(&DELETE_GROUP_ROLES, form::Platform::CURRENT)
+    let roles = delete_group_roles(form::Platform::CURRENT);
+    form::order(&roles, form::Platform::CURRENT)
         .into_iter()
-        .map(|i| DELETE_GROUP_ROLES[i])
+        .map(|i| roles[i])
         .collect()
 }
 
@@ -303,25 +315,25 @@ mod tests {
     use super::form::{order, Platform};
     use super::*;
 
+    /// The trash is never where the platform puts a dialog's default: the
+    /// right edge on macOS, Linux and the web, the left edge on Windows.
     #[test]
     fn delete_group_orders_its_footer_per_platform_and_trash_is_the_danger() {
         let t = t();
-        let buttons = delete_group_buttons(t, "Trash");
-        let role_of = |label: &str| buttons.iter().find(|b| b.label == label).unwrap().role;
-        assert_eq!(role_of("Trash"), Role::Danger);
-        assert_eq!(role_of(t.remove_group), Role::Primary);
-        assert_eq!(role_of(t.cancel), Role::Cancel);
-        let roles: Vec<Role> = buttons.iter().map(|b| b.role).collect();
-        let labels = |platform| -> Vec<&str> {
+        let on_screen = |platform| -> Vec<(&str, Role)> {
+            let buttons = delete_group_buttons(t, "Trash", platform);
+            let roles: Vec<Role> = buttons.iter().map(|b| b.role).collect();
             order(&roles, platform)
                 .into_iter()
-                .map(|i| buttons[i].label)
+                .map(|i| (buttons[i].label, buttons[i].role))
                 .collect()
         };
-        assert_eq!(labels(Platform::Mac), [t.cancel, "Trash", t.remove_group]);
-        assert_eq!(
-            labels(Platform::Windows),
-            ["Trash", t.remove_group, t.cancel]
+        let (cancel, trash, remove) = (
+            (t.cancel, Role::Cancel),
+            ("Trash", Role::Danger),
+            (t.remove_group, Role::Primary),
         );
+        assert_eq!(on_screen(Platform::Mac), [cancel, trash, remove]);
+        assert_eq!(on_screen(Platform::Windows), [remove, trash, cancel]);
     }
 }
