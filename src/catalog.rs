@@ -138,6 +138,9 @@ pub struct Catalog {
     dirty: HashSet<OsString>,
     /// The active directory. `None` before the first folder opens.
     dir: Option<PathBuf>,
+    /// Whether a sidecar load has landed for `dir`. Until one has, `groups`
+    /// is empty rather than known, so a group write would work from nothing.
+    loaded: bool,
     /// The latest persist failure, drained by [`Catalog::take_error`] into a
     /// toast.
     last_error: Option<String>,
@@ -159,6 +162,7 @@ impl Catalog {
             groups: Groups::default(),
             dirty: HashSet::new(),
             dir: None,
+            loaded: false,
             last_error: None,
             writeback: Writeback::new(),
             #[cfg(target_arch = "wasm32")]
@@ -230,6 +234,7 @@ impl Catalog {
     #[must_use]
     pub(crate) fn switch_dir(&mut self, dir: &Path) -> LoadMark {
         self.dir = Some(dir.to_path_buf());
+        self.loaded = false;
         self.images.clear();
         self.groups = Groups::default();
         self.dirty.clear();
@@ -287,6 +292,7 @@ impl Catalog {
             self.groups = Groups::from_loaded(loaded.groups, |n| names.contains(n));
             self.writeback
                 .overlay(dir, mark, &mut self.images, &mut self.groups);
+            self.loaded = true;
         }
         self.writeback.end_load();
     }
@@ -296,15 +302,24 @@ impl Catalog {
         &self.groups
     }
 
+    /// Apply `writes` to memory and queue them, with any repairs the load
+    /// left behind. A refused batch changes nothing, and its reason is both
+    /// returned and kept for the toast.
     #[allow(dead_code)] // only called from #[cfg(test)] today
-    pub(crate) fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) {
-        let Some(dir) = self.dir.clone() else {
-            self.note_persist_error("no folder is open for these groups");
-            return;
-        };
+    pub(crate) fn apply_group_writes(
+        &mut self,
+        writes: Vec<GroupWrite>,
+    ) -> Result<(), GroupWriteRefused> {
         if writes.is_empty() {
-            return;
+            return Ok(());
         }
+        let dir = match self.group_dir() {
+            Ok(dir) => dir,
+            Err(refused) => {
+                self.note_persist_error(refused);
+                return Err(refused);
+            }
+        };
         for write in &writes {
             self.groups.apply(write);
         }
@@ -316,6 +331,19 @@ impl Catalog {
             };
             self.enqueue(&group_file::path(&dir, &id), op);
         }
+        Ok(())
+    }
+
+    /// The folder a group write lands in, if groups can be written now.
+    fn group_dir(&self) -> Result<PathBuf, GroupWriteRefused> {
+        let dir = self.dir.clone().ok_or(GroupWriteRefused::NoFolder)?;
+        if !self.loaded {
+            return Err(GroupWriteRefused::LoadPending);
+        }
+        if cfg!(target_arch = "wasm32") {
+            return Err(GroupWriteRefused::Unsupported);
+        }
+        Ok(dir)
     }
 
     /// Take the pending persist error's cause. Each failure is returned once.
@@ -478,6 +506,26 @@ impl Catalog {
 impl Default for Catalog {
     fn default() -> Catalog {
         Catalog::new()
+    }
+}
+
+/// Why [`Catalog::apply_group_writes`] refused a batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupWriteRefused {
+    NoFolder,
+    /// The folder's groups have not loaded, so a write could revive or
+    /// clobber one the load has yet to show.
+    LoadPending,
+    Unsupported,
+}
+
+impl std::fmt::Display for GroupWriteRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            GroupWriteRefused::NoFolder => "no folder is open for these groups",
+            GroupWriteRefused::LoadPending => "the folder's groups are still loading",
+            GroupWriteRefused::Unsupported => "photo groups are not saved in the browser yet",
+        })
     }
 }
 
@@ -1401,7 +1449,7 @@ mod tests {
         let writes = cat
             .groups()
             .create(group.clone(), std::time::SystemTime::now());
-        cat.apply_group_writes(writes);
+        cat.apply_group_writes(writes).unwrap();
         flush(&mut cat);
         assert_eq!(cat.take_error(), None);
         let (id, _) = only_group(&cat);
@@ -1423,7 +1471,7 @@ mod tests {
         );
 
         let writes = cat.groups().dissolve(&id);
-        cat.apply_group_writes(writes);
+        cat.apply_group_writes(writes).unwrap();
         flush(&mut cat);
         assert!(!file.exists(), "dissolving deletes the sidecar");
         assert!(Catalog::with_dir(dir.clone()).groups().is_empty());
@@ -1552,7 +1600,7 @@ mod tests {
         let (winner, _) = only_group(&cat);
         assert_eq!(winner.to_string(), "g-000000000002-000000");
         let writes = cat.groups().dissolve(&winner);
-        cat.apply_group_writes(writes);
+        cat.apply_group_writes(writes).unwrap();
         flush(&mut cat);
 
         assert!(Catalog::with_dir(dir.clone()).groups().is_empty());
@@ -1578,7 +1626,7 @@ mod tests {
 
         let unrelated = Group::new(names(&["c.jpg", "d.jpg"]), "c.jpg".into()).unwrap();
         let writes = cat.groups().create(unrelated, std::time::SystemTime::now());
-        cat.apply_group_writes(writes);
+        cat.apply_group_writes(writes).unwrap();
         flush(&mut cat);
         assert!(
             !dropped.exists(),
@@ -1608,7 +1656,7 @@ mod tests {
         let writes = cat
             .groups()
             .create(group.clone(), std::time::SystemTime::now());
-        cat.apply_group_writes(writes);
+        cat.apply_group_writes(writes).unwrap();
         let _ = cat.switch_dir(&elsewhere);
         cat.abandon_load();
         let mark = cat.switch_dir(&dir);
@@ -1616,6 +1664,77 @@ mod tests {
         cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
 
         assert_eq!(only_group(&cat).1, group);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&elsewhere).unwrap();
+    }
+
+    #[test]
+    fn a_group_write_during_a_pending_load_is_refused_and_changes_nothing() {
+        let dir = unique_tmp_dir();
+        let members = photos(&dir, &["a.jpg", "b.jpg"]);
+        let group = Group::new(members, "a.jpg".into()).unwrap();
+        let writes = Groups::default().create(group, std::time::SystemTime::now());
+
+        let mut cat = Catalog::new();
+        let mark = cat.switch_dir(&dir);
+        assert_eq!(
+            cat.apply_group_writes(writes.clone()),
+            Err(GroupWriteRefused::LoadPending)
+        );
+        assert!(cat.take_error().is_some(), "the refusal reaches the toast");
+        assert!(cat.groups().is_empty());
+        assert_eq!(cat.backlog(), 0, "nothing was queued");
+
+        let loaded = load_sidecars(&dir);
+        cat.apply_loaded(&dir, mark, loaded, &images_in(&dir));
+        assert!(cat.groups().is_empty());
+        assert!(!groups_dir(&dir).exists());
+
+        let _ = cat.switch_dir(&dir);
+        cat.abandon_load();
+        assert_eq!(
+            cat.apply_group_writes(writes),
+            Err(GroupWriteRefused::LoadPending),
+            "an abandoned load leaves the groups unknown"
+        );
+        assert_eq!(cat.backlog(), 0);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_stale_load_replays_group_writes_in_the_order_they_were_issued() {
+        let dir = unique_tmp_dir();
+        let elsewhere = unique_tmp_dir();
+        photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
+        let (first, second) = (
+            GroupId::from_stem("g-1".as_ref()).unwrap(),
+            GroupId::from_stem("g-2".as_ref()).unwrap(),
+        );
+        let second_group = Group::new(names(&["b.jpg", "c.jpg"]), "c.jpg".into()).unwrap();
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        let stale = load_sidecars(&dir);
+        cat.enqueue(
+            &group_file::path(&dir, &second),
+            WriteOp::PutGroup(Group::new(names(&["a.jpg", "b.jpg"]), "a.jpg".into()).unwrap()),
+        );
+        cat.enqueue(
+            &group_file::path(&dir, &first),
+            WriteOp::PutGroup(second_group.clone()),
+        );
+        let _ = cat.switch_dir(&elsewhere);
+        cat.abandon_load();
+        let mark = cat.switch_dir(&dir);
+        flush(&mut cat);
+        cat.apply_loaded(&dir, mark, stale, &images_in(&dir));
+
+        assert_eq!(
+            only_group(&cat),
+            (first, second_group),
+            "the later write takes b.jpg from the earlier one"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(&elsewhere).unwrap();
