@@ -400,8 +400,7 @@ impl App {
 
     /// Drains the Worker pool's results. Thumbnails go into `loader.rs`'s
     /// cache; loupe results are set aside for `poll_web_preview` and
-    /// `poll_web_full`. Returns the `(path, max_px)` keys that arrived, for
-    /// burst and duplicate scoring.
+    /// `poll_web_full`. Returns the `(path, max_px)` keys that arrived.
     pub(crate) fn poll_web_thumbs(&mut self) -> Vec<(PathBuf, u32)> {
         let mut arrived = Vec::new();
         let pending = std::mem::take(&mut self.web_thumb_recovery_pending);

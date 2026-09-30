@@ -66,9 +66,9 @@ struct Run {
     /// decode, a bake and a JPEG encode, so a handful is already a minute's
     /// work on a folder of RAWs.
     exports: usize,
-    /// Photos the Vision phase runs feature prints, faces and segmentation
-    /// over. Small by default because every Vision call decodes the file at
-    /// full resolution itself.
+    /// Photos the Vision phase runs faces and segmentation over. Small by
+    /// default because every Vision call decodes the file at full resolution
+    /// itself.
     vision: usize,
     /// Delete this folder's cached thumbnails first, so the grid phase
     /// measures a first visit rather than a revisit.
@@ -259,33 +259,12 @@ impl Run {
         );
     }
 
-    /// What the grouping features cost per photo. Every call here makes Vision
-    /// decode the file itself at full resolution, which is the reason the
-    /// duplicate and burst tools are gated behind `SHOW_GROUPING_TOOLS`. The
-    /// pairing mirrors `refine_by_feature_print`, which compares each member
-    /// against one group anchor.
     #[cfg(target_os = "macos")]
     fn vision_signals(&self, photos: &[PathBuf]) {
         let wanted: Vec<&PathBuf> = photos.iter().take(self.vision).collect();
-        let Some((anchor, members)) = wanted.split_first() else {
+        let Some(&anchor) = wanted.first() else {
             return;
         };
-
-        let t0 = Instant::now();
-        let anchor_print = crate::featureprint::compute(anchor);
-        let mut compared = 0usize;
-        for member in members {
-            let (Ok(a), Ok(m)) = (&anchor_print, crate::featureprint::compute(member)) else {
-                continue;
-            };
-            if crate::featureprint::feature_distance(a, &m).is_ok() {
-                compared += 1;
-            }
-        }
-        eprintln!(
-            "[profile] {compared} feature-print comparisons in {:?}",
-            t0.elapsed()
-        );
 
         // Through the signal cache, the way `App::request_face_quality` reads
         // it: a photo whose analysis was seeded from disk is never submitted.

@@ -61,6 +61,7 @@ pub fn visible_indices(
 /// capture time is more than `gap` from the last known time, in either
 /// direction. Entries with no time (`None`) join the current burst and never
 /// split one.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn group_by_time(times: &[Option<SystemTime>], gap: Duration) -> Vec<u32> {
     let mut ids = Vec::with_capacity(times.len());
     let mut group = 0u32;
