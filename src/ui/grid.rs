@@ -384,7 +384,7 @@ pub(super) fn thumbnail_cell(
     }
 
     if let Some(n) = members {
-        count_pill(ui, pill_anchor, n, &colors);
+        count_pill(ui, pill_anchor, rect, n, &colors);
     }
 
     let badge_r = badge_radius(ui.style());
@@ -473,8 +473,16 @@ pub(super) fn thumbnail_cell(
 }
 
 /// A group's member count in a rounded pill at `PILL_CORNER` of `anchor`,
-/// the thumbnail or, before it loads, the room kept for it.
-fn count_pill(ui: &egui::Ui, anchor: egui::Rect, count: usize, colors: &theme::Palette) {
+/// the thumbnail or, before it loads, the room kept for it, kept inside
+/// `cell` when a large font and a narrow portrait make it wider than the
+/// thumbnail.
+fn count_pill(
+    ui: &egui::Ui,
+    anchor: egui::Rect,
+    cell: egui::Rect,
+    count: usize,
+    colors: &theme::Palette,
+) {
     let font = egui::FontId::proportional(font_size::px(ui.style(), 11.0));
     let galley = ui
         .painter()
@@ -487,6 +495,10 @@ fn count_pill(ui: &egui::Ui, anchor: egui::Rect, count: usize, colors: &theme::P
     let size = egui::vec2(size.x.max(size.y), size.y);
     let inset = font_size::px(ui.style(), 4.0);
     let pill = PILL_CORNER.align_size_within_rect(size, anchor.shrink(inset));
+    let pill = pill.translate(egui::vec2(
+        (cell.left() + inset - pill.left()).max(0.0),
+        0.0,
+    ));
     ui.painter()
         .rect_filled(pill, size.y / 2.0, colors.pill_fill);
     ui.painter().galley(
