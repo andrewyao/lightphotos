@@ -4,17 +4,16 @@
 //!
 //! Two costs used to land in one frame: the trash call per photo, which is
 //! filesystem metadata I/O, and `finish_delete`'s reconciliation, which is
-//! O(playlist) and regroups duplicates. This module moves the first off the
-//! UI thread and splits the second by what it indexes.
+//! O(playlist). This module moves the first off the UI thread and splits the
+//! second by what it indexes.
 //!
 //! A photo's removal divides in two. The path-keyed half (ratings, edits,
-//! rotations, the catalog record, the perceptual caches) is O(1) per photo
-//! and runs as each result lands. The half that shifts playlist indices
-//! (`playlist.remove_matching`, the `feature_*` retains, the duplicate and
-//! burst marks, the selection) runs exactly once, at the end. In between,
-//! trashed photos sit in `gone` and [`App::recompute_visible`] filters them
-//! out, so the grid shrinks live while every structure indexed by playlist
-//! position stays valid.
+//! rotations, the catalog record, the signal caches) is O(1) per photo and
+//! runs as each result lands. The half that shifts playlist indices
+//! (`playlist.remove_matching`, the selection) runs exactly once, at the end.
+//! In between, trashed photos sit in `gone` and [`App::recompute_visible`]
+//! filters them out, so the grid shrinks live while every structure indexed
+//! by playlist position stays valid.
 
 use super::*;
 use std::collections::{HashSet, VecDeque};
@@ -308,9 +307,6 @@ impl App {
         self.autotone_pending.remove(path);
         self.autotone_base.remove(path);
         self.rotations.remove(path);
-        // Pending duplicate jobs for deleted files would keep the redraw loop
-        // awake forever.
-        self.phashes.remove(path);
         self.sharpness.remove(path);
         self.capture_times.remove(path);
         self.signals.forget(path);
@@ -334,12 +330,10 @@ impl App {
     ///
     /// Everything here is O(playlist) or worse, and none of it is needed while
     /// photos are merely hidden. `remove_matching` is what invalidates the
-    /// index space that `gone` exists to keep stable, so the marks indexed by
-    /// that space are rebuilt right after it.
+    /// index space that `gone` exists to keep stable.
     fn prune_deleted(&mut self, d: BulkDelete) {
         let gone = d.gone;
         if !gone.is_empty() {
-            let survey_was_affected = self.survey_members.iter().any(|p| gone.contains(p));
             if let Some(pl) = self.playlist.as_mut() {
                 pl.remove_matching(|p| gone.contains(p));
             }
@@ -348,18 +342,6 @@ impl App {
                 if deferred.is_empty() {
                     self.autotone_deferred = None;
                 }
-            }
-            self.feature_distances
-                .retain(|(anchor, member), _| !gone.contains(anchor) && !gone.contains(member));
-            self.feature_failed
-                .retain(|(anchor, member)| !gone.contains(anchor) && !gone.contains(member));
-            self.feature_pending
-                .retain(|(anchor, member)| !gone.contains(anchor) && !gone.contains(member));
-
-            self.recompute_dup_marks();
-            self.recompute_burst_marks();
-            if survey_was_affected && self.mode == ViewMode::Survey {
-                self.close_survey();
             }
             // The cursor keeps its position (clamped), so it lands on a
             // neighbor of the deleted photos.
@@ -431,7 +413,6 @@ fn spawn_trash_worker(
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use crate::burst::BurstMark;
     use crate::navigation::Playlist;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime};
@@ -546,8 +527,6 @@ mod tests {
 
     /// The grid has to shrink while a long delete runs, or the user watches a
     /// toast climb over a grid full of photos that are already in the Trash.
-    /// Hiding them must not touch the playlist, because `dup_marks` and
-    /// `burst_marks` are indexed by playlist position.
     #[test]
     fn trashed_photos_leave_the_grid_without_touching_the_playlist() {
         let names = ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg"];
@@ -574,42 +553,6 @@ mod tests {
             "a trashed photo must leave the grid before the batch ends"
         );
         assert!(app.playlist.as_ref().unwrap().entries().is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// `burst_marks` is indexed by playlist position, and `remove_matching`
-    /// shifts every index. Without a rebuild the survivor of a burst keeps the
-    /// badge of the photo that was deleted ahead of it.
-    #[test]
-    fn burst_badges_are_rebuilt_after_a_delete_shifts_the_playlist() {
-        let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg", "c.jpg"]);
-        let (a, b, c) = (paths[0].clone(), paths[1].clone(), paths[2].clone());
-
-        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
-        app.capture_times.insert(a.clone(), Some(t));
-        app.capture_times
-            .insert(b.clone(), Some(t + Duration::from_millis(400)));
-        app.capture_times
-            .insert(c.clone(), Some(t + Duration::from_secs(3600)));
-        app.sharpness.insert(a.clone(), 10.0);
-        app.sharpness.insert(b.clone(), 90.0);
-        app.sharpness.insert(c.clone(), 50.0);
-        app.bursts_on = true;
-        app.recompute_burst_marks();
-        assert_eq!(app.burst_mark_at(0), Some(BurstMark::Sibling));
-        assert_eq!(app.burst_mark_at(1), Some(BurstMark::Best));
-        assert_eq!(app.burst_mark_at(2), None);
-
-        app.start_delete(vec![a]);
-        drain(&mut app);
-
-        assert_eq!(app.playlist.as_ref().unwrap().entries(), &[b, c]);
-        assert_eq!(
-            app.burst_mark_at(0),
-            None,
-            "the survivor of a two-photo burst is no longer in a burst, so it \
-             must not inherit the deleted photo's badge"
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

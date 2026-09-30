@@ -16,10 +16,8 @@ use web_time::Instant;
 use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::Window;
 
-use crate::burst::BurstMark;
 use crate::catalog::Catalog;
 use crate::develop::{Adjustments, Crop, TouchUp};
-use crate::duplicates::DuplicateMark;
 use crate::export::Exporter;
 use crate::loader::Loader;
 use crate::navigation::{Cmp, Playlist};
@@ -33,19 +31,9 @@ const MAX_ZOOM: f32 = 64.0;
 /// [`crate::thumbnail::THUMB_PX`] so HiDPI displays get real pixels to draw.
 pub(crate) const GRID_CELL_PT: f32 = 192.0;
 
-/// Whether the grouping tools are reachable at all: the Grid toolbar's
-/// Bursts / Duplicates / Eyes-closed buttons, the `B` and `D` keys, and the
-/// Culling section of the shortcut overlay. It is off because
-/// `CLOSED_EYE_RATIO` and `DEFAULT_MAX_FEATURE_DISTANCE` are both still
-/// guesses that no real photo set has checked, and a half-on feature that
-/// applies an unvalidated verdict from an undocumented key is worse than one
-/// that is plainly absent.
-///
-/// `ui::toolbar::grid_toolbar` and `App::TOOLBAR_CONTROLS` read it so the
-/// drawn controls and the F6 focus cycle agree, `app::keys` reads it so the
-/// keys match the buttons, and `ui::modals` reads it so the overlay does not
-/// advertise keys that do nothing.
-pub(crate) const SHOW_GROUPING_TOOLS: bool = false;
+/// Whether the Grid toolbar shows the Eyes-closed filter. Off because no real
+/// photo set has checked `CLOSED_EYE_RATIO`.
+pub(crate) const SHOW_EYES_FILTER: bool = false;
 
 /// Whether presets are reachable: the Develop panel's Presets block, the
 /// selection bar's Preset dropdown, and Cmd+Shift+P. Off until the feature is
@@ -81,10 +69,6 @@ pub(crate) const TOUCHUP_MIN_FEATHER: f32 = 0.02;
 pub enum ViewMode {
     Grid,
     Loupe,
-    /// Side-by-side review of one duplicate group (`survey_members`), opened
-    /// from a Grid badge. Uses `Region::Grid` for keyboard focus, since it is
-    /// a modal screen over the Grid, not part of the F6 cycle.
-    Survey,
 }
 
 /// One edge of the crop rectangle in texture space: `Left` is the low-x edge
@@ -331,7 +315,6 @@ pub(crate) struct App {
     pub(crate) loader: Option<Loader>,
     /// `None` until the window is created.
     pub(crate) exporter: Option<Exporter>,
-    pub(crate) feature_pool: Option<crate::featureprint::DistancePool>,
     pub(crate) face_pool: Option<crate::facequality::FacePool>,
     pub(crate) export_progress: Option<ExportProgress>,
     /// What the export form is set to, remembered across launches.
@@ -598,33 +581,10 @@ pub(crate) struct App {
     #[cfg(not(target_arch = "wasm32"))]
     signal_load_rx: Option<Receiver<SignalLoad>>,
 
-    /// Burst badges and dimming. Mutually exclusive with the star filter.
-    bursts_on: bool,
     /// Capture time per path, from EXIF or mtime. `Some(None)` means the read
     /// found no time, so it isn't requested again.
     capture_times: HashMap<PathBuf, Option<SystemTime>>,
     sharpness: HashMap<PathBuf, f64>,
-    /// Indexed by playlist entry, not visible position. Empty when bursts are off.
-    burst_marks: Vec<Option<BurstMark>>,
-
-    /// Content-duplicate badges. Independent of bursts: a photo can be in both.
-    dupes_on: bool,
-    /// dHash per path, computed for the whole folder as thumbnails arrive.
-    phashes: HashMap<PathBuf, u64>,
-    /// dHash groups before feature-print refinement, by playlist entry.
-    /// `request_feature_prints` reads each group's anchor and candidates here.
-    dup_index: crate::duplicates::HashGroups,
-    /// Groups after the feature-print split, by playlist entry. Survey Mode
-    /// uses this to find a clicked badge's members, which `dup_marks` loses.
-    dup_refined: Vec<u32>,
-    /// Vision feature-print distance per (group anchor, member). Anchor-relative,
-    /// not all pairs.
-    feature_distances: HashMap<(PathBuf, PathBuf), f32>,
-    /// Comparisons that failed for good, so they aren't resubmitted every frame.
-    feature_failed: HashSet<(PathBuf, PathBuf)>,
-    feature_pending: HashSet<(PathBuf, PathBuf)>,
-    /// Indexed by playlist entry, not visible position. Empty when dupes are off.
-    dup_marks: Vec<Option<DuplicateMark>>,
 
     /// Photos in the running Auto Tone batch still waiting on a thumbnail.
     /// Emptied by `cancel_auto_tone` on a folder change.
@@ -652,9 +612,6 @@ pub(crate) struct App {
     /// `autotone_pending.len()`.
     autotone_done: usize,
 
-    /// Face count and worst eye openness per path. Computed only for photos
-    /// already in a burst or duplicate group, because Vision decodes the file
-    /// at full resolution to find faces.
     face_quality: HashMap<PathBuf, crate::facequality::FaceQuality>,
     face_pending: HashSet<PathBuf>,
     /// Analyses that failed for good (corrupt or unsupported files).
@@ -673,14 +630,6 @@ pub(crate) struct App {
     /// Show only photos with a detected blink. Stacks with the star filter. A
     /// photo the face pass hasn't reached stays hidden.
     eyes_filter: bool,
-
-    /// The duplicate group under review. Empty outside `ViewMode::Survey`.
-    survey_members: Vec<PathBuf>,
-    /// The group's best member from `dup_marks` when Survey opened, so
-    /// `keep_best_reject_rest` agrees with the grid badge.
-    survey_best: Option<PathBuf>,
-    /// Index into `survey_members` that ratings and arrows apply to.
-    survey_focus: usize,
 
     /// Zoom as a multiple of the fit scale (`1.0` is fitted). Fit-relative so
     /// swapping decode tiers leaves the on-screen transform unchanged.
@@ -817,7 +766,6 @@ impl App {
             pushed_adj: None,
             loader: None,
             exporter: None,
-            feature_pool: None,
             face_pool: None,
             export_progress: None,
             // A test must never read the developer's own settings.
@@ -958,21 +906,11 @@ impl App {
             grid_scroll_reset: true,
             strip_range: (0, 0),
             thumb_tex: HashMap::new(),
-            bursts_on: false,
             signals: crate::signalcache::SignalCache::empty(),
             #[cfg(not(target_arch = "wasm32"))]
             signal_load_rx: None,
             capture_times: HashMap::new(),
             sharpness: HashMap::new(),
-            burst_marks: Vec::new(),
-            dupes_on: false,
-            phashes: HashMap::new(),
-            dup_index: Default::default(),
-            dup_refined: Vec::new(),
-            feature_distances: HashMap::new(),
-            feature_failed: HashSet::new(),
-            feature_pending: HashSet::new(),
-            dup_marks: Vec::new(),
             autotone_pending: HashSet::new(),
             autotone_queue: VecDeque::new(),
             autotone_window: VecDeque::new(),
@@ -993,9 +931,6 @@ impl App {
             renderer_init_tx,
             #[cfg(target_arch = "wasm32")]
             renderer_init_rx,
-            survey_members: Vec::new(),
-            survey_best: None,
-            survey_focus: 0,
             zoom_rel: 1.0,
             pan: (0.0, 0.0),
             win_size: (1.0, 1.0),
@@ -1099,8 +1034,7 @@ impl App {
             self.seed_mirrors(&playlist);
             let start_index = playlist.position();
             self.playlist = Some(playlist);
-            self.reset_burst_state();
-            self.reset_dup_state();
+            self.reset_eyes_filter();
             self.recompute_visible();
             self.sel = Some(
                 self.visible
@@ -1184,8 +1118,7 @@ impl App {
         self.teardown_loupe_state();
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
-        self.reset_burst_state();
-        self.reset_dup_state();
+        self.reset_eyes_filter();
         self.recompute_visible();
         self.sel = None;
         self.selected.clear();
@@ -1310,7 +1243,6 @@ impl App {
         };
 
         // In Loupe, draw the image into egui's central rect, in physical pixels.
-        // Grid and Survey are egui only.
         let image_viewport = match self.mode {
             ViewMode::Loupe => out.loupe_rect.map(|r| {
                 let x = (r.min.x * pixels_per_point).round().max(0.0) as u32;
@@ -1319,7 +1251,7 @@ impl App {
                 let h = (r.height() * pixels_per_point).round().max(0.0) as u32;
                 (x, y, w, h)
             }),
-            ViewMode::Grid | ViewMode::Survey => Some((0, 0, 0, 0)),
+            ViewMode::Grid => Some((0, 0, 0, 0)),
         };
 
         if self.mode == ViewMode::Loupe {
@@ -1459,15 +1391,9 @@ impl App {
                 ui::UiAction::SetFilterCmp(cmp) => self.set_filter_cmp(cmp),
                 ui::UiAction::SetRating(stars) => self.set_rating(stars),
                 ui::UiAction::ScrollFilmstrip(delta) => self.scroll_filmstrip(delta),
-                ui::UiAction::ToggleBursts => self.toggle_bursts(),
-                ui::UiAction::ToggleDupes => self.toggle_dupes(),
                 ui::UiAction::ToggleEyesClosed => self.toggle_eyes_filter(),
                 ui::UiAction::ToggleSelection => self.toggle_selection(),
                 ui::UiAction::ToggleSelectionInvert => self.toggle_selection_invert(),
-                ui::UiAction::OpenSurvey(pos) => self.open_survey(pos),
-                ui::UiAction::CloseSurvey => self.close_survey(),
-                ui::UiAction::KeepBestRejectRest => self.keep_best_reject_rest(),
-                ui::UiAction::FocusSurveyMember(i) => self.set_survey_focus(i),
                 ui::UiAction::OpenFolder(p) => {
                     // A click does what Enter does: focus, load, toggle expansion.
                     self.set_focus(Region::Folders, FocusLevel::Entered);

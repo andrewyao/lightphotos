@@ -2,20 +2,18 @@ use super::*;
 use std::path::{Path, PathBuf};
 
 use crate::develop::Adjustments;
-use crate::duplicates::DuplicateMark;
 use crate::navigation::Cmp;
 use crate::ui;
 
 impl App {
     /// Swaps in `playlist`'s folder's derived-signal cache and copies what it
-    /// holds into the four maps the grouping features read, so a folder
-    /// visited before starts with its capture times, sharpness, hashes and
-    /// face analyses already known.
+    /// holds into the three maps the culling signals live in, so a folder
+    /// visited before starts with its capture times, sharpness and face
+    /// analyses already known.
     ///
-    /// Seeding those maps is the whole integration. `toggle_bursts` and
-    /// `toggle_dupes` rebuild their marks from the maps directly, and
-    /// `request_face_quality` skips any photo already in `face_quality`, so a
-    /// warm folder submits no Vision work without either of them changing.
+    /// Seeding those maps is the whole integration. `request_face_quality`
+    /// skips any photo already in `face_quality`, so a warm folder submits no
+    /// Vision work without it changing.
     ///
     /// On native the swap runs on its own thread. Checking an entry against
     /// its file is one `stat`, a folder of thousands of photos on a network
@@ -101,18 +99,9 @@ impl App {
             if let Some(v) = s.sharpness {
                 self.sharpness.entry(p.clone()).or_insert(v);
             }
-            if let Some(v) = s.phash {
-                self.phashes.entry(p.clone()).or_insert(v);
-            }
             if let Some(q) = s.faces {
                 self.face_quality.entry(p).or_insert(q);
             }
-        }
-        if self.bursts_on {
-            self.recompute_burst_marks();
-        }
-        if self.dupes_on {
-            self.recompute_dup_marks();
         }
         if self.eyes_filter_on() {
             self.recompute_visible();
@@ -490,142 +479,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Toggles best-of-burst badges. Ignored while a star filter is active,
-    /// because bursts are runs of adjacent photos in the unfiltered folder.
-    /// Turning off keeps the caches, so turning back on is instant.
-    pub(super) fn toggle_bursts(&mut self) {
-        if self.filter.is_some() {
-            return;
-        }
-        self.bursts_on = !self.bursts_on;
-        if self.bursts_on {
-            self.request_capture_times();
-            self.recompute_burst_marks();
-            self.request_burst_thumbs();
-            self.request_face_quality();
-        } else {
-            self.burst_marks.clear();
-        }
-        self.request_redraw();
-    }
-
-    /// Toggles duplicate badges. Unlike bursts this works under a filter,
-    /// because duplicate groups cover the whole folder regardless of order.
-    /// Turning off keeps the caches, so turning back on is instant.
-    pub(super) fn toggle_dupes(&mut self) {
-        self.dupes_on = !self.dupes_on;
-        if self.dupes_on {
-            self.recompute_dup_marks();
-            self.request_dup_thumbs();
-            self.request_feature_prints();
-            self.request_face_quality();
-        } else {
-            self.dup_index = Default::default();
-            self.dup_marks.clear();
-        }
-        self.request_redraw();
-    }
-
-    /// Opens Survey Mode on the duplicate group of the visible cell at `pos`.
-    /// Does nothing unless that group has at least two photos.
-    pub(super) fn open_survey(&mut self, pos: usize) {
-        let Some(pl) = &self.playlist else { return };
-        let Some(&idx) = self.visible.get(pos) else {
-            return;
-        };
-        let Some(&group) = self.dup_refined.get(idx) else {
-            return;
-        };
-        let mut members = Vec::new();
-        let mut best = None;
-        for (i, &g) in self.dup_refined.iter().enumerate() {
-            if g != group {
-                continue;
-            }
-            let Some(p) = pl.entry(i) else { continue };
-            if matches!(self.dup_marks.get(i), Some(Some(DuplicateMark::Best))) {
-                best = Some(p.to_path_buf());
-            }
-            members.push(p.to_path_buf());
-        }
-        if members.len() < 2 {
-            return;
-        }
-        self.survey_members = members;
-        self.survey_best = best;
-        self.survey_focus = 0;
-        self.mode = ViewMode::Survey;
-        self.normalize_focus();
-        self.request_redraw();
-    }
-
-    pub(super) fn close_survey(&mut self) {
-        self.survey_members.clear();
-        self.survey_best = None;
-        self.survey_focus = 0;
-        self.mode = ViewMode::Grid;
-        self.normalize_focus();
-        self.request_redraw();
-    }
-
-    pub(super) fn set_survey_focus(&mut self, i: usize) {
-        if i < self.survey_members.len() {
-            self.survey_focus = i;
-            self.request_redraw();
-        }
-    }
-
-    /// Moves Survey Mode's focus by `delta`, wrapping at the ends.
-    pub(super) fn survey_move_focus(&mut self, delta: i32) {
-        let n = self.survey_members.len();
-        if n < 2 {
-            return;
-        }
-        let cur = self.survey_focus as i32;
-        self.survey_focus = (cur + delta).rem_euclid(n as i32) as usize;
-        self.request_redraw();
-    }
-
-    /// Rates the group's best photo 5 stars and every other member 1 star.
-    /// "Best" is `survey_best`, which matches the grid's badge.
-    pub(super) fn keep_best_reject_rest(&mut self) {
-        if self.survey_members.len() < 2 {
-            return;
-        }
-        let Some(best) = self.survey_best.clone() else {
-            return;
-        };
-        for path in self.survey_members.clone() {
-            let stars = if path == best { 5 } else { 1 };
-            self.ratings.insert(path.clone(), stars);
-            self.catalog.set(&path, stars);
-        }
-        if self.filter.is_some() {
-            self.recompute_visible();
-        }
-        let n = self.survey_members.len();
-        self.set_status(
-            StatusKind::Success,
-            (crate::i18n::t().kept_best)(n.saturating_sub(1)),
-        );
-        self.request_redraw();
-    }
-
-    pub(super) fn request_capture_times(&mut self) {
-        let Some(pl) = &self.playlist else { return };
-        let paths: Vec<PathBuf> = pl
-            .entries()
-            .iter()
-            .filter(|p| !self.capture_times.contains_key(*p))
-            .cloned()
-            .collect();
-        if let Some(loader) = &mut self.loader {
-            for p in paths {
-                loader.request_meta(p);
-            }
-        }
-    }
-
     /// Sets or clears the star filter. Does nothing in the Loupe, because a
     /// filter change there could hide the open photo from the selection
     /// cursor. This is the only mode check for both the toolbar and the
@@ -633,12 +486,6 @@ impl App {
     pub(super) fn set_filter(&mut self, filter: Option<(Cmp, u8)>) {
         if self.mode == ViewMode::Loupe {
             return;
-        }
-        // Bursts need the unfiltered folder, so a filter turns them off.
-        // Clearing the filter does not turn them back on.
-        if filter.is_some() && self.bursts_on {
-            self.bursts_on = false;
-            self.burst_marks.clear();
         }
         let want_idx = self.selected_index();
         #[cfg(target_arch = "wasm32")]
@@ -763,12 +610,10 @@ mod tests {
 
         let mut app = App::new(None);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        app.bursts_on = true;
         assert!(
             app.request_face_quality() && app.face_pending.is_empty(),
             "Vision work waits for the cache and submits nothing"
         );
-        app.bursts_on = false;
         app.signals.record(&b, Signal::Sharpness(42.0));
 
         finish_signal_load(&mut app);

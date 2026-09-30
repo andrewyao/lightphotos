@@ -2,26 +2,19 @@
 
 //! Derived per-photo signals, remembered between sessions.
 //!
-//! Capture time, sharpness, dHash and face quality are all functions of one
-//! photo's bytes, and three of them are expensive. On 6016x6016 photos a face
+//! Capture time, sharpness and face quality are all functions of one photo's
+//! bytes, and two of them are expensive. On 6016x6016 photos a face
 //! analysis measures about 73 ms because Vision decodes the file itself at
 //! full resolution, against 32 ms for a whole thumbnail decode. Recomputing
-//! them on every folder visit is the main reason the grouping features are too
-//! heavy to run unasked.
+//! them on every folder visit would make grouping too heavy to run unasked.
 //!
 //! These are deliberately *not* fields on [`ImageRecord`](crate::catalog::ImageRecord).
 //! That record is the user's authored edit state, the thing worth backing up,
-//! and its sidecar is deleted once it holds nothing. A cached hash living
+//! and its sidecar is deleted once it holds nothing. A cached signal living
 //! there would keep the sidecar alive forever, would rewrite it on every
 //! background computation rather than on a user edit, and would have nowhere
 //! to put an invalidation key. Authored state and derived state have different
 //! lifetimes, so they get different containers.
-//!
-//! Feature-print distances are absent on purpose. They are keyed by an
-//! (anchor, member) pair rather than by a photo, so they are not a property of
-//! a file at all, and their anchors move as grouping changes. Persisting the
-//! prints themselves through `VNFeaturePrintObservation`'s
-//! `dataRepresentation` is the right follow-up.
 
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -85,14 +78,13 @@ impl CaptureTime {
 /// One computed signal, as the app hands it over.
 pub enum Signal {
     Capture(Option<SystemTime>),
+    #[cfg_attr(not(test), allow(dead_code))]
     Sharpness(f64),
-    PHash(u64),
     Faces(FaceQuality),
 }
 
-/// What is known about one photo. Every field is optional because the four
-/// signals are computed by different passes at different times, and a folder
-/// the user never opened the duplicate tools on holds only the first two.
+/// What is known about one photo. Every field is optional because the three
+/// signals are computed by different passes at different times.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq)]
 pub struct PhotoSignals {
     /// Validity key over the file's mtime and length. A photo edited by
@@ -104,18 +96,13 @@ pub struct PhotoSignals {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sharpness: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phash: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faces: Option<FaceQuality>,
 }
 
 impl PhotoSignals {
     #[cfg(not(target_arch = "wasm32"))]
     fn is_empty(&self) -> bool {
-        self.capture.is_none()
-            && self.sharpness.is_none()
-            && self.phash.is_none()
-            && self.faces.is_none()
+        self.capture.is_none() && self.sharpness.is_none() && self.faces.is_none()
     }
 }
 
@@ -232,7 +219,6 @@ impl SignalCache {
             } else {
                 entry.capture = n.capture.or(entry.capture);
                 entry.sharpness = n.sharpness.or(entry.sharpness);
-                entry.phash = n.phash.or(entry.phash);
                 entry.faces = n.faces.or(entry.faces);
             }
             self.dirty = true;
@@ -270,7 +256,6 @@ impl SignalCache {
         match signal {
             Signal::Capture(t) => entry.capture = Some(CaptureTime::from_system_time(t)),
             Signal::Sharpness(v) => entry.sharpness = Some(v),
-            Signal::PHash(v) => entry.phash = Some(v),
             Signal::Faces(q) => entry.faces = Some(q),
         }
         self.dirty = true;
@@ -497,7 +482,6 @@ mod tests {
         {
             let mut cache = SignalCache::load(&dir);
             cache.record(&photo, Signal::Sharpness(12.5));
-            cache.record(&photo, Signal::PHash(0xdead_beef));
             cache.record(
                 &photo,
                 Signal::Faces(FaceQuality {
@@ -511,7 +495,6 @@ mod tests {
         let reopened = SignalCache::load(&dir);
         let s = reopened.get(&photo).expect("the entry survives a reload");
         assert_eq!(s.sharpness, Some(12.5));
-        assert_eq!(s.phash, Some(0xdead_beef));
         assert_eq!(s.faces.expect("faces recorded").faces, 2);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -538,6 +521,41 @@ mod tests {
         assert!(
             SignalCache::load(&dir).get(&photo).is_none(),
             "a changed file must not serve its old signals"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cache_file_with_the_removed_phash_field_still_loads() {
+        let dir = unique_dir("old-phash");
+        let photo = write_photo(&dir, "a.jpg", b"pixels");
+        let key = current_key(&photo).expect("the photo has a key");
+        let cache_dir = dir.join(crate::catalog::SIDECAR_DIR);
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let file = cache_dir.join(CACHE_FILE);
+        std::fs::write(
+            &file,
+            format!(
+                r#"{{"entries":{{"a.jpg":{{"k":{key},"sharpness":12.5,"phash":3735928559}}}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let mut cache = SignalCache::load(&dir);
+        let s = cache.get(&photo).expect("the old entry is a hit");
+        assert_eq!(s.sharpness, Some(12.5));
+
+        cache.record(&photo, Signal::Sharpness(13.0));
+        cache.flush_blocking(Duration::from_secs(5));
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert!(
+            written.contains("13.0"),
+            "the new value is written: {written}"
+        );
+        assert!(
+            !written.contains("phash"),
+            "the next write drops the field: {written}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -639,7 +657,7 @@ mod tests {
         {
             let mut cache = SignalCache::load(&dir);
             cache.record(&a, Signal::Sharpness(1.0));
-            cache.record(&a, Signal::PHash(7));
+            cache.record(&a, Signal::Capture(None));
             cache.flush_blocking(Duration::from_secs(5));
         }
 
@@ -656,7 +674,11 @@ mod tests {
         loaded.absorb(pending);
         let sa = loaded.get(&a).expect("a is known");
         assert_eq!(sa.sharpness, Some(2.0), "the newer value wins");
-        assert_eq!(sa.phash, Some(7), "a field only the file had survives");
+        assert_eq!(
+            sa.capture,
+            Some(CaptureTime::Unreadable),
+            "a field only the file had survives"
+        );
         assert_eq!(loaded.get(&b).and_then(|s| s.sharpness), Some(3.0));
 
         loaded.flush_blocking(Duration::from_secs(5));

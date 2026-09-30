@@ -98,13 +98,10 @@ impl App {
         self.visible.get(self.sel?).copied()
     }
 
-    /// Path of the photo that single-photo actions apply to. In Survey Mode,
-    /// the focused member. In the Loupe with `sel` empty (the filter hid every
-    /// photo, including the open one), the photo on screen.
+    /// Path of the photo that single-photo actions apply to. In the Loupe
+    /// with `sel` empty (the filter hid every photo, including the open one),
+    /// the photo on screen.
     pub(crate) fn selected_path(&self) -> Option<PathBuf> {
-        if self.mode == ViewMode::Survey {
-            return self.survey_members.get(self.survey_focus).cloned();
-        }
         if self.mode == ViewMode::Loupe && self.sel.is_none() {
             return self.want.clone();
         }
@@ -377,7 +374,6 @@ impl App {
         let shown = match self.mode {
             ViewMode::Loupe => true,
             ViewMode::Grid => self.left_tab == LeftTab::Info,
-            ViewMode::Survey => false,
         };
         let path = self.selected_path().filter(|_| shown)?;
         (!self.exif_cache.contains_key(&path)).then_some(path)
@@ -397,7 +393,6 @@ impl App {
         match self.mode {
             ViewMode::Grid => true,
             ViewMode::Loupe => self.left_tab == LeftTab::Info,
-            ViewMode::Survey => false,
         }
     }
 
@@ -431,7 +426,7 @@ impl App {
     pub(super) fn normalize_focus(&mut self) {
         if !self.region_available(self.main_focus) {
             self.main_focus = match self.mode {
-                ViewMode::Grid | ViewMode::Survey => Region::Grid,
+                ViewMode::Grid => Region::Grid,
                 ViewMode::Loupe => Region::Detail,
             };
         }
@@ -439,7 +434,7 @@ impl App {
             return;
         }
         self.focus = match self.mode {
-            ViewMode::Grid | ViewMode::Survey => Region::Grid,
+            ViewMode::Grid => Region::Grid,
             ViewMode::Loupe => Region::Detail,
         };
         self.focus_level = FocusLevel::Selected;
@@ -453,7 +448,7 @@ impl App {
             self.main_focus
         } else {
             match self.mode {
-                ViewMode::Grid | ViewMode::Survey => Region::Grid,
+                ViewMode::Grid => Region::Grid,
                 ViewMode::Loupe => Region::Detail,
             }
         };
@@ -763,7 +758,7 @@ impl App {
         self.request_redraw();
     }
 
-    /// How many controls the F6 cursor walks in the Grid and Survey toolbar,
+    /// How many controls the F6 cursor walks in the Grid toolbar,
     /// taken from the list the toolbar row is drawn from.
     pub(crate) const TOOLBAR_CONTROLS: usize = ToolbarControl::DRAWN;
 

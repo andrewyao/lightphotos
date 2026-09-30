@@ -68,23 +68,12 @@ pub enum UiAction {
     /// Raw per-frame wheel delta over the filmstrip (egui: positive is up or
     /// left). `App` accumulates it across frames into whole photo steps.
     ScrollFilmstrip(f32),
-    /// Best-of-burst badges and dimming. Ignored while a star filter is active.
-    ToggleBursts,
-    /// Duplicate-group badges. Unlike bursts, these ignore the star filter
-    /// because duplicate grouping does not depend on photo order.
-    ToggleDupes,
     /// Show only photos where the face pass found a blink. Covers only photos
     /// the face pass has reached so far.
     ToggleEyesClosed,
     /// Subject-selection overlay. The mask is computed the first time it turns on.
     ToggleSelection,
     ToggleSelectionInvert,
-    /// Open Survey Mode on the duplicate group containing this visible cell.
-    OpenSurvey(usize),
-    CloseSurvey,
-    KeepBestRejectRest,
-    /// Focus this Survey member so rating hotkeys apply to it.
-    FocusSurveyMember(usize),
     /// Load this folder's images and toggle its expansion.
     OpenFolder(std::path::PathBuf),
     /// Open the folder picker (`App::open_folder_picker`).
@@ -168,7 +157,6 @@ mod grid;
 mod info_panel;
 mod loupe;
 mod modals;
-mod survey;
 mod tabs;
 pub mod theme;
 /// `pub(crate)` so `app::nav` can walk `ToolbarControl`, the list the toolbar
@@ -180,7 +168,6 @@ use export_panel::draw_export_panel;
 use grid::{draw_grid, draw_left_panel};
 use loupe::draw_loupe;
 use modals::{confirm_modal, delete_preset_modal, help_modal, preset_name_modal, settings_modal};
-use survey::draw_survey;
 use toolbar::{grid_toolbar, selection_bar};
 
 /// Build the egui UI for one frame.
@@ -200,7 +187,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 
     // egui panels claim space in call order. Drawing the side panels before
     // the toolbar gives them full window height and keeps the toolbar in the
-    // middle column. Survey mode has no side panels.
+    // middle column.
     if app.left_panel_visible() {
         draw_left_panel(ui, app, &mut out);
     }
@@ -214,9 +201,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 
     // The Loupe has no toolbar. Changing the filter while a photo is open
     // could drop that photo out of the Grid's selection and break rating it.
-    if mode == ViewMode::Grid || mode == ViewMode::Loupe {
-        folder_title_bar(ui, app, &mut out);
-    }
+    folder_title_bar(ui, app, &mut out);
     if mode != ViewMode::Loupe {
         grid_toolbar(ui, app, &mut out);
         selection_bar(ui, app, &mut out);
@@ -224,7 +209,6 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     match mode {
         ViewMode::Grid => draw_grid(ui, app, &mut out),
         ViewMode::Loupe => draw_loupe(ui, app, &mut out),
-        ViewMode::Survey => draw_survey(ui, app, &mut out),
     }
     status_toast(ui, app);
     confirm_modal(ui, app, &mut out);

@@ -78,7 +78,7 @@ impl App {
         let dir = (dir != root).then(|| dir.to_path_buf());
         let view = match self.mode {
             ViewMode::Loupe => SessionView::Loupe,
-            ViewMode::Grid | ViewMode::Survey => SessionView::Grid,
+            ViewMode::Grid => SessionView::Grid,
         };
         Some(Session {
             root,
