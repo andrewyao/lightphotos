@@ -23,7 +23,6 @@ impl App {
         (group.rep() == name).then_some((id, group))
     }
 
-    /// Each selected stack's group once, in selection order.
     pub(crate) fn selected_groups(&self) -> Vec<(GroupId, Group)> {
         let mut seen = std::collections::HashSet::new();
         self.selected_cells()

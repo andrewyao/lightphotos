@@ -42,8 +42,6 @@ pub(super) fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
-/// Delete Group: dissolve the selected groups and keep their photos, or trash
-/// every member. Cancel, Esc, or a backdrop click dismisses it.
 pub(super) fn delete_group_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     let Some((photos, groups)) = app.pending_group_delete() else {
         return;
@@ -67,10 +65,6 @@ pub(super) fn delete_group_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput
     }
 }
 
-/// Delete Group's roles as passed to its footer on `platform`. Remove Group,
-/// not the trash, takes the default's place: the right edge on macOS, Linux
-/// and the web, the left edge on Windows. The trash sits between it and
-/// Cancel on both.
 fn delete_group_roles(platform: form::Platform) -> [Role; 3] {
     match platform {
         form::Platform::Mac => [Role::Cancel, Role::Danger, Role::Primary],
@@ -93,8 +87,6 @@ fn delete_group_buttons<'a>(
     })
 }
 
-/// Delete Group's buttons left to right on this platform, the order Tab
-/// walks them.
 pub(crate) fn delete_group_tab_order() -> Vec<Role> {
     let roles = delete_group_roles(form::Platform::CURRENT);
     form::order(&roles, form::Platform::CURRENT)
@@ -315,8 +307,6 @@ mod tests {
     use super::form::{order, Platform};
     use super::*;
 
-    /// The trash is never where the platform puts a dialog's default: the
-    /// right edge on macOS, Linux and the web, the left edge on Windows.
     #[test]
     fn delete_group_orders_its_footer_per_platform_and_trash_is_the_danger() {
         let t = t();
