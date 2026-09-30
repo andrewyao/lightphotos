@@ -1,0 +1,4 @@
+size 1200 800
+idle
+state
+shot grid
