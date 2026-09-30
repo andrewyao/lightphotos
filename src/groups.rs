@@ -19,9 +19,14 @@ use crate::hash::Fnv1a;
 pub struct GroupId(String);
 
 impl GroupId {
+    /// Only ASCII letters, digits, `-` and `_`, so an id joined into a path
+    /// can never leave `groups/`.
     pub fn from_stem(stem: &std::ffi::OsStr) -> Option<GroupId> {
         let s = stem.to_str()?;
-        (!s.is_empty()).then(|| GroupId(s.to_owned()))
+        let safe = !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        safe.then(|| GroupId(s.to_owned()))
     }
 
     #[allow(dead_code)] // only called from #[cfg(test)] today
@@ -490,6 +495,21 @@ mod tests {
         assert_eq!(after.get(&id("g-1")), None, "one photo left, so no group");
         assert_eq!(after.group_of("a".as_ref()), Some(&id("g-2")));
         assert_indexed(&after);
+    }
+
+    #[test]
+    fn a_sidecar_stem_that_could_leave_groups_is_not_an_id() {
+        for bad in ["", "..", ".", "a/b", "../g-1", "g 1", "g.1", "g-\u{e9}"] {
+            assert_eq!(GroupId::from_stem(bad.as_ref()), None, "{bad:?}");
+        }
+        for good in ["g-5f3a9c10e2", "g-fixture00001", "g-1", "My_Group"] {
+            assert_eq!(GroupId::from_stem(good.as_ref()), Some(id(good)));
+        }
+        let minted = GroupId::mint(&group(&["a", "b"], "a"), at(3), |_| false);
+        assert_eq!(
+            GroupId::from_stem(minted.to_string().as_ref()),
+            Some(minted)
+        );
     }
 
     #[test]
