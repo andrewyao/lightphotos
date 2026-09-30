@@ -210,12 +210,13 @@ impl App {
             .collect()
     }
 
-    /// What Delete trashes: `selected_paths` with each selected stack
-    /// expanded to every member still in the playlist. The confirm counts
-    /// this list and `start_delete` receives it, so the two cannot disagree.
+    /// What Delete trashes: in the Grid, `selected_paths` with each selected
+    /// stack expanded to every member still in the playlist; in the Loupe,
+    /// the photo on screen alone. The confirm counts this list and
+    /// `start_delete` receives it, so the two cannot disagree.
     pub(crate) fn delete_paths(&self) -> Vec<PathBuf> {
         let cells = self.selected_cells();
-        if cells.is_empty() {
+        if cells.is_empty() || self.mode == ViewMode::Loupe {
             return self.selected_paths();
         }
         let Some(pl) = self.playlist.as_ref() else {
