@@ -3,6 +3,7 @@
 //! Folder listing, rating filters, burst grouping by time, and grid/tree
 //! arrow-key movement.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -40,21 +41,31 @@ impl Cmp {
     }
 }
 
-/// Indices of `entries` that pass `filter`, in order. `rating_of` returns
+/// Indices of `entries` that get a cell of their own, in order: every photo
+/// but the group members `hidden` names, which show through their group's
+/// representative. The rating and eyes filters run after this, so they judge
+/// a group by its representative alone and never see a hidden member.
+#[hotpath::measure]
+pub fn collapse_groups(entries: &[PathBuf], hidden: impl Fn(&OsStr) -> bool) -> Vec<usize> {
+    (0..entries.len())
+        .filter(|&i| entries[i].file_name().is_none_or(|n| !hidden(n)))
+        .collect()
+}
+
+/// The `cells` whose photo passes `filter`, in order. `rating_of` returns
 /// 0..=5, with 0 for unset, so unset photos never pass `Gte` or `Eq` with a
 /// positive value.
 #[hotpath::measure]
 pub fn visible_indices(
     entries: &[PathBuf],
+    mut cells: Vec<usize>,
     filter: Option<(Cmp, u8)>,
     rating_of: impl Fn(&Path) -> u8,
 ) -> Vec<usize> {
-    match filter {
-        None => (0..entries.len()).collect(),
-        Some((cmp, value)) => (0..entries.len())
-            .filter(|&i| cmp.matches(rating_of(&entries[i]), value))
-            .collect(),
+    if let Some((cmp, value)) = filter {
+        cells.retain(|&i| cmp.matches(rating_of(&entries[i]), value));
     }
+    cells
 }
 
 /// A 0-based, increasing burst id per entry. A new burst starts when an entry's
@@ -92,11 +103,13 @@ fn read_dir_paths(dir: &Path) -> Vec<PathBuf> {
 /// Sort case-insensitively by file name. `web_fs.rs` uses this too, so the
 /// browser build lists folders in the same order.
 pub(crate) fn sort_by_name(entries: &mut [PathBuf]) {
-    entries.sort_by(|a, b| {
-        let an = a.file_name().map(|s| s.to_string_lossy().to_lowercase());
-        let bn = b.file_name().map(|s| s.to_string_lossy().to_lowercase());
-        an.cmp(&bn)
-    });
+    entries.sort_by(|a, b| name_key(a.file_name()).cmp(&name_key(b.file_name())));
+}
+
+/// The key [`sort_by_name`] orders by, shared with [`Playlist::index_of`] so
+/// the two can never disagree.
+fn name_key(name: Option<&OsStr>) -> Option<String> {
+    name.map(|s| s.to_string_lossy().to_lowercase())
 }
 
 #[hotpath::measure]
@@ -257,6 +270,22 @@ impl Playlist {
         self.entries.get(index).map(|p| p.as_path())
     }
 
+    /// The index of the entry named `name`. A binary search on
+    /// [`sort_by_name`]'s key finds the run of case-insensitive twins, and a
+    /// scan of that run finds the exact name. Groups name their photos by
+    /// file name, so this is how a group's representative finds its cell.
+    pub fn index_of(&self, name: &OsStr) -> Option<usize> {
+        let key = name_key(Some(name));
+        let start = self
+            .entries
+            .partition_point(|p| name_key(p.file_name()) < key);
+        self.entries[start..]
+            .iter()
+            .take_while(|p| name_key(p.file_name()) == key)
+            .position(|p| p.file_name() == Some(name))
+            .map(|i| start + i)
+    }
+
     /// Drop entries where `remove` is true, such as trashed files. This shifts
     /// indices, so the caller must rebuild derived views (`recompute_visible`).
     pub fn remove_matching(&mut self, remove: impl Fn(&Path) -> bool) {
@@ -275,10 +304,64 @@ mod tests {
         names.iter().map(PathBuf::from).collect()
     }
 
+    fn all(e: &[PathBuf]) -> Vec<usize> {
+        (0..e.len()).collect()
+    }
+
     #[test]
     fn visible_indices_no_filter_is_identity() {
         let e = paths(&["a", "b", "c"]);
-        assert_eq!(visible_indices(&e, None, |_| 0), vec![0, 1, 2]);
+        assert_eq!(visible_indices(&e, all(&e), None, |_| 0), vec![0, 1, 2]);
+    }
+
+    /// A group shows as its representative, in the representative's place,
+    /// and every other photo keeps its own cell in folder order.
+    #[test]
+    fn collapse_keeps_representatives_and_singles_in_order() {
+        let e = paths(&["a", "b", "c", "d", "e"]);
+        let hidden = |n: &OsStr| n == "b" || n == "d";
+        assert_eq!(collapse_groups(&e, hidden), vec![0, 2, 4]);
+        assert_eq!(collapse_groups(&e, |_| false), all(&e));
+    }
+
+    fn playlist(names: &[&str]) -> Playlist {
+        let mut entries: Vec<PathBuf> = names.iter().map(|n| Path::new("/f").join(n)).collect();
+        sort_by_name(&mut entries);
+        Playlist {
+            entries,
+            index: 0,
+            dir: PathBuf::from("/f"),
+        }
+    }
+
+    /// Case twins sort together in listing order, so the exact name has to be
+    /// found inside the run, not at its start.
+    #[test]
+    fn index_of_finds_the_exact_name_among_case_ties() {
+        let pl = playlist(&["b.jpg", "IMG.jpg", "a.jpg", "img.JPG", "Img.jpg"]);
+        for name in ["IMG.jpg", "img.JPG", "Img.jpg", "a.jpg", "b.jpg"] {
+            let i = pl.index_of(OsStr::new(name)).expect(name);
+            assert_eq!(pl.entry(i).unwrap().file_name().unwrap(), name);
+        }
+        assert_eq!(pl.index_of(OsStr::new("img.jpg")), None);
+        assert_eq!(pl.index_of(OsStr::new("c.jpg")), None);
+    }
+
+    /// Every entry of a sorted listing is found at its own index.
+    #[test]
+    fn index_of_finds_every_entry_of_a_sorted_listing() {
+        let names: Vec<String> = (0..300)
+            .map(|i| match i % 3 {
+                0 => format!("P{i:04}.JPG"),
+                1 => format!("p{:04}.jpg", i - 1),
+                _ => format!("dsc_{i}.nef"),
+            })
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let pl = playlist(&refs);
+        for (i, p) in pl.entries().iter().enumerate() {
+            assert_eq!(pl.index_of(p.file_name().unwrap()), Some(i), "{p:?}");
+        }
     }
 
     #[test]
@@ -292,26 +375,41 @@ mod tests {
         };
 
         // Unset (0) never passes a positive Gte.
-        assert_eq!(visible_indices(&e, Some((Cmp::Gte, 3)), rating), vec![1, 2]);
         assert_eq!(
-            visible_indices(&e, Some((Cmp::Gte, 1)), rating),
+            visible_indices(&e, all(&e), Some((Cmp::Gte, 3)), rating),
+            vec![1, 2]
+        );
+        assert_eq!(
+            visible_indices(&e, all(&e), Some((Cmp::Gte, 1)), rating),
             vec![1, 2, 3]
         );
         assert_eq!(
-            visible_indices(&e, Some((Cmp::Gte, 6)), rating),
+            visible_indices(&e, all(&e), Some((Cmp::Gte, 6)), rating),
             Vec::<usize>::new()
         );
 
-        assert_eq!(visible_indices(&e, Some((Cmp::Eq, 5)), rating), vec![2]);
-        assert_eq!(visible_indices(&e, Some((Cmp::Eq, 0)), rating), vec![0]);
+        assert_eq!(
+            visible_indices(&e, all(&e), Some((Cmp::Eq, 5)), rating),
+            vec![2]
+        );
+        assert_eq!(
+            visible_indices(&e, all(&e), Some((Cmp::Eq, 0)), rating),
+            vec![0]
+        );
 
         // Unset (0) always passes Lte.
-        assert_eq!(visible_indices(&e, Some((Cmp::Lte, 1)), rating), vec![0, 3]);
         assert_eq!(
-            visible_indices(&e, Some((Cmp::Lte, 5)), rating),
+            visible_indices(&e, all(&e), Some((Cmp::Lte, 1)), rating),
+            vec![0, 3]
+        );
+        assert_eq!(
+            visible_indices(&e, all(&e), Some((Cmp::Lte, 5)), rating),
             vec![0, 1, 2, 3]
         );
-        assert_eq!(visible_indices(&e, Some((Cmp::Lte, 0)), rating), vec![0]);
+        assert_eq!(
+            visible_indices(&e, all(&e), Some((Cmp::Lte, 0)), rating),
+            vec![0]
+        );
     }
 
     fn t(secs: u64) -> Option<SystemTime> {

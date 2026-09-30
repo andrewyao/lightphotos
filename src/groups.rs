@@ -235,6 +235,14 @@ impl Groups {
         self.of.get(name)
     }
 
+    /// Whether `name` is a member that is not its group's representative,
+    /// so it has no cell of its own.
+    pub fn hides(&self, name: &OsStr) -> bool {
+        self.of
+            .get(name)
+            .is_some_and(|id| self.by_id[id].rep != name)
+    }
+
     #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn iter(&self) -> impl Iterator<Item = (&GroupId, &Group)> {
         self.by_id.iter()
@@ -431,6 +439,21 @@ mod tests {
                 assert_eq!(groups.group_of(m), Some(id));
             }
         }
+    }
+
+    #[test]
+    fn hides_only_non_representative_members() {
+        let groups = load(
+            vec![(id("g-a"), saved(&["a", "b", "c"], "b"))],
+            &["a", "b", "c", "d"],
+        );
+        assert!(groups.hides("a".as_ref()));
+        assert!(groups.hides("c".as_ref()));
+        assert!(!groups.hides("b".as_ref()), "the representative has a cell");
+        assert!(
+            !groups.hides("d".as_ref()),
+            "a photo in no group has a cell"
+        );
     }
 
     #[test]
