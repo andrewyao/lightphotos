@@ -237,22 +237,17 @@ caches, or `image_decode.rs`.
 
 ```mermaid
 flowchart TD
-    keys["User presses B or D, or opens\nShow Selection in the Loupe\napp/keys.rs, ui/loupe.rs"]
-    keys --> req["request_feature_prints / request_face_quality (app/thumbs.rs)\nrequest_selection_mask (app/loupe.rs)"]
-    req --> pools["DistancePool and FacePool: 2 workers each\nsegmentation: one thread per request"]
+    keys["User opens Show Selection in the Loupe\nui/loupe.rs"]
+    keys --> req["request_face_quality (app/thumbs.rs)\nrequest_selection_mask (app/loupe.rs)"]
+    req --> pools["FacePool: 2 workers\nsegmentation: one thread per request"]
     pools --> vn["vision::perform_request\nVNImageRequestHandler decodes the file itself"]
-    vn --> fp["VNGenerateImageFeaturePrintRequest\nfeatureprint.rs"]
     vn --> fl["VNDetectFaceLandmarksRequest\nfacequality.rs"]
     vn --> sg["VNGeneratePersonSegmentationRequest, then\nVNGenerateForegroundInstanceMaskRequest\nsegmentation.rs"]
-    fp --> dup["duplicates::refine_by_feature_print\nsplits a dHash group that phash.rs over-joined"]
     fl --> blink["eye-openness geometry -> EyeState\nfeeds burst.rs's best-frame score"]
     sg --> mask["Mask -> the Loupe's selection overlay"]
 ```
 
 **What each request is for:**
-- Feature prints refine duplicate groups. `phash.rs`'s dHash finds candidates
-  cheaply and over-joins them, so Vision only ever sees pairs dHash already
-  flagged. That is what bounds the cost.
 - Face landmarks drive blink detection. Vision returns eye landmark points,
   and the scoring on top of them is plain geometry, testable with fabricated
   points.
@@ -272,16 +267,11 @@ flowchart TD
 - Nothing is persisted. `ImageRecord` stores `rating`, `label`,
   `adjustments`, `touchups` and `rotation` and nothing else, so every signal
   is recomputed from scratch on the next launch.
-- A duplicate group of `n` members costs `2(n-1)` feature-print computations
-  rather than `n`. `VNFeaturePrintObservation` is not `Send`, so each job
-  computes both prints on one thread and recomputes the anchor's print per
-  member.
-- Both pools cap at two workers (`cores - 2`, clamped to `1..=2`) to keep
+- `FacePool` caps at two workers (`cores - 2`, clamped to `1..=2`) to keep
   contention for Vision and the Neural Engine low.
 
 **What is not known.** None of this is a measurement. `vision.rs`,
-`featureprint.rs`, `facequality.rs`, `segmentation.rs`, `duplicates.rs`,
-`phash.rs` and `sharpness.rs` carry zero `hotpath::measure` call sites between
+`facequality.rs`, `segmentation.rs` and `sharpness.rs` carry zero `hotpath::measure` call sites between
 them, against 40 across decode, thumbnail, catalog, navigation and autotone.
 No wall-clock figure for a Vision call exists anywhere in the repo, so every
 cost claim above is structural.
@@ -289,8 +279,7 @@ cost claim above is structural.
 Off macOS, every entry point here returns `Err`, and the UI keeps that out of
 the user's way rather than surfacing it. `App::selection_supported()` is
 `cfg!(target_os = "macos")`, so the Loupe's "Show Selection" button does not
-render on Linux, Windows or the browser at all. `DistancePool::new` and
-`FacePool::new` return `None` when no worker thread starts, which is what
+render on Linux, Windows or the browser at all. `FacePool::new` returns `None` when no worker thread starts, which is what
 happens on wasm32, and `App` then holds no pool to submit to.
 
 ## File index
@@ -315,10 +304,7 @@ happens on wasm32, and `App` then holds no pool to submit to.
 | `web/web_fs.rs` | File System Access folder picking/listing/byte reads | wasm32 |
 | `web/web_catalog_fs.rs` | File System Access counterpart of `catalog.rs`'s sidecar I/O | wasm32 |
 | `app/loupe.rs` | View-state math (zoom/pan/fit) and the decision to fetch full resolution | all |
-| `app/thumbs.rs` | `try_show`'s tier-selection logic, thumbnail texture sync, burst/duplicate scoring hooks | all |
+| `app/thumbs.rs` | `try_show`'s tier-selection logic, thumbnail texture sync, capture-time and face signal hooks | all |
 | `vision.rs` | Runs one `VNRequest` against a file URL and blocks; Vision does its own decode | macOS (the module itself is `cfg(target_os = "macos")`) |
-| `featureprint.rs` | Learned image embeddings and the distance between two, refining duplicate groups; owns `DistancePool` | macOS; the non-mac arm returns `Err`, and on wasm32 the pool has no worker to start, so `DistancePool::new` returns `None` |
 | `facequality.rs` | Face landmarks from Vision, then eye-openness geometry for blink detection; owns `FacePool` | macOS; the non-mac arm returns `Err` |
 | `segmentation.rs` | Person mask, falling back to a general foreground mask, for the Loupe's selection overlay | macOS; the non-mac arm returns `Err`, and the button is hidden by `App::selection_supported()` |
-| `phash.rs` | 64-bit dHash over a 9x8 gray grid, computed from the thumbnail the Grid already decoded | all |
-| `duplicates.rs` | Groups dHash candidates, then splits them by feature-print distance | all (grouping is pure; the refinement step only gets distances on macOS) |

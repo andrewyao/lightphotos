@@ -22,7 +22,8 @@ fn crop_bounds(crop: Option<Crop>, w: u32, h: u32) -> (u32, u32, u32, u32) {
 }
 
 /// RGBA8 to Rec.601 luma (0..255), box-averaged down to `out_w` x `out_h`.
-/// The output must not be larger than the input. Used by sharpness and dHash.
+/// The output must not be larger than the input.
+#[cfg_attr(not(test), allow(dead_code))]
 #[hotpath::measure]
 pub(crate) fn resize_luma(
     rgba: &[u8],

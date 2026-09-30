@@ -232,8 +232,6 @@ impl FacePool {
     /// pool with no workers accepts jobs that never run, and the callers that
     /// mark those jobs pending would spin the frame loop waiting for them.
     pub fn new() -> Option<Self> {
-        // Only burst and duplicate members are analyzed, so two workers are
-        // enough and keep contention for Vision and the Neural Engine low.
         let cores = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
@@ -315,6 +313,27 @@ mod tests {
         path
     }
 
+    /// Whether Vision can run a model on this machine. GitHub's macOS runners
+    /// are VMs with no GPU or Neural Engine, and there every face request fails
+    /// ("Could not create inference context"). Tests that need a model return
+    /// early when this is false. Any other error counts as able, so a real
+    /// regression still fails the test that hits it.
+    fn vision_can_infer() -> bool {
+        static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *CAN.get_or_init(|| {
+            let path = write_jpeg("vision_can_infer.jpg", 64, 64, &[128u8; 64 * 64 * 4]);
+            let result = detect_faces(&path);
+            let _ = std::fs::remove_file(&path);
+            match result {
+                Err(e) if e.contains("Could not create inference context") => {
+                    eprintln!("skipping: Vision cannot run a model here ({e})");
+                    false
+                }
+                _ => true,
+            }
+        })
+    }
+
     #[test]
     fn a_pool_that_started_no_workers_is_never_handed_to_a_caller() {
         assert!(
@@ -360,7 +379,7 @@ mod tests {
     // still carry a job all the way through Vision and back.
     #[test]
     fn a_running_pool_returns_an_analysis_for_a_submitted_photo() {
-        if !crate::featureprint::vision_can_infer() {
+        if !vision_can_infer() {
             return;
         }
         let (w, h) = (64, 64);
@@ -393,7 +412,7 @@ mod tests {
     // error. Landmark quality needs real portraits; see `src/bin/face_probe.rs`.
     #[test]
     fn detect_faces_runs_and_finds_none_in_a_blank_image() {
-        if !crate::featureprint::vision_can_infer() {
+        if !vision_can_infer() {
             return;
         }
         let (w, h) = (64, 64);

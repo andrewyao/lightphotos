@@ -6,7 +6,6 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::app::SHOW_GROUPING_TOOLS;
 use crate::develop::{Section, SliderId};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -241,14 +240,8 @@ pub struct Strings {
     pub show_rated: fn(&str, u8) -> String,
     pub unrated: &'static str,
     pub unrated_tip: &'static str,
-    pub bursts: &'static str,
-    pub bursts_needs_no_filter: &'static str,
-    pub bursts_tip: &'static str,
-    pub duplicates: &'static str,
-    pub duplicates_tip: &'static str,
     pub eyes_closed: &'static str,
     pub eyes_closed_tip: &'static str,
-    pub eyes_closed_needs_grouping: &'static str,
     pub n_photos: fn(usize) -> String,
     /// The grid's message when the filters hide every photo.
     pub no_filter_matches: &'static str,
@@ -375,15 +368,8 @@ pub struct Strings {
     /// (year, month, day, hour, minute)
     pub capture_date: fn(i32, u32, u32, u32, u32) -> String,
 
-    // Survey.
-    pub survey_heading: fn(usize) -> String,
-    pub keep_best: &'static str,
-    pub keep_best_tip: &'static str,
-    pub close_esc: &'static str,
-
     // Window titles.
     pub grid_title: fn(usize) -> String,
-    pub survey_title: fn(usize) -> String,
 
     // Status messages.
     pub deleting: fn(usize, usize) -> String,
@@ -407,7 +393,6 @@ pub struct Strings {
     pub deleted_preset: fn(&str) -> String,
     pub cleared_rating: fn(usize) -> String,
     pub rated: fn(usize, u8) -> String,
-    pub kept_best: fn(usize) -> String,
     pub export_title: fn(usize) -> String,
     pub export_destination: &'static str,
     pub export_to_folder: &'static str,
@@ -650,14 +635,8 @@ pub static EN: Strings = Strings {
     show_rated: |cmp, n| format!("Show photos rated {cmp} {n}"),
     unrated: "Unrated",
     unrated_tip: "Show only photos with no rating",
-    bursts: "Bursts",
-    bursts_needs_no_filter: "Clear the filter to use Bursts",
-    bursts_tip: "Group bursts and badge the sharpest frame (B)",
-    duplicates: "Duplicates",
-    duplicates_tip: "Group visually-similar frames and badge them (D)",
     eyes_closed: "Eyes closed",
     eyes_closed_tip: "Show only photos where someone blinked",
-    eyes_closed_needs_grouping: "Turn on Bursts or Duplicates to detect blinks",
     n_photos: |n| format!("{n} photos"),
     no_filter_matches: "No photos match the filter",
     show_all_photos: "Show All Photos",
@@ -763,17 +742,6 @@ pub static EN: Strings = Strings {
                     },
                 ),
             ],
-        },
-        HelpSection {
-            title: "Group",
-            rows: if SHOW_GROUPING_TOOLS {
-                &[
-                    ("B", "Show or hide burst groups"),
-                    ("D", "Show or hide duplicate groups"),
-                ]
-            } else {
-                &[]
-            },
         },
         HelpSection {
             title: "Subject selection",
@@ -905,14 +873,7 @@ pub static EN: Strings = Strings {
         format!("{mon} {day}, {year} {h12}:{minute:02} {ampm}")
     },
 
-    survey_heading: |n| format!("Survey \u{2014} {n} photos"),
-    keep_best: "Keep Best, Reject Rest",
-    keep_best_tip:
-        "Rate the best photo \u{2605}5 and every other photo in this group \u{2605}1 (Enter)",
-    close_esc: "Close (Esc)",
-
     grid_title: |n| format!("Grid  ({n} photos)"),
-    survey_title: |n| format!("Survey  ({n} photos)"),
 
     deleting: if WEB {
         |done, total| format!("Deleting {done}/{total}\u{2026}")
@@ -945,7 +906,6 @@ pub static EN: Strings = Strings {
     deleted_preset: |name| format!("Deleted preset {name}"),
     cleared_rating: |n| format!("Cleared rating on {n} photo(s)"),
     rated: |n, stars| format!("Rated {n} photo(s) \u{2605}{stars}"),
-    kept_best: |n| format!("Kept best, rated {n} sibling(s) \u{2605}1"),
     export_title: |n| {
         if n == 1 {
             "Export 1 photo".into()
@@ -1156,14 +1116,8 @@ pub static ZH: Strings = Strings {
     show_rated: |cmp, n| format!("显示评分 {cmp} {n} 星的照片"),
     unrated: "未评分",
     unrated_tip: "只显示没有评分的照片",
-    bursts: "连拍",
-    bursts_needs_no_filter: "清除筛选后才能使用连拍",
-    bursts_tip: "将连拍分组，并标记最清晰的一张 (B)",
-    duplicates: "重复",
-    duplicates_tip: "将外观相似的照片分组并加标记 (D)",
     eyes_closed: "闭眼",
     eyes_closed_tip: "只显示有人闭眼的照片",
-    eyes_closed_needs_grouping: "打开连拍或重复后才能检测闭眼",
     n_photos: |n| format!("{n} 张照片"),
     no_filter_matches: "筛选后没有照片",
     show_all_photos: "显示全部照片",
@@ -1268,14 +1222,6 @@ pub static ZH: Strings = Strings {
                     },
                 ),
             ],
-        },
-        HelpSection {
-            title: "分组",
-            rows: if SHOW_GROUPING_TOOLS {
-                &[("B", "显示或隐藏连拍分组"), ("D", "显示或隐藏重复分组")]
-            } else {
-                &[]
-            },
         },
         HelpSection {
             title: "主体",
@@ -1395,13 +1341,7 @@ pub static ZH: Strings = Strings {
         format!("{year}年{month}月{day}日 {hour:02}:{minute:02}")
     },
 
-    survey_heading: |n| format!("组内比较 \u{2014} {n} 张照片"),
-    keep_best: "保留最佳，淘汰其余",
-    keep_best_tip: "将最佳照片评为 \u{2605}5，组内其他照片评为 \u{2605}1 (Enter)",
-    close_esc: "关闭 (Esc)",
-
     grid_title: |n| format!("网格  ({n} 张照片)"),
-    survey_title: |n| format!("组内比较  ({n} 张照片)"),
 
     deleting: if WEB {
         |done, total| format!("正在删除 {done}/{total}\u{2026}")
@@ -1434,7 +1374,6 @@ pub static ZH: Strings = Strings {
     deleted_preset: |name| format!("已删除预设 {name}"),
     cleared_rating: |n| format!("已清除 {n} 张照片的评分"),
     rated: |n, stars| format!("已将 {n} 张照片评为 \u{2605}{stars}"),
-    kept_best: |n| format!("已保留最佳，其余 {n} 张评为 \u{2605}1"),
     export_title: |n| format!("导出 {n} 张照片"),
     export_destination: "目标",
     export_to_folder: "文件夹",
@@ -1695,7 +1634,6 @@ mod tests {
             "ui/info_panel.rs",
             "ui/loupe.rs",
             "ui/modals.rs",
-            "ui/survey.rs",
             "ui/toolbar.rs",
             "app/mod.rs",
             "app/accessors.rs",
@@ -1799,9 +1737,6 @@ mod tests {
         ];
         if SUBJECT_KEYS {
             bound.extend(["O", "Shift+O"]);
-        }
-        if SHOW_GROUPING_TOOLS {
-            bound.extend(["B", "D"]);
         }
         let missing: Vec<&str> = bound
             .into_iter()

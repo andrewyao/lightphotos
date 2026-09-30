@@ -17,8 +17,8 @@ overlays); a hand-rolled wgpu renderer draws the loupe image.
 after the one-time `rawler` vendor step (see [Build from scratch](#build-from-scratch)).
 However, real runtime testing has been performed on Linux only, not on Windows yet.
 
-HEIC support and Vision-backed features (duplicate refinement, face/blink
-scoring, subject-selection overlay) are macOS-only.
+HEIC support and Vision-backed features (face/blink scoring,
+subject-selection overlay) are macOS-only.
 
 See [`plans/plan-i-native-linux-windows-port.md`](plans/plan-i-native-linux-windows-port.md)
 for full implementation status.

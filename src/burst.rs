@@ -1,21 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Picks the best frame of each burst from per-frame burst groups and scores.
-
-use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
-
-use crate::navigation::group_by_time;
+use std::time::Duration;
 
 /// Max gap between consecutive shots in one burst.
 pub const BURST_GAP: Duration = Duration::from_secs(2);
-
-/// A frame's role in a burst of 2+ frames. Single frames get `None`.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum BurstMark {
-    Best,
-    Sibling,
-}
 
 /// Strictly better: any score beats no score. Strictness keeps the earliest
 /// frame as the winner on ties.
@@ -27,49 +15,18 @@ fn score_gt(a: Option<f64>, b: Option<f64>) -> bool {
     }
 }
 
-/// One mark per entry. `scores` is parallel to `group_ids`. In a group of 2+,
-/// the highest score is `Best` and the rest are `Sibling`. Ties and missing
-/// scores go to the earliest frame.
-pub fn compute_marks(group_ids: &[u32], scores: &[Option<f64>]) -> Vec<Option<BurstMark>> {
-    let score_at = |i: usize| scores.get(i).copied().flatten();
-
-    let mut sizes: HashMap<u32, usize> = HashMap::new();
-    for &g in group_ids {
-        *sizes.entry(g).or_insert(0) += 1;
-    }
-
-    let mut best: HashMap<u32, usize> = HashMap::new();
-    for (i, &g) in group_ids.iter().enumerate() {
-        match best.get(&g).copied() {
-            None => {
-                best.insert(g, i);
-            }
-            Some(bi) => {
-                if score_gt(score_at(i), score_at(bi)) {
-                    best.insert(g, i);
-                }
-            }
+/// Index of the best frame in `scores`: the highest score, with ties and
+/// missing scores going to the earliest frame. `0` for an empty slice.
+pub fn best_index(scores: &[Option<f64>]) -> usize {
+    let mut best = 0;
+    for (i, &s) in scores.iter().enumerate().skip(1) {
+        if score_gt(s, scores[best]) {
+            best = i;
         }
     }
-
-    group_ids
-        .iter()
-        .enumerate()
-        .map(|(i, &g)| {
-            if sizes.get(&g).copied().unwrap_or(0) < 2 {
-                None
-            } else if best.get(&g) == Some(&i) {
-                Some(BurstMark::Best)
-            } else {
-                Some(BurstMark::Sibling)
-            }
-        })
-        .collect()
+    best
 }
 
-/// Fold eye state into the sharpness score before [`compute_marks`]. New
-/// culling signals belong here, so marking only ever compares one number.
-///
 /// Sharpness is never negative, so a blink maps to `(-1, 0)`: below every
 /// open or unknown frame, but still ordered by sharpness if everyone blinked.
 /// Unknown eyes leave the score alone. A blinking frame still beats a frame
@@ -85,17 +42,6 @@ pub fn combined_score(
     }
 }
 
-/// Group by capture time, then mark. The app calls this whenever times or
-/// scores change.
-pub fn marks_for(
-    times: &[Option<SystemTime>],
-    scores: &[Option<f64>],
-    gap: Duration,
-) -> Vec<Option<BurstMark>> {
-    let groups = group_by_time(times, gap);
-    compute_marks(&groups, scores)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,26 +50,20 @@ mod tests {
 
     #[test]
     fn a_blink_loses_to_a_blurrier_open_eyed_sibling() {
-        let scores = vec![
+        let scores = [
             combined_score(Some(400.0), Some(EyeState::Closed)),
             combined_score(Some(100.0), Some(EyeState::Open)),
         ];
-        assert_eq!(
-            compute_marks(&[0, 0], &scores),
-            vec![Some(BurstMark::Sibling), Some(BurstMark::Best)]
-        );
+        assert_eq!(best_index(&scores), 1);
     }
 
     #[test]
     fn an_all_blinking_burst_still_prefers_its_sharpest_frame() {
-        let scores = vec![
+        let scores = [
             combined_score(Some(10.0), Some(EyeState::Closed)),
             combined_score(Some(90.0), Some(EyeState::Closed)),
         ];
-        assert_eq!(
-            compute_marks(&[0, 0], &scores),
-            vec![Some(BurstMark::Sibling), Some(BurstMark::Best)]
-        );
+        assert_eq!(best_index(&scores), 1);
     }
 
     #[test]
@@ -133,14 +73,11 @@ mod tests {
         assert_eq!(combined_score(None, Some(EyeState::Open)), None);
         assert_eq!(combined_score(None, None), None);
         // Unknown eyes must rank above a blink.
-        let scores = vec![
+        let scores = [
             combined_score(Some(1.0), None),
             combined_score(Some(500.0), Some(EyeState::Closed)),
         ];
-        assert_eq!(
-            compute_marks(&[0, 0], &scores),
-            vec![Some(BurstMark::Best), Some(BurstMark::Sibling)]
-        );
+        assert_eq!(best_index(&scores), 0);
     }
 
     #[test]
@@ -157,79 +94,36 @@ mod tests {
     }
 
     #[test]
-    fn singleton_group_is_unmarked() {
-        assert_eq!(compute_marks(&[0], &[None]), vec![None]);
-        assert_eq!(
-            compute_marks(&[0, 1, 2], &[Some(1.0), Some(2.0), Some(3.0)]),
-            vec![None, None, None]
-        );
+    fn the_highest_score_wins() {
+        assert_eq!(best_index(&[Some(1.0), Some(2.0)]), 1);
+        assert_eq!(best_index(&[Some(1.0), Some(9.0), Some(3.0)]), 1);
     }
 
     #[test]
-    fn two_member_burst_picks_higher_score() {
-        assert_eq!(
-            compute_marks(&[0, 0], &[Some(1.0), Some(2.0)]),
-            vec![Some(BurstMark::Sibling), Some(BurstMark::Best)]
-        );
+    fn an_all_unscored_burst_defaults_to_the_first_frame() {
+        assert_eq!(best_index(&[None, None, None]), 0);
     }
 
     #[test]
-    fn all_unscored_burst_defaults_to_first() {
-        assert_eq!(
-            compute_marks(&[0, 0, 0], &[None, None, None]),
-            vec![
-                Some(BurstMark::Best),
-                Some(BurstMark::Sibling),
-                Some(BurstMark::Sibling)
-            ]
-        );
+    fn a_tie_keeps_the_earliest_frame() {
+        assert_eq!(best_index(&[Some(5.0), Some(5.0)]), 0);
+        assert_eq!(best_index(&[Some(1.0), Some(5.0), Some(5.0)]), 1);
     }
 
     #[test]
-    fn tie_keeps_earliest_as_best() {
-        assert_eq!(
-            compute_marks(&[0, 0], &[Some(5.0), Some(5.0)]),
-            vec![Some(BurstMark::Best), Some(BurstMark::Sibling)]
-        );
+    fn a_scored_frame_beats_an_earlier_unscored_one() {
+        assert_eq!(best_index(&[None, Some(1.0)]), 1);
+        assert_eq!(best_index(&[None, None, Some(0.0), None]), 2);
     }
 
     #[test]
-    fn scored_member_beats_unscored_even_if_later() {
-        assert_eq!(
-            compute_marks(&[0, 0], &[None, Some(1.0)]),
-            vec![Some(BurstMark::Sibling), Some(BurstMark::Best)]
-        );
+    fn an_unscored_frame_never_displaces_a_scored_one() {
+        assert_eq!(best_index(&[Some(0.0), None]), 0);
     }
 
     #[test]
-    fn mixed_groups_are_independent() {
-        let groups = [0u32, 0, 1, 2, 2];
-        let scores = [Some(1.0), Some(9.0), Some(3.0), None, Some(4.0)];
-        assert_eq!(
-            compute_marks(&groups, &scores),
-            vec![
-                Some(BurstMark::Sibling),
-                Some(BurstMark::Best),
-                None,
-                Some(BurstMark::Sibling),
-                Some(BurstMark::Best),
-            ]
-        );
-    }
-
-    #[test]
-    fn marks_for_groups_by_gap_then_marks() {
-        let t = |s: u64| Some(SystemTime::UNIX_EPOCH + Duration::from_secs(s));
-        let times = [t(0), t(1), t(10), t(11)];
-        let scores = [Some(1.0), Some(2.0), Some(8.0), Some(3.0)];
-        assert_eq!(
-            marks_for(&times, &scores, Duration::from_secs(3)),
-            vec![
-                Some(BurstMark::Sibling),
-                Some(BurstMark::Best),
-                Some(BurstMark::Best),
-                Some(BurstMark::Sibling),
-            ]
-        );
+    fn an_empty_or_single_burst_picks_index_zero() {
+        assert_eq!(best_index(&[]), 0);
+        assert_eq!(best_index(&[None]), 0);
     }
 }

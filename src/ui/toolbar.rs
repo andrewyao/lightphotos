@@ -1,9 +1,9 @@
 use super::*;
 
-use crate::app::{App, Region, SHOW_GROUPING_TOOLS};
+use crate::app::{App, Region, SHOW_EYES_FILTER};
 use crate::navigation::Cmp;
 
-/// A keyboard-focusable control in the Grid and Survey toolbar. `ALL` is the
+/// A keyboard-focusable control in the Grid toolbar. `ALL` is the
 /// row order: `grid_toolbar` draws the row from it and `App::toolbar_move`
 /// walks it, so the F6 cursor's index is a position in
 /// [`ToolbarControl::drawn`].
@@ -13,8 +13,6 @@ pub(crate) enum ToolbarControl {
     FilterCmp(Cmp),
     Star(u8),
     Unrated,
-    Bursts,
-    Dupes,
     EyesClosed,
 }
 
@@ -30,8 +28,6 @@ impl ToolbarControl {
         Self::Star(3),
         Self::Star(4),
         Self::Star(5),
-        Self::Bursts,
-        Self::Dupes,
         Self::EyesClosed,
     ];
 
@@ -49,11 +45,9 @@ impl ToolbarControl {
         n
     };
 
-    /// The grouping three are hidden while `SHOW_GROUPING_TOOLS` is off. The
-    /// `B` and `D` keys still work.
     const fn is_drawn(self) -> bool {
         match self {
-            Self::Bursts | Self::Dupes | Self::EyesClosed => SHOW_GROUPING_TOOLS,
+            Self::EyesClosed => SHOW_EYES_FILTER,
             _ => true,
         }
     }
@@ -66,7 +60,7 @@ impl ToolbarControl {
     fn starts_group(self) -> bool {
         matches!(
             self,
-            Self::FilterCmp(Cmp::Gte) | Self::Star(1) | Self::Bursts
+            Self::FilterCmp(Cmp::Gte) | Self::Star(1) | Self::EyesClosed
         )
     }
 
@@ -80,8 +74,6 @@ impl ToolbarControl {
                 let unrated = matches!(app.filter(), Some((Cmp::Eq, 0)));
                 UiAction::SetFilter(if unrated { None } else { Some((Cmp::Eq, 0)) })
             }
-            Self::Bursts => UiAction::ToggleBursts,
-            Self::Dupes => UiAction::ToggleDupes,
             Self::EyesClosed => UiAction::ToggleEyesClosed,
         }
     }
@@ -125,37 +117,12 @@ impl ToolbarControl {
             Self::Unrated => ui
                 .selectable_label(matches!(app.filter(), Some((Cmp::Eq, 0))), t.unrated)
                 .on_hover_text(t.unrated_tip),
-            Self::Bursts => {
-                // Bursts need the whole unfiltered folder.
-                let filter_active = app.filter().is_some();
-                ui.add_enabled(
-                    !filter_active,
-                    egui::Button::selectable(app.bursts_on(), t.bursts),
-                )
-                .on_hover_text(if filter_active {
-                    t.bursts_needs_no_filter
-                } else {
-                    t.bursts_tip
-                })
-            }
-            Self::Dupes => ui
-                .selectable_label(app.dupes_on(), t.duplicates)
-                .on_hover_text(t.duplicates_tip),
-            Self::EyesClosed => {
-                // Blink data comes only from the face pass that Bursts or
-                // Duplicates starts. Vision decodes at full resolution, which is
-                // too heavy to run on a whole folder unasked.
-                let grouped = app.bursts_on() || app.dupes_on();
-                ui.add_enabled(
-                    grouped || app.eyes_filter_on(),
-                    egui::Button::selectable(app.eyes_filter_on(), t.eyes_closed),
-                )
-                .on_hover_text(if grouped || app.eyes_filter_on() {
-                    t.eyes_closed_tip
-                } else {
-                    t.eyes_closed_needs_grouping
-                })
-            }
+            Self::EyesClosed => ui
+                .add(egui::Button::selectable(
+                    app.eyes_filter_on(),
+                    t.eyes_closed,
+                ))
+                .on_hover_text(t.eyes_closed_tip),
         }
     }
 }
@@ -168,9 +135,6 @@ fn cmp_glyph(cmp: Cmp) -> &'static str {
     }
 }
 
-/// The Grid and Survey toolbar: rating filter, grouping toggles (while
-/// `SHOW_GROUPING_TOOLS` is on), and the photo count. Actions on the selection
-/// live in `selection_bar`.
 pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::Panel::top("grid_toolbar").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
@@ -187,18 +151,15 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 toolbar_focus_sync(ui, app, idx, &resp, out);
             }
 
-            // Survey's own header already counts its photos.
-            if app.mode() == ViewMode::Grid {
-                ui.separator();
-                ui.weak((t.n_photos)(app.visible_len()));
-            }
+            ui.separator();
+            ui.weak((t.n_photos)(app.visible_len()));
 
             region_focus_marker(ui, app, Region::Toolbar);
         });
     });
 }
 
-/// Bulk actions on the Grid or Survey selection, in a row under the toolbar.
+/// Bulk actions on the Grid selection, in a row under the toolbar.
 /// The row stays up with nothing selected so the grid doesn't shift when a
 /// selection starts. Every action opens a confirm modal before it runs. These
 /// are not in the keyboard cycle because they come and go with the selection;

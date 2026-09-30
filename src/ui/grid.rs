@@ -4,8 +4,6 @@ use std::path::Path;
 use super::info_panel::draw_info_panel;
 use crate::app::GRID_CELL_PT;
 use crate::app::{App, LeftTab, Region};
-use crate::burst::BurstMark;
-use crate::duplicates::DuplicateMark;
 
 /// The left sidebar. A footer strip picks its tab: the folder tree, rooted at
 /// the opened folder, or the focused photo's metadata.
@@ -362,52 +360,6 @@ pub(super) fn thumbnail_cell(
     }
 
     let badge_r = badge_radius(ui.style());
-    // Corners: burst badge top-left, duplicate badge top-right, eyes-closed
-    // bottom-right, stars bottom-left. One photo can show all four.
-    match app.burst_mark_at(pos) {
-        Some(BurstMark::Sibling) => {
-            ui.painter()
-                .rect_filled(rect, style.corner, egui::Color32::from_black_alpha(140));
-        }
-        Some(BurstMark::Best) => {
-            let mut c = badge_center(rect, style, badge_r, egui::Align2::LEFT_TOP);
-            // The selection check owns the corner; the burst badge sits beside it.
-            if marked && !style.strip {
-                c.x += badge_r * 1.7 + 2.0;
-            }
-            ui.painter()
-                .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
-            ui.painter().text(
-                c,
-                egui::Align2::CENTER_CENTER,
-                "\u{2605}",
-                egui::FontId::proportional(font_size::px(ui.style(), 13.0)),
-                theme::BURST_BADGE,
-            );
-        }
-        None => {}
-    }
-
-    match app.dup_mark_at(pos) {
-        Some(DuplicateMark::Sibling) => {
-            ui.painter()
-                .rect_filled(rect, style.corner, egui::Color32::from_black_alpha(90));
-        }
-        Some(DuplicateMark::Best) => {
-            let c = badge_center(rect, style, badge_r, egui::Align2::RIGHT_TOP);
-            ui.painter()
-                .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
-            ui.painter().text(
-                c,
-                egui::Align2::CENTER_CENTER,
-                "D",
-                egui::FontId::proportional(font_size::px(ui.style(), 12.0)),
-                theme::DUP_BADGE,
-            );
-        }
-        None => {}
-    }
-
     if app.eyes_closed_at(pos) {
         let c = badge_center(rect, style, badge_r, egui::Align2::RIGHT_BOTTOM);
         ui.painter()
@@ -517,24 +469,6 @@ pub(super) fn grid_cell(
     let selected = app.is_selected(pos);
     let response = thumbnail_cell(ui, app, pos, cell, selected, primary, &GRID_CELL_STYLE);
     if response.clicked() {
-        // A click on the duplicate badge opens Survey Mode.
-        if app.dup_mark_at(pos).is_some() {
-            if let Some(click_pos) = response.interact_pointer_pos() {
-                let badge_r = badge_radius(ui.style());
-                let center = badge_center(
-                    response.rect,
-                    &GRID_CELL_STYLE,
-                    badge_r,
-                    egui::Align2::RIGHT_TOP,
-                );
-                // A hair of slop, so a click at the badge's edge still lands.
-                if click_pos.distance(center) <= badge_r + 1.0 {
-                    out.actions.push(UiAction::OpenSurvey(pos));
-                    out.actions.push(UiAction::Focus(Region::Grid));
-                    return;
-                }
-            }
-        }
         let mods = ui.input(|i| i.modifiers);
         let action = if mods.shift {
             UiAction::SelectRange(pos)

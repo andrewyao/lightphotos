@@ -63,24 +63,6 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 | `X` | Open or close the export form: a folder (`Exports/` by default) or an Immich server, and an output size. `Enter` exports, `Esc` closes. Edits are baked in and files are never overwritten |
 | `Delete` | Move the selection to the Trash, after a confirm; in the browser, deletes permanently |
 
-## Culling
-
-Turned off in the shipped build. `SHOW_GROUPING_TOOLS` in `src/app/mod.rs`
-gates the toolbar buttons, the two keys below and the in-app overlay's Culling
-section together, so nothing here is reachable until it is flipped on. It is
-off because the thresholds behind the two features, `CLOSED_EYE_RATIO` and
-`DEFAULT_MAX_FEATURE_DISTANCE`, have not been checked against real photos.
-
-| Key | Action |
-| --- | --- |
-| `B` | Best-of-burst badges (library) |
-| `D` | Duplicate-group badges (library) |
-| Click a badge | Survey the group |
-
-In Survey, `←` / `→` pick which photo the rating keys apply to. `Enter` rates the
-group's best frame, the one the grid badges, 5 stars and every other member 1
-star. `Esc` closes.
-
 ## Keyboard focus
 
 | Key | Action |
