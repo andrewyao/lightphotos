@@ -415,7 +415,7 @@ mod tests {
     use super::*;
     use crate::navigation::Playlist;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, Instant, SystemTime};
+    use std::time::{Duration, Instant};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
