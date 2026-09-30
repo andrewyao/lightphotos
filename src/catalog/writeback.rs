@@ -190,7 +190,9 @@ impl Writeback {
         images: &mut HashMap<OsString, ImageRecord>,
         groups: &mut Groups,
     ) {
-        let groups_dir = dir.join(super::SIDECAR_DIR).join(super::GROUPS_DIR);
+        let groups_dir = dir
+            .join(super::SIDECAR_DIR)
+            .join(super::group_file::GROUPS_DIR);
         let mut group_writes = Vec::new();
         for (path, authored) in &self.authored {
             if authored.seq < mark.0 {
@@ -370,7 +372,7 @@ fn perform(path: &Path, op: &WriteOp) -> Result<(), String> {
             Some(sidecar) => remove_if_present(&sidecar),
             None => Ok(()),
         },
-        WriteOp::PutGroup(group) => write_atomic_in_dir(path, &super::group_bytes(group)?),
+        WriteOp::PutGroup(group) => write_atomic_in_dir(path, &super::group_file::to_bytes(group)?),
         WriteOp::DeleteGroup => remove_if_present(path),
     }
 }
