@@ -72,6 +72,11 @@ pub(super) fn load(dir: &Path, skipped: &mut usize) -> Vec<(GroupId, SavedGroup)
             continue;
         }
         let Some(id) = path.file_stem().and_then(GroupId::from_stem) else {
+            eprintln!(
+                "[catalog] unreadable group {}: not a group id",
+                path.display()
+            );
+            *skipped += 1;
             continue;
         };
         let parsed = std::fs::read(&path)
