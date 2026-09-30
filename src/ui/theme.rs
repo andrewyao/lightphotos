@@ -86,6 +86,11 @@ pub struct Palette {
     /// A destructive primary, such as Move to Trash.
     pub danger_fill: Color32,
     pub danger_text: Color32,
+    /// The two cards behind a group's thumbnail in the Grid.
+    pub stack_card: Color32,
+    /// The member count on a group's cell.
+    pub pill_fill: Color32,
+    pub pill_text: Color32,
     /// Button backgrounds: idle, hovered, pressed, open menu.
     widget: [u8; 4],
     separator: Color32,
@@ -198,6 +203,9 @@ pub fn palette(theme: Theme) -> Palette {
             primary_text: Color32::WHITE,
             danger_fill: Color32::from_rgb(205, 55, 55),
             danger_text: Color32::WHITE,
+            stack_card: Color32::from_gray(130),
+            pill_fill: Color32::from_gray(225),
+            pill_text: Color32::from_gray(20),
             widget: [60, 70, 55, 45],
             separator: Color32::from_gray(60),
             field: Color32::from_gray(10),
@@ -226,6 +234,9 @@ pub fn palette(theme: Theme) -> Palette {
             primary_text: Color32::WHITE,
             danger_fill: Color32::from_rgb(185, 35, 35),
             danger_text: Color32::WHITE,
+            stack_card: Color32::from_gray(110),
+            pill_fill: Color32::from_gray(40),
+            pill_text: Color32::WHITE,
             widget: [214, 204, 190, 212],
             separator: Color32::from_gray(190),
             field: Color32::from_gray(255),
@@ -262,6 +273,9 @@ fn medium(panel: Color32) -> Palette {
         primary_text: Color32::PLACEHOLDER,
         danger_fill: Color32::PLACEHOLDER,
         danger_text: Color32::PLACEHOLDER,
+        stack_card: Color32::PLACEHOLDER,
+        pill_fill: Color32::PLACEHOLDER,
+        pill_text: Color32::PLACEHOLDER,
         widget: [shift(-24), shift(-32), shift(-40), shift(-16)],
         separator: gray(32),
         field: gray(-32),
@@ -277,6 +291,9 @@ fn medium(panel: Color32) -> Palette {
             primary_text: Color32::BLACK,
             danger_fill: Color32::from_rgb(255, 160, 160),
             danger_text: Color32::BLACK,
+            stack_card: Color32::from_gray(200),
+            pill_fill: Color32::from_gray(235),
+            pill_text: Color32::from_gray(20),
             ..base
         },
         Polarity::DarkText => Palette {
@@ -293,6 +310,9 @@ fn medium(panel: Color32) -> Palette {
             primary_text: Color32::WHITE,
             danger_fill: Color32::from_rgb(135, 20, 20),
             danger_text: Color32::WHITE,
+            stack_card: Color32::from_gray(40),
+            pill_fill: Color32::from_gray(30),
+            pill_text: Color32::WHITE,
             widget: [shift(24), shift(32), shift(40), shift(16)],
             divider: gray(-44),
             separator: gray(-32),
@@ -445,6 +465,37 @@ mod tests {
                     let edge = contrast_ratio(fill, bg);
                     assert!(edge >= 3.0, "{name} {role} fill {edge:.2}:1");
                 }
+            }
+        }
+    }
+
+    fn cell_backgrounds(p: &Palette) -> [Color32; 4] {
+        [
+            p.grid_cell,
+            p.grid_cell_selected,
+            p.strip_cell,
+            p.strip_cell_selected,
+        ]
+    }
+
+    #[test]
+    fn the_count_pill_reads_and_stands_out_from_every_cell() {
+        for (name, p) in every_palette() {
+            let text = contrast_ratio(p.pill_text, p.pill_fill);
+            assert!(text >= 4.5, "{name} pill text {text:.2}:1");
+            for bg in cell_backgrounds(&p) {
+                let edge = contrast_ratio(p.pill_fill, bg);
+                assert!(edge >= 3.0, "{name} pill fill {edge:.2}:1");
+            }
+        }
+    }
+
+    #[test]
+    fn stack_cards_stand_out_from_every_cell() {
+        for (name, p) in every_palette() {
+            for bg in cell_backgrounds(&p) {
+                let edge = contrast_ratio(p.stack_card, bg);
+                assert!(edge >= 3.0, "{name} stack card {edge:.2}:1");
             }
         }
     }
