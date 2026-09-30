@@ -20,6 +20,8 @@ mod coregraphics;
 mod develop;
 #[cfg(not(target_arch = "wasm32"))]
 mod dialog;
+#[cfg(not(target_arch = "wasm32"))]
+mod drive;
 mod export;
 mod facequality;
 mod groups;
@@ -246,31 +248,14 @@ impl ApplicationHandler<UserEvent> for App {
             self.dragging = false;
             self.request_redraw();
         }
-        if consumed {
-            // Navigation keys may still reach the app. See
-            // `nav_key_should_fall_through`.
-            let nav_key = matches!(
-                event,
-                WindowEvent::KeyboardInput {
-                    event: winit::event::KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(
-                            KeyCode::ArrowLeft
-                                | KeyCode::ArrowRight
-                                | KeyCode::ArrowUp
-                                | KeyCode::ArrowDown
-                                | KeyCode::PageUp
-                                | KeyCode::PageDown
-                                | KeyCode::Tab
-                        ),
-                        ..
-                    },
-                    ..
-                }
-            ) && self.nav_key_should_fall_through();
-            if !nav_key {
-                return;
+        if let WindowEvent::KeyboardInput { event, .. } = &event {
+            if let PhysicalKey::Code(code) = event.physical_key {
+                self.key_input(code, event.state, consumed);
             }
+            return;
+        }
+        if consumed {
+            return;
         }
 
         match event {
@@ -350,35 +335,13 @@ impl ApplicationHandler<UserEvent> for App {
                 }
             }
 
-            WindowEvent::PinchGesture { delta, .. } => {
-                if self.mode == ViewMode::Loupe && delta != 0.0 {
-                    let factor = 1.0 + delta as f32;
-                    let (cx, cy) = self.cursor_in_loupe();
-                    self.zoom_at(factor, cx, cy);
-                }
+            WindowEvent::PinchGesture { delta, .. }
+                if self.mode == ViewMode::Loupe && delta != 0.0 =>
+            {
+                let factor = 1.0 + delta as f32;
+                let (cx, cy) = self.cursor_in_loupe();
+                self.zoom_at(factor, cx, cy);
             }
-
-            WindowEvent::KeyboardInput { event, .. } => match event.physical_key {
-                // Holding Space and dragging pans the loupe, so Space acts
-                // only on a release that didn't pan.
-                PhysicalKey::Code(KeyCode::Space) => match event.state {
-                    ElementState::Pressed if !self.space_down => {
-                        self.space_down = true;
-                        self.space_panned = false;
-                    }
-                    ElementState::Released if self.space_down => {
-                        self.space_down = false;
-                        if !self.space_panned {
-                            self.handle_key(KeyCode::Space);
-                        }
-                    }
-                    _ => {}
-                },
-                PhysicalKey::Code(code) if event.state == ElementState::Pressed => {
-                    self.handle_key(code)
-                }
-                _ => {}
-            },
 
             _ => {}
         }
@@ -420,6 +383,68 @@ impl ApplicationHandler<UserEvent> for App {
             self.request_redraw();
         }
 
+        let poll_delay = self.pump();
+        let now = web_time::Instant::now();
+        if self.repaint_at.is_some_and(|at| at <= now) {
+            // Cleared here rather than left for `redraw` to replace, so a
+            // frame skipped while occluded can't spin this loop.
+            self.repaint_at = None;
+            self.request_redraw();
+        }
+        let poll_at = poll_delay.map(|d| now + d);
+        match poll_at.into_iter().chain(self.repaint_at).min() {
+            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
+        }
+    }
+}
+
+impl App {
+    /// The app's half of a key event. `consumed` is egui's verdict on it.
+    pub(crate) fn key_input(&mut self, code: KeyCode, state: ElementState, consumed: bool) {
+        if consumed {
+            // Navigation keys may still reach the app. See
+            // `nav_key_should_fall_through`.
+            let nav_key = state == ElementState::Pressed
+                && matches!(
+                    code,
+                    KeyCode::ArrowLeft
+                        | KeyCode::ArrowRight
+                        | KeyCode::ArrowUp
+                        | KeyCode::ArrowDown
+                        | KeyCode::PageUp
+                        | KeyCode::PageDown
+                        | KeyCode::Tab
+                )
+                && self.nav_key_should_fall_through();
+            if !nav_key {
+                return;
+            }
+        }
+        match code {
+            // Holding Space and dragging pans the loupe, so Space acts
+            // only on a release that didn't pan.
+            KeyCode::Space => match state {
+                ElementState::Pressed if !self.space_down => {
+                    self.space_down = true;
+                    self.space_panned = false;
+                }
+                ElementState::Released if self.space_down => {
+                    self.space_down = false;
+                    if !self.space_panned {
+                        self.handle_key(KeyCode::Space);
+                    }
+                }
+                _ => {}
+            },
+            _ if state == ElementState::Pressed => self.handle_key(code),
+            _ => {}
+        }
+    }
+
+    /// One turn of background bookkeeping. Returns how soon to look again,
+    /// or `None` when nothing is outstanding.
+    pub(crate) fn pump(&mut self) -> Option<std::time::Duration> {
         // Outside the loader block below, because a queued sidecar write has
         // no loader to wait on and can outlive the folder it came from.
         self.catalog.pump();
@@ -569,7 +594,7 @@ impl ApplicationHandler<UserEvent> for App {
         // needs the tight interval on wasm, where `pump` is the scheduler; on
         // native the worker drains on its own and only the toast needs
         // refreshing.
-        let poll_delay = if image_pending || thumbs_pending || self.bulk_delete_running() {
+        let poll_ms = if image_pending || thumbs_pending || self.bulk_delete_running() {
             Some(16)
         } else if self.export_progress.is_some()
             || self.catalog.backlog() > 0
@@ -584,18 +609,7 @@ impl ApplicationHandler<UserEvent> for App {
         } else {
             None
         };
-        let now = web_time::Instant::now();
-        if self.repaint_at.is_some_and(|at| at <= now) {
-            // Cleared here rather than left for `redraw` to replace, so a
-            // frame skipped while occluded can't spin this loop.
-            self.repaint_at = None;
-            self.request_redraw();
-        }
-        let poll_at = poll_delay.map(|ms| now + std::time::Duration::from_millis(ms));
-        match poll_at.into_iter().chain(self.repaint_at).min() {
-            Some(at) => event_loop.set_control_flow(ControlFlow::WaitUntil(at)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
-        }
+        poll_ms.map(std::time::Duration::from_millis)
     }
 }
 
@@ -635,6 +649,15 @@ fn main() {
     #[cfg(feature = "hotpath")]
     if profile::run_from_args() {
         return;
+    }
+
+    match drive::Args::from_env() {
+        Ok(Some(args)) => std::process::exit(drive::run(args)),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("[drive] {e}");
+            std::process::exit(2);
+        }
     }
 
     // The path argument is optional. Without one the app opens on the landing

@@ -1,0 +1,9 @@
+# Wheel up (positive dy) zooms in; `state` reports zoom above 1 once it has.
+size 1200 800
+dblclick-cell 2
+idle
+shot loupe
+scroll 0 5
+idle
+state
+shot zoom

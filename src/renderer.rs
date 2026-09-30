@@ -54,6 +54,13 @@ struct Transform {
     rot: [f32; 4],
 }
 
+/// One rendered frame read back from the GPU as tightly packed RGB rows.
+pub struct RgbFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
+}
+
 /// Everything egui needs to paint one frame.
 pub struct EguiPaint {
     pub textures_delta: egui::TexturesDelta,
@@ -111,6 +118,8 @@ pub struct Renderer {
     mip_sampler: wgpu::Sampler,
 
     egui_renderer: egui_wgpu::Renderer,
+
+    offscreen: Option<wgpu::Texture>,
 
     /// Grid thumbnails handed to egui as user textures. `register_native_texture`
     /// stores only a bind group, so the texture has to be kept alive here until
@@ -546,8 +555,92 @@ impl Renderer {
             mip_pipeline_linear,
             mip_sampler,
             egui_renderer,
+            offscreen: None,
             thumb_textures: HashMap::new(),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_offscreen(&mut self) {
+        self.offscreen = Some(self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen"),
+            size: wgpu::Extent3d {
+                width: self.config.width,
+                height: self.config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        }));
+    }
+
+    /// Blocks until the GPU has finished the last frame. `None` when
+    /// `render_offscreen` is off or the surface format is not 8-bit BGRA or
+    /// RGBA.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn read_offscreen(&self) -> Option<RgbFrame> {
+        let texture = self.offscreen.as_ref()?;
+        let swap_rb = match self.config.format {
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => true,
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => false,
+            _ => return None,
+        };
+        let (w, h) = (self.config.width, self.config.height);
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_row = (w * 4).div_ceil(align) * align;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: (padded_row * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("readback_encoder"),
+            });
+        encoder.copy_texture_to_buffer(
+            texture.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit(Some(encoder.finish()));
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        let mapped = slice.get_mapped_range();
+        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h as usize {
+            let row = &mapped[y * padded_row as usize..][..(w * 4) as usize];
+            for px in row.chunks_exact(4) {
+                let (r, b) = if swap_rb {
+                    (px[2], px[0])
+                } else {
+                    (px[0], px[2])
+                };
+                rgb.extend_from_slice(&[r, px[1], b]);
+            }
+        }
+        Some(RgbFrame {
+            width: w,
+            height: h,
+            rgb,
+        })
     }
 
     /// Upload one grid thumbnail and return the id egui draws it by.
@@ -641,6 +734,10 @@ impl Renderer {
         self.config.width = w;
         self.config.height = h;
         self.surface.configure(&self.device, &self.config);
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.offscreen.is_some() {
+            self.render_offscreen();
+        }
     }
 
     /// Upload a decoded image as a mipmapped texture and bind it.
@@ -961,20 +1058,26 @@ impl Renderer {
             }
         }
 
-        let frame = match self.surface.get_current_texture() {
-            C::Success(f) | C::Suboptimal(f) => f,
-            C::Outdated | C::Lost => {
-                self.surface.configure(&self.device, &self.config);
-                self.free_egui_textures(&egui);
-                return false;
-            }
-            C::Timeout | C::Occluded | C::Validation => {
-                self.free_egui_textures(&egui);
-                return false;
-            }
+        let frame = match &self.offscreen {
+            Some(_) => None,
+            None => match self.surface.get_current_texture() {
+                C::Success(f) | C::Suboptimal(f) => Some(f),
+                C::Outdated | C::Lost => {
+                    self.surface.configure(&self.device, &self.config);
+                    self.free_egui_textures(&egui);
+                    return false;
+                }
+                C::Timeout | C::Occluded | C::Validation => {
+                    self.free_egui_textures(&egui);
+                    return false;
+                }
+            },
         };
         let view = frame
-            .texture
+            .as_ref()
+            .map(|f| &f.texture)
+            .or(self.offscreen.as_ref())
+            .expect("a surface frame or the offscreen texture")
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
@@ -1098,7 +1201,9 @@ impl Renderer {
         }
 
         self.queue.submit(Some(encoder.finish()));
-        frame.present();
+        if let Some(frame) = frame {
+            frame.present();
+        }
         #[cfg(target_arch = "wasm32")]
         crate::analytics::presented();
         if crate::loader::timing_enabled() {
