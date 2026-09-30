@@ -144,8 +144,10 @@ impl App {
     pub(super) fn restore_session_view(&mut self, session: &Session) {
         let pos = session.photo.as_deref().and_then(|photo| {
             let pl = self.playlist.as_ref()?;
-            let idx = pl.entries().iter().position(|p| p == photo)?;
-            self.visible.iter().position(|&i| i == idx)
+            let idx = pl.index_of(photo.file_name()?)?;
+            (pl.entry(idx) == Some(photo))
+                .then(|| self.place_of(idx).cell())
+                .flatten()
         });
         if let Some(pos) = pos {
             self.select_single(pos);

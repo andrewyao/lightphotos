@@ -199,11 +199,18 @@ impl App {
             // Take and restore the playlist, because `reconcile_catalog_mirrors`
             // needs `&mut self` while reading it.
             if let Some(playlist) = self.playlist.take() {
-                if playlist.dir() == dir.as_path() {
+                let here = playlist.dir() == dir.as_path();
+                if here {
                     self.reconcile_catalog_mirrors(&playlist);
-                    self.request_redraw();
                 }
                 self.playlist = Some(playlist);
+                // The groups and ratings just landed, after the first paint,
+                // and both decide which cells show.
+                if here {
+                    self.recompute_visible();
+                    self.resync_loupe_selection();
+                    self.request_redraw();
+                }
             }
         }
         if self.catalog_load_pending.is_none() {
@@ -261,13 +268,7 @@ impl App {
         }
         self.catalog.set(&path, stars);
         if self.filter.is_some() {
-            let want_idx = self.selected_index();
             self.recompute_visible();
-            if let Some(idx) = want_idx {
-                if let Some(pos) = self.visible.iter().position(|&i| i == idx) {
-                    self.sel = Some(pos);
-                }
-            }
             self.resync_loupe_selection();
         }
         self.request_redraw();
@@ -491,7 +492,6 @@ impl App {
         if self.mode == ViewMode::Loupe {
             return;
         }
-        let want_idx = self.selected_index();
         #[cfg(target_arch = "wasm32")]
         if self.filter != filter {
             crate::analytics::property(
@@ -502,11 +502,6 @@ impl App {
         }
         self.filter = filter;
         self.recompute_visible();
-        if let Some(idx) = want_idx {
-            if let Some(pos) = self.visible.iter().position(|&i| i == idx) {
-                self.sel = Some(pos);
-            }
-        }
         self.request_redraw();
     }
 

@@ -1037,15 +1037,20 @@ impl App {
             let playlist = Playlist::from_file(&path);
             self.seed_mirrors(&playlist);
             let start_index = playlist.position();
+            let start = playlist.entry(start_index).map(Path::to_path_buf);
             self.playlist = Some(playlist);
             self.reset_eyes_filter();
             self.recompute_visible();
-            self.sel = Some(
-                self.visible
-                    .iter()
-                    .position(|&i| i == start_index)
-                    .unwrap_or(0),
-            );
+            self.sel = match self.place_of(start_index) {
+                nav::Place::Cell(p) => Some(p),
+                // Keep the opened photo on screen rather than its group's
+                // representative. `selected_path` falls back to `want`.
+                nav::Place::Hidden(_) => {
+                    self.want = start;
+                    None
+                }
+                nav::Place::Gone => Some(0),
+            };
             self.collapse_selection();
             self.mode = ViewMode::Loupe;
             self.develop_open = true;
@@ -1533,15 +1538,6 @@ fn range_set(anchor: usize, pos: usize) -> BTreeSet<usize> {
     (lo..=hi).collect()
 }
 
-/// Map a selection given as playlist indices to positions in `new_visible`,
-/// dropping photos the filter removed.
-fn remap_positions(selected_pl: &[usize], new_visible: &[usize]) -> BTreeSet<usize> {
-    selected_pl
-        .iter()
-        .filter_map(|&i| new_visible.iter().position(|&v| v == i))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1555,20 +1551,5 @@ mod tests {
         assert_eq!(range_set(2, 5), set(&[2, 3, 4, 5]));
         assert_eq!(range_set(5, 2), set(&[2, 3, 4, 5])); // same range, anchor after
         assert_eq!(range_set(3, 3), set(&[3])); // single cell
-    }
-
-    #[test]
-    fn remap_keeps_surviving_photos_and_drops_filtered() {
-        // Selected playlist indices 11 and 13 land at positions 0 and 2.
-        let selected_pl = [11usize, 13];
-        let new_visible = [11usize, 20, 13];
-        assert_eq!(remap_positions(&selected_pl, &new_visible), set(&[0, 2]));
-    }
-
-    #[test]
-    fn remap_drops_everything_when_all_filtered_out() {
-        let selected_pl = [11usize, 13];
-        let new_visible = [20usize, 21]; // none of the selected survive
-        assert_eq!(remap_positions(&selected_pl, &new_visible), set(&[]));
     }
 }
