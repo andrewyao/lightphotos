@@ -231,6 +231,8 @@ pub(crate) type SelectionOutcome = (PathBuf, Result<crate::segmentation::Mask, S
 pub(crate) enum PendingConfirm {
     Bulk(ui::BulkKind),
     DeletePreset(u64),
+    /// Delete Group, over every selected stack.
+    DeleteGroup,
 }
 
 /// What a status toast reports, which sets its colors.
@@ -1391,6 +1393,8 @@ impl App {
                 ui::UiAction::RequestBulk(kind) => self.request_bulk(kind),
                 ui::UiAction::ConfirmPending => self.confirm_pending(),
                 ui::UiAction::CancelPending => self.cancel_pending(),
+                ui::UiAction::RemoveGroups => self.remove_selected_groups(),
+                ui::UiAction::TrashGroups => self.trash_selected_groups(),
                 ui::UiAction::OpenLoupe(pos) => {
                     if pos < self.visible.len() {
                         self.select_single(pos);

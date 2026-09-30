@@ -436,6 +436,11 @@ impl App {
         match self.pending_confirm.take() {
             Some(PendingConfirm::Bulk(kind)) => self.run_bulk(kind),
             Some(PendingConfirm::DeletePreset(id)) => self.delete_preset(id),
+            // Neither of Delete Group's actions is a default, so Enter leaves
+            // it open.
+            Some(PendingConfirm::DeleteGroup) => {
+                self.pending_confirm = Some(PendingConfirm::DeleteGroup)
+            }
             None => {}
         }
         self.request_redraw();
@@ -463,6 +468,39 @@ impl App {
             self.pending_confirm = Some(PendingConfirm::Bulk(kind));
             self.request_redraw();
         }
+    }
+
+    /// Opens Delete Group over every selected stack.
+    pub(crate) fn request_delete_group(&mut self) {
+        if self.delete_available() && self.selection_has_group() {
+            self.pending_confirm = Some(PendingConfirm::DeleteGroup);
+            self.request_redraw();
+        }
+    }
+
+    /// The open Delete Group dialog's photo and group counts.
+    pub(crate) fn pending_group_delete(&self) -> Option<(usize, usize)> {
+        if self.pending_confirm != Some(PendingConfirm::DeleteGroup) {
+            return None;
+        }
+        let groups = self.selected_groups();
+        let photos = groups.iter().map(|(_, g)| self.member_paths(g).len()).sum();
+        Some((photos, groups.len()))
+    }
+
+    pub(super) fn remove_selected_groups(&mut self) {
+        self.cancel_pending();
+        self.ungroup_selected();
+    }
+
+    pub(super) fn trash_selected_groups(&mut self) {
+        self.cancel_pending();
+        let paths = self
+            .selected_groups()
+            .iter()
+            .flat_map(|(_, g)| self.member_paths(g))
+            .collect();
+        self.start_delete(paths);
     }
 
     pub(super) fn run_bulk(&mut self, kind: ui::BulkKind) {

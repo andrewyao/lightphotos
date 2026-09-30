@@ -59,6 +59,10 @@ pub enum UiAction {
     /// Run the action the open confirm dialog asks about.
     ConfirmPending,
     CancelPending,
+    /// Delete Group's Remove Group: dissolve the selected groups.
+    RemoveGroups,
+    /// Delete Group's trash: every member of the selected groups.
+    TrashGroups,
     /// `None` clears the star filter.
     SetFilter(Option<(Cmp, u8)>),
     /// Change the toolbar comparator applied to star-level clicks (≥ / = / ≤).
@@ -167,7 +171,10 @@ use develop_panel::draw_develop_panel;
 use export_panel::draw_export_panel;
 use grid::{draw_grid, draw_left_panel};
 use loupe::draw_loupe;
-use modals::{confirm_modal, delete_preset_modal, help_modal, preset_name_modal, settings_modal};
+use modals::{
+    confirm_modal, delete_group_modal, delete_preset_modal, help_modal, preset_name_modal,
+    settings_modal,
+};
 use toolbar::{grid_toolbar, selection_bar};
 
 /// Build the egui UI for one frame.
@@ -212,6 +219,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     }
     status_toast(ui, app);
     confirm_modal(ui, app, &mut out);
+    delete_group_modal(ui, app, &mut out);
     delete_preset_modal(ui, app, &mut out);
     preset_name_modal(ui, app, &mut out);
     help_modal(ui, app, &mut out);

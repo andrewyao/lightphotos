@@ -26,6 +26,7 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 | `Shift`+arrows | Extend the selection (library) |
 | `Cmd`+`G` | Group the selected cells into one stack; a selected stack brings all its members |
 | `Cmd`+`Shift`+`G` | Ungroup the selected stacks; their photos come back selected |
+| `Shift`+`Delete` | Delete Group: for the selected stacks, either Remove Group (keep every photo as a single) or move every member to the Trash |
 
 ## Rate and label
 
@@ -63,7 +64,7 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 | `Cmd`+`Shift`+`C` | Copy develop settings |
 | `Cmd`+`Shift`+`Y` | Apply settings to the selection (after a confirm) |
 | `X` | Open or close the export form: a folder (`Exports/` by default) or an Immich server, and an output size. `Enter` exports, `Esc` closes. Edits are baked in and files are never overwritten |
-| `Delete` | Move the selection to the Trash, after a confirm; in the browser, deletes permanently |
+| `Delete` | Move the selection to the Trash, after a confirm; a selected stack counts as all its photos. In the browser, deletes permanently |
 
 ## Keyboard focus
 
