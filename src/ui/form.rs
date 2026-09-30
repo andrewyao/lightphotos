@@ -151,7 +151,7 @@ pub(super) fn error(ui: &mut egui::Ui, text: &str) {
 /// What a footer button does. The role, not the caller, decides where the
 /// button sits and how it is filled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Role {
+pub(crate) enum Role {
     Cancel,
     Primary,
     /// A primary that destroys something.
@@ -184,7 +184,7 @@ pub(super) enum Platform {
 }
 
 impl Platform {
-    const CURRENT: Self = if cfg!(target_os = "windows") {
+    pub(super) const CURRENT: Self = if cfg!(target_os = "windows") {
         Platform::Windows
     } else {
         Platform::Mac
@@ -202,6 +202,16 @@ pub(super) fn order(roles: &[Role], platform: Platform) -> Vec<usize> {
 /// A row of `buttons` against the right edge, set off from the form above
 /// and ordered for this platform. Returns the role of the button clicked.
 pub(super) fn footer(ui: &mut egui::Ui, buttons: &[Button]) -> Option<Role> {
+    footer_with_focus(ui, buttons, None)
+}
+
+/// A [`footer`] whose `focus` button, the one the keyboard would press,
+/// wears the keyboard cursor's outline.
+pub(super) fn footer_with_focus(
+    ui: &mut egui::Ui,
+    buttons: &[Button],
+    focus: Option<Role>,
+) -> Option<Role> {
     ui.add_space(font_size::px(ui.style(), FOOTER_GAP));
     let roles: Vec<Role> = buttons.iter().map(|b| b.role).collect();
     let mut clicked = None;
@@ -209,7 +219,16 @@ pub(super) fn footer(ui: &mut egui::Ui, buttons: &[Button]) -> Option<Role> {
         ui.spacing_mut().item_spacing.x = font_size::px(ui.style(), BUTTON_GAP);
         // A right-to-left layout places the rightmost button first.
         for i in order(&roles, Platform::CURRENT).into_iter().rev() {
-            if button(ui, &buttons[i]).clicked() {
+            let resp = button(ui, &buttons[i]);
+            if focus == Some(buttons[i].role) {
+                ui.painter().rect_stroke(
+                    resp.rect.expand(2.0),
+                    2.0,
+                    egui::Stroke::new(2.0f32, theme::colors(ui.ctx()).cursor),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            if resp.clicked() {
                 clicked = Some(buttons[i].role);
             }
         }

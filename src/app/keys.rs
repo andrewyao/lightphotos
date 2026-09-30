@@ -53,6 +53,7 @@ impl App {
             match code {
                 KeyCode::Escape => self.cancel_pending(),
                 KeyCode::Enter | KeyCode::NumpadEnter => self.confirm_pending(),
+                KeyCode::Tab => self.step_group_delete_focus(shift),
                 _ => {}
             }
             return;
