@@ -186,7 +186,11 @@ impl App {
     /// mirrors for the open folder. Returns true while a load is still pending.
     pub(crate) fn poll_catalog_load(&mut self) -> bool {
         while let Ok((dir, token, mark, loaded)) = self.catalog_load_rx.try_recv() {
-            self.catalog.apply_loaded(&dir, mark, loaded);
+            let photos = match &self.playlist {
+                Some(p) if p.dir() == dir.as_path() => p.entries(),
+                _ => &[],
+            };
+            self.catalog.apply_loaded(&dir, mark, loaded, photos);
             // Match the token too: after A, B, A navigation two loads for A can
             // be in flight, and only the latest clears pending.
             if self.catalog_load_pending.as_ref() == Some(&(dir.clone(), token)) {
