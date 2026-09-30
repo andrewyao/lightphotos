@@ -68,8 +68,6 @@ impl Args {
         Args::parse(std::env::args().skip(1))
     }
 
-    /// A launch without a drive flag is the normal app's, whose argv this
-    /// leaves alone: it opens the first path and ignores the rest.
     fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Args>, String> {
         let args: Vec<String> = args.into_iter().collect();
         if !args.iter().any(|a| a == "--drive" || a == "--drive-out") {
@@ -144,7 +142,6 @@ pub(crate) enum Target {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Chord {
     mods: ModifiersState,
-    /// Also the text a bare press types into a focused field.
     name: &'static str,
     code: KeyCode,
     key: egui::Key,
@@ -372,7 +369,7 @@ impl std::fmt::Display for ParseError {
 pub(crate) fn run(args: Args) -> i32 {
     let config_dir = std::env::temp_dir().join(format!("lightphotos-drive-{}", std::process::id()));
     crate::prefs::override_config_dir(config_dir.clone());
-    crate::dialog::go_headless();
+    crate::dialog::cancel_all_pickers();
     crate::i18n::init();
 
     let mut builder = EventLoop::<UserEvent>::with_user_event();
@@ -457,7 +454,6 @@ impl ApplicationHandler<UserEvent> for Driver {
         event_loop.exit();
     }
 
-    /// The script is the only input; the hidden window's own events are dropped.
     fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, _: WindowEvent) {}
 
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
@@ -512,18 +508,7 @@ impl Driver {
     fn idle(&mut self) -> Result<(), String> {
         let start = Instant::now();
         loop {
-            let quiet_before = self.app.pump().is_none();
-            self.app.redraw();
-            // A frame can start work of its own, such as thumbnails for a
-            // range it just scrolled to, so quiet must hold after it too.
-            let quiet_after = self.app.pump().is_none();
-            if quiet_before
-                && quiet_after
-                && !self.app.batch_running()
-                && self.app.repaint_at.is_none()
-            {
-                // The signal cache batches its writes for seconds; a script
-                // that reads the sidecar folder next needs them on disk.
+            if self.settled_across_a_frame() {
                 self.app.signals.flush_blocking(IDLE_TIMEOUT);
                 return Ok(());
             }
@@ -532,6 +517,13 @@ impl Driver {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    fn settled_across_a_frame(&mut self) -> bool {
+        let quiet_before = self.app.pump().is_none();
+        self.app.redraw();
+        let quiet_after = self.app.pump().is_none();
+        quiet_before && quiet_after && !self.app.batch_running() && self.app.repaint_at.is_none()
     }
 
     fn window(&self) -> &Arc<Window> {
@@ -689,7 +681,7 @@ impl Driver {
             .app
             .renderer
             .as_ref()
-            .and_then(|r| r.read_offscreen())
+            .and_then(|r| r.read_offscreen_blocking())
             .ok_or("shot: no offscreen frame to read")?;
         let path = self.out_dir.join(format!("{slug}.png"));
         write_png(&path, &frame)?;

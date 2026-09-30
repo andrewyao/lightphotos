@@ -131,8 +131,6 @@ lightwatch = ["lightwatch/enabled"]
 # "clipboard" (and the Linux-only "wayland"/"x11", inert there anyway).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 egui-winit = "0.34"
-# Screenshots from the headless driver. Already in the tree through `image`
-# on the non-mac targets.
 png = "0.18"
 # Native "choose a folder" dialog for the landing page / Cmd+O. Per-OS native
 # picker: Cocoa NSOpenPanel via objc2 on macOS (same objc2 stack as the deps
