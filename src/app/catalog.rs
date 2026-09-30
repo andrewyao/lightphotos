@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::catalog::GroupWriteRefused;
 use crate::develop::Adjustments;
-use crate::groups::{self, Group, GroupId, GroupWrite};
+use crate::groups::{self, GroupWrite};
 use crate::navigation::Cmp;
 use crate::ui;
 
@@ -350,13 +350,7 @@ impl App {
         let cursor_rep = cursor_stack
             .and_then(|p| self.group_at(p))
             .map(|(_, g)| g.rep().to_os_string());
-        let mut seen = std::collections::HashSet::new();
-        let targets: Vec<(GroupId, Group)> = cells
-            .iter()
-            .filter_map(|&p| self.group_at(p))
-            .filter(|(id, _)| seen.insert(*id))
-            .map(|(id, g)| (id.clone(), g.clone()))
-            .collect();
+        let targets = self.selected_groups();
         let Some(groups) = self.catalog.groups() else {
             return;
         };
@@ -426,7 +420,10 @@ impl App {
                 (t.confirm_apply_preset)(name.as_deref().unwrap_or_default(), n)
             }
             ui::BulkKind::AutoTone => (t.confirm_auto_tone)(n),
-            ui::BulkKind::Delete => (t.confirm_delete)(n),
+            ui::BulkKind::Delete => match self.selected_groups().len() {
+                0 => (t.confirm_delete)(self.delete_paths().len()),
+                groups => (t.confirm_delete_groups)(self.delete_paths().len(), groups),
+            },
         };
         Some((kind, prompt))
     }
