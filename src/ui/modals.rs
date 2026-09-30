@@ -42,6 +42,39 @@ pub(super) fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
+/// Delete Group: dissolve the selected groups and keep their photos, or trash
+/// every member. Cancel, Esc, or a backdrop click dismisses it.
+pub(super) fn delete_group_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    let Some((photos, groups)) = app.pending_group_delete() else {
+        return;
+    };
+    let t = t();
+    let trash = (t.trash_group_photos)(photos);
+    let resp = form::dialog(ui.ctx(), "delete_group", form::DIALOG_WIDTH, |ui| {
+        form::title(ui, t.delete_group_title);
+        ui.label((t.delete_group_prompt)(photos, groups));
+        match form::footer(ui, &delete_group_buttons(t, &trash)) {
+            Some(Role::Cancel) => out.actions.push(UiAction::CancelPending),
+            Some(Role::Primary) => out.actions.push(UiAction::RemoveGroups),
+            Some(Role::Danger) => out.actions.push(UiAction::TrashGroups),
+            None => {}
+        }
+    });
+    if resp.should_close() {
+        out.actions.push(UiAction::CancelPending);
+    }
+}
+
+/// Remove Group is listed last so it, not the trash, takes the right edge
+/// where macOS puts a dialog's default.
+fn delete_group_buttons<'a>(t: &'a crate::i18n::Strings, trash: &'a str) -> [Button<'a>; 3] {
+    [
+        Button::new(t.cancel, Role::Cancel),
+        Button::new(trash, Role::Danger),
+        Button::new(t.remove_group, Role::Primary),
+    ]
+}
+
 /// Confirms deleting one preset. This can't go through `confirm_modal`, whose
 /// text is built from the selected photo count, which has nothing to do with
 /// deleting a preset.
@@ -246,5 +279,33 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     });
     if resp.should_close() {
         out.actions.push(UiAction::CloseSettings);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::form::{order, Platform};
+    use super::*;
+
+    #[test]
+    fn delete_group_orders_its_footer_per_platform_and_trash_is_the_danger() {
+        let t = t();
+        let buttons = delete_group_buttons(t, "Trash");
+        let role_of = |label: &str| buttons.iter().find(|b| b.label == label).unwrap().role;
+        assert_eq!(role_of("Trash"), Role::Danger);
+        assert_eq!(role_of(t.remove_group), Role::Primary);
+        assert_eq!(role_of(t.cancel), Role::Cancel);
+        let roles: Vec<Role> = buttons.iter().map(|b| b.role).collect();
+        let labels = |platform| -> Vec<&str> {
+            order(&roles, platform)
+                .into_iter()
+                .map(|i| buttons[i].label)
+                .collect()
+        };
+        assert_eq!(labels(Platform::Mac), [t.cancel, "Trash", t.remove_group]);
+        assert_eq!(
+            labels(Platform::Windows),
+            ["Trash", t.remove_group, t.cancel]
+        );
     }
 }

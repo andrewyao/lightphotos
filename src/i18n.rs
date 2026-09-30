@@ -287,6 +287,11 @@ pub struct Strings {
     pub confirm_delete: fn(usize) -> String,
     /// Photos, then the selected groups whose every member is among them.
     pub confirm_delete_groups: fn(usize, usize) -> String,
+    pub delete_group_title: &'static str,
+    /// Photos, then groups.
+    pub delete_group_prompt: fn(usize, usize) -> String,
+    pub remove_group: &'static str,
+    pub trash_group_photos: fn(usize) -> String,
     /// Titles and confirm buttons of the bulk dialogs that no toolbar label fits.
     pub bulk_rate: &'static str,
     pub bulk_apply_preset: &'static str,
@@ -504,6 +509,7 @@ pub struct MenuStrings {
     pub move_to_trash: &'static str,
     pub group_selected: &'static str,
     pub ungroup: &'static str,
+    pub delete_group: &'static str,
     pub view: &'static str,
     pub grid: &'static str,
     pub loupe: &'static str,
@@ -710,6 +716,10 @@ pub static EN: Strings = Strings {
                 ("Shift+arrows", "Extend selection (library)"),
                 ("Cmd+G", "Group the selection"),
                 ("Cmd+Shift+G", "Ungroup the selected groups"),
+                (
+                    "Shift+Delete",
+                    "Delete the selected groups, or remove them and keep the photos",
+                ),
             ],
         },
         HelpSection {
@@ -799,6 +809,20 @@ pub static EN: Strings = Strings {
         }
     } else {
         |n, g| format!("Move {n} photo(s) to the Trash? This includes every photo in {g} group(s).")
+    },
+    delete_group_title: "Delete Group",
+    delete_group_prompt: |n, g| {
+        if g == 1 {
+            format!("This group holds {n} photo(s). Remove Group keeps them as single photos.")
+        } else {
+            format!("These {g} groups hold {n} photo(s). Remove Group keeps them as single photos.")
+        }
+    },
+    remove_group: "Remove Group",
+    trash_group_photos: if WEB {
+        |n| format!("Delete {n} Photos")
+    } else {
+        |n| format!("Move {n} Photos to Trash")
     },
     bulk_rate: "Rate",
     bulk_apply_preset: "Apply Preset",
@@ -1033,6 +1057,7 @@ pub static EN: Strings = Strings {
         move_to_trash: "Move to Trash",
         group_selected: "Group",
         ungroup: "Ungroup",
+        delete_group: "Delete Group\u{2026}",
         view: "View",
         grid: "Grid",
         loupe: "Loupe",
@@ -1206,6 +1231,7 @@ pub static ZH: Strings = Strings {
                 ("Shift+方向键", "扩展选择（图库）"),
                 ("Cmd+G", "将所选照片编组"),
                 ("Cmd+Shift+G", "取消所选编组"),
+                ("Shift+Delete", "删除所选编组，或移除编组并保留照片"),
             ],
         },
         HelpSection {
@@ -1288,6 +1314,20 @@ pub static ZH: Strings = Strings {
         |n, g| format!("永久删除 {n} 张照片？其中有 {g} 个编组中的全部照片。此操作无法撤销。")
     } else {
         |n, g| format!("将 {n} 张照片移到废纸篓？其中有 {g} 个编组中的全部照片。")
+    },
+    delete_group_title: "删除编组",
+    delete_group_prompt: |n, g| {
+        if g == 1 {
+            format!("此编组有 {n} 张照片。移除编组后，照片会保留为单张。")
+        } else {
+            format!("这 {g} 个编组有 {n} 张照片。移除编组后，照片会保留为单张。")
+        }
+    },
+    remove_group: "移除编组",
+    trash_group_photos: if WEB {
+        |n| format!("删除 {n} 张照片")
+    } else {
+        |n| format!("将 {n} 张照片移到废纸篓")
     },
     bulk_rate: "评分",
     bulk_apply_preset: "应用预设",
@@ -1506,6 +1546,7 @@ pub static ZH: Strings = Strings {
         move_to_trash: "移到废纸篓",
         group_selected: "编组",
         ungroup: "取消编组",
+        delete_group: "删除编组\u{2026}",
         view: "显示",
         grid: "网格",
         loupe: "单张视图",
@@ -1771,6 +1812,7 @@ mod tests {
             "Cmd+Z",
             "Cmd+G",
             "Cmd+Shift+G",
+            "Shift+Delete",
         ];
         if SUBJECT_KEYS {
             bound.extend(["O", "Shift+O"]);

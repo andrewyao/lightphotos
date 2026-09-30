@@ -175,7 +175,7 @@ impl<'a> Button<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Platform {
+pub(super) enum Platform {
     /// macOS, and also Linux and the web, whose GNOME and browser dialogs
     /// agree with it: Cancel, then the action.
     Mac,
@@ -192,7 +192,7 @@ impl Platform {
 }
 
 /// The left-to-right order of `roles` on `platform`, as indices into `roles`.
-fn order(roles: &[Role], platform: Platform) -> Vec<usize> {
+pub(super) fn order(roles: &[Role], platform: Platform) -> Vec<usize> {
     let cancel_first = platform == Platform::Mac;
     let mut indices: Vec<usize> = (0..roles.len()).collect();
     indices.sort_by_key(|&i| (roles[i] == Role::Cancel) != cancel_first);

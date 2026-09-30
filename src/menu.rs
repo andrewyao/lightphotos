@@ -40,6 +40,7 @@ pub enum MenuCommand {
     MoveToTrash,
     GroupSelected,
     Ungroup,
+    DeleteGroup,
     Grid,
     Loupe,
     InfoPanel,
@@ -80,6 +81,7 @@ impl MenuCommand {
             MoveToTrash => (none, KeyCode::Delete),
             GroupSelected => (cmd, KeyCode::KeyG),
             Ungroup => (shift_cmd, KeyCode::KeyG),
+            DeleteGroup => (ModifiersState::SHIFT, KeyCode::Delete),
             Grid => (none, KeyCode::KeyG),
             Loupe => (none, KeyCode::KeyE),
             InfoPanel => (none, KeyCode::KeyI),
@@ -240,6 +242,7 @@ const MENUS: &[(Label, Role, &[Row])] = &[
             Separator,
             Command(C::GroupSelected, |m| m.group_selected),
             Command(C::Ungroup, |m| m.ungroup),
+            Command(C::DeleteGroup, |m| m.delete_group),
         ],
     ),
     (
