@@ -239,24 +239,34 @@ impl App {
         if self.signal_load_rx.is_some() {
             return true;
         }
-        let candidates: &[PathBuf] = &[];
-        let to_submit: Vec<PathBuf> = candidates
-            .iter()
-            .filter(|p| {
-                !self.face_quality.contains_key(*p)
-                    && !self.face_pending.contains(*p)
-                    && !self.face_failed.contains(*p)
-            })
-            .cloned()
-            .collect();
-
-        if let Some(pool) = &self.face_pool {
-            for p in to_submit {
-                self.face_pending.insert(p.clone());
-                pool.submit(p);
+        if std::mem::take(&mut self.faces_unscanned) && self.face_pool.is_some() {
+            let to_submit = self.face_candidates();
+            if let Some(pool) = &self.face_pool {
+                for p in to_submit {
+                    self.face_pending.insert(p.clone());
+                    pool.submit(p);
+                }
             }
         }
         !self.face_pending.is_empty()
+    }
+
+    /// Every grouped photo not yet analysed, asked for or given up on. Later
+    /// group tools rank a group's members by their eyes.
+    fn face_candidates(&self) -> Vec<PathBuf> {
+        let (Some(pl), Some(groups)) = (self.playlist.as_ref(), self.catalog.groups()) else {
+            return Vec::new();
+        };
+        groups
+            .iter()
+            .flat_map(|(_, g)| g.members())
+            .map(|name| pl.dir().join(name))
+            .filter(|p| {
+                !self.face_quality.contains_key(p)
+                    && !self.face_pending.contains(p)
+                    && !self.face_failed.contains(p)
+            })
+            .collect()
     }
 
     pub(crate) fn poll_face_quality(&mut self) {
@@ -550,5 +560,48 @@ mod tests {
         assert_eq!(queued[0], photos[550]);
         assert_eq!(queued.len(), 25);
         assert!(queued.iter().all(|p| photos[538..563].contains(p)));
+    }
+
+    /// The face pass covers every grouped photo, on screen or not, and skips
+    /// the ones already analysed.
+    #[test]
+    fn face_quality_candidates_are_every_grouped_photo() {
+        use crate::app::nav::tests::group_photos;
+        use crate::app::presets::tests::folder_app;
+        let (mut app, dir, paths) = folder_app("faces-scope", 8);
+        group_photos(&mut app, &[1, 2], 1);
+        group_photos(&mut app, &[5, 6, 7], 7);
+        app.face_quality.insert(
+            paths[6].clone(),
+            crate::facequality::FaceQuality {
+                faces: 0,
+                min_eye_openness: None,
+            },
+        );
+        let mut got = app.face_candidates();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                paths[1].clone(),
+                paths[2].clone(),
+                paths[5].clone(),
+                paths[7].clone()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The scan runs once per view rebuild, not once per frame.
+    #[test]
+    fn grouped_photos_are_scanned_once_per_rebuild() {
+        use crate::app::presets::tests::folder_app;
+        let (mut app, dir, _) = folder_app("faces-once", 2);
+        assert!(app.faces_unscanned, "a rebuild asks for a scan");
+        app.request_face_quality();
+        assert!(!app.faces_unscanned, "the scan is taken");
+        app.recompute_visible();
+        assert!(app.faces_unscanned);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

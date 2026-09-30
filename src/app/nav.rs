@@ -173,6 +173,7 @@ impl App {
         self.selected = selected;
         self.anchor = anchor;
         self.sel = sel;
+        self.faces_unscanned = true;
         // The title carries the visible count.
         self.update_window_title();
     }

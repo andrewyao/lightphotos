@@ -717,6 +717,8 @@ struct State {
     visible: usize,
     /// Cell positions `[start, end)` the Grid drew last frame.
     grid_range: (usize, usize),
+    /// Each stacked cell in `grid_range`, as its position and member count.
+    stacks: Vec<(usize, usize)>,
     /// The primary photo's position among the visible ones.
     sel: Option<usize>,
     /// The multi-selection's positions.
@@ -740,6 +742,12 @@ impl State {
             mode,
             visible: app.visible_len(),
             grid_range: app.grid_range(),
+            stacks: {
+                let (start, end) = app.grid_range();
+                (start..end)
+                    .filter_map(|p| app.group_at(p).map(|(_, g)| (p, g.members().len())))
+                    .collect()
+            },
             sel: app.sel(),
             selected: app.selected_positions(),
             photo: app
@@ -925,7 +933,7 @@ quit
         let json = serde_json::to_string(&State::of(&app)).unwrap();
         assert_eq!(
             json,
-            r#"{"mode":"grid","visible":0,"grid_range":[0,0],"sel":null,"selected":[],"photo":null,"focus":"folders","zoom":null,"status":null,"failed_thumbs":0}"#
+            r#"{"mode":"grid","visible":0,"grid_range":[0,0],"stacks":[],"sel":null,"selected":[],"photo":null,"focus":"folders","zoom":null,"status":null,"failed_thumbs":0}"#
         );
     }
 }

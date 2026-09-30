@@ -619,6 +619,11 @@ pub(crate) struct App {
     face_pending: HashSet<PathBuf>,
     /// Analyses that failed for good (corrupt or unsupported files).
     face_failed: HashSet<PathBuf>,
+    /// Set by every view rebuild, which is when groups can change, and
+    /// cleared by the one scan of grouped photos for face analysis that
+    /// follows. Results only shrink that list, so one scan per rebuild is
+    /// complete, and a frame never walks every group.
+    faces_unscanned: bool,
     selection_on: bool,
     /// Highlight the background instead of the subject.
     selection_invert: bool,
@@ -924,6 +929,7 @@ impl App {
             face_quality: HashMap::new(),
             face_pending: HashSet::new(),
             face_failed: HashSet::new(),
+            faces_unscanned: false,
             eyes_filter: false,
             selection_on: false,
             selection_invert: false,

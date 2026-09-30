@@ -342,6 +342,33 @@ impl Run {
         );
     }
 
+    /// The pure core of `App::recompute_visible` over the real folder and its
+    /// saved groups: collapse each group to its representative, then run the
+    /// star filter over what is left. It runs on the UI thread whenever the
+    /// view changes, so it has to stay far inside a frame.
+    fn view_rebuild(&self, photos: &[PathBuf]) {
+        let loaded = crate::catalog::load_sidecars(&self.dir);
+        let names: HashSet<&std::ffi::OsStr> =
+            photos.iter().filter_map(|p| p.file_name()).collect();
+        let groups = crate::groups::Groups::from_loaded(loaded.groups, |n| names.contains(n));
+        let ratings: std::collections::HashMap<PathBuf, u8> = std::collections::HashMap::new();
+        let t0 = Instant::now();
+        let cells = crate::navigation::collapse_groups(photos, |n| groups.hides(n));
+        let shown = crate::navigation::visible_indices(
+            photos,
+            cells,
+            Some((crate::navigation::Cmp::Gte, 0)),
+            |p| ratings.get(p).copied().unwrap_or(0),
+        );
+        eprintln!(
+            "[profile] view rebuild: {} photos in {} groups to {} cells in {:?}",
+            photos.len(),
+            groups.len(),
+            shown.len(),
+            t0.elapsed(),
+        );
+    }
+
     /// What a grid frame pays on the UI thread once thumbnails have landed,
     /// which the decode pool cannot absorb. `App::sync_thumb_textures` bakes
     /// an edited photo's thumbnail inline before uploading it, so a viewport
@@ -349,6 +376,8 @@ impl Run {
     /// cache's periodic write lists the folder and serializes every entry on
     /// the same thread, after `on_capture_times` has stat'ed each photo.
     fn ui_frame(&self, photos: &[PathBuf]) {
+        self.view_rebuild(photos);
+
         let wanted: Vec<PathBuf> = photos.iter().take(self.thumbs).cloned().collect();
         let mut loader = Loader::new(16384, self.limits);
         loader.set_thumb_working_set_size(wanted.len());
