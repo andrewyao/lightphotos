@@ -284,6 +284,10 @@ pub(super) const STRIP_CELL_STYLE: CellStyle = CellStyle {
     show_placeholder: false,
 };
 
+/// The corner a group's count pill sits in. The eyes badge holds the
+/// bottom-right, the stars the bottom-left and the check the top-left.
+const PILL_CORNER: egui::Align2 = egui::Align2::RIGHT_TOP;
+
 /// Radius of a corner badge, scaled with the UI text size.
 fn badge_radius(style: &egui::Style) -> f32 {
     font_size::px(style, 9.0)
@@ -333,13 +337,38 @@ pub(super) fn thumbnail_cell(
         0.0
     };
 
+    let members = app.group_at(pos).map(|(_, g)| g.members().len());
+    // A Grid stack's two cards step up and to the right of the thumbnail,
+    // so the thumbnail gives up that room. Nothing clips a cell, so the
+    // cards must stay inside it.
+    let card_step = font_size::px(ui.style(), 3.0);
+    let cards = members.is_some() && !style.strip;
+    let mut inner = rect.shrink(style.corner + margin);
+    if cards {
+        inner.min.y += 2.0 * card_step;
+        inner.max.x -= 2.0 * card_step;
+    }
+    let mut pill_anchor = inner;
+
     if let Some((tex, tw, th)) = app.thumb_texture_for(pos) {
-        let inner = rect.shrink(style.corner + margin);
         let scale = (inner.width() / tw as f32).min(inner.height() / th as f32);
         let dw = tw as f32 * scale;
         let dh = th as f32 * scale;
         let img_rect = egui::Rect::from_center_size(inner.center(), egui::vec2(dw, dh));
+        if cards {
+            for k in [2.0, 1.0] {
+                let card = img_rect.translate(egui::vec2(k * card_step, -k * card_step));
+                ui.painter().rect(
+                    card,
+                    style.corner,
+                    colors.stack_card,
+                    egui::Stroke::new(1.0_f32, bg),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
         egui::Image::from_texture((tex, egui::vec2(dw, dh))).paint_at(ui, img_rect);
+        pill_anchor = img_rect;
         #[cfg(target_arch = "wasm32")]
         if ui.is_rect_visible(img_rect) {
             crate::analytics::photo_drawn();
@@ -358,6 +387,10 @@ pub(super) fn thumbnail_cell(
             egui::FontId::proportional(font_size::px(ui.style(), size)),
             color,
         );
+    }
+
+    if let Some(n) = members {
+        count_pill(ui, pill_anchor, n, &colors);
     }
 
     let badge_r = badge_radius(ui.style());
@@ -443,6 +476,30 @@ pub(super) fn thumbnail_cell(
     }
 
     response
+}
+
+/// A group's member count in a rounded pill at `PILL_CORNER` of `anchor`,
+/// the thumbnail or, before it loads, the room kept for it.
+fn count_pill(ui: &egui::Ui, anchor: egui::Rect, count: usize, colors: &theme::Palette) {
+    let font = egui::FontId::proportional(font_size::px(ui.style(), 11.0));
+    let galley = ui
+        .painter()
+        .layout_no_wrap(count.to_string(), font, colors.pill_text);
+    let pad = egui::vec2(
+        font_size::px(ui.style(), 5.0),
+        font_size::px(ui.style(), 1.5),
+    );
+    let size = galley.size() + 2.0 * pad;
+    let size = egui::vec2(size.x.max(size.y), size.y);
+    let inset = font_size::px(ui.style(), 4.0);
+    let pill = PILL_CORNER.align_size_within_rect(size, anchor.shrink(inset));
+    ui.painter()
+        .rect_filled(pill, size.y / 2.0, colors.pill_fill);
+    ui.painter().galley(
+        pill.center() - galley.size() / 2.0,
+        galley,
+        colors.pill_text,
+    );
 }
 
 /// A blue disc with a white check, drawn as strokes so it needs no glyph from
