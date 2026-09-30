@@ -323,7 +323,13 @@ impl App {
         }
         let t = crate::i18n::t();
         let Some(groups) = self.catalog.groups() else {
-            self.set_status(StatusKind::Error, t.group_refused_loading.to_string());
+            // The browser never loads groups, so it is not waiting on a load.
+            let msg = if cfg!(target_arch = "wasm32") {
+                t.group_refused_browser
+            } else {
+                t.group_refused_loading
+            };
+            self.set_status(StatusKind::Error, msg.to_string());
             self.request_redraw();
             return;
         };
@@ -460,7 +466,7 @@ impl App {
 
     /// Delete waits for the folder's groups to load, since a group loaded
     /// after a photo left would still name it, and for any running delete.
-    pub(super) fn delete_available(&self) -> bool {
+    pub(crate) fn delete_available(&self) -> bool {
         !self.bulk_delete_running() && self.catalog_load_pending.is_none()
     }
 

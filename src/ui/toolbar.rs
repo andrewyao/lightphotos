@@ -247,8 +247,11 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
 
             // Destructive, so it sits last, in its own group.
             ui.separator();
+            let delete = egui::Button::new(
+                egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger),
+            );
             if ui
-                .button(egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger))
+                .add_enabled(app.delete_available(), delete)
                 .on_hover_text(t.delete_selection_tip)
                 .clicked()
             {
