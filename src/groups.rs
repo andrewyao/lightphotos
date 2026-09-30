@@ -142,6 +142,18 @@ impl Group {
     }
 }
 
+/// The group Group Selected makes of `cells`, each the photos one selected
+/// cell shows: a single photo, or every member of a stack. `rep` names the
+/// primary cell's photo. `None` when fewer than two cells are given or a
+/// name cannot be saved in a sidecar.
+pub fn merge_selection(cells: &[&[OsString]], rep: &OsStr) -> Option<Group> {
+    if cells.len() < 2 {
+        return None;
+    }
+    let members = cells.iter().flat_map(|c| c.iter().cloned()).collect();
+    Group::new(members, rep.to_os_string())
+}
+
 /// Two or more distinct UTF-8 names, sorted case-insensitively like the
 /// folder listing, with the exact name breaking ties so twins sit together.
 fn sorted_members(mut members: Vec<OsString>) -> Option<Vec<OsString>> {
@@ -225,13 +237,11 @@ impl Groups {
         groups
     }
 
-    #[allow(dead_code)] // only called from #[cfg(test)] today
-    fn get(&self, id: &GroupId) -> Option<&Group> {
+    pub fn get(&self, id: &GroupId) -> Option<&Group> {
         self.by_id.get(id)
     }
 
-    #[allow(dead_code)] // only called from #[cfg(test)] today
-    fn group_of(&self, name: &OsStr) -> Option<&GroupId> {
+    pub fn group_of(&self, name: &OsStr) -> Option<&GroupId> {
         self.of.get(name)
     }
 
@@ -264,7 +274,6 @@ impl Groups {
     /// loads with the photos in the new group. Creating a group whose members
     /// already form one only moves that group's representative, so repeating
     /// a create changes nothing.
-    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn create(&self, group: Group, at: SystemTime) -> Vec<GroupWrite> {
         if let Some(id) = self.group_of(&group.rep) {
             if self.by_id[id].members == group.members {
@@ -302,7 +311,6 @@ impl Groups {
         }
     }
 
-    #[allow(dead_code)] // only called from #[cfg(test)] today
     pub fn dissolve(&self, id: &GroupId) -> Vec<GroupWrite> {
         if self.by_id.contains_key(id) {
             vec![GroupWrite::Delete(id.clone())]
@@ -439,6 +447,27 @@ mod tests {
                 assert_eq!(groups.group_of(m), Some(id));
             }
         }
+    }
+
+    /// A stack brings every member, the singles bring themselves, and the
+    /// primary cell's photo stands for the result.
+    #[test]
+    fn merging_a_stack_and_two_singles_makes_one_group_of_all() {
+        let stack = names(&["b", "c", "d"]);
+        let a = names(&["a"]);
+        let e = names(&["e"]);
+        let merged = merge_selection(&[&a, &stack, &e], "c".as_ref()).unwrap();
+        assert_eq!(merged, group(&["a", "b", "c", "d", "e"], "c"));
+        assert_eq!(merge_selection(&[&stack], "c".as_ref()), None, "one cell");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merging_a_name_a_sidecar_cannot_hold_is_refused() {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = vec![OsString::from_vec(vec![b'a', 0xff])];
+        let b = names(&["b"]);
+        assert_eq!(merge_selection(&[&bad, &b], "b".as_ref()), None);
     }
 
     #[test]

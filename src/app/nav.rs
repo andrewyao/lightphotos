@@ -218,16 +218,21 @@ impl App {
         let Some(pl) = self.playlist.as_ref() else {
             return Vec::new();
         };
-        let positions: Vec<usize> = if self.selected.is_empty() {
-            self.sel.into_iter().collect()
-        } else {
-            self.selected.iter().copied().collect()
-        };
-        positions
+        self.selected_cells()
             .iter()
             .filter_map(|&p| self.visible.get(p).copied())
             .filter_map(|i| pl.entry(i).map(|p| p.to_path_buf()))
             .collect()
+    }
+
+    /// The selected cells in order, or the cursor's cell alone when nothing
+    /// is multi-selected.
+    pub(super) fn selected_cells(&self) -> Vec<usize> {
+        if self.selected.is_empty() {
+            self.sel.into_iter().collect()
+        } else {
+            self.selected.iter().copied().collect()
+        }
     }
 
     /// `selected_paths().len()` without building the list.

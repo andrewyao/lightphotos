@@ -376,6 +376,9 @@ pub struct Strings {
     pub deleted: fn(usize) -> String,
     pub deleted_partial: fn(usize, usize, &str) -> String,
     pub delete_in_progress: &'static str,
+    pub group_refused_loading: &'static str,
+    pub group_refused_browser: &'static str,
+    pub group_name_unsaveable: &'static str,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub delete_no_handle: fn(&str) -> String,
     pub copied_settings_from: fn(&str) -> String,
@@ -497,6 +500,8 @@ pub struct MenuStrings {
     pub rotate_left: &'static str,
     pub rotate_right: &'static str,
     pub move_to_trash: &'static str,
+    pub group_selected: &'static str,
+    pub ungroup: &'static str,
     pub view: &'static str,
     pub grid: &'static str,
     pub loupe: &'static str,
@@ -701,6 +706,8 @@ pub static EN: Strings = Strings {
                 ("Shift+Click", "Range-select"),
                 ("Cmd+Click", "Toggle individual selection"),
                 ("Shift+arrows", "Extend selection (library)"),
+                ("Cmd+G", "Group the selection"),
+                ("Cmd+Shift+G", "Ungroup the selected groups"),
             ],
         },
         HelpSection {
@@ -891,6 +898,9 @@ pub static EN: Strings = Strings {
         |n, total, e| format!("Moved {n}/{total} \u{2014} last error: {e}")
     },
     delete_in_progress: "Another delete is still running\u{2026}",
+    group_refused_loading: "This folder's groups are still loading. Try again in a moment.",
+    group_refused_browser: "Groups can't be saved in the browser yet.",
+    group_name_unsaveable: "A file name here can't be saved in a group.",
     delete_no_handle: |dir| format!("Could not delete photos: no directory handle for {dir}"),
     copied_settings_from: |name| format!("Copied settings from {name}"),
     applied_settings: |n| format!("Applied settings to {n} photo(s)"),
@@ -1010,6 +1020,8 @@ pub static EN: Strings = Strings {
         rotate_left: "Rotate Left",
         rotate_right: "Rotate Right",
         move_to_trash: "Move to Trash",
+        group_selected: "Group",
+        ungroup: "Ungroup",
         view: "View",
         grid: "Grid",
         loupe: "Loupe",
@@ -1181,6 +1193,8 @@ pub static ZH: Strings = Strings {
                 ("Shift+点按", "连续选择"),
                 ("Cmd+点按", "逐张加选或取消"),
                 ("Shift+方向键", "扩展选择（图库）"),
+                ("Cmd+G", "将所选照片编组"),
+                ("Cmd+Shift+G", "取消所选编组"),
             ],
         },
         HelpSection {
@@ -1359,6 +1373,9 @@ pub static ZH: Strings = Strings {
         |n, total, e| format!("已移动 {n}/{total} 张 \u{2014} 最后的错误：{e}")
     },
     delete_in_progress: "已有删除正在进行\u{2026}",
+    group_refused_loading: "此文件夹的编组仍在载入，请稍后再试。",
+    group_refused_browser: "浏览器中尚不能保存编组。",
+    group_name_unsaveable: "此文件夹中有文件名无法保存到编组中。",
     delete_no_handle: |dir| format!("无法删除照片：{dir} 没有目录句柄"),
     copied_settings_from: |name| format!("已从 {name} 拷贝设置"),
     applied_settings: |n| format!("已将设置应用到 {n} 张照片"),
@@ -1471,6 +1488,8 @@ pub static ZH: Strings = Strings {
         rotate_left: "向左旋转",
         rotate_right: "向右旋转",
         move_to_trash: "移到废纸篓",
+        group_selected: "编组",
+        ungroup: "取消编组",
         view: "显示",
         grid: "网格",
         loupe: "单张视图",
@@ -1734,6 +1753,8 @@ mod tests {
             "Cmd+Shift+C",
             "Cmd+Shift+Y",
             "Cmd+Z",
+            "Cmd+G",
+            "Cmd+Shift+G",
         ];
         if SUBJECT_KEYS {
             bound.extend(["O", "Shift+O"]);

@@ -294,13 +294,14 @@ impl Catalog {
         self.writeback.end_load();
     }
 
-    #[allow(dead_code)] // only called from #[cfg(test)] today
-    fn groups(&self) -> Option<&Groups> {
+    pub(crate) fn groups(&self) -> Option<&Groups> {
         self.groups.as_ref()
     }
 
-    #[allow(dead_code)] // only called from #[cfg(test)] today
-    fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) -> Result<(), GroupWriteRefused> {
+    pub(crate) fn apply_group_writes(
+        &mut self,
+        writes: Vec<GroupWrite>,
+    ) -> Result<(), GroupWriteRefused> {
         if writes.is_empty() {
             return Ok(());
         }
