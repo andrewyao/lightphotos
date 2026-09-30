@@ -237,13 +237,15 @@ caches, or `image_decode.rs`.
 
 ```mermaid
 flowchart TD
-    keys["User opens Show Selection in the Loupe\nui/loupe.rs"]
-    keys --> req["request_face_quality (app/thumbs.rs)\nrequest_selection_mask (app/loupe.rs)"]
-    req --> pools["FacePool: 2 workers\nsegmentation: one thread per request"]
-    pools --> vn["vision::perform_request\nVNImageRequestHandler decodes the file itself"]
+    frame["Every frame\nrequest_face_quality (app/thumbs.rs)\nno candidates until photos can be grouped"]
+    sel["User opens Show Selection in the Loupe\nrequest_selection_mask (app/loupe.rs)"]
+    frame --> fpool["FacePool: 2 workers"]
+    sel --> sthread["segmentation: one thread per request"]
+    fpool --> vn["vision::perform_request\nVNImageRequestHandler decodes the file itself"]
+    sthread --> vn
     vn --> fl["VNDetectFaceLandmarksRequest\nfacequality.rs"]
     vn --> sg["VNGeneratePersonSegmentationRequest, then\nVNGenerateForegroundInstanceMaskRequest\nsegmentation.rs"]
-    fl --> blink["eye-openness geometry -> EyeState\nfeeds burst.rs's best-frame score"]
+    fl --> blink["eye-openness geometry -> EyeState\nfeeds the eyes-closed filter and burst::combined_score"]
     sg --> mask["Mask -> the Loupe's selection overlay"]
 ```
 
