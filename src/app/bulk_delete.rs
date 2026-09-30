@@ -854,13 +854,19 @@ mod tests {
     }
 
     #[test]
-    fn trashing_a_representative_alone_in_the_loupe_promotes_the_next_member() {
+    fn trashing_a_representative_in_the_loupe_promotes_the_next_member() {
         use crate::app::nav::tests::group_photos;
         let (mut app, dir, paths) = grouped_app(&["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"]);
         group_photos(&mut app, &[1, 2, 3], 1);
         app.select_single(1);
         app.enter_loupe();
-        app.start_delete(vec![paths[1].clone()]);
+        assert_eq!(
+            app.delete_paths(),
+            vec![paths[1].clone()],
+            "the Loupe's Delete takes the photo on screen, not its whole stack"
+        );
+        app.request_bulk(crate::ui::BulkKind::Delete);
+        app.confirm_pending();
         drain(&mut app);
 
         assert!(!paths[1].exists());
