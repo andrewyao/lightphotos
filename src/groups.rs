@@ -100,13 +100,21 @@ pub struct Group {
 impl Group {
     /// `None` also for a member name that is not UTF-8, since the sidecar's
     /// JSON strings cannot hold it.
-    pub fn new(mut members: Vec<OsString>, rep: OsString) -> Option<Group> {
-        if members.len() < 2 || members.iter().any(|m| m.to_str().is_none()) {
-            return None;
-        }
-        members.sort_by_cached_key(|m| (m.to_string_lossy().to_lowercase(), m.clone()));
-        let distinct = members.windows(2).all(|w| w[0] != w[1]);
-        (distinct && members.contains(&rep)).then_some(Group { members, rep })
+    pub fn new(members: Vec<OsString>, rep: OsString) -> Option<Group> {
+        let members = sorted_members(members)?;
+        members.contains(&rep).then_some(Group { members, rep })
+    }
+
+    /// Like [`Group::new`], but a `rep` outside `members` moves to the
+    /// first member instead of refusing the group.
+    fn with_rep_or_first(members: Vec<OsString>, rep: &OsString) -> Option<Group> {
+        let members = sorted_members(members)?;
+        let rep = if members.contains(rep) {
+            rep.clone()
+        } else {
+            members[0].clone()
+        };
+        Some(Group { members, rep })
     }
 
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser saves no groups yet
@@ -120,14 +128,27 @@ impl Group {
     }
 
     fn retain(&self, keep: impl Fn(&OsString) -> bool) -> Option<Group> {
-        let members: Vec<OsString> = self.members.iter().filter(|m| keep(m)).cloned().collect();
-        let rep = if keep(&self.rep) {
-            self.rep.clone()
-        } else {
-            members.first()?.clone()
-        };
-        Group::new(members, rep)
+        let members = self.members.iter().filter(|m| keep(m)).cloned().collect();
+        Group::with_rep_or_first(members, &self.rep)
     }
+}
+
+/// Two or more distinct UTF-8 names, sorted case-insensitively like the
+/// folder listing, with the exact name breaking ties so twins sit together.
+fn sorted_members(mut members: Vec<OsString>) -> Option<Vec<OsString>> {
+    if members.len() < 2 || members.iter().any(|m| m.to_str().is_none()) {
+        return None;
+    }
+    members.sort_by_cached_key(|m| (m.to_string_lossy().to_lowercase(), m.clone()));
+    members.windows(2).all(|w| w[0] != w[1]).then_some(members)
+}
+
+/// A group as its sidecar spells it, before it is checked against the
+/// folder. Any of it may be wrong: missing photos, duplicates, one member.
+#[derive(Clone, Debug)]
+pub struct SavedGroup {
+    pub members: Vec<OsString>,
+    pub rep: OsString,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -136,32 +157,60 @@ pub enum GroupWrite {
     Delete(GroupId),
 }
 
+impl GroupWrite {
+    fn id(&self) -> &GroupId {
+        match self {
+            GroupWrite::Put(id, _) | GroupWrite::Delete(id) => id,
+        }
+    }
+}
+
 /// Every group in one folder. `of` indexes `by_id` by member, which is what
 /// holds a photo to at most one group.
 #[derive(Default, Debug)]
 pub struct Groups {
     by_id: BTreeMap<GroupId, Group>,
     of: HashMap<OsString, GroupId>,
+    /// Groups whose sidecar disagrees with memory, because loading repaired
+    /// them or a replayed write took their photos, with what the file should
+    /// say. `None` means the file should go. [`Groups::take_repairs`] hands
+    /// them to the next batch of writes.
+    repairs: BTreeMap<GroupId, Option<Group>>,
 }
 
 impl Groups {
     /// The groups a folder's sidecars describe, reconciled against the
-    /// folder's `listing` of file names. A member whose file is gone is
-    /// dropped, the newer id keeps a photo two sidecars claim, a group
-    /// left under two members is ignored, and a missing representative moves
-    /// to the first member. Nothing here writes, so opening a folder never
-    /// changes it, and the next mutation of a repaired group rewrites its file.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser loads no groups yet
+    /// folder's photos. A member that is not a photo in the folder is
+    /// dropped, the newest id keeps a photo two sidecars claim, a group left
+    /// under two members is dropped, and a missing representative moves to
+    /// the first member. Nothing here writes, so opening a folder never
+    /// changes it. Every group this changed is recorded for
+    /// [`Groups::take_repairs`], so a dropped group cannot come back when
+    /// its photos do.
     pub fn from_loaded(
-        files: impl IntoIterator<Item = (GroupId, Group)>,
-        listing: &HashSet<OsString>,
+        mut files: Vec<(GroupId, SavedGroup)>,
+        is_photo: impl Fn(&OsStr) -> bool,
     ) -> Groups {
-        let sorted: BTreeMap<GroupId, Group> = files.into_iter().collect();
+        files.sort_by(|a, b| b.0.cmp(&a.0));
         let mut groups = Groups::default();
-        for (id, group) in sorted.into_iter().rev() {
-            let kept = group.retain(|m| listing.contains(m) && !groups.of.contains_key(m));
-            if let Some(kept) = kept {
-                groups.insert(id, kept);
+        for (id, saved) in files {
+            let mut seen = HashSet::new();
+            let kept: Vec<OsString> = saved
+                .members
+                .iter()
+                .filter(|m| is_photo(m) && !groups.of.contains_key(*m) && seen.insert(*m))
+                .cloned()
+                .collect();
+            let intact = kept.len() == saved.members.len();
+            let repaired = Group::with_rep_or_first(kept, &saved.rep);
+            match &repaired {
+                Some(g) if intact && g.rep == saved.rep => {}
+                _ => {
+                    groups.repairs.insert(id.clone(), repaired.clone());
+                }
+            }
+            if let Some(group) = repaired {
+                groups.insert(id, group);
             }
         }
         groups
@@ -173,7 +222,7 @@ impl Groups {
     }
 
     #[allow(dead_code)] // only called from #[cfg(test)] today
-    pub fn group_of(&self, name: &std::ffi::OsStr) -> Option<&GroupId> {
+    pub fn group_of(&self, name: &OsStr) -> Option<&GroupId> {
         self.of.get(name)
     }
 
@@ -205,7 +254,9 @@ impl Groups {
                 return self.set_rep(id, &group.rep);
             }
         }
-        let id = GroupId::mint(&group, at, |id| self.by_id.contains_key(id));
+        let id = GroupId::mint(&group, at, |id| {
+            self.by_id.contains_key(id) || self.repairs.contains_key(id)
+        });
         let absorbed = self.forget(&group.members);
         let mut writes = vec![GroupWrite::Put(id, group)];
         writes.extend(absorbed);
@@ -252,15 +303,35 @@ impl Groups {
             .collect()
     }
 
-    /// Apply one write to the index. A `Put` whose members another group
-    /// still claims takes them from it, so the index stays one group per
-    /// photo even when the writes come from a stale snapshot.
+    /// The writes that bring every repaired group's sidecar in line with
+    /// memory, handed out once.
+    pub fn take_repairs(&mut self) -> Vec<GroupWrite> {
+        std::mem::take(&mut self.repairs)
+            .into_iter()
+            .map(|(id, group)| match group {
+                Some(g) => GroupWrite::Put(id, g),
+                None => GroupWrite::Delete(id),
+            })
+            .collect()
+    }
+
+    /// Apply one write that is on its way to disk. A `Put` whose members
+    /// another group still claims takes them from it and records that group
+    /// as a repair, since its sidecar still names them. A batch that goes on
+    /// to write that group clears the record; a write replayed onto an older
+    /// snapshot leaves it for the next batch.
     pub fn apply(&mut self, write: &GroupWrite) {
+        self.repairs.remove(write.id());
         match write {
             GroupWrite::Put(id, group) => {
                 self.remove(id);
-                for w in self.forget(&group.members) {
-                    self.apply(&w);
+                for taken in self.forget(&group.members) {
+                    self.apply(&taken);
+                    let (id, repaired) = match taken {
+                        GroupWrite::Put(id, g) => (id, Some(g)),
+                        GroupWrite::Delete(id) => (id, None),
+                    };
+                    self.repairs.insert(id, repaired);
                 }
                 self.insert(id.clone(), group.clone());
             }
@@ -309,8 +380,16 @@ mod tests {
         SystemTime::UNIX_EPOCH + Duration::from_millis(ms)
     }
 
-    fn listing(ns: &[&str]) -> HashSet<OsString> {
-        names(ns).into_iter().collect()
+    fn saved(ns: &[&str], rep: &str) -> SavedGroup {
+        SavedGroup {
+            members: names(ns),
+            rep: rep.into(),
+        }
+    }
+
+    fn load(files: Vec<(GroupId, SavedGroup)>, photos: &[&str]) -> Groups {
+        let photos: HashSet<OsString> = names(photos).into_iter().collect();
+        Groups::from_loaded(files, |n| photos.contains(n))
     }
 
     fn applied(mut groups: Groups, writes: &[GroupWrite]) -> Groups {
@@ -385,12 +464,12 @@ mod tests {
 
     #[test]
     fn creating_over_two_groups_puts_the_new_group_first_then_deletes_the_old() {
-        let loaded = Groups::from_loaded(
-            [
-                (id("g-1"), group(&["a", "b"], "a")),
-                (id("g-2"), group(&["c", "d"], "d")),
+        let loaded = load(
+            vec![
+                (id("g-1"), saved(&["a", "b"], "a")),
+                (id("g-2"), saved(&["c", "d"], "d")),
             ],
-            &listing(&["a", "b", "c", "d", "e"]),
+            &["a", "b", "c", "d", "e"],
         );
         let writes = loaded.create(group(&["a", "b", "c", "d", "e"], "c"), at(1));
 
@@ -410,9 +489,9 @@ mod tests {
 
     #[test]
     fn creating_over_part_of_a_group_shrinks_what_is_left() {
-        let loaded = Groups::from_loaded(
-            [(id("g-1"), group(&["a", "b", "c"], "a"))],
-            &listing(&["a", "b", "c", "d"]),
+        let loaded = load(
+            vec![(id("g-1"), saved(&["a", "b", "c"], "a"))],
+            &["a", "b", "c", "d"],
         );
         let writes = loaded.create(group(&["a", "d"], "d"), at(1));
         assert_eq!(
@@ -432,9 +511,9 @@ mod tests {
 
     #[test]
     fn forgetting_the_representative_promotes_the_first_survivor() {
-        let groups = Groups::from_loaded(
-            [(id("g-1"), group(&["a", "b", "c"], "b"))],
-            &listing(&["a", "b", "c"]),
+        let groups = load(
+            vec![(id("g-1"), saved(&["a", "b", "c"], "b"))],
+            &["a", "b", "c"],
         );
         assert_eq!(
             groups.forget(&names(&["b"])),
@@ -444,9 +523,9 @@ mod tests {
 
     #[test]
     fn forgetting_down_to_one_member_dissolves_the_group() {
-        let groups = Groups::from_loaded(
-            [(id("g-1"), group(&["a", "b", "c"], "a"))],
-            &listing(&["a", "b", "c"]),
+        let groups = load(
+            vec![(id("g-1"), saved(&["a", "b", "c"], "a"))],
+            &["a", "b", "c"],
         );
         let writes = groups.forget(&names(&["a", "c"]));
         assert_eq!(writes, vec![GroupWrite::Delete(id("g-1"))]);
@@ -460,16 +539,20 @@ mod tests {
     #[test]
     fn a_merge_cut_short_after_its_first_write_loads_as_the_new_group() {
         let old = minted(1_000);
-        let files = [(old.clone(), group(&["a", "b", "c"], "a"))];
-        let photos = listing(&["a", "b", "c", "d"]);
-        let before = Groups::from_loaded(files.clone(), &photos);
+        let photos = ["a", "b", "c", "d"];
+        let before = load(vec![(old.clone(), saved(&["a", "b", "c"], "a"))], &photos);
         let writes = before.create(group(&["b", "c", "d"], "d"), at(2_000));
         let GroupWrite::Put(new, new_group) = &writes[0] else {
             panic!("the new group comes first: {writes:?}");
         };
 
-        let [old_file] = files;
-        let reloaded = Groups::from_loaded([old_file, (new.clone(), new_group.clone())], &photos);
+        let reloaded = load(
+            vec![
+                (old.clone(), saved(&["a", "b", "c"], "a")),
+                (new.clone(), saved(&["b", "c", "d"], "d")),
+            ],
+            &photos,
+        );
         assert_eq!(reloaded.get(new), Some(new_group));
         assert_eq!(reloaded.get(&old), None, "the old group keeps only a");
         assert_indexed(&reloaded);
@@ -478,12 +561,12 @@ mod tests {
     #[test]
     fn two_sidecars_claiming_one_photo_resolve_to_the_newest_id() {
         let (older, newer) = (minted(1_000), minted(2_000));
-        let groups = Groups::from_loaded(
-            [
-                (newer.clone(), group(&["a", "x"], "x")),
-                (older.clone(), group(&["x", "c", "d"], "x")),
+        let groups = load(
+            vec![
+                (newer.clone(), saved(&["a", "x"], "x")),
+                (older.clone(), saved(&["x", "c", "d"], "x")),
             ],
-            &listing(&["a", "c", "d", "x"]),
+            &["a", "c", "d", "x"],
         );
         assert_eq!(groups.group_of("x".as_ref()), Some(&newer));
         assert_eq!(groups.get(&newer), Some(&group(&["a", "x"], "x")));
@@ -510,24 +593,24 @@ mod tests {
             "a minted id reads back as minted"
         );
 
-        let groups = Groups::from_loaded(
-            [
-                (id("g-fixture00001"), group(&["a", "b"], "a")),
-                (fixture.clone(), group(&["b", "c"], "b")),
+        let groups = load(
+            vec![
+                (id("g-fixture00001"), saved(&["a", "b"], "a")),
+                (fixture.clone(), saved(&["b", "c"], "b")),
             ],
-            &listing(&["a", "b", "c"]),
+            &["a", "b", "c"],
         );
         assert_eq!(groups.group_of("b".as_ref()), Some(&fixture));
     }
 
     #[test]
     fn loading_drops_missing_files_and_ignores_groups_left_under_two() {
-        let groups = Groups::from_loaded(
-            [
-                (id("g-1"), group(&["a", "b", "c"], "a")),
-                (id("g-2"), group(&["d", "e"], "d")),
+        let groups = load(
+            vec![
+                (id("g-1"), saved(&["a", "b", "c"], "a")),
+                (id("g-2"), saved(&["d", "e"], "d")),
             ],
-            &listing(&["b", "c", "e"]),
+            &["b", "c", "e"],
         );
         assert_eq!(groups.get(&id("g-1")), Some(&group(&["b", "c"], "b")));
         assert_eq!(groups.get(&id("g-2")), None);
@@ -536,11 +619,83 @@ mod tests {
     }
 
     #[test]
+    fn loading_records_the_writes_that_would_repair_each_file() {
+        let mut groups = load(
+            vec![
+                (id("g-1"), saved(&["a", "b", "c"], "a")),
+                (id("g-2"), saved(&["d", "e"], "d")),
+                (id("g-3"), saved(&["f"], "f")),
+                (id("g-4"), saved(&["h", "g"], "g")),
+                (id("g-5"), saved(&["i", "notes.txt"], "i")),
+                (id("g-6"), saved(&["j", "k", "j"], "j")),
+                (id("g-7"), saved(&["l", "m"], "gone")),
+            ],
+            &["b", "c", "e", "f", "g", "h", "i", "j", "k", "l", "m"],
+        );
+        assert_eq!(groups.get(&id("g-3")), None, "a one-member file is dropped");
+        assert_eq!(
+            groups.get(&id("g-5")),
+            None,
+            "a file that is not a photo cannot keep a group"
+        );
+        assert_eq!(groups.get(&id("g-6")), Some(&group(&["j", "k"], "j")));
+        assert_indexed(&groups);
+
+        assert_eq!(
+            groups.take_repairs(),
+            vec![
+                GroupWrite::Put(id("g-1"), group(&["b", "c"], "b")),
+                GroupWrite::Delete(id("g-2")),
+                GroupWrite::Delete(id("g-3")),
+                GroupWrite::Delete(id("g-5")),
+                GroupWrite::Put(id("g-6"), group(&["j", "k"], "j")),
+                GroupWrite::Put(id("g-7"), group(&["l", "m"], "l")),
+            ],
+            "g-4 only lists its members out of order, which needs no rewrite"
+        );
+        assert!(
+            groups.take_repairs().is_empty(),
+            "repairs are handed out once"
+        );
+    }
+
+    #[test]
+    fn the_older_of_two_claims_is_repaired_and_the_newer_is_not() {
+        let (older, newer) = (minted(1_000), minted(2_000));
+        let mut groups = load(
+            vec![
+                (older.clone(), saved(&["a", "b", "c"], "a")),
+                (newer.clone(), saved(&["b", "c"], "b")),
+            ],
+            &["a", "b", "c"],
+        );
+        assert_eq!(groups.take_repairs(), vec![GroupWrite::Delete(older)]);
+    }
+
+    #[test]
+    fn a_batch_that_writes_a_repaired_group_clears_its_repair() {
+        let loaded = load(
+            vec![
+                (id("g-1"), saved(&["a", "b", "gone"], "a")),
+                (id("g-2"), saved(&["c", "gone2"], "c")),
+            ],
+            &["a", "b", "c", "d"],
+        );
+        let writes = loaded.dissolve(&id("g-1"));
+        let mut after = applied(loaded, &writes);
+        assert_eq!(
+            after.take_repairs(),
+            vec![GroupWrite::Delete(id("g-2"))],
+            "g-1's own write already brings its file in line"
+        );
+    }
+
+    #[test]
     fn creating_the_same_group_twice_converges() {
         let base = || {
-            Groups::from_loaded(
-                [(id("g-1"), group(&["a", "b"], "a"))],
-                &listing(&["a", "b", "c", "d"]),
+            load(
+                vec![(id("g-1"), saved(&["a", "b"], "a"))],
+                &["a", "b", "c", "d"],
             )
         };
         let wanted = group(&["a", "b", "c"], "c");
@@ -563,10 +718,7 @@ mod tests {
 
     #[test]
     fn set_rep_refuses_a_photo_outside_the_group() {
-        let groups = Groups::from_loaded(
-            [(id("g-1"), group(&["a", "b"], "a"))],
-            &listing(&["a", "b", "c"]),
-        );
+        let groups = load(vec![(id("g-1"), saved(&["a", "b"], "a"))], &["a", "b", "c"]);
         assert!(groups.set_rep(&id("g-1"), &"c".into()).is_empty());
         assert!(groups.set_rep(&id("g-1"), &"a".into()).is_empty());
         assert_eq!(
@@ -577,10 +729,7 @@ mod tests {
 
     #[test]
     fn dissolve_deletes_the_file_and_frees_the_members() {
-        let groups = Groups::from_loaded(
-            [(id("g-1"), group(&["a", "b"], "a"))],
-            &listing(&["a", "b"]),
-        );
+        let groups = load(vec![(id("g-1"), saved(&["a", "b"], "a"))], &["a", "b"]);
         let writes = groups.dissolve(&id("g-1"));
         assert_eq!(writes, vec![GroupWrite::Delete(id("g-1"))]);
         let after = applied(groups, &writes);
@@ -589,17 +738,37 @@ mod tests {
     }
 
     #[test]
-    fn a_put_from_a_stale_snapshot_takes_its_members_from_other_groups() {
-        let groups = Groups::from_loaded(
-            [(id("g-1"), group(&["a", "b", "c"], "a"))],
-            &listing(&["a", "b", "c"]),
+    fn a_replayed_put_takes_members_from_other_groups_and_records_the_repair() {
+        let groups = load(
+            vec![(id("g-1"), saved(&["a", "b", "c"], "a"))],
+            &["a", "b", "c"],
         );
-        let after = applied(
+        let mut after = applied(
             groups,
             &[GroupWrite::Put(id("g-2"), group(&["a", "b"], "b"))],
         );
         assert_eq!(after.get(&id("g-1")), None, "one photo left, so no group");
         assert_eq!(after.group_of("a".as_ref()), Some(&id("g-2")));
+        assert_indexed(&after);
+        assert_eq!(
+            after.take_repairs(),
+            vec![GroupWrite::Delete(id("g-1"))],
+            "g-1's file still claims a and b, so the next batch deletes it"
+        );
+    }
+
+    #[test]
+    fn a_create_batch_leaves_no_repair_behind() {
+        let loaded = load(
+            vec![
+                (id("g-1"), saved(&["a", "b"], "a")),
+                (id("g-2"), saved(&["c", "d", "e"], "d")),
+            ],
+            &["a", "b", "c", "d", "e"],
+        );
+        let writes = loaded.create(group(&["a", "b", "c"], "c"), at(1));
+        let mut after = applied(loaded, &writes);
+        assert_eq!(after.take_repairs(), Vec::new());
         assert_indexed(&after);
     }
 
