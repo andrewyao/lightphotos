@@ -278,8 +278,6 @@ pub(super) const STRIP_CELL_STYLE: CellStyle = CellStyle {
     show_placeholder: false,
 };
 
-/// The corner a group's count pill sits in. The eyes badge holds the
-/// bottom-right, the stars the bottom-left and the check the top-left.
 const PILL_CORNER: egui::Align2 = egui::Align2::RIGHT_TOP;
 
 /// Radius of a corner badge, scaled with the UI text size.
@@ -332,9 +330,6 @@ pub(super) fn thumbnail_cell(
     };
 
     let members = app.group_at(pos).map(|(_, g)| g.members().len());
-    // A Grid stack's two cards step up and to the right of the thumbnail,
-    // so the thumbnail gives up that room. Nothing clips a cell, so the
-    // cards must stay inside it.
     let card_step = font_size::px(ui.style(), 3.0);
     let cards = members.is_some() && !style.strip;
     let mut inner = rect.shrink(style.corner + margin);
@@ -472,10 +467,6 @@ pub(super) fn thumbnail_cell(
     response
 }
 
-/// A group's member count in a rounded pill at `PILL_CORNER` of `anchor`,
-/// the thumbnail or, before it loads, the room kept for it, kept inside
-/// `cell` when a large font and a narrow portrait make it wider than the
-/// thumbnail.
 fn count_pill(
     ui: &egui::Ui,
     anchor: egui::Rect,

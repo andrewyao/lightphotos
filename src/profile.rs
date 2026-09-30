@@ -342,10 +342,6 @@ impl Run {
         );
     }
 
-    /// The pure core of `App::recompute_visible` over the real folder and its
-    /// saved groups: collapse each group to its representative, then run the
-    /// star filter over what is left. It runs on the UI thread whenever the
-    /// view changes, so it has to stay far inside a frame.
     fn view_rebuild(&self, photos: &[PathBuf]) {
         let loaded = crate::catalog::load_sidecars(&self.dir);
         let names: HashSet<&std::ffi::OsStr> =

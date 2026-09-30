@@ -206,8 +206,6 @@ impl App {
                     self.reconcile_catalog_mirrors(&playlist);
                 }
                 self.playlist = Some(playlist);
-                // The groups and ratings just landed, after the first paint,
-                // and both decide which cells show.
                 if here {
                     self.recompute_visible();
                     self.resync_loupe_selection();
@@ -276,11 +274,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// The only door from the app to the catalog's group writes. The view is
-    /// rebuilt in the same call, so no member ever shows alone, and the writes
-    /// are applied in the call that computed them, so they never cross a
-    /// folder switch. A refusal changes nothing and says why. Returns whether
-    /// the writes landed.
     fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) -> bool {
         match self.catalog.apply_group_writes(writes) {
             Ok(()) => {
@@ -305,17 +298,12 @@ impl App {
         }
     }
 
-    /// The file name of the photo in the cell at `pos`.
     fn cell_name(&self, pos: usize) -> Option<std::ffi::OsString> {
         let idx = *self.visible.get(pos)?;
         let path = self.playlist.as_ref()?.entry(idx)?;
         path.file_name().map(std::ffi::OsStr::to_os_string)
     }
 
-    /// Cmd+G: group two or more selected cells. A stack brings all its
-    /// members, and the primary cell's photo becomes the representative. The
-    /// rebuild puts every selected member on the new stack's cell, so the
-    /// selection becomes that cell with no code here.
     pub(super) fn group_selected(&mut self) {
         let cells = self.selected_cells();
         if cells.len() < 2 {
@@ -323,7 +311,6 @@ impl App {
         }
         let t = crate::i18n::t();
         let Some(groups) = self.catalog.groups() else {
-            // The browser never loads groups, so it is not waiting on a load.
             let msg = if cfg!(target_arch = "wasm32") {
                 t.group_refused_browser
             } else {
@@ -354,21 +341,19 @@ impl App {
         self.apply_group_writes(writes);
     }
 
-    /// Cmd+Shift+G: dissolve every selected stack without asking. Its members
-    /// come back selected, with the old representative as the cursor, so
-    /// Cmd+G right after rebuilds the same group.
     pub(super) fn ungroup_selected(&mut self) {
         let cells = self.selected_cells();
-        let primary = self
+        let cursor_stack = self
             .sel
-            .filter(|s| cells.contains(s) && self.group_at(*s).is_some());
-        // The cursor's stack comes first, since its representative becomes
-        // the cursor again.
+            .filter(|s| cells.contains(s) && self.group_at(*s).is_some())
+            .or_else(|| cells.iter().copied().find(|&p| self.group_at(p).is_some()));
+        let cursor_rep = cursor_stack
+            .and_then(|p| self.group_at(p))
+            .map(|(_, g)| g.rep().to_os_string());
         let mut seen = std::collections::HashSet::new();
-        let targets: Vec<(GroupId, Group)> = primary
-            .into_iter()
-            .chain(cells.iter().copied())
-            .filter_map(|p| self.group_at(p))
+        let targets: Vec<(GroupId, Group)> = cells
+            .iter()
+            .filter_map(|&p| self.group_at(p))
             .filter(|(id, _)| seen.insert(*id))
             .map(|(id, g)| (id.clone(), g.clone()))
             .collect();
@@ -392,7 +377,7 @@ impl App {
             .flat_map(|(_, g)| g.members())
             .filter_map(|m| place(m))
             .collect();
-        let cursor = place(targets[0].1.rep());
+        let cursor = cursor_rep.as_deref().and_then(place);
         self.selected.extend(freed);
         if cursor.is_some() {
             self.sel = cursor;
@@ -464,8 +449,6 @@ impl App {
         self.request_redraw();
     }
 
-    /// Delete waits for the folder's groups to load, since a group loaded
-    /// after a photo left would still name it, and for any running delete.
     pub(crate) fn delete_available(&self) -> bool {
         !self.bulk_delete_running() && self.catalog_load_pending.is_none()
     }

@@ -619,10 +619,6 @@ pub(crate) struct App {
     face_pending: HashSet<PathBuf>,
     /// Analyses that failed for good (corrupt or unsupported files).
     face_failed: HashSet<PathBuf>,
-    /// Set by every view rebuild, which is when groups can change, and
-    /// cleared by the one scan of grouped photos for face analysis that
-    /// follows. Results only shrink that list, so one scan per rebuild is
-    /// complete, and a frame never walks every group.
     faces_unscanned: bool,
     selection_on: bool,
     /// Highlight the background instead of the subject.
@@ -1049,8 +1045,6 @@ impl App {
             self.recompute_visible();
             self.sel = match self.place_of(start_index) {
                 nav::Place::Cell(p) => Some(p),
-                // Keep the opened photo on screen rather than its group's
-                // representative. `selected_path` falls back to `want`.
                 nav::Place::Hidden(_) => {
                     self.want = start;
                     None
