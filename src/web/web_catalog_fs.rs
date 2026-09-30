@@ -52,10 +52,20 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
 
     let dir = match sidecar_dir(root, false).await {
         Ok(Some(d)) => d,
-        Ok(None) => return SidecarLoad { images, skipped },
+        Ok(None) => {
+            return SidecarLoad {
+                images,
+                groups: crate::groups::Groups::default(),
+                skipped,
+            }
+        }
         Err(e) => {
             web_sys::console::error_1(&format!("[web] listing .lightphotos failed: {e}").into());
-            return SidecarLoad { images, skipped };
+            return SidecarLoad {
+                images,
+                groups: crate::groups::Groups::default(),
+                skipped,
+            };
         }
     };
 
@@ -109,7 +119,11 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
         }
     }
 
-    SidecarLoad { images, skipped }
+    SidecarLoad {
+        images,
+        groups: crate::groups::Groups::default(),
+        skipped,
+    }
 }
 
 /// Write `bytes` to `root/.lightphotos/<filename>.xmp`, creating the
