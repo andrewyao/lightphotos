@@ -103,7 +103,7 @@ fn read_dir_paths(dir: &Path) -> Vec<PathBuf> {
 /// Sort case-insensitively by file name. `web_fs.rs` uses this too, so the
 /// browser build lists folders in the same order.
 pub(crate) fn sort_by_name(entries: &mut [PathBuf]) {
-    entries.sort_by(|a, b| name_key(a.file_name()).cmp(&name_key(b.file_name())));
+    entries.sort_by_key(|p| name_key(p.file_name()));
 }
 
 /// The key [`sort_by_name`] orders by, shared with [`Playlist::index_of`] so
