@@ -231,8 +231,12 @@ pub(crate) type SelectionOutcome = (PathBuf, Result<crate::segmentation::Mask, S
 pub(crate) enum PendingConfirm {
     Bulk(ui::BulkKind),
     DeletePreset(u64),
-    /// Delete Group, over every selected stack.
-    DeleteGroup,
+    /// Delete Group, over every selected stack, with the button Tab has
+    /// focused. Nothing is focused when it opens, so Enter alone picks
+    /// neither action.
+    DeleteGroup {
+        focus: Option<ui::Role>,
+    },
 }
 
 /// What a status toast reports, which sets its colors.
