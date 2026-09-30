@@ -10,11 +10,6 @@ use crate::app::StatusKind;
 use egui::{Color32, Stroke};
 
 /// Colors that read on every theme's panels, or that sit on a photo.
-pub const BURST_BADGE: Color32 = Color32::from_rgb(120, 230, 160);
-/// The badge colors differ from each other and from the stars because one
-/// photo can carry several badges at once. Eyes-closed is the only cool color
-/// because it marks a defect, not a keeper.
-pub const DUP_BADGE: Color32 = Color32::from_rgb(255, 150, 90);
 pub const EYES_BADGE: Color32 = Color32::from_rgb(150, 190, 255);
 /// The wordmark's "Photos" color. Matches `--lp-accent` in lightphotos.app's
 /// `lp.css`. The site uses a gradient that egui can't draw, so this is its

@@ -1,16 +1,13 @@
 //! Which decode tier the Loupe shows (`try_show`), thumbnail textures for the
-//! Grid and filmstrip (`sync_thumb_textures`), and the burst, duplicate, and
-//! face scoring that runs on decoded thumbnails.
+//! Grid and filmstrip (`sync_thumb_textures`), and the capture-time and face
+//! signals the culling features read.
 
 use super::*;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::develop::{self};
-use crate::featureprint;
 use crate::image_decode;
-use crate::phash;
-use crate::sharpness;
 use crate::signalcache::Signal;
 use crate::thumbnail::THUMB_PX;
 
@@ -123,9 +120,6 @@ impl App {
             ViewMode::Grid => {
                 w.set_title(&(crate::i18n::t().grid_title)(self.visible.len()));
             }
-            ViewMode::Survey => {
-                w.set_title(&(crate::i18n::t().survey_title)(self.survey_members.len()));
-            }
         }
     }
 
@@ -165,9 +159,6 @@ impl App {
         match self.mode {
             ViewMode::Grid => grid_working_range(self.grid_range, self.grid_cols, len),
             ViewMode::Loupe => strip_working_range(self.strip_range, self.sel, len),
-            // Survey members aren't a contiguous range; `working_thumb_keys`
-            // adds them.
-            ViewMode::Survey => 0..0,
         }
     }
 
@@ -178,7 +169,6 @@ impl App {
         match self.mode {
             ViewMode::Grid => load_order(working, self.grid_range, None),
             ViewMode::Loupe => load_order(working, self.strip_range, self.sel),
-            ViewMode::Survey => Vec::new(),
         }
     }
 
@@ -201,22 +191,14 @@ impl App {
         let Some(pl) = &self.playlist else {
             return Vec::new();
         };
-        let mut keys: Vec<(PathBuf, u32, u64)> = self
-            .working_positions()
+        self.working_positions()
             .filter_map(|pos| self.visible.get(pos).copied())
             .filter_map(|i| pl.entry(i))
             .map(|p| {
                 let sig = self.edit_sig_for(p);
                 (p.to_path_buf(), px, sig)
             })
-            .collect();
-        if self.mode == ViewMode::Survey {
-            for p in &self.survey_members {
-                let sig = self.edit_sig_for(p);
-                keys.push((p.clone(), px, sig));
-            }
-        }
-        keys
+            .collect()
     }
 
     /// Request thumbnails for the working set, on-screen cells first. Returns
@@ -227,16 +209,13 @@ impl App {
         let Some(pl) = &self.playlist else {
             return false;
         };
-        let mut paths: Vec<PathBuf> = self
+        let paths: Vec<PathBuf> = self
             .working_positions_ordered()
             .into_iter()
             .filter_map(|pos| self.visible.get(pos).copied())
             .filter_map(|i| pl.entry(i))
             .map(Path::to_path_buf)
             .collect();
-        if self.mode == ViewMode::Survey {
-            paths.extend(self.survey_members.iter().cloned());
-        }
 
         // Auto Tone's window shares this cache, so it has to be counted in or
         // its thumbnails can be evicted before `poll_auto_tone` reads them.
@@ -252,312 +231,24 @@ impl App {
             .any(|p| loader.get_thumb(p, px).is_none() && !loader.thumb_failed(p, px))
     }
 
-    /// Score sharpness for every burst member, requesting thumbnails as needed,
-    /// so each burst's winner is chosen from all its frames, not just those on
-    /// screen. Returns true while the capture-time scan or any scoring is
-    /// unfinished. The event loop polls this on a timer, since worker
-    /// completions don't wake it.
-    pub(crate) fn request_burst_thumbs(&mut self) -> bool {
-        if !self.bursts_on {
-            return false;
-        }
-        let px = THUMB_PX;
-
-        let scan_pending = {
-            let Some(pl) = &self.playlist else {
-                return false;
-            };
-            pl.entries()
-                .iter()
-                .any(|p| !self.capture_times.contains_key(p))
-        };
-
-        let members: Vec<PathBuf> = {
-            let Some(pl) = &self.playlist else {
-                return false;
-            };
-            pl.entries()
-                .iter()
-                .enumerate()
-                .filter(|(idx, p)| {
-                    matches!(self.burst_marks.get(*idx), Some(Some(_)))
-                        && !self.sharpness.contains_key(*p)
-                })
-                .map(|(_, p)| p.clone())
-                .collect()
-        };
-
-        // Thumbnails are premultiplied RGBA8. Photos are opaque, so that equals
-        // straight alpha for the luma metric.
-        let mut newly: Vec<(PathBuf, f64)> = Vec::new();
-        let mut still_unscored = false;
-        if let Some(loader) = &mut self.loader {
-            for p in &members {
-                if let Some(img) = loader.get_thumb(p, px) {
-                    newly.push((
-                        p.clone(),
-                        sharpness::sharpness(&img.rgba, img.width, img.height),
-                    ));
-                } else if loader.thumb_failed(p, px) {
-                    // Failed for good; not pending.
-                } else {
-                    loader.request_thumb(p.clone(), px);
-                    still_unscored = true;
-                }
-            }
-        }
-        if !newly.is_empty() {
-            for (p, s) in newly {
-                self.signals.record(&p, Signal::Sharpness(s));
-                self.sharpness.insert(p, s);
-            }
-            self.recompute_burst_marks();
-            self.request_redraw();
-        }
-        scan_pending || still_unscored
-    }
-
-    /// Hash every photo in the folder, requesting thumbnails as needed. Grouping
-    /// needs every hash to find candidates, so this runs folder-wide. Returns
-    /// true while any hash is outstanding.
-    pub(crate) fn request_dup_thumbs(&mut self) -> bool {
-        if !self.dupes_on {
-            return false;
-        }
-        let px = THUMB_PX;
-        let pending: Vec<PathBuf> = {
-            let Some(pl) = &self.playlist else {
-                return false;
-            };
-            pl.entries()
-                .iter()
-                .filter(|p| !self.phashes.contains_key(*p) || !self.sharpness.contains_key(*p))
-                .cloned()
-                .collect()
-        };
-
-        let mut newly: Vec<(PathBuf, u64, f64)> = Vec::new();
-        let mut still_unhashed = false;
-        if let Some(loader) = &mut self.loader {
-            for p in &pending {
-                if let Some(img) = loader.get_thumb(p, px) {
-                    newly.push((
-                        p.clone(),
-                        phash::dhash(&img.rgba, img.width, img.height),
-                        sharpness::sharpness(&img.rgba, img.width, img.height),
-                    ));
-                } else if loader.thumb_failed(p, px) {
-                    // Failed for good; not pending.
-                } else {
-                    loader.request_thumb(p.clone(), px);
-                    still_unhashed = true;
-                }
-            }
-        }
-        if !newly.is_empty() {
-            let paths: Vec<PathBuf> = newly.iter().map(|(p, _, _)| p.clone()).collect();
-            for (p, h, s) in newly {
-                self.signals.record(&p, Signal::PHash(h));
-                self.signals.record(&p, Signal::Sharpness(s));
-                self.phashes.insert(p.clone(), h);
-                self.sharpness.insert(p, s);
-            }
-            self.add_dup_hashes(&paths);
-            self.request_redraw();
-        }
-        still_unhashed
-    }
-
-    /// Hash newly arrived thumbnails and refresh the duplicate groups.
-    pub(crate) fn score_arrived_dup_thumbs(&mut self, arrivals: &[(PathBuf, u32)]) {
-        if !self.dupes_on {
-            return;
-        }
-        let px = THUMB_PX;
-        let mut newly: Vec<(PathBuf, u64, f64)> = Vec::new();
-        if let Some(loader) = &self.loader {
-            for (path, mpx) in arrivals {
-                if *mpx != px
-                    || (self.phashes.contains_key(path) && self.sharpness.contains_key(path))
-                {
-                    continue;
-                }
-                if let Some(img) = loader.get_thumb(path, px) {
-                    newly.push((
-                        path.clone(),
-                        phash::dhash(&img.rgba, img.width, img.height),
-                        sharpness::sharpness(&img.rgba, img.width, img.height),
-                    ));
-                }
-            }
-        }
-        if !newly.is_empty() {
-            let paths: Vec<PathBuf> = newly.iter().map(|(p, _, _)| p.clone()).collect();
-            for (p, h, s) in newly {
-                self.signals.record(&p, Signal::PHash(h));
-                self.signals.record(&p, Signal::Sharpness(s));
-                self.phashes.insert(p.clone(), h);
-                self.sharpness.insert(p, s);
-            }
-            self.add_dup_hashes(&paths);
-            self.request_redraw();
-        }
-    }
-
-    /// Submit a feature-print comparison of each dHash group member against
-    /// its group's anchor, skipping pairs already done or in flight. Returns
-    /// true while any comparison is outstanding.
-    pub(crate) fn request_feature_prints(&mut self) -> bool {
-        if !self.dupes_on {
-            return false;
-        }
-        let Some(pl) = &self.playlist else {
-            return false;
-        };
-        let entries = pl.entries();
-        // `dup_index` hasn't been rebuilt for this playlist yet.
-        if entries.len() != self.dup_index.ids().len() {
-            return !self.feature_pending.is_empty();
-        }
-
-        let mut sizes: HashMap<u32, usize> = HashMap::new();
-        for &g in self.dup_index.ids() {
-            *sizes.entry(g).or_insert(0) += 1;
-        }
-        let mut anchor_of: HashMap<u32, PathBuf> = HashMap::new();
-        let mut to_submit: Vec<(PathBuf, PathBuf)> = Vec::new();
-        for (i, &g) in self.dup_index.ids().iter().enumerate() {
-            if sizes.get(&g).copied().unwrap_or(0) < 2 {
-                continue;
-            }
-            let anchor = anchor_of
-                .entry(g)
-                .or_insert_with(|| entries[i].clone())
-                .clone();
-            let member = &entries[i];
-            if *member == anchor {
-                continue;
-            }
-            let key = (anchor.clone(), member.clone());
-            if self.feature_distances.contains_key(&key)
-                || self.feature_failed.contains(&key)
-                || self.feature_pending.contains(&key)
-            {
-                continue;
-            }
-            to_submit.push((member.clone(), anchor));
-        }
-
-        if let Some(pool) = &self.feature_pool {
-            for (member, anchor) in to_submit {
-                self.feature_pending
-                    .insert((anchor.clone(), member.clone()));
-                pool.submit(featureprint::DistanceJob { member, anchor });
-            }
-        }
-        !self.feature_pending.is_empty()
-    }
-
-    /// Cache finished feature-print comparisons and refresh the duplicate marks.
-    pub(crate) fn poll_feature_prints(&mut self) {
-        let outcomes = self
-            .feature_pool
-            .as_ref()
-            .map(|p| p.poll())
-            .unwrap_or_default();
-        if outcomes.is_empty() {
-            return;
-        }
-        // Accept only pairs that match the current groups. A member's anchor
-        // can change while Vision is still running the old job.
-        let current_pairs: HashSet<(PathBuf, PathBuf)> = self
-            .playlist
-            .as_ref()
-            .map(|pl| {
-                let entries = pl.entries();
-                let mut anchors: HashMap<u32, PathBuf> = HashMap::new();
-                self.dup_index
-                    .ids()
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, &group)| {
-                        let anchor = anchors
-                            .entry(group)
-                            .or_insert_with(|| entries[i].clone())
-                            .clone();
-                        let member = entries[i].clone();
-                        (member != anchor).then_some((anchor, member))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let mut changed = false;
-        for o in outcomes {
-            let key = (o.anchor.clone(), o.member.clone());
-            self.feature_pending.remove(&key);
-            if !current_pairs.contains(&key) {
-                continue;
-            }
-            match o.result {
-                Ok(d) => {
-                    self.feature_distances.insert(key, d);
-                    changed = true;
-                }
-                Err(_) => {
-                    self.feature_failed.insert(key);
-                }
-            }
-        }
-        if changed {
-            self.refine_dup_marks();
-            self.request_redraw();
-        }
-    }
-
-    /// Submit face analysis for burst and duplicate group members only: a
-    /// blink matters only when a sibling frame can replace it, and Vision
-    /// decodes at full resolution. Returns true while any analysis is outstanding.
+    /// Returns true while any analysis is outstanding.
     pub(crate) fn request_face_quality(&mut self) -> bool {
-        if !self.bursts_on && !self.dupes_on {
-            return false;
-        }
         // The folder's cached analyses are still loading, and each one found
         // there is a Vision pass saved.
         #[cfg(not(target_arch = "wasm32"))]
         if self.signal_load_rx.is_some() {
             return true;
         }
-        let Some(pl) = &self.playlist else {
-            return false;
-        };
-        let entries = pl.entries();
-
-        // Group sizes, to skip singletons. The mark vectors are valid only once
-        // rebuilt for the current playlist.
-        let dups_valid = self.dupes_on && self.dup_refined.len() == entries.len();
-        let mut sizes: HashMap<u32, usize> = HashMap::new();
-        if dups_valid {
-            for &g in &self.dup_refined {
-                *sizes.entry(g).or_insert(0) += 1;
-            }
-        }
-
-        let mut to_submit: Vec<PathBuf> = Vec::new();
-        for (i, p) in entries.iter().enumerate() {
-            let in_burst = self.bursts_on && matches!(self.burst_marks.get(i), Some(Some(_)));
-            let in_dup_group =
-                dups_valid && sizes.get(&self.dup_refined[i]).copied().unwrap_or(0) >= 2;
-            if !(in_burst || in_dup_group) {
-                continue;
-            }
-            if self.face_quality.contains_key(p)
-                || self.face_pending.contains(p)
-                || self.face_failed.contains(p)
-            {
-                continue;
-            }
-            to_submit.push(p.clone());
-        }
+        let candidates: &[PathBuf] = &[];
+        let to_submit: Vec<PathBuf> = candidates
+            .iter()
+            .filter(|p| {
+                !self.face_quality.contains_key(*p)
+                    && !self.face_pending.contains(*p)
+                    && !self.face_failed.contains(*p)
+            })
+            .cloned()
+            .collect();
 
         if let Some(pool) = &self.face_pool {
             for p in to_submit {
@@ -568,8 +259,6 @@ impl App {
         !self.face_pending.is_empty()
     }
 
-    /// Cache finished face analyses. A new blink can change which frame is
-    /// Best, so the live marks are recomputed.
     pub(crate) fn poll_face_quality(&mut self) {
         let outcomes = self
             .face_pool
@@ -594,12 +283,6 @@ impl App {
             }
         }
         if changed {
-            if self.bursts_on {
-                self.recompute_burst_marks();
-            }
-            if self.dupes_on {
-                self.refine_dup_marks();
-            }
             if self.eyes_filter_on() {
                 self.recompute_visible();
             }
@@ -607,15 +290,10 @@ impl App {
         }
     }
 
-    /// Cache capture times, then regroup bursts and request their thumbnails.
     pub(crate) fn on_capture_times(&mut self, times: Vec<(PathBuf, Option<SystemTime>)>) {
         for (path, t) in times {
             self.signals.record(&path, Signal::Capture(t));
             self.capture_times.insert(path, t);
-        }
-        if self.bursts_on {
-            self.recompute_burst_marks();
-            self.request_burst_thumbs();
         }
     }
 
@@ -632,45 +310,6 @@ impl App {
                 }
             }
             self.exif_cache.insert(path, meta);
-        }
-    }
-
-    /// Score newly arrived burst-member thumbnails and refresh the winners.
-    pub(crate) fn score_arrived_thumbs(&mut self, arrivals: &[(PathBuf, u32)]) {
-        if !self.bursts_on {
-            return;
-        }
-        let px = THUMB_PX;
-        let mut newly: Vec<(PathBuf, f64)> = Vec::new();
-        if let Some(loader) = &self.loader {
-            for (path, mpx) in arrivals {
-                if *mpx != px || self.sharpness.contains_key(path) {
-                    continue;
-                }
-                let is_member = self
-                    .playlist
-                    .as_ref()
-                    .and_then(|pl| pl.entries().iter().position(|e| e == path))
-                    .map(|idx| matches!(self.burst_marks.get(idx), Some(Some(_))))
-                    .unwrap_or(false);
-                if !is_member {
-                    continue;
-                }
-                if let Some(img) = loader.get_thumb(path, px) {
-                    newly.push((
-                        path.clone(),
-                        sharpness::sharpness(&img.rgba, img.width, img.height),
-                    ));
-                }
-            }
-        }
-        if !newly.is_empty() {
-            for (p, s) in newly {
-                self.signals.record(&p, Signal::Sharpness(s));
-                self.sharpness.insert(p, s);
-            }
-            self.recompute_burst_marks();
-            self.request_redraw();
         }
     }
 

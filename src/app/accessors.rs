@@ -1,9 +1,7 @@
 use super::*;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
-use crate::burst::{self, BurstMark};
-use crate::duplicates::{self, DuplicateMark};
+use crate::burst;
 use crate::navigation::Cmp;
 use crate::thumbnail::THUMB_PX;
 
@@ -172,8 +170,7 @@ impl App {
         self.selected_path().and_then(|p| self.catalog.label(&p))
     }
 
-    /// The "which frame is better" score: sharpness with a blink penalty. Bursts
-    /// and duplicates both use it, so they agree on which frame to keep.
+    #[allow(dead_code)]
     pub(super) fn culling_score(&self, path: &Path) -> Option<f64> {
         burst::combined_score(
             self.sharpness.get(path).copied(),
@@ -182,7 +179,7 @@ impl App {
     }
 
     /// The face analysis for a path. `None` while pending, after a failure, or
-    /// when never requested. Only grouped photos are analyzed.
+    /// when never requested.
     pub(crate) fn face_quality_of(&self, path: &Path) -> Option<crate::facequality::FaceQuality> {
         self.face_quality.get(path).copied()
     }
@@ -212,163 +209,8 @@ impl App {
         self.request_redraw();
     }
 
-    /// Rebuild `burst_marks` from cached capture times and scores. Clears them
-    /// when bursts are off or no folder is open.
-    pub(super) fn recompute_burst_marks(&mut self) {
-        let Some(pl) = &self.playlist else {
-            self.burst_marks.clear();
-            return;
-        };
-        if !self.bursts_on {
-            self.burst_marks.clear();
-            return;
-        }
-        let entries = pl.entries();
-        // Wait until every capture time is read. `group_by_time` treats a run of
-        // unknown times as one burst, which would dim the whole folder.
-        if entries.iter().any(|p| !self.capture_times.contains_key(p)) {
-            self.burst_marks.clear();
-            return;
-        }
-        let times: Vec<Option<SystemTime>> = entries
-            .iter()
-            .map(|p| self.capture_times.get(p).copied().flatten())
-            .collect();
-        let scores: Vec<Option<f64>> = entries.iter().map(|p| self.culling_score(p)).collect();
-        self.burst_marks = burst::marks_for(&times, &scores, burst::BURST_GAP);
-    }
-
-    /// Burst mark for the visible cell at `pos`. `None` when bursts are off, the
-    /// photo is not in a burst, or `pos` is out of range.
-    pub(crate) fn burst_mark_at(&self, pos: usize) -> Option<BurstMark> {
-        let idx = *self.visible.get(pos)?;
-        self.burst_marks.get(idx).copied().flatten()
-    }
-
-    pub(crate) fn bursts_on(&self) -> bool {
-        self.bursts_on
-    }
-
-    /// Turn bursts off for a new folder. Path-keyed caches are kept for revisits.
-    pub(super) fn reset_burst_state(&mut self) {
-        self.bursts_on = false;
-        self.burst_marks.clear();
-    }
-
-    /// Rebuild `dup_marks` from cached dHashes and scores. Unlike bursts, this
-    /// can run on a partial scan: an unknown hash never joins a group.
-    pub(super) fn recompute_dup_marks(&mut self) {
-        let Some(pl) = &self.playlist else {
-            self.dup_index = Default::default();
-            self.dup_marks.clear();
-            return;
-        };
-        if !self.dupes_on {
-            self.dup_index = Default::default();
-            self.dup_marks.clear();
-            return;
-        }
-        let entries = pl.entries();
-        let mut index =
-            duplicates::HashGroups::new(entries.len(), duplicates::DEFAULT_MAX_DISTANCE);
-        index.add(
-            entries
-                .iter()
-                .enumerate()
-                .filter_map(|(i, p)| Some((i, *self.phashes.get(p)?))),
-        );
-        self.dup_index = index;
-        self.refine_dup_marks();
-    }
-
-    /// Adds newly hashed photos to the duplicate groups without regrouping the
-    /// folder. Falls back to `recompute_dup_marks` when the groups are not for
-    /// this playlist or a hash changed.
-    pub(super) fn add_dup_hashes(&mut self, paths: &[PathBuf]) {
-        let Some(pl) = &self.playlist else { return };
-        let entries = pl.entries();
-        if !self.dupes_on || self.dup_index.ids().len() != entries.len() {
-            return self.recompute_dup_marks();
-        }
-        let new: HashSet<&PathBuf> = paths.iter().collect();
-        let added = self.dup_index.add(
-            entries
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| new.contains(p))
-                .filter_map(|(i, p)| Some((i, *self.phashes.get(p)?))),
-        );
-        if added {
-            self.refine_dup_marks();
-        } else {
-            self.recompute_dup_marks();
-        }
-    }
-
-    /// Re-applies feature-print splits and scores to the current hash groups.
-    /// Linear, unlike the O(n²) regroup in `recompute_dup_marks`, so call this
-    /// when only feature distances or scores changed.
-    pub(super) fn refine_dup_marks(&mut self) {
-        let Some(pl) = &self.playlist else { return };
-        if !self.dupes_on {
-            return;
-        }
-        let entries = pl.entries();
-        let scores: Vec<Option<f64>> = entries.iter().map(|p| self.culling_score(p)).collect();
-        let groups = self.dup_index.ids();
-        // Split off dHash false positives whose feature-print distance to the
-        // group's anchor is too large. Members without a feature print stay.
-        let refined = duplicates::refine_by_feature_print(
-            groups,
-            duplicates::DEFAULT_MAX_FEATURE_DISTANCE,
-            |anchor, i| {
-                self.feature_distances
-                    .get(&(entries[anchor].clone(), entries[i].clone()))
-                    .copied()
-            },
-        );
-        self.dup_marks = duplicates::compute_marks(&refined, &scores);
-        self.dup_refined = refined;
-    }
-
-    /// Duplicate mark for the visible cell at `pos`. `None` when dupes are off,
-    /// the photo has no duplicates, or `pos` is out of range.
-    pub(crate) fn dup_mark_at(&self, pos: usize) -> Option<DuplicateMark> {
-        let idx = *self.visible.get(pos)?;
-        self.dup_marks.get(idx).copied().flatten()
-    }
-
-    pub(crate) fn dupes_on(&self) -> bool {
-        self.dupes_on
-    }
-
-    /// Turn duplicate grouping and the blink filter off for a new folder, so it
-    /// never opens to a silently empty grid. Path-keyed caches are kept.
-    pub(super) fn reset_dup_state(&mut self) {
-        self.dupes_on = false;
-        self.dup_index = Default::default();
-        self.dup_refined.clear();
-        self.dup_marks.clear();
+    pub(super) fn reset_eyes_filter(&mut self) {
         self.eyes_filter = false;
-    }
-
-    /// The duplicate group shown in Survey. Empty outside Survey.
-    pub(crate) fn survey_members(&self) -> &[PathBuf] {
-        &self.survey_members
-    }
-
-    pub(crate) fn survey_best(&self) -> Option<&Path> {
-        self.survey_best.as_deref()
-    }
-
-    /// Index into `survey_members()` that the rating keys apply to.
-    pub(crate) fn survey_focus(&self) -> usize {
-        self.survey_focus
-    }
-
-    /// Rating of `path`, 0 when unrated. Survey uses it for its member list.
-    pub(crate) fn rating_of_path(&self, path: &Path) -> u8 {
-        self.rating_of(path)
     }
 
     pub(crate) fn selected_rating(&self) -> u8 {
@@ -441,74 +283,6 @@ mod tests {
         assert!(!app.thumb_failed_at(0), "a.jpg is still loading");
         assert!(app.thumb_failed_at(1));
         assert!(!app.thumb_failed_at(2), "past the end");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn hashes_added_in_batches_match_a_full_recompute() {
-        let dir = std::env::temp_dir().join(format!("lp-dup-add-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        for n in ["a.jpg", "b.jpg", "c.jpg", "d.jpg"] {
-            std::fs::write(dir.join(n), []).unwrap();
-        }
-        let mut app = App::new(None);
-        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        app.dupes_on = true;
-        app.recompute_dup_marks();
-        let entries = app.playlist.as_ref().unwrap().entries().to_vec();
-        // a~b and b~c chain into one group; d stands alone.
-        let hashes = [0u64, 0b1111, 0xff, u64::MAX];
-        for batch in [&[2usize][..], &[0, 3], &[1]] {
-            let paths: Vec<PathBuf> = batch.iter().map(|&i| entries[i].clone()).collect();
-            for &i in batch {
-                app.phashes.insert(entries[i].clone(), hashes[i]);
-            }
-            app.add_dup_hashes(&paths);
-        }
-        let (ids, marks) = (app.dup_index.ids().to_vec(), app.dup_marks.clone());
-        assert_eq!(ids, vec![0, 0, 0, 1]);
-
-        app.recompute_dup_marks();
-        assert_eq!(app.dup_index.ids(), ids.as_slice());
-        assert_eq!(app.dup_marks, marks);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn refining_after_a_feature_print_matches_a_full_recompute() {
-        let dir = std::env::temp_dir().join(format!("lp-dup-refine-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let names = ["a.jpg", "b.jpg", "c.jpg"];
-        for n in names {
-            std::fs::write(dir.join(n), []).unwrap();
-        }
-        let mut app = App::new(None);
-        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        let entries = app.playlist.as_ref().unwrap().entries().to_vec();
-        for p in &entries {
-            app.phashes.insert(p.clone(), 0);
-        }
-        app.dupes_on = true;
-        app.recompute_dup_marks();
-        assert_eq!(
-            app.dup_refined,
-            vec![0, 0, 0],
-            "equal hashes form one group"
-        );
-
-        app.feature_distances.insert(
-            (entries[0].clone(), entries[2].clone()),
-            duplicates::DEFAULT_MAX_FEATURE_DISTANCE + 1.0,
-        );
-        app.refine_dup_marks();
-        let (refined, marks) = (app.dup_refined.clone(), app.dup_marks.clone());
-        assert_ne!(refined[2], refined[0], "the far feature print splits off");
-
-        app.recompute_dup_marks();
-        assert_eq!(app.dup_refined, refined);
-        assert_eq!(app.dup_marks, marks);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

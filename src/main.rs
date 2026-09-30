@@ -12,6 +12,7 @@
 mod analytics;
 mod app;
 mod autotone;
+#[cfg_attr(not(test), allow(dead_code))]
 mod burst;
 mod cache_limits;
 mod catalog;
@@ -20,10 +21,8 @@ mod coregraphics;
 mod develop;
 #[cfg(not(target_arch = "wasm32"))]
 mod dialog;
-mod duplicates;
 mod export;
 mod facequality;
-mod featureprint;
 mod hash;
 mod i18n;
 mod image_decode;
@@ -41,7 +40,6 @@ mod macos_delegate;
 mod menu;
 mod navigation;
 mod paths;
-mod phash;
 mod prefs;
 mod presets;
 // Profiling drives the real `navigation`, `catalog`, `Loader` and `export`
@@ -57,6 +55,7 @@ mod renderer;
 #[cfg(not(target_arch = "wasm32"))]
 mod secret;
 mod segmentation;
+#[cfg_attr(not(test), allow(dead_code))]
 mod sharpness;
 mod signalcache;
 mod thumbnail;
@@ -128,7 +127,6 @@ fn finish_window_setup(
     app.renderer = Some(renderer);
     app.loader = Some(loader);
     app.exporter = Some(export::Exporter::new());
-    app.feature_pool = featureprint::DistancePool::new();
     app.face_pool = facequality::FacePool::new();
     app.egui_state = Some(egui_state);
     #[cfg(target_arch = "wasm32")]
@@ -453,10 +451,6 @@ impl ApplicationHandler<UserEvent> for App {
             if !exifs.is_empty() {
                 self.on_exif_info(exifs);
             }
-            if !thumbs.is_empty() {
-                self.score_arrived_thumbs(&thumbs);
-                self.score_arrived_dup_thumbs(&thumbs);
-            }
             // Runs even with no arrivals, so Auto Tone notices failed thumbnails.
             self.poll_auto_tone();
             if any {
@@ -496,8 +490,6 @@ impl ApplicationHandler<UserEvent> for App {
             self.prepare_web_thumb_cache();
             let web_thumbs = self.poll_web_thumbs();
             if !web_thumbs.is_empty() {
-                self.score_arrived_thumbs(&web_thumbs);
-                self.score_arrived_dup_thumbs(&web_thumbs);
                 // Web thumbnails skip `loader.poll_all()`, so feed them to Auto
                 // Tone here too.
                 self.poll_auto_tone();
@@ -561,15 +553,11 @@ impl ApplicationHandler<UserEvent> for App {
         // Each `request_*` below returns true while background work is still
         // outstanding. Arrivals redraw when they land, so these only set the
         // poll interval below.
-        let thumbs_pending = self.request_burst_thumbs() | thumbs_pending;
-        let thumbs_pending = self.request_dup_thumbs() | thumbs_pending;
         let thumbs_pending =
             self.loader.as_ref().is_some_and(|l| l.bakes_pending()) || thumbs_pending;
 
-        self.poll_feature_prints();
-        let vision_pending = self.request_feature_prints();
         self.poll_face_quality();
-        let vision_pending = self.request_face_quality() | vision_pending;
+        let vision_pending = self.request_face_quality();
 
         // Segmentation starts from user actions, so it has no `request_*` call.
         self.poll_selection_mask();
