@@ -274,6 +274,7 @@ impl App {
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
             KeyCode::KeyC if cmd && shift => self.copy_settings(),
             KeyCode::KeyP if cmd && shift && crate::app::SHOW_PRESETS => self.prompt_save_preset(),
+            KeyCode::Delete if shift && self.selection_has_group() => self.request_delete_group(),
             KeyCode::Delete => self.request_bulk(ui::BulkKind::Delete),
 
             KeyCode::ArrowLeft => self.nav_arrow(-1, 0, shift),

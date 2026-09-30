@@ -172,7 +172,7 @@ impl App {
 
     /// Begin trashing `paths`. Refused while another delete or an export is
     /// running: the export reads bytes from files this batch would remove.
-    fn start_delete(&mut self, paths: Vec<PathBuf>) {
+    pub(super) fn start_delete(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
         }
@@ -1009,6 +1009,80 @@ mod tests {
         let groups_dir = dir.join(crate::catalog::SIDECAR_DIR).join("groups");
         let left = std::fs::read_dir(&groups_dir).map_or(0, |d| d.count());
         assert_eq!(left, 0, "the group's sidecar is deleted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Photos b to g stacked under b, then the stack and h selected, and
+    /// Delete Group opened with Shift+Delete.
+    fn delete_group_open() -> (App, PathBuf, Vec<PathBuf>) {
+        use crate::app::nav::tests::group_photos;
+        let names = [
+            "a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg", "g.jpg", "h.jpg",
+        ];
+        let (mut app, dir, paths) = grouped_app(&names);
+        group_photos(&mut app, &[1, 2, 3, 4, 5, 6], 1);
+        app.selected = BTreeSet::from([1, 2]);
+        app.sel = Some(1);
+        #[cfg(target_os = "macos")]
+        assert!(app.menu_enabled(crate::menu::MenuCommand::DeleteGroup));
+        app.modifiers = ModifiersState::SHIFT;
+        app.handle_key(winit::keyboard::KeyCode::Delete);
+        app.modifiers = ModifiersState::empty();
+        assert_eq!(app.pending_group_delete(), Some((6, 1)));
+        (app, dir, paths)
+    }
+
+    fn click_button(app: &mut App, label: &str) {
+        use crate::app::presets::tests::{click, settled};
+        let at = settled(app).pos_of(label);
+        let (actions, _) = click(app, at);
+        app.apply_ui_actions(actions);
+    }
+
+    #[test]
+    fn remove_group_keeps_every_photo_as_a_single() {
+        let (mut app, dir, paths) = delete_group_open();
+        click_button(&mut app, crate::i18n::t().remove_group);
+        assert!(!app.confirm_open());
+        assert!(app.bulk_delete.is_none());
+        assert!(paths.iter().all(|p| p.exists()));
+        assert!(app.catalog.groups().unwrap().is_empty());
+        assert_eq!(visible_names(&app).len(), 8);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_group_trashes_every_member_and_nothing_else() {
+        let (mut app, dir, paths) = delete_group_open();
+        click_button(&mut app, &(crate::i18n::t().trash_group_photos)(6));
+        assert!(!app.confirm_open());
+        drain(&mut app);
+        let exists: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
+        assert_eq!(
+            exists,
+            [true, false, false, false, false, false, false, true],
+            "the single h was selected too, and stays"
+        );
+        assert_eq!(visible_names(&app), ["a.jpg", "h.jpg"]);
+        assert!(app.catalog.groups().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_esc_and_enter_leave_the_group_and_its_photos_alone() {
+        let t = crate::i18n::t();
+        let (mut app, dir, paths) = delete_group_open();
+        app.handle_key(winit::keyboard::KeyCode::Enter);
+        assert!(app.confirm_open(), "Enter picks neither action");
+        click_button(&mut app, t.cancel);
+        assert!(!app.confirm_open(), "Cancel closes it");
+        app.request_delete_group();
+        app.handle_key(winit::keyboard::KeyCode::Escape);
+        assert!(!app.confirm_open(), "Esc closes it");
+        assert!(app.bulk_delete.is_none());
+        assert!(paths.iter().all(|p| p.exists()));
+        assert_eq!(group_names(&app).len(), 1);
+        assert_eq!(app.selection_count(), 2, "the selection stays");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

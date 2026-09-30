@@ -34,7 +34,6 @@ impl App {
             .collect()
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn selection_has_group(&self) -> bool {
         self.selected_cells()
             .into_iter()
