@@ -47,14 +47,7 @@ pub(crate) struct BulkDelete {
     gone: HashSet<PathBuf>,
     /// Set when `gone` grew since the last `recompute_visible`.
     view_dirty: bool,
-    /// The photos of each group this batch trashes whole, by file name, as
-    /// an index into `held`.
-    whole: HashMap<std::ffi::OsString, usize>,
-    /// Those groups' photos that landed before the group's last one did.
-    /// The catalog forgets a whole group in one step, so the group goes in
-    /// one sidecar delete rather than in a rewrite per landed member, and no
-    /// member is promoted to representative on the way.
-    held: Vec<Held>,
+    held: HeldGroups,
     total: usize,
     errors: usize,
     last_err: Option<String>,
@@ -79,30 +72,33 @@ pub(crate) struct BulkDelete {
     origin_handle: web_sys::FileSystemDirectoryHandle,
 }
 
+/// The groups a batch trashes whole, whose landed photos wait for the
+/// group's last one. The catalog forgets a whole group in one step, so the
+/// group goes in one sidecar delete rather than in a rewrite per landed
+/// member, and no member is promoted to representative on the way.
 #[derive(Default)]
+struct HeldGroups {
+    /// Each held photo's file name, as an index into `held`.
+    whole: HashMap<std::ffi::OsString, usize>,
+    held: Vec<Held>,
+}
+
 struct Held {
     /// Queued photos of the group with no result yet.
     pending: usize,
     trashed: Vec<PathBuf>,
 }
 
-impl BulkDelete {
-    /// Trashed but not yet dropped from the playlist. `recompute_visible` is
-    /// the only reader.
-    pub(super) fn gone(&self) -> &HashSet<PathBuf> {
-        &self.gone
-    }
-
-    fn done(&self) -> usize {
-        self.gone.len() + self.errors
-    }
-
-    fn finished(&self) -> bool {
-        self.queue.is_empty() && self.in_flight.is_empty()
-    }
-
-    fn take_result(&self) -> Option<DeleteResult> {
-        self.done_rx.try_recv().ok()
+impl HeldGroups {
+    /// Holds the group of `names`, every one of them queued once.
+    fn hold(&mut self, names: &[&std::ffi::OsStr]) {
+        self.held.push(Held {
+            pending: names.len(),
+            trashed: Vec::new(),
+        });
+        for name in names {
+            self.whole.insert(name.to_os_string(), self.held.len() - 1);
+        }
     }
 
     /// The photos the catalog can forget now that `path` has its result.
@@ -128,6 +124,26 @@ impl BulkDelete {
             .iter_mut()
             .flat_map(|h| std::mem::take(&mut h.trashed))
             .collect()
+    }
+}
+
+impl BulkDelete {
+    /// Trashed but not yet dropped from the playlist. `recompute_visible` is
+    /// the only reader.
+    pub(super) fn gone(&self) -> &HashSet<PathBuf> {
+        &self.gone
+    }
+
+    fn done(&self) -> usize {
+        self.gone.len() + self.errors
+    }
+
+    fn finished(&self) -> bool {
+        self.queue.is_empty() && self.in_flight.is_empty()
+    }
+
+    fn take_result(&self) -> Option<DeleteResult> {
+        self.done_rx.try_recv().ok()
     }
 
     /// Hand the worker everything it will take right now.
@@ -193,7 +209,7 @@ impl App {
             return;
         }
         let total = paths.len();
-        let (whole, held) = self.whole_groups(&paths);
+        let held = self.whole_groups(&paths);
         let (done_tx, done_rx) = channel();
 
         #[cfg(target_arch = "wasm32")]
@@ -222,7 +238,6 @@ impl App {
             in_flight: HashSet::new(),
             gone: HashSet::new(),
             view_dirty: false,
-            whole,
             held,
             total,
             errors: 0,
@@ -283,10 +298,10 @@ impl App {
                         false
                     }
                 };
-                forget.extend(d.release(path, ok));
+                forget.extend(d.held.release(path, ok));
             }
             if d.finished() {
-                forget.extend(d.release_all());
+                forget.extend(d.held.release_all());
             }
         }
         for path in &trashed {
@@ -351,7 +366,7 @@ impl App {
 
     /// Each path of `paths` whose group has every present member in `paths`,
     /// with that group.
-    fn whole_groups(&self, paths: &[PathBuf]) -> (HashMap<std::ffi::OsString, usize>, Vec<Held>) {
+    fn whole_groups(&self, paths: &[PathBuf]) -> HeldGroups {
         let Some(groups) = self.catalog.groups() else {
             return Default::default();
         };
@@ -361,23 +376,16 @@ impl App {
                 queued.entry(id).or_default().push(name);
             }
         }
-        let mut whole = HashMap::new();
-        let mut held = Vec::new();
+        let mut held = HeldGroups::default();
         for (id, names) in queued {
             if groups
                 .get(id)
                 .is_some_and(|g| g.members().len() == names.len())
             {
-                held.push(Held {
-                    pending: names.len(),
-                    trashed: Vec::new(),
-                });
-                for name in names {
-                    whole.insert(name.to_os_string(), held.len() - 1);
-                }
+                held.hold(&names);
             }
         }
-        (whole, held)
+        held
     }
 
     /// Whether a bulk delete is still running.
@@ -849,6 +857,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_held_group_is_released_when_its_last_photo_lands() {
+        let p = |n: &str| PathBuf::from("/photos").join(n);
+        let names = ["b.jpg", "c.jpg", "d.jpg"].map(std::ffi::OsStr::new);
+        let mut held = HeldGroups::default();
+        held.hold(&names);
+        assert_eq!(held.release(p("b.jpg"), true), Vec::<PathBuf>::new());
+        assert_eq!(held.release(p("c.jpg"), false), Vec::<PathBuf>::new());
+        assert_eq!(
+            held.release(p("d.jpg"), true),
+            [p("b.jpg"), p("d.jpg")],
+            "the last result releases every trashed member, not the failed one"
+        );
+        assert_eq!(held.release_all(), Vec::<PathBuf>::new(), "nothing left");
+        assert_eq!(held.release(p("e.jpg"), true), [p("e.jpg")], "unheld");
+        assert_eq!(held.release(p("f.jpg"), false), Vec::<PathBuf>::new());
+
+        let mut held = HeldGroups::default();
+        held.hold(&names);
+        assert_eq!(held.release(p("b.jpg"), true), Vec::<PathBuf>::new());
+        assert_eq!(held.release(p("c.jpg"), true), Vec::<PathBuf>::new());
+        assert_eq!(
+            held.release_all(),
+            [p("b.jpg"), p("c.jpg")],
+            "a batch that ends with d pending hands back only what was trashed"
+        );
+        assert_eq!(held.release_all(), Vec::<PathBuf>::new(), "once");
+    }
+
     fn grouped_app(names: &[&str]) -> (App, PathBuf, Vec<PathBuf>) {
         let (mut app, dir, paths) = app_with_photos(names);
         app.catalog.open_dir(&dir);
@@ -873,8 +910,8 @@ mod tests {
                 .map(|_| {
                     let t = Instant::now();
                     let paths = app.delete_paths();
-                    let (whole, _) = app.whole_groups(&paths);
-                    std::hint::black_box((paths.len(), whole.len()));
+                    let held = app.whole_groups(&paths);
+                    std::hint::black_box((paths.len(), held.whole.len()));
                     t.elapsed()
                 })
                 .collect();
@@ -897,7 +934,7 @@ mod tests {
         let paths = stack.delete_paths();
         let t_paths = t.elapsed();
         let t = Instant::now();
-        let (whole, _) = stack.whole_groups(&paths);
+        let whole = stack.whole_groups(&paths).whole;
         eprintln!(
             "split: delete_paths {t_paths:?}, whole_groups {:?} ({})",
             t.elapsed(),
