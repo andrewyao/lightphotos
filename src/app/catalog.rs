@@ -459,13 +459,19 @@ impl App {
         self.request_redraw();
     }
 
+    /// Delete waits for the folder's groups to load, since a group loaded
+    /// after a photo left would still name it, and for any running delete.
+    pub(super) fn delete_available(&self) -> bool {
+        !self.bulk_delete_running() && self.catalog_load_pending.is_none()
+    }
+
     fn bulk_available(&self) -> bool {
         self.selection_count() > 0
     }
 
     /// Opens the confirm modal for `kind` when something is selected.
     pub(super) fn request_bulk(&mut self, kind: ui::BulkKind) {
-        if kind == ui::BulkKind::Delete && self.bulk_delete_running() {
+        if kind == ui::BulkKind::Delete && !self.delete_available() {
             return;
         }
         if self.bulk_available() {
