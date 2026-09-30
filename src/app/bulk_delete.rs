@@ -340,7 +340,15 @@ impl App {
         let gone = d.gone;
         if !gone.is_empty() {
             if let Some(pl) = self.playlist.as_mut() {
-                pl.remove_matching(|p| gone.contains(p));
+                let removed = pl.remove_matching(|p| gone.contains(p));
+                // `visible` holds playlist indices, and the rebuild below
+                // reads the cursor's photo from it, so it must name the same
+                // photos in the shrunken playlist.
+                self.visible = self
+                    .visible
+                    .iter()
+                    .filter_map(|&i| crate::navigation::shift_index(i, &removed))
+                    .collect();
             }
             if let Some(deferred) = self.autotone_deferred.as_mut() {
                 deferred.retain(|p| !gone.contains(p));
@@ -348,8 +356,8 @@ impl App {
                     self.autotone_deferred = None;
                 }
             }
-            // The cursor keeps its position (clamped), so it lands on a
-            // neighbor of the deleted photos.
+            // The cursor already moved to a neighbor when its photo left the
+            // grid mid-batch, and the rebuild keeps it there.
             self.selected.clear();
             self.anchor = None;
             self.recompute_visible();
@@ -532,6 +540,29 @@ mod tests {
 
     /// The grid has to shrink while a long delete runs, or the user watches a
     /// toast climb over a grid full of photos that are already in the Trash.
+    /// Trashing b out of a..e lands the cursor on c, its neighbor, in the
+    /// Grid and in the Loupe, rather than skipping a photo for each trashed
+    /// one before it when the playlist shrinks.
+    #[test]
+    fn the_cursor_lands_on_the_next_photo_after_a_trash() {
+        for loupe in [false, true] {
+            let (mut app, dir, paths) =
+                app_with_photos(&["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"]);
+            app.select_single(1);
+            if loupe {
+                app.enter_loupe();
+            }
+            app.start_delete(vec![paths[1].clone()]);
+            drain(&mut app);
+
+            assert_eq!(app.selected_path(), Some(paths[2].clone()), "loupe={loupe}");
+            if loupe {
+                assert_eq!(app.want.as_ref(), Some(&paths[2]), "the Loupe shows c");
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
     #[test]
     fn trashed_photos_leave_the_grid_without_touching_the_playlist() {
         let names = ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg"];
