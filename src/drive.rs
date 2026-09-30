@@ -68,7 +68,13 @@ impl Args {
         Args::parse(std::env::args().skip(1))
     }
 
+    /// A launch without a drive flag is the normal app's, whose argv this
+    /// leaves alone: it opens the first path and ignores the rest.
     fn parse(args: impl IntoIterator<Item = String>) -> Result<Option<Args>, String> {
+        let args: Vec<String> = args.into_iter().collect();
+        if !args.iter().any(|a| a == "--drive" || a == "--drive-out") {
+            return Ok(None);
+        }
         let mut script = None;
         let mut out_dir = None;
         let mut target = None;
@@ -85,12 +91,7 @@ impl Args {
                 _ => return Err(format!("unexpected argument: {arg}")),
             }
         }
-        let Some(script) = script.map(PathBuf::from) else {
-            if out_dir.is_some() {
-                return Err("--drive-out needs --drive".into());
-            }
-            return Ok(None);
-        };
+        let script = PathBuf::from(script.ok_or("--drive-out needs --drive")?);
         let target = PathBuf::from(target.ok_or("--drive needs a photo or folder to open")?);
         if !target.exists() {
             return Err(format!("no such path: {}", target.display()));
@@ -371,6 +372,7 @@ impl std::fmt::Display for ParseError {
 pub(crate) fn run(args: Args) -> i32 {
     let config_dir = std::env::temp_dir().join(format!("lightphotos-drive-{}", std::process::id()));
     crate::prefs::override_config_dir(config_dir.clone());
+    crate::dialog::go_headless();
     crate::i18n::init();
 
     let mut builder = EventLoop::<UserEvent>::with_user_event();
@@ -510,9 +512,19 @@ impl Driver {
     fn idle(&mut self) -> Result<(), String> {
         let start = Instant::now();
         loop {
-            let pending = self.app.pump();
+            let quiet_before = self.app.pump().is_none();
             self.app.redraw();
-            if pending.is_none() && !self.app.batch_running() && self.app.repaint_at.is_none() {
+            // A frame can start work of its own, such as thumbnails for a
+            // range it just scrolled to, so quiet must hold after it too.
+            let quiet_after = self.app.pump().is_none();
+            if quiet_before
+                && quiet_after
+                && !self.app.batch_running()
+                && self.app.repaint_at.is_none()
+            {
+                // The signal cache batches its writes for seconds; a script
+                // that reads the sidecar folder next needs them on disk.
+                self.app.signals.flush_blocking(IDLE_TIMEOUT);
                 return Ok(());
             }
             if start.elapsed() > IDLE_TIMEOUT {
@@ -603,6 +615,9 @@ impl Driver {
     fn resolve(&self, at: Target) -> Result<(f32, f32), String> {
         match at {
             Target::Point(x, y) => Ok((x, y)),
+            Target::Cell(_) if self.app.mode() != ViewMode::Grid => {
+                Err("a grid cell was named outside the Grid".into())
+            }
             Target::Cell(pos) => {
                 let rect = self.app.grid_cell_rect(pos).ok_or_else(|| {
                     let (start, end) = self.app.grid_range();
@@ -885,6 +900,12 @@ quit
 
         assert!(args(&[&d]).unwrap().is_none());
         assert!(args(&[]).unwrap().is_none());
+        assert!(
+            args(&[&d, &d, "-NSDocumentRevisionsDebugMode", "YES"])
+                .unwrap()
+                .is_none(),
+            "a normal launch with several paths or foreign flags is not a drive run"
+        );
         let parsed = args(&["--drive", &s, "--drive-out", &d, &d])
             .unwrap()
             .unwrap();
