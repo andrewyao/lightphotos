@@ -12,7 +12,6 @@
 mod analytics;
 mod app;
 mod autotone;
-#[cfg_attr(not(test), allow(dead_code))]
 mod burst;
 mod cache_limits;
 mod catalog;
@@ -55,7 +54,6 @@ mod renderer;
 #[cfg(not(target_arch = "wasm32"))]
 mod secret;
 mod segmentation;
-#[cfg_attr(not(test), allow(dead_code))]
 mod sharpness;
 mod signalcache;
 mod thumbnail;

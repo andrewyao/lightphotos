@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::time::Duration;
-
-/// Max gap between consecutive shots in one burst.
-pub const BURST_GAP: Duration = Duration::from_secs(2);
-
 /// Strictly better: any score beats no score. Strictness keeps the earliest
 /// frame as the winner on ties.
 fn score_gt(a: Option<f64>, b: Option<f64>) -> bool {
@@ -17,6 +12,7 @@ fn score_gt(a: Option<f64>, b: Option<f64>) -> bool {
 
 /// Index of the best frame in `scores`: the highest score, with ties and
 /// missing scores going to the earliest frame. `0` for an empty slice.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn best_index(scores: &[Option<f64>]) -> usize {
     let mut best = 0;
     for (i, &s) in scores.iter().enumerate().skip(1) {
@@ -31,6 +27,7 @@ pub fn best_index(scores: &[Option<f64>]) -> usize {
 /// open or unknown frame, but still ordered by sharpness if everyone blinked.
 /// Unknown eyes leave the score alone. A blinking frame still beats a frame
 /// with no sharpness score yet, until that score arrives.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn combined_score(
     sharpness: Option<f64>,
     eyes: Option<crate::facequality::EyeState>,
