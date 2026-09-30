@@ -1343,6 +1343,32 @@ mod tests {
         std::fs::remove_dir_all(&elsewhere).unwrap();
     }
 
+    /// The same, with the intervening folder's load abandoned, so this load is
+    /// the last one outstanding and retiring it would drop the landed write's
+    /// history before the overlay could use it.
+    #[test]
+    fn a_completed_write_survives_the_last_outstanding_load() {
+        let dir = unique_tmp_dir();
+        let elsewhere = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+
+        Catalog::with_dir(dir.clone()).set(&p, 3);
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        let stale = load_sidecars(&dir);
+        cat.set(&p, 5);
+        let _ = cat.switch_dir(&elsewhere);
+        cat.abandon_load();
+        let mark = cat.switch_dir(&dir);
+        flush(&mut cat);
+        cat.apply_loaded(&dir, mark, stale);
+
+        assert_eq!(cat.get(&p), Some(5));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&elsewhere).unwrap();
+    }
+
     /// The mark must not shield a record forever: a sidecar changed outside the
     /// app between visits has to win on the revisit, which is what
     /// `reloading_a_folder_drops_values_its_sidecars_no_longer_have` relies on.
