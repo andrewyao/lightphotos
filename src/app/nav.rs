@@ -1075,6 +1075,27 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A stack paints its member count inside its own cell in the Grid, and
+    /// in the filmstrip too.
+    #[test]
+    fn a_group_cell_paints_its_member_count_inside_the_cell() {
+        use crate::app::presets::tests::settled;
+        let (mut app, dir, _) = folder_app("nav-pill", 8);
+        group_photos(&mut app, &[1, 2, 3, 4, 5, 6], 1);
+        let painted = settled(&mut app);
+        let cell = app.grid_cell_rect(1).expect("the stack's cell is drawn");
+        assert!(
+            cell.contains(painted.pos_of("6")),
+            "the count sits inside {cell:?}"
+        );
+        assert_eq!(painted.texts().iter().filter(|t| **t == "6").count(), 1);
+
+        app.select_single(1);
+        app.enter_loupe();
+        assert!(settled(&mut app).has("6"), "the filmstrip shows the count");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The Loupe names its folder, and the arrow beside the name goes back to
     /// the Grid.
     #[test]
