@@ -205,8 +205,6 @@ pub(super) fn footer(ui: &mut egui::Ui, buttons: &[Button]) -> Option<Role> {
     footer_with_focus(ui, buttons, None)
 }
 
-/// A [`footer`] whose `focus` button, the one the keyboard would press,
-/// wears the keyboard cursor's outline.
 pub(super) fn footer_with_focus(
     ui: &mut egui::Ui,
     buttons: &[Button],

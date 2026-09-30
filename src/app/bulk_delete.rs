@@ -72,38 +72,34 @@ pub(crate) struct BulkDelete {
     origin_handle: web_sys::FileSystemDirectoryHandle,
 }
 
-/// The groups a batch trashes whole, whose landed photos wait for the
-/// group's last one. The catalog forgets a whole group in one step, so the
-/// group goes in one sidecar delete rather than in a rewrite per landed
-/// member, and no member is promoted to representative on the way.
 #[derive(Default)]
 struct HeldGroups {
-    /// Each held photo's file name, as an index into `held`.
-    whole: HashMap<std::ffi::OsString, usize>,
+    slot_by_name: HashMap<std::ffi::OsString, usize>,
     held: Vec<Held>,
 }
 
 struct Held {
-    /// Queued photos of the group with no result yet.
     pending: usize,
     trashed: Vec<PathBuf>,
 }
 
 impl HeldGroups {
-    /// Holds the group of `names`, every one of them queued once.
     fn hold(&mut self, names: &[&std::ffi::OsStr]) {
         self.held.push(Held {
             pending: names.len(),
             trashed: Vec::new(),
         });
         for name in names {
-            self.whole.insert(name.to_os_string(), self.held.len() - 1);
+            self.slot_by_name
+                .insert(name.to_os_string(), self.held.len() - 1);
         }
     }
 
-    /// The photos the catalog can forget now that `path` has its result.
     fn release(&mut self, path: PathBuf, trashed: bool) -> Vec<PathBuf> {
-        let slot = path.file_name().and_then(|n| self.whole.get(n)).copied();
+        let slot = path
+            .file_name()
+            .and_then(|n| self.slot_by_name.get(n))
+            .copied();
         let Some(held) = slot.and_then(|i| self.held.get_mut(i)) else {
             return if trashed { vec![path] } else { Vec::new() };
         };
@@ -117,8 +113,6 @@ impl HeldGroups {
         std::mem::take(&mut held.trashed)
     }
 
-    /// Everything still held, for a batch that ends before its groups'
-    /// last photos land.
     fn release_all(&mut self) -> Vec<PathBuf> {
         self.held
             .iter_mut()
@@ -194,8 +188,6 @@ impl App {
     /// Begin trashing `paths`. Refused while another delete or an export is
     /// running: the export reads bytes from files this batch would remove.
     pub(super) fn start_delete(&mut self, mut paths: Vec<PathBuf>) {
-        // A path queued twice would count twice toward its group being
-        // whole, and its second trash call would fail on a file already gone.
         let mut seen = HashSet::new();
         paths.retain(|p| seen.insert(p.clone()));
         if paths.is_empty() {
@@ -364,8 +356,6 @@ impl App {
         self.poll_delete();
     }
 
-    /// Each path of `paths` whose group has every present member in `paths`,
-    /// with that group.
     fn whole_groups(&self, paths: &[PathBuf]) -> HeldGroups {
         let Some(groups) = self.catalog.groups() else {
             return Default::default();
@@ -893,11 +883,6 @@ mod tests {
         (app, dir, paths)
     }
 
-    /// The plan's G3 perf probe: the Delete frame's own work (the confirm's
-    /// count and `start_delete`'s group bookkeeping) for one 2 000-photo stack
-    /// against 2 000 selected singles. It stops short of `start_delete`, whose
-    /// remaining work is the same for both and would move 2 000 real files to
-    /// the Trash. Run with `cargo test --release delete_frame_bench -- --ignored --nocapture`.
     #[test]
     #[ignore]
     fn delete_frame_bench() {
@@ -911,7 +896,7 @@ mod tests {
                     let t = Instant::now();
                     let paths = app.delete_paths();
                     let held = app.whole_groups(&paths);
-                    std::hint::black_box((paths.len(), held.whole.len()));
+                    std::hint::black_box((paths.len(), held.slot_by_name.len()));
                     t.elapsed()
                 })
                 .collect();
@@ -1029,7 +1014,6 @@ mod tests {
             .collect()
     }
 
-    /// Photos b, c and d stacked under b, then the stack and e selected.
     fn stack_and_single() -> (App, PathBuf, Vec<PathBuf>) {
         use crate::app::nav::tests::group_photos;
         let (mut app, dir, paths) =
@@ -1070,8 +1054,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Every member landing in its own frame would otherwise rewrite the
-    /// group's sidecar once per member and promote each survivor in turn.
     #[test]
     fn trashing_a_whole_group_removes_it_in_one_step() {
         use crate::app::nav::tests::group_photos;
@@ -1144,8 +1126,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Photos b to g stacked under b, then the stack and h selected, and
-    /// Delete Group opened with Shift+Delete.
     fn delete_group_open() -> (App, PathBuf, Vec<PathBuf>) {
         use crate::app::nav::tests::group_photos;
         let names = [
@@ -1220,7 +1200,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The Delete Group button the keyboard cursor outlines, if any.
     fn focused_button(app: &mut App, trash: &str) -> Option<(String, f32)> {
         let t = crate::i18n::t();
         let painted = settled(app);
@@ -1275,7 +1254,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Opens Delete Group, tabs to `label`, and presses Enter.
     fn enter_on(label: &str) -> (App, PathBuf, Vec<PathBuf>) {
         let trash = (crate::i18n::t().trash_group_photos)(6);
         let (mut app, dir, paths) = delete_group_open();

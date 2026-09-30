@@ -285,10 +285,8 @@ pub struct Strings {
     pub confirm_apply_preset: fn(&str, usize) -> String,
     pub confirm_auto_tone: fn(usize) -> String,
     pub confirm_delete: fn(usize) -> String,
-    /// Photos, then the selected groups whose every member is among them.
     pub confirm_delete_groups: fn(usize, usize) -> String,
     pub delete_group_title: &'static str,
-    /// Photos, then groups.
     pub delete_group_prompt: fn(usize, usize) -> String,
     pub remove_group: &'static str,
     pub trash_group_photos: fn(usize) -> String,

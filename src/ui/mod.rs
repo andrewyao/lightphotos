@@ -59,9 +59,7 @@ pub enum UiAction {
     /// Run the action the open confirm dialog asks about.
     ConfirmPending,
     CancelPending,
-    /// Delete Group's Remove Group: dissolve the selected groups.
     RemoveGroups,
-    /// Delete Group's trash: every member of the selected groups.
     TrashGroups,
     /// `None` clears the star filter.
     SetFilter(Option<(Cmp, u8)>),

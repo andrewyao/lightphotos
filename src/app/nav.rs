@@ -210,10 +210,6 @@ impl App {
             .collect()
     }
 
-    /// What Delete trashes: in the Grid, `selected_paths` with each selected
-    /// stack expanded to every member still in the playlist; in the Loupe,
-    /// the photo on screen alone. The confirm counts this list and
-    /// `start_delete` receives it, so the two cannot disagree.
     pub(crate) fn delete_paths(&self) -> Vec<PathBuf> {
         let cells = self.selected_cells();
         if cells.is_empty() || self.mode == ViewMode::Loupe {
@@ -225,7 +221,7 @@ impl App {
         let mut paths = Vec::new();
         for p in cells {
             match self.group_at(p) {
-                Some((_, g)) => paths.extend(self.member_paths(g)),
+                Some((_, g)) => paths.extend(self.present_member_paths(g)),
                 None => paths.extend(
                     self.visible
                         .get(p)
@@ -237,8 +233,7 @@ impl App {
         paths
     }
 
-    /// The paths of `group`'s members that are still in the playlist.
-    pub(super) fn member_paths(&self, group: &crate::groups::Group) -> Vec<PathBuf> {
+    pub(super) fn present_member_paths(&self, group: &crate::groups::Group) -> Vec<PathBuf> {
         let Some(pl) = self.playlist.as_ref() else {
             return Vec::new();
         };
