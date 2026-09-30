@@ -24,6 +24,8 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 | `Shift`+click | Range-select |
 | `Cmd`+click | Toggle one cell's selection |
 | `Shift`+arrows | Extend the selection (library) |
+| `Cmd`+`G` | Group the selected cells into one stack; a selected stack brings all its members |
+| `Cmd`+`Shift`+`G` | Ungroup the selected stacks; their photos come back selected |
 
 ## Rate and label
 

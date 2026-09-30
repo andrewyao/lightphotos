@@ -215,6 +215,10 @@ impl App {
                 self.toggle_touchup();
             }
 
+            // Both always take the chord, even when they do nothing, since a
+            // disabled menu item passes it through and plain G leaves the Loupe.
+            KeyCode::KeyG if cmd && shift => self.ungroup_selected(),
+            KeyCode::KeyG if cmd => self.group_selected(),
             KeyCode::KeyG => self.enter_grid(),
             KeyCode::KeyI
                 if !cmd && !alt && matches!(self.mode, ViewMode::Grid | ViewMode::Loupe) =>
@@ -294,7 +298,9 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::nav::tests::group_photos;
     use crate::navigation::Playlist;
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
     use winit::keyboard::ModifiersState;
 
@@ -1208,5 +1214,128 @@ mod tests {
         app.set_develop_tab(DevelopTab::Masks);
         app.develop_move(1);
         assert_eq!(app.develop_tab(), DevelopTab::Sliders);
+    }
+
+    fn group_shapes(app: &App) -> Vec<(Vec<String>, String)> {
+        let groups = app.catalog.groups().expect("groups loaded");
+        groups
+            .iter()
+            .map(|(_, g)| {
+                let s = |n: &std::ffi::OsString| n.to_string_lossy().into_owned();
+                (g.members().iter().map(s).collect(), s(g.rep()))
+            })
+            .collect()
+    }
+
+    fn shape(members: &[&str], rep: &str) -> (Vec<String>, String) {
+        (
+            members.iter().map(|m| m.to_string()).collect(),
+            rep.to_string(),
+        )
+    }
+
+    #[test]
+    fn cmd_g_with_one_cell_does_nothing() {
+        let (mut app, _) = folder_app(4);
+        press(&mut app, CMD, KeyCode::KeyG);
+        assert!(group_shapes(&app).is_empty());
+        assert_eq!(app.visible, vec![0, 1, 2, 3]);
+        assert_eq!(app.mode, ViewMode::Grid);
+    }
+
+    /// Plain G leaves the Loupe, so both chords must be taken before it.
+    #[test]
+    fn cmd_g_in_the_loupe_stays_in_the_loupe() {
+        let (mut app, _) = folder_app(3);
+        app.enter_loupe();
+        press(&mut app, CMD, KeyCode::KeyG);
+        assert_eq!(app.mode, ViewMode::Loupe);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyG);
+        assert_eq!(app.mode, ViewMode::Loupe);
+    }
+
+    #[test]
+    fn cmd_g_over_a_group_and_two_singles_makes_one_group() {
+        let (mut app, _) = folder_app(6);
+        group_photos(&mut app, &[1, 2, 3], 2);
+        assert_eq!(app.visible, vec![0, 2, 4, 5]);
+        app.selected = BTreeSet::from([0, 1, 2]);
+        app.sel = Some(1);
+        press(&mut app, CMD, KeyCode::KeyG);
+        assert_eq!(
+            group_shapes(&app),
+            vec![shape(
+                &["0.jpg", "1.jpg", "2.jpg", "3.jpg", "4.jpg"],
+                "2.jpg"
+            )]
+        );
+        assert_eq!(app.visible, vec![2, 5]);
+    }
+
+    /// The primary cell's photo stands for the group, and the selection
+    /// becomes the new stack's cell.
+    #[test]
+    fn cmd_g_takes_the_primary_cells_photo_and_selects_the_new_cell() {
+        let (mut app, _) = folder_app(5);
+        app.selected = BTreeSet::from([1, 2, 3]);
+        app.sel = Some(3);
+        press(&mut app, CMD, KeyCode::KeyG);
+        assert_eq!(
+            group_shapes(&app),
+            vec![shape(&["1.jpg", "2.jpg", "3.jpg"], "3.jpg")]
+        );
+        assert_eq!(app.visible, vec![0, 3, 4]);
+        assert_eq!(app.selected, BTreeSet::from([1]));
+        assert_eq!(app.sel, Some(1));
+    }
+
+    #[test]
+    fn cmd_shift_g_restores_every_member_to_the_grid() {
+        let (mut app, _) = folder_app(5);
+        group_photos(&mut app, &[1, 2, 3], 2);
+        app.selected = BTreeSet::from([0, 1]);
+        app.sel = Some(0);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyG);
+        assert!(group_shapes(&app).is_empty());
+        assert_eq!(app.visible, vec![0, 1, 2, 3, 4]);
+        assert_eq!(app.selected, BTreeSet::from([0, 1, 2, 3]));
+        assert_eq!(app.sel, Some(2), "the old representative is the cursor");
+    }
+
+    #[test]
+    fn ungroup_then_group_restores_the_same_group() {
+        let (mut app, _) = folder_app(5);
+        group_photos(&mut app, &[1, 2, 3], 3);
+        let before = group_shapes(&app);
+        app.select_single(1);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyG);
+        press(&mut app, CMD, KeyCode::KeyG);
+        assert_eq!(group_shapes(&app), before);
+        assert_eq!(app.visible, vec![0, 3, 4]);
+    }
+
+    /// Right after a folder opens its groups are still loading. Cmd+G then
+    /// changes nothing, in memory or on disk, and says why.
+    #[test]
+    fn cmd_g_while_groups_load_changes_nothing() {
+        let (mut app, paths) = folder_app(3);
+        let dir = paths[0].parent().unwrap().to_path_buf();
+        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
+        app.mode = ViewMode::Grid;
+        app.selected = BTreeSet::from([0, 1]);
+        app.sel = Some(0);
+        press(&mut app, CMD, KeyCode::KeyG);
+        assert_eq!(
+            app.status_text(),
+            Some(crate::i18n::t().group_refused_loading)
+        );
+        assert_eq!(app.visible, vec![0, 1, 2]);
+        while app.poll_catalog_load() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        assert!(group_shapes(&app).is_empty());
+        assert!(!dir.join(".lightphotos").join("groups").exists());
     }
 }
