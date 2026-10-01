@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Cut a release: tag origin/main and push the tag, which starts
-# .github/workflows/release.yml (builds the macOS .dmg, Linux tarballs and
+# .github/workflows/release.yml (builds the macOS .dmgs, Linux tarballs and
 # Windows zip, then publishes the GitHub Release).
 #
 #   ./scripts/release.sh           # next patch after the newest tag on origin

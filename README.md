@@ -128,6 +128,10 @@ This script:
 3. Registers the bundle with Launch Services (`lsregister`) so Finder routes
    image files to it.
 
+Pass `--target x86_64-apple-darwin` to cross-build the Intel app from an Apple
+Silicon Mac (or `--target aarch64-apple-darwin` the other way round). The
+release workflow builds one `.dmg` per target this way.
+
 Both `target/` and `LightPhotos.app/` are git-ignored — they're build outputs.
 
 After bundling:

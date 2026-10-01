@@ -3,7 +3,17 @@
 
 # Build a release binary and assemble LightPhotos.app, then register it with
 # Launch Services so Finder double-click / "Open With" route image files to us.
+#
+#   ./scripts/bundle.sh                               # this Mac's architecture
+#   ./scripts/bundle.sh --target x86_64-apple-darwin  # cross-build the Intel app
 set -euo pipefail
+
+TARGET=""
+case "${1:-}" in
+  "") ;;
+  --target) TARGET="${2:?--target needs a triple}" ;;
+  *) echo "usage: $0 [--target <triple>]" >&2; exit 2 ;;
+esac
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/LightPhotos.app"
@@ -12,14 +22,24 @@ BIN_NAME="lightphotos"
 echo "==> Ensuring vendored rawler is present"
 "$ROOT/scripts/setup-vendor-rawler.sh"
 
-echo "==> Building release binary"
-cargo build --release --manifest-path "$ROOT/Cargo.toml"
+if [[ -n "$TARGET" ]]; then
+  # Rust's x86_64 default is 10.12; match Info.plist's LSMinimumSystemVersion.
+  export MACOSX_DEPLOYMENT_TARGET=11.0
+  rustup target add "$TARGET"
+  echo "==> Building release binary for $TARGET"
+  cargo build --release --bin "$BIN_NAME" --target "$TARGET" --manifest-path "$ROOT/Cargo.toml"
+  BIN="$ROOT/target/$TARGET/release/$BIN_NAME"
+else
+  echo "==> Building release binary"
+  cargo build --release --manifest-path "$ROOT/Cargo.toml"
+  BIN="$ROOT/target/release/$BIN_NAME"
+fi
 
 echo "==> Assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
-cp "$ROOT/target/release/$BIN_NAME" "$APP/Contents/MacOS/$BIN_NAME"
+cp "$BIN" "$APP/Contents/MacOS/$BIN_NAME"
 chmod +x "$APP/Contents/MacOS/$BIN_NAME"
 
 # Rendered from assets/icon/lightphotos.svg by scripts/make-icons.sh.

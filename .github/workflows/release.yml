@@ -4,9 +4,9 @@ name: release
 #   git tag v0.1.0 && git push origin v0.1.0
 # Each platform builds on its native runner (macOS decode uses Apple ImageIO;
 # HEIC/Vision code is cfg-gated off on non-macOS so it still compiles).
-# Ships: macOS Apple Silicon .dmg + Linux x86_64/arm64 tarballs + Windows x86_64 zip.
-# No Intel-mac. The .app inside the .dmg carries the CLI binary at
-# Contents/MacOS/lightphotos.
+# Ships: macOS Apple Silicon and Intel .dmgs + Linux x86_64/arm64 tarballs +
+# Windows x86_64 zip. The Intel .dmg is cross-built on the Apple Silicon runner.
+# The .app inside each .dmg carries the CLI binary at Contents/MacOS/lightphotos.
 
 on:
   push:
@@ -25,6 +25,9 @@ jobs:
           - os: macos-14        # Apple Silicon
             target: aarch64-apple-darwin
             name: lightphotos-macos-arm64
+          - os: macos-14        # cross-builds Intel; GitHub's Intel runners are being retired
+            target: x86_64-apple-darwin
+            name: lightphotos-macos-x86_64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             name: lightphotos-linux-x86_64
@@ -68,20 +71,17 @@ jobs:
       # which the probes don't re-declare, so `cargo build` (all targets) fails
       # to compile them on Linux / Windows.
       - name: Build
+        if: runner.os != 'macOS'
         run: cargo build --release --bin lightphotos --target ${{ matrix.target }}
 
-      # macOS: ship the double-clickable .app inside a drag-install .dmg.
-      # bundle.sh also does lsregister, which is a no-op / harmless on the
-      # runner; we inline the assembly here so it targets the per-target binary.
+      # macOS: bundle.sh builds and assembles the .app (its lsregister is
+      # harmless on the runner), then ship it inside a drag-install .dmg.
       # hdiutil is built into the runner.
-      - name: Package (macOS)
+      - name: Build and package (macOS)
         if: runner.os == 'macOS'
         run: |
+          ./scripts/bundle.sh --target ${{ matrix.target }}
           APP="LightPhotos.app"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          cp Info.plist "$APP/Contents/Info.plist"
-          cp "target/${{ matrix.target }}/release/lightphotos" "$APP/Contents/MacOS/lightphotos"
-          chmod +x "$APP/Contents/MacOS/lightphotos"
 
           # .dmg: stage the app + an /Applications symlink for drag-install.
           STAGE="$(mktemp -d)"
