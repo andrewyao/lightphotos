@@ -175,7 +175,7 @@ impl Adjustments {
 /// thumbnail cache key. Floats are rounded so tiny jitter doesn't re-bake, and
 /// every unedited photo gets the same value.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
+fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
     edit_signature_with_touchups(adj, &[], rot)
 }
 
@@ -552,10 +552,7 @@ pub(crate) fn denoise_sample(adj: &Adjustments, sample: impl Fn(i32, i32) -> [f3
 
 /// [`denoise_sample`] with a plain strength, for the RAW decoders' fixed
 /// denoise pass.
-pub(crate) fn denoise_sample_with_strength(
-    strength: f32,
-    sample: impl Fn(i32, i32) -> [f32; 3],
-) -> [f32; 3] {
+fn denoise_sample_with_strength(strength: f32, sample: impl Fn(i32, i32) -> [f32; 3]) -> [f32; 3] {
     if strength <= 0.0 {
         return sample(0, 0);
     }

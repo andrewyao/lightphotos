@@ -33,7 +33,7 @@ pub(super) struct Form {
 
 impl Form {
     /// A form whose label column fits the widest of `labels`.
-    pub fn new(ui: &egui::Ui, labels: &[&str]) -> Self {
+    pub(super) fn new(ui: &egui::Ui, labels: &[&str]) -> Self {
         let body = egui::TextStyle::Body.resolve(ui.style());
         let widest = labels
             .iter()
@@ -53,7 +53,7 @@ impl Form {
 
     /// A header over `body`'s rows, set off from the section before it. An
     /// empty `title` draws no header.
-    pub fn section(&self, ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    pub(super) fn section(&self, ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
         if !self.first.replace(false) {
             ui.add_space(font_size::px(ui.style(), BEFORE_DIVIDER));
             ui.separator();
@@ -72,7 +72,7 @@ impl Form {
 
     /// `label` in the label column and `value` beside it, both from the row's
     /// top. Returns the label.
-    pub fn row(
+    pub(super) fn row(
         &self,
         ui: &mut egui::Ui,
         label: &str,
@@ -165,7 +165,7 @@ pub(super) struct Button<'a> {
 }
 
 impl<'a> Button<'a> {
-    pub fn new(label: &'a str, role: Role) -> Self {
+    pub(super) fn new(label: &'a str, role: Role) -> Self {
         Self {
             label,
             role,

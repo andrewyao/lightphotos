@@ -31,7 +31,7 @@ pub enum Cmp {
 
 impl Cmp {
     /// `rating` is 0 when unset.
-    pub fn matches(self, rating: u8, value: u8) -> bool {
+    fn matches(self, rating: u8, value: u8) -> bool {
         match self {
             Cmp::Gte => rating >= value,
             Cmp::Eq => rating == value,
@@ -62,7 +62,7 @@ pub fn visible_indices(
 /// direction. Entries with no time (`None`) join the current burst and never
 /// split one.
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn group_by_time(times: &[Option<SystemTime>], gap: Duration) -> Vec<u32> {
+fn group_by_time(times: &[Option<SystemTime>], gap: Duration) -> Vec<u32> {
     let mut ids = Vec::with_capacity(times.len());
     let mut group = 0u32;
     let mut last_known: Option<SystemTime> = None;

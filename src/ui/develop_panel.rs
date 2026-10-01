@@ -507,7 +507,7 @@ fn draw_exposure_row(ui: &mut egui::Ui, app: &App) {
 
 /// The R, G, B histogram of the image after develop adjustments. `App`
 /// re-bins it on every adjustment change.
-pub(super) fn draw_histogram(ui: &mut egui::Ui, app: &App) {
+fn draw_histogram(ui: &mut egui::Ui, app: &App) {
     let height = 120.0;
     let width = ui.available_width();
     let (rect, _resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());

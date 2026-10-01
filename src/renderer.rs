@@ -713,7 +713,7 @@ impl Renderer {
     }
 
     #[allow(dead_code)]
-    pub fn surface_format(&self) -> wgpu::TextureFormat {
+    fn surface_format(&self) -> wgpu::TextureFormat {
         self.config.format
     }
 

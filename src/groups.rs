@@ -226,12 +226,12 @@ impl Groups {
     }
 
     #[allow(dead_code)] // only called from #[cfg(test)] today
-    pub fn get(&self, id: &GroupId) -> Option<&Group> {
+    fn get(&self, id: &GroupId) -> Option<&Group> {
         self.by_id.get(id)
     }
 
     #[allow(dead_code)] // only called from #[cfg(test)] today
-    pub fn group_of(&self, name: &OsStr) -> Option<&GroupId> {
+    fn group_of(&self, name: &OsStr) -> Option<&GroupId> {
         self.of.get(name)
     }
 
@@ -241,7 +241,7 @@ impl Groups {
     }
 
     #[allow(dead_code)] // only called from #[cfg(test)] today
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.by_id.len()
     }
 
@@ -281,7 +281,7 @@ impl Groups {
     /// Make `rep` the representative of group `id`. Nothing for a photo
     /// outside the group or the current representative.
     #[allow(dead_code)] // only called from #[cfg(test)] today
-    pub fn set_rep(&self, id: &GroupId, rep: &OsString) -> Vec<GroupWrite> {
+    fn set_rep(&self, id: &GroupId, rep: &OsString) -> Vec<GroupWrite> {
         let Some(group) = self.by_id.get(id) else {
             return Vec::new();
         };
@@ -306,7 +306,7 @@ impl Groups {
     /// Take `names` out of their groups, for photos that were trashed or
     /// absorbed into another group. A group losing its representative moves
     /// it to the first surviving member, and one left under two is deleted.
-    pub fn forget(&self, names: &[OsString]) -> Vec<GroupWrite> {
+    fn forget(&self, names: &[OsString]) -> Vec<GroupWrite> {
         let gone: HashSet<&OsString> = names.iter().collect();
         let touched: BTreeSet<&GroupId> = names.iter().filter_map(|n| self.of.get(n)).collect();
         touched

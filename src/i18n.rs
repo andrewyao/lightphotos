@@ -44,7 +44,7 @@ pub fn lang() -> Lang {
     }
 }
 
-pub fn set_lang(lang: Lang) {
+fn set_lang(lang: Lang) {
     LANG.store(lang as u8, Ordering::Relaxed);
 }
 
@@ -138,7 +138,7 @@ pub fn keys(text: &str) -> std::borrow::Cow<'_, str> {
 
 /// Whether the command key is Cmd: in the macOS app, and in a browser on a
 /// Mac. `App::handle_key` accepts either key everywhere.
-pub fn command_is_cmd() -> bool {
+fn command_is_cmd() -> bool {
     #[cfg(target_arch = "wasm32")]
     {
         crate::app::browser_is_mac()

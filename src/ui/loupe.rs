@@ -123,12 +123,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     }
 }
 
-pub(super) fn loupe_touchup_overlay(
-    ui: &mut egui::Ui,
-    app: &App,
-    central: egui::Rect,
-    out: &mut FrameOutput,
-) {
+fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
     let painter = ui.painter_at(central);
     let spots: &[crate::develop::TouchUp] = if app.touchup_spots_shown() {
         app.current_touchups()
@@ -246,12 +241,7 @@ fn touchup_screen_radius(app: &App, central: egui::Rect, center: [f32; 2], radiu
 
 /// A transparent click-catcher over the image while the WB picker is armed.
 /// The app disarms the picker after the click.
-pub(super) fn loupe_wb_picker_overlay(
-    ui: &egui::Ui,
-    app: &App,
-    central: egui::Rect,
-    out: &mut FrameOutput,
-) {
+fn loupe_wb_picker_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
     egui::Area::new(egui::Id::new("loupe_wb_picker"))
         .order(egui::Order::Foreground)
         .fixed_pos(central.min)
@@ -273,7 +263,7 @@ pub(super) fn loupe_wb_picker_overlay(
 }
 
 /// Divider and labels for before/after. The wgpu renderer draws the two halves.
-pub(super) fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
+fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     let painter = ui.painter_at(central);
     let mid_x = central.center().x;
     painter.line_segment(
@@ -310,7 +300,7 @@ pub(super) fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
 
 /// The info bar below the image: filename and rating centered, then the
 /// selection controls. Exposure sits under the Develop panel's histogram.
-pub(super) fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let bar_h = font_size::px(ui.style(), 36.0);
     egui::Panel::bottom("loupe_info_bar")
         .exact_size(bar_h)
@@ -558,12 +548,7 @@ pub(super) fn maps_url(gps: &image_decode::Gps) -> String {
 /// The crop overlay and its drag handling. The crop rect is in texture space.
 /// `App::loupe_tex_to_screen` maps it to screen, accounting for zoom, pan, and
 /// rotation.
-pub(super) fn loupe_crop_overlay(
-    ui: &egui::Ui,
-    app: &App,
-    central: egui::Rect,
-    out: &mut FrameOutput,
-) {
+fn loupe_crop_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
     let Some(rect) = app.crop_rect() else { return };
 
     let corner = |u, v| app.loupe_tex_to_screen(central, u, v);
@@ -680,7 +665,7 @@ pub(super) fn loupe_crop_overlay(
 }
 
 /// The edge nearest to `p`, if within `threshold` px.
-pub(super) fn nearest_edge(
+fn nearest_edge(
     edges: &[(CropEdge, egui::Pos2, egui::Pos2)],
     p: egui::Pos2,
     threshold: f32,
@@ -695,7 +680,7 @@ pub(super) fn nearest_edge(
     best.filter(|&(_, d)| d <= threshold).map(|(e, _)| e)
 }
 
-pub(super) fn dist_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
+fn dist_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
     let ab = b - a;
     let len2 = ab.length_sq();
     if len2 <= f32::EPSILON {
@@ -706,7 +691,7 @@ pub(super) fn dist_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f3
     (p - proj).length()
 }
 
-pub(super) fn filmstrip_cell(
+fn filmstrip_cell(
     ui: &mut egui::Ui,
     app: &App,
     pos: usize,
