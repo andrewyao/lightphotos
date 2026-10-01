@@ -448,7 +448,8 @@ pub(crate) struct App {
     /// Consecutive failure count and earliest next retry time per key.
     /// Chrome's `NotReadableError` is usually transient, so a key gives up only
     /// after `MAX_READ_RETRIES` failures. Retries a frame apart all fail, so the
-    /// deadline backs off per attempt (`retry_backoff`). Cleared on success or
+    /// deadline backs off per attempt (`retry_backoff`). A decode failure
+    /// gives up at once, see `web_decode::Failure`. Cleared on success or
     /// when giving up.
     #[cfg(target_arch = "wasm32")]
     web_thumb_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
