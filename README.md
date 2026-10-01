@@ -4,6 +4,11 @@
 
 A fast macOS Lightroom-lite photo culling & develop tool, written in Rust.
 
+**[lightphotos.app](https://lightphotos.app)** has the desktop downloads and a
+version that runs in your browser.
+
+<img src="assets/demo.gif" alt="Rating RAW photos with the number keys, opening one in the Loupe, zooming to 100%, and returning to the rated grid" width="800">
+
 Open a folder to browse thumbnails in a Grid; open a single image to jump
 straight into the Loupe. Decoding runs on background threads (Apple ImageIO
 on macOS; `image` / `rawler` / `mozjpeg-rs` / `kamadak-exif` crates on other
@@ -12,10 +17,10 @@ textures, so zoom and pan only update a small transform uniform — never a
 re-decode. egui draws all the chrome (grid, filmstrip, filter bar, rating
 overlays); a hand-rolled wgpu renderer draws the loupe image.
 
-**Linux/Windows (experimental):** The codebase builds successfully via
-`cargo build --release` on Linux and Windows targets (verified via `cargo check`),
-after the one-time `rawler` vendor step (see [Build from scratch](#build-from-scratch)).
-However, real runtime testing has been performed on Linux only, not on Windows yet.
+**Linux/Windows:** The codebase builds via `cargo build --release` on Linux
+and Windows after the one-time `rawler` vendor step (see
+[Build from scratch](#build-from-scratch)), and the app runs on both. Windows
+ships as a bare `lightphotos.exe` in a zip, with no installer yet.
 
 HEIC support and Vision-backed features (face/blink scoring,
 subject-selection overlay) are macOS-only.
@@ -30,7 +35,7 @@ for full implementation status.
   older system loses the feature rather than the app. Subject selection in the
   Loupe needs macOS 12.0 for person segmentation and macOS 14.0 for the
   general foreground fallback.
-  Linux, Windows, and wasm32 builds are experimental — see the note above.
+  The wasm32 (browser) build is experimental.
 - **Rust stable ≥ 1.92.** The repo pins `channel = "stable"` in
   `rust-toolchain.toml`, so `rustup` selects a compatible toolchain automatically
   without touching your global default. The version floor comes from egui 0.34
