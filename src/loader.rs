@@ -1072,7 +1072,7 @@ impl Loader {
     /// Requests `path`'s capture time. The result arrives in the third list
     /// returned by [`poll_all`](Self::poll_all).
     #[allow(dead_code)]
-    pub fn request_meta(&mut self, path: PathBuf) {
+    fn request_meta(&mut self, path: PathBuf) {
         if self.meta_inflight.contains(&path) {
             return;
         }

@@ -338,7 +338,7 @@ fn parse_step(line: &str) -> Result<Step, String> {
     Ok(step)
 }
 
-pub(crate) fn parse_script(text: &str) -> Result<Vec<Step>, ParseError> {
+fn parse_script(text: &str) -> Result<Vec<Step>, ParseError> {
     let mut steps = Vec::new();
     for (i, raw) in text.lines().enumerate() {
         let line = raw.split('#').next().unwrap_or_default().trim();

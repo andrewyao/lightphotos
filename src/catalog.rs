@@ -64,7 +64,7 @@ impl ColorLabel {
     /// The label Shift+`n` sets, for `n` in `1..=5`.
     /// No key sets a color label yet; kept for the label UI still to come.
     #[allow(dead_code)]
-    pub fn from_digit(n: u8) -> Option<ColorLabel> {
+    fn from_digit(n: u8) -> Option<ColorLabel> {
         Some(match n {
             1 => ColorLabel::Red,
             2 => ColorLabel::Yellow,

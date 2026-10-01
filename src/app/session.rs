@@ -69,7 +69,7 @@ impl Session {
 
 impl App {
     /// The session as it stands, or `None` on the landing page.
-    pub(crate) fn current_session(&self) -> Option<Session> {
+    fn current_session(&self) -> Option<Session> {
         let root = self.folder_root.clone()?;
         let dir = self.playlist.as_ref()?.dir();
         if !dir.starts_with(&root) {
@@ -107,7 +107,7 @@ impl App {
 
     /// Open the saved session, or the folder picker when there is none or its
     /// folder is gone.
-    pub(crate) fn reopen_session(&mut self) {
+    pub(super) fn reopen_session(&mut self) {
         let Some(session) = self.session.clone() else {
             self.open_folder_picker();
             return;
@@ -126,7 +126,7 @@ impl App {
     /// A missing subfolder falls back to `root`, and a missing photo leaves
     /// the grid with nothing selected.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn restore_session(&mut self, session: &Session) {
+    fn restore_session(&mut self, session: &Session) {
         self.open(session.root.clone());
         let chain = session.folder_chain();
         if let Some(dir) = chain.last().filter(|d| chain.len() > 1 && d.is_dir()) {

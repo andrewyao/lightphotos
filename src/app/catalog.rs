@@ -223,7 +223,7 @@ impl App {
 
     /// Makes the app's ratings, edits, touchups, and rotations for `playlist`
     /// match the loaded catalog, removing values its sidecars no longer have.
-    pub(super) fn reconcile_catalog_mirrors(&mut self, playlist: &Playlist) {
+    fn reconcile_catalog_mirrors(&mut self, playlist: &Playlist) {
         // A drag in progress lives only in `edits`; write it before the
         // catalog overwrites it.
         self.save_edit();
@@ -389,7 +389,7 @@ impl App {
     /// Labels the selected photo; `None` clears the label.
     /// No key sets a color label yet; kept for the label UI still to come.
     #[allow(dead_code)]
-    pub(super) fn set_label(&mut self, label: Option<crate::catalog::ColorLabel>) {
+    fn set_label(&mut self, label: Option<crate::catalog::ColorLabel>) {
         let Some(path) = self.selected_path() else {
             return;
         };
@@ -431,7 +431,7 @@ impl App {
         Some((kind, prompt))
     }
 
-    pub(crate) fn confirm_open(&self) -> bool {
+    pub(super) fn confirm_open(&self) -> bool {
         self.pending_confirm.is_some()
     }
 

@@ -14,7 +14,7 @@ pub(crate) const LINEAR_IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat:
 /// images. It shares the full 4-group `pipeline_layout` so `render()` binds
 /// groups 0-3 the same way for both pipelines. The vertex stage is
 /// `shader.wgsl`'s `vs_main`, so pan/zoom (group 1) works unchanged.
-pub(crate) fn create_raw_pipeline(
+pub(super) fn create_raw_pipeline(
     device: &wgpu::Device,
     pipeline_layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
@@ -59,7 +59,7 @@ pub(crate) fn create_raw_pipeline(
 
 /// The mip-gen pipeline for `LINEAR_IMAGE_FORMAT` textures. `mipgen.wgsl` is
 /// format-agnostic, so only the color target differs from `mip_pipeline`.
-pub(crate) fn create_mip_pipeline_linear(
+pub(super) fn create_mip_pipeline_linear(
     device: &wgpu::Device,
     mip_pipeline_layout: &wgpu::PipelineLayout,
     mip_shader: &wgpu::ShaderModule,

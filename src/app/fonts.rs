@@ -18,7 +18,7 @@ struct Face {
 
 /// Install the font stack. `full_cjk` is the complete Noto Sans SC, which only
 /// the web build has, once [`fetch_full_cjk`] lands it.
-pub(crate) fn configure(ctx: &egui::Context, full_cjk: Option<Vec<u8>>) {
+pub(super) fn configure(ctx: &egui::Context, full_cjk: Option<Vec<u8>>) {
     ctx.set_fonts(build(full_cjk));
 }
 

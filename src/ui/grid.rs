@@ -43,7 +43,7 @@ pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutpu
 
 /// Width of the widest visible folder row, measured in the body font that
 /// `selectable_label` uses. The sidebar sizes itself to this.
-pub(super) fn folder_content_width(
+fn folder_content_width(
     ui: &egui::Ui,
     app: &App,
     path: &Path,
@@ -208,13 +208,7 @@ fn disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
 }
 
 /// One folder row. Recurses into expanded folders.
-pub(super) fn folder_node(
-    ui: &mut egui::Ui,
-    app: &App,
-    path: &Path,
-    depth: usize,
-    out: &mut FrameOutput,
-) {
+fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mut FrameOutput) {
     let selected = app.folder_sel().as_deref() == Some(path);
     let row = ui.horizontal(|ui| {
         ui.add_space(depth as f32 * disclosure_w(ui.style()));
@@ -518,7 +512,7 @@ fn selection_check(ui: &egui::Ui, c: egui::Pos2, r: f32, fill: egui::Color32) {
     painter.line_segment([b, d], stroke);
 }
 
-pub(super) fn grid_cell(
+fn grid_cell(
     ui: &mut egui::Ui,
     app: &mut App,
     pos: usize,

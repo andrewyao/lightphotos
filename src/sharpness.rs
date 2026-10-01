@@ -12,7 +12,7 @@ const TARGET_LONG: u32 = 1024;
 /// empty input or a short buffer.
 #[hotpath::measure]
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn sharpness(rgba: &[u8], width: u32, height: u32) -> f64 {
+fn sharpness(rgba: &[u8], width: u32, height: u32) -> f64 {
     if width == 0 || height == 0 || rgba.len() < (width as usize * height as usize * 4) {
         return 0.0;
     }
