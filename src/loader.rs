@@ -395,18 +395,24 @@ impl WebDecoder {
             generation,
             from_cache: false,
         };
-        let _ = self
-            .res_tx
-            .send(JobResult::Web(Box::new(job.failed(&error))));
+        let _ = self.res_tx.send(JobResult::Web(Box::new(
+            job.failed(crate::web_decode::Failure::Read(error)),
+        )));
     }
 
     fn push(&self, job: crate::web_decode::WebJob) {
-        let failed = (self.workers == 0).then(|| job.failed("no decode threads started"));
+        let failed = (self.workers == 0).then(|| {
+            job.failed(crate::web_decode::Failure::Decode(
+                "no decode threads started".to_string(),
+            ))
+        });
         if let Some(failed) = failed {
             let _ = self.res_tx.send(JobResult::Web(Box::new(failed)));
             return;
         }
-        let failed = job.failed("the decode queue is poisoned");
+        let failed = job.failed(crate::web_decode::Failure::Decode(
+            "the decode queue is poisoned".to_string(),
+        ));
         if push_job(&self.shared, Job::Web(Box::new(job))) != Enqueued::Yes {
             let _ = self.res_tx.send(JobResult::Web(Box::new(failed)));
         }
@@ -606,7 +612,9 @@ mod panic_recovery {
     /// Records what to report if `job` never finishes.
     pub(super) fn start(job: &Job) {
         let failure = match job {
-            Job::Web(j) => Some(JobResult::Web(Box::new(j.failed("decoder panicked")))),
+            Job::Web(j) => Some(JobResult::Web(Box::new(j.failed(
+                crate::web_decode::Failure::Decode("decoder panicked".to_string()),
+            )))),
             Job::Bake(b) => Some(JobResult::Baked(b.path.clone(), b.px, b.sig, None)),
             Job::WebExport(e) => Some(JobResult::WebExport(
                 e.id,

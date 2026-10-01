@@ -27,11 +27,34 @@ impl JobKind {
     }
 }
 
+/// Why a job produced no image. Chrome's `NotReadableError` can pass, so a
+/// failed read is worth retrying. A decode of bytes already read fails the
+/// same way every time, and each retry would read the whole file again.
+#[derive(Clone, Debug)]
+pub enum Failure {
+    Read(String),
+    Decode(String),
+}
+
+impl Failure {
+    pub fn is_read(&self) -> bool {
+        matches!(self, Failure::Read(_))
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Read(e) | Failure::Decode(e) => f.write_str(e),
+        }
+    }
+}
+
 pub struct PoolResult {
     pub kind: JobKind,
     pub path: PathBuf,
     pub target: u32,
-    pub result: Result<DecodedImage, String>,
+    pub result: Result<DecodedImage, Failure>,
     /// The image as a JPEG for the disk cache. Set only for thumbnails decoded
     /// from the source, and only when JPEG can represent the pixels.
     pub jpeg: Option<Vec<u8>>,
@@ -69,12 +92,12 @@ pub struct WebJob {
 impl WebJob {
     /// What the caller sees if this job never finishes, because its thread
     /// panicked (fatal on wasm32) or it was dropped from the queue.
-    pub fn failed(&self, error: &str) -> PoolResult {
+    pub fn failed(&self, failure: Failure) -> PoolResult {
         PoolResult {
             kind: self.kind,
             path: self.path.clone(),
             target: self.target,
-            result: Err(error.to_string()),
+            result: Err(failure),
             jpeg: None,
             cache_name: self.cache_name.clone(),
             generation: self.generation,
@@ -83,7 +106,8 @@ impl WebJob {
     }
 
     pub fn run(self) -> PoolResult {
-        let result = decode(&self.bytes, self.target, self.is_raw, self.kind.quality());
+        let result = decode(&self.bytes, self.target, self.is_raw, self.kind.quality())
+            .map_err(Failure::Decode);
         // A thumbnail decoded from the source is also encoded for the disk
         // cache here, off the main thread. JPEG cannot hold alpha or
         // LinearF16, so those results are not cached.
