@@ -13,7 +13,7 @@ fn score_gt(a: Option<f64>, b: Option<f64>) -> bool {
 /// Index of the best frame in `scores`: the highest score, with ties and
 /// missing scores going to the earliest frame. `0` for an empty slice.
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn best_index(scores: &[Option<f64>]) -> usize {
+fn best_index(scores: &[Option<f64>]) -> usize {
     let mut best = 0;
     for (i, &s) in scores.iter().enumerate().skip(1) {
         if score_gt(s, scores[best]) {

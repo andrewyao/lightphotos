@@ -537,7 +537,7 @@ fn map_xtrans_coord(coord: usize, tile_step: usize) -> usize {
 /// for `Fast`, `PPGDemosaic` for `Quality`. Returns `None` for layouts that
 /// would panic (see `is_supported_bayer_layout`).
 #[hotpath::measure]
-pub(crate) fn demosaic_cfa(
+fn demosaic_cfa(
     raw: &mut rawler::RawImage,
     mode: DemosaicMode,
     max_px: u32,

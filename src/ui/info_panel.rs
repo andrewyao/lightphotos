@@ -24,7 +24,7 @@ pub(super) struct InfoGroup {
 /// The groups to show for `path`, with missing fields and empty groups left
 /// out. `meta` is `None` until the background read lands, when only the name
 /// is known.
-pub(super) fn info_groups(path: &Path, meta: Option<&ImageMetadata>) -> Vec<InfoGroup> {
+fn info_groups(path: &Path, meta: Option<&ImageMetadata>) -> Vec<InfoGroup> {
     let t = t();
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
     let m = |f: fn(&ImageMetadata) -> Option<String>| meta.and_then(f);

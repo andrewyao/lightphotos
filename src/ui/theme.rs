@@ -105,7 +105,7 @@ pub struct ToastColors {
 impl Palette {
     /// Deep fills with pale text on a dark theme, pale fills with deep text on
     /// a light one, so a toast never looks like a hole in the app.
-    pub fn toast(&self, kind: StatusKind) -> ToastColors {
+    pub(super) fn toast(&self, kind: StatusKind) -> ToastColors {
         let rgb = Color32::from_rgb;
         let (fill, text, stroke) = match (kind, self.dark_base) {
             (StatusKind::Success, true) => {
@@ -145,7 +145,7 @@ pub enum Polarity {
 
 /// The polarity that gives more contrast on `bg`. Black and white text have
 /// equal contrast on a background of relative luminance sqrt(1.05 * 0.05) - 0.05.
-pub fn text_polarity(bg: Color32) -> Polarity {
+fn text_polarity(bg: Color32) -> Polarity {
     let mid = (1.05f32 * 0.05).sqrt() - 0.05;
     if relative_luminance(bg) < mid {
         Polarity::LightText
@@ -155,7 +155,7 @@ pub fn text_polarity(bg: Color32) -> Polarity {
 }
 
 /// WCAG relative luminance of an sRGB color.
-pub fn relative_luminance(c: Color32) -> f32 {
+fn relative_luminance(c: Color32) -> f32 {
     let lin = |v: u8| {
         let v = v as f32 / 255.0;
         if v <= 0.04045 {
@@ -308,7 +308,7 @@ fn theme_id() -> egui::Id {
 }
 
 /// The theme `ctx` was last given, or Dark before any.
-pub fn current(ctx: &egui::Context) -> Theme {
+pub(super) fn current(ctx: &egui::Context) -> Theme {
     ctx.data(|d| d.get_temp(theme_id())).unwrap_or_default()
 }
 

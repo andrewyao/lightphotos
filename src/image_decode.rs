@@ -155,7 +155,7 @@ pub enum Flash {
 impl Flash {
     /// Bit 0 of the EXIF `Flash` bitfield is "fired" and bit 5 is "no flash
     /// function". The other bits describe the mode and return light.
-    pub(crate) fn from_exif(bits: u32) -> Option<Flash> {
+    fn from_exif(bits: u32) -> Option<Flash> {
         if bits & 0x01 != 0 {
             Some(Flash::Fired)
         } else if bits & 0x20 != 0 {
@@ -174,7 +174,7 @@ pub enum WhiteBalance {
 
 impl WhiteBalance {
     /// EXIF `WhiteBalance`: 0 is auto and 1 is manual.
-    pub(crate) fn from_exif(value: u32) -> Option<WhiteBalance> {
+    fn from_exif(value: u32) -> Option<WhiteBalance> {
         match value {
             0 => Some(WhiteBalance::Auto),
             1 => Some(WhiteBalance::Manual),
@@ -196,7 +196,7 @@ impl Gps {
     /// EXIF stores unsigned magnitudes and puts the sign in the Ref tags:
     /// `S` and `W` are negative, and an altitude ref of 1 is below sea level.
     /// `None` for coordinates off the globe.
-    pub(crate) fn from_exif(
+    fn from_exif(
         lat: f64,
         lat_ref: Option<&str>,
         lon: f64,
@@ -244,7 +244,7 @@ pub(crate) fn format_name(path: &Path) -> Option<String> {
 
 /// Size, modified time, and format: the facts that come from the file
 /// system rather than the image.
-pub(crate) fn fill_file_facts(meta: &mut ImageMetadata, path: &Path) {
+fn fill_file_facts(meta: &mut ImageMetadata, path: &Path) {
     meta.format = format_name(path);
     if let Ok(fs_meta) = std::fs::metadata(path) {
         meta.file_size = Some(fs_meta.len());
@@ -333,7 +333,7 @@ fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
     (secs >= 0).then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64))
 }
 
-pub(crate) fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
+fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
     let p = parse_exif_datetime_parts(s)?;
     Some(CaptureDate {
         year: p.y as i32,
@@ -775,7 +775,7 @@ pub fn cgimage_to_rgba(
 /// file's header, and a tiny crafted file can claim 65535x65535.
 pub(crate) const MAX_DECODE_PIXELS: u64 = 500_000_000;
 
-pub(crate) fn check_decode_size(w: u32, h: u32) -> Result<(), String> {
+fn check_decode_size(w: u32, h: u32) -> Result<(), String> {
     if w as u64 * h as u64 > MAX_DECODE_PIXELS {
         return Err(format!(
             "{w}x{h} is over the {} megapixel limit",

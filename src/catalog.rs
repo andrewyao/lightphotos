@@ -64,7 +64,7 @@ impl ColorLabel {
     /// The label Shift+`n` sets, for `n` in `1..=5`.
     /// No key sets a color label yet; kept for the label UI still to come.
     #[allow(dead_code)]
-    pub fn from_digit(n: u8) -> Option<ColorLabel> {
+    fn from_digit(n: u8) -> Option<ColorLabel> {
         Some(match n {
             1 => ColorLabel::Red,
             2 => ColorLabel::Yellow,
@@ -295,15 +295,12 @@ impl Catalog {
     }
 
     #[allow(dead_code)] // only called from #[cfg(test)] today
-    pub(crate) fn groups(&self) -> Option<&Groups> {
+    fn groups(&self) -> Option<&Groups> {
         self.groups.as_ref()
     }
 
     #[allow(dead_code)] // only called from #[cfg(test)] today
-    pub(crate) fn apply_group_writes(
-        &mut self,
-        writes: Vec<GroupWrite>,
-    ) -> Result<(), GroupWriteRefused> {
+    fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) -> Result<(), GroupWriteRefused> {
         if writes.is_empty() {
             return Ok(());
         }

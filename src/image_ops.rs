@@ -67,7 +67,7 @@ fn srgb8_to_linear_lut() -> &'static [f32; 256] {
 /// what `(v.max(0.0).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0)`
 /// gives, found by a search over the 255 inputs where that output steps up
 /// rather than a `powf` per channel.
-pub(crate) fn linear_to_srgb8(v: f32) -> u8 {
+fn linear_to_srgb8(v: f32) -> u8 {
     static STEPS: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
     let steps = STEPS.get_or_init(|| {
         // Positive floats order the same as their bit patterns, so each step
@@ -98,7 +98,7 @@ fn encode_srgb8_powf(v: f32) -> u8 {
 /// Premultiplied sRGB8 pixel (as decoded) to linear RGB, using the 2.2 gamma
 /// that `develop::apply_linear` assumes. Every CPU reader of decoded pixels
 /// goes through this so they all see the same values.
-pub(crate) fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
+fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
     let [r, g, b, a] = px;
     let (r, g, b) = if a == 0 {
         (0.0, 0.0, 0.0)
@@ -344,7 +344,7 @@ fn apply_touchups(
 /// Rotate packed RGBA8 by `steps` 90-degree clockwise turns. Returns the new
 /// `(width, height, rgba)`.
 #[hotpath::measure]
-pub(crate) fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, Vec<u8>) {
+fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, Vec<u8>) {
     let steps = steps % 4;
     if steps == 0 {
         return (w, h, src.to_vec());

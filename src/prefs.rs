@@ -63,7 +63,7 @@ pub(crate) fn config_dir() -> Option<PathBuf> {
 /// The path derivation, with the three environment variables injected, so a
 /// test never reads the developer's own environment.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn config_dir_from(
+fn config_dir_from(
     layout: Layout,
     home: Option<&OsStr>,
     appdata: Option<&OsStr>,
@@ -91,12 +91,12 @@ pub fn save(key: &str, value: &str) -> Result<(), String> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn load_at(path: &Path) -> Option<String> {
+fn load_at(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn save_at(path: &Path, value: &str) -> Result<(), String> {
+fn save_at(path: &Path, value: &str) -> Result<(), String> {
     path.parent()
         .map_or(Ok(()), std::fs::create_dir_all)
         .and_then(|()| std::fs::write(path, value))

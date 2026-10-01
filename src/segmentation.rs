@@ -101,7 +101,7 @@ impl Mask {
     /// This mask rotated or flipped by an EXIF orientation (`1..=8`) so it lines
     /// up with the decoded image.
     #[cfg(target_os = "macos")]
-    pub fn oriented(self, orientation: u8) -> Mask {
+    fn oriented(self, orientation: u8) -> Mask {
         if orientation <= 1 {
             return self;
         }
@@ -185,7 +185,7 @@ fn require_class(name: &std::ffi::CStr, needs: &str) -> Result<(), String> {
 /// so speed matters less than a clean edge. macOS 12.0 and later.
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
-pub fn segment_person(path: &Path) -> Result<Mask, String> {
+fn segment_person(path: &Path) -> Result<Mask, String> {
     require_class(c"VNGeneratePersonSegmentationRequest", "12.0")?;
     unsafe {
         let request = VNGeneratePersonSegmentationRequest::new();
@@ -206,7 +206,7 @@ pub fn segment_person(path: &Path) -> Result<Mask, String> {
 /// macOS 14.0 and later.
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
-pub fn segment_foreground(path: &Path) -> Result<Mask, String> {
+fn segment_foreground(path: &Path) -> Result<Mask, String> {
     require_class(c"VNGenerateForegroundInstanceMaskRequest", "14.0")?;
     unsafe {
         let request = VNGenerateForegroundInstanceMaskRequest::new();

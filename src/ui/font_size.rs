@@ -30,7 +30,7 @@ pub fn step(ctx: &egui::Context, steps: i32) {
 }
 
 /// `size` at the current base, for a size written against [`DEFAULT`].
-pub fn px(style: &Style, size: f32) -> f32 {
+pub(super) fn px(style: &Style, size: f32) -> f32 {
     size * base(style) / DEFAULT
 }
 
