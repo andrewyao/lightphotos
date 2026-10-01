@@ -9,7 +9,7 @@ use crate::develop::Adjustments;
 
 impl App {
     /// Image size after rotation, with w and h swapped for 90° and 270°.
-    pub(super) fn display_size(&self) -> (f32, f32) {
+    fn display_size(&self) -> (f32, f32) {
         let (w, h) = self.image_size();
         if self.current_rotation() % 2 == 1 {
             (h, w)
@@ -20,7 +20,7 @@ impl App {
 
     /// The loupe image area in physical pixels. While comparing, each side
     /// gets half the width. This must match the split the compare render uses.
-    pub(super) fn loupe_area(&self) -> (f32, f32) {
+    fn loupe_area(&self) -> (f32, f32) {
         match self.loupe_viewport {
             Some((_, _, w, h)) => {
                 if self.compare && self.mode == ViewMode::Loupe && w >= 2 && h > 0 {
@@ -41,7 +41,7 @@ impl App {
     }
 
     /// The current zoom in screen pixels per source pixel.
-    pub(crate) fn zoom(&self) -> f32 {
+    pub(super) fn zoom(&self) -> f32 {
         self.zoom_rel * self.fit_scale()
     }
 
@@ -86,7 +86,7 @@ impl App {
 
     /// Request the full-resolution decode if `full_wanted_for_zoom`. Cheap to
     /// call on every zoom step because `Loader::request_full` de-duplicates.
-    pub(super) fn ensure_full_for_zoom(&mut self) {
+    fn ensure_full_for_zoom(&mut self) {
         if !self.full_wanted_for_zoom() {
             return;
         }
@@ -140,7 +140,7 @@ impl App {
         }
     }
 
-    pub(super) fn center(&mut self) {
+    fn center(&mut self) {
         let (iw, ih) = self.display_size();
         let (ww, wh) = self.loupe_area();
         let z = self.zoom();
@@ -268,7 +268,7 @@ impl App {
 
     /// The `(scale, offset, rot)` shader transform that `push_transform`
     /// uploads. `rot` is a row-major 2×2 `[m00, m01, m10, m11]`.
-    pub(super) fn loupe_transform(&self) -> ([f32; 2], [f32; 2], [f32; 4]) {
+    fn loupe_transform(&self) -> ([f32; 2], [f32; 2], [f32; 4]) {
         loupe_xform(
             self.display_size(),
             self.loupe_area(),
@@ -279,7 +279,7 @@ impl App {
     }
 
     /// The display-UV to texture-UV rotation matrix for the current rotation.
-    pub(super) fn rot_matrix(&self) -> [f32; 4] {
+    fn rot_matrix(&self) -> [f32; 4] {
         match self.current_rotation() {
             1 => [0.0, 1.0, -1.0, 0.0],
             2 => [-1.0, 0.0, 0.0, -1.0],
@@ -407,7 +407,7 @@ impl App {
     /// Push the current mask, or its absence, to the renderer. The mask stays
     /// at Vision's resolution. The shader samples it by image UV, so it needs
     /// no update on zoom or pan.
-    pub(super) fn sync_selection_overlay(&mut self) {
+    fn sync_selection_overlay(&mut self) {
         let want = self.want.clone();
         let mask = if self.selection_on {
             self.current_selection

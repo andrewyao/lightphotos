@@ -75,7 +75,7 @@ impl App {
 
     /// Saves the shown photo's tone settings under `name`, with no crop,
     /// rotation or touch-ups, so the look can be applied to any other photo.
-    pub(super) fn save_preset_from_shown(&mut self, name: &str) {
+    fn save_preset_from_shown(&mut self, name: &str) {
         let tone = self.current_adjustments().tone_only();
         let Some(stored) = self.presets.add(name, tone, Vec::new()) else {
             return;

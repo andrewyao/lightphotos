@@ -192,7 +192,7 @@ impl App {
     }
 
     /// Shift+arrow in the grid.
-    pub(super) fn extend_grid(&mut self, dx: isize, dy: isize) {
+    fn extend_grid(&mut self, dx: isize, dy: isize) {
         if self.visible.is_empty() {
             return;
         }
@@ -322,7 +322,7 @@ impl App {
 
     /// Enter from Folders: focus the Grid and select its first image. Focus
     /// moves even when the grid is empty, so Escape can return to Folders.
-    pub(super) fn focus_grid_first(&mut self) {
+    fn focus_grid_first(&mut self) {
         self.focus = Region::Grid;
         self.focus_level = FocusLevel::Selected;
         self.on_focus_changed();
@@ -502,7 +502,7 @@ impl App {
     }
 
     /// The tree's visible rows, top to bottom.
-    pub(super) fn visible_tree(&self) -> Vec<PathBuf> {
+    fn visible_tree(&self) -> Vec<PathBuf> {
         let Some(root) = self.folder_root.clone() else {
             return Vec::new();
         };
@@ -549,7 +549,7 @@ impl App {
 
     /// Right arrow in the tree: expand the folder, or load its first child if
     /// already expanded.
-    pub(super) fn folder_expand(&mut self) {
+    fn folder_expand(&mut self) {
         let Some(cur) = self.folder_sel.clone() else {
             return;
         };
@@ -576,7 +576,7 @@ impl App {
 
     /// Left arrow in the tree: collapse the folder, or load its parent if
     /// already collapsed. Stops at the root.
-    pub(super) fn folder_collapse(&mut self) {
+    fn folder_collapse(&mut self) {
         #[cfg(target_arch = "wasm32")]
         self.supersede_web_pending_nav();
         let Some(cur) = self.folder_sel.clone() else {
@@ -592,7 +592,7 @@ impl App {
         }
     }
 
-    pub(super) fn folder_enter(&mut self) {
+    fn folder_enter(&mut self) {
         let Some(sel) = self.folder_sel.clone() else {
             return;
         };
@@ -643,7 +643,7 @@ impl App {
         }
     }
 
-    pub(super) fn nav_left(&mut self) {
+    fn nav_left(&mut self) {
         match self.focus {
             Region::Folders => self.folder_collapse(),
             Region::Grid => self.move_grid(-1, 0),
@@ -654,7 +654,7 @@ impl App {
         }
     }
 
-    pub(super) fn nav_right(&mut self) {
+    fn nav_right(&mut self) {
         match self.focus {
             Region::Folders => self.folder_expand(),
             Region::Grid => self.move_grid(1, 0),
@@ -665,7 +665,7 @@ impl App {
         }
     }
 
-    pub(super) fn nav_up(&mut self) {
+    fn nav_up(&mut self) {
         match self.focus {
             Region::Folders => self.folder_move(-1),
             Region::Grid => self.move_grid(0, -1),
@@ -676,7 +676,7 @@ impl App {
         }
     }
 
-    pub(super) fn nav_down(&mut self) {
+    fn nav_down(&mut self) {
         match self.focus {
             Region::Folders => self.folder_move(1),
             Region::Grid => self.move_grid(0, 1),
@@ -769,7 +769,7 @@ impl App {
     }
 
     /// Run the focused toolbar control's click action.
-    pub(super) fn activate_toolbar_focus(&mut self) {
+    fn activate_toolbar_focus(&mut self) {
         let Some(control) = ToolbarControl::drawn().nth(self.toolbar_focus) else {
             return;
         };
@@ -786,7 +786,7 @@ impl App {
     }
 
     /// Nudge the focused Develop slider one step in direction `dir` (-1 or +1).
-    pub(super) fn develop_adjust(&mut self, dir: isize) {
+    fn develop_adjust(&mut self, dir: isize) {
         self.set_develop_tab(DevelopTab::Sliders);
         let Some(slider) = develop::SLIDERS.get(self.develop_focus) else {
             return;

@@ -181,7 +181,7 @@ impl App {
 
     /// Push the current edits to the GPU with the crop removed, so the whole
     /// frame is visible under the crop overlay.
-    pub(super) fn push_crop_preview(&mut self) {
+    fn push_crop_preview(&mut self) {
         let mut adj = self.current_adjustments();
         adj.crop = None;
         #[cfg(test)]

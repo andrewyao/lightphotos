@@ -195,7 +195,7 @@ impl Shown {
 /// The wasm32 version lives in `app/web.rs`.
 #[cfg(not(target_arch = "wasm32"))]
 impl App {
-    pub(crate) fn loupe_is_loading(&self) -> bool {
+    fn loupe_is_loading(&self) -> bool {
         false
     }
 }
@@ -1060,7 +1060,7 @@ impl App {
 
     /// Open a folder picker and load the choice. On the web the picker is
     /// async and `poll_folder_pick` receives the result. Native uses a modal dialog.
-    pub(crate) fn open_folder_picker(&mut self) {
+    fn open_folder_picker(&mut self) {
         #[cfg(target_arch = "wasm32")]
         self.request_folder_pick();
         #[cfg(not(target_arch = "wasm32"))]

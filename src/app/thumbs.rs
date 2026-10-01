@@ -151,7 +151,7 @@ impl App {
     /// Visible positions whose thumbnails stay loaded: the grid cells on screen
     /// plus three rows, or the filmstrip range plus a margin. Keeps huge
     /// folders from loading every image.
-    pub(super) fn working_positions(&self) -> std::ops::Range<usize> {
+    fn working_positions(&self) -> std::ops::Range<usize> {
         let len = self.visible.len();
         if len == 0 {
             return 0..0;
@@ -174,7 +174,7 @@ impl App {
 
     /// Hash of `path`'s edits, rotation, and touch-ups. Part of the thumbnail
     /// texture key, so an edit re-bakes the thumbnail.
-    pub(super) fn edit_sig_for(&self, path: &Path) -> u64 {
+    fn edit_sig_for(&self, path: &Path) -> u64 {
         let adj = self.edits.get(path).copied().unwrap_or_default();
         let rot = self.rotations.get(path).copied().unwrap_or(0);
         develop::edit_signature_with_touchups(
