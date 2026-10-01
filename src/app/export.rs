@@ -790,7 +790,14 @@ mod status_tests {
             let rgba: Vec<u8> = (0..300 * 200)
                 .flat_map(|p| [(p % 251) as u8, seed, 40 * i as u8, 255])
                 .collect();
-            crate::image_encode::encode_jpeg(&dir.join(name), 300, 200, &rgba).unwrap();
+            crate::image_encode::encode_jpeg(
+                &dir.join(name),
+                300,
+                200,
+                &rgba,
+                crate::image_encode::JpegQuality::Export,
+            )
+            .unwrap();
         }
         // A camera time in UTC-7: the server should see 2024-06-02T01:00Z.
         let a = dir.join("a.jpg");

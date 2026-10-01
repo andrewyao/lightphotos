@@ -117,7 +117,13 @@ impl WebJob {
                     && !self.from_cache
                     && thumbnail::jpeg_cacheable(img) =>
             {
-                crate::image_encode::encode_jpeg_to_vec(img.width, img.height, &img.rgba).ok()
+                crate::image_encode::encode_jpeg_to_vec(
+                    img.width,
+                    img.height,
+                    &img.rgba,
+                    crate::image_encode::JpegQuality::Thumbnail,
+                )
+                .ok()
             }
             _ => None,
         };

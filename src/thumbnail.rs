@@ -479,7 +479,12 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let jpeg = crate::image_encode::encode_jpeg_to_vec(img.width, img.height, &img.rgba)?;
+        let jpeg = crate::image_encode::encode_jpeg_to_vec(
+            img.width,
+            img.height,
+            &img.rgba,
+            crate::image_encode::JpegQuality::Thumbnail,
+        )?;
         crate::paths::write_atomic(file, &jpeg).map_err(|e| format!("write: {e}"))
     }
     // ImageIO writes the file itself and replaces a symlink rather than
@@ -491,7 +496,13 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
         tmp.push(".tmp");
         let tmp = PathBuf::from(tmp);
 
-        crate::image_encode::encode_jpeg(&tmp, img.width, img.height, &img.rgba)?;
+        crate::image_encode::encode_jpeg(
+            &tmp,
+            img.width,
+            img.height,
+            &img.rgba,
+            crate::image_encode::JpegQuality::Thumbnail,
+        )?;
         if let Err(e) = fs::rename(&tmp, file) {
             let _ = fs::remove_file(&tmp);
             return Err(format!("rename: {e}"));
