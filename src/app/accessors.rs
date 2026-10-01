@@ -111,7 +111,7 @@ impl App {
     /// Longest-side size in pixels for the loupe's screen-fit preview decode.
     /// `win_size` is already in physical pixels, so don't scale it by the DPI
     /// factor again.
-    pub(crate) fn preview_px(&self) -> u32 {
+    pub(super) fn preview_px(&self) -> u32 {
         preview_target_px(self.win_size.0.max(self.win_size.1))
     }
 
@@ -202,7 +202,7 @@ impl App {
     }
 
     #[allow(dead_code)]
-    pub(super) fn culling_score(&self, path: &Path) -> Option<f64> {
+    fn culling_score(&self, path: &Path) -> Option<f64> {
         burst::combined_score(
             self.sharpness.get(path).copied(),
             self.face_quality.get(path).and_then(|q| q.eye_state()),
@@ -211,7 +211,7 @@ impl App {
 
     /// The face analysis for a path. `None` while pending, after a failure, or
     /// when never requested.
-    pub(crate) fn face_quality_of(&self, path: &Path) -> Option<crate::facequality::FaceQuality> {
+    fn face_quality_of(&self, path: &Path) -> Option<crate::facequality::FaceQuality> {
         self.face_quality.get(path).copied()
     }
 
@@ -273,10 +273,7 @@ impl App {
             .is_some_and(|l| l.thumb_failed(path, THUMB_PX))
     }
 
-    pub(crate) fn thumb_texture_for_path(
-        &self,
-        path: &Path,
-    ) -> Option<(egui::TextureId, u32, u32)> {
+    fn thumb_texture_for_path(&self, path: &Path) -> Option<(egui::TextureId, u32, u32)> {
         let tex = self.thumb_tex.get(&(path.to_path_buf(), THUMB_PX))?;
         Some((tex.id, tex.width, tex.height))
     }
@@ -285,7 +282,7 @@ impl App {
 /// Round a window's longest side (physical pixels) up to the preview decode
 /// size, clamped to the tier's bounds. The result is part of the preview cache
 /// key, so rounding stops a window resize from re-decoding on every pixel.
-pub(crate) fn preview_target_px(longest_physical: f32) -> u32 {
+fn preview_target_px(longest_physical: f32) -> u32 {
     let longest = longest_physical.max(1.0) as u32;
     let quantized = longest.div_ceil(PREVIEW_QUANTUM) * PREVIEW_QUANTUM;
     quantized.clamp(PREVIEW_MIN, PREVIEW_MAX)

@@ -26,7 +26,7 @@ impl App {
     /// it enters crop mode and leaving it commits the crop, as Lightroom does.
     /// Touch Up's controls live on Masks, so leaving it disarms the tool
     /// rather than leave it armed out of sight.
-    pub(crate) fn set_develop_tab(&mut self, tab: DevelopTab) {
+    pub(super) fn set_develop_tab(&mut self, tab: DevelopTab) {
         if tab == DevelopTab::Crop {
             if self.crop_edit.is_none() {
                 self.enter_crop();
@@ -45,7 +45,7 @@ impl App {
     pub(crate) fn touchup_active(&self) -> bool {
         self.tool == LoupeTool::TouchUp
     }
-    pub(crate) fn toggle_touchup(&mut self) {
+    pub(super) fn toggle_touchup(&mut self) {
         self.tool = if self.tool == LoupeTool::TouchUp {
             LoupeTool::None
         } else {
@@ -77,11 +77,11 @@ impl App {
         self.touchup_spots_hidden = false;
         self.request_redraw();
     }
-    pub(crate) fn set_touchup_radius(&mut self, radius: f32) {
+    pub(super) fn set_touchup_radius(&mut self, radius: f32) {
         self.touchup_radius = radius.clamp(self.touchup_radius_min(), TOUCHUP_MAX_RADIUS);
     }
     /// Multiplicative, so each press is the same visible step at any size.
-    pub(crate) fn step_touchup_radius(&mut self, grow: bool) {
+    pub(super) fn step_touchup_radius(&mut self, grow: bool) {
         let factor = if grow { 1.15 } else { 1.0 / 1.15 };
         self.set_touchup_radius(self.touchup_radius() * factor);
         self.request_redraw();
@@ -89,10 +89,10 @@ impl App {
     pub(crate) fn touchup_feather(&self) -> f32 {
         self.touchup_feather
     }
-    pub(crate) fn set_touchup_feather(&mut self, feather: f32) {
+    pub(super) fn set_touchup_feather(&mut self, feather: f32) {
         self.touchup_feather = feather.clamp(TOUCHUP_MIN_FEATHER, 1.0);
     }
-    pub(crate) fn step_touchup_feather(&mut self, delta: f32) {
+    pub(super) fn step_touchup_feather(&mut self, delta: f32) {
         self.set_touchup_feather(self.touchup_feather + delta);
         self.request_redraw();
     }
@@ -148,7 +148,7 @@ impl App {
 
     /// A slider drag changes the edit every frame. Writing the sidecar each
     /// time blocks the UI thread on disk I/O, so wait for the mouse release.
-    pub(crate) fn save_edit_unless_dragging(&mut self) {
+    pub(super) fn save_edit_unless_dragging(&mut self) {
         if !self.egui_ctx.input(|i| i.pointer.any_down()) {
             self.save_edit();
         }
@@ -220,7 +220,7 @@ impl App {
         self.request_redraw();
     }
 
-    pub(super) fn choose_touchup(&self, u: f32, v: f32) -> Option<TouchUp> {
+    fn choose_touchup(&self, u: f32, v: f32) -> Option<TouchUp> {
         let path = self.shown.path()?;
         // Samples by UV, so whichever loupe tier has landed will do.
         let img = self.loader.as_ref()?.get_best(path, self.preview_px())?;

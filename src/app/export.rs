@@ -439,7 +439,7 @@ impl App {
     /// Returns at once; `on_export_outcomes` reports progress. The caller has
     /// checked `export_blocker`.
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
+    fn start_export(&mut self, paths: Vec<PathBuf>) {
         let Some(exporter) = self.exporter.as_ref() else {
             return;
         };
