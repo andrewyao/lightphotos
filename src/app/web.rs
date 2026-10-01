@@ -24,7 +24,7 @@ const MAX_CONCURRENT_READS: u32 = 4;
 /// shrinks, so the high-water mark is what counts.
 const THUMBS_IN_FLIGHT_PER_THREAD: usize = 1;
 
-/// Failures a key tolerates before it is marked failed for good. Chrome's
+/// Read failures a key tolerates before it is marked failed for good. Chrome's
 /// read failures are transient and can last longer than a few seconds.
 const MAX_READ_RETRIES: u8 = 10;
 
@@ -508,7 +508,7 @@ impl App {
                         .or_insert((0, Instant::now()));
                     entry.0 += 1;
                     let retries = entry.0;
-                    if retries <= MAX_READ_RETRIES {
+                    if e.is_read() && retries <= MAX_READ_RETRIES {
                         // `request_web_thumbs` retries once this deadline
                         // passes.
                         entry.1 = Instant::now() + retry_backoff(retries);
@@ -761,7 +761,7 @@ impl App {
                                 .or_insert((0, Instant::now()));
                             entry.0 += 1;
                             let retries = entry.0;
-                            if retries <= MAX_READ_RETRIES {
+                            if e.is_read() && retries <= MAX_READ_RETRIES {
                                 entry.1 = Instant::now() + retry_backoff(retries);
                                 web_sys::console::warn_1(
                                     &format!(
@@ -824,7 +824,7 @@ impl App {
                         .or_insert((0, Instant::now()));
                     entry.0 += 1;
                     let retries = entry.0;
-                    if retries <= MAX_READ_RETRIES {
+                    if e.is_read() && retries <= MAX_READ_RETRIES {
                         entry.1 = Instant::now() + retry_backoff(retries);
                         web_sys::console::warn_1(
                             &format!(
@@ -968,7 +968,7 @@ impl App {
                         .or_insert((0, Instant::now()));
                     entry.0 += 1;
                     let retries = entry.0;
-                    if retries <= MAX_READ_RETRIES {
+                    if e.is_read() && retries <= MAX_READ_RETRIES {
                         entry.1 = Instant::now() + retry_backoff(retries);
                         web_sys::console::warn_1(
                             &format!(
