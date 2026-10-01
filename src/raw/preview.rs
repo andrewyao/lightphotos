@@ -93,6 +93,7 @@ fn decode_raw_preview_from_bytes(
     use rawler::rawimage::RawPhotometricInterpretation;
 
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
+    crate::image_decode::check_rawler_size_limit(&source)?;
     let params = rawler::decoders::RawDecodeParams::default();
     let orientation = real_orientation(&source, &params);
 
