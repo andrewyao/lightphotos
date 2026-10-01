@@ -1204,6 +1204,52 @@ mod tests {
         report.expect("rawler's decoded pixels diverged from the analytic gradient ground truth");
     }
 
+    /// rawler counts a row in samples, so 16,667 RGB pixels (50,001 samples)
+    /// is one past its limit. On wasm32 its panic kills the decode thread, so
+    /// the preview decode has to refuse that file with an error first.
+    #[test]
+    fn a_dng_one_sample_past_rawlers_limit_is_refused_before_rawler_panics() {
+        let read_fixture = |width: u32| {
+            let path = std::env::temp_dir().join(format!(
+                "lightphotos_linear_dng_limit_{width}_{}.dng",
+                std::process::id()
+            ));
+            write_linear_dng(&path, width, 4).expect("write_linear_dng failed");
+            let bytes = std::fs::read(&path).expect("read fixture");
+            let _ = std::fs::remove_file(&path);
+            bytes
+        };
+        let past = read_fixture(16_667);
+        let within = read_fixture(16_666);
+
+        // rawler catches its own panic on native and reports it as an error.
+        // wasm32 aborts before that catch can run.
+        let rawler_panics = |bytes: &[u8]| {
+            let source = rawler::rawsource::RawSource::new_from_slice(bytes);
+            let params = rawler::decoders::RawDecodeParams::default();
+            match std::panic::catch_unwind(|| rawler::decode(&source, &params)) {
+                Err(_) => true,
+                Ok(r) => r.is_err_and(|e| e.to_string().contains("Caught a panic")),
+            }
+        };
+        assert!(
+            rawler_panics(&past),
+            "rawler no longer panics at 50,001 samples"
+        );
+        assert!(!rawler_panics(&within), "rawler panics below its limit");
+
+        match raw_preview::decode_raw_fast_from_bytes(&past, u32::MAX) {
+            Ok(_) => panic!("a file past rawler's limit decoded"),
+            Err(e) => assert!(
+                e.contains("too large"),
+                "refused by a panic, not the check: {e}"
+            ),
+        }
+        if let Err(e) = raw_preview::decode_raw_fast_from_bytes(&within, u32::MAX) {
+            panic!("a file within rawler's limit was refused: {e}");
+        }
+    }
+
     /// See `develop_smoke_check`.
     #[test]
     fn develop_pipeline_runs_end_to_end_on_linear_dng() {
