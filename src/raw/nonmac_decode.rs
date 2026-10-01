@@ -28,6 +28,50 @@ pub(crate) fn is_raw_extension(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// rawler 0.7.2 panics instead of returning an error when the raw buffer it
+/// is about to allocate is over 50,000 samples on a side or 500 million in
+/// all. A panic is fatal to a wasm32 decode thread and strands everything the
+/// thread held, so a file past the limit is refused here first. rawler counts
+/// a row in samples, padded to whole tiles, so a 3-channel DNG wider than
+/// 16,666 px (a Lightroom panorama) is past it.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+pub(crate) fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<(), String> {
+    use rawler::decoders::WellKnownIFD;
+    use rawler::tags::TiffCommonTag;
+
+    let Some(ifd) = rawler::get_decoder(source)
+        .ok()
+        .and_then(|decoder| decoder.ifd(WellKnownIFD::Raw).ok().flatten())
+    else {
+        return Ok(());
+    };
+    let tag = |t| ifd.get_entry(t).map(|e| e.value.force_usize(0));
+    let (Some(width), Some(height)) = (
+        tag(TiffCommonTag::ImageWidth),
+        tag(TiffCommonTag::ImageLength),
+    ) else {
+        return Ok(());
+    };
+    let padded = |n: usize, tile: Option<usize>| match tile {
+        Some(t) if t > 0 => n.div_ceil(t) * t,
+        _ => n,
+    };
+    let cpp = tag(TiffCommonTag::SamplesPerPixel).unwrap_or(1).max(1);
+    let row = padded(width, tag(TiffCommonTag::TileWidth)).saturating_mul(cpp);
+    let rows = padded(height, tag(TiffCommonTag::TileLength));
+    if width == 0
+        || height == 0
+        || row > 50_000
+        || rows > 50_000
+        || row.saturating_mul(rows) > 500_000_000
+    {
+        return Err(format!(
+            "{width}x{height} with {cpp} samples per pixel is too large to decode"
+        ));
+    }
+    Ok(())
+}
+
 /// Decodes a RAW/DNG file to rawler's undeveloped `RawImage`: sensor samples
 /// with no white balance, color matrix, or gamma. Still mosaiced (cpp=1) for
 /// Bayer/X-Trans files, already RGB (cpp=3/4) for Linear DNG.
@@ -132,6 +176,7 @@ fn decode_raw_nonmac_from_source(
     source: rawler::rawsource::RawSource,
     max_dim: u32,
 ) -> Result<DecodedImage, String> {
+    check_rawler_size_limit(&source)?;
     let params = rawler::decoders::RawDecodeParams::default();
     let raw = rawler::decode(&source, &params).map_err(|e| e.to_string())?;
     let orientation = rawler::get_decoder(&source)
