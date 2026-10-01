@@ -2,7 +2,8 @@
 
 //! Encode RGBA8 pixels to JPEG. macOS uses ImageIO through a CoreGraphics
 //! bitmap context. Other targets use the pure-Rust `mozjpeg-rs` encoder.
-//! Export and the on-disk thumbnail cache both write through here.
+//! Export and the on-disk thumbnail cache both write through here, each at
+//! its own [`JpegQuality`].
 
 use std::path::Path;
 
@@ -10,18 +11,35 @@ use std::path::Path;
 use std::ffi::c_void;
 
 #[cfg(target_os = "macos")]
-use objc2_core_foundation::CFString;
+use objc2_core_foundation::{
+    kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionary, CFNumber,
+    CFNumberType, CFRetained, CFString,
+};
 #[cfg(target_os = "macos")]
-use objc2_image_io::CGImageDestination;
+use objc2_image_io::{kCGImageDestinationLossyCompressionQuality, CGImageDestination};
 
 #[cfg(target_os = "macos")]
 use crate::coregraphics;
+
+/// What a JPEG is for, which sets its quality. The cache holds one entry per
+/// photo for as long as the photo exists, so it trades quality for disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JpegQuality {
+    Export,
+    Thumbnail,
+}
 
 /// Encode `rgba` (tightly packed RGBA8, row-major, sRGB, alpha opaque or
 /// premultiplied) to a JPEG at `out`.
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
-pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
+pub fn encode_jpeg(
+    out: &Path,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    quality: JpegQuality,
+) -> Result<(), String> {
     if width == 0 || height == 0 {
         return Err("cannot encode a zero-sized image".into());
     }
@@ -47,13 +65,19 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
     let url = coregraphics::file_url(out)?;
 
     let jpeg_uti = CFString::from_str("public.jpeg");
-    // SAFETY: url and type are valid. No options, so ImageIO uses its default
-    // JPEG quality.
+    // SAFETY: url and type are valid.
     let dest = unsafe { CGImageDestination::with_url(&url, &jpeg_uti, 1, None) }
         .ok_or("could not create image destination (unwritable path?)")?;
 
-    // SAFETY: dest/image are valid; no per-image properties.
-    unsafe { CGImageDestination::add_image(&dest, &image, None) };
+    // Export passes no properties, so ImageIO uses its default quality and
+    // export output stays what it has always been.
+    let properties = match quality {
+        JpegQuality::Export => None,
+        JpegQuality::Thumbnail => Some(lossy_quality_properties(0.6)?),
+    };
+    // SAFETY: dest/image are valid; properties, if any, map a documented
+    // destination key to a CFNumber.
+    unsafe { CGImageDestination::add_image(&dest, &image, properties.as_deref()) };
     // SAFETY: dest is valid; returns false if the file could not be written.
     let ok = unsafe { CGImageDestination::finalize(&dest) };
     if !ok {
@@ -62,15 +86,51 @@ pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn lossy_quality_properties(quality: f64) -> Result<CFRetained<CFDictionary>, String> {
+    // SAFETY: value_ptr points at a valid f64 matching Float64Type.
+    let number = unsafe {
+        CFNumber::new(
+            None,
+            CFNumberType::Float64Type,
+            &quality as *const f64 as *const c_void,
+        )
+    }
+    .ok_or("could not create CFNumber for JPEG quality")?;
+    // SAFETY: the static is a valid CFString key at runtime.
+    let mut keys: [*const c_void; 1] = [
+        unsafe { kCGImageDestinationLossyCompressionQuality } as *const CFString as *const c_void
+    ];
+    let mut values: [*const c_void; 1] = [&*number as *const CFNumber as *const c_void];
+    // SAFETY: keys and values hold 1 valid CFType pointer each. The CFType
+    // callbacks retain entries, so `number` may drop afterwards.
+    unsafe {
+        CFDictionary::new(
+            None,
+            keys.as_mut_ptr(),
+            values.as_mut_ptr(),
+            keys.len() as isize,
+            &kCFTypeDictionaryKeyCallBacks,
+            &kCFTypeDictionaryValueCallBacks,
+        )
+    }
+    .ok_or_else(|| "could not create JPEG properties dictionary".into())
+}
+
 /// Encode `rgba` (same pixel contract as [`encode_jpeg`]) to JPEG bytes with
 /// `mozjpeg-rs`. The wasm32 export path uses this because it has no `std::fs`.
 ///
-/// Quality is 90, not mozjpeg's default 75, to stay close to ImageIO's
+/// Export is quality 90, not mozjpeg's default 75, to stay close to ImageIO's
 /// default on macOS. Built on macOS only under `raw-probe`, for its tests.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
 #[hotpath::measure]
-pub fn encode_jpeg_to_vec(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+pub fn encode_jpeg_to_vec(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    quality: JpegQuality,
+) -> Result<Vec<u8>, String> {
     if width == 0 || height == 0 {
         return Err("cannot encode a zero-sized image".into());
     }
@@ -79,8 +139,12 @@ pub fn encode_jpeg_to_vec(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8
         return Err("pixel buffer too small for the given dimensions".into());
     }
 
+    let quality = match quality {
+        JpegQuality::Export => 90,
+        JpegQuality::Thumbnail => 60,
+    };
     mozjpeg_rs::Encoder::new(mozjpeg_rs::Preset::default())
-        .quality(90)
+        .quality(quality)
         .encode_rgba(rgba, width, height)
         .map_err(|e| e.to_string())
 }
@@ -90,8 +154,14 @@ pub fn encode_jpeg_to_vec(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
-pub fn encode_jpeg(out: &Path, width: u32, height: u32, rgba: &[u8]) -> Result<(), String> {
-    let jpeg_data = encode_jpeg_to_vec(width, height, rgba)?;
+pub fn encode_jpeg(
+    out: &Path,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    quality: JpegQuality,
+) -> Result<(), String> {
+    let jpeg_data = encode_jpeg_to_vec(width, height, rgba, quality)?;
     std::fs::write(out, jpeg_data).map_err(|e| e.to_string())
 }
 
@@ -222,7 +292,8 @@ mod tests {
             rgba.extend_from_slice(&[220, 30, 30, 255]);
         }
 
-        let jpeg = encode_jpeg_to_vec(w, h, &rgba).expect("encode should succeed");
+        let jpeg =
+            encode_jpeg_to_vec(w, h, &rgba, JpegQuality::Export).expect("encode should succeed");
         assert!(!jpeg.is_empty(), "should have produced JPEG bytes");
 
         let path = std::env::temp_dir().join(format!(
@@ -246,14 +317,14 @@ mod tests {
     #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
     #[test]
     fn encode_jpeg_to_vec_rejects_zero_size() {
-        assert!(encode_jpeg_to_vec(0, 4, &[]).is_err());
-        assert!(encode_jpeg_to_vec(4, 0, &[]).is_err());
+        assert!(encode_jpeg_to_vec(0, 4, &[], JpegQuality::Export).is_err());
+        assert!(encode_jpeg_to_vec(4, 0, &[], JpegQuality::Export).is_err());
     }
 
     #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
     #[test]
     fn encode_jpeg_to_vec_rejects_short_buffer() {
-        assert!(encode_jpeg_to_vec(4, 4, &[0u8; 16]).is_err());
+        assert!(encode_jpeg_to_vec(4, 4, &[0u8; 16], JpegQuality::Export).is_err());
     }
 
     /// Write solid red through the platform encoder, decode it back, and check
@@ -267,7 +338,7 @@ mod tests {
         }
 
         let out = std::env::temp_dir().join(format!("iv-encode-test-{}.jpg", std::process::id()));
-        encode_jpeg(&out, w, h, &rgba).expect("encode should succeed");
+        encode_jpeg(&out, w, h, &rgba, JpegQuality::Export).expect("encode should succeed");
         assert!(out.exists(), "jpeg file should have been written");
 
         let decoded = image_decode::decode(&out, 16384).expect("re-decode should succeed");
@@ -278,6 +349,60 @@ mod tests {
         assert!(g < 100 && b < 100, "green/blue should be low, got {g},{b}");
 
         std::fs::remove_file(&out).ok();
+    }
+
+    /// Encode noise through `write` at both qualities and compare file sizes.
+    /// Noise, so the gap comes from quantization and not from flat areas
+    /// every quality compresses alike.
+    fn assert_thumbnail_is_smaller(
+        encoder: &str,
+        write: impl Fn(&Path, u32, u32, &[u8], JpegQuality),
+    ) {
+        let (w, h) = (256u32, 256u32);
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..w * h {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let [r, g, b, ..] = seed.to_le_bytes();
+            rgba.extend_from_slice(&[r, g, b, 255]);
+        }
+
+        let size = |quality: JpegQuality| {
+            let path = std::env::temp_dir().join(format!(
+                "lightphotos-quality-{encoder}-{quality:?}-{}.jpg",
+                std::process::id()
+            ));
+            write(&path, w, h, &rgba, quality);
+            let img = image_decode::decode(&path, u32::MAX).expect("re-decode should succeed");
+            assert_eq!((img.width, img.height), (w, h));
+            let len = std::fs::metadata(&path).unwrap().len();
+            std::fs::remove_file(&path).ok();
+            len
+        };
+
+        let (export, thumbnail) = (size(JpegQuality::Export), size(JpegQuality::Thumbnail));
+        assert!(
+            thumbnail * 10 < export * 8,
+            "{encoder}: thumbnail {thumbnail} bytes should be under 80% of export {export} bytes"
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_jpeg_is_smaller_than_an_export_of_the_same_pixels() {
+        assert_thumbnail_is_smaller("platform", |path, w, h, rgba, quality| {
+            encode_jpeg(path, w, h, rgba, quality).expect("encode should succeed")
+        });
+    }
+
+    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[test]
+    fn a_mozjpeg_thumbnail_is_smaller_than_an_export_of_the_same_pixels() {
+        assert_thumbnail_is_smaller("mozjpeg", |path, w, h, rgba, quality| {
+            let jpeg = encode_jpeg_to_vec(w, h, rgba, quality).expect("encode should succeed");
+            std::fs::write(path, jpeg).unwrap()
+        });
     }
 
     fn exif_blocks(jpeg: &[u8]) -> usize {
@@ -293,7 +418,7 @@ mod tests {
             "lightphotos-with-exif-test-{}.jpg",
             std::process::id()
         ));
-        encode_jpeg(&path, 12, 8, &[90u8; 12 * 8 * 4]).unwrap();
+        encode_jpeg(&path, 12, 8, &[90u8; 12 * 8 * 4], JpegQuality::Export).unwrap();
         let plain = std::fs::read(&path).unwrap();
 
         for stamp in [
@@ -338,7 +463,7 @@ mod tests {
     #[test]
     fn a_baked_export_carries_the_capture_date_of_its_source_bytes() {
         let stamp = image_decode::CaptureStamp::new("2024:06:01 18:04:05", Some("+09:00")).unwrap();
-        let plain = encode_jpeg_to_vec(16, 8, &[120u8; 16 * 8 * 4]).unwrap();
+        let plain = encode_jpeg_to_vec(16, 8, &[120u8; 16 * 8 * 4], JpegQuality::Export).unwrap();
         let tagged = with_exif(&plain, 16, 8, Some(&stamp));
         let bake = |src: Vec<u8>| {
             crate::export::bake_jpeg_from_shared_vec(

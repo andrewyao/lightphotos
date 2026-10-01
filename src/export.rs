@@ -114,7 +114,7 @@ pub fn bake_jpeg(
         image_decode::decode_nonraw_from_bytes(src_bytes, u32::MAX)?
     };
     let (w, h, rgba) = bake_sized(&img, adj, touchups, rot, max_px);
-    let jpeg = image_encode::encode_jpeg_to_vec(w, h, &rgba)?;
+    let jpeg = image_encode::encode_jpeg_to_vec(w, h, &rgba, image_encode::JpegQuality::Export)?;
     let stamp = image_decode::capture_stamp_from_bytes(src_bytes);
     Ok(image_encode::with_exif(&jpeg, w, h, stamp.as_ref()))
 }
@@ -139,7 +139,7 @@ pub fn bake_jpeg_from_shared_vec(
         image_decode::decode_nonraw_from_bytes(src_bytes.as_slice(), u32::MAX)?
     };
     let (w, h, rgba) = bake_sized(&img, adj, touchups, rot, max_px);
-    let jpeg = image_encode::encode_jpeg_to_vec(w, h, &rgba)?;
+    let jpeg = image_encode::encode_jpeg_to_vec(w, h, &rgba, image_encode::JpegQuality::Export)?;
     let stamp = image_decode::capture_stamp_from_bytes(&src_bytes);
     Ok(image_encode::with_exif(&jpeg, w, h, stamp.as_ref()))
 }
@@ -377,7 +377,14 @@ mod tests {
     fn a_folder_export_honors_the_long_edge_after_crop_and_rotation() {
         let dir = scratch_dir("long-edge");
         let src = dir.join("src.jpg");
-        image_encode::encode_jpeg(&src, 400, 200, &vec![128u8; 400 * 200 * 4]).unwrap();
+        image_encode::encode_jpeg(
+            &src,
+            400,
+            200,
+            &vec![128u8; 400 * 200 * 4],
+            image_encode::JpegQuality::Export,
+        )
+        .unwrap();
         let dest = dir.join("out.jpg");
         let adj = Adjustments {
             crop: Some(crate::develop::Crop {
@@ -559,7 +566,7 @@ fn jpeg_bytes(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    let read = image_encode::encode_jpeg(&staging, w, h, rgba)
+    let read = image_encode::encode_jpeg(&staging, w, h, rgba, image_encode::JpegQuality::Export)
         .and_then(|()| std::fs::read(&staging).map_err(|e| format!("read staged JPEG: {e}")));
     let _ = std::fs::remove_file(&staging);
     read
@@ -567,5 +574,5 @@ fn jpeg_bytes(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
 
 #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
 fn jpeg_bytes(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    image_encode::encode_jpeg_to_vec(w, h, rgba)
+    image_encode::encode_jpeg_to_vec(w, h, rgba, image_encode::JpegQuality::Export)
 }

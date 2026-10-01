@@ -816,7 +816,14 @@ mod tests {
     #[test]
     fn the_bitmap_draw_refuses_a_size_over_budget_before_allocating() {
         let path = std::env::temp_dir().join(format!("lp-budget-{}.jpg", std::process::id()));
-        crate::image_encode::encode_jpeg(&path, 16, 16, &[128u8; 16 * 16 * 4]).unwrap();
+        crate::image_encode::encode_jpeg(
+            &path,
+            16,
+            16,
+            &[128u8; 16 * 16 * 4],
+            crate::image_encode::JpegQuality::Export,
+        )
+        .unwrap();
         let source = open_image_source(&path).unwrap();
         let image = unsafe { source.image_at_index(0, None) }.unwrap();
         let _ = std::fs::remove_file(&path);

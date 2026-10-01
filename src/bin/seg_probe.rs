@@ -109,6 +109,7 @@ fn probe(path: &Path) -> Result<(), String> {
         mask.width,
         mask.height,
         &gray_to_rgba(&mask.alpha),
+        image_encode::JpegQuality::Export,
     )?;
     println!("  wrote {}", mask_out.display());
 
@@ -120,6 +121,7 @@ fn probe(path: &Path) -> Result<(), String> {
         img.width,
         img.height,
         &tint_foreground(&img.rgba, &scaled.alpha),
+        image_encode::JpegQuality::Export,
     )?;
     println!("  wrote {}", overlay_out.display());
 

@@ -309,7 +309,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lp-vision-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         let path = dir.join(name);
-        encode_jpeg(&path, w, h, rgba).expect("encode fixture jpeg");
+        encode_jpeg(&path, w, h, rgba, crate::image_encode::JpegQuality::Export)
+            .expect("encode fixture jpeg");
         path
     }
 
