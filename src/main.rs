@@ -254,7 +254,14 @@ impl ApplicationHandler<UserEvent> for App {
             }
             return;
         }
-        if consumed {
+        // SPIKE: the zoom marker is an egui area only to claim its drags;
+        // the wheel and pinch over it still zoom the Loupe beneath.
+        let spike_zoom = self.spike_marker_hovered
+            && matches!(
+                event,
+                WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. }
+            );
+        if consumed && !spike_zoom {
             return;
         }
 

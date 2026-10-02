@@ -314,6 +314,10 @@ pub(crate) struct App {
     /// SPIKE: one mipped texture per group member, keyed on the members and
     /// the preview size, so a resize or another group re-uploads the set.
     pub(crate) spike: Option<SpikeTiles>,
+    /// SPIKE: center of the zoomed square in uv, shared by every member.
+    pub(crate) spike_center: egui::Pos2,
+    /// SPIKE: the pointer was over the zoom marker last frame.
+    pub(crate) spike_marker_hovered: bool,
     pub(crate) spike_frames: Vec<f32>,
     /// Last adjustments handed to the GPU. Tests run without a renderer, so
     /// this is the only way to assert what the loupe would actually show.
@@ -950,6 +954,8 @@ impl App {
             rotations: HashMap::new(),
             loupe_viewport: None,
             spike: None,
+            spike_center: egui::pos2(0.5, 0.5),
+            spike_marker_hovered: false,
             spike_frames: Vec::new(),
             crop_edit: None,
             compare: false,

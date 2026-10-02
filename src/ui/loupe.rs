@@ -130,6 +130,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
         );
     }
 
+    app.spike_marker_hovered = false;
     if app.crop_rect().is_some() {
         loupe_crop_overlay(ui, app, central, out);
     } else if app.touchup_active() {
@@ -759,8 +760,12 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App) {
                     ui.painter().rect_filled(rect, 0.0, colors.divider);
                     continue;
                 };
-                ui.painter()
-                    .image(*id, rect, spike_zoom_uv(*w, *h), egui::Color32::WHITE);
+                ui.painter().image(
+                    *id,
+                    rect,
+                    spike_zoom_uv(*w, *h, app.spike_center),
+                    egui::Color32::WHITE,
+                );
                 let stroke = if *path == tiles.shown {
                     egui::Stroke::new(3.0f32, colors.selection)
                 } else {
@@ -773,31 +778,67 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App) {
     }
 }
 
-/// SPIKE: the centered square every tile samples, in uv of a `w`×`h` image.
-/// Its side is `LIGHTPHOTOS_SPIKE_SIDE` of the short side, 0.15 by default.
-fn spike_zoom_uv(w: u32, h: u32) -> egui::Rect {
+/// SPIKE: the square every tile samples, in uv of a `w`×`h` image, centered
+/// on `center` and kept inside the image. Its side is `LIGHTPHOTOS_SPIKE_SIDE`
+/// of the short side, 0.15 by default.
+fn spike_zoom_uv(w: u32, h: u32, center: egui::Pos2) -> egui::Rect {
     let side: f32 = std::env::var("LIGHTPHOTOS_SPIKE_SIDE")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0.15);
     let short = w.min(h) as f32;
     let half = egui::vec2(side * short / w as f32, side * short / h as f32) / 2.0;
-    egui::Rect::from_min_max(egui::pos2(0.5, 0.5) - half, egui::pos2(0.5, 0.5) + half)
+    let c = egui::pos2(
+        center.x.clamp(half.x, 1.0 - half.x),
+        center.y.clamp(half.y, 1.0 - half.y),
+    );
+    egui::Rect::from_min_max(c - half, c + half)
 }
 
-/// SPIKE: outline on the shown photo of the square the tiles zoom into.
-fn spike_zoom_marker(ui: &egui::Ui, app: &App, central: egui::Rect) {
+/// SPIKE: outline on the shown photo of the square the tiles zoom into. A
+/// drag that starts inside it moves it, and egui claims that press so the
+/// Loupe does not pan.
+fn spike_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
     let Some(tiles) = app.spike.as_ref() else {
         return;
     };
-    let Some((_, _, w, h)) = tiles.members.iter().flatten().find(|m| m.0 == tiles.shown) else {
+    let Some(&(_, _, w, h)) = tiles.members.iter().flatten().find(|m| m.0 == tiles.shown) else {
         return;
     };
-    let uv = spike_zoom_uv(*w, *h);
+    let uv = spike_zoom_uv(w, h, app.spike_center);
     let rect = egui::Rect::from_two_pos(
         app.loupe_tex_to_screen(central, uv.min.x, uv.min.y),
         app.loupe_tex_to_screen(central, uv.max.x, uv.max.y),
     );
+    let resp = egui::Area::new(egui::Id::new("spike_zoom_marker"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.allocate_exact_size(rect.size(), egui::Sense::drag()).1
+        })
+        .inner;
+    app.spike_marker_hovered = resp.hovered() || resp.dragged();
+    if resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if let Some(p) = resp.interact_pointer_pos() {
+            let (u0, v0) = app.loupe_screen_to_tex(central, p - resp.drag_delta());
+            let (u1, v1) = app.loupe_screen_to_tex(central, p);
+            // Store the clamped center, so dragging past an edge and back
+            // moves the square at once rather than after the overshoot.
+            app.spike_center =
+                spike_zoom_uv(w, h, uv.center() + egui::vec2(u1 - u0, v1 - v0)).center();
+            ui.ctx().request_repaint();
+        }
+    } else if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+    let rect = {
+        let uv = spike_zoom_uv(w, h, app.spike_center);
+        egui::Rect::from_two_pos(
+            app.loupe_tex_to_screen(central, uv.min.x, uv.min.y),
+            app.loupe_tex_to_screen(central, uv.max.x, uv.max.y),
+        )
+    };
     let painter = ui.painter_at(central);
     // Dark under light, so the square reads on bright and dark photos.
     painter.rect_stroke(
