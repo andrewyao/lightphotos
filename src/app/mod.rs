@@ -1449,6 +1449,7 @@ impl App {
     fn apply_ui_actions(&mut self, actions: Vec<ui::UiAction>) {
         for action in actions {
             match action {
+                ui::UiAction::SetGroupRep(path) => self.set_group_rep(&path),
                 ui::UiAction::Select(pos) => {
                     if pos < self.visible.len() {
                         self.select_single(pos);

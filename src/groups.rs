@@ -295,8 +295,7 @@ impl Groups {
 
     /// Make `rep` the representative of group `id`. Nothing for a photo
     /// outside the group or the current representative.
-    #[allow(dead_code)] // only called from #[cfg(test)] today
-    fn set_rep(&self, id: &GroupId, rep: &OsString) -> Vec<GroupWrite> {
+    pub fn set_rep(&self, id: &GroupId, rep: &OsString) -> Vec<GroupWrite> {
         let Some(group) = self.by_id.get(id) else {
             return Vec::new();
         };

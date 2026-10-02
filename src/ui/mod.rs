@@ -15,6 +15,8 @@ use crate::navigation::Cmp;
 #[derive(Debug, PartialEq)]
 pub enum UiAction {
     Select(usize),
+    /// Make this photo its group's representative, the one its cell shows.
+    SetGroupRep(std::path::PathBuf),
     /// Cmd-click: toggle this cell in the multi-selection.
     SelectToggle(usize),
     /// Shift-click: extend the range selection to this cell.

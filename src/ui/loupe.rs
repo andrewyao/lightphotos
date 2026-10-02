@@ -102,7 +102,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                 .show_inside(ui, |ui| {
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
-                        .show(ui, |ui| spike_tiles(ui, app));
+                        .show(ui, |ui| spike_tiles(ui, app, out));
                 });
             central = ui.available_rect_before_wrap();
         } else {
@@ -114,7 +114,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
             ui.painter_at(right)
                 .rect_filled(right, 0.0, theme::colors(ui.ctx()).panel);
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(right));
-            spike_tiles(&mut child, app);
+            spike_tiles(&mut child, app, out);
         }
     }
     out.loupe_rect = Some(central);
@@ -733,10 +733,11 @@ fn filmstrip_cell(
     response
 }
 
-/// SPIKE: one tile per group member, each sampling `spike_zoom_uv`, the
-/// shown photo's outlined. Up to 12 fit
+/// SPIKE: one tile per group member, each sampling `spike_zoom_uv`. The
+/// shown photo is the representative and is outlined; a click on another
+/// tile makes that member the representative. Up to 12 fit
 /// the pane; past that the rows keep that size and the pane scrolls.
-fn spike_tiles(ui: &mut egui::Ui, app: &App) {
+fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let colors = theme::colors(ui.ctx());
     let Some(tiles) = app.spike.as_ref() else {
         return;
@@ -754,7 +755,7 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App) {
     for row in tiles.members.chunks(cols) {
         ui.horizontal(|ui| {
             for m in row {
-                let (rect, _) =
+                let (rect, resp) =
                     ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click());
                 let Some((path, id, w, h)) = m else {
                     ui.painter().rect_filled(rect, 0.0, colors.divider);
@@ -766,8 +767,17 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App) {
                     spike_zoom_uv(*w, *h, app.spike_center, app.spike_side),
                     egui::Color32::WHITE,
                 );
-                let stroke = if *path == tiles.shown {
+                let is_rep = *path == tiles.shown;
+                if !is_rep && resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if !is_rep && resp.clicked() {
+                    out.actions.push(UiAction::SetGroupRep(path.clone()));
+                }
+                let stroke = if is_rep {
                     egui::Stroke::new(3.0f32, colors.selection)
+                } else if resp.hovered() {
+                    egui::Stroke::new(1.5f32, colors.cursor)
                 } else {
                     egui::Stroke::new(1.0f32, colors.divider)
                 };

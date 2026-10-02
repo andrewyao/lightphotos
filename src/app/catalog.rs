@@ -297,6 +297,34 @@ impl App {
         }
     }
 
+    /// Make the photo at `path` its group's representative and move the
+    /// cursor to it, so the Loupe shows it and the grid cell takes its
+    /// thumbnail. Nothing for a photo in no group.
+    pub(super) fn set_group_rep(&mut self, path: &std::path::Path) {
+        let Some(name) = path.file_name() else {
+            return;
+        };
+        let Some(groups) = self.catalog.groups() else {
+            return;
+        };
+        let Some(id) = groups.group_of(name) else {
+            return;
+        };
+        let writes = groups.set_rep(id, &name.to_os_string());
+        if writes.is_empty() || !self.apply_group_writes(writes) {
+            return;
+        }
+        let cell = self
+            .playlist
+            .as_ref()
+            .and_then(|pl| pl.index_of(name))
+            .and_then(|i| self.place_of(i).cell());
+        if let Some(pos) = cell {
+            self.select_single(pos);
+            self.resync_loupe_selection();
+        }
+    }
+
     fn cell_name(&self, pos: usize) -> Option<std::ffi::OsString> {
         let idx = *self.visible.get(pos)?;
         let path = self.playlist.as_ref()?.entry(idx)?;
@@ -711,6 +739,37 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn choosing_a_representative_moves_the_cell_the_loupe_and_the_sidecar() {
+        use crate::app::nav::tests::{cells, group_photos};
+        let (mut app, dir, paths) = crate::app::presets::tests::folder_app("set-rep", 6);
+        // Photo 2 sits between the members, so the group's cell moves.
+        group_photos(&mut app, &[1, 3], 1);
+        app.select_single(1);
+        app.enter_loupe();
+
+        app.set_group_rep(&paths[3]);
+
+        assert_eq!(
+            cells(&app),
+            vec![0, 2, 3, 4, 5],
+            "the cell shows the new rep"
+        );
+        assert_eq!(app.sel, Some(2), "the cursor follows the group's cell");
+        assert_eq!(app.want.as_ref(), Some(&paths[3]), "the Loupe shows it");
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        let reloaded = crate::catalog::Catalog::with_dir(dir.clone());
+        let reps: Vec<_> = reloaded
+            .groups()
+            .unwrap()
+            .iter()
+            .map(|(_, g)| g.rep().clone())
+            .collect();
+        assert_eq!(reps, vec![paths[3].file_name().unwrap().to_os_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Values cached in memory from an earlier visit must not outlive a
     /// sidecar that no longer has them, e.g. after another tool cleared it.
