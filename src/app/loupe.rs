@@ -198,6 +198,12 @@ impl App {
             return;
         }
         match (shift, alt) {
+            // SPIKE: Shift+wheel over the zoom marker resizes it; scrolling
+            // up shrinks it, which zooms the tiles in, as the wheel does.
+            (true, false) if self.spike_marker_hovered => {
+                self.spike_side = (self.spike_side / (s * 0.0025).exp()).clamp(0.02, 1.0);
+                self.request_redraw();
+            }
             (true, false) if self.touchup_active() => {}
             (true, false) => self.pan_by(s, 0.0),
             (false, true) => self.pan_by(0.0, s),

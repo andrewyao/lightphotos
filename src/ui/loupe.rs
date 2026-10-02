@@ -763,7 +763,7 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App) {
                 ui.painter().image(
                     *id,
                     rect,
-                    spike_zoom_uv(*w, *h, app.spike_center),
+                    spike_zoom_uv(*w, *h, app.spike_center, app.spike_side),
                     egui::Color32::WHITE,
                 );
                 let stroke = if *path == tiles.shown {
@@ -778,14 +778,9 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App) {
     }
 }
 
-/// SPIKE: the square every tile samples, in uv of a `w`×`h` image, centered
-/// on `center` and kept inside the image. Its side is `LIGHTPHOTOS_SPIKE_SIDE`
-/// of the short side, 0.15 by default.
-fn spike_zoom_uv(w: u32, h: u32, center: egui::Pos2) -> egui::Rect {
-    let side: f32 = std::env::var("LIGHTPHOTOS_SPIKE_SIDE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.15);
+/// SPIKE: the square every tile samples, in uv of a `w`×`h` image, `side`
+/// of the short side across, centered on `center` and kept inside the image.
+fn spike_zoom_uv(w: u32, h: u32, center: egui::Pos2, side: f32) -> egui::Rect {
     let short = w.min(h) as f32;
     let half = egui::vec2(side * short / w as f32, side * short / h as f32) / 2.0;
     let c = egui::pos2(
@@ -805,7 +800,7 @@ fn spike_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
     let Some(&(_, _, w, h)) = tiles.members.iter().flatten().find(|m| m.0 == tiles.shown) else {
         return;
     };
-    let uv = spike_zoom_uv(w, h, app.spike_center);
+    let uv = spike_zoom_uv(w, h, app.spike_center, app.spike_side);
     let rect = egui::Rect::from_two_pos(
         app.loupe_tex_to_screen(central, uv.min.x, uv.min.y),
         app.loupe_tex_to_screen(central, uv.max.x, uv.max.y),
@@ -825,15 +820,20 @@ fn spike_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
             let (u1, v1) = app.loupe_screen_to_tex(central, p);
             // Store the clamped center, so dragging past an edge and back
             // moves the square at once rather than after the overshoot.
-            app.spike_center =
-                spike_zoom_uv(w, h, uv.center() + egui::vec2(u1 - u0, v1 - v0)).center();
+            app.spike_center = spike_zoom_uv(
+                w,
+                h,
+                uv.center() + egui::vec2(u1 - u0, v1 - v0),
+                app.spike_side,
+            )
+            .center();
             ui.ctx().request_repaint();
         }
     } else if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
     let rect = {
-        let uv = spike_zoom_uv(w, h, app.spike_center);
+        let uv = spike_zoom_uv(w, h, app.spike_center, app.spike_side);
         egui::Rect::from_two_pos(
             app.loupe_tex_to_screen(central, uv.min.x, uv.min.y),
             app.loupe_tex_to_screen(central, uv.max.x, uv.max.y),

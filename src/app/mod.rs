@@ -318,6 +318,9 @@ pub(crate) struct App {
     pub(crate) spike_center: egui::Pos2,
     /// SPIKE: the pointer was over the zoom marker last frame.
     pub(crate) spike_marker_hovered: bool,
+    /// SPIKE: the zoomed square's side as a fraction of the photo's short
+    /// side. `LIGHTPHOTOS_SPIKE_SIDE` sets the start, 0.15 by default.
+    pub(crate) spike_side: f32,
     pub(crate) spike_frames: Vec<f32>,
     /// Last adjustments handed to the GPU. Tests run without a renderer, so
     /// this is the only way to assert what the loupe would actually show.
@@ -956,6 +959,10 @@ impl App {
             spike: None,
             spike_center: egui::pos2(0.5, 0.5),
             spike_marker_hovered: false,
+            spike_side: std::env::var("LIGHTPHOTOS_SPIKE_SIDE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.15),
             spike_frames: Vec::new(),
             crop_edit: None,
             compare: false,
