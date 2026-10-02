@@ -74,21 +74,14 @@ jobs:
         if: runner.os != 'macOS'
         run: cargo build --release --bin lightphotos --target ${{ matrix.target }}
 
-      # macOS: bundle.sh builds and assembles the .app (its lsregister is
-      # harmless on the runner), then ship it inside a drag-install .dmg.
-      # hdiutil is built into the runner.
+      # macOS: bundle.sh builds, assembles and ad-hoc signs the .app (its
+      # lsregister is harmless on the runner); make-dmg.sh wraps it in a
+      # drag-install .dmg.
       - name: Build and package (macOS)
         if: runner.os == 'macOS'
         run: |
           ./scripts/bundle.sh --target ${{ matrix.target }}
-          APP="LightPhotos.app"
-
-          # .dmg: stage the app + an /Applications symlink for drag-install.
-          STAGE="$(mktemp -d)"
-          cp -R "$APP" "$STAGE/"
-          ln -s /Applications "$STAGE/Applications"
-          hdiutil create -volname LightPhotos -srcfolder "$STAGE" \
-            -fs HFS+ -format UDZO -ov "${{ matrix.name }}.dmg"
+          ./scripts/make-dmg.sh "${{ matrix.name }}.dmg"
 
       - name: Package (Linux)
         if: runner.os == 'Linux'

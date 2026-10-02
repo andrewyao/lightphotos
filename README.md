@@ -135,7 +135,9 @@ This script:
 
 Pass `--target x86_64-apple-darwin` to cross-build the Intel app from an Apple
 Silicon Mac (or `--target aarch64-apple-darwin` the other way round). The
-release workflow builds one `.dmg` per target this way.
+release workflow builds one `.dmg` per target this way, then wraps each app
+with `./scripts/make-dmg.sh <out.dmg>`, which gives the mounted volume the app
+icon.
 
 Both `target/` and `LightPhotos.app/` are git-ignored — they're build outputs.
 

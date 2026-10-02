@@ -45,6 +45,12 @@ chmod +x "$APP/Contents/MacOS/$BIN_NAME"
 # Rendered from assets/icon/lightphotos.svg by scripts/make-icons.sh.
 cp "$ROOT/assets/icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
+# The linker signs only the binary, which leaves the bundle's signature invalid
+# and makes Gatekeeper call a downloaded copy "damaged". An ad-hoc signature
+# over the whole bundle is free and downgrades that to an "Open Anyway" prompt.
+echo "==> Ad-hoc signing $APP"
+codesign --force --sign - "$APP"
+
 echo "==> Registering with Launch Services"
 LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
 "$LSREGISTER" -f "$APP"
