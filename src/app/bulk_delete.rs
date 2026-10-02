@@ -309,6 +309,13 @@ impl App {
         if !forget.is_empty() {
             self.catalog.forget_photos(&forget);
         }
+        // `forget_photo` already dropped each record through the origin
+        // folder's handle, so only the groups are left. They are in memory
+        // only while that folder is still open, which the catalog checks.
+        #[cfg(target_arch = "wasm32")]
+        if !forget.is_empty() {
+            self.catalog.forget_group_members(&forget);
+        }
 
         let view_dirty = std::mem::take(&mut self.bulk_delete.as_mut().unwrap().view_dirty);
         if view_dirty {

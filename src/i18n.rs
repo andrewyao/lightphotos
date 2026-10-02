@@ -382,7 +382,6 @@ pub struct Strings {
     pub deleted_partial: fn(usize, usize, &str) -> String,
     pub delete_in_progress: &'static str,
     pub group_refused_loading: &'static str,
-    pub group_refused_browser: &'static str,
     pub group_name_unsaveable: &'static str,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub delete_no_handle: fn(&str) -> String,
@@ -932,7 +931,6 @@ pub static EN: Strings = Strings {
     },
     delete_in_progress: "Another delete is still running\u{2026}",
     group_refused_loading: "This folder's groups are still loading. Try again in a moment.",
-    group_refused_browser: "Groups can't be saved in the browser yet.",
     group_name_unsaveable: "A file name here can't be saved in a group.",
     delete_no_handle: |dir| format!("Could not delete photos: no directory handle for {dir}"),
     copied_settings_from: |name| format!("Copied settings from {name}"),
@@ -1428,7 +1426,6 @@ pub static ZH: Strings = Strings {
     },
     delete_in_progress: "已有删除正在进行\u{2026}",
     group_refused_loading: "此文件夹的编组仍在载入，请稍后再试。",
-    group_refused_browser: "浏览器中尚不能保存编组。",
     group_name_unsaveable: "此文件夹中有文件名无法保存到编组中。",
     delete_no_handle: |dir| format!("无法删除照片：{dir} 没有目录句柄"),
     copied_settings_from: |name| format!("已从 {name} 拷贝设置"),

@@ -6,16 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::groups::GroupId;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::groups::{Group, SavedGroup};
+use crate::groups::{Group, GroupId, SavedGroup};
 
-pub(super) const GROUPS_DIR: &str = "groups";
+pub(crate) const GROUPS_DIR: &str = "groups";
 const EXT: &str = "json";
-#[cfg(not(target_arch = "wasm32"))]
 const FORMAT: u32 = 1;
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(serde::Serialize, serde::Deserialize)]
 struct GroupFile {
     v: u32,
@@ -29,10 +25,16 @@ pub(super) fn path(dir: &Path, id: &GroupId) -> PathBuf {
         .join(format!("{id}.{EXT}"))
 }
 
+/// The id a file named `name` in `groups/` holds, or `None` for a file that
+/// is not a group sidecar.
+pub(crate) fn id_of(name: &str) -> Option<GroupId> {
+    let stem = name.strip_suffix(&format!(".{EXT}"))?;
+    GroupId::from_stem(stem.as_ref())
+}
+
 /// Only malformed JSON or an unknown version fails. What the members say is
 /// checked against the folder later, by `Groups::from_loaded`.
-#[cfg(not(target_arch = "wasm32"))]
-fn parse(bytes: &[u8]) -> Result<SavedGroup, String> {
+pub(crate) fn parse(bytes: &[u8]) -> Result<SavedGroup, String> {
     let file: GroupFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if file.v != FORMAT {
         return Err(format!("unknown group format version {}", file.v));
@@ -45,7 +47,6 @@ fn parse(bytes: &[u8]) -> Result<SavedGroup, String> {
 
 /// The sidecar body for `group`. `Group::new` admits only UTF-8 names, so
 /// the conversion to JSON strings loses nothing.
-#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn to_bytes(group: &Group) -> Result<Vec<u8>, String> {
     let name = |n: &std::ffi::OsString| n.to_string_lossy().into_owned();
     let file = GroupFile {
@@ -71,7 +72,7 @@ pub(super) fn load(dir: &Path, skipped: &mut usize) -> Vec<(GroupId, SavedGroup)
         {
             continue;
         }
-        let Some(id) = path.file_stem().and_then(GroupId::from_stem) else {
+        let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(id_of) else {
             eprintln!(
                 "[catalog] unreadable group {}: not a group id",
                 path.display()
@@ -91,4 +92,21 @@ pub(super) fn load(dir: &Path, skipped: &mut usize) -> Vec<(GroupId, SavedGroup)
         }
     }
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_json_file_with_a_safe_stem_is_a_group() {
+        assert_eq!(
+            id_of("g-fixture00001.json").map(|id| id.to_string()),
+            Some("g-fixture00001".into())
+        );
+        assert!(id_of("g-fixture00001.xmp").is_none(), "another extension");
+        assert!(id_of("g-1.json.tmp").is_none(), "a swap file");
+        assert!(id_of("../g-1.json").is_none(), "a stem that leaves groups/");
+        assert!(id_of(".json").is_none(), "an empty stem");
+    }
 }

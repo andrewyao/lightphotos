@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::develop::{Adjustments, TouchUp};
 use crate::groups::{GroupId, GroupWrite, Groups, SavedGroup};
 
-mod group_file;
+pub(crate) mod group_file;
 mod writeback;
 pub(crate) use writeback::LoadMark;
 use writeback::{WriteOp, Writeback};
@@ -306,9 +306,6 @@ impl Catalog {
             return Ok(());
         }
         let dir = self.dir.clone().ok_or(GroupWriteRefused::NoFolder)?;
-        if cfg!(target_arch = "wasm32") {
-            return Err(GroupWriteRefused::Unsupported);
-        }
         let groups = self.groups.as_mut().ok_or(GroupWriteRefused::LoadPending)?;
         for write in &writes {
             groups.apply(write);
@@ -408,15 +405,26 @@ impl Catalog {
     /// repair, so no group is left naming them.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn forget_photos(&mut self, paths: &[PathBuf]) {
-        let mut names = Vec::new();
         for path in paths {
             if let Some(name) = self.cache_key(path) {
                 self.images.remove(name);
                 self.dirty.insert(name.to_os_string());
-                names.push(name.to_os_string());
             }
             self.enqueue(path, WriteOp::Delete);
         }
+        self.forget_group_members(paths);
+    }
+
+    /// The group half of [`Catalog::forget_photos`]. wasm forgets each
+    /// photo's record through a captured handle instead, so it calls only
+    /// this. A photo outside the open folder is skipped, since its folder's
+    /// groups are not in memory; that folder's next load repairs them.
+    pub fn forget_group_members(&mut self, paths: &[PathBuf]) {
+        let names: Vec<OsString> = paths
+            .iter()
+            .filter_map(|p| self.cache_key(p))
+            .map(OsStr::to_os_string)
+            .collect();
         let Some(groups) = &self.groups else {
             return;
         };
@@ -509,7 +517,6 @@ impl Default for Catalog {
 pub(crate) enum GroupWriteRefused {
     NoFolder,
     LoadPending,
-    Unsupported,
 }
 
 impl std::fmt::Display for GroupWriteRefused {
@@ -517,7 +524,6 @@ impl std::fmt::Display for GroupWriteRefused {
         f.write_str(match self {
             GroupWriteRefused::NoFolder => "no folder is open for these groups",
             GroupWriteRefused::LoadPending => "the folder's groups are still loading",
-            GroupWriteRefused::Unsupported => "photo groups are not saved in the browser yet",
         })
     }
 }

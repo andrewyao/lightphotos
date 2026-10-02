@@ -459,29 +459,32 @@ impl Writeback {
                     .send((path, seq, Some("path has no file name".to_string())));
                 continue;
             };
+            // A photo's path names its sidecar; a group's path is already
+            // the group file's own.
+            let is_group = matches!(op, WriteOp::PutGroup(_) | WriteOp::DeleteGroup);
             let body = match &op {
-                WriteOp::Put(rec) => match serde_json::to_vec_pretty(rec) {
-                    Ok(bytes) => Some(bytes),
-                    Err(e) => {
-                        let _ = self.done_tx.send((path, seq, Some(e.to_string())));
-                        continue;
-                    }
-                },
-                WriteOp::Delete => None,
-                WriteOp::PutGroup(_) | WriteOp::DeleteGroup => {
-                    let err = "photo groups are not saved in the browser yet".to_string();
-                    let _ = self.done_tx.send((path, seq, Some(err)));
+                WriteOp::Put(rec) => serde_json::to_vec_pretty(rec)
+                    .map(Some)
+                    .map_err(|e| e.to_string()),
+                WriteOp::PutGroup(group) => super::group_file::to_bytes(group).map(Some),
+                WriteOp::Delete | WriteOp::DeleteGroup => Ok(None),
+            };
+            let body = match body {
+                Ok(body) => body,
+                Err(e) => {
+                    let _ = self.done_tx.send((path, seq, Some(e)));
                     continue;
                 }
             };
             self.in_flight.insert(path.clone());
             let done_tx = self.done_tx.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let result = match body {
-                    Some(bytes) => {
-                        crate::web_catalog_fs::write_sidecar(&dir_handle, &name, &bytes).await
-                    }
-                    None => crate::web_catalog_fs::delete_sidecar(&dir_handle, &name).await,
+                use crate::web_catalog_fs as fs;
+                let result = match (is_group, body) {
+                    (false, Some(bytes)) => fs::write_sidecar(&dir_handle, &name, &bytes).await,
+                    (false, None) => fs::delete_sidecar(&dir_handle, &name).await,
+                    (true, Some(bytes)) => fs::write_group(&dir_handle, &name, &bytes).await,
+                    (true, None) => fs::delete_group(&dir_handle, &name).await,
                 };
                 let err = result
                     .err()

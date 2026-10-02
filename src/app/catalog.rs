@@ -289,7 +289,6 @@ impl App {
                     GroupWriteRefused::NoFolder | GroupWriteRefused::LoadPending => {
                         t.group_refused_loading
                     }
-                    GroupWriteRefused::Unsupported => t.group_refused_browser,
                 };
                 self.set_status(StatusKind::Error, msg.to_string());
                 self.request_redraw();
@@ -311,12 +310,7 @@ impl App {
         }
         let t = crate::i18n::t();
         let Some(groups) = self.catalog.groups() else {
-            let msg = if cfg!(target_arch = "wasm32") {
-                t.group_refused_browser
-            } else {
-                t.group_refused_loading
-            };
-            self.set_status(StatusKind::Error, msg.to_string());
+            self.set_status(StatusKind::Error, t.group_refused_loading.to_string());
             self.request_redraw();
             return;
         };
@@ -337,7 +331,7 @@ impl App {
             self.request_redraw();
             return;
         };
-        let writes = groups.create(group, std::time::SystemTime::now());
+        let writes = groups.create(group, web_time::SystemTime::now());
         self.apply_group_writes(writes);
     }
 

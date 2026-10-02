@@ -14,6 +14,7 @@ use web_sys::{
     FileSystemGetFileOptions, FileSystemHandleKind, FileSystemWritableFileStream,
 };
 
+use crate::catalog::group_file::{self, GROUPS_DIR};
 use crate::catalog::{ImageRecord, SidecarLoad, SIDECAR_DIR, SIDECAR_EXT};
 
 /// The `.lightphotos` directory under `root`, created if `create` is set.
@@ -23,9 +24,28 @@ pub(crate) async fn sidecar_dir(
     root: &FileSystemDirectoryHandle,
     create: bool,
 ) -> Result<Option<FileSystemDirectoryHandle>, String> {
+    subdir(root, SIDECAR_DIR, create).await
+}
+
+/// `.lightphotos/groups` under `root`, on the same terms as `sidecar_dir`.
+async fn groups_dir(
+    root: &FileSystemDirectoryHandle,
+    create: bool,
+) -> Result<Option<FileSystemDirectoryHandle>, String> {
+    match sidecar_dir(root, create).await? {
+        Some(dir) => subdir(&dir, GROUPS_DIR, create).await,
+        None => Ok(None),
+    }
+}
+
+async fn subdir(
+    parent: &FileSystemDirectoryHandle,
+    name: &str,
+    create: bool,
+) -> Result<Option<FileSystemDirectoryHandle>, String> {
     let opts = FileSystemGetDirectoryOptions::new();
     opts.set_create(create);
-    match JsFuture::from(root.get_directory_handle_with_options(SIDECAR_DIR, &opts)).await {
+    match JsFuture::from(parent.get_directory_handle_with_options(name, &opts)).await {
         Ok(v) => Ok(Some(v.unchecked_into())),
         Err(e) if !create && is_not_found(&e) => Ok(None),
         Err(e) => Err(js_error_string(&e)),
@@ -43,32 +63,9 @@ fn strip_xmp(name: &str) -> Option<OsString> {
         .map(OsString::from)
 }
 
-/// Load every sidecar in `root/.lightphotos`. Like the native loader, an
-/// unreachable directory gives an empty result and a bad file counts toward
-/// `skipped` without stopping the scan.
-pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLoad {
-    let mut images = HashMap::new();
-    let mut skipped = 0usize;
-
-    let dir = match sidecar_dir(root, false).await {
-        Ok(Some(d)) => d,
-        Ok(None) => {
-            return SidecarLoad {
-                images,
-                groups: Vec::new(),
-                skipped,
-            }
-        }
-        Err(e) => {
-            web_sys::console::error_1(&format!("[web] listing .lightphotos failed: {e}").into());
-            return SidecarLoad {
-                images,
-                groups: Vec::new(),
-                skipped,
-            };
-        }
-    };
-
+/// The files directly in `dir`, by name. Subdirectories are left out.
+async fn files(dir: &FileSystemDirectoryHandle) -> Vec<(String, FileSystemFileHandle)> {
+    let mut out = Vec::new();
     let iter = dir.values();
     loop {
         let next = match iter.next() {
@@ -91,57 +88,94 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
         let Ok(child) = value.dyn_into::<web_sys::FileSystemHandle>() else {
             continue;
         };
-        if child.kind() != FileSystemHandleKind::File {
-            continue;
+        if child.kind() == FileSystemHandleKind::File {
+            out.push((child.name(), child.unchecked_into()));
         }
-        let name = child.name();
+    }
+    out
+}
+
+/// Load every sidecar in `root/.lightphotos` and every group in its
+/// `groups/`. Like the native loader, an unreachable directory gives an
+/// empty result and a bad file counts toward `skipped` without stopping the
+/// scan.
+pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLoad {
+    let mut load = SidecarLoad {
+        images: HashMap::new(),
+        groups: Vec::new(),
+        skipped: 0,
+    };
+    let dir = match sidecar_dir(root, false).await {
+        Ok(Some(d)) => d,
+        Ok(None) => return load,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[web] listing .lightphotos failed: {e}").into());
+            return load;
+        }
+    };
+
+    for (name, file_handle) in files(&dir).await {
         let Some(stem) = strip_xmp(&name) else {
             continue;
         };
-        let file_handle: FileSystemFileHandle = child.unchecked_into();
-        match crate::web_fs::read_bytes(&file_handle).await {
-            Ok(bytes) => match serde_json::from_slice::<ImageRecord>(&bytes) {
-                Ok(rec) if !rec.is_empty() => {
-                    images.insert(stem, rec);
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    web_sys::console::error_1(
-                        &format!("[web] unreadable sidecar {name}: {e}").into(),
-                    );
-                    skipped += 1;
-                }
-            },
+        let parsed = crate::web_fs::read_bytes(&file_handle)
+            .await
+            .and_then(|bytes| {
+                serde_json::from_slice::<ImageRecord>(&bytes).map_err(|e| e.to_string())
+            });
+        match parsed {
+            Ok(rec) if !rec.is_empty() => {
+                load.images.insert(stem, rec);
+            }
+            Ok(_) => {}
             Err(e) => {
-                web_sys::console::error_1(&format!("[web] could not read {name}: {e}").into());
-                skipped += 1;
+                web_sys::console::error_1(&format!("[web] unreadable sidecar {name}: {e}").into());
+                load.skipped += 1;
             }
         }
     }
 
-    SidecarLoad {
-        images,
-        groups: Vec::new(),
-        skipped,
+    let groups = match subdir(&dir, GROUPS_DIR, false).await {
+        Ok(Some(g)) => g,
+        Ok(None) => return load,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[web] listing groups failed: {e}").into());
+            return load;
+        }
+    };
+    for (name, file_handle) in files(&groups).await {
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let parsed = match group_file::id_of(&name) {
+            Some(id) => crate::web_fs::read_bytes(&file_handle)
+                .await
+                .and_then(|bytes| group_file::parse(&bytes))
+                .map(|saved| (id, saved)),
+            None => Err("not a group id".to_string()),
+        };
+        match parsed {
+            Ok(group) => load.groups.push(group),
+            Err(e) => {
+                web_sys::console::error_1(&format!("[web] unreadable group {name}: {e}").into());
+                load.skipped += 1;
+            }
+        }
     }
+    load
 }
 
-/// Write `bytes` to `root/.lightphotos/<filename>.xmp`, creating the
-/// directory if needed. The writable stream writes to a swap file and
-/// replaces the real file on `close()`, so the write is atomic.
-pub(crate) async fn write_sidecar(
-    root: &FileSystemDirectoryHandle,
-    filename: &OsStr,
+/// Write `bytes` to `dir/<name>`. The writable stream writes to a swap file
+/// and replaces the real file on `close()`, so the write is atomic.
+async fn write_file(
+    dir: &FileSystemDirectoryHandle,
+    name: &str,
     bytes: &[u8],
 ) -> Result<(), String> {
-    let dir = sidecar_dir(root, true)
-        .await?
-        .ok_or_else(|| "could not create .lightphotos".to_string())?;
-
     let opts = FileSystemGetFileOptions::new();
     opts.set_create(true);
     let file_handle: FileSystemFileHandle =
-        JsFuture::from(dir.get_file_handle_with_options(&xmp_name(filename), &opts))
+        JsFuture::from(dir.get_file_handle_with_options(name, &opts))
             .await
             .map_err(|e| js_error_string(&e))?
             .unchecked_into();
@@ -166,19 +200,62 @@ pub(crate) async fn write_sidecar(
     Ok(())
 }
 
+/// Delete `dir/<name>`. A file that is already gone is not an error.
+async fn remove_name(dir: &FileSystemDirectoryHandle, name: &str) -> Result<(), String> {
+    match JsFuture::from(dir.remove_entry(name)).await {
+        Ok(_) => Ok(()),
+        Err(e) if is_not_found(&e) => Ok(()),
+        Err(e) => Err(js_error_string(&e)),
+    }
+}
+
+/// Write `bytes` to `root/.lightphotos/<filename>.xmp`, creating the
+/// directory if needed.
+pub(crate) async fn write_sidecar(
+    root: &FileSystemDirectoryHandle,
+    filename: &OsStr,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let dir = sidecar_dir(root, true)
+        .await?
+        .ok_or_else(|| "could not create .lightphotos".to_string())?;
+    write_file(&dir, &xmp_name(filename), bytes).await
+}
+
 /// Delete `root/.lightphotos/<filename>.xmp`. A missing directory or file
 /// is not an error.
 pub(crate) async fn delete_sidecar(
     root: &FileSystemDirectoryHandle,
     filename: &OsStr,
 ) -> Result<(), String> {
-    let Some(dir) = sidecar_dir(root, false).await? else {
-        return Ok(());
-    };
-    match JsFuture::from(dir.remove_entry(&xmp_name(filename))).await {
-        Ok(_) => Ok(()),
-        Err(e) if is_not_found(&e) => Ok(()),
-        Err(e) => Err(js_error_string(&e)),
+    match sidecar_dir(root, false).await? {
+        Some(dir) => remove_name(&dir, &xmp_name(filename)).await,
+        None => Ok(()),
+    }
+}
+
+/// Write `bytes` to `root/.lightphotos/groups/<file>`, `file` being the
+/// group file's own name, creating the directories if needed.
+pub(crate) async fn write_group(
+    root: &FileSystemDirectoryHandle,
+    file: &OsStr,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let dir = groups_dir(root, true)
+        .await?
+        .ok_or_else(|| "could not create .lightphotos/groups".to_string())?;
+    write_file(&dir, &file.to_string_lossy(), bytes).await
+}
+
+/// Delete `root/.lightphotos/groups/<file>`. A missing directory or file is
+/// not an error.
+pub(crate) async fn delete_group(
+    root: &FileSystemDirectoryHandle,
+    file: &OsStr,
+) -> Result<(), String> {
+    match groups_dir(root, false).await? {
+        Some(dir) => remove_name(&dir, &file.to_string_lossy()).await,
+        None => Ok(()),
     }
 }
 
@@ -189,11 +266,7 @@ pub(crate) async fn remove_file(
     dir: &FileSystemDirectoryHandle,
     filename: &OsStr,
 ) -> Result<(), String> {
-    match JsFuture::from(dir.remove_entry(&filename.to_string_lossy())).await {
-        Ok(_) => Ok(()),
-        Err(e) if is_not_found(&e) => Ok(()),
-        Err(e) => Err(js_error_string(&e)),
-    }
+    remove_name(dir, &filename.to_string_lossy()).await
 }
 
 /// True when a thrown JS value is a `NotFoundError` `DOMException`, the

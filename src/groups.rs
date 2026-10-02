@@ -8,7 +8,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::time::SystemTime;
+// `std::time::SystemTime::now()` panics on wasm32; on native this is std.
+use web_time::SystemTime;
 
 use crate::hash::Fnv1a;
 
@@ -126,12 +127,10 @@ impl Group {
         Some(Group { members, rep })
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser saves no groups yet
     pub fn members(&self) -> &[OsString] {
         &self.members
     }
 
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))] // the browser saves no groups yet
     pub fn rep(&self) -> &OsString {
         &self.rep
     }
