@@ -9,7 +9,7 @@
     <key>CFBundleExecutable</key>
     <string>lightphotos</string>
     <key>CFBundleIdentifier</key>
-    <string>com.lancedb.lightphotos</string>
+    <string>app.lightphotos</string>
     <key>CFBundleVersion</key>
     <string>0.1.0</string>
     <key>CFBundleShortVersionString</key>
