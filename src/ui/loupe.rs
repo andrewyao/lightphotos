@@ -732,7 +732,8 @@ fn filmstrip_cell(
     response
 }
 
-/// SPIKE: one tile per member, each sampling `spike_zoom_uv`. Up to 12 fit
+/// SPIKE: one tile per group member, each sampling `spike_zoom_uv`, the
+/// shown photo's outlined. Up to 12 fit
 /// the pane; past that the rows keep that size and the pane scrolls.
 fn spike_tiles(ui: &mut egui::Ui, app: &App) {
     let colors = theme::colors(ui.ctx());
@@ -754,18 +755,19 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App) {
             for m in row {
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click());
-                let Some((_, id, w, h)) = m else {
+                let Some((path, id, w, h)) = m else {
                     ui.painter().rect_filled(rect, 0.0, colors.divider);
                     continue;
                 };
                 ui.painter()
                     .image(*id, rect, spike_zoom_uv(*w, *h), egui::Color32::WHITE);
-                ui.painter().rect_stroke(
-                    rect,
-                    0.0,
-                    egui::Stroke::new(1.0f32, colors.divider),
-                    egui::StrokeKind::Outside,
-                );
+                let stroke = if *path == tiles.shown {
+                    egui::Stroke::new(3.0f32, colors.selection)
+                } else {
+                    egui::Stroke::new(1.0f32, colors.divider)
+                };
+                ui.painter()
+                    .rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Outside);
             }
         });
     }
@@ -785,7 +787,10 @@ fn spike_zoom_uv(w: u32, h: u32) -> egui::Rect {
 
 /// SPIKE: outline on the shown photo of the square the tiles zoom into.
 fn spike_zoom_marker(ui: &egui::Ui, app: &App, central: egui::Rect) {
-    let Some(Some((_, _, w, h))) = app.spike.as_ref().and_then(|t| t.members.first()) else {
+    let Some(tiles) = app.spike.as_ref() else {
+        return;
+    };
+    let Some((_, _, w, h)) = tiles.members.iter().flatten().find(|m| m.0 == tiles.shown) else {
         return;
     };
     let uv = spike_zoom_uv(*w, *h);

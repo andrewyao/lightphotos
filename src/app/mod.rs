@@ -311,8 +311,8 @@ pub(crate) type SignalLoad = (
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
-    /// SPIKE: one mipped texture per member, keyed on the first member and
-    /// the preview size, so a resize or a new photo re-uploads the set.
+    /// SPIKE: one mipped texture per group member, keyed on the members and
+    /// the preview size, so a resize or another group re-uploads the set.
     pub(crate) spike: Option<SpikeTiles>,
     pub(crate) spike_frames: Vec<f32>,
     /// Last adjustments handed to the GPU. Tests run without a renderer, so
@@ -1358,8 +1358,9 @@ impl App {
         }
     }
 
-    /// SPIKE: upload a mipped texture for each of `spike_n()` members, the
-    /// shown photo and the ones after it, requesting previews as needed.
+    /// SPIKE: upload a mipped texture for each member of the shown photo's
+    /// group, the shown photo among them, requesting previews as needed. A
+    /// photo in no group is its own one member.
     fn spike_sync(&mut self) {
         if !spike_on() || self.mode != ViewMode::Loupe {
             return;
@@ -1369,16 +1370,16 @@ impl App {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| self.preview_px());
-        let paths: Vec<PathBuf> = match (self.sel, self.playlist.as_ref()) {
-            (Some(sel), Some(pl)) => self.visible[sel..]
-                .iter()
-                .take(spike_n())
-                .filter_map(|&i| pl.entry(i).map(Path::to_path_buf))
-                .collect(),
-            _ => return,
-        };
-        let Some(first) = paths.first().cloned() else {
+        let (Some(shown), Some(pl)) = (self.selected_path(), self.playlist.as_ref()) else {
             return;
+        };
+        let group = shown
+            .file_name()
+            .zip(self.catalog.groups())
+            .and_then(|(name, gs)| gs.get(gs.group_of(name)?));
+        let paths: Vec<PathBuf> = match group {
+            Some(g) => g.members().iter().map(|m| pl.dir().join(m)).collect(),
+            None => vec![shown.clone()],
         };
         let (Some(loader), Some(r)) = (self.loader.as_mut(), self.renderer.as_mut()) else {
             return;
@@ -1386,20 +1387,22 @@ impl App {
         if self
             .spike
             .as_ref()
-            .is_some_and(|t| t.key != (first.clone(), px))
+            .is_some_and(|t| t.key != (paths.clone(), px))
         {
             for m in self.spike.take().unwrap().members.into_iter().flatten() {
                 r.free_thumb(m.1);
             }
         }
         let tiles = self.spike.get_or_insert_with(|| SpikeTiles {
-            key: (first, px),
+            key: (paths.clone(), px),
+            shown: shown.clone(),
             members: vec![None; paths.len()],
             opened: Instant::now(),
             bytes: 0,
             upload_ms: 0.0,
             reported: false,
         });
+        tiles.shown = shown;
         for (slot, path) in tiles.members.iter_mut().zip(&paths) {
             if slot.is_some() {
                 continue;
@@ -1660,14 +1663,6 @@ pub(crate) fn spike_on() -> bool {
     std::env::var_os("LIGHTPHOTOS_SPIKE").is_some()
 }
 
-/// SPIKE: `LIGHTPHOTOS_SPIKE_N` members in the pane, 4 by default, a 2×2 grid.
-pub(crate) fn spike_n() -> usize {
-    std::env::var("LIGHTPHOTOS_SPIKE_N")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(4)
-}
-
 /// SPIKE: `LIGHTPHOTOS_SPIKE_PANE=paint` draws the pane with a bare painter
 /// as the first spike did; anything else allocates it inside a ScrollArea.
 pub(crate) fn spike_claims_pane() -> bool {
@@ -1675,7 +1670,9 @@ pub(crate) fn spike_claims_pane() -> bool {
 }
 
 pub(crate) struct SpikeTiles {
-    key: (PathBuf, u32),
+    key: (Vec<PathBuf>, u32),
+    /// The member the Loupe shows, which the marker and the tile outline follow.
+    pub(crate) shown: PathBuf,
     pub(crate) members: Vec<Option<(PathBuf, egui::TextureId, u32, u32)>>,
     opened: Instant,
     bytes: u64,
