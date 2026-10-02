@@ -1373,7 +1373,7 @@ impl App {
 
     /// SPIKE: upload a mipped texture for each member of the shown photo's
     /// group, the shown photo among them, requesting previews as needed. A
-    /// photo in no group is its own one member.
+    /// photo in no group leaves `spike` empty, which keeps the Loupe whole.
     fn spike_sync(&mut self) {
         if !spike_on() || self.mode != ViewMode::Loupe {
             return;
@@ -1390,10 +1390,9 @@ impl App {
             .file_name()
             .zip(self.catalog.groups())
             .and_then(|(name, gs)| gs.get(gs.group_of(name)?));
-        let paths: Vec<PathBuf> = match group {
-            Some(g) => g.members().iter().map(|m| pl.dir().join(m)).collect(),
-            None => vec![shown.clone()],
-        };
+        let paths: Vec<PathBuf> = group
+            .map(|g| g.members().iter().map(|m| pl.dir().join(m)).collect())
+            .unwrap_or_default();
         let (Some(loader), Some(r)) = (self.loader.as_mut(), self.renderer.as_mut()) else {
             return;
         };
@@ -1405,6 +1404,9 @@ impl App {
             for m in self.spike.take().unwrap().members.into_iter().flatten() {
                 r.free_thumb(m.1);
             }
+        }
+        if paths.is_empty() {
+            return;
         }
         let tiles = self.spike.get_or_insert_with(|| SpikeTiles {
             key: (paths.clone(), px),

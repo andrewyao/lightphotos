@@ -95,7 +95,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     // egui" (`is_pointer_over_egui`), so zoom, pan, and clicks there reach the
     // app. A CentralPanel would claim that input.
     let mut central = ui.available_rect_before_wrap();
-    if crate::app::spike_on() {
+    if crate::app::spike_on() && app.spike.is_some() {
         if crate::app::spike_claims_pane() {
             egui::Panel::right("spike_tiles")
                 .exact_size(central.width() / 2.0)
