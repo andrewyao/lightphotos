@@ -15,6 +15,7 @@
 //! dblclick 40 60
 //! click-cell 2 [shift]     the grid cell at that position, from the last frame's layout
 //! dblclick-cell 2
+//! move 40 60               pointer to (x, y) points, no click
 //! scroll 0 5 [shift]       wheel lines; up is positive, so this zooms the Loupe in
 //! drag 100 100 300 200
 //! idle                     wait until decodes, sidecar writes, batches and animations settle
@@ -118,6 +119,7 @@ pub(crate) enum Step {
         double: bool,
         mods: ModifiersState,
     },
+    Move(f32, f32),
     Scroll {
         dx: f32,
         dy: f32,
@@ -295,6 +297,10 @@ fn parse_step(line: &str) -> Result<Step, String> {
             double: *cmd == "dblclick-cell",
             mods: parse_mods(args.get(1..).unwrap_or_default())?,
         },
+        "move" => Step::Move(
+            number(args.first().copied(), "x")?,
+            number(args.get(1).copied(), "y")?,
+        ),
         "scroll" => Step::Scroll {
             dx: number(args.first().copied(), "dx")?,
             dy: number(args.get(1).copied(), "dy")?,
@@ -474,6 +480,7 @@ impl Driver {
                     let (x, y) = self.resolve(*at)?;
                     self.click(el, x, y, *double, *mods);
                 }
+                Step::Move(x, y) => self.move_to(el, *x, *y),
                 Step::Scroll { dx, dy, mods } => {
                     self.window_event(el, WindowEvent::ModifiersChanged((*mods).into()));
                     self.window_event(
