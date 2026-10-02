@@ -1660,12 +1660,12 @@ pub(crate) fn spike_on() -> bool {
     std::env::var_os("LIGHTPHOTOS_SPIKE").is_some()
 }
 
-/// SPIKE: `LIGHTPHOTOS_SPIKE_N` members in the pane, 6 by default.
+/// SPIKE: `LIGHTPHOTOS_SPIKE_N` members in the pane, 4 by default, a 2×2 grid.
 pub(crate) fn spike_n() -> usize {
     std::env::var("LIGHTPHOTOS_SPIKE_N")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(6)
+        .unwrap_or(4)
 }
 
 /// SPIKE: `LIGHTPHOTOS_SPIKE_PANE=paint` draws the pane with a bare painter

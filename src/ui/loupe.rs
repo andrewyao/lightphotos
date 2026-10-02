@@ -138,6 +138,8 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
         loupe_wb_picker_overlay(ui, app, central, out);
     } else if app.compare() {
         loupe_compare_overlay(ui, central);
+    } else if crate::app::spike_on() {
+        spike_zoom_marker(ui, app, central);
     }
 
     if app.dragging {
@@ -730,18 +732,13 @@ fn filmstrip_cell(
     response
 }
 
-/// SPIKE: one tile per member, each sampling the same centered square
-/// (`LIGHTPHOTOS_SPIKE_SIDE` of the short side, 0.15 by default). Up to 12
-/// fit the pane; past that the rows keep that size and the pane scrolls.
+/// SPIKE: one tile per member, each sampling `spike_zoom_uv`. Up to 12 fit
+/// the pane; past that the rows keep that size and the pane scrolls.
 fn spike_tiles(ui: &mut egui::Ui, app: &App) {
     let colors = theme::colors(ui.ctx());
     let Some(tiles) = app.spike.as_ref() else {
         return;
     };
-    let side: f32 = std::env::var("LIGHTPHOTOS_SPIKE_SIDE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.15);
     let n = tiles.members.len().max(1);
     let fit = n.min(12);
     let cols = (fit as f32).sqrt().ceil().max(1.0) as usize;
@@ -761,20 +758,53 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App) {
                     ui.painter().rect_filled(rect, 0.0, colors.divider);
                     continue;
                 };
-                let short = (*w).min(*h) as f32;
-                let half = egui::vec2(side * short / *w as f32, side * short / *h as f32) / 2.0;
-                let uv = egui::Rect::from_min_max(
-                    egui::pos2(0.5, 0.5) - half,
-                    egui::pos2(0.5, 0.5) + half,
-                );
-                ui.painter().image(*id, rect, uv, egui::Color32::WHITE);
+                ui.painter()
+                    .image(*id, rect, spike_zoom_uv(*w, *h), egui::Color32::WHITE);
                 ui.painter().rect_stroke(
                     rect,
                     0.0,
-                    egui::Stroke::new(1.0, colors.divider),
+                    egui::Stroke::new(1.0f32, colors.divider),
                     egui::StrokeKind::Outside,
                 );
             }
         });
     }
+}
+
+/// SPIKE: the centered square every tile samples, in uv of a `w`×`h` image.
+/// Its side is `LIGHTPHOTOS_SPIKE_SIDE` of the short side, 0.15 by default.
+fn spike_zoom_uv(w: u32, h: u32) -> egui::Rect {
+    let side: f32 = std::env::var("LIGHTPHOTOS_SPIKE_SIDE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.15);
+    let short = w.min(h) as f32;
+    let half = egui::vec2(side * short / w as f32, side * short / h as f32) / 2.0;
+    egui::Rect::from_min_max(egui::pos2(0.5, 0.5) - half, egui::pos2(0.5, 0.5) + half)
+}
+
+/// SPIKE: outline on the shown photo of the square the tiles zoom into.
+fn spike_zoom_marker(ui: &egui::Ui, app: &App, central: egui::Rect) {
+    let Some(Some((_, _, w, h))) = app.spike.as_ref().and_then(|t| t.members.first()) else {
+        return;
+    };
+    let uv = spike_zoom_uv(*w, *h);
+    let rect = egui::Rect::from_two_pos(
+        app.loupe_tex_to_screen(central, uv.min.x, uv.min.y),
+        app.loupe_tex_to_screen(central, uv.max.x, uv.max.y),
+    );
+    let painter = ui.painter_at(central);
+    // Dark under light, so the square reads on bright and dark photos.
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(3.0f32, egui::Color32::from_black_alpha(160)),
+        egui::StrokeKind::Middle,
+    );
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.5f32, egui::Color32::WHITE),
+        egui::StrokeKind::Middle,
+    );
 }
