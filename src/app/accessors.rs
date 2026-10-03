@@ -33,6 +33,18 @@ impl App {
             .collect()
     }
 
+    /// Group Selected applies: two or more cells, none of them a group.
+    pub(crate) fn group_available(&self) -> bool {
+        let cells = self.selected_cells();
+        cells.len() >= 2 && cells.iter().all(|&p| self.group_at(p).is_none())
+    }
+
+    /// The selection bar's Ungroup: exactly one cell, and it is a group.
+    pub(crate) fn ungroup_button_enabled(&self) -> bool {
+        matches!(self.selected_cells()[..], [p] if self.group_at(p).is_some())
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn selection_has_group(&self) -> bool {
         self.selected_cells()
             .into_iter()

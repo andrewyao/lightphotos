@@ -238,6 +238,27 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
             .on_disabled_hover_text(t.no_presets);
             ui.separator();
             if ui
+                .add_enabled(
+                    app.group_available(),
+                    egui::Button::new(t.menu.group_selected),
+                )
+                .on_hover_text(crate::i18n::keys(t.group_selection_tip))
+                .clicked()
+            {
+                out.actions.push(UiAction::GroupSelection);
+            }
+            if ui
+                .add_enabled(
+                    app.ungroup_button_enabled(),
+                    egui::Button::new(t.menu.ungroup),
+                )
+                .on_hover_text(crate::i18n::keys(t.ungroup_selection_tip))
+                .clicked()
+            {
+                out.actions.push(UiAction::UngroupSelection);
+            }
+            ui.separator();
+            if ui
                 .button(t.export_jpg)
                 .on_hover_text(t.export_jpg_tip)
                 .clicked()

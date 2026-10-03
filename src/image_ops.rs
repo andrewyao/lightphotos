@@ -192,6 +192,24 @@ pub(crate) fn bake_edited(
     rotate_rgba(&cropped, cw, ch, rot)
 }
 
+/// A `LinearF16` image as opaque sRGB8 RGBA, with no edits, as
+/// `raw_shader.wgsl` would display it. Empty for a short buffer.
+pub(crate) fn linear_f16_to_srgb8(img: &DecodedImage) -> Vec<u8> {
+    let n = img.width as usize * img.height as usize;
+    if img.rgba.len() < n * 8 {
+        return Vec::new();
+    }
+    let adj = Adjustments::default();
+    let f = |b: &[u8]| half::f16::from_le_bytes([b[0], b[1]]).to_f32();
+    let mut out = Vec::with_capacity(n * 4);
+    for px in img.rgba.chunks_exact(8).take(n) {
+        let d = develop::apply_raw_display(&adj, [f(&px[0..]), f(&px[2..]), f(&px[4..])]);
+        out.extend(d.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
+        out.push(255);
+    }
+    out
+}
+
 /// Shrink opaque sRGB8 RGBA so its long side is at most `max_px`, averaging
 /// each output pixel's whole source box in linear light. Averaging the whole
 /// box rather than sampling it is what keeps fine detail from aliasing at the

@@ -28,7 +28,7 @@ impl App {
             OpenFolder | AutoTone | Rate(_) | Grid | KeyboardShortcuts => free,
             AutoToneSelection => free && selected > 0,
             MoveToTrash => free && selected > 0 && self.delete_available(),
-            GroupSelected => free && self.selected_cells().len() >= 2,
+            GroupSelected => free && self.group_available(),
             Ungroup => free && self.selection_has_group(),
             DeleteGroup => free && self.selection_has_group() && self.delete_available(),
             CopySettings => free && selected == 1,

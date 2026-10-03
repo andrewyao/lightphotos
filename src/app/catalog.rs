@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::catalog::GroupWriteRefused;
 use crate::develop::Adjustments;
-use crate::groups::{self, GroupWrite};
+use crate::groups::{Group, GroupWrite};
 use crate::navigation::Cmp;
 use crate::ui;
 
@@ -331,11 +331,13 @@ impl App {
         path.file_name().map(std::ffi::OsStr::to_os_string)
     }
 
+    /// Groups two or more selected single photos. A selection holding a
+    /// group does nothing; ungroup it first.
     pub(super) fn group_selected(&mut self) {
-        let cells = self.selected_cells();
-        if cells.len() < 2 {
+        if !self.group_available() {
             return;
         }
+        let cells = self.selected_cells();
         let t = crate::i18n::t();
         let Some(groups) = self.catalog.groups() else {
             self.set_status(StatusKind::Error, t.group_refused_loading.to_string());
@@ -343,17 +345,10 @@ impl App {
             return;
         };
         let primary = self.sel.filter(|s| cells.contains(s)).unwrap_or(cells[0]);
-        let photos: Vec<Vec<std::ffi::OsString>> = cells
-            .iter()
-            .map(|&p| match self.group_at(p) {
-                Some((_, g)) => g.members().to_vec(),
-                None => self.cell_name(p).into_iter().collect(),
-            })
-            .collect();
-        let slices: Vec<&[std::ffi::OsString]> = photos.iter().map(Vec::as_slice).collect();
+        let members = cells.iter().filter_map(|&p| self.cell_name(p)).collect();
         let merged = self
             .cell_name(primary)
-            .and_then(|rep| groups::merge_selection(&slices, &rep));
+            .and_then(|rep| Group::new(members, rep));
         let Some(group) = merged else {
             self.set_status(StatusKind::Error, t.group_name_unsaveable.to_string());
             self.request_redraw();

@@ -95,7 +95,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     // egui" (`is_pointer_over_egui`), so zoom, pan, and clicks there reach the
     // app. A CentralPanel would claim that input.
     let mut central = ui.available_rect_before_wrap();
-    if crate::app::spike_on() && app.spike.is_some() {
+    if app.spike.is_some() {
         if crate::app::spike_claims_pane() {
             egui::Panel::right("spike_tiles")
                 .exact_size(central.width() / 2.0)
@@ -139,7 +139,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
         loupe_wb_picker_overlay(ui, app, central, out);
     } else if app.compare() {
         loupe_compare_overlay(ui, central);
-    } else if crate::app::spike_on() {
+    } else {
         spike_zoom_marker(ui, app, central);
     }
 
@@ -733,23 +733,29 @@ fn filmstrip_cell(
     response
 }
 
-/// SPIKE: one tile per group member, each sampling `spike_zoom_uv`. The
-/// shown photo is the representative and is outlined; a click on another
-/// tile makes that member the representative. Up to 12 fit
-/// the pane; past that the rows keep that size and the pane scrolls.
+/// SPIKE: one tile per member on the group's current page, each sampling
+/// `spike_zoom_uv`. The shown photo is the representative and is outlined; a
+/// click on another tile makes that member the representative. A page holds
+/// `SPIKE_PAGE` tiles, and a group with more gets arrows under the grid. The
+/// grid keeps one size across pages, so a short last page leaves cells empty.
 fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let colors = theme::colors(ui.ctx());
     let Some(tiles) = app.spike.as_ref() else {
         return;
     };
-    let n = tiles.members.len().max(1);
-    let fit = n.min(12);
+    let fit = tiles.group_len().clamp(1, crate::app::SPIKE_PAGE);
     let cols = (fit as f32).sqrt().ceil().max(1.0) as usize;
     let rows = fit.div_ceil(cols);
     let pad = 8.0;
+    let paged = tiles.pages() > 1;
+    let nav_h = if paged {
+        ui.spacing().interact_size.y + pad
+    } else {
+        0.0
+    };
     let avail = ui.available_size();
     let tile = ((avail.x - pad * (cols as f32 - 1.0)) / cols as f32)
-        .min((avail.y - pad * (rows as f32 - 1.0)) / rows as f32)
+        .min((avail.y - nav_h - pad * (rows as f32 - 1.0)) / rows as f32)
         .max(16.0);
     ui.spacing_mut().item_spacing = egui::vec2(pad, pad);
     for row in tiles.members.chunks(cols) {
@@ -786,6 +792,57 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             }
         });
     }
+    if paged {
+        // Keep the arrows put on a short last page.
+        let missing = rows - tiles.members.len().div_ceil(cols);
+        ui.add_space(missing as f32 * (tile + pad));
+        spike_page_nav(
+            ui,
+            tiles,
+            cols as f32 * tile + pad * (cols as f32 - 1.0),
+            out,
+        );
+    }
+}
+
+/// SPIKE: previous and next arrows either side of the page's member range,
+/// as wide as the tile grid above them.
+fn spike_page_nav(
+    ui: &mut egui::Ui,
+    tiles: &crate::app::SpikeTiles,
+    width: f32,
+    out: &mut FrameOutput,
+) {
+    let first = tiles.page * crate::app::SPIKE_PAGE + 1;
+    let last = first + tiles.page_paths().len() - 1;
+    let h = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, h),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            if ui
+                .add_enabled(tiles.page > 0, egui::Button::new("‹"))
+                .clicked()
+            {
+                out.actions.push(UiAction::SpikePage(tiles.page - 1));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(tiles.page + 1 < tiles.pages(), egui::Button::new("›"))
+                    .clicked()
+                {
+                    out.actions.push(UiAction::SpikePage(tiles.page + 1));
+                }
+                ui.centered_and_justified(|ui| {
+                    ui.label((crate::i18n::t().group_page)(
+                        first,
+                        last,
+                        tiles.group_len(),
+                    ));
+                });
+            });
+        },
+    );
 }
 
 /// SPIKE: the square every tile samples, in uv of a `w`×`h` image, `side`
@@ -807,7 +864,7 @@ fn spike_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
     let Some(tiles) = app.spike.as_ref() else {
         return;
     };
-    let Some(&(_, _, w, h)) = tiles.members.iter().flatten().find(|m| m.0 == tiles.shown) else {
+    let Some(&(w, h)) = tiles.sizes.get(&tiles.shown) else {
         return;
     };
     let uv = spike_zoom_uv(w, h, app.spike_center, app.spike_side);

@@ -266,6 +266,8 @@ pub struct Strings {
     pub settings_from: fn(&str) -> String,
     pub export_jpg: &'static str,
     pub export_jpg_tip: &'static str,
+    pub group_selection_tip: &'static str,
+    pub ungroup_selection_tip: &'static str,
     pub develop_tab_tip: &'static str,
     pub delete: &'static str,
     pub delete_selection_tip: &'static str,
@@ -462,6 +464,8 @@ pub struct Strings {
     pub open_folder_failed: fn(&str) -> String,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub preview_failed: fn(&str) -> String,
+    /// SPIKE: the group tiles' page, as first, last and group size.
+    pub group_page: fn(usize, usize, usize) -> String,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub folder_handle_missing: fn(&str) -> String,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -669,6 +673,8 @@ pub static EN: Strings = Strings {
     settings_from: |name| format!("from {name}"),
     export_jpg: "Export",
     export_jpg_tip: "Choose where and at what size, then export the selection as JPGs (X)",
+    group_selection_tip: "Stack the selected photos into one group (Cmd+G)",
+    ungroup_selection_tip: "Split the selected group back into single photos (Cmd+Shift+G)",
     develop_tab_tip: "Adjust the photo with sliders and masks",
     delete: "Delete",
     delete_selection_tip: if WEB {
@@ -1017,6 +1023,7 @@ pub static EN: Strings = Strings {
     wb_pick_brighter: "Pick a brighter, less saturated pixel for white balance",
     open_folder_failed: |e| format!("Couldn't open folder: {e}"),
     preview_failed: |path| format!("Unable to load Loupe preview for {path}"),
+    group_page: |first, last, n| format!("{first}–{last} of {n}"),
     folder_handle_missing: |dir| format!("Couldn't open {dir} \u{2014} folder handle missing"),
     list_folder_failed: |dir, e| format!("Couldn't list {dir}: {e}"),
     catalog_save_failed: |e| format!("Failed to save catalog entry: {e}"),
@@ -1183,6 +1190,8 @@ pub static ZH: Strings = Strings {
     settings_from: |name| format!("来自 {name}"),
     export_jpg: "导出",
     export_jpg_tip: "选择位置和尺寸，然后将所选照片导出为 JPG（X）",
+    group_selection_tip: "将所选照片编组（Cmd+G）",
+    ungroup_selection_tip: "取消所选编组（Cmd+Shift+G）",
     develop_tab_tip: "用滑块和蒙版调整照片",
     delete: "删除",
     delete_selection_tip: if WEB {
@@ -1506,6 +1515,7 @@ pub static ZH: Strings = Strings {
     wb_pick_brighter: "请选择更亮、饱和度更低的像素来设置白平衡",
     open_folder_failed: |e| format!("无法打开文件夹：{e}"),
     preview_failed: |path| format!("无法加载 {path} 的预览"),
+    group_page: |first, last, n| format!("{first}–{last} / {n} 张"),
     folder_handle_missing: |dir| format!("无法打开 {dir} \u{2014} 缺少文件夹句柄"),
     list_folder_failed: |dir, e| format!("无法列出 {dir}：{e}"),
     catalog_save_failed: |e| format!("无法保存目录条目：{e}"),

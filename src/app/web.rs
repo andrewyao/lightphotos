@@ -551,6 +551,8 @@ impl App {
     /// something is already shown for this photo. Whichever lands first
     /// paints, and the `Preview` replaces a `Speed` result. The same read also
     /// parses the photo's metadata if it is missing, see `WebExifJob`.
+    /// Then, with whatever read budget the wanted photo left, it requests a
+    /// `Preview` for each tile on the group's shown page that has none yet.
     /// Returns true if a read started.
     pub(crate) fn request_web_preview(&mut self) -> bool {
         let Some(path) = self.want.clone() else {
@@ -559,8 +561,11 @@ impl App {
         // The grid's selection is kept too: its metadata read for the info
         // panel is not a stale Loupe decode.
         let selected = self.selected_path();
+        let tiles = self.spike.as_ref().map_or(&[][..], |t| t.page_paths());
         if let Some(loader) = &mut self.loader {
-            let keep = |p: &Path| p == path || selected.as_deref() == Some(p);
+            let keep = |p: &Path| {
+                p == path || selected.as_deref() == Some(p) || tiles.iter().any(|t| t == p)
+            };
             for (kind, p, t) in loader.retain_web_loupe(keep) {
                 match kind {
                     JobKind::Speed => self.web_speed_inflight.remove(&(p, t)),
@@ -568,13 +573,38 @@ impl App {
                 };
             }
         }
+        let (quality_needed, speed_needed) = self.web_loupe_reads(&path);
+        let mut started = (quality_needed || speed_needed)
+            && self.start_web_preview_read(path.clone(), quality_needed, speed_needed);
+        let missing: Vec<PathBuf> = self
+            .spike
+            .iter()
+            .flat_map(|t| t.page_paths().iter().zip(&t.members))
+            .filter(|(p, slot)| slot.is_none() && **p != path)
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in missing {
+            if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
+                break;
+            }
+            if self.web_loupe_reads(&p).0 {
+                started |= self.start_web_preview_read(p, true, false);
+            }
+        }
+        started
+    }
+
+    /// Reads `path` and submits the `Preview` and `Speed` decodes asked for.
+    /// Returns true if a read started.
+    fn start_web_preview_read(
+        &mut self,
+        path: PathBuf,
+        quality_needed: bool,
+        speed_needed: bool,
+    ) -> bool {
         let target = self.preview_px();
         let key = (path.clone(), target);
         let is_raw = crate::image_decode::is_raw_extension(&path);
-        let (quality_needed, speed_needed) = self.web_loupe_reads(&path);
-        if !quality_needed && !speed_needed {
-            return false;
-        }
         // Shares the read budget with thumbnails. Callers retry every frame.
         if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
             return false;
@@ -843,14 +873,14 @@ impl App {
                             .into(),
                         );
                         self.web_preview_retries.remove(&key);
+                        self.web_preview_failed.insert(key);
                         if self.want.as_deref() == Some(path.as_path()) {
                             crate::analytics::decode_failed(&path, "preview");
+                            self.set_status(
+                                StatusKind::Error,
+                                (crate::i18n::t().preview_failed)(&path.display().to_string()),
+                            );
                         }
-                        self.web_preview_failed.insert(key);
-                        self.set_status(
-                            StatusKind::Error,
-                            (crate::i18n::t().preview_failed)(&path.display().to_string()),
-                        );
                     }
                 }
             }

@@ -321,7 +321,6 @@ pub(crate) struct App {
     /// SPIKE: the zoomed square's side as a fraction of the photo's short
     /// side. `LIGHTPHOTOS_SPIKE_SIDE` sets the start, 0.15 by default.
     pub(crate) spike_side: f32,
-    pub(crate) spike_frames: Vec<f32>,
     /// Last adjustments handed to the GPU. Tests run without a renderer, so
     /// this is the only way to assert what the loupe would actually show.
     #[cfg(test)]
@@ -963,7 +962,6 @@ impl App {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.15),
-            spike_frames: Vec::new(),
             crop_edit: None,
             compare: false,
             exif_cache: HashMap::new(),
@@ -1173,7 +1171,6 @@ impl App {
         crate::analytics::begin_frame();
         // Upload thumbnails before egui references them.
         self.sync_thumb_textures();
-        let spike_t0 = Instant::now();
         self.spike_sync();
 
         if self.hist_dirty && self.develop_open {
@@ -1344,26 +1341,7 @@ impl App {
             paint_jobs,
             screen_descriptor,
         };
-        let spike_t1 = Instant::now();
         let presented = renderer.render(primary_vp, compare_vp, Some(egui_paint));
-        if spike_on() {
-            // Pairs of (egui run + tessellate, render submit + present) per frame.
-            self.spike_frames
-                .push((spike_t1 - spike_t0).as_secs_f32() * 1000.0);
-            self.spike_frames
-                .push(spike_t1.elapsed().as_secs_f32() * 1000.0);
-            if self.spike_frames.len() == 240 {
-                let v = std::mem::take(&mut self.spike_frames);
-                let mut ui_ms: Vec<f32> = v.iter().step_by(2).copied().collect();
-                let mut render_ms: Vec<f32> = v.iter().skip(1).step_by(2).copied().collect();
-                ui_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                render_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                eprintln!(
-                    "spike: 120 frames ui ms p50={:.2} p95={:.2} max={:.2} | render(submit+present) ms p50={:.2} p95={:.2} max={:.2}",
-                    ui_ms[60], ui_ms[114], ui_ms[119], render_ms[60], render_ms[114], render_ms[119]
-                );
-            }
-        }
         // Retry an unpresentable surface so it draws once revealed. If winit
         // reports it occluded, wait for Occluded(false) instead of spinning.
         if !presented && !self.occluded {
@@ -1375,7 +1353,7 @@ impl App {
     /// group, the shown photo among them, requesting previews as needed. A
     /// photo in no group leaves `spike` empty, which keeps the Loupe whole.
     fn spike_sync(&mut self) {
-        if !spike_on() || self.mode != ViewMode::Loupe {
+        if self.mode != ViewMode::Loupe {
             return;
         }
         // `LIGHTPHOTOS_SPIKE_PX` caps the tile textures below the Loupe's size.
@@ -1408,21 +1386,37 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        let tiles = self.spike.get_or_insert_with(|| SpikeTiles {
-            key: (paths.clone(), px),
-            shown: shown.clone(),
-            members: vec![None; paths.len()],
-            opened: Instant::now(),
-            bytes: 0,
-            upload_ms: 0.0,
-            reported: false,
+        let tiles = self.spike.get_or_insert_with(|| {
+            let page = paths.iter().position(|p| *p == shown).unwrap_or(0) / SPIKE_PAGE;
+            SpikeTiles {
+                key: (paths.clone(), px),
+                shown: shown.clone(),
+                page,
+                members: Vec::new(),
+                loaded_page: usize::MAX,
+                sizes: HashMap::new(),
+                opened: Instant::now(),
+                bytes: 0,
+                upload_ms: 0.0,
+                reported: false,
+            }
         });
         tiles.shown = shown;
-        for (slot, path) in tiles.members.iter_mut().zip(&paths) {
+        if tiles.loaded_page != tiles.page {
+            for m in tiles.members.drain(..).flatten() {
+                r.free_thumb(m.1);
+            }
+            tiles.members = vec![None; tiles.page_paths().len()];
+            tiles.loaded_page = tiles.page;
+        }
+        let page_paths = tiles.page_paths().to_vec();
+        for (slot, path) in tiles.members.iter_mut().zip(&page_paths) {
             if slot.is_some() {
                 continue;
             }
             let Some(img) = loader.get_preview(path, px) else {
+                // On wasm32 `request_web_preview` requests these.
+                #[cfg(not(target_arch = "wasm32"))]
                 loader.request_preview(path.clone(), px);
                 continue;
             };
@@ -1431,6 +1425,7 @@ impl App {
                 tiles.upload_ms += t.elapsed().as_secs_f32() * 1000.0;
                 // Level 0 plus a full mip chain is 4/3 of it.
                 tiles.bytes += img.width as u64 * img.height as u64 * 4 * 4 / 3;
+                tiles.sizes.insert(path.clone(), (img.width, img.height));
                 *slot = Some((path.clone(), id, img.width, img.height));
             }
         }
@@ -1450,6 +1445,13 @@ impl App {
         for action in actions {
             match action {
                 ui::UiAction::SetGroupRep(path) => self.set_group_rep(&path),
+                ui::UiAction::GroupSelection => self.group_selected(),
+                ui::UiAction::UngroupSelection => self.ungroup_selected(),
+                ui::UiAction::SpikePage(page) => {
+                    if let Some(t) = self.spike.as_mut() {
+                        t.page = page.min(t.pages().saturating_sub(1));
+                    }
+                }
                 ui::UiAction::Select(pos) => {
                     if pos < self.visible.len() {
                         self.select_single(pos);
@@ -1674,11 +1676,6 @@ mod tests {
     }
 }
 
-/// SPIKE: `LIGHTPHOTOS_SPIKE=1` turns on the split Loupe and the tile pane.
-pub(crate) fn spike_on() -> bool {
-    std::env::var_os("LIGHTPHOTOS_SPIKE").is_some()
-}
-
 /// SPIKE: `LIGHTPHOTOS_SPIKE_PANE=paint` draws the pane with a bare painter
 /// as the first spike did; anything else allocates it inside a ScrollArea.
 pub(crate) fn spike_claims_pane() -> bool {
@@ -1686,12 +1683,45 @@ pub(crate) fn spike_claims_pane() -> bool {
 }
 
 pub(crate) struct SpikeTiles {
+    /// Every member of the group, and the preview size the textures were made at.
     key: (Vec<PathBuf>, u32),
     /// The member the Loupe shows, which the marker and the tile outline follow.
     pub(crate) shown: PathBuf,
+    /// Which `SPIKE_PAGE`-sized run of the members the pane shows. It starts
+    /// on the shown photo's run, but paging away leaves the representative
+    /// with no tile.
+    pub(crate) page: usize,
+    /// One slot per member of `page_paths`, filled once its texture uploads.
     pub(crate) members: Vec<Option<(PathBuf, egui::TextureId, u32, u32)>>,
+    /// The page `members` holds, so a page turn frees the old textures.
+    loaded_page: usize,
+    /// Pixel size of every member uploaded so far, which keeps the marker on
+    /// the shown photo when its tile is on another page.
+    pub(crate) sizes: HashMap<PathBuf, (u32, u32)>,
     opened: Instant,
     bytes: u64,
     upload_ms: f32,
     reported: bool,
+}
+
+/// SPIKE: tiles per page. The web build keeps fewer textures and decodes.
+#[cfg(target_arch = "wasm32")]
+pub(crate) const SPIKE_PAGE: usize = 4;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const SPIKE_PAGE: usize = 9;
+
+impl SpikeTiles {
+    pub(crate) fn group_len(&self) -> usize {
+        self.key.0.len()
+    }
+
+    pub(crate) fn pages(&self) -> usize {
+        self.group_len().div_ceil(SPIKE_PAGE)
+    }
+
+    /// The members on `page`, the last page possibly short.
+    pub(crate) fn page_paths(&self) -> &[PathBuf] {
+        let start = (self.page * SPIKE_PAGE).min(self.group_len());
+        &self.key.0[start..(start + SPIKE_PAGE).min(self.group_len())]
+    }
 }

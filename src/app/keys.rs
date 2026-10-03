@@ -1254,7 +1254,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_g_over_a_group_and_two_singles_makes_one_group() {
+    fn cmd_g_over_a_group_and_two_singles_changes_nothing() {
         let (mut app, _) = folder_app(6);
         group_photos(&mut app, &[1, 2, 3], 2);
         assert_eq!(app.visible, vec![0, 2, 4, 5]);
@@ -1263,12 +1263,9 @@ mod tests {
         press(&mut app, CMD, KeyCode::KeyG);
         assert_eq!(
             group_shapes(&app),
-            vec![shape(
-                &["0.jpg", "1.jpg", "2.jpg", "3.jpg", "4.jpg"],
-                "2.jpg"
-            )]
+            vec![shape(&["1.jpg", "2.jpg", "3.jpg"], "2.jpg")]
         );
-        assert_eq!(app.visible, vec![2, 5]);
+        assert_eq!(app.visible, vec![0, 2, 4, 5]);
     }
 
     #[test]

@@ -911,16 +911,23 @@ impl Renderer {
 
     /// SPIKE: upload an Srgb8 image as an egui user texture. `mipped` builds
     /// the mip chain through `mipgen.wgsl` and registers a sampler that reads
-    /// it; otherwise level 0 only with the plain linear sampler.
+    /// it; otherwise level 0 only with the plain linear sampler. A
+    /// `LinearF16` RAW, the decode off macOS, is encoded to sRGB8 first.
     pub fn upload_image_spike(
         &mut self,
         img: &DecodedImage,
         mipped: bool,
     ) -> Option<egui::TextureId> {
-        if img.pixel_format != PixelFormat::Srgb8 {
+        let rgba: std::borrow::Cow<[u8]> = match img.pixel_format {
+            PixelFormat::Srgb8 => std::borrow::Cow::Borrowed(&img.rgba),
+            PixelFormat::LinearF16 => {
+                std::borrow::Cow::Owned(crate::image_ops::linear_f16_to_srgb8(img))
+            }
+        };
+        let (w, h) = (img.width, img.height);
+        if rgba.len() < (4 * w * h) as usize {
             return None;
         }
-        let (w, h) = (img.width, img.height);
         let mip_count = if mipped {
             (32 - (w.max(h)).leading_zeros()).max(1)
         } else {
@@ -947,13 +954,13 @@ impl Renderer {
         let row = 4 * w;
         let padded_row = row.div_ceil(align) * align;
         let level0: std::borrow::Cow<[u8]> = if padded_row == row {
-            std::borrow::Cow::Borrowed(&img.rgba)
+            rgba
         } else {
             let mut padded = vec![0u8; (padded_row * h) as usize];
             for y in 0..h as usize {
                 let src = y * row as usize;
                 let dst = y * padded_row as usize;
-                padded[dst..dst + row as usize].copy_from_slice(&img.rgba[src..src + row as usize]);
+                padded[dst..dst + row as usize].copy_from_slice(&rgba[src..src + row as usize]);
             }
             std::borrow::Cow::Owned(padded)
         };
