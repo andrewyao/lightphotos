@@ -1,8 +1,9 @@
 use super::grid::{thumbnail_cell, STRIP_CELL_STYLE};
 use super::*;
 
+use super::form::{self, Button, Role};
 use crate::app::GRID_CELL_PT;
-use crate::app::{App, CropEdge, FocusLevel, Region};
+use crate::app::{spike_zoom_uv, App, CropEdge, FocusLevel, GroupView, Region, TileFidelity};
 use crate::image_decode;
 
 pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
@@ -94,6 +95,9 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     // Not a CentralPanel. egui treats the root UI's unused rect as "not over
     // egui" (`is_pointer_over_egui`), so zoom, pan, and clicks there reach the
     // app. A CentralPanel would claim that input.
+    if app.shown_in_group() {
+        egui::Panel::top("group_view_bar").show_inside(ui, |ui| group_view_bar(ui, app, out));
+    }
     let mut central = ui.available_rect_before_wrap();
     if app.spike.is_some() {
         if crate::app::spike_claims_pane() {
@@ -733,16 +737,75 @@ fn filmstrip_cell(
     response
 }
 
+/// Edit or Compare, over a grouped photo's Loupe.
+fn group_view_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = crate::i18n::t();
+    let choices = [
+        (GroupView::Edit, t.group_view_edit, None),
+        (GroupView::Compare, t.group_view_compare, None),
+    ];
+    let width = font_size::px(ui.style(), GROUP_VIEW_WIDTH).min(ui.available_width());
+    let picked = ui
+        .allocate_ui(egui::vec2(width, ui.spacing().interact_size.y), |ui| {
+            form::segmented(ui, &choices, app.group_view())
+        })
+        .inner;
+    if let Some(view) = picked.filter(|v| *v != app.group_view()) {
+        out.actions.push(UiAction::SetGroupView(view));
+    }
+}
+
+/// Wide enough for both labels in either language, and no wider, so the
+/// bar reads as a toggle rather than a page of tabs.
+const GROUP_VIEW_WIDTH: f32 = 200.0;
+
+/// The pane's header: the Speed or Full toggle on native, and Set as
+/// representative, live only while a pick other than the representative
+/// waits.
+fn spike_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = crate::i18n::t();
+    let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+    let layout = egui::Layout::right_to_left(egui::Align::Center);
+    ui.allocate_ui_with_layout(row, layout, |ui| {
+        let set = Button {
+            label: t.set_as_rep,
+            role: Role::Primary,
+            enabled: app.group_pick().is_some(),
+        };
+        if form::button(ui, &set).clicked() {
+            out.actions.push(UiAction::SetPickAsRep);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let choices = [
+                (TileFidelity::Speed, t.tile_speed, None),
+                (TileFidelity::Full, t.tile_full, None),
+            ];
+            if let Some(f) = form::segmented(ui, &choices, app.tile_fidelity())
+                .filter(|f| *f != app.tile_fidelity())
+            {
+                out.actions.push(UiAction::SetTileFidelity(f));
+            }
+        }
+    });
+}
+
 /// SPIKE: one tile per member on the group's current page, each sampling
-/// `spike_zoom_uv`. The shown photo is the representative and is outlined; a
-/// click on another tile makes that member the representative. A page holds
-/// `SPIKE_PAGE` tiles, and a group with more gets arrows under the grid. The
-/// grid keeps one size across pages, so a short last page leaves cells empty.
+/// the zoom square. The representative is outlined in the selection color
+/// and the picked member in the cursor color; a click on another tile picks
+/// it, and the header's button makes the pick the representative. A page
+/// holds `SPIKE_PAGE` tiles, and a group with more gets arrows under the
+/// grid. The grid keeps one size across pages, so a short last page leaves
+/// cells empty.
 fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let colors = theme::colors(ui.ctx());
     let Some(tiles) = app.spike.as_ref() else {
         return;
     };
+    spike_header(ui, app, out);
+    let square = app.spike_square();
+    let full = app.tile_fidelity() == TileFidelity::Full;
+    let pick = app.group_pick();
     let fit = tiles.group_len().clamp(1, crate::app::SPIKE_PAGE);
     let cols = (fit as f32).sqrt().ceil().max(1.0) as usize;
     let rows = fit.div_ceil(cols);
@@ -763,25 +826,40 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             for m in row {
                 let (rect, resp) =
                     ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click());
-                let Some((path, id, w, h)) = m else {
+                let Some(m) = m else {
                     ui.painter().rect_filled(rect, 0.0, colors.divider);
                     continue;
                 };
-                ui.painter().image(
-                    *id,
-                    rect,
-                    spike_zoom_uv(*w, *h, app.spike_center, app.spike_side),
-                    egui::Color32::WHITE,
-                );
-                let is_rep = *path == tiles.shown;
-                if !is_rep && resp.hovered() {
+                let (id, uv) = m.texture(square);
+                ui.painter().image(id, rect, uv, egui::Color32::WHITE);
+                if full && m.full_loading(square) {
+                    let side = font_size::px(ui.style(), 16.0);
+                    let at = egui::Rect::from_min_size(
+                        rect.right_top() + egui::vec2(-side - pad / 2.0, pad / 2.0),
+                        egui::vec2(side, side),
+                    );
+                    ui.painter().circle_filled(
+                        at.center(),
+                        side * 0.7,
+                        egui::Color32::from_black_alpha(140),
+                    );
+                    egui::Spinner::new()
+                        .size(side)
+                        .color(egui::Color32::WHITE)
+                        .paint_at(ui, at);
+                }
+                let is_rep = m.path == tiles.shown;
+                let picked = pick == Some(m.path.as_path());
+                if resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                if !is_rep && resp.clicked() {
-                    out.actions.push(UiAction::SetGroupRep(path.clone()));
+                if resp.clicked() {
+                    out.actions.push(UiAction::PickGroupTile(m.path.clone()));
                 }
                 let stroke = if is_rep {
                     egui::Stroke::new(3.0f32, colors.selection)
+                } else if picked {
+                    egui::Stroke::new(3.0f32, colors.cursor)
                 } else if resp.hovered() {
                     egui::Stroke::new(1.5f32, colors.cursor)
                 } else {
@@ -843,18 +921,6 @@ fn spike_page_nav(
             });
         },
     );
-}
-
-/// SPIKE: the square every tile samples, in uv of a `w`×`h` image, `side`
-/// of the short side across, centered on `center` and kept inside the image.
-fn spike_zoom_uv(w: u32, h: u32, center: egui::Pos2, side: f32) -> egui::Rect {
-    let short = w.min(h) as f32;
-    let half = egui::vec2(side * short / w as f32, side * short / h as f32) / 2.0;
-    let c = egui::pos2(
-        center.x.clamp(half.x, 1.0 - half.x),
-        center.y.clamp(half.y, 1.0 - half.y),
-    );
-    egui::Rect::from_min_max(c - half, c + half)
 }
 
 /// SPIKE: outline on the shown photo of the square the tiles zoom into. A

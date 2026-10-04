@@ -507,7 +507,14 @@ impl App {
             .as_ref()
             .is_some_and(|l| l.has_pending_image() || l.has_pending_exif())
             || self.selection_pending()
-            || catalog_load_pending;
+            || catalog_load_pending
+            || self.spike_wake_at().is_some();
+        if self
+            .spike_wake_at()
+            .is_some_and(|t| web_time::Instant::now() >= t)
+        {
+            self.request_redraw();
+        }
         #[cfg(target_arch = "wasm32")]
         let image_pending = image_pending || web_folder_pending || self.web_decode_pending();
 

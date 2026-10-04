@@ -353,6 +353,7 @@ impl App {
         // re-fits if the metadata isn't cached yet.
         if self.want.as_deref() != Some(path.as_path()) {
             self.source_size = self.exif_cache.get(&path).and_then(|m| m.source_size);
+            self.clear_group_pick();
         }
         self.want = Some(path);
         self.invalidate_selection();

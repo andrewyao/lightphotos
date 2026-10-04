@@ -321,6 +321,12 @@ pub(crate) struct App {
     /// SPIKE: the zoomed square's side as a fraction of the photo's short
     /// side. `LIGHTPHOTOS_SPIKE_SIDE` sets the start, 0.15 by default.
     pub(crate) spike_side: f32,
+    /// Whether a grouped photo's Loupe shows the group pane. Kept across
+    /// photos for the session, not saved.
+    group_view: GroupView,
+    tile_fidelity: TileFidelity,
+    /// The member a tile click picked, waiting for Set as representative.
+    pending_rep: Option<PathBuf>,
     /// Last adjustments handed to the GPU. Tests run without a renderer, so
     /// this is the only way to assert what the loupe would actually show.
     #[cfg(test)]
@@ -735,8 +741,10 @@ mod bulk_delete;
 mod catalog;
 mod crop;
 pub(crate) use crop::{CropAspect, CropOrientation};
+pub(crate) use group_compare::{spike_zoom_uv, GroupView, Square, Tile, TileFidelity};
 mod export;
 mod fonts;
+mod group_compare;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use export::ImmichLink;
 mod histogram;
@@ -962,6 +970,9 @@ impl App {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.15),
+            group_view: GroupView::default(),
+            tile_fidelity: TileFidelity::default(),
+            pending_rep: None,
             crop_edit: None,
             compare: false,
             exif_cache: HashMap::new(),
@@ -1351,9 +1362,16 @@ impl App {
 
     /// SPIKE: upload a mipped texture for each member of the shown photo's
     /// group, the shown photo among them, requesting previews as needed. A
-    /// photo in no group leaves `spike` empty, which keeps the Loupe whole.
+    /// photo in no group, or the Edit view, leaves `spike` empty, which keeps
+    /// the Loupe whole.
     fn spike_sync(&mut self) {
         if self.mode != ViewMode::Loupe {
+            return;
+        }
+        if self.group_view == GroupView::Edit {
+            if let (Some(tiles), Some(r)) = (self.spike.take(), self.renderer.as_mut()) {
+                tiles.free(r);
+            }
             return;
         }
         // `LIGHTPHOTOS_SPIKE_PX` caps the tile textures below the Loupe's size.
@@ -1361,6 +1379,7 @@ impl App {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| self.preview_px());
+        let square = self.spike_square();
         let (Some(shown), Some(pl)) = (self.selected_path(), self.playlist.as_ref()) else {
             return;
         };
@@ -1379,9 +1398,8 @@ impl App {
             .as_ref()
             .is_some_and(|t| t.key != (paths.clone(), px))
         {
-            for m in self.spike.take().unwrap().members.into_iter().flatten() {
-                r.free_thumb(m.1);
-            }
+            self.spike.take().unwrap().free(r);
+            self.pending_rep = None;
         }
         if paths.is_empty() {
             return;
@@ -1395,6 +1413,9 @@ impl App {
                 members: Vec::new(),
                 loaded_page: usize::MAX,
                 sizes: HashMap::new(),
+                square,
+                square_moved: Instant::now(),
+                wake_at: None,
                 opened: Instant::now(),
                 bytes: 0,
                 upload_ms: 0.0,
@@ -1403,10 +1424,10 @@ impl App {
         });
         tiles.shown = shown;
         if tiles.loaded_page != tiles.page {
-            for m in tiles.members.drain(..).flatten() {
-                r.free_thumb(m.1);
+            for t in tiles.members.drain(..).flatten() {
+                t.textures().for_each(|id| r.free_thumb(id));
             }
-            tiles.members = vec![None; tiles.page_paths().len()];
+            tiles.members = (0..tiles.page_paths().len()).map(|_| None).collect();
             tiles.loaded_page = tiles.page;
         }
         let page_paths = tiles.page_paths().to_vec();
@@ -1426,8 +1447,13 @@ impl App {
                 // Level 0 plus a full mip chain is 4/3 of it.
                 tiles.bytes += img.width as u64 * img.height as u64 * 4 * 4 / 3;
                 tiles.sizes.insert(path.clone(), (img.width, img.height));
-                *slot = Some((path.clone(), id, img.width, img.height));
+                *slot = Some(Tile::new(path.clone(), id, img.width, img.height));
             }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match self.tile_fidelity {
+            TileFidelity::Full => group_compare::sync_full_crops(tiles, square, loader, r),
+            TileFidelity::Speed => group_compare::drop_full_crops(tiles, r),
         }
         if !tiles.reported && tiles.members.iter().all(Option::is_some) {
             tiles.reported = true;
@@ -1441,17 +1467,28 @@ impl App {
         }
     }
 
+    /// When a Full re-crop is waiting on the zoom square to settle, the
+    /// moment it may start. No decode is in flight to wake the frame loop
+    /// then, so `pump` polls until it passes and redraws.
+    pub(crate) fn spike_wake_at(&self) -> Option<Instant> {
+        self.spike.as_ref()?.wake_at
+    }
+
     fn apply_ui_actions(&mut self, actions: Vec<ui::UiAction>) {
         for action in actions {
             match action {
-                ui::UiAction::SetGroupRep(path) => self.set_group_rep(&path),
                 ui::UiAction::GroupSelection => self.group_selected(),
                 ui::UiAction::UngroupSelection => self.ungroup_selected(),
                 ui::UiAction::SpikePage(page) => {
                     if let Some(t) = self.spike.as_mut() {
                         t.page = page.min(t.pages().saturating_sub(1));
                     }
+                    self.clear_group_pick();
                 }
+                ui::UiAction::SetGroupView(view) => self.set_group_view(view),
+                ui::UiAction::SetTileFidelity(f) => self.set_tile_fidelity(f),
+                ui::UiAction::PickGroupTile(path) => self.pick_group_tile(path),
+                ui::UiAction::SetPickAsRep => self.set_pick_as_rep(),
                 ui::UiAction::Select(pos) => {
                     if pos < self.visible.len() {
                         self.select_single(pos);
@@ -1692,12 +1729,17 @@ pub(crate) struct SpikeTiles {
     /// with no tile.
     pub(crate) page: usize,
     /// One slot per member of `page_paths`, filled once its texture uploads.
-    pub(crate) members: Vec<Option<(PathBuf, egui::TextureId, u32, u32)>>,
+    pub(crate) members: Vec<Option<Tile>>,
     /// The page `members` holds, so a page turn frees the old textures.
     loaded_page: usize,
     /// Pixel size of every member uploaded so far, which keeps the marker on
     /// the shown photo when its tile is on another page.
     pub(crate) sizes: HashMap<PathBuf, (u32, u32)>,
+    /// The zoom square as of the last sync, and when it last changed, which
+    /// Full waits on before cutting new crops.
+    square: Square,
+    square_moved: Instant,
+    wake_at: Option<Instant>,
     opened: Instant,
     bytes: u64,
     upload_ms: f32,
@@ -1711,6 +1753,12 @@ pub(crate) const SPIKE_PAGE: usize = 4;
 pub(crate) const SPIKE_PAGE: usize = 9;
 
 impl SpikeTiles {
+    fn free(self, r: &mut Renderer) {
+        for t in self.members.into_iter().flatten() {
+            t.textures().for_each(|id| r.free_thumb(id));
+        }
+    }
+
     pub(crate) fn group_len(&self) -> usize {
         self.key.0.len()
     }

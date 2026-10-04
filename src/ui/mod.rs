@@ -15,12 +15,17 @@ use crate::navigation::Cmp;
 #[derive(Debug, PartialEq)]
 pub enum UiAction {
     Select(usize),
-    /// Make this photo its group's representative, the one its cell shows.
-    SetGroupRep(std::path::PathBuf),
     GroupSelection,
     UngroupSelection,
     /// SPIKE: show this page of the group's tiles.
     SpikePage(usize),
+    SetGroupView(crate::app::GroupView),
+    SetTileFidelity(crate::app::TileFidelity),
+    /// Pick this member to become the representative, or clear the pick
+    /// when it is the representative or already picked.
+    PickGroupTile(std::path::PathBuf),
+    /// Make the picked member the representative.
+    SetPickAsRep,
     /// Cmd-click: toggle this cell in the multi-selection.
     SelectToggle(usize),
     /// Shift-click: extend the range selection to this cell.
