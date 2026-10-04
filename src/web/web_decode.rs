@@ -207,7 +207,7 @@ impl WebExportJob {
 /// decode, `true` is the full demosaic in `LinearF16`, which the renderer
 /// tonemaps on the GPU. It is ignored for non-RAW files.
 pub fn decode(
-    bytes: &[u8],
+    bytes: &Arc<Vec<u8>>,
     max_px: u32,
     is_raw: bool,
     quality: bool,
@@ -226,11 +226,7 @@ pub fn decode(
         if let Some(preview) = thumbnail::rawler_full_image_from_bytes(bytes, max_px) {
             return Ok(preview);
         }
-        return if quality {
-            crate::raw_preview::decode_raw_quality_from_bytes(bytes, max_px)
-        } else {
-            crate::raw_preview::decode_raw_fast_from_bytes(bytes, max_px)
-        };
+        return crate::raw_preview::decode_raw_from_shared_vec(Arc::clone(bytes), max_px, quality);
     }
     if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
         // Loupe jobs need more pixels than a small EXIF preview has.

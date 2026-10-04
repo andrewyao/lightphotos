@@ -584,7 +584,10 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
 /// thread and `catch_unwind` never returns. A decoder panic still runs the
 /// panic hook first, on the dying thread, and the hook uses that moment to
 /// send the job's failure, so the caller stops waiting, and to start a
-/// replacement thread, so the pool does not shrink one panic at a time.
+/// replacement thread, so the pool does not shrink one panic at a time. A
+/// failed allocation aborts the same way, through the alloc error hook
+/// instead. Either way the dying thread's memory is never freed, and its share
+/// of `decode_budget` is handed back here.
 #[cfg(target_arch = "wasm32")]
 mod panic_recovery {
     use super::{Job, JobResult, Worker};
@@ -595,14 +598,21 @@ mod panic_recovery {
         static FAILURE: RefCell<Option<JobResult>> = const { RefCell::new(None) };
     }
 
-    /// Chains onto the panic hook in place. Called once, from `main`, after
-    /// the console hook is set.
+    /// Chains onto the panic hook in place, and hooks failed allocations,
+    /// which abort without running the panic hook. Called once, from `main`,
+    /// after the console hook is set.
     pub(crate) fn install() {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             previous(info);
             on_panic();
         }));
+        std::alloc::set_alloc_error_hook(|layout| {
+            web_sys::console::error_1(
+                &format!("[loader] out of memory allocating {} bytes", layout.size()).into(),
+            );
+            on_panic();
+        });
     }
 
     pub(super) fn enter(worker: &Worker) {
@@ -632,6 +642,7 @@ mod panic_recovery {
     }
 
     fn on_panic() {
+        crate::decode_budget::release_held_by_this_thread();
         let Some(worker) = WORKER.with(|w| w.borrow_mut().take()) else {
             return;
         };

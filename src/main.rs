@@ -2,6 +2,8 @@
 // A console-subsystem program gets a console window of its own when launched
 // from Explorer. Debug builds keep it for their log output.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+// The wasm32 build is on nightly. See `loader::panic_recovery::install`.
+#![cfg_attr(target_arch = "wasm32", feature(alloc_error_hook))]
 
 //! LightPhotos, a fast Lightroom-lite photo culling and develop tool. This
 //! crate root owns `main()` and the winit event loop, which turns window events
@@ -48,6 +50,8 @@ mod presets;
 // code, none of which the browser build has, and the driver runs from the
 // native `main`. Gating the module the same way keeps `--features hotpath`
 // building for wasm32 instead of failing on APIs that target cannot have.
+#[path = "raw/decode_budget.rs"]
+mod decode_budget;
 #[cfg(all(feature = "hotpath", not(target_arch = "wasm32")))]
 mod profile;
 #[cfg(target_arch = "wasm32")]

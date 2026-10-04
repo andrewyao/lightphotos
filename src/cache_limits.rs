@@ -55,14 +55,15 @@ impl CacheLimits {
         decode_threads: usize::MAX,
     };
 
-    /// The same as native today, and the first arm to lower: a 32-bit address
-    /// space holds about 180 MB of thumbnails at 256, and a tab that runs out
-    /// of memory is killed rather than slowed down.
+    /// A 32-bit address space holds about 180 MB of thumbnails at 256, and a
+    /// tab that runs out of memory is killed rather than slowed down. A full
+    /// decode here is `LinearF16`, 8 bytes a pixel (360 MB at 45 MP), so only
+    /// the photo being zoomed is kept.
     #[cfg(target_arch = "wasm32")]
     pub const PLATFORM: CacheLimits = CacheLimits {
         thumbs: 256,
         previews: 8,
-        fulls: 3,
+        fulls: 1,
         decode_threads: 6,
     };
 

@@ -64,7 +64,8 @@ pub(crate) fn decode_raw_fast_from_bytes(
     bytes: &[u8],
     max_px: u32,
 ) -> Result<DecodedImage, String> {
-    decode_raw_preview_from_bytes(bytes, max_px, DemosaicMode::Fast)
+    let source = rawler::rawsource::RawSource::new_from_slice(bytes);
+    decode_raw_preview(source, max_px, DemosaicMode::Fast)
 }
 
 /// Decodes RAW bytes to the `Quality` preview: linear `LinearF16`, resized to
@@ -78,24 +79,52 @@ pub(crate) fn decode_raw_quality_from_bytes(
     bytes: &[u8],
     max_px: u32,
 ) -> Result<DecodedImage, String> {
-    decode_raw_preview_from_bytes(bytes, max_px, DemosaicMode::Quality)
+    let source = rawler::rawsource::RawSource::new_from_slice(bytes);
+    decode_raw_preview(source, max_px, DemosaicMode::Quality)
+}
+
+/// [`decode_raw_quality_from_bytes`] or, without `quality`,
+/// [`decode_raw_fast_from_bytes`], over bytes the caller already shares. The
+/// slice versions copy the whole file for rawler, and the copy lives as long
+/// as the decode.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn decode_raw_from_shared_vec(
+    bytes: std::sync::Arc<Vec<u8>>,
+    max_px: u32,
+    quality: bool,
+) -> Result<DecodedImage, String> {
+    let mode = if quality {
+        DemosaicMode::Quality
+    } else {
+        DemosaicMode::Fast
+    };
+    decode_raw_preview(
+        rawler::rawsource::RawSource::new_from_shared_vec(bytes),
+        max_px,
+        mode,
+    )
 }
 
 /// Shared body of [`decode_raw_fast_from_bytes`] and
 /// [`decode_raw_quality_from_bytes`].
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[hotpath::measure]
-fn decode_raw_preview_from_bytes(
-    bytes: &[u8],
+fn decode_raw_preview(
+    source: rawler::rawsource::RawSource,
     max_px: u32,
     mode: DemosaicMode,
 ) -> Result<DecodedImage, String> {
     use rawler::rawimage::RawPhotometricInterpretation;
 
-    let source = rawler::rawsource::RawSource::new_from_slice(bytes);
     crate::image_decode::check_rawler_size_limit(&source)?;
     let params = rawler::decoders::RawDecodeParams::default();
     let orientation = real_orientation(&source, &params);
+
+    // Taken before rawler's own decode, which already allocates at sensor
+    // size, and held until this decode returns. The sensor size is unknown
+    // until rawler has decoded, so this first ask is sized from the file.
+    #[cfg(target_arch = "wasm32")]
+    let mut grant = crate::decode_budget::acquire(file_estimate(source.len(), mode));
 
     let mut raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rawler::decode(&source, &params)
@@ -116,6 +145,20 @@ fn decode_raw_preview_from_bytes(
         ));
     }
 
+    crate::image_decode::normalize_linear_levels(&mut raw)?;
+    // A file smaller than its sensor (a lossy RAW) asked for too little.
+    // Asking again for the whole amount, rather than the difference while
+    // holding the first grant, keeps two decodes from each waiting on the
+    // other.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let needed = scratch_estimate(&raw, mode);
+        if needed > grant.bytes() {
+            drop(grant);
+            grant = crate::decode_budget::acquire(needed);
+        }
+    }
+
     let (w, h, rgba) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         raw.apply_scaling().map_err(|e| e.to_string())?;
         demosaic_preview(&mut raw, orientation, mode, max_px).ok_or_else(|| {
@@ -133,7 +176,7 @@ fn decode_raw_preview_from_bytes(
     }
 
     if mode == DemosaicMode::Quality && raw.cpp != 3 {
-        let (nw, nh, rgba) = resize_linear_f16(&rgba, w, h, max_px);
+        let (nw, nh, rgba) = resize_linear_f16(rgba, w, h, max_px);
         return Ok(DecodedImage::new_tracked(DecodedImageFields {
             width: nw,
             height: nh,
@@ -164,6 +207,59 @@ fn decode_raw_preview_from_bytes(
         rgba,
         pixel_format: PixelFormat::Srgb8,
     }))
+}
+
+/// True when a `Quality` decode can demosaic Bayer data with the half-size
+/// superpixel instead of full-size PPG. When `max_px` is at most half the
+/// sensor, the PPG result would be shrunk at least 2x straight away, so the
+/// detail it adds is lost. On wasm32, also true past 64 MP: PPG's RGB output
+/// is 12 bytes a pixel, a single 1.2 GB allocation at 100 MP, and a 4 GB heap
+/// that already holds thumbnails rarely has a hole that big.
+fn half_res_is_enough(area: rawler::imgop::Rect, max_px: u32) -> bool {
+    let long_side = area.d.w.max(area.d.h);
+    long_side >= 2 * max_px as usize
+        || (cfg!(target_arch = "wasm32") && area.d.w * area.d.h > 64_000_000)
+}
+
+/// Crops a row-major `width`-wide buffer to `crop` without a second buffer.
+/// Each kept row moves to an index at or before where it was, so rows are
+/// moved top to bottom. A 45 MP RGB f32 buffer is 550 MB, so a copying crop
+/// can push a wasm32 heap past 4 GB.
+fn crop_in_place<T: Copy>(data: &mut Vec<T>, width: usize, crop: rawler::imgop::Rect) {
+    for row in 0..crop.d.h {
+        let src = (crop.p.y + row) * width + crop.p.x;
+        data.copy_within(src..src + crop.d.w, row * crop.d.w);
+    }
+    data.truncate(crop.d.w * crop.d.h);
+}
+
+/// Most memory [`decode_raw_preview`] holds at once, from the sensor size:
+/// rawler's u16 sensor buffer, then what the steps after it allocate,
+/// measured at about 17 bytes a pixel for a 45 MP Bayer `Quality` decode (the
+/// f32 mosaic, PPG's RGB output and its scratch, then the f16 output).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn scratch_estimate(raw: &rawler::RawImage, mode: DemosaicMode) -> usize {
+    let pixels = raw.width.saturating_mul(raw.height);
+    let per_pixel = 2 * raw.cpp
+        + match mode {
+            DemosaicMode::Quality => 12 + 6 * raw.cpp,
+            DemosaicMode::Fast => 4 + 4 * raw.cpp,
+        };
+    pixels.saturating_mul(per_pixel)
+}
+
+/// [`scratch_estimate`] plus rawler's own decode, guessed from the file size
+/// before the sensor size is known. Compressed RAWs take a byte or more a
+/// pixel, so this rarely asks for too little; [`decode_raw_preview`] asks
+/// again when it does.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn file_estimate(file_len: usize, mode: DemosaicMode) -> usize {
+    // rawler's u16 sensor buffer is 2 bytes a pixel; a Bayer file has cpp 1.
+    let per_pixel = 2 + match mode {
+        DemosaicMode::Quality => 18,
+        DemosaicMode::Fast => 8,
+    };
+    file_len.saturating_mul(per_pixel)
 }
 
 /// Short label for error messages. The `Debug` output of the `Cfa` case
@@ -267,10 +363,10 @@ fn apply_orientation(
 /// more accurate than resizing gamma-encoded values, which darkens edges.
 /// Returns the input unchanged when it already fits.
 #[hotpath::measure]
-fn resize_linear_f16(rgba: &[u8], w: u32, h: u32, max_px: u32) -> (u32, u32, Vec<u8>) {
+fn resize_linear_f16(rgba: Vec<u8>, w: u32, h: u32, max_px: u32) -> (u32, u32, Vec<u8>) {
     let (out_w, out_h) = fit_within(w, h, max_px);
     if (out_w, out_h) == (w, h) {
-        return (w, h, rgba.to_vec());
+        return (w, h, rgba);
     }
     let (w, h) = (w as usize, h as usize);
     let (out_w, out_h) = (out_w as usize, out_h as usize);
@@ -304,16 +400,20 @@ fn resize_linear_f16(rgba: &[u8], w: u32, h: u32, max_px: u32) -> (u32, u32, Vec
 }
 
 /// Box-average downsample of linear RGB to `(out_w, out_h)`, using the same
-/// boxes as [`resize_linear_f16`].
+/// boxes as [`resize_linear_f16`]. Works in place: the box for output pixel
+/// `oy * out_w + ox` starts at source pixel `y0 * w + x0`, with `y0 >= oy`,
+/// `x0 >= ox` and `w >= out_w`, so every write lands at or before the first
+/// source pixel any later output reads. A 45 MP RGB f32 buffer is 550 MB, so
+/// a second one can push a wasm32 heap past 4 GB.
 #[hotpath::measure]
-fn box_downsample_rgb(
-    pixels: &[[f32; 3]],
+pub(crate) fn box_downsample_rgb(
+    mut pixels: Vec<[f32; 3]>,
     w: usize,
     h: usize,
     out_w: usize,
     out_h: usize,
 ) -> Vec<[f32; 3]> {
-    let mut out = vec![[0f32; 3]; out_w * out_h];
+    debug_assert!(out_w <= w && out_h <= h);
     for oy in 0..out_h {
         let y0 = oy * h / out_h;
         let y1 = ((oy + 1) * h / out_h).max(y0 + 1).min(h);
@@ -331,10 +431,11 @@ fn box_downsample_rgb(
                     n += 1;
                 }
             }
-            out[oy * out_w + ox] = sum.map(|s| s / n.max(1) as f32);
+            pixels[oy * out_w + ox] = sum.map(|s| s / n.max(1) as f32);
         }
     }
-    out
+    pixels.truncate(out_w * out_h);
+    pixels
 }
 
 /// Camera RGB to linear sRGB matrix. Reimplements rawler's
@@ -618,23 +719,28 @@ pub(crate) fn demosaic_cfa(
         area
     };
 
+    let half_res = mode == DemosaicMode::Fast || half_res_is_enough(area, max_px);
     let demosaiced = if is_xtrans {
         // rawler 0.7.2 has no X-Trans demosaic. `PPGDemosaic` does not panic
         // on it because it reads colors via `cfa.color_at()`, but it assumes
         // Bayer neighborhoods, so the result is soft.
         PPGDemosaic::new().demosaic(&pixels, &cfa, &colors, area)
     } else {
-        match mode {
-            DemosaicMode::Fast => Superpixel3Channel::new().demosaic(&pixels, &cfa, &colors, area),
-            DemosaicMode::Quality => PPGDemosaic::new().demosaic(&pixels, &cfa, &colors, area),
+        if half_res {
+            Superpixel3Channel::new().demosaic(&pixels, &cfa, &colors, area)
+        } else {
+            PPGDemosaic::new().demosaic(&pixels, &cfa, &colors, area)
         }
     };
+    // The mosaic is 4 bytes a sensor pixel (183 MB at 45 MP). Free it before
+    // the steps below allocate, since wasm32 shares one 4 GB heap.
+    drop(pixels);
 
     // Match `RawDevelop`'s `CropDefault` step: crop to `raw.crop_area`, the
     // DNG default display rectangle, which is often tighter than the active
     // area. Skipping it lets dark edge pixels into the mip chain and darkens
     // the fitted view. `crop_area` is in sensor coordinates, so adapt it to the
-    // active area and halve it for `Fast`'s quarter-res bin. X-Trans is
+    // active area and halve it for the superpixel's quarter-res bin. X-Trans is
     // skipped because its demosaic ran in reduced coordinates.
     let demosaiced = match (!is_xtrans)
         .then(|| raw.crop_area.or(Some(original_active_area)))
@@ -644,19 +750,17 @@ pub(crate) fn demosaic_cfa(
             if crop.d != rawler::imgop::Dim2::new(demosaiced.width, demosaiced.height) =>
         {
             crop = crop.adapt(&original_active_area);
-            if mode == DemosaicMode::Fast {
+            if half_res {
                 crop.scale(0.5);
             }
             // A crop that does not fit (bad metadata) means no crop.
             let fits =
                 crop.p.x + crop.d.w <= demosaiced.width && crop.p.y + crop.d.h <= demosaiced.height;
             if fits && !crop.is_empty() {
-                let cropped = rawler::imgop::crop(
-                    demosaiced.pixels(),
-                    rawler::imgop::Dim2::new(demosaiced.width, demosaiced.height),
-                    crop,
-                );
-                rawler::pixarray::Color2D::new_with(cropped, crop.d.w, crop.d.h)
+                let width = demosaiced.width;
+                let mut data = demosaiced.into_inner();
+                crop_in_place(&mut data, width, crop);
+                rawler::pixarray::Color2D::new_with(data, crop.d.w, crop.d.h)
             } else {
                 demosaiced
             }
@@ -676,29 +780,12 @@ pub(crate) fn demosaic_cfa(
         .map(|(w, h)| (w as usize, h as usize))
         .filter(|&target| target != (full_w, full_h));
     let (w, h) = downsample_target.unwrap_or((full_w, full_h));
-    let shrunk_pixels;
-    let source_pixels: &[[f32; 3]] = match downsample_target {
+    let demosaiced = demosaiced.into_inner();
+    let demosaic_pixels = match downsample_target {
         Some((target_w, target_h)) => {
-            shrunk_pixels =
-                box_downsample_rgb(demosaiced.pixels(), full_w, full_h, target_w, target_h);
-            &shrunk_pixels
+            box_downsample_rgb(demosaiced, full_w, full_h, target_w, target_h)
         }
-        None => demosaiced.pixels(),
-    };
-
-    // Auto-denoise (`AUTO_RAW_DENOISE_STRENGTH`), `Quality` only. Runs on
-    // linear camera RGB before white balance and the color matrix.
-    let denoised_quality;
-    let demosaic_pixels: &[[f32; 3]] = if mode == DemosaicMode::Quality {
-        denoised_quality = crate::develop::denoise_linear_rgb_buffer(
-            crate::image_decode::AUTO_RAW_DENOISE_STRENGTH,
-            w,
-            h,
-            source_pixels,
-        );
-        &denoised_quality
-    } else {
-        source_pixels
+        None => demosaiced,
     };
 
     // White balance comes after demosaic, as in `RawDevelop`, because PPG's
@@ -713,7 +800,18 @@ pub(crate) fn demosaic_cfa(
             }
         }
         DemosaicMode::Quality => {
-            for (i, &rgb) in demosaic_pixels.iter().enumerate() {
+            // Auto-denoise (`AUTO_RAW_DENOISE_STRENGTH`) on linear camera RGB,
+            // before white balance and the color matrix. Denoised pixels go
+            // straight into `rgba` rather than a second full-size buffer.
+            for i in 0..w * h {
+                let rgb = crate::develop::denoise_linear_rgb_pixel(
+                    crate::image_decode::AUTO_RAW_DENOISE_STRENGTH,
+                    w,
+                    h,
+                    &demosaic_pixels,
+                    i % w,
+                    i / w,
+                );
                 let balanced = [rgb[0] * wb[0], rgb[1] * wb[1], rgb[2] * wb[2]];
                 let px = render_rgb_sample_linear_bytes(balanced, &cam2rgb);
                 rgba[i * 8..i * 8 + 8].copy_from_slice(&px);

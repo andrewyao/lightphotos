@@ -72,6 +72,45 @@ pub(crate) fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> 
     Ok(())
 }
 
+/// rawler 0.7.2's `apply_scaling` panics on a Linear DNG whose black level
+/// count differs from its white level count. The Samsung Galaxy S23 Ultra
+/// writes a 2x2 `BlackLevelRepeatDim` (12 levels for 3 channels) against 3
+/// white levels. This averages the repeat down to one black level per channel
+/// and widens a single white level to every channel, or refuses the file when
+/// the levels still don't line up. Must run before `apply_scaling` or
+/// `RawDevelop`, since a panic is fatal to a wasm32 decode thread.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+pub(crate) fn normalize_linear_levels(raw: &mut rawler::RawImage) -> Result<(), String> {
+    use rawler::rawimage::{BlackLevel, RawPhotometricInterpretation, WhiteLevel};
+
+    if !matches!(raw.photometric, RawPhotometricInterpretation::LinearRaw) {
+        return Ok(());
+    }
+    let cpp = raw.cpp;
+    let black = raw.blacklevel.as_vec();
+    let white = &raw.whitelevel.0;
+    if black.len() == white.len() {
+        return Ok(());
+    }
+    if cpp == 0 || black.len() % cpp != 0 || !(white.len() == 1 || white.len() == cpp) {
+        return Err(format!(
+            "unsupported RAW levels ({} black, {} white, cpp={cpp})",
+            black.len(),
+            white.len()
+        ));
+    }
+    // Levels are stored position-major: `levels[pos * cpp + channel]`.
+    let positions = black.len() / cpp;
+    let per_channel: Vec<f32> = (0..cpp)
+        .map(|c| (0..positions).map(|p| black[p * cpp + c]).sum::<f32>() / positions as f32)
+        .collect();
+    raw.blacklevel = BlackLevel::new(&per_channel, 1, 1, cpp);
+    if white.len() == 1 {
+        raw.whitelevel = WhiteLevel(vec![white[0]; cpp]);
+    }
+    Ok(())
+}
+
 /// Decodes a RAW/DNG file to rawler's undeveloped `RawImage`: sensor samples
 /// with no white balance, color matrix, or gamma. Still mosaiced (cpp=1) for
 /// Bayer/X-Trans files, already RGB (cpp=3/4) for Linear DNG.
@@ -178,7 +217,8 @@ fn decode_raw_nonmac_from_source(
 ) -> Result<DecodedImage, String> {
     check_rawler_size_limit(&source)?;
     let params = rawler::decoders::RawDecodeParams::default();
-    let raw = rawler::decode(&source, &params).map_err(|e| e.to_string())?;
+    let mut raw = rawler::decode(&source, &params).map_err(|e| e.to_string())?;
+    normalize_linear_levels(&mut raw)?;
     let orientation = rawler::get_decoder(&source)
         .ok()
         .and_then(|decoder| decoder.raw_metadata(&source, &params).ok())

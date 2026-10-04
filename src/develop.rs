@@ -593,15 +593,27 @@ pub(crate) fn denoise_linear_rgb_buffer(
     }
     (0..height)
         .flat_map(|y| {
-            (0..width).map(move |x| {
-                denoise_sample_with_strength(strength, |dx, dy| {
-                    let sx = (x as i64 + dx as i64).clamp(0, width as i64 - 1) as usize;
-                    let sy = (y as i64 + dy as i64).clamp(0, height as i64 - 1) as usize;
-                    buf[sy * width + sx]
-                })
-            })
+            (0..width).map(move |x| denoise_linear_rgb_pixel(strength, width, height, buf, x, y))
         })
         .collect()
+}
+
+/// One pixel of [`denoise_linear_rgb_buffer`], for callers that consume
+/// pixels as they go and cannot afford a second full-size buffer.
+#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+pub(crate) fn denoise_linear_rgb_pixel(
+    strength: f32,
+    width: usize,
+    height: usize,
+    buf: &[[f32; 3]],
+    x: usize,
+    y: usize,
+) -> [f32; 3] {
+    denoise_sample_with_strength(strength, |dx, dy| {
+        let sx = (x as i64 + dx as i64).clamp(0, width as i64 - 1) as usize;
+        let sy = (y as i64 + dy as i64).clamp(0, height as i64 - 1) as usize;
+        buf[sy * width + sx]
+    })
 }
 
 #[cfg(test)]

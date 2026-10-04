@@ -1445,6 +1445,32 @@ mod tests {
         );
     }
 
+    /// The Samsung Galaxy S23 Ultra's Linear DNG has a 2x2 black level repeat
+    /// (12 levels) against 3 white levels, which panics rawler's
+    /// `apply_scaling` and kills a wasm32 decode thread.
+    #[test]
+    fn linear_dng_with_repeating_black_level_scales_without_panicking() {
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_linear_black_repeat_dng_test_{}.dng",
+            std::process::id()
+        ));
+        write_linear_dng(&path, 16, 12).expect("write_linear_dng failed");
+        let bytes = std::fs::read(&path).expect("read fixture bytes");
+        let _ = std::fs::remove_file(&path);
+
+        let source = rawler::rawsource::RawSource::new_from_slice(&bytes);
+        let params = rawler::decoders::RawDecodeParams::default();
+        let mut raw = rawler::decode(&source, &params).expect("rawler::decode failed on fixture");
+        assert_eq!(raw.cpp, 3);
+        let levels: [u16; 12] = [10, 20, 30, 12, 22, 32, 14, 24, 34, 16, 26, 36];
+        raw.blacklevel = rawler::rawimage::BlackLevel::new(&levels, 2, 2, 3);
+        raw.whitelevel = rawler::rawimage::WhiteLevel(vec![65535; 3]);
+
+        image_decode::normalize_linear_levels(&mut raw).expect("levels should normalize");
+        assert_eq!(raw.blacklevel.as_vec(), vec![13.0, 23.0, 33.0]);
+        raw.apply_scaling().expect("apply_scaling failed");
+    }
+
     /// `Quality` (PPG) demosaic runs without panicking and yields finite,
     /// non-black f16 output at 8 bytes per pixel.
     #[test]
