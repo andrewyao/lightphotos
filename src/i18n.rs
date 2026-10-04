@@ -466,6 +466,14 @@ pub struct Strings {
     pub preview_failed: fn(&str) -> String,
     /// SPIKE: the group tiles' page, as first, last and group size.
     pub group_page: fn(usize, usize, usize) -> String,
+    pub group_view_edit: &'static str,
+    pub group_view_compare: &'static str,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub tile_speed: &'static str,
+    /// Names its cost, so the person knows why the tiles take a moment.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub tile_full: &'static str,
+    pub set_as_rep: &'static str,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub folder_handle_missing: fn(&str) -> String,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -1024,6 +1032,11 @@ pub static EN: Strings = Strings {
     open_folder_failed: |e| format!("Couldn't open folder: {e}"),
     preview_failed: |path| format!("Unable to load Loupe preview for {path}"),
     group_page: |first, last, n| format!("{first}–{last} of {n}"),
+    group_view_edit: "Edit",
+    group_view_compare: "Compare",
+    tile_speed: "Speed",
+    tile_full: "Full (Slower)",
+    set_as_rep: "Set as representative",
     folder_handle_missing: |dir| format!("Couldn't open {dir} \u{2014} folder handle missing"),
     list_folder_failed: |dir, e| format!("Couldn't list {dir}: {e}"),
     catalog_save_failed: |e| format!("Failed to save catalog entry: {e}"),
@@ -1516,6 +1529,11 @@ pub static ZH: Strings = Strings {
     open_folder_failed: |e| format!("无法打开文件夹：{e}"),
     preview_failed: |path| format!("无法加载 {path} 的预览"),
     group_page: |first, last, n| format!("{first}–{last} / {n} 张"),
+    group_view_edit: "编辑",
+    group_view_compare: "比较",
+    tile_speed: "快速",
+    tile_full: "完整（较慢）",
+    set_as_rep: "设为代表照片",
     folder_handle_missing: |dir| format!("无法打开 {dir} \u{2014} 缺少文件夹句柄"),
     list_folder_failed: |dir, e| format!("无法列出 {dir}：{e}"),
     catalog_save_failed: |e| format!("无法保存目录条目：{e}"),
