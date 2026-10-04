@@ -954,6 +954,12 @@ impl Loader {
         !self.exif_inflight.is_empty()
     }
 
+    /// True while the full decode of `path` is queued or running.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn full_inflight(&self, path: &Path) -> bool {
+        self.inflight.contains(path)
+    }
+
     pub fn get_full(&self, path: &Path) -> Option<Arc<DecodedImage>> {
         self.cache.get(path).cloned()
     }
