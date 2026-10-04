@@ -201,7 +201,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # No toolchain action: build-web.sh installs the dated nightly that
+      # No toolchain action: setup-web.sh installs the dated nightly that
       # scripts/web-env.sh pins, with rust-src and the wasm target, through the
       # runner's own rustup.
 
@@ -228,12 +228,12 @@ jobs:
             | tar -xzf - -C "$HOME/.local/bin" trunk
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # index.html has trunk copy the full Noto Sans SC into the build, and the
-      # 8 MB file is not committed, so trunk fails without it.
-      - name: Fetch CJK font
-        run: ./scripts/fetch-cjk-font.sh
+      # The pinned nightly, plus the full Noto Sans SC that index.html has trunk
+      # copy into the build (8 MB, not committed, so trunk fails without it).
+      - name: Web setup
+        run: ./scripts/setup-web.sh
 
       # Always --release. A debug wasm build is 10-30x slower at RAW decode and
       # produces a ~10x larger bg.wasm, so it is not the artifact worth gating.
       - name: Build
-        run: ./scripts/build-web.sh
+        run: source scripts/web-env.sh && trunk build --release --config Trunk.toml

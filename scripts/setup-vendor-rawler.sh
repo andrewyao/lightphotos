@@ -26,6 +26,7 @@
 # Usage:
 #   scripts/setup-vendor-rawler.sh           ensure the tree exists (no-op if it does)
 #   scripts/setup-vendor-rawler.sh --force   wipe and regenerate from crates.io
+#   scripts/setup-vendor-rawler.sh --check   exit 1 unless the tree is set up with the current patches
 #
 # Bumping the pinned version is a deliberate edit here + a re-check that
 # every patch in PATCHES still applies. Adding a patch changes the sentinel,
@@ -43,6 +44,11 @@ STAMP="rawler $CRATE_VERSION + $PATCHES"
 
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
+
+if [ "${1:-}" = "--check" ]; then
+  [ -f "$SENTINEL" ] && [ "$(cat "$SENTINEL")" = "$STAMP" ]
+  exit
+fi
 
 if [ -d "$DEST" ]; then
   if [ "$FORCE" -eq 1 ]; then

@@ -10,6 +10,9 @@
 # public/app.html. Also copies the app icons to public/ and links them from
 # app.html. Does NOT commit or push in the site repo — review the diff there
 # and do that yourself.
+#
+# Run scripts/setup-web.sh first; this stops with a pointer to it if a setup
+# step is missing.
 
 set -euo pipefail
 
@@ -23,7 +26,31 @@ if [[ ! -f "$SITE_PUBLIC/app.html" ]]; then
   exit 1
 fi
 
-"$ROOT/scripts/build-web.sh"
+cd "$ROOT"
+source "$ROOT/scripts/web-env.sh"
+
+missing() {
+  echo "error: $1; run ./scripts/setup-web.sh" >&2
+  exit 1
+}
+
+command -v trunk >/dev/null 2>&1 || missing "trunk not found"
+# Checked first because querying a missing toolchain makes rustup install it.
+rustup toolchain list | grep -q "^$WEB_TOOLCHAIN-" \
+  || missing "$WEB_TOOLCHAIN is not installed"
+rustup target list --toolchain "$WEB_TOOLCHAIN" --installed 2>/dev/null \
+  | grep -qx wasm32-unknown-unknown \
+  || missing "$WEB_TOOLCHAIN has no wasm32-unknown-unknown target"
+rustup component list --toolchain "$WEB_TOOLCHAIN" --installed 2>/dev/null \
+  | grep -qx rust-src \
+  || missing "$WEB_TOOLCHAIN has no rust-src"
+"$ROOT/scripts/setup-vendor-rawler.sh" --check \
+  || missing "vendored rawler is missing or out of date"
+[[ -f assets/fonts/NotoSansSC-Regular.otf ]] || missing "the full Chinese font is missing"
+
+# Always --release: a debug wasm build is 10-30x slower at RAW decode.
+echo "==> Building (trunk build --release)"
+trunk build --release --config "$ROOT/Trunk.toml"
 
 DIST="$ROOT/dist"
 NEW_JS="$(find "$DIST" -maxdepth 1 -name 'lightphotos-*.js' -not -name '*_bg.wasm' | head -1)"

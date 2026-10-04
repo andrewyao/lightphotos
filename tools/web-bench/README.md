@@ -10,7 +10,7 @@ each, and hands the folder to the app through `window.__lpTestRoot`, which
 `web_fs::pick_and_list_folder` checks before opening the picker.
 
 ```sh
-./scripts/build-web.sh
+source scripts/web-env.sh && trunk build --release --config Trunk.toml
 ln -sfn /path/to/a/folder/of/jpegs dist/bench
 python3 tools/web-bench/serve.py 8801 dist &
 ```

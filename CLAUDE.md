@@ -8,15 +8,15 @@ LightPhotos: a fast macOS Lightroom-lite photo culling & develop tool, written i
 
 ## Commands
 
-Per-clone setup, before any `cargo` command below: `./scripts/setup-vendor-rawler.sh` (safe to re-run — no-op once the tree is present; `--force` regenerates it). `[patch.crates-io]` in `Cargo.toml` redirects the `rawler` crate (camera RAW decode) to a local patched copy at `vendor/rawler-0.7.2` for every target, not just wasm32 (Cargo has no way to scope a patch to one target) — see that entry's own comment for why. The script fetches plain rawler 0.7.2 from crates.io and applies `patches/rawler-web-time.patch` and `patches/rawler-ljpeg-restart.patch`, and regenerates a tree set up with a different patch list. `vendor/` isn't committed (see `.gitignore`), so a cold clone needs network to crates.io before its first build; `bundle.sh` and `deploy-web.sh` run the script for you.
+Per-clone setup, before any `cargo` command below: `./scripts/setup.sh` (`./scripts/setup-web.sh` for the browser build, which runs it too). It calls `./scripts/setup-vendor-rawler.sh` (safe to re-run — no-op once the tree is present; `--force` regenerates it; `--check` exits non-zero when the tree is missing or stale, which `build.sh` and `deploy-web.sh` use). `[patch.crates-io]` in `Cargo.toml` redirects the `rawler` crate (camera RAW decode) to a local patched copy at `vendor/rawler-0.7.2` for every target, not just wasm32 (Cargo has no way to scope a patch to one target) — see that entry's own comment for why. The script fetches plain rawler 0.7.2 from crates.io and applies `patches/rawler-web-time.patch` and `patches/rawler-ljpeg-restart.patch`, and regenerates a tree set up with a different patch list. `vendor/` isn't committed (see `.gitignore`), so a cold clone needs network to crates.io before its first build; `release.sh` and `make-dmg.sh` run it for you.
 
 ```sh
-cargo build --release   # release binary at target/release/lightphotos (opt-level 3, thin LTO — matters for decode/render throughput)
+./scripts/build.sh release   # = cargo build --release; release binary at target/release/lightphotos (opt-level 3, thin LTO — matters for decode/render throughput)
 cargo build              # debug build; works but noticeably slower at runtime
 cargo test                # run all unit tests (tests live inline in each module, #[cfg(test)])
 cargo test <name>         # run a single test by name substring, e.g. `cargo test burst::`
 cargo build --bins        # also builds the face_probe/seg_probe harnesses; see below
-./scripts/bundle.sh       # build release + assemble LightPhotos.app + register with Launch Services (lsregister)
+./scripts/make-dmg.sh aarch64-apple-darwin out.dmg   # build release, assemble + ad-hoc sign LightPhotos.app, wrap in a .dmg (release.yml runs it per target)
 ./scripts/release.sh      # test, tag origin/main as the next patch (or pass v1.2.3), push the tag → release.yml builds and publishes
 ```
 
@@ -39,12 +39,13 @@ stays out of CI, since `release.yml` covers it when a tag is pushed.
 The wasm32 (browser) build goes through `trunk`, on a dated nightly, with its environment in `scripts/web-env.sh`. The decode workers run as wasm threads over one shared memory, which needs std rebuilt with atomics (`-Z build-std`), hence the nightly; native stays on stable. The same file sets the unstable-apis cfg for the wgpu/WebGPU and File System Access bindings, which `Trunk.toml`'s `rustflags` key does *not* reach cargo with in trunk 0.21.14, and the shared-memory link arguments. The page must be cross-origin isolated (COOP/COEP) for `SharedArrayBuffer`: `trunk serve` sends the headers from `Trunk.toml`, and `deploy-web.sh` writes them into the site's `public/_headers`. Move the pinned nightly on purpose and rerun `tools/web-bench` after.
 
 ```sh
-./scripts/build-web.sh    # pinned nightly + rust-src + wasm target, vendor setup, CJK font, trunk build
+./scripts/setup-web.sh    # once: setup.sh + pinned nightly with rust-src and wasm target + CJK font
+source scripts/web-env.sh && trunk build --release --config Trunk.toml   # build into dist/ only
 source scripts/web-env.sh && trunk serve --release --config Trunk.toml
-./scripts/deploy-web.sh   # build-web.sh + sync into the lightphotos.app site repo
+./scripts/deploy-web.sh   # check setup, trunk build --release, sync into the lightphotos.app site repo
 ```
 
-`index.html` copies the full Noto Sans SC (8 MB, not committed) into the build, so run `./scripts/fetch-cjk-font.sh` once per clone before a bare `trunk build`/`trunk serve`; `build-web.sh` runs it for you. The app fetches that file only when a listed file or folder name has Chinese characters the bundled UI subset can't draw.
+`index.html` copies the full Noto Sans SC (8 MB, not committed) into the build, so run `./scripts/setup-web.sh` (which runs `fetch-cjk-font.sh`) once per clone before `deploy-web.sh` or a bare `trunk build`/`trunk serve`. The app fetches that file only when a listed file or folder name has Chinese characters the bundled UI subset can't draw.
 
 Always `--release` for wasm: debug wasm is 10-30x slower at RAW decode/demosaic and the `bg.wasm` is ~10x larger.
 
