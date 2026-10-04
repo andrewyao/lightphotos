@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
 # Render assets/icon/lightphotos.svg into every raster the app and site use:
-# AppIcon.icns for LightPhotos.app (bundle.sh copies it into Resources), the
+# AppIcon.icns for LightPhotos.app (make-dmg.sh copies it into Resources), the
 # favicon + apple-touch-icon that index.html links, and the README wordmark. The outputs are
 # committed, so only re-run this after editing the SVG.
 #

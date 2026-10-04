@@ -74,14 +74,11 @@ jobs:
         if: runner.os != 'macOS'
         run: cargo build --release --bin lightphotos --target ${{ matrix.target }}
 
-      # macOS: bundle.sh builds, assembles and ad-hoc signs the .app (its
-      # lsregister is harmless on the runner); make-dmg.sh wraps it in a
-      # drag-install .dmg.
+      # macOS: make-dmg.sh builds the binary, assembles and ad-hoc signs the
+      # .app, and wraps it in a drag-install .dmg.
       - name: Build and package (macOS)
         if: runner.os == 'macOS'
-        run: |
-          ./scripts/bundle.sh --target ${{ matrix.target }}
-          ./scripts/make-dmg.sh "${{ matrix.name }}.dmg"
+        run: ./scripts/make-dmg.sh ${{ matrix.target }} "${{ matrix.name }}.dmg"
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
