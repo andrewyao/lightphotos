@@ -2,164 +2,78 @@
 
 <h1><img src="assets/icon/wordmark.svg" alt="LightPhotos" width="420"></h1>
 
-A fast macOS Lightroom-lite photo culling & develop tool, written in Rust.
+## What it does
 
-**[lightphotos.app](https://lightphotos.app)** has the desktop downloads and a
-version that runs in your browser.
+LightPhotos is a fast, Lightroom-lite photo culling and develop tool written in
+Rust. Open a folder to browse thumbnails in a Grid, rate and filter them, and
+open any photo in the Loupe to zoom, pan and edit. JPEG, PNG, TIFF, HEIC and
+camera RAW are supported. Ratings and edits are saved to a `.lightphotos` folder next to your photos, so
+the originals are never modified.
 
 <img src="assets/demo.gif" alt="Rating RAW photos with the number keys, opening one in the Loupe, zooming to 100%, and returning to the rated grid" width="800">
 
-Open a folder to browse thumbnails in a Grid; open a single image to jump
-straight into the Loupe. Decoding runs on background threads (Apple ImageIO
-on macOS; `image` / `rawler` / `mozjpeg-rs` / `kamadak-exif` crates on other
-platforms — as wasm threads over shared memory on wasm32) and images live as GPU
-textures, so zoom and pan only update a small transform uniform — never a
-re-decode. egui draws all the chrome (grid, filmstrip, filter bar, rating
-overlays); a hand-rolled wgpu renderer draws the loupe image.
+It runs on macOS, Linux and Windows, and in the browser. Downloads and the
+browser version are at **[lightphotos.app](https://lightphotos.app)**. HEIC and
+the Vision-backed features (face/blink scoring, subject selection) are
+macOS-only.
 
-**Linux/Windows:** The codebase builds via `cargo build --release` on Linux
-and Windows after the one-time `rawler` vendor step (see
-[Build from scratch](#build-from-scratch)), and the app runs on both. Windows
-ships as a bare `lightphotos.exe` in a zip, with no installer yet.
+Keyboard shortcuts are in [`docs/KEYBOARD_SHORTCUTS.md`](docs/KEYBOARD_SHORTCUTS.md)
+(or press `?` in the app). The code layout is in
+[`docs/PROJECT_LAYOUT.md`](docs/PROJECT_LAYOUT.md).
 
-HEIC support and Vision-backed features (face/blink scoring,
-subject-selection overlay) are macOS-only.
+## How to build it from scratch
 
-See [`plans/plan-i-native-linux-windows-port.md`](plans/plan-i-native-linux-windows-port.md)
-for full implementation status.
+You need [Rust](https://rustup.rs). The repo picks the right toolchain for you.
 
-## Requirements
-
-- **macOS 11.0 or later** (the app links AppKit / Core Graphics / ImageIO via `objc2`).
-  Two Vision features need more than that and are checked at runtime, so an
-  older system loses the feature rather than the app. Subject selection in the
-  Loupe needs macOS 12.0 for person segmentation and macOS 14.0 for the
-  general foreground fallback.
-  The wasm32 (browser) build is experimental.
-- **Rust stable ≥ 1.92.** The repo pins `channel = "stable"` in
-  `rust-toolchain.toml`, so `rustup` selects a compatible toolchain automatically
-  without touching your global default. The version floor comes from egui 0.34
-  (the only egui line compatible with wgpu 29).
-
-If you don't have Rust yet:
+### Desktop build
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+./scripts/setup.sh           # once per clone, and again when the rawler dependency changes
+./scripts/build.sh release   # or: ./scripts/build.sh debug
+./target/release/lightphotos /path/to/a/folder
 ```
 
-## Build from scratch
+The debug build works but decodes and renders much more slowly. On Windows, run
+the scripts from Git Bash.
 
-Clone, run the one-time vendor setup, then build the release binary:
+### Web build
+
+Install [trunk](https://trunkrs.dev) once (`brew install trunk` or
+`cargo install --locked trunk`), then:
 
 ```sh
-git clone <repo-url> lightphotos
-cd lightphotos
-./scripts/setup-vendor-rawler.sh   # one-time per clone — see below
-cargo build --release
+./scripts/setup-web.sh    # once per clone, and again when the rawler dependency changes
+./scripts/deploy-web.sh   # builds and copies the result into the lightphotos.app site repo
 ```
 
-### The `rawler` vendor step
+`deploy-web.sh` expects the site repo at `../lightphotos-app` (or set
+`LIGHTPHOTOS_SITE_DIR`). It doesn't commit there, so review the diff and commit
+it yourself.
 
-`[patch.crates-io]` in `Cargo.toml` redirects the `rawler` crate (camera RAW
-decode) to a locally patched copy at `vendor/rawler-0.7.2`. The patch
-(`patches/rawler-web-time.patch`) swaps `std::time::Instant` for
-`web_time::Instant` at four call sites that otherwise panic on
-`wasm32-unknown-unknown` (no clock source); it is a real passthrough to
-`std::time::Instant` — zero functional change — on macOS/Linux/Windows.
+### Live profiling (optional)
 
-`vendor/` is **not** committed (it is git-ignored), so
-`scripts/setup-vendor-rawler.sh` must be run once per fresh clone: it fetches
-plain `rawler` 0.7.2 from crates.io and applies the patch. A cold clone
-therefore needs network access to crates.io before its first build. The script
-is a no-op on re-run (`--force` regenerates the tree), and
-`scripts/bundle.sh` / `scripts/deploy-web.sh` run it for you.
-
-Cargo applies `[patch.crates-io]` on every target, so this step is required
-before **any** Cargo command — `cargo build`, `cargo test`, `cargo check` — not
-just wasm builds.
-
-**Windows:** run the script from Git Bash (bundled with
-[Git for Windows](https://git-scm.com/download/win)), which provides the `sh`,
-`patch`, and `mktemp` it needs; `curl` and `tar` are already part of
-Windows 10+.
-
-The binary lands at `target/release/lightphotos`. You can run it directly:
+Only for profiling, not for normal builds. With a
+[lightwatch](https://github.com/andrewyao/lightwatch) checkout at
+`../lightwatch`:
 
 ```sh
-./target/release/lightphotos /path/to/a/photo.jpg     # opens in Loupe
-./target/release/lightphotos /path/to/a/folder        # opens in Grid
+./scripts/lightwatch-up.sh /path/to/a/folder   # starts an instrumented app and opens http://127.0.0.1:7700
+./scripts/lightwatch-down.sh                   # stops everything lightwatch-up.sh started
 ```
 
-A debug build (`cargo build`) works too, but release is strongly recommended —
-the `[profile.release]` settings (`opt-level = 3`, thin LTO, single codegen
-unit) matter a lot for decode/render throughput.
+The page shows function timings and live-object counts while you use the app.
 
-### Web build (experimental)
-
-A wasm32 build runs in the browser via [trunk](https://trunkrs.dev). Install
-`trunk` once per machine, then build:
+## Releasing and packaging
 
 ```sh
-brew install trunk                      # or: cargo install --locked trunk
-./scripts/build-web.sh                  # output in dist/
+./scripts/release.sh
 ```
 
-`scripts/build-web.sh` does the per-clone setup first: it adds the
-`wasm32-unknown-unknown` target to the toolchain `rust-toolchain.toml`
-selects, runs the `rawler` vendor step, and fetches the full CJK font
-(8 MB, not committed) that `index.html` copies into the build. Each step is a
-no-op once done. It then runs `trunk build --release` with the `RUSTFLAGS`
-the WebGPU and File System Access bindings need; extra arguments go to
-`trunk build`. See the script's header comment for why those flags live
-there and why it always builds `--release`.
+This runs the tests, tags `origin/main` with the next patch version (or the
+one you pass, e.g. `./scripts/release.sh v0.2.0`), and pushes the tag. CI then
+builds the macOS `.dmg`s, Linux tarballs and Windows zip and publishes the
+GitHub Release. The checkout must be clean and at `origin/main`.
 
-`scripts/deploy-web.sh` runs `build-web.sh`, then syncs the output into the
-companion site repo. The browser build reads folders through the File System
-Access API and decodes on wasm threads; it has none of the
-macOS-only features (no HEIC, no Vision-backed scoring).
-
-## Package as `LightPhotos.app`
-
-To get a double-clickable macOS app bundle registered with Finder / "Open With":
-
-```sh
-./scripts/bundle.sh
-```
-
-This script:
-
-1. Builds the release binary (`cargo build --release`).
-2. Assembles `LightPhotos.app/` from `Info.plist` and the release binary.
-3. Registers the bundle with Launch Services (`lsregister`) so Finder routes
-   image files to it.
-
-Pass `--target x86_64-apple-darwin` to cross-build the Intel app from an Apple
-Silicon Mac (or `--target aarch64-apple-darwin` the other way round). The
-release workflow builds one `.dmg` per target this way, then wraps each app
-with `./scripts/make-dmg.sh <out.dmg>`, which gives the mounted volume the app
-icon.
-
-Both `target/` and `LightPhotos.app/` are git-ignored — they're build outputs.
-
-After bundling:
-
-```sh
-open -a "$(pwd)/LightPhotos.app" /path/to/photo.jpg
-# or in Finder: right-click an image → Open With → LightPhotos
-```
-
-The bundle registers as an *Alternate* viewer for common image types (JPEG,
-PNG, TIFF, GIF, BMP, HEIC/HEIF, camera RAW), so it appears under "Open With"
-without hijacking your default image handler.
-
-## Keyboard shortcuts
-
-See [`docs/KEYBOARD_SHORTCUTS.md`](docs/KEYBOARD_SHORTCUTS.md) for the full table. Press `?` in-app for the built-in overlay.
-
-## Project layout
-
-See [`docs/PROJECT_LAYOUT.md`](docs/PROJECT_LAYOUT.md) for the full directory listing.
-
-## License
+---
 
 Licensed under the [GNU GPL v3.0 (or later)](LICENSE).
