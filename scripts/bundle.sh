@@ -44,6 +44,7 @@ chmod +x "$APP/Contents/MacOS/$BIN_NAME"
 
 # Rendered from assets/icon/lightphotos.svg by scripts/make-icons.sh.
 cp "$ROOT/assets/icon/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+cp "$ROOT/LICENSE" "$ROOT/THIRD-PARTY-LICENSES.txt" "$APP/Contents/Resources/"
 
 # The linker signs only the binary, which leaves the bundle's signature invalid
 # and makes Gatekeeper call a downloaded copy "damaged". An ad-hoc signature

@@ -4,7 +4,8 @@
 # Build the wasm app via trunk and sync the output into the lightphotos.app
 # site repo's public/ (its Astro build copies public/ straight into dist/),
 # automating the manual steps documented in that repo's public/app.html
-# comment: build, copy the four asset files, the snippets/ dir and the full Chinese font into
+# comment: build, copy the four asset files, the snippets/ dir, the full Chinese font
+# and LICENSE plus THIRD-PARTY-LICENSES.txt into
 # public/app/ (deleting stale hashed ones), update the two hashed URLs in
 # public/app.html. Also copies the app icons to public/ and links them from
 # app.html. Does NOT commit or push in the site repo — review the diff there
@@ -79,6 +80,7 @@ rm -f "$SITE_PUBLIC"/app/lightphotos-*.js "$SITE_PUBLIC"/app/lightphotos-*_bg.wa
 echo "==> Copying build output into $SITE_PUBLIC/app"
 cp "$NEW_JS" "$NEW_WASM" "$SITE_PUBLIC/app/"
 cp "$DIST/NotoSansSC-Regular.otf" "$SITE_PUBLIC/app/"
+cp "$ROOT/LICENSE" "$ROOT/THIRD-PARTY-LICENSES.txt" "$SITE_PUBLIC/app/"
 # The Web Worker pool's bundle is gone; decodes run as wasm threads now.
 rm -f "$SITE_PUBLIC/app/wasm_worker.js" "$SITE_PUBLIC/app/wasm_worker_bg.wasm"
 # wasm-bindgen `inline_js` blocks land in snippets/, and the JS glue imports
