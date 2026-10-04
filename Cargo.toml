@@ -3,6 +3,9 @@ name = "lightphotos"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
+# Also keeps the app out of THIRD-PARTY-LICENSES.txt: about.toml ignores
+# unpublished crates.
+publish = false
 # egui 0.34 (the egui line that targets wgpu 29) requires rustc >= 1.92.
 rust-version = "1.92"
 
