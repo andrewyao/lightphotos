@@ -39,13 +39,13 @@ stays out of CI, since `release.yml` covers it when a tag is pushed.
 The wasm32 (browser) build goes through `trunk`, on a dated nightly, with its environment in `scripts/web-env.sh`. The decode workers run as wasm threads over one shared memory, which needs std rebuilt with atomics (`-Z build-std`), hence the nightly; native stays on stable. The same file sets the unstable-apis cfg for the wgpu/WebGPU and File System Access bindings, which `Trunk.toml`'s `rustflags` key does *not* reach cargo with in trunk 0.21.14, and the shared-memory link arguments. The page must be cross-origin isolated (COOP/COEP) for `SharedArrayBuffer`: `trunk serve` sends the headers from `Trunk.toml`, and `deploy-web.sh` writes them into the site's `public/_headers`. Move the pinned nightly on purpose and rerun `tools/web-bench` after.
 
 ```sh
-./scripts/setup-web.sh    # once: setup.sh + pinned nightly with rust-src and wasm target + CJK font
+./scripts/setup-web.sh    # once: setup.sh + pinned nightly with rust-src and wasm target
 source scripts/web-env.sh && trunk build --release --config Trunk.toml   # build into dist/ only
 source scripts/web-env.sh && trunk serve --release --config Trunk.toml
 ./scripts/deploy-web.sh   # check setup, trunk build --release, sync into the lightphotos.app site repo
 ```
 
-`index.html` copies the full Noto Sans SC (8 MB, not committed) into the build, so run `./scripts/setup-web.sh` (which runs `fetch-cjk-font.sh`) once per clone before `deploy-web.sh` or a bare `trunk build`/`trunk serve`. The app fetches that file only when a listed file or folder name has Chinese characters the bundled UI subset can't draw.
+`index.html` copies the full Noto Sans SC (8 MB, not committed) into the build, so `deploy-web.sh` runs `fetch-cjk-font.sh` before it builds (a no-op once the file is there). Run `./scripts/fetch-cjk-font.sh` yourself once before a bare `trunk build`/`trunk serve`. The app fetches that file only when a listed file or folder name has Chinese characters the bundled UI subset can't draw.
 
 Always `--release` for wasm: debug wasm is 10-30x slower at RAW decode/demosaic and the `bg.wasm` is ~10x larger.
 

@@ -7,8 +7,7 @@
 # once done.
 #
 # Runs the desktop setup, then installs the pinned nightly with rust-src and
-# the wasm target, and fetches the full Chinese font that index.html copies
-# into the build. trunk itself is installed once per machine, not here.
+# the wasm target. trunk itself is installed once per machine, not here.
 
 set -euo pipefail
 
@@ -26,6 +25,3 @@ fi
 echo "==> Ensuring $WEB_TOOLCHAIN with rust-src and wasm32-unknown-unknown"
 rustup toolchain install "$WEB_TOOLCHAIN" --profile minimal \
   --component rust-src --target wasm32-unknown-unknown
-
-echo "==> Ensuring the full Chinese font is present"
-"$ROOT/scripts/fetch-cjk-font.sh"

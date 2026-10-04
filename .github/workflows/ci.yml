@@ -228,10 +228,13 @@ jobs:
             | tar -xzf - -C "$HOME/.local/bin" trunk
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # The pinned nightly, plus the full Noto Sans SC that index.html has trunk
-      # copy into the build (8 MB, not committed, so trunk fails without it).
       - name: Web setup
         run: ./scripts/setup-web.sh
+
+      # The full Noto Sans SC that index.html has trunk copy into the build
+      # (8 MB, not committed, so trunk fails without it).
+      - name: Fetch Chinese font
+        run: ./scripts/fetch-cjk-font.sh
 
       # Always --release. A debug wasm build is 10-30x slower at RAW decode and
       # produces a ~10x larger bg.wasm, so it is not the artifact worth gating.

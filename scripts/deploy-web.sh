@@ -46,7 +46,11 @@ rustup component list --toolchain "$WEB_TOOLCHAIN" --installed 2>/dev/null \
   || missing "$WEB_TOOLCHAIN has no rust-src"
 "$ROOT/scripts/setup-vendor-rawler.sh" --check \
   || missing "vendored rawler is missing or out of date"
-[[ -f assets/fonts/NotoSansSC-Regular.otf ]] || missing "the full Chinese font is missing"
+
+# index.html has trunk copy the full Chinese font into the build. A no-op once
+# the file is present and verified.
+echo "==> Ensuring the full Chinese font is present"
+"$ROOT/scripts/fetch-cjk-font.sh"
 
 # Always --release: a debug wasm build is 10-30x slower at RAW decode.
 echo "==> Building (trunk build --release)"
