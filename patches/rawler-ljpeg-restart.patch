@@ -1,0 +1,190 @@
+# The diff applied to vendor/rawler-0.7.2/ after rawler-web-time.patch.
+# Adds restart interval (DRI/RSTn) support to the plain lossless JPEG
+# decoder. Samsung Galaxy phones write Linear DNGs whose LJPEG strip has a
+# restart marker every 16 rows; without this every row after the first band
+# decodes to garbage. Regenerate the full vendored copy via
+# ./scripts/setup-vendor-rawler.sh.
+diff -ru rawler-upstream/src/decompressors/ljpeg/decompressors.rs rawler-0.7.2/src/decompressors/ljpeg/decompressors.rs
+--- a/rawler-upstream/src/decompressors/ljpeg/decompressors.rs	2026-10-03 21:57:31
++++ b/rawler-0.7.2/src/decompressors/ljpeg/decompressors.rs	2026-10-03 21:57:33
+@@ -8,7 +8,10 @@
+ /// `stripwidth` is the count of pixels of a single output strip (may
+ /// be larger than width if each row has padding bytes).
+ /// `width` is the output image width in pixels.
+-#[allow(clippy::let_and_return)]
++///
++/// A stream with a restart interval (DRI) is decoded one restart band at a
++/// time: each band's entropy data ends at an RSTn marker, and prediction
++/// starts over at the first pixel of every band, as on the first row.
+ pub fn decode_ljpeg(ljpeg: &LjpegDecompressor, out: &mut [u16], x: usize, stripwidth: usize, width: usize, height: usize) -> Result<(), String> {
+   let ncomp: usize = ljpeg.components();
+   if ljpeg.sof.width * ncomp < width || ljpeg.sof.height < height {
+@@ -18,58 +21,107 @@
+     ));
+   }
+ 
++  let band_rows = match ljpeg.restart_interval {
++    0 => height,
++    interval if interval >= ljpeg.sof.width * height => height,
++    interval if interval % ljpeg.sof.width == 0 => interval / ljpeg.sof.width,
++    interval => {
++      return Err(format!(
++        "ljpeg: restart interval {} is not a whole number of {}-pixel rows",
++        interval, ljpeg.sof.width
++      ));
++    }
++  };
++
++  let mut buffer = ljpeg.buffer;
++  for first_row in (0..height).step_by(band_rows) {
++    let last_row = (first_row + band_rows).min(height);
++    let band = if last_row < height {
++      let marker = find_restart_marker(buffer).ok_or_else(|| format!("ljpeg: missing restart marker before row {}", last_row))?;
++      let band = &buffer[..marker];
++      buffer = &buffer[marker + 2..];
++      band
++    } else {
++      buffer
++    };
++    decode_ljpeg_rows(ljpeg, band, out, x, stripwidth, width, first_row, last_row)?;
++  }
++  Ok(())
++}
++
++/// Offset of the next RSTn marker. Entropy-coded data byte-stuffs every
++/// 0xFF with 0x00, so 0xFF followed by 0xD0..=0xD7 can only be a marker.
++fn find_restart_marker(buffer: &[u8]) -> Option<usize> {
++  buffer.windows(2).position(|w| w[0] == 0xFF && (0xD0..=0xD7).contains(&w[1]))
++}
++
++/// Decodes rows `first_row..last_row` from `buffer`, predicting the first
++/// pixel from the base value and the rest of `first_row` from the left.
++#[allow(clippy::let_and_return, clippy::too_many_arguments)]
++fn decode_ljpeg_rows(
++  ljpeg: &LjpegDecompressor,
++  buffer: &[u8],
++  out: &mut [u16],
++  x: usize,
++  stripwidth: usize,
++  width: usize,
++  first_row: usize,
++  last_row: usize,
++) -> Result<(), String> {
++  let ncomp: usize = ljpeg.components();
+   let htable = |index: usize| -> &HuffTable { &ljpeg.dhts[ljpeg.sof.components[index].dc_tbl_num] };
+-  let mut pump = BitPumpJPEG::new(ljpeg.buffer);
++  let mut pump = BitPumpJPEG::new(buffer);
+   let base_prediction = 1 << (ljpeg.sof.precision - ljpeg.point_transform - 1);
+ 
+   // initialize first pixel components
+   for c in 0..ncomp {
+-    out[x + c] = (base_prediction + htable(c).huff_decode(&mut pump)?) as u16;
++    out[first_row * stripwidth + x + c] = (base_prediction + htable(c).huff_decode(&mut pump)?) as u16;
+   }
+ 
+   let skip_x = ljpeg.sof.width - width / ncomp;
+ 
+-  for row in 0..height {
+-    let startcol = if row == 0 { x + ncomp } else { x }; // skip first pixel in first row
++  for row in first_row..last_row {
++    let top = row == first_row;
++    let startcol = if top { x + ncomp } else { x }; // skip first pixel in first row
+     for col in (startcol..(width + x)).step_by(ncomp) {
+       for c in 0..ncomp {
+         let p: i32 = if col == x {
+           // At start of line predictor starts with start of previous line
+           out[(row - 1) * stripwidth + x + c] as i32
++        } else if top || ljpeg.predictor == 1 {
++          // The first row only has the pixel to the left
++          let a = out[row * stripwidth + (col - ncomp) + c] as i32;
++          a
+         } else {
+           // All other cases use the two previous pixels in the same line
+-          match (row, ljpeg.predictor) {
+-            (row @ 0, _) | (row, 1) => {
+-              let a = out[row * stripwidth + (col - ncomp) + c] as i32;
+-              a
+-            }
+-            (row, 2) => {
++          match ljpeg.predictor {
++            2 => {
+               let b = out[(row - 1) * stripwidth + col + c] as i32;
+               b
+             }
+-            (row, 3) => {
++            3 => {
+               let c = out[(row - 1) * stripwidth + (col - ncomp) + c] as i32;
+               c
+             }
+-            (row, 4) => {
++            4 => {
+               let a = out[row * stripwidth + (col - ncomp) + c] as i32;
+               let b = out[(row - 1) * stripwidth + col + c] as i32;
+               let c = out[(row - 1) * stripwidth + (col - ncomp) + c] as i32;
+               a + b - c
+             }
+-            (row, 5) => {
++            5 => {
+               let a = out[row * stripwidth + (col - ncomp) + c] as i32;
+               let b = out[(row - 1) * stripwidth + col + c] as i32;
+               let c = out[(row - 1) * stripwidth + (col - ncomp) + c] as i32;
+               a + ((b - c) >> 1)
+             }
+-            (row, 6) => {
++            6 => {
+               let a = out[row * stripwidth + (col - ncomp) + c] as i32;
+               let b = out[(row - 1) * stripwidth + col + c] as i32;
+               let c = out[(row - 1) * stripwidth + (col - ncomp) + c] as i32;
+               b + ((a - c) >> 1)
+             }
+-            (row, 7) => {
++            7 => {
+               let a = out[row * stripwidth + (col - ncomp) + c] as i32;
+               let b = out[(row - 1) * stripwidth + col + c] as i32;
+               (a + b) >> 1 // Adobe DNG SDK uses int32 and shifts, so we will do, too.
+diff -ru rawler-upstream/src/decompressors/ljpeg/mod.rs rawler-0.7.2/src/decompressors/ljpeg/mod.rs
+--- a/rawler-upstream/src/decompressors/ljpeg/mod.rs	2026-10-03 21:57:31
++++ b/rawler-0.7.2/src/decompressors/ljpeg/mod.rs	2026-10-03 21:57:33
+@@ -16,6 +16,7 @@
+   EOI = 0xd9,  // end of image
+   SOS = 0xda,  // start of scan
+   DQT = 0xdb,  // quantization tables
++  DRI = 0xdd,  // restart interval
+   Fill = 0xff,
+ }
+ 
+@@ -129,6 +130,8 @@
+   predictor: usize,
+   point_transform: usize,
+   dhts: Vec<HuffTable>,
++  /// Pixels (MCUs) between restart markers, 0 when the stream has none.
++  restart_interval: usize,
+ }
+ 
+ impl<'a> LjpegDecompressor<'a> {
+@@ -146,6 +149,7 @@
+     let mut dht_init = [false; 4];
+     let mut dht_bits = [[0_u32; 17]; 4];
+     let mut dht_huffval = [[0_u32; 256]; 4];
++    let mut restart_interval = 0;
+     let pred;
+     let pt;
+     loop {
+@@ -168,6 +172,9 @@
+       } else if marker == m(Marker::EOI) {
+         // Should never be reached as we stop at SOS
+         return Err("ljpeg: reached EOI before SOS".to_string());
++      } else if marker == m(Marker::DRI) {
++        let _length = input.get_u16();
++        restart_interval = input.get_u16() as usize;
+       } else if marker == m(Marker::DQT) {
+         return Err("ljpeg: not a valid raw file, found DQT".to_string());
+       }
+@@ -205,6 +212,7 @@
+       predictor: pred,
+       point_transform: pt,
+       dhts,
++      restart_interval,
+     })
+   }
+ 

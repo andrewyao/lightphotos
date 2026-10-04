@@ -290,6 +290,10 @@ uuid = { version = "1", features = ["js"] }
 # on macOS/Linux/Windows builds: timing/logging stays live on every target,
 # this only changes which clock it reads.
 #
+# `patches/rawler-ljpeg-restart.patch` adds restart marker support to the
+# lossless JPEG decoder, without which Samsung Galaxy Linear DNGs decode to
+# garbage below their first 16 rows.
+#
 # `[patch.crates-io]` applies globally (Cargo has no way to scope a patch to
 # one target), so `vendor/rawler-0.7.2` must exist for every platform and
 # every Cargo entry point. It is NOT committed — `scripts/setup-vendor-rawler.sh`

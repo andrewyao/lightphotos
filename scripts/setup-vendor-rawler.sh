@@ -14,6 +14,8 @@
 # DemosaicMode::Quality (PPGDemosaic) ran inside an actual wasm32 Web
 # Worker: "panicked at .../unsupported.rs: time not implemented on this
 # platform". See Cargo.toml's own comment on the [patch.crates-io] entry.
+# Then it applies patches/rawler-ljpeg-restart.patch, which teaches the
+# lossless JPEG decoder restart markers (Samsung Galaxy Linear DNGs).
 #
 # Needed for ANY cargo invocation that touches this crate, wasm32 or not —
 # [patch.crates-io] redirects every use of `rawler` here, globally (Cargo
@@ -26,7 +28,8 @@
 #   scripts/setup-vendor-rawler.sh --force   wipe and regenerate from crates.io
 #
 # Bumping the pinned version is a deliberate edit here + a re-check that
-# patches/rawler-web-time.patch still applies.
+# every patch in PATCHES still applies. Adding a patch changes the sentinel,
+# so trees set up before it are regenerated on the next run.
 set -eu
 
 CRATE_VERSION="0.7.2"
@@ -35,6 +38,8 @@ DEST="$HERE/vendor/rawler-$CRATE_VERSION"
 # Written only after the patch applies cleanly; its presence is what marks
 # the tree as fully set up (a half-materialized dir has no sentinel).
 SENTINEL="$DEST/.lightphotos-patched"
+PATCHES="rawler-web-time.patch rawler-ljpeg-restart.patch"
+STAMP="rawler $CRATE_VERSION + $PATCHES"
 
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
@@ -44,9 +49,13 @@ if [ -d "$DEST" ]; then
     echo "Removing existing $DEST (--force)..."
     chmod -R u+w "$DEST" 2>/dev/null || true
     rm -rf "$DEST"
-  elif [ -f "$SENTINEL" ]; then
-    echo "vendor/rawler-$CRATE_VERSION already set up ($(cat "$SENTINEL")) — nothing to do."
+  elif [ -f "$SENTINEL" ] && [ "$(cat "$SENTINEL")" = "$STAMP" ]; then
+    echo "vendor/rawler-$CRATE_VERSION already set up ($STAMP) — nothing to do."
     exit 0
+  elif [ -f "$SENTINEL" ]; then
+    echo "vendor/rawler-$CRATE_VERSION was set up with other patches ($(cat "$SENTINEL")) — regenerating."
+    chmod -R u+w "$DEST" 2>/dev/null || true
+    rm -rf "$DEST"
   else
     echo "vendor/rawler-$CRATE_VERSION exists but looks incomplete (no patch sentinel)." >&2
     echo "Re-run with --force to wipe and regenerate it." >&2
@@ -67,12 +76,14 @@ tar -xzf "$TMP/rawler.crate" -C "$TMP"
 mv "$TMP/rawler-$CRATE_VERSION" "$DEST"
 chmod -R u+w "$DEST"
 
-echo "Applying rawler-web-time.patch..."
-# -d vendor: the patch's paths are "a/rawler-upstream/..." and
-# "b/rawler-0.7.2/...", -p1 strips the first component, so the remainder
-# needs to resolve relative to vendor/, not to this script's own directory.
-patch -p1 -d "$HERE/vendor" < "$HERE/patches/rawler-web-time.patch"
+for p in $PATCHES; do
+  echo "Applying $p..."
+  # -d vendor: the patch's paths are "a/rawler-upstream/..." and
+  # "b/rawler-0.7.2/...", -p1 strips the first component, so the remainder
+  # needs to resolve relative to vendor/, not to this script's own directory.
+  patch -p1 -d "$HERE/vendor" < "$HERE/patches/$p"
+done
 
-echo "rawler $CRATE_VERSION + rawler-web-time.patch" > "$SENTINEL"
+echo "$STAMP" > "$SENTINEL"
 
-echo "Done — vendor/rawler-$CRATE_VERSION ready with the wasm time fix applied."
+echo "Done — vendor/rawler-$CRATE_VERSION ready with $PATCHES applied."

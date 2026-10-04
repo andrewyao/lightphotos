@@ -8,7 +8,7 @@ LightPhotos: a fast macOS Lightroom-lite photo culling & develop tool, written i
 
 ## Commands
 
-Per-clone setup, before any `cargo` command below: `./scripts/setup-vendor-rawler.sh` (safe to re-run — no-op once the tree is present; `--force` regenerates it). `[patch.crates-io]` in `Cargo.toml` redirects the `rawler` crate (camera RAW decode) to a local patched copy at `vendor/rawler-0.7.2` for every target, not just wasm32 (Cargo has no way to scope a patch to one target) — see that entry's own comment for why. The script fetches plain rawler 0.7.2 from crates.io and applies `patches/rawler-web-time.patch`. `vendor/` isn't committed (see `.gitignore`), so a cold clone needs network to crates.io before its first build; `bundle.sh` and `deploy-web.sh` run the script for you.
+Per-clone setup, before any `cargo` command below: `./scripts/setup-vendor-rawler.sh` (safe to re-run — no-op once the tree is present; `--force` regenerates it). `[patch.crates-io]` in `Cargo.toml` redirects the `rawler` crate (camera RAW decode) to a local patched copy at `vendor/rawler-0.7.2` for every target, not just wasm32 (Cargo has no way to scope a patch to one target) — see that entry's own comment for why. The script fetches plain rawler 0.7.2 from crates.io and applies `patches/rawler-web-time.patch` and `patches/rawler-ljpeg-restart.patch`, and regenerates a tree set up with a different patch list. `vendor/` isn't committed (see `.gitignore`), so a cold clone needs network to crates.io before its first build; `bundle.sh` and `deploy-web.sh` run the script for you.
 
 ```sh
 cargo build --release   # release binary at target/release/lightphotos (opt-level 3, thin LTO — matters for decode/render throughput)
