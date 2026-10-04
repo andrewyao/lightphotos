@@ -167,6 +167,30 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+  # A dependency change has to come with a regenerated notices file, since
+  # every download ships THIRD-PARTY-LICENSES.txt as committed.
+  licenses:
+    name: third-party licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache vendored rawler
+        uses: actions/cache@v4
+        with:
+          path: vendor
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+
+      # Pinned to the ABOUT_VERSION the script requires.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.2
+
+      - name: Check THIRD-PARTY-LICENSES.txt
+        run: ./scripts/third-party-licenses.sh --check
+
   web:
     name: wasm build
     runs-on: ubuntu-latest
