@@ -251,9 +251,13 @@ impl App {
         }
     }
 
-    /// Rates the selected photo (0 clears). Under a filter the photo may drop
-    /// out of view, and the loupe then follows the cursor to a neighbor.
+    /// Rates the selected photo (0 clears, above `MAX_RATING` is ignored).
+    /// Under a filter the photo may drop out of view, and the loupe then
+    /// follows the cursor to a neighbor.
     pub(super) fn set_rating(&mut self, stars: u8) {
+        if stars > crate::catalog::MAX_RATING {
+            return;
+        }
         let Some(path) = self.selected_path() else {
             return;
         };

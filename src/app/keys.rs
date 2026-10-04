@@ -158,9 +158,9 @@ impl App {
             return;
         }
 
-        // Plain digits set the rating, and 0 clears it.
+        // Plain digits 1-5 set the rating, and 0 clears it. 6-9 do nothing.
         if !shift && !cmd && !alt {
-            if let Some(n) = digit_of(code) {
+            if let Some(n) = digit_of(code).filter(|&n| n <= crate::catalog::MAX_RATING) {
                 self.set_rating(n);
                 return;
             }
@@ -921,6 +921,24 @@ mod tests {
             "wraps after the last"
         );
         assert!(app.touchup_spots_shown(), "stepping shows the spots again");
+    }
+
+    #[test]
+    fn digits_above_five_do_not_rate() {
+        let (mut app, _) = folder_app(1);
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit3);
+        for code in [
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+            KeyCode::Numpad9,
+        ] {
+            press(&mut app, ModifiersState::empty(), code);
+            assert_eq!(app.selected_rating(), 3, "{code:?} keeps the rating");
+        }
+        app.set_rating(9);
+        assert_eq!(app.selected_rating(), 3, "set_rating ignores 9");
     }
 
     /// Color labels have no UI yet, so the keys that used to set them are

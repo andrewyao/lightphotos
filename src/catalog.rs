@@ -27,6 +27,8 @@ use writeback::{WriteOp, Writeback};
 pub(crate) const SIDECAR_DIR: &str = ".lightphotos";
 /// Sidecar file extension. Cosmetic; see the module docs.
 pub(crate) const SIDECAR_EXT: &str = "xmp";
+/// Highest star rating. Ratings run `0..=MAX_RATING`, with 0 for unrated.
+pub(crate) const MAX_RATING: u8 = 5;
 
 /// Persisted state for one photo. Default fields are skipped on write, so a
 /// rated but unedited photo's sidecar stays small.
@@ -350,9 +352,9 @@ impl Catalog {
         self.record(path).and_then(|r| r.rating)
     }
 
-    /// Set the rating, clamped to `0..=5`. `0` clears it.
+    /// Set the rating, clamped to `0..=MAX_RATING`. `0` clears it.
     pub fn set(&mut self, path: &Path, stars: u8) {
-        let stars = stars.min(5);
+        let stars = stars.min(MAX_RATING);
         let rating = if stars == 0 { None } else { Some(stars) };
         self.update(path, |rec| rec.rating = rating);
     }
