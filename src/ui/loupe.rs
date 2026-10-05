@@ -97,17 +97,22 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     // app. A CentralPanel would claim that input.
     let mut central = ui.available_rect_before_wrap();
     if app.spike.is_some() {
-        if crate::app::spike_claims_pane() {
+        let controls_h = if crate::app::spike_claims_pane() {
+            let mut controls_h = 0.0;
             egui::Panel::right("spike_tiles")
                 .exact_size(central.width() / 2.0)
                 .show_inside(ui, |ui| {
-                    egui::Panel::bottom("spike_controls")
-                        .show_inside(ui, |ui| spike_controls(ui, app, out));
+                    controls_h = egui::Panel::bottom("spike_controls")
+                        .show_inside(ui, |ui| spike_controls(ui, app, out))
+                        .response
+                        .rect
+                        .height();
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| spike_tiles(ui, app, out));
                 });
             central = ui.available_rect_before_wrap();
+            controls_h
         } else {
             let whole = central;
             central =
@@ -122,7 +127,12 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
             spike_tiles(&mut child, app, out);
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(controls_rect));
             spike_controls(&mut child, app, out);
-        }
+            controls_h
+        };
+        // The hint strip lines up with the controls under the tiles.
+        let hint;
+        (central, hint) = central.split_top_bottom_at_y(central.max.y - controls_h);
+        focus_hint(ui, hint);
     }
     out.loupe_rect = Some(central);
 
@@ -780,6 +790,27 @@ fn group_view_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     if let Some(view) = super::tabs::upward(ui, &tabs, app.group_view()) {
         out.actions.push(UiAction::SetGroupView(view));
     }
+}
+
+/// One line under the photo in Compare on how to move and size the square.
+/// It claims its strip, so a click or scroll on it doesn't reach the Loupe.
+fn focus_hint(ui: &mut egui::Ui, rect: egui::Rect) {
+    ui.interact(rect, egui::Id::new("focus_hint"), egui::Sense::hover());
+    let colors = theme::colors(ui.ctx());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, colors.panel);
+    painter.hline(
+        rect.x_range(),
+        rect.top(),
+        egui::Stroke::new(1.0f32, colors.divider),
+    );
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        crate::i18n::t().focus_hint,
+        egui::TextStyle::Body.resolve(ui.style()),
+        colors.label,
+    );
 }
 
 /// The row under the pane's tiles: how to load the tiles on native, and
