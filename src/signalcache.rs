@@ -2,8 +2,8 @@
 
 //! Derived per-photo signals, remembered between sessions.
 //!
-//! Capture time, sharpness and face quality are all functions of one photo's
-//! bytes, and two of them are expensive. On 6016x6016 photos a face
+//! Capture time and face quality are both functions of one photo's
+//! bytes, and face quality is expensive. On 6016x6016 photos a face
 //! analysis measures about 73 ms because Vision decodes the file itself at
 //! full resolution, against 32 ms for a whole thumbnail decode. Recomputing
 //! them on every folder visit would make grouping too heavy to run unasked.
@@ -78,8 +78,6 @@ impl CaptureTime {
 /// One computed signal, as the app hands it over.
 pub enum Signal {
     Capture(Option<SystemTime>),
-    #[cfg_attr(not(test), allow(dead_code))]
-    Sharpness(f64),
     Faces(FaceQuality),
 }
 
@@ -94,15 +92,13 @@ pub struct PhotoSignals {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture: Option<CaptureTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sharpness: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub faces: Option<FaceQuality>,
 }
 
 impl PhotoSignals {
     #[cfg(not(target_arch = "wasm32"))]
     fn is_empty(&self) -> bool {
-        self.capture.is_none() && self.sharpness.is_none() && self.faces.is_none()
+        self.capture.is_none() && self.faces.is_none()
     }
 }
 
@@ -218,7 +214,6 @@ impl SignalCache {
                 *entry = *n;
             } else {
                 entry.capture = n.capture.or(entry.capture);
-                entry.sharpness = n.sharpness.or(entry.sharpness);
                 entry.faces = n.faces.or(entry.faces);
             }
             self.dirty = true;
@@ -255,7 +250,6 @@ impl SignalCache {
         }
         match signal {
             Signal::Capture(t) => entry.capture = Some(CaptureTime::from_system_time(t)),
-            Signal::Sharpness(v) => entry.sharpness = Some(v),
             Signal::Faces(q) => entry.faces = Some(q),
         }
         self.dirty = true;
@@ -468,6 +462,17 @@ mod tests {
         dir
     }
 
+    fn faces(n: u32) -> Signal {
+        Signal::Faces(FaceQuality {
+            faces: n,
+            min_eye_openness: None,
+        })
+    }
+
+    fn face_count(s: &PhotoSignals) -> Option<u32> {
+        s.faces.map(|f| f.faces)
+    }
+
     fn write_photo(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
         let p = dir.join(name);
         std::fs::write(&p, bytes).expect("write fixture");
@@ -481,7 +486,7 @@ mod tests {
 
         {
             let mut cache = SignalCache::load(&dir);
-            cache.record(&photo, Signal::Sharpness(12.5));
+            cache.record(&photo, Signal::Capture(None));
             cache.record(
                 &photo,
                 Signal::Faces(FaceQuality {
@@ -494,7 +499,7 @@ mod tests {
 
         let reopened = SignalCache::load(&dir);
         let s = reopened.get(&photo).expect("the entry survives a reload");
-        assert_eq!(s.sharpness, Some(12.5));
+        assert_eq!(s.capture, Some(CaptureTime::Unreadable));
         assert_eq!(s.faces.expect("faces recorded").faces, 2);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -509,7 +514,7 @@ mod tests {
 
         {
             let mut cache = SignalCache::load(&dir);
-            cache.record(&photo, Signal::Sharpness(12.5));
+            cache.record(&photo, faces(12));
             cache.flush_blocking(Duration::from_secs(5));
         }
         assert!(
@@ -527,8 +532,8 @@ mod tests {
     }
 
     #[test]
-    fn a_cache_file_with_the_removed_phash_field_still_loads() {
-        let dir = unique_dir("old-phash");
+    fn a_cache_file_with_removed_fields_still_loads() {
+        let dir = unique_dir("old-fields");
         let photo = write_photo(&dir, "a.jpg", b"pixels");
         let key = current_key(&photo).expect("the photo has a key");
         let cache_dir = dir.join(crate::catalog::SIDECAR_DIR);
@@ -537,26 +542,28 @@ mod tests {
         std::fs::write(
             &file,
             format!(
-                r#"{{"entries":{{"a.jpg":{{"k":{key},"sharpness":12.5,"phash":3735928559}}}}}}"#
+                r#"{{"entries":{{"a.jpg":{{"k":{key},"sharpness":12.5,"phash":3735928559,"faces":{{"faces":12,"min_eye_openness":null}}}}}}}}"#
             ),
         )
         .unwrap();
 
         let mut cache = SignalCache::load(&dir);
         let s = cache.get(&photo).expect("the old entry is a hit");
-        assert_eq!(s.sharpness, Some(12.5));
+        assert_eq!(face_count(s), Some(12));
 
-        cache.record(&photo, Signal::Sharpness(13.0));
+        cache.record(&photo, faces(13));
         cache.flush_blocking(Duration::from_secs(5));
         let written = std::fs::read_to_string(&file).unwrap();
         assert!(
-            written.contains("13.0"),
+            written.contains(r#""faces":13"#),
             "the new value is written: {written}"
         );
-        assert!(
-            !written.contains("phash"),
-            "the next write drops the field: {written}"
-        );
+        for gone in ["phash", "sharpness"] {
+            assert!(
+                !written.contains(gone),
+                "the next write drops {gone}: {written}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -582,8 +589,8 @@ mod tests {
         let gone = write_photo(&dir, "gone.jpg", b"pixels");
 
         let mut cache = SignalCache::load(&dir);
-        cache.record(&kept, Signal::Sharpness(1.0));
-        cache.record(&gone, Signal::Sharpness(2.0));
+        cache.record(&kept, faces(1));
+        cache.record(&gone, faces(2));
         std::fs::remove_file(&gone).unwrap();
         cache.flush_blocking(Duration::from_secs(5));
 
@@ -603,7 +610,7 @@ mod tests {
         let photo = write_photo(&dir, "a.jpg", b"pixels");
 
         let mut cache = SignalCache::load(&dir);
-        cache.record(&photo, Signal::Sharpness(1.0));
+        cache.record(&photo, faces(1));
         assert!(cache.get(&photo).is_some());
         cache.forget(&photo);
         assert!(cache.get(&photo).is_none());
@@ -637,11 +644,11 @@ mod tests {
         let theirs = write_photo(&elsewhere, "IMG_0001.JPG", b"a different photo");
 
         let mut cache = SignalCache::load(&here);
-        cache.record(&ours, Signal::Sharpness(1.0));
-        cache.record(&theirs, Signal::Sharpness(99.0));
+        cache.record(&ours, faces(1));
+        cache.record(&theirs, faces(99));
 
         let s = cache.get(&ours).expect("our photo's entry survives");
-        assert_eq!(s.sharpness, Some(1.0));
+        assert_eq!(face_count(s), Some(1));
 
         let _ = std::fs::remove_dir_all(&here);
         let _ = std::fs::remove_dir_all(&elsewhere);
@@ -656,14 +663,14 @@ mod tests {
         let b = write_photo(&dir, "b.jpg", b"other pixels");
         {
             let mut cache = SignalCache::load(&dir);
-            cache.record(&a, Signal::Sharpness(1.0));
+            cache.record(&a, faces(1));
             cache.record(&a, Signal::Capture(None));
             cache.flush_blocking(Duration::from_secs(5));
         }
 
         let mut pending = SignalCache::detached(&dir);
-        pending.record(&a, Signal::Sharpness(2.0));
-        pending.record(&b, Signal::Sharpness(3.0));
+        pending.record(&a, faces(2));
+        pending.record(&b, faces(3));
         pending.flush_blocking(Duration::from_secs(5));
         assert!(
             SignalCache::load(&dir).get(&b).is_none(),
@@ -673,18 +680,18 @@ mod tests {
         let mut loaded = SignalCache::load(&dir);
         loaded.absorb(pending);
         let sa = loaded.get(&a).expect("a is known");
-        assert_eq!(sa.sharpness, Some(2.0), "the newer value wins");
+        assert_eq!(face_count(sa), Some(2), "the newer value wins");
         assert_eq!(
             sa.capture,
             Some(CaptureTime::Unreadable),
             "a field only the file had survives"
         );
-        assert_eq!(loaded.get(&b).and_then(|s| s.sharpness), Some(3.0));
+        assert_eq!(loaded.get(&b).and_then(face_count), Some(3));
 
         loaded.flush_blocking(Duration::from_secs(5));
         assert_eq!(
-            SignalCache::load(&dir).get(&b).and_then(|s| s.sharpness),
-            Some(3.0),
+            SignalCache::load(&dir).get(&b).and_then(face_count),
+            Some(3),
             "the absorbed records are written with the next flush"
         );
 
@@ -697,7 +704,7 @@ mod tests {
         let photo = write_photo(&dir, "a.jpg", b"pixels");
 
         let mut cache = SignalCache::empty();
-        cache.record(&photo, Signal::Sharpness(1.0));
+        cache.record(&photo, faces(1));
         assert!(cache.get(&photo).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);

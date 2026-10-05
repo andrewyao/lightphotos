@@ -1,7 +1,6 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
-use crate::burst;
 use crate::groups::{Group, GroupId};
 use crate::navigation::Cmp;
 use crate::thumbnail::THUMB_PX;
@@ -240,14 +239,6 @@ impl App {
 
     pub(crate) fn selected_label(&self) -> Option<crate::catalog::ColorLabel> {
         self.selected_path().and_then(|p| self.catalog.label(&p))
-    }
-
-    #[allow(dead_code)]
-    fn culling_score(&self, path: &Path) -> Option<f64> {
-        burst::combined_score(
-            self.sharpness.get(path).copied(),
-            self.face_quality.get(path).and_then(|q| q.eye_state()),
-        )
     }
 
     /// The face analysis for a path. `None` while pending, after a failure, or

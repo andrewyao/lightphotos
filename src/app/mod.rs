@@ -605,7 +605,6 @@ pub(crate) struct App {
     /// Capture time per path, from EXIF or mtime. `Some(None)` means the read
     /// found no time, so it isn't requested again.
     capture_times: HashMap<PathBuf, Option<SystemTime>>,
-    sharpness: HashMap<PathBuf, f64>,
 
     /// Photos in the running Auto Tone batch still waiting on a thumbnail.
     /// Emptied by `cancel_auto_tone` on a folder change.
@@ -935,7 +934,6 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             signal_load_rx: None,
             capture_times: HashMap::new(),
-            sharpness: HashMap::new(),
             autotone_pending: HashSet::new(),
             autotone_queue: VecDeque::new(),
             autotone_window: VecDeque::new(),

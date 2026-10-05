@@ -108,14 +108,7 @@ fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
 /// `src/bin/face_probe.rs` for that.
 pub const CLOSED_EYE_RATIO: f32 = 0.15;
 
-/// What the eye geometry says about a photo, once every face has been scored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EyeState {
-    /// Every detected eye is open.
-    Open,
-    /// At least one detected eye is closed.
-    Closed,
-}
+pub use crate::quality::EyeState;
 
 /// A photo's face-based culling signals.
 ///

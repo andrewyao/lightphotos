@@ -9,9 +9,9 @@ use crate::ui;
 
 impl App {
     /// Swaps in `playlist`'s folder's derived-signal cache and copies what it
-    /// holds into the three maps the culling signals live in, so a folder
-    /// visited before starts with its capture times, sharpness and face
-    /// analyses already known.
+    /// holds into the two maps the culling signals live in, so a folder
+    /// visited before starts with its capture times and face analyses
+    /// already known.
     ///
     /// Seeding those maps is the whole integration. `request_face_quality`
     /// skips any photo already in `face_quality`, so a warm folder submits no
@@ -97,9 +97,6 @@ impl App {
                 self.capture_times
                     .entry(p.clone())
                     .or_insert(capture.to_system_time());
-            }
-            if let Some(v) = s.sharpness {
-                self.sharpness.entry(p.clone()).or_insert(v);
             }
             if let Some(q) = s.faces {
                 self.face_quality.entry(p).or_insert(q);
@@ -849,21 +846,25 @@ mod tests {
             app.request_face_quality() && app.face_pending.is_empty(),
             "Vision work waits for the cache and submits nothing"
         );
-        app.signals.record(&b, Signal::Sharpness(42.0));
+        let two_faces = FaceQuality {
+            faces: 2,
+            min_eye_openness: None,
+        };
+        app.signals.record(&b, Signal::Faces(two_faces));
 
         finish_signal_load(&mut app);
         assert_eq!(app.face_quality.get(&a), Some(&blink), "seeded from disk");
         assert_eq!(
-            app.signals.get(&b).and_then(|s| s.sharpness),
-            Some(42.0),
+            app.signals.get(&b).and_then(|s| s.faces),
+            Some(two_faces),
             "recorded during the load"
         );
 
         app.load_playlist(Playlist::from_dir(&other), other.clone());
         finish_signal_load(&mut app);
         assert_eq!(
-            SignalCache::load(&dir).get(&b).and_then(|s| s.sharpness),
-            Some(42.0),
+            SignalCache::load(&dir).get(&b).and_then(|s| s.faces),
+            Some(two_faces),
             "leaving the folder writes what was recorded during its load"
         );
 

@@ -14,7 +14,6 @@
 mod analytics;
 mod app;
 mod autotone;
-mod burst;
 mod cache_limits;
 mod catalog;
 #[cfg(target_os = "macos")]
@@ -46,6 +45,8 @@ mod navigation;
 mod paths;
 mod prefs;
 mod presets;
+#[cfg_attr(not(test), allow(dead_code))]
+mod quality;
 // Profiling drives the real `navigation`, `catalog`, `Loader` and `export`
 // code, none of which the browser build has, and the driver runs from the
 // native `main`. Gating the module the same way keeps `--features hotpath`
@@ -61,7 +62,6 @@ mod renderer;
 #[cfg(not(target_arch = "wasm32"))]
 mod secret;
 mod segmentation;
-mod sharpness;
 mod signalcache;
 mod thumbnail;
 mod trash;

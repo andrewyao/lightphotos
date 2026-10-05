@@ -403,7 +403,6 @@ impl App {
         self.autotone_pending.remove(path);
         self.autotone_base.remove(path);
         self.rotations.remove(path);
-        self.sharpness.remove(path);
         self.capture_times.remove(path);
         self.signals.forget(path);
 

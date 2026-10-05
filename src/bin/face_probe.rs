@@ -20,6 +20,8 @@ mod coregraphics;
 mod facequality;
 #[path = "../image_decode.rs"]
 mod image_decode;
+#[path = "../quality.rs"]
+mod quality;
 #[cfg(target_os = "macos")]
 #[path = "../vision.rs"]
 mod vision;
