@@ -417,16 +417,29 @@ pub(super) fn thumbnail_cell(
     let stars = app.rating_at(pos);
     match style.rating {
         RatingMark::Stars { dx, dy, size } => {
-            ui.painter().text(
+            let font = egui::FontId::proportional(font_size::px(ui.style(), size));
+            let drawn = ui.painter().text(
                 egui::pos2(
                     rect.left() + font_size::px(ui.style(), dx),
                     rect.bottom() + font_size::px(ui.style(), dy),
                 ),
                 egui::Align2::LEFT_CENTER,
                 star_string(stars),
-                egui::FontId::proportional(font_size::px(ui.style(), size)),
+                font.clone(),
                 colors.star,
             );
+            if let Some((value, stale)) = app.score_at(pos) {
+                ui.painter().text(
+                    egui::pos2(
+                        drawn.right() + font_size::px(ui.style(), 6.0),
+                        drawn.center().y,
+                    ),
+                    egui::Align2::LEFT_CENTER,
+                    value.to_string(),
+                    font,
+                    score_color(&colors, stale),
+                );
+            }
         }
         RatingMark::Dots => {
             let r = (cell * 0.028).max(2.0);
@@ -465,6 +478,15 @@ pub(super) fn thumbnail_cell(
     }
 
     response
+}
+
+/// A stale score, one whose photo was edited after scoring, is dimmed.
+pub(super) fn score_color(colors: &theme::Palette, stale: bool) -> egui::Color32 {
+    if stale {
+        colors.label.gamma_multiply(0.45)
+    } else {
+        colors.label
+    }
 }
 
 fn count_pill(

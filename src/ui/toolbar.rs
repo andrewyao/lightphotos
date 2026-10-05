@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::app::{App, Region, SHOW_EYES_FILTER};
+use crate::app::{App, GridSort, Region, SHOW_EYES_FILTER};
 use crate::navigation::Cmp;
 
 /// A keyboard-focusable control in the Grid toolbar. `ALL` is the
@@ -14,6 +14,7 @@ pub(crate) enum ToolbarControl {
     Star(u8),
     Unrated,
     EyesClosed,
+    Sort(GridSort),
 }
 
 impl ToolbarControl {
@@ -29,6 +30,8 @@ impl ToolbarControl {
         Self::Star(4),
         Self::Star(5),
         Self::EyesClosed,
+        Self::Sort(GridSort::Name),
+        Self::Sort(GridSort::Quality),
     ];
 
     /// How far the F6 cursor walks. Bulk actions are excluded because their
@@ -60,7 +63,10 @@ impl ToolbarControl {
     fn starts_group(self) -> bool {
         matches!(
             self,
-            Self::FilterCmp(Cmp::Gte) | Self::Star(1) | Self::EyesClosed
+            Self::FilterCmp(Cmp::Gte)
+                | Self::Star(1)
+                | Self::EyesClosed
+                | Self::Sort(GridSort::Name)
         )
     }
 
@@ -75,6 +81,7 @@ impl ToolbarControl {
                 UiAction::SetFilter(if unrated { None } else { Some((Cmp::Eq, 0)) })
             }
             Self::EyesClosed => UiAction::ToggleEyesClosed,
+            Self::Sort(sort) => UiAction::SetSort(sort),
         }
     }
 
@@ -123,6 +130,13 @@ impl ToolbarControl {
                     t.eyes_closed,
                 ))
                 .on_hover_text(t.eyes_closed_tip),
+            Self::Sort(GridSort::Name) => {
+                ui.label(t.sort_by);
+                ui.selectable_label(app.grid_sort() == GridSort::Name, t.sort_name)
+            }
+            Self::Sort(GridSort::Quality) => ui
+                .selectable_label(app.grid_sort() == GridSort::Quality, t.sort_quality)
+                .on_hover_text(t.sort_quality_tip),
         }
     }
 }
@@ -141,6 +155,12 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             let t = t();
             ui.label(t.rating_filter);
             for (idx, control) in ToolbarControl::drawn().enumerate() {
+                // The count reads as the filters' result, so it closes their
+                // group rather than trailing the sort.
+                if matches!(control, ToolbarControl::Sort(GridSort::Name)) {
+                    ui.separator();
+                    ui.weak((t.n_photos)(app.visible_len()));
+                }
                 if control.starts_group() {
                     ui.separator();
                 }
@@ -150,9 +170,6 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 }
                 toolbar_focus_sync(ui, app, idx, &resp, out);
             }
-
-            ui.separator();
-            ui.weak((t.n_photos)(app.visible_len()));
 
             if let Some((done, total)) = app.score_progress() {
                 ui.separator();

@@ -41,6 +41,7 @@ impl App {
         };
         let outcomes = pool.poll();
         let landed = !outcomes.is_empty();
+        let mut stored = false;
         for o in outcomes {
             let ours = self
                 .score_job
@@ -52,7 +53,11 @@ impl App {
             }
             if let Ok(score) = o.result {
                 self.catalog.set_score(&o.path, score, o.edits);
+                stored = true;
             }
+        }
+        if stored && self.grid_sort == GridSort::Quality {
+            self.recompute_visible();
         }
 
         if let Some(job) = self.score_job.as_mut() {
@@ -112,6 +117,36 @@ impl App {
 
     pub(crate) fn scoring_available(&self) -> bool {
         self.score_pool.is_some()
+    }
+
+    /// The visible cell's stored score and whether it went stale.
+    pub(crate) fn score_at(&self, pos: usize) -> Option<(u8, bool)> {
+        let pl = self.playlist.as_ref()?;
+        let path = pl.entry(*self.visible.get(pos)?)?;
+        self.catalog
+            .score(path)
+            .map(|(s, stale)| (s.score.value, stale))
+    }
+
+    /// The shown photo's stored score and whether it went stale.
+    pub(crate) fn shown_score(&self) -> Option<(crate::quality::QualityScore, bool)> {
+        let path = self.selected_path()?;
+        self.catalog
+            .score(&path)
+            .map(|(s, stale)| (s.score.clone(), stale))
+    }
+
+    pub(crate) fn grid_sort(&self) -> GridSort {
+        self.grid_sort
+    }
+
+    pub(super) fn set_sort(&mut self, sort: GridSort) {
+        if self.mode == ViewMode::Loupe || self.grid_sort == sort {
+            return;
+        }
+        self.grid_sort = sort;
+        self.recompute_visible();
+        self.request_redraw();
     }
 }
 
@@ -222,6 +257,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&other);
     }
 
+    fn scored(value: u8) -> QualityScore {
+        QualityScore {
+            value,
+            basis: Basis::TechnicalOnly,
+            penalties: Vec::new(),
+        }
+    }
+
+    fn visible_names(app: &App) -> Vec<String> {
+        let pl = app.playlist.as_ref().unwrap();
+        app.visible
+            .iter()
+            .map(|&i| {
+                pl.entry(i)
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_quality_sort_puts_the_best_first_and_the_unscored_last_and_keeps_the_selection() {
+        let (mut app, dir, paths) = folder_app(4);
+        let unedited = crate::catalog::ImageRecord::default().edit_signature();
+        app.catalog.set_score(&paths[1], scored(30), unedited);
+        app.catalog.set_score(&paths[2], scored(80), unedited);
+        app.catalog.set_score(&paths[3], scored(30), unedited);
+        app.select_single(2);
+        assert_eq!(app.selected_path().as_ref(), Some(&paths[2]));
+
+        app.set_sort(GridSort::Quality);
+        assert_eq!(
+            visible_names(&app),
+            ["p02.jpg", "p01.jpg", "p03.jpg", "p00.jpg"]
+        );
+        assert_eq!(app.sel, Some(0), "the cursor follows its photo");
+        assert_eq!(app.selected_path().as_ref(), Some(&paths[2]));
+        assert_eq!(app.score_at(0), Some((80, false)));
+        assert_eq!(app.score_at(3), None);
+
+        app.set_sort(GridSort::Name);
+        assert_eq!(
+            visible_names(&app),
+            ["p00.jpg", "p01.jpg", "p02.jpg", "p03.jpg"]
+        );
+        assert_eq!(app.selected_path().as_ref(), Some(&paths[2]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_score_taken_before_an_edit_reads_as_stale() {
         let (mut app, dir, paths) = folder_app(1);
@@ -229,8 +316,10 @@ mod tests {
         app.select_all();
         app.score_selection();
         run_until_idle(&mut app);
-        let mut adj = Adjustments::default();
-        adj.exposure = 0.5;
+        let adj = Adjustments {
+            exposure: 0.5,
+            ..Adjustments::default()
+        };
         app.catalog.set_adjustments(&paths[0], &adj);
         assert_eq!(
             app.catalog.score(&paths[0]).map(|(_, stale)| stale),

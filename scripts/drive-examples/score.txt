@@ -1,0 +1,34 @@
+# Score a selection, scroll the grid while the job runs, and check the score
+# lands under each thumbnail next to its stars, sorts the grid, and shows in
+# the Loupe's info bar.
+# Make a folder first: scripts/drive-examples/make-fixture.sh /tmp/fx 40
+size 1200 800
+idle
+click-cell 1
+key 3
+key cmd+a
+key cmd+shift+s
+move 600 450
+scroll 0 -4
+shot scoring-mid
+state
+scroll 0 -4
+scroll 0 -4
+idle
+shot scored
+state
+# The toolbar's Sort: Quality.
+click 801 86
+idle
+shot sorted
+state
+dblclick-cell 0
+idle
+shot loupe
+state
+# Hover the Loupe score for its penalties and basis.
+move 535 669
+idle
+move 536 669
+idle
+shot loupe-tip

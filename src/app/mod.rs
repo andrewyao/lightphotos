@@ -137,6 +137,16 @@ pub enum Region {
     Develop,
 }
 
+/// The Grid's order. Session only; every launch starts on `Name`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum GridSort {
+    /// The folder's file-name order.
+    #[default]
+    Name,
+    /// Highest quality score first, unscored photos last in name order.
+    Quality,
+}
+
 /// Which view fills the left panel. Session only; every launch starts on
 /// `Folders`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -566,6 +576,7 @@ pub(crate) struct App {
     filter: Option<(Cmp, u8)>,
     /// Comparator used when a star level is clicked. Stays set across "All".
     filter_cmp: Cmp,
+    grid_sort: GridSort,
     /// Indices into `playlist.entries()` that pass the current filter.
     visible: Vec<usize>,
     /// Position within `visible` of the current selection. `None` in the Grid
@@ -927,6 +938,7 @@ impl App {
             unsaved_edit_kind: "adjustment",
             filter: None,
             filter_cmp: Cmp::Gte,
+            grid_sort: GridSort::Name,
             visible: Vec::new(),
             sel: None,
             selected: BTreeSet::new(),
@@ -1554,6 +1566,7 @@ impl App {
                 ui::UiAction::RequestBulk(kind) => self.request_bulk(kind),
                 ui::UiAction::ScoreSelection => self.score_selection(),
                 ui::UiAction::CancelScoring => self.cancel_scoring(),
+                ui::UiAction::SetSort(sort) => self.set_sort(sort),
                 ui::UiAction::ConfirmPending => self.confirm_pending(),
                 ui::UiAction::CancelPending => self.cancel_pending(),
                 ui::UiAction::RemoveGroups => self.remove_selected_groups(),

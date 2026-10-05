@@ -8,8 +8,6 @@
 use std::path::Path;
 
 #[cfg(target_os = "macos")]
-use objc2::runtime::AnyClass;
-#[cfg(target_os = "macos")]
 use objc2::ClassType;
 #[cfg(target_os = "macos")]
 use objc2_core_video::{
@@ -166,32 +164,20 @@ pub fn segment(_path: &Path) -> Result<Mask, String> {
     Err("subject segmentation is unsupported on this platform".into())
 }
 
-/// Both Vision requests below postdate the app's own `LSMinimumSystemVersion`
-/// of 11.0, and `ClassType::new` aborts on a class the runtime never
-/// registered. Ask the runtime by name first so an older system takes the
-/// ordinary error path instead of killing the process.
-#[cfg(target_os = "macos")]
-fn require_class(name: &std::ffi::CStr, needs: &str) -> Result<(), String> {
-    if AnyClass::get(name).is_some() {
-        return Ok(());
-    }
-    Err(format!(
-        "{} needs macOS {needs} or later",
-        name.to_string_lossy()
-    ))
-}
-
 /// Person segmentation at Accurate quality. It runs on demand for one photo,
 /// so speed matters less than a clean edge. macOS 12.0 and later.
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
 fn segment_person(path: &Path) -> Result<Mask, String> {
-    require_class(c"VNGeneratePersonSegmentationRequest", "12.0")?;
+    vision::require_class(c"VNGeneratePersonSegmentationRequest", "12.0")?;
     unsafe {
         let request = VNGeneratePersonSegmentationRequest::new();
         request.setQualityLevel(VNGeneratePersonSegmentationRequestQualityLevel::Accurate);
         request.setOutputPixelFormat(ONE_COMPONENT_8);
-        vision::perform_request(path, request.as_super().as_super().as_super())?;
+        vision::perform(
+            vision::Source::File(path),
+            &[request.as_super().as_super().as_super()],
+        )?;
 
         let observation = request
             .results()
@@ -207,10 +193,10 @@ fn segment_person(path: &Path) -> Result<Mask, String> {
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
 fn segment_foreground(path: &Path) -> Result<Mask, String> {
-    require_class(c"VNGenerateForegroundInstanceMaskRequest", "14.0")?;
+    vision::require_class(c"VNGenerateForegroundInstanceMaskRequest", "14.0")?;
     unsafe {
         let request = VNGenerateForegroundInstanceMaskRequest::new();
-        vision::perform_request(path, request.as_super().as_super())?;
+        vision::perform(vision::Source::File(path), &[request.as_super().as_super()])?;
 
         let observation = request
             .results()
@@ -326,6 +312,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_availability_guard_names_classes_this_runtime_actually_has() {
+        use crate::vision::require_class;
         require_class(c"VNGeneratePersonSegmentationRequest", "12.0")
             .expect("this machine runs macOS 12 or later");
         require_class(c"VNGenerateForegroundInstanceMaskRequest", "14.0")

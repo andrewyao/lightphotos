@@ -72,6 +72,7 @@ pub enum UiAction {
     /// Score the selection's quality. Read-only on the photos, so no confirm.
     ScoreSelection,
     CancelScoring,
+    SetSort(crate::app::GridSort),
     /// Run the action the open confirm dialog asks about.
     ConfirmPending,
     CancelPending,

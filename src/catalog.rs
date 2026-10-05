@@ -422,7 +422,6 @@ impl Catalog {
     }
 
     /// The stored score and whether the photo was edited after it was taken.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn score(&self, path: &Path) -> Option<(&StoredScore, bool)> {
         let rec = self.record(path)?;
         let stored = rec.score.as_ref()?;
@@ -1063,8 +1062,10 @@ mod tests {
             "a rating is not an edit"
         );
 
-        let mut adj = Adjustments::default();
-        adj.exposure = 1.0;
+        let adj = Adjustments {
+            exposure: 1.0,
+            ..Adjustments::default()
+        };
         cat.set_adjustments(&p, &adj);
         assert_eq!(cat.score(&p).map(|(_, stale)| stale), Some(true));
         cat.set_adjustments(&p, &Adjustments::default());

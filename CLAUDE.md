@@ -14,17 +14,17 @@ Per-clone setup, before any `cargo` command below: `./scripts/setup.sh` (`./scri
 ./scripts/build.sh release   # = cargo build --release; release binary at target/release/lightphotos (opt-level 3, thin LTO — matters for decode/render throughput)
 cargo build              # debug build; works but noticeably slower at runtime
 cargo test                # run all unit tests (tests live inline in each module, #[cfg(test)])
-cargo test <name>         # run a single test by name substring, e.g. `cargo test burst::`
-cargo build --bins        # also builds the face_probe/seg_probe harnesses; see below
+cargo test <name>         # run a single test by name substring, e.g. `cargo test quality::`
+cargo build --bins        # also builds the face_probe/seg_probe/score_probe harnesses; see below
 ./scripts/make-dmg.sh aarch64-apple-darwin out.dmg   # build release, assemble + ad-hoc sign LightPhotos.app, wrap in a .dmg (release.yml runs it per target)
 ./scripts/release.sh      # test, tag origin/main as the next patch (or pass v1.2.3), push the tag → release.yml builds and publishes
 ```
 
 Verify a change with `cargo fmt --check && cargo test && cargo build --release && cargo build --bins`. The
-last one is not redundant. `src/bin/face_probe.rs` and `src/bin/seg_probe.rs` pull
-their dependencies in through `#[path]` includes because the crate has no lib target,
-so adding a `use crate::..` to `facequality.rs` or `segmentation.rs` breaks those two
-binaries while `cargo build` and `cargo test` both stay green. Only `--bins` catches it.
+last one is not redundant. `src/bin/face_probe.rs`, `src/bin/seg_probe.rs` and
+`src/bin/score_probe.rs` pull their dependencies in through `#[path]` includes because
+the crate has no lib target, so adding a `use crate::..` to `facequality.rs`,
+`segmentation.rs`, `quality.rs` or `judge.rs` breaks those binaries while `cargo build` and `cargo test` both stay green. Only `--bins` catches it.
 
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request. On macOS
 it runs `cargo build --bins`, `cargo test` and clippy. It also builds the wasm target, and
@@ -70,7 +70,7 @@ cargo run --release --features hotpath-alloc -- --profile /path/to/a/folder  # t
 
 `--profile` drives the paths headlessly through the real `navigation`, `catalog`, `Loader`, `thumbnail` and `export` code, prints a per-function report, and exits without opening a window. `src/profile.rs` explains why the measurement does not go through the window.
 
-`LIGHTPHOTOS_PROFILE_PHASES` narrows the run to a comma-separated list of phase keys, from `grid`, `strip`, `scroll`, `frame`, `open`, `full`, `auto_tone`, `export`, `select_subject` and `vision`. Unset means all of them. An unrecognized key prints a warning naming the valid keys, and the run continues. `LIGHTPHOTOS_PROFILE_COLD=1` deletes the folder's cached thumbnails first, so the grid phase measures a first visit. `LIGHTPHOTOS_PROFILE_THUMBS`, `_OPENS`, `_PREVIEW_PX`, `_FULLS`, `_EXPORTS` and `_VISION` size the phases. `scroll` flicks a simulated grid viewport (`_SCROLL_ROWS` by `_SCROLL_COLS`, default 5 by 6) down the first `_THUMBS` photos one row per `_STEP_MS` (default 16) without waiting, and `strip` holds the arrow key the same way, so both report how long the last viewport takes to fill after the input stops; the report's `get_or_make` count is how many thumbnails the pool decoded on the way. The queue keeps up at 16 ms, so use `_STEP_MS=4` or `1` to see a backlog. The export phase writes every JPEG into a scratch directory under the system temp directory and removes it afterwards, so profiling a folder never leaves files in it. `frame` measures what a grid frame pays on the UI thread: baking edits into a viewport of thumbnails inline versus through the decode workers, and the signal cache's periodic write, which it runs against a scratch copy of the folder's file names. `LIGHTPHOTOS_CACHE_THUMBS`, `_PREVIEWS` and `_FULLS` override the loader's cache sizes (`src/cache_limits.rs`, one default per platform) for the app and the profiler alike.
+`LIGHTPHOTOS_PROFILE_PHASES` narrows the run to a comma-separated list of phase keys, from `grid`, `strip`, `scroll`, `frame`, `open`, `full`, `auto_tone`, `export`, `select_subject` and `vision`. Unset means all of them. An unrecognized key prints a warning naming the valid keys, and the run continues. `LIGHTPHOTOS_PROFILE_COLD=1` deletes the folder's cached thumbnails first, so the grid phase measures a first visit. `LIGHTPHOTOS_PROFILE_THUMBS`, `_OPENS`, `_PREVIEW_PX`, `_FULLS`, `_EXPORTS` and `_VISION` size the phases. The `vision` phase also times `score::score_photo` per photo, and `LIGHTPHOTOS_PROFILE_SCORE_DURING=1` runs a scoring job through the `scroll` phase so its fill time can be compared with and without one. `scroll` flicks a simulated grid viewport (`_SCROLL_ROWS` by `_SCROLL_COLS`, default 5 by 6) down the first `_THUMBS` photos one row per `_STEP_MS` (default 16) without waiting, and `strip` holds the arrow key the same way, so both report how long the last viewport takes to fill after the input stops; the report's `get_or_make` count is how many thumbnails the pool decoded on the way. The queue keeps up at 16 ms, so use `_STEP_MS=4` or `1` to see a backlog. The export phase writes every JPEG into a scratch directory under the system temp directory and removes it afterwards, so profiling a folder never leaves files in it. `frame` measures what a grid frame pays on the UI thread: baking edits into a viewport of thumbnails inline versus through the decode workers, and the signal cache's periodic write, which it runs against a scratch copy of the folder's file names. `LIGHTPHOTOS_CACHE_THUMBS`, `_PREVIEWS` and `_FULLS` override the loader's cache sizes (`src/cache_limits.rs`, one default per platform) for the app and the profiler alike.
 
 hotpath's own `HOTPATH_*` variables still apply, so `HOTPATH_OUTPUT_FORMAT=json HOTPATH_OUTPUT_PATH=run.json` writes a report that a later run can be diffed against. The report prints the top 15 functions by total time. A full run instruments over 40, so raise `HOTPATH_FUNCTIONS_LIMIT` to see the cheap phases.
 

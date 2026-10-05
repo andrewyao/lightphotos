@@ -38,13 +38,18 @@ pub struct RawFace {
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
 pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
-    unsafe {
-        let request = VNDetectFaceLandmarksRequest::new();
-        vision::perform_request(path, request.as_super().as_super())?;
+    let request = unsafe { VNDetectFaceLandmarksRequest::new() };
+    vision::perform(vision::Source::File(path), &[request.as_super().as_super()])?;
+    Ok(faces_from(&request))
+}
 
+/// The faces a finished landmarks request found.
+#[cfg(target_os = "macos")]
+pub fn faces_from(request: &VNDetectFaceLandmarksRequest) -> Vec<RawFace> {
+    unsafe {
         // Some Vision revisions return nil instead of an empty list for no faces.
         let Some(results) = request.results() else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
 
         let mut faces = Vec::with_capacity(results.len());
@@ -75,7 +80,7 @@ pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
                 right_eye,
             });
         }
-        Ok(faces)
+        faces
     }
 }
 

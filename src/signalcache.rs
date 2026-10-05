@@ -14,7 +14,9 @@
 //! there would keep the sidecar alive forever, would rewrite it on every
 //! background computation rather than on a user edit, and would have nowhere
 //! to put an invalidation key. Authored state and derived state have different
-//! lifetimes, so they get different containers.
+//! lifetimes, so they get different containers. The quality score is the
+//! exception: it is measured on the edited photo, only on request, and keys
+//! its staleness to the edits, so it lives in the sidecar beside them.
 
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]

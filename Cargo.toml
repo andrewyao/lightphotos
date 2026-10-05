@@ -29,6 +29,12 @@ name = "seg_probe"
 path = "src/bin/seg_probe.rs"
 test = false
 
+# Same arrangement for the quality-score harness (see `quality.rs`).
+[[bin]]
+name = "score_probe"
+path = "src/bin/score_probe.rs"
+test = false
+
 [[bin]]
 name = "decode_probe"
 path = "src/raw/probe.rs"
@@ -169,6 +175,8 @@ objc2-vision = { version = "0.3.2", default-features = false, features = [
     "VNFaceLandmarks",
     "VNGeneratePersonSegmentationRequest",
     "VNGenerateForegroundInstanceMaskRequest",
+    # macOS 15 and later; `judge.rs` checks for the class before using it.
+    "VNCalculateImageAestheticsScoresRequest",
     "VNStatefulRequest",
     "objc2-core-video",
     "VNObservation",

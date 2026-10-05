@@ -380,10 +380,22 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             } else {
                 0.0
             };
+            let score = app.shown_score().map(|(score, stale)| {
+                let galley = painter.layout_no_wrap(
+                    score.value.to_string(),
+                    main_font.clone(),
+                    super::grid::score_color(&colors, stale),
+                );
+                (score, stale, galley)
+            });
+            let score_w = score
+                .as_ref()
+                .map_or(0.0, |(_, _, g)| 3.0 * group_gap + g.size().x);
             let group_w = filename_w
                 + if filename.is_empty() { 0.0 } else { group_gap }
                 + stars_total_w
                 + 4.0 * ui.spacing().item_spacing.x
+                + score_w
                 + tabs_w;
             let group_left = (rect.center().x - group_w / 2.0).max(rect.left() + pad);
 
@@ -448,11 +460,30 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 );
             }
 
+            // Past the label dot, like the tabs below.
+            let mut row_right = stars_drawn.right();
+            if let Some((score, stale, galley)) = score {
+                let label_right = if app.selected_label().is_some() {
+                    stars_rect.right() + 2.0 * group_gap
+                } else {
+                    stars_drawn.right()
+                };
+                let at = egui::pos2(
+                    stars_drawn.right().max(label_right) + group_gap,
+                    main_y - galley.size().y / 2.0,
+                );
+                let hit = egui::Rect::from_min_size(at, galley.size());
+                ui.painter().galley(at, galley, colors.label);
+                ui.interact(hit, egui::Id::new("loupe_score"), egui::Sense::hover())
+                    .on_hover_text(score_tip(&score, stale));
+                row_right = row_right.max(hit.right());
+            }
+
             // Past the label dot, so the two never overlap, and hung from the
             // bar's top edge so the tabs open up into the photo.
             if app.shown_in_group() {
                 let view_rect = egui::Rect::from_min_max(
-                    egui::pos2(stars_drawn.right() + 3.0 * group_gap, rect.top()),
+                    egui::pos2(row_right + 3.0 * group_gap, rect.top()),
                     rect.right_bottom(),
                 );
                 ui.scope_builder(egui::UiBuilder::new().max_rect(view_rect), |ui| {
@@ -506,6 +537,34 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             }
         });
+}
+
+/// What the quality number means: its basis, the defects that lowered it,
+/// and whether an edit has made it stale.
+fn score_tip(score: &crate::quality::QualityScore, stale: bool) -> String {
+    let t = t();
+    let mut lines = vec![(t.quality_of)(score.value)];
+    lines.push(
+        match score.basis {
+            crate::quality::Basis::TechnicalOnly => t.basis_technical,
+            crate::quality::Basis::WithAesthetics => t.basis_aesthetics,
+        }
+        .to_string(),
+    );
+    if score.penalties.is_empty() {
+        lines.push(t.no_penalties.to_string());
+    } else {
+        lines.extend(
+            score
+                .penalties
+                .iter()
+                .map(|&p| format!("\u{2212} {}", (t.penalty)(p))),
+        );
+    }
+    if stale {
+        lines.push(t.score_stale.to_string());
+    }
+    lines.join("\n")
 }
 
 /// The exposure readout under the histogram, Lightroom's order:

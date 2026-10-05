@@ -7,8 +7,8 @@
 //! set on the move, which is where a stale backlog shows. Opening a photo splits into the first
 //! pixels on screen and the preview escalation that sharpens them. The
 //! full-resolution decode is what zooming past the preview costs. Auto Tone,
-//! a batch export and the Vision signals are the jobs a user starts and then
-//! waits out. Subject selection is the wait behind the Loupe's "Show
+//! a batch export and the Vision signals, quality scoring among them, are the
+//! jobs a user starts and then waits out. Subject selection is the wait behind the Loupe's "Show
 //! selection" button. Compiled only under the `hotpath` feature.
 //!
 //! It exists because a report is only worth acting on if the next person can
@@ -259,12 +259,42 @@ impl Run {
         );
     }
 
+    /// What "Score photos" costs per photo on one worker: the preview
+    /// decode, the edit bake, the measurements and, on macOS, the Vision pass.
+    /// Sequential, so the numbers are per photo rather than per batch.
+    fn score_photos(&self, photos: &[PathBuf]) {
+        let mut times = Vec::new();
+        for path in photos.iter().take(self.vision) {
+            let req = crate::score::ScoreRequest {
+                path: path.clone(),
+                adj: Default::default(),
+                touchups: Vec::new(),
+                rot: 0,
+                edits: 0,
+            };
+            let t0 = Instant::now();
+            let scored = crate::score::score_photo(&req);
+            times.push(t0.elapsed());
+            if let Err(e) = scored {
+                eprintln!("[profile] score {}: {e}", path.display());
+            }
+        }
+        times.sort();
+        if let (Some(p50), Some(max)) = (times.get(times.len() / 2), times.last()) {
+            eprintln!(
+                "[profile] score_photo per photo: p50 {p50:?}, max {max:?} over {}",
+                times.len()
+            );
+        }
+    }
+
     #[cfg(target_os = "macos")]
     fn vision_signals(&self, photos: &[PathBuf]) {
         let wanted: Vec<&PathBuf> = photos.iter().take(self.vision).collect();
         let Some(&anchor) = wanted.first() else {
             return;
         };
+        self.score_photos(photos);
 
         // Through the signal cache, the way `App::request_face_quality` reads
         // it: a photo whose analysis was seeded from disk is never submitted.
@@ -307,8 +337,9 @@ impl Run {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn vision_signals(&self, _photos: &[PathBuf]) {
-        eprintln!("[profile] Vision signals are macOS only; phase skipped");
+    fn vision_signals(&self, photos: &[PathBuf]) {
+        self.score_photos(photos);
+        eprintln!("[profile] face and subject Vision passes are macOS only; skipped");
     }
 
     /// What an Auto Tone batch costs per photo once its thumbnail is in
@@ -644,6 +675,8 @@ impl Run {
         }
         let mut loader = Loader::new(16384, self.limits);
         let mut fetched: HashSet<PathBuf> = HashSet::new();
+        let scoring = (std::env::var("LIGHTPHOTOS_PROFILE_SCORE_DURING").as_deref() == Ok("1"))
+            .then(|| BackgroundScoring::start(photos.to_vec()));
 
         let t0 = Instant::now();
         let mut ticks = 0usize;
@@ -668,13 +701,20 @@ impl Run {
         };
         let stopped = Instant::now();
         wait_for_thumbs(&mut loader, &photos[visible]);
+        let fill = stopped.elapsed();
+        if let Some(scoring) = scoring {
+            eprintln!(
+                "[profile] scroll: a scoring job ran throughout and scored {} photos",
+                scoring.stop()
+            );
+        }
         eprintln!(
             "[profile] scroll: {rows}x{cols} viewport, {ticks} rows every {:?} over {len} \
              photos, {} thumbnails asked for, last viewport filled {:?} after the scroll \
              stopped, {:?} in all",
             self.step,
             fetched.len(),
-            stopped.elapsed(),
+            fill,
             t0.elapsed()
         );
     }
@@ -801,4 +841,51 @@ fn drop_thumb_cache(dir: &Path) -> usize {
                 && std::fs::remove_file(e.path()).is_ok()
         })
         .count()
+}
+
+/// A "Score photos" job over `photos` on its own thread, fed the way
+/// `App::pump_scoring` feeds it, so the scroll phase can show whether a
+/// running job slows the grid. `LIGHTPHOTOS_PROFILE_SCORE_DURING=1` turns it on.
+struct BackgroundScoring {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: std::thread::JoinHandle<usize>,
+}
+
+impl BackgroundScoring {
+    fn start(photos: Vec<PathBuf>) -> Self {
+        use std::sync::atomic::Ordering;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let Some(mut pool) = crate::score::ScorePool::new() else {
+                return 0;
+            };
+            let mut job = crate::score::ScoreJob::default();
+            job.add(photos.iter().cycle().take(photos.len() * 4).cloned());
+            let mut scored = 0;
+            while !flag.load(Ordering::Relaxed) {
+                for path in job.take(pool.capacity()) {
+                    pool.submit(crate::score::ScoreRequest {
+                        path,
+                        adj: Default::default(),
+                        touchups: Vec::new(),
+                        rot: 0,
+                        edits: 0,
+                    });
+                }
+                for o in pool.poll() {
+                    job.finish(&o.path, o.result.is_ok());
+                    scored += 1;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            scored
+        });
+        BackgroundScoring { stop, thread }
+    }
+
+    fn stop(self) -> usize {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.thread.join().unwrap_or(0)
+    }
 }

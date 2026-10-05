@@ -31,6 +31,9 @@ impl Place {
 struct Placer<'a> {
     app: &'a App,
     group_cells: HashMap<&'a GroupId, Option<usize>>,
+    /// Playlist index to cell, built on first use when `visible` is not in
+    /// playlist order and so cannot be binary-searched.
+    cells: Option<HashMap<usize, usize>>,
 }
 
 impl<'a> Placer<'a> {
@@ -38,12 +41,23 @@ impl<'a> Placer<'a> {
         Placer {
             app,
             group_cells: HashMap::new(),
+            cells: None,
         }
     }
 
-    fn place(&mut self, idx: usize) -> Place {
+    fn cell(&mut self, idx: usize) -> Option<usize> {
         let visible = &self.app.visible;
-        if let Ok(p) = visible.binary_search(&idx) {
+        if self.app.grid_sort == GridSort::Name {
+            return visible.binary_search(&idx).ok();
+        }
+        self.cells
+            .get_or_insert_with(|| visible.iter().enumerate().map(|(p, &i)| (i, p)).collect())
+            .get(&idx)
+            .copied()
+    }
+
+    fn place(&mut self, idx: usize) -> Place {
+        if let Some(p) = self.cell(idx) {
             return Place::Cell(p);
         }
         let (Some(pl), Some(groups)) = (self.app.playlist.as_ref(), self.app.catalog.groups())
@@ -57,10 +71,15 @@ impl<'a> Placer<'a> {
         else {
             return Place::Gone;
         };
-        let cell = *self.group_cells.entry(id).or_insert_with(|| {
-            let rep = pl.index_of(groups.get(id)?.rep())?;
-            visible.binary_search(&rep).ok()
-        });
+        let rep = groups.get(id).and_then(|g| pl.index_of(g.rep()));
+        let cell = match self.group_cells.get(id) {
+            Some(&cell) => cell,
+            None => {
+                let cell = rep.and_then(|rep| self.cell(rep));
+                self.group_cells.insert(id, cell);
+                cell
+            }
+        };
         cell.map_or(Place::Gone, Place::Hidden)
     }
 }
@@ -134,6 +153,18 @@ impl App {
                 self.visible
                     .retain(|&i| entries.get(i).is_none_or(|p| !gone.contains(p)));
             }
+        }
+        if self.grid_sort == GridSort::Quality {
+            let catalog = &self.catalog;
+            // Stable, so equal scores and the unscored tail keep name order.
+            self.visible.sort_by_cached_key(|&i| {
+                std::cmp::Reverse(
+                    entries
+                        .get(i)
+                        .and_then(|p| catalog.score(p))
+                        .map(|(s, _)| s.score.value),
+                )
+            });
         }
         let clamped = match self.visible.len() {
             0 => None,
