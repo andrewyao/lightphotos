@@ -27,6 +27,7 @@ impl App {
             Export => tool_free && !self.show_settings,
             OpenFolder | AutoTone | Rate(_) | Grid | KeyboardShortcuts => free,
             AutoToneSelection => free && selected > 0,
+            ScorePhotos => free && selected > 0 && self.scoring_available(),
             MoveToTrash => free && selected > 0 && self.delete_available(),
             GroupSelected => free && self.group_available(),
             Ungroup => free && self.selection_has_group(),

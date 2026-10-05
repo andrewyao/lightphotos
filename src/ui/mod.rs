@@ -69,6 +69,9 @@ pub enum UiAction {
     DisconnectImmich,
     /// Ask to run a bulk action on the current selection (opens a confirm modal).
     RequestBulk(BulkKind),
+    /// Score the selection's quality. Read-only on the photos, so no confirm.
+    ScoreSelection,
+    CancelScoring,
     /// Run the action the open confirm dialog asks about.
     ConfirmPending,
     CancelPending,

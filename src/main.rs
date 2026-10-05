@@ -33,6 +33,7 @@ mod image_encode;
 mod image_ops;
 #[cfg(not(target_arch = "wasm32"))]
 mod immich;
+mod judge;
 mod loader;
 // The importer is native-only, so the browser build compiles the parser with
 // no caller until a wasm file picker exists.
@@ -45,7 +46,6 @@ mod navigation;
 mod paths;
 mod prefs;
 mod presets;
-#[cfg_attr(not(test), allow(dead_code))]
 mod quality;
 // Profiling drives the real `navigation`, `catalog`, `Loader` and `export`
 // code, none of which the browser build has, and the driver runs from the
@@ -59,6 +59,7 @@ mod profile;
 #[path = "raw/preview.rs"]
 mod raw_preview;
 mod renderer;
+mod score;
 #[cfg(not(target_arch = "wasm32"))]
 mod secret;
 mod segmentation;
@@ -133,6 +134,7 @@ fn finish_window_setup(
     app.loader = Some(loader);
     app.exporter = Some(export::Exporter::new());
     app.face_pool = facequality::FacePool::new();
+    app.score_pool = score::ScorePool::new();
     app.egui_state = Some(egui_state);
     #[cfg(target_arch = "wasm32")]
     analytics::started();
@@ -593,6 +595,7 @@ impl App {
 
         self.poll_face_quality();
         let vision_pending = self.request_face_quality();
+        let scoring = self.pump_scoring();
 
         // Segmentation starts from user actions, so it has no `request_*` call.
         self.poll_selection_mask();
@@ -611,6 +614,7 @@ impl App {
             || self.catalog.backlog() > 0
             || immich_connecting
             || vision_pending
+            || scoring
         {
             Some(if cfg!(target_arch = "wasm32") {
                 16

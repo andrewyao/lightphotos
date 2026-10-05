@@ -154,6 +154,14 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             ui.separator();
             ui.weak((t.n_photos)(app.visible_len()));
 
+            if let Some((done, total)) = app.score_progress() {
+                ui.separator();
+                ui.weak((t.scoring_progress)(done, total));
+                if ui.small_button(t.cancel).clicked() {
+                    out.actions.push(UiAction::CancelScoring);
+                }
+            }
+
             region_focus_marker(ui, app, Region::Toolbar);
         });
     });
@@ -195,6 +203,14 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
                 .clicked()
             {
                 out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));
+            }
+            if app.scoring_available()
+                && ui
+                    .button(t.score_selection)
+                    .on_hover_text(crate::i18n::keys(t.score_selection_tip))
+                    .clicked()
+            {
+                out.actions.push(UiAction::ScoreSelection);
             }
             ui.separator();
             if ui

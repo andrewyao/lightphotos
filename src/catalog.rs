@@ -430,7 +430,6 @@ impl Catalog {
     }
 
     /// Store `score` as measured on the photo's edits as of `edits`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_score(&mut self, path: &Path, score: QualityScore, edits: u64) {
         self.update(path, |rec| rec.score = Some(StoredScore { score, edits }));
     }

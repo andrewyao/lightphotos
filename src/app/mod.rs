@@ -335,6 +335,11 @@ pub(crate) struct App {
     /// `None` until the window is created.
     pub(crate) exporter: Option<Exporter>,
     pub(crate) face_pool: Option<crate::facequality::FacePool>,
+    /// `None` until the window is created, and on targets that cannot spawn
+    /// threads.
+    pub(crate) score_pool: Option<crate::score::ScorePool>,
+    /// The photos a "Score photos" run has left. `None` when none is running.
+    score_job: Option<crate::score::ScoreJob>,
     pub(crate) export_progress: Option<ExportProgress>,
     /// What the export form is set to, remembered across launches.
     export_settings: crate::export::ExportSettings,
@@ -753,6 +758,7 @@ mod loupe;
 mod menu;
 mod nav;
 mod presets;
+mod score;
 mod session;
 mod thumbs;
 #[cfg(target_arch = "wasm32")]
@@ -790,6 +796,8 @@ impl App {
             loader: None,
             exporter: None,
             face_pool: None,
+            score_pool: None,
+            score_job: None,
             export_progress: None,
             // A test must never read the developer's own settings.
             #[cfg(test)]
@@ -1135,6 +1143,7 @@ impl App {
     fn seed_mirrors(&mut self, playlist: &Playlist) {
         // Finish pending edits before replacing the catalog they write to.
         self.cancel_auto_tone();
+        self.cancel_scoring();
         self.cancel_delete();
         self.save_edit();
         self.adopt_signal_cache(playlist);
@@ -1543,6 +1552,8 @@ impl App {
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::DisconnectImmich => self.disconnect_immich(),
                 ui::UiAction::RequestBulk(kind) => self.request_bulk(kind),
+                ui::UiAction::ScoreSelection => self.score_selection(),
+                ui::UiAction::CancelScoring => self.cancel_scoring(),
                 ui::UiAction::ConfirmPending => self.confirm_pending(),
                 ui::UiAction::CancelPending => self.cancel_pending(),
                 ui::UiAction::RemoveGroups => self.remove_selected_groups(),

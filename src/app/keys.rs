@@ -235,6 +235,7 @@ impl App {
             // Cmd+Shift+U tones the selection. It must come before plain Cmd+U.
             KeyCode::KeyU if cmd && shift => self.request_bulk(ui::BulkKind::AutoTone),
             KeyCode::KeyU if cmd => self.auto_tone_one(),
+            KeyCode::KeyS if cmd && shift => self.score_selection(),
             // Cmd+Shift+Y pastes copied settings onto the selection. It must
             // come before plain `Y`, which toggles the before/after view.
             KeyCode::KeyY if cmd && shift && self.has_copied_settings() => {

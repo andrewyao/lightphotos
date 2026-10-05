@@ -256,6 +256,8 @@ pub struct Strings {
     pub clear_rating: &'static str,
     pub auto_tone: &'static str,
     pub auto_tone_selection_tip: &'static str,
+    pub score_selection: &'static str,
+    pub score_selection_tip: &'static str,
     pub copy_settings: &'static str,
     pub copy_settings_tip: &'static str,
     pub copy_settings_needs_one: &'static str,
@@ -456,6 +458,10 @@ pub struct Strings {
     pub auto_tone_stopped: fn(usize, usize) -> String,
     pub auto_tone_applied_n: fn(usize) -> String,
     pub auto_tone_progress: fn(usize, usize) -> String,
+    pub scoring_progress: fn(usize, usize) -> String,
+    pub scoring_stopped: fn(usize, usize) -> String,
+    pub scored_n: fn(usize) -> String,
+    pub scored_partial: fn(usize, usize) -> String,
     pub touch_up_limit: &'static str,
     pub touch_up_needs_full: &'static str,
     pub wb_no_image: &'static str,
@@ -516,6 +522,7 @@ pub struct MenuStrings {
     pub no_rating: &'static str,
     pub auto_tone: &'static str,
     pub auto_tone_selection: &'static str,
+    pub score_photos: &'static str,
     pub rotate_left: &'static str,
     pub rotate_right: &'static str,
     pub move_to_trash: &'static str,
@@ -674,6 +681,8 @@ pub static EN: Strings = Strings {
     auto_tone: "Auto Tone",
     auto_tone_selection_tip:
         "Set each selected photo's tone sliders from its own histogram (Cmd+Shift+U)",
+    score_selection: "Score",
+    score_selection_tip: "Rate each selected photo's quality from 0 to 100 (Cmd+Shift+S)",
     copy_settings: "Copy Settings",
     copy_settings_tip: "Copy this photo's develop settings (Cmd+Shift+C)",
     copy_settings_needs_one: "Select a single photo to copy its settings",
@@ -738,7 +747,14 @@ pub static EN: Strings = Strings {
         },
         HelpSection {
             title: "Rate",
-            rows: &[("0 1 2 3 4 5", "Set star rating 0-5")],
+            rows: if WEB {
+                &[("0 1 2 3 4 5", "Set star rating 0-5")]
+            } else {
+                &[
+                    ("0 1 2 3 4 5", "Set star rating 0-5"),
+                    ("Cmd+Shift+S", "Score the selection's quality, 0-100"),
+                ]
+            },
         },
         HelpSection {
             title: "Zoom and pan (in editor)",
@@ -1028,6 +1044,10 @@ pub static EN: Strings = Strings {
     auto_tone_stopped: |done, total| format!("Auto Tone stopped at {done}/{total}"),
     auto_tone_applied_n: |n| format!("Auto Tone applied to {n} photos"),
     auto_tone_progress: |done, total| format!("Auto Tone {done}/{total}\u{2026}"),
+    scoring_progress: |done, total| format!("Scoring {done}/{total}\u{2026}"),
+    scoring_stopped: |done, total| format!("Scoring stopped at {done}/{total}"),
+    scored_n: |n| format!("Scored {n} photo(s)"),
+    scored_partial: |ok, total| format!("Scored {ok}/{total}; the rest could not be read"),
     touch_up_limit: "Touch Up supports up to 64 spots",
     touch_up_needs_full: "Touch Up needs a full-resolution image",
     wb_no_image: "No image loaded to pick from",
@@ -1073,6 +1093,7 @@ pub static EN: Strings = Strings {
         no_rating: "No Rating",
         auto_tone: "Auto Tone",
         auto_tone_selection: "Auto Tone Selection",
+        score_photos: "Score Quality",
         rotate_left: "Rotate Left",
         rotate_right: "Rotate Right",
         move_to_trash: "Move to Trash",
@@ -1198,6 +1219,8 @@ pub static ZH: Strings = Strings {
     clear_rating: "清除评分",
     auto_tone: "自动色调",
     auto_tone_selection_tip: "根据每张所选照片自身的直方图设置色调滑块 (Cmd+Shift+U)",
+    score_selection: "评分",
+    score_selection_tip: "为每张所选照片的质量打 0 到 100 分 (Cmd+Shift+S)",
     copy_settings: "拷贝设置",
     copy_settings_tip: "拷贝这张照片的调整设置 (Cmd+Shift+C)",
     copy_settings_needs_one: "只选择一张照片才能拷贝其设置",
@@ -1259,7 +1282,14 @@ pub static ZH: Strings = Strings {
         },
         HelpSection {
             title: "评分",
-            rows: &[("0 1 2 3 4 5", "设置星级 0-5")],
+            rows: if WEB {
+                &[("0 1 2 3 4 5", "设置星级 0-5")]
+            } else {
+                &[
+                    ("0 1 2 3 4 5", "设置星级 0-5"),
+                    ("Cmd+Shift+S", "为所选照片的质量评分 0-100"),
+                ]
+            },
         },
         HelpSection {
             title: "缩放和平移（编辑器中）",
@@ -1527,6 +1557,10 @@ pub static ZH: Strings = Strings {
     auto_tone_stopped: |done, total| format!("自动色调已停止于 {done}/{total}"),
     auto_tone_applied_n: |n| format!("已对 {n} 张照片应用自动色调"),
     auto_tone_progress: |done, total| format!("自动色调 {done}/{total}\u{2026}"),
+    scoring_progress: |done, total| format!("正在评分 {done}/{total}\u{2026}"),
+    scoring_stopped: |done, total| format!("评分已停止于 {done}/{total}"),
+    scored_n: |n| format!("已为 {n} 张照片评分"),
+    scored_partial: |ok, total| format!("已评分 {ok}/{total} 张，其余无法读取"),
     touch_up_limit: "修补最多支持 64 个点",
     touch_up_needs_full: "修补需要全分辨率图像",
     wb_no_image: "没有已加载的图像可供取样",
@@ -1571,6 +1605,7 @@ pub static ZH: Strings = Strings {
         no_rating: "无评分",
         auto_tone: "自动色调",
         auto_tone_selection: "对所选照片自动色调",
+        score_photos: "质量评分",
         rotate_left: "向左旋转",
         rotate_right: "向右旋转",
         move_to_trash: "移到废纸篓",
