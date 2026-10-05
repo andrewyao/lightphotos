@@ -74,14 +74,32 @@ pub enum Penalty {
     Utility,
 }
 
+/// One penalty that fired and the points it took off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Deduction {
+    pub penalty: Penalty,
+    pub points: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QualityScore {
     /// `0..=100`.
     pub value: u8,
     pub basis: Basis,
-    /// The penalties that fired, in [`CURVES`] order.
+    /// `0..=100`, what the score started from before any deduction. `None`
+    /// on a score stored before it was recorded, which has no breakdown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<u8>,
+    /// Largest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub penalties: Vec<Penalty>,
+    pub deductions: Vec<Deduction>,
+}
+
+#[cfg(test)]
+impl QualityScore {
+    pub fn penalties(&self) -> Vec<Penalty> {
+        self.deductions.iter().map(|d| d.penalty).collect()
+    }
 }
 
 /// Base without aesthetics. A flawless frame scores 50, which leaves room to
@@ -195,22 +213,30 @@ pub fn score(t: &Technical, a: Option<&Aesthetics>, eyes: Option<EyeState>) -> Q
         _ => (TECHNICAL_BASE, Basis::TechnicalOnly),
     };
     let inputs = Inputs { t, a, eyes };
+    let points = |v: f32| (v * 100.0).round().clamp(0.0, 100.0) as u8;
     let mut value = base;
-    let mut penalties = Vec::new();
+    let mut deductions = Vec::new();
     for c in CURVES {
         let Some(x) = (c.measure)(&inputs).filter(|x| x.is_finite()) else {
             continue;
         };
         let f = factor(c, x);
+        let before = value;
         value *= f;
         if f < LISTED_BELOW {
-            penalties.push(c.penalty);
+            deductions.push(Deduction {
+                penalty: c.penalty,
+                points: points(before) - points(value),
+            });
         }
     }
+    // Stable, so equal deductions keep CURVES order.
+    deductions.sort_by(|a, b| b.points.cmp(&a.points));
     QualityScore {
-        value: (value * 100.0).round().clamp(0.0, 100.0) as u8,
+        value: points(value),
         basis,
-        penalties,
+        base: Some(points(base)),
+        deductions,
     }
 }
 
@@ -395,8 +421,33 @@ mod tests {
         let blink = score(&sharp, None, Some(EyeState::Closed));
         let open = score(&soft, None, Some(EyeState::Open));
         assert!(blink.value < open.value, "blink {blink:?} open {open:?}");
-        assert_eq!(blink.penalties, vec![Penalty::EyesClosed]);
-        assert_eq!(open.penalties, vec![Penalty::SoftFocus]);
+        assert_eq!(blink.penalties(), vec![Penalty::EyesClosed]);
+        assert_eq!(open.penalties(), vec![Penalty::SoftFocus]);
+    }
+
+    #[test]
+    fn the_breakdown_adds_up_to_the_score_largest_first() {
+        let t = Technical {
+            focus: 0.3,
+            clip_hi: 0.05,
+            ..clean()
+        };
+        let a = Aesthetics {
+            overall: 0.6,
+            utility: false,
+        };
+        let s = score(&t, Some(&a), Some(EyeState::Closed));
+        assert_eq!(s.base, Some(80));
+        assert_eq!(
+            s.penalties(),
+            vec![
+                Penalty::EyesClosed,
+                Penalty::SoftFocus,
+                Penalty::HighlightsClipped
+            ]
+        );
+        let taken: u32 = s.deductions.iter().map(|d| u32::from(d.points)).sum();
+        assert_eq!(taken + u32::from(s.value), 80, "{s:?}");
     }
 
     #[test]
@@ -421,8 +472,8 @@ mod tests {
         let worse = score(&clipped, Some(&a), None);
         let better = score(&clean(), Some(&a), None);
         assert!(worse.value < better.value, "{worse:?} vs {better:?}");
-        assert_eq!(worse.penalties, vec![Penalty::HighlightsClipped]);
-        assert!(better.penalties.is_empty());
+        assert_eq!(worse.penalties(), vec![Penalty::HighlightsClipped]);
+        assert!(better.deductions.is_empty());
     }
 
     #[test]
@@ -445,7 +496,7 @@ mod tests {
         };
         let s = score(&clean(), Some(&receipt), None);
         assert!(s.value <= 30, "{s:?}");
-        assert_eq!(s.penalties, vec![Penalty::Utility]);
+        assert_eq!(s.penalties(), vec![Penalty::Utility]);
     }
 
     #[test]
@@ -489,9 +540,9 @@ mod tests {
         };
         let s = score(&t, None, Some(EyeState::Closed));
         assert!(s.value < 5, "{s:?}");
-        assert!(!s.penalties.contains(&Penalty::Bright));
-        assert!(s.penalties.contains(&Penalty::SoftFocus));
-        assert!(s.penalties.contains(&Penalty::EyesClosed));
+        assert!(!s.penalties().contains(&Penalty::Bright));
+        assert!(s.penalties().contains(&Penalty::SoftFocus));
+        assert!(s.penalties().contains(&Penalty::EyesClosed));
     }
 
     #[test]

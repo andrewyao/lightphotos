@@ -428,17 +428,19 @@ pub(super) fn thumbnail_cell(
                 font.clone(),
                 colors.star,
             );
-            if let Some((value, stale)) = app.score_at(pos) {
-                ui.painter().text(
+            if let Some((score, stale)) = app.score_at(pos) {
+                let shown = ui.painter().text(
                     egui::pos2(
                         drawn.right() + font_size::px(ui.style(), 6.0),
                         drawn.center().y,
                     ),
                     egui::Align2::LEFT_CENTER,
-                    value.to_string(),
+                    score.value.to_string(),
                     font,
                     score_color(&colors, stale),
                 );
+                ui.interact(shown, response.id.with("score"), egui::Sense::hover())
+                    .on_hover_text(score_tip(score, stale));
             }
         }
         RatingMark::Dots => {
@@ -478,6 +480,35 @@ pub(super) fn thumbnail_cell(
     }
 
     response
+}
+
+/// Why a photo got its score: the base it started from, each defect with
+/// the points it cost, and whether an edit has made it stale.
+pub(super) fn score_tip(score: &crate::quality::QualityScore, stale: bool) -> String {
+    let t = crate::i18n::t();
+    let mut lines = vec![(t.quality_of)(score.value)];
+    match score.base {
+        Some(base) => {
+            lines.push(match score.basis {
+                crate::quality::Basis::TechnicalOnly => (t.base_technical)(base),
+                crate::quality::Basis::WithAesthetics => (t.base_aesthetics)(base),
+            });
+            if score.deductions.is_empty() {
+                lines.push(t.no_penalties.to_string());
+            }
+            lines.extend(
+                score
+                    .deductions
+                    .iter()
+                    .map(|d| format!("{} \u{2212}{}", (t.penalty)(d.penalty), d.points)),
+            );
+        }
+        None => lines.push(t.score_no_breakdown.to_string()),
+    }
+    if stale {
+        lines.push(t.score_stale.to_string());
+    }
+    lines.join("\n")
 }
 
 /// A stale score, one whose photo was edited after scoring, is dimmed.

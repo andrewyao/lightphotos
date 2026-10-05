@@ -318,7 +318,8 @@ mod tests {
         Ok(QualityScore {
             value: 42,
             basis: crate::quality::Basis::TechnicalOnly,
-            penalties: Vec::new(),
+            base: None,
+            deductions: Vec::new(),
         })
     }
 

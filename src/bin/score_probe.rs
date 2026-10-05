@@ -140,7 +140,7 @@ struct Row {
     eyes: Option<EyeState>,
     technical_only: u8,
     with_aesthetics: Option<u8>,
-    penalties: Vec<quality::Penalty>,
+    penalties: Vec<quality::Deduction>,
 }
 
 fn measure(path: &Path, sidecar: &Sidecar) -> Result<Row, String> {
@@ -161,14 +161,14 @@ fn measure(path: &Path, sidecar: &Sidecar) -> Result<Row, String> {
         eyes: vision.eyes,
         technical_only: technical_only.value,
         with_aesthetics: (full.basis == Basis::WithAesthetics).then_some(full.value),
-        penalties: full.penalties,
+        penalties: full.deductions,
     })
 }
 
 fn print_row(path: &Path, rating: Option<u8>, r: &Row) {
     let opt = |v: Option<String>| v.unwrap_or_else(|| "-".into());
     println!(
-        "{:<24} {:>5} {:>5} {:>5} {:>6.3} {:>6.3} {:>6.3} {:>5.2} {:>6.2} {:>6} {:>7} {:>6}  {:?}",
+        "{:<24} {:>5} {:>5} {:>5} {:>6.3} {:>6.3} {:>6.3} {:>5.2} {:>6.2} {:>6} {:>7} {:>6}  {}",
         name(path),
         opt(rating.map(|r| r.to_string())),
         r.technical_only,
@@ -181,7 +181,11 @@ fn print_row(path: &Path, rating: Option<u8>, r: &Row) {
         opt(r.aesthetics.map(|a| format!("{:+.2}", a.overall))),
         opt(r.aesthetics.map(|a| a.utility.to_string())),
         opt(r.eyes.map(|e| format!("{e:?}").to_lowercase())),
-        r.penalties,
+        r.penalties
+            .iter()
+            .map(|d| format!("{:?} -{}", d.penalty, d.points))
+            .collect::<Vec<_>>()
+            .join(", "),
     );
 }
 

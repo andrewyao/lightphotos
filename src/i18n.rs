@@ -259,8 +259,9 @@ pub struct Strings {
     pub score_selection: &'static str,
     pub score_selection_tip: &'static str,
     pub quality_of: fn(u8) -> String,
-    pub basis_technical: &'static str,
-    pub basis_aesthetics: &'static str,
+    pub base_technical: fn(u8) -> String,
+    pub base_aesthetics: fn(u8) -> String,
+    pub score_no_breakdown: &'static str,
     pub no_penalties: &'static str,
     pub penalty: fn(crate::quality::Penalty) -> &'static str,
     pub score_stale: &'static str,
@@ -694,8 +695,9 @@ pub static EN: Strings = Strings {
     score_selection: "Score",
     score_selection_tip: "Rate each selected photo's quality from 0 to 100 (Cmd+Shift+S)",
     quality_of: |v| format!("Quality {v} of 100"),
-    basis_technical: "Technical only: focus, exposure, noise and eyes",
-    basis_aesthetics: "Includes Apple's aesthetics score",
+    base_technical: |b| format!("Starts at {b}: technical checks only (focus, exposure, noise, eyes)"),
+    base_aesthetics: |b| format!("Apple aesthetics score: {b}"),
+    score_no_breakdown: "Score again to see the breakdown",
     no_penalties: "No defects found",
     penalty: |p| {
         use crate::quality::Penalty::*;
@@ -1254,8 +1256,9 @@ pub static ZH: Strings = Strings {
     score_selection: "评分",
     score_selection_tip: "为每张所选照片的质量打 0 到 100 分 (Cmd+Shift+S)",
     quality_of: |v| format!("质量 {v} / 100"),
-    basis_technical: "仅技术指标：对焦、曝光、噪点和眼睛",
-    basis_aesthetics: "包含 Apple 的美学评分",
+    base_technical: |b| format!("起始分 {b}：仅技术指标（对焦、曝光、噪点、眼睛）"),
+    base_aesthetics: |b| format!("Apple 美学评分：{b}"),
+    score_no_breakdown: "重新评分以查看明细",
     no_penalties: "未发现缺陷",
     penalty: |p| {
         use crate::quality::Penalty::*;

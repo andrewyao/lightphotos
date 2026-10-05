@@ -1027,7 +1027,11 @@ mod tests {
         QualityScore {
             value: 73,
             basis: crate::quality::Basis::WithAesthetics,
-            penalties: vec![crate::quality::Penalty::Noisy],
+            base: Some(80),
+            deductions: vec![crate::quality::Deduction {
+                penalty: crate::quality::Penalty::Noisy,
+                points: 7,
+            }],
         }
     }
 

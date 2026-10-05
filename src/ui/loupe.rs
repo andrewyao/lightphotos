@@ -475,7 +475,7 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 let hit = egui::Rect::from_min_size(at, galley.size());
                 ui.painter().galley(at, galley, colors.label);
                 ui.interact(hit, egui::Id::new("loupe_score"), egui::Sense::hover())
-                    .on_hover_text(score_tip(&score, stale));
+                    .on_hover_text(super::grid::score_tip(&score, stale));
                 row_right = row_right.max(hit.right());
             }
 
@@ -537,34 +537,6 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             }
         });
-}
-
-/// What the quality number means: its basis, the defects that lowered it,
-/// and whether an edit has made it stale.
-fn score_tip(score: &crate::quality::QualityScore, stale: bool) -> String {
-    let t = t();
-    let mut lines = vec![(t.quality_of)(score.value)];
-    lines.push(
-        match score.basis {
-            crate::quality::Basis::TechnicalOnly => t.basis_technical,
-            crate::quality::Basis::WithAesthetics => t.basis_aesthetics,
-        }
-        .to_string(),
-    );
-    if score.penalties.is_empty() {
-        lines.push(t.no_penalties.to_string());
-    } else {
-        lines.extend(
-            score
-                .penalties
-                .iter()
-                .map(|&p| format!("\u{2212} {}", (t.penalty)(p))),
-        );
-    }
-    if stale {
-        lines.push(t.score_stale.to_string());
-    }
-    lines.join("\n")
 }
 
 /// The exposure readout under the histogram, Lightroom's order:

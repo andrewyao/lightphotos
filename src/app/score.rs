@@ -120,12 +120,10 @@ impl App {
     }
 
     /// The visible cell's stored score and whether it went stale.
-    pub(crate) fn score_at(&self, pos: usize) -> Option<(u8, bool)> {
+    pub(crate) fn score_at(&self, pos: usize) -> Option<(&crate::quality::QualityScore, bool)> {
         let pl = self.playlist.as_ref()?;
         let path = pl.entry(*self.visible.get(pos)?)?;
-        self.catalog
-            .score(path)
-            .map(|(s, stale)| (s.score.value, stale))
+        self.catalog.score(path).map(|(s, stale)| (&s.score, stale))
     }
 
     /// The shown photo's stored score and whether it went stale.
@@ -185,7 +183,8 @@ mod tests {
         Ok(QualityScore {
             value: 61,
             basis: Basis::TechnicalOnly,
-            penalties: Vec::new(),
+            base: None,
+            deductions: Vec::new(),
         })
     }
 
@@ -261,7 +260,8 @@ mod tests {
         QualityScore {
             value,
             basis: Basis::TechnicalOnly,
-            penalties: Vec::new(),
+            base: None,
+            deductions: Vec::new(),
         }
     }
 
@@ -297,8 +297,11 @@ mod tests {
         );
         assert_eq!(app.sel, Some(0), "the cursor follows its photo");
         assert_eq!(app.selected_path().as_ref(), Some(&paths[2]));
-        assert_eq!(app.score_at(0), Some((80, false)));
-        assert_eq!(app.score_at(3), None);
+        assert_eq!(
+            app.score_at(0).map(|(s, stale)| (s.value, stale)),
+            Some((80, false))
+        );
+        assert!(app.score_at(3).is_none());
 
         app.set_sort(GridSort::Name);
         assert_eq!(

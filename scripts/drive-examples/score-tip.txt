@@ -1,0 +1,16 @@
+# Hover a grid cell's score for its breakdown, then click it to check the
+# hover target doesn't swallow the cell's click.
+# Make a folder first: scripts/drive-examples/make-fixture.sh /tmp/fx 8
+size 1200 800
+idle
+key cmd+a
+key cmd+shift+s
+idle
+move 314 308
+idle
+move 315 308
+idle
+shot grid-tip
+click 315 308
+idle
+state
