@@ -953,10 +953,32 @@ fn spike_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
         .show(ui.ctx(), |ui| {
-            ui.allocate_exact_size(rect.size(), egui::Sense::drag()).1
+            ui.allocate_exact_size(rect.size(), egui::Sense::click_and_drag())
+                .1
         })
         .inner;
     app.spike_marker_hovered = resp.hovered() || resp.dragged();
+    // A click anywhere on the photo, the square included, centers the
+    // square there. Off the square only a click the bare Loupe got counts,
+    // not one on a panel drawn over it.
+    let clicked_at = if resp.clicked() {
+        resp.interact_pointer_pos()
+    } else if ui.ctx().is_pointer_over_egui() {
+        None
+    } else {
+        ui.input(|i| {
+            i.pointer
+                .primary_clicked()
+                .then(|| i.pointer.interact_pos())
+                .flatten()
+        })
+        .filter(|p| central.contains(*p))
+    };
+    if let Some(p) = clicked_at {
+        let (u, v) = app.loupe_screen_to_tex(central, p);
+        app.spike_center = spike_zoom_uv(w, h, egui::pos2(u, v), app.spike_side).center();
+        ui.ctx().request_repaint();
+    }
     if resp.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         if let Some(p) = resp.interact_pointer_pos() {
