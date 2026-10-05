@@ -135,6 +135,27 @@ pub(super) fn footer<T: Copy + PartialEq>(
         .inner
 }
 
+/// A row of tabs hanging from the rule at the top of `ui`'s rect and
+/// opening upward, so the active one joins the content above. Returns the
+/// tab clicked, if it isn't `current` already.
+pub(super) fn upward<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    tabs: &[(T, &str)],
+    current: T,
+) -> Option<T> {
+    let mut picked = None;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        for &(tab, label) in tabs {
+            let active = tab == current;
+            if footer_tab(ui, label, active).clicked() && !active {
+                picked = Some(tab);
+            }
+        }
+    });
+    picked
+}
+
 /// One footer tab, hanging from the strip's top rule and opening upward into
 /// the panel. The active tab breaks the rule so it joins the content above.
 fn footer_tab(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response {

@@ -427,15 +427,12 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 );
             }
 
-            // Past the label dot, so the two never overlap.
+            // Past the label dot, so the two never overlap, and hung from the
+            // bar's top edge so the tabs open up into the photo.
             if app.shown_in_group() {
-                let size = egui::vec2(
-                    font_size::px(ui.style(), GROUP_VIEW_WIDTH),
-                    ui.spacing().interact_size.y,
-                );
-                let view_rect = egui::Rect::from_min_size(
-                    egui::pos2(stars_drawn.right() + 3.0 * group_gap, main_y - size.y / 2.0),
-                    size,
+                let view_rect = egui::Rect::from_min_max(
+                    egui::pos2(stars_drawn.right() + 3.0 * group_gap, rect.top()),
+                    rect.right_bottom(),
                 );
                 ui.scope_builder(egui::UiBuilder::new().max_rect(view_rect), |ui| {
                     group_view_bar(ui, app, out)
@@ -762,27 +759,17 @@ fn filmstrip_cell(
     response
 }
 
-/// Edit or Compare, right of a grouped photo's rating stars.
+/// Edit or Compare, as tabs right of a grouped photo's rating stars.
 fn group_view_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
-    let choices = [
-        (GroupView::Edit, t.group_view_edit, None),
-        (GroupView::Compare, t.group_view_compare, None),
+    let tabs = [
+        (GroupView::Edit, t.group_view_edit),
+        (GroupView::Compare, t.group_view_compare),
     ];
-    let width = font_size::px(ui.style(), GROUP_VIEW_WIDTH).min(ui.available_width());
-    let picked = ui
-        .allocate_ui(egui::vec2(width, ui.spacing().interact_size.y), |ui| {
-            form::segmented(ui, &choices, app.group_view())
-        })
-        .inner;
-    if let Some(view) = picked.filter(|v| *v != app.group_view()) {
+    if let Some(view) = super::tabs::upward(ui, &tabs, app.group_view()) {
         out.actions.push(UiAction::SetGroupView(view));
     }
 }
-
-/// Wide enough for both labels in either language, and no wider, so the
-/// control reads as a toggle rather than a page of tabs.
-const GROUP_VIEW_WIDTH: f32 = 200.0;
 
 /// The row under the pane's tiles: the Speed or Full toggle on native, and
 /// Set as representative, live only while a pick other than the
