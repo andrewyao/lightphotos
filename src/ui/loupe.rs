@@ -782,7 +782,7 @@ fn group_view_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
-/// The row under the pane's tiles: the Speed or Full toggle on native, and
+/// The row under the pane's tiles: how to load the tiles on native, and
 /// Set as representative, live only while a pick other than the
 /// representative waits.
 fn spike_controls(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
@@ -798,20 +798,23 @@ fn spike_controls(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             out.actions.push(UiAction::SetPickAsRep);
         }
         // As tall as the button, so the radios center on the same line.
-        let row = egui::vec2(ui.available_width(), set.rect.height());
-        let layout = egui::Layout::left_to_right(egui::Align::Center);
-        ui.allocate_ui_with_layout(row, layout, |ui| {
-            #[cfg(not(target_arch = "wasm32"))]
-            for (f, label) in [
-                (TileFidelity::Speed, t.tile_speed),
-                (TileFidelity::Full, t.tile_full),
-            ] {
-                let current = app.tile_fidelity();
-                if ui.radio(current == f, label).clicked() && current != f {
-                    out.actions.push(UiAction::SetTileFidelity(f));
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let row = egui::vec2(ui.available_width(), set.rect.height());
+            let layout = egui::Layout::left_to_right(egui::Align::Center);
+            ui.allocate_ui_with_layout(row, layout, |ui| {
+                ui.label(t.tile_load);
+                for (f, label) in [
+                    (TileFidelity::Speed, t.tile_speed),
+                    (TileFidelity::Full, t.tile_full),
+                ] {
+                    let current = app.tile_fidelity();
+                    if ui.radio(current == f, label).clicked() && current != f {
+                        out.actions.push(UiAction::SetTileFidelity(f));
+                    }
                 }
-            }
-        });
+            });
+        }
     });
 }
 

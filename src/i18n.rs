@@ -469,6 +469,8 @@ pub struct Strings {
     pub edit_rep_tab: &'static str,
     pub choose_rep_tab: &'static str,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub tile_load: &'static str,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub tile_speed: &'static str,
     /// Names its cost, so the person knows why the tiles take a moment.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -1034,8 +1036,9 @@ pub static EN: Strings = Strings {
     group_page: |first, last, n| format!("{first}–{last} of {n}"),
     edit_rep_tab: "Edit Representative",
     choose_rep_tab: "Choose Representative",
-    tile_speed: "Speed",
-    tile_full: "Full (Slower)",
+    tile_load: "Load all photos:",
+    tile_speed: "Quickly",
+    tile_full: "Fully (Slower)",
     set_as_rep: "Set as representative",
     folder_handle_missing: |dir| format!("Couldn't open {dir} \u{2014} folder handle missing"),
     list_folder_failed: |dir, e| format!("Couldn't list {dir}: {e}"),
@@ -1531,6 +1534,7 @@ pub static ZH: Strings = Strings {
     group_page: |first, last, n| format!("{first}–{last} / {n} 张"),
     edit_rep_tab: "编辑代表照片",
     choose_rep_tab: "选择代表照片",
+    tile_load: "加载所有照片：",
     tile_speed: "快速",
     tile_full: "完整（较慢）",
     set_as_rep: "设为代表照片",
