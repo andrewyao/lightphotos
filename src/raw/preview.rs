@@ -124,7 +124,7 @@ fn decode_raw_preview(
     // size, and held until this decode returns. The sensor size is unknown
     // until rawler has decoded, so this first ask is sized from the file.
     #[cfg(target_arch = "wasm32")]
-    let mut grant = crate::decode_budget::acquire(file_estimate(source.len(), mode));
+    let grant = crate::decode_budget::acquire(file_estimate(source.len(), mode));
 
     let mut raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rawler::decode(&source, &params)
@@ -151,13 +151,15 @@ fn decode_raw_preview(
     // holding the first grant, keeps two decodes from each waiting on the
     // other.
     #[cfg(target_arch = "wasm32")]
-    {
+    let _grant = {
         let needed = scratch_estimate(&raw, mode);
         if needed > grant.bytes() {
             drop(grant);
-            grant = crate::decode_budget::acquire(needed);
+            crate::decode_budget::acquire(needed)
+        } else {
+            grant
         }
-    }
+    };
 
     let (w, h, rgba) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         raw.apply_scaling().map_err(|e| e.to_string())?;

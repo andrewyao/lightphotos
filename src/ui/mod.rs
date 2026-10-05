@@ -20,6 +20,8 @@ pub enum UiAction {
     /// SPIKE: show this page of the group's tiles.
     SpikePage(usize),
     SetGroupView(crate::app::GroupView),
+    /// Native only, as is the row that sends it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     SetTileFidelity(crate::app::TileFidelity),
     /// Pick this member to become the representative, or clear the pick
     /// when it is the representative or already picked.

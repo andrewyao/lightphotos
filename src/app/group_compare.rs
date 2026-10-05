@@ -5,7 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{App, SpikeTiles};
+use super::App;
+#[cfg(not(target_arch = "wasm32"))]
+use super::SpikeTiles;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
 #[cfg(not(target_arch = "wasm32"))]
@@ -67,7 +69,9 @@ pub(crate) fn crop_px(w: u32, h: u32, uv: egui::Rect) -> (u32, u32, u32, u32) {
     (x0, y0, x1 - x0, y1 - y0)
 }
 
-/// What a tile has of its member's full-resolution crop.
+/// What a tile has of its member's full-resolution crop. Only `None` on
+/// the web, which has no Full.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Full {
     None,
     /// The full decode is requested and not yet cut.

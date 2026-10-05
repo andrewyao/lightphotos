@@ -1737,7 +1737,9 @@ pub(crate) struct SpikeTiles {
     pub(crate) sizes: HashMap<PathBuf, (u32, u32)>,
     /// The zoom square as of the last sync, and when it last changed, which
     /// Full waits on before cutting new crops.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     square: Square,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     square_moved: Instant,
     wake_at: Option<Instant>,
     opened: Instant,
