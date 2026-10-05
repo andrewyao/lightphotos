@@ -95,15 +95,14 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     // Not a CentralPanel. egui treats the root UI's unused rect as "not over
     // egui" (`is_pointer_over_egui`), so zoom, pan, and clicks there reach the
     // app. A CentralPanel would claim that input.
-    if app.shown_in_group() {
-        egui::Panel::top("group_view_bar").show_inside(ui, |ui| group_view_bar(ui, app, out));
-    }
     let mut central = ui.available_rect_before_wrap();
     if app.spike.is_some() {
         if crate::app::spike_claims_pane() {
             egui::Panel::right("spike_tiles")
                 .exact_size(central.width() / 2.0)
                 .show_inside(ui, |ui| {
+                    egui::Panel::bottom("spike_controls")
+                        .show_inside(ui, |ui| spike_controls(ui, app, out));
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| spike_tiles(ui, app, out));
@@ -117,8 +116,12 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                 egui::Rect::from_min_max(egui::pos2(whole.center().x, whole.min.y), whole.max);
             ui.painter_at(right)
                 .rect_filled(right, 0.0, theme::colors(ui.ctx()).panel);
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(right));
+            let controls_h = ui.spacing().interact_size.y + 2.0 * ui.spacing().item_spacing.y;
+            let (tiles_rect, controls_rect) = right.split_top_bottom_at_y(right.max.y - controls_h);
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(tiles_rect));
             spike_tiles(&mut child, app, out);
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(controls_rect));
+            spike_controls(&mut child, app, out);
         }
     }
     out.loupe_rect = Some(central);
@@ -379,35 +382,42 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 egui::pos2(stars_left + stars_total_w / 2.0, main_y),
                 egui::vec2(stars_total_w, star_w),
             );
-            ui.scope_builder(egui::UiBuilder::new().max_rect(stars_rect), |ui| {
-                ui.horizontal_centered(|ui| {
-                    let current = app.selected_rating();
-                    for i in 0..5u8 {
-                        let (r, resp) = ui
-                            .allocate_exact_size(egui::vec2(star_w, star_w), egui::Sense::click());
-                        let filled = (i + 1) <= current;
-                        let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
-                        let color = if filled {
-                            theme::colors(ui.ctx()).star
-                        } else {
-                            theme::colors(ui.ctx()).label
-                        };
-                        ui.painter().text(
-                            r.center(),
-                            egui::Align2::CENTER_CENTER,
-                            glyph,
-                            egui::FontId::proportional(font_size::px(ui.style(), 18.0)),
-                            color,
-                        );
-                        if resp.clicked() {
-                            let n = i + 1;
-                            // Clicking the current rating clears it, as in Lightroom.
-                            let stars = if n == current { 0 } else { n };
-                            out.actions.push(UiAction::SetRating(stars));
+            // The stars' item spacing runs past `stars_rect`, so what sits
+            // right of them goes by the row they actually drew.
+            let stars_drawn = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(stars_rect), |ui| {
+                    ui.horizontal_centered(|ui| {
+                        let current = app.selected_rating();
+                        for i in 0..5u8 {
+                            let (r, resp) = ui.allocate_exact_size(
+                                egui::vec2(star_w, star_w),
+                                egui::Sense::click(),
+                            );
+                            let filled = (i + 1) <= current;
+                            let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
+                            let color = if filled {
+                                theme::colors(ui.ctx()).star
+                            } else {
+                                theme::colors(ui.ctx()).label
+                            };
+                            ui.painter().text(
+                                r.center(),
+                                egui::Align2::CENTER_CENTER,
+                                glyph,
+                                egui::FontId::proportional(font_size::px(ui.style(), 18.0)),
+                                color,
+                            );
+                            if resp.clicked() {
+                                let n = i + 1;
+                                // Clicking the current rating clears it, as in Lightroom.
+                                let stars = if n == current { 0 } else { n };
+                                out.actions.push(UiAction::SetRating(stars));
+                            }
                         }
-                    }
-                });
-            });
+                    });
+                })
+                .response
+                .rect;
 
             if let Some(label) = app.selected_label() {
                 ui.painter().circle_filled(
@@ -415,6 +425,21 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     font_size::px(ui.style(), 5.0),
                     label_color(label),
                 );
+            }
+
+            // Past the label dot, so the two never overlap.
+            if app.shown_in_group() {
+                let size = egui::vec2(
+                    font_size::px(ui.style(), GROUP_VIEW_WIDTH),
+                    ui.spacing().interact_size.y,
+                );
+                let view_rect = egui::Rect::from_min_size(
+                    egui::pos2(stars_drawn.right() + 3.0 * group_gap, main_y - size.y / 2.0),
+                    size,
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(view_rect), |ui| {
+                    group_view_bar(ui, app, out)
+                });
             }
 
             // Subject selection is a way of viewing the photo, not an edit, so
@@ -737,7 +762,7 @@ fn filmstrip_cell(
     response
 }
 
-/// Edit or Compare, over a grouped photo's Loupe.
+/// Edit or Compare, right of a grouped photo's rating stars.
 fn group_view_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
     let choices = [
@@ -756,13 +781,13 @@ fn group_view_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 }
 
 /// Wide enough for both labels in either language, and no wider, so the
-/// bar reads as a toggle rather than a page of tabs.
+/// control reads as a toggle rather than a page of tabs.
 const GROUP_VIEW_WIDTH: f32 = 200.0;
 
-/// The pane's header: the Speed or Full toggle on native, and Set as
-/// representative, live only while a pick other than the representative
-/// waits.
-fn spike_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+/// The row under the pane's tiles: the Speed or Full toggle on native, and
+/// Set as representative, live only while a pick other than the
+/// representative waits.
+fn spike_controls(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
     let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
     let layout = egui::Layout::right_to_left(egui::Align::Center);
@@ -793,7 +818,7 @@ fn spike_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// SPIKE: one tile per member on the group's current page, each sampling
 /// the zoom square. The representative is outlined in the selection color
 /// and the picked member in the cursor color; a click on another tile picks
-/// it, and the header's button makes the pick the representative. A page
+/// it, and the button below the tiles makes the pick the representative. A page
 /// holds `SPIKE_PAGE` tiles, and a group with more gets arrows under the
 /// grid. The grid keeps one size across pages, so a short last page leaves
 /// cells empty.
@@ -802,7 +827,6 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let Some(tiles) = app.spike.as_ref() else {
         return;
     };
-    spike_header(ui, app, out);
     let square = app.spike_square();
     let full = app.tile_fidelity() == TileFidelity::Full;
     let pick = app.group_pick();
