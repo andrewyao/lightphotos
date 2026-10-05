@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::develop::{Adjustments, TouchUp};
 use crate::groups::{GroupId, GroupWrite, Groups, SavedGroup};
+use crate::quality::QualityScore;
 
 pub(crate) mod group_file;
 mod writeback;
@@ -49,6 +50,20 @@ pub struct ImageRecord {
     /// Manual rotation in 90° clockwise steps, `0..=3`.
     #[serde(default, skip_serializing_if = "is_zero_rot")]
     pub rotation: u8,
+    /// Kept here rather than in `signals.json` because it is measured on the
+    /// edited photo, so it travels with the edits it describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<StoredScore>,
+}
+
+/// A quality score and the edits it was measured on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct StoredScore {
+    #[serde(flatten)]
+    pub score: QualityScore,
+    /// [`ImageRecord::edit_signature`] when scored. A different signature
+    /// now means the photo was edited since, and the score is stale.
+    pub edits: u64,
 }
 
 /// A photo's color label, set with Shift+1..5 in Lightroom's order.
@@ -108,7 +123,8 @@ impl ImageRecord {
             && self.label.is_none()
             && self.adjustments.is_identity()
             && self.touchups.is_empty()
-            && self.rotation == 0;
+            && self.rotation == 0
+            && self.score.is_none();
         debug_assert_eq!(
             empty,
             self.serializes_to_nothing(),
@@ -116,6 +132,15 @@ impl ImageRecord {
              a field was added to the struct but not to is_empty"
         );
         empty
+    }
+
+    /// A hash of the edits that change how the photo renders.
+    pub(crate) fn edit_signature(&self) -> u64 {
+        crate::develop::edit_signature_with_touchups(
+            &self.adjustments,
+            &self.touchups,
+            self.rotation,
+        )
     }
 
     /// Whether this record's sidecar would be `{}`, read off the serde
@@ -394,6 +419,20 @@ impl Catalog {
     pub fn set_rotation(&mut self, path: &Path, rotation: u8) {
         let rotation = rotation % 4;
         self.update(path, |rec| rec.rotation = rotation);
+    }
+
+    /// The stored score and whether the photo was edited after it was taken.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn score(&self, path: &Path) -> Option<(&StoredScore, bool)> {
+        let rec = self.record(path)?;
+        let stored = rec.score.as_ref()?;
+        Some((stored, stored.edits != rec.edit_signature()))
+    }
+
+    /// Store `score` as measured on the photo's edits as of `edits`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_score(&mut self, path: &Path, score: QualityScore, edits: u64) {
+        self.update(path, |rec| rec.score = Some(StoredScore { score, edits }));
     }
 
     /// The one entry point for photos that left the folder, such as trashed
@@ -959,13 +998,17 @@ mod tests {
             delta: [0.01, -0.02, 0.0],
         });
         populated.rotation = 1;
+        populated.score = Some(StoredScore {
+            score: sample_score(),
+            edits: 7,
+        });
 
         let serde_json::Value::Object(fields) = serde_json::to_value(&populated).unwrap() else {
             panic!("a record serializes to an object");
         };
         assert_eq!(
             fields.len(),
-            5,
+            6,
             "set every field of ImageRecord here, got {fields:?}"
         );
 
@@ -980,6 +1023,59 @@ mod tests {
         }
 
         assert!(ImageRecord::default().is_empty());
+    }
+
+    fn sample_score() -> QualityScore {
+        QualityScore {
+            value: 73,
+            basis: crate::quality::Basis::WithAesthetics,
+            penalties: vec![crate::quality::Penalty::Noisy],
+        }
+    }
+
+    #[test]
+    fn a_score_alone_keeps_the_sidecar_and_round_trips() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+        let mut cat = Catalog::with_dir(dir.clone());
+        let edits = ImageRecord::default().edit_signature();
+        cat.set_score(&p, sample_score(), edits);
+        flush(&mut cat);
+        assert!(sidecar_for(&dir, "photo.jpg").exists());
+
+        let reloaded = Catalog::with_dir(dir.clone());
+        let (stored, stale) = reloaded.score(&p).expect("the score survives a reload");
+        assert_eq!(stored.score, sample_score());
+        assert!(!stale, "nothing was edited since");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_edit_after_scoring_marks_the_score_stale_and_undoing_it_clears_that() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+        let mut cat = Catalog::with_dir(dir.clone());
+        cat.set_score(&p, sample_score(), ImageRecord::default().edit_signature());
+        cat.set(&p, 4);
+        assert_eq!(
+            cat.score(&p).map(|(_, stale)| stale),
+            Some(false),
+            "a rating is not an edit"
+        );
+
+        let mut adj = Adjustments::default();
+        adj.exposure = 1.0;
+        cat.set_adjustments(&p, &adj);
+        assert_eq!(cat.score(&p).map(|(_, stale)| stale), Some(true));
+        cat.set_adjustments(&p, &Adjustments::default());
+        assert_eq!(cat.score(&p).map(|(_, stale)| stale), Some(false));
+
+        cat.set_rotation(&p, 1);
+        assert_eq!(cat.score(&p).map(|(_, stale)| stale), Some(true));
+
+        flush(&mut cat);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
