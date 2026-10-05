@@ -362,9 +362,20 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     .size()
                     .x
             };
-            let group_w =
-                filename_w + if filename.is_empty() { 0.0 } else { group_gap } + stars_total_w;
-            let group_left = rect.center().x - group_w / 2.0;
+            // A grouped photo's tabs join the centered group, so the row
+            // fits until it is wider than the bar, then starts at the left.
+            let tabs_w = if app.shown_in_group() {
+                let labels = [t().edit_rep_tab, t().choose_rep_tab];
+                3.0 * group_gap + super::tabs::upward_width(ui, &labels)
+            } else {
+                0.0
+            };
+            let group_w = filename_w
+                + if filename.is_empty() { 0.0 } else { group_gap }
+                + stars_total_w
+                + 4.0 * ui.spacing().item_spacing.x
+                + tabs_w;
+            let group_left = (rect.center().x - group_w / 2.0).max(rect.left() + pad);
 
             if !filename.is_empty() {
                 painter.text(
@@ -759,12 +770,12 @@ fn filmstrip_cell(
     response
 }
 
-/// Edit or Compare, as tabs right of a grouped photo's rating stars.
+/// Edit Representative or Choose Representative, as tabs right of a grouped photo's rating stars.
 fn group_view_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
     let tabs = [
-        (GroupView::Edit, t.group_view_edit),
-        (GroupView::Compare, t.group_view_compare),
+        (GroupView::Edit, t.edit_rep_tab),
+        (GroupView::Compare, t.choose_rep_tab),
     ];
     if let Some(view) = super::tabs::upward(ui, &tabs, app.group_view()) {
         out.actions.push(UiAction::SetGroupView(view));
@@ -776,29 +787,31 @@ fn group_view_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// representative waits.
 fn spike_controls(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
-    let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
-    let layout = egui::Layout::right_to_left(egui::Align::Center);
-    ui.allocate_ui_with_layout(row, layout, |ui| {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let set = Button {
             label: t.set_as_rep,
             role: Role::Primary,
             enabled: app.group_pick().is_some(),
         };
-        if form::button(ui, &set).clicked() {
+        let set = form::button(ui, &set);
+        if set.clicked() {
             out.actions.push(UiAction::SetPickAsRep);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let choices = [
-                (TileFidelity::Speed, t.tile_speed, None),
-                (TileFidelity::Full, t.tile_full, None),
-            ];
-            if let Some(f) = form::segmented(ui, &choices, app.tile_fidelity())
-                .filter(|f| *f != app.tile_fidelity())
-            {
-                out.actions.push(UiAction::SetTileFidelity(f));
+        // As tall as the button, so the radios center on the same line.
+        let row = egui::vec2(ui.available_width(), set.rect.height());
+        let layout = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(row, layout, |ui| {
+            #[cfg(not(target_arch = "wasm32"))]
+            for (f, label) in [
+                (TileFidelity::Speed, t.tile_speed),
+                (TileFidelity::Full, t.tile_full),
+            ] {
+                let current = app.tile_fidelity();
+                if ui.radio(current == f, label).clicked() && current != f {
+                    out.actions.push(UiAction::SetTileFidelity(f));
+                }
             }
-        }
+        });
     });
 }
 

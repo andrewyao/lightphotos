@@ -466,8 +466,8 @@ pub struct Strings {
     pub preview_failed: fn(&str) -> String,
     /// SPIKE: the group tiles' page, as first, last and group size.
     pub group_page: fn(usize, usize, usize) -> String,
-    pub group_view_edit: &'static str,
-    pub group_view_compare: &'static str,
+    pub edit_rep_tab: &'static str,
+    pub choose_rep_tab: &'static str,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub tile_speed: &'static str,
     /// Names its cost, so the person knows why the tiles take a moment.
@@ -1032,8 +1032,8 @@ pub static EN: Strings = Strings {
     open_folder_failed: |e| format!("Couldn't open folder: {e}"),
     preview_failed: |path| format!("Unable to load Loupe preview for {path}"),
     group_page: |first, last, n| format!("{first}–{last} of {n}"),
-    group_view_edit: "Edit",
-    group_view_compare: "Compare",
+    edit_rep_tab: "Edit Representative",
+    choose_rep_tab: "Choose Representative",
     tile_speed: "Speed",
     tile_full: "Full (Slower)",
     set_as_rep: "Set as representative",
@@ -1529,8 +1529,8 @@ pub static ZH: Strings = Strings {
     open_folder_failed: |e| format!("无法打开文件夹：{e}"),
     preview_failed: |path| format!("无法加载 {path} 的预览"),
     group_page: |first, last, n| format!("{first}–{last} / {n} 张"),
-    group_view_edit: "编辑",
-    group_view_compare: "比较",
+    edit_rep_tab: "编辑代表照片",
+    choose_rep_tab: "选择代表照片",
     tile_speed: "快速",
     tile_full: "完整（较慢）",
     set_as_rep: "设为代表照片",
