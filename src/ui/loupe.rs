@@ -373,11 +373,11 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     .size()
                     .x
             };
-            // A grouped photo's Representative button joins the centered
+            // A grouped photo's view icons join the centered
             // group, so the row fits until it is wider than the bar, then
             // starts at the left.
             let tabs_w = if app.shown_in_group() {
-                3.0 * group_gap + representative_button_width(ui)
+                3.0 * group_gap + group_view_buttons_width(ui)
             } else {
                 0.0
             };
@@ -498,7 +498,7 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 let layout = egui::Layout::left_to_right(egui::Align::Center);
                 ui.scope_builder(
                     egui::UiBuilder::new().max_rect(view_rect).layout(layout),
-                    |ui| representative_button(ui, app, out),
+                    |ui| group_view_buttons(ui, app, out),
                 );
             }
 
@@ -857,37 +857,85 @@ fn filmstrip_cell(
     response
 }
 
-/// Representative, right of a grouped photo's rating stars. A click opens
-/// the Compare pane, and it stays lit while the pane is open; the pane's
-/// Cancel goes back.
-fn representative_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    super::toolbar::toolbar_spacing(ui);
-    let open = app.group_view() == GroupView::Compare;
-    let label = crate::i18n::t().representative;
-    if ui.add(egui::Button::selectable(open, label)).clicked() && !open {
-        out.actions.push(UiAction::SetGroupView(GroupView::Compare));
+/// Two icons right of a grouped photo's rating stars, one per
+/// `GroupView`: a lone frame for the photo alone, and a large frame beside
+/// a column of small ones for the Compare pane. The current view's icon
+/// stays lit.
+fn group_view_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    ui.spacing_mut().item_spacing.x = font_size::px(ui.style(), VIEW_ICON_GAP);
+    let t = crate::i18n::t();
+    let current = app.group_view();
+    for (view, tip) in [
+        (GroupView::Edit, t.view_single),
+        (GroupView::Compare, t.view_compare),
+    ] {
+        if group_view_icon(ui, view, current == view)
+            .on_hover_text(tip)
+            .clicked()
+            && current != view
+        {
+            out.actions.push(UiAction::SetGroupView(view));
+        }
     }
 }
 
-/// How wide `representative_button` draws.
-fn representative_button_width(ui: &egui::Ui) -> f32 {
-    let font = egui::TextStyle::Button.resolve(ui.style());
-    let text = ui
-        .painter()
-        .layout_no_wrap(
-            crate::i18n::t().representative.to_string(),
-            font,
-            egui::Color32::WHITE,
-        )
-        .size()
-        .x;
-    text + 2.0 * font_size::px(ui.style(), super::toolbar::BUTTON_PAD.x)
+const VIEW_ICON_SIZE: egui::Vec2 = egui::vec2(30.0, 22.0);
+const VIEW_ICON_GAP: f32 = 2.0;
+
+/// How wide `group_view_buttons` draws.
+fn group_view_buttons_width(ui: &egui::Ui) -> f32 {
+    font_size::px(ui.style(), 2.0 * VIEW_ICON_SIZE.x + VIEW_ICON_GAP)
+}
+
+/// One of `group_view_buttons`' icons, drawn as outlines so it follows the
+/// theme's text color.
+fn group_view_icon(ui: &mut egui::Ui, view: GroupView, selected: bool) -> egui::Response {
+    let size = egui::vec2(
+        font_size::px(ui.style(), VIEW_ICON_SIZE.x),
+        font_size::px(ui.style(), VIEW_ICON_SIZE.y),
+    );
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+    let visuals = ui.style().interact_selectable(&response, selected);
+    let painter = ui.painter();
+    if selected || response.hovered() {
+        painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+    }
+    let stroke = egui::Stroke::new(font_size::px(ui.style(), 1.3), visuals.fg_stroke.color);
+    let unit = font_size::px(ui.style(), 1.0);
+    let art = egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 12.0) * unit);
+    let radius = 1.5 * unit;
+    let frame = |r: egui::Rect| painter.rect_stroke(r, radius, stroke, egui::StrokeKind::Middle);
+    match view {
+        GroupView::Edit => {
+            frame(art);
+        }
+        GroupView::Compare => {
+            let gap = 2.0 * unit;
+            let small_w = 4.0 * unit;
+            frame(egui::Rect::from_min_max(
+                art.min,
+                egui::pos2(art.right() - small_w - gap, art.bottom()),
+            ));
+            let small_h = (art.height() - 2.0 * gap) / 3.0;
+            for i in 0..3 {
+                let top = art.top() + i as f32 * (small_h + gap);
+                frame(egui::Rect::from_min_size(
+                    egui::pos2(art.right() - small_w, top),
+                    egui::vec2(small_w, small_h),
+                ));
+            }
+        }
+    }
+    response
 }
 
 /// The Compare pane's controls, in the info bar while the pane is open:
-/// how to load the tiles on native, Cancel back to Edit Representative,
-/// Set as representative, live while exactly one member is picked, then
-/// the actions on the picks (`toolbar::pick_actions`).
+/// how to load the tiles on native, Set as representative, live while
+/// exactly one member is picked, then the actions on the picks
+/// (`toolbar::pick_actions`).
 fn compare_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
     let picks = app.group_picks().len();
@@ -903,14 +951,6 @@ fn compare_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 out.actions.push(UiAction::SetTileFidelity(f));
             }
         }
-    }
-    let cancel = Button {
-        label: t.cancel,
-        role: Role::Cancel,
-        enabled: true,
-    };
-    if form::button(ui, &cancel).clicked() {
-        out.actions.push(UiAction::SetGroupView(GroupView::Edit));
     }
     let set = Button {
         label: t.set_as_rep,

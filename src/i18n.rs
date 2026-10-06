@@ -504,6 +504,10 @@ pub struct Strings {
     pub tile_full: &'static str,
     pub set_as_rep: &'static str,
     pub representative: &'static str,
+    /// Hover text on the info bar's icon for the Loupe alone.
+    pub view_single: &'static str,
+    /// Hover text on the info bar's icon for the Compare pane.
+    pub view_compare: &'static str,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub folder_handle_missing: fn(&str) -> String,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -1135,6 +1139,8 @@ pub static EN: Strings = Strings {
     tile_full: "Fully (Slower)",
     set_as_rep: "Set as representative",
     representative: "Representative",
+    view_single: "Single photo",
+    view_compare: "Compare group",
     folder_handle_missing: |dir| format!("Couldn't open {dir} \u{2014} folder handle missing"),
     list_folder_failed: |dir, e| format!("Couldn't list {dir}: {e}"),
     catalog_save_failed: |e| format!("Failed to save catalog entry: {e}"),
@@ -1691,6 +1697,8 @@ pub static ZH: Strings = Strings {
     tile_full: "完整（较慢）",
     set_as_rep: "设为代表照片",
     representative: "代表照片",
+    view_single: "单张照片",
+    view_compare: "组内比较",
     folder_handle_missing: |dir| format!("无法打开 {dir} \u{2014} 缺少文件夹句柄"),
     list_folder_failed: |dir, e| format!("无法列出 {dir}：{e}"),
     catalog_save_failed: |e| format!("无法保存目录条目：{e}"),
