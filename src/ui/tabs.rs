@@ -135,19 +135,6 @@ pub(super) fn footer<T: Copy + PartialEq>(
         .inner
 }
 
-/// How wide `upward` draws tabs with these labels.
-pub(super) fn upward_width(ui: &egui::Ui, labels: &[&str]) -> f32 {
-    let gaps = labels.len().saturating_sub(1) as f32 * 2.0;
-    labels
-        .iter()
-        .map(|l| {
-            let (galley, pad) = footer_tab_text(ui, l);
-            galley.size().x + 2.0 * pad.x
-        })
-        .sum::<f32>()
-        + gaps
-}
-
 /// A footer tab's laid-out label and its padding.
 fn footer_tab_text(ui: &egui::Ui, label: &str) -> (std::sync::Arc<egui::Galley>, egui::Vec2) {
     let mut font = egui::TextStyle::Body.resolve(ui.style());
@@ -160,27 +147,6 @@ fn footer_tab_text(ui: &egui::Ui, label: &str) -> (std::sync::Arc<egui::Galley>,
         font_size::px(ui.style(), 7.0),
     );
     (galley, pad)
-}
-
-/// A row of tabs hanging from the rule at the top of `ui`'s rect and
-/// opening upward, so the active one joins the content above. Returns the
-/// tab clicked, if it isn't `current` already.
-pub(super) fn upward<T: Copy + PartialEq>(
-    ui: &mut egui::Ui,
-    tabs: &[(T, &str)],
-    current: T,
-) -> Option<T> {
-    let mut picked = None;
-    ui.horizontal_top(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        for &(tab, label) in tabs {
-            let active = tab == current;
-            if footer_tab(ui, label, active).clicked() && !active {
-                picked = Some(tab);
-            }
-        }
-    });
-    picked
 }
 
 /// One footer tab, hanging from the strip's top rule and opening upward into

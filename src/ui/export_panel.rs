@@ -37,7 +37,7 @@ pub(super) fn draw_export_panel(
         if develop_tab {
             super::develop_panel::right_tabs(ui, app, out);
         }
-        form::panel_title(ui, &(t.export_title)(app.selection_count()));
+        form::panel_title(ui, &(t.export_title)(app.action_count()));
         let form = Form::new(
             ui,
             &[

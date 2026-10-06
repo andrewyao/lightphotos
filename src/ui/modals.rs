@@ -16,7 +16,7 @@ pub(super) fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         BulkKind::Rate(_) => t.bulk_rate,
         BulkKind::ApplySettings => t.apply_settings,
         BulkKind::ApplyPreset(_) => t.bulk_apply_preset,
-        BulkKind::AutoTone => t.auto_tone,
+        BulkKind::AutoTone | BulkKind::AutoToneAll => t.auto_tone,
         BulkKind::Delete => t.bulk_delete,
     };
     let role = if kind == BulkKind::Delete {

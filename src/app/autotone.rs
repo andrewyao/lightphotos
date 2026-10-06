@@ -98,7 +98,12 @@ impl App {
     /// Auto Tone every selected photo. Photos without a cached thumbnail finish
     /// in `poll_auto_tone` as thumbnails arrive.
     pub(super) fn auto_tone_selection(&mut self) {
-        self.auto_tone_batch(self.selected_paths(), DeferredAutoToneMode::Replace);
+        self.auto_tone_batch(self.action_paths(), DeferredAutoToneMode::Replace);
+    }
+
+    /// Auto Tone every photo in the grid, group members included.
+    pub(super) fn auto_tone_all(&mut self) {
+        self.auto_tone_batch(self.all_member_paths(), DeferredAutoToneMode::Replace);
     }
 
     /// Start a batch over `paths`, or defer it while the catalog loads. When
@@ -383,6 +388,21 @@ mod tests {
 
     /// In the Grid, `shown` is still the photo last opened in the Loupe. Cmd+U
     /// must tone the photo under the cursor instead.
+    #[test]
+    fn auto_adjust_all_asks_first_then_takes_every_photo_and_group_member() {
+        let (mut app, dir, _) = crate::app::presets::tests::folder_app("tone-all", 5);
+        crate::app::nav::tests::group_photos(&mut app, &[0, 1, 2], 0);
+        assert_eq!(app.selection_count(), 0);
+        app.request_bulk(ui::BulkKind::AutoToneAll);
+        let (kind, prompt) = app.pending_bulk_prompt().expect("it asks first");
+        assert_eq!(kind, ui::BulkKind::AutoToneAll);
+        assert_eq!(prompt, (crate::i18n::t().confirm_auto_tone)(5));
+        assert_eq!(app.autotone_total(), 0, "nothing runs before the confirm");
+        app.confirm_pending();
+        assert_eq!(app.autotone_total(), 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn cmd_u_in_the_grid_tones_the_cursor_photo_not_the_last_loupe_photo() {
         let (mut app, dir, a, b) = grid_with_two_photos("autotone-cursor");

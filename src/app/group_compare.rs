@@ -773,6 +773,38 @@ mod tests {
     }
 
     #[test]
+    fn the_toolbar_rates_the_picks_not_the_shown_photo() {
+        let (mut app, dir, paths) = compare("rate-picks", 6, &[1, 2, 3, 4], 1);
+        pick(&mut app, &paths[2], PickHow::Toggle);
+        pick(&mut app, &paths[4], PickHow::Toggle);
+        act(
+            &mut app,
+            UiAction::RequestBulk(crate::ui::BulkKind::Rate(3)),
+        );
+        let (_, prompt) = app.pending_bulk_prompt().expect("it asks first");
+        assert_eq!(
+            prompt,
+            (crate::i18n::t().confirm_rate)("\u{2605}\u{2605}\u{2605}", 2)
+        );
+        act(&mut app, UiAction::ConfirmPending);
+        let ratings: Vec<u8> = paths.iter().map(|p| app.member_rating(p)).collect();
+        assert_eq!(ratings, [0, 0, 3, 0, 3, 0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn copy_adjustment_with_one_pick_copies_from_that_pick() {
+        let (mut app, dir, paths) = compare("copy-pick", 6, &[1, 2, 3], 1);
+        pick(&mut app, &paths[3], PickHow::Only);
+        act(&mut app, UiAction::CopySettings);
+        assert_eq!(
+            app.copied_settings.as_ref().map(|(p, _)| p),
+            Some(&paths[3])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_picks_clear_when_the_loupe_moves_to_another_photo_or_leaves_compare() {
         let (mut app, dir, paths) = grouped_loupe("pick-clears");
         act(&mut app, UiAction::SetGroupView(GroupView::Compare));

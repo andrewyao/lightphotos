@@ -20,6 +20,11 @@ pub enum UiAction {
     /// only, as is the button that sends it.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     GroupBursts,
+    /// Group the bursts among every photo in the grid. Native only.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    GroupAllBursts,
+    /// Score every photo in the grid, group members included.
+    ScoreAll,
     UngroupSelection,
     /// SPIKE: show this page of the group's tiles.
     SpikePage(usize),
@@ -171,6 +176,8 @@ pub enum BulkKind {
     /// Apply this saved preset.
     ApplyPreset(u64),
     AutoTone,
+    /// Auto Tone every photo in the grid, not the selection.
+    AutoToneAll,
     /// Move to the Trash.
     Delete,
 }
@@ -241,6 +248,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 
     // The Loupe has no toolbar. Changing the filter while a photo is open
     // could drop that photo out of the Grid's selection and break rating it.
+    // Its actions on the photo sit in its info bar instead.
     folder_title_bar(ui, app, &mut out);
     if mode != ViewMode::Loupe {
         grid_toolbar(ui, app, &mut out);

@@ -225,6 +225,25 @@ impl App {
         pl.entry(idx).map(|p| p.to_path_buf())
     }
 
+    /// What the toolbar's actions act on: the Compare pane's picks while
+    /// any are picked, else the selection (`selected_paths`).
+    pub(crate) fn action_paths(&self) -> Vec<PathBuf> {
+        let picks = self.group_picks();
+        if picks.is_empty() {
+            self.selected_paths()
+        } else {
+            picks.into_iter().map(Path::to_path_buf).collect()
+        }
+    }
+
+    /// How many photos `action_paths` names, without building the list.
+    pub(crate) fn action_count(&self) -> usize {
+        match self.group_picks().len() {
+            0 => self.selection_count(),
+            n => n,
+        }
+    }
+
     /// Paths bulk actions apply to, in `visible` order. Falls back to `sel`,
     /// then in the Loupe to the photo on screen, like `selected_path`.
     pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
@@ -248,6 +267,18 @@ impl App {
         if cells.is_empty() || self.mode == ViewMode::Loupe {
             return self.selected_paths();
         }
+        self.member_paths(cells)
+    }
+
+    /// Every photo behind the grid's cells, each group's members included:
+    /// what the selection bar's "All" actions act on.
+    pub(crate) fn all_member_paths(&self) -> Vec<PathBuf> {
+        self.member_paths(0..self.visible.len())
+    }
+
+    /// The photos behind `cells`, a grouped cell expanded to every member
+    /// still in the folder.
+    fn member_paths(&self, cells: impl IntoIterator<Item = usize>) -> Vec<PathBuf> {
         let Some(pl) = self.playlist.as_ref() else {
             return Vec::new();
         };

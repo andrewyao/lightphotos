@@ -547,11 +547,12 @@ mod tests {
     /// each sitting alone at the window's right edge.
     #[test]
     fn the_count_and_delete_sit_beside_their_rows() {
-        use crate::app::presets::tests::{folder_app, settled};
+        use crate::app::presets::tests::{folder_app, settled_at};
         let t = crate::i18n::t();
         let (mut app, dir, _) = folder_app("toolbar-rows", 3);
         app.select_single(0);
-        let painted = settled(&mut app);
+        // Wide enough for the whole one-line action row.
+        let painted = settled_at(&mut app, egui::vec2(1900.0, 800.0));
         let export = painted.pos_of(t.export_jpg);
         let delete = painted.pos_of(t.delete);
         let count = painted.pos_of(&(t.n_photos)(3));

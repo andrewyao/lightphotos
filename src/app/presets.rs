@@ -114,7 +114,7 @@ impl App {
         };
         let name = preset.name.clone();
         let tone = preset.adjustments.tone_only();
-        let n = self.apply_tone_to(tone, &self.selected_paths());
+        let n = self.apply_tone_to(tone, &self.action_paths());
         if n == 0 {
             return;
         }
@@ -507,12 +507,25 @@ pub(in crate::app) mod tests {
         events: Vec<egui::Event>,
         modifiers: egui::Modifiers,
     ) -> (Vec<crate::ui::UiAction>, Painted) {
+        frame_sized(app, events, modifiers, egui::vec2(1100.0, 800.0))
+    }
+
+    /// What the UI paints once settled in a window `size` points big.
+    pub(in crate::app) fn settled_at(app: &mut App, size: egui::Vec2) -> Painted {
+        let none = egui::Modifiers::NONE;
+        let _ = frame_sized(app, Vec::new(), none, size);
+        frame_sized(app, Vec::new(), none, size).1
+    }
+
+    fn frame_sized(
+        app: &mut App,
+        events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+        size: egui::Vec2,
+    ) -> (Vec<crate::ui::UiAction>, Painted) {
         let ctx = app.egui_ctx.clone();
         let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1100.0, 800.0),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
             events,
             modifiers,
             ..Default::default()

@@ -3,6 +3,58 @@ use super::*;
 use crate::app::{App, GridSort, Region, SHOW_EYES_FILTER};
 use crate::navigation::Cmp;
 
+/// The grid's two rows of controls share these, in points before
+/// `font_size::px` scales them: the gap between items, the room inside each
+/// button, and the margin around the row.
+const ITEM_GAP: f32 = 10.0;
+pub(super) const BUTTON_PAD: egui::Vec2 = egui::vec2(8.0, 3.0);
+const ROW_MARGIN: egui::Vec2 = egui::vec2(10.0, 6.0);
+
+/// A panel for one of the grid's rows of controls, on top or at the
+/// bottom, laid out with the spacing above.
+fn toolbar_row<R>(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    bottom: bool,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let style = ui.style().clone();
+    let margin = egui::Margin::symmetric(
+        font_size::px(&style, ROW_MARGIN.x).round() as i8,
+        font_size::px(&style, ROW_MARGIN.y).round() as i8,
+    );
+    let panel = if bottom {
+        egui::Panel::bottom(id)
+    } else {
+        egui::Panel::top(id)
+    };
+    panel
+        .frame(egui::Frame::side_top_panel(&style).inner_margin(margin))
+        .show_inside(ui, |ui| {
+            toolbar_spacing(ui);
+            add(ui)
+        })
+        .inner
+}
+
+/// The toolbar rows' gaps and button padding, for a row drawn elsewhere.
+pub(super) fn toolbar_spacing(ui: &mut egui::Ui) {
+    let style = ui.style().clone();
+    let spacing = ui.spacing_mut();
+    spacing.item_spacing.x = font_size::px(&style, ITEM_GAP);
+    spacing.button_padding = egui::vec2(
+        font_size::px(&style, BUTTON_PAD.x),
+        font_size::px(&style, BUTTON_PAD.y),
+    );
+    // A row centers its items in this height, so it must fit the padded
+    // buttons or the labels ride high.
+    let text = egui::TextStyle::Button.resolve(&style).size;
+    spacing.interact_size.y = spacing
+        .interact_size
+        .y
+        .max(text + 2.0 * spacing.button_padding.y);
+}
+
 /// A keyboard-focusable control in the Grid toolbar. `ALL` is the
 /// row order: `grid_toolbar` draws the row from it and `App::toolbar_move`
 /// walks it, so the F6 cursor's index is a position in
@@ -150,7 +202,7 @@ fn cmp_glyph(cmp: Cmp) -> &'static str {
 }
 
 pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    egui::Panel::top("grid_toolbar").show_inside(ui, |ui| {
+    toolbar_row(ui, "grid_toolbar", false, |ui| {
         ui.horizontal(|ui| {
             let t = t();
             ui.label(t.rating_filter);
@@ -184,146 +236,294 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
     });
 }
 
-/// Bulk actions on the Grid selection, in a row under the toolbar.
-/// The row stays up with nothing selected so the grid doesn't shift when a
-/// selection starts. Every action opens a confirm modal before it runs. These
-/// are not in the keyboard cycle because they come and go with the selection;
-/// each has its own shortcut instead.
+/// Actions in one row under the grid. The grid's own half acts on every
+/// photo the filter shows: Score All, Group All Bursts and Auto Adjust All.
+/// With one photo selected a second half acts on it; with more, the row
+/// acts on the selection alone. Delete sits last behind a divider. The row
+/// stays up with nothing selected so the grid doesn't shift when a
+/// selection starts.
 pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let n = app.selection_count();
-    let t = t();
-    egui::Panel::top("selection_bar").show_inside(ui, |ui| {
-        ui.horizontal(|ui| {
-            // Buttons are taller than a label; keep the row one height.
-            ui.set_min_height(ui.spacing().interact_size.y);
-            if n == 0 {
-                ui.weak(crate::i18n::keys(t.no_selection));
-                return;
-            }
-            ui.strong((t.n_selected)(n));
-            ui.separator();
-            egui::ComboBox::from_id_salt("bulk_star")
-                .selected_text(t.rate_menu)
-                .show_ui(ui, |ui| {
-                    for s in (1u8..=5).rev() {
-                        if ui.button(star_string(s)).clicked() {
-                            out.actions.push(UiAction::RequestBulk(BulkKind::Rate(s)));
-                        }
+    toolbar_row(ui, "selection_bar", true, |ui| {
+        // One line that never wraps; a window too narrow for it scrolls
+        // sideways rather than hiding Export and Delete.
+        egui::ScrollArea::horizontal()
+            .id_salt("selection_bar_scroll")
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Buttons are taller than a label; keep the row one height.
+                    ui.set_min_height(ui.spacing().interact_size.y);
+                    if n <= 1 {
+                        grid_actions(ui, app, out);
                     }
-                    if ui.button(t.clear_rating).clicked() {
-                        out.actions.push(UiAction::RequestBulk(BulkKind::Rate(0)));
+                    match n {
+                        0 => {}
+                        1 => {
+                            ui.separator();
+                            one_photo_actions(ui, app, out);
+                            delete_button(ui, app, out);
+                        }
+                        n => {
+                            selection_actions(ui, app, n, out);
+                            delete_button(ui, app, out);
+                        }
                     }
                 });
-            if ui
-                .button(t.auto_tone)
-                .on_hover_text(crate::i18n::keys(t.auto_tone_selection_tip))
-                .clicked()
-            {
-                out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));
-            }
-            if app.scoring_available()
-                && ui
-                    .button(t.score_selection)
-                    .on_hover_text(crate::i18n::keys(t.score_selection_tip))
-                    .clicked()
-            {
-                out.actions.push(UiAction::ScoreSelection);
-            }
-            ui.separator();
-            if ui
-                .add_enabled(n == 1, egui::Button::new(t.copy_settings))
-                .on_hover_text(crate::i18n::keys(t.copy_settings_tip))
-                .on_disabled_hover_text(t.copy_settings_needs_one)
-                .clicked()
-            {
-                out.actions.push(UiAction::CopySettings);
-            }
-            let apply = ui
-                .add_enabled(
-                    app.has_copied_settings(),
-                    egui::Button::new(t.apply_settings),
-                )
-                .on_disabled_hover_text(t.apply_settings_needs_copy);
-            if apply.clicked() {
-                out.actions
-                    .push(UiAction::RequestBulk(BulkKind::ApplySettings));
-            }
-            if let Some(name) = app.copied_settings_name() {
-                ui.weak((t.settings_from)(&name));
-            }
-            ui.add_enabled_ui(!app.presets().is_empty(), |ui| {
-                if !crate::app::SHOW_PRESETS {
-                    return;
-                }
-                egui::ComboBox::from_id_salt("bulk_preset")
-                    .selected_text(t.preset_menu)
-                    .show_ui(ui, |ui| {
-                        for preset in app.presets() {
-                            if ui.button(&preset.name).clicked() {
-                                out.actions
-                                    .push(UiAction::RequestBulk(BulkKind::ApplyPreset(preset.id)));
-                            }
-                        }
-                    });
-            })
-            .response
-            .on_hover_text(t.apply_preset_selection_tip)
-            .on_disabled_hover_text(t.no_presets);
-            ui.separator();
-            if ui
-                .add_enabled(
-                    app.group_available(),
-                    egui::Button::new(t.menu.group_selected),
-                )
-                .on_hover_text(crate::i18n::keys(t.group_selection_tip))
-                .clicked()
-            {
-                out.actions.push(UiAction::GroupSelection);
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if ui
-                .add_enabled(
-                    app.group_bursts_available(),
-                    egui::Button::new(t.menu.group_bursts),
-                )
-                .on_hover_text(crate::i18n::keys(t.group_bursts_tip))
-                .clicked()
-            {
-                out.actions.push(UiAction::GroupBursts);
-            }
-            if ui
-                .add_enabled(
-                    app.ungroup_button_enabled(),
-                    egui::Button::new(t.menu.ungroup),
-                )
-                .on_hover_text(crate::i18n::keys(t.ungroup_selection_tip))
-                .clicked()
-            {
-                out.actions.push(UiAction::UngroupSelection);
-            }
-            ui.separator();
-            if ui
-                .button(t.export_jpg)
-                .on_hover_text(t.export_jpg_tip)
-                .clicked()
-            {
-                out.actions.push(UiAction::ToggleExportForm);
-            }
+            });
+    });
+}
 
-            // Destructive, so it sits last, in its own group.
-            ui.separator();
-            let delete = egui::Button::new(
-                egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger),
-            );
-            if ui
-                .add_enabled(app.delete_available(), delete)
-                .on_hover_text(t.delete_selection_tip)
-                .clicked()
-            {
-                out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
+/// The selection bar's actions on one photo, for the Loupe's info bar,
+/// where they act on the photo on screen. The bar already names the photo
+/// and rates it with its stars, so neither the label nor Rate comes along.
+pub(super) fn loupe_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    photo_actions(ui, app, out);
+    delete_button(ui, app, out);
+}
+
+/// "All n photos:" or, under a filter, "Filtered n photos:", then the
+/// actions on all of them.
+fn grid_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = t();
+    let cells = app.visible_len();
+    ui.strong(if app.filter().is_some() {
+        (t.filtered_n_photos)(cells)
+    } else {
+        (t.all_n_photos)(cells)
+    });
+    let any = cells > 0;
+    if app.scoring_available()
+        && ui
+            .add_enabled(any, egui::Button::new(t.score_all))
+            .on_hover_text(t.score_all_tip)
+            .clicked()
+    {
+        out.actions.push(UiAction::ScoreAll);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if ui
+        .add_enabled(
+            app.group_bursts_available(),
+            egui::Button::new(t.group_all_bursts),
+        )
+        .on_hover_text(t.group_all_bursts_tip)
+        .clicked()
+    {
+        out.actions.push(UiAction::GroupAllBursts);
+    }
+    if ui
+        .add_enabled(any, egui::Button::new(t.auto_adjust_all))
+        .on_hover_text(t.auto_adjust_all_tip)
+        .clicked()
+    {
+        out.actions
+            .push(UiAction::RequestBulk(BulkKind::AutoToneAll));
+    }
+}
+
+/// "Selected photo:" and the actions on that one photo.
+fn one_photo_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    ui.strong(t().selected_photo);
+    rate_menu(ui, out);
+    photo_actions(ui, app, out);
+}
+
+/// One photo's actions after its rating: score, adjust, export.
+fn photo_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = t();
+    score_button(ui, app, t.update_score, out);
+    auto_adjust_button(ui, t.auto_tone, out);
+    copy_button(ui, out);
+    apply_adjustment(ui, app, out);
+    if app.ungroup_button_enabled()
+        && ui
+            .button(t.menu.ungroup)
+            .on_hover_text(crate::i18n::keys(t.ungroup_selection_tip))
+            .clicked()
+    {
+        out.actions.push(UiAction::UngroupSelection);
+    }
+    export_button(ui, out);
+}
+
+/// "Selected n photos:" and the actions on them.
+fn selection_actions(ui: &mut egui::Ui, app: &App, n: usize, out: &mut FrameOutput) {
+    let t = t();
+    ui.strong((t.selected_n_photos)(n));
+    rate_menu(ui, out);
+    score_button(ui, app, t.score_all, out);
+    #[cfg(not(target_arch = "wasm32"))]
+    if ui
+        .add_enabled(
+            app.group_bursts_available(),
+            egui::Button::new(t.group_all_bursts),
+        )
+        .on_hover_text(crate::i18n::keys(t.group_bursts_tip))
+        .clicked()
+    {
+        out.actions.push(UiAction::GroupBursts);
+    }
+    auto_adjust_button(ui, t.auto_adjust_all, out);
+    apply_adjustment(ui, app, out);
+    if ui
+        .add_enabled(
+            app.group_available(),
+            egui::Button::new(t.menu.group_selected),
+        )
+        .on_hover_text(crate::i18n::keys(t.group_selection_tip))
+        .clicked()
+    {
+        out.actions.push(UiAction::GroupSelection);
+    }
+    export_button(ui, out);
+}
+
+/// The Compare pane's picks, as the grid's selection: one pick gets the
+/// one-photo actions and several the selection's, less grouping, which
+/// means nothing inside a group. Nothing while none is picked.
+pub(super) fn pick_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = t();
+    let picks = app.group_picks().len();
+    if picks == 0 {
+        return;
+    }
+    ui.separator();
+    if picks == 1 {
+        ui.strong(t.selected_photo);
+        rate_menu(ui, out);
+        score_button(ui, app, t.update_score, out);
+        auto_adjust_button(ui, t.auto_tone, out);
+        copy_button(ui, out);
+    } else {
+        ui.strong((t.selected_n_photos)(picks));
+        rate_menu(ui, out);
+        score_button(ui, app, t.score_all, out);
+        auto_adjust_button(ui, t.auto_adjust_all, out);
+    }
+    apply_adjustment(ui, app, out);
+    export_button(ui, out);
+    ui.separator();
+    let delete =
+        egui::Button::new(egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger));
+    if ui
+        .add_enabled(app.delete_available(), delete)
+        .on_hover_text(t.delete_selection_tip)
+        .clicked()
+    {
+        out.actions.push(UiAction::RequestDeletePicks);
+    }
+}
+
+fn copy_button(ui: &mut egui::Ui, out: &mut FrameOutput) {
+    let t = t();
+    if ui
+        .button(t.copy_settings)
+        .on_hover_text(crate::i18n::keys(t.copy_settings_tip))
+        .clicked()
+    {
+        out.actions.push(UiAction::CopySettings);
+    }
+}
+
+fn rate_menu(ui: &mut egui::Ui, out: &mut FrameOutput) {
+    let t = t();
+    egui::ComboBox::from_id_salt("bulk_star")
+        .selected_text(t.rate_menu)
+        .show_ui(ui, |ui| {
+            for s in (1u8..=5).rev() {
+                if ui.button(star_string(s)).clicked() {
+                    out.actions.push(UiAction::RequestBulk(BulkKind::Rate(s)));
+                }
+            }
+            if ui.button(t.clear_rating).clicked() {
+                out.actions.push(UiAction::RequestBulk(BulkKind::Rate(0)));
             }
         });
-    });
+}
+
+fn score_button(ui: &mut egui::Ui, app: &App, label: &str, out: &mut FrameOutput) {
+    if app.scoring_available()
+        && ui
+            .button(label)
+            .on_hover_text(crate::i18n::keys(t().score_selection_tip))
+            .clicked()
+    {
+        out.actions.push(UiAction::ScoreSelection);
+    }
+}
+
+fn auto_adjust_button(ui: &mut egui::Ui, label: &str, out: &mut FrameOutput) {
+    let t = t();
+    if ui
+        .button(label)
+        .on_hover_text(crate::i18n::keys(t.auto_tone_selection_tip))
+        .clicked()
+    {
+        out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));
+    }
+}
+
+/// Apply Adjustment, live once one is copied, with where it came from, and
+/// the presets menu while presets are shown.
+fn apply_adjustment(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = t();
+    let apply = ui
+        .add_enabled(
+            app.has_copied_settings(),
+            egui::Button::new(t.apply_settings),
+        )
+        .on_disabled_hover_text(t.apply_settings_needs_copy);
+    if apply.clicked() {
+        out.actions
+            .push(UiAction::RequestBulk(BulkKind::ApplySettings));
+    }
+    if let Some(name) = app.copied_settings_name() {
+        ui.weak((t.settings_from)(&name));
+    }
+    if !crate::app::SHOW_PRESETS {
+        return;
+    }
+    ui.add_enabled_ui(!app.presets().is_empty(), |ui| {
+        egui::ComboBox::from_id_salt("bulk_preset")
+            .selected_text(t.preset_menu)
+            .show_ui(ui, |ui| {
+                for preset in app.presets() {
+                    if ui.button(&preset.name).clicked() {
+                        out.actions
+                            .push(UiAction::RequestBulk(BulkKind::ApplyPreset(preset.id)));
+                    }
+                }
+            });
+    })
+    .response
+    .on_hover_text(t.apply_preset_selection_tip)
+    .on_disabled_hover_text(t.no_presets);
+}
+
+fn export_button(ui: &mut egui::Ui, out: &mut FrameOutput) {
+    let t = t();
+    if ui
+        .button(t.export_jpg)
+        .on_hover_text(t.export_jpg_tip)
+        .clicked()
+    {
+        out.actions.push(UiAction::ToggleExportForm);
+    }
+}
+
+/// Destructive, so it sits last, behind a divider.
+fn delete_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = t();
+    ui.separator();
+    let delete =
+        egui::Button::new(egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger));
+    if ui
+        .add_enabled(app.delete_available(), delete)
+        .on_hover_text(t.delete_selection_tip)
+        .clicked()
+    {
+        out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
+    }
 }
 
 #[cfg(test)]

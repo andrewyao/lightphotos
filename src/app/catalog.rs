@@ -450,7 +450,7 @@ impl App {
             }
             _ => return None,
         };
-        let n = self.selection_count();
+        let n = self.action_count();
         let prompt = match kind {
             ui::BulkKind::Rate(0) => (t.confirm_clear_rating)(n),
             ui::BulkKind::Rate(s) => (t.confirm_rate)(&"\u{2605}".repeat(s as usize), n),
@@ -460,6 +460,7 @@ impl App {
                 (t.confirm_apply_preset)(name.as_deref().unwrap_or_default(), n)
             }
             ui::BulkKind::AutoTone => (t.confirm_auto_tone)(n),
+            ui::BulkKind::AutoToneAll => (t.confirm_auto_tone)(self.all_member_paths().len()),
             ui::BulkKind::Delete => match self.selected_groups().len() {
                 0 => (t.confirm_delete)(self.selected_member_paths().len()),
                 groups => (t.confirm_delete_groups)(self.selected_member_paths().len(), groups),
@@ -503,7 +504,7 @@ impl App {
     }
 
     fn bulk_available(&self) -> bool {
-        self.selection_count() > 0
+        self.action_count() > 0
     }
 
     /// Opens the confirm modal for `kind` when something is selected.
@@ -511,7 +512,11 @@ impl App {
         if kind == ui::BulkKind::Delete && !self.delete_available() {
             return;
         }
-        if self.bulk_available() {
+        let available = match kind {
+            ui::BulkKind::AutoToneAll => !self.visible.is_empty(),
+            _ => self.bulk_available(),
+        };
+        if available {
             self.pending_confirm = Some(PendingConfirm::Bulk(kind));
             self.request_redraw();
         }
@@ -583,6 +588,7 @@ impl App {
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
             ui::BulkKind::ApplyPreset(id) => self.apply_preset_to_selection(id),
             ui::BulkKind::AutoTone => self.auto_tone_selection(),
+            ui::BulkKind::AutoToneAll => self.auto_tone_all(),
             ui::BulkKind::Delete => self.delete_selection(),
         }
     }
@@ -590,12 +596,10 @@ impl App {
     /// Copies the selected photo's tone settings (not crop) to the in-app
     /// clipboard. Does nothing unless exactly one photo is selected.
     pub(super) fn copy_settings(&mut self) {
-        if self.selection_count() != 1 {
-            return;
-        }
-        let Some(path) = self.selected_path() else {
+        let [path] = &self.action_paths()[..] else {
             return;
         };
+        let path = path.clone();
         let tone = self
             .edits
             .get(&path)
@@ -616,7 +620,7 @@ impl App {
         let Some((_, tone)) = self.copied_settings.clone() else {
             return;
         };
-        let n = self.apply_tone_to(tone, &self.selected_paths());
+        let n = self.apply_tone_to(tone, &self.action_paths());
         if n == 0 {
             return;
         }
@@ -677,7 +681,7 @@ impl App {
 
     /// Applies `stars` (0 clears) to every selected photo.
     pub(super) fn apply_rating_to_selection(&mut self, stars: u8) {
-        let paths = self.selected_paths();
+        let paths = self.action_paths();
         if paths.is_empty() {
             return;
         }

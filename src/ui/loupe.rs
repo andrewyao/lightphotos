@@ -99,22 +99,16 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     // app. A CentralPanel would claim that input.
     let mut central = ui.available_rect_before_wrap();
     if app.spike.is_some() {
-        let controls_h = if crate::app::spike_claims_pane() {
-            let mut controls_h = 0.0;
+        // The pane's own controls sit in the info bar (`compare_actions`).
+        if crate::app::spike_claims_pane() {
             egui::Panel::right("spike_tiles")
                 .exact_size(central.width() / 2.0)
                 .show_inside(ui, |ui| {
-                    controls_h = egui::Panel::top("spike_controls")
-                        .show_inside(ui, |ui| spike_controls(ui, app, out))
-                        .response
-                        .rect
-                        .height();
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| spike_tiles(ui, app, out));
                 });
             central = ui.available_rect_before_wrap();
-            controls_h
         } else {
             let whole = central;
             central =
@@ -123,18 +117,9 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
                 egui::Rect::from_min_max(egui::pos2(whole.center().x, whole.min.y), whole.max);
             ui.painter_at(right)
                 .rect_filled(right, 0.0, theme::colors(ui.ctx()).panel);
-            let controls_h = ui.spacing().interact_size.y + 2.0 * ui.spacing().item_spacing.y;
-            let (controls_rect, tiles_rect) = right.split_top_bottom_at_y(right.min.y + controls_h);
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(tiles_rect));
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(right));
             spike_tiles(&mut child, app, out);
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(controls_rect));
-            spike_controls(&mut child, app, out);
-            controls_h
-        };
-        // The hint strip lines up with the controls above the tiles.
-        let hint;
-        (hint, central) = central.split_top_bottom_at_y(central.min.y + controls_h);
-        focus_hint(ui, hint);
+        }
     }
     out.loupe_rect = Some(central);
 
@@ -346,11 +331,24 @@ fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
 /// The info bar below the image: filename and rating centered, then the
 /// selection controls. Exposure sits under the Develop panel's histogram.
 fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let bar_h = font_size::px(ui.style(), 36.0);
+    let row_h = font_size::px(ui.style(), 36.0);
+    // The photo's actions share the row when they fit beside the filename
+    // group, else they take a second row. Their width is last frame's.
+    let actions_id = egui::Id::new("loupe_actions_w");
+    let actions_w = ui.ctx().data(|d| d.get_temp::<f32>(actions_id));
+    let bar_w = ui.available_width();
+    let measure_pad = font_size::px(ui.style(), 14.0);
+    let group_w_guess = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(egui::Id::new("loupe_group_w")))
+        .unwrap_or(0.0);
+    let fits = actions_w.is_none_or(|w| group_w_guess + w + 4.0 * measure_pad <= bar_w);
+    let bar_h = if fits { row_h } else { 2.0 * row_h };
     egui::Panel::bottom("loupe_info_bar")
         .exact_size(bar_h)
         .show_inside(ui, |ui| {
-            let rect = ui.max_rect();
+            let full = ui.max_rect();
+            let rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), row_h));
             let filename = app
                 .selected_path()
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -375,11 +373,11 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     .size()
                     .x
             };
-            // A grouped photo's tabs join the centered group, so the row
-            // fits until it is wider than the bar, then starts at the left.
+            // A grouped photo's Representative button joins the centered
+            // group, so the row fits until it is wider than the bar, then
+            // starts at the left.
             let tabs_w = if app.shown_in_group() {
-                let labels = [t().edit_rep_tab, t().choose_rep_tab];
-                3.0 * group_gap + super::tabs::upward_width(ui, &labels)
+                3.0 * group_gap + representative_button_width(ui)
             } else {
                 0.0
             };
@@ -400,7 +398,16 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 + 4.0 * ui.spacing().item_spacing.x
                 + score_w
                 + tabs_w;
-            let group_left = (rect.center().x - group_w / 2.0).max(rect.left() + pad);
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(egui::Id::new("loupe_group_w"), group_w));
+            // With the actions beside it, the group and the actions center
+            // as one run; alone on its row the group centers.
+            let gap = 3.0 * group_gap;
+            let run_w = match actions_w {
+                Some(w) if fits => group_w + gap + w,
+                _ => group_w,
+            };
+            let group_left = (rect.center().x - run_w / 2.0).max(rect.left() + pad);
 
             if !filename.is_empty() {
                 painter.text(
@@ -482,16 +489,52 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 row_right = row_right.max(hit.right());
             }
 
-            // Past the label dot, so the two never overlap, and hung from the
-            // bar's top edge so the tabs open up into the photo.
+            // Past the label dot, so the two never overlap.
             if app.shown_in_group() {
                 let view_rect = egui::Rect::from_min_max(
                     egui::pos2(row_right + 3.0 * group_gap, rect.top()),
                     rect.right_bottom(),
                 );
-                ui.scope_builder(egui::UiBuilder::new().max_rect(view_rect), |ui| {
-                    group_view_bar(ui, app, out)
-                });
+                let layout = egui::Layout::left_to_right(egui::Align::Center);
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(view_rect).layout(layout),
+                    |ui| representative_button(ui, app, out),
+                );
+            }
+
+            let w = actions_w.unwrap_or(0.0);
+            let actions_rect = if fits {
+                let left = group_left + group_w + gap;
+                egui::Rect::from_min_max(
+                    egui::pos2(left, rect.top()),
+                    egui::pos2(left + w, rect.bottom()),
+                )
+            } else {
+                let left = (full.center().x - w / 2.0).max(full.left() + pad);
+                egui::Rect::from_min_max(
+                    egui::pos2(left, rect.bottom()),
+                    egui::pos2(full.right() - pad, full.bottom()),
+                )
+            };
+            let layout = egui::Layout::left_to_right(egui::Align::Center);
+            let drawn = ui
+                .scope_builder(
+                    egui::UiBuilder::new().max_rect(actions_rect).layout(layout),
+                    |ui| {
+                        super::toolbar::toolbar_spacing(ui);
+                        if app.spike.is_some() {
+                            compare_actions(ui, app, out);
+                        } else {
+                            super::toolbar::loupe_actions(ui, app, out);
+                        }
+                    },
+                )
+                .response
+                .rect
+                .width();
+            if actions_w.is_none_or(|l| (l - drawn).abs() > 0.5) {
+                ui.ctx().data_mut(|d| d.insert_temp(actions_id, drawn));
+                ui.ctx().request_repaint();
             }
 
             // Subject selection is a way of viewing the photo, not an edit, so
@@ -814,94 +857,77 @@ fn filmstrip_cell(
     response
 }
 
-/// Edit Representative or Choose Representative, as tabs right of a grouped photo's rating stars.
-fn group_view_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let t = crate::i18n::t();
-    let tabs = [
-        (GroupView::Edit, t.edit_rep_tab),
-        (GroupView::Compare, t.choose_rep_tab),
-    ];
-    if let Some(view) = super::tabs::upward(ui, &tabs, app.group_view()) {
-        out.actions.push(UiAction::SetGroupView(view));
+/// Representative, right of a grouped photo's rating stars. A click opens
+/// the Compare pane, and it stays lit while the pane is open; the pane's
+/// Cancel goes back.
+fn representative_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    super::toolbar::toolbar_spacing(ui);
+    let open = app.group_view() == GroupView::Compare;
+    let label = crate::i18n::t().representative;
+    if ui.add(egui::Button::selectable(open, label)).clicked() && !open {
+        out.actions.push(UiAction::SetGroupView(GroupView::Compare));
     }
 }
 
-/// One line above the photo in Compare on how to move and size the square.
-/// It claims its strip, so a click or scroll on it doesn't reach the Loupe.
-fn focus_hint(ui: &mut egui::Ui, rect: egui::Rect) {
-    ui.interact(rect, egui::Id::new("focus_hint"), egui::Sense::hover());
-    let colors = theme::colors(ui.ctx());
-    let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, colors.panel);
-    painter.hline(
-        rect.x_range(),
-        rect.bottom(),
-        egui::Stroke::new(1.0f32, colors.divider),
-    );
-    painter.text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        crate::i18n::t().focus_hint,
-        egui::TextStyle::Body.resolve(ui.style()),
-        colors.label,
-    );
+/// How wide `representative_button` draws.
+fn representative_button_width(ui: &egui::Ui) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let text = ui
+        .painter()
+        .layout_no_wrap(
+            crate::i18n::t().representative.to_string(),
+            font,
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x;
+    text + 2.0 * font_size::px(ui.style(), super::toolbar::BUTTON_PAD.x)
 }
 
-/// The centered line above the pane's tiles: how to load the tiles on
-/// native, Set as representative, live while exactly one member is picked,
-/// and Delete, live while any are.
-fn spike_controls(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+/// The Compare pane's controls, in the info bar while the pane is open:
+/// how to load the tiles on native, Cancel back to Edit Representative,
+/// Set as representative, live while exactly one member is picked, then
+/// the actions on the picks (`toolbar::pick_actions`).
+fn compare_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
     let picks = app.group_picks().len();
-    // egui lays a row out left to right, so center it on last frame's width
-    // and redraw when that width changes.
-    let width_id = egui::Id::new("spike_controls_width");
-    let last_w = ui.ctx().data(|d| d.get_temp::<f32>(width_id));
-    ui.horizontal(|ui| {
-        ui.add_space(((ui.available_width() - last_w.unwrap_or(0.0)) / 2.0).max(0.0));
-        let row_start = ui.cursor().min.x;
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            ui.label(t.tile_load);
-            for (f, label) in [
-                (TileFidelity::Speed, t.tile_speed),
-                (TileFidelity::Full, t.tile_full),
-            ] {
-                let current = app.tile_fidelity();
-                if ui.radio(current == f, label).clicked() && current != f {
-                    out.actions.push(UiAction::SetTileFidelity(f));
-                }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        ui.label(t.tile_load);
+        for (f, label) in [
+            (TileFidelity::Speed, t.tile_speed),
+            (TileFidelity::Full, t.tile_full),
+        ] {
+            let current = app.tile_fidelity();
+            if ui.radio(current == f, label).clicked() && current != f {
+                out.actions.push(UiAction::SetTileFidelity(f));
             }
         }
-        let set = Button {
-            label: t.set_as_rep,
-            role: Role::Primary,
-            enabled: picks == 1,
-        };
-        if form::button(ui, &set).clicked() {
-            out.actions.push(UiAction::SetPickAsRep);
-        }
-        let delete = Button {
-            label: &(t.delete_picks)(picks),
-            role: Role::Danger,
-            enabled: picks > 0 && app.delete_available(),
-        };
-        if form::button(ui, &delete).clicked() {
-            out.actions.push(UiAction::RequestDeletePicks);
-        }
-        let w = ui.min_rect().max.x - row_start;
-        if last_w.is_none_or(|l| (l - w).abs() > 0.5) {
-            ui.ctx().data_mut(|d| d.insert_temp(width_id, w));
-            ui.ctx().request_repaint();
-        }
-    });
+    }
+    let cancel = Button {
+        label: t.cancel,
+        role: Role::Cancel,
+        enabled: true,
+    };
+    if form::button(ui, &cancel).clicked() {
+        out.actions.push(UiAction::SetGroupView(GroupView::Edit));
+    }
+    let set = Button {
+        label: t.set_as_rep,
+        role: Role::Primary,
+        enabled: picks == 1,
+    };
+    if form::button(ui, &set).clicked() {
+        out.actions.push(UiAction::SetPickAsRep);
+    }
+    super::toolbar::pick_actions(ui, app, out);
 }
 
 /// SPIKE: one tile per member on the group's current page, each sampling
 /// the zoom square. The representative is outlined in the selection color
 /// and the picked members in the cursor color. A click picks only that
 /// tile, Cmd-click toggles it, and Shift-click picks the run from the last
-/// click across pages; the buttons above the tiles act on the picks. Each
+/// click across pages; the info bar's buttons act on the picks. Each
 /// tile carries its member's stars and score (`tile_marks`). A page
 /// holds `SPIKE_PAGE` tiles, and a group with more gets arrows under the
 /// grid. The grid keeps one size across pages, so a short last page leaves

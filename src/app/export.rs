@@ -123,7 +123,7 @@ impl App {
     /// Why Export can't run right now, shown under the disabled button.
     pub(crate) fn export_blocker(&self) -> Option<&'static str> {
         let t = crate::i18n::t();
-        if self.selection_count() == 0 {
+        if self.action_count() == 0 {
             return Some(t.export_nothing_selected);
         }
         // One batch at a time. A second batch would pick the same file names
@@ -169,7 +169,7 @@ impl App {
             self.request_redraw();
             return;
         }
-        self.start_export(self.selected_paths());
+        self.start_export(self.action_paths());
         if self.export_progress.is_some() {
             self.close_export_form();
         }

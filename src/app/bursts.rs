@@ -12,10 +12,21 @@ impl App {
     /// Group the bursts among the selection, or the whole folder when one
     /// photo or none is selected. Photos already in a group are left alone.
     pub(crate) fn group_bursts(&mut self) {
+        let paths = self.burst_candidates();
+        self.scan_bursts(paths);
+    }
+
+    /// Group the bursts among every single photo in the grid, whatever is
+    /// selected.
+    pub(crate) fn group_all_bursts(&mut self) {
+        let paths = self.single_paths(0..self.visible.len());
+        self.scan_bursts(paths);
+    }
+
+    fn scan_bursts(&mut self, paths: Vec<PathBuf>) {
         if !self.group_bursts_available() {
             return;
         }
-        let paths = self.burst_candidates();
         let mut waiting = Vec::new();
         for path in &paths {
             if self.capture_times.contains_key(path) {
@@ -207,6 +218,20 @@ mod tests {
             vec![vec![0, 1], vec![3, 4], vec![5, 6]],
             "a second run changes nothing"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn group_all_bursts_ignores_the_selection() {
+        let (mut app, dir, paths) = folder_app("bursts-all", 4);
+        let times = [at(0), at(300), at(5_000), at(9_000)];
+        for (p, t) in paths.iter().zip(times) {
+            app.capture_times.insert(p.clone(), t);
+        }
+        app.select_single(2);
+        app.selected.extend([2, 3]);
+        app.group_all_bursts();
+        assert_eq!(groups_of(&app, &paths), vec![vec![0, 1]]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
