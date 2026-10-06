@@ -938,9 +938,9 @@ pub static EN: Strings = Strings {
     bulk_delete: if WEB { "Delete Photos" } else { "Move to Trash" },
 
     develop: "Develop",
-    tab_sliders: "Sliders",
-    tab_crop: "Crop",
-    tab_masks: "Masks",
+    tab_sliders: "Adjustments",
+    tab_crop: "Crop & Transform",
+    tab_masks: "Cleanup",
     crop_rotate: "Rotate",
     crop_left: "Left",
     crop_right: "Right",
@@ -1516,8 +1516,8 @@ pub static ZH: Strings = Strings {
 
     develop: "调整",
     tab_sliders: "调整",
-    tab_crop: "裁剪",
-    tab_masks: "蒙版",
+    tab_crop: "裁剪与变换",
+    tab_masks: "修复",
     crop_rotate: "旋转",
     crop_left: "向左",
     crop_right: "向右",

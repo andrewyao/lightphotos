@@ -547,6 +547,29 @@ mod tests {
             }
         }
 
+        /// A page whose content asks for more than the panel's width makes
+        /// egui widen the panel to fit, and the next frame asks for more
+        /// again, so the panel creeps wider every frame until its limit.
+        #[test]
+        fn no_develop_page_widens_the_panel() {
+            let mut app = loupe("width");
+            let width = |app: &App| {
+                egui::containers::panel::PanelState::load(&app.egui_ctx, egui::Id::new("develop"))
+                    .expect("the Develop panel drew")
+                    .rect
+                    .width()
+            };
+            for tab in [DevelopTab::Sliders, DevelopTab::Crop, DevelopTab::Masks] {
+                app.set_develop_tab(tab);
+                settled(&mut app);
+                let before = width(&app);
+                for _ in 0..20 {
+                    settled(&mut app);
+                }
+                assert_eq!(width(&app), before, "{tab:?} widened the panel");
+            }
+        }
+
         #[test]
         fn export_tab_sits_at_the_panel_foot_and_auto_tone_under_tone() {
             let mut app = loupe("export");

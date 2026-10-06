@@ -13,6 +13,8 @@ use super::{font_size, theme};
 pub(super) const HEADER: f32 = 15.0;
 const HEADER_GAP: f32 = 8.0;
 const ROW_GAP: f32 = 10.0;
+const SPACIOUS_ROW_GAP: f32 = 24.0;
+const PAGE_MARGIN: egui::Vec2 = egui::vec2(12.0, 18.0);
 const BEFORE_DIVIDER: f32 = 14.0;
 const AFTER_DIVIDER: f32 = 18.0;
 const TITLE_GAP: f32 = 6.0;
@@ -28,6 +30,7 @@ pub(super) const DIALOG_WIDTH: f32 = 400.0;
 
 pub(super) struct Form {
     label_w: f32,
+    row_gap: f32,
     first: Cell<bool>,
 }
 
@@ -47,7 +50,17 @@ impl Form {
             .fold(0.0, f32::max);
         Self {
             label_w: widest + ui.spacing().item_spacing.x * 2.0,
+            row_gap: ROW_GAP,
             first: Cell::new(true),
+        }
+    }
+
+    /// The same form with more room between its rows, for a side panel page
+    /// with a few controls and the height to spare.
+    pub(super) fn spacious(self) -> Self {
+        Self {
+            row_gap: SPACIOUS_ROW_GAP,
+            ..self
         }
     }
 
@@ -65,7 +78,7 @@ impl Form {
             ui.add_space(font_size::px(ui.style(), HEADER_GAP));
         }
         ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), ROW_GAP);
+            ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), self.row_gap);
             body(ui);
         });
     }
@@ -99,6 +112,15 @@ impl Form {
         })
         .inner
     }
+}
+
+/// A side panel page's body, inset from the panel's edges and its title.
+pub(super) fn page<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let margin = egui::Margin::symmetric(
+        font_size::px(ui.style(), PAGE_MARGIN.x) as i8,
+        font_size::px(ui.style(), PAGE_MARGIN.y) as i8,
+    );
+    egui::Frame::NONE.inner_margin(margin).show(ui, body).inner
 }
 
 /// A modal dialog `width` wide, before scaling, with the forms' margin.

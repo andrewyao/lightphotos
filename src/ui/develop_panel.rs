@@ -12,25 +12,29 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
         .default_size(340.0)
         .show_inside(ui, |ui| {
             right_tabs(ui, app, out);
-            develop_rail(ui, app, out);
-            // Scroll rather than overflow, which would push the Loupe's bottom
-            // panels off the window when the rows outgrow its height.
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    // Crop and Masks work on the frame, not its tones, so
-                    // they get the panel's height to themselves.
-                    if app.develop_tab() == DevelopTab::Sliders {
-                        draw_histogram(ui, app);
-                        draw_exposure_row(ui, app);
-                        ui.add_space(6.0);
-                    }
-                    match app.develop_tab() {
+            // The rail and the page split the space by hand. A nested
+            // `Panel` for the rail comes out a fraction of a point wider than
+            // its share, which this resizable panel grows to fit, a little
+            // more every frame.
+            let area = ui.available_rect_before_wrap();
+            let rail = area.with_min_x(area.right() - rail_width(ui));
+            let gap = font_size::px(ui.style(), RAIL_MARGIN);
+            let page = area.with_max_x(rail.left() - gap);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rail), |ui| {
+                develop_rail(ui, app, out)
+            });
+            ui.scope_builder(egui::UiBuilder::new().max_rect(page), |ui| {
+                // Scroll rather than overflow, which would push the Loupe's
+                // bottom panels off the window when the rows outgrow its
+                // height.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match app.develop_tab() {
                         DevelopTab::Sliders => draw_sliders_tab(ui, app, out),
                         DevelopTab::Crop => draw_crop_tab(ui, app, out),
                         DevelopTab::Masks => draw_masks_tab(ui, app, out),
-                    }
-                });
+                    });
+            });
 
             region_focus_marker(ui, app, Region::Develop);
         });
@@ -95,29 +99,46 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     ui.add_space(6.0);
 }
 
+/// The open page's name over a rule, with `trailing` at the right end of
+/// the row.
+fn page_title(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.heading(title);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+    });
+    ui.separator();
+}
+
 /// Sliders, Crop and Masks as a column of icons down the panel's right
 /// edge, the open one lit.
 fn develop_rail(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let side = font_size::px(ui.style(), RAIL_BUTTON);
     let margin = font_size::px(ui.style(), RAIL_MARGIN);
-    egui::Panel::right("develop_rail")
-        .resizable(false)
-        .exact_size(side + 2.0 * margin)
-        .frame(egui::Frame::NONE.inner_margin(margin))
-        .show_inside(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = margin;
-            let t = t();
-            let current = app.develop_tab();
-            for (tab, tip) in [
-                (DevelopTab::Sliders, t.tab_sliders),
-                (DevelopTab::Crop, t.tab_crop),
-                (DevelopTab::Masks, t.tab_masks),
-            ] {
-                if rail_button(ui, tab, tip, current == tab).clicked() && current != tab {
-                    out.actions.push(UiAction::SetDevelopTab(tab));
-                }
+    let area = ui.max_rect();
+    ui.painter().vline(
+        area.left(),
+        area.y_range(),
+        ui.visuals().widgets.noninteractive.bg_stroke,
+    );
+    let inner = area.shrink(margin);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+        ui.spacing_mut().item_spacing.y = margin;
+        let t = t();
+        let current = app.develop_tab();
+        for (tab, tip) in [
+            (DevelopTab::Sliders, t.tab_sliders),
+            (DevelopTab::Crop, t.tab_crop),
+            (DevelopTab::Masks, t.tab_masks),
+        ] {
+            if rail_button(ui, tab, tip, current == tab).clicked() && current != tab {
+                out.actions.push(UiAction::SetDevelopTab(tab));
             }
-        });
+        }
+    });
+}
+
+/// How wide `develop_rail` is: one icon and its margins.
+fn rail_width(ui: &egui::Ui) -> f32 {
+    font_size::px(ui.style(), RAIL_BUTTON + 2.0 * RAIL_MARGIN)
 }
 
 const RAIL_BUTTON: f32 = 36.0;
@@ -170,18 +191,27 @@ fn rail_button(ui: &mut egui::Ui, tab: DevelopTab, tip: &str, selected: bool) ->
                 stroke,
             ));
         }
-        // Stacked layers: a diamond with two more edges under it.
+        // A brush: the handle up to the right, a ferrule across it, and a
+        // round head of bristles down to the left.
         DevelopTab::Masks => {
+            painter.line_segment([p(10.0, -10.0), p(3.5, -3.5)], stroke);
             painter.add(egui::Shape::closed_line(
-                vec![p(0.0, -9.0), p(10.0, -4.0), p(0.0, 1.0), p(-10.0, -4.0)],
+                vec![p(0.0, -6.0), p(6.0, 0.0), p(3.0, 3.0), p(-3.0, -3.0)],
                 stroke,
             ));
-            for dy in [4.5, 9.0] {
-                painter.add(egui::Shape::line(
-                    vec![p(-10.0, -4.0 + dy), p(0.0, 1.0 + dy), p(10.0, -4.0 + dy)],
-                    stroke,
-                ));
-            }
+            painter.add(egui::Shape::closed_line(
+                vec![
+                    p(-3.0, -3.0),
+                    p(3.0, 3.0),
+                    p(1.5, 7.0),
+                    p(-2.5, 9.5),
+                    p(-8.0, 10.0),
+                    p(-9.5, 8.5),
+                    p(-9.0, 3.0),
+                    p(-7.0, -1.0),
+                ],
+                stroke,
+            ));
         }
     }
     response
@@ -196,69 +226,73 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let (Some(aspect), Some(orientation)) = (app.crop_aspect(), app.crop_orientation()) else {
         return;
     };
-    let form = Form::new(
-        ui,
-        &[
-            t.crop_rotate,
-            t.crop_aspect,
-            t.crop_orientation,
-            t.crop_size,
-        ],
-    );
-    form.section(ui, "", |ui| {
-        form.row(ui, t.crop_rotate, |ui| {
-            ui.horizontal(|ui| {
-                for (label, tip, clockwise) in [
-                    (t.crop_left, t.menu.rotate_left, false),
-                    (t.crop_right, t.menu.rotate_right, true),
-                ] {
-                    if ui.button(label).on_hover_text(tip).clicked() {
-                        out.actions.push(UiAction::Rotate(clockwise));
+    page_title(ui, t.tab_crop, |_| {});
+    form::page(ui, |ui| {
+        let form = Form::new(
+            ui,
+            &[
+                t.crop_rotate,
+                t.crop_aspect,
+                t.crop_orientation,
+                t.crop_size,
+            ],
+        )
+        .spacious();
+        form.section(ui, "", |ui| {
+            form.row(ui, t.crop_rotate, |ui| {
+                ui.horizontal(|ui| {
+                    for (label, tip, clockwise) in [
+                        (t.crop_left, t.menu.rotate_left, false),
+                        (t.crop_right, t.menu.rotate_right, true),
+                    ] {
+                        if ui.button(label).on_hover_text(tip).clicked() {
+                            out.actions.push(UiAction::Rotate(clockwise));
+                        }
                     }
+                });
+            });
+            form.row(ui, t.crop_aspect, |ui| {
+                let aspects = [
+                    (CropAspect::Original, t.crop_original, None),
+                    (CropAspect::Custom, t.crop_custom, None),
+                    (CropAspect::R4x3, "4:3", None),
+                    (CropAspect::R16x9, "16:9", None),
+                    (CropAspect::Square, "1:1", None),
+                ];
+                // Picking the current ratio again re-centers its box.
+                if let Some(choice) = form::segmented(ui, &aspects, aspect) {
+                    out.actions.push(UiAction::SetCropAspect(choice));
                 }
             });
-        });
-        form.row(ui, t.crop_aspect, |ui| {
-            let aspects = [
-                (CropAspect::Original, t.crop_original, None),
-                (CropAspect::Custom, t.crop_custom, None),
-                (CropAspect::R4x3, "4:3", None),
-                (CropAspect::R16x9, "16:9", None),
-                (CropAspect::Square, "1:1", None),
-            ];
-            // Picking the current ratio again re-centers its box.
-            if let Some(choice) = form::segmented(ui, &aspects, aspect) {
-                out.actions.push(UiAction::SetCropAspect(choice));
+            form.row(ui, t.crop_orientation, |ui| {
+                let orientable = !matches!(aspect, CropAspect::Custom | CropAspect::Square);
+                ui.add_enabled_ui(orientable, |ui| {
+                    let choices = [
+                        (CropOrientation::Horizontal, t.crop_horizontal, None),
+                        (CropOrientation::Vertical, t.crop_vertical, None),
+                    ];
+                    let picked = form::segmented(ui, &choices, orientation);
+                    if let Some(choice) = picked.filter(|&c| c != orientation) {
+                        out.actions.push(UiAction::SetCropOrientation(choice));
+                    }
+                });
+            });
+            if let Some((w, h)) = app.crop_pixel_size() {
+                form.row(ui, t.crop_size, |ui| {
+                    ui.label(format!("{w} \u{d7} {h}"));
+                });
             }
         });
-        form.row(ui, t.crop_orientation, |ui| {
-            let orientable = !matches!(aspect, CropAspect::Custom | CropAspect::Square);
-            ui.add_enabled_ui(orientable, |ui| {
-                let choices = [
-                    (CropOrientation::Horizontal, t.crop_horizontal, None),
-                    (CropOrientation::Vertical, t.crop_vertical, None),
-                ];
-                let picked = form::segmented(ui, &choices, orientation);
-                if let Some(choice) = picked.filter(|&c| c != orientation) {
-                    out.actions.push(UiAction::SetCropOrientation(choice));
-                }
-            });
-        });
-        if let Some((w, h)) = app.crop_pixel_size() {
-            form.row(ui, t.crop_size, |ui| {
-                ui.label(format!("{w} \u{d7} {h}"));
-            });
+        let buttons = [
+            Button::new(t.cancel, Role::Cancel),
+            Button::new(t.done, Role::Primary),
+        ];
+        match form::footer(ui, &buttons) {
+            Some(Role::Cancel) => out.actions.push(UiAction::CancelCrop),
+            Some(_) => out.actions.push(UiAction::CommitCrop),
+            None => {}
         }
     });
-    let buttons = [
-        Button::new(t.cancel, Role::Cancel),
-        Button::new(t.done, Role::Primary),
-    ];
-    match form::footer(ui, &buttons) {
-        Some(Role::Cancel) => out.actions.push(UiAction::CancelCrop),
-        Some(_) => out.actions.push(UiAction::CommitCrop),
-        None => {}
-    }
 }
 
 /// The Develop header with Reset, presets, and every tone, color, and detail
@@ -266,16 +300,17 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let mut adj = app.current_adjustments();
-    ui.horizontal(|ui| {
-        ui.heading(t.develop);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.button(t.reset).clicked() {
-                out.actions.push(UiAction::ResetAdjustments);
-                out.actions.push(UiAction::Focus(Region::Develop));
-            }
-        });
+    page_title(ui, t.tab_sliders, |ui| {
+        if ui.button(t.reset).clicked() {
+            out.actions.push(UiAction::ResetAdjustments);
+            out.actions.push(UiAction::Focus(Region::Develop));
+        }
     });
-    ui.separator();
+    // Only this page has the histogram: Crop and Masks work on the frame,
+    // not its tones.
+    draw_histogram(ui, app);
+    draw_exposure_row(ui, app);
+    ui.add_space(6.0);
     if crate::app::SHOW_PRESETS {
         draw_presets(ui, app, out);
     }
@@ -481,55 +516,61 @@ fn toggle_switch(ui: &mut egui::Ui, on: bool) -> egui::Response {
 /// The brush only matters while the tool is armed.
 fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    let active = app.touchup_active();
-    let form = Form::new(ui, &[t.touch_up, t.brush_size, t.feather, t.spots]);
-    form.section(ui, "", |ui| {
-        form.row(ui, t.touch_up, |ui| {
-            if toggle_switch(ui, active).clicked() {
-                out.actions.push(UiAction::ToggleTouchUp);
-            }
-        });
-        form.row(ui, t.brush_size, |ui| {
-            let mut radius = app.touchup_radius();
-            let range = app.touchup_radius_min()..=crate::app::TOUCHUP_MAX_RADIUS;
-            if full_width_slider(ui, active, &mut radius, range) {
-                out.actions.push(UiAction::SetTouchUpRadius(radius));
-            }
-            form::hint(ui, t.brush_size_hint);
-        })
-        .on_hover_text(t.brush_size_tip);
-        form.row(ui, t.feather, |ui| {
-            let mut feather = app.touchup_feather();
-            let range = crate::app::TOUCHUP_MIN_FEATHER..=1.0;
-            if full_width_slider(ui, active, &mut feather, range) {
-                out.actions.push(UiAction::SetTouchUpFeather(feather));
-            }
-            form::hint(ui, t.feather_hint);
-        })
-        .on_hover_text(t.feather_tip);
-        if !app.current_touchups().is_empty() {
-            form.row(ui, t.spots, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for i in 0..app.current_touchups().len() {
-                        let label = format!("{}", i + 1);
+    page_title(ui, t.tab_masks, |_| {});
+    form::page(ui, |ui| {
+        let active = app.touchup_active();
+        let form = Form::new(ui, &[t.touch_up, t.brush_size, t.feather, t.spots]).spacious();
+        form.section(ui, "", |ui| {
+            form.row(ui, t.touch_up, |ui| {
+                if toggle_switch(ui, active).clicked() {
+                    out.actions.push(UiAction::ToggleTouchUp);
+                }
+            });
+            form.row(ui, t.brush_size, |ui| {
+                let mut radius = app.touchup_radius();
+                let range = app.touchup_radius_min()..=crate::app::TOUCHUP_MAX_RADIUS;
+                if full_width_slider(ui, active, &mut radius, range) {
+                    out.actions.push(UiAction::SetTouchUpRadius(radius));
+                }
+                form::hint(ui, t.brush_size_hint);
+            })
+            .on_hover_text(t.brush_size_tip);
+            form.row(ui, t.feather, |ui| {
+                let mut feather = app.touchup_feather();
+                let range = crate::app::TOUCHUP_MIN_FEATHER..=1.0;
+                if full_width_slider(ui, active, &mut feather, range) {
+                    out.actions.push(UiAction::SetTouchUpFeather(feather));
+                }
+                form::hint(ui, t.feather_hint);
+            })
+            .on_hover_text(t.feather_tip);
+            if !app.current_touchups().is_empty() {
+                form.row(ui, t.spots, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        for i in 0..app.current_touchups().len() {
+                            let label = format!("{}", i + 1);
+                            if ui
+                                .selectable_label(app.touchup_selected() == Some(i), label)
+                                .clicked()
+                            {
+                                out.actions.push(UiAction::SelectTouchUp(i));
+                            }
+                        }
+                        let delete =
+                            egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger);
                         if ui
-                            .selectable_label(app.touchup_selected() == Some(i), label)
+                            .add_enabled(
+                                app.touchup_selected().is_some(),
+                                egui::Button::new(delete),
+                            )
                             .clicked()
                         {
-                            out.actions.push(UiAction::SelectTouchUp(i));
+                            out.actions.push(UiAction::DeleteTouchUp);
                         }
-                    }
-                    let delete =
-                        egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger);
-                    if ui
-                        .add_enabled(app.touchup_selected().is_some(), egui::Button::new(delete))
-                        .clicked()
-                    {
-                        out.actions.push(UiAction::DeleteTouchUp);
-                    }
+                    });
                 });
-            });
-        }
+            }
+        });
     });
 }
 
