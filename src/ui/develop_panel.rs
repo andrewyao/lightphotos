@@ -12,15 +12,19 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
         .default_size(340.0)
         .show_inside(ui, |ui| {
             right_tabs(ui, app, out);
+            develop_rail(ui, app, out);
             // Scroll rather than overflow, which would push the Loupe's bottom
             // panels off the window when the rows outgrow its height.
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    draw_histogram(ui, app);
-                    draw_exposure_row(ui, app);
-                    ui.add_space(6.0);
-                    draw_tab_row(ui, app, out);
+                    // Crop and Masks work on the frame, not its tones, so
+                    // they get the panel's height to themselves.
+                    if app.develop_tab() == DevelopTab::Sliders {
+                        draw_histogram(ui, app);
+                        draw_exposure_row(ui, app);
+                        ui.add_space(6.0);
+                    }
                     match app.develop_tab() {
                         DevelopTab::Sliders => draw_sliders_tab(ui, app, out),
                         DevelopTab::Crop => draw_crop_tab(ui, app, out),
@@ -91,17 +95,98 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     ui.add_space(6.0);
 }
 
-/// Sliders | Crop | Masks.
-fn draw_tab_row(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let t = t();
-    let tabs = [
-        (DevelopTab::Sliders, t.tab_sliders),
-        (DevelopTab::Crop, t.tab_crop),
-        (DevelopTab::Masks, t.tab_masks),
-    ];
-    if let Some(tab) = super::tabs::bar(ui, &tabs, app.develop_tab()) {
-        out.actions.push(UiAction::SetDevelopTab(tab));
+/// Sliders, Crop and Masks as a column of icons down the panel's right
+/// edge, the open one lit.
+fn develop_rail(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let side = font_size::px(ui.style(), RAIL_BUTTON);
+    let margin = font_size::px(ui.style(), RAIL_MARGIN);
+    egui::Panel::right("develop_rail")
+        .resizable(false)
+        .exact_size(side + 2.0 * margin)
+        .frame(egui::Frame::NONE.inner_margin(margin))
+        .show_inside(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = margin;
+            let t = t();
+            let current = app.develop_tab();
+            for (tab, tip) in [
+                (DevelopTab::Sliders, t.tab_sliders),
+                (DevelopTab::Crop, t.tab_crop),
+                (DevelopTab::Masks, t.tab_masks),
+            ] {
+                if rail_button(ui, tab, tip, current == tab).clicked() && current != tab {
+                    out.actions.push(UiAction::SetDevelopTab(tab));
+                }
+            }
+        });
+}
+
+const RAIL_BUTTON: f32 = 36.0;
+const RAIL_MARGIN: f32 = 6.0;
+
+fn rail_id(tab: DevelopTab) -> egui::Id {
+    egui::Id::new(("develop_rail", tab))
+}
+
+/// Where the rail drew `tab`'s icon last frame, for tests that click it.
+#[cfg(test)]
+pub(crate) fn rail_button_rect(ctx: &egui::Context, tab: DevelopTab) -> Option<egui::Rect> {
+    ctx.read_response(rail_id(tab)).map(|r| r.rect)
+}
+
+/// One of `develop_rail`'s icons, painted in strokes like
+/// `eyedropper_button` so it follows the theme.
+fn rail_button(ui: &mut egui::Ui, tab: DevelopTab, tip: &str, selected: bool) -> egui::Response {
+    let side = font_size::px(ui.style(), RAIL_BUTTON);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
+    let response = ui.interact(rect, rail_id(tab), egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, tip)
+    });
+    let visuals = ui.style().interact_selectable(&response, selected);
+    let painter = ui.painter();
+    if selected || response.hovered() {
+        painter.rect_filled(rect, 6.0, visuals.weak_bg_fill);
     }
+    let u = font_size::px(ui.style(), 1.0);
+    let c = rect.center();
+    let p = |x: f32, y: f32| egui::pos2(c.x + x * u, c.y + y * u);
+    let stroke = egui::Stroke::new(1.6 * u, visuals.fg_stroke.color);
+    match tab {
+        // Three faders, each with its knob at a different height.
+        DevelopTab::Sliders => {
+            for (y, knob) in [(-6.0, 3.0), (0.0, -4.0), (6.0, 1.0)] {
+                painter.line_segment([p(-9.0, y), p(9.0, y)], stroke);
+                painter.line_segment([p(knob, y - 3.0), p(knob, y + 3.0)], stroke);
+            }
+        }
+        // Two corner brackets crossing, as a crop tool's marks do.
+        DevelopTab::Crop => {
+            painter.add(egui::Shape::line(
+                vec![p(-5.0, -10.0), p(-5.0, 5.0), p(10.0, 5.0)],
+                stroke,
+            ));
+            painter.add(egui::Shape::line(
+                vec![p(-10.0, -5.0), p(5.0, -5.0), p(5.0, 10.0)],
+                stroke,
+            ));
+        }
+        // Stacked layers: a diamond with two more edges under it.
+        DevelopTab::Masks => {
+            painter.add(egui::Shape::closed_line(
+                vec![p(0.0, -9.0), p(10.0, -4.0), p(0.0, 1.0), p(-10.0, -4.0)],
+                stroke,
+            ));
+            for dy in [4.5, 9.0] {
+                painter.add(egui::Shape::line(
+                    vec![p(-10.0, -4.0 + dy), p(0.0, 1.0 + dy), p(10.0, -4.0 + dy)],
+                    stroke,
+                ));
+            }
+        }
+    }
+    response
+        .on_hover_text(tip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Crop mode's controls: rotation, the ratio and its orientation, the crop's

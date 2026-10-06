@@ -272,7 +272,7 @@ pub(crate) enum WebPendingNav {
 }
 
 /// Which module the Develop panel shows under the histogram.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum DevelopTab {
     /// Tone, color, and detail sliders.
     Sliders,

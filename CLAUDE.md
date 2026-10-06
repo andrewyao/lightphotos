@@ -101,7 +101,7 @@ Buttons go through `form::footer`, never laid out by hand. A footer is a table o
 
 Spacing comes from the constants in `form.rs` through `font_size::px`, never from literal `add_space` numbers, so Alt+= and Alt+- scale it. The filled button colors are `primary_fill`, `primary_text`, `danger_fill` and `danger_text` in `theme::Palette`, and a test holds every theme to their contrast. A new fill needs a matching test.
 
-`tabs::bar` is for a real page switch, such as Develop's Sliders, Crop and Masks. It is not for a choice inside a form. New strings go in both the English and the Chinese table in `src/i18n.rs`.
+A real page switch, such as Develop's Sliders, Crop and Masks, is a column of painted icons on the panel's right edge (`develop_panel::develop_rail`), with the page's name as hover text. It is not for a choice inside a form. New strings go in both the English and the Chinese table in `src/i18n.rs`.
 
 ## Commit messages
 

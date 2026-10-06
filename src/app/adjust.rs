@@ -493,24 +493,37 @@ mod tests {
             app
         }
 
+        /// The center of `tab`'s icon on the Develop panel's rail.
+        fn rail_icon(app: &App, tab: DevelopTab) -> egui::Pos2 {
+            crate::ui::rail_button_rect(&app.egui_ctx, tab)
+                .unwrap_or_else(|| panic!("the rail drew no {tab:?} icon"))
+                .center()
+        }
+
         #[test]
         fn the_panel_opens_on_sliders_and_touch_up_lives_on_masks() {
             let mut app = loupe("tabs");
             let t = crate::i18n::t();
             let painted = settled(&mut app);
-            assert!(painted.has(t.tab_sliders) && painted.has(t.tab_masks));
             assert!(
                 !painted.has(t.touch_up),
                 "Touch Up is not on the Sliders tab: {:?}",
                 painted.texts()
             );
-            let xs = [t.tab_sliders, t.tab_crop, t.tab_masks].map(|tab| painted.pos_of(tab).x);
+            let ys = [DevelopTab::Sliders, DevelopTab::Crop, DevelopTab::Masks]
+                .map(|tab| rail_icon(&app, tab).y);
             assert!(
-                xs[0] < xs[1] && xs[1] < xs[2],
-                "the tabs read Sliders, Crop, Masks: {xs:?}"
+                ys[0] < ys[1] && ys[1] < ys[2],
+                "the rail reads Sliders, Crop, Masks down: {ys:?}"
+            );
+            let slider = painted.pos_of(t.section(crate::develop::Section::Tone));
+            assert!(
+                rail_icon(&app, DevelopTab::Sliders).x > slider.x,
+                "the rail sits right of the panel's content"
             );
 
-            let (actions, _) = click(&mut app, painted.pos_of(t.tab_masks));
+            let icon = rail_icon(&app, DevelopTab::Masks);
+            let (actions, _) = click(&mut app, icon);
             let tab = actions.into_iter().find_map(|a| match a {
                 UiAction::SetDevelopTab(tab) => Some(tab),
                 _ => None,
@@ -518,7 +531,10 @@ mod tests {
             assert_eq!(tab, Some(DevelopTab::Masks));
             app.set_develop_tab(DevelopTab::Masks);
             let painted = settled(&mut app);
-            assert!(painted.has(t.touch_up));
+            assert!(
+                painted.pos_of(t.touch_up).y < rail_icon(&app, DevelopTab::Crop).y,
+                "Masks starts at the panel's top, with no histogram over it"
+            );
             for (slider, hint) in [
                 (t.brush_size, t.brush_size_hint),
                 (t.feather, t.feather_hint),
@@ -549,7 +565,7 @@ mod tests {
                 let painted = settled(&mut app);
                 let export = painted.pos_of(t.export_jpg);
                 assert!(
-                    export.y > painted.pos_of(t.tab_masks).y + 100.0,
+                    export.y > rail_icon(&app, DevelopTab::Masks).y + 100.0,
                     "the Export tab sits below the panel's content"
                 );
                 let (actions, _) = click(&mut app, export);
@@ -577,8 +593,9 @@ mod tests {
         fn the_crop_tab_picks_a_ratio_and_commits() {
             let mut app = loupe("crop");
             let t = crate::i18n::t();
-            let painted = settled(&mut app);
-            let (actions, _) = click(&mut app, painted.pos_of(t.tab_crop));
+            settled(&mut app);
+            let icon = rail_icon(&app, DevelopTab::Crop);
+            let (actions, _) = click(&mut app, icon);
             assert!(
                 actions
                     .iter()

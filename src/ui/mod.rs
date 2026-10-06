@@ -206,6 +206,8 @@ pub mod theme;
 pub(crate) mod toolbar;
 
 use develop_panel::draw_develop_panel;
+#[cfg(test)]
+pub(crate) use develop_panel::rail_button_rect;
 use export_panel::draw_export_panel;
 pub(crate) use form::Role;
 use grid::{draw_grid, draw_left_panel};
