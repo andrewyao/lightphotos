@@ -23,11 +23,23 @@ pub enum UiAction {
     /// Native only, as is the row that sends it.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     SetTileFidelity(crate::app::TileFidelity),
-    /// Pick this member to become the representative, or clear the pick
-    /// when it is the representative or already picked.
-    PickGroupTile(std::path::PathBuf),
-    /// Make the picked member the representative.
+    /// A click on this member's tile in the Compare pane, which changes the
+    /// picks as `how` says. The representative is never picked.
+    PickGroupTile {
+        path: std::path::PathBuf,
+        how: crate::app::PickHow,
+    },
+    /// Stars on a member's tile in the Compare pane (0 clears).
+    RateGroupMember {
+        path: std::path::PathBuf,
+        stars: u8,
+    },
+    /// Move Compare's focus square to center on this point of the photo.
+    SetSpikeCenter(egui::Pos2),
+    /// Make the one picked member the representative.
     SetPickAsRep,
+    /// Ask to confirm trashing the picked members.
+    RequestDeletePicks,
     /// Cmd-click: toggle this cell in the multi-selection.
     SelectToggle(usize),
     /// Shift-click: extend the range selection to this cell.

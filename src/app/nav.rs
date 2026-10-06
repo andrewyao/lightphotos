@@ -241,7 +241,9 @@ impl App {
             .collect()
     }
 
-    pub(crate) fn delete_paths(&self) -> Vec<PathBuf> {
+    /// The selection with each grouped cell expanded to every member still in
+    /// the folder, which is what Delete and Score act on.
+    pub(crate) fn selected_member_paths(&self) -> Vec<PathBuf> {
         let cells = self.selected_cells();
         if cells.is_empty() || self.mode == ViewMode::Loupe {
             return self.selected_paths();
@@ -384,7 +386,7 @@ impl App {
         // re-fits if the metadata isn't cached yet.
         if self.want.as_deref() != Some(path.as_path()) {
             self.source_size = self.exif_cache.get(&path).and_then(|m| m.source_size);
-            self.clear_group_pick();
+            self.clear_group_picks();
         }
         self.want = Some(path);
         self.invalidate_selection();

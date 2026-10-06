@@ -252,12 +252,16 @@ impl App {
     /// Under a filter the photo may drop out of view, and the loupe then
     /// follows the cursor to a neighbor.
     pub(super) fn set_rating(&mut self, stars: u8) {
+        if let Some(path) = self.selected_path() {
+            self.set_rating_of(path, stars);
+        }
+    }
+
+    /// Rates `path`, as `set_rating` does the selected photo.
+    pub(super) fn set_rating_of(&mut self, path: PathBuf, stars: u8) {
         if stars > crate::catalog::MAX_RATING {
             return;
         }
-        let Some(path) = self.selected_path() else {
-            return;
-        };
         #[cfg(target_arch = "wasm32")]
         if self.rating_of(&path) != stars {
             crate::analytics::event("photo_rated");
@@ -345,7 +349,19 @@ impl App {
             self.request_redraw();
             return;
         };
-        let primary = self.sel.filter(|s| cells.contains(s)).unwrap_or(cells[0]);
+        // The representative is the first photo with the highest score, or
+        // the cursor's when none is scored.
+        let scored = cells
+            .iter()
+            .filter_map(|&p| Some((p, self.score_at(p)?.0.value)))
+            .fold(None, |best: Option<(usize, u8)>, (p, v)| match best {
+                Some((_, b)) if b >= v => best,
+                _ => Some((p, v)),
+            });
+        let primary = scored
+            .map(|(p, _)| p)
+            .or_else(|| self.sel.filter(|s| cells.contains(s)))
+            .unwrap_or(cells[0]);
         let members = cells.iter().filter_map(|&p| self.cell_name(p)).collect();
         let merged = self
             .cell_name(primary)
@@ -422,13 +438,19 @@ impl App {
     }
 
     /// The pending bulk action and its confirm-modal text, or `None` when no
-    /// bulk confirmation is open.
+    /// bulk confirmation is open. Trashing the Compare pane's picks reads as
+    /// a bulk Delete of them.
     pub(crate) fn pending_bulk_prompt(&self) -> Option<(ui::BulkKind, String)> {
-        let Some(PendingConfirm::Bulk(kind)) = self.pending_confirm else {
-            return None;
+        let t = crate::i18n::t();
+        let kind = match self.pending_confirm {
+            Some(PendingConfirm::Bulk(kind)) => kind,
+            Some(PendingConfirm::DeletePicks) => {
+                let prompt = (t.confirm_delete)(self.group_picks().len());
+                return Some((ui::BulkKind::Delete, prompt));
+            }
+            _ => return None,
         };
         let n = self.selection_count();
-        let t = crate::i18n::t();
         let prompt = match kind {
             ui::BulkKind::Rate(0) => (t.confirm_clear_rating)(n),
             ui::BulkKind::Rate(s) => (t.confirm_rate)(&"\u{2605}".repeat(s as usize), n),
@@ -439,8 +461,8 @@ impl App {
             }
             ui::BulkKind::AutoTone => (t.confirm_auto_tone)(n),
             ui::BulkKind::Delete => match self.selected_groups().len() {
-                0 => (t.confirm_delete)(self.delete_paths().len()),
-                groups => (t.confirm_delete_groups)(self.delete_paths().len(), groups),
+                0 => (t.confirm_delete)(self.selected_member_paths().len()),
+                groups => (t.confirm_delete_groups)(self.selected_member_paths().len(), groups),
             },
         };
         Some((kind, prompt))
@@ -460,6 +482,7 @@ impl App {
         match self.pending_confirm.take() {
             Some(PendingConfirm::Bulk(kind)) => self.run_bulk(kind),
             Some(PendingConfirm::DeletePreset(id)) => self.delete_preset(id),
+            Some(PendingConfirm::DeletePicks) => self.delete_group_picks(),
             Some(PendingConfirm::DeleteGroup { focus }) => match focus {
                 None | Some(ui::Role::Cancel) => {}
                 Some(ui::Role::Primary) => self.remove_selected_groups(),

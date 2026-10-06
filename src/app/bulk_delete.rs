@@ -182,7 +182,7 @@ impl BulkDelete {
 
 impl App {
     pub(super) fn delete_selection(&mut self) {
-        self.start_delete(self.delete_paths());
+        self.start_delete(self.selected_member_paths());
     }
 
     /// Begin trashing `paths`. Refused while another delete or an export is
@@ -900,7 +900,7 @@ mod tests {
             let mut runs: Vec<Duration> = (0..5)
                 .map(|_| {
                     let t = Instant::now();
-                    let paths = app.delete_paths();
+                    let paths = app.selected_member_paths();
                     let held = app.whole_groups(&paths);
                     std::hint::black_box((paths.len(), held.slot_by_name.len()));
                     t.elapsed()
@@ -916,7 +916,7 @@ mod tests {
         let (mut stack, dir_b, _) = grouped_app(&refs);
         group_photos(&mut stack, &(0..N).collect::<Vec<_>>(), 0);
         stack.select_single(0);
-        assert_eq!(stack.delete_paths().len(), N);
+        assert_eq!(stack.selected_member_paths().len(), N);
         let grouped = time(&stack);
         eprintln!("delete frame, {N} singles: {base:?}");
         eprintln!("delete frame, one {N}-photo stack: {grouped:?}");
@@ -943,7 +943,7 @@ mod tests {
         app.select_single(1);
         app.enter_loupe();
         assert_eq!(
-            app.delete_paths(),
+            app.selected_member_paths(),
             vec![paths[1].clone()],
             "the Loupe's Delete takes the photo on screen, not its whole stack"
         );

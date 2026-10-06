@@ -9,8 +9,8 @@ use super::*;
 use crate::score::{ScoreJob, ScoreRequest};
 
 impl App {
-    /// Score the selection, or in the Loupe the photo on screen. A run
-    /// already going takes these on as well.
+    /// Score the selection, every photo of a selected group included, or in
+    /// the Loupe the photo on screen. A run already going takes these on too.
     pub(crate) fn score_selection(&mut self) {
         if self.score_pool.is_none() {
             return;
@@ -18,7 +18,7 @@ impl App {
         let paths = if self.mode == ViewMode::Loupe {
             self.selected_path().into_iter().collect()
         } else {
-            self.selected_paths()
+            self.selected_member_paths()
         };
         if paths.is_empty() {
             return;
@@ -217,6 +217,22 @@ mod tests {
             assert_eq!((stored.score.value, stale), (61, false));
         }
         assert_eq!(app.status_text(), Some("Scored 12 photo(s)"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scoring_a_group_scores_every_photo_in_it() {
+        let (mut app, dir, paths) = folder_app(5);
+        crate::app::nav::tests::group_photos(&mut app, &[0, 1, 2], 0);
+        app.score_pool = ScorePool::with_runner(2, slow_fixed);
+        app.select_single(0);
+        app.score_selection();
+        assert_eq!(app.score_progress(), Some((0, 3)));
+        run_until_idle(&mut app);
+        for p in &paths[..3] {
+            assert!(app.catalog.score(p).is_some(), "{p:?} is scored");
+        }
+        assert!(paths[3..].iter().all(|p| app.catalog.score(p).is_none()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

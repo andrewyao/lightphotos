@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! The Loupe's group pane: whether a grouped photo shows it, how sharp its
-//! tiles are, and the member picked to become the representative.
+//! tiles are, and the members picked to become the representative or to
+//! be trashed.
 
 use std::path::{Path, PathBuf};
 
-use super::App;
 #[cfg(not(target_arch = "wasm32"))]
 use super::SpikeTiles;
+use super::{App, PendingConfirm, ViewMode};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,6 +38,28 @@ pub(crate) enum TileFidelity {
     /// only: the web build keeps one full decode in a 4 GB heap.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Full,
+}
+
+/// How a tile click changes the picks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PickHow {
+    /// A plain click: pick only this member, or clear the picks when it is
+    /// already the only one.
+    Only,
+    /// Cmd-click: add or remove this member.
+    Toggle,
+    /// Shift-click: pick every member from the anchor to this one in the
+    /// pane's order, across pages.
+    Range,
+}
+
+/// The members tile clicks picked, in the pane's order, and the member a
+/// range extends from. Either can name a photo that has since left the
+/// group, so `App::group_picks` filters on read.
+#[derive(Debug, Default)]
+pub(super) struct GroupPicks {
+    picked: Vec<PathBuf>,
+    anchor: Option<PathBuf>,
 }
 
 /// The zoom square every tile samples: its center in uv and its side as a
@@ -271,23 +294,75 @@ impl App {
         self.shown_group().is_some()
     }
 
-    /// The picked member, while the pane is open and it is still a member
-    /// of the shown photo's group other than its representative. Showing
-    /// another photo clears it (`load_selected`).
-    pub(crate) fn group_pick(&self) -> Option<&Path> {
-        let pick = self.pending_rep.as_deref()?;
-        if self.group_view != GroupView::Compare {
+    /// `paths` in the pane's order: highest score first, unscored last, and
+    /// ties in the order given.
+    pub(super) fn by_score(&self, mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        paths.sort_by_key(|p| std::cmp::Reverse(self.catalog.score(p).map(|(s, _)| s.score.value)));
+        paths
+    }
+
+    /// The shown group's members in the pane's order (`by_score`) and its
+    /// representative's path. `None` while the pane is closed.
+    fn pane_members(&self) -> Option<(Vec<PathBuf>, PathBuf)> {
+        if self.mode != ViewMode::Loupe || self.group_view != GroupView::Compare {
             return None;
         }
+        let dir = self.playlist.as_ref()?.dir();
         let (members, rep) = self.shown_group()?;
-        let name = pick.file_name()?;
-        (name != rep && members.iter().any(|m| m == name)).then_some(pick)
+        let members = members.iter().map(|m| dir.join(m)).collect();
+        Some((self.by_score(members), dir.join(rep)))
+    }
+
+    /// The members a pick may name: the shown group's, in the pane's order,
+    /// other than the representative. `None` while the pane is closed.
+    fn pickable(&self) -> Option<Vec<PathBuf>> {
+        let (members, rep) = self.pane_members()?;
+        Some(members.into_iter().filter(|m| *m != rep).collect())
+    }
+
+    /// A member's stars, for its tile.
+    pub(crate) fn member_rating(&self, path: &Path) -> u8 {
+        self.rating_of(path)
+    }
+
+    /// A member's stored score and whether it went stale, for its tile.
+    pub(crate) fn member_score(
+        &self,
+        path: &Path,
+    ) -> Option<(&crate::quality::QualityScore, bool)> {
+        self.catalog.score(path).map(|(s, stale)| (&s.score, stale))
+    }
+
+    /// Rate a member of the shown group from its tile, the representative
+    /// included, without touching the picks. Nothing for any other photo.
+    pub(super) fn rate_group_member(&mut self, path: PathBuf, stars: u8) {
+        if self
+            .pane_members()
+            .is_some_and(|(members, _)| members.contains(&path))
+        {
+            self.set_rating_of(path, stars);
+        }
+    }
+
+    /// The picked members that are still members of the shown photo's group
+    /// other than its representative, in the pane's order. Empty while the
+    /// pane is closed. Showing another photo clears them (`load_selected`).
+    pub(crate) fn group_picks(&self) -> Vec<&Path> {
+        let Some(pickable) = self.pickable() else {
+            return Vec::new();
+        };
+        self.picks
+            .picked
+            .iter()
+            .filter(|p| pickable.contains(p))
+            .map(PathBuf::as_path)
+            .collect()
     }
 
     pub(super) fn set_group_view(&mut self, view: GroupView) {
         self.group_view = view;
         if view == GroupView::Edit {
-            self.pending_rep = None;
+            self.clear_group_picks();
         }
         self.request_redraw();
     }
@@ -297,29 +372,91 @@ impl App {
         self.request_redraw();
     }
 
-    /// Pick `path`, or clear the pick when `path` is already picked or is
-    /// the representative.
-    pub(super) fn pick_group_tile(&mut self, path: PathBuf) {
-        let again = self.group_pick() == Some(path.as_path());
-        self.pending_rep = Some(path);
-        if again || self.group_pick().is_none() {
-            self.pending_rep = None;
-        }
-        self.request_redraw();
-    }
-
-    pub(super) fn clear_group_pick(&mut self) {
-        self.pending_rep = None;
-    }
-
-    /// Make the picked member the representative. Nothing without a pick.
-    pub(super) fn set_pick_as_rep(&mut self) {
-        let Some(path) = self.group_pick().map(Path::to_path_buf) else {
+    /// Change the picks for a click on `path`'s tile. A plain click on the
+    /// representative clears them; a Cmd- or Shift-click on it does nothing.
+    pub(super) fn pick_group_tile(&mut self, path: PathBuf, how: PickHow) {
+        let Some(pickable) = self.pickable() else {
             return;
         };
-        self.pending_rep = None;
+        let Some(at) = pickable.iter().position(|p| *p == path) else {
+            if how == PickHow::Only {
+                self.clear_group_picks();
+                self.request_redraw();
+            }
+            return;
+        };
+        let current: Vec<PathBuf> = self
+            .group_picks()
+            .into_iter()
+            .map(Path::to_path_buf)
+            .collect();
+        let anchor = self
+            .picks
+            .anchor
+            .as_ref()
+            .and_then(|a| pickable.iter().position(|p| p == a));
+        let (picked, anchor) = match (how, anchor) {
+            (PickHow::Only, _) if current == [path.clone()] => (Vec::new(), None),
+            (PickHow::Only, _) | (PickHow::Range, None) => (vec![path.clone()], Some(path)),
+            (PickHow::Toggle, _) => {
+                let mut picked = current;
+                match picked.iter().position(|p| *p == path) {
+                    Some(i) => {
+                        picked.remove(i);
+                    }
+                    None => picked.push(path.clone()),
+                }
+                (picked, Some(path))
+            }
+            (PickHow::Range, Some(a)) => {
+                let range = pickable[a.min(at)..=a.max(at)].to_vec();
+                (range, self.picks.anchor.clone())
+            }
+        };
+        self.picks = GroupPicks {
+            picked: pickable
+                .into_iter()
+                .filter(|p| picked.contains(p))
+                .collect(),
+            anchor,
+        };
+        self.request_redraw();
+    }
+
+    pub(super) fn clear_group_picks(&mut self) {
+        self.picks = GroupPicks::default();
+    }
+
+    /// Make the picked member the representative. Nothing unless exactly
+    /// one member is picked.
+    pub(super) fn set_pick_as_rep(&mut self) {
+        let [path] = self.group_picks()[..] else {
+            return;
+        };
+        let path = path.to_path_buf();
+        self.clear_group_picks();
         self.set_group_rep(&path);
         self.request_redraw();
+    }
+
+    /// Open the confirm for trashing the picks, when there are any and no
+    /// other delete is running.
+    pub(super) fn request_delete_picks(&mut self) {
+        if self.delete_available() && !self.group_picks().is_empty() {
+            self.pending_confirm = Some(PendingConfirm::DeletePicks);
+            self.request_redraw();
+        }
+    }
+
+    /// Trash the picks, for the confirm's Delete.
+    pub(super) fn delete_group_picks(&mut self) {
+        let paths = self
+            .group_picks()
+            .into_iter()
+            .map(Path::to_path_buf)
+            .collect();
+        self.clear_group_picks();
+        self.start_delete(paths);
     }
 }
 
@@ -329,6 +466,7 @@ mod tests {
     use crate::app::nav::tests::{cells, group_photos};
     use crate::app::presets::tests::folder_app;
     use crate::ui::UiAction;
+    use std::time::{Duration, Instant};
 
     /// Photos 1 and 3 grouped with 1 as representative, shown in the Loupe.
     fn grouped_loupe(name: &str) -> (App, PathBuf, Vec<PathBuf>) {
@@ -367,13 +505,71 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn pick(app: &mut App, path: &Path, how: PickHow) {
+        let path = path.to_path_buf();
+        act(app, UiAction::PickGroupTile { path, how });
+    }
+
+    fn picks(app: &App) -> Vec<PathBuf> {
+        app.group_picks()
+            .into_iter()
+            .map(Path::to_path_buf)
+            .collect()
+    }
+
+    /// `members` of a `photos`-photo folder grouped under `rep`, shown in
+    /// the Loupe with the Compare pane open.
+    fn compare(
+        name: &str,
+        photos: usize,
+        members: &[usize],
+        rep: usize,
+    ) -> (App, PathBuf, Vec<PathBuf>) {
+        let (mut app, dir, paths) = folder_app(name, photos);
+        group_photos(&mut app, members, rep);
+        let pos = app.visible.iter().position(|&i| i == rep).unwrap();
+        app.select_single(pos);
+        app.enter_loupe();
+        act(&mut app, UiAction::SetGroupView(GroupView::Compare));
+        (app, dir, paths)
+    }
+
+    /// The shown group's members in its own order.
+    fn member_order(app: &App) -> Vec<PathBuf> {
+        let dir = app.playlist.as_ref().unwrap().dir();
+        app.shown_group()
+            .unwrap()
+            .0
+            .iter()
+            .map(|m| dir.join(m))
+            .collect()
+    }
+
+    fn drain_delete(app: &mut App) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while app.bulk_delete.is_some() {
+            assert!(Instant::now() < deadline, "the delete batch never finished");
+            app.poll_delete();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn in_playlist(app: &App, path: &Path) -> bool {
+        app.playlist
+            .as_ref()
+            .unwrap()
+            .entries()
+            .iter()
+            .any(|p| p == path)
+    }
+
     #[test]
     fn a_tile_click_picks_without_changing_the_representative_until_set_as_rep() {
         let (mut app, dir, paths) = grouped_loupe("pick-then-set");
         act(&mut app, UiAction::SetGroupView(GroupView::Compare));
 
-        act(&mut app, UiAction::PickGroupTile(paths[3].clone()));
-        assert_eq!(app.group_pick(), Some(paths[3].as_path()));
+        pick(&mut app, &paths[3], PickHow::Only);
+        assert_eq!(picks(&app), vec![paths[3].clone()]);
         assert_eq!(rep_name(&app), paths[1].file_name().unwrap());
         assert_eq!(cells(&app), vec![0, 1, 2, 4, 5], "the cell keeps the rep");
         assert_eq!(
@@ -390,52 +586,315 @@ mod tests {
             "the cell shows the new rep"
         );
         assert_eq!(app.want.as_ref(), Some(&paths[3]), "the Loupe shows it");
-        assert_eq!(app.group_pick(), None, "setting it spends the pick");
+        assert!(picks(&app).is_empty(), "setting it spends the pick");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn set_as_rep_without_a_pick_or_with_the_rep_picked_changes_nothing() {
-        let (mut app, dir, paths) = grouped_loupe("set-rep-no-pick");
-        act(&mut app, UiAction::SetGroupView(GroupView::Compare));
+    fn a_plain_click_picks_only_that_tile_and_clicking_the_sole_pick_clears_it() {
+        let (mut app, dir, paths) = compare("pick-only", 6, &[1, 2, 3, 4], 1);
+        pick(&mut app, &paths[2], PickHow::Toggle);
+        pick(&mut app, &paths[3], PickHow::Toggle);
+        pick(&mut app, &paths[4], PickHow::Only);
+        assert_eq!(picks(&app), vec![paths[4].clone()], "the others drop");
+        pick(&mut app, &paths[4], PickHow::Only);
+        assert!(picks(&app).is_empty(), "again clears it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        act(&mut app, UiAction::SetPickAsRep);
-        assert_eq!(rep_name(&app), paths[1].file_name().unwrap());
+    #[test]
+    fn cmd_click_toggles_a_tile_and_the_picks_keep_the_groups_order() {
+        let (mut app, dir, paths) = compare("pick-toggle", 6, &[1, 2, 3, 4], 1);
+        pick(&mut app, &paths[4], PickHow::Toggle);
+        pick(&mut app, &paths[2], PickHow::Toggle);
+        assert_eq!(picks(&app), vec![paths[2].clone(), paths[4].clone()]);
+        pick(&mut app, &paths[4], PickHow::Toggle);
+        assert_eq!(picks(&app), vec![paths[2].clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        act(&mut app, UiAction::PickGroupTile(paths[1].clone()));
-        assert_eq!(app.group_pick(), None, "the rep is not a pick");
+    #[test]
+    fn shift_click_picks_the_run_from_the_anchor_across_pages_and_skips_the_rep() {
+        let (mut app, dir, _) = compare("pick-range", 14, &(0..12).collect::<Vec<_>>(), 4);
+        let order = member_order(&app);
+        assert!(
+            order.len() > crate::app::SPIKE_PAGE,
+            "the group spans pages"
+        );
+        let rep = app.want.clone().unwrap();
+        let without_rep = |run: &[PathBuf]| -> Vec<PathBuf> {
+            run.iter().filter(|p| **p != rep).cloned().collect()
+        };
+
+        pick(&mut app, &order[1], PickHow::Only);
+        act(&mut app, UiAction::SpikePage(1));
+        pick(&mut app, &order[11], PickHow::Range);
+        assert!(order[1..=11].contains(&rep));
+        assert_eq!(picks(&app), without_rep(&order[1..=11]));
+
+        pick(&mut app, &order[0], PickHow::Range);
+        assert_eq!(
+            picks(&app),
+            without_rep(&order[0..=1]),
+            "a second Shift-click replaces the run from the same anchor"
+        );
+
+        pick(&mut app, &order[8], PickHow::Toggle);
+        pick(&mut app, &order[6], PickHow::Range);
+        assert_eq!(
+            picks(&app),
+            without_rep(&order[6..=8]),
+            "Cmd-click moved the anchor"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shift_click_with_no_anchor_picks_just_that_tile() {
+        let (mut app, dir, paths) = compare("pick-range-first", 6, &[1, 2, 3, 4], 1);
+        pick(&mut app, &paths[3], PickHow::Range);
+        assert_eq!(picks(&app), vec![paths[3].clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_representative_is_never_picked() {
+        let (mut app, dir, paths) = compare("pick-rep", 6, &[1, 2, 3], 1);
+        pick(&mut app, &paths[2], PickHow::Only);
+        pick(&mut app, &paths[1], PickHow::Toggle);
+        pick(&mut app, &paths[1], PickHow::Range);
+        assert_eq!(
+            picks(&app),
+            vec![paths[2].clone()],
+            "Cmd and Shift on it do nothing"
+        );
+        pick(&mut app, &paths[1], PickHow::Only);
+        assert!(
+            picks(&app).is_empty(),
+            "a plain click on it clears the picks"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_as_rep_needs_exactly_one_pick() {
+        let (mut app, dir, paths) = compare("set-rep-one", 6, &[1, 2, 3], 1);
         act(&mut app, UiAction::SetPickAsRep);
-        assert_eq!(rep_name(&app), paths[1].file_name().unwrap());
+        assert_eq!(rep_name(&app), paths[1].file_name().unwrap(), "no pick");
+
+        pick(&mut app, &paths[2], PickHow::Toggle);
+        pick(&mut app, &paths[3], PickHow::Toggle);
+        act(&mut app, UiAction::SetPickAsRep);
+        assert_eq!(rep_name(&app), paths[1].file_name().unwrap(), "two picks");
         assert_eq!(app.want.as_ref(), Some(&paths[1]));
+
+        pick(&mut app, &paths[2], PickHow::Toggle);
+        act(&mut app, UiAction::SetPickAsRep);
+        assert_eq!(rep_name(&app), paths[3].file_name().unwrap(), "one pick");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn clicking_the_picked_tile_again_clears_the_pick() {
-        let (mut app, dir, paths) = grouped_loupe("pick-toggle");
-        act(&mut app, UiAction::SetGroupView(GroupView::Compare));
-        act(&mut app, UiAction::PickGroupTile(paths[3].clone()));
-        act(&mut app, UiAction::PickGroupTile(paths[3].clone()));
-        assert_eq!(app.group_pick(), None);
+    fn deleting_two_picks_asks_first_then_trashes_exactly_those_and_the_group_shrinks() {
+        let (mut app, dir, paths) = compare("delete-picks", 6, &[1, 2, 3, 5], 1);
+        pick(&mut app, &paths[2], PickHow::Only);
+        pick(&mut app, &paths[3], PickHow::Range);
+        act(&mut app, UiAction::RequestDeletePicks);
+        let (kind, prompt) = app.pending_bulk_prompt().expect("the confirm opens");
+        assert_eq!(kind, crate::ui::BulkKind::Delete);
+        assert_eq!(prompt, (crate::i18n::t().confirm_delete)(2));
+        assert!(
+            paths.iter().all(|p| p.exists()),
+            "nothing goes before the confirm"
+        );
+
+        act(&mut app, UiAction::ConfirmPending);
+        drain_delete(&mut app);
+        let exists: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
+        assert_eq!(exists, [true, true, false, false, true, true]);
+        assert!(!in_playlist(&app, &paths[2]) && !in_playlist(&app, &paths[3]));
+        assert_eq!(member_order(&app), vec![paths[1].clone(), paths[5].clone()]);
+        assert_eq!(rep_name(&app), paths[1].file_name().unwrap());
+        assert_eq!(
+            app.want.as_ref(),
+            Some(&paths[1]),
+            "the Loupe keeps the rep"
+        );
+        assert!(picks(&app).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn the_pick_clears_when_the_loupe_moves_to_another_photo_or_leaves_compare() {
+    fn deleting_every_member_but_the_rep_dissolves_the_group() {
+        let (mut app, dir, paths) = compare("delete-picks-all", 4, &[1, 2], 1);
+        pick(&mut app, &paths[2], PickHow::Only);
+        act(&mut app, UiAction::RequestDeletePicks);
+        act(&mut app, UiAction::ConfirmPending);
+        drain_delete(&mut app);
+        assert!(!paths[2].exists() && paths[1].exists());
+        assert!(!app.shown_in_group());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancelling_the_delete_trashes_nothing_and_keeps_the_picks() {
+        let (mut app, dir, paths) = compare("delete-picks-cancel", 6, &[1, 2, 3], 1);
+        pick(&mut app, &paths[2], PickHow::Toggle);
+        pick(&mut app, &paths[3], PickHow::Toggle);
+        act(&mut app, UiAction::RequestDeletePicks);
+        act(&mut app, UiAction::CancelPending);
+        assert!(app.pending_confirm.is_none());
+        assert!(app.bulk_delete.is_none());
+        assert!(paths.iter().all(|p| p.exists()));
+        assert_eq!(member_order(&app).len(), 3);
+        assert_eq!(picks(&app), vec![paths[2].clone(), paths[3].clone()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_delete_key_with_picks_asks_to_trash_the_picks_not_the_shown_photo() {
+        use winit::keyboard::KeyCode;
+        let (mut app, dir, paths) = compare("delete-key-picks", 6, &[1, 2, 3], 1);
+        app.handle_key(KeyCode::Delete);
+        assert_eq!(
+            app.pending_confirm,
+            Some(PendingConfirm::Bulk(crate::ui::BulkKind::Delete)),
+            "no picks, the shown photo's own Delete"
+        );
+        act(&mut app, UiAction::CancelPending);
+
+        pick(&mut app, &paths[2], PickHow::Toggle);
+        pick(&mut app, &paths[3], PickHow::Toggle);
+        app.handle_key(KeyCode::Delete);
+        assert_eq!(app.pending_confirm, Some(PendingConfirm::DeletePicks));
+        let (_, prompt) = app.pending_bulk_prompt().unwrap();
+        assert_eq!(prompt, (crate::i18n::t().confirm_delete)(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_picks_clear_when_the_loupe_moves_to_another_photo_or_leaves_compare() {
         let (mut app, dir, paths) = grouped_loupe("pick-clears");
         act(&mut app, UiAction::SetGroupView(GroupView::Compare));
-        act(&mut app, UiAction::PickGroupTile(paths[3].clone()));
+        pick(&mut app, &paths[3], PickHow::Only);
 
         act(&mut app, UiAction::Select(0));
         act(&mut app, UiAction::Select(1));
-        assert_eq!(app.group_pick(), None, "another photo drops the pick");
+        assert!(picks(&app).is_empty(), "another photo drops the picks");
         act(&mut app, UiAction::SetPickAsRep);
         assert_eq!(rep_name(&app), paths[1].file_name().unwrap());
 
-        act(&mut app, UiAction::PickGroupTile(paths[3].clone()));
+        pick(&mut app, &paths[3], PickHow::Only);
         act(&mut app, UiAction::SetGroupView(GroupView::Edit));
         act(&mut app, UiAction::SetGroupView(GroupView::Compare));
-        assert_eq!(app.group_pick(), None, "leaving Compare drops the pick");
+        assert!(picks(&app).is_empty(), "leaving Compare drops the picks");
+
+        pick(&mut app, &paths[3], PickHow::Only);
+        app.mode = ViewMode::Grid;
+        assert!(picks(&app).is_empty(), "the grid has no pane to pick in");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn rate(app: &mut App, path: &Path, stars: u8) {
+        let path = path.to_path_buf();
+        act(app, UiAction::RateGroupMember { path, stars });
+    }
+
+    #[test]
+    fn a_tiles_stars_rate_that_member_and_leave_the_shown_photo_and_picks_alone() {
+        let (mut app, dir, paths) = compare("rate-member", 6, &[1, 2, 3], 1);
+        pick(&mut app, &paths[2], PickHow::Only);
+        rate(&mut app, &paths[3], 4);
+        assert_eq!(app.member_rating(&paths[3]), 4);
+        assert_eq!(app.selected_rating(), 0, "the shown rep is unrated");
+        assert_eq!(picks(&app), vec![paths[2].clone()], "the picks stay");
+        assert_eq!(app.want.as_ref(), Some(&paths[1]), "the Loupe stays put");
+
+        rate(&mut app, &paths[1], 2);
+        assert_eq!(app.selected_rating(), 2, "the rep's tile rates the rep");
+        rate(&mut app, &paths[3], 0);
+        assert_eq!(app.member_rating(&paths[3]), 0, "0 clears");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tile_rating_names_only_a_member_of_the_shown_group_in_compare() {
+        let (mut app, dir, paths) = compare("rate-outsider", 6, &[1, 2, 3], 1);
+        rate(&mut app, &paths[4], 3);
+        assert_eq!(app.member_rating(&paths[4]), 0, "not in the group");
+        act(&mut app, UiAction::SetGroupView(GroupView::Edit));
+        rate(&mut app, &paths[2], 3);
+        assert_eq!(app.member_rating(&paths[2]), 0, "the pane is closed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn set_score(app: &mut App, path: &Path, value: u8) {
+        let score = crate::quality::QualityScore {
+            value,
+            basis: crate::quality::Basis::TechnicalOnly,
+            base: None,
+            deductions: Vec::new(),
+        };
+        app.catalog.set_score(path, score, 0);
+    }
+
+    #[test]
+    fn the_pane_orders_members_highest_score_first_and_unscored_last() {
+        let (mut app, dir, paths) = compare("pane-order", 6, &[1, 2, 3, 4], 1);
+        set_score(&mut app, &paths[2], 40);
+        set_score(&mut app, &paths[4], 80);
+        set_score(&mut app, &paths[1], 40);
+        let (order, _) = app.pane_members().unwrap();
+        assert_eq!(
+            order,
+            [&paths[4], &paths[1], &paths[2], &paths[3]].map(|p| p.clone()),
+            "a tie keeps the group's order"
+        );
+
+        pick(&mut app, &paths[4], PickHow::Only);
+        pick(&mut app, &paths[2], PickHow::Range);
+        assert_eq!(
+            picks(&app),
+            vec![paths[4].clone(), paths[2].clone()],
+            "Shift-click runs in the pane's order and skips the rep"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grouping_makes_the_first_highest_scored_photo_the_representative() {
+        let (mut app, dir, paths) = folder_app("group-rep-score", 6);
+        set_score(&mut app, &paths[1], 50);
+        set_score(&mut app, &paths[2], 70);
+        set_score(&mut app, &paths[4], 70);
+        app.select_single(1);
+        for pos in [2, 3, 4] {
+            act(&mut app, UiAction::SelectToggle(pos));
+        }
+        app.group_selected();
+        let groups = app.catalog.groups().unwrap();
+        let g = groups
+            .get(groups.group_of(paths[1].file_name().unwrap()).unwrap())
+            .unwrap();
+        assert_eq!(g.rep(), paths[2].file_name().unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grouping_unscored_photos_keeps_the_cursor_as_representative() {
+        let (mut app, dir, paths) = folder_app("group-rep-cursor", 6);
+        app.select_single(1);
+        act(&mut app, UiAction::SelectToggle(3));
+        act(&mut app, UiAction::SelectToggle(2));
+        app.group_selected();
+        let groups = app.catalog.groups().unwrap();
+        let g = groups
+            .get(groups.group_of(paths[1].file_name().unwrap()).unwrap())
+            .unwrap();
+        let cursor = app
+            .selected_path()
+            .and_then(|p| p.file_name().map(|n| n.to_os_string()));
+        assert_eq!(Some(g.rep().to_os_string()), cursor);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

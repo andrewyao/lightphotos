@@ -260,9 +260,10 @@ impl ApplicationHandler<UserEvent> for App {
             }
             return;
         }
-        // SPIKE: the zoom marker is an egui area only to claim its drags;
-        // the wheel and pinch over it still zoom the Loupe beneath.
-        let spike_zoom = self.spike_marker_hovered
+        // SPIKE: Compare's photo and zoom marker are egui areas only to
+        // claim their drags; the wheel and pinch over them still zoom the
+        // Loupe beneath.
+        let spike_zoom = self.spike_photo_hovered
             && matches!(
                 event,
                 WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. }

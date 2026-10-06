@@ -3,7 +3,9 @@ use super::*;
 
 use super::form::{self, Button, Role};
 use crate::app::GRID_CELL_PT;
-use crate::app::{spike_zoom_uv, App, CropEdge, FocusLevel, GroupView, Region, TileFidelity};
+use crate::app::{
+    spike_zoom_uv, App, CropEdge, FocusLevel, GroupView, PickHow, Region, TileFidelity,
+};
 use crate::image_decode;
 
 pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
@@ -102,7 +104,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
             egui::Panel::right("spike_tiles")
                 .exact_size(central.width() / 2.0)
                 .show_inside(ui, |ui| {
-                    controls_h = egui::Panel::bottom("spike_controls")
+                    controls_h = egui::Panel::top("spike_controls")
                         .show_inside(ui, |ui| spike_controls(ui, app, out))
                         .response
                         .rect
@@ -122,16 +124,16 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
             ui.painter_at(right)
                 .rect_filled(right, 0.0, theme::colors(ui.ctx()).panel);
             let controls_h = ui.spacing().interact_size.y + 2.0 * ui.spacing().item_spacing.y;
-            let (tiles_rect, controls_rect) = right.split_top_bottom_at_y(right.max.y - controls_h);
+            let (controls_rect, tiles_rect) = right.split_top_bottom_at_y(right.min.y + controls_h);
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(tiles_rect));
             spike_tiles(&mut child, app, out);
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(controls_rect));
             spike_controls(&mut child, app, out);
             controls_h
         };
-        // The hint strip lines up with the controls under the tiles.
+        // The hint strip lines up with the controls above the tiles.
         let hint;
-        (central, hint) = central.split_top_bottom_at_y(central.max.y - controls_h);
+        (hint, central) = central.split_top_bottom_at_y(central.min.y + controls_h);
         focus_hint(ui, hint);
     }
     out.loupe_rect = Some(central);
@@ -148,6 +150,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     }
 
     app.spike_marker_hovered = false;
+    app.spike_photo_hovered = false;
     if app.crop_rect().is_some() {
         loupe_crop_overlay(ui, app, central, out);
     } else if app.touchup_active() {
@@ -823,7 +826,7 @@ fn group_view_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
-/// One line under the photo in Compare on how to move and size the square.
+/// One line above the photo in Compare on how to move and size the square.
 /// It claims its strip, so a click or scroll on it doesn't reach the Loupe.
 fn focus_hint(ui: &mut egui::Ui, rect: egui::Rect) {
     ui.interact(rect, egui::Id::new("focus_hint"), egui::Sense::hover());
@@ -832,7 +835,7 @@ fn focus_hint(ui: &mut egui::Ui, rect: egui::Rect) {
     painter.rect_filled(rect, 0.0, colors.panel);
     painter.hline(
         rect.x_range(),
-        rect.top(),
+        rect.bottom(),
         egui::Stroke::new(1.0f32, colors.divider),
     );
     painter.text(
@@ -844,46 +847,62 @@ fn focus_hint(ui: &mut egui::Ui, rect: egui::Rect) {
     );
 }
 
-/// The row under the pane's tiles: how to load the tiles on native, and
-/// Set as representative, live only while a pick other than the
-/// representative waits.
+/// The centered line above the pane's tiles: how to load the tiles on
+/// native, Set as representative, live while exactly one member is picked,
+/// and Delete, live while any are.
 fn spike_controls(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
-    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+    let picks = app.group_picks().len();
+    // egui lays a row out left to right, so center it on last frame's width
+    // and redraw when that width changes.
+    let width_id = egui::Id::new("spike_controls_width");
+    let last_w = ui.ctx().data(|d| d.get_temp::<f32>(width_id));
+    ui.horizontal(|ui| {
+        ui.add_space(((ui.available_width() - last_w.unwrap_or(0.0)) / 2.0).max(0.0));
+        let row_start = ui.cursor().min.x;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            ui.label(t.tile_load);
+            for (f, label) in [
+                (TileFidelity::Speed, t.tile_speed),
+                (TileFidelity::Full, t.tile_full),
+            ] {
+                let current = app.tile_fidelity();
+                if ui.radio(current == f, label).clicked() && current != f {
+                    out.actions.push(UiAction::SetTileFidelity(f));
+                }
+            }
+        }
         let set = Button {
             label: t.set_as_rep,
             role: Role::Primary,
-            enabled: app.group_pick().is_some(),
+            enabled: picks == 1,
         };
-        let set = form::button(ui, &set);
-        if set.clicked() {
+        if form::button(ui, &set).clicked() {
             out.actions.push(UiAction::SetPickAsRep);
         }
-        // As tall as the button, so the radios center on the same line.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let row = egui::vec2(ui.available_width(), set.rect.height());
-            let layout = egui::Layout::left_to_right(egui::Align::Center);
-            ui.allocate_ui_with_layout(row, layout, |ui| {
-                ui.label(t.tile_load);
-                for (f, label) in [
-                    (TileFidelity::Speed, t.tile_speed),
-                    (TileFidelity::Full, t.tile_full),
-                ] {
-                    let current = app.tile_fidelity();
-                    if ui.radio(current == f, label).clicked() && current != f {
-                        out.actions.push(UiAction::SetTileFidelity(f));
-                    }
-                }
-            });
+        let delete = Button {
+            label: &(t.delete_picks)(picks),
+            role: Role::Danger,
+            enabled: picks > 0 && app.delete_available(),
+        };
+        if form::button(ui, &delete).clicked() {
+            out.actions.push(UiAction::RequestDeletePicks);
+        }
+        let w = ui.min_rect().max.x - row_start;
+        if last_w.is_none_or(|l| (l - w).abs() > 0.5) {
+            ui.ctx().data_mut(|d| d.insert_temp(width_id, w));
+            ui.ctx().request_repaint();
         }
     });
 }
 
 /// SPIKE: one tile per member on the group's current page, each sampling
 /// the zoom square. The representative is outlined in the selection color
-/// and the picked member in the cursor color; a click on another tile picks
-/// it, and the button below the tiles makes the pick the representative. A page
+/// and the picked members in the cursor color. A click picks only that
+/// tile, Cmd-click toggles it, and Shift-click picks the run from the last
+/// click across pages; the buttons above the tiles act on the picks. Each
+/// tile carries its member's stars and score (`tile_marks`). A page
 /// holds `SPIKE_PAGE` tiles, and a group with more gets arrows under the
 /// grid. The grid keeps one size across pages, so a short last page leaves
 /// cells empty.
@@ -894,7 +913,7 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     };
     let square = app.spike_square();
     let full = app.tile_fidelity() == TileFidelity::Full;
-    let pick = app.group_pick();
+    let picks = app.group_picks();
     let fit = tiles.group_len().clamp(1, crate::app::SPIKE_PAGE);
     let cols = (fit as f32).sqrt().ceil().max(1.0) as usize;
     let rows = fit.div_ceil(cols);
@@ -914,7 +933,7 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         ui.horizontal(|ui| {
             for m in row {
                 let (rect, resp) =
-                    ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click());
+                    ui.allocate_exact_size(egui::vec2(tile, tile), egui::Sense::click_and_drag());
                 let Some(m) = m else {
                     ui.painter().rect_filled(rect, 0.0, colors.divider);
                     continue;
@@ -938,24 +957,45 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         .paint_at(ui, at);
                 }
                 let is_rep = m.path == tiles.shown;
-                let picked = pick == Some(m.path.as_path());
-                if resp.hovered() {
+                tile_marks(ui, app, rect, &m.path, is_rep, out);
+                let picked = picks.contains(&m.path.as_path());
+                if resp.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                    drag_tile_square(app, tile, resp.drag_delta(), out);
+                } else if resp.hovered() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 if resp.clicked() {
-                    out.actions.push(UiAction::PickGroupTile(m.path.clone()));
+                    let mods = ui.input(|i| i.modifiers);
+                    let how = if mods.shift {
+                        PickHow::Range
+                    } else if mods.command {
+                        PickHow::Toggle
+                    } else {
+                        PickHow::Only
+                    };
+                    out.actions.push(UiAction::PickGroupTile {
+                        path: m.path.clone(),
+                        how,
+                    });
                 }
-                let stroke = if is_rep {
-                    egui::Stroke::new(3.0f32, colors.selection)
+                // One width for every tile, so only the color tells the
+                // representative and the picks from the rest.
+                let color = if is_rep {
+                    colors.selection
                 } else if picked {
-                    egui::Stroke::new(3.0f32, colors.cursor)
+                    colors.cursor
                 } else if resp.hovered() {
-                    egui::Stroke::new(1.5f32, colors.cursor)
+                    egui::Color32::from_gray(160)
                 } else {
-                    egui::Stroke::new(1.0f32, colors.divider)
+                    egui::Color32::from_gray(110)
                 };
-                ui.painter()
-                    .rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Outside);
+                ui.painter().rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(TILE_BORDER, color),
+                    egui::StrokeKind::Outside,
+                );
             }
         });
     }
@@ -969,6 +1009,128 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             cols as f32 * tile + pad * (cols as f32 - 1.0),
             out,
         );
+    }
+}
+
+/// A drag on a tile moves what every tile shows, as grabbing the photo
+/// would: the square moves against the drag, by the photo it covers.
+fn drag_tile_square(app: &App, tile: f32, delta: egui::Vec2, out: &mut FrameOutput) {
+    let Some(tiles) = app.spike.as_ref() else {
+        return;
+    };
+    let Some(&(w, h)) = tiles.sizes.get(&tiles.shown) else {
+        return;
+    };
+    if delta == egui::Vec2::ZERO {
+        return;
+    }
+    let uv = spike_zoom_uv(w, h, app.spike_center, app.spike_side);
+    let moved = uv.center() - delta / tile * uv.size();
+    let center = spike_zoom_uv(w, h, moved, app.spike_side).center();
+    out.actions.push(UiAction::SetSpikeCenter(center));
+}
+
+/// Every Compare tile's border width.
+const TILE_BORDER: f32 = 4.0;
+
+/// A band along a tile's bottom with the member's stars, which rate it as
+/// the info bar's do, and its score, which explains itself on hover. A tile
+/// too narrow for the band goes without. The stars sit over the tile, so a
+/// click on them rates and does not pick.
+fn tile_marks(
+    ui: &mut egui::Ui,
+    app: &App,
+    rect: egui::Rect,
+    path: &std::path::Path,
+    is_rep: bool,
+    out: &mut FrameOutput,
+) {
+    let colors = theme::colors(ui.ctx());
+    let star_w = font_size::px(ui.style(), 16.0);
+    let pad = font_size::px(ui.style(), 4.0);
+    let score = app.member_score(path);
+    let font = egui::FontId::proportional(font_size::px(ui.style(), 12.0));
+    // The band is dark in every theme, so the score is light, dimmed when
+    // stale as `grid::score_color` dims it.
+    let galley = score.map(|(s, stale)| {
+        let color = egui::Color32::from_white_alpha(if stale { 110 } else { 230 });
+        ui.painter()
+            .layout_no_wrap(s.value.to_string(), font.clone(), color)
+    });
+    let score_w = galley.as_ref().map_or(0.0, |g| g.size().x + pad);
+    if rect.width() < 5.0 * star_w + score_w + 2.0 * pad {
+        return;
+    }
+    // The representative says so after its stars, when the band has room.
+    let rep_label = is_rep
+        .then(|| {
+            ui.painter().layout_no_wrap(
+                crate::i18n::t().representative.to_string(),
+                font.clone(),
+                colors.selection,
+            )
+        })
+        .filter(|g| rect.width() >= 5.0 * star_w + g.size().x + score_w + 3.0 * pad);
+    let band = egui::Rect::from_min_max(
+        egui::pos2(rect.left(), rect.bottom() - star_w - pad),
+        rect.right_bottom(),
+    );
+    ui.painter()
+        .rect_filled(band, 0.0, egui::Color32::from_black_alpha(150));
+    let y = band.center().y;
+    let current = app.member_rating(path);
+    for i in 0..5u8 {
+        let n = i + 1;
+        let r = egui::Rect::from_center_size(
+            egui::pos2(band.left() + pad + star_w * (i as f32 + 0.5), y),
+            egui::vec2(star_w, star_w),
+        );
+        let resp = ui.interact(
+            r,
+            egui::Id::new(("tile_star", path, i)),
+            egui::Sense::click(),
+        );
+        let filled = n <= current;
+        let color = if filled {
+            colors.star
+        } else if resp.hovered() {
+            colors.star.gamma_multiply(0.6)
+        } else {
+            egui::Color32::from_white_alpha(170)
+        };
+        ui.painter().text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            if filled { "\u{2605}" } else { "\u{2606}" },
+            egui::FontId::proportional(font_size::px(ui.style(), 14.0)),
+            color,
+        );
+        if resp.clicked() {
+            // Clicking the current rating clears it, as in the info bar.
+            let stars = if n == current { 0 } else { n };
+            out.actions.push(UiAction::RateGroupMember {
+                path: path.to_path_buf(),
+                stars,
+            });
+        }
+    }
+    if let Some(g) = rep_label {
+        let at = egui::pos2(band.left() + 2.0 * pad + 5.0 * star_w, y - g.size().y / 2.0);
+        ui.painter().galley(at, g, egui::Color32::WHITE);
+    }
+    if let (Some((score, stale)), Some(galley)) = (score, galley) {
+        let at = egui::pos2(
+            band.right() - pad - galley.size().x,
+            y - galley.size().y / 2.0,
+        );
+        let hit = egui::Rect::from_min_size(at, galley.size());
+        ui.painter().galley(at, galley, egui::Color32::WHITE);
+        ui.interact(
+            hit,
+            egui::Id::new(("tile_score", path)),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(super::grid::score_tip(score, stale));
     }
 }
 
@@ -1013,8 +1175,9 @@ fn spike_page_nav(
 }
 
 /// SPIKE: outline on the shown photo of the square the tiles zoom into. A
-/// drag that starts inside it moves it, and egui claims that press so the
-/// Loupe does not pan.
+/// drag that starts inside it moves it, and one that starts elsewhere on
+/// the photo centers it under the pointer and carries it along. egui claims
+/// both presses so the Loupe does not pan.
 fn spike_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
     let Some(tiles) = app.spike.as_ref() else {
         return;
@@ -1027,6 +1190,19 @@ fn spike_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
         app.loupe_tex_to_screen(central, uv.min.x, uv.min.y),
         app.loupe_tex_to_screen(central, uv.max.x, uv.max.y),
     );
+    // Beneath the square's own area, so a press on the square reaches it.
+    // Held Space leaves the photo to the Loupe, which pans on Space+drag.
+    let photo = (!app.space_down).then(|| {
+        egui::Area::new(egui::Id::new("spike_zoom_photo"))
+            .order(egui::Order::Middle)
+            .fixed_pos(central.min)
+            .show(ui.ctx(), |ui| {
+                ui.allocate_exact_size(central.size(), egui::Sense::click_and_drag())
+                    .1
+            })
+            .inner
+    });
+    let photo_dragged = photo.as_ref().is_some_and(|p| p.dragged());
     let resp = egui::Area::new(egui::Id::new("spike_zoom_marker"))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
@@ -1036,26 +1212,24 @@ fn spike_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
         })
         .inner;
     app.spike_marker_hovered = resp.hovered() || resp.dragged();
+    app.spike_photo_hovered =
+        app.spike_marker_hovered || photo.as_ref().is_some_and(|p| p.hovered()) || photo_dragged;
     // A click anywhere on the photo, the square included, centers the
-    // square there. Off the square only a click the bare Loupe got counts,
-    // not one on a panel drawn over it.
-    let clicked_at = if resp.clicked() {
+    // square there, and so does each frame of a drag off the square.
+    let centered_at = if resp.clicked() {
         resp.interact_pointer_pos()
-    } else if ui.ctx().is_pointer_over_egui() {
-        None
+    } else if let Some(p) = photo.filter(|p| p.clicked() || p.dragged()) {
+        p.interact_pointer_pos()
     } else {
-        ui.input(|i| {
-            i.pointer
-                .primary_clicked()
-                .then(|| i.pointer.interact_pos())
-                .flatten()
-        })
-        .filter(|p| central.contains(*p))
+        None
     };
-    if let Some(p) = clicked_at {
+    if let Some(p) = centered_at {
         let (u, v) = app.loupe_screen_to_tex(central, p);
         app.spike_center = spike_zoom_uv(w, h, egui::pos2(u, v), app.spike_side).center();
         ui.ctx().request_repaint();
+    }
+    if photo_dragged {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
     if resp.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);

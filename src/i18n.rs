@@ -493,6 +493,9 @@ pub struct Strings {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub tile_full: &'static str,
     pub set_as_rep: &'static str,
+    pub representative: &'static str,
+    /// The Compare pane's button for its picked members, `n` of them.
+    pub delete_picks: fn(usize) -> String,
     pub focus_hint: &'static str,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub folder_handle_missing: fn(&str) -> String,
@@ -1095,6 +1098,12 @@ pub static EN: Strings = Strings {
     tile_speed: "Quickly",
     tile_full: "Fully (Slower)",
     set_as_rep: "Set as representative",
+    representative: "Representative",
+    delete_picks: |n| match n {
+        0 => "Delete Photos\u{2026}".to_string(),
+        1 => "Delete 1 Photo\u{2026}".to_string(),
+        n => format!("Delete {n} Photos\u{2026}"),
+    },
     focus_hint: "Click or drag to move the focus area. Shift+scroll on it to resize.",
     folder_handle_missing: |dir| format!("Couldn't open {dir} \u{2014} folder handle missing"),
     list_folder_failed: |dir, e| format!("Couldn't list {dir}: {e}"),
@@ -1631,6 +1640,11 @@ pub static ZH: Strings = Strings {
     tile_speed: "快速",
     tile_full: "完整（较慢）",
     set_as_rep: "设为代表照片",
+    representative: "代表照片",
+    delete_picks: |n| match n {
+        0 => "删除照片\u{2026}".to_string(),
+        n => format!("删除 {n} 张照片\u{2026}"),
+    },
     focus_hint: "点击或拖动以移动对焦区域，在其上按住 Shift 滚动可调整大小。",
     folder_handle_missing: |dir| format!("无法打开 {dir} \u{2014} 缺少文件夹句柄"),
     list_folder_failed: |dir, e| format!("无法列出 {dir}：{e}"),

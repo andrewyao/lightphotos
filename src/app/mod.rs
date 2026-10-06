@@ -241,7 +241,11 @@ pub(crate) type SelectionOutcome = (PathBuf, Result<crate::segmentation::Mask, S
 pub(crate) enum PendingConfirm {
     Bulk(ui::BulkKind),
     DeletePreset(u64),
-    DeleteGroup { focus: Option<ui::Role> },
+    DeleteGroup {
+        focus: Option<ui::Role>,
+    },
+    /// Trash the members picked in the Loupe's Compare pane.
+    DeletePicks,
 }
 
 /// What a status toast reports, which sets its colors.
@@ -328,6 +332,8 @@ pub(crate) struct App {
     pub(crate) spike_center: egui::Pos2,
     /// SPIKE: the pointer was over the zoom marker last frame.
     pub(crate) spike_marker_hovered: bool,
+    /// SPIKE: the pointer is over the shown photo in Compare, square or not.
+    pub(crate) spike_photo_hovered: bool,
     /// SPIKE: the zoomed square's side as a fraction of the photo's short
     /// side. `LIGHTPHOTOS_SPIKE_SIDE` sets the start, 0.15 by default.
     pub(crate) spike_side: f32,
@@ -335,8 +341,9 @@ pub(crate) struct App {
     /// photos for the session, not saved.
     group_view: GroupView,
     tile_fidelity: TileFidelity,
-    /// The member a tile click picked, waiting for Set as representative.
-    pending_rep: Option<PathBuf>,
+    /// The members tile clicks picked in the Compare pane, waiting for Set
+    /// as representative or Delete.
+    picks: GroupPicks,
     /// Last adjustments handed to the GPU. Tests run without a renderer, so
     /// this is the only way to assert what the loupe would actually show.
     #[cfg(test)]
@@ -756,7 +763,8 @@ mod bulk_delete;
 mod catalog;
 mod crop;
 pub(crate) use crop::{CropAspect, CropOrientation};
-pub(crate) use group_compare::{spike_zoom_uv, GroupView, Square, Tile, TileFidelity};
+use group_compare::GroupPicks;
+pub(crate) use group_compare::{spike_zoom_uv, GroupView, PickHow, Square, Tile, TileFidelity};
 mod export;
 mod fonts;
 mod group_compare;
@@ -984,13 +992,14 @@ impl App {
             spike: None,
             spike_center: egui::pos2(0.5, 0.5),
             spike_marker_hovered: false,
+            spike_photo_hovered: false,
             spike_side: std::env::var("LIGHTPHOTOS_SPIKE_SIDE")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.15),
             group_view: GroupView::default(),
             tile_fidelity: TileFidelity::default(),
-            pending_rep: None,
+            picks: GroupPicks::default(),
             crop_edit: None,
             compare: false,
             exif_cache: HashMap::new(),
@@ -1409,6 +1418,7 @@ impl App {
         let paths: Vec<PathBuf> = group
             .map(|g| g.members().iter().map(|m| pl.dir().join(m)).collect())
             .unwrap_or_default();
+        let order = self.by_score(paths.clone());
         let (Some(loader), Some(r)) = (self.loader.as_mut(), self.renderer.as_mut()) else {
             return;
         };
@@ -1418,15 +1428,16 @@ impl App {
             .is_some_and(|t| t.key != (paths.clone(), px))
         {
             self.spike.take().unwrap().free(r);
-            self.pending_rep = None;
+            self.picks = GroupPicks::default();
         }
         if paths.is_empty() {
             return;
         }
         let tiles = self.spike.get_or_insert_with(|| {
-            let page = paths.iter().position(|p| *p == shown).unwrap_or(0) / SPIKE_PAGE;
+            let page = order.iter().position(|p| *p == shown).unwrap_or(0) / SPIKE_PAGE;
             SpikeTiles {
                 key: (paths.clone(), px),
+                order: order.clone(),
                 shown: shown.clone(),
                 page,
                 members: Vec::new(),
@@ -1442,6 +1453,26 @@ impl App {
             }
         });
         tiles.shown = shown;
+        if tiles.order != order {
+            // A score landed: move the page's tiles to their new slots
+            // rather than upload them again.
+            tiles.order = order;
+            if tiles.loaded_page == tiles.page {
+                let mut old: Vec<Tile> = tiles.members.drain(..).flatten().collect();
+                let slots = tiles
+                    .page_paths()
+                    .iter()
+                    .map(|p| {
+                        let at = old.iter().position(|t| t.path == *p)?;
+                        Some(old.swap_remove(at))
+                    })
+                    .collect();
+                tiles.members = slots;
+                for t in old {
+                    t.textures().for_each(|id| r.free_thumb(id));
+                }
+            }
+        }
         if tiles.loaded_page != tiles.page {
             for t in tiles.members.drain(..).flatten() {
                 t.textures().for_each(|id| r.free_thumb(id));
@@ -1502,12 +1533,19 @@ impl App {
                     if let Some(t) = self.spike.as_mut() {
                         t.page = page.min(t.pages().saturating_sub(1));
                     }
-                    self.clear_group_pick();
                 }
                 ui::UiAction::SetGroupView(view) => self.set_group_view(view),
                 ui::UiAction::SetTileFidelity(f) => self.set_tile_fidelity(f),
-                ui::UiAction::PickGroupTile(path) => self.pick_group_tile(path),
+                ui::UiAction::PickGroupTile { path, how } => self.pick_group_tile(path, how),
+                ui::UiAction::RateGroupMember { path, stars } => {
+                    self.rate_group_member(path, stars)
+                }
+                ui::UiAction::SetSpikeCenter(center) => {
+                    self.spike_center = center;
+                    self.request_redraw();
+                }
                 ui::UiAction::SetPickAsRep => self.set_pick_as_rep(),
+                ui::UiAction::RequestDeletePicks => self.request_delete_picks(),
                 ui::UiAction::Select(pos) => {
                     if pos < self.visible.len() {
                         self.select_single(pos);
@@ -1744,6 +1782,10 @@ pub(crate) fn spike_claims_pane() -> bool {
 pub(crate) struct SpikeTiles {
     /// Every member of the group, and the preview size the textures were made at.
     key: (Vec<PathBuf>, u32),
+    /// The members as the pane lays them out, highest score first
+    /// (`App::by_score`). Pages cut this, not `key`, so a score landing
+    /// reorders the tiles without reloading them.
+    order: Vec<PathBuf>,
     /// The member the Loupe shows, which the marker and the tile outline follow.
     pub(crate) shown: PathBuf,
     /// Which `SPIKE_PAGE`-sized run of the members the pane shows. It starts
@@ -1794,6 +1836,6 @@ impl SpikeTiles {
     /// The members on `page`, the last page possibly short.
     pub(crate) fn page_paths(&self) -> &[PathBuf] {
         let start = (self.page * SPIKE_PAGE).min(self.group_len());
-        &self.key.0[start..(start + SPIKE_PAGE).min(self.group_len())]
+        &self.order[start..(start + SPIKE_PAGE).min(self.group_len())]
     }
 }
