@@ -16,6 +16,10 @@ use crate::navigation::Cmp;
 pub enum UiAction {
     Select(usize),
     GroupSelection,
+    /// Group the bursts among the selection, or the whole folder. Native
+    /// only, as is the button that sends it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    GroupBursts,
     UngroupSelection,
     /// SPIKE: show this page of the group's tiles.
     SpikePage(usize),

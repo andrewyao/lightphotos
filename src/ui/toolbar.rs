@@ -280,6 +280,17 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
             {
                 out.actions.push(UiAction::GroupSelection);
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            if ui
+                .add_enabled(
+                    app.group_bursts_available(),
+                    egui::Button::new(t.menu.group_bursts),
+                )
+                .on_hover_text(crate::i18n::keys(t.group_bursts_tip))
+                .clicked()
+            {
+                out.actions.push(UiAction::GroupBursts);
+            }
             if ui
                 .add_enabled(
                     app.ungroup_button_enabled(),

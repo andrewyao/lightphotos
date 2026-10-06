@@ -303,6 +303,7 @@ impl App {
             self.signals.record(&path, Signal::Capture(t));
             self.capture_times.insert(path, t);
         }
+        self.poll_bursts();
     }
 
     /// Cache metadata for the info panel. For the photo in the loupe, this is

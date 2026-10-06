@@ -362,12 +362,40 @@ pub(crate) fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<Dec
     }))
 }
 
-/// Capture time for `path`. Non-mac reads no EXIF here, so this is the file
-/// mtime, the same fallback the mac version uses.
+/// Capture time for `path`: EXIF `DateTimeOriginal` with its sub-seconds,
+/// else the file mtime, the same fallback the mac version uses. A RAW goes
+/// straight to the mtime.
 #[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
 pub fn capture_time(path: &Path) -> Option<std::time::SystemTime> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(t) = exif_capture_time(path) {
+        return Some(t);
+    }
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+fn exif_capture_time(path: &Path) -> Option<std::time::SystemTime> {
+    if is_raw_extension(path) {
+        return None;
+    }
+    let file = std::fs::File::open(path).ok()?;
+    let exif = exif::Reader::new()
+        .read_from_container(&mut std::io::BufReader::new(file))
+        .ok()?;
+    let ascii = |tag| {
+        let field = exif.get_field(tag, exif::In::PRIMARY)?;
+        match &field.value {
+            exif::Value::Ascii(v) => v.first().map(|b| String::from_utf8_lossy(b).into_owned()),
+            _ => None,
+        }
+    };
+    let t = crate::image_decode::parse_exif_datetime(&ascii(exif::Tag::DateTimeOriginal)?)?;
+    Some(crate::image_decode::with_subsec(
+        t,
+        ascii(exif::Tag::SubSecTimeOriginal).as_deref(),
+    ))
 }
 
 /// EXIF `DateTimeOriginal` with `OffsetTimeOriginal`, else `DateTime` with

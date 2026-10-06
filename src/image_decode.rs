@@ -24,12 +24,12 @@ use objc2_image_io::{
     kCGImagePropertyExifFNumber, kCGImagePropertyExifFlash, kCGImagePropertyExifFocalLength,
     kCGImagePropertyExifISOSpeedRatings, kCGImagePropertyExifLensModel,
     kCGImagePropertyExifOffsetTime, kCGImagePropertyExifOffsetTimeOriginal,
-    kCGImagePropertyExifWhiteBalance, kCGImagePropertyGPSAltitude, kCGImagePropertyGPSAltitudeRef,
-    kCGImagePropertyGPSDictionary, kCGImagePropertyGPSLatitude, kCGImagePropertyGPSLatitudeRef,
-    kCGImagePropertyGPSLongitude, kCGImagePropertyGPSLongitudeRef, kCGImagePropertyOrientation,
-    kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth, kCGImagePropertyTIFFDateTime,
-    kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel,
-    CGImageSource,
+    kCGImagePropertyExifSubsecTimeOriginal, kCGImagePropertyExifWhiteBalance,
+    kCGImagePropertyGPSAltitude, kCGImagePropertyGPSAltitudeRef, kCGImagePropertyGPSDictionary,
+    kCGImagePropertyGPSLatitude, kCGImagePropertyGPSLatitudeRef, kCGImagePropertyGPSLongitude,
+    kCGImagePropertyGPSLongitudeRef, kCGImagePropertyOrientation, kCGImagePropertyPixelHeight,
+    kCGImagePropertyPixelWidth, kCGImagePropertyTIFFDateTime, kCGImagePropertyTIFFDictionary,
+    kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel, CGImageSource,
 };
 
 #[cfg(target_os = "macos")]
@@ -327,10 +327,30 @@ fn parse_exif_datetime_parts(s: &str) -> Option<DateTimeParts> {
 /// Parse an EXIF datetime as UTC. EXIF has no time zone, and burst grouping
 /// only needs times to be consistent with each other.
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
+pub(crate) fn parse_exif_datetime(s: &str) -> Option<SystemTime> {
     let p = parse_exif_datetime_parts(s)?;
     let secs = days_from_civil(p.y, p.mo, p.da) * 86_400 + (p.h * 3600 + p.mi * 60 + p.se) as i64;
     (secs >= 0).then(|| SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64))
+}
+
+/// `t` plus EXIF `SubSecTimeOriginal`, the digits after the decimal point
+/// of `DateTimeOriginal`'s seconds: `"5"` is 500 ms and `"045"` is 45 ms.
+/// Whole seconds can't tell a burst's frames apart. Anything but digits
+/// leaves `t` as it is.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn with_subsec(t: SystemTime, subsec: Option<&str>) -> SystemTime {
+    let Some(digits) = subsec
+        .map(str::trim)
+        .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+    else {
+        return t;
+    };
+    let nanos = digits
+        .bytes()
+        .chain(std::iter::repeat(b'0'))
+        .take(9)
+        .fold(0u32, |n, b| n * 10 + u32::from(b - b'0'));
+    t + Duration::from_nanos(u64::from(nanos))
 }
 
 fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
@@ -430,7 +450,8 @@ fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
         if let Some(t) = dict_string(exif, unsafe { kCGImagePropertyExifDateTimeOriginal })
             .and_then(|s| parse_exif_datetime(&s))
         {
-            return Some(t);
+            let subsec = dict_string(exif, unsafe { kCGImagePropertyExifSubsecTimeOriginal });
+            return Some(with_subsec(t, subsec.as_deref()));
         }
     }
 
@@ -897,6 +918,19 @@ mod tests {
         let d0 = parse_exif_datetime("2026:07:15 08:30:00").unwrap();
         let d1 = parse_exif_datetime("2026:07:16 08:30:00").unwrap();
         assert_eq!(d1.duration_since(d0).unwrap(), Duration::from_secs(86_400));
+    }
+
+    #[test]
+    fn subsec_digits_are_a_decimal_fraction_of_the_second() {
+        let t = parse_exif_datetime("2026:07:15 08:30:00").unwrap();
+        let ms = |s| with_subsec(t, s).duration_since(t).unwrap().as_millis();
+        assert_eq!(ms(Some("5")), 500);
+        assert_eq!(ms(Some("045")), 45);
+        assert_eq!(ms(Some(" 12 ")), 120);
+        assert_eq!(ms(Some("1234567891")), 123);
+        assert_eq!(ms(None), 0);
+        assert_eq!(ms(Some("")), 0);
+        assert_eq!(ms(Some("1a")), 0);
     }
 
     #[test]

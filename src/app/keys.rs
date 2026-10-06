@@ -216,6 +216,7 @@ impl App {
                 self.toggle_touchup();
             }
 
+            KeyCode::KeyG if cmd && alt => self.group_bursts(),
             KeyCode::KeyG if cmd && shift => self.ungroup_selected(),
             KeyCode::KeyG if cmd => self.group_selected(),
             KeyCode::KeyG => self.enter_grid(),

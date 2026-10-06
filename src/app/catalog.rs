@@ -279,7 +279,7 @@ impl App {
         self.request_redraw();
     }
 
-    fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) -> bool {
+    pub(super) fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) -> bool {
         match self.catalog.apply_group_writes(writes) {
             Ok(()) => {
                 self.recompute_visible();

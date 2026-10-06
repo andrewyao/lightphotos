@@ -628,6 +628,8 @@ pub(crate) struct App {
     /// Capture time per path, from EXIF or mtime. `Some(None)` means the read
     /// found no time, so it isn't requested again.
     capture_times: HashMap<PathBuf, Option<SystemTime>>,
+    /// Group Bursts' photos while their capture times are read.
+    burst_scan: Option<Vec<PathBuf>>,
 
     /// Photos in the running Auto Tone batch still waiting on a thumbnail.
     /// Emptied by `cancel_auto_tone` on a folder change.
@@ -760,6 +762,7 @@ mod accessors;
 mod adjust;
 mod autotone;
 mod bulk_delete;
+mod bursts;
 mod catalog;
 mod crop;
 pub(crate) use crop::{CropAspect, CropOrientation};
@@ -962,6 +965,7 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             signal_load_rx: None,
             capture_times: HashMap::new(),
+            burst_scan: None,
             autotone_pending: HashSet::new(),
             autotone_queue: VecDeque::new(),
             autotone_window: VecDeque::new(),
@@ -1183,6 +1187,7 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         crate::analytics::folder_opened(playlist.entries().len());
         self.teardown_loupe_state();
+        self.burst_scan = None;
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
         self.reset_eyes_filter();
@@ -1528,6 +1533,7 @@ impl App {
         for action in actions {
             match action {
                 ui::UiAction::GroupSelection => self.group_selected(),
+                ui::UiAction::GroupBursts => self.group_bursts(),
                 ui::UiAction::UngroupSelection => self.ungroup_selected(),
                 ui::UiAction::SpikePage(page) => {
                     if let Some(t) = self.spike.as_mut() {

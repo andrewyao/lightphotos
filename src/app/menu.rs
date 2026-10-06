@@ -30,6 +30,7 @@ impl App {
             ScorePhotos => free && selected > 0 && self.scoring_available(),
             MoveToTrash => free && selected > 0 && self.delete_available(),
             GroupSelected => free && self.group_available(),
+            GroupBursts => free && self.group_bursts_available(),
             Ungroup => free && self.selection_has_group(),
             DeleteGroup => free && self.selection_has_group() && self.delete_available(),
             CopySettings => free && selected == 1,

@@ -1095,15 +1095,16 @@ impl Loader {
     }
 
     /// Requests `path`'s capture time. The result arrives in the third list
-    /// returned by [`poll_all`](Self::poll_all).
-    #[allow(dead_code)]
-    fn request_meta(&mut self, path: PathBuf) {
+    /// returned by [`poll_all`](Self::poll_all). False when no result will.
+    pub fn request_meta(&mut self, path: PathBuf) -> bool {
         if self.meta_inflight.contains(&path) {
-            return;
+            return true;
         }
         if self.enqueue(Job::Meta(path.clone())) == Enqueued::Yes {
             self.meta_inflight.insert(path);
+            return true;
         }
+        false
     }
 
     /// Requests `path`'s camera, lens, and exposure metadata. The result arrives

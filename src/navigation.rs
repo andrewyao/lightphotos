@@ -68,11 +68,37 @@ pub fn visible_indices(
     cells
 }
 
+/// Frames this close to the one before belong to the same burst. A chain of
+/// them can run longer, so a slow burst stays whole.
+pub(crate) const BURST_GAP: Duration = Duration::from_secs(1);
+
+/// The bursts among `photos`: runs of two or more, in capture order, each
+/// frame within `gap` of the one before. Ties in time keep name order.
+pub(crate) fn bursts(mut photos: Vec<(PathBuf, SystemTime)>, gap: Duration) -> Vec<Vec<PathBuf>> {
+    photos.sort_by(|(pa, ta), (pb, tb)| {
+        ta.cmp(tb)
+            .then_with(|| name_key(pa.file_name()).cmp(&name_key(pb.file_name())))
+    });
+    let times: Vec<_> = photos.iter().map(|(_, t)| Some(*t)).collect();
+    let ids = group_by_time(&times, gap);
+    let mut runs: Vec<Vec<PathBuf>> = Vec::new();
+    let mut last = None;
+    for ((path, _), id) in photos.into_iter().zip(ids) {
+        if last == Some(id) {
+            runs.last_mut().expect("a run per id").push(path);
+        } else {
+            runs.push(vec![path]);
+            last = Some(id);
+        }
+    }
+    runs.retain(|r| r.len() >= 2);
+    runs
+}
+
 /// A 0-based, increasing burst id per entry. A new burst starts when an entry's
 /// capture time is more than `gap` from the last known time, in either
 /// direction. Entries with no time (`None`) join the current burst and never
 /// split one.
-#[cfg_attr(not(test), allow(dead_code))]
 fn group_by_time(times: &[Option<SystemTime>], gap: Duration) -> Vec<u32> {
     let mut ids = Vec::with_capacity(times.len());
     let mut group = 0u32;
@@ -455,6 +481,27 @@ mod tests {
 
     fn t(secs: u64) -> Option<SystemTime> {
         Some(SystemTime::UNIX_EPOCH + Duration::from_secs(secs))
+    }
+
+    #[test]
+    fn bursts_chain_close_frames_and_drop_lone_shots() {
+        let at = |ms: u64| SystemTime::UNIX_EPOCH + Duration::from_millis(ms);
+        let p = |n: &str| PathBuf::from(format!("/f/{n}.jpg"));
+        // Listed out of order: c and d share a time, so name breaks the tie.
+        let photos = vec![
+            (p("d"), at(1_100)),
+            (p("a"), at(0)),
+            (p("lone"), at(5_000)),
+            (p("b"), at(400)),
+            (p("c"), at(1_100)),
+            (p("e"), at(9_000)),
+            (p("f"), at(9_900)),
+        ];
+        assert_eq!(
+            bursts(photos, BURST_GAP),
+            vec![vec![p("a"), p("b"), p("c"), p("d")], vec![p("e"), p("f")],]
+        );
+        assert!(bursts(vec![(p("a"), at(0))], BURST_GAP).is_empty());
     }
 
     #[test]
