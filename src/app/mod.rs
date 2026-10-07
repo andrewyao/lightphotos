@@ -675,31 +675,8 @@ pub(crate) struct App {
     /// Group Bursts' photos while their capture times are read.
     burst_scan: Option<Vec<PathBuf>>,
 
-    /// Photos in the running Auto Tone batch still waiting on a thumbnail.
-    /// Emptied by `cancel_auto_tone` on a folder change.
-    ///
-    /// The batch is paced across three stages so its memory never tracks the
-    /// selection: this set is the whole outstanding batch, for progress and
-    /// deduplication, and every photo in it sits in exactly one of
-    /// `autotone_queue` or `autotone_window`.
-    autotone_pending: HashSet<PathBuf>,
-    /// Batch photos whose thumbnail has not been asked for yet, in the order
-    /// they will be. Unbounded, but a `PathBuf` each, not a decoded thumbnail.
-    autotone_queue: VecDeque<PathBuf>,
-    /// Batch photos whose thumbnail has been requested, oldest first. Capped at
-    /// `AUTOTONE_WINDOW`, and this is the only part of a batch the thumbnail
-    /// cache has to hold at once.
-    autotone_window: VecDeque<PathBuf>,
-    /// Each pending photo's edits when it was queued. If they changed by the
-    /// time its thumbnail lands, the user edited by hand, and `tone_one` must
-    /// not overwrite that.
-    autotone_base: HashMap<PathBuf, crate::develop::Adjustments>,
-    /// Targets waiting for the sidecar scan, so Auto Tone snapshots their
-    /// saved edits and not an empty default.
-    autotone_deferred: Option<Vec<PathBuf>>,
-    /// Photos toned so far in the running batch. The total is this plus
-    /// `autotone_pending.len()`.
-    autotone_done: usize,
+    /// The running Auto Tone batch and the centering it analyses with.
+    autotone: autotone::AutoTone,
 
     face_quality: HashMap<PathBuf, crate::facequality::FaceQuality>,
     face_pending: HashSet<PathBuf>,
@@ -760,8 +737,6 @@ pub(crate) struct App {
 
     show_help: bool,
     show_settings: bool,
-    /// How Auto Tone centers a normal photo, from Settings.
-    autotone_centering: crate::autotone::Centering,
     left_tab: LeftTab,
 
     /// Toast message and when it was set.
@@ -1020,12 +995,11 @@ impl App {
             signal_load_rx: None,
             capture_times: HashMap::new(),
             burst_scan: None,
-            autotone_pending: HashSet::new(),
-            autotone_queue: VecDeque::new(),
-            autotone_window: VecDeque::new(),
-            autotone_base: HashMap::new(),
-            autotone_deferred: None,
-            autotone_done: 0,
+            // A test must never read the developer's own settings.
+            #[cfg(test)]
+            autotone: autotone::AutoTone::new(Default::default()),
+            #[cfg(not(test))]
+            autotone: autotone::AutoTone::new(crate::autotone::Centering::load()),
             face_quality: HashMap::new(),
             face_pending: HashSet::new(),
             face_failed: HashSet::new(),
@@ -1073,11 +1047,6 @@ impl App {
             preset_name_edit: None,
             show_help: false,
             show_settings: false,
-            // A test must never read the developer's own settings.
-            #[cfg(test)]
-            autotone_centering: Default::default(),
-            #[cfg(not(test))]
-            autotone_centering: crate::autotone::Centering::load(),
             left_tab: LeftTab::Folders,
             status: None,
             occluded: false,
@@ -1720,7 +1689,7 @@ impl App {
                     self.request_redraw();
                 }
                 ui::UiAction::SetAutoToneCentering(centering) => {
-                    self.autotone_centering = centering;
+                    self.autotone.set_centering(centering);
                     centering.save();
                     self.request_redraw();
                 }

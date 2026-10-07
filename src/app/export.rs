@@ -702,7 +702,7 @@ impl App {
         self.export_progress.is_some()
             || adding_to_album
             || self.bulk_delete.is_some()
-            || !self.autotone_pending.is_empty()
+            || self.autotone.is_running()
             || self.score_job.is_some()
             || self.catalog.backlog() > 0
     }

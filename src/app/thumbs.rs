@@ -219,7 +219,7 @@ impl App {
 
         // Auto Tone's window shares this cache, so it has to be counted in or
         // its thumbnails can be evicted before `poll_auto_tone` reads them.
-        let reserved = paths.len() + self.autotone_window.len();
+        let reserved = paths.len() + self.autotone.window_len();
         let Some(loader) = &mut self.loader else {
             return false;
         };

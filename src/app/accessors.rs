@@ -145,7 +145,7 @@ impl App {
     }
 
     pub(crate) fn autotone_centering(&self) -> crate::autotone::Centering {
-        self.autotone_centering
+        self.autotone.centering()
     }
 
     /// Longest-side size in pixels for the loupe's screen-fit preview decode.

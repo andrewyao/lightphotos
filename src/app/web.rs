@@ -142,7 +142,7 @@ impl App {
         // The window, not the whole batch. Sizing this to `autotone_pending`
         // told the cache to hold the entire selection, which on a 32-bit heap
         // that never shrinks is how a large folder ran the tab out of memory.
-        let capacity = visible + self.autotone_window.len();
+        let capacity = visible + self.autotone.window_len();
         if let Some(loader) = &mut self.loader {
             loader.set_thumb_working_set_size(capacity);
         }
@@ -258,7 +258,7 @@ impl App {
         // Auto Tone needs thumbnails for its photos even off screen, and
         // `loader.rs`'s queue has no workers on wasm32. They go after the
         // visible grid so the grid reads first.
-        keys.extend(self.autotone_pending.iter().cloned());
+        keys.extend(self.autotone.pending().cloned());
         self.prepare_web_thumb_cache();
         let Some(decoder) = self.loader.as_ref().map(|l| l.web_decoder()) else {
             return false;

@@ -211,7 +211,7 @@ impl App {
             }
         }
         if self.catalog_load_pending.is_none() {
-            if let Some(paths) = self.autotone_deferred.take() {
+            if let Some(paths) = self.autotone.take_deferred() {
                 self.enqueue_auto_tone(paths);
             }
         }

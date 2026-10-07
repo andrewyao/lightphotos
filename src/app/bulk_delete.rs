@@ -400,8 +400,7 @@ impl App {
     ) {
         self.ratings.remove(path);
         self.edits.remove(path);
-        self.autotone_pending.remove(path);
-        self.autotone_base.remove(path);
+        self.autotone.forget(path);
         self.rotations.remove(path);
         self.capture_times.remove(path);
         self.signals.forget(path);
@@ -435,12 +434,7 @@ impl App {
                     .filter_map(|&i| crate::navigation::shift_index(i, &removed))
                     .collect();
             }
-            if let Some(deferred) = self.autotone_deferred.as_mut() {
-                deferred.retain(|p| !gone.contains(p));
-                if deferred.is_empty() {
-                    self.autotone_deferred = None;
-                }
-            }
+            self.autotone.drop_deferred(&gone);
             self.selected.clear();
             self.anchor = None;
             self.recompute_visible();
@@ -664,14 +658,14 @@ mod tests {
     #[test]
     fn a_delete_drops_its_photos_from_a_deferred_auto_tone_batch() {
         let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg"]);
-        app.autotone_deferred = Some(paths.clone());
+        app.autotone.defer(paths.clone());
 
         app.start_delete(vec![paths[0].clone()]);
         drain(&mut app);
 
         assert_eq!(
-            app.autotone_deferred,
-            Some(vec![paths[1].clone()]),
+            app.autotone.deferred(),
+            Some(&paths[1..]),
             "the surviving photo must stay queued for Auto Tone"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -680,12 +674,12 @@ mod tests {
     #[test]
     fn deleting_every_deferred_auto_tone_target_clears_the_batch() {
         let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg"]);
-        app.autotone_deferred = Some(paths.clone());
+        app.autotone.defer(paths.clone());
 
         app.start_delete(paths);
         drain(&mut app);
 
-        assert!(app.autotone_deferred.is_none());
+        assert!(app.autotone.deferred().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -695,18 +689,16 @@ mod tests {
     #[test]
     fn a_trashed_photo_leaves_the_auto_tone_batch() {
         let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg"]);
-        app.autotone_pending.insert(paths[0].clone());
-        app.autotone_base
-            .insert(paths[0].clone(), Default::default());
+        app.enqueue_auto_tone(vec![paths[0].clone()]);
+        assert!(app.autotone.is_pending(&paths[0]));
 
         app.start_delete(vec![paths[0].clone()]);
         drain(&mut app);
 
         assert!(
-            !app.autotone_pending.contains(&paths[0]),
+            !app.autotone.is_pending(&paths[0]),
             "a trashed photo must stop being an Auto Tone target"
         );
-        assert!(!app.autotone_base.contains_key(&paths[0]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

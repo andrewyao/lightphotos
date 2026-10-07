@@ -7,6 +7,7 @@ use super::*;
 use std::path::Path;
 
 use crate::autotone;
+use crate::develop::Adjustments;
 use crate::image_ops;
 use crate::thumbnail::THUMB_PX;
 
@@ -40,6 +41,112 @@ const _: () = assert!(AUTOTONE_WINDOW <= 64);
 /// of a second.
 const AUTOTONE_FRAME_BUDGET: std::time::Duration = std::time::Duration::from_millis(5);
 
+/// One Auto Tone batch's bookkeeping. App's other modules see it only
+/// through the methods below.
+pub(super) struct AutoTone {
+    /// Photos in the running Auto Tone batch still waiting on a thumbnail.
+    /// Emptied by `cancel_auto_tone` on a folder change.
+    ///
+    /// The batch is paced across three stages so its memory never tracks the
+    /// selection: this set is the whole outstanding batch, for progress and
+    /// deduplication, and every photo in it sits in exactly one of
+    /// `queue` or `window`.
+    pending: HashSet<PathBuf>,
+    /// Batch photos whose thumbnail has not been asked for yet, in the order
+    /// they will be. Unbounded, but a `PathBuf` each, not a decoded thumbnail.
+    queue: VecDeque<PathBuf>,
+    /// Batch photos whose thumbnail has been requested, oldest first. Capped at
+    /// `AUTOTONE_WINDOW`, and this is the only part of a batch the thumbnail
+    /// cache has to hold at once.
+    window: VecDeque<PathBuf>,
+    /// Each pending photo's edits when it was queued. If they changed by the
+    /// time its thumbnail lands, the user edited by hand, and `tone_one` must
+    /// not overwrite that.
+    base: HashMap<PathBuf, Adjustments>,
+    /// Targets waiting for the sidecar scan, so Auto Tone snapshots their
+    /// saved edits and not an empty default.
+    deferred: Option<Vec<PathBuf>>,
+    /// Photos toned so far in the running batch. The total is this plus
+    /// `pending.len()`.
+    done: usize,
+    /// How a normal photo is centered, from Settings.
+    centering: autotone::Centering,
+}
+
+impl AutoTone {
+    pub(super) fn new(centering: autotone::Centering) -> Self {
+        Self {
+            pending: HashSet::new(),
+            queue: VecDeque::new(),
+            window: VecDeque::new(),
+            base: HashMap::new(),
+            deferred: None,
+            done: 0,
+            centering,
+        }
+    }
+
+    pub(super) fn centering(&self) -> autotone::Centering {
+        self.centering
+    }
+
+    pub(super) fn set_centering(&mut self, centering: autotone::Centering) {
+        self.centering = centering;
+    }
+
+    /// Whether a batch has photos left to tone.
+    pub(super) fn is_running(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Batch photos whose thumbnail is requested and not yet toned.
+    pub(super) fn window_len(&self) -> usize {
+        self.window.len()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn pending(&self) -> impl Iterator<Item = &PathBuf> {
+        self.pending.iter()
+    }
+
+    /// The batch that waited for the catalog, once it has loaded.
+    pub(super) fn take_deferred(&mut self) -> Option<Vec<PathBuf>> {
+        self.deferred.take()
+    }
+
+    /// Stops toning `path`, which has gone to the Trash.
+    pub(super) fn forget(&mut self, path: &Path) {
+        self.pending.remove(path);
+        self.base.remove(path);
+    }
+
+    /// Drops trashed photos from a batch waiting for the catalog, and the
+    /// batch with them if none are left.
+    pub(super) fn drop_deferred(&mut self, gone: &HashSet<PathBuf>) {
+        if let Some(deferred) = self.deferred.as_mut() {
+            deferred.retain(|p| !gone.contains(p));
+            if deferred.is_empty() {
+                self.deferred = None;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl AutoTone {
+    pub(super) fn deferred(&self) -> Option<&[PathBuf]> {
+        self.deferred.as_deref()
+    }
+
+    pub(super) fn defer(&mut self, paths: Vec<PathBuf>) {
+        self.deferred = Some(paths);
+    }
+
+    pub(super) fn is_pending(&self, path: &Path) -> bool {
+        self.pending.contains(path) || self.base.contains_key(path)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum DeferredAutoToneMode {
     Replace,
@@ -67,7 +174,7 @@ impl App {
         let auto = autotone::analyze(
             &self.hist_sample,
             self.hist_pixel_format,
-            self.autotone_centering,
+            self.autotone.centering,
         );
         let merged = autotone::merge(&self.current_adjustments(), &auto);
         self.apply_adjustments_kind(merged, "auto_tone");
@@ -120,10 +227,10 @@ impl App {
                         .into_iter()
                         .filter(|path| seen.insert(path.clone()))
                         .collect();
-                    self.autotone_deferred = Some(paths);
+                    self.autotone.deferred = Some(paths);
                 }
                 DeferredAutoToneMode::Append => {
-                    let deferred = self.autotone_deferred.get_or_insert_with(Vec::new);
+                    let deferred = self.autotone.deferred.get_or_insert_with(Vec::new);
                     let mut seen: std::collections::HashSet<PathBuf> =
                         deferred.iter().cloned().collect();
                     for path in paths {
@@ -140,11 +247,11 @@ impl App {
             self.request_redraw();
             return;
         }
-        self.autotone_pending.clear();
-        self.autotone_queue.clear();
-        self.autotone_window.clear();
-        self.autotone_base.clear();
-        self.autotone_done = 0;
+        self.autotone.pending.clear();
+        self.autotone.queue.clear();
+        self.autotone.window.clear();
+        self.autotone.base.clear();
+        self.autotone.done = 0;
         self.enqueue_auto_tone(paths);
     }
 
@@ -156,7 +263,7 @@ impl App {
     /// under a frame budget instead, one frame later at worst.
     pub(super) fn enqueue_auto_tone(&mut self, paths: Vec<PathBuf>) {
         for path in paths {
-            if self.autotone_pending.contains(&path) {
+            if self.autotone.pending.contains(&path) {
                 continue;
             }
             // The shown photo's histogram sample needs no decode.
@@ -164,19 +271,19 @@ impl App {
                 let auto = autotone::analyze(
                     &self.hist_sample,
                     self.hist_pixel_format,
-                    self.autotone_centering,
+                    self.autotone.centering,
                 );
                 self.tone_one(&path, &auto);
                 continue;
             }
             // Record the edits now, so a hand edit made while the photo waits
             // its turn can be detected later.
-            self.autotone_base.insert(
+            self.autotone.base.insert(
                 path.clone(),
                 self.edits.get(&path).copied().unwrap_or_default(),
             );
-            self.autotone_pending.insert(path.clone());
-            self.autotone_queue.push_back(path);
+            self.autotone.pending.insert(path.clone());
+            self.autotone.queue.push_back(path);
         }
         self.pump_auto_tone();
         self.report_auto_tone_progress();
@@ -190,12 +297,12 @@ impl App {
         let Some(loader) = &mut self.loader else {
             return;
         };
-        while self.autotone_window.len() < AUTOTONE_WINDOW {
-            let Some(path) = self.autotone_queue.pop_front() else {
+        while self.autotone.window.len() < AUTOTONE_WINDOW {
+            let Some(path) = self.autotone.queue.pop_front() else {
                 return;
             };
             loader.request_thumb(path.clone(), THUMB_PX);
-            self.autotone_window.push_back(path);
+            self.autotone.window.push_back(path);
         }
     }
 
@@ -207,7 +314,7 @@ impl App {
     /// cost is bounded by `AUTOTONE_WINDOW` and not by the selection. Analysis
     /// stops at `AUTOTONE_FRAME_BUDGET` and resumes next frame.
     pub(crate) fn poll_auto_tone(&mut self) {
-        if self.autotone_pending.is_empty() {
+        if self.autotone.pending.is_empty() {
             return;
         }
         self.pump_auto_tone();
@@ -217,7 +324,7 @@ impl App {
         let mut toned: Vec<(PathBuf, crate::develop::Adjustments)> = Vec::new();
         let mut waiting: VecDeque<PathBuf> = VecDeque::new();
         let mut spent = false;
-        while let Some(path) = self.autotone_window.pop_front() {
+        while let Some(path) = self.autotone.window.pop_front() {
             let thumb = self.loader.as_ref().and_then(|loader| {
                 if loader.thumb_failed(&path, THUMB_PX) {
                     None
@@ -248,19 +355,19 @@ impl App {
                 dropped.insert(path);
                 continue;
             }
-            let auto = autotone::analyze(&grid, img.pixel_format, self.autotone_centering);
+            let auto = autotone::analyze(&grid, img.pixel_format, self.autotone.centering);
             toned.push((path, auto));
             spent = Instant::now() >= deadline;
         }
-        self.autotone_window = waiting;
+        self.autotone.window = waiting;
 
         for path in &dropped {
-            self.autotone_pending.remove(path);
-            self.autotone_base.remove(path);
+            self.autotone.pending.remove(path);
+            self.autotone.base.remove(path);
         }
         for (path, auto) in toned {
-            let still_wanted = self.autotone_pending.remove(&path);
-            let base = self.autotone_base.remove(&path);
+            let still_wanted = self.autotone.pending.remove(&path);
+            let base = self.autotone.base.remove(&path);
             // A photo trashed, or a batch cancelled, while this thumbnail
             // loaded. Toning it now would write a sidecar for a file that is
             // no longer there.
@@ -283,16 +390,16 @@ impl App {
     /// writes to the active catalog, which keys records by filename only, so a
     /// late photo from the old folder would corrupt a same-named record.
     pub(super) fn cancel_auto_tone(&mut self) {
-        if self.autotone_pending.is_empty() && self.autotone_deferred.is_none() {
+        if self.autotone.pending.is_empty() && self.autotone.deferred.is_none() {
             return;
         }
-        let (done, total) = (self.autotone_done, self.autotone_total());
-        self.autotone_pending.clear();
-        self.autotone_queue.clear();
-        self.autotone_window.clear();
-        self.autotone_base.clear();
-        self.autotone_deferred = None;
-        self.autotone_done = 0;
+        let (done, total) = (self.autotone.done, self.autotone_total());
+        self.autotone.pending.clear();
+        self.autotone.queue.clear();
+        self.autotone.window.clear();
+        self.autotone.base.clear();
+        self.autotone.deferred = None;
+        self.autotone.done = 0;
         self.set_status(
             StatusKind::Info,
             (crate::i18n::t().auto_tone_stopped)(done, total),
@@ -302,7 +409,7 @@ impl App {
     /// Batch size: photos toned plus photos waiting. Dropped or skipped photos
     /// count toward neither, so the total shrinks.
     fn autotone_total(&self) -> usize {
-        self.autotone_done + self.autotone_pending.len()
+        self.autotone.done + self.autotone.pending.len()
     }
 
     /// Save one photo's auto adjustments, keeping its crop, white balance,
@@ -321,7 +428,7 @@ impl App {
         if merged != base {
             crate::analytics::property("develop_edit_applied", "edit_kind", "auto_tone");
         }
-        self.autotone_done += 1;
+        self.autotone.done += 1;
         if self.shown.path() == Some(path) {
             self.push_adjustments();
             self.hist_dirty = true;
@@ -329,12 +436,12 @@ impl App {
     }
 
     fn report_auto_tone_progress(&mut self) {
-        let done = self.autotone_done;
+        let done = self.autotone.done;
         let total = self.autotone_total();
         if total == 0 {
             return;
         }
-        if self.autotone_pending.is_empty() {
+        if self.autotone.pending.is_empty() {
             // Cmd+U lands here for one photo when its thumbnail had to load.
             let t = crate::i18n::t();
             self.set_status(
@@ -345,7 +452,7 @@ impl App {
                     (t.auto_tone_applied_n)(done)
                 },
             );
-            self.autotone_done = 0;
+            self.autotone.done = 0;
         } else {
             self.set_status(
                 StatusKind::Progress,
@@ -413,7 +520,7 @@ mod tests {
             "the photo left over in the Loupe must not be touched"
         );
         assert!(
-            app.autotone_pending.contains(&b),
+            app.autotone.pending.contains(&b),
             "the cursor photo must be the one queued for toning"
         );
 
@@ -430,9 +537,9 @@ mod tests {
             assert!(app.sel.is_some());
             app.auto_tone_one();
         }
-        assert_eq!(app.autotone_pending.len(), 2);
+        assert_eq!(app.autotone.pending.len(), 2);
         assert_eq!(app.autotone_total(), 2);
-        assert_eq!(app.autotone_done, 0);
+        assert_eq!(app.autotone.done, 0);
 
         app.loader = Some(crate::loader::Loader::new(
             16384,
@@ -452,13 +559,13 @@ mod tests {
             app.poll_auto_tone();
             assert!(app.edits.contains_key(path), "each request must be toned");
             if index == 0 {
-                assert!(app.autotone_pending.contains(&b));
-                assert_eq!(app.autotone_done, 1);
+                assert!(app.autotone.pending.contains(&b));
+                assert_eq!(app.autotone.done, 1);
                 assert_eq!(app.autotone_total(), 2);
             }
         }
-        assert!(app.autotone_pending.is_empty());
-        assert_eq!(app.autotone_done, 0);
+        assert!(app.autotone.pending.is_empty());
+        assert_eq!(app.autotone.done, 0);
         assert_eq!(app.autotone_total(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -490,12 +597,12 @@ mod tests {
             photos.len()
         );
         assert_eq!(
-            app.autotone_window.len(),
+            app.autotone.window.len(),
             AUTOTONE_WINDOW,
             "the batch must ask for exactly one window up front"
         );
         assert_eq!(
-            app.autotone_queue.len(),
+            app.autotone.queue.len(),
             photos.len() - AUTOTONE_WINDOW,
             "the rest must wait their turn, not be requested"
         );
@@ -508,7 +615,7 @@ mod tests {
         // Land one window's thumbnails. The next poll tones what it can inside
         // its frame budget and refills from the queue, so the window stays
         // capped however much of the batch is left.
-        for path in app.autotone_window.clone() {
+        for path in app.autotone.window.clone() {
             app.loader.as_mut().unwrap().insert_thumb_external(
                 path,
                 THUMB_PX,
@@ -522,11 +629,11 @@ mod tests {
         }
         app.poll_auto_tone();
 
-        assert!(app.autotone_done > 0, "the poll must make progress");
+        assert!(app.autotone.done > 0, "the poll must make progress");
         assert!(
-            app.autotone_window.len() <= AUTOTONE_WINDOW,
+            app.autotone.window.len() <= AUTOTONE_WINDOW,
             "the window must stay capped after a refill, got {}",
-            app.autotone_window.len()
+            app.autotone.window.len()
         );
         assert!(
             app.loader.as_ref().unwrap().thumbs_in_flight() <= AUTOTONE_WINDOW,
@@ -534,7 +641,7 @@ mod tests {
             app.loader.as_ref().unwrap().thumbs_in_flight()
         );
         assert_eq!(
-            app.autotone_done + app.autotone_queue.len() + app.autotone_window.len(),
+            app.autotone.done + app.autotone.queue.len() + app.autotone.window.len(),
             photos.len(),
             "every photo must be toned, queued or in the window"
         );
@@ -577,7 +684,7 @@ mod tests {
             rgba,
             pixel_format: crate::image_decode::PixelFormat::Srgb8,
         }));
-        for path in app.autotone_window.clone() {
+        for path in app.autotone.window.clone() {
             app.loader
                 .as_mut()
                 .unwrap()
@@ -586,9 +693,9 @@ mod tests {
 
         app.poll_auto_tone();
 
-        assert!(app.autotone_done > 0, "a poll must make progress");
+        assert!(app.autotone.done > 0, "a poll must make progress");
         assert!(
-            app.autotone_done < photos.len(),
+            app.autotone.done < photos.len(),
             "a poll must stop at its budget, not tone all {} ready photos",
             photos.len()
         );
@@ -604,7 +711,7 @@ mod tests {
         loader.poison_thumb_queue_for_test(a.clone(), THUMB_PX);
         app.loader = Some(loader);
         app.auto_tone_batch(vec![a.clone()], DeferredAutoToneMode::Replace);
-        assert!(app.autotone_pending.contains(&a));
+        assert!(app.autotone.pending.contains(&a));
         let loader = app.loader.as_mut().unwrap();
         loader.poll_all();
         assert!(loader.thumb_failed(&a, THUMB_PX));
@@ -615,7 +722,7 @@ mod tests {
         assert!(loader.thumb_failed(&a, THUMB_PX));
         assert!(loader.thumb_failed(&b, THUMB_PX));
         app.poll_auto_tone();
-        assert!(app.autotone_pending.is_empty());
+        assert!(app.autotone.pending.is_empty());
         assert_eq!(app.autotone_total(), 0);
         assert!(!app.edits.contains_key(&a));
         assert!(!app.edits.contains_key(&b));
@@ -638,7 +745,7 @@ mod tests {
             app.edits.contains_key(&a),
             "the open photo must be toned inline, with no decode queued"
         );
-        assert!(app.autotone_pending.is_empty(), "nothing should be pending");
+        assert!(app.autotone.pending.is_empty(), "nothing should be pending");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -651,16 +758,16 @@ mod tests {
 
         let mut app = App::new(None);
         let stale = PathBuf::from("/folder-a/IMG_0001.jpg");
-        app.autotone_pending.insert(stale.clone());
-        app.autotone_done = 1;
+        app.autotone.pending.insert(stale.clone());
+        app.autotone.done = 1;
 
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
 
         assert!(
-            app.autotone_pending.is_empty(),
+            app.autotone.pending.is_empty(),
             "folder B must not inherit folder A's outstanding Auto Tone work"
         );
-        assert_eq!(app.autotone_done, 0);
+        assert_eq!(app.autotone.done, 0);
         assert_eq!(app.autotone_total(), 0);
 
         app.poll_auto_tone();
@@ -681,7 +788,7 @@ mod tests {
 
         app.auto_tone_shown();
 
-        assert_eq!(app.autotone_deferred, Some(vec![a.clone()]));
+        assert_eq!(app.autotone.deferred, Some(vec![a.clone()]));
         assert!(!app.edits.contains_key(&a));
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -701,7 +808,7 @@ mod tests {
 
         app.auto_tone_one();
 
-        assert_eq!(app.autotone_deferred, Some(vec![b.clone()]));
+        assert_eq!(app.autotone.deferred, Some(vec![b.clone()]));
         assert!(!app.edits.contains_key(&b));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -719,8 +826,8 @@ mod tests {
             app.auto_tone_one();
         }
 
-        assert_eq!(app.autotone_deferred, Some(vec![a.clone(), b.clone()]));
-        assert!(app.autotone_pending.is_empty());
+        assert_eq!(app.autotone.deferred, Some(vec![a.clone(), b.clone()]));
+        assert!(app.autotone.pending.is_empty());
         assert!(!app.edits.contains_key(&a));
         assert!(!app.edits.contains_key(&b));
 
@@ -739,7 +846,7 @@ mod tests {
             DeferredAutoToneMode::Replace,
         );
 
-        assert_eq!(app.autotone_deferred, Some(vec![b, c]));
+        assert_eq!(app.autotone.deferred, Some(vec![b, c]));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -756,7 +863,7 @@ mod tests {
 
         app.auto_tone_one();
 
-        assert_eq!(app.autotone_deferred, Some(vec![a.clone()]));
+        assert_eq!(app.autotone.deferred, Some(vec![a.clone()]));
         assert!(!app.edits.contains_key(&a));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -770,14 +877,14 @@ mod tests {
         let (mut app, dir, a, b) = grid_with_two_photos("autotone-dropped");
         app.auto_tone_batch(vec![a.clone(), b.clone()], DeferredAutoToneMode::Replace);
         assert!(
-            app.autotone_pending.contains(&a),
+            app.autotone.pending.contains(&a),
             "thumbnail not resident yet"
         );
 
         // What `forget_photo` does when the trash call for `a` lands. Its
         // thumbnail request is already in the window.
-        app.autotone_pending.remove(&a);
-        app.autotone_base.remove(&a);
+        app.autotone.pending.remove(&a);
+        app.autotone.base.remove(&a);
 
         app.loader = Some(crate::loader::Loader::new(
             16384,
@@ -810,7 +917,7 @@ mod tests {
         let (mut app, dir, a, _b) = grid_with_two_photos("autotone-manual-edit-race");
         app.auto_tone_batch(vec![a.clone()], DeferredAutoToneMode::Replace);
         assert!(
-            app.autotone_pending.contains(&a),
+            app.autotone.pending.contains(&a),
             "thumbnail not resident yet"
         );
 
@@ -842,7 +949,7 @@ mod tests {
             "the manual edit must survive untouched, not be merged with a stale auto result"
         );
         assert!(
-            app.autotone_pending.is_empty(),
+            app.autotone.pending.is_empty(),
             "the photo must still be dropped from the batch, not left waiting forever"
         );
 
