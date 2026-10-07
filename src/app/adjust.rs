@@ -53,7 +53,7 @@ impl App {
         if self.export_form_open() {
             return Some(RailItem::Export);
         }
-        if self.group_view == GroupView::Compare {
+        if self.group_view() == GroupView::Compare {
             return Some(RailItem::GroupCompare);
         }
         self.develop_page_shown().map(RailItem::Develop)
@@ -108,7 +108,7 @@ impl App {
     /// Compare needs a group, so moving to a photo in none goes back to
     /// the sliders.
     pub(super) fn leave_compare_off_group(&mut self) {
-        if self.group_view == GroupView::Compare && !self.shown_in_group() {
+        if self.group_view() == GroupView::Compare && !self.shown_in_group() {
             self.show_develop_page(DevelopTab::Sliders);
         }
     }

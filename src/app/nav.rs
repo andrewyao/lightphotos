@@ -606,7 +606,7 @@ impl App {
 
     /// Develop gives way to the Compare pane while it is open.
     pub(crate) fn develop_visible(&self) -> bool {
-        self.develop_open && self.group_view == GroupView::Edit
+        self.develop_open && self.group_view() == GroupView::Edit
     }
 
     /// Loupe only.

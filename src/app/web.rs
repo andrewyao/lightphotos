@@ -815,10 +815,9 @@ impl App {
         // The grid's selection is kept too: its metadata read for the info
         // panel is not a stale Loupe decode.
         let selected = self.selected_path();
-        let tiles = self
-            .compare_tiles
-            .as_ref()
-            .map_or(&[][..], |t| t.page_paths());
+        let tiles: Vec<PathBuf> = self
+            .compare_tiles()
+            .map_or(Vec::new(), |t| t.page_paths().to_vec());
         if let Some(loader) = &mut self.loader {
             let keep = |p: &Path| {
                 p == path || selected.as_deref() == Some(p) || tiles.iter().any(|t| t == p)
@@ -834,8 +833,8 @@ impl App {
         let mut started = (quality_needed || speed_needed)
             && self.start_web_preview_read(path.clone(), quality_needed, speed_needed);
         let missing: Vec<PathBuf> = self
-            .compare_tiles
-            .iter()
+            .compare_tiles()
+            .into_iter()
             .flat_map(|t| t.page_paths().iter().zip(&t.members))
             .filter(|(p, slot)| slot.is_none() && **p != path)
             .map(|(p, _)| p.clone())

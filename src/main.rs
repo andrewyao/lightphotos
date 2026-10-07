@@ -250,7 +250,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Compare's photo and zoom marker are egui areas only to
         // claim their drags; the wheel and pinch over them still zoom the
         // Loupe beneath.
-        let compare_zoom = self.compare_photo_hovered
+        let compare_zoom = self.compare_photo_hovered()
             && matches!(
                 event,
                 WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. }

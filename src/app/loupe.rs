@@ -218,8 +218,7 @@ impl App {
         match (shift, alt) {
             // Shift+wheel over the zoom marker resizes it; scrolling
             // up shrinks it, which zooms the tiles in, as the wheel does.
-            (true, false) if self.compare_marker_hovered => {
-                self.compare_side = (self.compare_side / (s * 0.0025).exp()).clamp(0.02, 1.0);
+            (true, false) if self.resize_compare_square((s * 0.0025).exp()) => {
                 self.request_redraw();
             }
             (true, false) if self.touchup_active() => {}

@@ -100,7 +100,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     // egui" (`is_pointer_over_egui`), so zoom, pan, and clicks there reach the
     // app. A CentralPanel would claim that input.
     let mut central = ui.available_rect_before_wrap();
-    if app.compare_tiles.is_some() {
+    if app.compare_tiles().is_some() {
         if crate::app::compare_claims_pane() {
             egui::Panel::right("draw_compare_tiles")
                 .exact_size(central.width() / 2.0)
@@ -137,8 +137,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
         );
     }
 
-    app.compare_marker_hovered = false;
-    app.compare_photo_hovered = false;
+    app.set_compare_hover(false, false);
     if app.crop_rect().is_some() && app.straighten_tool() != StraightenTool::Off {
         loupe_straighten_overlay(ui, app, central, out);
     } else if app.crop_rect().is_some() {
@@ -978,7 +977,7 @@ fn filmstrip_cell(
 /// rating and actions, and Set as representative while exactly one member
 /// is picked, on one line.
 fn compare_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let Some(tiles) = app.compare_tiles.as_ref() else {
+    let Some(tiles) = app.compare_tiles() else {
         return;
     };
     let t = crate::i18n::t();
@@ -1062,7 +1061,7 @@ fn compare_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// cells empty.
 fn draw_compare_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let colors = theme::colors(ui.ctx());
-    let Some(tiles) = app.compare_tiles.as_ref() else {
+    let Some(tiles) = app.compare_tiles() else {
         return;
     };
     let square = app.compare_square();
@@ -1154,7 +1153,7 @@ fn draw_compare_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// A drag on a tile moves what every tile shows, as grabbing the photo
 /// would: the square moves against the drag, by the photo it covers.
 fn drag_tile_square(app: &App, tile: f32, delta: egui::Vec2, out: &mut FrameOutput) {
-    let Some(tiles) = app.compare_tiles.as_ref() else {
+    let Some(tiles) = app.compare_tiles() else {
         return;
     };
     let Some(&(w, h)) = tiles.sizes.get(&tiles.shown) else {
@@ -1163,9 +1162,9 @@ fn drag_tile_square(app: &App, tile: f32, delta: egui::Vec2, out: &mut FrameOutp
     if delta == egui::Vec2::ZERO {
         return;
     }
-    let uv = compare_zoom_uv(w, h, app.compare_center, app.compare_side);
+    let uv = app.compare_square_uv(w, h);
     let moved = uv.center() - delta / tile * uv.size();
-    let center = compare_zoom_uv(w, h, moved, app.compare_side).center();
+    let center = compare_zoom_uv(w, h, moved, app.compare_side()).center();
     out.actions.push(UiAction::SetCompareCenter(center));
 }
 
@@ -1377,13 +1376,13 @@ fn paint_trash(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) 
 /// the photo centers it under the pointer and carries it along. egui claims
 /// both presses so the Loupe does not pan.
 fn compare_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
-    let Some(tiles) = app.compare_tiles.as_ref() else {
+    let Some(tiles) = app.compare_tiles() else {
         return;
     };
     let Some(&(w, h)) = tiles.sizes.get(&tiles.shown) else {
         return;
     };
-    let uv = compare_zoom_uv(w, h, app.compare_center, app.compare_side);
+    let uv = app.compare_square_uv(w, h);
     let rect = egui::Rect::from_two_pos(
         app.loupe_tex_to_screen(central, uv.min.x, uv.min.y),
         app.loupe_tex_to_screen(central, uv.max.x, uv.max.y),
@@ -1409,9 +1408,11 @@ fn compare_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
                 .1
         })
         .inner;
-    app.compare_marker_hovered = resp.hovered() || resp.dragged();
-    app.compare_photo_hovered =
-        app.compare_marker_hovered || photo.as_ref().is_some_and(|p| p.hovered()) || photo_dragged;
+    let marker_hovered = resp.hovered() || resp.dragged();
+    app.set_compare_hover(
+        marker_hovered,
+        marker_hovered || photo.as_ref().is_some_and(|p| p.hovered()) || photo_dragged,
+    );
     // A click anywhere on the photo, the square included, centers the
     // square there, and so does each frame of a drag off the square.
     let centered_at = if resp.clicked() {
@@ -1423,7 +1424,8 @@ fn compare_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
     };
     if let Some(p) = centered_at {
         let (u, v) = app.loupe_screen_to_tex(central, p);
-        app.compare_center = compare_zoom_uv(w, h, egui::pos2(u, v), app.compare_side).center();
+        let side = app.compare_side();
+        app.place_compare_center(compare_zoom_uv(w, h, egui::pos2(u, v), side).center());
         ui.ctx().request_repaint();
     }
     if photo_dragged {
@@ -1436,20 +1438,17 @@ fn compare_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
             let (u1, v1) = app.loupe_screen_to_tex(central, p);
             // Store the clamped center, so dragging past an edge and back
             // moves the square at once rather than after the overshoot.
-            app.compare_center = compare_zoom_uv(
-                w,
-                h,
-                uv.center() + egui::vec2(u1 - u0, v1 - v0),
-                app.compare_side,
-            )
-            .center();
+            let side = app.compare_side();
+            app.place_compare_center(
+                compare_zoom_uv(w, h, uv.center() + egui::vec2(u1 - u0, v1 - v0), side).center(),
+            );
             ui.ctx().request_repaint();
         }
     } else if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
     let rect = {
-        let uv = compare_zoom_uv(w, h, app.compare_center, app.compare_side);
+        let uv = app.compare_square_uv(w, h);
         egui::Rect::from_two_pos(
             app.loupe_tex_to_screen(central, uv.min.x, uv.min.y),
             app.loupe_tex_to_screen(central, uv.max.x, uv.max.y),

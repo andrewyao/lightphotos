@@ -361,25 +361,8 @@ pub(crate) type SignalLoad = (
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
-    /// One mipped texture per group member, keyed on the members and
-    /// the preview size, so a resize or another group re-uploads the set.
-    pub(crate) compare_tiles: Option<CompareTiles>,
-    /// Center of the zoomed square in uv, shared by every member.
-    pub(crate) compare_center: egui::Pos2,
-    /// The pointer was over the zoom marker last frame.
-    pub(crate) compare_marker_hovered: bool,
-    /// The pointer is over the shown photo in Compare, square or not.
-    pub(crate) compare_photo_hovered: bool,
-    /// The zoomed square's side as a fraction of the photo's short
-    /// side. `LIGHTPHOTOS_COMPARE_SIDE` sets the start, 0.15 by default.
-    pub(crate) compare_side: f32,
-    /// Whether a grouped photo's Loupe shows the group pane. Kept across
-    /// photos for the session, not saved.
-    group_view: GroupView,
-    tile_fidelity: TileFidelity,
-    /// The members tile clicks picked in the Compare pane, waiting for Set
-    /// as representative or Delete.
-    picks: GroupPicks,
+    /// Group compare's pane: its tiles, zoom square, view and picks.
+    group_compare: group_compare::GroupCompare,
     /// Last adjustments handed to the GPU. Tests run without a renderer, so
     /// this is the only way to assert what the loupe would actually show.
     #[cfg(test)]
@@ -452,8 +435,6 @@ pub(crate) struct App {
     filter: Option<(Cmp, u8)>,
     /// The grid's flag filter, applied with the star filter.
     flag_filter: FlagFilter,
-    /// The Compare pane's own flag filter over the shown group's tiles.
-    compare_flag_filter: FlagFilter,
     /// Comparator used when a star level is clicked. Stays set across "All".
     filter_cmp: Cmp,
     grid_sort: GridSort,
@@ -614,8 +595,9 @@ mod crop;
 pub(crate) use accessors::FlagCoverage;
 pub(crate) use catalog::flag_name;
 pub(crate) use crop::{CropAspect, CropOrientation, CropOverlay};
-use group_compare::GroupPicks;
-pub(crate) use group_compare::{compare_zoom_uv, GroupView, PickHow, Square, Tile, TileFidelity};
+pub(crate) use group_compare::{
+    compare_claims_pane, compare_zoom_uv, GroupView, PickHow, TileFidelity, COMPARE_PAGE,
+};
 mod export;
 mod faces;
 mod fonts;
@@ -695,7 +677,6 @@ impl App {
             unsaved_edit_kind: "adjustment",
             filter: None,
             flag_filter: FlagFilter::All,
-            compare_flag_filter: FlagFilter::NotRejected,
             filter_cmp: Cmp::Gte,
             grid_sort: GridSort::Name,
             visible: Vec::new(),
@@ -737,17 +718,7 @@ impl App {
             fitted: false,
             rotations: HashMap::new(),
             loupe_viewport: None,
-            compare_tiles: None,
-            compare_center: egui::pos2(0.5, 0.5),
-            compare_marker_hovered: false,
-            compare_photo_hovered: false,
-            compare_side: std::env::var("LIGHTPHOTOS_COMPARE_SIDE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.15),
-            group_view: GroupView::default(),
-            tile_fidelity: TileFidelity::default(),
-            picks: GroupPicks::default(),
+            group_compare: group_compare::GroupCompare::new(),
             crop_edit: None,
             crop_overlay: CropOverlay::default(),
             compare: false,
@@ -1133,164 +1104,19 @@ impl App {
         }
     }
 
-    /// Upload a mipped texture for each member of the shown photo's
-    /// group, the shown photo among them, requesting previews as needed. A
-    /// photo in no group, or the Edit view, leaves `compare_tiles` empty, which keeps
-    /// the Loupe whole.
-    fn sync_compare_tiles(&mut self) {
-        if self.mode != ViewMode::Loupe {
-            return;
-        }
-        if self.group_view == GroupView::Edit {
-            if let (Some(tiles), Some(r)) = (self.compare_tiles.take(), self.renderer.as_mut()) {
-                tiles.free(r);
-            }
-            return;
-        }
-        // `LIGHTPHOTOS_COMPARE_PX` caps the tile textures below the Loupe's size.
-        let px = std::env::var("LIGHTPHOTOS_COMPARE_PX")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or_else(|| self.preview_px());
-        let square = self.compare_square();
-        let (Some(shown), Some(pl)) = (self.selected_path(), self.playlist.as_ref()) else {
-            return;
-        };
-        let group = shown
-            .file_name()
-            .zip(self.catalog.groups())
-            .and_then(|(name, gs)| gs.get(gs.group_of(name)?));
-        let paths: Vec<PathBuf> = group
-            .map(|g| g.members().iter().map(|m| pl.dir().join(m)).collect())
-            .unwrap_or_default();
-        let order = self.compare_order(paths.clone());
-        let (Some(loader), Some(r)) = (self.loader.as_mut(), self.renderer.as_mut()) else {
-            return;
-        };
-        if self
-            .compare_tiles
-            .as_ref()
-            .is_some_and(|t| t.key != (paths.clone(), px))
-        {
-            self.compare_tiles.take().unwrap().free(r);
-            self.picks = GroupPicks::default();
-        }
-        if paths.is_empty() {
-            return;
-        }
-        let tiles = self.compare_tiles.get_or_insert_with(|| {
-            let page = order.iter().position(|p| *p == shown).unwrap_or(0) / COMPARE_PAGE;
-            CompareTiles {
-                key: (paths.clone(), px),
-                order: order.clone(),
-                shown: shown.clone(),
-                page,
-                members: Vec::new(),
-                loaded_page: usize::MAX,
-                sizes: HashMap::new(),
-                square,
-                square_moved: Instant::now(),
-                wake_at: None,
-                opened: Instant::now(),
-                bytes: 0,
-                upload_ms: 0.0,
-                reported: false,
-            }
-        });
-        tiles.shown = shown;
-        if tiles.order != order {
-            // A score landed or the flag filter changed: move the page's
-            // tiles to their new slots rather than upload them again. A
-            // shorter order can leave the page past its end.
-            tiles.order = order;
-            tiles.page = tiles.page.min(tiles.pages().saturating_sub(1));
-            if tiles.loaded_page == tiles.page {
-                let mut old: Vec<Tile> = tiles.members.drain(..).flatten().collect();
-                let slots = tiles
-                    .page_paths()
-                    .iter()
-                    .map(|p| {
-                        let at = old.iter().position(|t| t.path == *p)?;
-                        Some(old.swap_remove(at))
-                    })
-                    .collect();
-                tiles.members = slots;
-                for t in old {
-                    t.textures().for_each(|id| r.free_thumb(id));
-                }
-            }
-        }
-        if tiles.loaded_page != tiles.page {
-            for t in tiles.members.drain(..).flatten() {
-                t.textures().for_each(|id| r.free_thumb(id));
-            }
-            tiles.members = (0..tiles.page_paths().len()).map(|_| None).collect();
-            tiles.loaded_page = tiles.page;
-        }
-        let page_paths = tiles.page_paths().to_vec();
-        for (slot, path) in tiles.members.iter_mut().zip(&page_paths) {
-            if slot.is_some() {
-                continue;
-            }
-            let Some(img) = loader.get_preview(path, px) else {
-                // On wasm32 `request_web_preview` requests these.
-                #[cfg(not(target_arch = "wasm32"))]
-                loader.request_preview(path.clone(), px);
-                continue;
-            };
-            let t = Instant::now();
-            if let Some(id) = r.upload_egui_image(&img, true) {
-                tiles.upload_ms += t.elapsed().as_secs_f32() * 1000.0;
-                // Level 0 plus a full mip chain is 4/3 of it.
-                tiles.bytes += img.width as u64 * img.height as u64 * 4 * 4 / 3;
-                tiles.sizes.insert(path.clone(), (img.width, img.height));
-                *slot = Some(Tile::new(path.clone(), id, img.width, img.height));
-            }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        match self.tile_fidelity {
-            TileFidelity::Full => group_compare::sync_full_crops(tiles, square, loader, r),
-            TileFidelity::Speed => group_compare::drop_full_crops(tiles, r),
-        }
-        if !tiles.reported && tiles.members.iter().all(Option::is_some) {
-            tiles.reported = true;
-            eprintln!(
-                "compare: {} tiles at preview {px}px drawn {:.0} ms after open, upload cpu {:.1} ms, gpu {:.0} MB",
-                tiles.members.len(),
-                tiles.opened.elapsed().as_secs_f32() * 1000.0,
-                tiles.upload_ms,
-                tiles.bytes as f64 / 1e6
-            );
-        }
-    }
-
-    /// When a Full re-crop is waiting on the zoom square to settle, the
-    /// moment it may start. No decode is in flight to wake the frame loop
-    /// then, so `pump` polls until it passes and redraws.
-    pub(crate) fn compare_wake_at(&self) -> Option<Instant> {
-        self.compare_tiles.as_ref()?.wake_at
-    }
-
     fn apply_ui_actions(&mut self, actions: Vec<ui::UiAction>) {
         for action in actions {
             match action {
                 ui::UiAction::GroupAllBursts => self.group_all_bursts(),
                 ui::UiAction::ScoreAll => self.score_all(),
-                ui::UiAction::ComparePage(page) => {
-                    if let Some(t) = self.compare_tiles.as_mut() {
-                        t.page = page.min(t.pages().saturating_sub(1));
-                    }
-                }
+                ui::UiAction::ComparePage(page) => self.set_compare_page(page),
                 ui::UiAction::SetTileFidelity(f) => self.set_tile_fidelity(f),
                 ui::UiAction::PickGroupTile { path, how } => self.pick_group_tile(path, how),
                 ui::UiAction::RateGroupMember { path, stars } => {
                     self.rate_group_member(path, stars)
                 }
                 ui::UiAction::FlagGroupMember { path, flag } => self.flag_group_member(path, flag),
-                ui::UiAction::SetCompareCenter(center) => {
-                    self.compare_center = center;
-                    self.request_redraw();
-                }
+                ui::UiAction::SetCompareCenter(center) => self.set_compare_center(center),
                 ui::UiAction::SetMemberAsRep(path) => self.set_member_as_rep(path),
                 ui::UiAction::DeleteMember(path) => self.request_delete_member(path),
                 ui::UiAction::RequestDeletePicks => self.request_delete_picks(),
@@ -1526,73 +1352,5 @@ mod tests {
         assert_eq!(range_set(2, 5), set(&[2, 3, 4, 5]));
         assert_eq!(range_set(5, 2), set(&[2, 3, 4, 5])); // same range, anchor after
         assert_eq!(range_set(3, 3), set(&[3])); // single cell
-    }
-}
-
-/// `LIGHTPHOTOS_COMPARE_PANE=paint` draws the pane with a bare painter
-/// as the first version did; anything else allocates it inside a ScrollArea.
-pub(crate) fn compare_claims_pane() -> bool {
-    std::env::var("LIGHTPHOTOS_COMPARE_PANE").as_deref() != Ok("paint")
-}
-
-pub(crate) struct CompareTiles {
-    /// Every member of the group, and the preview size the textures were made at.
-    key: (Vec<PathBuf>, u32),
-    /// The members as the pane lays them out, highest score first
-    /// (`App::by_score`). Pages cut this, not `key`, so a score landing
-    /// reorders the tiles without reloading them.
-    order: Vec<PathBuf>,
-    /// The member the Loupe shows, which the marker and the tile outline follow.
-    pub(crate) shown: PathBuf,
-    /// Which `COMPARE_PAGE`-sized run of the members the pane shows. It starts
-    /// on the shown photo's run, but paging away leaves the representative
-    /// with no tile.
-    pub(crate) page: usize,
-    /// One slot per member of `page_paths`, filled once its texture uploads.
-    pub(crate) members: Vec<Option<Tile>>,
-    /// The page `members` holds, so a page turn frees the old textures.
-    loaded_page: usize,
-    /// Pixel size of every member uploaded so far, which keeps the marker on
-    /// the shown photo when its tile is on another page.
-    pub(crate) sizes: HashMap<PathBuf, (u32, u32)>,
-    /// The zoom square as of the last sync, and when it last changed, which
-    /// Full waits on before cutting new crops.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    square: Square,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    square_moved: Instant,
-    wake_at: Option<Instant>,
-    opened: Instant,
-    bytes: u64,
-    upload_ms: f32,
-    reported: bool,
-}
-
-/// Tiles per page. The web build keeps fewer textures and decodes.
-#[cfg(target_arch = "wasm32")]
-pub(crate) const COMPARE_PAGE: usize = 4;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) const COMPARE_PAGE: usize = 9;
-
-impl CompareTiles {
-    fn free(self, r: &mut Renderer) {
-        for t in self.members.into_iter().flatten() {
-            t.textures().for_each(|id| r.free_thumb(id));
-        }
-    }
-
-    /// The members the pane lays out, after its flag filter.
-    pub(crate) fn group_len(&self) -> usize {
-        self.order.len()
-    }
-
-    pub(crate) fn pages(&self) -> usize {
-        self.group_len().div_ceil(COMPARE_PAGE)
-    }
-
-    /// The members on `page`, the last page possibly short.
-    pub(crate) fn page_paths(&self) -> &[PathBuf] {
-        let start = (self.page * COMPARE_PAGE).min(self.group_len());
-        &self.order[start..(start + COMPARE_PAGE).min(self.group_len())]
     }
 }
