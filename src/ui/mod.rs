@@ -139,13 +139,18 @@ pub enum UiAction {
     /// Move the active crop drag to this normalized texture coordinate.
     CropDragTo(f32, f32),
     CropRelease,
+    ToggleStraightenTool,
+    /// Start the Straighten tool's line at this canvas coordinate.
+    StraightenLineFrom(f32, f32),
+    StraightenLineTo(f32, f32),
+    ResetStraighten,
+    /// Put the crop draft back to the full, level frame.
+    ResetCrop,
     SetCropAspect(crate::app::CropAspect),
     SetCropOverlay(crate::app::CropOverlay),
     SetCropOrientation(crate::app::CropOrientation),
     /// Rotate the shown photo 90 degrees, clockwise if true.
     Rotate(bool),
-    CommitCrop,
-    CancelCrop,
     /// While armed, the next Loupe click samples a pixel and solves temp and
     /// tint to make it neutral gray.
     ToggleWbPicker,

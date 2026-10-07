@@ -313,11 +313,12 @@ impl App {
     }
 
     /// Set up the renderer for before/after compare. "Before" keeps only the
-    /// crop; "after" has all edits. Both share the zoom and pan.
+    /// crop and straighten; "after" has all edits. Both share the zoom and pan.
     pub(super) fn push_compare(&mut self) {
         let after = self.current_adjustments();
         let before = Adjustments {
             crop: after.crop,
+            straighten: after.straighten,
             ..Adjustments::default()
         };
         let (scale, offset, rot) = self.loupe_transform();
@@ -533,6 +534,25 @@ impl App {
             central.min.x + bx * central.width(),
             central.min.y + by * central.height(),
         )
+    }
+
+    /// Like `loupe_tex_to_screen`, for a point of the source photo, which
+    /// touch-ups and the white balance picker work in. The texture UV is the
+    /// straightened canvas, so the two differ by the photo's straighten.
+    pub(crate) fn loupe_source_to_screen(&self, central: egui::Rect, u: f32, v: f32) -> egui::Pos2 {
+        let (u, v) = self.shown_straighten().to_canvas(u, v);
+        self.loupe_tex_to_screen(central, u, v)
+    }
+
+    /// Inverse of `loupe_source_to_screen`.
+    pub(crate) fn loupe_screen_to_source(&self, central: egui::Rect, p: egui::Pos2) -> (f32, f32) {
+        let (u, v) = self.loupe_screen_to_tex(central, p);
+        self.shown_straighten().to_source(u, v)
+    }
+
+    fn shown_straighten(&self) -> crate::develop::Straighten {
+        let (w, h) = self.image_size();
+        crate::develop::Straighten::new(self.current_adjustments().straighten, w, h)
     }
 
     /// Map a point in the loupe rect `central` to a texture UV (0..1). Inverse

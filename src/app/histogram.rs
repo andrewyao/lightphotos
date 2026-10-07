@@ -42,16 +42,29 @@ impl App {
             .filter(|c| c.left > 0.0 || c.top > 0.0 || c.right < 1.0 || c.bottom < 1.0);
         let (dw, dh) = (self.hist_dw, self.hist_dh);
         let grid = &self.hist_sample;
+        let turn = (adj.straighten != 0.0)
+            .then(|| develop::Straighten::new(adj.straighten, dw as f32, dh as f32));
         let mut bins = [[0f32; 256]; 3];
-        for gy in 0..dh {
-            for gx in 0..dw {
-                let u = (gx as f32 + 0.5) / dw as f32;
-                let v = (gy as f32 + 0.5) / dh as f32;
+        for cy in 0..dh {
+            for cx in 0..dw {
+                let u = (cx as f32 + 0.5) / dw as f32;
+                let v = (cy as f32 + 0.5) / dh as f32;
                 if let Some(c) = crop {
                     if u < c.left || u >= c.right || v < c.top || v >= c.bottom {
                         continue;
                     }
                 }
+                // A straightened canvas cell counts the source cell under it.
+                let (gx, gy) = match turn {
+                    Some(t) => {
+                        let (su, sv) = t.to_source(u, v);
+                        if !(0.0..1.0).contains(&su) || !(0.0..1.0).contains(&sv) {
+                            continue;
+                        }
+                        ((su * dw as f32) as usize, (sv * dh as f32) as usize)
+                    }
+                    None => (cx, cy),
+                };
                 // Clamp neighbors to the grid, as the shader clamps to the texture.
                 let px = develop::denoise_sample(&adj, |dx, dy| {
                     let sx = (gx as i64 + dx as i64).clamp(0, dw as i64 - 1) as usize;

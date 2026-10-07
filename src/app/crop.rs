@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::develop::Crop;
+use crate::develop::{Crop, Straighten, STRAIGHTEN_RANGE};
 
 /// The crop's shape: the photo's own, free, or a fixed ratio.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,6 +32,15 @@ pub(crate) enum CropOverlay {
 }
 
 impl CropOrientation {
+    /// The orientation of a box `w` by `h` as shown; square counts as wide.
+    fn of(w: f32, h: f32) -> Self {
+        if w >= h {
+            CropOrientation::Horizontal
+        } else {
+            CropOrientation::Vertical
+        }
+    }
+
     pub(super) fn flipped(self) -> Self {
         match self {
             CropOrientation::Horizontal => CropOrientation::Vertical,
@@ -124,6 +133,56 @@ fn locked_spans(
     (span, (start, start + plen))
 }
 
+/// The furthest rect on the way from `from` to `to` that `turn` covers, so a
+/// drag stops at the turned photo's edge. `from` must be covered. Every step
+/// of the way keeps the ratio the two share.
+fn furthest_covered(from: Crop, to: Crop, turn: &Straighten) -> Crop {
+    let lerp = |t: f32| Crop {
+        left: from.left + (to.left - from.left) * t,
+        top: from.top + (to.top - from.top) * t,
+        right: from.right + (to.right - from.right) * t,
+        bottom: from.bottom + (to.bottom - from.bottom) * t,
+    };
+    let (mut lo, mut hi) = (0.0, 1.0);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if turn.covers(lerp(mid)) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lerp(lo)
+}
+
+/// `r` if `turn` covers it. Otherwise `r` shrunk about its center until it
+/// fits, or the largest box of its shape when its center is off the photo.
+/// `w` and `h` are the photo's size in pixels.
+fn fit_inside(r: Crop, turn: &Straighten, w: f32, h: f32) -> Crop {
+    if turn.covers(r) {
+        return r;
+    }
+    let (cu, cv) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+    let center = Crop {
+        left: cu,
+        top: cv,
+        right: cu,
+        bottom: cv,
+    };
+    if turn.covers(center) {
+        furthest_covered(center, r, turn)
+    } else {
+        turn.largest_crop((r.right - r.left) * w / ((r.bottom - r.top) * h))
+    }
+}
+
+/// The turn, in degrees, that brings a line running `dx, dy` pixels to the
+/// nearest of level or upright.
+fn level_angle(dx: f32, dy: f32) -> f32 {
+    let a = dy.atan2(dx).to_degrees();
+    a - 90.0 * (a / 90.0).round()
+}
+
 impl App {
     /// The crop rectangle currently being edited, if crop mode is active.
     pub(crate) fn crop_rect(&self) -> Option<Crop> {
@@ -153,6 +212,154 @@ impl App {
         Some((w.round() as u32, h.round() as u32))
     }
 
+    /// The draft's straighten angle in degrees, if crop mode is active.
+    pub(crate) fn crop_straighten(&self) -> Option<f32> {
+        self.crop_edit.as_ref().map(|d| d.straighten)
+    }
+
+    pub(crate) fn straighten_tool(&self) -> StraightenTool {
+        self.crop_edit
+            .as_ref()
+            .map_or(StraightenTool::Off, |d| d.straighten_tool)
+    }
+
+    /// The angle and box Enter would apply: the draft turned so the drawn
+    /// line runs level or upright, and the draft's box shrunk about its
+    /// center as far as the turned photo needs. `None` until a line is long
+    /// enough to read.
+    pub(crate) fn straighten_preview(&self) -> Option<(f32, Crop)> {
+        let d = self.crop_edit.as_ref()?;
+        let StraightenTool::Line { from, to } = d.straighten_tool else {
+            return None;
+        };
+        let (w, h) = self.image_size();
+        let (dx, dy) = ((to.0 - from.0) * w, (to.1 - from.1) * h);
+        if dx.hypot(dy) < 0.01 * w.max(h) {
+            return None;
+        }
+        let angle = (d.straighten + level_angle(dx, dy))
+            .clamp(*STRAIGHTEN_RANGE.start(), *STRAIGHTEN_RANGE.end());
+        let rect = fit_inside(d.rect, &Straighten::new(angle, w, h), w, h);
+        Some((angle, rect))
+    }
+
+    /// The preview box's corners in the draft's canvas as shown now, in
+    /// order around it. It is slanted by the turn Enter would add.
+    pub(crate) fn straighten_outline(&self) -> Option<[(f32, f32); 4]> {
+        let (angle, r) = self.straighten_preview()?;
+        let (w, h) = self.image_size();
+        let next = Straighten::new(angle, w, h);
+        let shown = Straighten::new(self.crop_straighten()?, w, h);
+        Some(
+            [
+                (r.left, r.top),
+                (r.right, r.top),
+                (r.right, r.bottom),
+                (r.left, r.bottom),
+            ]
+            .map(|(u, v)| {
+                let (su, sv) = next.to_source(u, v);
+                shown.to_canvas(su, sv)
+            }),
+        )
+    }
+
+    pub(super) fn toggle_straighten_tool(&mut self) {
+        if let Some(d) = self.crop_edit.as_mut() {
+            d.grab = None;
+            d.straighten_tool = match d.straighten_tool {
+                StraightenTool::Off => StraightenTool::Ready,
+                _ => StraightenTool::Off,
+            };
+        }
+        self.request_redraw();
+    }
+
+    /// Start a new line at canvas coordinate `(u, v)`.
+    pub(super) fn straighten_line_from(&mut self, u: f32, v: f32) {
+        if let Some(d) = self.crop_edit.as_mut() {
+            if d.straighten_tool != StraightenTool::Off {
+                d.straighten_tool = StraightenTool::Line {
+                    from: (u, v),
+                    to: (u, v),
+                };
+            }
+        }
+        self.request_redraw();
+    }
+
+    pub(super) fn straighten_line_to(&mut self, u: f32, v: f32) {
+        if let Some(d) = self.crop_edit.as_mut() {
+            if let StraightenTool::Line { from, .. } = d.straighten_tool {
+                d.straighten_tool = StraightenTool::Line { from, to: (u, v) };
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Turn the draft by the drawn line and take the previewed box, then put
+    /// the tool away. With no line, only the tool goes away.
+    pub(super) fn apply_straighten(&mut self) {
+        match self.straighten_preview() {
+            Some((angle, _)) => self.straighten_draft(angle),
+            None => {
+                if let Some(d) = self.crop_edit.as_mut() {
+                    d.straighten_tool = StraightenTool::Off;
+                }
+                self.request_redraw();
+            }
+        }
+    }
+
+    pub(super) fn reset_straighten(&mut self) {
+        self.straighten_draft(0.0);
+    }
+
+    /// Set the draft's angle. The box stays where it is, and shrinks about
+    /// its center only as far as the turned photo needs.
+    fn straighten_draft(&mut self, angle: f32) {
+        let (w, h) = self.image_size();
+        if let Some(d) = self.crop_edit.as_mut() {
+            d.straighten = angle;
+            d.rect = fit_inside(d.rect, &Straighten::new(angle, w, h), w, h);
+            d.straighten_tool = StraightenTool::Off;
+            d.grab = None;
+        }
+        self.push_crop_preview();
+    }
+
+    /// Put the draft back to the full, level frame at the photo's own ratio.
+    /// The 90-degree rotation stays.
+    pub(super) fn reset_crop(&mut self) {
+        let (img_w, img_h) = self.image_size();
+        let (disp_w, disp_h) = self.crop_display_px(FULL_CROP);
+        if let Some(d) = self.crop_edit.as_mut() {
+            d.rect = FULL_CROP;
+            d.straighten = 0.0;
+            d.straighten_tool = StraightenTool::Off;
+            d.grab = None;
+            d.aspect = CropAspect::infer(disp_w, disp_h, img_w, img_h);
+            d.orientation = CropOrientation::of(disp_w, disp_h);
+        }
+        self.push_crop_preview();
+    }
+
+    /// The saved adjustments with the draft's crop and angle in them.
+    /// Full-frame crops store as `None`. A turned photo always keeps its box,
+    /// since even a near-full one hides corners the turn leaves empty.
+    fn draft_adjustments(&self, draft: &CropDraft) -> Adjustments {
+        let r = draft.rect;
+        let is_full = draft.straighten == 0.0
+            && r.left <= MIN_CROP
+            && r.top <= MIN_CROP
+            && r.right >= 1.0 - MIN_CROP
+            && r.bottom >= 1.0 - MIN_CROP;
+        let mut adj = self.current_adjustments();
+        adj.crop = if is_full { None } else { Some(r) };
+        adj.straighten = draft.straighten;
+        adj
+    }
+
     fn crop_display_px(&self, r: Crop) -> (f32, f32) {
         let (w, h) = self.image_size();
         let (cw, ch) = ((r.right - r.left) * w, (r.bottom - r.top) * h);
@@ -165,7 +372,8 @@ impl App {
 
     /// Enter crop mode on the Develop panel's Crop tab, opening the loupe
     /// first if needed. The draft starts from the saved crop, with the ratio
-    /// it already has, and the GPU shows the full frame while editing.
+    /// it already has, and the GPU shows the full frame while editing. A
+    /// saved box the saved turn leaves corners in is shrunk to fit.
     pub(super) fn enter_crop(&mut self) {
         if self.mode != ViewMode::Loupe {
             self.enter_loupe();
@@ -177,19 +385,24 @@ impl App {
             return;
         }
         self.tool = LoupeTool::None;
-        let rect = self.current_adjustments().crop.unwrap_or(FULL_CROP);
+        let saved = self.current_adjustments().crop.unwrap_or(FULL_CROP);
         let (img_w, img_h) = self.image_size();
-        let (disp_w, disp_h) = self.crop_display_px(rect);
+        let (disp_w, disp_h) = self.crop_display_px(saved);
+        let straighten = self.current_adjustments().straighten;
+        let rect = fit_inside(
+            saved,
+            &Straighten::new(straighten, img_w, img_h),
+            img_w,
+            img_h,
+        );
         self.crop_edit = Some(CropDraft {
             rect,
             grab: None,
+            straighten,
+            straighten_tool: StraightenTool::Off,
             grab_aspect: 1.0,
             aspect: CropAspect::infer(disp_w, disp_h, img_w, img_h),
-            orientation: if disp_w >= disp_h {
-                CropOrientation::Horizontal
-            } else {
-                CropOrientation::Vertical
-            },
+            orientation: CropOrientation::of(disp_w, disp_h),
             return_tab: self.develop_tab,
         });
         self.develop_tab = DevelopTab::Crop;
@@ -200,11 +413,14 @@ impl App {
         self.request_redraw();
     }
 
-    /// Push the current edits to the GPU with the crop removed, so the whole
-    /// frame is visible under the crop overlay.
+    /// Push the current edits to the GPU with the crop removed and the
+    /// draft's angle, so the whole turned frame shows under the overlay.
     fn push_crop_preview(&mut self) {
         let mut adj = self.current_adjustments();
         adj.crop = None;
+        if let Some(d) = &self.crop_edit {
+            adj.straighten = d.straighten;
+        }
         #[cfg(test)]
         {
             self.pushed_adj = Some(adj);
@@ -216,25 +432,22 @@ impl App {
         self.request_redraw();
     }
 
-    /// Commit the crop draft into the image's persisted adjustments (full-frame
-    /// crops store as `None`), then leave crop mode.
+    /// Save the draft and leave crop mode, applying a line still drawn with
+    /// the Straighten tool. Nothing saves before this.
     pub(super) fn commit_crop(&mut self) {
+        if self.straighten_preview().is_some() {
+            self.apply_straighten();
+        }
         let Some(draft) = self.crop_edit.take() else {
             return;
         };
         self.develop_tab = draft.return_tab;
-        let r = draft.rect;
-        let is_full = r.left <= MIN_CROP
-            && r.top <= MIN_CROP
-            && r.right >= 1.0 - MIN_CROP
-            && r.bottom >= 1.0 - MIN_CROP;
-        let mut adj = self.current_adjustments();
-        adj.crop = if is_full { None } else { Some(r) };
+        let adj = self.draft_adjustments(&draft);
         self.apply_adjustments(adj);
         self.request_redraw();
     }
 
-    /// Leave crop mode without committing, restoring the previously-committed crop.
+    /// Leave crop mode without saving, putting the saved view back.
     pub(super) fn cancel_crop(&mut self) {
         if let Some(draft) = self.crop_edit.take() {
             self.develop_tab = draft.return_tab;
@@ -268,6 +481,10 @@ impl App {
         if let Some(r) = d.aspect.w_over_h(d.orientation, w, h) {
             let texture_ratio = if quarter_turned { 1.0 / r } else { r };
             d.rect = reshaped(d.rect, texture_ratio, w, h);
+            let turn = Straighten::new(d.straighten, w, h);
+            if !turn.covers(d.rect) {
+                d.rect = turn.largest_crop(texture_ratio);
+            }
         }
         self.request_redraw();
     }
@@ -355,7 +572,12 @@ impl App {
                 }
             }
         }
-        d.rect = r;
+        let turn = Straighten::new(d.straighten, w, h);
+        d.rect = if turn.covers(r) {
+            r
+        } else {
+            furthest_covered(d.rect, r, &turn)
+        };
         self.request_redraw();
     }
 
@@ -371,7 +593,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn committing_an_untouched_crop_restores_the_cropped_view() {
+    fn leaving_crop_mode_restores_the_cropped_view() {
         let photo = PathBuf::from("/photos/a.jpg");
         let crop = Crop {
             left: 0.1,
@@ -394,7 +616,7 @@ mod tests {
         app.enter_crop();
         assert_eq!(app.pushed_adj.unwrap().crop, None);
 
-        // Committing without touching a handle stores the same crop it started
+        // Leaving without touching a handle stores the same crop it started
         // from, so nothing changes -- but the GPU still holds the full frame
         // and has to be put back, or the loupe keeps showing it uncropped.
         app.commit_crop();
@@ -411,7 +633,7 @@ mod tests {
         app.apply_ui_actions(vec![ui::UiAction::ToggleTouchUp]);
         assert!(app.touchup_active());
         app.enter_crop();
-        app.cancel_crop();
+        app.commit_crop();
         assert!(
             !app.touchup_active(),
             "touch-up must not return after a crop"
@@ -420,7 +642,7 @@ mod tests {
         app.toggle_wb_picker();
         assert!(app.wb_picker_active());
         app.enter_crop();
-        app.cancel_crop();
+        app.commit_crop();
         assert!(
             !app.wb_picker_active(),
             "the picker must not return after a crop"
@@ -719,7 +941,9 @@ mod tests {
         app.handle_key(KeyCode::Escape);
         assert_eq!(app.develop_tab(), DevelopTab::Masks, "Esc goes back");
         assert_rect(
-            app.current_adjustments().crop.unwrap(),
+            app.current_adjustments()
+                .crop
+                .expect("Esc discards the edit"),
             (0.125, 0.0, 0.875, 1.0),
         );
 
@@ -729,6 +953,279 @@ mod tests {
             app.develop_tab(),
             DevelopTab::Masks,
             "navigating away leaves no Crop tab without a crop"
+        );
+    }
+
+    /// Draw a line `deg` degrees off level, in source pixels, across the
+    /// middle of the 4000x3000 photo.
+    fn draw_line(app: &mut App, deg: f32) {
+        let dy = 3200.0 * deg.to_radians().tan() / 3000.0;
+        app.apply_ui_actions(vec![
+            ui::UiAction::StraightenLineFrom(0.1, 0.5),
+            ui::UiAction::StraightenLineTo(0.9, 0.5 + dy),
+        ]);
+    }
+
+    #[test]
+    fn enter_turns_the_photo_by_the_drawn_line_and_crops_inside_it() {
+        use winit::keyboard::KeyCode;
+        let mut app = photo_app(0, None);
+        app.enter_crop();
+        app.set_crop_aspect(CropAspect::R4x3);
+        app.apply_ui_actions(vec![ui::UiAction::ToggleStraightenTool]);
+        assert_eq!(app.straighten_tool(), StraightenTool::Ready);
+        draw_line(&mut app, 5.0);
+
+        let (angle, preview) = app.straighten_preview().expect("a drawn line previews");
+        assert!((angle - 5.0).abs() < 1e-3, "{angle}");
+        // The slanted box sits inside the photo as it shows now.
+        let outline = app.straighten_outline().unwrap();
+        // `covers` allows 1e-4 of slack at the edge.
+        let inside = -1e-3..=1.0 + 1e-3;
+        for (u, v) in outline {
+            assert!(inside.contains(&u) && inside.contains(&v), "{u},{v}");
+        }
+        let (a, b) = (outline[0], outline[1]);
+        let top = ((b.1 - a.1) * 3000.0)
+            .atan2((b.0 - a.0) * 4000.0)
+            .to_degrees();
+        assert!(
+            (top - 5.0).abs() < 1e-2,
+            "the box's top edge follows the line: {top}"
+        );
+        assert_eq!(app.crop_rect().map(|r| r != preview), Some(true));
+
+        // Applying a line turns the draft but saves nothing yet.
+        app.apply_straighten();
+        assert_eq!(app.straighten_tool(), StraightenTool::Off);
+        assert_eq!(app.crop_straighten(), Some(angle));
+        let r = app.crop_rect().unwrap();
+        assert_eq!(r, preview);
+        assert!((pixel_ratio(r) - 4.0 / 3.0).abs() < 1e-3, "{r:?}");
+        assert_eq!(
+            app.pushed_adj.unwrap().straighten,
+            angle,
+            "the GPU shows the turn"
+        );
+        assert_eq!(
+            app.pushed_adj.unwrap().crop,
+            None,
+            "the full frame still shows under the overlay"
+        );
+        assert_eq!(app.current_adjustments().straighten, 0.0, "not saved yet");
+
+        // A second line adds to the first, and Enter on it saves and leaves.
+        app.toggle_straighten_tool();
+        draw_line(&mut app, -2.0);
+        app.handle_key(KeyCode::Enter);
+        assert!(app.crop_edit.is_none(), "Enter saves and goes back");
+        assert_eq!(app.develop_tab(), DevelopTab::Sliders);
+        let saved = app.current_adjustments();
+        assert!(
+            (saved.straighten - 3.0).abs() < 1e-3,
+            "{}",
+            saved.straighten
+        );
+        assert!(saved.crop.is_some());
+    }
+
+    #[test]
+    fn reset_returns_the_draft_to_the_full_level_frame() {
+        use winit::keyboard::KeyCode;
+        let mut app = photo_app(0, None);
+        app.enter_crop();
+        app.set_crop_aspect(CropAspect::R16x9);
+        app.toggle_straighten_tool();
+        draw_line(&mut app, 5.0);
+        app.handle_key(KeyCode::Enter);
+        app.enter_crop();
+
+        app.apply_ui_actions(vec![ui::UiAction::ResetCrop]);
+        assert_eq!(app.crop_straighten(), Some(0.0));
+        assert_rect(app.crop_rect().unwrap(), (0.0, 0.0, 1.0, 1.0));
+        assert_eq!(app.crop_aspect(), Some(CropAspect::Original));
+        assert_eq!(app.pushed_adj.unwrap().straighten, 0.0);
+        assert!(app.current_adjustments().crop.is_some(), "not saved yet");
+        app.handle_key(KeyCode::Enter);
+        let saved = app.current_adjustments();
+        assert_eq!((saved.crop, saved.straighten), (None, 0.0));
+    }
+
+    #[test]
+    fn nothing_saves_until_enter() {
+        use winit::keyboard::KeyCode;
+        let mut app = photo_app(0, None);
+        app.enter_crop();
+        app.set_crop_aspect(CropAspect::Custom);
+        app.crop_grab(CropEdge::Right);
+        app.crop_drag_to(0.6, 0.5);
+        app.crop_release();
+        let dragged = app.crop_rect().unwrap();
+        app.toggle_straighten_tool();
+        draw_line(&mut app, 2.0);
+        app.apply_straighten();
+        assert_eq!(app.current_adjustments(), Adjustments::default());
+
+        app.handle_key(KeyCode::Escape);
+        assert!(app.crop_edit.is_none(), "Esc leaves crop mode");
+        assert_eq!(app.current_adjustments(), Adjustments::default(), "unsaved");
+        assert_eq!(app.pushed_adj.unwrap().crop, None);
+
+        app.enter_crop();
+        app.set_crop_aspect(CropAspect::Custom);
+        app.crop_grab(CropEdge::Right);
+        app.crop_drag_to(0.6, 0.5);
+        app.crop_release();
+        app.handle_key(KeyCode::Enter);
+        assert_eq!(app.current_adjustments().crop, Some(dragged));
+        assert_eq!(app.pushed_adj.unwrap().crop, Some(dragged));
+    }
+
+    #[test]
+    fn a_small_turn_keeps_its_box() {
+        let mut app = photo_app(0, None);
+        app.enter_crop();
+        app.set_crop_aspect(CropAspect::R4x3);
+        app.toggle_straighten_tool();
+        draw_line(&mut app, 1.0);
+        app.apply_straighten();
+        let r = app.crop_rect().unwrap();
+        assert!(r.left < MIN_CROP, "the box is within MIN_CROP: {r:?}");
+        app.commit_crop();
+        assert_eq!(
+            app.current_adjustments().crop,
+            Some(r),
+            "a near-full box still hides the corners the turn leaves"
+        );
+    }
+
+    #[test]
+    fn a_saved_turn_without_a_box_gets_one_that_drags() {
+        let photo = PathBuf::from(PHOTO);
+        let mut app = photo_app(0, None);
+        app.edits.insert(
+            photo,
+            Adjustments {
+                straighten: 3.0,
+                ..Default::default()
+            },
+        );
+        app.enter_crop();
+        let turn = Straighten::new(3.0, 4000.0, 3000.0);
+        let r = app.crop_rect().unwrap();
+        assert!(turn.covers(r), "{r:?}");
+
+        app.crop_grab(CropEdge::Right);
+        app.crop_drag_to(0.7, 0.5);
+        assert!(app.crop_rect().unwrap().right < r.right, "the box drags");
+    }
+
+    #[test]
+    fn leaving_crop_mode_applies_a_drawn_line() {
+        let mut app = photo_app(0, None);
+        app.enter_crop();
+        app.toggle_straighten_tool();
+        draw_line(&mut app, 4.0);
+        app.set_develop_tab(DevelopTab::Sliders);
+        assert!(app.crop_edit.is_none());
+        assert!((app.current_adjustments().straighten - 4.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn straightening_keeps_a_placed_box_that_still_fits() {
+        let placed = Crop {
+            left: 0.4,
+            top: 0.4,
+            right: 0.6,
+            bottom: 0.6,
+        };
+        let mut app = photo_app(0, Some(placed));
+        app.enter_crop();
+        app.toggle_straighten_tool();
+        draw_line(&mut app, 3.0);
+        app.apply_straighten();
+        assert_eq!(app.crop_rect(), Some(placed), "a turn it fits leaves it be");
+        app.reset_straighten();
+        assert_eq!(app.crop_rect(), Some(placed), "so does Reset");
+
+        // A box near the edge shrinks about its own center, not the photo's.
+        let edge = Crop {
+            left: 0.0,
+            top: 0.0,
+            right: 0.5,
+            bottom: 0.5,
+        };
+        let mut app = photo_app(0, Some(edge));
+        app.enter_crop();
+        app.toggle_straighten_tool();
+        draw_line(&mut app, 5.0);
+        app.apply_straighten();
+        let r = app.crop_rect().unwrap();
+        assert!(Straighten::new(5.0, 4000.0, 3000.0).covers(r), "{r:?}");
+        assert!(((r.left + r.right) / 2.0 - 0.25).abs() < 1e-3, "{r:?}");
+        assert!(((r.top + r.bottom) / 2.0 - 0.25).abs() < 1e-3, "{r:?}");
+    }
+
+    #[test]
+    fn a_steep_line_levels_to_upright() {
+        let mut app = photo_app(0, None);
+        app.enter_crop();
+        app.toggle_straighten_tool();
+        draw_line(&mut app, 88.0);
+        let (angle, _) = app.straighten_preview().unwrap();
+        assert!((angle + 2.0).abs() < 1e-2, "{angle}");
+    }
+
+    #[test]
+    fn escape_puts_the_tool_away_and_reset_levels_the_photo() {
+        use winit::keyboard::KeyCode;
+        let mut app = photo_app(0, None);
+        app.enter_crop();
+        app.toggle_straighten_tool();
+        draw_line(&mut app, 4.0);
+        app.handle_key(KeyCode::Escape);
+        assert_eq!(app.straighten_tool(), StraightenTool::Off);
+        assert!(
+            app.crop_edit.is_some(),
+            "Esc on the tool stays in crop mode"
+        );
+        assert_eq!(app.crop_straighten(), Some(0.0), "Esc applies nothing");
+
+        app.toggle_straighten_tool();
+        draw_line(&mut app, 4.0);
+        app.apply_straighten();
+        let turned = app.crop_rect().unwrap();
+        app.apply_ui_actions(vec![ui::UiAction::ResetStraighten]);
+        assert_eq!(app.crop_straighten(), Some(0.0));
+        assert_eq!(app.crop_rect(), Some(turned), "the box stays put");
+    }
+
+    #[test]
+    fn a_drag_stops_at_the_turned_photos_edge() {
+        let mut app = photo_app(0, None);
+        app.enter_crop();
+        app.set_crop_aspect(CropAspect::Custom);
+        app.toggle_straighten_tool();
+        draw_line(&mut app, 6.0);
+        app.apply_straighten();
+        let turn = Straighten::new(app.crop_straighten().unwrap(), 4000.0, 3000.0);
+
+        app.crop_grab(CropEdge::Left);
+        app.crop_drag_to(0.0, 0.5);
+        let r = app.crop_rect().unwrap();
+        assert!(turn.covers(r), "{r:?}");
+
+        let before = app.crop_rect().unwrap();
+        app.crop_grab_move(0.5, 0.5);
+        app.crop_drag_to(0.0, 0.0);
+        let r = app.crop_rect().unwrap();
+        assert!(turn.covers(r), "{r:?}");
+        let size = |r: Crop| (r.right - r.left, r.bottom - r.top);
+        let (w0, h0) = size(before);
+        let (w1, h1) = size(r);
+        assert!(
+            (w0 - w1).abs() < 1e-5 && (h0 - h1).abs() < 1e-5,
+            "a move keeps the size"
         );
     }
 

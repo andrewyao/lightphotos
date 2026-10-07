@@ -61,6 +61,14 @@ impl App {
 
         // While cropping, other keys do nothing, so a stray arrow or digit
         // can't move the selection out from under the crop.
+        if self.straighten_tool() != StraightenTool::Off {
+            match code {
+                KeyCode::Enter | KeyCode::NumpadEnter => self.commit_crop(),
+                KeyCode::Escape => self.toggle_straighten_tool(),
+                _ => {}
+            }
+            return;
+        }
         if self.crop_edit.is_some() {
             match code {
                 KeyCode::KeyC | KeyCode::Enter | KeyCode::NumpadEnter => self.commit_crop(),

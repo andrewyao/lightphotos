@@ -162,9 +162,88 @@ pub struct Adjustments {
     pub saturation: f32,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub denoise: f32,
-    /// `None` means the full frame.
+    /// `None` means the full frame of the straightened photo.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<Crop>,
+    /// Degrees the photo turns about its center before the crop, within
+    /// [`STRAIGHTEN_RANGE`]. See [`Straighten`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub straighten: f32,
+}
+
+/// How far the Straighten tool can turn a photo, in degrees.
+pub const STRAIGHTEN_RANGE: std::ops::RangeInclusive<f32> = -45.0..=45.0;
+
+/// The straighten turn as a map between the straightened canvas and the
+/// source photo. Both are 0..1 coordinates of the same `w x h` frame, and
+/// the turn is in pixel space so it stays a rotation on a non-square photo.
+/// A source pixel's offset from the center is the canvas offset turned by
+/// the angle, clockwise on screen for a positive angle with y down. Must
+/// match `straightenUv` in `loupe_common.wgsl`.
+#[derive(Clone, Copy, Debug)]
+pub struct Straighten {
+    cos: f32,
+    sin: f32,
+    w: f32,
+    h: f32,
+}
+
+impl Straighten {
+    pub fn new(degrees: f32, w: f32, h: f32) -> Self {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        Self { cos, sin, w, h }
+    }
+
+    fn turn(&self, u: f32, v: f32, sin: f32) -> (f32, f32) {
+        let (x, y) = ((u - 0.5) * self.w, (v - 0.5) * self.h);
+        let (rx, ry) = (self.cos * x - sin * y, sin * x + self.cos * y);
+        (rx / self.w + 0.5, ry / self.h + 0.5)
+    }
+
+    pub fn to_source(self, u: f32, v: f32) -> (f32, f32) {
+        self.turn(u, v, self.sin)
+    }
+
+    pub fn to_canvas(self, u: f32, v: f32) -> (f32, f32) {
+        self.turn(u, v, -self.sin)
+    }
+
+    /// True when all of `r` shows the photo, with no corner past its edge.
+    pub fn covers(&self, r: Crop) -> bool {
+        const EPS: f32 = 1e-4;
+        let inside =
+            |(u, v): (f32, f32)| (-EPS..=1.0 + EPS).contains(&u) && (-EPS..=1.0 + EPS).contains(&v);
+        [
+            (r.left, r.top),
+            (r.right, r.top),
+            (r.left, r.bottom),
+            (r.right, r.bottom),
+        ]
+        .into_iter()
+        .all(|(u, v)| inside((u, v)) && inside(self.to_source(u, v)))
+    }
+
+    /// The largest centered crop of pixel ratio `w_over_h` that `covers`
+    /// accepts. The turned photo is convex and symmetric about the center,
+    /// so no off-center box of that ratio is larger.
+    pub fn largest_crop(&self, w_over_h: f32) -> Crop {
+        let (c, s) = (self.cos.abs(), self.sin.abs());
+        // A centered `a*h0 x h0` box fits the turned `w x h` photo when its
+        // corners, turned back, land inside: a*h0*c + h0*s <= w and
+        // a*h0*s + h0*c <= h. It must also fit the canvas itself.
+        let a = w_over_h;
+        let h0 = (self.w / (a * c + s))
+            .min(self.h / (a * s + c))
+            .min(self.w / a)
+            .min(self.h);
+        let (hw, hh) = (a * h0 / self.w / 2.0, h0 / self.h / 2.0);
+        Crop {
+            left: 0.5 - hw,
+            top: 0.5 - hh,
+            right: 0.5 + hw,
+            bottom: 0.5 + hh,
+        }
+    }
 }
 
 impl Adjustments {
@@ -173,10 +252,12 @@ impl Adjustments {
         *self == Self::default()
     }
 
-    /// A copy without the crop, for pasting settings onto other photos.
+    /// A copy without the crop or straighten, for pasting settings onto
+    /// other photos.
     pub fn tone_only(&self) -> Adjustments {
         Adjustments {
             crop: None,
+            straighten: 0.0,
             ..*self
         }
     }
@@ -245,6 +326,10 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
         }
         _ => h.write(&[0]),
     }
+    // Only a nonzero turn writes, so an unedited photo keeps its hash.
+    if adj.straighten != 0.0 {
+        h.write(&((adj.straighten * 1000.0).round() as i32).to_le_bytes());
+    }
 
     h.write(&[rot % 4]);
 
@@ -299,7 +384,8 @@ pub struct GpuAdjust {
     pub texel_w: f32,
     pub texel_h: f32,
     pub _pad0: f32,
-    pub _pad1: f32,
+    /// [`Adjustments::straighten`] in radians.
+    pub straighten: f32,
     pub _pad2: f32,
 }
 
@@ -324,7 +410,7 @@ impl Default for GpuAdjust {
             texel_w: 1.0,
             texel_h: 1.0,
             _pad0: 0.0,
-            _pad1: 0.0,
+            straighten: 0.0,
             _pad2: 0.0,
         }
     }
@@ -353,6 +439,7 @@ impl From<&Adjustments> for GpuAdjust {
             denoise: a.denoise,
             vibrance: a.vibrance,
             saturation: a.saturation,
+            straighten: a.straighten.to_radians(),
             ..Self::default()
         }
     }
@@ -689,6 +776,52 @@ mod tests {
             right: r,
             bottom: b,
         }
+    }
+
+    #[test]
+    fn the_largest_straightened_crop_just_fits() {
+        for deg in [-30.0, -7.5, 0.0, 3.0, 45.0] {
+            for ratio in [4.0 / 3.0, 9.0 / 16.0, 1.0] {
+                let turn = Straighten::new(deg, 4000.0, 3000.0);
+                let r = turn.largest_crop(ratio);
+                assert!(turn.covers(r), "{deg} {ratio}: {r:?}");
+                let px = ((r.right - r.left) * 4000.0) / ((r.bottom - r.top) * 3000.0);
+                assert!((px - ratio).abs() < 1e-3, "{deg} {ratio}: {px}");
+                let grow = |v: f32| 0.5 + (v - 0.5) * 1.01;
+                let bigger = Crop {
+                    left: grow(r.left),
+                    top: grow(r.top),
+                    right: grow(r.right),
+                    bottom: grow(r.bottom),
+                };
+                assert!(!turn.covers(bigger), "{deg} {ratio}: room to grow");
+            }
+        }
+    }
+
+    #[test]
+    fn straighten_round_trips() {
+        let turn = Straighten::new(12.0, 4000.0, 3000.0);
+        let (u, v) = turn.to_source(0.2, 0.7);
+        let (u, v) = turn.to_canvas(u, v);
+        assert!((u - 0.2).abs() < 1e-5 && (v - 0.7).abs() < 1e-5);
+    }
+
+    #[test]
+    fn edit_signature_differs_on_straighten() {
+        let turned = Adjustments {
+            straighten: 2.5,
+            ..Default::default()
+        };
+        assert_ne!(
+            edit_signature(&turned, 0),
+            edit_signature(&Adjustments::default(), 0)
+        );
+        assert_eq!(
+            turned.tone_only().straighten,
+            0.0,
+            "a look never carries a turn"
+        );
     }
 
     #[test]

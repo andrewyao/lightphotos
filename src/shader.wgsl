@@ -56,6 +56,8 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // `in.uv` is the straightened canvas, which the crop is in.
+    let uv = straightenUv(in.uv);
     // Sample before any early return. WebGPU requires `textureSample` under
     // uniform control flow and rejects the shader module otherwise.
     // `textureSampleLevel(0.0)` would also pass but skips mips, which breaks
@@ -63,10 +65,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     //
     // An Rgba8UnormSrgb texture samples as linear light. The math below must
     // match `apply_linear` in develop.rs.
-    let texel = textureSample(tex, samp, in.uv);
+    let texel = textureSample(tex, samp, uv);
 
     // Outside the image or the crop: the neutral background.
-    if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         return BACKGROUND;
     }
     if (in.uv.x < adj.crop_l || in.uv.x > adj.crop_r || in.uv.y < adj.crop_t || in.uv.y > adj.crop_b) {
@@ -82,14 +84,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // not uniform control flow, so denoise loses mip antialiasing when zoomed
     // out. Must match `denoise_sample` in develop.rs.
     if (adj.denoise > 0.0) {
-        let center = textureSampleLevel(tex, samp, in.uv, 0.0).rgb;
+        let center = textureSampleLevel(tex, samp, uv, 0.0).rgb;
         let sigmaR = 0.02 + adj.denoise / 100.0 * 0.30;
         let sigmaR2 = sigmaR * sigmaR;
         var sum = vec3<f32>(0.0, 0.0, 0.0);
         var wsum = 0.0;
         for (var dy = -2; dy <= 2; dy = dy + 1) {
             for (var dx = -2; dx <= 2; dx = dx + 1) {
-                let tapUv = in.uv + vec2<f32>(f32(dx), f32(dy)) * vec2<f32>(adj.texel_w, adj.texel_h);
+                let tapUv = uv + vec2<f32>(f32(dx), f32(dy)) * vec2<f32>(adj.texel_w, adj.texel_h);
                 let tap = textureSampleLevel(tex, samp, tapUv, 0.0).rgb;
                 let diff = tap - center;
                 let diff2 = dot(diff, diff);
@@ -111,7 +113,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let touch_count = u32(adj._pad0);
     for (var i = 0u; i < touch_count; i = i + 1u) {
         let t = touchups[i];
-        let d = (in.uv - t.center_radius_feather.xy) /
+        let d = (uv - t.center_radius_feather.xy) /
             vec2<f32>(adj.texel_w, adj.texel_h);
         // Radii are fractions of the image's shorter side, as on the CPU.
         let radius_px = t.center_radius_feather.z / max(adj.texel_w, adj.texel_h);
@@ -120,7 +122,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             let feather_px = max(radius_px * clamp(t.center_radius_feather.w, 0.02, 1.0), 1.0);
             var mask = clamp((radius_px - distance_px) / feather_px, 0.0, 1.0);
             mask = mask * mask * (3.0 - 2.0 * mask) * t.opacity;
-            let source_uv = t.source + (in.uv - t.center_radius_feather.xy);
+            let source_uv = t.source + (uv - t.center_radius_feather.xy);
             let source = textureSampleLevel(tex, samp, source_uv, 0.0).rgb + t.delta.xyz;
             r = r * (1.0 - mask) + clamp(source.r, 0.0, 1.0) * mask;
             g = g * (1.0 - mask) + clamp(source.g, 0.0, 1.0) * mask;
@@ -176,11 +178,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 // It is separate from `fs_main` so it can never change the rendered tone.
 @fragment
 fn fs_overlay(in: VsOut) -> @location(0) vec4<f32> {
+    // `in.uv` is the straightened canvas, which the crop is in.
+    let uv = straightenUv(in.uv);
     // Sample before the discards, as in `fs_main`. Coverage is 0 for
     // background, 1 for subject, soft in between.
-    var coverage = textureSample(mask_tex, mask_samp, in.uv).r;
+    var coverage = textureSample(mask_tex, mask_samp, uv).r;
 
-    if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
         discard;
     }
     if (in.uv.x < adj.crop_l || in.uv.x > adj.crop_r || in.uv.y < adj.crop_t || in.uv.y > adj.crop_b) {

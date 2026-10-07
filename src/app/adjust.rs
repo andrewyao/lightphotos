@@ -23,7 +23,7 @@ impl App {
     }
 
     /// Switch the Develop panel's tab. The Crop tab is crop mode, so picking
-    /// it enters crop mode and leaving it commits the crop, as Lightroom does.
+    /// it enters crop mode and leaving it saves the crop, as Lightroom does.
     /// Touch Up's controls live on Masks, so leaving it disarms the tool
     /// rather than leave it armed out of sight.
     pub(super) fn set_develop_tab(&mut self, tab: DevelopTab) {
@@ -738,7 +738,7 @@ mod tests {
         }
 
         #[test]
-        fn the_crop_tab_picks_a_ratio_and_commits() {
+        fn the_crop_tab_picks_a_ratio_and_saves_it() {
             let mut app = loupe("crop");
             let t = crate::i18n::t();
             settled(&mut app);
@@ -803,10 +803,16 @@ mod tests {
             );
             assert_eq!(app.current_rotation(), 1, "a quarter turn clockwise");
 
-            let (actions, _) = click(&mut app, painted.pos_of(t.done));
+            assert!(
+                app.current_adjustments().crop.is_none(),
+                "nothing saves in crop mode"
+            );
+            let icon = rail_icon(&app, DevelopTab::Sliders);
+            let (actions, _) = click(&mut app, icon);
             app.apply_ui_actions(actions);
-            assert!(app.crop_rect().is_none(), "Done leaves crop mode");
-            assert!(app.current_adjustments().crop.is_some(), "Done commits");
+            assert!(app.crop_rect().is_none(), "another tab leaves crop mode");
+            assert!(app.current_adjustments().crop.is_some(), "and saves");
+            assert!(!painted.has(t.cancel), "there is no Cancel");
             assert_eq!(app.develop_tab(), DevelopTab::Sliders);
         }
 

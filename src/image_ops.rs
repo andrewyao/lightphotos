@@ -139,6 +139,19 @@ pub fn bake_edited(
         return (0, 0, Vec::new());
     }
 
+    if adj.straighten != 0.0 {
+        // Touch-ups and denoise are in source pixels, so bake the whole
+        // photo upright first, then turn and crop the result.
+        let upright = Adjustments {
+            crop: None,
+            straighten: 0.0,
+            ..*adj
+        };
+        let (_, _, full) = bake_edited(img, &upright, touchups, 0);
+        let (cw, ch, turned) = straightened(&full, w, h, adj);
+        return rotate_rgba(&turned, cw, ch, rot);
+    }
+
     let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
     let (cw, ch) = (x1 - x0, y1 - y0);
     let encode = linear_to_srgb8;
@@ -190,6 +203,37 @@ pub fn bake_edited(
     }
 
     rotate_rgba(&cropped, cw, ch, rot)
+}
+
+/// `adj`'s crop of the straightened canvas of an opaque `w x h` RGBA8
+/// buffer, sampled bilinearly and clamped at the photo's edge.
+fn straightened(src: &[u8], w: u32, h: u32, adj: &Adjustments) -> (u32, u32, Vec<u8>) {
+    let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    let turn = develop::Straighten::new(adj.straighten, w as f32, h as f32);
+    let at = |x: i64, y: i64, c: usize| {
+        let (x, y) = (x.clamp(0, w as i64 - 1), y.clamp(0, h as i64 - 1));
+        src[((y * w as i64 + x) * 4) as usize + c] as f32
+    };
+    let mut out = vec![255u8; (cw * ch * 4) as usize];
+    for y in 0..ch {
+        for x in 0..cw {
+            let u = (x0 + x) as f32 + 0.5;
+            let v = (y0 + y) as f32 + 0.5;
+            let (su, sv) = turn.to_source(u / w as f32, v / h as f32);
+            let (sx, sy) = (su * w as f32 - 0.5, sv * h as f32 - 0.5);
+            let (fx, fy) = (sx.floor(), sy.floor());
+            let (tx, ty) = (sx - fx, sy - fy);
+            let (ix, iy) = (fx as i64, fy as i64);
+            let di = ((y * cw + x) * 4) as usize;
+            for c in 0..3 {
+                let top = at(ix, iy, c) * (1.0 - tx) + at(ix + 1, iy, c) * tx;
+                let bottom = at(ix, iy + 1, c) * (1.0 - tx) + at(ix + 1, iy + 1, c) * tx;
+                out[di + c] = (top * (1.0 - ty) + bottom * ty).round() as u8;
+            }
+        }
+    }
+    (cw, ch, out)
 }
 
 /// A `LinearF16` image as opaque sRGB8 RGBA, with no edits, as
@@ -552,6 +596,26 @@ mod tests {
         assert_eq!((w, h), (2, 1));
         assert_eq!(&out[0..4], &px(3));
         assert_eq!(&out[4..8], &px(4));
+    }
+
+    #[test]
+    fn a_quarter_straighten_bakes_as_a_quarter_turn() {
+        let src: Vec<u8> = (0..9u8).flat_map(|i| px(i * 25)).collect();
+        let img = DecodedImage::new_tracked(DecodedImageFields {
+            width: 3,
+            height: 3,
+            rgba: src,
+            pixel_format: PixelFormat::Srgb8,
+        });
+        let adj = Adjustments {
+            straighten: 90.0,
+            ..Default::default()
+        };
+        // A positive angle shows the photo turned anti-clockwise.
+        assert_eq!(
+            bake_edited(&img, &adj, &[], 0),
+            bake_edited(&img, &Adjustments::default(), &[], 3)
+        );
     }
 
     #[test]

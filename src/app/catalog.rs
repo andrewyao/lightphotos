@@ -655,8 +655,8 @@ impl App {
         self.set_status(StatusKind::Success, (crate::i18n::t().applied_settings)(n));
     }
 
-    /// Writes one look onto every path, keeping each photo's own crop, and
-    /// returns how many were touched. An entry whose merge comes out identity
+    /// Writes one look onto every path, keeping each photo's own crop and
+    /// straighten, and returns how many were touched. An entry whose merge comes out identity
     /// is removed rather than stored, matching how the catalog stores edits.
     /// Grid and filmstrip thumbnails re-bake by themselves, because
     /// `edit_sig_for` hashes the live edits into the thumbnail cache key.
@@ -671,6 +671,7 @@ impl App {
             let existing = self.edits.get(path).copied().unwrap_or_default();
             let merged = Adjustments {
                 crop: existing.crop,
+                straighten: existing.straighten,
                 ..tone
             };
             #[cfg(target_arch = "wasm32")]

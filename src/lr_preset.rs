@@ -407,6 +407,7 @@ mod tests {
             saturation: -5.0,
             denoise: 30.0,
             crop: None,
+            straighten: 0.0,
         }
     }
 

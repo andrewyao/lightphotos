@@ -4,7 +4,8 @@ use super::*;
 use super::form::{self, Button, Role};
 use crate::app::GRID_CELL_PT;
 use crate::app::{
-    spike_zoom_uv, App, CropEdge, CropOverlay, FocusLevel, PickHow, Region, TileFidelity,
+    spike_zoom_uv, App, CropEdge, CropOverlay, FocusLevel, PickHow, Region, StraightenTool,
+    TileFidelity,
 };
 use crate::image_decode;
 
@@ -138,7 +139,9 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
 
     app.spike_marker_hovered = false;
     app.spike_photo_hovered = false;
-    if app.crop_rect().is_some() {
+    if app.crop_rect().is_some() && app.straighten_tool() != StraightenTool::Off {
+        loupe_straighten_overlay(ui, app, central, out);
+    } else if app.crop_rect().is_some() {
         loupe_crop_overlay(ui, app, central, out);
     } else if app.touchup_active() {
         loupe_touchup_overlay(ui, app, central, out);
@@ -163,7 +166,7 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
         &[]
     };
     for (i, t) in spots.iter().enumerate() {
-        let c = app.loupe_tex_to_screen(central, t.center[0], t.center[1]);
+        let c = app.loupe_source_to_screen(central, t.center[0], t.center[1]);
         let radius = touchup_screen_radius(app, central, t.center, t.radius).max(3.0);
         let selected = app.touchup_selected() == Some(i);
         painter.circle_stroke(
@@ -197,7 +200,7 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
                 // The brush itself is the cursor: a circle the size of the
                 // spot a click would add.
                 ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-                let (u, v) = app.loupe_screen_to_tex(central, p);
+                let (u, v) = app.loupe_screen_to_source(central, p);
                 let r = touchup_screen_radius(app, central, [u, v], app.touchup_radius()).max(3.0);
                 let painter = ui.painter_at(central);
                 // Dark under light, so the ring reads on bright and dark photos.
@@ -239,7 +242,7 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
             }
             if resp.clicked() {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    let (u, v) = app.loupe_screen_to_tex(central, p);
+                    let (u, v) = app.loupe_screen_to_source(central, p);
                     let mut hit = None;
                     for (i, t) in spots.iter().enumerate() {
                         let (radius_u, radius_v) = app.touchup_uv_radii(t.radius);
@@ -264,10 +267,10 @@ fn loupe_touchup_overlay(ui: &mut egui::Ui, app: &App, central: egui::Rect, out:
 /// averaged across the two axes since the stored radius is relative to the
 /// image's shorter side.
 fn touchup_screen_radius(app: &App, central: egui::Rect, center: [f32; 2], radius: f32) -> f32 {
-    let c = app.loupe_tex_to_screen(central, center[0], center[1]);
+    let c = app.loupe_source_to_screen(central, center[0], center[1]);
     let (radius_u, radius_v) = app.touchup_uv_radii(radius);
-    let edge_u = app.loupe_tex_to_screen(central, center[0] + radius_u, center[1]);
-    let edge_v = app.loupe_tex_to_screen(central, center[0], center[1] + radius_v);
+    let edge_u = app.loupe_source_to_screen(central, center[0] + radius_u, center[1]);
+    let edge_v = app.loupe_source_to_screen(central, center[0], center[1] + radius_v);
     ((edge_u - c).length() + (edge_v - c).length()) * 0.5
 }
 
@@ -287,7 +290,7 @@ fn loupe_wb_picker_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &
             }
             if resp.clicked() {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    let (u, v) = app.loupe_screen_to_tex(central, p);
+                    let (u, v) = app.loupe_screen_to_source(central, p);
                     out.actions.push(UiAction::PickWhiteBalance(u, v));
                 }
             }
@@ -809,6 +812,120 @@ fn golden_spiral(r: egui::Rect) -> Vec<Vec<egui::Pos2>> {
     }
     lines.push(spiral);
     lines
+}
+
+/// The Straighten tool: a drag draws a line, and the box Enter would crop to
+/// shows slanted by the turn the line asks for. Before a line, the current
+/// crop shows in its place.
+fn loupe_straighten_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut FrameOutput) {
+    let Some(rect) = app.crop_rect() else { return };
+    let corners = app.straighten_outline().unwrap_or([
+        (rect.left, rect.top),
+        (rect.right, rect.top),
+        (rect.right, rect.bottom),
+        (rect.left, rect.bottom),
+    ]);
+    let quad = corners.map(|(u, v)| app.loupe_tex_to_screen(central, u, v));
+
+    egui::Area::new(egui::Id::new("loupe_straighten"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(central.min)
+        .show(ui.ctx(), |ui| {
+            let (_id, resp) = ui.allocate_exact_size(central.size(), egui::Sense::drag());
+            let painter = ui.painter_at(central);
+            dim_outside(
+                &painter,
+                central,
+                quad,
+                egui::Color32::from_black_alpha(150),
+            );
+
+            let line = egui::Color32::from_gray(235);
+            let edge = egui::Stroke::new(1.5f32, line);
+            for i in 0..4 {
+                painter.line_segment([quad[i], quad[(i + 1) % 4]], edge);
+            }
+            let faint = egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(70));
+            for i in 1..3 {
+                let f = i as f32 / 3.0;
+                painter.line_segment([quad[0].lerp(quad[1], f), quad[3].lerp(quad[2], f)], faint);
+                painter.line_segment([quad[0].lerp(quad[3], f), quad[1].lerp(quad[2], f)], faint);
+            }
+
+            if let StraightenTool::Line { from, to } = app.straighten_tool() {
+                let a = app.loupe_tex_to_screen(central, from.0, from.1);
+                let b = app.loupe_tex_to_screen(central, to.0, to.1);
+                let shadow = egui::Stroke::new(3.5f32, egui::Color32::from_black_alpha(160));
+                painter.line_segment([a, b], shadow);
+                painter.line_segment([a, b], egui::Stroke::new(1.5f32, line));
+                for p in [a, b] {
+                    painter.circle_filled(p, 4.0, line);
+                }
+            }
+
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            }
+            let to_tex = |p| app.loupe_screen_to_tex(central, p);
+            if resp.drag_started() {
+                // The line starts where the press did, not where the drag
+                // threshold was crossed.
+                if let Some((u, v)) = ui.input(|i| i.pointer.press_origin()).map(to_tex) {
+                    out.actions.push(UiAction::StraightenLineFrom(u, v));
+                }
+            }
+            if resp.dragged() {
+                if let Some((u, v)) = resp.interact_pointer_pos().map(to_tex) {
+                    out.actions.push(UiAction::StraightenLineTo(u, v));
+                }
+            }
+        });
+}
+
+/// Shade `outer` outside the convex `inner` quad, as four bands that each
+/// join one side of `outer` to the matching side of `inner`.
+fn dim_outside(
+    painter: &egui::Painter,
+    outer: egui::Rect,
+    inner: [egui::Pos2; 4],
+    color: egui::Color32,
+) {
+    let center = inner.iter().fold(egui::Vec2::ZERO, |s, p| s + p.to_vec2()) / 4.0;
+    let center = center.to_pos2();
+    let by_angle = |mut ps: [egui::Pos2; 4]| {
+        ps.sort_by(|a, b| {
+            let (a, b) = (*a - center, *b - center);
+            a.y.atan2(a.x).total_cmp(&b.y.atan2(b.x))
+        });
+        ps
+    };
+    let inner = by_angle(inner);
+    let outer = by_angle([
+        outer.left_top(),
+        outer.right_top(),
+        outer.right_bottom(),
+        outer.left_bottom(),
+    ]);
+    // Pair each inner corner with the outer corner it faces.
+    let cost = |k: usize| -> f32 { (0..4).map(|i| inner[i].distance(outer[(i + k) % 4])).sum() };
+    let k = (0..4)
+        .min_by(|&a, &b| cost(a).total_cmp(&cost(b)))
+        .unwrap_or(0);
+    let mut mesh = egui::Mesh::default();
+    for i in 0..4 {
+        let base = mesh.vertices.len() as u32;
+        for p in [
+            outer[(i + k) % 4],
+            outer[(i + k + 1) % 4],
+            inner[(i + 1) % 4],
+            inner[i],
+        ] {
+            mesh.colored_vertex(p, color);
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    }
+    painter.add(mesh);
 }
 
 /// The edge nearest to `p`, if within `threshold` px.

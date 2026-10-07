@@ -3,6 +3,7 @@ use super::*;
 use super::form::{self, Button, Form, Role};
 use crate::app::{
     App, CropAspect, CropOrientation, CropOverlay, DevelopTab, FocusLevel, RailItem, Region,
+    StraightenTool,
 };
 
 /// The right-hand Develop panel, with sliders in Lightroom's order. Pushes one
@@ -235,14 +236,19 @@ fn rail_button(ui: &mut egui::Ui, item: RailItem, tip: &str, selected: bool) -> 
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Crop mode's controls: rotation, the ratio and its orientation, the crop's
-/// size in pixels, and Done and Cancel.
+/// Crop mode's controls: Reset, rotation, straighten, the ratio and its
+/// orientation, and the crop's size in pixels. Nothing saves until Enter,
+/// which saves and goes back, as in Lightroom; Esc discards.
 fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let (Some(aspect), Some(orientation)) = (app.crop_aspect(), app.crop_orientation()) else {
         return;
     };
-    form::page_heading(ui, t.tab_crop, |_| {});
+    form::page_heading(ui, t.tab_crop, |ui| {
+        if ui.button(t.reset).clicked() {
+            out.actions.push(UiAction::ResetCrop);
+        }
+    });
     form::page(ui, |ui| {
         let form = Form::stacked();
         form.section(ui, "", |ui| {
@@ -262,6 +268,29 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         }
                     }
                 });
+            });
+            form.row(ui, t.crop_straighten, |ui| {
+                let tool_on = app.straighten_tool() != StraightenTool::Off;
+                let angle = app.crop_straighten().unwrap_or(0.0);
+                // Filled while the tool is on, as a pressed toggle.
+                let role = if tool_on { Role::Primary } else { Role::Cancel };
+                let tool = Button::new(t.crop_straighten_tool, role);
+                if form::button(ui, &tool).clicked() {
+                    out.actions.push(UiAction::ToggleStraightenTool);
+                }
+                // The angle and Reset get their own line, so the row never
+                // outgrows a narrow panel.
+                ui.horizontal(|ui| {
+                    ui.label(format!("{angle:+.1}\u{b0}"));
+                    if angle != 0.0
+                        && form::button(ui, &Button::new(t.reset, Role::Cancel)).clicked()
+                    {
+                        out.actions.push(UiAction::ResetStraighten);
+                    }
+                });
+                if tool_on {
+                    form::hint(ui, t.crop_straighten_hint);
+                }
             });
             form.row(ui, t.crop_aspect, |ui| {
                 let aspects = [
@@ -310,15 +339,6 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             }
         });
-        let buttons = [
-            Button::new(t.cancel, Role::Cancel),
-            Button::new(t.done, Role::Primary),
-        ];
-        match form::footer(ui, &buttons) {
-            Some(Role::Cancel) => out.actions.push(UiAction::CancelCrop),
-            Some(_) => out.actions.push(UiAction::CommitCrop),
-            None => {}
-        }
     });
 }
 

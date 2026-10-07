@@ -23,7 +23,8 @@ struct Adjust {
     texel_w: f32,
     texel_h: f32,
     _pad0: f32,
-    _pad1: f32,
+    // Radians. See `straightenUv`.
+    straighten: f32,
     _pad2: f32,
 };
 
@@ -39,6 +40,21 @@ struct TouchUp {
 @group(0) @binding(1) var samp: sampler;
 @group(2) @binding(0) var<uniform> adj: Adjust;
 @group(3) @binding(0) var<storage, read> touchups: array<TouchUp>;
+
+// A straightened-canvas UV to the source texture's UV: the canvas offset from
+// the center, turned in pixel space. The crop is in canvas UV; sampling,
+// touch-ups and masks are in source UV. Must match `develop::Straighten`.
+fn straightenUv(uv: vec2<f32>) -> vec2<f32> {
+    if (adj.straighten == 0.0) {
+        return uv;
+    }
+    let px = vec2<f32>(1.0 / adj.texel_w, 1.0 / adj.texel_h);
+    let d = (uv - vec2<f32>(0.5, 0.5)) * px;
+    let c = cos(adj.straighten);
+    let s = sin(adj.straighten);
+    let r = vec2<f32>(c * d.x - s * d.y, s * d.x + c * d.y);
+    return r / px + vec2<f32>(0.5, 0.5);
+}
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,

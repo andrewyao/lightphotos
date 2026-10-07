@@ -96,7 +96,8 @@ enum CropGrab {
 }
 
 /// Crop-mode state, present only while crop mode is active. `rect` is in
-/// normalized texture space and is committed to `Adjustments.crop` on exit.
+/// normalized texture space and saves to `Adjustments.crop` as each edit
+/// lands.
 /// While cropping, the GPU draws the full frame and egui draws the mask.
 pub struct CropDraft {
     rect: Crop,
@@ -108,8 +109,25 @@ pub struct CropDraft {
     aspect: CropAspect,
     /// The draft's shape on screen. Only fixed, non-square ratios read it.
     orientation: CropOrientation,
+    /// Degrees the photo turns before `rect` applies. `rect` is in the
+    /// straightened canvas, so it stays inside the turned photo.
+    straighten: f32,
+    straighten_tool: StraightenTool,
     /// The Develop tab to go back to when crop mode ends.
     return_tab: DevelopTab,
+}
+
+/// The Straighten tool inside crop mode. A line is drawn in the draft's
+/// canvas uv, so it reads the angle the photo shows on screen.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum StraightenTool {
+    Off,
+    /// On, waiting for the first drag.
+    Ready,
+    Line {
+        from: (f32, f32),
+        to: (f32, f32),
+    },
 }
 
 const FULL_CROP: Crop = Crop {
@@ -1716,12 +1734,15 @@ impl App {
                 ui::UiAction::CropGrabMove(u, v) => self.crop_grab_move(u, v),
                 ui::UiAction::CropDragTo(u, v) => self.crop_drag_to(u, v),
                 ui::UiAction::CropRelease => self.crop_release(),
+                ui::UiAction::ToggleStraightenTool => self.toggle_straighten_tool(),
+                ui::UiAction::StraightenLineFrom(u, v) => self.straighten_line_from(u, v),
+                ui::UiAction::StraightenLineTo(u, v) => self.straighten_line_to(u, v),
+                ui::UiAction::ResetStraighten => self.reset_straighten(),
+                ui::UiAction::ResetCrop => self.reset_crop(),
                 ui::UiAction::SetCropAspect(aspect) => self.set_crop_aspect(aspect),
                 ui::UiAction::SetCropOverlay(overlay) => self.set_crop_overlay(overlay),
                 ui::UiAction::SetCropOrientation(o) => self.set_crop_orientation(o),
                 ui::UiAction::Rotate(cw) => self.rotate(cw),
-                ui::UiAction::CommitCrop => self.commit_crop(),
-                ui::UiAction::CancelCrop => self.cancel_crop(),
                 ui::UiAction::ToggleWbPicker => self.toggle_wb_picker(),
                 ui::UiAction::PickWhiteBalance(u, v) => self.pick_white_balance(u, v),
                 ui::UiAction::ToggleTouchUp => self.toggle_touchup(),
