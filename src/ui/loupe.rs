@@ -328,8 +328,8 @@ fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     );
 }
 
-/// The info bar below the image: filename and rating centered, then the
-/// selection controls. Exposure sits under the Develop panel's histogram.
+/// The info bar below the image: rating centered, then the selection
+/// controls. The filename sits in the title bar above. Exposure sits under the Develop panel's histogram.
 fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let row_h = font_size::px(ui.style(), 36.0);
     // The photo's actions share the row when they fit beside the filename
@@ -349,30 +349,16 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         .show_inside(ui, |ui| {
             let full = ui.max_rect();
             let rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), row_h));
-            let filename = app
-                .selected_path()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-                .unwrap_or_default();
-
             let painter = ui.painter();
             let main_font = egui::FontId::proportional(font_size::px(ui.style(), 13.0));
             let colors = theme::colors(ui.ctx());
-            let text_color = colors.value;
             let main_y = rect.center().y;
             let pad = font_size::px(ui.style(), 14.0);
 
-            // Center the filename and stars as one group.
+            // Center the stars, label and score as one group.
             let star_w = font_size::px(ui.style(), 20.0);
             let stars_total_w = star_w * 5.0;
             let group_gap = font_size::px(ui.style(), 10.0);
-            let filename_w = if filename.is_empty() {
-                0.0
-            } else {
-                painter
-                    .layout_no_wrap(filename.clone(), main_font.clone(), text_color)
-                    .size()
-                    .x
-            };
             // A grouped photo's view icons join the centered
             // group, so the row fits until it is wider than the bar, then
             // starts at the left.
@@ -392,12 +378,7 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             let score_w = score
                 .as_ref()
                 .map_or(0.0, |(_, _, g)| 3.0 * group_gap + g.size().x);
-            let group_w = filename_w
-                + if filename.is_empty() { 0.0 } else { group_gap }
-                + stars_total_w
-                + 4.0 * ui.spacing().item_spacing.x
-                + score_w
-                + tabs_w;
+            let group_w = stars_total_w + 4.0 * ui.spacing().item_spacing.x + score_w + tabs_w;
             ui.ctx()
                 .data_mut(|d| d.insert_temp(egui::Id::new("loupe_group_w"), group_w));
             // With the actions beside it, the group and the actions center
@@ -409,18 +390,7 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             };
             let group_left = (rect.center().x - run_w / 2.0).max(rect.left() + pad);
 
-            if !filename.is_empty() {
-                painter.text(
-                    egui::pos2(group_left, main_y),
-                    egui::Align2::LEFT_CENTER,
-                    &filename,
-                    main_font,
-                    text_color,
-                );
-            }
-
-            let stars_left =
-                group_left + filename_w + if filename.is_empty() { 0.0 } else { group_gap };
+            let stars_left = group_left;
             let stars_rect = egui::Rect::from_center_size(
                 egui::pos2(stars_left + stars_total_w / 2.0, main_y),
                 egui::vec2(stars_total_w, star_w),

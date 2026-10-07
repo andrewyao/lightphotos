@@ -589,8 +589,8 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     });
 }
 
-/// The shown folder's name above the Grid or Loupe, with a back arrow to the
-/// Grid while in the Loupe.
+/// The shown folder's name above the Grid or Loupe. In the Loupe it adds a
+/// back arrow to the Grid and the open photo's name and dimensions.
 fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let name = app
         .folder_sel()
@@ -610,14 +610,46 @@ fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             {
                 out.actions.push(UiAction::EnterGrid);
             }
-            ui.label(
-                egui::RichText::new(name)
-                    .size(font_size::px(ui.style(), 18.0))
-                    .strong(),
-            );
+            if app.mode() != ViewMode::Loupe {
+                ui.label(
+                    egui::RichText::new(name)
+                        .size(font_size::px(ui.style(), 18.0))
+                        .strong(),
+                );
+            } else {
+                loupe_title(ui, app, name);
+            }
         });
         ui.add_space(4.0);
     });
+}
+
+/// `fx / IMG_1.JPG   4032 × 3024` beside the Loupe's back arrow. The
+/// dimensions are smaller and wait for the photo's metadata. `ui.horizontal`
+/// centers each label on the row, so the sizes line up on one center line.
+fn loupe_title(ui: &mut egui::Ui, app: &App, folder: String) {
+    let size = font_size::px(ui.style(), 15.0);
+    let gap = font_size::px(ui.style(), 6.0);
+    let dim = theme::colors(ui.ctx()).label;
+    ui.label(egui::RichText::new(folder).size(size).strong());
+    let Some(path) = app.selected_path() else {
+        return;
+    };
+    let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return;
+    };
+    ui.add_space(gap);
+    ui.label(egui::RichText::new("/").size(size).color(dim));
+    ui.add_space(gap);
+    ui.label(egui::RichText::new(name).size(size));
+    if let Some((w, h)) = app.current_metadata().and_then(|m| m.source_size) {
+        ui.add_space(3.0 * gap);
+        ui.label(
+            egui::RichText::new(format!("{w} \u{d7} {h}"))
+                .size(font_size::px(ui.style(), 12.0))
+                .color(dim),
+        );
+    }
 }
 
 /// A status message (such as an export result) shown bottom-center for a few
