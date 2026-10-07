@@ -99,7 +99,7 @@ impl App {
                     .or_insert(capture.to_system_time());
             }
             if let Some(q) = s.faces {
-                self.face_quality.entry(p).or_insert(q);
+                self.faces.seed(p, q);
             }
         }
         if self.eyes_filter_on() || self.grid_sort == GridSort::Time {
@@ -927,7 +927,7 @@ mod tests {
         let mut app = App::new(None);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
         assert!(
-            app.request_face_quality() && app.face_pending.is_empty(),
+            app.request_face_quality() && app.faces.submitted() == 0,
             "Vision work waits for the cache and submits nothing"
         );
         let two_faces = FaceQuality {
@@ -937,7 +937,7 @@ mod tests {
         app.signals.record(&b, Signal::Faces(two_faces));
 
         finish_signal_load(&mut app);
-        assert_eq!(app.face_quality.get(&a), Some(&blink), "seeded from disk");
+        assert_eq!(app.face_quality_of(&a), Some(blink), "seeded from disk");
         assert_eq!(
             app.signals.get(&b).and_then(|s| s.faces),
             Some(two_faces),

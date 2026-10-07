@@ -146,7 +146,7 @@ impl App {
                 .get(i)
                 .is_some_and(|p| flag_filter.matches(catalog.flag(p)))
         });
-        if self.eyes_filter {
+        if self.eyes_filter_on() {
             let keep: Vec<usize> = self
                 .visible
                 .iter()
@@ -214,7 +214,7 @@ impl App {
                     .map_or(1, |(_, g)| self.present_member_paths(g).len())
             })
             .sum();
-        self.faces_unscanned = true;
+        self.faces.mark_unscanned();
         // The title carries the visible count.
         self.update_window_title();
     }

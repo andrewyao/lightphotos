@@ -120,7 +120,7 @@ fn finish_window_setup(
     app.renderer = Some(renderer);
     app.loader = Some(loader);
     app.start_exporter();
-    app.face_pool = facequality::FacePool::new();
+    app.start_face_pool();
     app.score_pool = score::ScorePool::new();
     app.egui_state = Some(egui_state);
     #[cfg(target_arch = "wasm32")]

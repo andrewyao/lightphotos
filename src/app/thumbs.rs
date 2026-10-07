@@ -231,73 +231,6 @@ impl App {
             .any(|p| loader.get_thumb(p, px).is_none() && !loader.thumb_failed(p, px))
     }
 
-    /// Returns true while any analysis is outstanding.
-    pub(crate) fn request_face_quality(&mut self) -> bool {
-        // The folder's cached analyses are still loading, and each one found
-        // there is a Vision pass saved.
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.signal_load_rx.is_some() {
-            return true;
-        }
-        if std::mem::take(&mut self.faces_unscanned) && self.face_pool.is_some() {
-            let to_submit = self.face_candidates();
-            if let Some(pool) = &self.face_pool {
-                for p in to_submit {
-                    self.face_pending.insert(p.clone());
-                    pool.submit(p);
-                }
-            }
-        }
-        !self.face_pending.is_empty()
-    }
-
-    fn face_candidates(&self) -> Vec<PathBuf> {
-        let (Some(pl), Some(groups)) = (self.playlist.as_ref(), self.catalog.groups()) else {
-            return Vec::new();
-        };
-        groups
-            .iter()
-            .flat_map(|(_, g)| g.members())
-            .map(|name| pl.dir().join(name))
-            .filter(|p| {
-                !self.face_quality.contains_key(p)
-                    && !self.face_pending.contains(p)
-                    && !self.face_failed.contains(p)
-            })
-            .collect()
-    }
-
-    pub(crate) fn poll_face_quality(&mut self) {
-        let outcomes = self
-            .face_pool
-            .as_ref()
-            .map(|p| p.poll())
-            .unwrap_or_default();
-        if outcomes.is_empty() {
-            return;
-        }
-        let mut changed = false;
-        for o in outcomes {
-            self.face_pending.remove(&o.path);
-            match o.result {
-                Ok(q) => {
-                    self.signals.record(&o.path, Signal::Faces(q));
-                    self.face_quality.insert(o.path, q);
-                    changed = true;
-                }
-                Err(_) => {
-                    self.face_failed.insert(o.path);
-                }
-            }
-        }
-        if changed {
-            if self.eyes_filter_on() {
-                self.recompute_visible();
-            }
-            self.request_redraw();
-        }
-    }
-
     pub(crate) fn on_capture_times(&mut self, times: Vec<(PathBuf, Option<SystemTime>)>) {
         for (path, t) in times {
             self.signals.record(&path, Signal::Capture(t));
@@ -562,45 +495,5 @@ mod tests {
         assert_eq!(queued[0], photos[550]);
         assert_eq!(queued.len(), 25);
         assert!(queued.iter().all(|p| photos[538..563].contains(p)));
-    }
-
-    #[test]
-    fn face_quality_candidates_are_every_grouped_photo() {
-        use crate::app::nav::tests::group_photos;
-        use crate::app::test_support::folder_app;
-        let (mut app, dir, paths) = folder_app("faces-scope", 8);
-        group_photos(&mut app, &[1, 2], 1);
-        group_photos(&mut app, &[5, 6, 7], 7);
-        app.face_quality.insert(
-            paths[6].clone(),
-            crate::facequality::FaceQuality {
-                faces: 0,
-                min_eye_openness: None,
-            },
-        );
-        let mut got = app.face_candidates();
-        got.sort();
-        assert_eq!(
-            got,
-            vec![
-                paths[1].clone(),
-                paths[2].clone(),
-                paths[5].clone(),
-                paths[7].clone()
-            ]
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn grouped_photos_are_scanned_once_per_rebuild() {
-        use crate::app::test_support::folder_app;
-        let (mut app, dir, _) = folder_app("faces-once", 2);
-        assert!(app.faces_unscanned, "a rebuild asks for a scan");
-        app.request_face_quality();
-        assert!(!app.faces_unscanned, "the scan is taken");
-        app.recompute_visible();
-        assert!(app.faces_unscanned);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

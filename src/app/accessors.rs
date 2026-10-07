@@ -277,32 +277,6 @@ impl App {
         self.selected_path().and_then(|p| self.catalog.label(&p))
     }
 
-    /// The face analysis for a path. `None` while pending, after a failure, or
-    /// when never requested.
-    fn face_quality_of(&self, path: &Path) -> Option<crate::facequality::FaceQuality> {
-        self.face_quality.get(path).copied()
-    }
-
-    pub(super) fn eyes_closed(&self, path: &Path) -> bool {
-        self.face_quality_of(path)
-            .and_then(|q| q.eye_state())
-            .is_some_and(|s| s == crate::facequality::EyeState::Closed)
-    }
-
-    pub(crate) fn eyes_filter_on(&self) -> bool {
-        self.eyes_filter
-    }
-
-    pub(super) fn toggle_eyes_filter(&mut self) {
-        self.eyes_filter = !self.eyes_filter;
-        self.recompute_visible();
-        self.request_redraw();
-    }
-
-    pub(super) fn reset_eyes_filter(&mut self) {
-        self.eyes_filter = false;
-    }
-
     #[cfg(test)]
     pub(crate) fn selected_rating(&self) -> u8 {
         self.selected_path()

@@ -385,7 +385,6 @@ pub(crate) struct App {
     #[cfg(test)]
     pub(crate) pushed_adj: Option<Adjustments>,
     pub(crate) loader: Option<Loader>,
-    pub(crate) face_pool: Option<crate::facequality::FacePool>,
     /// `None` until the window is created, and on targets that cannot spawn
     /// threads.
     pub(crate) score_pool: Option<crate::score::ScorePool>,
@@ -657,11 +656,8 @@ pub(crate) struct App {
     /// The running Auto Tone batch and the centering it analyses with.
     autotone: autotone::AutoTone,
 
-    face_quality: HashMap<PathBuf, crate::facequality::FaceQuality>,
-    face_pending: HashSet<PathBuf>,
-    /// Analyses that failed for good (corrupt or unsupported files).
-    face_failed: HashSet<PathBuf>,
-    faces_unscanned: bool,
+    /// Face analysis of grouped photos, and the eyes-closed filter it feeds.
+    faces: faces::Faces,
     selection_on: bool,
     /// Highlight the background instead of the subject.
     selection_invert: bool,
@@ -672,10 +668,6 @@ pub(crate) struct App {
     selection_pending: Option<PathBuf>,
     selection_tx: Sender<SelectionOutcome>,
     selection_rx: Receiver<SelectionOutcome>,
-
-    /// Show only photos with a detected blink. Stacks with the star filter. A
-    /// photo the face pass hasn't reached stays hidden.
-    eyes_filter: bool,
 
     /// Zoom as a multiple of the fit scale (`1.0` is fitted). Fit-relative so
     /// swapping decode tiers leaves the on-screen transform unchanged.
@@ -771,6 +763,7 @@ pub(crate) use crop::{CropAspect, CropOrientation, CropOverlay};
 use group_compare::GroupPicks;
 pub(crate) use group_compare::{compare_zoom_uv, GroupView, PickHow, Square, Tile, TileFidelity};
 mod export;
+mod faces;
 mod fonts;
 mod group_compare;
 #[cfg(not(target_arch = "wasm32"))]
@@ -820,7 +813,6 @@ impl App {
             #[cfg(test)]
             pushed_adj: None,
             loader: None,
-            face_pool: None,
             score_pool: None,
             score_job: None,
             exports: export::Exports::new(),
@@ -959,11 +951,7 @@ impl App {
             autotone: autotone::AutoTone::new(Default::default()),
             #[cfg(not(test))]
             autotone: autotone::AutoTone::new(crate::autotone::Centering::load()),
-            face_quality: HashMap::new(),
-            face_pending: HashSet::new(),
-            face_failed: HashSet::new(),
-            faces_unscanned: false,
-            eyes_filter: false,
+            faces: faces::Faces::new(),
             selection_on: false,
             selection_invert: false,
             current_selection: None,
