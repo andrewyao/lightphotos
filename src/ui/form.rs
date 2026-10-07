@@ -106,11 +106,38 @@ impl Form {
         label: &str,
         value: impl FnOnce(&mut egui::Ui),
     ) -> egui::Response {
+        self.row_with_label_pad(ui, label, 0.0, value)
+    }
+
+    /// A `row` whose value opens with a control as tall as a `button`, such
+    /// as `segmented`, so a label beside it lines up with its text.
+    pub(super) fn button_row(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        value: impl FnOnce(&mut egui::Ui),
+    ) -> egui::Response {
+        let pad = (button_height(ui) - ui.spacing().interact_size.y).max(0.0) / 2.0;
+        self.row_with_label_pad(ui, label, pad, value)
+    }
+
+    fn row_with_label_pad(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        label_pad: f32,
+        value: impl FnOnce(&mut egui::Ui),
+    ) -> egui::Response {
         if self.stacked {
             return ui
                 .vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), SLIDER_LABEL_GAP);
-                    let label = ui.label(label);
+                    // An empty label would leave a blank line over the value.
+                    let label = if label.is_empty() {
+                        ui.allocate_response(egui::Vec2::ZERO, egui::Sense::hover())
+                    } else {
+                        ui.label(label)
+                    };
                     value(ui);
                     label
                 })
@@ -123,6 +150,7 @@ impl Form {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         ui.set_width(self.label_w);
+                        ui.add_space(label_pad);
                         ui.label(egui::RichText::new(label).weak())
                     },
                 )
@@ -244,12 +272,6 @@ pub(super) fn title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(font_size::px(ui.style(), TITLE_GAP));
     ui.separator();
     ui.add_space(font_size::px(ui.style(), TITLE_GAP));
-}
-
-/// A side panel's title. A panel, unlike a dialog, has no margin above it.
-pub(super) fn panel_title(ui: &mut egui::Ui, text: &str) {
-    ui.add_space(font_size::px(ui.style(), TITLE_GAP));
-    title(ui, text);
 }
 
 /// Help for a value, set under it.
@@ -377,6 +399,12 @@ pub(super) fn button(ui: &mut egui::Ui, b: &Button) -> egui::Response {
     .inner
 }
 
+/// The height of a `button`, for a row that has to line up with one.
+pub(super) fn button_height(ui: &egui::Ui) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    ui.fonts_mut(|f| f.row_height(&font)) + 2.0 * font_size::px(ui.style(), BUTTON_PAD.y)
+}
+
 /// A single choice as a bar of equal segments filling the row, each
 /// `(value, label, tooltip)`, with `current` filled. Segments too narrow for
 /// the widest label wrap onto more rows of the same columns, so five aspect ratios still take
@@ -388,9 +416,8 @@ pub(super) fn segmented<T: Copy + PartialEq>(
     current: T,
 ) -> Option<T> {
     let font = egui::TextStyle::Body.resolve(ui.style());
-    // A button's height, so the label beside it lines up with its text the
-    // way it does with a combo box or a text field.
-    let height = ui.spacing().interact_size.y;
+    // A footer button's height, so an option reads as a button.
+    let height = button_height(ui);
     let width = ui.available_width();
     let widest = choices
         .iter()

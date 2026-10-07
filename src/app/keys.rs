@@ -542,7 +542,8 @@ mod tests {
         );
     }
 
-    /// Export's two sections, Destination and Output, share one label column.
+    /// Export's two sections, Destination and Output, set each label over
+    /// its value, flush with the page's left edge.
     #[test]
     fn export_lays_out_as_a_form() {
         use crate::app::presets::tests::settled;
@@ -557,7 +558,9 @@ mod tests {
         let folder = painted.pos_of(t().export_folder);
 
         assert!(destination.y < folder.y && folder.y < output.y && output.y < size.y);
-        assert_eq!(folder.x, size.x, "labels in both sections share one column");
+        assert_eq!(folder.x, size.x, "labels in both sections share one edge");
+        let full = painted.pos_of(t().export_size_full);
+        assert!(full.y > size.y, "the value sits under its label");
         let folder_tab = painted.pos_of(t().export_to_folder);
         assert!(
             destination.y < folder_tab.y && folder_tab.y < folder.y,
@@ -595,9 +598,12 @@ mod tests {
             settled(app)
         };
         let field_x = painted.pos_of(t().immich_url_example).x + 20.0;
-        let url_at = egui::pos2(field_x, painted.pos_of(t().immich_server_url).y);
-        let key_at = egui::pos2(field_x, painted.pos_of(t().immich_api_key).y);
+        // Each field sits under its label, the URL's between it and the example.
+        let url_label = painted.pos_of(t().immich_server_url).y;
         let example = painted.pos_of(t().immich_url_example).y;
+        let below_label = (example - url_label) / 2.0;
+        let url_at = egui::pos2(field_x, url_label + below_label);
+        let key_at = egui::pos2(field_x, painted.pos_of(t().immich_api_key).y + below_label);
         assert!(
             url_at.y < example && example < key_at.y,
             "the example sits under the URL field"

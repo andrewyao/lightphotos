@@ -35,106 +35,109 @@ pub(super) fn draw_export_panel(
             .default_size(300.0)
     };
     panel.show_inside(ui, |ui| {
-        form::panel_title(ui, &(t.export_title)(app.action_count()));
-        let form = Form::new(
-            ui,
-            &[
-                t.immich_album,
-                t.album_name,
-                t.export_folder,
-                t.immich_server_url,
-                t.immich_api_key,
-                t.immich_account,
-                t.export_size,
-            ],
-        );
-        form.section(ui, t.export_destination, |ui| {
-            let immich = settings.target == ExportTarget::Immich;
-            form.row(ui, "", |ui| {
-                let choices = [
-                    (false, t.export_to_folder, None),
-                    (true, t.export_to_immich, None),
-                ];
-                let picked = form::segmented(ui, &choices, immich);
-                if let Some(to_immich) = picked.filter(|&to| to != immich) {
-                    next = Some(ExportSettings {
-                        target: if to_immich {
-                            ExportTarget::Immich
-                        } else {
-                            ExportTarget::default()
-                        },
-                        ..settings.clone()
-                    });
-                }
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                form::page_heading(ui, &(t.export_title)(app.action_count()), |_| {});
+                form::page(ui, |ui| draw_export_form(ui, app, settings, &mut next, out));
             });
-            match &settings.target {
-                ExportTarget::Folder(choice) => {
-                    form.row(ui, t.export_folder, |ui| {
-                        folder_rows(ui, app, choice, settings, &mut next, &mut out.actions)
-                    });
-                }
-                #[cfg(not(target_arch = "wasm32"))]
-                ExportTarget::Immich => {
-                    immich_rows(ui, &form, app, settings, &mut next, &mut out.actions)
-                }
-                #[cfg(target_arch = "wasm32")]
-                ExportTarget::Immich => native_only_notice(ui),
-            }
-        });
-
-        // The browser can't reach an Immich server. The notice above says so,
-        // and there is nothing left to set or explain below it.
-        let immich_unavailable =
-            cfg!(target_arch = "wasm32") && settings.target == ExportTarget::Immich;
-        if !immich_unavailable {
-            form.section(ui, t.export_output, |ui| {
-                form.row(ui, t.export_size, |ui| {
-                    let size_label = |size: ExportSize| match size {
-                        ExportSize::Full => t.export_size_full.to_string(),
-                        ExportSize::LongEdge(px) => (t.export_size_long_edge)(px),
-                    };
-                    egui::ComboBox::from_id_salt("export_size")
-                        .selected_text(size_label(settings.size))
-                        .width(ui.available_width())
-                        .show_ui(ui, |ui| {
-                            for size in ExportSize::CHOICES {
-                                if ui
-                                    .selectable_label(settings.size == size, size_label(size))
-                                    .clicked()
-                                {
-                                    next = Some(ExportSettings {
-                                        size,
-                                        ..settings.clone()
-                                    });
-                                }
-                            }
-                        });
-                });
-            });
-        }
-
-        let blocker = app.export_blocker();
-        let buttons = [
-            Button::new(t.cancel, Role::Cancel),
-            Button {
-                enabled: blocker.is_none(),
-                ..Button::new(t.export_run, Role::Primary)
-            },
-        ];
-        match form::footer(ui, &buttons) {
-            Some(Role::Cancel) => out.actions.push(UiAction::ToggleExportForm),
-            Some(_) => out.actions.push(UiAction::RunExport),
-            None => {}
-        }
-        // Under the buttons, because it says why Export is off.
-        if let Some(why) = blocker.filter(|_| !immich_unavailable) {
-            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-                form::hint(ui, why)
-            });
-        }
     });
     if let Some(changed) = next {
         out.actions.push(UiAction::SetExportSettings(changed));
+    }
+}
+
+/// The export page under its heading: where to, how big, and the footer.
+fn draw_export_form(
+    ui: &mut egui::Ui,
+    app: &App,
+    settings: &ExportSettings,
+    next: &mut Option<ExportSettings>,
+    out: &mut FrameOutput,
+) {
+    let t = t();
+    let form = Form::stacked();
+    form.section(ui, t.export_destination, |ui| {
+        let immich = settings.target == ExportTarget::Immich;
+        form.row(ui, "", |ui| {
+            let choices = [
+                (false, t.export_to_folder, None),
+                (true, t.export_to_immich, None),
+            ];
+            let picked = form::segmented(ui, &choices, immich);
+            if let Some(to_immich) = picked.filter(|&to| to != immich) {
+                *next = Some(ExportSettings {
+                    target: if to_immich {
+                        ExportTarget::Immich
+                    } else {
+                        ExportTarget::default()
+                    },
+                    ..settings.clone()
+                });
+            }
+        });
+        match &settings.target {
+            ExportTarget::Folder(choice) => {
+                form.row(ui, t.export_folder, |ui| {
+                    folder_rows(ui, app, choice, settings, next, &mut out.actions)
+                });
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            ExportTarget::Immich => immich_rows(ui, &form, app, settings, next, &mut out.actions),
+            #[cfg(target_arch = "wasm32")]
+            ExportTarget::Immich => native_only_notice(ui),
+        }
+    });
+
+    // The browser can't reach an Immich server. The notice above says so,
+    // and there is nothing left to set or explain below it.
+    let immich_unavailable =
+        cfg!(target_arch = "wasm32") && settings.target == ExportTarget::Immich;
+    if !immich_unavailable {
+        form.section(ui, t.export_output, |ui| {
+            form.row(ui, t.export_size, |ui| {
+                let size_label = |size: ExportSize| match size {
+                    ExportSize::Full => t.export_size_full.to_string(),
+                    ExportSize::LongEdge(px) => (t.export_size_long_edge)(px),
+                };
+                egui::ComboBox::from_id_salt("export_size")
+                    .selected_text(size_label(settings.size))
+                    .width(ui.available_width())
+                    .show_ui(ui, |ui| {
+                        for size in ExportSize::CHOICES {
+                            if ui
+                                .selectable_label(settings.size == size, size_label(size))
+                                .clicked()
+                            {
+                                *next = Some(ExportSettings {
+                                    size,
+                                    ..settings.clone()
+                                });
+                            }
+                        }
+                    });
+            });
+        });
+    }
+
+    let blocker = app.export_blocker();
+    let buttons = [
+        Button::new(t.cancel, Role::Cancel),
+        Button {
+            enabled: blocker.is_none(),
+            ..Button::new(t.export_run, Role::Primary)
+        },
+    ];
+    match form::footer(ui, &buttons) {
+        Some(Role::Cancel) => out.actions.push(UiAction::ToggleExportForm),
+        Some(_) => out.actions.push(UiAction::RunExport),
+        None => {}
+    }
+    // Under the buttons, because it says why Export is off.
+    if let Some(why) = blocker.filter(|_| !immich_unavailable) {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+            form::hint(ui, why)
+        });
     }
 }
 
@@ -157,10 +160,20 @@ fn folder_rows(
             });
         }
         ui.horizontal(|ui| {
+            // Center the radio on the taller button beside it.
+            ui.spacing_mut().interact_size.y = form::button_height(ui);
             // Picking a folder is what selects this option, so the radio and
             // the button do the same thing.
             if ui.radio(!subfolder, t.export_chosen_folder).clicked()
-                | ui.button(t.export_choose_folder).clicked()
+                | form::button(
+                    ui,
+                    &form::Button {
+                        label: t.export_choose_folder,
+                        role: form::Role::Cancel,
+                        enabled: true,
+                    },
+                )
+                .clicked()
             {
                 actions.push(UiAction::ChooseExportFolder);
             }

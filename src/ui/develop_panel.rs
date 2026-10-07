@@ -252,7 +252,12 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         (t.crop_left, t.menu.rotate_left, false),
                         (t.crop_right, t.menu.rotate_right, true),
                     ] {
-                        if ui.button(label).on_hover_text(tip).clicked() {
+                        let b = form::Button {
+                            label,
+                            role: form::Role::Cancel,
+                            enabled: true,
+                        };
+                        if form::button(ui, &b).on_hover_text(tip).clicked() {
                             out.actions.push(UiAction::Rotate(clockwise));
                         }
                     }

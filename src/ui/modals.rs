@@ -246,7 +246,7 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         }
         let form = Form::new(ui, &labels);
         form.section(ui, t.form_general, |ui| {
-            form.row(ui, t.settings_theme, |ui| {
+            form.button_row(ui, t.settings_theme, |ui| {
                 let themes = [
                     (theme::Theme::Dark, t.theme_dark, None),
                     (theme::Theme::Light, t.theme_light, None),
@@ -272,7 +272,7 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
         });
         if crate::app::SHOW_AUTOTONE_CENTERING {
             form.section(ui, t.develop, |ui| {
-                form.row(ui, t.settings_auto_tone, |ui| {
+                form.button_row(ui, t.settings_auto_tone, |ui| {
                     let centerings = [
                         (
                             Centering::Range,
