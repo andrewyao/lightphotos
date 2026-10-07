@@ -320,18 +320,10 @@ pub(super) fn thumbnail_cell(
     };
     ui.painter().rect_filled(rect, style.corner, bg);
 
-    // A selected photo steps back from the cell edge, leaving a margin inside
-    // its outline.
-    let margin = if marked {
-        font_size::px(ui.style(), 5.0)
-    } else {
-        0.0
-    };
-
     let members = app.group_at(pos).map(|(_, g)| g.members().len());
     let card_step = font_size::px(ui.style(), 3.0);
     let cards = members.is_some() && !style.strip;
-    let mut inner = rect.shrink(style.corner + margin);
+    let mut inner = rect.shrink(style.corner);
     if cards {
         inner.min.y += 2.0 * card_step;
         inner.max.x -= 2.0 * card_step;
@@ -383,32 +375,19 @@ pub(super) fn thumbnail_cell(
         count_pill(ui, pill_anchor, rect, n, &colors);
     }
 
+    // The top-left corner holds the flag, then the selection check, each only
+    // when it applies.
     let badge_r = badge_radius(ui.style());
+    let mut top_left = badge_center(rect, style, badge_r, egui::Align2::LEFT_TOP);
     let flag = app.flag_at(pos);
     if let Some(flag) = flag {
-        let c = badge_center(rect, style, badge_r, egui::Align2::RIGHT_BOTTOM);
+        let c = top_left;
+        top_left.x += 2.4 * badge_r;
         ui.painter()
             .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
         let mark = egui::Rect::from_center_size(c, egui::Vec2::splat(badge_r * 1.3));
         let color = super::flag_color(&colors, Some(flag), colors.value);
         super::paint_flag(ui.painter(), mark, Some(flag), color, true);
-    }
-    if app.eyes_closed_at(pos) {
-        let mut c = badge_center(rect, style, badge_r, egui::Align2::RIGHT_BOTTOM);
-        // Beside the flag's badge rather than under it.
-        if flag.is_some() {
-            c.x -= 2.4 * badge_r;
-        }
-        ui.painter()
-            .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
-        ui.painter().text(
-            c,
-            egui::Align2::CENTER_CENTER,
-            // An arc, read as a closed eyelid.
-            "\u{2312}",
-            egui::FontId::proportional(font_size::px(ui.style(), 13.0)),
-            theme::EYES_BADGE,
-        );
     }
 
     // The color label fills the cell's bottom margin, below the thumbnail.
@@ -432,27 +411,40 @@ pub(super) fn thumbnail_cell(
     match style.rating {
         RatingMark::Stars { dx, dy, size } => {
             let font = egui::FontId::proportional(font_size::px(ui.style(), size));
-            let drawn = ui.painter().text(
-                egui::pos2(
-                    rect.left() + font_size::px(ui.style(), dx),
-                    rect.bottom() + font_size::px(ui.style(), dy),
-                ),
-                egui::Align2::LEFT_CENTER,
-                star_string(stars),
-                font.clone(),
-                colors.star,
+            let start = egui::pos2(
+                rect.left() + font_size::px(ui.style(), dx),
+                rect.bottom() + font_size::px(ui.style(), dy),
             );
-            if let Some((score, stale)) = app.score_at(pos) {
-                let shown = ui.painter().text(
-                    egui::pos2(
-                        drawn.right() + font_size::px(ui.style(), 6.0),
-                        drawn.center().y,
-                    ),
+            // Only the stars a photo has; an unrated cell shows none.
+            if stars > 0 {
+                ui.painter().text(
+                    start,
                     egui::Align2::LEFT_CENTER,
-                    score.value.to_string(),
+                    "\u{2605}".repeat(stars.min(5) as usize),
                     font,
-                    score_color(&colors, stale),
+                    colors.star,
                 );
+            }
+            if let Some((score, stale)) = app.score_at(pos) {
+                // A smaller number on a half-black disc in the right corner,
+                // so it reads over any cell and stays put as the stars change.
+                let text = if stale {
+                    egui::Color32::WHITE.gamma_multiply(0.45)
+                } else {
+                    egui::Color32::WHITE
+                };
+                let galley = ui.painter().layout_no_wrap(
+                    score.value.to_string(),
+                    egui::FontId::proportional(font_size::px(ui.style(), size * 0.75)),
+                    text,
+                );
+                let r = galley.size().max_elem() / 2.0 + font_size::px(ui.style(), 2.5);
+                let center = egui::pos2(rect.right() - font_size::px(ui.style(), dx) - r, start.y);
+                ui.painter()
+                    .circle_filled(center, r, egui::Color32::from_black_alpha(128));
+                ui.painter()
+                    .galley(center - galley.size() / 2.0, galley, text);
+                let shown = egui::Rect::from_center_size(center, egui::Vec2::splat(r * 2.0));
                 ui.interact(shown, response.id.with("score"), egui::Sense::hover())
                     .on_hover_text(score_tip(score, stale));
             }
@@ -484,12 +476,13 @@ pub(super) fn thumbnail_cell(
         // Filmstrip cells are too small to carry a check as well.
         if !style.strip {
             let check_r = badge_r * 0.7;
-            selection_check(
-                ui,
-                badge_center(rect, style, check_r, egui::Align2::LEFT_TOP),
-                check_r,
-                colors.selection,
-            );
+            // Alone it hugs the corner like the badges' own inset.
+            let c = if top_left == badge_center(rect, style, badge_r, egui::Align2::LEFT_TOP) {
+                badge_center(rect, style, check_r, egui::Align2::LEFT_TOP)
+            } else {
+                top_left
+            };
+            selection_check(ui, c, check_r, colors.selection);
         }
     }
 

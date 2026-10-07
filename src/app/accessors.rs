@@ -273,15 +273,6 @@ impl App {
             .is_some_and(|s| s == crate::facequality::EyeState::Closed)
     }
 
-    /// Whether the visible cell at `pos` has a detected blink. `false` when out
-    /// of range or not yet analyzed.
-    pub(crate) fn eyes_closed_at(&self, pos: usize) -> bool {
-        self.visible
-            .get(pos)
-            .and_then(|&i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))
-            .is_some_and(|p| self.eyes_closed(p))
-    }
-
     pub(crate) fn eyes_filter_on(&self) -> bool {
         self.eyes_filter
     }

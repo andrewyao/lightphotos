@@ -9,8 +9,6 @@
 use crate::app::StatusKind;
 use egui::{Color32, Stroke};
 
-/// Colors that read on every theme's panels, or that sit on a photo.
-pub const EYES_BADGE: Color32 = Color32::from_rgb(150, 190, 255);
 /// The wordmark's "Photos" color. Matches `--lp-accent` in lightphotos.app's
 /// `lp.css`. The site uses a gradient that egui can't draw, so this is its
 /// dominant color. Update it if `lp.css` changes.
