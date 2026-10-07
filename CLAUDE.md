@@ -27,17 +27,22 @@ scoring layer, and an app binary (`src/main.rs`) holding the rest. The probes in
 crate root, so `crate::develop::..` resolves in both. A lib item the app or a probe
 uses has to be `pub`, not `pub(crate)`, and a lib module can't reach into the app.
 Their `#[cfg(test)]` blocks run as `cargo test --lib`, which `cargo test` includes.
-Under `--features raw-probe` they cover the non-mac decode path on a Mac.
+
+rawler (LGPL-2.1) is a non-mac dependency only, and the macOS build, which ships to the
+App Store, must never contain it. So the non-mac decode path and its tests compile only
+off macOS, and a Mac cannot run them.
 
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request. On macOS
-it runs `cargo build --bins`, `cargo test` and clippy. It also builds the wasm target, and
-builds `--bin lightphotos` on Linux and on Windows, which is the only thing that
-typechecks the non-mac branches before a tag. `cargo fmt --check` runs there too and
+it runs `cargo build --bins`, `cargo test` and clippy, and fails if rawler enters the
+macOS dependency graph. On Linux it runs `cargo build --bins` and `cargo test`, the only
+place the non-mac decode tests and `decode_probe`'s fixture suite run. It also builds the
+wasm target, and builds `--bin lightphotos` on Windows. Before a tag, these are the only
+things that typecheck the non-mac branches. `cargo fmt --check` runs there too and
 blocks, so run `cargo fmt` before committing.
 
-Note that the Linux and Windows jobs build `--bin lightphotos`, not `--bins`. The
-Vision probes compile off macOS too, but only to a stub that exits. The optimized
-native build stays out of CI, since `release.yml` covers it when a tag is pushed.
+The probes compile on every platform, but to a stub that exits where they cannot run:
+the Vision probes off macOS, `decode_probe` on macOS. The optimized native build stays
+out of CI, since `release.yml` covers it when a tag is pushed.
 
 The wasm32 (browser) build goes through `trunk`, on a dated nightly, with its environment in `scripts/web-env.sh`. The decode workers run as wasm threads over one shared memory, which needs std rebuilt with atomics (`-Z build-std`), hence the nightly; native stays on stable. The same file sets the unstable-apis cfg for the wgpu/WebGPU and File System Access bindings, which `Trunk.toml`'s `rustflags` key does *not* reach cargo with in trunk 0.21.14, and the shared-memory link arguments. The page must be cross-origin isolated (COOP/COEP) for `SharedArrayBuffer`: `trunk serve` sends the headers from `Trunk.toml`, and `deploy-web.sh` writes them into the site's `public/_headers`. Move the pinned nightly on purpose and rerun `tools/web-bench` after.
 

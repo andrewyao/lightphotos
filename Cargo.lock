@@ -1646,17 +1646,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "img-parts"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19734e3c43b2a850f5889c077056e47c874095f2d87e853c7c41214ae67375f0"
-dependencies = [
- "bytes",
- "crc32fast",
- "miniz_oxide",
-]
-
-[[package]]
 name = "imgref"
 version = "1.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2069,7 +2058,6 @@ dependencies = [
  "half",
  "hotpath",
  "image",
- "img-parts",
  "js-sys",
  "kamadak-exif",
  "lightwatch-probe",

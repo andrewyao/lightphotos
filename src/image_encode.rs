@@ -121,8 +121,8 @@ fn lossy_quality_properties(quality: f64) -> Result<CFRetained<CFDictionary>, St
 /// `mozjpeg-rs`. The wasm32 export path uses this because it has no `std::fs`.
 ///
 /// Export is quality 90, not mozjpeg's default 75, to stay close to ImageIO's
-/// default on macOS. Built on macOS only under `raw-probe`, for its tests.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+/// default on macOS.
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn encode_jpeg_to_vec(
@@ -283,7 +283,7 @@ mod tests {
 
     /// Encode solid red, decode the bytes back, and check that the size and
     /// the approximate color survive.
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn encode_jpeg_to_vec_round_trips() {
         let (w, h) = (8u32, 6u32);
@@ -314,14 +314,14 @@ mod tests {
         std::fs::remove_file(path).ok();
     }
 
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn encode_jpeg_to_vec_rejects_zero_size() {
         assert!(encode_jpeg_to_vec(0, 4, &[], JpegQuality::Export).is_err());
         assert!(encode_jpeg_to_vec(4, 0, &[], JpegQuality::Export).is_err());
     }
 
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn encode_jpeg_to_vec_rejects_short_buffer() {
         assert!(encode_jpeg_to_vec(4, 4, &[0u8; 16], JpegQuality::Export).is_err());
@@ -396,7 +396,7 @@ mod tests {
         });
     }
 
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_mozjpeg_thumbnail_is_smaller_than_an_export_of_the_same_pixels() {
         assert_thumbnail_is_smaller("mozjpeg", |path, w, h, rgba, quality| {
@@ -459,7 +459,7 @@ mod tests {
 
     /// The browser's export path: its worker holds only the source bytes, so
     /// the date it writes has to come from them.
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_baked_export_carries_the_capture_date_of_its_source_bytes() {
         let stamp = image_decode::CaptureStamp::new("2024:06:01 18:04:05", Some("+09:00")).unwrap();

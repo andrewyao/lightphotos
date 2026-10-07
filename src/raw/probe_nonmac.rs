@@ -207,6 +207,7 @@ fn save_decoded_png(img: &image_decode::DecodedImage, out: &str) {
 
 /// Copy of `thumbnail.rs`'s `rawler_full_image_from_bytes`, so this binary
 /// avoids `thumbnail.rs`'s cfg split and its `crate::paths` dependency.
+#[cfg(test)]
 fn rawler_full_image_diag(bytes: &[u8], max_px: u32) -> Option<image_decode::DecodedImage> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
     let params = rawler::decoders::RawDecodeParams::default();
@@ -567,6 +568,7 @@ fn write_linear_dng_with_wb(
 /// uncompressed 8-bit RGB preview IFD with `NewSubfileType = 1`. That is the
 /// shape rawler's `DngDecoder::full_image()` reads. The preview is a solid
 /// color so tests can assert on it easily.
+#[cfg(test)]
 fn write_dng_with_preview_subifd(
     path: &Path,
     width: u32,
@@ -741,12 +743,14 @@ fn write_dng_with_preview_subifd(
 ///
 /// rawler reads only `CFAPattern` for the CFA, so `CFARepeatPatternDim` is
 /// omitted. Color codes are RED=0, GREEN=1, BLUE=2, so `[0,1,1,2]` is RGGB.
+#[cfg(test)]
 fn write_bayer_dng(path: &Path, width: u32, height: u32) -> std::io::Result<()> {
     write_bayer_dng_with_cfa(path, width, height, [0, 1, 1, 2])
 }
 
 /// [`write_bayer_dng`] with an explicit `CFAPattern`, for fixtures outside
 /// the four RGGB-family patterns.
+#[cfg(test)]
 fn write_bayer_dng_with_cfa(
     path: &Path,
     width: u32,

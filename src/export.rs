@@ -90,9 +90,8 @@ impl ExportSize {
 }
 
 /// Decode `src_bytes` at full resolution, bake in the edits, and encode JPEG
-/// bytes. Used by non-mac native export for non-RAW files. On macOS it is
-/// built only under `raw-probe`, for tests.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+/// bytes. Used by non-mac native export for non-RAW files.
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn bake_jpeg(
@@ -117,7 +116,7 @@ pub fn bake_jpeg(
 /// [`bake_jpeg`] for the wasm32 export worker, which already owns the bytes
 /// in an `Arc` and passes it to rawler without copying. Like the desktop
 /// exporter, it writes the source's capture date into the export's EXIF.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn bake_jpeg_from_shared_vec(
@@ -264,7 +263,7 @@ impl Exporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     use std::io::Cursor;
 
     /// Callers count outcomes to know a batch is done, so a photo that panics
@@ -392,7 +391,7 @@ mod tests {
 
     /// With no edits, a solid-color source keeps its size and roughly its
     /// color.
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn bake_jpeg_nonraw_round_trips_identity_edit() {
         let (w, h) = (10u32, 8u32);
@@ -419,7 +418,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn bake_jpeg_applies_rotation() {
         let (w, h) = (12u32, 6u32);

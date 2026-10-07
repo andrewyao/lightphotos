@@ -3,13 +3,10 @@
 //! Decode and metadata for Linux, Windows, and wasm32, mounted into
 //! `image_decode` with `#[path]` and a glob re-export. Also owns the RAW
 //! display boost and auto-denoise strength shared with `raw/preview.rs`.
-//!
-//! Items gated on `feature = "raw-probe"` also build on macOS so the
-//! `decode_probe` binary (`raw/probe.rs`) and its parity tests can call them.
 
 use std::path::Path;
 
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 use crate::image_decode::{
     apply_exif_orientation, fit_within, DecodedImage, DecodedImageFields, Flash, Gps,
     ImageMetadata, PixelFormat, WhiteBalance,
@@ -34,7 +31,7 @@ pub fn is_raw_extension(path: &Path) -> bool {
 /// thread held, so a file past the limit is refused here first. rawler counts
 /// a row in samples, padded to whole tiles, so a 3-channel DNG wider than
 /// 16,666 px (a Lightroom panorama) is past it.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<(), String> {
     use rawler::decoders::WellKnownIFD;
     use rawler::tags::TiffCommonTag;
@@ -79,7 +76,7 @@ pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<
 /// and widens a single white level to every channel, or refuses the file when
 /// the levels still don't line up. Must run before `apply_scaling` or
 /// `RawDevelop`, since a panic is fatal to a wasm32 decode thread.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 pub fn normalize_linear_levels(raw: &mut rawler::RawImage) -> Result<(), String> {
     use rawler::rawimage::{BlackLevel, RawPhotometricInterpretation, WhiteLevel};
 
@@ -114,8 +111,7 @@ pub fn normalize_linear_levels(raw: &mut rawler::RawImage) -> Result<(), String>
 /// Decodes a RAW/DNG file to rawler's undeveloped `RawImage`: sensor samples
 /// with no white balance, color matrix, or gamma. Still mosaiced (cpp=1) for
 /// Bayer/X-Trans files, already RGB (cpp=3/4) for Linear DNG.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-// Unused in the main binary on a mac+raw-probe build.
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
@@ -125,7 +121,7 @@ pub fn decode_raw_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
 /// Maps rawler's `Orientation` to the EXIF code `1..=8` that
 /// [`apply_exif_orientation`] expects. The variants are the same eight EXIF
 /// cases in the same order.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 pub fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
     use rawler::Orientation::*;
     match o {
@@ -141,14 +137,14 @@ pub fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
     }
 }
 
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 pub use crate::develop::apply_raw_preview_boost;
 
 /// Strength (0..=100, the Denoise slider's scale) of the always-on denoise
 /// applied when decoding RAW. It stands in for the noise reduction ImageIO
 /// does on macOS. Not ISO-scaled, because non-mac has no EXIF ISO read.
 /// The `Fast` tier skips it: its 2x2 binning already averages out noise.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 pub const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 
 /// Decodes a camera RAW file with rawler's `RawDevelop` (demosaic, white
@@ -157,8 +153,7 @@ pub const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 ///
 /// rawler's demosaic dispatch panics via `todo!()` on a few unusual CFA
 /// layouts. Ordinary Bayer and X-Trans files never reach those arms.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-// On mac, only the raw-probe parity test calls this.
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
@@ -185,7 +180,7 @@ pub fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, Stri
 /// [`decode_raw_nonmac`] for an in-memory file. Export uses it, and a browser
 /// has no path to open. The parity test in `raw/probe.rs` checks both
 /// produce identical bytes.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_nonmac_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedImage, String> {
@@ -195,7 +190,7 @@ pub fn decode_raw_nonmac_from_bytes(bytes: &[u8], max_dim: u32) -> Result<Decode
 
 /// Like [`decode_raw_nonmac_from_bytes`], but takes ownership of the buffer
 /// so rawler can use it without a copy. The wasm export worker uses this.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_nonmac_from_shared_vec(
@@ -206,7 +201,7 @@ pub fn decode_raw_nonmac_from_shared_vec(
     decode_raw_nonmac_from_source(source, max_dim)
 }
 
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
 fn decode_raw_nonmac_from_source(
     source: rawler::rawsource::RawSource,
@@ -230,7 +225,7 @@ fn decode_raw_nonmac_from_source(
 
 /// Develops a decoded RAW to premultiplied sRGB8: `RawDevelop`, display
 /// boost, auto-denoise, `max_dim` downscale, then EXIF orientation.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
 fn develop_raw_image_to_srgb8(
     raw: &rawler::RawImage,
@@ -322,8 +317,7 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
 
 /// The non-RAW half of [`decode`], from bytes. The wasm32 worker shares it
 /// so browser decodes get the same orientation handling and Lanczos3 resize.
-/// Built under raw-probe so export's round-trip test runs on mac.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedImage, String> {
@@ -461,7 +455,7 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
 /// Camera, exposure, date, and GPS fields from a whole file in memory. The
 /// browser has bytes, not a path. File facts and `source_size` are left to
 /// the caller.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 pub fn fill_metadata_from_bytes(meta: &mut ImageMetadata, bytes: &[u8], raw: bool) {
     if raw {
@@ -475,7 +469,7 @@ pub fn fill_metadata_from_bytes(meta: &mut ImageMetadata, bytes: &[u8], raw: boo
 
 /// `catch_unwind` because rawler panics on some malformed files, and a
 /// metadata read must not take its worker thread down.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 fn fill_from_raw_source(meta: &mut ImageMetadata, source: &rawler::rawsource::RawSource) {
     let read = std::panic::AssertUnwindSafe(|| {
         let params = rawler::decoders::RawDecodeParams::default();
@@ -489,7 +483,7 @@ fn fill_from_raw_source(meta: &mut ImageMetadata, source: &rawler::rawsource::Ra
     }
 }
 
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 fn fill_from_rawler(meta: &mut ImageMetadata, raw: &rawler::decoders::RawMetadata) {
     use rawler::formats::tiff::{Rational, SRational};
     let ratio = |r: &Rational| finite(r.n as f64 / r.d as f64);
@@ -539,7 +533,7 @@ fn fill_from_rawler(meta: &mut ImageMetadata, raw: &rawler::decoders::RawMetadat
     });
 }
 
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 fn fill_from_exif(meta: &mut ImageMetadata, exif: &exif::Exif) {
     use exif::{In, Tag, Value};
     let field = |tag| exif.get_field(tag, In::PRIMARY).map(|f| &f.value);
@@ -589,18 +583,18 @@ fn fill_from_exif(meta: &mut ImageMetadata, exif: &exif::Exif) {
 }
 
 /// EXIF stores a coordinate as degrees, minutes, and seconds.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 fn dms_to_degrees(d: f64, m: f64, s: f64) -> f64 {
     d + m / 60.0 + s / 3600.0
 }
 
 /// A zero denominator gives infinity or NaN, which means "unknown" here.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 fn finite(v: f64) -> Option<f64> {
     v.is_finite().then_some(v)
 }
 
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 fn non_empty(s: &str) -> Option<String> {
     let s = s.trim();
     (!s.is_empty()).then(|| s.to_string())
@@ -639,7 +633,7 @@ mod tests {
 
     /// A 16x8 JPEG carrying an APP1 EXIF segment with the given fields,
     /// built the way a camera lays it out: SOI, APP1, then the image.
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     fn jpeg_with_exif(fields: &[exif::Field]) -> Vec<u8> {
         let mut writer = exif::experimental::Writer::new();
         for f in fields {
@@ -660,7 +654,7 @@ mod tests {
         out
     }
 
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     fn plain_jpeg() -> Vec<u8> {
         let mut jpeg = Vec::new();
         image::RgbImage::new(16, 8)
@@ -673,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     fn a_jpegs_exif_fills_camera_exposure_date_and_signed_gps() {
         use exif::{Field, In, Rational, SRational, Tag, Value};
         let f = |tag, value| Field {
@@ -751,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     fn a_jpeg_without_exif_leaves_every_field_empty() {
         let mut meta = ImageMetadata::default();
         fill_metadata_from_bytes(&mut meta, &plain_jpeg(), false);

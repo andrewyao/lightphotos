@@ -10,9 +10,6 @@
 //! - `Quality` (Loupe `Preview`/`Full`): full-res PPG demosaic, left in linear
 //!   light as `PixelFormat::LinearF16`. `raw_shader.wgsl` applies gamma and
 //!   the display boost on the GPU.
-//!
-//! The bytes entry points are also built under `raw-probe` so the
-//! `decode_probe` binary (`raw/probe.rs`) can test them on macOS.
 
 use crate::image_decode::{fit_within, DecodedImage, DecodedImageFields, PixelFormat};
 
@@ -57,7 +54,7 @@ fn to_srgb_u8(v: f32) -> u8 {
 
 /// Decodes RAW bytes to the `Fast` sRGB8 preview, Lanczos3-resized to fit
 /// `max_px`. The `decode_probe` golden-hash tests call it by name.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_fast_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
@@ -69,7 +66,7 @@ pub fn decode_raw_fast_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedIm
 /// fit `max_px`. The bound matters: the Loupe keeps its `zoom` when a sharper
 /// tier of the same photo lands (`app/thumbs.rs::upload_shown`), so a much
 /// larger `Quality` image would suddenly appear zoomed in.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_quality_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
@@ -101,7 +98,7 @@ pub fn decode_raw_from_shared_vec(
 
 /// Shared body of [`decode_raw_fast_from_bytes`] and
 /// [`decode_raw_quality_from_bytes`].
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
 fn decode_raw_preview(
     source: rawler::rawsource::RawSource,

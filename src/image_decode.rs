@@ -37,10 +37,10 @@ use crate::coregraphics;
 
 /// The non-mac decode and metadata functions, re-exported so callers use
 /// `image_decode::decode` on every platform.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[path = "raw/nonmac_decode.rs"]
 mod nonmac_decode;
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 pub use nonmac_decode::*;
 
 /// How `DecodedImage::rgba` is laid out. Every decoder produces `Srgb8`
@@ -833,7 +833,7 @@ mod tests {
     /// ImageIO itself refuses a tiny file that claims a huge size, so the
     /// budget is checked here, where the pixel buffer is allocated.
     // decode_probe mounts this file without `image_encode`.
-    #[cfg(all(target_os = "macos", not(feature = "raw-probe")))]
+    #[cfg(target_os = "macos")]
     #[test]
     fn the_bitmap_draw_refuses_a_size_over_budget_before_allocating() {
         let path = std::env::temp_dir().join(format!("lp-budget-{}.jpg", std::process::id()));

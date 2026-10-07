@@ -64,6 +64,16 @@ jobs:
       - name: Test
         run: cargo test
 
+      # rawler is LGPL-2.1. The macOS build decodes RAW through ImageIO, so
+      # rawler must never enter its dependency graph: that build ships to the
+      # App Store.
+      - name: Keep rawler out of the macOS build
+        run: |
+          if cargo tree --target aarch64-apple-darwin -e normal | grep -q rawler; then
+            echo "rawler is in the macOS dependency graph"
+            exit 1
+          fi
+
       # No `-D warnings`. The tree still carries clippy warnings, so
       # denying them would fail every run from the first one. They print in this
       # step's log regardless. Once they are cleared, append `-- -D warnings`.
@@ -75,12 +85,11 @@ jobs:
   # run was v0.1.6, 49 commits back, so a Linux break would surface at release
   # time rather than on the pull request that caused it. The platform-gated
   # branches (the Loupe's subject-selection control, the non-mac decode path)
-  # are exactly the code no mac job can typecheck.
-  #
-  # `--bin lightphotos`, not `--bins`. The probes are mac-only dev harnesses
-  # that build to a stub here, so building them would only cost time.
+  # are exactly the code no mac job can typecheck. It is also the only job that
+  # runs the non-mac decode tests (rawler, mozjpeg, `raw_preview`) and
+  # `decode_probe`'s fixture suite.
   linux:
-    name: build (Linux)
+    name: build and test (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -103,8 +112,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build
-        run: cargo build --bin lightphotos
+      - name: Build all binaries
+        run: cargo build --bins
+
+      - name: Test
+        run: cargo test
 
   # Same gap and same reasoning as the Linux job. README.md calls Windows
   # experimental and says no runtime testing has happened there, which makes the

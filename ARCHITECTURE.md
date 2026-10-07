@@ -291,7 +291,7 @@ happens on wasm32, and `App` then holds no pool to submit to.
 | `loader.rs` | Job queue + LRU caches for both the Loupe and Grid tiers | native (macOS + Linux/Windows); wasm32 shares its caches via `insert_*_external` but bypasses its queue |
 | `image_decode.rs` | Full decode + metadata read, mac arm | macOS |
 | `raw/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `rawler`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
-| `raw/preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | wasm32 (also reachable from a mac dev build via `--features raw-probe`) |
+| `raw/preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | Linux, Windows, wasm32 |
 | `raw/render.rs` | Builds the GPU tonemap pipeline for `PixelFormat::LinearF16` images | all (only ever fed a linear image on wasm32) |
 | `thumbnail.rs` | Decode-at-size for both the Loupe's screen-fit preview and Grid thumbnails, plus the on-disk `.thumb.jpg` cache in `.lightphotos/` | macOS (ImageIO) + Linux/Windows (`kamadak-exif`/`rawler`); wasm32 keeps the same entry naming through `web/web_thumb_cache.rs` |
 | `image_encode.rs` | JPEG write for export | macOS (ImageIO) / Linux/Windows (`mozjpeg-rs`) |

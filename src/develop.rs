@@ -676,7 +676,7 @@ fn denoise_sample_with_strength(strength: f32, sample: impl Fn(i32, i32) -> [f32
 /// `rawler` RAW decoders (browser, Linux, Windows) call this after demosaic
 /// because rawler doesn't denoise; ImageIO on macOS does its own. Returns a
 /// copy of `buf` when `strength <= 0.0` or the size is bad.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
 pub(crate) fn denoise_linear_rgb_buffer(
     strength: f32,
@@ -696,7 +696,7 @@ pub(crate) fn denoise_linear_rgb_buffer(
 
 /// One pixel of [`denoise_linear_rgb_buffer`], for callers that consume
 /// pixels as they go and cannot afford a second full-size buffer.
-#[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn denoise_linear_rgb_pixel(
     strength: f32,
     width: usize,
@@ -1134,7 +1134,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     fn denoise_linear_rgb_buffer_smooths_an_isolated_outlier() {
         let (w, h) = (3, 3);
         let mut buf = vec![[0.0f32; 3]; w * h];
@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     fn denoise_linear_rgb_buffer_zero_strength_is_identity() {
         let buf = vec![[0.2, 0.3, 0.4], [1.0, 0.0, 0.0]];
         let out = denoise_linear_rgb_buffer(0.0, 2, 1, &buf);
@@ -1162,7 +1162,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
+    #[cfg(not(target_os = "macos"))]
     fn denoise_linear_rgb_buffer_clamps_at_edges_without_panicking() {
         let buf = vec![
             [0.1, 0.1, 0.1],

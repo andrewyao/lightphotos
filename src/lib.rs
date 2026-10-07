@@ -20,7 +20,7 @@ pub mod immich;
 pub mod judge;
 pub mod paths;
 pub mod quality;
-#[cfg(any(target_arch = "wasm32", feature = "raw-probe"))]
+#[cfg(not(target_os = "macos"))]
 #[path = "raw/preview.rs"]
 pub mod raw_preview;
 pub mod segmentation;
