@@ -385,35 +385,14 @@ pub(crate) struct App {
     #[cfg(test)]
     pub(crate) pushed_adj: Option<Adjustments>,
     pub(crate) loader: Option<Loader>,
-    /// `None` until the window is created.
-    pub(crate) exporter: Option<Exporter>,
     pub(crate) face_pool: Option<crate::facequality::FacePool>,
     /// `None` until the window is created, and on targets that cannot spawn
     /// threads.
     pub(crate) score_pool: Option<crate::score::ScorePool>,
     /// The photos a "Score photos" run has left. `None` when none is running.
     score_job: Option<crate::score::ScoreJob>,
-    pub(crate) export_progress: Option<ExportProgress>,
-    /// What the export form is set to, remembered across launches.
-    export_settings: crate::export::ExportSettings,
-    /// The export form is showing in the right-hand panel.
-    export_form_open: bool,
-    /// The Immich server export uploads to, and the form's sign-in fields.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) immich: export::ImmichLink,
-    /// Whether the saved API key has been looked up yet. The lookup waits for
-    /// the first time the form shows Immich, so someone who never uses it never
-    /// sees a Keychain prompt.
-    #[cfg(not(target_arch = "wasm32"))]
-    immich_key_looked_up: bool,
-    /// The album add that ends an Immich batch, with the batch's summary to
-    /// finish the toast with.
-    #[cfg(not(target_arch = "wasm32"))]
-    album_add: Option<(
-        Receiver<Result<crate::immich::Album, String>>,
-        String,
-        StatusKind,
-    )>,
+    /// The export form, its settings and the exports it started.
+    exports: export::Exports,
     /// The running bulk delete, if any. `pub(crate)` because the frame loop
     /// polls it.
     pub(crate) bulk_delete: Option<bulk_delete::BulkDelete>,
@@ -841,30 +820,10 @@ impl App {
             #[cfg(test)]
             pushed_adj: None,
             loader: None,
-            exporter: None,
             face_pool: None,
             score_pool: None,
             score_job: None,
-            export_progress: None,
-            // A test must never read the developer's own settings.
-            #[cfg(test)]
-            export_settings: Default::default(),
-            #[cfg(not(test))]
-            export_settings: export::load_export_settings(),
-            export_form_open: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            immich: export::ImmichLink::Disconnected {
-                #[cfg(test)]
-                url: String::new(),
-                #[cfg(not(test))]
-                url: crate::prefs::load(export::IMMICH_SERVER_PREF).unwrap_or_default(),
-                key: String::new(),
-                error: None,
-            },
-            #[cfg(not(target_arch = "wasm32"))]
-            immich_key_looked_up: cfg!(test),
-            #[cfg(not(target_arch = "wasm32"))]
-            album_add: None,
+            exports: export::Exports::new(),
             bulk_delete: None,
             playlist: None,
             want: None,

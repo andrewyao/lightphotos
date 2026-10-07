@@ -407,7 +407,7 @@ impl App {
         });
         self.develop_tab = DevelopTab::Crop;
         self.develop_open = true;
-        self.export_form_open = false;
+        self.exports.close_form();
         self.push_crop_preview();
         self.fit_for_crop();
         self.request_redraw();

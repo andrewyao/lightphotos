@@ -193,7 +193,7 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        if self.bulk_delete.is_some() || self.export_progress.is_some() {
+        if self.bulk_delete.is_some() || self.export_running() {
             self.set_status(
                 StatusKind::Error,
                 crate::i18n::t().delete_in_progress.to_string(),

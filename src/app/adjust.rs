@@ -44,13 +44,13 @@ impl App {
 
     /// The Develop page on screen, if Develop is.
     pub(crate) fn develop_page_shown(&self) -> Option<DevelopTab> {
-        (self.develop_visible() && !self.export_form_open).then_some(self.develop_tab)
+        (self.develop_visible() && !self.export_form_open()).then_some(self.develop_tab)
     }
 
     /// The rail icon to light: Export while its form is open, Compare while
     /// the pane is, otherwise the Develop page on screen.
     pub(crate) fn rail_lit(&self) -> Option<RailItem> {
-        if self.export_form_open {
+        if self.export_form_open() {
             return Some(RailItem::Export);
         }
         if self.group_view == GroupView::Compare {
@@ -93,7 +93,7 @@ impl App {
     fn show_develop_page(&mut self, tab: DevelopTab) {
         self.set_group_view(GroupView::Edit);
         self.develop_open = true;
-        self.export_form_open = false;
+        self.exports.close_form();
         self.set_develop_tab(tab);
     }
 

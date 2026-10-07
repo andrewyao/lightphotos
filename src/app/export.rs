@@ -87,34 +87,115 @@ pub(crate) enum ImmichLink {
     },
 }
 
+/// The export form and the exports it runs. App's other modules see it
+/// only through the methods below and App's export methods.
+pub(crate) struct Exports {
+    /// `None` until the window is created.
+    exporter: Option<Exporter>,
+    progress: Option<ExportProgress>,
+    /// What the export form is set to, remembered across launches.
+    settings: ExportSettings,
+    /// The export form is showing in the right-hand panel.
+    form_open: bool,
+    /// The Immich server export uploads to, and the form's sign-in fields.
+    #[cfg(not(target_arch = "wasm32"))]
+    immich: ImmichLink,
+    /// Whether the saved API key has been looked up yet. The lookup waits for
+    /// the first time the form shows Immich, so someone who never uses it never
+    /// sees a Keychain prompt.
+    #[cfg(not(target_arch = "wasm32"))]
+    key_looked_up: bool,
+    /// The album add that ends an Immich batch, with the batch's summary to
+    /// finish the toast with.
+    #[cfg(not(target_arch = "wasm32"))]
+    album_add: Option<(
+        Receiver<Result<crate::immich::Album, String>>,
+        String,
+        StatusKind,
+    )>,
+}
+
+impl Exports {
+    pub(super) fn new() -> Self {
+        Self {
+            exporter: None,
+            progress: None,
+            // A test must never read the developer's own settings.
+            #[cfg(test)]
+            settings: Default::default(),
+            #[cfg(not(test))]
+            settings: load_export_settings(),
+            form_open: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            immich: ImmichLink::Disconnected {
+                #[cfg(test)]
+                url: String::new(),
+                #[cfg(not(test))]
+                url: crate::prefs::load(IMMICH_SERVER_PREF).unwrap_or_default(),
+                key: String::new(),
+                error: None,
+            },
+            #[cfg(not(target_arch = "wasm32"))]
+            key_looked_up: cfg!(test),
+            #[cfg(not(target_arch = "wasm32"))]
+            album_add: None,
+        }
+    }
+
+    /// Hides the form without a redraw, for a page switch that redraws anyway.
+    pub(super) fn close_form(&mut self) {
+        self.form_open = false;
+    }
+}
+
 impl App {
     pub(crate) fn export_form_open(&self) -> bool {
-        self.export_form_open
+        self.exports.form_open
+    }
+
+    /// Starts the export workers. The window's setup calls it, so a test's App
+    /// has none.
+    pub(crate) fn start_exporter(&mut self) {
+        self.exports.exporter = Some(Exporter::new());
+    }
+
+    /// Exports finished since the last call.
+    pub(crate) fn poll_exporter(&self) -> Vec<ExportOutcome> {
+        self.exports
+            .exporter
+            .as_ref()
+            .map(|e| e.poll())
+            .unwrap_or_default()
+    }
+
+    /// Whether an export batch is running.
+    pub(crate) fn export_running(&self) -> bool {
+        self.exports.progress.is_some()
     }
 
     pub(crate) fn export_settings(&self) -> &ExportSettings {
-        &self.export_settings
+        &self.exports.settings
     }
 
     /// Open the export form, or close it if it is showing. Opening it is what
     /// the toolbar's Export button and `X` do; Export in the form runs it.
     pub(super) fn toggle_export_form(&mut self) {
-        self.export_form_open = !self.export_form_open;
+        self.exports.form_open = !self.exports.form_open;
         #[cfg(not(target_arch = "wasm32"))]
-        if self.export_form_open {
+        if self.exports.form_open {
             self.resume_immich();
         }
         self.request_redraw();
     }
 
     pub(super) fn close_export_form(&mut self) {
-        self.export_form_open = false;
+        self.exports.form_open = false;
         self.request_redraw();
     }
 
     pub(super) fn set_export_settings(&mut self, settings: ExportSettings) {
         save_export_settings(&settings);
-        self.export_settings = settings;
+        self.exports.settings = settings;
         #[cfg(not(target_arch = "wasm32"))]
         self.resume_immich();
         self.request_redraw();
@@ -128,13 +209,13 @@ impl App {
         }
         // One batch at a time. A second batch would pick the same file names
         // before the first batch's files exist on disk, and overwrite them.
-        if self.export_progress.is_some() {
+        if self.exports.progress.is_some() {
             return Some(t.export_in_progress);
         }
         // The album add that ends an Immich batch counts as part of it: a
         // batch started meanwhile would create a second new album.
         #[cfg(not(target_arch = "wasm32"))]
-        if self.album_add.is_some() {
+        if self.exports.album_add.is_some() {
             return Some(t.export_in_progress);
         }
         // The edit maps read below fill in only after the background catalog
@@ -143,19 +224,19 @@ impl App {
             return Some(t.export_catalog_loading);
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.export_settings.target == ExportTarget::Immich
-            && !matches!(self.immich, ImmichLink::Connected { .. })
+        if self.exports.settings.target == ExportTarget::Immich
+            && !matches!(self.exports.immich, ImmichLink::Connected { .. })
         {
             return Some(t.export_needs_immich);
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.export_settings.target == ExportTarget::Immich
-            && matches!(&self.export_settings.album, AlbumChoice::New(name) if name.trim().is_empty())
+        if self.exports.settings.target == ExportTarget::Immich
+            && matches!(&self.exports.settings.album, AlbumChoice::New(name) if name.trim().is_empty())
         {
             return Some(t.album_name_needed);
         }
         #[cfg(target_arch = "wasm32")]
-        if self.export_settings.target == crate::export::ExportTarget::Immich {
+        if self.exports.settings.target == crate::export::ExportTarget::Immich {
             return Some(t.immich_native_only);
         }
         None
@@ -170,7 +251,7 @@ impl App {
             return;
         }
         self.start_export(self.action_paths());
-        if self.export_progress.is_some() {
+        if self.exports.progress.is_some() {
             self.close_export_form();
         }
     }
@@ -178,7 +259,7 @@ impl App {
     /// Where a folder export would land, for the form to show.
     pub(crate) fn export_folder(&self) -> Option<PathBuf> {
         #[cfg(not(target_arch = "wasm32"))]
-        if let ExportTarget::Folder(FolderChoice::Custom(dir)) = &self.export_settings.target {
+        if let ExportTarget::Folder(FolderChoice::Custom(dir)) = &self.exports.settings.target {
             return Some(dir.clone());
         }
         self.folder_sel
@@ -192,19 +273,19 @@ impl App {
         if let Some(dir) = crate::dialog::pick_folder() {
             self.set_export_settings(ExportSettings {
                 target: ExportTarget::Folder(FolderChoice::Custom(dir)),
-                ..self.export_settings.clone()
+                ..self.exports.settings.clone()
             });
         }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn immich(&self) -> &ImmichLink {
-        &self.immich
+        &self.exports.immich
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn set_immich_fields(&mut self, new_url: Option<String>, new_key: Option<String>) {
-        if let ImmichLink::Disconnected { url, key, error } = &mut self.immich {
+        if let ImmichLink::Disconnected { url, key, error } = &mut self.exports.immich {
             if let Some(u) = new_url {
                 *url = u;
             }
@@ -220,11 +301,11 @@ impl App {
     /// a returning user finds it already connected.
     #[cfg(not(target_arch = "wasm32"))]
     fn resume_immich(&mut self) {
-        if self.immich_key_looked_up || self.export_settings.target != ExportTarget::Immich {
+        if self.exports.key_looked_up || self.exports.settings.target != ExportTarget::Immich {
             return;
         }
-        self.immich_key_looked_up = true;
-        if let ImmichLink::Disconnected { url, key, .. } = &mut self.immich {
+        self.exports.key_looked_up = true;
+        if let ImmichLink::Disconnected { url, key, .. } = &mut self.exports.immich {
             if url.is_empty() {
                 return;
             }
@@ -240,7 +321,7 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn connect_immich(&mut self) {
-        let ImmichLink::Disconnected { url, key, .. } = &self.immich else {
+        let ImmichLink::Disconnected { url, key, .. } = &self.exports.immich else {
             return;
         };
         let (url, key) = (url.clone(), key.clone());
@@ -254,7 +335,7 @@ impl App {
                     (server, account, albums)
                 }));
             });
-        self.immich = match spawned {
+        self.exports.immich = match spawned {
             Ok(_) => ImmichLink::Connecting { url, key, rx },
             Err(e) => ImmichLink::Disconnected {
                 url,
@@ -268,9 +349,9 @@ impl App {
     /// Forget the server and its saved key.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn disconnect_immich(&mut self) {
-        if let ImmichLink::Connected { server, .. } = &self.immich {
+        if let ImmichLink::Connected { server, .. } = &self.exports.immich {
             crate::secret::delete_api_key(server.origin());
-            self.immich = ImmichLink::Disconnected {
+            self.exports.immich = ImmichLink::Disconnected {
                 url: server.origin().to_string(),
                 key: String::new(),
                 error: None,
@@ -283,7 +364,7 @@ impl App {
     /// frame loop keeps polling.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn poll_immich_connect(&mut self) -> bool {
-        let ImmichLink::Connecting { url, key, rx } = &self.immich else {
+        let ImmichLink::Connecting { url, key, rx } = &self.exports.immich else {
             return false;
         };
         let result = match rx.try_recv() {
@@ -293,7 +374,7 @@ impl App {
                 Err("the connection check stopped".into())
             }
         };
-        self.immich = match result {
+        self.exports.immich = match result {
             Ok((server, account, albums)) => {
                 if let Err(e) = crate::prefs::save(IMMICH_SERVER_PREF, server.origin()) {
                     eprintln!("[immich] could not save the server URL: {e}");
@@ -356,8 +437,8 @@ impl App {
             .collect();
 
         let total = jobs.len();
-        let max_px = self.export_settings.size.max_px();
-        self.export_progress = Some(ExportProgress {
+        let max_px = self.exports.settings.size.max_px();
+        self.exports.progress = Some(ExportProgress {
             done: 0,
             total,
             errors: 0,
@@ -440,10 +521,10 @@ impl App {
     /// checked `export_blocker`.
     #[cfg(not(target_arch = "wasm32"))]
     fn start_export(&mut self, paths: Vec<PathBuf>) {
-        let Some(exporter) = self.exporter.as_ref() else {
+        let Some(exporter) = self.exports.exporter.as_ref() else {
             return;
         };
-        let settings = &self.export_settings;
+        let settings = &self.exports.settings;
         let max_px = settings.size.max_px();
         let job = |src: PathBuf, dest: ExportDest| ExportJob {
             adj: self.edits.get(&src).copied().unwrap_or_default(),
@@ -478,7 +559,7 @@ impl App {
                 }
             }
             ExportTarget::Immich => {
-                let ImmichLink::Connected { server, .. } = &self.immich else {
+                let ImmichLink::Connected { server, .. } = &self.exports.immich else {
                     return;
                 };
                 for src in paths {
@@ -497,7 +578,7 @@ impl App {
             true => settings.album.clone(),
             false => AlbumChoice::None,
         };
-        self.export_progress = Some(ExportProgress {
+        self.exports.progress = Some(ExportProgress {
             done: 0,
             total,
             errors: 0,
@@ -528,7 +609,7 @@ impl App {
     /// Add finished exports to the progress toast. After the last one, show a
     /// summary and clear `export_progress`.
     pub(crate) fn on_export_outcomes(&mut self, outcomes: Vec<ExportOutcome>) {
-        let Some(mut prog) = self.export_progress.take() else {
+        let Some(mut prog) = self.exports.progress.take() else {
             return;
         };
         for ExportOutcome { src, result } in outcomes {
@@ -597,7 +678,7 @@ impl App {
                 StatusKind::Progress,
                 Self::progress_text(prog.uploading, prog.done, prog.total),
             );
-            self.export_progress = Some(prog);
+            self.exports.progress = Some(prog);
         }
     }
 
@@ -612,7 +693,7 @@ impl App {
         summary: String,
         kind: StatusKind,
     ) -> Result<String, String> {
-        let ImmichLink::Connected { server, .. } = &self.immich else {
+        let ImmichLink::Connected { server, .. } = &self.exports.immich else {
             return Err(summary);
         };
         let name = match &album {
@@ -637,7 +718,7 @@ impl App {
             return Err((crate::i18n::t().album_failed)(&summary, &e.to_string()));
         }
         let adding = (crate::i18n::t().adding_to_album)(&summary, &name);
-        self.album_add = Some((rx, summary, kind));
+        self.exports.album_add = Some((rx, summary, kind));
         Ok(adding)
     }
 
@@ -646,7 +727,7 @@ impl App {
     /// into the same album rather than a second one of the same name.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn poll_album_add(&mut self) -> bool {
-        let Some((rx, ..)) = &self.album_add else {
+        let Some((rx, ..)) = &self.exports.album_add else {
             return false;
         };
         let result = match rx.try_recv() {
@@ -654,7 +735,7 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Empty) => return true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the album add stopped".into()),
         };
-        let Some((_, summary, export_kind)) = self.album_add.take() else {
+        let Some((_, summary, export_kind)) = self.exports.album_add.take() else {
             return false;
         };
         let summary = &summary;
@@ -663,20 +744,20 @@ impl App {
             Ok(album) => {
                 if let ImmichLink::Connected {
                     albums: Ok(list), ..
-                } = &mut self.immich
+                } = &mut self.exports.immich
                 {
                     if !list.iter().any(|a| a.id == album.id) {
                         list.push(album.clone());
                         list.sort_by_key(|a| a.name.to_lowercase());
                     }
                 }
-                if matches!(self.export_settings.album, AlbumChoice::New(_)) {
+                if matches!(self.exports.settings.album, AlbumChoice::New(_)) {
                     self.set_export_settings(ExportSettings {
                         album: AlbumChoice::Existing {
                             id: album.id,
                             name: album.name.clone(),
                         },
-                        ..self.export_settings.clone()
+                        ..self.exports.settings.clone()
                     });
                 }
                 (export_kind, (t.added_to_album)(summary, &album.name))
@@ -696,10 +777,10 @@ impl App {
     /// than a condition that grows an `||` per feature.
     pub(crate) fn batch_running(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
-        let adding_to_album = self.album_add.is_some();
+        let adding_to_album = self.exports.album_add.is_some();
         #[cfg(target_arch = "wasm32")]
         let adding_to_album = false;
-        self.export_progress.is_some()
+        self.exports.progress.is_some()
             || adding_to_album
             || self.bulk_delete.is_some()
             || self.autotone.is_running()
@@ -800,8 +881,8 @@ mod status_tests {
         app.selected.insert(0);
         app.apply_rating_to_selection(4);
         app.selected.insert(1);
-        app.exporter = Some(crate::export::Exporter::new());
-        app.export_settings = ExportSettings {
+        app.exports.exporter = Some(crate::export::Exporter::new());
+        app.exports.settings = ExportSettings {
             target: ExportTarget::Immich,
             size: ExportSize::LongEdge(120),
             album: AlbumChoice::None,
@@ -811,7 +892,7 @@ mod status_tests {
         let (server, account) = ImmichServer::connect(&url, &key).expect("connect");
         eprintln!("connected as {} <{}>", account.name, account.email);
         let albums = server.albums();
-        app.immich = ImmichLink::Connected {
+        app.exports.immich = ImmichLink::Connected {
             server: Arc::new(server),
             account,
             albums,
@@ -825,9 +906,9 @@ mod status_tests {
                 "the form closes once the batch runs"
             );
             let deadline = Instant::now() + std::time::Duration::from_secs(120);
-            while app.export_progress.is_some() {
+            while app.exports.progress.is_some() {
                 assert!(Instant::now() < deadline, "the batch finished in time");
-                let outcomes = app.exporter.as_ref().unwrap().poll();
+                let outcomes = app.exports.exporter.as_ref().unwrap().poll();
                 if !outcomes.is_empty() {
                     app.on_export_outcomes(outcomes);
                 }
@@ -952,11 +1033,11 @@ mod status_tests {
     #[test]
     fn a_created_album_becomes_the_remembered_choice() {
         let mut app = App::new(None);
-        app.immich = connected(vec![]);
-        app.export_settings.target = ExportTarget::Immich;
-        app.export_settings.album = AlbumChoice::New("Trip".into());
+        app.exports.immich = connected(vec![]);
+        app.exports.settings.target = ExportTarget::Immich;
+        app.exports.settings.album = AlbumChoice::New("Trip".into());
         let (tx, rx) = std::sync::mpsc::channel();
-        app.album_add = Some((rx, "Uploaded 2".into(), StatusKind::Success));
+        app.exports.album_add = Some((rx, "Uploaded 2".into(), StatusKind::Success));
         assert!(app.poll_album_add(), "still waiting before a reply");
         assert!(
             app.batch_running(),
@@ -970,13 +1051,13 @@ mod status_tests {
         tx.send(Ok(album.clone())).unwrap();
         assert!(!app.poll_album_add());
         assert_eq!(
-            app.export_settings.album,
+            app.exports.settings.album,
             AlbumChoice::Existing {
                 id: "a1".into(),
                 name: "Trip".into()
             }
         );
-        let ImmichLink::Connected { albums, .. } = &app.immich else {
+        let ImmichLink::Connected { albums, .. } = &app.exports.immich else {
             panic!("still connected");
         };
         assert_eq!(albums.as_ref().unwrap(), &vec![album]);
@@ -994,18 +1075,18 @@ mod status_tests {
         app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
         app.recompute_visible();
         app.selected.insert(0);
-        app.immich = connected(vec![]);
-        app.export_settings.target = ExportTarget::Immich;
-        app.export_settings.album = AlbumChoice::New("  ".into());
+        app.exports.immich = connected(vec![]);
+        app.exports.settings.target = ExportTarget::Immich;
+        app.exports.settings.album = AlbumChoice::New("  ".into());
         assert_eq!(
             app.export_blocker(),
             Some(crate::i18n::t().album_name_needed)
         );
-        app.export_settings.album = AlbumChoice::New("Trip".into());
+        app.exports.settings.album = AlbumChoice::New("Trip".into());
         assert_eq!(app.export_blocker(), None);
 
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.album_add = Some((rx, "Uploaded 1".into(), StatusKind::Success));
+        app.exports.album_add = Some((rx, "Uploaded 1".into(), StatusKind::Success));
         assert_eq!(
             app.export_blocker(),
             Some(crate::i18n::t().export_in_progress),
@@ -1019,7 +1100,7 @@ mod status_tests {
     #[test]
     fn an_album_add_keeps_or_raises_the_export_error() {
         let mut app = App::new(None);
-        app.immich = connected(vec![]);
+        app.exports.immich = connected(vec![]);
         let album = || Album {
             id: "a1".into(),
             name: "Trip".into(),
@@ -1035,7 +1116,7 @@ mod status_tests {
         ];
         for (export_kind, result, expected) in cases {
             let (tx, rx) = std::sync::mpsc::channel();
-            app.album_add = Some((rx, "Uploaded 1".into(), export_kind));
+            app.exports.album_add = Some((rx, "Uploaded 1".into(), export_kind));
             tx.send(result).unwrap();
             assert!(!app.poll_album_add());
             assert_eq!(app.status().map(|(kind, _)| kind), Some(expected));
@@ -1046,7 +1127,7 @@ mod status_tests {
     #[test]
     fn an_album_add_starts_only_with_an_album_and_uploads() {
         let mut app = App::new(None);
-        app.immich = connected(vec![]);
+        app.exports.immich = connected(vec![]);
         let none = app.start_album_add(
             AlbumChoice::None,
             vec!["x".into()],
@@ -1061,6 +1142,156 @@ mod status_tests {
             StatusKind::Success,
         );
         assert_eq!(empty, Err("s".into()));
-        assert!(app.album_add.is_none());
+        assert!(app.exports.album_add.is_none());
+    }
+}
+
+#[cfg(test)]
+mod form_tests {
+    use super::*;
+
+    fn folder_app(photos: usize) -> (App, Vec<PathBuf>) {
+        let (mut app, _, paths) = crate::app::test_support::folder_app("export-form", photos);
+        app.focus = Region::Grid;
+        app.sel = Some(0);
+        (app, paths)
+    }
+
+    /// Export's two sections, Destination and Output, set each label over
+    /// its value, flush with the page's left edge.
+    #[test]
+    fn export_lays_out_as_a_form() {
+        use crate::app::test_support::settled;
+        use crate::i18n::t;
+
+        let (mut app, _) = folder_app(2);
+        app.exports.form_open = true;
+        let painted = settled(&mut app);
+        let destination = painted.pos_of(t().export_destination);
+        let output = painted.pos_of(t().export_output);
+        let size = painted.pos_of(t().export_size);
+        let folder = painted.pos_of(t().export_folder);
+
+        assert!(destination.y < folder.y && folder.y < output.y && output.y < size.y);
+        assert_eq!(folder.x, size.x, "labels in both sections share one edge");
+        let full = painted.pos_of(t().export_size_full);
+        assert!(full.y > size.y, "the value sits under its label");
+        let folder_tab = painted.pos_of(t().export_to_folder);
+        assert!(
+            destination.y < folder_tab.y && folder_tab.y < folder.y,
+            "the Folder/Immich choice sits between the header and the rows"
+        );
+    }
+
+    /// Typing a server URL and an API key into the Immich rows enables
+    /// Connect, and clicking it asks to connect.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn immich_connect_enables_once_both_fields_are_typed() {
+        use crate::app::test_support::{click, frame, settled};
+        use crate::export::ExportTarget;
+        use crate::i18n::t;
+        use crate::ui::UiAction;
+
+        let (mut app, _) = folder_app(2);
+        app.sel = Some(0);
+        app.exports.form_open = true;
+        app.exports.settings.target = ExportTarget::Immich;
+        let painted = settled(&mut app);
+        let connect = painted.pos_of(t().immich_connect);
+        let (actions, _) = click(&mut app, connect);
+        assert!(
+            actions.is_empty(),
+            "Connect is disabled while both fields are empty"
+        );
+
+        let type_into = |app: &mut App, at: egui::Pos2, text: &str| {
+            let (actions, _) = click(app, at);
+            app.apply_ui_actions(actions);
+            let (actions, _) = frame(app, vec![egui::Event::Text(text.into())]);
+            app.apply_ui_actions(actions);
+            settled(app)
+        };
+        let field_x = painted.pos_of(t().immich_url_example).x + 20.0;
+        // Each field sits under its label, the URL's between it and the example.
+        let url_label = painted.pos_of(t().immich_server_url).y;
+        let example = painted.pos_of(t().immich_url_example).y;
+        let below_label = (example - url_label) / 2.0;
+        let url_at = egui::pos2(field_x, url_label + below_label);
+        let key_at = egui::pos2(field_x, painted.pos_of(t().immich_api_key).y + below_label);
+        assert!(
+            url_at.y < example && example < key_at.y,
+            "the example sits under the URL field"
+        );
+        type_into(&mut app, url_at, "https://example.org");
+        let painted = type_into(&mut app, key_at, "secret");
+        match app.immich() {
+            ImmichLink::Disconnected { url, key, .. } => {
+                assert_eq!(
+                    (url.as_str(), key.as_str()),
+                    ("https://example.org", "secret")
+                )
+            }
+            _ => panic!("still disconnected"),
+        }
+        let (actions, _) = click(&mut app, painted.pos_of(t().immich_connect));
+        assert_eq!(actions, vec![UiAction::ConnectImmich]);
+    }
+
+    /// Once connected, the Album dropdown lists the account's albums after
+    /// "No album" and "New album", and picking New asks for its name.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_album_dropdown_lists_albums_and_new_asks_for_a_name() {
+        use crate::app::test_support::{click, settled};
+        use crate::export::{AlbumChoice, ExportTarget};
+        use crate::i18n::t;
+        use crate::immich::{Account, Album, ImmichServer};
+        use crate::ui::UiAction;
+
+        let (mut app, _) = folder_app(2);
+        app.sel = Some(0);
+        app.exports.form_open = true;
+        app.exports.settings.target = ExportTarget::Immich;
+        let album = |id: &str, name: &str| Album {
+            id: id.into(),
+            name: name.into(),
+        };
+        app.exports.immich = ImmichLink::Connected {
+            server: std::sync::Arc::new(ImmichServer::offline("https://immich.test")),
+            account: Account {
+                name: "Ada".into(),
+                email: "ada@example.com".into(),
+            },
+            albums: Ok(vec![album("1", "Beach"), album("2", "Wedding")]),
+        };
+        let painted = settled(&mut app);
+        let (_, painted) = click(&mut app, painted.pos_of(t().album_none));
+        assert!(
+            painted.has("Beach") && painted.has("Wedding"),
+            "{:?}",
+            painted.texts()
+        );
+
+        let (actions, _) = click(&mut app, painted.pos_of("Wedding"));
+        let [UiAction::SetExportSettings(picked)] = &actions[..] else {
+            panic!("{actions:?}");
+        };
+        assert_eq!(
+            picked.album,
+            AlbumChoice::Existing {
+                id: "2".into(),
+                name: "Wedding".into()
+            }
+        );
+
+        app.exports.settings.album = AlbumChoice::New(String::new());
+        let painted = settled(&mut app);
+        assert!(painted.has(t().album_name), "{:?}", painted.texts());
+        assert_eq!(app.export_blocker(), Some(t().album_name_needed));
+        assert!(
+            painted.has(t().album_name_needed),
+            "the blocker shows under Export"
+        );
     }
 }

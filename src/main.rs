@@ -119,7 +119,7 @@ fn finish_window_setup(
     app.window = Some(window);
     app.renderer = Some(renderer);
     app.loader = Some(loader);
-    app.exporter = Some(export::Exporter::new());
+    app.start_exporter();
     app.face_pool = facequality::FacePool::new();
     app.score_pool = score::ScorePool::new();
     app.egui_state = Some(egui_state);
@@ -483,7 +483,7 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         let catalog_load_pending = self.poll_signal_load() || catalog_load_pending;
 
-        let outcomes = self.exporter.as_ref().map(|e| e.poll()).unwrap_or_default();
+        let outcomes = self.poll_exporter();
         #[cfg(not(target_arch = "wasm32"))]
         let immich_connecting = self.poll_immich_connect() | self.poll_album_add();
         #[cfg(target_arch = "wasm32")]
@@ -598,7 +598,7 @@ impl App {
         // refreshing.
         let poll_ms = if image_pending || thumbs_pending || self.bulk_delete_running() {
             Some(16)
-        } else if self.export_progress.is_some()
+        } else if self.export_running()
             || self.catalog.backlog() > 0
             || immich_connecting
             || vision_pending
