@@ -121,7 +121,7 @@ fn finish_window_setup(
     app.loader = Some(loader);
     app.start_exporter();
     app.start_face_pool();
-    app.score_pool = score::ScorePool::new();
+    app.start_score_pool();
     app.egui_state = Some(egui_state);
     #[cfg(target_arch = "wasm32")]
     analytics::started();

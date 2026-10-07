@@ -120,6 +120,12 @@ impl App {
         self.request_redraw();
     }
 
+    /// Starts the scoring workers. The window's setup calls it, so a test's
+    /// App has none.
+    pub(crate) fn start_score_pool(&mut self) {
+        self.score_pool = crate::score::ScorePool::new();
+    }
+
     /// `(done, total)` while a run is going.
     pub(crate) fn score_progress(&self) -> Option<(usize, usize)> {
         self.score_job.as_ref().map(ScoreJob::progress)

@@ -784,7 +784,7 @@ impl App {
             || adding_to_album
             || self.bulk_delete.is_some()
             || self.autotone.is_running()
-            || self.score_job.is_some()
+            || self.score_progress().is_some()
             || self.catalog.backlog() > 0
     }
 

@@ -387,7 +387,7 @@ pub(crate) struct App {
     pub(crate) loader: Option<Loader>,
     /// `None` until the window is created, and on targets that cannot spawn
     /// threads.
-    pub(crate) score_pool: Option<crate::score::ScorePool>,
+    score_pool: Option<crate::score::ScorePool>,
     /// The photos a "Score photos" run has left. `None` when none is running.
     score_job: Option<crate::score::ScoreJob>,
     /// The export form, its settings and the exports it started.
