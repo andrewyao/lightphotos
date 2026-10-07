@@ -143,6 +143,8 @@ pub enum GridSort {
     /// The folder's file-name order.
     #[default]
     Name,
+    /// Oldest capture time first, photos without one last in name order.
+    Time,
     /// Highest quality score first, unscored photos last in name order.
     Quality,
 }
@@ -606,6 +608,8 @@ pub(crate) struct App {
     grid_sort: GridSort,
     /// Indices into `playlist.entries()` that pass the current filter.
     visible: Vec<usize>,
+    /// The photos behind `visible`, a group's cell counting each member.
+    shown_photos: usize,
     /// Position within `visible` of the current selection. `None` in the Grid
     /// before the user clicks or arrows. The Loupe always has a selection.
     sel: Option<usize>,
@@ -979,6 +983,7 @@ impl App {
             filter_cmp: Cmp::Gte,
             grid_sort: GridSort::Name,
             visible: Vec::new(),
+            shown_photos: 0,
             sel: None,
             selected: BTreeSet::new(),
             anchor: None,

@@ -23,6 +23,20 @@ impl App {
         self.scan_bursts(paths);
     }
 
+    /// Asks the loader for every listed photo's capture time not yet known,
+    /// for the Time sort. Each landing re-sorts the Grid.
+    pub(super) fn request_capture_times(&mut self) {
+        let (Some(pl), Some(loader)) = (self.playlist.as_ref(), self.loader.as_mut()) else {
+            return;
+        };
+        for path in pl.entries() {
+            if !self.capture_times.contains_key(path) && !loader.request_meta(path.clone()) {
+                // No worker will read it, so it sorts with the untimed.
+                self.capture_times.insert(path.clone(), None);
+            }
+        }
+    }
+
     fn scan_bursts(&mut self, paths: Vec<PathBuf>) {
         if !self.group_bursts_available() {
             return;

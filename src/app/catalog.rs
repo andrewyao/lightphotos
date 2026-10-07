@@ -102,7 +102,7 @@ impl App {
                 self.face_quality.entry(p).or_insert(q);
             }
         }
-        if self.eyes_filter_on() {
+        if self.eyes_filter_on() || self.grid_sort == GridSort::Time {
             self.recompute_visible();
         }
         self.request_redraw();

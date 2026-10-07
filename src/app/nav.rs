@@ -122,8 +122,12 @@ impl App {
         let anchor_pl = self.anchor.and_then(|p| self.visible.get(p).copied());
         let sel_pl = self.selected_index();
 
+        if self.grid_sort == GridSort::Time {
+            self.request_capture_times();
+        }
         let Some(pl) = &self.playlist else {
             self.visible.clear();
+            self.shown_photos = 0;
             self.sel = None;
             self.selected.clear();
             self.anchor = None;
@@ -159,6 +163,14 @@ impl App {
                 self.visible
                     .retain(|&i| entries.get(i).is_none_or(|p| !gone.contains(p)));
             }
+        }
+        if self.grid_sort == GridSort::Time {
+            let times = &self.capture_times;
+            // Stable, so equal times and the untimed tail keep name order.
+            self.visible.sort_by_key(|&i| {
+                let t = entries.get(i).and_then(|p| times.get(p).copied().flatten());
+                (t.is_none(), t)
+            });
         }
         if self.grid_sort == GridSort::Quality {
             let catalog = &self.catalog;
@@ -196,6 +208,12 @@ impl App {
         self.sel = sel;
         self.selected = selected;
         self.anchor = anchor;
+        self.shown_photos = (0..self.visible.len())
+            .map(|p| {
+                self.group_at(p)
+                    .map_or(1, |(_, g)| self.present_member_paths(g).len())
+            })
+            .sum();
         self.faces_unscanned = true;
         // The title carries the visible count.
         self.update_window_title();

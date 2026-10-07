@@ -37,6 +37,11 @@ impl App {
         // The worker reads the edits from the mirrors, and staleness is judged
         // against the catalog, so the two must agree before it starts.
         self.save_edit();
+        // Each new score would reorder the Grid under the pointer.
+        if self.grid_sort == GridSort::Quality {
+            self.grid_sort = GridSort::Name;
+            self.recompute_visible();
+        }
         self.score_job
             .get_or_insert_with(ScoreJob::default)
             .add(paths);
@@ -52,7 +57,6 @@ impl App {
         };
         let outcomes = pool.poll();
         let landed = !outcomes.is_empty();
-        let mut stored = false;
         for o in outcomes {
             let ours = self
                 .score_job
@@ -64,13 +68,8 @@ impl App {
             }
             if let Ok(score) = o.result {
                 self.catalog.set_score(&o.path, score, o.edits);
-                stored = true;
             }
         }
-        if stored && self.grid_sort == GridSort::Quality {
-            self.recompute_visible();
-        }
-
         if let Some(job) = self.score_job.as_mut() {
             let free = self.score_pool.as_ref().map_or(0, |p| p.capacity());
             for path in job.take(free) {
@@ -280,6 +279,35 @@ mod tests {
         assert!(app.quality_sort_available());
         app.set_sort(GridSort::Quality);
         assert_eq!(app.grid_sort(), GridSort::Quality);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn starting_a_scoring_run_leaves_the_quality_sort() {
+        let (mut app, dir, _) = folder_app(3);
+        app.score_pool = ScorePool::with_runner(2, slow_fixed);
+        app.set_sort(GridSort::Quality);
+        app.score_all();
+        assert_eq!(app.grid_sort(), GridSort::Name);
+        run_until_idle(&mut app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_time_sort_puts_the_oldest_first_and_the_untimed_last() {
+        let (mut app, dir, paths) = folder_app(4);
+        let at = |s| Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(s));
+        app.set_sort(GridSort::Time);
+        app.on_capture_times(vec![
+            (paths[0].clone(), None),
+            (paths[1].clone(), at(300)),
+            (paths[2].clone(), at(100)),
+            (paths[3].clone(), at(200)),
+        ]);
+        assert_eq!(
+            visible_names(&app),
+            ["p02.jpg", "p03.jpg", "p01.jpg", "p00.jpg"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

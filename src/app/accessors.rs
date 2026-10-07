@@ -165,6 +165,17 @@ impl App {
         self.visible.len()
     }
 
+    /// How many photos pass the filters, every member of a shown group
+    /// included.
+    pub(crate) fn shown_photos(&self) -> usize {
+        self.shown_photos
+    }
+
+    /// How many photos the folder or collection holds.
+    pub(crate) fn total_photos(&self) -> usize {
+        self.playlist.as_ref().map_or(0, |pl| pl.entries().len())
+    }
+
     pub(crate) fn set_grid_cols(&mut self, cols: usize) {
         self.grid_cols = cols.max(1);
     }

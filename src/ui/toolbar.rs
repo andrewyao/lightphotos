@@ -85,7 +85,6 @@ pub(super) fn toolbar_spacing(ui: &mut egui::Ui) {
 /// [`ToolbarControl::drawn`].
 #[derive(Clone, Copy)]
 pub(crate) enum ToolbarControl {
-    AnyRating,
     FilterCmp(Cmp),
     Star(u8),
     Unrated,
@@ -96,7 +95,6 @@ pub(crate) enum ToolbarControl {
 
 impl ToolbarControl {
     const ALL: &'static [Self] = &[
-        Self::AnyRating,
         Self::Unrated,
         Self::FilterCmp(Cmp::Gte),
         Self::FilterCmp(Cmp::Eq),
@@ -106,7 +104,6 @@ impl ToolbarControl {
         Self::Star(3),
         Self::Star(4),
         Self::Star(5),
-        Self::Flag(FlagFilter::All),
         Self::Flag(FlagFilter::Unflagged),
         Self::Flag(FlagFilter::Picked),
         Self::Flag(FlagFilter::Rejected),
@@ -145,7 +142,7 @@ impl ToolbarControl {
             self,
             Self::FilterCmp(Cmp::Gte)
                 | Self::Star(1)
-                | Self::Flag(FlagFilter::All)
+                | Self::Flag(FlagFilter::Unflagged)
                 | Self::EyesClosed
                 | Self::Sort
         )
@@ -154,9 +151,12 @@ impl ToolbarControl {
     /// What a click on this control, or Enter on it, does.
     pub(crate) fn action(self, app: &App) -> UiAction {
         match self {
-            Self::AnyRating => UiAction::SetFilter(None),
             Self::FilterCmp(cmp) => UiAction::SetFilterCmp(cmp),
-            Self::Star(n) => UiAction::SetFilter(Some((app.filter_cmp(), n))),
+            // Clicking the star the filter is on clears it, as the toggles do.
+            Self::Star(n) => {
+                let star = Some((app.filter_cmp(), n));
+                UiAction::SetFilter(if app.filter() == star { None } else { star })
+            }
             Self::Unrated => {
                 let unrated = matches!(app.filter(), Some((Cmp::Eq, 0)));
                 UiAction::SetFilter(if unrated { None } else { Some((Cmp::Eq, 0)) })
@@ -165,18 +165,18 @@ impl ToolbarControl {
             Self::Flag(f) if f == app.flag_filter() => UiAction::SetFlagFilter(FlagFilter::All),
             Self::Flag(f) => UiAction::SetFlagFilter(f),
             Self::EyesClosed => UiAction::ToggleEyesClosed,
-            // The keyboard flips the sort; a click opens the dropdown.
-            Self::Sort => UiAction::SetSort(match app.grid_sort() {
-                GridSort::Name => GridSort::Quality,
-                GridSort::Quality => GridSort::Name,
-            }),
+            // The keyboard steps to the next sort; a click opens the dropdown.
+            Self::Sort => {
+                let sorts = sort_choices(app);
+                let at = sorts.iter().position(|&s| s == app.grid_sort());
+                UiAction::SetSort(sorts[at.map_or(0, |i| (i + 1) % sorts.len())])
+            }
         }
     }
 
     fn widget(self, ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) -> egui::Response {
         let t = t();
         match self {
-            Self::AnyRating => ui.selectable_label(app.filter().is_none(), t.all),
             // The comparator applies to the next star click. It stays
             // highlighted even when no filter is set.
             Self::FilterCmp(cmp) => ui
@@ -209,11 +209,10 @@ impl ToolbarControl {
                 ui.add(star)
                     .on_hover_text((t.show_rated)(cmp_glyph(app.filter_cmp()), n))
             }
-            Self::Flag(FlagFilter::All) => {
-                ui.label(t.flag_filter_label);
-                ui.selectable_label(app.flag_filter() == FlagFilter::All, t.all)
-            }
             Self::Flag(f) => {
+                if f == FlagFilter::Unflagged {
+                    ui.label(t.flag_filter_label);
+                }
                 let state = match f {
                     FlagFilter::Picked => Some(Flag::Pick),
                     FlagFilter::Rejected => Some(Flag::Reject),
@@ -229,9 +228,10 @@ impl ToolbarControl {
                 super::flag_button(ui, state, on, side, (colors.value, colors.label))
                     .on_hover_text((t.show_flagged)(crate::app::flag_name(state)))
             }
-            Self::Unrated => ui
-                .selectable_label(matches!(app.filter(), Some((Cmp::Eq, 0))), t.unrated)
-                .on_hover_text(t.unrated_tip),
+            Self::Unrated => {
+                let on = matches!(app.filter(), Some((Cmp::Eq, 0)));
+                unrated_button(ui, on).on_hover_text(t.unrated_tip)
+            }
             Self::EyesClosed => ui
                 .add(egui::Button::selectable(
                     app.eyes_filter_on(),
@@ -243,22 +243,19 @@ impl ToolbarControl {
                 let current = app.grid_sort();
                 let name = |sort| match sort {
                     GridSort::Name => t.sort_name,
+                    GridSort::Time => t.sort_time,
                     GridSort::Quality => t.sort_quality,
                 };
                 egui::ComboBox::from_id_salt("grid_sort")
                     .selected_text(name(current))
                     .width(0.0)
                     .show_ui(ui, |ui| {
-                        for sort in [GridSort::Name, GridSort::Quality] {
-                            if sort == GridSort::Quality
-                                && current != sort
-                                && !app.quality_sort_available()
-                            {
-                                continue;
-                            }
+                        for sort in sort_choices(app) {
                             let mut item = ui.selectable_label(current == sort, name(sort));
-                            if sort == GridSort::Quality {
-                                item = item.on_hover_text(t.sort_quality_tip);
+                            match sort {
+                                GridSort::Time => item = item.on_hover_text(t.sort_time_tip),
+                                GridSort::Quality => item = item.on_hover_text(t.sort_quality_tip),
+                                GridSort::Name => {}
                             }
                             if item.clicked() && current != sort {
                                 out.actions.push(UiAction::SetSort(sort));
@@ -269,6 +266,49 @@ impl ToolbarControl {
             }
         }
     }
+}
+
+/// The Grid's sorts on offer. Quality waits out a scoring run, since each
+/// new score would reorder the Grid, and the browser can't read capture
+/// times.
+fn sort_choices(app: &App) -> Vec<GridSort> {
+    let mut sorts = vec![GridSort::Name];
+    if !cfg!(target_arch = "wasm32") {
+        sorts.push(GridSort::Time);
+    }
+    if app.quality_sort_available() {
+        sorts.push(GridSort::Quality);
+    }
+    sorts
+}
+
+/// The Unrated filter as an icon toggle beside the flag ones: a hollow star
+/// struck through, lit while the filter is on.
+fn unrated_button(ui: &mut egui::Ui, on: bool) -> egui::Response {
+    let side = font_size::px(ui.style(), 20.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    let colors = theme::colors(ui.ctx());
+    let color = if on {
+        colors.star
+    } else if resp.hovered() {
+        colors.value
+    } else {
+        colors.label
+    };
+    let painter = ui.painter();
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "\u{2606}",
+        egui::FontId::proportional(side * 0.9),
+        color,
+    );
+    let r = rect.shrink(side * 0.2);
+    painter.line_segment(
+        [r.left_bottom(), r.right_top()],
+        egui::Stroke::new((side * 0.08).max(1.0), color),
+    );
+    resp
 }
 
 /// The flag states in the order their icons sit: Unflagged, Picked, Rejected.
@@ -328,7 +368,7 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
                 }
                 toolbar_focus_sync(ui, app, idx, &resp, out);
             }
-            ui.weak((t.n_photos)(app.visible_len()));
+            ui.weak((t.n_of_m_photos)(app.shown_photos(), app.total_photos()));
             all_photos_menu(ui, app, out);
 
             if let Some((done, total)) = app.score_progress() {

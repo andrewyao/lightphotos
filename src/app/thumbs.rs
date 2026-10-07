@@ -303,6 +303,9 @@ impl App {
             self.signals.record(&path, Signal::Capture(t));
             self.capture_times.insert(path, t);
         }
+        if self.grid_sort == GridSort::Time {
+            self.recompute_visible();
+        }
         self.poll_bursts();
     }
 

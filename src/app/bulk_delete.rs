@@ -552,7 +552,7 @@ mod tests {
         let (mut app, dir, _) = folder_app("toolbar-rows", 3);
         app.select_single(0);
         let painted = settled_at(&mut app, egui::vec2(1900.0, 800.0));
-        let count = painted.pos_of(&(t.n_photos)(3));
+        let count = painted.pos_of(&(t.n_of_m_photos)(3, 3));
         let sort = painted.pos_of(t.sort_name);
         let actions = painted.pos_of(&format!("{} \u{23f7}", t.actions_menu));
         assert!(
