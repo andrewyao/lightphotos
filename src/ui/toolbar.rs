@@ -273,11 +273,15 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
     });
 }
 
-/// The selection bar's actions on one photo, for the Loupe's info bar,
-/// where they act on the photo on screen. The bar already names the photo
-/// and rates it with its stars, so neither the label nor Rate comes along.
-pub(super) fn loupe_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    photo_actions(ui, app, out);
+/// The actions under the filmstrip: the Loupe photo's, or with several
+/// photos selected in the strip, the selection bar's for all of them. The
+/// bar already rates the shown photo with its stars, so one photo gets
+/// neither the label nor Rate.
+pub(super) fn strip_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    match app.selection_count() {
+        n if n > 1 => selection_actions(ui, app, n, out),
+        _ => photo_actions(ui, app, out),
+    }
     delete_button(ui, app, out);
 }
 
@@ -378,40 +382,49 @@ fn selection_actions(ui: &mut egui::Ui, app: &App, n: usize, out: &mut FrameOutp
     export_button(ui, out);
 }
 
-/// The Compare pane's picks, as the grid's selection: one pick gets the
-/// one-photo actions and several the selection's, less grouping, which
-/// means nothing inside a group. Nothing while none is picked.
+/// "Selected n photos", Rate and an Actions menu over the Compare pane's
+/// picks, which the pane's toolbar has no room to lay out as buttons.
 pub(super) fn pick_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let picks = app.group_picks().len();
     if picks == 0 {
         return;
     }
-    ui.separator();
-    if picks == 1 {
-        ui.strong(t.selected_photo);
-        rate_menu(ui, out);
-        score_button(ui, app, t.update_score, out);
-        auto_adjust_button(ui, t.auto_tone, out);
-        copy_button(ui, out);
+    let label = if picks == 1 {
+        t.selected_photo.to_string()
     } else {
-        ui.strong((t.selected_n_photos)(picks));
-        rate_menu(ui, out);
-        score_button(ui, app, t.score_all, out);
-        auto_adjust_button(ui, t.auto_adjust_all, out);
-    }
-    apply_adjustment(ui, app, out);
-    export_button(ui, out);
-    ui.separator();
-    let delete =
-        egui::Button::new(egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger));
-    if ui
-        .add_enabled(app.delete_available(), delete)
-        .on_hover_text(t.delete_selection_tip)
-        .clicked()
-    {
-        out.actions.push(UiAction::RequestDeletePicks);
-    }
+        (t.selected_n_photos)(picks)
+    };
+    // The toolbar wraps, but never inside the label.
+    ui.add(egui::Label::new(egui::RichText::new(label).strong()).extend());
+    rate_menu(ui, out);
+    // The toolbar sits at the window's bottom, so the menu opens upward.
+    let button = ui.button(t.actions_menu);
+    egui::Popup::menu(&button)
+        .align(egui::RectAlign::TOP_START)
+        .show(|ui| {
+            if picks == 1 {
+                score_button(ui, app, t.update_score, out);
+                auto_adjust_button(ui, t.auto_tone, out);
+                copy_button(ui, out);
+            } else {
+                score_button(ui, app, t.score_all, out);
+                auto_adjust_button(ui, t.auto_adjust_all, out);
+            }
+            apply_adjustment(ui, app, out);
+            export_button(ui, out);
+            ui.separator();
+            let delete = egui::Button::new(
+                egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger),
+            );
+            if ui
+                .add_enabled(app.delete_available(), delete)
+                .on_hover_text(t.delete_selection_tip)
+                .clicked()
+            {
+                out.actions.push(UiAction::RequestDeletePicks);
+            }
+        });
 }
 
 fn copy_button(ui: &mut egui::Ui, out: &mut FrameOutput) {

@@ -263,6 +263,8 @@ pub struct Strings {
     pub update_score: &'static str,
     pub n_selected: fn(usize) -> String,
     pub rate_menu: &'static str,
+    /// The Compare toolbar's menu of actions on the picks; it opens upward.
+    pub actions_menu: &'static str,
     pub clear_rating: &'static str,
     pub auto_tone: &'static str,
     pub auto_tone_selection_tip: &'static str,
@@ -719,6 +721,7 @@ pub static EN: Strings = Strings {
     update_score: "Update Score",
     n_selected: |n| format!("{n} selected"),
     rate_menu: "Rate \u{2605}",
+    actions_menu: "Actions \u{23f6}",
     clear_rating: "Clear rating",
     auto_tone: "Auto Adjust",
     auto_tone_selection_tip:
@@ -1306,6 +1309,7 @@ pub static ZH: Strings = Strings {
     update_score: "更新评分",
     n_selected: |n| format!("已选 {n} 张"),
     rate_menu: "评分 \u{2605}",
+    actions_menu: "操作 \u{23f6}",
     clear_rating: "清除评分",
     auto_tone: "自动调整",
     auto_tone_selection_tip: "根据每张所选照片自身的直方图设置色调滑块 (Cmd+Shift+U)",

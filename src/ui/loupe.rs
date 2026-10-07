@@ -100,11 +100,11 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
     // app. A CentralPanel would claim that input.
     let mut central = ui.available_rect_before_wrap();
     if app.spike.is_some() {
-        // The pane's own controls sit in the info bar (`compare_actions`).
         if crate::app::spike_claims_pane() {
             egui::Panel::right("spike_tiles")
                 .exact_size(central.width() / 2.0)
                 .show_inside(ui, |ui| {
+                    compare_toolbar(ui, app, out);
                     egui::ScrollArea::vertical()
                         .auto_shrink([false, false])
                         .show(ui, |ui| spike_tiles(ui, app, out));
@@ -119,6 +119,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
             ui.painter_at(right)
                 .rect_filled(right, 0.0, theme::colors(ui.ctx()).panel);
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(right));
+            compare_toolbar(&mut child, app, out);
             spike_tiles(&mut child, app, out);
         }
     }
@@ -493,11 +494,7 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     egui::UiBuilder::new().max_rect(actions_rect).layout(layout),
                     |ui| {
                         super::toolbar::toolbar_spacing(ui);
-                        if app.spike.is_some() {
-                            compare_actions(ui, app, out);
-                        } else {
-                            super::toolbar::loupe_actions(ui, app, out);
-                        }
+                        super::toolbar::strip_actions(ui, app, out);
                     },
                 )
                 .response
@@ -904,45 +901,81 @@ fn group_view_icon(ui: &mut egui::Ui, view: GroupView, selected: bool) -> egui::
     response
 }
 
-/// The Compare pane's controls, in the info bar while the pane is open:
-/// how to load the tiles on native, Set as representative, live while
-/// exactly one member is picked, then the actions on the picks
-/// (`toolbar::pick_actions`).
-fn compare_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let t = crate::i18n::t();
-    let picks = app.group_picks().len();
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        ui.label(t.tile_load);
-        for (f, label) in [
-            (TileFidelity::Speed, t.tile_speed),
-            (TileFidelity::Full, t.tile_full),
-        ] {
-            let current = app.tile_fidelity();
-            if ui.radio(current == f, label).clicked() && current != f {
-                out.actions.push(UiAction::SetTileFidelity(f));
-            }
-        }
-    }
-    let set = Button {
-        label: t.set_as_rep,
-        role: Role::Primary,
-        enabled: picks == 1,
+/// The Compare pane's toolbar along its bottom: how to load the tiles on
+/// native, the page arrows for a group of more than one page, the picks'
+/// rating and actions, and Set as representative while exactly one member
+/// is picked. It wraps onto more rows when the pane is too narrow.
+fn compare_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let Some(tiles) = app.spike.as_ref() else {
+        return;
     };
-    if form::button(ui, &set).clicked() {
-        out.actions.push(UiAction::SetPickAsRep);
-    }
-    super::toolbar::pick_actions(ui, app, out);
+    let t = crate::i18n::t();
+    egui::Panel::bottom("compare_toolbar")
+        .resizable(false)
+        .show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.set_min_height(ui.spacing().interact_size.y);
+                super::toolbar::toolbar_spacing(ui);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    ui.label(t.tile_load);
+                    for (f, label) in [
+                        (TileFidelity::Speed, t.tile_speed),
+                        (TileFidelity::Full, t.tile_full),
+                    ] {
+                        let current = app.tile_fidelity();
+                        if ui.radio(current == f, label).clicked() && current != f {
+                            out.actions.push(UiAction::SetTileFidelity(f));
+                        }
+                    }
+                }
+                if tiles.pages() > 1 {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    ui.separator();
+                    let first = tiles.page * crate::app::SPIKE_PAGE + 1;
+                    let last = first + tiles.page_paths().len() - 1;
+                    if ui
+                        .add_enabled(tiles.page > 0, egui::Button::new("\u{2039}"))
+                        .clicked()
+                    {
+                        out.actions.push(UiAction::SpikePage(tiles.page - 1));
+                    }
+                    ui.label((t.group_page)(first, last, tiles.group_len()));
+                    if ui
+                        .add_enabled(
+                            tiles.page + 1 < tiles.pages(),
+                            egui::Button::new("\u{203a}"),
+                        )
+                        .clicked()
+                    {
+                        out.actions.push(UiAction::SpikePage(tiles.page + 1));
+                    }
+                }
+                if !app.group_picks().is_empty() {
+                    ui.separator();
+                }
+                super::toolbar::pick_actions(ui, app, out);
+                if app.group_picks().len() == 1 {
+                    let set = Button {
+                        label: t.set_as_rep,
+                        role: Role::Primary,
+                        enabled: true,
+                    };
+                    if form::button(ui, &set).clicked() {
+                        out.actions.push(UiAction::SetPickAsRep);
+                    }
+                }
+            });
+        });
 }
 
 /// SPIKE: one tile per member on the group's current page, each sampling
 /// the zoom square. The representative is outlined in the selection color
 /// and the picked members in the cursor color. A click picks only that
 /// tile, Cmd-click toggles it, and Shift-click picks the run from the last
-/// click across pages; the info bar's buttons act on the picks. Each
-/// tile carries its member's stars and score (`tile_marks`). A page
-/// holds `SPIKE_PAGE` tiles, and a group with more gets arrows under the
-/// grid. The grid keeps one size across pages, so a short last page leaves
+/// click across pages; the pane's toolbar (`compare_toolbar`) acts on the
+/// picks and pages through a group of more than `SPIKE_PAGE` members. Each
+/// tile carries its member's stars and score (`tile_marks`). The grid keeps one size across pages, so a short last page leaves
 /// cells empty.
 fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let colors = theme::colors(ui.ctx());
@@ -956,15 +989,9 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let cols = (fit as f32).sqrt().ceil().max(1.0) as usize;
     let rows = fit.div_ceil(cols);
     let pad = 8.0;
-    let paged = tiles.pages() > 1;
-    let nav_h = if paged {
-        ui.spacing().interact_size.y + pad
-    } else {
-        0.0
-    };
     let avail = ui.available_size();
     let tile = ((avail.x - pad * (cols as f32 - 1.0)) / cols as f32)
-        .min((avail.y - nav_h - pad * (rows as f32 - 1.0)) / rows as f32)
+        .min((avail.y - pad * (rows as f32 - 1.0)) / rows as f32)
         .max(16.0);
     ui.spacing_mut().item_spacing = egui::vec2(pad, pad);
     for row in tiles.members.chunks(cols) {
@@ -1037,17 +1064,6 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             }
         });
     }
-    if paged {
-        // Keep the arrows put on a short last page.
-        let missing = rows - tiles.members.len().div_ceil(cols);
-        ui.add_space(missing as f32 * (tile + pad));
-        spike_page_nav(
-            ui,
-            tiles,
-            cols as f32 * tile + pad * (cols as f32 - 1.0),
-            out,
-        );
-    }
 }
 
 /// A drag on a tile moves what every tile shows, as grabbing the photo
@@ -1072,7 +1088,7 @@ fn drag_tile_square(app: &App, tile: f32, delta: egui::Vec2, out: &mut FrameOutp
 const TILE_BORDER: f32 = 4.0;
 
 /// A band along a tile's bottom with the member's stars, which rate it as
-/// the info bar's do, and its score, which explains itself on hover. A tile
+/// the filmstrip bar's do, and its score, which explains itself on hover. A tile
 /// too narrow for the band goes without. The stars sit over the tile, so a
 /// click on them rates and does not pick.
 fn tile_marks(
@@ -1144,7 +1160,7 @@ fn tile_marks(
             color,
         );
         if resp.clicked() {
-            // Clicking the current rating clears it, as in the info bar.
+            // Clicking the current rating clears it, as in the filmstrip bar.
             let stars = if n == current { 0 } else { n };
             out.actions.push(UiAction::RateGroupMember {
                 path: path.to_path_buf(),
@@ -1170,46 +1186,6 @@ fn tile_marks(
         )
         .on_hover_text(super::grid::score_tip(score, stale));
     }
-}
-
-/// SPIKE: previous and next arrows either side of the page's member range,
-/// as wide as the tile grid above them.
-fn spike_page_nav(
-    ui: &mut egui::Ui,
-    tiles: &crate::app::SpikeTiles,
-    width: f32,
-    out: &mut FrameOutput,
-) {
-    let first = tiles.page * crate::app::SPIKE_PAGE + 1;
-    let last = first + tiles.page_paths().len() - 1;
-    let h = ui.spacing().interact_size.y;
-    ui.allocate_ui_with_layout(
-        egui::vec2(width, h),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            if ui
-                .add_enabled(tiles.page > 0, egui::Button::new("‹"))
-                .clicked()
-            {
-                out.actions.push(UiAction::SpikePage(tiles.page - 1));
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .add_enabled(tiles.page + 1 < tiles.pages(), egui::Button::new("›"))
-                    .clicked()
-                {
-                    out.actions.push(UiAction::SpikePage(tiles.page + 1));
-                }
-                ui.centered_and_justified(|ui| {
-                    ui.label((crate::i18n::t().group_page)(
-                        first,
-                        last,
-                        tiles.group_len(),
-                    ));
-                });
-            });
-        },
-    );
 }
 
 /// SPIKE: outline on the shown photo of the square the tiles zoom into. A
