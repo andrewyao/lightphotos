@@ -164,18 +164,14 @@ impl App {
             self.auto_tone_batch(vec![path], DeferredAutoToneMode::Append);
             return;
         }
-        if self.hist_sample.is_empty() {
+        let Some((sample, format)) = self.hist.sample() else {
             self.set_status(
                 StatusKind::Error,
                 crate::i18n::t().auto_tone_needs_load.into(),
             );
             return;
-        }
-        let auto = autotone::analyze(
-            &self.hist_sample,
-            self.hist_pixel_format,
-            self.autotone.centering,
-        );
+        };
+        let auto = autotone::analyze(sample, format, self.autotone.centering);
         let merged = autotone::merge(&self.current_adjustments(), &auto);
         self.apply_adjustments_kind(merged, "auto_tone");
         self.set_status(
@@ -195,7 +191,7 @@ impl App {
             self.auto_tone_batch(vec![path], DeferredAutoToneMode::Append);
             return;
         }
-        if Some(path.as_path()) == self.shown.path() && !self.hist_sample.is_empty() {
+        if Some(path.as_path()) == self.shown.path() && self.hist.sample().is_some() {
             self.auto_tone_shown();
             return;
         }
@@ -267,12 +263,12 @@ impl App {
                 continue;
             }
             // The shown photo's histogram sample needs no decode.
-            if self.shown.path() == Some(path.as_path()) && !self.hist_sample.is_empty() {
-                let auto = autotone::analyze(
-                    &self.hist_sample,
-                    self.hist_pixel_format,
-                    self.autotone.centering,
-                );
+            let shown_sample = self
+                .hist
+                .sample()
+                .filter(|_| self.shown.path() == Some(path.as_path()));
+            if let Some((sample, format)) = shown_sample {
+                let auto = autotone::analyze(sample, format, self.autotone.centering);
                 self.tone_one(&path, &auto);
                 continue;
             }
@@ -431,7 +427,7 @@ impl App {
         self.autotone.done += 1;
         if self.shown.path() == Some(path) {
             self.push_adjustments();
-            self.hist_dirty = true;
+            self.hist.invalidate();
         }
     }
 
@@ -502,7 +498,7 @@ mod tests {
         let (mut app, dir, a, b) = grid_with_two_photos("autotone-cursor");
         // Photo A was open in the Loupe, and still has its histogram sample.
         app.shown = Shown::Preview(a.clone(), 1024, 1024);
-        app.hist_sample = vec![[0.02f32; 3]; 64];
+        app.hist.set_sample(vec![[0.02f32; 3]; 64]);
         // The grid cursor is on photo B.
         app.sel = app
             .visible
@@ -735,7 +731,7 @@ mod tests {
         let (mut app, dir, a, _b) = grid_with_two_photos("autotone-loupe");
         app.mode = ViewMode::Loupe;
         app.shown = Shown::Preview(a.clone(), 1024, 1024);
-        app.hist_sample = vec![[0.02f32; 3]; 64];
+        app.hist.set_sample(vec![[0.02f32; 3]; 64]);
         app.sel = None;
         app.want = Some(a.clone());
 
@@ -783,7 +779,7 @@ mod tests {
     fn shown_photo_auto_tone_waits_for_catalog_load() {
         let (mut app, dir, a, _b) = grid_with_two_photos("autotone-catalog-race");
         app.shown = Shown::Preview(a.clone(), 1024, 1024);
-        app.hist_sample = vec![[0.02f32; 3]; 64];
+        app.hist.set_sample(vec![[0.02f32; 3]; 64]);
         app.catalog_load_pending = Some((dir.clone(), 1));
 
         app.auto_tone_shown();
@@ -798,7 +794,7 @@ mod tests {
     fn cmd_u_in_the_grid_waits_for_catalog_load() {
         let (mut app, dir, a, b) = grid_with_two_photos("autotone-grid-catalog-race");
         app.shown = Shown::Preview(a, 1024, 1024);
-        app.hist_sample = vec![[0.02f32; 3]; 64];
+        app.hist.set_sample(vec![[0.02f32; 3]; 64]);
         app.sel = app
             .visible
             .iter()
@@ -858,7 +854,7 @@ mod tests {
         app.shown = Shown::Preview(a.clone(), 1024, 1024);
         app.sel = None;
         app.want = Some(a.clone());
-        app.hist_sample.clear();
+        app.hist.set_sample(Vec::new());
         app.catalog_load_pending = Some((dir.clone(), 1));
 
         app.auto_tone_one();

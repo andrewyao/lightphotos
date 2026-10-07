@@ -692,7 +692,7 @@ impl App {
         if let Some(shown) = self.shown.path().map(Path::to_path_buf) {
             if paths.contains(&shown) {
                 self.push_adjustments();
-                self.hist_dirty = true;
+                self.hist.invalidate();
             }
         }
         self.request_redraw();

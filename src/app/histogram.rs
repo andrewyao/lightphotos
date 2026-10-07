@@ -1,7 +1,68 @@
 use super::*;
 
 use crate::develop::{self};
+use crate::image_decode::PixelFormat;
 use crate::{image_decode, image_ops};
+
+pub(super) struct Histogram {
+    /// Small row-major grid (`dw` x `dh`) of the shown image in
+    /// linear-light RGB, so the bins recomputes cheaply as edits change.
+    /// A real 2D grid so denoise can read neighbors and crop can drop cells.
+    sample: Vec<[f32; 3]>,
+    /// Format of the image behind `sample`. RAW linear samples need the
+    /// RAW shader's sRGB transfer and preview boost.
+    pixel_format: PixelFormat,
+    dw: usize,
+    dh: usize,
+    /// Per-channel display-space bins. Float bins: each sample splits
+    /// across neighboring bins, so a tone stretch doesn't leave a comb of gaps.
+    bins: Option<[[f32; 256]; 3]>,
+    dirty: bool,
+}
+
+impl Histogram {
+    pub(super) fn new() -> Self {
+        Self {
+            sample: Vec::new(),
+            pixel_format: PixelFormat::Srgb8,
+            dw: 0,
+            dh: 0,
+            bins: None,
+            dirty: false,
+        }
+    }
+
+    /// The bins no longer match the edits, so the next frame rebins.
+    pub(super) fn invalidate(&mut self) {
+        self.dirty = true;
+    }
+
+    pub(super) fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// The shown photo's sample and its format. `None` before one is shown.
+    pub(super) fn sample(&self) -> Option<(&[[f32; 3]], PixelFormat)> {
+        (!self.sample.is_empty()).then_some((&self.sample, self.pixel_format))
+    }
+
+    /// The sample cell under `(u, v)` in the photo's UV space.
+    pub(super) fn pixel_at(&self, u: f32, v: f32) -> Option<[f32; 3]> {
+        if self.dw == 0 || self.dh == 0 {
+            return None;
+        }
+        let gx = ((u * self.dw as f32) as usize).min(self.dw - 1);
+        let gy = ((v * self.dh as f32) as usize).min(self.dh - 1);
+        Some(self.sample[gy * self.dw + gx])
+    }
+}
+
+#[cfg(test)]
+impl Histogram {
+    pub(super) fn set_sample(&mut self, sample: Vec<[f32; 3]>) {
+        self.sample = sample;
+    }
+}
 
 impl App {
     /// Store a ~256 px linear-light downsample of a newly shown image. It stays
@@ -12,27 +73,27 @@ impl App {
         const TARGET: usize = 256;
         let (sample, dw, dh) = image_ops::downsample_linear(img, TARGET);
         if sample.is_empty() {
-            self.hist_sample.clear();
-            self.hist_dw = 0;
-            self.hist_dh = 0;
-            self.hist_pixel_format = image_decode::PixelFormat::Srgb8;
-            self.hist_dirty = true;
+            self.hist.sample.clear();
+            self.hist.dw = 0;
+            self.hist.dh = 0;
+            self.hist.pixel_format = image_decode::PixelFormat::Srgb8;
+            self.hist.dirty = true;
             return;
         }
-        self.hist_sample = sample;
-        self.hist_dw = dw;
-        self.hist_dh = dh;
-        self.hist_pixel_format = img.pixel_format;
-        self.hist_dirty = true;
+        self.hist.sample = sample;
+        self.hist.dw = dw;
+        self.hist.dh = dh;
+        self.hist.pixel_format = img.pixel_format;
+        self.hist.dirty = true;
     }
 
     /// Rebin `hist_sample` under the current adjustments. Each cell goes through
     /// the same denoise and tone math as the preview, is encoded to display
     /// space, and lands in one of 256 buckets per channel.
     pub(super) fn recompute_histogram(&mut self) {
-        if self.hist_sample.is_empty() {
-            self.histogram = None;
-            self.hist_dirty = false;
+        if self.hist.sample.is_empty() {
+            self.hist.bins = None;
+            self.hist.dirty = false;
             return;
         }
         let adj = self.current_adjustments();
@@ -40,8 +101,8 @@ impl App {
         let crop = adj
             .crop
             .filter(|c| c.left > 0.0 || c.top > 0.0 || c.right < 1.0 || c.bottom < 1.0);
-        let (dw, dh) = (self.hist_dw, self.hist_dh);
-        let grid = &self.hist_sample;
+        let (dw, dh) = (self.hist.dw, self.hist.dh);
+        let grid = &self.hist.sample;
         let turn = (adj.straighten != 0.0)
             .then(|| develop::Straighten::new(adj.straighten, dw as f32, dh as f32));
         let mut bins = [[0f32; 256]; 3];
@@ -71,14 +132,14 @@ impl App {
                     let sy = (gy as i64 + dy as i64).clamp(0, dh as i64 - 1) as usize;
                     grid[sy * dw + sx]
                 });
-                let out = match self.hist_pixel_format {
+                let out = match self.hist.pixel_format {
                     image_decode::PixelFormat::Srgb8 => develop::apply_linear(&adj, px),
                     image_decode::PixelFormat::LinearF16 => develop::apply_raw_display(&adj, px),
                 };
                 for ch in 0..3 {
                     // `apply_raw_display` already returns display space. The
                     // sRGB path returns linear, so approximate with gamma 2.2.
-                    let v = match self.hist_pixel_format {
+                    let v = match self.hist.pixel_format {
                         image_decode::PixelFormat::Srgb8 => out[ch].max(0.0).powf(1.0 / 2.2),
                         image_decode::PixelFormat::LinearF16 => out[ch],
                     }
@@ -96,13 +157,13 @@ impl App {
                 }
             }
         }
-        self.histogram = Some(bins);
-        self.hist_dirty = false;
+        self.hist.bins = Some(bins);
+        self.hist.dirty = false;
     }
 
     /// The cached histogram bins for the panel (`None` when no image is shown).
     pub(crate) fn histogram(&self) -> Option<&[[f32; 256]; 3]> {
-        self.histogram.as_ref()
+        self.hist.bins.as_ref()
     }
 
     /// The current image's camera and exposure metadata. `None` until the

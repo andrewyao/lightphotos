@@ -224,7 +224,7 @@ impl App {
         self.unsaved_edit = Some(path);
         self.save_edit_unless_dragging();
         self.push_adjustments();
-        self.hist_dirty = true;
+        self.hist.invalidate();
         self.request_redraw();
     }
 
@@ -298,7 +298,7 @@ impl App {
         }
         self.touchup_selected = None;
         self.push_adjustments();
-        self.hist_dirty = true;
+        self.hist.invalidate();
         self.request_redraw();
     }
 
@@ -442,13 +442,10 @@ impl App {
     pub(super) fn pick_white_balance(&mut self, u: f32, v: f32) {
         self.tool = LoupeTool::None;
         self.request_redraw();
-        if self.hist_dw == 0 || self.hist_dh == 0 {
+        let Some(px) = self.hist.pixel_at(u, v) else {
             self.set_status(StatusKind::Error, crate::i18n::t().wb_no_image.into());
             return;
-        }
-        let gx = ((u * self.hist_dw as f32) as usize).min(self.hist_dw - 1);
-        let gy = ((v * self.hist_dh as f32) as usize).min(self.hist_dh - 1);
-        let px = self.hist_sample[gy * self.hist_dw + gx];
+        };
         match develop::neutralize_gray(px) {
             Some((temp, tint)) => {
                 let mut adj = self.current_adjustments();

@@ -576,19 +576,8 @@ pub(crate) struct App {
     touchup_undo: HashMap<PathBuf, Vec<Vec<TouchUp>>>,
     develop_open: bool,
     develop_tab: DevelopTab,
-    /// Small row-major grid (`hist_dw` x `hist_dh`) of the shown image in
-    /// linear-light RGB, so the histogram recomputes cheaply as edits change.
-    /// A real 2D grid so denoise can read neighbors and crop can drop cells.
-    hist_sample: Vec<[f32; 3]>,
-    /// Format of the image behind `hist_sample`. RAW linear samples need the
-    /// RAW shader's sRGB transfer and preview boost.
-    hist_pixel_format: image_decode::PixelFormat,
-    hist_dw: usize,
-    hist_dh: usize,
-    /// Per-channel display-space histogram. Float bins: each sample splits
-    /// across neighboring bins, so a tone stretch doesn't leave a comb of gaps.
-    histogram: Option<[[f32; 256]; 3]>,
-    hist_dirty: bool,
+    /// The shown photo's pixel sample and the histogram binned from it.
+    hist: histogram::Histogram,
     /// Photo whose edit is not yet written to its sidecar. See
     /// `save_edit_unless_dragging`.
     unsaved_edit: Option<PathBuf>,
@@ -915,12 +904,7 @@ impl App {
             touchup_undo: HashMap::new(),
             develop_open: true,
             develop_tab: DevelopTab::Sliders,
-            hist_sample: Vec::new(),
-            hist_pixel_format: image_decode::PixelFormat::Srgb8,
-            hist_dw: 0,
-            hist_dh: 0,
-            histogram: None,
-            hist_dirty: false,
+            hist: histogram::Histogram::new(),
             unsaved_edit: None,
             #[cfg(target_arch = "wasm32")]
             unsaved_edit_kind: "adjustment",
@@ -1188,7 +1172,7 @@ impl App {
         self.sync_thumb_textures();
         self.sync_compare_tiles();
 
-        if self.hist_dirty && self.develop_open {
+        if self.hist.is_dirty() && self.develop_open {
             self.recompute_histogram();
         }
 
@@ -1703,7 +1687,7 @@ impl App {
                     self.catalog.set_touchups(&path, &[]);
                     self.touchup_selected = None;
                     self.push_adjustments();
-                    self.hist_dirty = true;
+                    self.hist.invalidate();
                     self.request_redraw();
                 }
             }
