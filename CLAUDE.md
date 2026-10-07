@@ -20,11 +20,14 @@ cargo build --bins        # also builds the face_probe/seg_probe/score_probe har
 ./scripts/release.sh      # test, tag origin/main as the next patch (or pass v1.2.3), push the tag → release.yml builds and publishes
 ```
 
-Verify a change with `cargo fmt --check && cargo test && cargo build --release && cargo build --bins`. The
-last one is not redundant. `src/bin/face_probe.rs`, `src/bin/seg_probe.rs` and
-`src/bin/score_probe.rs` pull their dependencies in through `#[path]` includes because
-the crate has no lib target, so adding a `use crate::..` to `facequality.rs`,
-`segmentation.rs`, `quality.rs` or `judge.rs` breaks those binaries while `cargo build` and `cargo test` both stay green. Only `--bins` catches it.
+Verify a change with `cargo fmt --check && cargo test && cargo build --release && cargo build --bins`.
+The package has a lib target (`src/lib.rs`) holding the decode, encode, develop and
+scoring layer, and an app binary (`src/main.rs`) holding the rest. The probes in
+`src/bin/` and `src/raw/probe.rs` link the lib. The app imports each lib module at its
+crate root, so `crate::develop::..` resolves in both. A lib item the app or a probe
+uses has to be `pub`, not `pub(crate)`, and a lib module can't reach into the app.
+Their `#[cfg(test)]` blocks run as `cargo test --lib`, which `cargo test` includes.
+Under `--features raw-probe` they cover the non-mac decode path on a Mac.
 
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request. On macOS
 it runs `cargo build --bins`, `cargo test` and clippy. It also builds the wasm target, and
@@ -32,9 +35,9 @@ builds `--bin lightphotos` on Linux and on Windows, which is the only thing that
 typechecks the non-mac branches before a tag. `cargo fmt --check` runs there too and
 blocks, so run `cargo fmt` before committing.
 
-Note that the Linux and Windows jobs build `--bin lightphotos`, not `--bins`. The two
-probe harnesses are mac-only and do not compile off macOS. The optimized native build
-stays out of CI, since `release.yml` covers it when a tag is pushed.
+Note that the Linux and Windows jobs build `--bin lightphotos`, not `--bins`. The
+Vision probes compile off macOS too, but only to a stub that exits. The optimized
+native build stays out of CI, since `release.yml` covers it when a tag is pushed.
 
 The wasm32 (browser) build goes through `trunk`, on a dated nightly, with its environment in `scripts/web-env.sh`. The decode workers run as wasm threads over one shared memory, which needs std rebuilt with atomics (`-Z build-std`), hence the nightly; native stays on stable. The same file sets the unstable-apis cfg for the wgpu/WebGPU and File System Access bindings, which `Trunk.toml`'s `rustflags` key does *not* reach cargo with in trunk 0.21.14, and the shared-memory link arguments. The page must be cross-origin isolated (COOP/COEP) for `SharedArrayBuffer`: `trunk serve` sends the headers from `Trunk.toml`, and `deploy-web.sh` writes them into the site's `public/_headers`. Move the pinned nightly on purpose and rerun `tools/web-bench` after.
 

@@ -128,7 +128,7 @@ fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
 /// per pixel, then rotate by `rot` 90-degree clockwise steps. Returns
 /// `(w, h, rgba)`. Tone uses `develop::apply_linear`, which matches the shader.
 #[hotpath::measure]
-pub(crate) fn bake_edited(
+pub fn bake_edited(
     img: &DecodedImage,
     adj: &Adjustments,
     touchups: &[TouchUp],
@@ -194,7 +194,7 @@ pub(crate) fn bake_edited(
 
 /// A `LinearF16` image as opaque sRGB8 RGBA, with no edits, as
 /// `raw_shader.wgsl` would display it. Empty for a short buffer.
-pub(crate) fn linear_f16_to_srgb8(img: &DecodedImage) -> Vec<u8> {
+pub fn linear_f16_to_srgb8(img: &DecodedImage) -> Vec<u8> {
     let n = img.width as usize * img.height as usize;
     if img.rgba.len() < n * 8 {
         return Vec::new();
@@ -270,10 +270,7 @@ pub(crate) fn fit_long_edge(w: u32, h: u32, rgba: Vec<u8>, max_px: u32) -> (u32,
 /// the long side. Returns `(grid, w, h)`, or an empty grid for a bad image.
 /// The histogram and Auto Tone both use this so they see the same pixels.
 #[hotpath::measure]
-pub(crate) fn downsample_linear(
-    img: &DecodedImage,
-    target: usize,
-) -> (Vec<[f32; 3]>, usize, usize) {
+pub fn downsample_linear(img: &DecodedImage, target: usize) -> (Vec<[f32; 3]>, usize, usize) {
     let (w, h) = (img.width as usize, img.height as usize);
     let bytes_per_px = match img.pixel_format {
         PixelFormat::Srgb8 => 4,
@@ -303,7 +300,7 @@ pub(crate) fn downsample_linear(
 
 /// Nearest-pixel sample at UV coordinates, as linear RGB. Handles both pixel
 /// formats; the browser RAW path decodes to linear RGBA16F.
-pub(crate) fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
+pub fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
     let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
     let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;
     let i = ((y * img.width + x) * 4) as usize;

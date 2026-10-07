@@ -4,9 +4,6 @@
 //! an image already in memory. Given a file, Vision decodes it itself, so
 //! this never touches our decode pipeline.
 //!
-//! Keep this module free of other crate modules. The probe binaries in
-//! `src/bin/` include it by `#[path]` because the crate has no lib target.
-//!
 //! Vision does not read EXIF orientation from a file here. Feature prints
 //! don't care, and face detection tolerates roll. To fix it, switch to
 //! `initWithURL:orientation:options:` and pass the EXIF value through.

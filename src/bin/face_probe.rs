@@ -7,24 +7,11 @@
 //! ```sh
 //! cargo run --bin face_probe -- ~/Pictures/burst/*.jpg
 //! ```
-//!
-//! There is no lib target, so `facequality.rs` and its dependencies come in
-//! through `#[path]`. Extend the list when its dependencies grow.
 
-#![allow(dead_code)]
+// Off macOS only the stub `main` below is built.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
 
-#[cfg(target_os = "macos")]
-#[path = "../coregraphics.rs"]
-mod coregraphics;
-#[path = "../facequality.rs"]
-mod facequality;
-#[path = "../image_decode.rs"]
-mod image_decode;
-#[path = "../quality.rs"]
-mod quality;
-#[cfg(target_os = "macos")]
-#[path = "../vision.rs"]
-mod vision;
+use lightphotos::{facequality, image_decode};
 
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;

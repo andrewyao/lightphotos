@@ -8,24 +8,10 @@
 //! ImageIO cannot decode LinearRaw DNG pixels (see
 //! `linear_dng_pixel_decode_is_blocked_on_this_machine`), so the baseline is
 //! the analytic gradient the fixture was built from, not ImageIO.
-//!
-//! There is no lib target, so modules come in by `#[path]` and `crate::`
-//! resolves as in the main binary.
 
-#![allow(dead_code)]
-
-#[cfg(target_os = "macos")]
-#[path = "../coregraphics.rs"]
-mod coregraphics;
-#[path = "../hash.rs"]
-mod hash;
-#[path = "../image_decode.rs"]
-mod image_decode;
-#[path = "preview.rs"]
-mod raw_preview;
-// For `denoise_linear_rgb_buffer`, used by `raw_preview`'s `Quality` tier.
-#[path = "../develop.rs"]
-mod develop;
+#[cfg(test)]
+use lightphotos::hash;
+use lightphotos::{image_decode, raw_preview};
 
 use std::path::Path;
 use std::path::PathBuf;

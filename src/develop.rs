@@ -179,11 +179,7 @@ fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
     edit_signature_with_touchups(adj, &[], rot)
 }
 
-pub(crate) fn edit_signature_with_touchups(
-    adj: &Adjustments,
-    touchups: &[TouchUp],
-    rot: u8,
-) -> u64 {
+pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot: u8) -> u64 {
     use crate::hash::Fnv1a;
 
     let mut h = Fnv1a::new();
@@ -381,7 +377,7 @@ pub(crate) const RAW_LOOK_KNOTS: [f32; 17] = [
     0.976, 0.992, 1.000, 1.000,
 ];
 
-pub(crate) fn apply_raw_preview_boost(srgb: f32) -> f32 {
+pub fn apply_raw_preview_boost(srgb: f32) -> f32 {
     let x = srgb.clamp(0.0, 1.0) * (RAW_LOOK_KNOTS.len() - 1) as f32;
     let i = (x as usize).min(RAW_LOOK_KNOTS.len() - 2);
     let t = x - i as f32;
@@ -546,7 +542,7 @@ fn spatial_weight(dx: i32, dy: i32) -> f32 {
 /// edges. Returns `sample(0, 0)` exactly when denoise is off.
 ///
 /// Must match the denoise branch of `fs_main` in shader.wgsl.
-pub(crate) fn denoise_sample(adj: &Adjustments, sample: impl Fn(i32, i32) -> [f32; 3]) -> [f32; 3] {
+pub fn denoise_sample(adj: &Adjustments, sample: impl Fn(i32, i32) -> [f32; 3]) -> [f32; 3] {
     denoise_sample_with_strength(adj.denoise, sample)
 }
 

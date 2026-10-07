@@ -11,7 +11,7 @@ pub fn normalize(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-pub(crate) fn export_stem(src: &Path) -> String {
+pub fn export_stem(src: &Path) -> String {
     src.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "export".into())
@@ -70,7 +70,7 @@ pub fn jpg_export_target(src: &Path, dest_dir: &Path, taken: &HashSet<PathBuf>) 
 /// prepared can plant a link at a temp name, and a plain write would follow it
 /// and overwrite whatever it points at.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -106,7 +106,7 @@ pub(crate) fn write_atomic(dest: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// The file a [`write_atomic`] temp name was writing, or `name` itself when it
 /// has no `.<pid>-<n>` suffix. `name` has its `.tmp` already stripped.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn atomic_tmp_target(name: &str) -> &str {
+pub fn atomic_tmp_target(name: &str) -> &str {
     match name.rsplit_once('.') {
         Some((target, tag))
             if tag.split_once('-').is_some_and(|(pid, n)| {

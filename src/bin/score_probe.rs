@@ -14,33 +14,8 @@
 //! The app decodes through ImageIO's thumbnail path, which can use a RAW's
 //! embedded preview. That module drags in the catalog, so the probe decodes
 //! the image itself at the same size instead; RAW renders may differ a little.
-//!
-//! There is no lib target, so the modules come in through `#[path]`.
 
-#![allow(dead_code)]
-
-#[cfg(target_os = "macos")]
-#[path = "../coregraphics.rs"]
-mod coregraphics;
-#[path = "../develop.rs"]
-mod develop;
-#[path = "../facequality.rs"]
-mod facequality;
-#[path = "../hash.rs"]
-mod hash;
-#[path = "../image_decode.rs"]
-mod image_decode;
-#[path = "../image_encode.rs"]
-mod image_encode;
-#[path = "../image_ops.rs"]
-mod image_ops;
-#[path = "../judge.rs"]
-mod judge;
-#[path = "../quality.rs"]
-mod quality;
-#[cfg(target_os = "macos")]
-#[path = "../vision.rs"]
-mod vision;
+use lightphotos::{develop, image_decode, image_ops, judge, quality};
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

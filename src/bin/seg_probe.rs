@@ -11,30 +11,11 @@
 //! ```sh
 //! cargo run --bin seg_probe -- ~/Pictures/portrait.jpg
 //! ```
-//!
-//! There is no lib target, so `segmentation.rs` and its dependencies come in
-//! through `#[path]`.
 
-#![allow(dead_code)]
+// Off macOS only the stub `main` below is built.
+#![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
 
-#[cfg(target_os = "macos")]
-#[path = "../coregraphics.rs"]
-mod coregraphics;
-#[path = "../develop.rs"]
-mod develop;
-#[path = "../hash.rs"]
-mod hash;
-#[path = "../image_decode.rs"]
-mod image_decode;
-#[path = "../image_encode.rs"]
-mod image_encode;
-#[path = "../image_ops.rs"]
-mod image_ops;
-#[path = "../segmentation.rs"]
-mod segmentation;
-#[cfg(target_os = "macos")]
-#[path = "../vision.rs"]
-mod vision;
+use lightphotos::{image_decode, image_encode, segmentation};
 
 #[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};

@@ -3,7 +3,7 @@
 //! FNV-1a 64-bit hasher. Unlike `DefaultHasher`, its output is stable across
 //! runs, so it can key data saved to disk (thumbnail cache, edit signature).
 
-pub(crate) struct Fnv1a {
+pub struct Fnv1a {
     state: u64,
 }
 
@@ -11,20 +11,20 @@ impl Fnv1a {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
 
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Fnv1a {
             state: Self::OFFSET_BASIS,
         }
     }
 
-    pub(crate) fn write(&mut self, bytes: &[u8]) {
+    pub fn write(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.state ^= b as u64;
             self.state = self.state.wrapping_mul(Self::PRIME);
         }
     }
 
-    pub(crate) fn finish(&self) -> u64 {
+    pub fn finish(&self) -> u64 {
         self.state
     }
 }

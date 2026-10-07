@@ -21,7 +21,7 @@ use crate::develop::{Adjustments, TouchUp};
 use crate::{image_decode, image_encode};
 
 /// Subfolder of the current folder that exports go to, on every platform.
-pub(crate) const EXPORTS_DIR: &str = "Exports";
+pub const EXPORTS_DIR: &str = "Exports";
 
 /// What the export form is set to. Remembered across launches in `prefs`.
 #[derive(Clone, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]

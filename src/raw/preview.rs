@@ -20,7 +20,7 @@ use crate::image_decode::{fit_within, DecodedImage, DecodedImageFields, PixelFor
 /// `Srgb8` output. `Quality` is rawler's `PPGDemosaic` (full-res,
 /// edge-directed) with `LinearF16` output.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum DemosaicMode {
+pub enum DemosaicMode {
     Fast,
     Quality,
 }
@@ -60,10 +60,7 @@ fn to_srgb_u8(v: f32) -> u8 {
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
 #[hotpath::measure]
-pub(crate) fn decode_raw_fast_from_bytes(
-    bytes: &[u8],
-    max_px: u32,
-) -> Result<DecodedImage, String> {
+pub fn decode_raw_fast_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
     decode_raw_preview(source, max_px, DemosaicMode::Fast)
 }
@@ -75,10 +72,7 @@ pub(crate) fn decode_raw_fast_from_bytes(
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
 #[hotpath::measure]
-pub(crate) fn decode_raw_quality_from_bytes(
-    bytes: &[u8],
-    max_px: u32,
-) -> Result<DecodedImage, String> {
+pub fn decode_raw_quality_from_bytes(bytes: &[u8], max_px: u32) -> Result<DecodedImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
     decode_raw_preview(source, max_px, DemosaicMode::Quality)
 }
@@ -88,7 +82,7 @@ pub(crate) fn decode_raw_quality_from_bytes(
 /// slice versions copy the whole file for rawler, and the copy lives as long
 /// as the decode.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn decode_raw_from_shared_vec(
+pub fn decode_raw_from_shared_vec(
     bytes: std::sync::Arc<Vec<u8>>,
     max_px: u32,
     quality: bool,
@@ -641,7 +635,7 @@ fn map_xtrans_coord(coord: usize, tile_step: usize) -> usize {
 /// for `Fast`, `PPGDemosaic` for `Quality`. Returns `None` for layouts that
 /// would panic (see `is_supported_bayer_layout`).
 #[hotpath::measure]
-pub(crate) fn demosaic_cfa(
+pub fn demosaic_cfa(
     raw: &mut rawler::RawImage,
     mode: DemosaicMode,
     max_px: u32,

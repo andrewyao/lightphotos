@@ -6,9 +6,7 @@
 //! scale down; elsewhere the base is a flat midpoint, so the score separates
 //! sound frames from broken ones but cannot judge composition.
 //!
-//! Pure functions on every platform. Keep this module free of other crate
-//! modules: `src/bin/score_probe.rs` and `src/bin/face_probe.rs` include it
-//! by `#[path]`.
+//! Pure functions on every platform.
 
 use serde::{Deserialize, Serialize};
 

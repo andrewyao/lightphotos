@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! Rendered pixels in, a quality score out. Shared by the app's scoring
-//! workers and `src/bin/score_probe.rs`, which includes it by `#[path]`, so
-//! it reaches other modules only through ones the probe also includes.
+//! workers and `src/bin/score_probe.rs`.
 //!
 //! On macOS one Vision pass over the pixels already in hand finds the faces
 //! and, from macOS 15, the aesthetics score. Elsewhere, and when Vision

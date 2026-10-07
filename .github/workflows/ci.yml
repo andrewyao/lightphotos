@@ -56,26 +56,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # The gate for the probe binaries. face_probe and seg_probe pull their
-      # dependencies in through `#[path]` includes because the crate has no lib
-      # target, so adding a `use crate::..` to facequality.rs or segmentation.rs
-      # breaks this while `cargo build` and `cargo test` both stay green.
+      # The probe binaries link the lib target, so this is what catches a lib
+      # item they use losing its `pub`.
       - name: Build all binaries
         run: cargo build --bins
 
       - name: Test
         run: cargo test
 
-      # `--bins --tests`, not `--all-targets`. The latter builds a test harness
-      # for face_probe despite its `test = false`, and that harness does not
-      # compile (E0432 on crate::image_encode), which is the breakage
-      # Cargo.toml's `test = false` comment describes.
-      #
-      # No `-D warnings` either. The tree still carries clippy warnings, so
+      # No `-D warnings`. The tree still carries clippy warnings, so
       # denying them would fail every run from the first one. They print in this
       # step's log regardless. Once they are cleared, append `-- -D warnings`.
       - name: Clippy
-        run: cargo clippy --bins --tests
+        run: cargo clippy --all-targets
 
   # Nothing else here compiles for a non-Apple target, and the tag-triggered
   # release.yml is the only thing that ever has. Its last green cross-platform
@@ -84,10 +77,8 @@ jobs:
   # branches (the Loupe's subject-selection control, the non-mac decode path)
   # are exactly the code no mac job can typecheck.
   #
-  # `--bin lightphotos`, never `--bins`. face_probe and seg_probe are mac-only
-  # dev harnesses whose `#[path]` includes pull in the non-mac decode path
-  # without re-declaring what it needs, so `--bins` cannot compile here. That is
-  # the same reasoning release.yml's Build step already carries.
+  # `--bin lightphotos`, not `--bins`. The probes are mac-only dev harnesses
+  # that build to a stub here, so building them would only cost time.
   linux:
     name: build (Linux)
     runs-on: ubuntu-latest

@@ -96,7 +96,7 @@ pub(crate) fn acquire(bytes: usize) -> Grant {
 /// Gives back whatever this thread holds. wasm32 aborts on a panic or a
 /// failed allocation, so a `Grant` on the dying thread never drops; the panic
 /// hook calls this instead, or every later decode would wait forever.
-pub(crate) fn release_held_by_this_thread() {
+pub fn release_held_by_this_thread() {
     let bytes = HELD.with(|held| held.replace(0));
     if bytes > 0 {
         GLOBAL.release(bytes);

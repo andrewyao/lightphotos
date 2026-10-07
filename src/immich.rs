@@ -111,7 +111,6 @@ impl ImmichServer {
     }
 
     /// A server that was never reached, for tests of what surrounds one.
-    #[cfg(test)]
     pub fn offline(origin: &str) -> Self {
         ImmichServer {
             origin: origin.into(),

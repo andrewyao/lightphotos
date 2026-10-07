@@ -55,5 +55,5 @@ From the architecture review of 2026-09-27. Items are ordered by risk, then payo
 |---|------|
 | 28 | Split the 167-field `App` into owned sub-structs (library, edits, analysis, export, view, input, web backend). Replace the six modal bools with `modal: Option<Modal>`, and the pending/failed set pairs with one `JobState` per photo. |
 | 29 | Route keys through `UiAction` so there is one state reducer instead of two. |
-| 30 | Add `src/lib.rs` so shared files stop being mounted by `#[path]` from seven places. |
+| 30 | Add `src/lib.rs` so shared files stop being mounted by `#[path]` from seven places. Done: the probes link the lib, and `#[path]` only places files (`raw/`, `web/`). |
 | 31 | Typed errors in place of `Result<_, String>`, so retryable and permanent failures differ. |

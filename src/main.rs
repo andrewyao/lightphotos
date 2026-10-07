@@ -16,24 +16,12 @@ mod app;
 mod autotone;
 mod cache_limits;
 mod catalog;
-#[cfg(target_os = "macos")]
-mod coregraphics;
-mod develop;
 #[cfg(not(target_arch = "wasm32"))]
 mod dialog;
 #[cfg(not(target_arch = "wasm32"))]
 mod drive;
-mod export;
-mod facequality;
 mod groups;
-mod hash;
 mod i18n;
-mod image_decode;
-mod image_encode;
-mod image_ops;
-#[cfg(not(target_arch = "wasm32"))]
-mod immich;
-mod judge;
 mod loader;
 // The importer is native-only, so the browser build compiles the parser with
 // no caller until a wasm file picker exists.
@@ -43,32 +31,22 @@ mod macos_delegate;
 #[cfg(target_os = "macos")]
 mod menu;
 mod navigation;
-mod paths;
 mod prefs;
 mod presets;
-mod quality;
 // Profiling drives the real `navigation`, `catalog`, `Loader` and `export`
 // code, none of which the browser build has, and the driver runs from the
 // native `main`. Gating the module the same way keeps `--features hotpath`
 // building for wasm32 instead of failing on APIs that target cannot have.
-#[path = "raw/decode_budget.rs"]
-mod decode_budget;
 #[cfg(all(feature = "hotpath", not(target_arch = "wasm32")))]
 mod profile;
-#[cfg(target_arch = "wasm32")]
-#[path = "raw/preview.rs"]
-mod raw_preview;
 mod renderer;
 mod score;
 #[cfg(not(target_arch = "wasm32"))]
 mod secret;
-mod segmentation;
 mod signalcache;
 mod thumbnail;
 mod trash;
 mod ui;
-#[cfg(target_os = "macos")]
-mod vision;
 #[cfg(target_arch = "wasm32")]
 #[path = "web/web_canvas.rs"]
 mod web_canvas;
@@ -92,6 +70,15 @@ mod web_fs;
 mod web_thumb_cache;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_rect;
+
+#[cfg(not(target_arch = "wasm32"))]
+use lightphotos::immich;
+#[cfg(target_arch = "wasm32")]
+use lightphotos::{decode_budget, raw_preview};
+use lightphotos::{
+    develop, export, facequality, hash, image_decode, image_encode, image_ops, judge, paths,
+    quality, segmentation,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;

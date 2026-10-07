@@ -18,7 +18,7 @@ use crate::image_decode::{
 /// True for camera RAW extensions, which the `image` crate cannot decode.
 /// Mirrors the RAW subset of `navigation.rs`'s `IMAGE_EXTS`.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn is_raw_extension(path: &Path) -> bool {
+pub fn is_raw_extension(path: &Path) -> bool {
     const RAW_EXTS: &[&str] = &[
         "cr2", "cr3", "nef", "arw", "dng", "raf", "rw2", "orf", "pef", "srw",
     ];
@@ -35,7 +35,7 @@ pub(crate) fn is_raw_extension(path: &Path) -> bool {
 /// a row in samples, padded to whole tiles, so a 3-channel DNG wider than
 /// 16,666 px (a Lightroom panorama) is past it.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-pub(crate) fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<(), String> {
+pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<(), String> {
     use rawler::decoders::WellKnownIFD;
     use rawler::tags::TiffCommonTag;
 
@@ -80,7 +80,7 @@ pub(crate) fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> 
 /// the levels still don't line up. Must run before `apply_scaling` or
 /// `RawDevelop`, since a panic is fatal to a wasm32 decode thread.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-pub(crate) fn normalize_linear_levels(raw: &mut rawler::RawImage) -> Result<(), String> {
+pub fn normalize_linear_levels(raw: &mut rawler::RawImage) -> Result<(), String> {
     use rawler::rawimage::{BlackLevel, RawPhotometricInterpretation, WhiteLevel};
 
     if !matches!(raw.photometric, RawPhotometricInterpretation::LinearRaw) {
@@ -118,7 +118,7 @@ pub(crate) fn normalize_linear_levels(raw: &mut rawler::RawImage) -> Result<(), 
 // Unused in the main binary on a mac+raw-probe build.
 #[allow(dead_code)]
 #[hotpath::measure]
-pub(crate) fn decode_raw_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
+pub fn decode_raw_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
     rawler::decode_file(path).map_err(|e| e.to_string())
 }
 
@@ -126,7 +126,7 @@ pub(crate) fn decode_raw_via_rawler(path: &Path) -> Result<rawler::RawImage, Str
 /// [`apply_exif_orientation`] expects. The variants are the same eight EXIF
 /// cases in the same order.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-pub(crate) fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
+pub fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
     use rawler::Orientation::*;
     match o {
         Normal => 1,
@@ -142,14 +142,14 @@ pub(crate) fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
 }
 
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-pub(crate) use crate::develop::apply_raw_preview_boost;
+pub use crate::develop::apply_raw_preview_boost;
 
 /// Strength (0..=100, the Denoise slider's scale) of the always-on denoise
 /// applied when decoding RAW. It stands in for the noise reduction ImageIO
 /// does on macOS. Not ISO-scaled, because non-mac has no EXIF ISO read.
 /// The `Fast` tier skips it: its 2x2 binning already averages out noise.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-pub(crate) const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
+pub const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 
 /// Decodes a camera RAW file with rawler's `RawDevelop` (demosaic, white
 /// balance, color matrix, crop, sRGB gamma), then applies EXIF orientation.
@@ -161,7 +161,7 @@ pub(crate) const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 // On mac, only the raw-probe parity test calls this.
 #[allow(dead_code)]
 #[hotpath::measure]
-pub(crate) fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+pub fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let raw = decode_raw_via_rawler(path)?;
     // Memory-map instead of `std::fs::read` + `new_from_slice`, which would
     // hold two full heap copies of the file just to read the orientation.
@@ -188,10 +188,7 @@ pub(crate) fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImag
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
 #[hotpath::measure]
-pub(crate) fn decode_raw_nonmac_from_bytes(
-    bytes: &[u8],
-    max_dim: u32,
-) -> Result<DecodedImage, String> {
+pub fn decode_raw_nonmac_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(bytes);
     decode_raw_nonmac_from_source(source, max_dim)
 }
@@ -201,7 +198,7 @@ pub(crate) fn decode_raw_nonmac_from_bytes(
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
 #[hotpath::measure]
-pub(crate) fn decode_raw_nonmac_from_shared_vec(
+pub fn decode_raw_nonmac_from_shared_vec(
     bytes: std::sync::Arc<Vec<u8>>,
     max_dim: u32,
 ) -> Result<DecodedImage, String> {
@@ -329,7 +326,7 @@ pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
 #[hotpath::measure]
-pub(crate) fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedImage, String> {
+pub fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedImage, String> {
     let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
@@ -466,7 +463,7 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
 /// the caller.
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
 #[allow(dead_code)]
-pub(crate) fn fill_metadata_from_bytes(meta: &mut ImageMetadata, bytes: &[u8], raw: bool) {
+pub fn fill_metadata_from_bytes(meta: &mut ImageMetadata, bytes: &[u8], raw: bool) {
     if raw {
         fill_from_raw_source(meta, &rawler::rawsource::RawSource::new_from_slice(bytes));
     } else if let Ok(exif) =

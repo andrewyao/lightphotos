@@ -41,7 +41,7 @@ use crate::coregraphics;
 #[path = "raw/nonmac_decode.rs"]
 mod nonmac_decode;
 #[cfg(any(not(target_os = "macos"), feature = "raw-probe"))]
-pub(crate) use nonmac_decode::*;
+pub use nonmac_decode::*;
 
 /// How `DecodedImage::rgba` is laid out. Every decoder produces `Srgb8`
 /// except `raw_preview::decode_raw_quality_from_bytes` (the wasm32 Loupe RAW
@@ -133,7 +133,7 @@ pub struct CaptureDate {
 }
 
 /// `t` in the local time zone.
-pub(crate) fn local_date(t: SystemTime) -> CaptureDate {
+pub fn local_date(t: SystemTime) -> CaptureDate {
     use chrono::{Datelike, Timelike};
     let d: chrono::DateTime<chrono::Local> = t.into();
     CaptureDate {
@@ -233,7 +233,7 @@ impl Gps {
 }
 
 /// Short format name from the file extension, such as `JPEG` or `CR3`.
-pub(crate) fn format_name(path: &Path) -> Option<String> {
+pub fn format_name(path: &Path) -> Option<String> {
     let ext = path.extension()?.to_str()?.to_ascii_uppercase();
     Some(match ext.as_str() {
         "JPG" | "JPE" => "JPEG".to_string(),
@@ -710,7 +710,7 @@ fn read_orientation(source: &CGImageSource) -> u8 {
 /// Rotate or mirror RGBA8 pixels upright for EXIF orientation `1..=8`.
 /// Orientations `5..=8` swap width and height.
 #[hotpath::measure]
-pub(crate) fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImage {
+pub fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImage {
     if orientation <= 1 {
         return img;
     }
@@ -808,7 +808,7 @@ fn check_decode_size(w: u32, h: u32) -> Result<(), String> {
 
 /// Scale `(w, h)` down, keeping aspect ratio, so neither side exceeds
 /// `max_dim`.
-pub(crate) fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
+pub fn fit_within(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
     if w <= max_dim && h <= max_dim {
         return (w, h);
     }
