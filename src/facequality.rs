@@ -269,11 +269,13 @@ impl FacePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use crate::image_encode::encode_jpeg;
 
     // Per process, because two `cargo test` runs on one machine otherwise
     // share these fixture names and one truncates a file while the other's
     // Vision request is still reading it.
+    #[cfg(target_os = "macos")]
     fn write_jpeg(name: &str, w: u32, h: u32, rgba: &[u8]) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("lp-vision-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create fixture dir");
@@ -289,6 +291,7 @@ mod tests {
     /// create inference context"). Tests that need a model return early when
     /// this is false. Any other error counts as able, so a real regression
     /// still fails the test that hits it.
+    #[cfg(target_os = "macos")]
     fn vision_can_infer() -> bool {
         static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *CAN.get_or_init(|| {
@@ -351,6 +354,7 @@ mod tests {
 
     // The counterpart to the test above: a pool that did start a worker must
     // still carry a job all the way through Vision and back.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_running_pool_returns_an_analysis_for_a_submitted_photo() {
         if !vision_can_infer() {
@@ -384,6 +388,7 @@ mod tests {
 
     // Runs real Vision on a blank image. "No faces" must be an empty Ok, not an
     // error. Landmark quality needs real portraits; see `src/bin/face_probe.rs`.
+    #[cfg(target_os = "macos")]
     #[test]
     fn detect_faces_runs_and_finds_none_in_a_blank_image() {
         if !vision_can_infer() {

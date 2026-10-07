@@ -622,7 +622,13 @@ mod tests {
 
     /// The grid has to shrink while a long delete runs, or the user watches a
     /// toast climb over a grid full of photos that are already in the Trash.
+    ///
+    /// macOS only: it needs the trash worker to be slower than the poll loop.
+    /// Finder's Trash is. Linux's freedesktop Trash is a rename, which can
+    /// finish all six before the first poll, so there it fails about one run
+    /// in three.
     #[test]
+    #[cfg(target_os = "macos")]
     fn trashed_photos_leave_the_grid_without_touching_the_playlist() {
         let names = ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg"];
         let (mut app, dir, paths) = app_with_photos(&names);
