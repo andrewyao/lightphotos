@@ -550,15 +550,8 @@ pub(crate) struct App {
     pub(crate) mode: ViewMode,
     /// `pub(crate)` because the frame loop drives its write queue directly.
     pub(crate) catalog: Catalog,
-    /// Directory and token of the background sidecar scan in flight, if any.
-    /// Cleared only when the result with the matching token lands. A token is
-    /// needed because fast A to B to A navigation runs two loads for A, and the
-    /// first one landing must not clear the second.
-    catalog_load_pending: Option<(PathBuf, u64)>,
-    /// One per `request_catalog_load` call.
-    catalog_load_token: u64,
-    catalog_load_tx: Sender<CatalogLoadResult>,
-    catalog_load_rx: Receiver<CatalogLoadResult>,
+    /// The background sidecar scan in flight.
+    catalog_load: catalog::CatalogLoad,
     ratings: HashMap<PathBuf, u8>,
     /// Per-image develop edits. Holds only non-identity edits.
     edits: HashMap<PathBuf, Adjustments>,
@@ -785,7 +778,6 @@ impl App {
         crate::ui::font_size::init(&egui_ctx);
         crate::ui::theme::init(&egui_ctx);
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
-        let (catalog_load_tx, catalog_load_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
         let (renderer_init_tx, renderer_init_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
@@ -887,10 +879,7 @@ impl App {
             web_full_pending: Vec::new(),
             mode: ViewMode::Grid,
             catalog,
-            catalog_load_pending: None,
-            catalog_load_token: 0,
-            catalog_load_tx,
-            catalog_load_rx,
+            catalog_load: catalog::CatalogLoad::new(),
             ratings: HashMap::new(),
             edits: HashMap::new(),
             touchups: HashMap::new(),

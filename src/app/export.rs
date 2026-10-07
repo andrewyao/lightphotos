@@ -220,7 +220,7 @@ impl App {
         }
         // The edit maps read below fill in only after the background catalog
         // load finishes. Exporting earlier would silently drop edits.
-        if self.catalog_load_pending.is_some() {
+        if self.catalog_loading() {
             return Some(t.export_catalog_loading);
         }
         #[cfg(not(target_arch = "wasm32"))]

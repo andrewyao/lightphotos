@@ -160,7 +160,7 @@ impl App {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
         };
-        if self.catalog_load_pending.is_some() {
+        if self.catalog_loading() {
             self.auto_tone_batch(vec![path], DeferredAutoToneMode::Append);
             return;
         }
@@ -187,7 +187,7 @@ impl App {
         let Some(path) = self.selected_path() else {
             return;
         };
-        if self.catalog_load_pending.is_some() {
+        if self.catalog_loading() {
             self.auto_tone_batch(vec![path], DeferredAutoToneMode::Append);
             return;
         }
@@ -215,7 +215,7 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        if self.catalog_load_pending.is_some() {
+        if self.catalog_loading() {
             match mode {
                 DeferredAutoToneMode::Replace => {
                     let mut seen = std::collections::HashSet::with_capacity(paths.len());
@@ -780,7 +780,7 @@ mod tests {
         let (mut app, dir, a, _b) = grid_with_two_photos("autotone-catalog-race");
         app.shown = Shown::Preview(a.clone(), 1024, 1024);
         app.hist.set_sample(vec![[0.02f32; 3]; 64]);
-        app.catalog_load_pending = Some((dir.clone(), 1));
+        app.pretend_catalog_loading(&dir);
 
         app.auto_tone_shown();
 
@@ -800,7 +800,7 @@ mod tests {
             .iter()
             .position(|&i| app.playlist.as_ref().and_then(|pl| pl.entry(i)) == Some(b.as_path()));
         assert!(app.sel.is_some());
-        app.catalog_load_pending = Some((dir.clone(), 1));
+        app.pretend_catalog_loading(&dir);
 
         app.auto_tone_one();
 
@@ -812,7 +812,7 @@ mod tests {
     #[test]
     fn successive_cmd_u_requests_during_catalog_load_are_preserved_once() {
         let (mut app, dir, a, b) = grid_with_two_photos("autotone-successive-catalog-race");
-        app.catalog_load_pending = Some((dir.clone(), 1));
+        app.pretend_catalog_loading(&dir);
 
         for path in [&a, &b, &a] {
             app.sel = app.visible.iter().position(|&i| {
@@ -834,7 +834,7 @@ mod tests {
     fn selection_request_replaces_deferred_single_photo_requests() {
         let (mut app, dir, a, b) = grid_with_two_photos("autotone-selection-catalog-race");
         let c = dir.join("c.jpg");
-        app.catalog_load_pending = Some((dir.clone(), 1));
+        app.pretend_catalog_loading(&dir);
 
         app.auto_tone_batch(vec![a.clone()], DeferredAutoToneMode::Append);
         app.auto_tone_batch(
@@ -855,7 +855,7 @@ mod tests {
         app.sel = None;
         app.want = Some(a.clone());
         app.hist.set_sample(Vec::new());
-        app.catalog_load_pending = Some((dir.clone(), 1));
+        app.pretend_catalog_loading(&dir);
 
         app.auto_tone_one();
 

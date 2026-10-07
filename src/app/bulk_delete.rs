@@ -1281,7 +1281,7 @@ mod tests {
     fn delete_while_the_folder_loads_is_refused_and_trashes_nothing() {
         let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg"]);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        assert!(app.catalog_load_pending.is_some());
+        assert!(app.catalog_loading());
         app.select_single(0);
         app.request_bulk(crate::ui::BulkKind::Delete);
         assert!(app.pending_confirm.is_none(), "no confirm is offered");

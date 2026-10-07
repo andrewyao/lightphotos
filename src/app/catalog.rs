@@ -7,7 +7,42 @@ use crate::groups::{Group, GroupWrite};
 use crate::navigation::{Cmp, FlagFilter};
 use crate::ui;
 
+pub(super) struct CatalogLoad {
+    /// Directory and token of the background sidecar scan in flight, if any.
+    /// Cleared only when the result with the matching token lands. A token is
+    /// needed because fast A to B to A navigation runs two loads for A, and the
+    /// first one landing must not clear the second.
+    pending: Option<(PathBuf, u64)>,
+    /// One per `request_catalog_load` call.
+    token: u64,
+    tx: Sender<CatalogLoadResult>,
+    rx: Receiver<CatalogLoadResult>,
+}
+
+impl CatalogLoad {
+    pub(super) fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            pending: None,
+            token: 0,
+            tx,
+            rx,
+        }
+    }
+}
+
 impl App {
+    /// Whether the folder's sidecars are still loading.
+    pub(super) fn catalog_loading(&self) -> bool {
+        self.catalog_load.pending.is_some()
+    }
+
+    /// Makes the App act as if `dir`'s sidecars were still loading.
+    #[cfg(test)]
+    pub(super) fn pretend_catalog_loading(&mut self, dir: &Path) {
+        self.catalog_load.pending = Some((dir.to_path_buf(), 1));
+    }
+
     /// Swaps in `playlist`'s folder's derived-signal cache and copies what it
     /// holds into the two maps the culling signals live in, so a folder
     /// visited before starts with its capture times and face analyses
@@ -114,10 +149,10 @@ impl App {
     /// show for the new one. `poll_catalog_load` folds in the result.
     pub(super) fn request_catalog_load(&mut self, dir: &Path) {
         let mark = self.catalog.switch_dir(dir);
-        self.catalog_load_token += 1;
-        let token = self.catalog_load_token;
+        self.catalog_load.token += 1;
+        let token = self.catalog_load.token;
         let dir = dir.to_path_buf();
-        let tx = self.catalog_load_tx.clone();
+        let tx = self.catalog_load.tx.clone();
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -132,7 +167,7 @@ impl App {
                     crate::thumbnail::sweep_orphans(&for_thread);
                 });
             match spawned {
-                Ok(_) => self.catalog_load_pending = Some((dir, token)),
+                Ok(_) => self.catalog_load.pending = Some((dir, token)),
                 Err(e) => {
                     // The catalog stays empty, so tell the user. Keep the load
                     // marked pending on purpose: export refuses to run while a
@@ -141,7 +176,7 @@ impl App {
                     self.catalog
                         .note_persist_error(format!("could not load {}: {e}", dir.display()));
                     self.catalog.abandon_load();
-                    self.catalog_load_pending = Some((dir, token));
+                    self.catalog_load.pending = Some((dir, token));
                 }
             }
         }
@@ -172,11 +207,11 @@ impl App {
                     let _ = tx.send((for_task, token, mark, loaded));
                     crate::web_thumb_cache::sweep_orphans(&handle, &live, reads).await;
                 });
-                self.catalog_load_pending = Some((dir, token));
+                self.catalog_load.pending = Some((dir, token));
             }
             None => {
                 self.catalog.abandon_load();
-                self.catalog_load_pending = None;
+                self.catalog_load.pending = None;
             }
         }
     }
@@ -184,7 +219,7 @@ impl App {
     /// Applies finished catalog loads and refreshes the ratings and edits
     /// mirrors for the open folder. Returns true while a load is still pending.
     pub(crate) fn poll_catalog_load(&mut self) -> bool {
-        while let Ok((dir, token, mark, loaded)) = self.catalog_load_rx.try_recv() {
+        while let Ok((dir, token, mark, loaded)) = self.catalog_load.rx.try_recv() {
             let photos = match &self.playlist {
                 Some(p) if p.dir() == dir.as_path() => p.entries(),
                 _ => &[],
@@ -192,8 +227,8 @@ impl App {
             self.catalog.apply_loaded(&dir, mark, loaded, photos);
             // Match the token too: after A, B, A navigation two loads for A can
             // be in flight, and only the latest clears pending.
-            if self.catalog_load_pending.as_ref() == Some(&(dir.clone(), token)) {
-                self.catalog_load_pending = None;
+            if self.catalog_load.pending.as_ref() == Some(&(dir.clone(), token)) {
+                self.catalog_load.pending = None;
             }
             // Take and restore the playlist, because `reconcile_catalog_mirrors`
             // needs `&mut self` while reading it.
@@ -210,12 +245,12 @@ impl App {
                 }
             }
         }
-        if self.catalog_load_pending.is_none() {
+        if self.catalog_load.pending.is_none() {
             if let Some(paths) = self.autotone.take_deferred() {
                 self.enqueue_auto_tone(paths);
             }
         }
-        self.catalog_load_pending.is_some()
+        self.catalog_load.pending.is_some()
     }
 
     /// Makes the app's ratings, edits, touchups, and rotations for `playlist`
@@ -527,7 +562,7 @@ impl App {
     }
 
     pub(crate) fn delete_available(&self) -> bool {
-        !self.bulk_delete_running() && self.catalog_load_pending.is_none()
+        !self.bulk_delete_running() && self.catalog_load.pending.is_none()
     }
 
     fn bulk_available(&self) -> bool {

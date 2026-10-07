@@ -70,7 +70,7 @@ impl App {
     pub(crate) fn group_bursts_available(&self) -> bool {
         !cfg!(target_arch = "wasm32")
             && self.mode == ViewMode::Grid
-            && self.catalog_load_pending.is_none()
+            && !self.catalog_loading()
             && !self.visible.is_empty()
     }
 
