@@ -13,7 +13,7 @@
 //! type Holiday             text for a focused field
 //! click 40 60 [shift]      pointer at (x, y) points, optional modifiers
 //! dblclick 40 60
-//! click-cell 2 [shift]     the grid cell at that position, from the last frame's layout
+//! click-cell 2 [shift]     the Grid or filmstrip cell at that position, from the last frame's layout
 //! dblclick-cell 2
 //! move 40 60               pointer to (x, y) points, no click
 //! scroll 0 5 [shift]       wheel lines; up is positive, so this zooms the Loupe in
@@ -617,12 +617,12 @@ impl Driver {
     fn resolve(&self, at: Target) -> Result<(f32, f32), String> {
         match at {
             Target::Point(x, y) => Ok((x, y)),
-            Target::Cell(_) if self.app.mode() != ViewMode::Grid => {
-                Err("a grid cell was named outside the Grid".into())
-            }
             Target::Cell(pos) => {
-                let rect = self.app.grid_cell_rect(pos).ok_or_else(|| {
-                    let (start, end) = self.app.grid_range();
+                let rect = self.app.cell_rect(pos).ok_or_else(|| {
+                    let (start, end) = match self.app.mode() {
+                        ViewMode::Grid => self.app.grid_range(),
+                        _ => self.app.strip_range(),
+                    };
                     format!("cell {pos} is not on screen (cells {start}..{end} are)")
                 })?;
                 Ok((rect.center().x, rect.center().y))

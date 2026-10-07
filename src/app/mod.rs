@@ -602,7 +602,8 @@ pub(crate) struct App {
     /// load thumbnails, so huge folders stay cheap.
     grid_range: (usize, usize),
     grid_scroll_reset: bool,
-    grid_cell_rects: Vec<(usize, egui::Rect)>,
+    /// Where the Grid or the filmstrip drew each cell last frame.
+    cell_rects: Vec<(usize, egui::Rect)>,
     /// The filmstrip's equivalent of `grid_range`.
     strip_range: (usize, usize),
     /// Thumbnail textures keyed by (path, THUMB_PX), each carrying the edit
@@ -957,7 +958,7 @@ impl App {
             filmstrip_scroll_accum: 0.0,
             grid_cols: 1,
             grid_range: (0, 0),
-            grid_cell_rects: Vec::new(),
+            cell_rects: Vec::new(),
             grid_scroll_reset: true,
             strip_range: (0, 0),
             thumb_tex: HashMap::new(),
@@ -1557,25 +1558,21 @@ impl App {
                 ui::UiAction::Select(pos) => {
                     if pos < self.visible.len() {
                         self.select_single(pos);
-                        // In the loupe, the selection is what's shown. In the
-                        // grid, Enter or double-click opens it.
-                        if self.mode == ViewMode::Loupe {
-                            self.load_selected();
-                            self.request_neighbors();
-                        }
-                        self.request_redraw();
+                        self.show_sel();
                     }
                 }
                 ui::UiAction::SelectToggle(pos) => {
-                    if pos < self.visible.len() {
+                    // The Loupe always shows a photo, so it keeps the last one.
+                    let last = self.mode == ViewMode::Loupe && self.selected_cells() == [pos];
+                    if pos < self.visible.len() && !last {
                         self.select_toggle(pos);
-                        self.request_redraw();
+                        self.show_sel();
                     }
                 }
                 ui::UiAction::SelectRange(pos) => {
                     if pos < self.visible.len() {
                         self.select_range(pos);
-                        self.request_redraw();
+                        self.show_sel();
                     }
                 }
                 ui::UiAction::CopySettings => self.copy_settings(),

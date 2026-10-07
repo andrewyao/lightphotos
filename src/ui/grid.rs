@@ -129,7 +129,6 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
                 }
             }
         }
-        app.clear_grid_cells();
         let output = grid_scroll.show_rows(ui, cell, rows, |ui, row_range| {
             let start = row_range.start * cols;
             let end = (row_range.end * cols).min(len);
@@ -565,6 +564,20 @@ fn selection_check(ui: &egui::Ui, c: egui::Pos2, r: f32, fill: egui::Color32) {
     painter.line_segment([b, d], stroke);
 }
 
+/// What a click on cell `pos` does to the selection, by the modifiers held:
+/// Shift selects a range, Cmd toggles the cell, and a plain click selects it
+/// alone.
+pub(super) fn click_action(ui: &egui::Ui, pos: usize) -> UiAction {
+    let mods = ui.input(|i| i.modifiers);
+    if mods.shift {
+        UiAction::SelectRange(pos)
+    } else if mods.command {
+        UiAction::SelectToggle(pos)
+    } else {
+        UiAction::Select(pos)
+    }
+}
+
 fn grid_cell(
     ui: &mut egui::Ui,
     app: &mut App,
@@ -576,17 +589,9 @@ fn grid_cell(
     let primary = sel == Some(pos);
     let selected = app.is_selected(pos);
     let response = thumbnail_cell(ui, app, pos, cell, selected, primary, &GRID_CELL_STYLE);
-    app.record_grid_cell(pos, response.rect);
+    app.record_cell_rect(pos, response.rect);
     if response.clicked() {
-        let mods = ui.input(|i| i.modifiers);
-        let action = if mods.shift {
-            UiAction::SelectRange(pos)
-        } else if mods.command {
-            UiAction::SelectToggle(pos)
-        } else {
-            UiAction::Select(pos)
-        };
-        out.actions.push(action);
+        out.actions.push(click_action(ui, pos));
         out.actions.push(UiAction::Focus(Region::Grid));
     }
     if response.double_clicked() {

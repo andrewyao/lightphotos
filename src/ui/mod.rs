@@ -222,6 +222,7 @@ use toolbar::{grid_toolbar, selection_bar};
 /// Build the egui UI for one frame.
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     let mut out = FrameOutput::default();
+    app.clear_cell_rects();
 
     // Drawn first and on every screen, so the Open button never moves.
     app_header(ui, app, &mut out);

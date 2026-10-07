@@ -1,4 +1,4 @@
-use super::grid::{thumbnail_cell, STRIP_CELL_STYLE};
+use super::grid::{click_action, thumbnail_cell, STRIP_CELL_STYLE};
 use super::*;
 
 use super::form::{self, Button, Role};
@@ -812,19 +812,20 @@ fn dist_to_segment(p: egui::Pos2, a: egui::Pos2, b: egui::Pos2) -> f32 {
 
 fn filmstrip_cell(
     ui: &mut egui::Ui,
-    app: &App,
+    app: &mut App,
     pos: usize,
     cell: f32,
     sel: Option<usize>,
     out: &mut FrameOutput,
-) -> egui::Response {
+) {
     let primary = sel == Some(pos);
-    let response = thumbnail_cell(ui, app, pos, cell, primary, primary, &STRIP_CELL_STYLE);
+    let selected = app.is_selected(pos);
+    let response = thumbnail_cell(ui, app, pos, cell, selected, primary, &STRIP_CELL_STYLE);
+    app.record_cell_rect(pos, response.rect);
     if response.clicked() {
-        out.actions.push(UiAction::Select(pos));
+        out.actions.push(click_action(ui, pos));
         out.actions.push(UiAction::Focus(Region::Filmstrip));
     }
-    response
 }
 
 /// Two icons right of a grouped photo's rating stars, one per

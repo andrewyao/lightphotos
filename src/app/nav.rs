@@ -391,6 +391,29 @@ impl App {
         self.request_redraw();
     }
 
+    /// Shift+arrow in the filmstrip: grow or shrink the range by one photo.
+    fn extend_strip(&mut self, step: isize) {
+        let Some(last) = self.visible.len().checked_sub(1) else {
+            return;
+        };
+        let from = self.sel.unwrap_or(0);
+        if self.anchor.is_none() {
+            self.anchor = Some(from);
+        }
+        self.select_range(from.saturating_add_signed(step).min(last));
+        self.show_sel();
+    }
+
+    /// After the selection changes: in the Loupe, the selection is what's
+    /// shown. In the Grid, Enter or double-click opens it.
+    pub(super) fn show_sel(&mut self) {
+        if self.mode == ViewMode::Loupe {
+            self.load_selected();
+            self.request_neighbors();
+        }
+        self.request_redraw();
+    }
+
     pub(crate) fn is_selected(&self, pos: usize) -> bool {
         self.selected.contains(&pos)
     }
@@ -929,6 +952,10 @@ impl App {
             self.extend_grid(dx, dy);
             return;
         }
+        if shift && self.focus == Region::Filmstrip {
+            self.extend_strip(dx + dy);
+            return;
+        }
         match (dx, dy) {
             (-1, 0) => self.nav_left(),
             (1, 0) => self.nav_right(),
@@ -1151,7 +1178,7 @@ pub(in crate::app) mod tests {
         let (mut app, dir, _) = folder_app("nav-pill", 8);
         group_photos(&mut app, &[1, 2, 3, 4, 5, 6], 1);
         let painted = settled(&mut app);
-        let cell = app.grid_cell_rect(1).expect("the stack's cell is drawn");
+        let cell = app.cell_rect(1).expect("the stack's cell is drawn");
         assert!(
             cell.contains(painted.pos_of("6")),
             "the count sits inside {cell:?}"
@@ -1258,5 +1285,118 @@ pub(in crate::app) mod tests {
             vec![app.want.clone().unwrap()],
             "the open photo must be the one bulk actions act on"
         );
+    }
+
+    fn click_strip_cell(app: &mut App, pos: usize, modifiers: egui::Modifiers) {
+        use crate::app::presets::tests::{frame_with_modifiers, settled};
+        let _ = settled(app);
+        let at = app
+            .cell_rect(pos)
+            .expect("the strip cell is drawn")
+            .center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        let _ = frame_with_modifiers(
+            app,
+            vec![egui::Event::PointerMoved(at), button(true)],
+            modifiers,
+        );
+        let (actions, _) = frame_with_modifiers(app, vec![button(false)], modifiers);
+        app.apply_ui_actions(actions);
+    }
+
+    /// Cmd-click and Shift-click in the filmstrip build a multi-selection, the
+    /// Loupe shows the photo clicked last, and the strip outlines every
+    /// selected cell.
+    #[test]
+    fn the_filmstrip_extends_the_selection_with_cmd_and_shift() {
+        use crate::app::presets::tests::settled;
+        let (mut app, dir, paths) = folder_app("nav-strip-multi", 8);
+        app.select_single(0);
+        app.enter_loupe();
+
+        click_strip_cell(&mut app, 2, egui::Modifiers::COMMAND);
+        assert_eq!(app.selected_cells(), vec![0, 2]);
+        assert_eq!(app.selected_path().as_ref(), Some(&paths[2]));
+
+        click_strip_cell(&mut app, 4, egui::Modifiers::SHIFT);
+        assert_eq!(
+            app.selected_cells(),
+            vec![2, 3, 4],
+            "the range runs from the last Cmd-click"
+        );
+        assert_eq!(app.selected_path().as_ref(), Some(&paths[4]));
+        assert_eq!(
+            app.selected_paths(),
+            paths[2..5].to_vec(),
+            "bulk actions act on the range"
+        );
+
+        let selection = crate::ui::theme::colors(&app.egui_ctx).selection;
+        let outlined = settled(&mut app).outlined(selection);
+        for pos in [2, 3, 4] {
+            let cell = app.cell_rect(pos).unwrap();
+            assert!(
+                outlined.contains(&cell),
+                "cell {pos} is outlined as selected"
+            );
+        }
+        assert!(!outlined.contains(&app.cell_rect(0).unwrap()));
+
+        click_strip_cell(&mut app, 6, egui::Modifiers::NONE);
+        assert_eq!(
+            app.selected_cells(),
+            vec![6],
+            "a plain click collapses the selection"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Loupe always shows a photo, so Cmd-click cannot deselect the last one.
+    #[test]
+    fn cmd_click_keeps_the_loupe_last_selected_photo() {
+        let (mut app, dir, paths) = folder_app("nav-strip-last", 4);
+        app.select_single(1);
+        app.enter_loupe();
+        click_strip_cell(&mut app, 1, egui::Modifiers::COMMAND);
+        assert_eq!(app.selected_cells(), vec![1]);
+        assert_eq!(app.selected_path().as_ref(), Some(&paths[1]));
+
+        click_strip_cell(&mut app, 3, egui::Modifiers::COMMAND);
+        click_strip_cell(&mut app, 3, egui::Modifiers::COMMAND);
+        assert_eq!(app.selected_cells(), vec![1]);
+        assert_eq!(
+            app.selected_path().as_ref(),
+            Some(&paths[1]),
+            "the Loupe falls back to the one left"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shift_arrows_in_the_filmstrip_extend_the_selection() {
+        let (mut app, dir, paths) = folder_app("nav-strip-shift", 6);
+        app.select_single(3);
+        app.enter_loupe();
+        app.focus = Region::Filmstrip;
+        app.nav_arrow(1, 0, true);
+        app.nav_arrow(1, 0, true);
+        assert_eq!(app.selected_cells(), vec![3, 4, 5]);
+        assert_eq!(app.selected_path().as_ref(), Some(&paths[5]));
+        app.nav_arrow(-1, 0, true);
+        app.nav_arrow(-1, 0, true);
+        app.nav_arrow(-1, 0, true);
+        assert_eq!(
+            app.selected_cells(),
+            vec![2, 3],
+            "the range flips past the anchor"
+        );
+        app.nav_arrow(1, 0, false);
+        assert_eq!(app.selected_cells(), vec![3], "a plain arrow collapses it");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

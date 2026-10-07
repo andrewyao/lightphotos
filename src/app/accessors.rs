@@ -180,17 +180,17 @@ impl App {
         self.grid_range
     }
 
-    pub(crate) fn clear_grid_cells(&mut self) {
-        self.grid_cell_rects.clear();
+    pub(crate) fn clear_cell_rects(&mut self) {
+        self.cell_rects.clear();
     }
 
-    pub(crate) fn record_grid_cell(&mut self, pos: usize, rect: egui::Rect) {
-        self.grid_cell_rects.push((pos, rect));
+    pub(crate) fn record_cell_rect(&mut self, pos: usize, rect: egui::Rect) {
+        self.cell_rects.push((pos, rect));
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn grid_cell_rect(&self, pos: usize) -> Option<egui::Rect> {
-        self.grid_cell_rects
+    pub(crate) fn cell_rect(&self, pos: usize) -> Option<egui::Rect> {
+        self.cell_rects
             .iter()
             .find(|(p, _)| *p == pos)
             .map(|(_, r)| *r)

@@ -1,0 +1,10 @@
+size 1200 800
+dblclick-cell 1
+idle
+click-cell 3 cmd
+idle
+click-cell 6 shift
+key shift+right
+idle
+state
+shot strip-selected
