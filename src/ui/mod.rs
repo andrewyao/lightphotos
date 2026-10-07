@@ -95,6 +95,9 @@ pub enum UiAction {
     ScoreSelection,
     CancelScoring,
     SetSort(crate::app::GridSort),
+    /// Zoom the Loupe to this many screen pixels per source pixel, about
+    /// the center.
+    SetZoom(f32),
     /// Run the action the open confirm dialog asks about.
     ConfirmPending,
     CancelPending,

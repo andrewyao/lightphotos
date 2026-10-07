@@ -24,7 +24,8 @@ use crate::navigation::{Cmp, FlagFilter, Playlist};
 use crate::renderer::{EguiPaint, Renderer};
 use crate::{image_decode, ui};
 
-const MIN_ZOOM: f32 = 0.02;
+/// The closest manual zoom, in screen pixels per source pixel. The farthest
+/// is the fit, so zooming out never shrinks the photo below the window.
 const MAX_ZOOM: f32 = 64.0;
 
 /// Side of a grid cell, in egui points. Smaller than
@@ -1643,6 +1644,7 @@ impl App {
                 ui::UiAction::ScoreSelection => self.score_selection(),
                 ui::UiAction::CancelScoring => self.cancel_scoring(),
                 ui::UiAction::SetSort(sort) => self.set_sort(sort),
+                ui::UiAction::SetZoom(zoom) => self.set_zoom(zoom),
                 ui::UiAction::ConfirmPending => self.confirm_pending(),
                 ui::UiAction::CancelPending => self.cancel_pending(),
                 ui::UiAction::RemoveGroups => self.remove_selected_groups(),

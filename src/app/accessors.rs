@@ -212,6 +212,11 @@ impl App {
         self.selected.iter().copied().collect()
     }
 
+    /// Screen pixels per source pixel, as a percentage.
+    pub(crate) fn zoom_percent(&self) -> f32 {
+        self.zoom() * 100.0
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn zoom_rel(&self) -> f32 {
         self.zoom_rel

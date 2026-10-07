@@ -160,7 +160,8 @@ impl App {
     /// point is in pixels from the loupe area's top-left.
     pub(crate) fn zoom_at(&mut self, factor: f32, cx: f32, cy: f32) {
         let cur_zoom = self.zoom();
-        let new_zoom = bounded_zoom(cur_zoom, factor);
+        let (lo, hi) = self.zoom_bounds();
+        let new_zoom = bounded_zoom(cur_zoom, factor, lo, hi);
         let ipx = (cx - self.pan.0) / cur_zoom;
         let ipy = (cy - self.pan.1) / cur_zoom;
         self.pan.0 = cx - ipx * new_zoom;
@@ -180,9 +181,26 @@ impl App {
             self.pan.1 = (wh - ih * new_zoom) / 2.0;
         }
 
-        self.fitted = false;
+        // Zooming all the way out lands on the fit, which a resize keeps.
+        self.fitted = new_zoom <= lo * 1.0001;
         self.push_transform();
         self.ensure_full_for_zoom();
+    }
+
+    /// The manual zoom's range: the fit up to `MAX_ZOOM`, or just the fit
+    /// for a photo so small its fit is closer than that.
+    pub(crate) fn zoom_bounds(&self) -> (f32, f32) {
+        let fs = self.fit_scale();
+        (fs, MAX_ZOOM.max(fs))
+    }
+
+    /// Zoom to `zoom` screen pixels per source pixel, within
+    /// [`zoom_bounds`](Self::zoom_bounds), about the loupe area's center.
+    pub(super) fn set_zoom(&mut self, zoom: f32) {
+        let cur = self.zoom();
+        if cur > 0.0 && zoom > 0.0 {
+            self.zoom_by(zoom / cur);
+        }
     }
 
     /// A scroll of `(dx, dy)` physical pixels over the loupe. Shift pans
@@ -571,16 +589,16 @@ fn fit_scale_of(image_size: (f32, f32), area: (f32, f32)) -> f32 {
     (ww / iw).min(wh / ih)
 }
 
-/// Clamp a manual zoom to `MIN_ZOOM..=MAX_ZOOM`. A fit zoom can lie outside
-/// that range, so from there only moves toward the range are allowed.
-fn bounded_zoom(cur_zoom: f32, factor: f32) -> f32 {
+/// Clamp a manual zoom to `lo..=hi`. Crop's fit, with its margin, lies below
+/// `lo`, so from outside the range only moves toward it are allowed.
+fn bounded_zoom(cur_zoom: f32, factor: f32, lo: f32, hi: f32) -> f32 {
     let requested = cur_zoom * factor;
-    if cur_zoom < MIN_ZOOM {
-        requested.clamp(cur_zoom, MIN_ZOOM)
-    } else if cur_zoom > MAX_ZOOM {
-        requested.clamp(MAX_ZOOM, cur_zoom)
+    if cur_zoom < lo {
+        requested.clamp(cur_zoom, lo)
+    } else if cur_zoom > hi {
+        requested.clamp(hi, cur_zoom)
     } else {
-        requested.clamp(MIN_ZOOM, MAX_ZOOM)
+        requested.clamp(lo, hi)
     }
 }
 
@@ -702,16 +720,22 @@ mod tests {
 
     #[test]
     fn zoom_below_minimum_moves_only_toward_the_allowed_range() {
-        assert_eq!(bounded_zoom(0.001, 2.0), 0.002);
-        assert_eq!(bounded_zoom(0.001, 0.5), 0.001);
-        assert_eq!(bounded_zoom(0.001, 100.0), MIN_ZOOM);
+        assert_eq!(bounded_zoom(0.25, 2.0, 1.0, 64.0), 0.5);
+        assert_eq!(bounded_zoom(0.25, 0.5, 1.0, 64.0), 0.25);
+        assert_eq!(bounded_zoom(0.25, 100.0, 1.0, 64.0), 1.0);
     }
 
     #[test]
     fn zoom_above_maximum_moves_only_toward_the_allowed_range() {
-        assert_eq!(bounded_zoom(100.0, 1.1), 100.0);
-        assert_eq!(bounded_zoom(100.0, 0.5), 64.0);
-        assert_eq!(bounded_zoom(100.0, 2.0), 100.0);
+        assert_eq!(bounded_zoom(100.0, 1.1, 1.0, 64.0), 100.0);
+        assert_eq!(bounded_zoom(100.0, 0.5, 1.0, 64.0), 64.0);
+        assert_eq!(bounded_zoom(100.0, 2.0, 1.0, 64.0), 100.0);
+    }
+
+    #[test]
+    fn zooming_out_stops_at_the_fit() {
+        assert_eq!(bounded_zoom(0.5, 0.1, 0.3, 64.0), 0.3);
+        assert_eq!(bounded_zoom(0.3, 0.5, 0.3, 64.0), 0.3);
     }
 
     /// The control and the backend must appear on the same platforms, so this

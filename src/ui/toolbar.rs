@@ -19,12 +19,16 @@ fn toolbar_row<R>(
     add: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
     let style = ui.style().clone();
+    // The bottom row is as tall as the side panels' footer tabs, and
+    // centers its content in that height rather than taking a margin.
+    let margin_y = if bottom { 0.0 } else { ROW_MARGIN.y };
     let margin = egui::Margin::symmetric(
         font_size::px(&style, ROW_MARGIN.x).round() as i8,
-        font_size::px(&style, ROW_MARGIN.y).round() as i8,
+        font_size::px(&style, margin_y).round() as i8,
     );
+    let height = super::tabs::footer_height(ui);
     let panel = if bottom {
-        egui::Panel::bottom(id)
+        egui::Panel::bottom(id).exact_size(height)
     } else {
         egui::Panel::top(id)
     };
@@ -32,7 +36,23 @@ fn toolbar_row<R>(
         .frame(egui::Frame::side_top_panel(&style).inner_margin(margin))
         .show_inside(ui, |ui| {
             toolbar_spacing(ui);
-            add(ui)
+            if !bottom {
+                return add(ui);
+            }
+            // Centered on the whole panel, its separator line included, as
+            // the Loupe's info bar is, by the row's height last frame.
+            let id = egui::Id::new(id).with("row_h");
+            let row_h = ui.ctx().data(|d| d.get_temp::<f32>(id));
+            let center = ui.ctx().content_rect().bottom() - height / 2.0;
+            let h = row_h.unwrap_or(ui.spacing().interact_size.y);
+            ui.add_space((center - h / 2.0 - ui.cursor().top()).max(0.0));
+            let row = ui.scope(add);
+            let drawn = row.response.rect.height();
+            if row_h.is_none_or(|h| (h - drawn).abs() > 0.5) {
+                ui.ctx().data_mut(|d| d.insert_temp(id, drawn));
+                ui.ctx().request_repaint();
+            }
+            row.inner
         })
         .inner
 }

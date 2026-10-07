@@ -335,13 +335,14 @@ fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
 /// filename sits in the title bar above. Exposure sits under the Develop
 /// panel's histogram.
 fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let row_h = font_size::px(ui.style(), 36.0);
+    let row_h = super::tabs::footer_height(ui);
     egui::Panel::bottom("loupe_info_bar")
         .exact_size(row_h)
         .show_inside(ui, |ui| {
             let rect = ui.max_rect();
             let pad = font_size::px(ui.style(), 14.0);
             let main_y = rect.center().y;
+            zoom_control(ui, app, rect, pad, out);
             // Centered by last frame's width, so the first frame starts left.
             let width_id = egui::Id::new("loupe_bar_w");
             let last_w = ui.ctx().data(|d| d.get_temp::<f32>(width_id));
@@ -409,6 +410,77 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             }
         });
+}
+
+/// The zoom slider and its readout at the info bar's right edge. The slider
+/// runs from the fit to the closest zoom on a log scale, so each stretch of
+/// it doubles the zoom about equally.
+fn zoom_control(ui: &mut egui::Ui, app: &App, bar: egui::Rect, pad: f32, out: &mut FrameOutput) {
+    let mut right = bar.right() - pad;
+    if crate::app::SHOW_SELECTION_BUTTONS && App::selection_supported() {
+        // The subject-selection buttons hold the corner.
+        right -= font_size::px(ui.style(), 190.0) + pad;
+    }
+    let w = font_size::px(ui.style(), 180.0);
+    let area = egui::Rect::from_min_max(
+        egui::pos2(right - w, bar.top()),
+        egui::pos2(right, bar.bottom()),
+    );
+    let layout = egui::Layout::right_to_left(egui::Align::Center);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(area).layout(layout), |ui| {
+        let (lo, hi) = app.zoom_bounds();
+        zoom_presets(ui, app, (lo, hi), out);
+        let mut pct = app.zoom_percent();
+        ui.spacing_mut().slider_width = ui.available_width();
+        let slider = egui::Slider::new(&mut pct, lo * 100.0..=hi * 100.0)
+            .logarithmic(true)
+            .show_value(false)
+            .handle_shape(egui::style::HandleShape::Circle);
+        let resp = ui.add_enabled(hi > lo, slider).on_hover_text(t().zoom_tip);
+        if resp.changed() {
+            out.actions.push(UiAction::SetZoom(pct / 100.0));
+        }
+    });
+}
+
+/// The zoom readout, as a button whose menu jumps to Fit or a preset
+/// percentage. The presets outside the zoom's range are left out.
+fn zoom_presets(ui: &mut egui::Ui, app: &App, (lo, hi): (f32, f32), out: &mut FrameOutput) {
+    const PRESETS: [f32; 6] = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+    let w = font_size::px(ui.style(), 64.0);
+    // The bar sits at the window's bottom, so the menu opens upward.
+    let text = format!("{} \u{23f6}", zoom_text(app));
+    let button = ui.add_sized([w, ui.spacing().interact_size.y], egui::Button::new(text));
+    egui::Popup::menu(&button)
+        .align(egui::RectAlign::TOP_END)
+        .show(|ui| {
+            let fit = app.fitted;
+            if ui.selectable_label(fit, t().zoom_fit).clicked() && !fit {
+                out.actions.push(UiAction::SetZoom(lo));
+            }
+            let cur = app.zoom_percent() / 100.0;
+            for z in PRESETS.into_iter().filter(|&z| z > lo * 1.001 && z <= hi) {
+                let on = !fit && (cur - z).abs() < z * 0.005;
+                let label = if z == 1.0 {
+                    t().zoom_actual.to_string()
+                } else {
+                    format!("{:.0}%", z * 100.0)
+                };
+                if ui.selectable_label(on, label).clicked() && !on {
+                    out.actions.push(UiAction::SetZoom(z));
+                }
+            }
+        });
+}
+
+/// "Fit" while the photo fits the window, else its zoom as a percentage of
+/// its own pixels.
+fn zoom_text(app: &App) -> String {
+    if app.fitted {
+        t().zoom_fit.to_string()
+    } else {
+        format!("{:.0}%", app.zoom_percent())
+    }
 }
 
 /// The exposure readout under the histogram, Lightroom's order:

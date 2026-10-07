@@ -18,9 +18,10 @@ pub(super) fn footer<T: Copy + PartialEq>(
         left: 8,
         right: 8,
         top: 0,
-        bottom: 6,
+        bottom: BOTTOM_MARGIN as i8,
     });
     egui::Panel::bottom(id.to_owned())
+        .exact_size(strip_height(ui))
         .show_separator_line(false)
         .frame(frame)
         .show_inside(ui, |ui| {
@@ -44,6 +45,20 @@ pub(super) fn footer<T: Copy + PartialEq>(
             picked
         })
         .inner
+}
+
+const BOTTOM_MARGIN: f32 = 6.0;
+
+fn strip_height(ui: &egui::Ui) -> f32 {
+    let (galley, pad) = footer_tab_text(ui, "Ag");
+    (galley.size().y + 2.0 * pad.y + BOTTOM_MARGIN).round()
+}
+
+/// The height for a bar docked at the window's bottom so its top meets the
+/// footer tabs' rule, which the side panel's own margin lifts off the bottom.
+pub(super) fn footer_height(ui: &egui::Ui) -> f32 {
+    let panel = egui::Frame::side_top_panel(ui.style()).inner_margin;
+    strip_height(ui) + f32::from(panel.bottom)
 }
 
 /// A footer tab's laid-out label and its padding.
