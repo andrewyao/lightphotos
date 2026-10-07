@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn face_quality_candidates_are_every_grouped_photo() {
         use crate::app::nav::tests::group_photos;
-        use crate::app::presets::tests::folder_app;
+        use crate::app::test_support::folder_app;
         let (mut app, dir, paths) = folder_app("faces-scope", 8);
         group_photos(&mut app, &[1, 2], 1);
         group_photos(&mut app, &[5, 6, 7], 7);
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn grouped_photos_are_scanned_once_per_rebuild() {
-        use crate::app::presets::tests::folder_app;
+        use crate::app::test_support::folder_app;
         let (mut app, dir, _) = folder_app("faces-once", 2);
         assert!(app.faces_unscanned, "a rebuild asks for a scan");
         app.request_face_quality();

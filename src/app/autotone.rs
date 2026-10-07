@@ -359,38 +359,25 @@ impl App {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use crate::app::test_support::{folder_of, load_folder, temp_folder};
     use crate::image_decode::{DecodedImage, DecodedImageFields};
 
     /// An app showing a real folder of two empty photos in the Grid. Nothing
     /// decodes them, so neither has a thumbnail in memory.
     fn grid_with_two_photos(tag: &str) -> (App, PathBuf, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("lp-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let (a, b) = (dir.join("a.jpg"), dir.join("b.jpg"));
-        std::fs::write(&a, []).unwrap();
-        std::fs::write(&b, []).unwrap();
-
+        let (dir, paths) = folder_of(tag, &["a.jpg".into(), "b.jpg".into()]);
         let mut app = App::new(None);
-        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
         // Auto Tone waits for the async catalog load, so let it finish first.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while app.poll_catalog_load() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "catalog load timed out"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        load_folder(&mut app, &dir);
         app.mode = ViewMode::Grid;
-        (app, dir, a, b)
+        (app, dir, paths[0].clone(), paths[1].clone())
     }
 
     /// In the Grid, `shown` is still the photo last opened in the Loupe. Cmd+U
     /// must tone the photo under the cursor instead.
     #[test]
     fn auto_adjust_all_asks_first_then_takes_every_photo_and_group_member() {
-        let (mut app, dir, _) = crate::app::presets::tests::folder_app("tone-all", 5);
+        let (mut app, dir, _) = crate::app::test_support::folder_app("tone-all", 5);
         crate::app::nav::tests::group_photos(&mut app, &[0, 1, 2], 0);
         assert_eq!(app.selection_count(), 0);
         app.request_bulk(ui::BulkKind::AutoToneAll);
@@ -481,24 +468,13 @@ mod tests {
     /// selection from asking for 20k decoded thumbnails.
     #[test]
     fn a_large_batch_only_requests_a_window_of_thumbnails_at_a_time() {
-        let dir = std::env::temp_dir().join(format!("lp-autotone-window-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let photos: Vec<PathBuf> = (0..AUTOTONE_WINDOW * 3)
-            .map(|i| {
-                let p = dir.join(format!("p{i:03}.jpg"));
-                std::fs::write(&p, []).unwrap();
-                p
-            })
+        let names: Vec<String> = (0..AUTOTONE_WINDOW * 3)
+            .map(|i| format!("p{i:03}.jpg"))
             .collect();
+        let (dir, photos) = folder_of("autotone-window", &names);
 
         let mut app = App::new(None);
-        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        let deadline = Instant::now() + std::time::Duration::from_secs(10);
-        while app.poll_catalog_load() {
-            assert!(Instant::now() < deadline, "catalog load timed out");
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        load_folder(&mut app, &dir);
         app.mode = ViewMode::Grid;
         app.loader = Some(crate::loader::Loader::new(
             16384,
@@ -571,24 +547,13 @@ mod tests {
     /// quarter of a second. The budget is what turns that into a progress bar.
     #[test]
     fn one_poll_does_not_analyse_a_whole_window_of_photos() {
-        let dir = std::env::temp_dir().join(format!("lp-autotone-budget-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let photos: Vec<PathBuf> = (0..AUTOTONE_WINDOW)
-            .map(|i| {
-                let p = dir.join(format!("p{i:03}.jpg"));
-                std::fs::write(&p, []).unwrap();
-                p
-            })
+        let names: Vec<String> = (0..AUTOTONE_WINDOW)
+            .map(|i| format!("p{i:03}.jpg"))
             .collect();
+        let (dir, photos) = folder_of("autotone-budget", &names);
 
         let mut app = App::new(None);
-        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        let deadline = Instant::now() + std::time::Duration::from_secs(10);
-        while app.poll_catalog_load() {
-            assert!(Instant::now() < deadline, "catalog load timed out");
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        load_folder(&mut app, &dir);
         app.mode = ViewMode::Grid;
         app.loader = Some(crate::loader::Loader::new(
             16384,
@@ -682,8 +647,7 @@ mod tests {
     /// be toned against B's catalog. See `cancel_auto_tone`.
     #[test]
     fn switching_folders_cancels_a_pending_auto_tone_batch() {
-        let dir = std::env::temp_dir().join(format!("lp-autotone-switch-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_folder("autotone-switch");
 
         let mut app = App::new(None);
         let stale = PathBuf::from("/folder-a/IMG_0001.jpg");

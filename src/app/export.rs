@@ -738,20 +738,7 @@ impl App {
 #[cfg(not(target_arch = "wasm32"))]
 mod status_tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn unique_tmp_dir() -> PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "lightphotos-status-test-{}-{}",
-            std::process::id(),
-            n
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
+    use crate::app::test_support::temp_folder;
 
     /// An App whose status was set longer ago than the 3-second expiry.
     fn app_with_a_stale_status() -> App {
@@ -780,7 +767,7 @@ mod status_tests {
         let url = std::env::var("LIGHTPHOTOS_IMMICH_URL").expect("LIGHTPHOTOS_IMMICH_URL");
         let key = std::env::var("LIGHTPHOTOS_IMMICH_KEY").expect("LIGHTPHOTOS_IMMICH_KEY");
 
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("status-test");
         // Content unique to this run, so a real server sees new assets.
         let seed = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -875,7 +862,7 @@ mod status_tests {
     /// progress toast blank out halfway through.
     #[test]
     fn a_status_survives_while_sidecars_are_still_being_written() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("status-test");
         let mut app = App::new(None);
         app.catalog.open_dir(&dir);
         app.set_status(StatusKind::Success, "Rated 20000 photos".to_string());
@@ -910,7 +897,7 @@ mod status_tests {
     /// that already expired, such as an earlier "Auto Tone applied".
     #[test]
     fn a_later_write_does_not_revive_an_expired_status() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("status-test");
         let mut app = app_with_a_stale_status();
         app.catalog.open_dir(&dir);
         app.catalog.set(&dir.join("p.jpg"), 3);
@@ -925,7 +912,7 @@ mod status_tests {
 
     #[test]
     fn a_status_survives_while_a_delete_is_running() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("status-test");
         std::fs::write(dir.join("a.jpg"), b"").unwrap();
 
         let mut app = App::new(None);
@@ -1001,7 +988,7 @@ mod status_tests {
 
     #[test]
     fn a_new_album_needs_a_name_before_export() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("status-test");
         std::fs::write(dir.join("a.jpg"), b"").unwrap();
         let mut app = App::new(None);
         app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));

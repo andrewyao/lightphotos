@@ -95,7 +95,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::presets::tests::folder_app;
+    use crate::app::test_support::folder_app;
 
     #[test]
     fn a_rate_command_rates_the_selection_like_its_digit_key() {

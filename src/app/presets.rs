@@ -204,13 +204,12 @@ impl App {
     }
 }
 
-/// Also the pointer-driven UI harness other `app` tests reuse.
 #[cfg(test)]
 pub(in crate::app) mod tests {
     use super::*;
+    use crate::app::test_support::*;
     use crate::catalog::Catalog;
     use crate::develop::Crop;
-    use crate::navigation::Playlist;
 
     const CROP: Crop = Crop {
         left: 0.1,
@@ -236,27 +235,6 @@ pub(in crate::app) mod tests {
         xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
         crs:Exposure2012=\"-0.2\" crs:ConvertToGrayscale=\"True\"/>\
         </rdf:RDF></x:xmpmeta>";
-
-    /// A real `App` over a temp folder of empty files, the shape
-    /// `app::keys::tests::folder_app` uses. No window and no GPU.
-    pub(in crate::app) fn folder_app(tag: &str, photos: usize) -> (App, PathBuf, Vec<PathBuf>) {
-        let dir = std::env::temp_dir().join(format!("lp-presets-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths: Vec<PathBuf> = (0..photos)
-            .map(|i| {
-                let p = dir.join(format!("{i}.jpg"));
-                std::fs::write(&p, []).unwrap();
-                p
-            })
-            .collect();
-        let mut app = App::new(None);
-        app.catalog.open_dir(&dir);
-        app.playlist = Some(Playlist::from_dir(&dir));
-        app.mode = ViewMode::Grid;
-        app.recompute_visible();
-        (app, dir, paths)
-    }
 
     /// Sidecar writes are queued behind `Catalog`'s write-back worker, so a
     /// test that reads the disk waits here first. A timeout rather than an
@@ -489,155 +467,6 @@ pub(in crate::app) mod tests {
             assert_eq!(catalog.adjustments(path).exposure, 0.4);
         }
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// One real frame of the whole UI. Returns the actions it pushed and every
-    /// string it painted with where it landed, so a test can aim a click at a
-    /// widget it cannot see.
-    pub(in crate::app) fn frame(
-        app: &mut App,
-        events: Vec<egui::Event>,
-    ) -> (Vec<crate::ui::UiAction>, Painted) {
-        frame_with_modifiers(app, events, egui::Modifiers::NONE)
-    }
-
-    /// A frame with `modifiers` held down.
-    pub(in crate::app) fn frame_with_modifiers(
-        app: &mut App,
-        events: Vec<egui::Event>,
-        modifiers: egui::Modifiers,
-    ) -> (Vec<crate::ui::UiAction>, Painted) {
-        frame_sized(app, events, modifiers, egui::vec2(1100.0, 800.0))
-    }
-
-    /// What the UI paints once settled in a window `size` points big.
-    pub(in crate::app) fn settled_at(app: &mut App, size: egui::Vec2) -> Painted {
-        let none = egui::Modifiers::NONE;
-        let _ = frame_sized(app, Vec::new(), none, size);
-        frame_sized(app, Vec::new(), none, size).1
-    }
-
-    fn frame_sized(
-        app: &mut App,
-        events: Vec<egui::Event>,
-        modifiers: egui::Modifiers,
-        size: egui::Vec2,
-    ) -> (Vec<crate::ui::UiAction>, Painted) {
-        let ctx = app.egui_ctx.clone();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), size)),
-            events,
-            modifiers,
-            ..Default::default()
-        };
-        let mut actions = Vec::new();
-        let output = ctx.run_ui(input, |ui| {
-            actions = crate::ui::draw(ui, app).actions;
-        });
-        let mut texts = Vec::new();
-        let mut circles = Vec::new();
-        let mut rects = Vec::new();
-        for clipped in &output.shapes {
-            match &clipped.shape {
-                egui::Shape::Text(text) => texts.push((
-                    text.galley.text().to_string(),
-                    text.pos + egui::vec2(4.0, text.galley.size().y / 2.0),
-                )),
-                egui::Shape::Circle(circle) => circles.push(*circle),
-                egui::Shape::Rect(rect) => rects.push((rect.rect, rect.stroke.color)),
-                _ => {}
-            }
-        }
-        (actions, Painted(texts, circles, rects))
-    }
-
-    pub(in crate::app) struct Painted(
-        Vec<(String, egui::Pos2)>,
-        Vec<egui::epaint::CircleShape>,
-        Vec<(egui::Rect, egui::Color32)>,
-    );
-
-    impl Painted {
-        pub(in crate::app) fn has(&self, text: &str) -> bool {
-            self.0.iter().any(|(t, _)| t == text)
-        }
-
-        fn any_containing(&self, needle: &str) -> bool {
-            self.0.iter().any(|(t, _)| t.contains(needle))
-        }
-
-        pub(in crate::app) fn pos_of(&self, text: &str) -> egui::Pos2 {
-            self.0
-                .iter()
-                .find(|(t, _)| t == text)
-                .unwrap_or_else(|| panic!("nothing painted {text:?}; got {:?}", self.texts()))
-                .1
-        }
-
-        /// The `text` nearest `anchor`, for a label the window paints more than
-        /// once. Touch Up has its own Delete button, so the row menu's has to be
-        /// picked by where it opened.
-        pub(in crate::app) fn pos_of_near(&self, text: &str, anchor: egui::Pos2) -> egui::Pos2 {
-            self.0
-                .iter()
-                .filter(|(t, _)| t == text)
-                .min_by(|(_, a), (_, b)| a.distance(anchor).total_cmp(&b.distance(anchor)))
-                .unwrap_or_else(|| panic!("nothing painted {text:?}; got {:?}", self.texts()))
-                .1
-        }
-
-        pub(in crate::app) fn texts(&self) -> Vec<&str> {
-            self.0.iter().map(|(t, _)| t.as_str()).collect()
-        }
-
-        /// Every rect outlined in `stroke`, at any opacity, since a modal
-        /// fading in paints everything in it translucent.
-        pub(in crate::app) fn outlined(&self, stroke: egui::Color32) -> Vec<egui::Rect> {
-            let near = |c: egui::Color32| {
-                let (a, b) = (c.to_opaque().to_array(), stroke.to_array());
-                a.iter().zip(b).all(|(&x, y)| x.abs_diff(y) <= 2)
-            };
-            self.2
-                .iter()
-                .filter(|(_, color)| color.a() > 0 && near(*color))
-                .map(|(rect, _)| *rect)
-                .collect()
-        }
-
-        /// Every circle painted in `fill`.
-        pub(in crate::app) fn circles_filled(&self, fill: egui::Color32) -> Vec<egui::Pos2> {
-            self.1
-                .iter()
-                .filter(|c| c.fill == fill)
-                .map(|c| c.center)
-                .collect()
-        }
-    }
-
-    /// What the UI paints once it has settled. A modal is an `egui::Area`,
-    /// which egui sizes on one frame and paints on the next, so one frame is
-    /// not enough to see one.
-    pub(in crate::app) fn settled(app: &mut App) -> Painted {
-        let _ = frame(app, Vec::new());
-        frame(app, Vec::new()).1
-    }
-
-    /// Presses at `pos` in one frame and releases in the next, which is when
-    /// egui reports the click. Returns that frame's actions, and what the UI
-    /// paints once it has settled afterwards.
-    pub(in crate::app) fn click(
-        app: &mut App,
-        pos: egui::Pos2,
-    ) -> (Vec<crate::ui::UiAction>, Painted) {
-        let button = |pressed| egui::Event::PointerButton {
-            pos,
-            button: egui::PointerButton::Primary,
-            pressed,
-            modifiers: Default::default(),
-        };
-        let _ = frame(app, vec![egui::Event::PointerMoved(pos), button(true)]);
-        let (actions, _) = frame(app, vec![button(false)]);
-        (actions, settled(app))
     }
 
     /// The pointer paths the tests above reach through `App` directly: clicking

@@ -509,26 +509,13 @@ fn spawn_trash_worker(
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use crate::app::test_support::{temp_folder, wait_for_catalog_within};
     use crate::navigation::Playlist;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn unique_tmp_dir() -> PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "lightphotos-bulk-delete-test-{}-{}",
-            std::process::id(),
-            n
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     /// An App over `names`, each an empty file in a fresh folder.
     fn app_with_photos(names: &[&str]) -> (App, PathBuf, Vec<PathBuf>) {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("bulk-delete-test");
         let paths: Vec<PathBuf> = names
             .iter()
             .map(|n| {
@@ -547,7 +534,7 @@ mod tests {
     /// rather than sitting alone at the window's right edge.
     #[test]
     fn the_count_sits_between_the_sort_and_actions() {
-        use crate::app::presets::tests::{folder_app, settled_at};
+        use crate::app::test_support::{folder_app, settled_at};
         let t = crate::i18n::t();
         let (mut app, dir, _) = folder_app("toolbar-rows", 3);
         app.select_single(0);
@@ -734,7 +721,7 @@ mod tests {
         let refs: Vec<&str> = doomed.iter().map(String::as_str).collect();
         let (mut app, old_dir, old_paths) = app_with_photos(&refs);
 
-        let new_dir = unique_tmp_dir();
+        let new_dir = temp_folder("bulk-delete-test");
         let survivor = new_dir.join(&doomed[0]);
         std::fs::write(&survivor, b"").unwrap();
         crate::catalog::Catalog::with_dir(new_dir.clone()).set(&survivor, 4);
@@ -751,11 +738,7 @@ mod tests {
             app.bulk_delete.is_none(),
             "a folder change must abandon the batch before the new folder loads"
         );
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while app.poll_catalog_load() {
-            assert!(Instant::now() < deadline, "catalog load timed out");
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        wait_for_catalog_within(&mut app, Duration::from_secs(20));
         // What the frame loop would do next. A batch that survived the change
         // would speak for the old folder here.
         drain(&mut app);
@@ -1149,10 +1132,10 @@ mod tests {
         (app, dir, paths)
     }
 
-    use crate::app::presets::tests::settled;
+    use crate::app::test_support::settled;
 
     fn click_button(app: &mut App, label: &str) {
-        use crate::app::presets::tests::click;
+        use crate::app::test_support::click;
         let at = settled(app).pos_of(label);
         let (actions, _) = click(app, at);
         app.apply_ui_actions(actions);

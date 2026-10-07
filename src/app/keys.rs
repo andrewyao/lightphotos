@@ -308,7 +308,6 @@ mod tests {
     use crate::app::nav::tests::group_photos;
     use crate::navigation::Playlist;
     use std::collections::BTreeSet;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use winit::keyboard::ModifiersState;
 
     #[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
@@ -316,29 +315,9 @@ mod tests {
     #[cfg(not(all(not(target_arch = "wasm32"), target_os = "macos")))]
     const CMD: ModifiersState = ModifiersState::CONTROL;
 
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
     fn folder_app(photos: usize) -> (App, Vec<PathBuf>) {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "lightphotos-keys-test-{}-{}",
-            std::process::id(),
-            n
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths: Vec<PathBuf> = (0..photos)
-            .map(|i| {
-                let p = dir.join(format!("{i}.jpg"));
-                std::fs::write(&p, b"").unwrap();
-                p
-            })
-            .collect();
-        let mut app = App::new(None);
-        app.catalog.open_dir(&dir);
-        app.playlist = Some(Playlist::from_dir(&dir));
-        app.mode = ViewMode::Grid;
+        let (mut app, _, paths) = crate::app::test_support::folder_app("keys-test", photos);
         app.focus = Region::Grid;
-        app.recompute_visible();
         app.sel = Some(0);
         (app, paths)
     }
@@ -395,7 +374,7 @@ mod tests {
         press(&mut app, CMD, KeyCode::KeyA);
         press(&mut app, ModifiersState::empty(), KeyCode::Delete);
         assert!(app.confirm_open(), "Delete asks first");
-        let painted = crate::app::presets::tests::settled(&mut app);
+        let painted = crate::app::test_support::settled(&mut app);
         let t = crate::i18n::t();
         assert!(
             painted.has(t.bulk_delete) && !painted.has(t.confirm),
@@ -481,7 +460,7 @@ mod tests {
     /// them would write the user's saved preferences.
     #[test]
     fn settings_opens_from_the_landing_page_and_its_choices_ask_for_changes() {
-        use crate::app::presets::tests::{click, settled};
+        use crate::app::test_support::{click, settled};
         use crate::i18n::{t, Lang};
         use crate::ui::{theme::Theme, UiAction};
 
@@ -522,7 +501,7 @@ mod tests {
     /// labels share one column and whose values start level with them.
     #[test]
     fn settings_lays_out_as_a_form() {
-        use crate::app::presets::tests::settled;
+        use crate::app::test_support::settled;
         use crate::i18n::t;
 
         let mut app = App::new(None);
@@ -550,7 +529,7 @@ mod tests {
     /// its value, flush with the page's left edge.
     #[test]
     fn export_lays_out_as_a_form() {
-        use crate::app::presets::tests::settled;
+        use crate::app::test_support::settled;
         use crate::i18n::t;
 
         let (mut app, _) = folder_app(2);
@@ -577,7 +556,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn immich_connect_enables_once_both_fields_are_typed() {
-        use crate::app::presets::tests::{click, frame, settled};
+        use crate::app::test_support::{click, frame, settled};
         use crate::export::ExportTarget;
         use crate::i18n::t;
         use crate::ui::UiAction;
@@ -632,7 +611,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_album_dropdown_lists_albums_and_new_asks_for_a_name() {
-        use crate::app::presets::tests::{click, settled};
+        use crate::app::test_support::{click, settled};
         use crate::export::{AlbumChoice, ExportTarget};
         use crate::i18n::t;
         use crate::immich::{Account, Album, ImmichServer};
@@ -688,7 +667,7 @@ mod tests {
     /// whose labels share one column, with values level beside them.
     #[test]
     fn info_panel_lays_out_as_a_form() {
-        use crate::app::presets::tests::settled;
+        use crate::app::test_support::settled;
         use crate::i18n::t;
 
         let (mut app, _) = folder_app(2);
@@ -715,7 +694,7 @@ mod tests {
 
     #[test]
     fn the_header_offers_settings_once_a_folder_is_open() {
-        use crate::app::presets::tests::{click, settled};
+        use crate::app::test_support::{click, settled};
         use crate::i18n::t;
 
         let (mut app, _) = folder_app(2);
@@ -726,7 +705,7 @@ mod tests {
 
     #[test]
     fn the_filmstrip_shows_one_dot_per_star() {
-        use crate::app::presets::tests::settled;
+        use crate::app::test_support::settled;
 
         let (mut app, _) = editor_app();
         assert!(app.filmstrip_visible());
@@ -1143,7 +1122,7 @@ mod tests {
 
     #[test]
     fn the_loupe_draws_no_folders_panel() {
-        use crate::app::presets::tests::settled;
+        use crate::app::test_support::settled;
         use crate::i18n::t;
 
         let (mut app, _) = folder_app(2);
@@ -1372,9 +1351,7 @@ mod tests {
             Some(crate::i18n::t().group_refused_loading)
         );
         assert_eq!(app.visible, vec![0, 1, 2]);
-        while app.poll_catalog_load() {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        crate::app::test_support::wait_for_catalog(&mut app);
         app.catalog
             .flush_blocking(std::time::Duration::from_secs(10));
         assert!(group_shapes(&app).is_empty());

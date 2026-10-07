@@ -1042,7 +1042,7 @@ impl App {
 #[cfg(test)]
 pub(in crate::app) mod tests {
     use super::*;
-    use crate::app::presets::tests::folder_app;
+    use crate::app::test_support::{folder_app, wait_for_catalog};
     use crate::groups::Group;
     use crate::navigation::Cmp;
 
@@ -1062,17 +1062,6 @@ pub(in crate::app) mod tests {
         let writes = groups.create(group, std::time::SystemTime::now());
         app.catalog.apply_group_writes(writes).unwrap();
         app.recompute_visible();
-    }
-
-    fn drain_catalog_load(app: &mut App) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while app.poll_catalog_load() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "catalog load timed out"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
     }
 
     fn folder_with_saved_group(tag: &str, n: usize, members: &[usize], rep: usize) -> PathBuf {
@@ -1124,7 +1113,7 @@ pub(in crate::app) mod tests {
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
         assert_eq!(cells(&app), vec![0, 1, 2, 3, 4, 5], "no groups yet");
         app.select_single(4);
-        drain_catalog_load(&mut app);
+        wait_for_catalog(&mut app);
         assert_eq!(cells(&app), vec![0, 1, 4, 5]);
         assert_eq!(app.sel, Some(2), "the cursor stays on photo 4");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1136,7 +1125,7 @@ pub(in crate::app) mod tests {
         let opened = dir.join("2.jpg");
         let mut app = App::new(None);
         app.open(opened.clone());
-        drain_catalog_load(&mut app);
+        wait_for_catalog(&mut app);
         assert_eq!(cells(&app), vec![0, 1, 4]);
         assert_eq!(app.mode, ViewMode::Loupe);
         assert_eq!(app.sel, None);
@@ -1200,7 +1189,7 @@ pub(in crate::app) mod tests {
 
     #[test]
     fn a_group_cell_paints_its_member_count_inside_the_cell() {
-        use crate::app::presets::tests::settled;
+        use crate::app::test_support::settled;
         let (mut app, dir, _) = folder_app("nav-pill", 8);
         group_photos(&mut app, &[1, 2, 3, 4, 5, 6], 1);
         let painted = settled(&mut app);
@@ -1221,7 +1210,7 @@ pub(in crate::app) mod tests {
     /// the Grid.
     #[test]
     fn the_loupe_back_arrow_returns_to_the_grid() {
-        use crate::app::presets::tests::{click, settled};
+        use crate::app::test_support::{click, settled};
         use crate::ui::UiAction;
 
         let dir = std::env::temp_dir().join(format!("lp-nav-back-{}", std::process::id()));
@@ -1314,7 +1303,7 @@ pub(in crate::app) mod tests {
     }
 
     fn click_strip_cell(app: &mut App, pos: usize, modifiers: egui::Modifiers) {
-        use crate::app::presets::tests::{frame_with_modifiers, settled};
+        use crate::app::test_support::{frame_with_modifiers, settled};
         let _ = settled(app);
         let at = app
             .cell_rect(pos)
@@ -1358,7 +1347,7 @@ pub(in crate::app) mod tests {
     /// selected cell.
     #[test]
     fn the_filmstrip_extends_the_selection_with_cmd_and_shift() {
-        use crate::app::presets::tests::settled;
+        use crate::app::test_support::settled;
         let (mut app, dir, paths) = folder_app("nav-strip-multi", 8);
         app.select_single(0);
         app.enter_loupe();

@@ -179,7 +179,7 @@ fn burst_group(burst: &[PathBuf], score: impl Fn(&Path) -> Option<u8>) -> Option
 mod tests {
     use super::*;
     use crate::app::nav::tests::group_photos;
-    use crate::app::presets::tests::folder_app;
+    use crate::app::test_support::folder_app;
     use std::time::{Duration, SystemTime};
 
     fn at(ms: u64) -> Option<SystemTime> {

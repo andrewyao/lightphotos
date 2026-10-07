@@ -514,7 +514,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::nav::tests::{cells, group_photos};
-    use crate::app::presets::tests::folder_app;
+    use crate::app::test_support::folder_app;
     use crate::ui::UiAction;
     use std::time::{Duration, Instant};
 

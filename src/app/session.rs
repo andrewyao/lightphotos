@@ -323,7 +323,7 @@ mod tests {
     /// A real click on the landing page's button, through the whole UI.
     #[test]
     fn the_landing_page_button_reopens_the_saved_session() {
-        use crate::app::presets::tests::{click, settled};
+        use crate::app::test_support::{click, settled};
         use crate::i18n::t;
         use crate::ui::UiAction;
 
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn a_first_launch_has_no_reopen_session_button() {
-        use crate::app::presets::tests::settled;
+        use crate::app::test_support::settled;
         use crate::i18n::t;
 
         let mut app = App::new(None);

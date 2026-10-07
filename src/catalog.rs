@@ -662,22 +662,8 @@ fn skipped_message(skipped: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::temp_folder;
     use crate::groups::{Group, GroupId};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    /// A unique temp dir under `std::env::temp_dir()`.
-    fn unique_tmp_dir() -> PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "lightphotos-catalog-test-{}-{}",
-            std::process::id(),
-            n
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     /// Sidecar writes are queued, so a test that reads the disk waits here
     /// first. A timeout rather than an unbounded wait, so a stuck writer
@@ -692,7 +678,7 @@ mod tests {
 
     #[test]
     fn round_trip_persists_across_reload() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg"); // nonexistent — exercises the fallback.
 
         {
@@ -709,7 +695,7 @@ mod tests {
 
     #[test]
     fn zero_removes_entry_and_persists_removal() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         {
@@ -728,7 +714,7 @@ mod tests {
 
     #[test]
     fn rating_is_clamped_to_five() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         let mut cat = Catalog::with_dir(dir.clone());
@@ -744,7 +730,7 @@ mod tests {
 
     #[test]
     fn a_flag_persists_and_clearing_it_deletes_an_otherwise_empty_sidecar() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         let mut cat = Catalog::with_dir(dir.clone());
@@ -770,7 +756,7 @@ mod tests {
 
     #[test]
     fn adjustments_persist_across_reload() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         let mut adj = Adjustments::default();
@@ -791,7 +777,7 @@ mod tests {
 
     #[test]
     fn denoise_persists_across_reload() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         let mut adj = Adjustments::default();
@@ -811,7 +797,7 @@ mod tests {
 
     #[test]
     fn rotation_persists_across_reload() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         {
@@ -831,7 +817,7 @@ mod tests {
 
     #[test]
     fn touchups_persist_across_reload_and_can_be_removed() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
         let t = TouchUp {
             center: [0.4, 0.5],
@@ -856,7 +842,7 @@ mod tests {
 
     #[test]
     fn rating_and_adjustments_coexist() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         let mut adj = Adjustments::default();
@@ -880,7 +866,7 @@ mod tests {
 
     #[test]
     fn identity_adjustments_omitted_from_sidecar_json() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         // A rated image with identity edits: sidecar has no "adjustments" key.
@@ -916,7 +902,7 @@ mod tests {
     fn failed_persist_is_reported_once_via_take_error() {
         // A file named .lightphotos makes create_dir_all, and so every
         // write, fail.
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         std::fs::write(dir.join(SIDECAR_DIR), b"not a dir").unwrap();
 
         let mut cat = Catalog::with_dir(dir.clone());
@@ -941,7 +927,7 @@ mod tests {
 
     #[test]
     fn unreadable_sidecar_is_reported_not_silently_dropped() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         std::fs::create_dir_all(dir.join(SIDECAR_DIR)).unwrap();
         std::fs::write(sidecar_for(&dir, "bad.jpg"), b"{not valid json").unwrap();
 
@@ -961,7 +947,7 @@ mod tests {
 
     #[test]
     fn corrupt_sidecar_does_not_block_other_photos_in_same_directory() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         std::fs::create_dir_all(dir.join(SIDECAR_DIR)).unwrap();
         std::fs::write(sidecar_for(&dir, "bad.jpg"), b"{not valid json").unwrap();
 
@@ -986,7 +972,7 @@ mod tests {
 
     #[test]
     fn same_stem_raw_and_jpeg_get_independent_sidecars() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let raw = dir.join("PHOTO1.ARW");
         let jpg = dir.join("PHOTO1.JPG");
 
@@ -1008,7 +994,7 @@ mod tests {
 
     #[test]
     fn lightphotos_dir_created_lazily_only_on_first_write() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let mut cat = Catalog::with_dir(dir.clone());
         assert!(
             !dir.join(SIDECAR_DIR).exists(),
@@ -1084,7 +1070,7 @@ mod tests {
 
     #[test]
     fn a_score_alone_keeps_the_sidecar_and_round_trips() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
         let mut cat = Catalog::with_dir(dir.clone());
         let edits = ImageRecord::default().edit_signature();
@@ -1102,7 +1088,7 @@ mod tests {
 
     #[test]
     fn an_edit_after_scoring_marks_the_score_stale_and_undoing_it_clears_that() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
         let mut cat = Catalog::with_dir(dir.clone());
         cat.set_score(&p, sample_score(), ImageRecord::default().edit_signature());
@@ -1131,7 +1117,7 @@ mod tests {
 
     #[test]
     fn empty_record_deletes_the_sidecar_file() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
         let mut cat = Catalog::with_dir(dir.clone());
         cat.set(&p, 3);
@@ -1149,7 +1135,7 @@ mod tests {
 
     #[test]
     fn forgetting_a_photo_deletes_its_sidecar_file() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
         let mut cat = Catalog::with_dir(dir.clone());
         cat.set(&p, 4);
@@ -1167,8 +1153,8 @@ mod tests {
 
     #[test]
     fn open_dir_switches_active_directory_without_cross_directory_leakage() {
-        let a = unique_tmp_dir();
-        let b = unique_tmp_dir();
+        let a = temp_folder("catalog-test");
+        let b = temp_folder("catalog-test");
         let pa = a.join("photo.jpg");
         let pb = b.join("photo.jpg"); // same filename, different directory
 
@@ -1210,8 +1196,8 @@ mod tests {
 
     #[test]
     fn a_photo_outside_the_active_directory_never_sees_its_records() {
-        let a = unique_tmp_dir();
-        let b = unique_tmp_dir();
+        let a = temp_folder("catalog-test");
+        let b = temp_folder("catalog-test");
         let pa = a.join("IMG_0001.JPG");
         let pb = b.join("IMG_0001.JPG");
 
@@ -1260,8 +1246,8 @@ mod tests {
 
     #[test]
     fn apply_loaded_is_discarded_for_a_directory_no_longer_active() {
-        let a = unique_tmp_dir();
-        let b = unique_tmp_dir();
+        let a = temp_folder("catalog-test");
+        let b = temp_folder("catalog-test");
         let pa = a.join("photo.jpg");
 
         let mut cat = Catalog::with_dir(a.clone());
@@ -1287,7 +1273,7 @@ mod tests {
 
     #[test]
     fn apply_loaded_does_not_clobber_a_local_write_made_after_switch() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let written = dir.join("written.jpg");
         let other = dir.join("other.jpg");
 
@@ -1321,7 +1307,7 @@ mod tests {
 
     #[test]
     fn apply_loaded_does_not_resurrect_a_locally_removed_record() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         // A rating exists on disk from a previous session.
@@ -1346,8 +1332,8 @@ mod tests {
 
     #[test]
     fn apply_loaded_still_surfaces_skipped_count_for_a_stale_directory() {
-        let a = unique_tmp_dir();
-        let b = unique_tmp_dir();
+        let a = temp_folder("catalog-test");
+        let b = temp_folder("catalog-test");
         std::fs::create_dir_all(a.join(SIDECAR_DIR)).unwrap();
         std::fs::write(sidecar_for(&a, "bad.jpg"), b"{not valid json").unwrap();
 
@@ -1371,7 +1357,7 @@ mod tests {
     /// filesystem once per photo and froze the window for seconds.
     #[test]
     fn rating_a_whole_folder_does_not_block_on_the_filesystem() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let paths: Vec<PathBuf> = (0..20_000)
             .map(|i| dir.join(format!("photo{i:05}.jpg")))
             .collect();
@@ -1408,8 +1394,8 @@ mod tests {
 
     #[test]
     fn a_folder_round_trip_during_a_flush_does_not_revert_the_edit() {
-        let dir = unique_tmp_dir();
-        let elsewhere = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
+        let elsewhere = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         // A previous session left this photo at three stars.
@@ -1454,8 +1440,8 @@ mod tests {
     /// sidecars is still running.
     #[test]
     fn a_completed_write_is_not_reverted_by_a_load_that_predates_it() {
-        let dir = unique_tmp_dir();
-        let elsewhere = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
+        let elsewhere = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         Catalog::with_dir(dir.clone()).set(&p, 3);
@@ -1483,8 +1469,8 @@ mod tests {
     /// history before the overlay could use it.
     #[test]
     fn a_completed_write_survives_the_last_outstanding_load() {
-        let dir = unique_tmp_dir();
-        let elsewhere = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
+        let elsewhere = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         Catalog::with_dir(dir.clone()).set(&p, 3);
@@ -1509,8 +1495,8 @@ mod tests {
     /// `reloading_a_folder_drops_values_its_sidecars_no_longer_have` relies on.
     #[test]
     fn a_load_requested_after_a_write_landed_still_wins() {
-        let dir = unique_tmp_dir();
-        let elsewhere = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
+        let elsewhere = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
         let mut cat = Catalog::with_dir(dir.clone());
@@ -1537,7 +1523,7 @@ mod tests {
 
     #[test]
     fn load_sidecars_reads_a_directory_without_mutating_a_catalog() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
         Catalog::with_dir(dir.clone()).set(&p, 4);
 
@@ -1590,7 +1576,7 @@ mod tests {
 
     #[test]
     fn a_group_round_trips_through_writeback_and_reload() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let members = photos(&dir, &["IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG"]);
         let group = Group::new(members, "IMG_0002.JPG".into()).unwrap();
 
@@ -1631,7 +1617,7 @@ mod tests {
 
     #[test]
     fn a_load_without_groups_creates_no_directory() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         photos(&dir, &["a.jpg", "b.jpg"]);
         let cat = Catalog::with_dir(dir.clone());
         assert!(cat.groups().unwrap().is_empty());
@@ -1653,7 +1639,7 @@ mod tests {
 
     #[test]
     fn loading_repairs_groups_in_memory_and_leaves_their_files_alone() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
         let missing =
             r#"{"v":1,"members":["gone.jpg","a.jpg","b.jpg"],"representative":"gone.jpg"}"#;
@@ -1680,7 +1666,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_group_is_counted_and_the_rest_still_load() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         photos(&dir, &["a.jpg", "b.jpg", "c.jpg", "d.jpg", "notes.txt"]);
         write_group_file(&dir, "g-bad", "{not json");
         write_group_file(
@@ -1741,7 +1727,7 @@ mod tests {
 
     #[test]
     fn ungrouping_the_winner_does_not_bring_the_loser_back() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
         write_group_file(
             &dir,
@@ -1769,7 +1755,7 @@ mod tests {
 
     #[test]
     fn a_group_dropped_for_a_missing_photo_stays_dropped_when_it_returns() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         photos(&dir, &["a.jpg", "c.jpg", "d.jpg"]);
         let dropped = write_group_file(
             &dir,
@@ -1807,8 +1793,8 @@ mod tests {
 
     #[test]
     fn a_load_that_predates_a_group_write_keeps_the_group() {
-        let dir = unique_tmp_dir();
-        let elsewhere = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
+        let elsewhere = temp_folder("catalog-test");
         let members = photos(&dir, &["a.jpg", "b.jpg"]);
 
         let mut cat = Catalog::with_dir(dir.clone());
@@ -1833,7 +1819,7 @@ mod tests {
 
     #[test]
     fn a_group_write_during_a_pending_load_is_refused_and_changes_nothing() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
         let members = photos(&dir, &["a.jpg", "b.jpg"]);
         let group = Group::new(members, "a.jpg".into()).unwrap();
         let writes = Groups::default().create(group, std::time::SystemTime::now());
@@ -1866,8 +1852,8 @@ mod tests {
 
     #[test]
     fn a_stale_load_replays_group_writes_in_the_order_they_were_issued() {
-        let dir = unique_tmp_dir();
-        let elsewhere = unique_tmp_dir();
+        let dir = temp_folder("catalog-test");
+        let elsewhere = temp_folder("catalog-test");
         photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
         let (first, second) = (
             GroupId::from_stem("g-1".as_ref()).unwrap(),

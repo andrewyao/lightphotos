@@ -825,15 +825,13 @@ pub(crate) fn flag_name(flag: Option<Flag>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::{load_folder, temp_folder};
     use crate::navigation::Playlist;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn choosing_a_representative_moves_the_cell_the_loupe_and_the_sidecar() {
         use crate::app::nav::tests::{cells, group_photos};
-        let (mut app, dir, paths) = crate::app::presets::tests::folder_app("set-rep", 6);
+        let (mut app, dir, paths) = crate::app::test_support::folder_app("set-rep", 6);
         // Photo 2 sits between the members, so the group's cell moves.
         group_photos(&mut app, &[1, 3], 1);
         app.select_single(1);
@@ -865,7 +863,7 @@ mod tests {
     /// sidecar that no longer has them, e.g. after another tool cleared it.
     #[test]
     fn reloading_a_folder_drops_values_its_sidecars_no_longer_have() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("app-catalog-test");
         let photo = dir.join("a.jpg");
         std::fs::write(&photo, b"").unwrap();
 
@@ -879,15 +877,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while app.poll_catalog_load() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "catalog load timed out"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        load_folder(&mut app, &dir);
 
         assert_eq!(app.ratings.get(&photo), None);
         assert_eq!(app.rotations.get(&photo), None);
@@ -918,8 +908,8 @@ mod tests {
         use crate::facequality::FaceQuality;
         use crate::signalcache::{Signal, SignalCache};
 
-        let dir = unique_tmp_dir();
-        let other = unique_tmp_dir();
+        let dir = temp_folder("app-catalog-test");
+        let other = temp_folder("app-catalog-test");
         let a = dir.join("a.jpg");
         let b = dir.join("b.jpg");
         std::fs::write(&a, b"a").unwrap();
@@ -966,23 +956,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&other);
     }
 
-    fn unique_tmp_dir() -> PathBuf {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "lightphotos-app-catalog-test-{}-{}",
-            std::process::id(),
-            n
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
     /// Rating a photo below an active "≥N" filter drops it from `visible` and
     /// leaves `sel` as `None` in the Loupe. A later rating must still apply to
     /// the photo on screen (`want`).
     #[test]
     fn rating_a_loupe_photo_applies_even_when_sel_has_gone_stale() {
-        let dir = unique_tmp_dir();
+        let dir = temp_folder("app-catalog-test");
         let photo = dir.join("a.jpg");
         std::fs::write(&photo, b"").unwrap();
 
@@ -1013,7 +992,7 @@ mod tests {
 
     #[test]
     fn flags_apply_to_one_photo_or_the_selection_and_report_mixed_coverage() {
-        let (mut app, dir, paths) = crate::app::presets::tests::folder_app("flag-sel", 3);
+        let (mut app, dir, paths) = crate::app::test_support::folder_app("flag-sel", 3);
         app.selected = (0..3).collect();
         app.sel = Some(0);
         app.apply_ui_actions(vec![ui::UiAction::RequestBulk(ui::BulkKind::Flag(Some(
@@ -1066,7 +1045,7 @@ mod tests {
 
     #[test]
     fn the_grid_keeps_rejects_in_view_by_default_and_the_flag_filter_narrows_the_star_filter() {
-        let (mut app, dir, paths) = crate::app::presets::tests::folder_app("flag-filter", 4);
+        let (mut app, dir, paths) = crate::app::test_support::folder_app("flag-filter", 4);
         app.catalog.set_flag(&paths[0], Some(Flag::Pick));
         app.catalog.set_flag(&paths[1], Some(Flag::Pick));
         app.set_rating_of(paths[1].clone(), 3);

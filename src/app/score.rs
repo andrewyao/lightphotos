@@ -197,24 +197,10 @@ mod tests {
     use super::*;
     use crate::quality::{Basis, QualityScore};
     use crate::score::ScorePool;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn folder_app(n: usize) -> (App, PathBuf, Vec<PathBuf>) {
-        let dir = std::env::temp_dir().join(format!(
-            "lightphotos-score-test-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let paths: Vec<PathBuf> = (0..n)
-            .map(|i| {
-                let p = dir.join(format!("p{i:02}.jpg"));
-                std::fs::write(&p, b"x").unwrap();
-                p
-            })
-            .collect();
+        let names: Vec<String> = (0..n).map(|i| format!("p{i:02}.jpg")).collect();
+        let (dir, paths) = crate::app::test_support::folder_of("score-test", &names);
         let mut app = App::new(None);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
         app.catalog.open_dir(&dir);
@@ -362,11 +348,7 @@ mod tests {
         app.score_pool = ScorePool::with_runner(2, slow_fixed);
         app.select_all();
         app.score_selection();
-        let other = std::env::temp_dir().join(format!(
-            "lightphotos-score-test-other-{}",
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&other).unwrap();
+        let other = crate::app::test_support::temp_folder("score-test-other");
         app.load_playlist(Playlist::from_dir(&other), other.clone());
         assert_eq!(app.score_progress(), None);
         run_until_idle(&mut app);

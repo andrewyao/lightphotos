@@ -830,6 +830,8 @@ mod nav;
 mod presets;
 mod score;
 mod session;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod thumbs;
 #[cfg(target_arch = "wasm32")]
 mod web;

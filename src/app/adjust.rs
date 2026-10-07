@@ -564,7 +564,7 @@ mod tests {
     /// widget tree with the presets module's pointer harness.
     mod develop_tabs {
         use super::super::*;
-        use crate::app::presets::tests::{click, folder_app, frame, frame_with_modifiers, settled};
+        use crate::app::test_support::{click, folder_app, frame, frame_with_modifiers, settled};
         use crate::ui::UiAction;
 
         fn loupe(tag: &str) -> App {
