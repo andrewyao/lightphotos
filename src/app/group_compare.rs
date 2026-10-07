@@ -1090,6 +1090,8 @@ mod tests {
     #[test]
     fn grouping_makes_the_first_highest_scored_photo_the_representative() {
         let (mut app, dir, paths) = folder_app("group-rep-score", 6);
+        // Scores count only where scoring is on offer.
+        app.score_pool = crate::score::ScorePool::with_runner(1, |_| Err("unused".into()));
         set_score(&mut app, &paths[1], 50);
         set_score(&mut app, &paths[2], 70);
         set_score(&mut app, &paths[4], 70);

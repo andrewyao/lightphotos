@@ -125,12 +125,17 @@ impl App {
         self.score_job.as_ref().map(ScoreJob::progress)
     }
 
+    /// Whether scoring, and every score shown, is on offer: only where a
+    /// pool started, which is macOS alone.
     pub(crate) fn scoring_available(&self) -> bool {
         self.score_pool.is_some()
     }
 
     /// The visible cell's stored score and whether it went stale.
     pub(crate) fn score_at(&self, pos: usize) -> Option<(&crate::quality::QualityScore, bool)> {
+        if !self.scoring_available() {
+            return None;
+        }
         let pl = self.playlist.as_ref()?;
         let path = pl.entry(*self.visible.get(pos)?)?;
         self.catalog.score(path).map(|(s, stale)| (&s.score, stale))
@@ -138,6 +143,9 @@ impl App {
 
     /// The shown photo's stored score and whether it went stale.
     pub(crate) fn shown_score(&self) -> Option<(crate::quality::QualityScore, bool)> {
+        if !self.scoring_available() {
+            return None;
+        }
         let path = self.selected_path()?;
         self.catalog
             .score(&path)
@@ -147,6 +155,9 @@ impl App {
     /// The lowest and highest stored score across the selection, and
     /// whether any of them went stale. `None` while none is scored.
     pub(crate) fn selection_score_span(&self) -> Option<(u8, u8, bool)> {
+        if !self.scoring_available() {
+            return None;
+        }
         self.selected_paths()
             .iter()
             .filter_map(|p| self.catalog.score(p))
@@ -161,10 +172,10 @@ impl App {
         self.grid_sort
     }
 
-    /// Whether the Grid may sort by Quality: not while a scoring run is
-    /// going, since each new score would reorder the Grid.
+    /// Whether the Grid may sort by Quality: only where scoring is, and not
+    /// while a run is going, since each new score would reorder the Grid.
     pub(crate) fn quality_sort_available(&self) -> bool {
-        self.score_job.is_none()
+        self.scoring_available() && self.score_job.is_none()
     }
 
     pub(super) fn set_sort(&mut self, sort: GridSort) {
@@ -388,8 +399,25 @@ mod tests {
     }
 
     #[test]
+    fn without_a_scoring_pool_no_score_or_quality_sort_shows() {
+        let (mut app, _dir, paths) = folder_app(2);
+        let unedited = crate::catalog::ImageRecord::default().edit_signature();
+        app.catalog.set_score(&paths[0], scored(80), unedited);
+        app.select_single(0);
+        assert!(app.score_pool.is_none());
+
+        assert!(!app.quality_sort_available());
+        app.set_sort(GridSort::Quality);
+        assert_eq!(app.grid_sort(), GridSort::Name);
+        assert!(app.score_at(0).is_none());
+        assert!(app.shown_score().is_none());
+        assert!(app.selection_score_span().is_none());
+    }
+
+    #[test]
     fn the_quality_sort_puts_the_best_first_and_the_unscored_last_and_keeps_the_selection() {
         let (mut app, dir, paths) = folder_app(4);
+        app.score_pool = ScorePool::with_runner(2, slow_fixed);
         let unedited = crate::catalog::ImageRecord::default().edit_signature();
         app.catalog.set_score(&paths[1], scored(30), unedited);
         app.catalog.set_score(&paths[2], scored(80), unedited);

@@ -845,7 +845,7 @@ pub static EN: Strings = Strings {
         },
         HelpSection {
             title: "Rate",
-            rows: if WEB {
+            rows: if !cfg!(target_os = "macos") {
                 &[("0 1 2 3 4 5", "Set star rating 0-5")]
             } else {
                 &[
@@ -1445,7 +1445,7 @@ pub static ZH: Strings = Strings {
         },
         HelpSection {
             title: "评分",
-            rows: if WEB {
+            rows: if !cfg!(target_os = "macos") {
                 &[("0 1 2 3 4 5", "设置星级 0-5")]
             } else {
                 &[

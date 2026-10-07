@@ -71,9 +71,13 @@ pub struct ScorePool {
 }
 
 impl ScorePool {
-    /// `None` when no worker could start, as on wasm32, which cannot spawn
-    /// threads. A pool with no workers would hold a job open forever.
+    /// `None` off macOS, where Vision's face and aesthetics signals are
+    /// missing and a technical-only score would mislead, and when no worker
+    /// could start. A pool with no workers would hold a job open forever.
     pub fn new() -> Option<Self> {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
         let cores = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
