@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Background JPEG export. Each export decodes at full resolution, bakes in
 //! the edits, and encodes a JPEG, which takes hundreds of milliseconds. A

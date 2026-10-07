@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The base font size, which Alt+= and Alt+- step. egui's Body style is the
 //! base, and every other text style and every hand-painted label keeps its

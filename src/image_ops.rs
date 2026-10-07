@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! CPU pixel operations with no UI dependency. [`bake_edited`] is the one
 //! place edits are burned into pixels, for both export and edited thumbnails,

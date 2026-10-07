@@ -78,14 +78,14 @@ jobs:
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: tar -czf "${{ matrix.name }}.tar.gz" -C "target/${{ matrix.target }}/release" lightphotos -C "$GITHUB_WORKSPACE" LICENSE THIRD-PARTY-LICENSES.txt
+        run: tar -czf "${{ matrix.name }}.tar.gz" -C "target/${{ matrix.target }}/release" lightphotos -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE THIRD-PARTY-LICENSES.txt -C "$GITHUB_WORKSPACE/patches" LICENSE-LGPL
 
       # Windows: zip the .exe and the license files. Compress-Archive ships
       # with the runner; git-bash has no `zip`.
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Compress-Archive -Path "target/${{ matrix.target }}/release/lightphotos.exe", LICENSE, THIRD-PARTY-LICENSES.txt -DestinationPath "${{ matrix.name }}.zip"
+        run: Compress-Archive -Path "target/${{ matrix.target }}/release/lightphotos.exe", LICENSE-MIT, LICENSE-APACHE, patches/LICENSE-LGPL, THIRD-PARTY-LICENSES.txt -DestinationPath "${{ matrix.name }}.zip"
 
       - uses: actions/upload-artifact@v5
         with:

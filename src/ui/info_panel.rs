@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The left panel's Info tab: the focused photo's file, camera, exposure,
 //! date, and location details.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Headless script driver for live checks. `--drive <script>` runs the real
 //! `App`, egui frame and renderer against a hidden window, so a check never

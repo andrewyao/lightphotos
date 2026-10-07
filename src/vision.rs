@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Shared Apple Vision plumbing: run Vision requests against an image file or
 //! an image already in memory. Given a file, Vision decodes it itself, so

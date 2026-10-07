@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Folder listing, rating filters, burst grouping by time, and grid/tree
 //! arrow-key movement.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The `App`: all viewer state, plus the logic that ties together the GPU
 //! renderer, the background loader, the catalog, the egui chrome, and the

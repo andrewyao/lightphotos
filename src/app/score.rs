@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! "Score photos": the App side of `crate::score`. It queues the selection,
 //! keeps the scoring pool fed one photo per free worker, and stores each

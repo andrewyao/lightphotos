@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Scoring photos on request. The user picks the photos; nothing here sweeps
 //! a folder. Each photo is decoded at a small preview size, has its edits

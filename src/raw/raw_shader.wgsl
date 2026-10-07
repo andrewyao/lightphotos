@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 // Fragment shader for linear-light RAW images (`PixelFormat::LinearF16`, the
 // wasm32 Loupe path). The CPU demosaics to linear camera RGB and this shader

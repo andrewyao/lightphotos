@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! User-facing text in every supported language. Each language is one
 //! `Strings` value, so a string missing from any language is a compile error.

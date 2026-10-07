@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Per-photo sidecars that persist ratings and develop edits. Each photo's
 //! record lives in `<photo dir>/.lightphotos/<photo filename>.xmp`, so edits

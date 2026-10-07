@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! wgpu rendering of the loupe image, plus the egui pass on top. Each decoded
 //! image is uploaded once as a texture with a GPU-built mip chain. Zoom and pan

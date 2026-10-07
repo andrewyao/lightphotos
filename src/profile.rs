@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Headless driver for the paths a culling session actually waits on.
 //! Listing a folder gates the rest and always runs. Ten phases sit behind

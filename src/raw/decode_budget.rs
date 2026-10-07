@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Caps how much memory the wasm32 RAW decodes use at once. Every decode
 //! thread shares one heap of at most 4 GB that never shrinks, and a 45 MP

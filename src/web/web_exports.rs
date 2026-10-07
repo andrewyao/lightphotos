@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! wasm32: the main thread's half of a batch export. The loader's threads
 //! bake each JPEG, but the folder it goes to is a File System Access handle,

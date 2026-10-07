@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 // Declarations shared by the two loupe fragment shaders. Rust prepends this
 // file to `shader.wgsl` and `raw/raw_shader.wgsl`, so each is one module.

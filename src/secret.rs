@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Where the Immich API key is kept. macOS files it in the login Keychain
 //! under one account per server. Elsewhere it goes in a file under the config

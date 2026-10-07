@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! RAW decode for the wasm32 worker, in two tiers picked by `DemosaicMode`.
 //! Browsers have no ImageIO, so this runs after the embedded-preview

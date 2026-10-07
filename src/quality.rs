@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! A 0-100 quality score per photo. Classical measurements on the pixels
 //! catch defects (missed focus, clipping, darkness, noise, a blink). On

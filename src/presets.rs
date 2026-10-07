@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The named-look library. A preset is the tone half of an edit under a name,
 //! saved once and applied to any photo afterwards.

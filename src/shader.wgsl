@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 // The loupe image shader. The vertex shader applies zoom, pan, and rotation to
 // the UVs; the fragment shader applies develop adjustments.

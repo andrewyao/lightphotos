@@ -1,5 +1,5 @@
 #!/bin/sh
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: MIT OR Apache-2.0
 set -eu
 
 dir=${1:?usage: make-fixture.sh <dir> [count]}

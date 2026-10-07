@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Decode and metadata for Linux, Windows, and wasm32, mounted into
 //! `image_decode` with `#[path]` and a glob re-export. Also owns the RAW

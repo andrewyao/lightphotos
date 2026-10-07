@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Rendered pixels in, a quality score out. Shared by the app's scoring
 //! workers and `src/bin/score_probe.rs`.

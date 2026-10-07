@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! wasm32-only: export file access through the File System Access API.
 //! Sources are read through file handles. JPEGs are written through a

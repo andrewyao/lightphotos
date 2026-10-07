@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! `face_probe`: prints Vision face landmarks and eye-openness scores so a
 //! person can check `facequality.rs` against real open-eyed and blinking

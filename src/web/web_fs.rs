@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! wasm32-only: folder picking, listing, and file reads through the File
 //! System Access API. The browser counterpart of `navigation.rs`. A picked

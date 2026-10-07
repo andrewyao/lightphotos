@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Blink detection. Vision finds faces and eye landmark points, then pure
 //! geometry scores how open each eye is. [`detect_faces`] is thin Vision glue;

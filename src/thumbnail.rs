@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Reduced-size decodes and the on-disk thumbnail cache. macOS asks ImageIO
 //! for a thumbnail. Other targets try the file's embedded preview, then fall

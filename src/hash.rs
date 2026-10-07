@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! FNV-1a 64-bit hasher. Unlike `DefaultHasher`, its output is stable across
 //! runs, so it can key data saved to disk (thumbnail cache, edit signature).

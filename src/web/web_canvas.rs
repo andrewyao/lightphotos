@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! wasm32-only: puts winit's `<canvas>` into the page. winit creates the
 //! canvas on web but leaves inserting it into the DOM to the app.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The egui chrome: Grid, filmstrip, toolbar, panels, and overlays. The wgpu
 //! renderer draws the loupe image; this module draws everything around it and

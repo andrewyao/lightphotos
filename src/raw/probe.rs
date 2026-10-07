@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! `decode_probe`: a RAW decode test harness. It writes synthetic DNG
 //! fixtures (Linear DNG, Bayer, and DNG with a preview sub-IFD) and checks

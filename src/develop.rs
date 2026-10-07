@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The edit model. [`Adjustments`] is what the catalog stores, [`GpuAdjust`]
 //! is its uniform-buffer copy, and [`apply_linear`] is the CPU tone pipeline

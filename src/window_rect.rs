@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The main window's size and place: a roomy default for a first launch, and
 //! the rectangle it last closed at for every launch after.

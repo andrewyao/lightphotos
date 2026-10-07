@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 // Mip-chain generation. Each level is drawn by sampling the level above with
 // a linear filter. The destination is half the source size, so one bilinear

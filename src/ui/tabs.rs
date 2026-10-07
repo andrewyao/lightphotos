@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! A side panel's footer strip of text tabs. The active tab is outlined on
 //! three sides and open at the top, so it joins the content above it.

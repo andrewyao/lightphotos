@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The one layout every form follows: an optional title, sections, each a
 //! header over rows of a weak label and its value, top aligned, with a

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Render pipelines for linear-light RAW images (`PixelFormat::LinearF16`).
 //! Only the wasm32 Loupe RAW path produces those; every other path bakes the

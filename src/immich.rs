@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! A blocking client for the part of the Immich API that export uses: check a
 //! key, upload a JPEG, set its rating. Any server that speaks the Immich v2/v3

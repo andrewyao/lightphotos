@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! How many decoded images each `Loader` tier keeps in memory. One value per
 //! target, so a platform with less memory to spare, or a slower disk behind

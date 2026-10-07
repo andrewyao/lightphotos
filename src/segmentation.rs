@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Subject masks from Apple Vision, used by the Loupe's "Show Selection"
 //! overlay. Person segmentation runs first because it gives the cleanest edge

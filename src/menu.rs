@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The macOS menu bar. Each command stands for a key chord that
 //! `App::handle_key` already binds, and choosing it replays that chord, so the

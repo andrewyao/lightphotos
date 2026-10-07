@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! One sidecar per photo group, `<dir>/.lightphotos/groups/<id>.json`, so a
 //! group's members and representative change together in one atomic write.

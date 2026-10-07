@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Encode RGBA8 pixels to JPEG. macOS uses ImageIO through a CoreGraphics
 //! bitmap context. Other targets use the pure-Rust `mozjpeg-rs` encoder.

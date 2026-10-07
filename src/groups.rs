@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Saved photo groups for one folder. A group is two or more photos shown as
 //! one, its representative. This module is the pure model: it holds no UI,

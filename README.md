@@ -1,4 +1,4 @@
-<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 
 <h1><img src="assets/icon/wordmark.svg" alt="LightPhotos" width="420"></h1>
 
@@ -76,4 +76,10 @@ GitHub Release. The checkout must be clean and at `origin/main`.
 
 ---
 
-Licensed under the [GNU GPL v3.0 (or later)](LICENSE).
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE),
+at your option.
+
+The Linux, Windows and web builds also include a modified copy of
+[rawler](https://crates.io/crates/rawler) for camera RAW decoding. rawler and
+the patches to it in `patches/` are licensed under the
+[GNU LGPL v2.1](patches/LICENSE-LGPL). The macOS build does not include it.

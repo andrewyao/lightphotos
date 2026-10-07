@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The Loupe's group pane: whether a grouped photo shows it, how sharp its
 //! tiles are, and the members picked to become the representative or to

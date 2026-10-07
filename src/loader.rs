@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Background image decoding and the decoded-image caches. Worker threads
 //! decode off the UI thread. Results land in one of three LRU caches:

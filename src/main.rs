@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 // A console-subsystem program gets a console window of its own when launched
 // from Explorer. Debug builds keep it for their log output.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]

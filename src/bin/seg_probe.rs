@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! `seg_probe`: writes Vision subject masks as images so a person can check
 //! `segmentation.rs` on real photos. For each input it writes, into the

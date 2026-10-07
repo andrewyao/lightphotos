@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The native folder and Lightroom-preset pickers, a thin wrapper over `rfd`.
 //! The wasm build uses its own async picker in `web_fs` instead.

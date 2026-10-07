@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Regenerate THIRD-PARTY-LICENSES.txt, the notices file every download ships
-# beside LICENSE. It covers every crate compiled into any shipped binary (the
-# release.yml targets plus the wasm build, per about.toml), then the bundled
-# assets that are not crates: the Noto Sans SC font and the modified rawler.
+# beside LICENSE-MIT and LICENSE-APACHE. It covers every crate compiled into
+# any shipped binary (the release.yml targets plus the wasm build, per
+# about.toml), then the bundled assets that are not crates: the Noto Sans SC
+# font and the modified rawler.
 #
 #   scripts/third-party-licenses.sh           rewrite the committed file
 #   scripts/third-party-licenses.sh --check   exit 1 if the committed file is stale
