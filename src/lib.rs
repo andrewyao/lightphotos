@@ -26,3 +26,4 @@ pub mod raw_preview;
 pub mod segmentation;
 #[cfg(target_os = "macos")]
 pub mod vision;
+pub mod worker_pool;

@@ -7,13 +7,8 @@
 //! workers never touch `App`.
 
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::mpsc::Sender;
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::{Arc, Mutex};
-#[cfg(not(target_arch = "wasm32"))]
-use std::thread;
+use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
 
@@ -207,10 +202,9 @@ pub struct ExportOutcome {
 }
 
 pub struct Exporter {
-    // wasm32 exports run on the Web Worker pool instead, so it has no `submit`.
+    // wasm32 exports run on the Web Worker pool instead, so it has no workers.
     #[cfg(not(target_arch = "wasm32"))]
-    job_tx: Sender<ExportJob>,
-    res_rx: Receiver<ExportOutcome>,
+    pool: crate::worker_pool::WorkerPool<ExportJob, ExportLanding>,
 }
 
 impl Exporter {
@@ -221,88 +215,49 @@ impl Exporter {
 
     #[cfg(target_arch = "wasm32")]
     pub fn new() -> Self {
-        // No workers here, so nothing ever sends on the result channel.
-        let (_, res_rx) = std::sync::mpsc::channel::<ExportOutcome>();
-        Self { res_rx }
+        Self {}
     }
 
     /// `new`, with the per-photo work swapped out so a test can make it panic.
     #[cfg(not(target_arch = "wasm32"))]
-    fn with_runner(run: fn(ExportJob) -> Result<ExportLanding, String>) -> Self {
-        let (job_tx, job_rx) = std::sync::mpsc::channel::<ExportJob>();
-        let (res_tx, res_rx) = std::sync::mpsc::channel::<ExportOutcome>();
-        Self::spawn_workers(job_rx, res_tx, run);
-        Self { job_tx, res_rx }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn spawn_workers(
-        job_rx: Receiver<ExportJob>,
-        res_tx: Sender<ExportOutcome>,
-        run: fn(ExportJob) -> Result<ExportLanding, String>,
-    ) {
-        // Workers share one receiver, so whichever is idle takes the next job.
-        let job_rx = Arc::new(Mutex::new(job_rx));
-
-        let cores = thread::available_parallelism()
+    fn with_runner(run: fn(&ExportJob) -> Result<ExportLanding, String>) -> Self {
+        let cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let workers = cores.saturating_sub(2).max(1);
-
-        for i in 0..workers {
-            let job_rx = Arc::clone(&job_rx);
-            let res_tx = res_tx.clone();
-            let spawned = thread::Builder::new()
-                .name(format!("export-worker-{i}"))
-                .spawn(move || {
-                    loop {
-                        // Hold the lock only while receiving, not during the export.
-                        let job = {
-                            let rx = match job_rx.lock() {
-                                Ok(rx) => rx,
-                                Err(_) => return,
-                            };
-                            match rx.recv() {
-                                Ok(job) => job,
-                                // The Exporter was dropped.
-                                Err(_) => return,
-                            }
-                        };
-
-                        let src = job.src.clone();
-                        // rawler panics on some malformed files. Callers count
-                        // outcomes to know a batch is done, so a panic must
-                        // still send one, and the worker stays alive for the
-                        // rest of the batch.
-                        let result =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(job)))
-                                .unwrap_or_else(|_| {
-                                    Err(format!("export panicked: {}", src.display()))
-                                });
-                        if res_tx.send(ExportOutcome { src, result }).is_err() {
-                            break;
-                        }
-                    }
-                });
-            if let Err(e) = spawned {
-                eprintln!("[export] could not spawn export worker {i}: {e}");
-            }
-        }
+        // rawler panics on some malformed files. The pool still reports the
+        // photo, and the worker stays alive for the rest of the batch.
+        let pool = crate::worker_pool::WorkerPool::spawn(
+            "export",
+            cores.saturating_sub(2).max(1),
+            || {},
+            run,
+            |job| format!("export panicked: {}", job.src.display()),
+        );
+        Self { pool }
     }
 
     /// Queue a photo for export. Dropped silently after shutdown.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn submit(&self, job: ExportJob) {
-        let _ = self.job_tx.send(job);
+        self.pool.submit(job);
     }
 
     /// Drain finished exports without blocking.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn poll(&self) -> Vec<ExportOutcome> {
-        let mut out = Vec::new();
-        while let Ok(o) = self.res_rx.try_recv() {
-            out.push(o);
-        }
-        out
+        self.pool
+            .poll()
+            .into_iter()
+            .map(|(job, result)| ExportOutcome {
+                src: job.src,
+                result,
+            })
+            .collect()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn poll(&self) -> Vec<ExportOutcome> {
+        Vec::new()
     }
 }
 
@@ -319,7 +274,7 @@ mod tests {
     fn a_panicking_export_still_reports_and_the_worker_survives() {
         use std::time::{Duration, Instant};
 
-        fn panics_on_bad(job: ExportJob) -> Result<ExportLanding, String> {
+        fn panics_on_bad(job: &ExportJob) -> Result<ExportLanding, String> {
             if job.src.ends_with("bad.raw") {
                 panic!("malformed file");
             }
@@ -396,7 +351,7 @@ mod tests {
             ..Adjustments::default()
         };
 
-        let landing = do_export(ExportJob {
+        let landing = do_export(&ExportJob {
             src,
             dest: ExportDest::Folder(dest.clone()),
             adj,
@@ -485,14 +440,14 @@ mod tests {
 /// deliver the JPEG to `job.dest`.
 #[cfg(not(target_arch = "wasm32"))]
 #[hotpath::measure]
-fn do_export(job: ExportJob) -> Result<ExportLanding, String> {
-    let (w, h, rgba) = bake_job(&job)?;
+fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
+    let (w, h, rgba) = bake_job(job)?;
     let stamp = image_decode::capture_stamp(&job.src);
     let jpeg = image_encode::with_exif(&jpeg_bytes(w, h, &rgba)?, w, h, stamp.as_ref());
-    match job.dest {
+    match &job.dest {
         ExportDest::Folder(dest) => {
-            crate::paths::write_atomic(&dest, &jpeg).map_err(|e| format!("write: {e}"))?;
-            Ok(ExportLanding::File(dest))
+            crate::paths::write_atomic(dest, &jpeg).map_err(|e| format!("write: {e}"))?;
+            Ok(ExportLanding::File(dest.clone()))
         }
         ExportDest::Immich {
             server,
@@ -507,12 +462,12 @@ fn do_export(job: ExportJob) -> Result<ExportLanding, String> {
                 .and_then(|s| s.instant())
                 .or_else(|| std::fs::metadata(&job.src).and_then(|m| m.modified()).ok())
                 .unwrap_or_else(SystemTime::now);
-            let asset = server.upload(&jpeg, &filename, taken)?;
+            let asset = server.upload(&jpeg, filename, taken)?;
             // The photo is on the server either way, so a rating the key
             // isn't allowed to set is a warning, not a failed export.
             let rating_error = (1..=5)
-                .contains(&stars)
-                .then(|| server.set_rating(&asset.id, stars).err())
+                .contains(stars)
+                .then(|| server.set_rating(&asset.id, *stars).err())
                 .flatten();
             Ok(ExportLanding::Asset {
                 id: asset.id,

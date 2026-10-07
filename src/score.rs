@@ -11,12 +11,11 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::develop::{Adjustments, TouchUp};
 use crate::quality::QualityScore;
+use crate::worker_pool::WorkerPool;
 
 /// Everything one worker needs to score one photo, owned so it never reads
 /// app state.
@@ -63,9 +62,7 @@ fn preview(path: &Path) -> Result<crate::image_decode::DecodedImage, String> {
 /// The scoring workers. Two to four of them, a quarter of the cores, so a
 /// job leaves the rest of the machine to the decode pool and the UI.
 pub struct ScorePool {
-    job_tx: Sender<ScoreRequest>,
-    res_rx: Receiver<ScoreOutcome>,
-    workers: usize,
+    pool: WorkerPool<ScoreRequest, QualityScore>,
     /// Submitted and not yet polled back.
     outstanding: usize,
 }
@@ -88,53 +85,20 @@ impl ScorePool {
         workers: usize,
         run: fn(&ScoreRequest) -> Result<QualityScore, String>,
     ) -> Option<Self> {
-        let (job_tx, job_rx) = std::sync::mpsc::channel::<ScoreRequest>();
-        let (res_tx, res_rx) = std::sync::mpsc::channel::<ScoreOutcome>();
-        let job_rx = Arc::new(Mutex::new(job_rx));
-        let mut running = 0usize;
-        for i in 0..workers {
-            let job_rx = Arc::clone(&job_rx);
-            let res_tx = res_tx.clone();
-            let spawned = thread::Builder::new()
-                .name(format!("score-worker-{i}"))
-                .spawn(move || {
-                    lower_priority();
-                    loop {
-                        let req = {
-                            let Ok(rx) = job_rx.lock() else { return };
-                            let Ok(req) = rx.recv() else { return };
-                            req
-                        };
-                        // The job counts the photo in flight until its outcome
-                        // arrives, so a panic must still send one.
-                        let result = std::panic::catch_unwind(|| run(&req))
-                            .unwrap_or_else(|_| Err("scoring panicked".into()));
-                        let outcome = ScoreOutcome {
-                            path: req.path,
-                            edits: req.edits,
-                            result,
-                        };
-                        if res_tx.send(outcome).is_err() {
-                            return;
-                        }
-                    }
-                });
-            match spawned {
-                Ok(_) => running += 1,
-                Err(e) => eprintln!("[score] could not spawn worker {i}: {e}"),
-            }
-        }
-        (running > 0).then_some(Self {
-            job_tx,
-            res_rx,
-            workers: running,
+        // The job counts the photo in flight until its outcome arrives, so a
+        // panic must still send one.
+        let pool = WorkerPool::spawn("score", workers, lower_priority, run, |_| {
+            "scoring panicked".into()
+        });
+        (pool.workers() > 0).then_some(Self {
+            pool,
             outstanding: 0,
         })
     }
 
     /// How many more photos the workers can start right now.
     pub fn capacity(&self) -> usize {
-        self.workers.saturating_sub(self.outstanding)
+        self.pool.workers().saturating_sub(self.outstanding)
     }
 
     #[cfg(test)]
@@ -147,14 +111,23 @@ impl ScorePool {
     }
 
     pub fn submit(&mut self, req: ScoreRequest) {
-        if self.job_tx.send(req).is_ok() {
+        if self.pool.submit(req) {
             self.outstanding += 1;
         }
     }
 
     /// Drain finished photos without blocking.
     pub fn poll(&mut self) -> Vec<ScoreOutcome> {
-        let out: Vec<ScoreOutcome> = std::iter::from_fn(|| self.res_rx.try_recv().ok()).collect();
+        let out: Vec<ScoreOutcome> = self
+            .pool
+            .poll()
+            .into_iter()
+            .map(|(req, result)| ScoreOutcome {
+                path: req.path,
+                edits: req.edits,
+                result,
+            })
+            .collect();
         self.outstanding = self.outstanding.saturating_sub(out.len());
         out
     }

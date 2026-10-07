@@ -77,7 +77,7 @@ use lightphotos::immich;
 use lightphotos::{decode_budget, raw_preview};
 use lightphotos::{
     develop, export, facequality, hash, image_decode, image_encode, image_ops, judge, paths,
-    quality, segmentation,
+    quality, segmentation, worker_pool,
 };
 
 #[cfg(not(target_arch = "wasm32"))]

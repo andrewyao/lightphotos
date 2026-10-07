@@ -5,9 +5,9 @@
 //! the scoring below it is tested with fabricated points.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, Mutex};
 use std::thread;
+
+use crate::worker_pool::WorkerPool;
 
 #[cfg(target_os = "macos")]
 use objc2::ClassType;
@@ -220,8 +220,7 @@ pub struct FaceOutcome {
 /// Background workers for [`analyze`], which makes Vision decode the full-size
 /// file and is too slow for the UI thread.
 pub struct FacePool {
-    job_tx: Sender<PathBuf>,
-    res_rx: Receiver<FaceOutcome>,
+    pool: WorkerPool<PathBuf, FaceQuality>,
 }
 
 impl FacePool {
@@ -240,58 +239,30 @@ impl FacePool {
         workers: usize,
         analyze: fn(&Path) -> Result<FaceQuality, String>,
     ) -> Option<Self> {
-        let (job_tx, job_rx) = std::sync::mpsc::channel::<PathBuf>();
-        let (res_tx, res_rx) = std::sync::mpsc::channel::<FaceOutcome>();
-        let job_rx = Arc::new(Mutex::new(job_rx));
-        let mut running = 0usize;
-
-        for i in 0..workers {
-            let job_rx = Arc::clone(&job_rx);
-            let res_tx = res_tx.clone();
-            let spawned = thread::Builder::new()
-                .name(format!("facequality-worker-{i}"))
-                .spawn(move || loop {
-                    let path = {
-                        let rx = match job_rx.lock() {
-                            Ok(rx) => rx,
-                            Err(_) => return,
-                        };
-                        match rx.recv() {
-                            Ok(p) => p,
-                            Err(_) => return,
-                        }
-                    };
-                    // Callers hold the path as pending until its outcome
-                    // arrives, so a panic must still send one.
-                    let result = std::panic::catch_unwind(|| analyze(&path))
-                        .unwrap_or_else(|_| Err("face analysis panicked".into()));
-                    if res_tx.send(FaceOutcome { path, result }).is_err() {
-                        break;
-                    }
-                });
-            match spawned {
-                Ok(_) => running += 1,
-                // Some targets (wasm32) can't spawn threads. Log instead of
-                // crashing at startup.
-                Err(e) => eprintln!("[facequality] could not spawn worker {i}: {e}"),
-            }
-        }
-
-        (running > 0).then_some(Self { job_tx, res_rx })
+        // Callers hold the path as pending until its outcome arrives, so a
+        // panic must still send one.
+        let pool = WorkerPool::spawn(
+            "facequality",
+            workers,
+            || {},
+            move |path: &PathBuf| analyze(path),
+            |_| "face analysis panicked".into(),
+        );
+        (pool.workers() > 0).then_some(Self { pool })
     }
 
     /// Queue an analysis. Ignored if the workers are gone (shutdown).
     pub fn submit(&self, path: PathBuf) {
-        let _ = self.job_tx.send(path);
+        self.pool.submit(path);
     }
 
     /// Drain finished analyses without blocking.
     pub fn poll(&self) -> Vec<FaceOutcome> {
-        let mut out = Vec::new();
-        while let Ok(o) = self.res_rx.try_recv() {
-            out.push(o);
-        }
-        out
+        self.pool
+            .poll()
+            .into_iter()
+            .map(|(path, result)| FaceOutcome { path, result })
+            .collect()
     }
 }
 
