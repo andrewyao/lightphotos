@@ -38,6 +38,8 @@ pub struct ImageRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<Flag>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<ColorLabel>,
     #[serde(default, skip_serializing_if = "Adjustments::is_identity")]
     pub adjustments: Adjustments,
@@ -64,6 +66,14 @@ pub struct StoredScore {
     /// [`ImageRecord::edit_signature`] when scored. A different signature
     /// now means the photo was edited since, and the score is stale.
     pub edits: u64,
+}
+
+/// A culling decision on a photo, apart from its stars. Unflagged is `None`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Flag {
+    Pick,
+    Reject,
 }
 
 /// A photo's color label, set with Shift+1..5 in Lightroom's order.
@@ -120,6 +130,7 @@ impl ImageRecord {
     /// the moment any test sets it.
     pub(crate) fn is_empty(&self) -> bool {
         let empty = self.rating.is_none()
+            && self.flag.is_none()
             && self.label.is_none()
             && self.adjustments.is_identity()
             && self.touchups.is_empty()
@@ -382,6 +393,14 @@ impl Catalog {
         let stars = stars.min(MAX_RATING);
         let rating = if stars == 0 { None } else { Some(stars) };
         self.update(path, |rec| rec.rating = rating);
+    }
+
+    pub fn flag(&self, path: &Path) -> Option<Flag> {
+        self.record(path).and_then(|r| r.flag)
+    }
+
+    pub fn set_flag(&mut self, path: &Path, flag: Option<Flag>) {
+        self.update(path, |rec| rec.flag = flag);
     }
 
     pub fn label(&self, path: &Path) -> Option<ColorLabel> {
@@ -719,6 +738,32 @@ mod tests {
         flush(&mut cat);
         let reloaded = Catalog::with_dir(dir.clone());
         assert_eq!(reloaded.get(&p), Some(5));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_flag_persists_and_clearing_it_deletes_an_otherwise_empty_sidecar() {
+        let dir = unique_tmp_dir();
+        let p = dir.join("photo.jpg");
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        cat.set_flag(&p, Some(Flag::Reject));
+        flush(&mut cat);
+        let sidecar = std::fs::read_to_string(sidecar_for(&dir, "photo.jpg")).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&sidecar).unwrap(),
+            serde_json::json!({"flag": "reject"})
+        );
+        let mut reloaded = Catalog::with_dir(dir.clone());
+        assert_eq!(reloaded.flag(&p), Some(Flag::Reject));
+
+        reloaded.set_flag(&p, None);
+        flush(&mut reloaded);
+        assert!(
+            !sidecar_for(&dir, "photo.jpg").exists(),
+            "an unflagged, unrated photo has no sidecar"
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -302,6 +302,24 @@ impl App {
         paths
     }
 
+    /// The members the pane shows, in its order: `by_score`, less those its
+    /// flag filter hides.
+    pub(super) fn compare_order(&self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+        let mut order = self.by_score(paths);
+        let filter = self.compare_flag_filter;
+        order.retain(|p| filter.matches(self.flag_of(p)));
+        order
+    }
+
+    pub(crate) fn compare_flag_filter(&self) -> crate::navigation::FlagFilter {
+        self.compare_flag_filter
+    }
+
+    pub(super) fn set_compare_flag_filter(&mut self, filter: crate::navigation::FlagFilter) {
+        self.compare_flag_filter = filter;
+        self.request_redraw();
+    }
+
     /// The shown group's members in the pane's order (`by_score`) and its
     /// representative's path. `None` while the pane is closed.
     fn pane_members(&self) -> Option<(Vec<PathBuf>, PathBuf)> {
@@ -311,7 +329,7 @@ impl App {
         let dir = self.playlist.as_ref()?.dir();
         let (members, rep) = self.shown_group()?;
         let members = members.iter().map(|m| dir.join(m)).collect();
-        Some((self.by_score(members), dir.join(rep)))
+        Some((self.compare_order(members), dir.join(rep)))
     }
 
     /// The members a pick may name: the shown group's, in the pane's order,
@@ -342,6 +360,22 @@ impl App {
             .is_some_and(|(members, _)| members.contains(&path))
         {
             self.set_rating_of(path, stars);
+        }
+    }
+
+    /// A member's flag, for its tile.
+    pub(crate) fn member_flag(&self, path: &Path) -> Option<crate::catalog::Flag> {
+        self.flag_of(path)
+    }
+
+    /// Flag a member of the shown group from its tile, as
+    /// `rate_group_member` rates one.
+    pub(super) fn flag_group_member(&mut self, path: PathBuf, flag: Option<crate::catalog::Flag>) {
+        if self
+            .pane_members()
+            .is_some_and(|(members, _)| members.contains(&path))
+        {
+            self.set_flag_of(path, flag);
         }
     }
 
@@ -430,14 +464,29 @@ impl App {
 
     /// Make the picked member the representative. Nothing unless exactly
     /// one member is picked.
-    pub(super) fn set_pick_as_rep(&mut self) {
-        let [path] = self.group_picks()[..] else {
+    /// Make `path`, a member the pane shows other than the representative,
+    /// the representative, from its tile's hover button. Clears the picks.
+    pub(super) fn set_member_as_rep(&mut self, path: PathBuf) {
+        if !self.pickable().is_some_and(|m| m.contains(&path)) {
             return;
-        };
-        let path = path.to_path_buf();
+        }
         self.clear_group_picks();
         self.set_group_rep(&path);
         self.request_redraw();
+    }
+
+    /// Pick only `path`, a member the pane shows other than the
+    /// representative, and open the confirm for trashing it, from its
+    /// tile's Delete.
+    pub(super) fn request_delete_member(&mut self, path: PathBuf) {
+        if !self.pickable().is_some_and(|m| m.contains(&path)) {
+            return;
+        }
+        self.picks = GroupPicks {
+            picked: vec![path.clone()],
+            anchor: Some(path),
+        };
+        self.request_delete_picks();
     }
 
     /// Open the confirm for trashing the picks, when there are any and no
@@ -637,7 +686,7 @@ mod tests {
             "the Loupe keeps the rep"
         );
 
-        act(&mut app, UiAction::SetPickAsRep);
+        act(&mut app, UiAction::SetMemberAsRep(paths[3].clone()));
         assert_eq!(rep_name(&app), paths[3].file_name().unwrap());
         assert_eq!(
             cells(&app),
@@ -736,20 +785,23 @@ mod tests {
     }
 
     #[test]
-    fn set_as_rep_needs_exactly_one_pick() {
+    fn set_as_rep_names_a_shown_member_other_than_the_representative() {
         let (mut app, dir, paths) = compare("set-rep-one", 6, &[1, 2, 3], 1);
-        act(&mut app, UiAction::SetPickAsRep);
-        assert_eq!(rep_name(&app), paths[1].file_name().unwrap(), "no pick");
+        act(&mut app, UiAction::SetMemberAsRep(paths[4].clone()));
+        assert_eq!(
+            rep_name(&app),
+            paths[1].file_name().unwrap(),
+            "not in the group"
+        );
 
         pick(&mut app, &paths[2], PickHow::Toggle);
-        pick(&mut app, &paths[3], PickHow::Toggle);
-        act(&mut app, UiAction::SetPickAsRep);
-        assert_eq!(rep_name(&app), paths[1].file_name().unwrap(), "two picks");
-        assert_eq!(app.want.as_ref(), Some(&paths[1]));
-
-        pick(&mut app, &paths[2], PickHow::Toggle);
-        act(&mut app, UiAction::SetPickAsRep);
-        assert_eq!(rep_name(&app), paths[3].file_name().unwrap(), "one pick");
+        act(&mut app, UiAction::SetMemberAsRep(paths[3].clone()));
+        assert_eq!(
+            rep_name(&app),
+            paths[3].file_name().unwrap(),
+            "no pick needed"
+        );
+        assert!(picks(&app).is_empty(), "and the picks clear");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -780,6 +832,30 @@ mod tests {
             "the Loupe keeps the rep"
         );
         assert!(picks(&app).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tiles_delete_asks_first_then_trashes_only_that_member() {
+        let (mut app, dir, paths) = compare("delete-member", 6, &[1, 2, 3], 1);
+        pick(&mut app, &paths[2], PickHow::Only);
+        act(&mut app, UiAction::DeleteMember(paths[1].clone()));
+        assert!(
+            app.pending_bulk_prompt().is_none(),
+            "never the representative"
+        );
+
+        act(&mut app, UiAction::DeleteMember(paths[3].clone()));
+        let (_, prompt) = app.pending_bulk_prompt().expect("the confirm opens");
+        assert_eq!(prompt, (crate::i18n::t().confirm_delete)(1));
+        act(&mut app, UiAction::ConfirmPending);
+        drain_delete(&mut app);
+        let exists: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
+        assert_eq!(
+            exists,
+            [true, true, true, false, true, true],
+            "not the old pick"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -875,8 +951,6 @@ mod tests {
         act(&mut app, UiAction::Select(0));
         act(&mut app, UiAction::Select(1));
         assert!(picks(&app).is_empty(), "another photo drops the picks");
-        act(&mut app, UiAction::SetPickAsRep);
-        assert_eq!(rep_name(&app), paths[1].file_name().unwrap());
 
         pick(&mut app, &paths[3], PickHow::Only);
         act(
@@ -928,6 +1002,55 @@ mod tests {
         );
         rate(&mut app, &paths[2], 3);
         assert_eq!(app.member_rating(&paths[2]), 0, "the pane is closed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_tiles_flags_flag_only_a_member_of_the_shown_group() {
+        use crate::catalog::Flag;
+        let (mut app, dir, paths) = compare("flag-member", 6, &[1, 2, 3], 1);
+        let flag = |app: &mut App, path: &Path, flag| {
+            let path = path.to_path_buf();
+            act(app, UiAction::FlagGroupMember { path, flag });
+        };
+        flag(&mut app, &paths[3], Some(Flag::Pick));
+        assert_eq!(app.member_flag(&paths[3]), Some(Flag::Pick));
+        assert_eq!(app.want.as_ref(), Some(&paths[1]), "the Loupe stays put");
+        flag(&mut app, &paths[3], None);
+        assert_eq!(app.member_flag(&paths[3]), None, "None clears");
+        flag(&mut app, &paths[4], Some(Flag::Pick));
+        assert_eq!(app.member_flag(&paths[4]), None, "not in the group");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_panes_flag_filter_hides_rejected_tiles_by_default() {
+        use crate::catalog::Flag;
+        use crate::navigation::FlagFilter;
+        let (mut app, dir, paths) = compare("flag-pane", 6, &[1, 2, 3], 1);
+        let shown = |app: &App| app.pane_members().unwrap().0;
+        assert_eq!(shown(&app).len(), 3);
+        act(
+            &mut app,
+            UiAction::FlagGroupMember {
+                path: paths[3].clone(),
+                flag: Some(Flag::Reject),
+            },
+        );
+        assert!(
+            !shown(&app).contains(&paths[3]),
+            "Not Rejected is the default"
+        );
+        act(
+            &mut app,
+            UiAction::SetCompareFlagFilter(FlagFilter::Rejected),
+        );
+        assert_eq!(shown(&app), vec![paths[3].clone()]);
+        assert_eq!(
+            app.flag_filter(),
+            FlagFilter::All,
+            "the grid keeps its own filter"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

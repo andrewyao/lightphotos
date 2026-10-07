@@ -1,10 +1,10 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
-use crate::catalog::GroupWriteRefused;
+use crate::catalog::{Flag, GroupWriteRefused};
 use crate::develop::Adjustments;
 use crate::groups::{Group, GroupWrite};
-use crate::navigation::Cmp;
+use crate::navigation::{Cmp, FlagFilter};
 use crate::ui;
 
 impl App {
@@ -279,6 +279,32 @@ impl App {
         self.request_redraw();
     }
 
+    /// Flags the selected photo (`None` clears). Under a flag filter the
+    /// photo may drop out of view, as under a star filter.
+    pub(super) fn set_flag(&mut self, flag: Option<Flag>) {
+        if let Some(path) = self.selected_path() {
+            self.set_flag_of(path, flag);
+        }
+    }
+
+    /// Flags `path`, as `set_flag` does the selected photo.
+    pub(super) fn set_flag_of(&mut self, path: PathBuf, flag: Option<Flag>) {
+        self.catalog.set_flag(&path, flag);
+        self.after_flag_change();
+    }
+
+    fn after_flag_change(&mut self) {
+        if self.flag_filter != FlagFilter::All {
+            self.recompute_visible();
+            self.resync_loupe_selection();
+        }
+        self.request_redraw();
+    }
+
+    pub(super) fn flag_of(&self, path: &Path) -> Option<Flag> {
+        self.catalog.flag(path)
+    }
+
     pub(super) fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) -> bool {
         match self.catalog.apply_group_writes(writes) {
             Ok(()) => {
@@ -454,6 +480,7 @@ impl App {
         let prompt = match kind {
             ui::BulkKind::Rate(0) => (t.confirm_clear_rating)(n),
             ui::BulkKind::Rate(s) => (t.confirm_rate)(&"\u{2605}".repeat(s as usize), n),
+            ui::BulkKind::Flag(flag) => (t.confirm_flag)(flag_name(flag), n),
             ui::BulkKind::ApplySettings => (t.confirm_apply_settings)(n),
             ui::BulkKind::ApplyPreset(id) => {
                 let name = self.presets.get(id).map(|p| p.name.clone());
@@ -585,6 +612,7 @@ impl App {
     pub(super) fn run_bulk(&mut self, kind: ui::BulkKind) {
         match kind {
             ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
+            ui::BulkKind::Flag(flag) => self.apply_flag_to_selection(flag),
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
             ui::BulkKind::ApplyPreset(id) => self.apply_preset_to_selection(id),
             ui::BulkKind::AutoTone => self.auto_tone_selection(),
@@ -713,6 +741,34 @@ impl App {
         self.request_redraw();
     }
 
+    /// Applies `flag` (`None` clears) to every selected photo.
+    pub(super) fn apply_flag_to_selection(&mut self, flag: Option<Flag>) {
+        let paths = self.action_paths();
+        if paths.is_empty() {
+            return;
+        }
+        for path in &paths {
+            self.catalog.set_flag(path, flag);
+        }
+        self.after_flag_change();
+        let n = paths.len();
+        self.set_status(
+            StatusKind::Success,
+            (crate::i18n::t().flagged)(n, flag_name(flag)),
+        );
+    }
+
+    /// Sets the grid's flag filter. Does nothing in the Loupe, as
+    /// `set_filter` does not.
+    pub(super) fn set_flag_filter(&mut self, filter: FlagFilter) {
+        if self.mode == ViewMode::Loupe {
+            return;
+        }
+        self.flag_filter = filter;
+        self.recompute_visible();
+        self.request_redraw();
+    }
+
     /// Sets or clears the star filter. Does nothing in the Loupe, because a
     /// filter change there could hide the open photo from the selection
     /// cursor. This is the only mode check for both the toolbar and the
@@ -752,6 +808,16 @@ impl App {
     /// 0 when unrated.
     pub(super) fn rating_of(&self, path: &Path) -> u8 {
         self.ratings.get(path).copied().unwrap_or(0)
+    }
+}
+
+/// A flag state's name as the UI shows it, `None` being Unflagged.
+pub(crate) fn flag_name(flag: Option<Flag>) -> &'static str {
+    let t = crate::i18n::t();
+    match flag {
+        Some(Flag::Pick) => t.flag_picked,
+        Some(Flag::Reject) => t.flag_rejected,
+        None => t.flag_unflagged,
     }
 }
 
@@ -937,6 +1003,93 @@ mod tests {
         app.catalog
             .flush_blocking(std::time::Duration::from_secs(10));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The selection's coverage of Unflagged, Picked and Rejected.
+    fn coverage(app: &App) -> [FlagCoverage; 3] {
+        [None, Some(Flag::Pick), Some(Flag::Reject)].map(|f| app.selection_flag_coverage(f))
+    }
+
+    #[test]
+    fn flags_apply_to_one_photo_or_the_selection_and_report_mixed_coverage() {
+        let (mut app, dir, paths) = crate::app::presets::tests::folder_app("flag-sel", 3);
+        app.selected = (0..3).collect();
+        app.sel = Some(0);
+        app.apply_ui_actions(vec![ui::UiAction::RequestBulk(ui::BulkKind::Flag(Some(
+            Flag::Pick,
+        )))]);
+        assert!(
+            app.confirm_open(),
+            "a multi-photo flag asks first, as stars do"
+        );
+        app.confirm_pending();
+        assert!(paths.iter().all(|p| app.flag_of(p) == Some(Flag::Pick)));
+        assert_eq!(
+            coverage(&app),
+            [FlagCoverage::None, FlagCoverage::All, FlagCoverage::None]
+        );
+
+        app.select_single(1);
+        app.apply_ui_actions(vec![ui::UiAction::SetFlag(Some(Flag::Reject))]);
+        assert_eq!(
+            app.flag_of(&paths[1]),
+            Some(Flag::Reject),
+            "Reject replaces Pick"
+        );
+        assert_eq!(
+            app.flag_of(&paths[0]),
+            Some(Flag::Pick),
+            "the others keep theirs"
+        );
+        assert_eq!(
+            coverage(&app),
+            [FlagCoverage::None, FlagCoverage::None, FlagCoverage::All]
+        );
+
+        app.selected = (0..3).collect();
+        assert_eq!(
+            coverage(&app),
+            [FlagCoverage::None, FlagCoverage::Some, FlagCoverage::Some]
+        );
+
+        app.select_single(1);
+        app.apply_ui_actions(vec![ui::UiAction::SetFlag(None)]);
+        assert_eq!(app.flag_of(&paths[1]), None);
+        app.selected = (0..3).collect();
+        assert_eq!(
+            coverage(&app),
+            [FlagCoverage::Some, FlagCoverage::Some, FlagCoverage::None],
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_grid_keeps_rejects_in_view_by_default_and_the_flag_filter_narrows_the_star_filter() {
+        let (mut app, dir, paths) = crate::app::presets::tests::folder_app("flag-filter", 4);
+        app.catalog.set_flag(&paths[0], Some(Flag::Pick));
+        app.catalog.set_flag(&paths[1], Some(Flag::Pick));
+        app.set_rating_of(paths[1].clone(), 3);
+
+        app.select_single(2);
+        app.apply_ui_actions(vec![ui::UiAction::SetFlag(Some(Flag::Reject))]);
+        assert_eq!(app.flag_filter(), FlagFilter::All);
+        assert_eq!(
+            app.visible_len(),
+            4,
+            "a reject stays, dimmed, as in Lightroom"
+        );
+
+        let shown = |app: &mut App, f| {
+            app.apply_ui_actions(vec![ui::UiAction::SetFlagFilter(f)]);
+            app.visible_len()
+        };
+        assert_eq!(shown(&mut app, FlagFilter::All), 4);
+        assert_eq!(shown(&mut app, FlagFilter::Rejected), 1);
+        assert_eq!(shown(&mut app, FlagFilter::Unflagged), 1);
+        assert_eq!(shown(&mut app, FlagFilter::Picked), 2);
+        app.set_filter(Some((Cmp::Gte, 3)));
+        assert_eq!(app.visible_len(), 1, "both filters apply");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

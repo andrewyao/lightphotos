@@ -20,7 +20,7 @@ use crate::catalog::Catalog;
 use crate::develop::{Adjustments, Crop, TouchUp};
 use crate::export::Exporter;
 use crate::loader::Loader;
-use crate::navigation::{Cmp, Playlist};
+use crate::navigation::{Cmp, FlagFilter, Playlist};
 use crate::renderer::{EguiPaint, Renderer};
 use crate::{image_decode, ui};
 
@@ -597,6 +597,10 @@ pub(crate) struct App {
     unsaved_edit_kind: &'static str,
     /// Active star filter. `None` shows all.
     filter: Option<(Cmp, u8)>,
+    /// The grid's flag filter, applied with the star filter.
+    flag_filter: FlagFilter,
+    /// The Compare pane's own flag filter over the shown group's tiles.
+    compare_flag_filter: FlagFilter,
     /// Comparator used when a star level is clicked. Stays set across "All".
     filter_cmp: Cmp,
     grid_sort: GridSort,
@@ -784,6 +788,8 @@ mod bulk_delete;
 mod bursts;
 mod catalog;
 mod crop;
+pub(crate) use accessors::FlagCoverage;
+pub(crate) use catalog::flag_name;
 pub(crate) use crop::{CropAspect, CropOrientation, CropOverlay};
 use group_compare::GroupPicks;
 pub(crate) use group_compare::{spike_zoom_uv, GroupView, PickHow, Square, Tile, TileFidelity};
@@ -968,6 +974,8 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             unsaved_edit_kind: "adjustment",
             filter: None,
+            flag_filter: FlagFilter::All,
+            compare_flag_filter: FlagFilter::NotRejected,
             filter_cmp: Cmp::Gte,
             grid_sort: GridSort::Name,
             visible: Vec::new(),
@@ -1444,7 +1452,7 @@ impl App {
         let paths: Vec<PathBuf> = group
             .map(|g| g.members().iter().map(|m| pl.dir().join(m)).collect())
             .unwrap_or_default();
-        let order = self.by_score(paths.clone());
+        let order = self.compare_order(paths.clone());
         let (Some(loader), Some(r)) = (self.loader.as_mut(), self.renderer.as_mut()) else {
             return;
         };
@@ -1480,9 +1488,11 @@ impl App {
         });
         tiles.shown = shown;
         if tiles.order != order {
-            // A score landed: move the page's tiles to their new slots
-            // rather than upload them again.
+            // A score landed or the flag filter changed: move the page's
+            // tiles to their new slots rather than upload them again. A
+            // shorter order can leave the page past its end.
             tiles.order = order;
+            tiles.page = tiles.page.min(tiles.pages().saturating_sub(1));
             if tiles.loaded_page == tiles.page {
                 let mut old: Vec<Tile> = tiles.members.drain(..).flatten().collect();
                 let slots = tiles
@@ -1565,11 +1575,13 @@ impl App {
                 ui::UiAction::RateGroupMember { path, stars } => {
                     self.rate_group_member(path, stars)
                 }
+                ui::UiAction::FlagGroupMember { path, flag } => self.flag_group_member(path, flag),
                 ui::UiAction::SetSpikeCenter(center) => {
                     self.spike_center = center;
                     self.request_redraw();
                 }
-                ui::UiAction::SetPickAsRep => self.set_pick_as_rep(),
+                ui::UiAction::SetMemberAsRep(path) => self.set_member_as_rep(path),
+                ui::UiAction::DeleteMember(path) => self.request_delete_member(path),
                 ui::UiAction::RequestDeletePicks => self.request_delete_picks(),
                 ui::UiAction::Select(pos) => {
                     if pos < self.visible.len() {
@@ -1639,6 +1651,9 @@ impl App {
                 ui::UiAction::SetFilter(f) => self.set_filter(f),
                 ui::UiAction::SetFilterCmp(cmp) => self.set_filter_cmp(cmp),
                 ui::UiAction::SetRating(stars) => self.set_rating(stars),
+                ui::UiAction::SetFlag(flag) => self.set_flag(flag),
+                ui::UiAction::SetFlagFilter(f) => self.set_flag_filter(f),
+                ui::UiAction::SetCompareFlagFilter(f) => self.set_compare_flag_filter(f),
                 ui::UiAction::ScrollFilmstrip(delta) => self.scroll_filmstrip(delta),
                 ui::UiAction::ToggleEyesClosed => self.toggle_eyes_filter(),
                 ui::UiAction::ToggleSelection => self.toggle_selection(),
@@ -1851,8 +1866,9 @@ impl SpikeTiles {
         }
     }
 
+    /// The members the pane lays out, after its flag filter.
     pub(crate) fn group_len(&self) -> usize {
-        self.key.0.len()
+        self.order.len()
     }
 
     pub(crate) fn pages(&self) -> usize {

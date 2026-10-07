@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::app::{App, GridSort, Region, SHOW_EYES_FILTER};
-use crate::navigation::Cmp;
+use crate::navigation::{Cmp, FlagFilter};
 
 /// The grid's two rows of controls share these, in points before
 /// `font_size::px` scales them: the gap between items, the room inside each
@@ -89,6 +89,7 @@ pub(crate) enum ToolbarControl {
     FilterCmp(Cmp),
     Star(u8),
     Unrated,
+    Flag(FlagFilter),
     EyesClosed,
     Sort,
 }
@@ -105,6 +106,10 @@ impl ToolbarControl {
         Self::Star(3),
         Self::Star(4),
         Self::Star(5),
+        Self::Flag(FlagFilter::All),
+        Self::Flag(FlagFilter::Unflagged),
+        Self::Flag(FlagFilter::Picked),
+        Self::Flag(FlagFilter::Rejected),
         Self::EyesClosed,
         Self::Sort,
     ];
@@ -138,7 +143,11 @@ impl ToolbarControl {
     fn starts_group(self) -> bool {
         matches!(
             self,
-            Self::FilterCmp(Cmp::Gte) | Self::Star(1) | Self::EyesClosed | Self::Sort
+            Self::FilterCmp(Cmp::Gte)
+                | Self::Star(1)
+                | Self::Flag(FlagFilter::All)
+                | Self::EyesClosed
+                | Self::Sort
         )
     }
 
@@ -152,6 +161,9 @@ impl ToolbarControl {
                 let unrated = matches!(app.filter(), Some((Cmp::Eq, 0)));
                 UiAction::SetFilter(if unrated { None } else { Some((Cmp::Eq, 0)) })
             }
+            // Like a star, clicking the shown flag again shows all.
+            Self::Flag(f) if f == app.flag_filter() => UiAction::SetFlagFilter(FlagFilter::All),
+            Self::Flag(f) => UiAction::SetFlagFilter(f),
             Self::EyesClosed => UiAction::ToggleEyesClosed,
             // The keyboard flips the sort; a click opens the dropdown.
             Self::Sort => UiAction::SetSort(match app.grid_sort() {
@@ -197,6 +209,26 @@ impl ToolbarControl {
                 ui.add(star)
                     .on_hover_text((t.show_rated)(cmp_glyph(app.filter_cmp()), n))
             }
+            Self::Flag(FlagFilter::All) => {
+                ui.label(t.flag_filter_label);
+                ui.selectable_label(app.flag_filter() == FlagFilter::All, t.all)
+            }
+            Self::Flag(f) => {
+                let state = match f {
+                    FlagFilter::Picked => Some(Flag::Pick),
+                    FlagFilter::Rejected => Some(Flag::Reject),
+                    _ => None,
+                };
+                let on = if app.flag_filter() == f {
+                    FlagCoverage::All
+                } else {
+                    FlagCoverage::None
+                };
+                let colors = theme::colors(ui.ctx());
+                let side = font_size::px(ui.style(), 20.0);
+                super::flag_button(ui, state, on, side, (colors.value, colors.label))
+                    .on_hover_text((t.show_flagged)(crate::app::flag_name(state)))
+            }
             Self::Unrated => ui
                 .selectable_label(matches!(app.filter(), Some((Cmp::Eq, 0))), t.unrated)
                 .on_hover_text(t.unrated_tip),
@@ -237,6 +269,40 @@ impl ToolbarControl {
             }
         }
     }
+}
+
+/// The flag states in the order their icons sit: Unflagged, Picked, Rejected.
+pub(super) const FLAG_STATES: [Option<Flag>; 3] = [None, Some(Flag::Pick), Some(Flag::Reject)];
+
+/// "Flag:" and a dropdown of the flag filters, for the grid's toolbar and
+/// the Compare pane's. `pick` gets a choice other than `current`.
+pub(super) fn flag_filter_menu(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    choices: &[FlagFilter],
+    current: FlagFilter,
+    mut pick: impl FnMut(FlagFilter),
+) -> egui::Response {
+    let t = t();
+    ui.label(t.flag_filter_label);
+    let name = |f| match f {
+        FlagFilter::All => t.all,
+        FlagFilter::Picked => t.flag_picked,
+        FlagFilter::Unflagged => t.flag_unflagged,
+        FlagFilter::Rejected => t.flag_rejected,
+        FlagFilter::NotRejected => t.flag_not_rejected,
+    };
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(name(current))
+        .width(0.0)
+        .show_ui(ui, |ui| {
+            for &f in choices {
+                if ui.selectable_label(current == f, name(f)).clicked() && current != f {
+                    pick(f);
+                }
+            }
+        })
+        .response
 }
 
 fn cmp_glyph(cmp: Cmp) -> &'static str {
@@ -348,6 +414,23 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     UiAction::SetRating(stars)
                 } else {
                     UiAction::RequestBulk(BulkKind::Rate(stars))
+                });
+            }
+        }
+    });
+    let flag_w = font_size::px(ui.style(), 20.0);
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for flag in FLAG_STATES {
+            let coverage = app.selection_flag_coverage(flag);
+            let resp = super::flag_button(ui, flag, coverage, flag_w, (colors.value, colors.label))
+                .on_hover_text((t.set_flag_tip)(crate::app::flag_name(flag)));
+            // Marking photos with the state they all have already does nothing.
+            if resp.clicked() && coverage != FlagCoverage::All {
+                out.actions.push(if n == 1 {
+                    UiAction::SetFlag(flag)
+                } else {
+                    UiAction::RequestBulk(BulkKind::Flag(flag))
                 });
             }
         }

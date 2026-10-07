@@ -240,6 +240,15 @@ pub struct Strings {
     pub show_rated: fn(&str, u8) -> String,
     pub unrated: &'static str,
     pub unrated_tip: &'static str,
+    pub flag_filter_label: &'static str,
+    /// Hover text on a flag filter icon; takes the flag state's name.
+    pub show_flagged: fn(&str) -> String,
+    pub flag_not_rejected: &'static str,
+    pub flag_picked: &'static str,
+    pub flag_rejected: &'static str,
+    pub flag_unflagged: &'static str,
+    /// Hover text on a flag button; takes the flag's name.
+    pub set_flag_tip: fn(&str) -> String,
     pub eyes_closed: &'static str,
     pub eyes_closed_tip: &'static str,
     pub n_photos: fn(usize) -> String,
@@ -308,6 +317,7 @@ pub struct Strings {
     // Bulk confirmations.
     pub confirm_clear_rating: fn(usize) -> String,
     pub confirm_rate: fn(&str, usize) -> String,
+    pub confirm_flag: fn(&str, usize) -> String,
     pub confirm_apply_settings: fn(usize) -> String,
     /// (preset name, photo count)
     pub confirm_apply_preset: fn(&str, usize) -> String,
@@ -435,6 +445,7 @@ pub struct Strings {
     pub deleted_preset: fn(&str) -> String,
     pub cleared_rating: fn(usize) -> String,
     pub rated: fn(usize, u8) -> String,
+    pub flagged: fn(usize, &str) -> String,
     pub export_title: fn(usize) -> String,
     pub export_destination: &'static str,
     pub export_to_folder: &'static str,
@@ -511,6 +522,8 @@ pub struct Strings {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub tile_full: &'static str,
     pub set_as_rep: &'static str,
+    /// `set_as_rep` short enough for a Compare tile's band.
+    pub set_as_rep_short: &'static str,
     pub representative: &'static str,
     /// Hover text on the info bar's icon for the Loupe alone.
     /// Hover text on the info bar's icon for the Compare pane.
@@ -701,6 +714,13 @@ pub static EN: Strings = Strings {
     show_rated: |cmp, n| format!("Show photos rated {cmp} {n}"),
     unrated: "Unrated",
     unrated_tip: "Show only photos with no rating",
+    flag_filter_label: "Flag:",
+    show_flagged: |flag| format!("Show only {flag} photos"),
+    flag_not_rejected: "Picked or Unflagged",
+    flag_picked: "Picked",
+    flag_rejected: "Rejected",
+    flag_unflagged: "Unflagged",
+    set_flag_tip: |flag| format!("Mark as {flag}"),
     eyes_closed: "Eyes closed",
     eyes_closed_tip: "Show only photos where someone blinked",
     n_photos: |n| format!("{n} photos"),
@@ -902,6 +922,7 @@ pub static EN: Strings = Strings {
 
     confirm_clear_rating: |n| format!("Clear the rating on {n} photo(s)?"),
     confirm_rate: |stars, n| format!("Apply {stars} to {n} photo(s)?"),
+    confirm_flag: |flag, n| format!("Mark {n} photo(s) as {flag}?"),
     confirm_apply_settings: |n| format!("Apply the copied adjustment to {n} photo(s)?"),
     confirm_apply_preset: |name, n| format!("Apply {name} to {n} photo(s)?"),
     confirm_auto_tone: |n| format!("Auto Adjust {n} photo(s)?"),
@@ -1066,6 +1087,7 @@ pub static EN: Strings = Strings {
     deleted_preset: |name| format!("Deleted preset {name}"),
     cleared_rating: |n| format!("Cleared rating on {n} photo(s)"),
     rated: |n, stars| format!("Rated {n} photo(s) \u{2605}{stars}"),
+    flagged: |n, flag| format!("Marked {n} photo(s) as {flag}"),
     export_title: |n| {
         if n == 1 {
             "Export 1 photo".into()
@@ -1145,6 +1167,7 @@ pub static EN: Strings = Strings {
     tile_speed: "Quickly",
     tile_full: "Fully (Slower)",
     set_as_rep: "Set as representative",
+    set_as_rep_short: "Set as Rep",
     representative: "Representative",
     view_compare: "Compare group",
     view_compare_needs_group: "Compare group: select a photo in a group",
@@ -1293,6 +1316,13 @@ pub static ZH: Strings = Strings {
     show_rated: |cmp, n| format!("显示评分 {cmp} {n} 星的照片"),
     unrated: "未评分",
     unrated_tip: "只显示没有评分的照片",
+    flag_filter_label: "旗标：",
+    show_flagged: |flag| format!("只显示{flag}的照片"),
+    flag_not_rejected: "已选或未标记",
+    flag_picked: "已选",
+    flag_rejected: "已拒绝",
+    flag_unflagged: "未标记",
+    set_flag_tip: |flag| format!("标为{flag}"),
     eyes_closed: "闭眼",
     eyes_closed_tip: "只显示有人闭眼的照片",
     n_photos: |n| format!("{n} 张照片"),
@@ -1484,6 +1514,7 @@ pub static ZH: Strings = Strings {
 
     confirm_clear_rating: |n| format!("清除 {n} 张照片的评分？"),
     confirm_rate: |stars, n| format!("将 {n} 张照片评为 {stars}？"),
+    confirm_flag: |flag, n| format!("将 {n} 张照片标为{flag}？"),
     confirm_apply_settings: |n| format!("将拷贝的调整应用到 {n} 张照片？"),
     confirm_apply_preset: |name, n| format!("将 {name} 应用到 {n} 张照片？"),
     confirm_auto_tone: |n| format!("对 {n} 张照片应用自动调整？"),
@@ -1635,6 +1666,7 @@ pub static ZH: Strings = Strings {
     deleted_preset: |name| format!("已删除预设 {name}"),
     cleared_rating: |n| format!("已清除 {n} 张照片的评分"),
     rated: |n, stars| format!("已将 {n} 张照片评为 \u{2605}{stars}"),
+    flagged: |n, flag| format!("已将 {n} 张照片标为{flag}"),
     export_title: |n| format!("导出 {n} 张照片"),
     export_destination: "目标",
     export_to_folder: "文件夹",
@@ -1708,6 +1740,7 @@ pub static ZH: Strings = Strings {
     tile_speed: "快速",
     tile_full: "完整（较慢）",
     set_as_rep: "设为代表照片",
+    set_as_rep_short: "设为代表",
     representative: "代表照片",
     view_compare: "组内比较",
     view_compare_needs_group: "组内比较：请选择组内的照片",

@@ -5,7 +5,8 @@
 //! returns the loupe rect plus the user's actions for `main.rs` to apply. The
 //! Loupe's central panel is transparent so the wgpu image shows through.
 
-use crate::app::{App, CropEdge, FocusLevel, Region, ViewMode};
+use crate::app::{App, CropEdge, FlagCoverage, FocusLevel, Region, ViewMode};
+use crate::catalog::Flag;
 use crate::develop::Adjustments;
 use crate::i18n::{t, Lang};
 use crate::navigation::Cmp;
@@ -36,10 +37,17 @@ pub enum UiAction {
         path: std::path::PathBuf,
         stars: u8,
     },
+    /// A flag on a member's tile in the Compare pane (`None` clears).
+    FlagGroupMember {
+        path: std::path::PathBuf,
+        flag: Option<crate::catalog::Flag>,
+    },
     /// Move Compare's focus square to center on this point of the photo.
     SetSpikeCenter(egui::Pos2),
-    /// Make the one picked member the representative.
-    SetPickAsRep,
+    /// Make this member of the shown group its representative.
+    SetMemberAsRep(std::path::PathBuf),
+    /// Ask to trash this member of the shown group, from its tile.
+    DeleteMember(std::path::PathBuf),
     /// Ask to confirm trashing the picked members.
     RequestDeletePicks,
     /// Cmd-click: toggle this cell in the multi-selection.
@@ -98,6 +106,12 @@ pub enum UiAction {
     SetFilterCmp(Cmp),
     /// Rate the current selection/shown image (0 clears).
     SetRating(u8),
+    /// Flag the selected photo (`None` clears).
+    SetFlag(Option<crate::catalog::Flag>),
+    /// The grid's flag filter.
+    SetFlagFilter(crate::navigation::FlagFilter),
+    /// The Compare pane's flag filter.
+    SetCompareFlagFilter(crate::navigation::FlagFilter),
     /// Raw per-frame wheel delta over the filmstrip (egui: positive is up or
     /// left). `App` accumulates it across frames into whole photo steps.
     ScrollFilmstrip(f32),
@@ -168,6 +182,8 @@ pub enum UiAction {
 pub enum BulkKind {
     /// 0 clears the rating.
     Rate(u8),
+    /// `None` clears the flag.
+    Flag(Option<crate::catalog::Flag>),
     /// Apply the copied develop settings.
     ApplySettings,
     /// Apply this saved preset.
@@ -697,6 +713,108 @@ fn label_color(label: crate::catalog::ColorLabel) -> egui::Color32 {
         Blue => egui::Color32::from_rgb(70, 130, 230),
         Purple => egui::Color32::from_rgb(160, 90, 210),
     }
+}
+
+/// The tint a photo's pixels are drawn with: a reject fades toward the
+/// background, as in Lightroom, so it reads as set aside while still in view.
+fn photo_tint(flag: Option<Flag>) -> egui::Color32 {
+    match flag {
+        Some(Flag::Reject) => egui::Color32::WHITE.gamma_multiply(0.35),
+        _ => egui::Color32::WHITE,
+    }
+}
+
+/// Paints flag state `flag`'s icon into `rect`: a square flag on a pole for
+/// Picked, the same with a cross inside it for Rejected, and a ring for
+/// Unflagged. `filled` paints the flag solid, else as an outline; the ring
+/// is always an outline. Drawn with strokes rather than a glyph so it needs
+/// no font coverage.
+fn paint_flag(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    flag: Option<Flag>,
+    color: egui::Color32,
+    filled: bool,
+) {
+    let at = |x: f32, y: f32| rect.min + egui::vec2(x * rect.width(), y * rect.height());
+    let stroke = egui::Stroke::new((rect.width() * 0.1).max(1.2), color);
+    let Some(flag) = flag else {
+        painter.circle_stroke(rect.center(), rect.width() * 0.34, stroke);
+        return;
+    };
+    painter.line_segment([at(0.18, 0.06), at(0.18, 0.96)], stroke);
+    let cloth = egui::Rect::from_min_max(at(0.18, 0.08), at(0.9, 0.62));
+    if filled {
+        painter.rect_filled(cloth, 0.0, color);
+    } else {
+        painter.rect_stroke(cloth, 0.0, stroke, egui::StrokeKind::Inside);
+    }
+    if flag == Flag::Reject {
+        // On a solid flag the cross is cut out in black so it still reads.
+        let cross = if filled {
+            egui::Stroke::new(stroke.width, egui::Color32::from_black_alpha(220))
+        } else {
+            stroke
+        };
+        let x = cloth.shrink2(egui::vec2(cloth.width() * 0.28, cloth.height() * 0.24));
+        painter.line_segment([x.left_top(), x.right_bottom()], cross);
+        painter.line_segment([x.right_top(), x.left_bottom()], cross);
+    }
+}
+
+/// A flag state's color: green for Picked, the danger red for Rejected, and
+/// `neutral` for Unflagged.
+fn flag_color(
+    colors: &theme::Palette,
+    flag: Option<Flag>,
+    neutral: egui::Color32,
+) -> egui::Color32 {
+    match flag {
+        Some(Flag::Pick) => colors.pick,
+        Some(Flag::Reject) => colors.danger,
+        None => neutral,
+    }
+}
+
+/// A clickable flag-state icon `side` wide: solid when the whole selection
+/// is in that state, half-transparent when part of it is, and outlined in
+/// `idle` when none is, taking its own color on hover. `neutral` colors the
+/// Unflagged circle.
+fn flag_button(
+    ui: &mut egui::Ui,
+    flag: Option<Flag>,
+    coverage: FlagCoverage,
+    side: f32,
+    (neutral, idle): (egui::Color32, egui::Color32),
+) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
+    paint_flag_mark(ui, rect, flag, coverage, (neutral, idle), resp.hovered());
+    resp
+}
+
+/// The icon `flag_button` draws, for a caller that places its own hit area.
+fn paint_flag_mark(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    flag: Option<Flag>,
+    coverage: FlagCoverage,
+    (neutral, idle): (egui::Color32, egui::Color32),
+    hovered: bool,
+) {
+    let full = flag_color(&theme::colors(ui.ctx()), flag, neutral);
+    let (color, filled) = match coverage {
+        FlagCoverage::All => (full, true),
+        FlagCoverage::Some => (full.gamma_multiply(0.5), true),
+        FlagCoverage::None if hovered => (full, false),
+        FlagCoverage::None => (idle, false),
+    };
+    paint_flag(
+        ui.painter(),
+        rect.shrink(rect.width() * 0.1),
+        flag,
+        color,
+        filled,
+    );
 }
 
 /// Stars as a compact string, e.g. 3 → "★★★☆☆".

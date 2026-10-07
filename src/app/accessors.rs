@@ -1,6 +1,7 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+use crate::catalog::Flag;
 use crate::groups::{Group, GroupId};
 use crate::navigation::Cmp;
 use crate::thumbnail::THUMB_PX;
@@ -126,6 +127,10 @@ impl App {
         self.filter
     }
 
+    pub(crate) fn flag_filter(&self) -> crate::navigation::FlagFilter {
+        self.flag_filter
+    }
+
     /// The comparator the toolbar will apply to the next star-level click.
     pub(crate) fn filter_cmp(&self) -> Cmp {
         self.filter_cmp
@@ -232,6 +237,26 @@ impl App {
             .and_then(|p| self.catalog.label(p))
     }
 
+    /// Flag of the visible cell at `pos`. `None` when unflagged or out of range.
+    pub(crate) fn flag_at(&self, pos: usize) -> Option<Flag> {
+        self.visible
+            .get(pos)
+            .and_then(|&i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))
+            .and_then(|p| self.flag_of(p))
+    }
+
+    /// How much of the selection is in flag state `flag` (`None` being
+    /// Unflagged): all of it, some, or none. Nothing selected counts as none.
+    pub(crate) fn selection_flag_coverage(&self, flag: Option<Flag>) -> FlagCoverage {
+        let paths = self.selected_paths();
+        let n = paths.iter().filter(|p| self.flag_of(p) == flag).count();
+        match n {
+            0 => FlagCoverage::None,
+            n if n == paths.len() => FlagCoverage::All,
+            _ => FlagCoverage::Some,
+        }
+    }
+
     pub(crate) fn selected_label(&self) -> Option<crate::catalog::ColorLabel> {
         self.selected_path().and_then(|p| self.catalog.label(&p))
     }
@@ -276,6 +301,11 @@ impl App {
         self.selected_path()
             .map(|p| self.rating_of(&p))
             .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selected_flag(&self) -> Option<Flag> {
+        self.selected_path().and_then(|p| self.flag_of(&p))
     }
 
     /// The lowest and highest rating across the selection, `(0, 0)` when
@@ -391,4 +421,13 @@ mod tests {
         // A preview no larger than a thumbnail would add no detail when swapped in.
         assert!(PREVIEW_MIN > THUMB_PX);
     }
+}
+
+/// How much of a selection carries one flag, which the flag buttons draw
+/// solid, half-transparent, or empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FlagCoverage {
+    None,
+    Some,
+    All,
 }

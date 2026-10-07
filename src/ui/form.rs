@@ -21,6 +21,9 @@ const TITLE_GAP: f32 = 6.0;
 const FOOTER_GAP: f32 = 20.0;
 const BUTTON_MIN_WIDTH: f32 = 84.0;
 const BUTTON_PAD: egui::Vec2 = egui::vec2(12.0, 5.0);
+/// A `compact_button`'s text size and padding.
+const COMPACT_TEXT: f32 = 12.0;
+const COMPACT_PAD: egui::Vec2 = egui::vec2(6.0, 1.0);
 const BUTTON_GAP: f32 = 8.0;
 const SEGMENT_ROW_GAP: f32 = 4.0;
 const DIALOG_MARGIN: f32 = 20.0;
@@ -397,6 +400,40 @@ pub(super) fn button(ui: &mut egui::Ui, b: &Button) -> egui::Response {
         ui.add_enabled(b.enabled, widget.min_size(min))
     })
     .inner
+}
+
+/// A `button` for a dense strip, such as a Compare tile's band: the same
+/// roles and fills, with smaller text and padding and no minimum width.
+pub(super) fn compact_button(ui: &mut egui::Ui, b: &Button) -> egui::Response {
+    let colors = theme::colors(ui.ctx());
+    let size = font_size::px(ui.style(), COMPACT_TEXT);
+    let text = egui::RichText::new(b.label).size(size);
+    let widget = match b.role {
+        Role::Cancel => egui::Button::new(text),
+        Role::Primary => {
+            egui::Button::new(text.color(colors.primary_text)).fill(colors.primary_fill)
+        }
+        Role::Danger => egui::Button::new(text.color(colors.danger_text)).fill(colors.danger_fill),
+    };
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = COMPACT_PAD * font_size::px(ui.style(), 1.0);
+        ui.add_enabled(b.enabled, widget)
+    })
+    .inner
+}
+
+/// The width `compact_button` takes for `label`, to decide before drawing
+/// whether a strip has room.
+pub(super) fn compact_button_width(ui: &egui::Ui, label: &str) -> f32 {
+    let font = egui::FontId::proportional(font_size::px(ui.style(), COMPACT_TEXT));
+    let text = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), font, egui::Color32::WHITE));
+    text.size().x + 2.0 * font_size::px(ui.style(), COMPACT_PAD.x)
+}
+
+/// The height of a `compact_button`.
+pub(super) fn compact_button_height(ui: &egui::Ui) -> f32 {
+    let font = egui::FontId::proportional(font_size::px(ui.style(), COMPACT_TEXT));
+    ui.fonts_mut(|f| f.row_height(&font)) + 2.0 * font_size::px(ui.style(), COMPACT_PAD.y)
 }
 
 /// The height of a `button`, for a row that has to line up with one.

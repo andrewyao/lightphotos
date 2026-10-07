@@ -824,9 +824,16 @@ fn compare_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                                         }
                                     }
                                 });
+                            ui.separator();
                         }
+                        super::toolbar::flag_filter_menu(
+                            ui,
+                            "compare_flag_filter",
+                            &crate::navigation::FlagFilter::COMPARE,
+                            app.compare_flag_filter(),
+                            |f| out.actions.push(UiAction::SetCompareFlagFilter(f)),
+                        );
                         if tiles.pages() > 1 {
-                            #[cfg(not(target_arch = "wasm32"))]
                             ui.separator();
                             let first = tiles.page * crate::app::SPIKE_PAGE + 1;
                             let last = first + tiles.page_paths().len() - 1;
@@ -851,16 +858,6 @@ fn compare_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                             ui.separator();
                         }
                         super::toolbar::pick_actions(ui, app, out);
-                        if app.group_picks().len() == 1 {
-                            let set = Button {
-                                label: t.set_as_rep,
-                                role: Role::Primary,
-                                enabled: true,
-                            };
-                            if form::button(ui, &set).clicked() {
-                                out.actions.push(UiAction::SetPickAsRep);
-                            }
-                        }
                     });
                 });
         });
@@ -901,7 +898,8 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     continue;
                 };
                 let (id, uv) = m.texture(square);
-                ui.painter().image(id, rect, uv, egui::Color32::WHITE);
+                let tint = super::photo_tint(app.member_flag(&m.path));
+                ui.painter().image(id, rect, uv, tint);
                 if full && m.full_loading(square) {
                     let side = font_size::px(ui.style(), 16.0);
                     let at = egui::Rect::from_min_size(
@@ -919,7 +917,8 @@ fn spike_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         .paint_at(ui, at);
                 }
                 let is_rep = m.path == tiles.shown;
-                tile_marks(ui, app, rect, &m.path, is_rep, out);
+                let hovered = !resp.dragged() && ui.rect_contains_pointer(rect);
+                tile_marks(ui, app, rect, &m.path, is_rep, hovered, out);
                 let picked = picks.contains(&m.path.as_path());
                 if resp.dragged() {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -984,16 +983,21 @@ fn drag_tile_square(app: &App, tile: f32, delta: egui::Vec2, out: &mut FrameOutp
 /// Every Compare tile's border width.
 const TILE_BORDER: f32 = 4.0;
 
-/// A band along a tile's bottom with the member's stars, which rate it as
-/// the filmstrip bar's do, and its score, which explains itself on hover. A tile
-/// too narrow for the band goes without. The stars sit over the tile, so a
-/// click on them rates and does not pick.
+/// A band along a tile's bottom with the member's stars and its Unflagged,
+/// Picked and Rejected icons, which rate and flag it as the filmstrip bar's
+/// do, and its score, which explains itself on hover. While the pointer is
+/// over a member other than the representative, the band also carries Set
+/// as representative after the flags and Delete at the far right. A tile
+/// too narrow for the band goes without, and one too narrow for the buttons
+/// without them. The band sits over the tile, so a click in it does not
+/// pick.
 fn tile_marks(
     ui: &mut egui::Ui,
     app: &App,
     rect: egui::Rect,
     path: &std::path::Path,
     is_rep: bool,
+    hovered: bool,
     out: &mut FrameOutput,
 ) {
     let colors = theme::colors(ui.ctx());
@@ -1009,7 +1013,9 @@ fn tile_marks(
             .layout_no_wrap(s.value.to_string(), font.clone(), color)
     });
     let score_w = galley.as_ref().map_or(0.0, |g| g.size().x + pad);
-    if rect.width() < 5.0 * star_w + score_w + 2.0 * pad {
+    // Five stars, a gap, then the three flag states.
+    let marks_w = 8.0 * star_w + pad;
+    if rect.width() < marks_w + score_w + 2.0 * pad {
         return;
     }
     // The representative says so after its stars, when the band has room.
@@ -1021,9 +1027,15 @@ fn tile_marks(
                 colors.selection,
             )
         })
-        .filter(|g| rect.width() >= 5.0 * star_w + g.size().x + score_w + 3.0 * pad);
+        .filter(|g| rect.width() >= marks_w + g.size().x + score_w + 3.0 * pad);
+    let t = crate::i18n::t();
+    let buttons_w = form::compact_button_width(ui, t.set_as_rep_short)
+        + form::compact_button_width(ui, t.delete)
+        + 2.0 * pad;
+    let buttons = hovered && !is_rep && rect.width() >= marks_w + score_w + buttons_w + 2.0 * pad;
+    let band_h = form::compact_button_height(ui).max(star_w) + pad;
     let band = egui::Rect::from_min_max(
-        egui::pos2(rect.left(), rect.bottom() - star_w - pad),
+        egui::pos2(rect.left(), rect.bottom() - band_h),
         rect.right_bottom(),
     );
     ui.painter()
@@ -1065,15 +1077,80 @@ fn tile_marks(
             });
         }
     }
+    let flag = app.member_flag(path);
+    for (i, f) in super::toolbar::FLAG_STATES.into_iter().enumerate() {
+        let r = egui::Rect::from_center_size(
+            egui::pos2(band.left() + 2.0 * pad + star_w * (5.5 + i as f32), y),
+            egui::vec2(star_w, star_w),
+        );
+        let resp = ui.interact(
+            r,
+            egui::Id::new(("tile_flag", path, i)),
+            egui::Sense::click(),
+        );
+        let set = flag == f;
+        let coverage = if set {
+            FlagCoverage::All
+        } else {
+            FlagCoverage::None
+        };
+        // The band is dark in every theme, so Unflagged is white on it.
+        let colors = (egui::Color32::WHITE, egui::Color32::from_white_alpha(170));
+        super::paint_flag_mark(ui, r, f, coverage, colors, resp.hovered());
+        let resp = resp.on_hover_text((crate::i18n::t().set_flag_tip)(crate::app::flag_name(f)));
+        if resp.clicked() && !set {
+            out.actions.push(UiAction::FlagGroupMember {
+                path: path.to_path_buf(),
+                flag: f,
+            });
+        }
+    }
     if let Some(g) = rep_label {
-        let at = egui::pos2(band.left() + 2.0 * pad + 5.0 * star_w, y - g.size().y / 2.0);
+        let at = egui::pos2(band.left() + 3.0 * pad + 8.0 * star_w, y - g.size().y / 2.0);
         ui.painter().galley(at, g, egui::Color32::WHITE);
     }
-    if let (Some((score, stale)), Some(galley)) = (score, galley) {
-        let at = egui::pos2(
-            band.right() - pad - galley.size().x,
-            y - galley.size().y / 2.0,
+    let mut right = band.right() - pad;
+    if buttons {
+        let inner = band.shrink2(egui::vec2(pad, 0.0));
+        let mut ends = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
         );
+        let delete = Button {
+            label: t.delete,
+            role: Role::Danger,
+            enabled: app.delete_available(),
+        };
+        let resp = form::compact_button(&mut ends, &delete);
+        if resp.clicked() {
+            out.actions.push(UiAction::DeleteMember(path.to_path_buf()));
+        }
+        right = resp.rect.left() - pad;
+        let after_flags = band.left() + 3.0 * pad + 8.0 * star_w;
+        let mut start = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_x_y_ranges(
+                    after_flags..=right,
+                    inner.y_range(),
+                ))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        let set = Button {
+            label: t.set_as_rep_short,
+            role: Role::Primary,
+            enabled: true,
+        };
+        if form::compact_button(&mut start, &set)
+            .on_hover_text(t.set_as_rep)
+            .clicked()
+        {
+            out.actions
+                .push(UiAction::SetMemberAsRep(path.to_path_buf()));
+        }
+    }
+    if let (Some((score, stale)), Some(galley)) = (score, galley) {
+        let at = egui::pos2(right - galley.size().x, y - galley.size().y / 2.0);
         let hit = egui::Rect::from_min_size(at, galley.size());
         ui.painter().galley(at, galley, egui::Color32::WHITE);
         ui.interact(

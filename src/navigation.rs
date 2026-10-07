@@ -3,6 +3,7 @@
 //! Folder listing, rating filters, burst grouping by time, and grid/tree
 //! arrow-key movement.
 
+use crate::catalog::Flag;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -37,6 +38,40 @@ impl Cmp {
             Cmp::Gte => rating >= value,
             Cmp::Eq => rating == value,
             Cmp::Lte => rating <= value,
+        }
+    }
+}
+
+/// Which photos a flag filter shows. The grid offers every choice but
+/// `NotRejected` and starts on `All`, as Lightroom does, dimming rejects rather than
+/// hiding them; the Compare pane offers [`FlagFilter::COMPARE`] and starts
+/// by hiding rejects.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FlagFilter {
+    All,
+    Picked,
+    Unflagged,
+    Rejected,
+    /// Picked or unflagged.
+    NotRejected,
+}
+
+impl FlagFilter {
+    /// The Compare pane's choices, in menu order.
+    pub const COMPARE: [FlagFilter; 4] = [
+        FlagFilter::NotRejected,
+        FlagFilter::Picked,
+        FlagFilter::Unflagged,
+        FlagFilter::Rejected,
+    ];
+
+    pub fn matches(self, flag: Option<Flag>) -> bool {
+        match self {
+            FlagFilter::All => true,
+            FlagFilter::Picked => flag == Some(Flag::Pick),
+            FlagFilter::Unflagged => flag.is_none(),
+            FlagFilter::Rejected => flag == Some(Flag::Reject),
+            FlagFilter::NotRejected => flag != Some(Flag::Reject),
         }
     }
 }
@@ -429,6 +464,19 @@ mod tests {
         for (i, p) in pl.entries().iter().enumerate() {
             assert_eq!(pl.index_of(p.file_name().unwrap()), Some(i), "{p:?}");
         }
+    }
+
+    #[test]
+    fn each_flag_filter_shows_its_flags() {
+        use FlagFilter::*;
+        let shown = |f: FlagFilter| {
+            [Some(Flag::Pick), Some(Flag::Reject), None].map(|flag| f.matches(flag))
+        };
+        assert_eq!(shown(NotRejected), [true, false, true]);
+        assert_eq!(shown(All), [true, true, true]);
+        assert_eq!(shown(Picked), [true, false, false]);
+        assert_eq!(shown(Rejected), [false, true, false]);
+        assert_eq!(shown(Unflagged), [false, false, true]);
     }
 
     #[test]

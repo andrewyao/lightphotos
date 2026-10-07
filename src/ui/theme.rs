@@ -17,6 +17,7 @@ pub const EYES_BADGE: Color32 = Color32::from_rgb(150, 190, 255);
 pub const BRAND_BLUE: Color32 = Color32::from_rgb(79, 140, 255);
 
 const STAR_GOLD: Color32 = Color32::from_rgb(255, 210, 80);
+const PICK_GREEN: Color32 = Color32::from_rgb(90, 205, 120);
 /// Mouse selection outline on a thumbnail cell.
 const SELECTION_BLUE: Color32 = Color32::from_rgb(90, 160, 255);
 const SELECTION_BG: Color32 = Color32::from_rgb(40, 80, 140);
@@ -76,6 +77,8 @@ pub struct Palette {
     pub histogram_bg: Color32,
     pub histogram_border: Color32,
     pub star: Color32,
+    /// A Pass flag. A Reject flag takes `danger`.
+    pub pick: Color32,
     pub cursor: Color32,
     pub selection: Color32,
     pub selection_bg: Color32,
@@ -195,6 +198,7 @@ pub fn palette(theme: Theme) -> Palette {
             histogram_bg: Color32::from_gray(16),
             histogram_border: Color32::from_gray(48),
             star: STAR_GOLD,
+            pick: PICK_GREEN,
             cursor: CURSOR_AMBER,
             selection: SELECTION_BLUE,
             selection_bg: SELECTION_BG,
@@ -226,6 +230,7 @@ pub fn palette(theme: Theme) -> Palette {
             histogram_bg: Color32::from_gray(250),
             histogram_border: Color32::from_gray(190),
             star: Color32::from_rgb(160, 105, 0),
+            pick: Color32::from_rgb(25, 125, 55),
             cursor: Color32::from_rgb(170, 85, 0),
             selection: Color32::from_rgb(30, 100, 220),
             selection_bg: Color32::from_rgb(185, 210, 245),
@@ -265,6 +270,7 @@ fn medium(panel: Color32) -> Palette {
         histogram_bg: gray(-40),
         histogram_border: gray(-20),
         star: STAR_GOLD,
+        pick: PICK_GREEN,
         cursor: CURSOR_AMBER,
         selection: SELECTION_BLUE,
         selection_bg: SELECTION_BG,
@@ -300,6 +306,7 @@ fn medium(panel: Color32) -> Palette {
             label: Color32::from_gray(24),
             value: Color32::BLACK,
             star: Color32::from_rgb(120, 80, 0),
+            pick: Color32::from_rgb(10, 95, 35),
             cursor: Color32::from_rgb(150, 80, 0),
             selection: Color32::from_rgb(20, 70, 170),
             selection_bg: Color32::from_rgb(150, 180, 225),

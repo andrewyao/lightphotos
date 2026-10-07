@@ -355,7 +355,9 @@ pub(super) fn thumbnail_cell(
                 );
             }
         }
-        egui::Image::from_texture((tex, egui::vec2(dw, dh))).paint_at(ui, img_rect);
+        egui::Image::from_texture((tex, egui::vec2(dw, dh)))
+            .tint(super::photo_tint(app.flag_at(pos)))
+            .paint_at(ui, img_rect);
         pill_anchor = img_rect;
         #[cfg(target_arch = "wasm32")]
         if ui.is_rect_visible(img_rect) {
@@ -382,8 +384,21 @@ pub(super) fn thumbnail_cell(
     }
 
     let badge_r = badge_radius(ui.style());
-    if app.eyes_closed_at(pos) {
+    let flag = app.flag_at(pos);
+    if let Some(flag) = flag {
         let c = badge_center(rect, style, badge_r, egui::Align2::RIGHT_BOTTOM);
+        ui.painter()
+            .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
+        let mark = egui::Rect::from_center_size(c, egui::Vec2::splat(badge_r * 1.3));
+        let color = super::flag_color(&colors, Some(flag), colors.value);
+        super::paint_flag(ui.painter(), mark, Some(flag), color, true);
+    }
+    if app.eyes_closed_at(pos) {
+        let mut c = badge_center(rect, style, badge_r, egui::Align2::RIGHT_BOTTOM);
+        // Beside the flag's badge rather than under it.
+        if flag.is_some() {
+            c.x -= 2.4 * badge_r;
+        }
         ui.painter()
             .circle_filled(c, badge_r, egui::Color32::from_black_alpha(170));
         ui.painter().text(

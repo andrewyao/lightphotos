@@ -136,6 +136,12 @@ impl App {
         self.visible = visible_indices(entries, cells, self.filter, |p| {
             ratings.get(p).copied().unwrap_or(0)
         });
+        let (catalog, flag_filter) = (&self.catalog, self.flag_filter);
+        self.visible.retain(|&i| {
+            entries
+                .get(i)
+                .is_some_and(|p| flag_filter.matches(catalog.flag(p)))
+        });
         if self.eyes_filter {
             let keep: Vec<usize> = self
                 .visible
