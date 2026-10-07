@@ -579,12 +579,15 @@ fn adjustment_pair(ui: &mut egui::Ui, app: &App, one: bool, out: &mut FrameOutpu
             out.actions.push(UiAction::CopySettings);
         }
         let apply = egui::Button::new(t.apply_settings).corner_radius(right);
-        let mut apply = ui
+        let tip = crate::i18n::keys(t.apply_settings_tip);
+        let hover = match app.copied_settings_name() {
+            Some(name) => [tip.as_ref(), &(t.settings_from)(&name)].join("\n"),
+            None => tip.into_owned(),
+        };
+        let apply = ui
             .add_enabled(app.has_copied_settings(), apply)
-            .on_disabled_hover_text(t.apply_settings_needs_copy);
-        if let Some(name) = app.copied_settings_name() {
-            apply = apply.on_hover_text((t.settings_from)(&name));
-        }
+            .on_disabled_hover_text(t.apply_settings_needs_copy)
+            .on_hover_text(hover);
         if apply.clicked() {
             out.actions
                 .push(UiAction::RequestBulk(BulkKind::ApplySettings));
@@ -739,7 +742,8 @@ fn apply_adjustment(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             app.has_copied_settings(),
             egui::Button::new(t.apply_settings),
         )
-        .on_disabled_hover_text(t.apply_settings_needs_copy);
+        .on_disabled_hover_text(t.apply_settings_needs_copy)
+        .on_hover_text(crate::i18n::keys(t.apply_settings_tip));
     if apply.clicked() {
         out.actions
             .push(UiAction::RequestBulk(BulkKind::ApplySettings));

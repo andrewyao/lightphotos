@@ -432,6 +432,52 @@ mod tests {
         }
     }
 
+    /// The help overlay lists every chord the menu shows, written the way the
+    /// overlay writes keys, so the two can't name different shortcuts.
+    #[test]
+    fn every_menu_chord_is_in_the_help() {
+        let listed: Vec<&str> = i18n::t()
+            .help
+            .iter()
+            .flat_map(|s| s.rows)
+            .flat_map(|(keys, _)| keys.split_whitespace())
+            .collect();
+        for cmd in commands() {
+            // The text-editing commands act on a focused field, not on photos.
+            if matches!(cmd, C::Cut | C::Copy | C::Paste) {
+                continue;
+            }
+            let (mods, key) = cmd.chord();
+            let name = match key {
+                KeyCode::Slash if mods.shift_key() => "?".to_string(),
+                KeyCode::Comma => ",".into(),
+                KeyCode::Equal => "=".into(),
+                KeyCode::Minus => "-".into(),
+                KeyCode::BracketLeft => "[".into(),
+                KeyCode::BracketRight => "]".into(),
+                KeyCode::Delete => "Delete".into(),
+                other => {
+                    let name = format!("{other:?}");
+                    name.trim_start_matches("Key")
+                        .trim_start_matches("Digit")
+                        .to_string()
+                }
+            };
+            let mut chord = String::new();
+            for (held, label) in [
+                (mods.super_key(), "Cmd+"),
+                (mods.shift_key() && name != "?", "Shift+"),
+                (mods.alt_key(), "Alt+"),
+            ] {
+                if held {
+                    chord.push_str(label);
+                }
+            }
+            chord.push_str(&name);
+            assert!(listed.contains(&chord.as_str()), "{cmd:?}: {chord}");
+        }
+    }
+
     #[test]
     fn menu_ids_name_one_command_each() {
         let all = commands();

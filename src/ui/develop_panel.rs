@@ -390,7 +390,9 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         }
                     }
                     crate::develop::Section::Tone => {
-                        let auto = ui.button(t.auto_tone).on_hover_text(t.auto_tone_tip);
+                        let auto = ui
+                            .button(t.auto_tone)
+                            .on_hover_text(crate::i18n::keys(t.auto_tone_tip));
                         if auto.clicked() {
                             out.actions.push(UiAction::AutoTone);
                             out.actions.push(UiAction::Focus(Region::Develop));

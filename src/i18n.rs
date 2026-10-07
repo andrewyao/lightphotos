@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
+use crate::app::SHOW_AUTOTONE_CENTERING;
 use crate::develop::{Section, SliderId};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -302,6 +303,7 @@ pub struct Strings {
     pub apply_settings_needs_copy: &'static str,
     pub preset_menu: &'static str,
     pub apply_preset_selection_tip: &'static str,
+    pub apply_settings_tip: &'static str,
     pub settings_from: fn(&str) -> String,
     pub export_jpg: &'static str,
     pub export_jpg_tip: &'static str,
@@ -627,7 +629,11 @@ impl Strings {
 
 pub static EN: Strings = Strings {
     settings: "Settings",
-    settings_tip: "Theme, language and Auto Adjust (Cmd+,)",
+    settings_tip: if SHOW_AUTOTONE_CENTERING {
+        "Theme, language and Auto Adjust (Cmd+,)"
+    } else {
+        "Theme and language (Cmd+,)"
+    },
     settings_title: "Settings",
     settings_theme: "Theme",
     settings_language: "Language",
@@ -785,6 +791,7 @@ pub static EN: Strings = Strings {
     apply_settings_needs_copy: "Copy the adjustment from a photo first",
     preset_menu: "Preset",
     apply_preset_selection_tip: "Apply a saved preset to the selection",
+    apply_settings_tip: "Apply the copied adjustment to the selection (Cmd+Shift+Y)",
     settings_from: |name| format!("from {name}"),
     export_jpg: "Export",
     export_jpg_tip: "Choose where and at what size, then export the selection as JPGs (X)",
@@ -824,19 +831,27 @@ pub static EN: Strings = Strings {
                 ("Tab / Shift+Tab", "Move between items in the focused region"),
                 ("Cmd+O", "Open a folder"),
                 ("?", "Show or hide this help"),
-                ("Cmd+,", "Settings: theme, language and Auto Adjust"),
+                (
+                    "Cmd+,",
+                    if SHOW_AUTOTONE_CENTERING {
+                        "Settings: theme, language and Auto Adjust"
+                    } else {
+                        "Settings: theme and language"
+                    },
+                ),
                 ("Alt+= / Alt+-", "Bigger / smaller text"),
             ],
         },
         HelpSection {
             title: "Select",
             rows: &[
-                ("Cmd+A", "Select all in current folder"),
+                ("Cmd+A", "Select all in current folder (in library)"),
                 ("Shift+Click", "Range-select"),
                 ("Cmd+Click", "Toggle individual selection"),
                 ("Shift+arrows", "Extend selection (library)"),
                 ("Cmd+G", "Group the selection"),
                 ("Cmd+Shift+G", "Ungroup the selected groups"),
+                ("Cmd+Alt+G", "Group the bursts in this folder"),
                 (
                     "Shift+Delete",
                     "Delete the selected groups, or remove them and keep the photos",
@@ -863,8 +878,11 @@ pub static EN: Strings = Strings {
                 ("Cmd++ or Cmd+=", "Zoom in (20% step)"),
                 ("Cmd+-", "Zoom out (20% step)"),
                 ("\u{2191} / \u{2193}", "Zoom in / out (10% step)"),
+                ("Scroll", "Zoom at the pointer"),
                 ("Drag", "Pan"),
                 ("Space+Drag", "Pan"),
+                ("Shift+Scroll", "Pan sideways"),
+                ("Alt+Scroll", "Pan up and down"),
             ],
         },
         HelpSection {
@@ -873,7 +891,7 @@ pub static EN: Strings = Strings {
                 ("[", "Rotate image -90 degrees"),
                 ("]", "Rotate image +90 degrees"),
                 ("C", "Crop"),
-                ("Y", "Before / after compare"),
+                ("Y", "Before / after compare (in editor)"),
                 ("X", "Open or close the export form"),
                 ("Cmd+U", "Auto Adjust this photo"),
                 ("Cmd+Shift+U", "Auto Adjust the selection"),
@@ -888,6 +906,14 @@ pub static EN: Strings = Strings {
                         "Move to Trash"
                     },
                 ),
+            ],
+        },
+        HelpSection {
+            title: "Crop",
+            rows: &[
+                ("Enter or C", "Apply the crop"),
+                ("Esc", "Cancel the crop"),
+                ("[ / ]", "Rotate -90 / +90 degrees"),
             ],
         },
         HelpSection {
@@ -913,7 +939,7 @@ pub static EN: Strings = Strings {
         HelpSection {
             title: "Touch Up",
             rows: &[
-                ("K", "Open the Masks tab"),
+                ("K", "Open the Cleanup tab"),
                 ("Q", "Touch Up on / off"),
                 ("[ / ]", "Brush size"),
                 ("Scroll", "Brush size"),
@@ -1010,7 +1036,7 @@ pub static EN: Strings = Strings {
     preset_default_name: |n| format!("Preset {n}"),
     confirm_delete_preset: |name| format!("Delete the preset {name}?"),
     reset: "Reset",
-    auto_tone_tip: "Set the tone sliders from this photo's own histogram",
+    auto_tone_tip: "Set the tone sliders from this photo's own histogram (Cmd+U)",
     touch_up: "Touch Up",
     brush_size: "Size",
     brush_size_tip: "[ / ] or the scroll wheel",
@@ -1240,7 +1266,11 @@ pub static EN: Strings = Strings {
 
 pub static ZH: Strings = Strings {
     settings: "设置",
-    settings_tip: "主题、语言和自动调整 (Cmd+,)",
+    settings_tip: if SHOW_AUTOTONE_CENTERING {
+        "主题、语言和自动调整 (Cmd+,)"
+    } else {
+        "主题和语言 (Cmd+,)"
+    },
     settings_title: "设置",
     settings_theme: "主题",
     settings_language: "语言",
@@ -1391,9 +1421,10 @@ pub static ZH: Strings = Strings {
     apply_settings_needs_copy: "请先从一张照片拷贝调整",
     preset_menu: "预设",
     apply_preset_selection_tip: "将已保存的预设应用到所选照片",
+    apply_settings_tip: "将拷贝的调整应用到所选照片 (Cmd+Shift+Y)",
     settings_from: |name| format!("来自 {name}"),
     export_jpg: "导出",
-    export_jpg_tip: "选择位置和尺寸，然后将所选照片导出为 JPG（X）",
+    export_jpg_tip: "选择位置和尺寸，然后将所选照片导出为 JPG (X)",
     bursts_reading: "正在读取拍摄时间\u{2026}",
     bursts_none: "未找到连拍",
     bursts_grouped: |n, photos| format!("已将 {photos} 张照片编为 {n} 组连拍"),
@@ -1427,19 +1458,27 @@ pub static ZH: Strings = Strings {
                 ("Tab / Shift+Tab", "在当前区域内的项目间移动"),
                 ("Cmd+O", "打开文件夹"),
                 ("?", "显示或隐藏此帮助"),
-                ("Cmd+,", "设置：主题、语言和自动调整"),
+                (
+                    "Cmd+,",
+                    if SHOW_AUTOTONE_CENTERING {
+                        "设置：主题、语言和自动调整"
+                    } else {
+                        "设置：主题和语言"
+                    },
+                ),
                 ("Alt+= / Alt+-", "增大 / 减小文字"),
             ],
         },
         HelpSection {
             title: "选择",
             rows: &[
-                ("Cmd+A", "全选当前文件夹"),
+                ("Cmd+A", "全选当前文件夹（图库中）"),
                 ("Shift+点按", "连续选择"),
                 ("Cmd+点按", "逐张加选或取消"),
                 ("Shift+方向键", "扩展选择（图库）"),
                 ("Cmd+G", "将所选照片编组"),
                 ("Cmd+Shift+G", "取消所选编组"),
+                ("Cmd+Alt+G", "将此文件夹中的连拍编组"),
                 ("Shift+Delete", "删除所选编组，或移除编组并保留照片"),
             ],
         },
@@ -1463,8 +1502,11 @@ pub static ZH: Strings = Strings {
                 ("Cmd++ 或 Cmd+=", "放大（每次 20%）"),
                 ("Cmd+-", "缩小（每次 20%）"),
                 ("\u{2191} / \u{2193}", "放大 / 缩小（每次 10%）"),
+                ("滚轮", "缩放"),
                 ("拖移", "平移"),
                 ("Space+拖移", "平移"),
+                ("Shift+滚轮", "左右平移"),
+                ("Alt+滚轮", "上下平移"),
             ],
         },
         HelpSection {
@@ -1473,7 +1515,7 @@ pub static ZH: Strings = Strings {
                 ("[", "向左旋转 90 度"),
                 ("]", "向右旋转 90 度"),
                 ("C", "裁剪"),
-                ("Y", "调整前 / 调整后对比"),
+                ("Y", "调整前 / 调整后对比（编辑器中）"),
                 ("X", "打开或关闭导出表单"),
                 ("Cmd+U", "对此照片自动调整"),
                 ("Cmd+Shift+U", "对所选照片自动调整"),
@@ -1488,6 +1530,14 @@ pub static ZH: Strings = Strings {
                         "移到废纸篓"
                     },
                 ),
+            ],
+        },
+        HelpSection {
+            title: "裁剪",
+            rows: &[
+                ("Enter 或 C", "应用裁剪"),
+                ("Esc", "取消裁剪"),
+                ("[ / ]", "向左 / 向右旋转 90 度"),
             ],
         },
         HelpSection {
@@ -1510,7 +1560,7 @@ pub static ZH: Strings = Strings {
         HelpSection {
             title: "修补",
             rows: &[
-                ("K", "打开蒙版"),
+                ("K", "打开修复"),
                 ("Q", "开启 / 关闭修补"),
                 ("[ / ]", "画笔大小"),
                 ("滚轮", "画笔大小"),
@@ -1607,7 +1657,7 @@ pub static ZH: Strings = Strings {
     preset_default_name: |n| format!("预设 {n}"),
     confirm_delete_preset: |name| format!("删除预设 {name}？"),
     reset: "复位",
-    auto_tone_tip: "根据这张照片自身的直方图设置色调滑块",
+    auto_tone_tip: "根据这张照片自身的直方图设置色调滑块 (Cmd+U)",
     touch_up: "修补",
     brush_size: "大小",
     brush_size_tip: "[ / ] 或滚轮",

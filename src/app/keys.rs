@@ -227,17 +227,13 @@ impl App {
             KeyCode::KeyG if cmd && alt => self.group_bursts(),
             KeyCode::KeyG if cmd && shift => self.ungroup_selected(),
             KeyCode::KeyG if cmd => self.group_selected(),
-            KeyCode::KeyG => self.enter_grid(),
+            KeyCode::KeyG if !alt => self.enter_grid(),
             KeyCode::KeyI
                 if !cmd && !alt && matches!(self.mode, ViewMode::Grid | ViewMode::Loupe) =>
             {
                 self.toggle_left_tab()
             }
-            KeyCode::KeyE => {
-                if self.mode == ViewMode::Grid {
-                    self.enter_loupe();
-                }
-            }
+            KeyCode::KeyE if !cmd && !alt && self.mode == ViewMode::Grid => self.enter_loupe(),
             KeyCode::KeyC if !cmd && !alt => self.enter_crop(),
             KeyCode::KeyX if !cmd && !alt => self.toggle_export_form(),
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
@@ -250,7 +246,7 @@ impl App {
             KeyCode::KeyY if cmd && shift && self.has_copied_settings() => {
                 self.request_bulk(ui::BulkKind::ApplySettings)
             }
-            KeyCode::KeyY if self.mode == ViewMode::Loupe && !cmd => self.toggle_compare(),
+            KeyCode::KeyY if self.mode == ViewMode::Loupe && !cmd && !alt => self.toggle_compare(),
             // Escape undoes Enter one step per press and stops at the Grid
             // or Folders. Leaving the Grid for Folders also clears the selection.
             KeyCode::Escape => {
@@ -817,6 +813,24 @@ mod tests {
         assert_zoom(&app, 0.6);
         assert!(app.selected_label().is_none(), "zoom keys must not label");
         assert_eq!(app.rating_of(&app.selected_path().unwrap()), 0);
+    }
+
+    /// A bare-letter view key only acts unmodified, so Alt+G, Cmd+E and
+    /// Alt+Y stay free rather than doubling as G, E and Y.
+    #[test]
+    fn view_letters_ignore_cmd_and_alt() {
+        let (mut app, _) = folder_app(2);
+        press(&mut app, CMD, KeyCode::KeyE);
+        press(&mut app, ModifiersState::ALT, KeyCode::KeyE);
+        assert_eq!(app.mode, ViewMode::Grid, "modified E does not open");
+
+        let (mut app, _) = editor_app();
+        press(&mut app, ModifiersState::ALT, KeyCode::KeyY);
+        assert!(!app.compare, "Alt+Y does not compare");
+        press(&mut app, ModifiersState::ALT, KeyCode::KeyG);
+        assert_eq!(app.mode, ViewMode::Loupe, "Alt+G does not leave");
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyG);
+        assert_eq!(app.mode, ViewMode::Grid);
     }
 
     #[test]
