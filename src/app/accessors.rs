@@ -310,11 +310,6 @@ impl App {
             .unwrap_or(0)
     }
 
-    #[cfg(test)]
-    pub(crate) fn selected_flag(&self) -> Option<Flag> {
-        self.selected_path().and_then(|p| self.flag_of(&p))
-    }
-
     /// The lowest and highest rating across the selection, `(0, 0)` when
     /// nothing is selected.
     pub(crate) fn selection_rating_span(&self) -> (u8, u8) {
