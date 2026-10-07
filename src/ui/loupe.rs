@@ -985,12 +985,12 @@ const TILE_BORDER: f32 = 4.0;
 
 /// A band along a tile's bottom with the member's stars and its Unflagged,
 /// Picked and Rejected icons, which rate and flag it as the filmstrip bar's
-/// do, and its score, which explains itself on hover. While the pointer is
-/// over a member other than the representative, the band also carries Set
-/// as representative after the flags and Delete at the far right. A tile
-/// too narrow for the band goes without, and one too narrow for the buttons
-/// without them. The band sits over the tile, so a click in it does not
-/// pick.
+/// do, then its score, which explains itself on hover. The representative's
+/// band says so next. While the pointer is over any other member, the band
+/// carries Set as Representative there instead and a trash icon at the far
+/// right. A tile too narrow for the band goes without, and one too narrow
+/// for the button without it. The band sits over the tile, so a click in it
+/// does not pick.
 fn tile_marks(
     ui: &mut egui::Ui,
     app: &App,
@@ -1018,21 +1018,8 @@ fn tile_marks(
     if rect.width() < marks_w + score_w + 2.0 * pad {
         return;
     }
-    // The representative says so after its stars, when the band has room.
-    let rep_label = is_rep
-        .then(|| {
-            ui.painter().layout_no_wrap(
-                crate::i18n::t().representative.to_string(),
-                font.clone(),
-                colors.selection,
-            )
-        })
-        .filter(|g| rect.width() >= marks_w + g.size().x + score_w + 3.0 * pad);
     let t = crate::i18n::t();
-    let buttons_w = form::compact_button_width(ui, t.set_as_rep_short)
-        + form::compact_button_width(ui, t.delete)
-        + 2.0 * pad;
-    let buttons = hovered && !is_rep && rect.width() >= marks_w + score_w + buttons_w + 2.0 * pad;
+    let tools = hovered && !is_rep;
     let band_h = form::compact_button_height(ui).max(star_w) + pad;
     let band = egui::Rect::from_min_max(
         egui::pos2(rect.left(), rect.bottom() - band_h),
@@ -1105,52 +1092,9 @@ fn tile_marks(
             });
         }
     }
-    if let Some(g) = rep_label {
-        let at = egui::pos2(band.left() + 3.0 * pad + 8.0 * star_w, y - g.size().y / 2.0);
-        ui.painter().galley(at, g, egui::Color32::WHITE);
-    }
-    let mut right = band.right() - pad;
-    if buttons {
-        let inner = band.shrink2(egui::vec2(pad, 0.0));
-        let mut ends = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(inner)
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
-        );
-        let delete = Button {
-            label: t.delete,
-            role: Role::Danger,
-            enabled: app.delete_available(),
-        };
-        let resp = form::compact_button(&mut ends, &delete);
-        if resp.clicked() {
-            out.actions.push(UiAction::DeleteMember(path.to_path_buf()));
-        }
-        right = resp.rect.left() - pad;
-        let after_flags = band.left() + 3.0 * pad + 8.0 * star_w;
-        let mut start = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(egui::Rect::from_x_y_ranges(
-                    after_flags..=right,
-                    inner.y_range(),
-                ))
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-        );
-        let set = Button {
-            label: t.set_as_rep_short,
-            role: Role::Primary,
-            enabled: true,
-        };
-        if form::compact_button(&mut start, &set)
-            .on_hover_text(t.set_as_rep)
-            .clicked()
-        {
-            out.actions
-                .push(UiAction::SetMemberAsRep(path.to_path_buf()));
-        }
-    }
+    let mut x = band.left() + 3.0 * pad + 8.0 * star_w;
     if let (Some((score, stale)), Some(galley)) = (score, galley) {
-        let at = egui::pos2(right - galley.size().x, y - galley.size().y / 2.0);
+        let at = egui::pos2(x, y - galley.size().y / 2.0);
         let hit = egui::Rect::from_min_size(at, galley.size());
         ui.painter().galley(at, galley, egui::Color32::WHITE);
         ui.interact(
@@ -1159,7 +1103,84 @@ fn tile_marks(
             egui::Sense::hover(),
         )
         .on_hover_text(super::grid::score_tip(score, stale));
+        x += score_w;
     }
+    let mut right = band.right() - pad;
+    if tools {
+        let r = egui::Rect::from_min_max(
+            egui::pos2(right - star_w, y - star_w / 2.0),
+            egui::pos2(right, y + star_w / 2.0),
+        );
+        let enabled = app.delete_available();
+        let resp = ui.interact(
+            r,
+            egui::Id::new(("tile_trash", path)),
+            if enabled {
+                egui::Sense::click()
+            } else {
+                egui::Sense::hover()
+            },
+        );
+        let color = if !enabled {
+            egui::Color32::from_white_alpha(70)
+        } else if resp.hovered() {
+            colors.danger
+        } else {
+            egui::Color32::from_white_alpha(200)
+        };
+        paint_trash(ui.painter(), r, color);
+        if resp.on_hover_text(t.delete).clicked() {
+            out.actions.push(UiAction::DeleteMember(path.to_path_buf()));
+        }
+        right = r.left() - pad;
+    }
+    if is_rep {
+        let g = ui
+            .painter()
+            .layout_no_wrap(t.representative.to_string(), font, colors.selection);
+        if x + g.size().x <= right {
+            ui.painter()
+                .galley(egui::pos2(x, y - g.size().y / 2.0), g, egui::Color32::WHITE);
+        }
+    } else if tools && x + form::compact_button_width(ui, t.set_as_rep) <= right {
+        let mut start = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(egui::Rect::from_x_y_ranges(x..=right, band.y_range()))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        let set = Button {
+            label: t.set_as_rep,
+            role: Role::Primary,
+            enabled: true,
+        };
+        if form::compact_button(&mut start, &set).clicked() {
+            out.actions
+                .push(UiAction::SetMemberAsRep(path.to_path_buf()));
+        }
+    }
+}
+
+/// A trash can drawn into `rect`: lid, handle and a tapered bin with two
+/// ribs, with strokes so it needs no font coverage.
+fn paint_trash(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32) {
+    let at = |x: f32, y: f32| rect.min + egui::vec2(x * rect.width(), y * rect.height());
+    let stroke = egui::Stroke::new((rect.width() * 0.09).max(1.2), color);
+    painter.line_segment([at(0.12, 0.24), at(0.88, 0.24)], stroke);
+    painter.add(egui::Shape::line(
+        vec![at(0.38, 0.24), at(0.38, 0.1), at(0.62, 0.1), at(0.62, 0.24)],
+        stroke,
+    ));
+    painter.add(egui::Shape::line(
+        vec![
+            at(0.22, 0.32),
+            at(0.28, 0.92),
+            at(0.72, 0.92),
+            at(0.78, 0.32),
+        ],
+        stroke,
+    ));
+    painter.line_segment([at(0.42, 0.42), at(0.43, 0.8)], stroke);
+    painter.line_segment([at(0.58, 0.42), at(0.57, 0.8)], stroke);
 }
 
 /// SPIKE: outline on the shown photo of the square the tiles zoom into. A

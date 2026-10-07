@@ -522,8 +522,6 @@ pub struct Strings {
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub tile_full: &'static str,
     pub set_as_rep: &'static str,
-    /// `set_as_rep` short enough for a Compare tile's band.
-    pub set_as_rep_short: &'static str,
     pub representative: &'static str,
     /// Hover text on the info bar's icon for the Loupe alone.
     /// Hover text on the info bar's icon for the Compare pane.
@@ -1166,8 +1164,7 @@ pub static EN: Strings = Strings {
     tile_load: "Load Photos:",
     tile_speed: "Quickly",
     tile_full: "Fully (Slower)",
-    set_as_rep: "Set as representative",
-    set_as_rep_short: "Set as Rep",
+    set_as_rep: "Set as Representative",
     representative: "Representative",
     view_compare: "Compare group",
     view_compare_needs_group: "Compare group: select a photo in a group",
@@ -1740,7 +1737,6 @@ pub static ZH: Strings = Strings {
     tile_speed: "快速",
     tile_full: "完整（较慢）",
     set_as_rep: "设为代表照片",
-    set_as_rep_short: "设为代表",
     representative: "代表照片",
     view_compare: "组内比较",
     view_compare_needs_group: "组内比较：请选择组内的照片",
