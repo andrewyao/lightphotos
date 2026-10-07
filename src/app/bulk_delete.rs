@@ -543,24 +543,22 @@ mod tests {
         (app, dir, paths)
     }
 
-    /// The count follows the filters and Delete follows Export, rather than
-    /// each sitting alone at the window's right edge.
+    /// The count follows the sort and leads the Actions menu on every photo,
+    /// rather than sitting alone at the window's right edge.
     #[test]
-    fn the_count_and_delete_sit_beside_their_rows() {
+    fn the_count_sits_between_the_sort_and_actions() {
         use crate::app::presets::tests::{folder_app, settled_at};
         let t = crate::i18n::t();
         let (mut app, dir, _) = folder_app("toolbar-rows", 3);
         app.select_single(0);
-        // Wide enough for the whole one-line action row.
         let painted = settled_at(&mut app, egui::vec2(1900.0, 800.0));
-        let export = painted.pos_of(t.export_jpg);
-        let delete = painted.pos_of(t.delete);
         let count = painted.pos_of(&(t.n_photos)(3));
+        let sort = painted.pos_of(t.sort_name);
+        let actions = painted.pos_of(&format!("{} \u{23f7}", t.actions_menu));
         assert!(
-            delete.x > export.x && delete.x - export.x < 120.0,
-            "Delete follows Export: {export:?} vs {delete:?}"
+            sort.x < count.x && count.x < actions.x && actions.x - count.x < 120.0,
+            "the count sits between the sort and Actions: {sort:?} {count:?} {actions:?}"
         );
-        assert!(count.x < 800.0, "the count follows the filters: {count:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -38,6 +38,30 @@ fn toolbar_row<R>(
 }
 
 /// The toolbar rows' gaps and button padding, for a row drawn elsewhere.
+/// One row of `add`, centered in the width available by last frame's
+/// width, as the Loupe's bar is. A row wider than the space starts at the
+/// left.
+fn centered_row<R>(ui: &mut egui::Ui, id: &'static str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let id = egui::Id::new(id);
+    let last = ui.ctx().data(|d| d.get_temp::<f32>(id));
+    let avail = ui.available_width();
+    ui.horizontal(|ui| {
+        if let Some(w) = last {
+            let gap = ui.spacing().item_spacing.x;
+            ui.add_space(((avail - w) / 2.0 - gap).max(0.0));
+        }
+        // Its own row, so the keyboard cursor's outline skips the lead-in.
+        let row = ui.horizontal(add);
+        let w = row.response.rect.width();
+        if last.is_none_or(|l| (l - w).abs() > 0.5) {
+            ui.ctx().data_mut(|d| d.insert_temp(id, w));
+            ui.ctx().request_repaint();
+        }
+        row.inner
+    })
+    .inner
+}
+
 pub(super) fn toolbar_spacing(ui: &mut egui::Ui) {
     let style = ui.style().clone();
     let spacing = ui.spacing_mut();
@@ -66,7 +90,7 @@ pub(crate) enum ToolbarControl {
     Star(u8),
     Unrated,
     EyesClosed,
-    Sort(GridSort),
+    Sort,
 }
 
 impl ToolbarControl {
@@ -82,8 +106,7 @@ impl ToolbarControl {
         Self::Star(4),
         Self::Star(5),
         Self::EyesClosed,
-        Self::Sort(GridSort::Name),
-        Self::Sort(GridSort::Quality),
+        Self::Sort,
     ];
 
     /// How far the F6 cursor walks. Bulk actions are excluded because their
@@ -115,10 +138,7 @@ impl ToolbarControl {
     fn starts_group(self) -> bool {
         matches!(
             self,
-            Self::FilterCmp(Cmp::Gte)
-                | Self::Star(1)
-                | Self::EyesClosed
-                | Self::Sort(GridSort::Name)
+            Self::FilterCmp(Cmp::Gte) | Self::Star(1) | Self::EyesClosed | Self::Sort
         )
     }
 
@@ -133,11 +153,15 @@ impl ToolbarControl {
                 UiAction::SetFilter(if unrated { None } else { Some((Cmp::Eq, 0)) })
             }
             Self::EyesClosed => UiAction::ToggleEyesClosed,
-            Self::Sort(sort) => UiAction::SetSort(sort),
+            // The keyboard flips the sort; a click opens the dropdown.
+            Self::Sort => UiAction::SetSort(match app.grid_sort() {
+                GridSort::Name => GridSort::Quality,
+                GridSort::Quality => GridSort::Name,
+            }),
         }
     }
 
-    fn widget(self, ui: &mut egui::Ui, app: &App) -> egui::Response {
+    fn widget(self, ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) -> egui::Response {
         let t = t();
         match self {
             Self::AnyRating => ui.selectable_label(app.filter().is_none(), t.all),
@@ -182,13 +206,35 @@ impl ToolbarControl {
                     t.eyes_closed,
                 ))
                 .on_hover_text(t.eyes_closed_tip),
-            Self::Sort(GridSort::Name) => {
+            Self::Sort => {
                 ui.label(t.sort_by);
-                ui.selectable_label(app.grid_sort() == GridSort::Name, t.sort_name)
+                let current = app.grid_sort();
+                let name = |sort| match sort {
+                    GridSort::Name => t.sort_name,
+                    GridSort::Quality => t.sort_quality,
+                };
+                egui::ComboBox::from_id_salt("grid_sort")
+                    .selected_text(name(current))
+                    .width(0.0)
+                    .show_ui(ui, |ui| {
+                        for sort in [GridSort::Name, GridSort::Quality] {
+                            if sort == GridSort::Quality
+                                && current != sort
+                                && !app.quality_sort_available()
+                            {
+                                continue;
+                            }
+                            let mut item = ui.selectable_label(current == sort, name(sort));
+                            if sort == GridSort::Quality {
+                                item = item.on_hover_text(t.sort_quality_tip);
+                            }
+                            if item.clicked() && current != sort {
+                                out.actions.push(UiAction::SetSort(sort));
+                            }
+                        }
+                    })
+                    .response
             }
-            Self::Sort(GridSort::Quality) => ui
-                .selectable_label(app.grid_sort() == GridSort::Quality, t.sort_quality)
-                .on_hover_text(t.sort_quality_tip),
         }
     }
 }
@@ -207,21 +253,17 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             let t = t();
             ui.label(t.rating_filter);
             for (idx, control) in ToolbarControl::drawn().enumerate() {
-                // The count reads as the filters' result, so it closes their
-                // group rather than trailing the sort.
-                if matches!(control, ToolbarControl::Sort(GridSort::Name)) {
-                    ui.separator();
-                    ui.weak((t.n_photos)(app.visible_len()));
-                }
                 if control.starts_group() {
                     ui.separator();
                 }
-                let resp = control.widget(ui, app);
-                if resp.clicked() {
+                let resp = control.widget(ui, app, out);
+                if resp.clicked() && !matches!(control, ToolbarControl::Sort) {
                     out.actions.push(control.action(app));
                 }
                 toolbar_focus_sync(ui, app, idx, &resp, out);
             }
+            ui.weak((t.n_photos)(app.visible_len()));
+            all_photos_menu(ui, app, out);
 
             if let Some((done, total)) = app.score_progress() {
                 ui.separator();
@@ -250,136 +292,203 @@ pub(super) fn selection_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput)
         egui::ScrollArea::horizontal()
             .id_salt("selection_bar_scroll")
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
+                centered_row(ui, "selection_bar_w", |ui| {
                     // Buttons are taller than a label; keep the row one height.
                     ui.set_min_height(ui.spacing().interact_size.y);
-                    if n <= 1 {
-                        grid_actions(ui, app, out);
-                    }
-                    match n {
-                        0 => {}
-                        1 => {
-                            ui.separator();
-                            one_photo_actions(ui, app, out);
-                            delete_button(ui, app, out);
-                        }
-                        n => {
-                            selection_actions(ui, app, n, out);
-                            delete_button(ui, app, out);
-                        }
+                    // The selection reads as it does under the filmstrip.
+                    if n > 0 {
+                        strip_bar(ui, app, out);
                     }
                 });
             });
     });
 }
 
-/// The actions under the filmstrip: the Loupe photo's, or with several
-/// photos selected in the strip, the selection bar's for all of them. The
-/// bar already rates the shown photo with its stars, so one photo gets
-/// neither the label nor Rate.
-pub(super) fn strip_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    match app.selection_count() {
-        n if n > 1 => selection_actions(ui, app, n, out),
-        _ => photo_actions(ui, app, out),
-    }
-    delete_button(ui, app, out);
-}
-
-/// "All n photos:" or, under a filter, "Filtered n photos:", then the
-/// actions on all of them.
-fn grid_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+/// The bar under the filmstrip, over its selection: "Selected photo" or
+/// "Selected n photos", the stars, the score, Copy and Apply Adjustment as
+/// one pair, and an Actions menu. Across photos rated differently the
+/// stars fill solid up to the lowest rating and half-transparent up to the
+/// highest, and the score reads as a range.
+pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    let cells = app.visible_len();
-    ui.strong(if app.filter().is_some() {
-        (t.filtered_n_photos)(cells)
+    let n = app.selection_count().max(1);
+    let colors = theme::colors(ui.ctx());
+    ui.strong(if n == 1 {
+        t.selected_photo.to_string()
     } else {
-        (t.all_n_photos)(cells)
+        (t.selected_n_photos)(n)
     });
-    let any = cells > 0;
-    if app.scoring_available()
-        && ui
-            .add_enabled(any, egui::Button::new(t.score_all))
-            .on_hover_text(t.score_all_tip)
-            .clicked()
-    {
-        out.actions.push(UiAction::ScoreAll);
+
+    let (lo, hi) = app.selection_rating_span();
+    let star_w = font_size::px(ui.style(), 20.0);
+    let star_font = egui::FontId::proportional(font_size::px(ui.style(), 18.0));
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for s in 1..=5u8 {
+            let (r, resp) =
+                ui.allocate_exact_size(egui::vec2(star_w, star_w), egui::Sense::click());
+            let (glyph, color) = if s <= lo {
+                ("\u{2605}", colors.star)
+            } else if s <= hi {
+                ("\u{2605}", colors.star.gamma_multiply(0.5))
+            } else {
+                ("\u{2606}", colors.label)
+            };
+            ui.painter().text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                glyph,
+                star_font.clone(),
+                color,
+            );
+            if resp.clicked() {
+                // Clicking the rating every photo already has clears it, as in Lightroom.
+                let stars = if lo == s && hi == s { 0 } else { s };
+                out.actions.push(if n == 1 {
+                    UiAction::SetRating(stars)
+                } else {
+                    UiAction::RequestBulk(BulkKind::Rate(stars))
+                });
+            }
+        }
+    });
+    if n == 1 {
+        if let Some(label) = app.selected_label() {
+            let (r, _) =
+                ui.allocate_exact_size(egui::vec2(star_w / 2.0, star_w), egui::Sense::hover());
+            ui.painter().circle_filled(
+                r.center(),
+                font_size::px(ui.style(), 5.0),
+                super::label_color(label),
+            );
+        }
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    if ui
-        .add_enabled(
-            app.group_bursts_available(),
-            egui::Button::new(t.group_all_bursts),
-        )
-        .on_hover_text(t.group_all_bursts_tip)
-        .clicked()
-    {
-        out.actions.push(UiAction::GroupAllBursts);
+
+    if n == 1 {
+        if let Some((score, stale)) = app.shown_score() {
+            ui.label(t.score_label);
+            ui.label(
+                egui::RichText::new(score.value.to_string())
+                    .color(super::grid::score_color(&colors, stale)),
+            )
+            .on_hover_text(super::grid::score_tip(&score, stale));
+        }
+    } else if let Some((lo, hi, stale)) = app.selection_score_span() {
+        ui.label(t.score_label);
+        let range = if lo == hi {
+            lo.to_string()
+        } else {
+            format!("{lo}\u{2013}{hi}")
+        };
+        ui.label(egui::RichText::new(range).color(super::grid::score_color(&colors, stale)));
     }
-    if ui
-        .add_enabled(any, egui::Button::new(t.auto_adjust_all))
-        .on_hover_text(t.auto_adjust_all_tip)
-        .clicked()
-    {
-        out.actions
-            .push(UiAction::RequestBulk(BulkKind::AutoToneAll));
-    }
+
+    adjustment_pair(ui, app, n == 1, out);
+
+    // The bar sits at the window's bottom, so the menu opens upward.
+    let button = ui.button(actions_label(true));
+    egui::Popup::menu(&button)
+        .align(egui::RectAlign::TOP_START)
+        .show(|ui| {
+            // Several photos get a heading naming what the menu acts on.
+            let score = if n == 1 {
+                t.update_score
+            } else {
+                ui.weak((t.selected_n_photos_title)(n));
+                t.update_scores
+            };
+            score_button(ui, app, score, out);
+            auto_adjust_button(ui, t.auto_tone, out);
+            if ui
+                .button(t.export_jpg)
+                .on_hover_text(t.export_jpg_tip)
+                .clicked()
+            {
+                out.actions.push(UiAction::ToggleExportForm);
+            }
+            ui.separator();
+            let delete = egui::Button::new(egui::RichText::new(t.delete).color(colors.danger));
+            if ui
+                .add_enabled(app.delete_available(), delete)
+                .on_hover_text(t.delete_selection_tip)
+                .clicked()
+            {
+                out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
+            }
+        });
 }
 
-/// "Selected photo:" and the actions on that one photo.
-fn one_photo_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    ui.strong(t().selected_photo);
-    rate_menu(ui, out);
-    photo_actions(ui, app, out);
-}
-
-/// One photo's actions after its rating: score, adjust, export.
-fn photo_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+/// Copy Adjustment and Apply Adjustment as one control split down the
+/// middle. Copy takes one photo's adjustment, so it waits for a single
+/// selection.
+fn adjustment_pair(ui: &mut egui::Ui, app: &App, one: bool, out: &mut FrameOutput) {
     let t = t();
-    score_button(ui, app, t.update_score, out);
-    auto_adjust_button(ui, t.auto_tone, out);
-    copy_button(ui, out);
-    apply_adjustment(ui, app, out);
-    if app.ungroup_button_enabled()
-        && ui
-            .button(t.menu.ungroup)
-            .on_hover_text(crate::i18n::keys(t.ungroup_selection_tip))
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 1.0;
+        let r = ui.visuals().widgets.inactive.corner_radius;
+        let left = egui::CornerRadius { ne: 0, se: 0, ..r };
+        let right = egui::CornerRadius { nw: 0, sw: 0, ..r };
+        if ui
+            .add_enabled(one, egui::Button::new(t.copy_settings).corner_radius(left))
+            .on_hover_text(crate::i18n::keys(t.copy_settings_tip))
             .clicked()
-    {
-        out.actions.push(UiAction::UngroupSelection);
-    }
-    export_button(ui, out);
+        {
+            out.actions.push(UiAction::CopySettings);
+        }
+        let apply = egui::Button::new(t.apply_settings).corner_radius(right);
+        let mut apply = ui
+            .add_enabled(app.has_copied_settings(), apply)
+            .on_disabled_hover_text(t.apply_settings_needs_copy);
+        if let Some(name) = app.copied_settings_name() {
+            apply = apply.on_hover_text((t.settings_from)(&name));
+        }
+        if apply.clicked() {
+            out.actions
+                .push(UiAction::RequestBulk(BulkKind::ApplySettings));
+        }
+    });
 }
 
-/// "Selected n photos:" and the actions on them.
-fn selection_actions(ui: &mut egui::Ui, app: &App, n: usize, out: &mut FrameOutput) {
+/// The Actions menu on every photo the Grid shows, after their count.
+fn all_photos_menu(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    ui.strong((t.selected_n_photos)(n));
-    rate_menu(ui, out);
-    score_button(ui, app, t.score_all, out);
-    #[cfg(not(target_arch = "wasm32"))]
-    if ui
-        .add_enabled(
-            app.group_bursts_available(),
-            egui::Button::new(t.group_all_bursts),
-        )
-        .on_hover_text(crate::i18n::keys(t.group_bursts_tip))
-        .clicked()
-    {
-        out.actions.push(UiAction::GroupBursts);
-    }
-    auto_adjust_button(ui, t.auto_adjust_all, out);
-    apply_adjustment(ui, app, out);
-    if ui
-        .add_enabled(
-            app.group_available(),
-            egui::Button::new(t.menu.group_selected),
-        )
-        .on_hover_text(crate::i18n::keys(t.group_selection_tip))
-        .clicked()
-    {
-        out.actions.push(UiAction::GroupSelection);
-    }
-    export_button(ui, out);
+    let any = app.visible_len() > 0;
+    let button = ui.add_enabled(any, egui::Button::new(actions_label(false)));
+    egui::Popup::menu(&button).show(|ui| {
+        if app.scoring_available()
+            && ui
+                .button(t.score_all)
+                .on_hover_text(t.score_all_tip)
+                .clicked()
+        {
+            out.actions.push(UiAction::ScoreAll);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui
+            .add_enabled(
+                app.group_bursts_available(),
+                egui::Button::new(t.group_all_bursts),
+            )
+            .on_hover_text(t.group_all_bursts_tip)
+            .clicked()
+        {
+            out.actions.push(UiAction::GroupAllBursts);
+        }
+        if ui
+            .button(t.auto_adjust_all)
+            .on_hover_text(t.auto_adjust_all_tip)
+            .clicked()
+        {
+            out.actions
+                .push(UiAction::RequestBulk(BulkKind::AutoToneAll));
+        }
+    });
+}
+
+/// "Actions" with an arrow for which way its menu opens.
+fn actions_label(up: bool) -> String {
+    let arrow = if up { "\u{23f6}" } else { "\u{23f7}" };
+    format!("{} {arrow}", t().actions_menu)
 }
 
 /// "Selected n photos", Rate and an Actions menu over the Compare pane's
@@ -399,7 +508,7 @@ pub(super) fn pick_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
     ui.add(egui::Label::new(egui::RichText::new(label).strong()).extend());
     rate_menu(ui, out);
     // The toolbar sits at the window's bottom, so the menu opens upward.
-    let button = ui.button(t.actions_menu);
+    let button = ui.button(actions_label(true));
     egui::Popup::menu(&button)
         .align(egui::RectAlign::TOP_START)
         .show(|ui| {
@@ -440,8 +549,10 @@ fn copy_button(ui: &mut egui::Ui, out: &mut FrameOutput) {
 
 fn rate_menu(ui: &mut egui::Ui, out: &mut FrameOutput) {
     let t = t();
+    // Only as wide as its label, so it fits the Compare pane's toolbar.
     egui::ComboBox::from_id_salt("bulk_star")
         .selected_text(t.rate_menu)
+        .width(0.0)
         .show_ui(ui, |ui| {
             for s in (1u8..=5).rev() {
                 if ui.button(star_string(s)).clicked() {
@@ -521,21 +632,6 @@ fn export_button(ui: &mut egui::Ui, out: &mut FrameOutput) {
         .clicked()
     {
         out.actions.push(UiAction::ToggleExportForm);
-    }
-}
-
-/// Destructive, so it sits last, behind a divider.
-fn delete_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let t = t();
-    ui.separator();
-    let delete =
-        egui::Button::new(egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger));
-    if ui
-        .add_enabled(app.delete_available(), delete)
-        .on_hover_text(t.delete_selection_tip)
-        .clicked()
-    {
-        out.actions.push(UiAction::RequestBulk(BulkKind::Delete));
     }
 }
 

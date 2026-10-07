@@ -38,11 +38,6 @@ impl App {
         cells.len() >= 2 && cells.iter().all(|&p| self.group_at(p).is_none())
     }
 
-    /// The selection bar's Ungroup: exactly one cell, and it is a group.
-    pub(crate) fn ungroup_button_enabled(&self) -> bool {
-        matches!(self.selected_cells()[..], [p] if self.group_at(p).is_some())
-    }
-
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn selection_has_group(&self) -> bool {
         self.selected_cells()
@@ -276,10 +271,26 @@ impl App {
         self.eyes_filter = false;
     }
 
+    #[cfg(test)]
     pub(crate) fn selected_rating(&self) -> u8 {
         self.selected_path()
             .map(|p| self.rating_of(&p))
             .unwrap_or(0)
+    }
+
+    /// The lowest and highest rating across the selection, `(0, 0)` when
+    /// nothing is selected.
+    pub(crate) fn selection_rating_span(&self) -> (u8, u8) {
+        let ratings = self
+            .selected_paths()
+            .into_iter()
+            .map(|p| self.rating_of(&p));
+        ratings
+            .fold(None, |span, r| match span {
+                None => Some((r, r)),
+                Some((lo, hi)) => Some((r.min(lo), r.max(hi))),
+            })
+            .unwrap_or((0, 0))
     }
 
     /// The thumbnail texture and its size for the visible cell at `pos`, if

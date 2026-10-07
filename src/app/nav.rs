@@ -1309,6 +1309,24 @@ pub(in crate::app) mod tests {
         app.apply_ui_actions(actions);
     }
 
+    /// The filmstrip bar's stars read the selection's lowest and highest
+    /// rating, so photos rated alike show one rating.
+    #[test]
+    fn the_rating_span_covers_the_whole_selection() {
+        let (mut app, dir, paths) = folder_app("nav-rating-span", 4);
+        app.set_rating_of(paths[1].clone(), 3);
+        app.set_rating_of(paths[2].clone(), 1);
+        app.select_single(0);
+        app.select_range(2);
+        assert_eq!(app.selection_rating_span(), (0, 3));
+        app.select_single(1);
+        app.select_range(2);
+        assert_eq!(app.selection_rating_span(), (1, 3));
+        app.select_single(1);
+        assert_eq!(app.selection_rating_span(), (3, 3));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Cmd-click and Shift-click in the filmstrip build a multi-selection, the
     /// Loupe shows the photo clicked last, and the strip outlines every
     /// selected cell.

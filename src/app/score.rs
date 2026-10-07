@@ -145,12 +145,34 @@ impl App {
             .map(|(s, stale)| (s.score.clone(), stale))
     }
 
+    /// The lowest and highest stored score across the selection, and
+    /// whether any of them went stale. `None` while none is scored.
+    pub(crate) fn selection_score_span(&self) -> Option<(u8, u8, bool)> {
+        self.selected_paths()
+            .iter()
+            .filter_map(|p| self.catalog.score(p))
+            .map(|(s, stale)| (s.score.value, stale))
+            .fold(None, |span, (v, stale)| match span {
+                None => Some((v, v, stale)),
+                Some((lo, hi, any)) => Some((v.min(lo), v.max(hi), any || stale)),
+            })
+    }
+
     pub(crate) fn grid_sort(&self) -> GridSort {
         self.grid_sort
     }
 
+    /// Whether the Grid may sort by Quality: not while a scoring run is
+    /// going, since each new score would reorder the Grid.
+    pub(crate) fn quality_sort_available(&self) -> bool {
+        self.score_job.is_none()
+    }
+
     pub(super) fn set_sort(&mut self, sort: GridSort) {
         if self.mode == ViewMode::Loupe || self.grid_sort == sort {
+            return;
+        }
+        if sort == GridSort::Quality && !self.quality_sort_available() {
             return;
         }
         self.grid_sort = sort;
@@ -241,6 +263,23 @@ mod tests {
         assert_eq!(app.score_progress(), Some((0, 5)));
         run_until_idle(&mut app);
         assert!(paths.iter().all(|p| app.catalog.score(p).is_some()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Sorting by a score still coming in would reshuffle the Grid under the
+    /// pointer, so the Quality sort waits for the run to finish.
+    #[test]
+    fn the_quality_sort_waits_for_a_scoring_run() {
+        let (mut app, dir, _) = folder_app(3);
+        app.score_pool = ScorePool::with_runner(2, slow_fixed);
+        app.score_all();
+        assert!(!app.quality_sort_available());
+        app.set_sort(GridSort::Quality);
+        assert_eq!(app.grid_sort(), GridSort::Name, "no Quality sort mid-run");
+        run_until_idle(&mut app);
+        assert!(app.quality_sort_available());
+        app.set_sort(GridSort::Quality);
+        assert_eq!(app.grid_sort(), GridSort::Quality);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

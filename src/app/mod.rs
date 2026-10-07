@@ -1533,11 +1533,8 @@ impl App {
     fn apply_ui_actions(&mut self, actions: Vec<ui::UiAction>) {
         for action in actions {
             match action {
-                ui::UiAction::GroupSelection => self.group_selected(),
-                ui::UiAction::GroupBursts => self.group_bursts(),
                 ui::UiAction::GroupAllBursts => self.group_all_bursts(),
                 ui::UiAction::ScoreAll => self.score_all(),
-                ui::UiAction::UngroupSelection => self.ungroup_selected(),
                 ui::UiAction::SpikePage(page) => {
                     if let Some(t) = self.spike.as_mut() {
                         t.page = page.min(t.pages().saturating_sub(1));

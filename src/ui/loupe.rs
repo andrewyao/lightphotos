@@ -330,178 +330,40 @@ fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     );
 }
 
-/// The info bar under the filmstrip: rating centered, then the selection
-/// controls. The filename sits in the title bar above. Exposure sits under the Develop panel's histogram.
+/// The info bar under the filmstrip: the selection's bar
+/// (`toolbar::strip_bar`) centered, then a grouped photo's view icons. The
+/// filename sits in the title bar above. Exposure sits under the Develop
+/// panel's histogram.
 fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let row_h = font_size::px(ui.style(), 36.0);
-    // The photo's actions share the row when they fit beside the filename
-    // group, else they take a second row. Their width is last frame's.
-    let actions_id = egui::Id::new("loupe_actions_w");
-    let actions_w = ui.ctx().data(|d| d.get_temp::<f32>(actions_id));
-    let bar_w = ui.available_width();
-    let measure_pad = font_size::px(ui.style(), 14.0);
-    let group_w_guess = ui
-        .ctx()
-        .data(|d| d.get_temp::<f32>(egui::Id::new("loupe_group_w")))
-        .unwrap_or(0.0);
-    let fits = actions_w.is_none_or(|w| group_w_guess + w + 4.0 * measure_pad <= bar_w);
-    let bar_h = if fits { row_h } else { 2.0 * row_h };
     egui::Panel::bottom("loupe_info_bar")
-        .exact_size(bar_h)
+        .exact_size(row_h)
         .show_inside(ui, |ui| {
-            let full = ui.max_rect();
-            let rect = egui::Rect::from_min_size(full.min, egui::vec2(full.width(), row_h));
-            let painter = ui.painter();
-            let main_font = egui::FontId::proportional(font_size::px(ui.style(), 13.0));
-            let colors = theme::colors(ui.ctx());
-            let main_y = rect.center().y;
+            let rect = ui.max_rect();
             let pad = font_size::px(ui.style(), 14.0);
-
-            // Center the stars, label and score as one group.
-            let star_w = font_size::px(ui.style(), 20.0);
-            let stars_total_w = star_w * 5.0;
-            let group_gap = font_size::px(ui.style(), 10.0);
-            // A grouped photo's view icons join the centered
-            // group, so the row fits until it is wider than the bar, then
-            // starts at the left.
-            let tabs_w = if app.shown_in_group() {
-                3.0 * group_gap + group_view_buttons_width(ui)
-            } else {
-                0.0
-            };
-            let score = app.shown_score().map(|(score, stale)| {
-                let galley = painter.layout_no_wrap(
-                    score.value.to_string(),
-                    main_font.clone(),
-                    super::grid::score_color(&colors, stale),
-                );
-                (score, stale, galley)
+            let main_y = rect.center().y;
+            // Centered by last frame's width, so the first frame starts left.
+            let width_id = egui::Id::new("loupe_bar_w");
+            let last_w = ui.ctx().data(|d| d.get_temp::<f32>(width_id));
+            let left = last_w.map_or(rect.left() + pad, |w| {
+                (rect.center().x - w / 2.0).max(rect.left() + pad)
             });
-            let score_w = score
-                .as_ref()
-                .map_or(0.0, |(_, _, g)| 3.0 * group_gap + g.size().x);
-            let group_w = stars_total_w + 4.0 * ui.spacing().item_spacing.x + score_w + tabs_w;
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(egui::Id::new("loupe_group_w"), group_w));
-            // With the actions beside it, the group and the actions center
-            // as one run; alone on its row the group centers.
-            let gap = 3.0 * group_gap;
-            let run_w = match actions_w {
-                Some(w) if fits => group_w + gap + w,
-                _ => group_w,
-            };
-            let group_left = (rect.center().x - run_w / 2.0).max(rect.left() + pad);
-
-            let stars_left = group_left;
-            let stars_rect = egui::Rect::from_center_size(
-                egui::pos2(stars_left + stars_total_w / 2.0, main_y),
-                egui::vec2(stars_total_w, star_w),
-            );
-            // The stars' item spacing runs past `stars_rect`, so what sits
-            // right of them goes by the row they actually drew.
-            let stars_drawn = ui
-                .scope_builder(egui::UiBuilder::new().max_rect(stars_rect), |ui| {
-                    ui.horizontal_centered(|ui| {
-                        let current = app.selected_rating();
-                        for i in 0..5u8 {
-                            let (r, resp) = ui.allocate_exact_size(
-                                egui::vec2(star_w, star_w),
-                                egui::Sense::click(),
-                            );
-                            let filled = (i + 1) <= current;
-                            let glyph = if filled { "\u{2605}" } else { "\u{2606}" };
-                            let color = if filled {
-                                theme::colors(ui.ctx()).star
-                            } else {
-                                theme::colors(ui.ctx()).label
-                            };
-                            ui.painter().text(
-                                r.center(),
-                                egui::Align2::CENTER_CENTER,
-                                glyph,
-                                egui::FontId::proportional(font_size::px(ui.style(), 18.0)),
-                                color,
-                            );
-                            if resp.clicked() {
-                                let n = i + 1;
-                                // Clicking the current rating clears it, as in Lightroom.
-                                let stars = if n == current { 0 } else { n };
-                                out.actions.push(UiAction::SetRating(stars));
-                            }
-                        }
-                    });
-                })
-                .response
-                .rect;
-
-            if let Some(label) = app.selected_label() {
-                ui.painter().circle_filled(
-                    egui::pos2(stars_rect.right() + group_gap, main_y),
-                    font_size::px(ui.style(), 5.0),
-                    label_color(label),
-                );
-            }
-
-            // Past the label dot, like the tabs below.
-            let mut row_right = stars_drawn.right();
-            if let Some((score, stale, galley)) = score {
-                let label_right = if app.selected_label().is_some() {
-                    stars_rect.right() + 2.0 * group_gap
-                } else {
-                    stars_drawn.right()
-                };
-                let at = egui::pos2(
-                    stars_drawn.right().max(label_right) + group_gap,
-                    main_y - galley.size().y / 2.0,
-                );
-                let hit = egui::Rect::from_min_size(at, galley.size());
-                ui.painter().galley(at, galley, colors.label);
-                ui.interact(hit, egui::Id::new("loupe_score"), egui::Sense::hover())
-                    .on_hover_text(super::grid::score_tip(&score, stale));
-                row_right = row_right.max(hit.right());
-            }
-
-            // Past the label dot, so the two never overlap.
-            if app.shown_in_group() {
-                let view_rect = egui::Rect::from_min_max(
-                    egui::pos2(row_right + 3.0 * group_gap, rect.top()),
-                    rect.right_bottom(),
-                );
-                let layout = egui::Layout::left_to_right(egui::Align::Center);
-                ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(view_rect).layout(layout),
-                    |ui| group_view_buttons(ui, app, out),
-                );
-            }
-
-            let w = actions_w.unwrap_or(0.0);
-            let actions_rect = if fits {
-                let left = group_left + group_w + gap;
-                egui::Rect::from_min_max(
-                    egui::pos2(left, rect.top()),
-                    egui::pos2(left + w, rect.bottom()),
-                )
-            } else {
-                let left = (full.center().x - w / 2.0).max(full.left() + pad);
-                egui::Rect::from_min_max(
-                    egui::pos2(left, rect.bottom()),
-                    egui::pos2(full.right() - pad, full.bottom()),
-                )
-            };
+            let row = egui::Rect::from_min_max(egui::pos2(left, rect.top()), rect.right_bottom());
             let layout = egui::Layout::left_to_right(egui::Align::Center);
             let drawn = ui
-                .scope_builder(
-                    egui::UiBuilder::new().max_rect(actions_rect).layout(layout),
-                    |ui| {
-                        super::toolbar::toolbar_spacing(ui);
-                        super::toolbar::strip_actions(ui, app, out);
-                    },
-                )
+                .scope_builder(egui::UiBuilder::new().max_rect(row).layout(layout), |ui| {
+                    super::toolbar::toolbar_spacing(ui);
+                    super::toolbar::strip_bar(ui, app, out);
+                    if app.shown_in_group() {
+                        ui.separator();
+                        group_view_buttons(ui, app, out);
+                    }
+                })
                 .response
                 .rect
                 .width();
-            if actions_w.is_none_or(|l| (l - drawn).abs() > 0.5) {
-                ui.ctx().data_mut(|d| d.insert_temp(actions_id, drawn));
+            if last_w.is_none_or(|w| (w - drawn).abs() > 0.5) {
+                ui.ctx().data_mut(|d| d.insert_temp(width_id, drawn));
                 ui.ctx().request_repaint();
             }
 
@@ -851,11 +713,6 @@ fn group_view_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 const VIEW_ICON_SIZE: egui::Vec2 = egui::vec2(30.0, 22.0);
 const VIEW_ICON_GAP: f32 = 2.0;
 
-/// How wide `group_view_buttons` draws.
-fn group_view_buttons_width(ui: &egui::Ui) -> f32 {
-    font_size::px(ui.style(), 2.0 * VIEW_ICON_SIZE.x + VIEW_ICON_GAP)
-}
-
 /// One of `group_view_buttons`' icons, drawn as outlines so it follows the
 /// theme's text color.
 fn group_view_icon(ui: &mut egui::Ui, view: GroupView, selected: bool) -> egui::Response {
@@ -904,7 +761,7 @@ fn group_view_icon(ui: &mut egui::Ui, view: GroupView, selected: bool) -> egui::
 /// The Compare pane's toolbar along its bottom: how to load the tiles on
 /// native, the page arrows for a group of more than one page, the picks'
 /// rating and actions, and Set as representative while exactly one member
-/// is picked. It wraps onto more rows when the pane is too narrow.
+/// is picked, on one line.
 fn compare_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let Some(tiles) = app.spike.as_ref() else {
         return;
@@ -913,59 +770,73 @@ fn compare_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     egui::Panel::bottom("compare_toolbar")
         .resizable(false)
         .show_inside(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.set_min_height(ui.spacing().interact_size.y);
-                super::toolbar::toolbar_spacing(ui);
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    ui.label(t.tile_load);
-                    for (f, label) in [
-                        (TileFidelity::Speed, t.tile_speed),
-                        (TileFidelity::Full, t.tile_full),
-                    ] {
-                        let current = app.tile_fidelity();
-                        if ui.radio(current == f, label).clicked() && current != f {
-                            out.actions.push(UiAction::SetTileFidelity(f));
+            // One line that never wraps; a pane too narrow for it scrolls
+            // sideways, as the selection bar does.
+            egui::ScrollArea::horizontal()
+                .id_salt("compare_toolbar_scroll")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.set_min_height(ui.spacing().interact_size.y);
+                        super::toolbar::toolbar_spacing(ui);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            ui.label(t.tile_load);
+                            let current = app.tile_fidelity();
+                            let name = |f| match f {
+                                TileFidelity::Speed => t.tile_speed,
+                                TileFidelity::Full => t.tile_full,
+                            };
+                            egui::ComboBox::from_id_salt("tile_fidelity")
+                                .selected_text(name(current))
+                                .width(0.0)
+                                .show_ui(ui, |ui| {
+                                    for f in [TileFidelity::Speed, TileFidelity::Full] {
+                                        if ui.selectable_label(current == f, name(f)).clicked()
+                                            && current != f
+                                        {
+                                            out.actions.push(UiAction::SetTileFidelity(f));
+                                        }
+                                    }
+                                });
                         }
-                    }
-                }
-                if tiles.pages() > 1 {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    ui.separator();
-                    let first = tiles.page * crate::app::SPIKE_PAGE + 1;
-                    let last = first + tiles.page_paths().len() - 1;
-                    if ui
-                        .add_enabled(tiles.page > 0, egui::Button::new("\u{2039}"))
-                        .clicked()
-                    {
-                        out.actions.push(UiAction::SpikePage(tiles.page - 1));
-                    }
-                    ui.label((t.group_page)(first, last, tiles.group_len()));
-                    if ui
-                        .add_enabled(
-                            tiles.page + 1 < tiles.pages(),
-                            egui::Button::new("\u{203a}"),
-                        )
-                        .clicked()
-                    {
-                        out.actions.push(UiAction::SpikePage(tiles.page + 1));
-                    }
-                }
-                if !app.group_picks().is_empty() {
-                    ui.separator();
-                }
-                super::toolbar::pick_actions(ui, app, out);
-                if app.group_picks().len() == 1 {
-                    let set = Button {
-                        label: t.set_as_rep,
-                        role: Role::Primary,
-                        enabled: true,
-                    };
-                    if form::button(ui, &set).clicked() {
-                        out.actions.push(UiAction::SetPickAsRep);
-                    }
-                }
-            });
+                        if tiles.pages() > 1 {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            ui.separator();
+                            let first = tiles.page * crate::app::SPIKE_PAGE + 1;
+                            let last = first + tiles.page_paths().len() - 1;
+                            if ui
+                                .add_enabled(tiles.page > 0, egui::Button::new("\u{2039}"))
+                                .clicked()
+                            {
+                                out.actions.push(UiAction::SpikePage(tiles.page - 1));
+                            }
+                            ui.label((t.group_page)(first, last, tiles.group_len()));
+                            if ui
+                                .add_enabled(
+                                    tiles.page + 1 < tiles.pages(),
+                                    egui::Button::new("\u{203a}"),
+                                )
+                                .clicked()
+                            {
+                                out.actions.push(UiAction::SpikePage(tiles.page + 1));
+                            }
+                        }
+                        if !app.group_picks().is_empty() {
+                            ui.separator();
+                        }
+                        super::toolbar::pick_actions(ui, app, out);
+                        if app.group_picks().len() == 1 {
+                            let set = Button {
+                                label: t.set_as_rep,
+                                role: Role::Primary,
+                                enabled: true,
+                            };
+                            if form::button(ui, &set).clicked() {
+                                out.actions.push(UiAction::SetPickAsRep);
+                            }
+                        }
+                    });
+                });
         });
 }
 

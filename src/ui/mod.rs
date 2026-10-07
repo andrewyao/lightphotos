@@ -15,17 +15,11 @@ use crate::navigation::Cmp;
 #[derive(Debug, PartialEq)]
 pub enum UiAction {
     Select(usize),
-    GroupSelection,
-    /// Group the bursts among the selection, or the whole folder. Native
-    /// only, as is the button that sends it.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    GroupBursts,
     /// Group the bursts among every photo in the grid. Native only.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     GroupAllBursts,
     /// Score every photo in the grid, group members included.
     ScoreAll,
-    UngroupSelection,
     /// SPIKE: show this page of the group's tiles.
     SpikePage(usize),
     SetGroupView(crate::app::GroupView),
