@@ -266,11 +266,6 @@ impl Adjustments {
 /// A hash of everything that changes how an image renders, used in the
 /// thumbnail cache key. Floats are rounded so tiny jitter doesn't re-bake, and
 /// every unedited photo gets the same value.
-#[cfg_attr(not(test), allow(dead_code))]
-fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
-    edit_signature_with_touchups(adj, &[], rot)
-}
-
 pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot: u8) -> u64 {
     use crate::hash::Fnv1a;
 
@@ -720,6 +715,10 @@ pub(crate) fn denoise_linear_rgb_pixel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
+        edit_signature_with_touchups(adj, &[], rot)
+    }
 
     /// 0 and 1 stay fixed, so the boost never clips or crushes, and mid-gray
     /// comes out brighter.

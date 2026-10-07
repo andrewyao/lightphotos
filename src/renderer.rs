@@ -712,11 +712,6 @@ impl Renderer {
         }
     }
 
-    #[allow(dead_code)]
-    fn surface_format(&self) -> wgpu::TextureFormat {
-        self.config.format
-    }
-
     /// The size the surface is configured at, which is what every pass
     /// draws into. On wasm this can differ by a pixel from
     /// `window.inner_size()`, which rounds the canvas size its own way.

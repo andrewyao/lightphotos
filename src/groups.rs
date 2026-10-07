@@ -43,7 +43,6 @@ impl GroupId {
 
     /// A new id that sorts after `newest`, the latest minted time in the
     /// folder, even when the clock reads the same millisecond or earlier.
-    #[allow(dead_code)] // only called from #[cfg(test)] today
     fn mint(
         group: &Group,
         at: SystemTime,
@@ -249,7 +248,7 @@ impl Groups {
         self.by_id.len()
     }
 
-    #[allow(dead_code)] // only called from #[cfg(test)] today
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.by_id.is_empty()
     }

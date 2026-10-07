@@ -240,7 +240,7 @@ impl Catalog {
     }
 
     /// `new()` plus `open_dir(&dir)`.
-    #[allow(dead_code)] // only called from #[cfg(test)] today
+    #[cfg(test)]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_dir(dir: PathBuf) -> Catalog {
         let mut cat = Catalog::new();
@@ -252,8 +252,8 @@ impl Catalog {
     /// instead calls [`Catalog::switch_dir`], runs `load_sidecars` on a
     /// background thread, then calls [`Catalog::apply_loaded`]. Native only,
     /// because File System Access has no synchronous reads.
+    #[cfg(test)]
     #[cfg(not(target_arch = "wasm32"))]
-    #[hotpath::measure]
     pub fn open_dir(&mut self, dir: &Path) {
         let mark = self.switch_dir(dir);
         let loaded = load_sidecars(dir);

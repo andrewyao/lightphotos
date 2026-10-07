@@ -21,41 +21,6 @@ fn crop_bounds(crop: Option<Crop>, w: u32, h: u32) -> (u32, u32, u32, u32) {
     (x0, y0, x1, y1)
 }
 
-/// RGBA8 to Rec.601 luma (0..255), box-averaged down to `out_w` x `out_h`.
-/// The output must not be larger than the input.
-#[cfg_attr(not(test), allow(dead_code))]
-#[hotpath::measure]
-pub(crate) fn resize_luma(
-    rgba: &[u8],
-    width: u32,
-    height: u32,
-    out_w: usize,
-    out_h: usize,
-) -> Vec<f32> {
-    let (w, h) = (width as usize, height as usize);
-    let mut out = vec![0f32; out_w * out_h];
-    for oy in 0..out_h {
-        let y0 = oy * h / out_h;
-        let y1 = ((oy + 1) * h / out_h).max(y0 + 1).min(h);
-        for ox in 0..out_w {
-            let x0 = ox * w / out_w;
-            let x1 = ((ox + 1) * w / out_w).max(x0 + 1).min(w);
-            let mut sum = 0f32;
-            let mut n = 0u32;
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let i = (y * w + x) * 4;
-                    let (r, g, b) = (rgba[i] as f32, rgba[i + 1] as f32, rgba[i + 2] as f32);
-                    sum += 0.299 * r + 0.587 * g + 0.114 * b;
-                    n += 1;
-                }
-            }
-            out[oy * out_w + ox] = if n > 0 { sum / n as f32 } else { 0.0 };
-        }
-    }
-    out
-}
-
 /// `(c / 255)^2.2` for every 8-bit `c`: the same floats the `powf` gives,
 /// computed once. A 512px edited thumbnail makes half a million of these.
 fn srgb8_to_linear_lut() -> &'static [f32; 256] {
@@ -781,35 +746,6 @@ mod tests {
     #[test]
     fn unpremul_zero_alpha_is_black() {
         assert_eq!(unpremul_to_linear([200, 100, 50, 0]), [0.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn resize_luma_identity_is_per_pixel_luma() {
-        let src = [px(0), px(64), px(128), px(255)].concat();
-        let out = resize_luma(&src, 2, 2, 2, 2);
-        assert_eq!(out, vec![0.0, 64.0, 128.0, 255.0]);
-    }
-
-    #[test]
-    fn resize_luma_downscale_averages_blocks() {
-        let mut src = vec![0u8; 4 * 4 * 4];
-        for y in 0..4u32 {
-            for x in 0..4u32 {
-                let v = if x < 2 && y < 2 {
-                    0u8
-                } else if x >= 2 && y < 2 {
-                    100u8
-                } else if x < 2 && y >= 2 {
-                    200u8
-                } else {
-                    255u8
-                };
-                let i = ((y * 4 + x) * 4) as usize;
-                src[i..i + 4].copy_from_slice(&px(v));
-            }
-        }
-        let out = resize_luma(&src, 4, 4, 2, 2);
-        assert_eq!(out, vec![0.0, 100.0, 200.0, 255.0]);
     }
 
     #[test]

@@ -19,8 +19,6 @@
 //! its staleness to the edits, so it lives in the sidecar beside them.
 
 use std::collections::HashMap;
-#[cfg(not(target_arch = "wasm32"))]
-use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
@@ -307,6 +305,9 @@ impl SignalCache {
         let (Some(dir), Some(writer)) = (&self.dir, &self.writer) else {
             return;
         };
+        // A photo name is stored as a `String`, so a non-UTF-8 filename simply
+        // never caches. Recomputing is always correct, and the alternative is
+        // an encoding in the file format that only a few filenames would use.
         let named: HashMap<String, PhotoSignals> = self
             .entries
             .iter()
@@ -358,14 +359,6 @@ fn read_file(dir: &Path) -> HashMap<OsString, PhotoSignals> {
         .into_iter()
         .map(|(k, v)| (OsString::from(k), v))
         .collect()
-}
-
-/// A photo name is stored as a `String`, so a non-UTF-8 filename simply never
-/// caches. Recomputing is always correct, and the alternative is an encoding
-/// in the file format that only a few filenames would ever use.
-#[cfg(not(target_arch = "wasm32"))]
-fn _name_must_be_utf8(name: &OsStr) -> Option<&str> {
-    name.to_str()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
