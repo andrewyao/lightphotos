@@ -899,6 +899,7 @@ mod tests {
             source: [u, 0.3],
             feather: 1.0,
             delta: [0.0; 3],
+            opacity: 1.0,
         };
         app.apply_touchups(vec![spot(0.2), spot(0.5), spot(0.8)]);
         press(&mut app, ModifiersState::empty(), KeyCode::KeyQ);

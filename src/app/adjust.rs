@@ -42,6 +42,77 @@ impl App {
         self.request_redraw();
     }
 
+    /// The Develop page on screen, if Develop is.
+    pub(crate) fn develop_page_shown(&self) -> Option<DevelopTab> {
+        (self.develop_visible() && !self.export_form_open).then_some(self.develop_tab)
+    }
+
+    /// The rail icon to light: Export while its form is open, Compare while
+    /// the pane is, otherwise the Develop page on screen.
+    pub(crate) fn rail_lit(&self) -> Option<RailItem> {
+        if self.export_form_open {
+            return Some(RailItem::Export);
+        }
+        if self.group_view == GroupView::Compare {
+            return Some(RailItem::GroupCompare);
+        }
+        self.develop_page_shown().map(RailItem::Develop)
+    }
+
+    /// The lit icon turns its page off; any other icon shows its page in
+    /// place of the lit one. Leaving a Develop page ends its tool the way
+    /// switching pages does: a crop is kept and the brush is put down.
+    /// Compare and Export stand in for Develop without closing it, so turning
+    /// either off brings back the page Develop had.
+    pub(super) fn click_rail(&mut self, item: RailItem) {
+        let lit = self.rail_lit() == Some(item);
+        match item {
+            RailItem::GroupCompare if !self.shown_in_group() => {}
+            RailItem::GroupCompare if lit => self.set_group_view(GroupView::Edit),
+            RailItem::GroupCompare => {
+                self.put_down_develop_tools();
+                self.close_export_form();
+                self.set_group_view(GroupView::Compare);
+            }
+            RailItem::Export if lit => self.toggle_export_form(),
+            RailItem::Export => {
+                self.put_down_develop_tools();
+                self.set_group_view(GroupView::Edit);
+                self.toggle_export_form();
+            }
+            RailItem::Develop(_) if lit => {
+                self.put_down_develop_tools();
+                self.develop_open = false;
+                self.normalize_focus();
+                self.request_redraw();
+            }
+            RailItem::Develop(tab) => self.show_develop_page(tab),
+        }
+    }
+
+    fn show_develop_page(&mut self, tab: DevelopTab) {
+        self.set_group_view(GroupView::Edit);
+        self.develop_open = true;
+        self.export_form_open = false;
+        self.set_develop_tab(tab);
+    }
+
+    fn put_down_develop_tools(&mut self) {
+        self.commit_crop();
+        if self.tool == LoupeTool::TouchUp {
+            self.tool = LoupeTool::None;
+            self.touchup_selected = None;
+        }
+    }
+
+    /// Compare needs a group, so moving to a photo in none goes back to
+    /// the sliders.
+    pub(super) fn leave_compare_off_group(&mut self) {
+        if self.group_view == GroupView::Compare && !self.shown_in_group() {
+            self.show_develop_page(DevelopTab::Sliders);
+        }
+    }
+
     pub(crate) fn touchup_active(&self) -> bool {
         self.tool == LoupeTool::TouchUp
     }
@@ -91,6 +162,17 @@ impl App {
     }
     pub(super) fn set_touchup_feather(&mut self, feather: f32) {
         self.touchup_feather = feather.clamp(TOUCHUP_MIN_FEATHER, 1.0);
+    }
+    pub(crate) fn touchup_opacity(&self) -> f32 {
+        self.touchup_opacity
+    }
+    pub(super) fn set_touchup_opacity(&mut self, opacity: f32) {
+        self.touchup_opacity = opacity.clamp(0.0, 1.0);
+    }
+    /// The brush radius in source pixels, for the panel's Size readout.
+    pub(crate) fn touchup_radius_px(&self) -> f32 {
+        let (w, h) = self.image_size();
+        self.touchup_radius() * w.min(h)
     }
     pub(super) fn step_touchup_feather(&mut self, delta: f32) {
         self.set_touchup_feather(self.touchup_feather + delta);
@@ -283,6 +365,7 @@ impl App {
                 target_ring[1] - source_ring[1],
                 target_ring[2] - source_ring[2],
             ],
+            opacity: self.touchup_opacity,
         })
     }
 
@@ -494,9 +577,10 @@ mod tests {
         }
 
         /// The center of `tab`'s icon on the Develop panel's rail.
-        fn rail_icon(app: &App, tab: DevelopTab) -> egui::Pos2 {
-            crate::ui::rail_button_rect(&app.egui_ctx, tab)
-                .unwrap_or_else(|| panic!("the rail drew no {tab:?} icon"))
+        fn rail_icon(app: &App, item: impl Into<RailItem>) -> egui::Pos2 {
+            let item = item.into();
+            crate::ui::rail_button_rect(&app.egui_ctx, item)
+                .unwrap_or_else(|| panic!("the rail drew no {item:?} icon"))
                 .center()
         }
 
@@ -525,26 +609,34 @@ mod tests {
             let icon = rail_icon(&app, DevelopTab::Masks);
             let (actions, _) = click(&mut app, icon);
             let tab = actions.into_iter().find_map(|a| match a {
-                UiAction::SetDevelopTab(tab) => Some(tab),
+                UiAction::ClickRail(RailItem::Develop(tab)) => Some(tab),
                 _ => None,
             });
             assert_eq!(tab, Some(DevelopTab::Masks));
             app.set_develop_tab(DevelopTab::Masks);
             let painted = settled(&mut app);
             assert!(
-                painted.pos_of(t.touch_up).y < rail_icon(&app, DevelopTab::Crop).y,
+                painted.pos_of(t.touch_up).y < rail_icon(&app, DevelopTab::Masks).y,
                 "Masks starts at the panel's top, with no histogram over it"
             );
-            for (slider, hint) in [
-                (t.brush_size, t.brush_size_hint),
-                (t.feather, t.feather_hint),
+            let size_px = format!("{:.0} px", app.touchup_radius_px());
+            for (slider, readout) in [
+                (t.brush_size, size_px.as_str()),
+                (t.feather, "100%"),
+                (t.opacity, "100%"),
             ] {
+                let label = painted.pos_of(slider);
+                let value = painted.pos_of_near(readout, label);
                 assert!(
-                    painted.pos_of(hint).y > painted.pos_of(slider).y,
-                    "{slider}'s mouse shortcut shows under it: {:?}",
+                    (value.y - label.y).abs() < 4.0 && value.x > label.x,
+                    "{slider}'s value reads at the right of its label: {:?}",
                     painted.texts()
                 );
             }
+            assert!(
+                painted.pos_of(t.opacity).y > painted.pos_of(t.feather).y,
+                "Opacity sits under Feather"
+            );
         }
 
         /// A page whose content asks for more than the panel's width makes
@@ -571,7 +663,7 @@ mod tests {
         }
 
         #[test]
-        fn export_tab_sits_at_the_panel_foot_and_auto_tone_under_tone() {
+        fn the_rail_opens_export_in_develops_place_and_auto_tone_sits_under_tone() {
             let mut app = loupe("export");
             let t = crate::i18n::t();
             let painted = settled(&mut app);
@@ -582,34 +674,67 @@ mod tests {
                 (auto.y - tone.y).abs() < 4.0,
                 "Auto Tone shares the Tone header's row: {tone:?} vs {auto:?}"
             );
+            assert!(!painted.has(t.develop), "no Develop/Export tabs");
 
-            for tab in [DevelopTab::Sliders, DevelopTab::Masks] {
-                app.set_develop_tab(tab);
-                let painted = settled(&mut app);
-                let export = painted.pos_of(t.export_jpg);
-                assert!(
-                    export.y > rail_icon(&app, DevelopTab::Masks).y + 100.0,
-                    "the Export tab sits below the panel's content"
-                );
-                let (actions, _) = click(&mut app, export);
-                assert!(
-                    actions
-                        .iter()
-                        .any(|a| matches!(a, UiAction::ToggleExportForm)),
-                    "Export on {tab:?} opens the Export form"
-                );
-            }
-
-            app.toggle_export_form();
-            let painted = settled(&mut app);
+            let press = |app: &mut App, item: RailItem| {
+                settled(app);
+                let (actions, _) = click(app, rail_icon(app, item));
+                app.apply_ui_actions(actions);
+                settled(app)
+            };
+            app.set_develop_tab(DevelopTab::Masks);
+            let painted = press(&mut app, RailItem::Export);
             assert!(painted.has(t.export_run), "{:?}", painted.texts());
-            let (actions, _) = click(&mut app, painted.pos_of(t.develop));
+            assert_eq!(app.rail_lit(), Some(RailItem::Export));
             assert!(
-                actions
-                    .iter()
-                    .any(|a| matches!(a, UiAction::ToggleExportForm)),
-                "Develop on the Export form goes back to the sliders"
+                rail_icon(&app, RailItem::Export).y > rail_icon(&app, RailItem::GroupCompare).y,
+                "Export sits under Compare"
             );
+
+            press(&mut app, RailItem::Export);
+            assert!(!app.export_form_open(), "Export's own icon closes it");
+            assert_eq!(
+                app.rail_lit(),
+                Some(RailItem::Develop(DevelopTab::Masks)),
+                "closing Export brings back the page Develop had"
+            );
+
+            press(&mut app, RailItem::Export);
+            press(&mut app, RailItem::Develop(DevelopTab::Sliders));
+            assert!(!app.export_form_open(), "a page icon closes Export");
+            assert_eq!(app.develop_page_shown(), Some(DevelopTab::Sliders));
+        }
+
+        #[test]
+        fn the_shown_pages_icon_hides_develop_and_any_icon_brings_it_back() {
+            let mut app = loupe("rail-toggle");
+            let press = |app: &mut App, tab: DevelopTab| {
+                settled(app);
+                let (actions, _) = click(app, rail_icon(app, tab));
+                app.apply_ui_actions(actions);
+                settled(app);
+            };
+            assert_eq!(app.develop_page_shown(), Some(DevelopTab::Sliders));
+
+            press(&mut app, DevelopTab::Sliders);
+            assert_eq!(app.develop_page_shown(), None, "Sliders' own icon hides it");
+            press(&mut app, DevelopTab::Sliders);
+            assert_eq!(app.develop_page_shown(), Some(DevelopTab::Sliders));
+
+            press(&mut app, DevelopTab::Masks);
+            app.toggle_touchup();
+            press(&mut app, DevelopTab::Masks);
+            assert_eq!(app.develop_page_shown(), None);
+            assert!(!app.touchup_active(), "hiding Cleanup puts the brush down");
+
+            press(&mut app, DevelopTab::Crop);
+            assert!(app.crop_rect().is_some());
+            press(&mut app, DevelopTab::Crop);
+            assert_eq!(app.develop_page_shown(), None);
+            assert!(app.crop_rect().is_none(), "hiding Crop ends crop mode");
+
+            press(&mut app, DevelopTab::Crop);
+            assert_eq!(app.develop_page_shown(), Some(DevelopTab::Crop));
         }
 
         #[test]
@@ -622,7 +747,7 @@ mod tests {
             assert!(
                 actions
                     .iter()
-                    .any(|a| matches!(a, UiAction::SetDevelopTab(DevelopTab::Crop))),
+                    .any(|a| matches!(a, UiAction::ClickRail(RailItem::Develop(DevelopTab::Crop)))),
                 "{actions:?}"
             );
             app.apply_ui_actions(actions);
@@ -767,6 +892,7 @@ mod tests {
                 source: [u, 0.3],
                 feather: TOUCHUP_FEATHER,
                 delta: [0.0; 3],
+                opacity: 1.0,
             }
         }
 
@@ -834,8 +960,8 @@ mod tests {
             app.set_develop_tab(DevelopTab::Masks);
             let t = crate::i18n::t();
             let painted = settled(&mut app);
-            // The switch is the knob on the Touch Up row; the Size slider right
-            // of its label, on the row below.
+            // The switch is the knob on the Touch Up row; the Size track under
+            // its label.
             let knob = app.egui_ctx.global_style().visuals.widgets.inactive.bg_fill;
             let row = painted.pos_of(t.touch_up).y;
             let switch = *painted
@@ -843,7 +969,7 @@ mod tests {
                 .iter()
                 .find(|c| (c.y - row).abs() < 8.0)
                 .expect("a switch knob on the Touch Up row");
-            let slider = painted.pos_of(t.brush_size) + egui::vec2(100.0, 0.0);
+            let slider = painted.pos_of(t.brush_size) + TRACK_UNDER_LABEL;
             let resizes = |actions: &[UiAction]| {
                 actions
                     .iter()
@@ -869,6 +995,10 @@ mod tests {
             );
         }
 
+        /// From a brush slider's label to the middle of its track, which
+        /// runs under the label's row.
+        const TRACK_UNDER_LABEL: egui::Vec2 = egui::vec2(100.0, 24.0);
+
         #[test]
         fn the_feather_slider_is_live_only_while_touch_up_is_armed() {
             let mut app = loupe("feather-slider");
@@ -880,7 +1010,7 @@ mod tests {
                 feather.y > painted.pos_of(t.brush_size).y,
                 "Feather sits on its own row below Size"
             );
-            let slider = feather + egui::vec2(100.0, 0.0);
+            let slider = feather + TRACK_UNDER_LABEL;
             let feathered = |actions: &[UiAction]| {
                 actions.iter().find_map(|a| match a {
                     UiAction::SetTouchUpFeather(f) => Some(*f),

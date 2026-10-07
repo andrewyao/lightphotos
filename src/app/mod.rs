@@ -282,6 +282,21 @@ pub(crate) enum DevelopTab {
     Masks,
 }
 
+/// An icon on the Loupe's right-edge rail: a Develop page, or the group's
+/// Compare pane. At most one is lit, and clicking the lit one turns it off.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum RailItem {
+    Develop(DevelopTab),
+    GroupCompare,
+    Export,
+}
+
+impl From<DevelopTab> for RailItem {
+    fn from(tab: DevelopTab) -> Self {
+        RailItem::Develop(tab)
+    }
+}
+
 /// What a click on the Loupe image does, besides panning.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum LoupeTool {
@@ -553,6 +568,7 @@ pub(crate) struct App {
     tool: LoupeTool,
     touchup_radius: f32,
     touchup_feather: f32,
+    touchup_opacity: f32,
     touchup_selected: Option<usize>,
     /// O hides the spot circles in Touch Up to judge the fix unobstructed.
     touchup_spots_hidden: bool,
@@ -690,6 +706,8 @@ pub(crate) struct App {
     /// The viewport rect (physical px) the loupe drew into last frame.
     loupe_viewport: Option<(u32, u32, u32, u32)>,
     crop_edit: Option<CropDraft>,
+    /// Kept across crops, like Lightroom's overlay choice.
+    crop_overlay: CropOverlay,
     /// Before/after split. The left half keeps crop and rotation but no tone edits.
     compare: bool,
     /// Camera and exposure metadata for the info panel. Memory only, read from
@@ -766,7 +784,7 @@ mod bulk_delete;
 mod bursts;
 mod catalog;
 mod crop;
-pub(crate) use crop::{CropAspect, CropOrientation};
+pub(crate) use crop::{CropAspect, CropOrientation, CropOverlay};
 use group_compare::GroupPicks;
 pub(crate) use group_compare::{spike_zoom_uv, GroupView, PickHow, Square, Tile, TileFidelity};
 mod export;
@@ -934,6 +952,7 @@ impl App {
             // Clamped up to TOUCHUP_MIN_PIXELS once an image is loaded.
             touchup_radius: 0.001,
             touchup_feather: TOUCHUP_FEATHER,
+            touchup_opacity: 1.0,
             touchup_selected: None,
             touchup_spots_hidden: false,
             touchup_undo: HashMap::new(),
@@ -1006,6 +1025,7 @@ impl App {
             tile_fidelity: TileFidelity::default(),
             picks: GroupPicks::default(),
             crop_edit: None,
+            crop_overlay: CropOverlay::default(),
             compare: false,
             exif_cache: HashMap::new(),
             source_size: None,
@@ -1540,7 +1560,6 @@ impl App {
                         t.page = page.min(t.pages().saturating_sub(1));
                     }
                 }
-                ui::UiAction::SetGroupView(view) => self.set_group_view(view),
                 ui::UiAction::SetTileFidelity(f) => self.set_tile_fidelity(f),
                 ui::UiAction::PickGroupTile { path, how } => self.pick_group_tile(path, how),
                 ui::UiAction::RateGroupMember { path, stars } => {
@@ -1676,6 +1695,7 @@ impl App {
                 ui::UiAction::CropDragTo(u, v) => self.crop_drag_to(u, v),
                 ui::UiAction::CropRelease => self.crop_release(),
                 ui::UiAction::SetCropAspect(aspect) => self.set_crop_aspect(aspect),
+                ui::UiAction::SetCropOverlay(overlay) => self.set_crop_overlay(overlay),
                 ui::UiAction::SetCropOrientation(o) => self.set_crop_orientation(o),
                 ui::UiAction::Rotate(cw) => self.rotate(cw),
                 ui::UiAction::CommitCrop => self.commit_crop(),
@@ -1683,13 +1703,17 @@ impl App {
                 ui::UiAction::ToggleWbPicker => self.toggle_wb_picker(),
                 ui::UiAction::PickWhiteBalance(u, v) => self.pick_white_balance(u, v),
                 ui::UiAction::ToggleTouchUp => self.toggle_touchup(),
-                ui::UiAction::SetDevelopTab(tab) => self.set_develop_tab(tab),
+                ui::UiAction::ClickRail(item) => self.click_rail(item),
                 ui::UiAction::SetTouchUpRadius(r) => {
                     self.set_touchup_radius(r);
                     self.request_redraw();
                 }
                 ui::UiAction::SetTouchUpFeather(f) => {
                     self.set_touchup_feather(f);
+                    self.request_redraw();
+                }
+                ui::UiAction::SetTouchUpOpacity(o) => {
+                    self.set_touchup_opacity(o);
                     self.request_redraw();
                 }
                 ui::UiAction::TouchUpClick(u, v) => self.add_touchup(u, v),

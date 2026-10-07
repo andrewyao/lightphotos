@@ -794,6 +794,7 @@ mod tests {
             source: [0.6, 0.5],
             feather: 0.5,
             delta: [0.01, -0.02, 0.0],
+            opacity: 1.0,
         };
         {
             let mut cat = Catalog::with_dir(dir.clone());
@@ -994,6 +995,7 @@ mod tests {
             source: [0.6, 0.5],
             feather: 0.5,
             delta: [0.01, -0.02, 0.0],
+            opacity: 1.0,
         });
         populated.rotation = 1;
         populated.score = Some(StoredScore {
@@ -1179,6 +1181,7 @@ mod tests {
                 source: [0.2, 0.2],
                 feather: 0.5,
                 delta: [0.0; 3],
+                opacity: 1.0,
             }],
         );
         let adj = Adjustments {

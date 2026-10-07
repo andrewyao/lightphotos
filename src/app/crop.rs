@@ -19,6 +19,18 @@ pub(crate) enum CropOrientation {
     Vertical,
 }
 
+/// The composition guides drawn inside the crop box.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum CropOverlay {
+    #[default]
+    Thirds,
+    Grid,
+    Golden,
+    Diagonal,
+    Spiral,
+    None,
+}
+
 impl CropOrientation {
     pub(super) fn flipped(self) -> Self {
         match self {
@@ -120,6 +132,15 @@ impl App {
 
     pub(crate) fn crop_aspect(&self) -> Option<CropAspect> {
         self.crop_edit.as_ref().map(|d| d.aspect)
+    }
+
+    pub(crate) fn crop_overlay(&self) -> CropOverlay {
+        self.crop_overlay
+    }
+
+    pub(super) fn set_crop_overlay(&mut self, overlay: CropOverlay) {
+        self.crop_overlay = overlay;
+        self.request_redraw();
     }
 
     pub(crate) fn crop_orientation(&self) -> Option<CropOrientation> {

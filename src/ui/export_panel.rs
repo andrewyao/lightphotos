@@ -17,14 +17,15 @@ use crate::immich::Album;
 pub(super) fn draw_export_panel(
     ui: &mut egui::Ui,
     app: &App,
-    develop_tab: bool,
+    in_loupe: bool,
     out: &mut FrameOutput,
 ) {
     let t = t();
     let settings = app.export_settings();
     let mut next: Option<ExportSettings> = None;
 
-    let panel = if develop_tab {
+    // In the Loupe, Export takes Develop's place and width beside the rail.
+    let panel = if in_loupe {
         egui::Panel::right("develop")
             .resizable(true)
             .default_size(340.0)
@@ -34,9 +35,6 @@ pub(super) fn draw_export_panel(
             .default_size(300.0)
     };
     panel.show_inside(ui, |ui| {
-        if develop_tab {
-            super::develop_panel::right_tabs(ui, app, out);
-        }
         form::panel_title(ui, &(t.export_title)(app.action_count()));
         let form = Form::new(
             ui,

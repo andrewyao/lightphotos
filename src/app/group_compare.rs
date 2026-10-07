@@ -267,6 +267,7 @@ pub(super) fn drop_full_crops(tiles: &mut SpikeTiles, r: &mut Renderer) {
 }
 
 impl App {
+    #[cfg(test)]
     pub(crate) fn group_view(&self) -> GroupView {
         self.group_view
     }
@@ -492,8 +493,60 @@ mod tests {
         assert!(app.shown_in_group(), "the Edit/Compare toggle shows");
         assert!(app.spike.is_none(), "Edit loads no tiles");
 
-        act(&mut app, UiAction::SetGroupView(GroupView::Compare));
+        act(
+            &mut app,
+            UiAction::ClickRail(crate::app::RailItem::GroupCompare),
+        );
         assert_eq!(app.group_view(), GroupView::Compare);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compare_takes_develops_place_on_the_rail_and_needs_a_group() {
+        use crate::app::{DevelopTab, RailItem};
+        let (mut app, dir, _) = grouped_loupe("rail-compare");
+        let group = || UiAction::ClickRail(RailItem::GroupCompare);
+        let page = |tab| UiAction::ClickRail(RailItem::Develop(tab));
+
+        act(&mut app, page(DevelopTab::Masks));
+        act(&mut app, group());
+        assert_eq!(app.group_view(), GroupView::Compare);
+        assert_eq!(app.rail_lit(), Some(RailItem::GroupCompare));
+        assert_eq!(app.develop_page_shown(), None, "Compare hides Develop");
+
+        act(&mut app, group());
+        assert_eq!(
+            app.group_view(),
+            GroupView::Edit,
+            "its own icon turns it off"
+        );
+        assert_eq!(app.develop_page_shown(), Some(DevelopTab::Masks));
+
+        act(&mut app, group());
+        act(&mut app, page(DevelopTab::Sliders));
+        assert_eq!(
+            app.group_view(),
+            GroupView::Edit,
+            "a page icon turns it off"
+        );
+        assert_eq!(app.develop_page_shown(), Some(DevelopTab::Sliders));
+
+        act(&mut app, group());
+        act(&mut app, UiAction::Select(0));
+        assert!(!app.shown_in_group());
+        assert_eq!(
+            app.group_view(),
+            GroupView::Edit,
+            "a lone photo leaves Compare"
+        );
+        assert_eq!(app.develop_page_shown(), Some(DevelopTab::Sliders));
+
+        act(&mut app, group());
+        assert_eq!(
+            app.group_view(),
+            GroupView::Edit,
+            "no Compare outside a group"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -530,7 +583,10 @@ mod tests {
         let pos = app.visible.iter().position(|&i| i == rep).unwrap();
         app.select_single(pos);
         app.enter_loupe();
-        act(&mut app, UiAction::SetGroupView(GroupView::Compare));
+        act(
+            &mut app,
+            UiAction::ClickRail(crate::app::RailItem::GroupCompare),
+        );
         (app, dir, paths)
     }
 
@@ -566,7 +622,10 @@ mod tests {
     #[test]
     fn a_tile_click_picks_without_changing_the_representative_until_set_as_rep() {
         let (mut app, dir, paths) = grouped_loupe("pick-then-set");
-        act(&mut app, UiAction::SetGroupView(GroupView::Compare));
+        act(
+            &mut app,
+            UiAction::ClickRail(crate::app::RailItem::GroupCompare),
+        );
 
         pick(&mut app, &paths[3], PickHow::Only);
         assert_eq!(picks(&app), vec![paths[3].clone()]);
@@ -807,7 +866,10 @@ mod tests {
     #[test]
     fn the_picks_clear_when_the_loupe_moves_to_another_photo_or_leaves_compare() {
         let (mut app, dir, paths) = grouped_loupe("pick-clears");
-        act(&mut app, UiAction::SetGroupView(GroupView::Compare));
+        act(
+            &mut app,
+            UiAction::ClickRail(crate::app::RailItem::GroupCompare),
+        );
         pick(&mut app, &paths[3], PickHow::Only);
 
         act(&mut app, UiAction::Select(0));
@@ -817,8 +879,14 @@ mod tests {
         assert_eq!(rep_name(&app), paths[1].file_name().unwrap());
 
         pick(&mut app, &paths[3], PickHow::Only);
-        act(&mut app, UiAction::SetGroupView(GroupView::Edit));
-        act(&mut app, UiAction::SetGroupView(GroupView::Compare));
+        act(
+            &mut app,
+            UiAction::ClickRail(crate::app::RailItem::GroupCompare),
+        );
+        act(
+            &mut app,
+            UiAction::ClickRail(crate::app::RailItem::GroupCompare),
+        );
         assert!(picks(&app).is_empty(), "leaving Compare drops the picks");
 
         pick(&mut app, &paths[3], PickHow::Only);
@@ -854,7 +922,10 @@ mod tests {
         let (mut app, dir, paths) = compare("rate-outsider", 6, &[1, 2, 3], 1);
         rate(&mut app, &paths[4], 3);
         assert_eq!(app.member_rating(&paths[4]), 0, "not in the group");
-        act(&mut app, UiAction::SetGroupView(GroupView::Edit));
+        act(
+            &mut app,
+            UiAction::ClickRail(crate::app::RailItem::GroupCompare),
+        );
         rate(&mut app, &paths[2], 3);
         assert_eq!(app.member_rating(&paths[2]), 0, "the pane is closed");
         let _ = std::fs::remove_dir_all(&dir);

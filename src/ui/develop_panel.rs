@@ -1,7 +1,9 @@
 use super::*;
 
 use super::form::{self, Button, Form, Role};
-use crate::app::{App, CropAspect, CropOrientation, DevelopTab, FocusLevel, Region};
+use crate::app::{
+    App, CropAspect, CropOrientation, CropOverlay, DevelopTab, FocusLevel, RailItem, Region,
+};
 
 /// The right-hand Develop panel, with sliders in Lightroom's order. Pushes one
 /// `SetAdjustments` only on frames where a slider changed. Double-clicking a
@@ -11,33 +13,28 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
         .resizable(true)
         .default_size(340.0)
         .show_inside(ui, |ui| {
-            right_tabs(ui, app, out);
-            // The rail and the page split the space by hand. A nested
-            // `Panel` for the rail comes out a fraction of a point wider than
-            // its share, which this resizable panel grows to fit, a little
-            // more every frame.
-            let area = ui.available_rect_before_wrap();
-            let rail = area.with_min_x(area.right() - rail_width(ui));
-            let gap = font_size::px(ui.style(), RAIL_MARGIN);
-            let page = area.with_max_x(rail.left() - gap);
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rail), |ui| {
-                develop_rail(ui, app, out)
-            });
-            ui.scope_builder(egui::UiBuilder::new().max_rect(page), |ui| {
-                // Scroll rather than overflow, which would push the Loupe's
-                // bottom panels off the window when the rows outgrow its
-                // height.
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| match app.develop_tab() {
-                        DevelopTab::Sliders => draw_sliders_tab(ui, app, out),
-                        DevelopTab::Crop => draw_crop_tab(ui, app, out),
-                        DevelopTab::Masks => draw_masks_tab(ui, app, out),
-                    });
-            });
-
+            // Scroll rather than overflow, which would push the Loupe's
+            // bottom panels off the window when the rows outgrow its height.
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match app.develop_tab() {
+                    DevelopTab::Sliders => draw_sliders_tab(ui, app, out),
+                    DevelopTab::Crop => draw_crop_tab(ui, app, out),
+                    DevelopTab::Masks => draw_masks_tab(ui, app, out),
+                });
             region_focus_marker(ui, app, Region::Develop);
         });
+}
+
+/// The rail of page icons at the window's right edge. It is its own panel,
+/// outside Develop, so it stays on screen to bring a page back after its own
+/// icon turned it off.
+pub(super) fn draw_develop_rail(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    egui::Panel::right("develop_rail")
+        .resizable(false)
+        .exact_size(rail_width(ui))
+        .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
+        .show_inside(ui, |ui| develop_rail(ui, app, out));
 }
 
 /// The saved-look library. A plain section header like the slider sections
@@ -99,44 +96,39 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     ui.add_space(6.0);
 }
 
-/// The open page's name over a rule, with `trailing` at the right end of
-/// the row.
-fn page_title(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui)) {
-    ui.horizontal(|ui| {
-        ui.heading(title);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
-    });
-    ui.separator();
-}
-
-/// Sliders, Crop and Masks as a column of icons down the panel's right
-/// edge, the open one lit.
+/// Sliders, Crop, Cleanup, the group's Compare pane and Export as a column
+/// of icons, the one on screen lit. Compare is greyed out unless the photo is
+/// in a group.
 fn develop_rail(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let margin = font_size::px(ui.style(), RAIL_MARGIN);
-    let area = ui.max_rect();
-    ui.painter().vline(
-        area.left(),
-        area.y_range(),
-        ui.visuals().widgets.noninteractive.bg_stroke,
-    );
-    let inner = area.shrink(margin);
+    let inner = ui.max_rect().shrink(margin);
     ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
         ui.spacing_mut().item_spacing.y = margin;
         let t = t();
-        let current = app.develop_tab();
-        for (tab, tip) in [
-            (DevelopTab::Sliders, t.tab_sliders),
-            (DevelopTab::Crop, t.tab_crop),
-            (DevelopTab::Masks, t.tab_masks),
+        let lit = app.rail_lit();
+        let in_group = app.shown_in_group();
+        for (item, tip, enabled) in [
+            (RailItem::Develop(DevelopTab::Sliders), t.tab_sliders, true),
+            (RailItem::Develop(DevelopTab::Crop), t.tab_crop, true),
+            (RailItem::Develop(DevelopTab::Masks), t.tab_masks, true),
+            (RailItem::GroupCompare, t.view_compare, in_group),
+            (RailItem::Export, t.export_jpg_tip, true),
         ] {
-            if rail_button(ui, tab, tip, current == tab).clicked() && current != tab {
-                out.actions.push(UiAction::SetDevelopTab(tab));
+            let tip = if enabled {
+                tip
+            } else {
+                t.view_compare_needs_group
+            };
+            let button =
+                ui.add_enabled_ui(enabled, |ui| rail_button(ui, item, tip, lit == Some(item)));
+            if button.inner.clicked() {
+                out.actions.push(UiAction::ClickRail(item));
             }
         }
     });
 }
 
-/// How wide `develop_rail` is: one icon and its margins.
+/// How wide the rail is: one icon and its margins.
 fn rail_width(ui: &egui::Ui) -> f32 {
     font_size::px(ui.style(), RAIL_BUTTON + 2.0 * RAIL_MARGIN)
 }
@@ -144,22 +136,22 @@ fn rail_width(ui: &egui::Ui) -> f32 {
 const RAIL_BUTTON: f32 = 36.0;
 const RAIL_MARGIN: f32 = 6.0;
 
-fn rail_id(tab: DevelopTab) -> egui::Id {
-    egui::Id::new(("develop_rail", tab))
+fn rail_id(item: RailItem) -> egui::Id {
+    egui::Id::new(("develop_rail", item))
 }
 
-/// Where the rail drew `tab`'s icon last frame, for tests that click it.
+/// Where the rail drew `item`'s icon last frame, for tests that click it.
 #[cfg(test)]
-pub(crate) fn rail_button_rect(ctx: &egui::Context, tab: DevelopTab) -> Option<egui::Rect> {
-    ctx.read_response(rail_id(tab)).map(|r| r.rect)
+pub(crate) fn rail_button_rect(ctx: &egui::Context, item: RailItem) -> Option<egui::Rect> {
+    ctx.read_response(rail_id(item)).map(|r| r.rect)
 }
 
 /// One of `develop_rail`'s icons, painted in strokes like
 /// `eyedropper_button` so it follows the theme.
-fn rail_button(ui: &mut egui::Ui, tab: DevelopTab, tip: &str, selected: bool) -> egui::Response {
+fn rail_button(ui: &mut egui::Ui, item: RailItem, tip: &str, selected: bool) -> egui::Response {
     let side = font_size::px(ui.style(), RAIL_BUTTON);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::hover());
-    let response = ui.interact(rect, rail_id(tab), egui::Sense::click());
+    let response = ui.interact(rect, rail_id(item), egui::Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, tip)
     });
@@ -172,16 +164,24 @@ fn rail_button(ui: &mut egui::Ui, tab: DevelopTab, tip: &str, selected: bool) ->
     let c = rect.center();
     let p = |x: f32, y: f32| egui::pos2(c.x + x * u, c.y + y * u);
     let stroke = egui::Stroke::new(1.6 * u, visuals.fg_stroke.color);
-    match tab {
+    let frame = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        painter.rect_stroke(
+            egui::Rect::from_min_max(p(x0, y0), p(x1, y1)),
+            0.8 * u,
+            stroke,
+            egui::StrokeKind::Middle,
+        );
+    };
+    match item {
         // Three faders, each with its knob at a different height.
-        DevelopTab::Sliders => {
+        RailItem::Develop(DevelopTab::Sliders) => {
             for (y, knob) in [(-6.0, 3.0), (0.0, -4.0), (6.0, 1.0)] {
                 painter.line_segment([p(-9.0, y), p(9.0, y)], stroke);
                 painter.line_segment([p(knob, y - 3.0), p(knob, y + 3.0)], stroke);
             }
         }
         // Two corner brackets crossing, as a crop tool's marks do.
-        DevelopTab::Crop => {
+        RailItem::Develop(DevelopTab::Crop) => {
             painter.add(egui::Shape::line(
                 vec![p(-5.0, -10.0), p(-5.0, 5.0), p(10.0, 5.0)],
                 stroke,
@@ -191,31 +191,47 @@ fn rail_button(ui: &mut egui::Ui, tab: DevelopTab, tip: &str, selected: bool) ->
                 stroke,
             ));
         }
-        // A brush: the handle up to the right, a ferrule across it, and a
-        // round head of bristles down to the left.
-        DevelopTab::Masks => {
-            painter.line_segment([p(10.0, -10.0), p(3.5, -3.5)], stroke);
+        // An eraser leaning to the right on a baseline, a band across it
+        // where the rubber tip starts.
+        RailItem::Develop(DevelopTab::Masks) => {
             painter.add(egui::Shape::closed_line(
-                vec![p(0.0, -6.0), p(6.0, 0.0), p(3.0, 3.0), p(-3.0, -3.0)],
+                vec![p(-10.0, 1.5), p(0.0, -8.5), p(7.0, -1.5), p(-3.0, 8.5)],
                 stroke,
             ));
-            painter.add(egui::Shape::closed_line(
+            painter.line_segment([p(-5.0, -3.5), p(2.0, 3.5)], stroke);
+            painter.line_segment([p(-3.0, 8.5), p(10.0, 8.5)], stroke);
+        }
+        // A large frame beside a column of three small ones, as the Compare
+        // pane sets the group beside the photo.
+        RailItem::GroupCompare => {
+            frame(-10.0, -7.0, 2.0, 7.0);
+            for top in [-7.0, -2.0, 3.0] {
+                frame(4.5, top, 10.0, top + 4.0);
+            }
+        }
+        // An arrow rising out of an open tray.
+        RailItem::Export => {
+            painter.add(egui::Shape::line(
                 vec![
-                    p(-3.0, -3.0),
-                    p(3.0, 3.0),
-                    p(1.5, 7.0),
-                    p(-2.5, 9.5),
-                    p(-8.0, 10.0),
-                    p(-9.5, 8.5),
-                    p(-9.0, 3.0),
-                    p(-7.0, -1.0),
+                    p(-5.0, -2.0),
+                    p(-9.0, -2.0),
+                    p(-9.0, 9.0),
+                    p(9.0, 9.0),
+                    p(9.0, -2.0),
+                    p(5.0, -2.0),
                 ],
+                stroke,
+            ));
+            painter.line_segment([p(0.0, 4.0), p(0.0, -10.0)], stroke);
+            painter.add(egui::Shape::line(
+                vec![p(-4.0, -6.0), p(0.0, -10.0), p(4.0, -6.0)],
                 stroke,
             ));
         }
     }
     response
         .on_hover_text(tip)
+        .on_disabled_hover_text(tip)
         .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -226,18 +242,9 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let (Some(aspect), Some(orientation)) = (app.crop_aspect(), app.crop_orientation()) else {
         return;
     };
-    page_title(ui, t.tab_crop, |_| {});
+    form::page_heading(ui, t.tab_crop, |_| {});
     form::page(ui, |ui| {
-        let form = Form::new(
-            ui,
-            &[
-                t.crop_rotate,
-                t.crop_aspect,
-                t.crop_orientation,
-                t.crop_size,
-            ],
-        )
-        .spacious();
+        let form = Form::stacked();
         form.section(ui, "", |ui| {
             form.row(ui, t.crop_rotate, |ui| {
                 ui.horizontal(|ui| {
@@ -277,6 +284,21 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     }
                 });
             });
+            form.row(ui, t.crop_overlay, |ui| {
+                let overlays = [
+                    (CropOverlay::Thirds, t.crop_thirds, None),
+                    (CropOverlay::Grid, t.crop_grid, None),
+                    (CropOverlay::Golden, t.crop_golden, None),
+                    (CropOverlay::Diagonal, t.crop_diagonal, None),
+                    (CropOverlay::Spiral, t.crop_spiral, None),
+                    (CropOverlay::None, t.crop_overlay_none, None),
+                ];
+                let current = app.crop_overlay();
+                let picked = form::segmented(ui, &overlays, current);
+                if let Some(choice) = picked.filter(|&c| c != current) {
+                    out.actions.push(UiAction::SetCropOverlay(choice));
+                }
+            });
             if let Some((w, h)) = app.crop_pixel_size() {
                 form.row(ui, t.crop_size, |ui| {
                     ui.label(format!("{w} \u{d7} {h}"));
@@ -300,147 +322,144 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let mut adj = app.current_adjustments();
-    page_title(ui, t.tab_sliders, |ui| {
+    form::page_heading(ui, t.tab_sliders, |ui| {
         if ui.button(t.reset).clicked() {
             out.actions.push(UiAction::ResetAdjustments);
             out.actions.push(UiAction::Focus(Region::Develop));
         }
     });
-    // Only this page has the histogram: Crop and Masks work on the frame,
-    // not its tones.
-    draw_histogram(ui, app);
-    draw_exposure_row(ui, app);
-    ui.add_space(6.0);
-    if crate::app::SHOW_PRESETS {
-        draw_presets(ui, app, out);
-    }
-    // `interacted_idx` is the slider the mouse touched this frame, so the
-    // keyboard cursor can follow it.
-    let mut changed = false;
-    let mut interacted_idx: Option<usize> = None;
-    let focus_idx = if app.focus() == Region::Develop && app.focus_level() == FocusLevel::Entered {
-        Some(app.develop_focus())
-    } else {
-        None
-    };
-
-    // Returns (value changed, mouse interacted).
-    fn slider(
-        ui: &mut egui::Ui,
-        label: &str,
-        field: &mut f32,
-        range: std::ops::RangeInclusive<f32>,
-        decimals: usize,
-        focused: bool,
-    ) -> (bool, bool) {
-        ui.label(label);
-        // Widen the track to the panel, leaving room for the value box.
-        // egui keeps spacing changes for the rest of the frame, so restore
-        // the old width afterward.
-        let prev_width = ui.spacing().slider_width;
-        let value_box = ui.spacing().interact_size.x + 2.0 * ui.spacing().item_spacing.x;
-        ui.spacing_mut().slider_width = (ui.available_width() - value_box).max(80.0);
-        let resp = ui.add(
-            egui::Slider::new(field, range)
-                // Preserve fractional Auto Tone/catalog values on
-                // display. Default clamping rounds them on first draw,
-                // producing an edit without any user interaction.
-                .clamping(egui::SliderClamping::Edits)
-                .max_decimals(decimals)
-                .show_value(true),
-        );
-        ui.spacing_mut().slider_width = prev_width;
-        let mut changed = resp.changed();
-        if resp.double_clicked() {
-            *field = 0.0;
-            changed = true;
+    form::page(ui, |ui| {
+        // Only this page has the histogram: Crop and Masks work on the frame,
+        // not its tones.
+        draw_histogram(ui, app);
+        draw_exposure_row(ui, app);
+        ui.add_space(6.0);
+        if crate::app::SHOW_PRESETS {
+            draw_presets(ui, app, out);
         }
-        if focused {
-            ui.painter().rect_stroke(
-                resp.rect.expand(1.0),
-                2.0,
-                egui::Stroke::new(2.0f32, theme::colors(ui.ctx()).cursor),
-                egui::StrokeKind::Outside,
-            );
-        }
-        let interacted = resp.clicked() || resp.dragged() || resp.double_clicked();
-        (changed, interacted)
-    }
+        // `interacted_idx` is the slider the mouse touched this frame, so the
+        // keyboard cursor can follow it.
+        let mut changed = false;
+        let mut interacted_idx: Option<usize> = None;
+        let focus_idx =
+            if app.focus() == Region::Develop && app.focus_level() == FocusLevel::Entered {
+                Some(app.develop_focus())
+            } else {
+                None
+            };
+        ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
 
-    let mut section = None;
-    for (idx, s) in crate::develop::SLIDERS.iter().enumerate() {
-        if section != Some(s.section) {
-            if section.is_some() {
-                ui.add_space(6.0);
-                ui.separator();
-            }
-            section = Some(s.section);
-            let title = egui::RichText::new(t.section(s.section))
-                .size(font_size::px(ui.style(), form::HEADER))
-                .strong();
-            if s.section == crate::develop::Section::WhiteBalance {
-                ui.horizontal(|ui| {
-                    ui.label(title);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if eyedropper_button(ui, app.wb_picker_active())
-                            .on_hover_text(t.pick_gray_tip)
-                            .clicked()
-                        {
+        let mut section = None;
+        for (idx, s) in crate::develop::SLIDERS.iter().enumerate() {
+            if section != Some(s.section) {
+                if section.is_some() {
+                    form::divider(ui);
+                }
+                section = Some(s.section);
+                form::section_header(ui, t.section(s.section), |ui| match s.section {
+                    crate::develop::Section::WhiteBalance => {
+                        let picker = eyedropper_button(ui, app.wb_picker_active())
+                            .on_hover_text(t.pick_gray_tip);
+                        if picker.clicked() {
                             out.actions.push(UiAction::ToggleWbPicker);
                         }
-                    });
-                });
-            } else if s.section == crate::develop::Section::Tone {
-                ui.horizontal(|ui| {
-                    ui.label(title);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
-                            .button(t.auto_tone)
-                            .on_hover_text(t.auto_tone_tip)
-                            .clicked()
-                        {
+                    }
+                    crate::develop::Section::Tone => {
+                        let auto = ui.button(t.auto_tone).on_hover_text(t.auto_tone_tip);
+                        if auto.clicked() {
                             out.actions.push(UiAction::AutoTone);
                             out.actions.push(UiAction::Focus(Region::Develop));
                         }
-                    });
+                    }
+                    _ => {}
                 });
-            } else {
-                ui.label(title);
+            }
+            let field = (s.field)(&mut adj);
+            let (c, i) = develop_slider(
+                ui,
+                t.slider(s.id),
+                field,
+                s.range.clone(),
+                s.decimals,
+                focus_idx == Some(idx),
+            );
+            changed |= c;
+            if i {
+                interacted_idx = Some(idx);
             }
         }
-        let field = (s.field)(&mut adj);
-        let (c, i) = slider(
-            ui,
-            t.slider(s.id),
-            field,
-            s.range.clone(),
-            s.decimals,
-            focus_idx == Some(idx),
-        );
-        changed |= c;
-        if i {
-            interacted_idx = Some(idx);
-        }
-    }
 
-    if changed {
-        out.actions.push(UiAction::SetAdjustments(adj));
-    }
-    if let Some(idx) = interacted_idx {
-        out.actions.push(UiAction::FocusDevelop(idx));
-    }
+        if changed {
+            out.actions.push(UiAction::SetAdjustments(adj));
+        }
+        if let Some(idx) = interacted_idx {
+            out.actions.push(UiAction::FocusDevelop(idx));
+        }
+    });
 }
 
-/// The right-hand panel's footer: Develop, or the Export form in its place.
-pub(super) fn right_tabs(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let t = t();
-    let tabs = [
-        (false, t.develop, t.develop_tab_tip),
-        (true, t.export_jpg, t.export_jpg_tip),
-    ];
-    if super::tabs::footer(ui, "right_tabs", &tabs, app.export_form_open()).is_some() {
-        out.actions.push(UiAction::ToggleExportForm);
+/// One Develop slider, its value typed or dragged in the readout. Double-
+/// clicking the track resets it to 0. Returns (value changed, mouse
+/// interacted).
+fn develop_slider(
+    ui: &mut egui::Ui,
+    label: &str,
+    field: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    decimals: usize,
+    focused: bool,
+) -> (bool, bool) {
+    // The readout and the track can't both borrow `field`, so the readout
+    // edits a copy that is written back when it changes.
+    let mut typed = *field;
+    let speed = (range.end() - range.start()) / 300.0;
+    let readout = egui::DragValue::new(&mut typed)
+        .range(range.clone())
+        // Preserve fractional Auto Tone/catalog values on display. Clamping
+        // would round them on first draw, producing an edit without any user
+        // interaction.
+        .clamp_existing_to_range(false)
+        .max_decimals(decimals)
+        .speed(speed);
+    let track = egui::Slider::new(field, range)
+        .clamping(egui::SliderClamping::Edits)
+        .max_decimals(decimals);
+    let (track, value) = form::slider(
+        ui,
+        label,
+        |ui| {
+            ui.scope(|ui| {
+                ui.visuals_mut().button_frame = false;
+                ui.spacing_mut().button_padding.x = 0.0;
+                ui.add(readout)
+            })
+            .inner
+        },
+        track,
+    );
+    let mut changed = track.changed();
+    if value.changed() {
+        *field = typed;
+        changed = true;
     }
+    if track.double_clicked() {
+        *field = 0.0;
+        changed = true;
+    }
+    if focused {
+        ui.painter().rect_stroke(
+            track.rect.union(value.rect).expand(3.0),
+            2.0,
+            egui::Stroke::new(2.0f32, theme::colors(ui.ctx()).cursor),
+            egui::StrokeKind::Outside,
+        );
+    }
+    let interacted = track.clicked()
+        || track.dragged()
+        || track.double_clicked()
+        || value.clicked()
+        || value.dragged();
+    (changed, interacted)
 }
 
 /// The white-balance picker's toggle: an eyedropper, painted so it can't fall
@@ -516,35 +535,61 @@ fn toggle_switch(ui: &mut egui::Ui, on: bool) -> egui::Response {
 /// The brush only matters while the tool is armed.
 fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    page_title(ui, t.tab_masks, |_| {});
+    form::page_heading(ui, t.tab_masks, |_| {});
     form::page(ui, |ui| {
         let active = app.touchup_active();
-        let form = Form::new(ui, &[t.touch_up, t.brush_size, t.feather, t.spots]).spacious();
+        let form = Form::new(ui, &[t.touch_up, t.spots]).spacious();
         form.section(ui, "", |ui| {
             form.row(ui, t.touch_up, |ui| {
                 if toggle_switch(ui, active).clicked() {
                     out.actions.push(UiAction::ToggleTouchUp);
                 }
             });
-            form.row(ui, t.brush_size, |ui| {
-                let mut radius = app.touchup_radius();
-                let range = app.touchup_radius_min()..=crate::app::TOUCHUP_MAX_RADIUS;
-                if full_width_slider(ui, active, &mut radius, range) {
-                    out.actions.push(UiAction::SetTouchUpRadius(radius));
-                }
-                form::hint(ui, t.brush_size_hint);
-            })
-            .on_hover_text(t.brush_size_tip);
-            form.row(ui, t.feather, |ui| {
-                let mut feather = app.touchup_feather();
-                let range = crate::app::TOUCHUP_MIN_FEATHER..=1.0;
-                if full_width_slider(ui, active, &mut feather, range) {
-                    out.actions.push(UiAction::SetTouchUpFeather(feather));
-                }
-                form::hint(ui, t.feather_hint);
-            })
-            .on_hover_text(t.feather_tip);
-            if !app.current_touchups().is_empty() {
+        });
+        ui.add_space(font_size::px(ui.style(), form::SLIDER_GAP));
+        ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
+        let mut radius = app.touchup_radius();
+        let range = app.touchup_radius_min()..=crate::app::TOUCHUP_MAX_RADIUS;
+        let size_px = format!("{:.0} px", app.touchup_radius_px());
+        if brush_slider(
+            ui,
+            active,
+            t.brush_size,
+            &size_px,
+            t.brush_size_tip,
+            &mut radius,
+            range,
+        ) {
+            out.actions.push(UiAction::SetTouchUpRadius(radius));
+        }
+        let mut feather = app.touchup_feather();
+        let range = crate::app::TOUCHUP_MIN_FEATHER..=1.0;
+        let percent = |v: f32| format!("{:.0}%", v * 100.0);
+        if brush_slider(
+            ui,
+            active,
+            t.feather,
+            &percent(feather),
+            t.feather_tip,
+            &mut feather,
+            range,
+        ) {
+            out.actions.push(UiAction::SetTouchUpFeather(feather));
+        }
+        let mut opacity = app.touchup_opacity();
+        if brush_slider(
+            ui,
+            active,
+            t.opacity,
+            &percent(opacity),
+            t.opacity_tip,
+            &mut opacity,
+            0.0..=1.0,
+        ) {
+            out.actions.push(UiAction::SetTouchUpOpacity(opacity));
+        }
+        if !app.current_touchups().is_empty() {
+            form.section(ui, "", |ui| {
                 form.row(ui, t.spots, |ui| {
                     ui.horizontal_wrapped(|ui| {
                         for i in 0..app.current_touchups().len() {
@@ -569,21 +614,32 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         }
                     });
                 });
-            }
-        });
+            });
+        }
     });
 }
 
-/// A slider without a value box, filling its row's value column.
-fn full_width_slider(
+/// One of the brush's sliders, with its value as text and its key and
+/// scroll shortcuts on hover. Returns whether it changed.
+fn brush_slider(
     ui: &mut egui::Ui,
     enabled: bool,
+    label: &str,
+    readout: &str,
+    tip: &str,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
 ) -> bool {
-    ui.spacing_mut().slider_width = ui.available_width();
-    ui.add_enabled(enabled, egui::Slider::new(value, range).show_value(false))
-        .changed()
+    ui.add_enabled_ui(enabled, |ui| {
+        let (track, _) = form::slider(
+            ui,
+            label,
+            |ui| ui.label(egui::RichText::new(readout).color(theme::colors(ui.ctx()).value)),
+            egui::Slider::new(value, range),
+        );
+        track.on_hover_text(tip).changed()
+    })
+    .inner
 }
 
 /// ISO, focal length, aperture and shutter spread across the histogram's

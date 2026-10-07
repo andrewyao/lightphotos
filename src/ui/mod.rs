@@ -22,7 +22,6 @@ pub enum UiAction {
     ScoreAll,
     /// SPIKE: show this page of the group's tiles.
     SpikePage(usize),
-    SetGroupView(crate::app::GroupView),
     /// Native only, as is the row that sends it.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     SetTileFidelity(crate::app::TileFidelity),
@@ -124,6 +123,7 @@ pub enum UiAction {
     CropDragTo(f32, f32),
     CropRelease,
     SetCropAspect(crate::app::CropAspect),
+    SetCropOverlay(crate::app::CropOverlay),
     SetCropOrientation(crate::app::CropOrientation),
     /// Rotate the shown photo 90 degrees, clockwise if true.
     Rotate(bool),
@@ -134,10 +134,13 @@ pub enum UiAction {
     ToggleWbPicker,
     /// The WB picker's armed click landed at this normalized texture coordinate.
     PickWhiteBalance(f32, f32),
-    SetDevelopTab(crate::app::DevelopTab),
+    /// A rail icon: turns its page off when it is the one lit, otherwise
+    /// shows it.
+    ClickRail(crate::app::RailItem),
     ToggleTouchUp,
     SetTouchUpRadius(f32),
     SetTouchUpFeather(f32),
+    SetTouchUpOpacity(f32),
     TouchUpClick(f32, f32),
     SelectTouchUp(usize),
     DeleteTouchUp,
@@ -199,9 +202,9 @@ pub mod theme;
 /// row is drawn from.
 pub(crate) mod toolbar;
 
-use develop_panel::draw_develop_panel;
 #[cfg(test)]
 pub(crate) use develop_panel::rail_button_rect;
+use develop_panel::{draw_develop_panel, draw_develop_rail};
 use export_panel::draw_export_panel;
 pub(crate) use form::Role;
 use grid::{draw_grid, draw_left_panel};
@@ -235,10 +238,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     if app.left_panel_visible() {
         draw_left_panel(ui, app, &mut out);
     }
-    // In the Loupe, Develop and Export are two tabs of one right-hand panel.
+    // In the Loupe, Develop and Export are two tabs of one right-hand panel,
+    // inside the rail that shows and hides Develop.
+    if mode == ViewMode::Loupe {
+        draw_develop_rail(ui, app, &mut out);
+    }
     let develop_here = mode == ViewMode::Loupe && app.develop_visible();
     if app.export_form_open() {
-        draw_export_panel(ui, app, develop_here, &mut out);
+        draw_export_panel(ui, app, mode == ViewMode::Loupe, &mut out);
     } else if develop_here {
         draw_develop_panel(ui, app, &mut out);
     }

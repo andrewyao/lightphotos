@@ -102,10 +102,21 @@ pub struct TouchUp {
     pub source: [f32; 2],
     pub feather: f32,
     pub delta: [f32; 3],
+    /// How much of the patch shows over the photo, 0..1.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub opacity: f32,
 }
 
 fn is_zero(v: &f32) -> bool {
     *v == 0.0
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn is_one(v: &f32) -> bool {
+    *v == 1.0
 }
 
 /// A crop rectangle in 0..1 image coordinates, origin top-left.
@@ -216,6 +227,11 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
         for v in t.delta {
             h.write(&((v * 100_000.0).round() as i32).to_le_bytes());
         }
+        // Only a partial spot hashes its opacity, so spots saved before
+        // opacity existed keep their cached renders.
+        if t.opacity != 1.0 {
+            h.write(&((t.opacity * 100_000.0).round() as i32).to_le_bytes());
+        }
     }
 
     // A full-frame crop hashes the same as no crop. Coordinates round to 1e-5.
@@ -241,7 +257,8 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
 pub struct GpuTouchUp {
     pub center_radius_feather: [f32; 4],
     pub source: [f32; 2],
-    pub _pad: [f32; 2],
+    pub opacity: f32,
+    pub _pad: f32,
     pub delta: [f32; 4],
 }
 
@@ -250,7 +267,8 @@ impl From<&TouchUp> for GpuTouchUp {
         Self {
             center_radius_feather: [t.center[0], t.center[1], t.radius, t.feather],
             source: t.source,
-            _pad: [0.0; 2],
+            opacity: t.opacity,
+            _pad: 0.0,
             delta: [t.delta[0], t.delta[1], t.delta[2], 0.0],
         }
     }

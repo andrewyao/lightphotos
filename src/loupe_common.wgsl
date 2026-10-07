@@ -30,7 +30,8 @@ struct Adjust {
 struct TouchUp {
     center_radius_feather: vec4<f32>,
     source: vec2<f32>,
-    _pad: vec2<f32>,
+    opacity: f32,
+    _pad: f32,
     delta: vec4<f32>,
 };
 

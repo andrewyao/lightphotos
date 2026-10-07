@@ -342,7 +342,7 @@ fn apply_touchups(
         }
         let feather = (radius * t.feather.clamp(0.02, 1.0)).max(1.0);
         let mask = ((radius - distance) / feather).clamp(0.0, 1.0);
-        let mask = mask * mask * (3.0 - 2.0 * mask);
+        let mask = mask * mask * (3.0 - 2.0 * mask) * t.opacity;
         let source_u = t.source[0] + (u - t.center[0]);
         let source_v = t.source[1] + (v - t.center[1]);
         let mut src = sample_linear(img, source_u, source_v);
@@ -618,9 +618,35 @@ mod tests {
             source: [0.0, 0.0],
             feather: 0.5,
             delta: [0.0; 3],
+            opacity: 1.0,
         };
         let (_, _, out) = bake_edited(&img, &Adjustments::default(), &[touchup], 0);
         assert!(out[2 * 4] < 255, "touch-up should reduce the bright spot");
+
+        let at = |opacity: f32| {
+            let t = TouchUp { opacity, ..touchup };
+            bake_edited(&img, &Adjustments::default(), &[t], 0).2[2 * 4]
+        };
+        assert_eq!(at(0.0), 255, "a transparent spot leaves the photo alone");
+        assert!(
+            at(0.5) > out[2 * 4] && at(0.5) < 255,
+            "half opacity lands between the photo and the full fix"
+        );
+    }
+
+    #[test]
+    fn a_spot_saved_without_opacity_reads_as_opaque_and_a_partial_one_hashes_apart() {
+        let json =
+            r#"{"center":[0.5,0.5],"radius":0.1,"source":[0.2,0.2],"feather":0.5,"delta":[0,0,0]}"#;
+        let t: TouchUp = serde_json::from_str(json).unwrap();
+        assert_eq!(t.opacity, 1.0);
+        assert!(
+            !serde_json::to_string(&t).unwrap().contains("opacity"),
+            "an opaque spot writes no opacity"
+        );
+        let adj = Adjustments::default();
+        let sig = |t: TouchUp| crate::develop::edit_signature_with_touchups(&adj, &[t], 0);
+        assert_ne!(sig(t), sig(TouchUp { opacity: 0.5, ..t }));
     }
 
     #[test]

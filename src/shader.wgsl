@@ -119,7 +119,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if (distance_px < radius_px) {
             let feather_px = max(radius_px * clamp(t.center_radius_feather.w, 0.02, 1.0), 1.0);
             var mask = clamp((radius_px - distance_px) / feather_px, 0.0, 1.0);
-            mask = mask * mask * (3.0 - 2.0 * mask);
+            mask = mask * mask * (3.0 - 2.0 * mask) * t.opacity;
             let source_uv = t.source + (in.uv - t.center_radius_feather.xy);
             let source = textureSampleLevel(tex, samp, source_uv, 0.0).rgb + t.delta.xyz;
             r = r * (1.0 - mask) + clamp(source.r, 0.0, 1.0) * mask;

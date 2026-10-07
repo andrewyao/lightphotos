@@ -426,6 +426,7 @@ impl App {
         let Some(path) = self.selected_path() else {
             return;
         };
+        self.leave_compare_off_group();
         // On wasm32 `app/web.rs` decodes the preview and thumbnail instead.
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -606,8 +607,9 @@ impl App {
         }
     }
 
+    /// Develop gives way to the Compare pane while it is open.
     pub(crate) fn develop_visible(&self) -> bool {
-        self.develop_open
+        self.develop_open && self.group_view == GroupView::Edit
     }
 
     /// Loupe only.

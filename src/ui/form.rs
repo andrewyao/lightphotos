@@ -10,7 +10,7 @@ use std::cell::Cell;
 
 use super::{font_size, theme};
 
-pub(super) const HEADER: f32 = 15.0;
+const HEADER: f32 = 15.0;
 const HEADER_GAP: f32 = 8.0;
 const ROW_GAP: f32 = 10.0;
 const SPACIOUS_ROW_GAP: f32 = 24.0;
@@ -24,6 +24,11 @@ const BUTTON_PAD: egui::Vec2 = egui::vec2(12.0, 5.0);
 const BUTTON_GAP: f32 = 8.0;
 const SEGMENT_ROW_GAP: f32 = 4.0;
 const DIALOG_MARGIN: f32 = 20.0;
+const PAGE_HEADING_PAD: egui::Vec2 = egui::vec2(12.0, 14.0);
+const SLIDER_LABEL_GAP: f32 = 4.0;
+
+/// Between one `slider` and the next.
+pub(super) const SLIDER_GAP: f32 = 16.0;
 
 /// Confirms, prompts and Settings.
 pub(super) const DIALOG_WIDTH: f32 = 400.0;
@@ -31,6 +36,8 @@ pub(super) const DIALOG_WIDTH: f32 = 400.0;
 pub(super) struct Form {
     label_w: f32,
     row_gap: f32,
+    /// Each label over its value rather than beside it.
+    stacked: bool,
     first: Cell<bool>,
 }
 
@@ -51,6 +58,18 @@ impl Form {
         Self {
             label_w: widest + ui.spacing().item_spacing.x * 2.0,
             row_gap: ROW_GAP,
+            stacked: false,
+            first: Cell::new(true),
+        }
+    }
+
+    /// A form whose rows set each label over its value, spaced like a page
+    /// of `slider`s, for a side panel too narrow for a label column.
+    pub(super) fn stacked() -> Self {
+        Self {
+            label_w: 0.0,
+            row_gap: SLIDER_GAP,
+            stacked: true,
             first: Cell::new(true),
         }
     }
@@ -68,14 +87,10 @@ impl Form {
     /// empty `title` draws no header.
     pub(super) fn section(&self, ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
         if !self.first.replace(false) {
-            ui.add_space(font_size::px(ui.style(), BEFORE_DIVIDER));
-            ui.separator();
-            ui.add_space(font_size::px(ui.style(), AFTER_DIVIDER));
+            divider(ui);
         }
         if !title.is_empty() {
-            let size = font_size::px(ui.style(), HEADER);
-            ui.label(egui::RichText::new(title).size(size).strong());
-            ui.add_space(font_size::px(ui.style(), HEADER_GAP));
+            section_header(ui, title, |_| {});
         }
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), self.row_gap);
@@ -84,13 +99,23 @@ impl Form {
     }
 
     /// `label` in the label column and `value` beside it, both from the row's
-    /// top. Returns the label.
+    /// top, or `label` over `value` in a stacked form. Returns the label.
     pub(super) fn row(
         &self,
         ui: &mut egui::Ui,
         label: &str,
         value: impl FnOnce(&mut egui::Ui),
     ) -> egui::Response {
+        if self.stacked {
+            return ui
+                .vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), SLIDER_LABEL_GAP);
+                    let label = ui.label(label);
+                    value(ui);
+                    label
+                })
+                .inner;
+        }
         ui.horizontal_top(|ui| {
             let label = ui
                 .allocate_ui_with_layout(
@@ -112,6 +137,79 @@ impl Form {
         })
         .inner
     }
+}
+
+/// The rule and whitespace between two sections.
+pub(super) fn divider(ui: &mut egui::Ui) {
+    ui.add_space(font_size::px(ui.style(), BEFORE_DIVIDER));
+    ui.separator();
+    ui.add_space(font_size::px(ui.style(), AFTER_DIVIDER));
+}
+
+/// A section's header, with `trailing` at the right end of its row.
+pub(super) fn section_header(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui)) {
+    let size = font_size::px(ui.style(), HEADER);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(title).size(size).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+    });
+    ui.add_space(font_size::px(ui.style(), HEADER_GAP));
+}
+
+/// A side panel page's heading over a rule, inset like the page under it,
+/// with `trailing` at the right end of its row.
+pub(super) fn page_heading(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui)) {
+    let x = font_size::px(ui.style(), PAGE_HEADING_PAD.x) as i8;
+    let y = font_size::px(ui.style(), PAGE_HEADING_PAD.y) as i8;
+    let margin = egui::Margin {
+        left: x,
+        right: x,
+        top: y,
+        bottom: y / 2,
+    };
+    egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.heading(title);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+        });
+    });
+    ui.separator();
+}
+
+/// A slider set out as
+///
+/// ```text
+/// Label                  value
+/// ------------O---------------
+/// ```
+///
+/// `value` draws the readout at the right end of the label's row, and the
+/// track fills the width under them with a round knob. Returns the track's
+/// response and the readout's.
+pub(super) fn slider(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: impl FnOnce(&mut egui::Ui) -> egui::Response,
+    track: egui::Slider,
+) -> (egui::Response, egui::Response) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), SLIDER_LABEL_GAP);
+        let value = ui
+            .horizontal(|ui| {
+                ui.label(label);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), value)
+                    .inner
+            })
+            .inner;
+        ui.spacing_mut().slider_width = ui.available_width();
+        let track = ui.add(
+            track
+                .show_value(false)
+                .handle_shape(egui::style::HandleShape::Circle),
+        );
+        (track, value)
+    })
+    .inner
 }
 
 /// A side panel page's body, inset from the panel's edges and its title.

@@ -4,7 +4,7 @@ use super::*;
 use super::form::{self, Button, Role};
 use crate::app::GRID_CELL_PT;
 use crate::app::{
-    spike_zoom_uv, App, CropEdge, FocusLevel, GroupView, PickHow, Region, TileFidelity,
+    spike_zoom_uv, App, CropEdge, CropOverlay, FocusLevel, PickHow, Region, TileFidelity,
 };
 use crate::image_decode;
 
@@ -354,10 +354,6 @@ fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 .scope_builder(egui::UiBuilder::new().max_rect(row).layout(layout), |ui| {
                     super::toolbar::toolbar_spacing(ui);
                     super::toolbar::strip_bar(ui, app, out);
-                    if app.shown_in_group() {
-                        ui.separator();
-                        group_view_buttons(ui, app, out);
-                    }
                 })
                 .response
                 .rect
@@ -572,7 +568,7 @@ fn loupe_crop_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut F
                 }
             }
 
-            // Outline and rule-of-thirds guides.
+            // Outline and the chosen composition guides.
             let line = egui::Color32::from_gray(235);
             painter.rect_stroke(
                 r,
@@ -580,18 +576,9 @@ fn loupe_crop_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut F
                 egui::Stroke::new(1.5f32, line),
                 egui::StrokeKind::Inside,
             );
-            for i in 1..3 {
-                let fx = r.min.x + r.width() * i as f32 / 3.0;
-                let fy = r.min.y + r.height() * i as f32 / 3.0;
-                let faint = egui::Color32::from_white_alpha(70);
-                painter.line_segment(
-                    [egui::pos2(fx, r.min.y), egui::pos2(fx, r.max.y)],
-                    egui::Stroke::new(1.0f32, faint),
-                );
-                painter.line_segment(
-                    [egui::pos2(r.min.x, fy), egui::pos2(r.max.x, fy)],
-                    egui::Stroke::new(1.0f32, faint),
-                );
+            let faint = egui::Stroke::new(1.0f32, egui::Color32::from_white_alpha(70));
+            for guide in crop_guides(app.crop_overlay(), r) {
+                painter.add(egui::Shape::line(guide, faint));
             }
             // A handle dot at each edge midpoint.
             for (_, a, b) in edges {
@@ -643,6 +630,115 @@ fn loupe_crop_overlay(ui: &egui::Ui, app: &App, central: egui::Rect, out: &mut F
         });
 }
 
+/// The composition guides for `overlay` inside the crop box `r`, each a
+/// polyline in screen points.
+fn crop_guides(overlay: CropOverlay, r: egui::Rect) -> Vec<Vec<egui::Pos2>> {
+    let at = |u: f32, v: f32| egui::pos2(r.min.x + u * r.width(), r.min.y + v * r.height());
+    let verticals_and_horizontals = |fractions: &[f32], rows: &[f32]| {
+        let mut lines = Vec::new();
+        for &u in fractions {
+            lines.push(vec![at(u, 0.0), at(u, 1.0)]);
+        }
+        for &v in rows {
+            lines.push(vec![at(0.0, v), at(1.0, v)]);
+        }
+        lines
+    };
+    match overlay {
+        CropOverlay::None => Vec::new(),
+        CropOverlay::Thirds => {
+            verticals_and_horizontals(&[1.0 / 3.0, 2.0 / 3.0], &[1.0 / 3.0, 2.0 / 3.0])
+        }
+        CropOverlay::Golden => {
+            let (a, b) = (0.381_966, 0.618_034);
+            verticals_and_horizontals(&[a, b], &[a, b])
+        }
+        // Square cells, eight across the shorter side.
+        CropOverlay::Grid => {
+            let cell = r.width().min(r.height()) / 8.0;
+            if cell <= 0.0 {
+                return Vec::new();
+            }
+            let steps = |len: f32| -> Vec<f32> {
+                (1..)
+                    .map(|i| i as f32 * cell / len)
+                    .take_while(|&f| f < 1.0 - 1e-4)
+                    .collect()
+            };
+            verticals_and_horizontals(&steps(r.width()), &steps(r.height()))
+        }
+        // A 45-degree line in from each corner, as long as the short side.
+        CropOverlay::Diagonal => {
+            let s = r.width().min(r.height());
+            [
+                (r.left_top(), egui::vec2(1.0, 1.0)),
+                (r.right_top(), egui::vec2(-1.0, 1.0)),
+                (r.left_bottom(), egui::vec2(1.0, -1.0)),
+                (r.right_bottom(), egui::vec2(-1.0, -1.0)),
+            ]
+            .into_iter()
+            .map(|(corner, dir)| vec![corner, corner + dir * s])
+            .collect()
+        }
+        CropOverlay::Spiral => golden_spiral(r),
+    }
+}
+
+/// A golden spiral stretched to fill `r`: the golden rectangle's squares cut
+/// off left, top, right, bottom in turn, each with its divider and a quarter
+/// arc that carries the spiral on into the next. A portrait box gets the
+/// landscape spiral mirrored across its diagonal.
+fn golden_spiral(r: egui::Rect) -> Vec<Vec<egui::Pos2>> {
+    const PHI: f32 = 1.618_034;
+    const ARC_STEPS: usize = 16;
+    let portrait = r.height() > r.width();
+    // Work in a PHI x 1 golden rectangle, then map onto `r`.
+    let to_screen = |x: f32, y: f32| {
+        let (u, v) = (x / PHI, y);
+        let (u, v) = if portrait { (v, u) } else { (u, v) };
+        egui::pos2(r.min.x + u * r.width(), r.min.y + v * r.height())
+    };
+    let (mut x0, mut y0, mut x1, mut y1) = (0.0f32, 0.0f32, PHI, 1.0f32);
+    let mut lines = Vec::new();
+    let mut spiral = Vec::new();
+    let arc = |cx: f32, cy: f32, s: f32, from: f32, spiral: &mut Vec<egui::Pos2>| {
+        for i in 0..=ARC_STEPS {
+            let a = (from + i as f32 / ARC_STEPS as f32 * 0.5) * std::f32::consts::PI;
+            spiral.push(to_screen(cx + s * a.cos(), cy + s * a.sin()));
+        }
+    };
+    for step in 0..10 {
+        match step % 4 {
+            0 => {
+                let s = y1 - y0;
+                arc(x0 + s, y1, s, 1.0, &mut spiral);
+                x0 += s;
+                lines.push(vec![to_screen(x0, y0), to_screen(x0, y1)]);
+            }
+            1 => {
+                let s = x1 - x0;
+                arc(x0, y0 + s, s, 1.5, &mut spiral);
+                y0 += s;
+                lines.push(vec![to_screen(x0, y0), to_screen(x1, y0)]);
+            }
+            2 => {
+                let s = y1 - y0;
+                arc(x1 - s, y0, s, 0.0, &mut spiral);
+                x1 -= s;
+                lines.push(vec![to_screen(x1, y0), to_screen(x1, y1)]);
+            }
+            _ => {
+                let s = x1 - x0;
+                arc(x1, y1 - s, s, 0.5, &mut spiral);
+                y1 -= s;
+                lines.push(vec![to_screen(x0, y1), to_screen(x1, y1)]);
+            }
+        }
+    }
+    lines.push(spiral);
+    lines
+}
+
 /// The edge nearest to `p`, if within `threshold` px.
 fn nearest_edge(
     edges: &[(CropEdge, egui::Pos2, egui::Pos2)],
@@ -686,76 +782,6 @@ fn filmstrip_cell(
         out.actions.push(click_action(ui, pos));
         out.actions.push(UiAction::Focus(Region::Filmstrip));
     }
-}
-
-/// Two icons right of a grouped photo's rating stars, one per
-/// `GroupView`: a lone frame for the photo alone, and a large frame beside
-/// a column of small ones for the Compare pane. The current view's icon
-/// stays lit.
-fn group_view_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    ui.spacing_mut().item_spacing.x = font_size::px(ui.style(), VIEW_ICON_GAP);
-    let t = crate::i18n::t();
-    let current = app.group_view();
-    for (view, tip) in [
-        (GroupView::Edit, t.view_single),
-        (GroupView::Compare, t.view_compare),
-    ] {
-        if group_view_icon(ui, view, current == view)
-            .on_hover_text(tip)
-            .clicked()
-            && current != view
-        {
-            out.actions.push(UiAction::SetGroupView(view));
-        }
-    }
-}
-
-const VIEW_ICON_SIZE: egui::Vec2 = egui::vec2(30.0, 22.0);
-const VIEW_ICON_GAP: f32 = 2.0;
-
-/// One of `group_view_buttons`' icons, drawn as outlines so it follows the
-/// theme's text color.
-fn group_view_icon(ui: &mut egui::Ui, view: GroupView, selected: bool) -> egui::Response {
-    let size = egui::vec2(
-        font_size::px(ui.style(), VIEW_ICON_SIZE.x),
-        font_size::px(ui.style(), VIEW_ICON_SIZE.y),
-    );
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    if !ui.is_rect_visible(rect) {
-        return response;
-    }
-    let visuals = ui.style().interact_selectable(&response, selected);
-    let painter = ui.painter();
-    if selected || response.hovered() {
-        painter.rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
-    }
-    let stroke = egui::Stroke::new(font_size::px(ui.style(), 1.3), visuals.fg_stroke.color);
-    let unit = font_size::px(ui.style(), 1.0);
-    let art = egui::Rect::from_center_size(rect.center(), egui::vec2(18.0, 12.0) * unit);
-    let radius = 1.5 * unit;
-    let frame = |r: egui::Rect| painter.rect_stroke(r, radius, stroke, egui::StrokeKind::Middle);
-    match view {
-        GroupView::Edit => {
-            frame(art);
-        }
-        GroupView::Compare => {
-            let gap = 2.0 * unit;
-            let small_w = 4.0 * unit;
-            frame(egui::Rect::from_min_max(
-                art.min,
-                egui::pos2(art.right() - small_w - gap, art.bottom()),
-            ));
-            let small_h = (art.height() - 2.0 * gap) / 3.0;
-            for i in 0..3 {
-                let top = art.top() + i as f32 * (small_h + gap);
-                frame(egui::Rect::from_min_size(
-                    egui::pos2(art.right() - small_w, top),
-                    egui::vec2(small_w, small_h),
-                ));
-            }
-        }
-    }
-    response
 }
 
 /// The Compare pane's toolbar along its bottom: how to load the tiles on
@@ -1156,4 +1182,61 @@ fn spike_zoom_marker(ui: &egui::Ui, app: &mut App, central: egui::Rect) {
         egui::Stroke::new(1.5f32, egui::Color32::WHITE),
         egui::StrokeKind::Middle,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn landscape() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(300.0, 200.0))
+    }
+
+    fn inside(r: egui::Rect, guides: &[Vec<egui::Pos2>]) -> bool {
+        guides.iter().flatten().all(|p| r.expand(0.01).contains(*p))
+    }
+
+    #[test]
+    fn each_overlay_draws_its_guides_inside_the_crop() {
+        let r = landscape();
+        let count = |o| crop_guides(o, r).len();
+        assert_eq!(count(CropOverlay::None), 0);
+        assert_eq!(count(CropOverlay::Thirds), 4);
+        assert_eq!(count(CropOverlay::Golden), 4);
+        assert_eq!(count(CropOverlay::Diagonal), 4);
+        // 200 / 8 = 25 pt cells: 11 verticals across 300, 7 horizontals.
+        assert_eq!(count(CropOverlay::Grid), 18);
+        for o in [
+            CropOverlay::Thirds,
+            CropOverlay::Grid,
+            CropOverlay::Golden,
+            CropOverlay::Diagonal,
+            CropOverlay::Spiral,
+        ] {
+            assert!(inside(r, &crop_guides(o, r)), "{o:?} stays in the box");
+        }
+    }
+
+    #[test]
+    fn golden_lines_sit_at_the_golden_section() {
+        let r = landscape();
+        let x = crop_guides(CropOverlay::Golden, r)[0][0].x;
+        assert!((x - (10.0 + 300.0 * 0.381_966)).abs() < 0.01);
+    }
+
+    #[test]
+    fn spiral_is_one_unbroken_curve_from_the_corner_inward() {
+        let r = landscape();
+        let guides = crop_guides(CropOverlay::Spiral, r);
+        let spiral = guides.last().unwrap();
+        assert!(
+            (spiral[0] - r.left_bottom()).length() < 0.01,
+            "starts at a corner"
+        );
+        for pair in spiral.windows(2) {
+            assert!((pair[1] - pair[0]).length() < 40.0, "no jumps between arcs");
+        }
+        let end = *spiral.last().unwrap();
+        assert!(r.shrink(20.0).contains(end), "winds into the box");
+    }
 }
