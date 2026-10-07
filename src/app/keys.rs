@@ -14,7 +14,7 @@ impl App {
     /// than `egui_wants_keyboard_input`, which is true of any focused widget
     /// and so would strand the arrows this whole method exists to let through.
     pub(crate) fn nav_key_should_fall_through(&self) -> bool {
-        self.crop_edit.is_none()
+        !self.cropping()
             && !self.egui_ctx.egui_is_using_pointer()
             && !self.egui_ctx.text_edit_focused()
     }
@@ -69,7 +69,7 @@ impl App {
             }
             return;
         }
-        if self.crop_edit.is_some() {
+        if self.cropping() {
             match code {
                 KeyCode::KeyC | KeyCode::Enter | KeyCode::NumpadEnter => self.commit_crop(),
                 KeyCode::Escape => self.cancel_crop(),

@@ -119,13 +119,9 @@ impl App {
         self.catalog.set_rotation(&path, step);
         #[cfg(target_arch = "wasm32")]
         crate::analytics::property("develop_edit_applied", "edit_kind", "adjustment");
-        if let Some(d) = self.crop_edit.as_mut() {
-            // The texture rect stays on the same content, which now lies the
-            // other way on screen.
-            d.orientation = d.orientation.flipped();
-        }
+        self.flip_crop_orientation();
         if self.fitted {
-            if self.crop_edit.is_some() {
+            if self.cropping() {
                 self.fit_for_crop();
             } else {
                 self.fit_to_window();
@@ -342,7 +338,7 @@ impl App {
         let keep_zoom = self.zoom();
         self.compare = !self.compare;
         if self.fitted {
-            if self.crop_edit.is_some() {
+            if self.cropping() {
                 self.fit_for_crop();
             } else {
                 self.fit_to_window();

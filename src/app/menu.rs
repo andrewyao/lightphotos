@@ -15,14 +15,14 @@ impl App {
         // dialog each hold the keyboard. Settings holds it too, except for Cmd+,.
         let tool_free =
             self.tool == LoupeTool::None && self.preset_name_edit.is_none() && !self.confirm_open();
-        let free = tool_free && self.crop_edit.is_none() && !self.show_settings;
+        let free = tool_free && !self.cropping() && !self.show_settings;
         let loupe = self.mode == ViewMode::Loupe;
         let selected = self.selection_count();
         match cmd {
             Cut | Copy | Paste | BiggerText | SmallerText => true,
             SelectAll => typing || (free && self.mode == ViewMode::Grid),
             Undo => typing || (self.tool == LoupeTool::TouchUp && self.can_undo_touchup()),
-            Settings => tool_free && self.crop_edit.is_none(),
+            Settings => tool_free && !self.cropping(),
             // X still opens the export form while cropping.
             Export => tool_free && !self.show_settings,
             OpenFolder | AutoTone | Rate(_) | Grid | KeyboardShortcuts => free,

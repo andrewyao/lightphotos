@@ -183,27 +183,54 @@ fn level_angle(dx: f32, dy: f32) -> f32 {
     a - 90.0 * (a / 90.0).round()
 }
 
+#[derive(Default)]
+pub(super) struct CropState {
+    edit: Option<CropDraft>,
+    /// Kept across crops, like Lightroom's overlay choice.
+    overlay: CropOverlay,
+}
+
 impl App {
+    /// Whether Crop & Transform is editing a draft.
+    pub(super) fn cropping(&self) -> bool {
+        self.crop.edit.is_some()
+    }
+
+    /// Drops the draft unsaved and goes back to the Develop page it came from.
+    pub(super) fn abandon_crop_draft(&mut self) {
+        if let Some(draft) = self.crop.edit.take() {
+            self.develop_tab = draft.return_tab;
+        }
+    }
+
+    /// Turns the draft's aspect with the photo after a 90° rotate. The texture
+    /// rect stays on the same content, which now lies the other way on screen.
+    pub(super) fn flip_crop_orientation(&mut self) {
+        if let Some(d) = self.crop.edit.as_mut() {
+            d.orientation = d.orientation.flipped();
+        }
+    }
+
     /// The crop rectangle currently being edited, if crop mode is active.
     pub(crate) fn crop_rect(&self) -> Option<Crop> {
-        self.crop_edit.as_ref().map(|d| d.rect)
+        self.crop.edit.as_ref().map(|d| d.rect)
     }
 
     pub(crate) fn crop_aspect(&self) -> Option<CropAspect> {
-        self.crop_edit.as_ref().map(|d| d.aspect)
+        self.crop.edit.as_ref().map(|d| d.aspect)
     }
 
     pub(crate) fn crop_overlay(&self) -> CropOverlay {
-        self.crop_overlay
+        self.crop.overlay
     }
 
     pub(super) fn set_crop_overlay(&mut self, overlay: CropOverlay) {
-        self.crop_overlay = overlay;
+        self.crop.overlay = overlay;
         self.request_redraw();
     }
 
     pub(crate) fn crop_orientation(&self) -> Option<CropOrientation> {
-        self.crop_edit.as_ref().map(|d| d.orientation)
+        self.crop.edit.as_ref().map(|d| d.orientation)
     }
 
     /// The draft's size in source pixels, width by height as shown on screen.
@@ -214,11 +241,12 @@ impl App {
 
     /// The draft's straighten angle in degrees, if crop mode is active.
     pub(crate) fn crop_straighten(&self) -> Option<f32> {
-        self.crop_edit.as_ref().map(|d| d.straighten)
+        self.crop.edit.as_ref().map(|d| d.straighten)
     }
 
     pub(crate) fn straighten_tool(&self) -> StraightenTool {
-        self.crop_edit
+        self.crop
+            .edit
             .as_ref()
             .map_or(StraightenTool::Off, |d| d.straighten_tool)
     }
@@ -228,7 +256,7 @@ impl App {
     /// center as far as the turned photo needs. `None` until a line is long
     /// enough to read.
     pub(crate) fn straighten_preview(&self) -> Option<(f32, Crop)> {
-        let d = self.crop_edit.as_ref()?;
+        let d = self.crop.edit.as_ref()?;
         let StraightenTool::Line { from, to } = d.straighten_tool else {
             return None;
         };
@@ -265,7 +293,7 @@ impl App {
     }
 
     pub(super) fn toggle_straighten_tool(&mut self) {
-        if let Some(d) = self.crop_edit.as_mut() {
+        if let Some(d) = self.crop.edit.as_mut() {
             d.grab = None;
             d.straighten_tool = match d.straighten_tool {
                 StraightenTool::Off => StraightenTool::Ready,
@@ -277,7 +305,7 @@ impl App {
 
     /// Start a new line at canvas coordinate `(u, v)`.
     pub(super) fn straighten_line_from(&mut self, u: f32, v: f32) {
-        if let Some(d) = self.crop_edit.as_mut() {
+        if let Some(d) = self.crop.edit.as_mut() {
             if d.straighten_tool != StraightenTool::Off {
                 d.straighten_tool = StraightenTool::Line {
                     from: (u, v),
@@ -289,7 +317,7 @@ impl App {
     }
 
     pub(super) fn straighten_line_to(&mut self, u: f32, v: f32) {
-        if let Some(d) = self.crop_edit.as_mut() {
+        if let Some(d) = self.crop.edit.as_mut() {
             if let StraightenTool::Line { from, .. } = d.straighten_tool {
                 d.straighten_tool = StraightenTool::Line { from, to: (u, v) };
             }
@@ -303,7 +331,7 @@ impl App {
         match self.straighten_preview() {
             Some((angle, _)) => self.straighten_draft(angle),
             None => {
-                if let Some(d) = self.crop_edit.as_mut() {
+                if let Some(d) = self.crop.edit.as_mut() {
                     d.straighten_tool = StraightenTool::Off;
                 }
                 self.request_redraw();
@@ -319,7 +347,7 @@ impl App {
     /// its center only as far as the turned photo needs.
     fn straighten_draft(&mut self, angle: f32) {
         let (w, h) = self.image_size();
-        if let Some(d) = self.crop_edit.as_mut() {
+        if let Some(d) = self.crop.edit.as_mut() {
             d.straighten = angle;
             d.rect = fit_inside(d.rect, &Straighten::new(angle, w, h), w, h);
             d.straighten_tool = StraightenTool::Off;
@@ -333,7 +361,7 @@ impl App {
     pub(super) fn reset_crop(&mut self) {
         let (img_w, img_h) = self.image_size();
         let (disp_w, disp_h) = self.crop_display_px(FULL_CROP);
-        if let Some(d) = self.crop_edit.as_mut() {
+        if let Some(d) = self.crop.edit.as_mut() {
             d.rect = FULL_CROP;
             d.straighten = 0.0;
             d.straighten_tool = StraightenTool::Off;
@@ -395,7 +423,7 @@ impl App {
             img_w,
             img_h,
         );
-        self.crop_edit = Some(CropDraft {
+        self.crop.edit = Some(CropDraft {
             rect,
             grab: None,
             straighten,
@@ -418,7 +446,7 @@ impl App {
     fn push_crop_preview(&mut self) {
         let mut adj = self.current_adjustments();
         adj.crop = None;
-        if let Some(d) = &self.crop_edit {
+        if let Some(d) = &self.crop.edit {
             adj.straighten = d.straighten;
         }
         #[cfg(test)]
@@ -438,7 +466,7 @@ impl App {
         if self.straighten_preview().is_some() {
             self.apply_straighten();
         }
-        let Some(draft) = self.crop_edit.take() else {
+        let Some(draft) = self.crop.edit.take() else {
             return;
         };
         self.develop_tab = draft.return_tab;
@@ -449,7 +477,7 @@ impl App {
 
     /// Leave crop mode without saving, putting the saved view back.
     pub(super) fn cancel_crop(&mut self) {
-        if let Some(draft) = self.crop_edit.take() {
+        if let Some(draft) = self.crop.edit.take() {
             self.develop_tab = draft.return_tab;
             self.push_adjustments();
             self.request_redraw();
@@ -457,14 +485,14 @@ impl App {
     }
 
     pub(super) fn set_crop_aspect(&mut self, aspect: CropAspect) {
-        if let Some(d) = self.crop_edit.as_mut() {
+        if let Some(d) = self.crop.edit.as_mut() {
             d.aspect = aspect;
         }
         self.snap_crop_to_aspect();
     }
 
     pub(super) fn set_crop_orientation(&mut self, orientation: CropOrientation) {
-        if let Some(d) = self.crop_edit.as_mut() {
+        if let Some(d) = self.crop.edit.as_mut() {
             d.orientation = orientation;
         }
         self.snap_crop_to_aspect();
@@ -475,7 +503,7 @@ impl App {
     fn snap_crop_to_aspect(&mut self) {
         let (w, h) = self.image_size();
         let quarter_turned = self.current_rotation() % 2 == 1;
-        let Some(d) = self.crop_edit.as_mut() else {
+        let Some(d) = self.crop.edit.as_mut() else {
             return;
         };
         if let Some(r) = d.aspect.w_over_h(d.orientation, w, h) {
@@ -493,7 +521,7 @@ impl App {
     /// Shift-locked drags.
     pub(super) fn crop_grab(&mut self, edge: CropEdge) {
         let (w, h) = self.image_size();
-        if let Some(d) = self.crop_edit.as_mut() {
+        if let Some(d) = self.crop.edit.as_mut() {
             let cw = (d.rect.right - d.rect.left) * w;
             let ch = (d.rect.bottom - d.rect.top) * h;
             d.grab_aspect = if ch > 0.0 { cw / ch } else { 1.0 };
@@ -503,7 +531,7 @@ impl App {
 
     /// Begin moving the whole crop rectangle from texture coordinate `(u, v)`.
     pub(super) fn crop_grab_move(&mut self, u: f32, v: f32) {
-        if let Some(d) = self.crop_edit.as_mut() {
+        if let Some(d) = self.crop.edit.as_mut() {
             d.grab = Some(CropGrab::Move {
                 anchor: (u, v),
                 rect0: d.rect,
@@ -519,7 +547,7 @@ impl App {
         let shift = self.modifiers.shift_key();
         let (w, h) = self.image_size();
         let quarter_turned = self.current_rotation() % 2 == 1;
-        let Some(d) = self.crop_edit.as_mut() else {
+        let Some(d) = self.crop.edit.as_mut() else {
             return;
         };
         let Some(grab) = d.grab else { return };
@@ -582,7 +610,7 @@ impl App {
     }
 
     pub(super) fn crop_release(&mut self) {
-        if let Some(d) = self.crop_edit.as_mut() {
+        if let Some(d) = self.crop.edit.as_mut() {
             d.grab = None;
         }
     }
@@ -902,7 +930,7 @@ mod tests {
         assert_eq!(app.current_rotation(), 3, "[ turns anti-clockwise");
         assert_eq!(app.crop_rect(), Some(rect));
         assert_eq!(app.crop_orientation(), Some(CropOrientation::Vertical));
-        assert!(app.crop_edit.is_some(), "rotating stays in crop mode");
+        assert!(app.crop.edit.is_some(), "rotating stays in crop mode");
     }
 
     #[test]
@@ -917,17 +945,17 @@ mod tests {
         assert!(app.develop_visible(), "C opens the Develop panel");
         app.set_crop_aspect(CropAspect::R16x9);
         app.handle_key(KeyCode::Enter);
-        assert!(app.crop_edit.is_none());
+        assert!(app.crop.edit.is_none());
         assert_eq!(app.develop_tab(), DevelopTab::Sliders, "Enter goes back");
         let saved = app.current_adjustments().crop.expect("Enter commits");
         assert_rect(saved, (0.0, 0.125, 1.0, 0.875));
 
         app.set_develop_tab(DevelopTab::Masks);
         app.set_develop_tab(DevelopTab::Crop);
-        assert!(app.crop_edit.is_some(), "the Crop tab enters crop mode");
+        assert!(app.crop.edit.is_some(), "the Crop tab enters crop mode");
         app.set_crop_aspect(CropAspect::Square);
         app.set_develop_tab(DevelopTab::Masks);
-        assert!(app.crop_edit.is_none());
+        assert!(app.crop.edit.is_none());
         assert_eq!(app.develop_tab(), DevelopTab::Masks);
         assert_rect(
             app.current_adjustments()
@@ -1018,7 +1046,7 @@ mod tests {
         app.toggle_straighten_tool();
         draw_line(&mut app, -2.0);
         app.handle_key(KeyCode::Enter);
-        assert!(app.crop_edit.is_none(), "Enter saves and goes back");
+        assert!(app.crop.edit.is_none(), "Enter saves and goes back");
         assert_eq!(app.develop_tab(), DevelopTab::Sliders);
         let saved = app.current_adjustments();
         assert!(
@@ -1067,7 +1095,7 @@ mod tests {
         assert_eq!(app.current_adjustments(), Adjustments::default());
 
         app.handle_key(KeyCode::Escape);
-        assert!(app.crop_edit.is_none(), "Esc leaves crop mode");
+        assert!(app.crop.edit.is_none(), "Esc leaves crop mode");
         assert_eq!(app.current_adjustments(), Adjustments::default(), "unsaved");
         assert_eq!(app.pushed_adj.unwrap().crop, None);
 
@@ -1127,7 +1155,7 @@ mod tests {
         app.toggle_straighten_tool();
         draw_line(&mut app, 4.0);
         app.set_develop_tab(DevelopTab::Sliders);
-        assert!(app.crop_edit.is_none());
+        assert!(app.crop.edit.is_none());
         assert!((app.current_adjustments().straighten - 4.0).abs() < 1e-3);
     }
 
@@ -1186,7 +1214,7 @@ mod tests {
         app.handle_key(KeyCode::Escape);
         assert_eq!(app.straighten_tool(), StraightenTool::Off);
         assert!(
-            app.crop_edit.is_some(),
+            app.crop.edit.is_some(),
             "Esc on the tool stays in crop mode"
         );
         assert_eq!(app.crop_straighten(), Some(0.0), "Esc applies nothing");

@@ -297,7 +297,7 @@ pub(crate) enum WebPendingNav {
 pub(crate) enum DevelopTab {
     /// Tone, color, and detail sliders.
     Sliders,
-    /// Crop mode: the tab shows exactly while `crop_edit` is set.
+    /// Crop mode: the tab shows exactly while `cropping()`.
     Crop,
     /// Touch Up and future local adjustments.
     Masks,
@@ -411,7 +411,7 @@ pub(crate) struct App {
     /// Per-image develop edits. Holds only non-identity edits.
     edits: HashMap<PathBuf, Adjustments>,
     touchups: HashMap<PathBuf, Vec<TouchUp>>,
-    /// Loupe click tool. Crop mode (`crop_edit`) turns it off.
+    /// Loupe click tool. Crop mode (`cropping()`) turns it off.
     tool: LoupeTool,
     touchup_radius: f32,
     touchup_feather: f32,
@@ -515,9 +515,8 @@ pub(crate) struct App {
     rotations: HashMap<PathBuf, u8>,
     /// The viewport rect (physical px) the loupe drew into last frame.
     loupe_viewport: Option<(u32, u32, u32, u32)>,
-    crop_edit: Option<CropDraft>,
-    /// Kept across crops, like Lightroom's overlay choice.
-    crop_overlay: CropOverlay,
+    /// The crop being edited, and the overlay it draws with.
+    crop: crop::CropState,
     /// Before/after split. The left half keeps crop and rotation but no tone edits.
     compare: bool,
     /// Camera and exposure metadata for the info panel. Memory only, read from
@@ -719,8 +718,7 @@ impl App {
             rotations: HashMap::new(),
             loupe_viewport: None,
             group_compare: group_compare::GroupCompare::new(),
-            crop_edit: None,
-            crop_overlay: CropOverlay::default(),
+            crop: crop::CropState::default(),
             compare: false,
             exif_cache: HashMap::new(),
             source_size: None,
@@ -849,9 +847,7 @@ impl App {
     /// Leave any Loupe editing mode. Call before navigating, so input isn't
     /// captured by a mode meant for the previous image.
     fn teardown_loupe_state(&mut self) {
-        if let Some(draft) = self.crop_edit.take() {
-            self.develop_tab = draft.return_tab;
-        }
+        self.abandon_crop_draft();
         self.tool = LoupeTool::None;
         self.touchup_selected = None;
     }
@@ -1042,7 +1038,7 @@ impl App {
             if image_viewport != self.loupe_viewport {
                 if self.fitted {
                     self.loupe_viewport = image_viewport;
-                    if self.crop_edit.is_some() {
+                    if self.cropping() {
                         self.fit_for_crop();
                     } else {
                         self.fit_to_window();

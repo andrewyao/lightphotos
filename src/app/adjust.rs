@@ -28,7 +28,7 @@ impl App {
     /// rather than leave it armed out of sight.
     pub(super) fn set_develop_tab(&mut self, tab: DevelopTab) {
         if tab == DevelopTab::Crop {
-            if self.crop_edit.is_none() {
+            if !self.cropping() {
                 self.enter_crop();
             }
             return;
