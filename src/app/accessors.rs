@@ -56,7 +56,7 @@ impl App {
     pub(crate) fn folder_pick_pending(&self) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
-            self.web_folder_pending
+            self.web.folder_pending()
         }
         #[cfg(not(target_arch = "wasm32"))]
         {

@@ -531,48 +531,7 @@ impl App {
                 self.request_redraw();
             }
 
-            // Write each JPEG a decode thread finished baking, then report
-            // the completed writes.
-            let baked = self
-                .loader
-                .as_mut()
-                .map(|l| l.take_web_exports())
-                .unwrap_or_default();
-            for r in self.web_exports.land(baked) {
-                let crate::web_exports::ExportResult {
-                    path,
-                    folder,
-                    dest_dir,
-                    filename,
-                    result,
-                } = r;
-                let tx = self.web_export_tx.clone();
-                match result {
-                    Ok(jpeg) => {
-                        let file_handles = self.web_file_handles.clone();
-                        let dest = dest_dir.join(&filename);
-                        wasm_bindgen_futures::spawn_local(async move {
-                            let result = crate::web_export_fs::WebFs::new(folder, file_handles)
-                                .write_atomic(&dest, &jpeg)
-                                .await
-                                .map(|()| crate::export::ExportLanding::File(dest.clone()));
-                            let _ = tx.send(crate::export::ExportOutcome { src: path, result });
-                        });
-                    }
-                    Err(e) => {
-                        let _ = tx.send(crate::export::ExportOutcome {
-                            src: path,
-                            result: Err(e),
-                        });
-                    }
-                }
-            }
-            let export_outcomes: Vec<_> =
-                std::iter::from_fn(|| self.web_export_rx.try_recv().ok()).collect();
-            if !export_outcomes.is_empty() {
-                self.on_export_outcomes(export_outcomes);
-                self.request_redraw();
-            }
+            self.land_web_exports();
         }
 
         // Each `request_*` below returns true while background work is still

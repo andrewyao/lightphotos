@@ -85,33 +85,6 @@ impl<'a> Placer<'a> {
 }
 
 impl App {
-    /// Invalidate in-flight directory listings and any navigation deferred
-    /// behind one. Runs on every tree action. Thumbnails are keyed to the
-    /// handle maps instead, see [`App::invalidate_web_thumb_handles`].
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn supersede_web_pending_nav(&mut self) {
-        self.web_nav_generation = self.web_nav_generation.wrapping_add(1);
-        self.web_pending_nav = None;
-        self.web_session_restore = None;
-    }
-
-    /// Invalidate thumbnail work after a pick replaces the handle maps.
-    /// `poll_web_thumbs` drops the old results on arrival. Clearing their keys
-    /// lets the new pick request the same browser paths again.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn invalidate_web_thumb_handles(&mut self) {
-        self.web_handle_generation = self.web_handle_generation.wrapping_add(1);
-        self.web_thumb_inflight.clear();
-        self.web_thumb_recovery_pending.clear();
-        self.web_thumb_retries.clear();
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn defer_web_nav(&mut self, nav: crate::app::WebPendingNav) {
-        self.web_pending_nav_generation = self.web_nav_generation;
-        self.web_pending_nav = Some(nav);
-    }
-
     #[hotpath::measure]
     pub(super) fn recompute_visible(&mut self) {
         let selected_pl: Vec<usize> = self

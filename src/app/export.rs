@@ -406,7 +406,7 @@ impl App {
         use std::collections::HashSet;
 
         let folder = self.folder_sel.clone().unwrap_or_default();
-        let Some(folder_handle) = self.web_dir_handles.get(&folder).cloned() else {
+        let Some(folder_handle) = self.web.dir_handle(&folder) else {
             self.set_status(StatusKind::Error, crate::i18n::t().export_no_handle.into());
             self.request_redraw();
             return;
@@ -451,8 +451,8 @@ impl App {
         self.set_status(StatusKind::Progress, (crate::i18n::t().exporting)(0, total));
         self.request_redraw();
 
-        let pool = self.web_exports.clone();
-        let fs = crate::web_export_fs::WebFs::new(folder_handle, self.web_file_handles.clone());
+        let pool = self.web.exports();
+        let fs = crate::web_export_fs::WebFs::new(folder_handle, self.web.file_handles().clone());
         wasm_bindgen_futures::spawn_local(async move {
             let existing = match fs.existing_export_names().await {
                 Ok(existing) => existing,

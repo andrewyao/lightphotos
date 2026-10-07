@@ -415,137 +415,9 @@ pub(crate) struct App {
     /// The last session saved, which the landing page's Reopen Session
     /// button restores.
     session: Option<session::Session>,
-    /// A Reopen Session waiting on its folder's listing, then on each
-    /// listing down to its subfolder.
+    /// The browser build's file handles, channels and decode bookkeeping.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) web_session_restore: Option<session::Session>,
-
-    /// True while `showDirectoryPicker` and its listing are in flight. Disables
-    /// the landing page's "Choose Folder" button so a second picker can't open.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_folder_pending: bool,
-    /// Set while `fonts::fetch_full_cjk` is running or once it has succeeded,
-    /// so the font downloads at most once a session. A failed fetch clears it.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_full_cjk_requested: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_folder_tx: Sender<Result<crate::web_fs::PickedFolder, String>>,
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_folder_rx: Receiver<Result<crate::web_fs::PickedFolder, String>>,
-    /// File handles for the open folder's images, keyed like the playlist
-    /// entries. A picked folder has no OS path, so every read goes through these.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_file_handles: HashMap<PathBuf, web_sys::FileSystemFileHandle>,
-    /// Directory handles for every folder browsed so far, keyed by relative
-    /// path with the picked root's name first. The catalog's sidecar handle
-    /// switches to the current folder's entry on each navigation.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_dir_handles: HashMap<PathBuf, web_sys::FileSystemDirectoryHandle>,
-    /// Per-folder thumbnail cache index, shared by that folder's async writes.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_thumb_cleanup:
-        HashMap<PathBuf, std::rc::Rc<std::cell::RefCell<crate::web_thumb_cache::Cleanup>>>,
-    /// Async subfolder listings, tagged with the navigation generation that
-    /// asked for them. `poll_dir_listing` drops stale generations.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_dirlist_tx: Sender<(u64, PathBuf, Result<crate::web_fs::DirListing, String>)>,
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_dirlist_rx: Receiver<(u64, PathBuf, Result<crate::web_fs::DirListing, String>)>,
-    /// `(directory, generation)` pairs with a listing in flight. Stops per-frame
-    /// polling from re-requesting, while a newer generation may retry.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_dirlist_inflight: std::collections::HashSet<(PathBuf, u64)>,
-    /// Finished browser JPEG writes, drained into `on_export_outcomes`. The
-    /// browser counterpart of native `Exporter::poll()`.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_export_tx: Sender<crate::export::ExportOutcome>,
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_export_rx: Receiver<crate::export::ExportOutcome>,
-    /// Text read from the browser clipboard, fed to egui as a paste on the
-    /// next frame. See `request_web_paste`.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_paste_tx: Sender<String>,
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_paste_rx: Receiver<String>,
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_pending_nav: Option<WebPendingNav>,
-    /// Bumped on every tree action. A listing may apply only the navigation
-    /// deferred by the latest action.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_nav_generation: u64,
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_pending_nav_generation: u64,
-    /// Bumped only when a folder pick replaces the handle maps. Thumbnail jobs
-    /// carry it so results for an old pick are dropped: browser paths start
-    /// with the folder's name, so re-picking a same-named folder would
-    /// otherwise match stale jobs. Not `web_nav_generation`, which bumps on
-    /// every tree action and would cancel decodes while arrowing through the tree.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_handle_generation: u64,
-    /// Thumbnail decodes in flight on the Web Worker pool. `loader.rs`'s queue
-    /// has no workers on wasm32, so its own in-flight set doesn't apply.
-    #[cfg(target_arch = "wasm32")]
-    web_thumb_inflight: HashSet<(PathBuf, u32)>,
-    /// Failed cached decodes waiting for a slot to read the source file. Their
-    /// keys stay in `web_thumb_inflight` so normal requests don't retry the
-    /// corrupt cache.
-    #[cfg(target_arch = "wasm32")]
-    web_thumb_recovery_pending: Vec<crate::web_decode::PoolResult>,
-    /// `get_file()` reads in flight across all decode tiers. Chrome throws
-    /// `NotReadableError` when too many reads are open against one folder, so
-    /// `MAX_CONCURRENT_READS` caps this. A key that can't start this frame
-    /// stays out of its in-flight set and is retried next frame.
-    /// `Rc<Cell<_>>` so the `spawn_local` task can decrement it without `&mut App`.
-    #[cfg(target_arch = "wasm32")]
-    web_read_inflight: std::rc::Rc<std::cell::Cell<u32>>,
-    /// Consecutive failure count and earliest next retry time per key.
-    /// Chrome's `NotReadableError` is usually transient, so a key gives up only
-    /// after `MAX_READ_RETRIES` failures. Retries a frame apart all fail, so the
-    /// deadline backs off per attempt (`retry_backoff`). A decode failure
-    /// gives up at once, see `web_decode::Failure`. Cleared on success or
-    /// when giving up.
-    #[cfg(target_arch = "wasm32")]
-    web_thumb_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
-    #[cfg(target_arch = "wasm32")]
-    web_preview_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
-    /// Loupe preview decodes. `try_show` asks for the preview every frame, so
-    /// `web_preview_failed` stops a doomed decode from retrying forever.
-    #[cfg(target_arch = "wasm32")]
-    web_preview_inflight: HashSet<(PathBuf, u32)>,
-    #[cfg(target_arch = "wasm32")]
-    web_preview_failed: HashSet<(PathBuf, u32)>,
-    /// The loupe's fast screen-fit decode (`JobKind::Speed`). Tracked apart
-    /// from `Preview` because both results usually have the same size, so they
-    /// can't share `loader.rs`'s preview slot. `poll_web_preview` uploads a
-    /// `Speed` result directly instead.
-    #[cfg(target_arch = "wasm32")]
-    web_speed_inflight: HashSet<(PathBuf, u32)>,
-    #[cfg(target_arch = "wasm32")]
-    web_speed_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
-    #[cfg(target_arch = "wasm32")]
-    web_speed_failed: HashSet<(PathBuf, u32)>,
-    /// The loupe's zoom-triggered full-resolution decode, the wasm32
-    /// counterpart of `Loader::request_full`. Results land through
-    /// `loader.insert_full_external`, where `try_show` finds them.
-    #[cfg(target_arch = "wasm32")]
-    web_full_inflight: HashSet<(PathBuf, u32)>,
-    #[cfg(target_arch = "wasm32")]
-    web_full_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
-    #[cfg(target_arch = "wasm32")]
-    web_full_failed: HashSet<(PathBuf, u32)>,
-
-    /// Where each running export's JPEG goes. The loader's threads bake it;
-    /// the destination folder handle cannot leave the main thread.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) web_exports: crate::web_exports::WebExports,
-    /// `Preview` and `Speed` results that `poll_web_thumbs` pulled off the
-    /// pool's single shared channel. `poll_web_preview` consumes them in the
-    /// same frame.
-    #[cfg(target_arch = "wasm32")]
-    web_preview_pending: Vec<crate::web_decode::PoolResult>,
-    /// `Full` results set aside the same way, for `poll_web_full`.
-    #[cfg(target_arch = "wasm32")]
-    web_full_pending: Vec<crate::web_decode::PoolResult>,
+    web: web::Web,
 
     pub(crate) mode: ViewMode,
     /// `pub(crate)` because the frame loop drives its write queue directly.
@@ -780,14 +652,6 @@ impl App {
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
         let (renderer_init_tx, renderer_init_rx) = std::sync::mpsc::channel();
-        #[cfg(target_arch = "wasm32")]
-        let (web_folder_tx, web_folder_rx) = std::sync::mpsc::channel();
-        #[cfg(target_arch = "wasm32")]
-        let (web_dirlist_tx, web_dirlist_rx) = std::sync::mpsc::channel();
-        #[cfg(target_arch = "wasm32")]
-        let (web_export_tx, web_export_rx) = std::sync::mpsc::channel();
-        #[cfg(target_arch = "wasm32")]
-        let (web_paste_tx, web_paste_rx) = std::sync::mpsc::channel();
         Self {
             window: None,
             renderer: None,
@@ -808,75 +672,7 @@ impl App {
             #[cfg(not(test))]
             session: session::Session::load(),
             #[cfg(target_arch = "wasm32")]
-            web_session_restore: None,
-            #[cfg(target_arch = "wasm32")]
-            web_folder_pending: false,
-            #[cfg(target_arch = "wasm32")]
-            web_full_cjk_requested: Default::default(),
-            #[cfg(target_arch = "wasm32")]
-            web_folder_tx,
-            #[cfg(target_arch = "wasm32")]
-            web_folder_rx,
-            #[cfg(target_arch = "wasm32")]
-            web_file_handles: HashMap::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_dir_handles: HashMap::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_thumb_cleanup: HashMap::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_dirlist_tx,
-            #[cfg(target_arch = "wasm32")]
-            web_dirlist_rx,
-            #[cfg(target_arch = "wasm32")]
-            web_dirlist_inflight: std::collections::HashSet::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_export_tx,
-            #[cfg(target_arch = "wasm32")]
-            web_export_rx,
-            #[cfg(target_arch = "wasm32")]
-            web_paste_tx,
-            #[cfg(target_arch = "wasm32")]
-            web_paste_rx,
-            #[cfg(target_arch = "wasm32")]
-            web_pending_nav: None,
-            #[cfg(target_arch = "wasm32")]
-            web_nav_generation: 0,
-            #[cfg(target_arch = "wasm32")]
-            web_pending_nav_generation: 0,
-            #[cfg(target_arch = "wasm32")]
-            web_handle_generation: 0,
-            #[cfg(target_arch = "wasm32")]
-            web_thumb_inflight: HashSet::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_thumb_recovery_pending: Vec::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_read_inflight: std::rc::Rc::new(std::cell::Cell::new(0)),
-            #[cfg(target_arch = "wasm32")]
-            web_thumb_retries: HashMap::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_preview_retries: HashMap::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_preview_inflight: HashSet::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_preview_failed: HashSet::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_speed_inflight: HashSet::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_speed_retries: HashMap::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_speed_failed: HashSet::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_full_inflight: HashSet::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_full_retries: HashMap::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_full_failed: HashSet::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_exports: Default::default(),
-            #[cfg(target_arch = "wasm32")]
-            web_preview_pending: Vec::new(),
-            #[cfg(target_arch = "wasm32")]
-            web_full_pending: Vec::new(),
+            web: web::Web::new(),
             mode: ViewMode::Grid,
             catalog,
             catalog_load: catalog::CatalogLoad::new(),
@@ -1000,7 +796,7 @@ impl App {
             .map(|m| m.is_dir())
             .unwrap_or(false);
         #[cfg(target_arch = "wasm32")]
-        let is_dir = self.web_dir_handles.contains_key(&path) || self.subdirs.contains_key(&path);
+        let is_dir = self.web.has_dir(&path) || self.subdirs.contains_key(&path);
         eprintln!(
             "[lightphotos] open {}: {}",
             if is_dir { "dir" } else { "file" },
@@ -1205,9 +1001,9 @@ impl App {
             raw_input
                 .events
                 .retain(|e| !matches!(e, egui::Event::Paste(_)));
-            raw_input.events.extend(
-                std::iter::from_fn(|| self.web_paste_rx.try_recv().ok()).map(egui::Event::Paste),
-            );
+            raw_input
+                .events
+                .extend(self.web.take_pastes().map(egui::Event::Paste));
         }
 
         let mut out = ui::FrameOutput::default();

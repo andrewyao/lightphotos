@@ -41,6 +41,7 @@ impl Faces {
     }
 
     /// A result the signal cache saved. One computed this session wins.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn seed(&mut self, path: PathBuf, quality: FaceQuality) {
         self.quality.entry(path).or_insert(quality);
     }

@@ -187,7 +187,7 @@ impl App {
         // Look the handle up by `dir` so the load and the thumbnail sweep can
         // never target a different folder. No handle means nothing to load.
         #[cfg(target_arch = "wasm32")]
-        match self.web_dir_handles.get(&dir).cloned() {
+        match self.web.dir_handle(&dir) {
             Some(handle) => {
                 let for_task = dir.clone();
                 // Photos still in this folder, with their handles. The sweep
@@ -196,12 +196,13 @@ impl App {
                     std::ffi::OsString,
                     web_sys::FileSystemFileHandle,
                 > = self
-                    .web_file_handles
+                    .web
+                    .file_handles()
                     .iter()
                     .filter(|(p, _)| p.parent() == Some(dir.as_path()))
                     .filter_map(|(p, h)| p.file_name().map(|n| (n.to_os_string(), h.clone())))
                     .collect();
-                let reads = self.web_read_inflight.clone();
+                let reads = self.web.read_inflight();
                 wasm_bindgen_futures::spawn_local(async move {
                     let loaded = crate::web_catalog_fs::load_sidecars(&handle).await;
                     let _ = tx.send((for_task, token, mark, loaded));

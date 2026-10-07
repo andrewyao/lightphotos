@@ -207,7 +207,7 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         let (origin_dir, origin_handle) = {
             let dir = paths[0].parent().unwrap_or(Path::new("")).to_path_buf();
-            let Some(handle) = self.web_dir_handles.get(&dir).cloned() else {
+            let Some(handle) = self.web.dir_handle(&dir) else {
                 self.set_status(
                     StatusKind::Error,
                     (crate::i18n::t().delete_no_handle)(&dir.display().to_string()),
@@ -412,8 +412,7 @@ impl App {
             } else {
                 self.catalog.delete_sidecar_with_handle(path, origin_handle);
             }
-            self.web_file_handles.remove(path);
-            self.web_dir_handles.remove(path);
+            self.web.forget_handles(path);
         }
     }
 

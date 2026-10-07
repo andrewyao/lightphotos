@@ -88,7 +88,257 @@ async fn file_facts(
     meta
 }
 
+pub(crate) struct Web {
+    /// A Reopen Session waiting on its folder's listing, then on each
+    /// listing down to its subfolder.
+    session_restore: Option<session::Session>,
+    /// True while `showDirectoryPicker` and its listing are in flight. Disables
+    /// the landing page's "Choose Folder" button so a second picker can't open.
+    folder_pending: bool,
+    /// Set while `fonts::fetch_full_cjk` is running or once it has succeeded,
+    /// so the font downloads at most once a session. A failed fetch clears it.
+    full_cjk_requested: Arc<std::sync::atomic::AtomicBool>,
+    folder_tx: Sender<Result<crate::web_fs::PickedFolder, String>>,
+    folder_rx: Receiver<Result<crate::web_fs::PickedFolder, String>>,
+    /// File handles for the open folder's images, keyed like the playlist
+    /// entries. A picked folder has no OS path, so every read goes through these.
+    file_handles: HashMap<PathBuf, web_sys::FileSystemFileHandle>,
+    /// Directory handles for every folder browsed so far, keyed by relative
+    /// path with the picked root's name first. The catalog's sidecar handle
+    /// switches to the current folder's entry on each navigation.
+    dir_handles: HashMap<PathBuf, web_sys::FileSystemDirectoryHandle>,
+    /// Per-folder thumbnail cache index, shared by that folder's async writes.
+    thumb_cleanup:
+        HashMap<PathBuf, std::rc::Rc<std::cell::RefCell<crate::web_thumb_cache::Cleanup>>>,
+    /// Async subfolder listings, tagged with the navigation generation that
+    /// asked for them. `poll_dir_listing` drops stale generations.
+    dirlist_tx: Sender<(u64, PathBuf, Result<crate::web_fs::DirListing, String>)>,
+    dirlist_rx: Receiver<(u64, PathBuf, Result<crate::web_fs::DirListing, String>)>,
+    /// `(directory, generation)` pairs with a listing in flight. Stops per-frame
+    /// polling from re-requesting, while a newer generation may retry.
+    dirlist_inflight: std::collections::HashSet<(PathBuf, u64)>,
+    /// Finished browser JPEG writes, drained into `on_export_outcomes`. The
+    /// browser counterpart of native `Exporter::poll()`.
+    export_tx: Sender<crate::export::ExportOutcome>,
+    export_rx: Receiver<crate::export::ExportOutcome>,
+    /// Text read from the browser clipboard, fed to egui as a paste on the
+    /// next frame. See `request_web_paste`.
+    paste_tx: Sender<String>,
+    paste_rx: Receiver<String>,
+    pending_nav: Option<WebPendingNav>,
+    /// Bumped on every tree action. A listing may apply only the navigation
+    /// deferred by the latest action.
+    nav_generation: u64,
+    pending_nav_generation: u64,
+    /// Bumped only when a folder pick replaces the handle maps. Thumbnail jobs
+    /// carry it so results for an old pick are dropped: browser paths start
+    /// with the folder's name, so re-picking a same-named folder would
+    /// otherwise match stale jobs. Not `nav_generation`, which bumps on
+    /// every tree action and would cancel decodes while arrowing through the tree.
+    handle_generation: u64,
+    /// Thumbnail decodes in flight on the Web Worker pool. `loader.rs`'s queue
+    /// has no workers on wasm32, so its own in-flight set doesn't apply.
+    thumb_inflight: HashSet<(PathBuf, u32)>,
+    /// Failed cached decodes waiting for a slot to read the source file. Their
+    /// keys stay in `thumb_inflight` so normal requests don't retry the
+    /// corrupt cache.
+    thumb_recovery_pending: Vec<crate::web_decode::PoolResult>,
+    /// `get_file()` reads in flight across all decode tiers. Chrome throws
+    /// `NotReadableError` when too many reads are open against one folder, so
+    /// `MAX_CONCURRENT_READS` caps this. A key that can't start this frame
+    /// stays out of its in-flight set and is retried next frame.
+    /// `Rc<Cell<_>>` so the `spawn_local` task can decrement it without `&mut App`.
+    read_inflight: std::rc::Rc<std::cell::Cell<u32>>,
+    /// Consecutive failure count and earliest next retry time per key.
+    /// Chrome's `NotReadableError` is usually transient, so a key gives up only
+    /// after `MAX_READ_RETRIES` failures. Retries a frame apart all fail, so the
+    /// deadline backs off per attempt (`retry_backoff`). A decode failure
+    /// gives up at once, see `web_decode::Failure`. Cleared on success or
+    /// when giving up.
+    thumb_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
+    preview_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
+    /// Loupe preview decodes. `try_show` asks for the preview every frame, so
+    /// `preview_failed` stops a doomed decode from retrying forever.
+    preview_inflight: HashSet<(PathBuf, u32)>,
+    preview_failed: HashSet<(PathBuf, u32)>,
+    /// The loupe's fast screen-fit decode (`JobKind::Speed`). Tracked apart
+    /// from `Preview` because both results usually have the same size, so they
+    /// can't share `loader.rs`'s preview slot. `poll_web_preview` uploads a
+    /// `Speed` result directly instead.
+    speed_inflight: HashSet<(PathBuf, u32)>,
+    speed_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
+    speed_failed: HashSet<(PathBuf, u32)>,
+    /// The loupe's zoom-triggered full-resolution decode, the wasm32
+    /// counterpart of `Loader::request_full`. Results land through
+    /// `loader.insert_full_external`, where `try_show` finds them.
+    full_inflight: HashSet<(PathBuf, u32)>,
+    full_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
+    full_failed: HashSet<(PathBuf, u32)>,
+
+    /// Where each running export's JPEG goes. The loader's threads bake it;
+    /// the destination folder handle cannot leave the main thread.
+    exports: crate::web_exports::WebExports,
+    /// `Preview` and `Speed` results that `poll_web_thumbs` pulled off the
+    /// pool's single shared channel. `poll_web_preview` consumes them in the
+    /// same frame.
+    preview_pending: Vec<crate::web_decode::PoolResult>,
+    /// `Full` results set aside the same way, for `poll_web_full`.
+    full_pending: Vec<crate::web_decode::PoolResult>,
+}
+
+impl Web {
+    pub(super) fn new() -> Self {
+        let (folder_tx, folder_rx) = std::sync::mpsc::channel();
+        let (dirlist_tx, dirlist_rx) = std::sync::mpsc::channel();
+        let (export_tx, export_rx) = std::sync::mpsc::channel();
+        let (paste_tx, paste_rx) = std::sync::mpsc::channel();
+        Self {
+            session_restore: None,
+            folder_pending: false,
+            full_cjk_requested: Default::default(),
+            file_handles: HashMap::new(),
+            dir_handles: HashMap::new(),
+            thumb_cleanup: HashMap::new(),
+            dirlist_inflight: std::collections::HashSet::new(),
+            pending_nav: None,
+            nav_generation: 0,
+            pending_nav_generation: 0,
+            handle_generation: 0,
+            thumb_inflight: HashSet::new(),
+            thumb_recovery_pending: Vec::new(),
+            read_inflight: std::rc::Rc::new(std::cell::Cell::new(0)),
+            thumb_retries: HashMap::new(),
+            preview_retries: HashMap::new(),
+            preview_inflight: HashSet::new(),
+            preview_failed: HashSet::new(),
+            speed_inflight: HashSet::new(),
+            speed_retries: HashMap::new(),
+            speed_failed: HashSet::new(),
+            full_inflight: HashSet::new(),
+            full_retries: HashMap::new(),
+            full_failed: HashSet::new(),
+            exports: Default::default(),
+            preview_pending: Vec::new(),
+            full_pending: Vec::new(),
+            folder_tx,
+            folder_rx,
+            dirlist_tx,
+            dirlist_rx,
+            export_tx,
+            export_rx,
+            paste_tx,
+            paste_rx,
+        }
+    }
+
+    /// The handle of a folder the person picked or opened.
+    pub(super) fn dir_handle(&self, path: &Path) -> Option<web_sys::FileSystemDirectoryHandle> {
+        self.dir_handles.get(path).cloned()
+    }
+
+    pub(super) fn has_dir(&self, path: &Path) -> bool {
+        self.dir_handles.contains_key(path)
+    }
+
+    pub(super) fn file_handles(&self) -> &HashMap<PathBuf, web_sys::FileSystemFileHandle> {
+        &self.file_handles
+    }
+
+    /// Drops a trashed photo's handles.
+    pub(super) fn forget_handles(&mut self, path: &Path) {
+        self.file_handles.remove(path);
+        self.dir_handles.remove(path);
+    }
+
+    /// File reads in flight, shared with the reads' own tasks.
+    pub(super) fn read_inflight(&self) -> std::rc::Rc<std::cell::Cell<u32>> {
+        self.read_inflight.clone()
+    }
+
+    pub(super) fn exports(&self) -> crate::web_exports::WebExports {
+        self.exports.clone()
+    }
+
+    pub(super) fn folder_pending(&self) -> bool {
+        self.folder_pending
+    }
+
+    /// Text pasted since the last frame.
+    pub(super) fn take_pastes(&self) -> impl Iterator<Item = String> + '_ {
+        std::iter::from_fn(|| self.paste_rx.try_recv().ok())
+    }
+}
+
 impl App {
+    /// Invalidate in-flight directory listings and any navigation deferred
+    /// behind one. Runs on every tree action. Thumbnails are keyed to the
+    /// handle maps instead, see [`App::invalidate_web_thumb_handles`].
+    pub(crate) fn supersede_web_pending_nav(&mut self) {
+        self.web.nav_generation = self.web.nav_generation.wrapping_add(1);
+        self.web.pending_nav = None;
+        self.web.session_restore = None;
+    }
+
+    /// Invalidate thumbnail work after a pick replaces the handle maps.
+    /// `poll_web_thumbs` drops the old results on arrival. Clearing their keys
+    /// lets the new pick request the same browser paths again.
+    pub(crate) fn invalidate_web_thumb_handles(&mut self) {
+        self.web.handle_generation = self.web.handle_generation.wrapping_add(1);
+        self.web.thumb_inflight.clear();
+        self.web.thumb_recovery_pending.clear();
+        self.web.thumb_retries.clear();
+    }
+
+    pub(crate) fn defer_web_nav(&mut self, nav: crate::app::WebPendingNav) {
+        self.web.pending_nav_generation = self.web.nav_generation;
+        self.web.pending_nav = Some(nav);
+    }
+
+    /// Writes each JPEG a decode thread finished baking, then reports the
+    /// completed writes.
+    pub(crate) fn land_web_exports(&mut self) {
+        let baked = self
+            .loader
+            .as_mut()
+            .map(|l| l.take_web_exports())
+            .unwrap_or_default();
+        for r in self.web.exports.land(baked) {
+            let crate::web_exports::ExportResult {
+                path,
+                folder,
+                dest_dir,
+                filename,
+                result,
+            } = r;
+            let tx = self.web.export_tx.clone();
+            match result {
+                Ok(jpeg) => {
+                    let file_handles = self.web.file_handles.clone();
+                    let dest = dest_dir.join(&filename);
+                    wasm_bindgen_futures::spawn_local(async move {
+                        let result = crate::web_export_fs::WebFs::new(folder, file_handles)
+                            .write_atomic(&dest, &jpeg)
+                            .await
+                            .map(|()| crate::export::ExportLanding::File(dest.clone()));
+                        let _ = tx.send(crate::export::ExportOutcome { src: path, result });
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(crate::export::ExportOutcome {
+                        src: path,
+                        result: Err(e),
+                    });
+                }
+            }
+        }
+        let export_outcomes: Vec<_> =
+            std::iter::from_fn(|| self.web.export_rx.try_recv().ok()).collect();
+        if !export_outcomes.is_empty() {
+            self.on_export_outcomes(export_outcomes);
+            self.request_redraw();
+        }
+    }
+
     /// Makes Cmd egui's command key in a Mac browser. egui_winit picks the
     /// command key at compile time and wasm is never `target_os = "macos"`, so
     /// it takes Ctrl: Cmd+C didn't copy and Cmd+V typed a "v". Call after
@@ -116,7 +366,7 @@ impl App {
             return;
         };
         let promise = browser.navigator().clipboard().read_text();
-        let tx = self.web_paste_tx.clone();
+        let tx = self.web.paste_tx.clone();
         let window = self.window.clone();
         wasm_bindgen_futures::spawn_local(async move {
             match wasm_bindgen_futures::JsFuture::from(promise).await {
@@ -150,12 +400,12 @@ impl App {
 
     /// Opens the browser's folder picker unless one is already open.
     pub(crate) fn request_folder_pick(&mut self) {
-        if self.web_folder_pending {
+        if self.web.folder_pending {
             return;
         }
-        self.web_folder_pending = true;
-        self.web_session_restore = None;
-        let tx = self.web_folder_tx.clone();
+        self.web.folder_pending = true;
+        self.web.session_restore = None;
+        let tx = self.web.folder_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let result = web_fs::pick_and_list_folder().await;
             let _ = tx.send(result);
@@ -168,12 +418,12 @@ impl App {
     /// Must run inside the click's user activation, which the browser's
     /// permission prompt and the fallback picker both need.
     pub(crate) fn request_session_reopen(&mut self, session: super::session::Session) {
-        if self.web_folder_pending {
+        if self.web.folder_pending {
             return;
         }
-        self.web_folder_pending = true;
-        self.web_session_restore = Some(session);
-        let tx = self.web_folder_tx.clone();
+        self.web.folder_pending = true;
+        self.web.session_restore = Some(session);
+        let tx = self.web.folder_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let result = match web_fs::reopen_saved_folder().await {
                 Ok(picked) => Ok(picked),
@@ -192,9 +442,9 @@ impl App {
     /// Loads a finished pick through `load_playlist`, like native
     /// `load_folder`. Returns true while a pick is still open.
     pub(crate) fn poll_folder_pick(&mut self) -> bool {
-        if let Ok(result) = self.web_folder_rx.try_recv() {
-            self.web_folder_pending = false;
-            let restore = self.web_session_restore.take();
+        if let Ok(result) = self.web.folder_rx.try_recv() {
+            self.web.folder_pending = false;
+            let restore = self.web.session_restore.take();
             match result {
                 Ok(picked) => {
                     // A new folder invalidates pending listings, deferred
@@ -202,14 +452,15 @@ impl App {
                     self.supersede_web_pending_nav();
                     self.invalidate_web_thumb_handles();
                     self.fetch_cjk_font_for(picked.handles.keys().chain(picked.dir_handles.keys()));
-                    self.web_file_handles = picked.handles;
-                    self.web_dir_handles = picked.dir_handles;
-                    self.web_thumb_cleanup.clear();
+                    self.web.file_handles = picked.handles;
+                    self.web.dir_handles = picked.dir_handles;
+                    self.web.thumb_cleanup.clear();
                     self.subdirs.clear();
 
                     let root = picked.dir.clone();
                     let mut first_level: Vec<PathBuf> = self
-                        .web_dir_handles
+                        .web
+                        .dir_handles
                         .keys()
                         .filter(|p| p.parent() == Some(root.as_path()))
                         .cloned()
@@ -219,7 +470,7 @@ impl App {
 
                     // Must precede `load_playlist`, whose catalog load reads
                     // sidecars through this handle.
-                    let root_handle = self.web_dir_handles.get(&root).cloned();
+                    let root_handle = self.web.dir_handles.get(&root).cloned();
                     self.catalog.set_wasm_dir_handle(root_handle);
                     let playlist = Playlist::from_entries(root.clone(), picked.entries);
                     self.load_playlist(playlist, root.clone());
@@ -228,7 +479,7 @@ impl App {
                     self.expanded = std::collections::HashSet::from([root.clone()]);
                     self.mode = ViewMode::Grid;
                     // The picker fallback may have opened a different folder.
-                    self.web_session_restore = restore.filter(|s| s.root == root);
+                    self.web.session_restore = restore.filter(|s| s.root == root);
                     self.continue_web_session_restore();
                 }
                 Err(e) => {
@@ -242,7 +493,7 @@ impl App {
             }
             self.request_redraw();
         }
-        self.web_folder_pending
+        self.web.folder_pending
     }
 
     /// The wasm32 version of `request_working_thumbs`. Reads each missing
@@ -270,7 +521,7 @@ impl App {
         let wanted: std::collections::HashSet<&Path> = keys.iter().map(PathBuf::as_path).collect();
         if let Some(loader) = &mut self.loader {
             for key in loader.retain_web_thumbs(|p| wanted.contains(p)) {
-                self.web_thumb_inflight.remove(&key);
+                self.web.thumb_inflight.remove(&key);
             }
         }
 
@@ -282,12 +533,13 @@ impl App {
                 .loader
                 .as_ref()
                 .is_some_and(|l| l.get_thumb(&path, px).is_some() || l.thumb_failed(&path, px));
-            if already_have || self.web_thumb_inflight.contains(&key) {
+            if already_have || self.web.thumb_inflight.contains(&key) {
                 continue;
             }
             any_missing = true;
             if self
-                .web_thumb_retries
+                .web
+                .thumb_retries
                 .get(&key)
                 .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
             {
@@ -296,12 +548,12 @@ impl App {
             // Out of read slots, or enough bytes already waiting on the
             // threads. The key stays off `web_thumb_inflight`, so a later
             // frame tries it again, and in on-screen order.
-            if self.web_read_inflight.get() >= MAX_CONCURRENT_READS
-                || self.web_thumb_inflight.len() >= max_in_flight
+            if self.web.read_inflight.get() >= MAX_CONCURRENT_READS
+                || self.web.thumb_inflight.len() >= max_in_flight
             {
                 continue;
             }
-            let Some(handle) = self.web_file_handles.get(&path).cloned() else {
+            let Some(handle) = self.web.file_handles.get(&path).cloned() else {
                 // An Auto Tone photo deleted mid-batch has no handle. Mark it
                 // failed so `poll_auto_tone` drops it instead of waiting.
                 if let Some(loader) = &mut self.loader {
@@ -313,12 +565,12 @@ impl App {
             // missing, the photo decodes without the cache.
             let cache_dir = path
                 .parent()
-                .and_then(|d| self.web_dir_handles.get(d))
+                .and_then(|d| self.web.dir_handles.get(d))
                 .cloned();
-            let generation = self.web_handle_generation;
-            self.web_thumb_inflight.insert(key);
-            self.web_read_inflight.set(self.web_read_inflight.get() + 1);
-            let read_inflight = self.web_read_inflight.clone();
+            let generation = self.web.handle_generation;
+            self.web.thumb_inflight.insert(key);
+            self.web.read_inflight.set(self.web.read_inflight.get() + 1);
+            let read_inflight = self.web.read_inflight.clone();
             let pool = decoder.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let is_raw = crate::image_decode::is_raw_extension(&path);
@@ -374,13 +626,14 @@ impl App {
     fn store_web_thumb(&mut self, path: &Path, name: String, bytes: Vec<u8>) {
         let Some(root) = path
             .parent()
-            .and_then(|d| self.web_dir_handles.get(d))
+            .and_then(|d| self.web.dir_handles.get(d))
             .cloned()
         else {
             return;
         };
         let cleanup = self
-            .web_thumb_cleanup
+            .web
+            .thumb_cleanup
             .entry(path.parent().unwrap().to_path_buf())
             .or_default()
             .clone();
@@ -403,7 +656,7 @@ impl App {
     /// `poll_web_full`. Returns the `(path, max_px)` keys that arrived.
     pub(crate) fn poll_web_thumbs(&mut self) -> Vec<(PathBuf, u32)> {
         let mut arrived = Vec::new();
-        let pending = std::mem::take(&mut self.web_thumb_recovery_pending);
+        let pending = std::mem::take(&mut self.web.thumb_recovery_pending);
         let landed = self
             .loader
             .as_mut()
@@ -411,24 +664,24 @@ impl App {
             .unwrap_or_default();
         for r in pending.into_iter().chain(landed) {
             if r.kind == JobKind::Full {
-                self.web_full_pending.push(r);
+                self.web.full_pending.push(r);
                 continue;
             }
             if r.kind != JobKind::Thumb {
-                self.web_preview_pending.push(r);
+                self.web.preview_pending.push(r);
                 continue;
             }
             // Browser paths start at the picked folder's name, so two picks of
             // same-named folders share paths. Drop results from before the
             // last pick so they cannot resolve the new folder's handles.
-            if r.generation != Some(self.web_handle_generation) {
+            if r.generation != Some(self.web.handle_generation) {
                 continue;
             }
             let recover_source = r.needs_source_decode();
             // A corrupt cache entry needs a source read. With no read slot
             // free, park the result for next frame without using a retry.
-            if recover_source && self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
-                self.web_thumb_recovery_pending.push(r);
+            if recover_source && self.web.read_inflight.get() >= MAX_CONCURRENT_READS {
+                self.web.thumb_recovery_pending.push(r);
                 continue;
             }
             let crate::web_decode::PoolResult {
@@ -446,10 +699,10 @@ impl App {
             // failure arm, whose retry limit eventually marks it failed.
             if recover_source {
                 if let (Some(handle), Some(pool)) = (
-                    self.web_file_handles.get(&path).cloned(),
+                    self.web.file_handles.get(&path).cloned(),
                     self.loader.as_ref().map(|l| l.web_decoder()),
                 ) {
-                    let read_inflight = self.web_read_inflight.clone();
+                    let read_inflight = self.web.read_inflight.clone();
                     read_inflight.set(read_inflight.get() + 1);
                     wasm_bindgen_futures::spawn_local(async move {
                         let source = web_fs::read_array_buffer(&handle).await;
@@ -473,19 +726,19 @@ impl App {
                     continue;
                 }
             }
-            self.web_thumb_inflight.remove(&key);
+            self.web.thumb_inflight.remove(&key);
             // Ignore results for files deleted while they decoded.
             if !self
                 .playlist
                 .as_ref()
                 .is_some_and(|playlist| playlist.entries().contains(&path))
-                || !self.web_file_handles.contains_key(&path)
+                || !self.web.file_handles.contains_key(&path)
             {
                 continue;
             }
             match result {
                 Ok(img) => {
-                    self.web_thumb_retries.remove(&key);
+                    self.web.thumb_retries.remove(&key);
                     // `jpeg` is `Some` only on a cache miss.
                     if let (Some(bytes), Some(name)) = (jpeg, cache_name) {
                         self.store_web_thumb(&path, name, bytes);
@@ -503,7 +756,8 @@ impl App {
                     // Log with `web_sys::console`: `eprintln!` goes nowhere on
                     // wasm32.
                     let entry = self
-                        .web_thumb_retries
+                        .web
+                        .thumb_retries
                         .entry(key)
                         .or_insert((0, Instant::now()));
                     entry.0 += 1;
@@ -528,7 +782,7 @@ impl App {
                             )
                             .into(),
                         );
-                        self.web_thumb_retries.remove(&(path.clone(), target));
+                        self.web.thumb_retries.remove(&(path.clone(), target));
                         crate::analytics::decode_failed(&path, "thumbnail");
                         if let Some(loader) = &mut self.loader {
                             loader.mark_thumb_failed_external(path.clone(), target);
@@ -571,8 +825,8 @@ impl App {
             };
             for (kind, p, t) in loader.retain_web_loupe(keep) {
                 match kind {
-                    JobKind::Speed => self.web_speed_inflight.remove(&(p, t)),
-                    _ => self.web_preview_inflight.remove(&(p, t)),
+                    JobKind::Speed => self.web.speed_inflight.remove(&(p, t)),
+                    _ => self.web.preview_inflight.remove(&(p, t)),
                 };
             }
         }
@@ -587,7 +841,7 @@ impl App {
             .map(|(p, _)| p.clone())
             .collect();
         for p in missing {
-            if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
+            if self.web.read_inflight.get() >= MAX_CONCURRENT_READS {
                 break;
             }
             if self.web_loupe_reads(&p).0 {
@@ -609,10 +863,10 @@ impl App {
         let key = (path.clone(), target);
         let is_raw = crate::image_decode::is_raw_extension(&path);
         // Shares the read budget with thumbnails. Callers retry every frame.
-        if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
+        if self.web.read_inflight.get() >= MAX_CONCURRENT_READS {
             return false;
         }
-        let Some(handle) = self.web_file_handles.get(&path).cloned() else {
+        let Some(handle) = self.web.file_handles.get(&path).cloned() else {
             return false;
         };
         let Some(loader) = self.loader.as_mut() else {
@@ -621,13 +875,13 @@ impl App {
         let pool = loader.web_decoder();
         let exif_needed = !self.exif_cache.contains_key(&path) && loader.begin_web_exif(&path);
         if quality_needed {
-            self.web_preview_inflight.insert(key.clone());
+            self.web.preview_inflight.insert(key.clone());
         }
         if speed_needed {
-            self.web_speed_inflight.insert(key);
+            self.web.speed_inflight.insert(key);
         }
-        self.web_read_inflight.set(self.web_read_inflight.get() + 1);
-        let read_inflight = self.web_read_inflight.clone();
+        self.web.read_inflight.set(self.web.read_inflight.get() + 1);
+        let read_inflight = self.web.read_inflight.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let meta = if exif_needed {
                 Some(file_facts(&path, &handle).await)
@@ -684,19 +938,21 @@ impl App {
             .as_ref()
             .is_some_and(|l| l.get_full(path).is_some() || l.get_preview(path, target).is_some());
         let quality_needed = !already_have
-            && !self.web_preview_inflight.contains(&key)
-            && !self.web_preview_failed.contains(&key)
+            && !self.web.preview_inflight.contains(&key)
+            && !self.web.preview_failed.contains(&key)
             && !self
-                .web_preview_retries
+                .web
+                .preview_retries
                 .get(&key)
                 .is_some_and(|(_, retry_at)| Instant::now() < *retry_at);
 
         let speed_needed = is_raw
             && self.shown.path() != Some(path)
-            && !self.web_speed_inflight.contains(&key)
-            && !self.web_speed_failed.contains(&key)
+            && !self.web.speed_inflight.contains(&key)
+            && !self.web.speed_failed.contains(&key)
             && !self
-                .web_speed_retries
+                .web
+                .speed_retries
                 .get(&key)
                 .is_some_and(|(_, retry_at)| Instant::now() < *retry_at);
         (quality_needed, speed_needed)
@@ -715,10 +971,10 @@ impl App {
                 return;
             }
         }
-        if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
+        if self.web.read_inflight.get() >= MAX_CONCURRENT_READS {
             return;
         }
-        let Some(handle) = self.web_file_handles.get(&path).cloned() else {
+        let Some(handle) = self.web.file_handles.get(&path).cloned() else {
             return;
         };
         let Some(loader) = self.loader.as_mut() else {
@@ -728,8 +984,8 @@ impl App {
             return;
         }
         let decoder = loader.web_decoder();
-        self.web_read_inflight.set(self.web_read_inflight.get() + 1);
-        let read_inflight = self.web_read_inflight.clone();
+        self.web.read_inflight.set(self.web.read_inflight.get() + 1);
+        let read_inflight = self.web.read_inflight.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let meta = file_facts(&path, &handle).await;
             let read = web_fs::read_bytes(&handle).await;
@@ -758,7 +1014,7 @@ impl App {
     /// retries go in `web_preview_failed` or `web_speed_failed`.
     pub(crate) fn poll_web_preview(&mut self) -> bool {
         let mut landed = false;
-        let pending = std::mem::take(&mut self.web_preview_pending);
+        let pending = std::mem::take(&mut self.web.preview_pending);
         for crate::web_decode::PoolResult {
             kind,
             path,
@@ -770,10 +1026,10 @@ impl App {
             let key = (path.clone(), target);
             match kind {
                 JobKind::Speed => {
-                    self.web_speed_inflight.remove(&key);
+                    self.web.speed_inflight.remove(&key);
                     match result {
                         Ok(img) => {
-                            self.web_speed_retries.remove(&key);
+                            self.web.speed_retries.remove(&key);
                             if self.want.as_deref() == Some(path.as_path())
                                 && self.shown.path() != Some(path.as_path())
                             {
@@ -789,7 +1045,8 @@ impl App {
                             // No status toast: the `Preview` decode is still
                             // running independently.
                             let entry = self
-                                .web_speed_retries
+                                .web
+                                .speed_retries
                                 .entry(key.clone())
                                 .or_insert((0, Instant::now()));
                             entry.0 += 1;
@@ -812,11 +1069,11 @@ impl App {
                                     )
                                     .into(),
                                 );
-                                self.web_speed_retries.remove(&key);
+                                self.web.speed_retries.remove(&key);
                                 if self.want.as_deref() == Some(path.as_path()) {
                                     crate::analytics::decode_failed(&path, "speed");
                                 }
-                                self.web_speed_failed.insert(key);
+                                self.web.speed_failed.insert(key);
                             }
                         }
                     }
@@ -826,7 +1083,7 @@ impl App {
                 JobKind::Full => continue,
                 JobKind::Preview | JobKind::Thumb => {}
             }
-            self.web_preview_inflight.remove(&key);
+            self.web.preview_inflight.remove(&key);
             match result {
                 Ok(img) => {
                     // Web metadata reads carry no pixel size, so take the
@@ -847,12 +1104,13 @@ impl App {
                             std::sync::Arc::new(img),
                         );
                     }
-                    self.web_preview_retries.remove(&key);
+                    self.web.preview_retries.remove(&key);
                     landed = true;
                 }
                 Err(e) => {
                     let entry = self
-                        .web_preview_retries
+                        .web
+                        .preview_retries
                         .entry(key.clone())
                         .or_insert((0, Instant::now()));
                     entry.0 += 1;
@@ -875,8 +1133,8 @@ impl App {
                             )
                             .into(),
                         );
-                        self.web_preview_retries.remove(&key);
-                        self.web_preview_failed.insert(key);
+                        self.web.preview_retries.remove(&key);
+                        self.web.preview_failed.insert(key);
                         if self.want.as_deref() == Some(path.as_path()) {
                             crate::analytics::decode_failed(&path, "preview");
                             self.set_status(
@@ -916,27 +1174,28 @@ impl App {
             .as_ref()
             .is_some_and(|l| l.get_full(&path).is_some());
         if already_have
-            || self.web_full_inflight.contains(&key)
-            || self.web_full_failed.contains(&key)
+            || self.web.full_inflight.contains(&key)
+            || self.web.full_failed.contains(&key)
             || self
-                .web_full_retries
+                .web
+                .full_retries
                 .get(&key)
                 .is_some_and(|(_, retry_at)| Instant::now() < *retry_at)
         {
             return false;
         }
-        if self.web_read_inflight.get() >= MAX_CONCURRENT_READS {
+        if self.web.read_inflight.get() >= MAX_CONCURRENT_READS {
             return false;
         }
-        let Some(handle) = self.web_file_handles.get(&path).cloned() else {
+        let Some(handle) = self.web.file_handles.get(&path).cloned() else {
             return false;
         };
         let Some(pool) = self.loader.as_ref().map(|l| l.web_decoder()) else {
             return false;
         };
-        self.web_full_inflight.insert(key);
-        self.web_read_inflight.set(self.web_read_inflight.get() + 1);
-        let read_inflight = self.web_read_inflight.clone();
+        self.web.full_inflight.insert(key);
+        self.web.read_inflight.set(self.web.read_inflight.get() + 1);
+        let read_inflight = self.web.read_inflight.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let is_raw = crate::image_decode::is_raw_extension(&path);
             let result = web_fs::read_bytes(&handle).await;
@@ -964,7 +1223,7 @@ impl App {
     /// full-resolution cache, where `try_show` picks them up.
     pub(crate) fn poll_web_full(&mut self) -> bool {
         let mut landed = false;
-        let pending = std::mem::take(&mut self.web_full_pending);
+        let pending = std::mem::take(&mut self.web.full_pending);
         for crate::web_decode::PoolResult {
             path,
             target,
@@ -973,10 +1232,10 @@ impl App {
         } in pending
         {
             let key = (path.clone(), target);
-            self.web_full_inflight.remove(&key);
+            self.web.full_inflight.remove(&key);
             match result {
                 Ok(img) => {
-                    self.web_full_retries.remove(&key);
+                    self.web.full_retries.remove(&key);
                     // `source_size` came from the preview, which is capped at
                     // `preview_px()`, so zoom and "100%" were using preview
                     // pixels. The full decode has the true size for any image
@@ -996,7 +1255,8 @@ impl App {
                 }
                 Err(e) => {
                     let entry = self
-                        .web_full_retries
+                        .web
+                        .full_retries
                         .entry(key.clone())
                         .or_insert((0, Instant::now()));
                     entry.0 += 1;
@@ -1019,11 +1279,11 @@ impl App {
                             )
                             .into(),
                         );
-                        self.web_full_retries.remove(&key);
+                        self.web.full_retries.remove(&key);
                         if self.want.as_deref() == Some(path.as_path()) {
                             crate::analytics::decode_failed(&path, "full");
                         }
-                        self.web_full_failed.insert(key);
+                        self.web.full_failed.insert(key);
                     }
                 }
             }
@@ -1040,10 +1300,10 @@ impl App {
     /// does not wake winit. `loader.has_pending_image` is always false on
     /// wasm32.
     pub(crate) fn web_decode_pending(&self) -> bool {
-        !self.web_thumb_inflight.is_empty()
-            || !self.web_preview_inflight.is_empty()
-            || !self.web_speed_inflight.is_empty()
-            || !self.web_full_inflight.is_empty()
+        !self.web.thumb_inflight.is_empty()
+            || !self.web.preview_inflight.is_empty()
+            || !self.web.speed_inflight.is_empty()
+            || !self.web.full_inflight.is_empty()
     }
 
     /// True while the wanted RAW has nothing to show yet. Stays true during
@@ -1065,26 +1325,27 @@ impl App {
                 loader.get_full(&path).is_some() || loader.get_preview(&path, target).is_some()
             });
         !has_preview
-            && (self.web_preview_inflight.contains(&key)
-                || self.web_preview_retries.contains_key(&key)
-                || self.web_preview_failed.contains(&key)
-                || self.web_file_handles.contains_key(&path))
+            && (self.web.preview_inflight.contains(&key)
+                || self.web.preview_retries.contains_key(&key)
+                || self.web.preview_failed.contains(&key)
+                || self.web.file_handles.contains_key(&path))
     }
 
     /// Starts listing `dir` unless it is cached in `subdirs` or already in
     /// flight. `poll_dir_listing` receives the result. A missing handle is
     /// treated as an empty folder.
     pub(crate) fn request_dir_listing(&mut self, dir: &Path) {
-        let generation = self.web_nav_generation;
+        let generation = self.web.nav_generation;
         let dir = dir.to_path_buf();
         if self.subdirs.contains_key(&dir)
             || self
-                .web_dirlist_inflight
+                .web
+                .dirlist_inflight
                 .contains(&(dir.clone(), generation))
         {
             return;
         }
-        let Some(handle) = self.web_dir_handles.get(&dir).cloned() else {
+        let Some(handle) = self.web.dir_handles.get(&dir).cloned() else {
             web_sys::console::error_1(
                 &format!("[web] no directory handle for {}", dir.display()).into(),
             );
@@ -1098,9 +1359,9 @@ impl App {
             self.supersede_web_pending_nav();
             return;
         };
-        self.web_dirlist_inflight.insert((dir.clone(), generation));
+        self.web.dirlist_inflight.insert((dir.clone(), generation));
         let base = dir;
-        let tx = self.web_dirlist_tx.clone();
+        let tx = self.web.dirlist_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
             let result = web_fs::list_dir(&base, &handle).await;
             let _ = tx.send((generation, base, result));
@@ -1112,11 +1373,11 @@ impl App {
     /// runs any navigation that was waiting on that folder. Returns true while
     /// a listing is still in flight.
     pub(crate) fn poll_dir_listing(&mut self) -> bool {
-        while let Ok((generation, dir, result)) = self.web_dirlist_rx.try_recv() {
-            self.web_dirlist_inflight.remove(&(dir.clone(), generation));
+        while let Ok((generation, dir, result)) = self.web.dirlist_rx.try_recv() {
+            self.web.dirlist_inflight.remove(&(dir.clone(), generation));
 
             // Superseded by a newer navigation.
-            if generation != self.web_nav_generation {
+            if generation != self.web.nav_generation {
                 continue;
             }
 
@@ -1126,13 +1387,13 @@ impl App {
                     let mut subdir_paths = Vec::with_capacity(listing.subdirs.len());
                     for (path, handle) in listing.subdirs {
                         subdir_paths.push(path.clone());
-                        self.web_dir_handles.insert(path, handle);
+                        self.web.dir_handles.insert(path, handle);
                     }
                     self.fetch_cjk_font_for(
                         listing.images.iter().map(|(p, _)| p).chain(&subdir_paths),
                     );
                     for (path, handle) in listing.images {
-                        self.web_file_handles.insert(path, handle);
+                        self.web.file_handles.insert(path, handle);
                     }
                     self.subdirs.insert(dir.clone(), subdir_paths);
                 }
@@ -1148,24 +1409,24 @@ impl App {
                 }
             }
 
-            if self.web_pending_nav_generation != self.web_nav_generation {
-                self.web_pending_nav = None;
+            if self.web.pending_nav_generation != self.web.nav_generation {
+                self.web.pending_nav = None;
             }
-            match self.web_pending_nav.clone() {
+            match self.web.pending_nav.clone() {
                 Some(WebPendingNav::Open(p)) if p == dir => {
-                    self.web_pending_nav = None;
+                    self.web.pending_nav = None;
                     if listing_succeeded {
                         self.apply_web_open_folder(p);
                     }
                 }
                 Some(WebPendingNav::Load(p)) if p == dir => {
-                    self.web_pending_nav = None;
+                    self.web.pending_nav = None;
                     if listing_succeeded {
                         self.apply_web_load_folder(p);
                     }
                 }
                 Some(WebPendingNav::LoadAfterOpen(p)) if p == dir => {
-                    self.web_pending_nav = None;
+                    self.web.pending_nav = None;
                     if listing_succeeded {
                         self.apply_web_load_folder(p);
                         self.mode = ViewMode::Grid;
@@ -1178,18 +1439,18 @@ impl App {
             if listing_succeeded {
                 self.continue_web_session_restore();
             } else {
-                self.web_session_restore = None;
+                self.web.session_restore = None;
             }
             self.request_redraw();
         }
-        !self.web_dirlist_inflight.is_empty()
+        !self.web.dirlist_inflight.is_empty()
     }
 
     /// Walk a reopened session down to its subfolder, one listing at a time,
     /// then select its photo. `poll_dir_listing` calls back as each listing
     /// lands. A tree action or a failed listing drops the rest of the restore.
     fn continue_web_session_restore(&mut self) {
-        let Some(session) = self.web_session_restore.clone() else {
+        let Some(session) = self.web.session_restore.clone() else {
             return;
         };
         let chain = session.folder_chain();
@@ -1197,7 +1458,7 @@ impl App {
             self.request_dir_listing(&unlisted.clone());
             return;
         }
-        self.web_session_restore = None;
+        self.web.session_restore = None;
         let dir = chain.last().expect("the chain starts at the root").clone();
         if chain.len() > 1 {
             self.expanded.extend(chain);
@@ -1211,7 +1472,7 @@ impl App {
     /// it through a listing first.
     fn fetch_cjk_font_for<'a>(&mut self, paths: impl IntoIterator<Item = &'a PathBuf>) {
         use std::sync::atomic::Ordering;
-        if self.web_full_cjk_requested.load(Ordering::Relaxed) {
+        if self.web.full_cjk_requested.load(Ordering::Relaxed) {
             return;
         }
         let font = egui::FontId::proportional(14.0);
@@ -1223,11 +1484,11 @@ impl App {
             })
         });
         if missing {
-            self.web_full_cjk_requested.store(true, Ordering::Relaxed);
+            self.web.full_cjk_requested.store(true, Ordering::Relaxed);
             super::fonts::fetch_full_cjk(
                 self.egui_ctx.clone(),
                 self.window.clone(),
-                self.web_full_cjk_requested.clone(),
+                self.web.full_cjk_requested.clone(),
             );
         }
     }
@@ -1238,7 +1499,8 @@ impl App {
     pub(crate) fn apply_web_open_folder(&mut self, dir: PathBuf) {
         let subdirs = self.subdirs.get(&dir).cloned().unwrap_or_default();
         let has_own_images = self
-            .web_file_handles
+            .web
+            .file_handles
             .keys()
             .any(|p| p.parent() == Some(dir.as_path()));
         let pure_container = !subdirs.is_empty() && !has_own_images;
@@ -1285,10 +1547,11 @@ impl App {
         }
         // Must precede `load_playlist`. Set even when `None`, so sidecar
         // writes never go to the previous folder.
-        let dir_handle = self.web_dir_handles.get(&dir).cloned();
+        let dir_handle = self.web.dir_handles.get(&dir).cloned();
         self.catalog.set_wasm_dir_handle(dir_handle);
         let mut entries: Vec<PathBuf> = self
-            .web_file_handles
+            .web
+            .file_handles
             .keys()
             .filter(|p| p.parent() == Some(dir.as_path()))
             .cloned()
