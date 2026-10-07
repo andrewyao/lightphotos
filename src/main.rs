@@ -247,15 +247,15 @@ impl ApplicationHandler<UserEvent> for App {
             }
             return;
         }
-        // SPIKE: Compare's photo and zoom marker are egui areas only to
+        // Compare's photo and zoom marker are egui areas only to
         // claim their drags; the wheel and pinch over them still zoom the
         // Loupe beneath.
-        let spike_zoom = self.spike_photo_hovered
+        let compare_zoom = self.compare_photo_hovered
             && matches!(
                 event,
                 WindowEvent::MouseWheel { .. } | WindowEvent::PinchGesture { .. }
             );
-        if consumed && !spike_zoom {
+        if consumed && !compare_zoom {
             return;
         }
 
@@ -498,9 +498,9 @@ impl App {
             .is_some_and(|l| l.has_pending_image() || l.has_pending_exif())
             || self.selection_pending()
             || catalog_load_pending
-            || self.spike_wake_at().is_some();
+            || self.compare_wake_at().is_some();
         if self
-            .spike_wake_at()
+            .compare_wake_at()
             .is_some_and(|t| web_time::Instant::now() >= t)
         {
             self.request_redraw();

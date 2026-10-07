@@ -361,18 +361,18 @@ pub(crate) type SignalLoad = (
 pub(crate) struct App {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) renderer: Option<Renderer>,
-    /// SPIKE: one mipped texture per group member, keyed on the members and
+    /// One mipped texture per group member, keyed on the members and
     /// the preview size, so a resize or another group re-uploads the set.
-    pub(crate) spike: Option<SpikeTiles>,
-    /// SPIKE: center of the zoomed square in uv, shared by every member.
-    pub(crate) spike_center: egui::Pos2,
-    /// SPIKE: the pointer was over the zoom marker last frame.
-    pub(crate) spike_marker_hovered: bool,
-    /// SPIKE: the pointer is over the shown photo in Compare, square or not.
-    pub(crate) spike_photo_hovered: bool,
-    /// SPIKE: the zoomed square's side as a fraction of the photo's short
-    /// side. `LIGHTPHOTOS_SPIKE_SIDE` sets the start, 0.15 by default.
-    pub(crate) spike_side: f32,
+    pub(crate) compare_tiles: Option<CompareTiles>,
+    /// Center of the zoomed square in uv, shared by every member.
+    pub(crate) compare_center: egui::Pos2,
+    /// The pointer was over the zoom marker last frame.
+    pub(crate) compare_marker_hovered: bool,
+    /// The pointer is over the shown photo in Compare, square or not.
+    pub(crate) compare_photo_hovered: bool,
+    /// The zoomed square's side as a fraction of the photo's short
+    /// side. `LIGHTPHOTOS_COMPARE_SIDE` sets the start, 0.15 by default.
+    pub(crate) compare_side: f32,
     /// Whether a grouped photo's Loupe shows the group pane. Kept across
     /// photos for the session, not saved.
     group_view: GroupView,
@@ -815,7 +815,7 @@ pub(crate) use accessors::FlagCoverage;
 pub(crate) use catalog::flag_name;
 pub(crate) use crop::{CropAspect, CropOrientation, CropOverlay};
 use group_compare::GroupPicks;
-pub(crate) use group_compare::{spike_zoom_uv, GroupView, PickHow, Square, Tile, TileFidelity};
+pub(crate) use group_compare::{compare_zoom_uv, GroupView, PickHow, Square, Tile, TileFidelity};
 mod export;
 mod fonts;
 mod group_compare;
@@ -1045,11 +1045,11 @@ impl App {
             fitted: false,
             rotations: HashMap::new(),
             loupe_viewport: None,
-            spike: None,
-            spike_center: egui::pos2(0.5, 0.5),
-            spike_marker_hovered: false,
-            spike_photo_hovered: false,
-            spike_side: std::env::var("LIGHTPHOTOS_SPIKE_SIDE")
+            compare_tiles: None,
+            compare_center: egui::pos2(0.5, 0.5),
+            compare_marker_hovered: false,
+            compare_photo_hovered: false,
+            compare_side: std::env::var("LIGHTPHOTOS_COMPARE_SIDE")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.15),
@@ -1268,7 +1268,7 @@ impl App {
         crate::analytics::begin_frame();
         // Upload thumbnails before egui references them.
         self.sync_thumb_textures();
-        self.spike_sync();
+        self.sync_compare_tiles();
 
         if self.hist_dirty && self.develop_open {
             self.recompute_histogram();
@@ -1446,26 +1446,26 @@ impl App {
         }
     }
 
-    /// SPIKE: upload a mipped texture for each member of the shown photo's
+    /// Upload a mipped texture for each member of the shown photo's
     /// group, the shown photo among them, requesting previews as needed. A
-    /// photo in no group, or the Edit view, leaves `spike` empty, which keeps
+    /// photo in no group, or the Edit view, leaves `compare_tiles` empty, which keeps
     /// the Loupe whole.
-    fn spike_sync(&mut self) {
+    fn sync_compare_tiles(&mut self) {
         if self.mode != ViewMode::Loupe {
             return;
         }
         if self.group_view == GroupView::Edit {
-            if let (Some(tiles), Some(r)) = (self.spike.take(), self.renderer.as_mut()) {
+            if let (Some(tiles), Some(r)) = (self.compare_tiles.take(), self.renderer.as_mut()) {
                 tiles.free(r);
             }
             return;
         }
-        // `LIGHTPHOTOS_SPIKE_PX` caps the tile textures below the Loupe's size.
-        let px = std::env::var("LIGHTPHOTOS_SPIKE_PX")
+        // `LIGHTPHOTOS_COMPARE_PX` caps the tile textures below the Loupe's size.
+        let px = std::env::var("LIGHTPHOTOS_COMPARE_PX")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| self.preview_px());
-        let square = self.spike_square();
+        let square = self.compare_square();
         let (Some(shown), Some(pl)) = (self.selected_path(), self.playlist.as_ref()) else {
             return;
         };
@@ -1481,19 +1481,19 @@ impl App {
             return;
         };
         if self
-            .spike
+            .compare_tiles
             .as_ref()
             .is_some_and(|t| t.key != (paths.clone(), px))
         {
-            self.spike.take().unwrap().free(r);
+            self.compare_tiles.take().unwrap().free(r);
             self.picks = GroupPicks::default();
         }
         if paths.is_empty() {
             return;
         }
-        let tiles = self.spike.get_or_insert_with(|| {
-            let page = order.iter().position(|p| *p == shown).unwrap_or(0) / SPIKE_PAGE;
-            SpikeTiles {
+        let tiles = self.compare_tiles.get_or_insert_with(|| {
+            let page = order.iter().position(|p| *p == shown).unwrap_or(0) / COMPARE_PAGE;
+            CompareTiles {
                 key: (paths.clone(), px),
                 order: order.clone(),
                 shown: shown.clone(),
@@ -1552,7 +1552,7 @@ impl App {
                 continue;
             };
             let t = Instant::now();
-            if let Some(id) = r.upload_image_spike(&img, true) {
+            if let Some(id) = r.upload_egui_image(&img, true) {
                 tiles.upload_ms += t.elapsed().as_secs_f32() * 1000.0;
                 // Level 0 plus a full mip chain is 4/3 of it.
                 tiles.bytes += img.width as u64 * img.height as u64 * 4 * 4 / 3;
@@ -1568,7 +1568,7 @@ impl App {
         if !tiles.reported && tiles.members.iter().all(Option::is_some) {
             tiles.reported = true;
             eprintln!(
-                "spike: {} tiles at preview {px}px drawn {:.0} ms after open, upload cpu {:.1} ms, gpu {:.0} MB",
+                "compare: {} tiles at preview {px}px drawn {:.0} ms after open, upload cpu {:.1} ms, gpu {:.0} MB",
                 tiles.members.len(),
                 tiles.opened.elapsed().as_secs_f32() * 1000.0,
                 tiles.upload_ms,
@@ -1580,8 +1580,8 @@ impl App {
     /// When a Full re-crop is waiting on the zoom square to settle, the
     /// moment it may start. No decode is in flight to wake the frame loop
     /// then, so `pump` polls until it passes and redraws.
-    pub(crate) fn spike_wake_at(&self) -> Option<Instant> {
-        self.spike.as_ref()?.wake_at
+    pub(crate) fn compare_wake_at(&self) -> Option<Instant> {
+        self.compare_tiles.as_ref()?.wake_at
     }
 
     fn apply_ui_actions(&mut self, actions: Vec<ui::UiAction>) {
@@ -1589,8 +1589,8 @@ impl App {
             match action {
                 ui::UiAction::GroupAllBursts => self.group_all_bursts(),
                 ui::UiAction::ScoreAll => self.score_all(),
-                ui::UiAction::SpikePage(page) => {
-                    if let Some(t) = self.spike.as_mut() {
+                ui::UiAction::ComparePage(page) => {
+                    if let Some(t) = self.compare_tiles.as_mut() {
                         t.page = page.min(t.pages().saturating_sub(1));
                     }
                 }
@@ -1600,8 +1600,8 @@ impl App {
                     self.rate_group_member(path, stars)
                 }
                 ui::UiAction::FlagGroupMember { path, flag } => self.flag_group_member(path, flag),
-                ui::UiAction::SetSpikeCenter(center) => {
-                    self.spike_center = center;
+                ui::UiAction::SetCompareCenter(center) => {
+                    self.compare_center = center;
                     self.request_redraw();
                 }
                 ui::UiAction::SetMemberAsRep(path) => self.set_member_as_rep(path),
@@ -1842,13 +1842,13 @@ mod tests {
     }
 }
 
-/// SPIKE: `LIGHTPHOTOS_SPIKE_PANE=paint` draws the pane with a bare painter
-/// as the first spike did; anything else allocates it inside a ScrollArea.
-pub(crate) fn spike_claims_pane() -> bool {
-    std::env::var("LIGHTPHOTOS_SPIKE_PANE").as_deref() != Ok("paint")
+/// `LIGHTPHOTOS_COMPARE_PANE=paint` draws the pane with a bare painter
+/// as the first version did; anything else allocates it inside a ScrollArea.
+pub(crate) fn compare_claims_pane() -> bool {
+    std::env::var("LIGHTPHOTOS_COMPARE_PANE").as_deref() != Ok("paint")
 }
 
-pub(crate) struct SpikeTiles {
+pub(crate) struct CompareTiles {
     /// Every member of the group, and the preview size the textures were made at.
     key: (Vec<PathBuf>, u32),
     /// The members as the pane lays them out, highest score first
@@ -1857,7 +1857,7 @@ pub(crate) struct SpikeTiles {
     order: Vec<PathBuf>,
     /// The member the Loupe shows, which the marker and the tile outline follow.
     pub(crate) shown: PathBuf,
-    /// Which `SPIKE_PAGE`-sized run of the members the pane shows. It starts
+    /// Which `COMPARE_PAGE`-sized run of the members the pane shows. It starts
     /// on the shown photo's run, but paging away leaves the representative
     /// with no tile.
     pub(crate) page: usize,
@@ -1881,13 +1881,13 @@ pub(crate) struct SpikeTiles {
     reported: bool,
 }
 
-/// SPIKE: tiles per page. The web build keeps fewer textures and decodes.
+/// Tiles per page. The web build keeps fewer textures and decodes.
 #[cfg(target_arch = "wasm32")]
-pub(crate) const SPIKE_PAGE: usize = 4;
+pub(crate) const COMPARE_PAGE: usize = 4;
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) const SPIKE_PAGE: usize = 9;
+pub(crate) const COMPARE_PAGE: usize = 9;
 
-impl SpikeTiles {
+impl CompareTiles {
     fn free(self, r: &mut Renderer) {
         for t in self.members.into_iter().flatten() {
             t.textures().for_each(|id| r.free_thumb(id));
@@ -1900,12 +1900,12 @@ impl SpikeTiles {
     }
 
     pub(crate) fn pages(&self) -> usize {
-        self.group_len().div_ceil(SPIKE_PAGE)
+        self.group_len().div_ceil(COMPARE_PAGE)
     }
 
     /// The members on `page`, the last page possibly short.
     pub(crate) fn page_paths(&self) -> &[PathBuf] {
-        let start = (self.page * SPIKE_PAGE).min(self.group_len());
-        &self.order[start..(start + SPIKE_PAGE).min(self.group_len())]
+        let start = (self.page * COMPARE_PAGE).min(self.group_len());
+        &self.order[start..(start + COMPARE_PAGE).min(self.group_len())]
     }
 }

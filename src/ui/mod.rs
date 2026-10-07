@@ -21,8 +21,8 @@ pub enum UiAction {
     GroupAllBursts,
     /// Score every photo in the grid, group members included.
     ScoreAll,
-    /// SPIKE: show this page of the group's tiles.
-    SpikePage(usize),
+    /// Show this page of the group's tiles.
+    ComparePage(usize),
     /// Native only, as is the row that sends it.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     SetTileFidelity(crate::app::TileFidelity),
@@ -43,7 +43,7 @@ pub enum UiAction {
         flag: Option<crate::catalog::Flag>,
     },
     /// Move Compare's focus square to center on this point of the photo.
-    SetSpikeCenter(egui::Pos2),
+    SetCompareCenter(egui::Pos2),
     /// Make this member of the shown group its representative.
     SetMemberAsRep(std::path::PathBuf),
     /// Ask to trash this member of the shown group, from its tile.

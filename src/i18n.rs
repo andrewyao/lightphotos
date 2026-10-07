@@ -520,7 +520,7 @@ pub struct Strings {
     pub open_folder_failed: fn(&str) -> String,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub preview_failed: fn(&str) -> String,
-    /// SPIKE: the group tiles' page, as first, last and group size.
+    /// The group tiles' page, as first, last and group size.
     pub group_page: fn(usize, usize, usize) -> String,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub tile_load: &'static str,

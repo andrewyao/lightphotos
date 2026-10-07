@@ -909,11 +909,11 @@ impl Renderer {
         }
     }
 
-    /// SPIKE: upload an Srgb8 image as an egui user texture. `mipped` builds
+    /// Upload an Srgb8 image as an egui user texture. `mipped` builds
     /// the mip chain through `mipgen.wgsl` and registers a sampler that reads
     /// it; otherwise level 0 only with the plain linear sampler. A
     /// `LinearF16` RAW, the decode off macOS, is encoded to sRGB8 first.
-    pub fn upload_image_spike(
+    pub fn upload_egui_image(
         &mut self,
         img: &DecodedImage,
         mipped: bool,
@@ -934,7 +934,7 @@ impl Renderer {
             1
         };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("spike_image"),
+            label: Some("egui_image"),
             size: wgpu::Extent3d {
                 width: w,
                 height: h,
@@ -995,7 +995,7 @@ impl Renderer {
                 &self.device,
                 &view,
                 wgpu::SamplerDescriptor {
-                    label: Some("spike_sampler"),
+                    label: Some("egui_image_sampler"),
                     mag_filter: wgpu::FilterMode::Linear,
                     min_filter: wgpu::FilterMode::Linear,
                     mipmap_filter: if mipped {
@@ -1007,7 +1007,7 @@ impl Renderer {
                 },
             );
         eprintln!(
-            "spike: upload {w}x{h} mipped={mipped} mips={mip_count} took {:?}",
+            "compare: upload {w}x{h} mipped={mipped} mips={mip_count} took {:?}",
             t0.elapsed()
         );
         self.thumb_textures.insert(id, texture);

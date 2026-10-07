@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 #[cfg(not(target_arch = "wasm32"))]
-use super::SpikeTiles;
+use super::CompareTiles;
 use super::{App, PendingConfirm, ViewMode};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
@@ -72,7 +72,7 @@ pub(crate) struct Square {
 
 /// The square in uv of a `w`×`h` image, `side` of the short side across,
 /// centered on `center` and kept inside the image.
-pub(crate) fn spike_zoom_uv(w: u32, h: u32, center: egui::Pos2, side: f32) -> egui::Rect {
+pub(crate) fn compare_zoom_uv(w: u32, h: u32, center: egui::Pos2, side: f32) -> egui::Rect {
     let short = w.min(h) as f32;
     let half = egui::vec2(side * short / w as f32, side * short / h as f32) / 2.0;
     let c = egui::pos2(
@@ -139,7 +139,7 @@ impl Tile {
             ),
             _ => (
                 self.speed,
-                spike_zoom_uv(self.w, self.h, square.center, square.side),
+                compare_zoom_uv(self.w, self.h, square.center, square.side),
             ),
         }
     }
@@ -207,7 +207,7 @@ fn crop_image(img: &DecodedImage, (x, y, w, h): (u32, u32, u32, u32)) -> Decoded
 /// `wake_at` while a re-crop waits on the square settling.
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn sync_full_crops(
-    tiles: &mut SpikeTiles,
+    tiles: &mut CompareTiles,
     square: Square,
     loader: &mut Loader,
     r: &mut Renderer,
@@ -243,9 +243,9 @@ pub(super) fn sync_full_crops(
             continue;
         }
         if let Some(img) = loader.get_full(&tile.path) {
-            let uv = spike_zoom_uv(img.width, img.height, square.center, square.side);
+            let uv = compare_zoom_uv(img.width, img.height, square.center, square.side);
             let crop = crop_image(&img, crop_px(img.width, img.height, uv));
-            tile.full = match r.upload_image_spike(&crop, true) {
+            tile.full = match r.upload_egui_image(&crop, true) {
                 Some(id) => Full::Ready { id, square },
                 None => Full::Failed(square),
             };
@@ -259,7 +259,7 @@ pub(super) fn sync_full_crops(
 
 /// Free every crop, for leaving Full.
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn drop_full_crops(tiles: &mut SpikeTiles, r: &mut Renderer) {
+pub(super) fn drop_full_crops(tiles: &mut CompareTiles, r: &mut Renderer) {
     for tile in tiles.members.iter_mut().flatten() {
         tile.drop_full(r);
     }
@@ -276,10 +276,10 @@ impl App {
         self.tile_fidelity
     }
 
-    pub(crate) fn spike_square(&self) -> Square {
+    pub(crate) fn compare_square(&self) -> Square {
         Square {
-            center: self.spike_center,
-            side: self.spike_side,
+            center: self.compare_center,
+            side: self.compare_side,
         }
     }
 
@@ -540,7 +540,7 @@ mod tests {
         let (mut app, dir, _) = grouped_loupe("group-view");
         assert_eq!(app.group_view(), GroupView::Edit);
         assert!(app.shown_in_group(), "the Edit/Compare toggle shows");
-        assert!(app.spike.is_none(), "Edit loads no tiles");
+        assert!(app.compare_tiles.is_none(), "Edit loads no tiles");
 
         act(
             &mut app,
@@ -726,7 +726,7 @@ mod tests {
         let (mut app, dir, _) = compare("pick-range", 14, &(0..12).collect::<Vec<_>>(), 4);
         let order = member_order(&app);
         assert!(
-            order.len() > crate::app::SPIKE_PAGE,
+            order.len() > crate::app::COMPARE_PAGE,
             "the group spans pages"
         );
         let rep = app.want.clone().unwrap();
@@ -735,7 +735,7 @@ mod tests {
         };
 
         pick(&mut app, &order[1], PickHow::Only);
-        act(&mut app, UiAction::SpikePage(1));
+        act(&mut app, UiAction::ComparePage(1));
         pick(&mut app, &order[11], PickHow::Range);
         assert!(order[1..=11].contains(&rep));
         assert_eq!(picks(&app), without_rep(&order[1..=11]));
