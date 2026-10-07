@@ -11,6 +11,12 @@ use crate::image_decode;
 pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let sel = app.sel();
 
+    // Added before the filmstrip so it sits along the window's bottom edge,
+    // under the strip.
+    if app.metadata_panel_visible() {
+        draw_loupe_info_bar(ui, app, out);
+    }
+
     if app.filmstrip_visible() {
         let strip_h = (GRID_CELL_PT * 0.55).clamp(72.0, 200.0) + 8.0;
         egui::Panel::bottom("filmstrip")
@@ -87,11 +93,6 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
 
                 region_focus_marker(ui, app, Region::Filmstrip);
             });
-    }
-
-    // Added after the filmstrip so it sits directly above it.
-    if app.metadata_panel_visible() {
-        draw_loupe_info_bar(ui, app, out);
     }
 
     // Not a CentralPanel. egui treats the root UI's unused rect as "not over
@@ -328,7 +329,7 @@ fn loupe_compare_overlay(ui: &egui::Ui, central: egui::Rect) {
     );
 }
 
-/// The info bar below the image: rating centered, then the selection
+/// The info bar under the filmstrip: rating centered, then the selection
 /// controls. The filename sits in the title bar above. Exposure sits under the Develop panel's histogram.
 fn draw_loupe_info_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let row_h = font_size::px(ui.style(), 36.0);
