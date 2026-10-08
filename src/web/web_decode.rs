@@ -198,6 +198,31 @@ impl WebExportJob {
     }
 }
 
+/// One Remove Chromatic Aberration measurement. It decodes the sensor data,
+/// never the embedded JPEG, which the camera has already corrected.
+///
+/// The RAW decode is the Loupe's `Quality` one, not export's
+/// `decode_raw_nonmac`: that one takes no `decode_budget` grant and does not
+/// reject the layouts rawler panics on, and under `panic=abort` an aborted
+/// thread keeps its memory, so every later decode fails too.
+pub struct WebMeasureJob {
+    pub path: PathBuf,
+    pub bytes: Arc<Vec<u8>>,
+    pub is_raw: bool,
+    pub max_px: u32,
+}
+
+impl WebMeasureJob {
+    pub fn run(self) -> Result<crate::develop::CaScale, String> {
+        let img = if self.is_raw {
+            crate::raw_preview::decode_raw_from_shared_vec(self.bytes, self.max_px, true)?
+        } else {
+            image_decode::decode_nonraw_from_bytes(&self.bytes, self.max_px)?
+        };
+        Ok(crate::chroma::measure(&img))
+    }
+}
+
 /// Decode one file's bytes. RAW files try the embedded EXIF preview, then
 /// rawler's embedded full image (RAF/CR3 only), then a real decode. The
 /// embedded paths are faster and avoid rawler's decode path, where a panic

@@ -91,6 +91,10 @@ enum Job {
     /// wasm32: `Exif` over bytes the main thread already read.
     #[cfg(target_arch = "wasm32")]
     WebExif(Box<crate::web_decode::WebExifJob>),
+    /// wasm32: a Remove Chromatic Aberration measurement over bytes the main
+    /// thread already read.
+    #[cfg(target_arch = "wasm32")]
+    WebMeasure(Box<crate::web_decode::WebMeasureJob>),
 }
 
 /// Everything a worker needs to bake one edited thumbnail, owned so the
@@ -154,6 +158,8 @@ enum JobResult {
     /// The export's id, its source, and the JPEG.
     #[cfg(target_arch = "wasm32")]
     WebExport(u64, PathBuf, Result<Vec<u8>, String>),
+    #[cfg(target_arch = "wasm32")]
+    WebMeasure(PathBuf, Result<crate::develop::CaScale, String>),
 }
 
 /// The shared job queue. Workers take jobs in this priority order:
@@ -241,6 +247,9 @@ fn push_job(shared: &Shared, job: Job) -> Enqueued {
         // its metadata, see `WebExifJob`.
         #[cfg(target_arch = "wasm32")]
         Job::WebExif(..) => &mut q.preview,
+        // A full decode the user waits on, like a zoom's.
+        #[cfg(target_arch = "wasm32")]
+        Job::WebMeasure(..) => &mut q.full,
     };
     lane.push_back(job);
     // notify_all because notify_one might wake only the reserved worker,
@@ -347,6 +356,20 @@ impl WebDecoder {
                 id,
                 path,
                 Err("no decode thread can take the export".to_string()),
+            ));
+        }
+    }
+
+    /// Queue a Remove Chromatic Aberration measurement. Its scales come back
+    /// through `Loader::take_web_measures`.
+    pub fn submit_measure(&self, job: crate::web_decode::WebMeasureJob) {
+        let path = job.path.clone();
+        if self.workers == 0
+            || push_job(&self.shared, Job::WebMeasure(Box::new(job))) != Enqueued::Yes
+        {
+            let _ = self.res_tx.send(JobResult::WebMeasure(
+                path,
+                Err("no decode thread can take the measurement".to_string()),
             ));
         }
     }
@@ -577,6 +600,8 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
         }
         #[cfg(target_arch = "wasm32")]
         Job::WebExif(job) => JobResult::Exif(job.path.clone(), job.run()),
+        #[cfg(target_arch = "wasm32")]
+        Job::WebMeasure(job) => JobResult::WebMeasure(job.path.clone(), job.run()),
     }
 }
 
@@ -632,6 +657,10 @@ mod panic_recovery {
                 Err("export panicked".to_string()),
             )),
             Job::WebExif(e) => Some(JobResult::Exif(e.path.clone(), e.failed())),
+            Job::WebMeasure(m) => Some(JobResult::WebMeasure(
+                m.path.clone(),
+                Err("decoder panicked".to_string()),
+            )),
             _ => None,
         };
         FAILURE.with(|f| *f.borrow_mut() = failure);
@@ -754,6 +783,9 @@ pub struct Loader {
     /// wasm32: finished exports not yet taken by `take_web_exports`.
     #[cfg(target_arch = "wasm32")]
     web_exports: Vec<(u64, PathBuf, Result<Vec<u8>, String>)>,
+    /// wasm32: finished measurements not yet taken by `take_web_measures`.
+    #[cfg(target_arch = "wasm32")]
+    web_measures: Vec<(PathBuf, Result<crate::develop::CaScale, String>)>,
     /// Kept so `web_decoder` can hand async readers a way to submit.
     #[cfg(target_arch = "wasm32")]
     res_tx: std::sync::mpsc::Sender<JobResult>,
@@ -834,6 +866,8 @@ impl Loader {
             web_results: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             web_exports: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            web_measures: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             res_tx,
             workers: started,
@@ -1155,6 +1189,13 @@ impl Loader {
     #[cfg(target_arch = "wasm32")]
     pub fn take_web_exports(&mut self) -> Vec<(u64, PathBuf, Result<Vec<u8>, String>)> {
         std::mem::take(&mut self.web_exports)
+    }
+
+    /// wasm32: finished Remove Chromatic Aberration measurements since the
+    /// last call. Filled by `poll_all`.
+    #[cfg(target_arch = "wasm32")]
+    pub fn take_web_measures(&mut self) -> Vec<(PathBuf, Result<crate::develop::CaScale, String>)> {
+        std::mem::take(&mut self.web_measures)
     }
 
     /// wasm32: drops queued browser thumbnails whose photo `keep` rejects,
@@ -1512,6 +1553,8 @@ impl Loader {
                 JobResult::Web(r) => self.web_results.push(*r),
                 #[cfg(target_arch = "wasm32")]
                 JobResult::WebExport(id, path, r) => self.web_exports.push((id, path, r)),
+                #[cfg(target_arch = "wasm32")]
+                JobResult::WebMeasure(path, r) => self.web_measures.push((path, r)),
             }
         }
         (full, thumbs, metas, exifs)

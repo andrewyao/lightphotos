@@ -480,21 +480,17 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             }
         }
 
-        // The measurement decodes the file by path on its own thread, which
-        // the browser build cannot do.
-        if !cfg!(target_arch = "wasm32") {
-            form::divider(ui);
-            form::section_header(ui, t.section(crate::develop::Section::Optics), |_| {});
-            let mut remove_ca = app.remove_ca_on();
-            let ca_box = ui
-                .add_enabled(
-                    !app.remove_ca_pending(),
-                    egui::Checkbox::new(&mut remove_ca, t.remove_ca),
-                )
-                .on_hover_text(t.remove_ca_tip);
-            if ca_box.changed() {
-                out.actions.push(UiAction::SetRemoveCa(remove_ca));
-            }
+        form::divider(ui);
+        form::section_header(ui, t.section(crate::develop::Section::Optics), |_| {});
+        let mut remove_ca = app.remove_ca_on();
+        let ca_box = ui
+            .add_enabled(
+                !app.remove_ca_pending(),
+                egui::Checkbox::new(&mut remove_ca, t.remove_ca),
+            )
+            .on_hover_text(t.remove_ca_tip);
+        if ca_box.changed() {
+            out.actions.push(UiAction::SetRemoveCa(remove_ca));
         }
 
         if changed {

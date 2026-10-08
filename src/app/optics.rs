@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, Sender};
 
 use super::{App, StatusKind};
 use crate::develop::{Adjustments, CaScale};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::thumbnail::EmbeddedPreview;
 
 /// The size the measurement decodes at. `chroma`'s search window is sized
@@ -66,23 +67,7 @@ impl App {
         if self.remove_ca_on() {
             return;
         }
-        let tx = self.optics.tx.clone();
-        let thread_path = path.clone();
-        // Not the Loupe's cached image: that can be the camera's embedded
-        // JPEG, which the camera has already corrected and may frame
-        // differently from the sensor data the edit applies to.
-        let spawned = std::thread::Builder::new()
-            .name("chroma-measure".to_string())
-            .spawn(move || {
-                let scale = crate::thumbnail::decode_at_size(
-                    &thread_path,
-                    MEASURE_PX,
-                    EmbeddedPreview::Never,
-                )
-                .map(|img| crate::chroma::measure(&img));
-                let _ = tx.send((thread_path, scale));
-            });
-        if let Err(e) = spawned {
+        if let Err(e) = self.start_measure(path.clone()) {
             self.set_status(
                 StatusKind::Error,
                 format!("{}: {e}", crate::i18n::t().remove_ca_failed),
@@ -96,9 +81,69 @@ impl App {
         );
     }
 
+    /// Decode and measure `path` off the UI thread, sending the outcome to
+    /// `optics.tx`.
+    ///
+    /// Not the Loupe's cached image: that can be the camera's embedded JPEG,
+    /// which the camera has already corrected and may frame differently from
+    /// the sensor data the edit applies to.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_measure(&self, path: PathBuf) -> Result<(), String> {
+        let tx = self.optics.tx.clone();
+        std::thread::Builder::new()
+            .name("chroma-measure".to_string())
+            .spawn(move || {
+                let scale =
+                    crate::thumbnail::decode_at_size(&path, MEASURE_PX, EmbeddedPreview::Never)
+                        .map(|img| crate::chroma::measure(&img));
+                let _ = tx.send((path, scale));
+            })
+            .map(drop)
+            .map_err(|e| e.to_string())
+    }
+
+    /// The browser cannot open a file by path off the main thread, so this
+    /// reads the bytes here and hands them to the decode pool, whose result
+    /// `poll_remove_ca` forwards to `optics.tx`.
+    #[cfg(target_arch = "wasm32")]
+    fn start_measure(&self, path: PathBuf) -> Result<(), String> {
+        let handle = self
+            .web
+            .file_handles()
+            .get(&path)
+            .cloned()
+            .ok_or("the file is not open")?;
+        let pool = self
+            .loader
+            .as_ref()
+            .map(|l| l.web_decoder())
+            .ok_or("no decode threads started")?;
+        let tx = self.optics.tx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match crate::web_fs::read_bytes(&handle).await {
+                Ok(bytes) => pool.submit_measure(crate::web_decode::WebMeasureJob {
+                    is_raw: crate::image_decode::is_raw_extension(&path),
+                    path,
+                    bytes: std::sync::Arc::new(bytes),
+                    max_px: MEASURE_PX,
+                }),
+                Err(e) => {
+                    let _ = tx.send((path, Err(e)));
+                }
+            }
+        });
+        Ok(())
+    }
+
     /// Store a finished measurement, unless the Loupe has moved to another
     /// photo or the box was cleared meanwhile.
     pub(crate) fn poll_remove_ca(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        if let Some(loader) = self.loader.as_mut() {
+            for outcome in loader.take_web_measures() {
+                let _ = self.optics.tx.send(outcome);
+            }
+        }
         while let Ok((path, scale)) = self.optics.rx.try_recv() {
             if self.optics.pending.as_ref() != Some(&path) {
                 continue;
