@@ -93,13 +93,48 @@ pub fn decode_at_size(
     }
 }
 
+/// A fast decode of `path` at `max_px`, for the Loupe's first tier and the
+/// thumbnail cache. An embedded preview under [`preview_is_large_enough`] is
+/// skipped for a source decode. A JPEG's embedded preview is its EXIF
+/// thumbnail, often 160x120: Sony's is 4:3 and letterboxed, so it showed the
+/// photo at the wrong aspect ratio until the sharper tier landed.
+///
+/// ImageIO does not report whether it used the embedded preview, so a short
+/// result is retried with `Never`. ImageIO decodes a JPEG at a reduced size,
+/// so the retry is cheap.
+#[cfg(target_os = "macos")]
+#[hotpath::measure]
+pub fn decode_speed(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
+    let img = decode_at_size(path, max_px, EmbeddedPreview::UseIfPresent)?;
+    if preview_is_large_enough(img.width, img.height, max_px) {
+        return Ok(img);
+    }
+    decode_at_size(path, max_px, EmbeddedPreview::Never)
+}
+
+/// Off macOS, the same order as `web_decode::decode`: the EXIF thumbnail if it
+/// is large enough, then rawler's embedded full image (RAF/CR3), then a
+/// source decode. Small originals come back at their native size.
+#[cfg(not(target_os = "macos"))]
+#[hotpath::measure]
+pub fn decode_speed(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
+    if let Ok(bytes) = fs::read(path) {
+        let preview = embedded_preview_from_bytes(&bytes, max_px)
+            .filter(|img| preview_is_large_enough(img.width, img.height, max_px))
+            .or_else(|| rawler_full_image_from_bytes(&bytes, max_px));
+        if let Some(img) = preview {
+            return Ok(img);
+        }
+    }
+    crate::image_decode::decode(path, max_px)
+}
+
 /// The file's embedded preview, fit within `max_px` and never upscaled.
 /// `None` on any failure, so the caller falls back to a full decode.
 ///
 /// Reads the EXIF IFD1 thumbnail, which is often only 160x120. Larger
 /// maker-specific previews are not parsed, except CR3 and RAF through rawler.
-/// There is no minimum size here: the Loupe's `Job::Speed` tier wants any
-/// preview fast and escalates later. The cache applies its own minimum.
+/// There is no minimum size here. [`decode_speed`] applies one.
 #[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
@@ -297,35 +332,6 @@ pub(crate) fn preview_is_large_enough(width: u32, height: u32, max_px: u32) -> b
     width > 0 && height > 0 && width.max(height) >= max_px.div_ceil(2)
 }
 
-/// Decode `path` for the cache. Entries last as long as the photo, so a tiny
-/// embedded preview (under [`preview_is_large_enough`]) is skipped for a
-/// source decode. Small originals are cached at their native size.
-#[cfg(all(not(target_arch = "wasm32"), not(target_os = "macos")))]
-#[hotpath::measure]
-fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
-    // Try the preview directly instead of `decode_at_size(UseIfPresent)`, so
-    // a small original is never decoded twice.
-    if let Some(img) = try_extract_embedded_preview(path, THUMB_PX)
-        .filter(|img| preview_is_large_enough(img.width, img.height, THUMB_PX))
-    {
-        return Ok(img);
-    }
-    crate::image_decode::decode(path, THUMB_PX)
-}
-
-/// macOS version. ImageIO does not report whether it used the embedded
-/// preview, so a short result is retried with `Never`. The retry is cheap
-/// when the source itself is small.
-#[cfg(all(not(target_arch = "wasm32"), target_os = "macos"))]
-#[hotpath::measure]
-fn decode_for_cache(path: &Path) -> Result<DecodedImage, String> {
-    let img = decode_at_size(path, THUMB_PX, EmbeddedPreview::UseIfPresent)?;
-    if preview_is_large_enough(img.width, img.height, THUMB_PX) {
-        return Ok(img);
-    }
-    decode_at_size(path, THUMB_PX, EmbeddedPreview::Never)
-}
-
 /// Suffix of every cache entry name. Not `.xmp`, so the catalog's sidecar
 /// scans skip these files.
 const CACHE_SUFFIX: &str = ".thumb.jpg";
@@ -418,7 +424,9 @@ impl ThumbCache {
             }
         }
 
-        let img = decode_for_cache(path)?;
+        // Entries last as long as the photo, so a tiny embedded preview must
+        // not become one.
+        let img = decode_speed(path, THUMB_PX)?;
         if let Some(file) = &entry {
             let _ = write_entry(file, &img);
         }
@@ -607,6 +615,74 @@ mod tests {
         assert!(preview_is_large_enough(192, 256, THUMB_PX));
         assert!(!preview_is_large_enough(256, 192, 513));
         assert!(!preview_is_large_enough(512, 0, THUMB_PX));
+    }
+
+    /// A gray JPEG of `w`x`h` whose EXIF IFD1 holds a 160x120 thumbnail, as a
+    /// camera writes it. The thumbnail's 4:3 differs from the photo's 3:2.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn jpeg_with_exif_thumbnail(dir: &Path, w: u32, h: u32) -> Vec<u8> {
+        let encode = |name: &str, w: u32, h: u32| {
+            let file = dir.join(name);
+            let pixels = vec![128u8; (w * h * 4) as usize];
+            crate::image_encode::encode_jpeg(
+                &file,
+                w,
+                h,
+                &pixels,
+                crate::image_encode::JpegQuality::Export,
+            )
+            .unwrap();
+            fs::read(file).unwrap()
+        };
+        let main = encode("main.jpg", w, h);
+        let thumb = encode("thumb.jpg", 160, 120);
+
+        // Big-endian TIFF: an empty IFD0, then IFD1 with Compression = JPEG
+        // and the thumbnail's offset and length. IFD1 is 2 + 3 * 12 + 4 bytes.
+        let entry = |tag: u16, kind: u16, value: u32| {
+            let mut e = Vec::new();
+            e.extend(tag.to_be_bytes());
+            e.extend(kind.to_be_bytes());
+            e.extend(1u32.to_be_bytes());
+            e.extend(value.to_be_bytes());
+            e
+        };
+        let thumb_at = 14 + 2 + 3 * 12 + 4;
+        let mut tiff = b"MM\0\x2a".to_vec();
+        tiff.extend(8u32.to_be_bytes());
+        tiff.extend(0u16.to_be_bytes());
+        tiff.extend(14u32.to_be_bytes());
+        tiff.extend(3u16.to_be_bytes());
+        tiff.extend(entry(0x0103, 3, 6 << 16));
+        tiff.extend(entry(0x0201, 4, thumb_at));
+        tiff.extend(entry(0x0202, 4, thumb.len() as u32));
+        tiff.extend(0u32.to_be_bytes());
+        tiff.extend(&thumb);
+
+        let mut app1 = vec![0xFF, 0xE1];
+        app1.extend(((2 + 6 + tiff.len()) as u16).to_be_bytes());
+        app1.extend(b"Exif\0\0");
+        app1.extend(tiff);
+        [&main[..2], &app1, &main[2..]].concat()
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn the_loupe_speed_pass_skips_a_jpegs_tiny_exif_thumbnail() {
+        let dir = std::env::temp_dir().join(format!("lp-speed-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("photo.jpg");
+        fs::write(&photo, jpeg_with_exif_thumbnail(&dir, 1200, 800)).unwrap();
+
+        let thumb = decode_at_size(&photo, 1024, EmbeddedPreview::UseIfPresent).unwrap();
+        assert!(
+            thumb.width < 512,
+            "fixture must carry a small EXIF thumbnail"
+        );
+
+        let img = decode_speed(&photo, 1024).unwrap();
+        assert_eq!((img.width, img.height), (1024, 683));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

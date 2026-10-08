@@ -531,11 +531,7 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
         Job::Speed(path, target) => {
             let t0 = web_time::Instant::now();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::thumbnail::decode_at_size(
-                    &path,
-                    target,
-                    crate::thumbnail::EmbeddedPreview::UseIfPresent,
-                )
+                crate::thumbnail::decode_speed(&path, target)
             }))
             .unwrap_or_else(|_| Err(format!("speed decode panicked: {}", path.display())));
             report_decode("speed", &path, target, t0, &r);
