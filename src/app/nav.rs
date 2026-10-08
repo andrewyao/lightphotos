@@ -374,6 +374,16 @@ impl App {
         self.anchor = self.sel;
     }
 
+    /// Cmd+D. The Loupe keeps its photo under the cursor.
+    pub(super) fn deselect_all(&mut self) {
+        self.selected.clear();
+        self.anchor = None;
+        if self.mode == ViewMode::Grid {
+            self.sel = None;
+        }
+        self.request_redraw();
+    }
+
     /// Shift+arrow in the grid.
     fn extend_grid(&mut self, dx: isize, dy: isize) {
         if self.visible.is_empty() {

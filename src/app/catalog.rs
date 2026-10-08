@@ -286,7 +286,7 @@ impl App {
 
     /// Whether a rating or flag goes to `action_paths` rather than the one
     /// selected photo: a multi-selection, or any Compare picks.
-    fn marks_action_paths(&self) -> bool {
+    pub(super) fn marks_action_paths(&self) -> bool {
         self.action_count() > 1 || !self.group_picks().is_empty()
     }
 
@@ -490,15 +490,44 @@ impl App {
         self.request_redraw();
     }
 
-    /// Labels the selected photo; `None` clears the label.
-    /// No key sets a color label yet; kept for the label UI still to come.
-    #[allow(dead_code)]
-    fn set_label(&mut self, label: Option<crate::catalog::ColorLabel>) {
-        let Some(path) = self.selected_path() else {
-            return;
+    /// Gives `label` to the selected photo, or to the photos `set_rating`
+    /// would rate, or clears it when every one of them has it already.
+    pub(super) fn toggle_label(&mut self, label: crate::catalog::ColorLabel) {
+        let paths = if self.marks_action_paths() {
+            self.action_paths()
+        } else {
+            self.selected_path().into_iter().collect()
         };
-        self.catalog.set_label(&path, label);
+        if paths.is_empty() {
+            return;
+        }
+        let all = paths.iter().all(|p| self.catalog.label(p) == Some(label));
+        let label = (!all).then_some(label);
+        for path in &paths {
+            self.catalog.set_label(path, label);
+        }
         self.request_redraw();
+    }
+
+    /// A digit key's rating. With `advance` (Shift held) it then moves on to
+    /// the next photo, as Lightroom's Shift+digit does, unless it rated a
+    /// multi-selection or the rating filtered the photo out of view, which
+    /// already moved the cursor.
+    pub(super) fn rate_key(&mut self, stars: u8, advance: bool) {
+        let one = !self.marks_action_paths();
+        let before = self.selected_path();
+        self.set_rating(stars);
+        if advance && one && self.selected_path() == before {
+            self.nav_arrow(1, 0, false);
+        }
+    }
+
+    /// Lightroom's backquote: Pick, or Unflag when every photo it applies to
+    /// is already picked.
+    pub(super) fn toggle_pick(&mut self) {
+        let picked =
+            self.selection_flag_coverage(Some(Flag::Pick)) == crate::app::FlagCoverage::All;
+        self.set_flag((!picked).then_some(Flag::Pick));
     }
 
     /// In the loupe, loads the selected photo if a filter recompute moved the

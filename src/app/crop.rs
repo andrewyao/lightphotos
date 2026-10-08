@@ -904,15 +904,18 @@ mod tests {
     }
 
     #[test]
-    fn brackets_rotate_the_crop_and_flip_its_orientation() {
-        use winit::keyboard::KeyCode;
+    fn cmd_brackets_rotate_the_crop_and_flip_its_orientation() {
+        use winit::keyboard::{KeyCode, ModifiersState};
         let mut app = photo_app(0, None);
         app.enter_crop();
         app.set_crop_aspect(CropAspect::R16x9);
         let rect = app.crop_rect().unwrap();
 
         app.handle_key(KeyCode::BracketRight);
-        assert_eq!(app.current_rotation(), 1, "] turns clockwise");
+        assert_eq!(app.current_rotation(), 0, "a bare ] does nothing");
+        app.modifiers = ModifiersState::SUPER;
+        app.handle_key(KeyCode::BracketRight);
+        assert_eq!(app.current_rotation(), 1, "Cmd+] turns clockwise");
         assert_eq!(
             app.crop_rect(),
             Some(rect),
@@ -927,7 +930,7 @@ mod tests {
 
         app.handle_key(KeyCode::BracketLeft);
         app.handle_key(KeyCode::BracketLeft);
-        assert_eq!(app.current_rotation(), 3, "[ turns anti-clockwise");
+        assert_eq!(app.current_rotation(), 3, "Cmd+[ turns anti-clockwise");
         assert_eq!(app.crop_rect(), Some(rect));
         assert_eq!(app.crop_orientation(), Some(CropOrientation::Vertical));
         assert!(app.crop.edit.is_some(), "rotating stays in crop mode");
@@ -940,9 +943,9 @@ mod tests {
         app.develop_open = false;
         assert_eq!(app.develop_tab(), DevelopTab::Sliders);
 
-        app.handle_key(KeyCode::KeyC);
+        app.handle_key(KeyCode::KeyR);
         assert_eq!(app.develop_tab(), DevelopTab::Crop);
-        assert!(app.develop_visible(), "C opens the Develop panel");
+        assert!(app.develop_visible(), "R opens the Develop panel");
         app.set_crop_aspect(CropAspect::R16x9);
         app.handle_key(KeyCode::Enter);
         assert!(app.crop.edit.is_none());
@@ -964,7 +967,7 @@ mod tests {
             (0.125, 0.0, 0.875, 1.0),
         );
 
-        app.handle_key(KeyCode::KeyC);
+        app.handle_key(KeyCode::KeyR);
         app.set_crop_aspect(CropAspect::R16x9);
         app.handle_key(KeyCode::Escape);
         assert_eq!(app.develop_tab(), DevelopTab::Masks, "Esc goes back");
@@ -975,7 +978,7 @@ mod tests {
             (0.125, 0.0, 0.875, 1.0),
         );
 
-        app.handle_key(KeyCode::KeyC);
+        app.handle_key(KeyCode::KeyR);
         app.teardown_loupe_state();
         assert_eq!(
             app.develop_tab(),

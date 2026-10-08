@@ -35,8 +35,13 @@
     // both as page zoom instead and scales the whole UI, text included, so
     // they are swallowed here and left for the canvas to handle.
     const zoomKeys = new Set(['+', '=', '-', '_']);
+    // The app's own Cmd/Ctrl chords that a browser also binds: D bookmarks
+    // the page, [ and ] go back and forward, Shift+E opens a sidebar.
+    const appCodes = new Set(['KeyD', 'BracketLeft', 'BracketRight']);
     window.addEventListener('keydown', (e) => {
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && zoomKeys.has(e.key)) {
+      const primary = (e.ctrlKey || e.metaKey) && !e.altKey;
+      if (primary && (zoomKeys.has(e.key) || appCodes.has(e.code) ||
+          (e.shiftKey && e.code === 'KeyE'))) {
         e.preventDefault();
       }
     }, { passive: false });

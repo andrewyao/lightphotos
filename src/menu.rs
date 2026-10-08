@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The macOS menu bar. Each command stands for a key chord that
-//! `App::handle_key` already binds, and choosing it replays that chord, so the
-//! menu can do nothing the keyboard can't, under the same modal rules.
+//! The macOS menu bar. Most commands stand for a key chord that
+//! `App::handle_key` already binds, and choosing one replays that chord, so
+//! the menu acts under the same modal rules as the keyboard. A few commands
+//! have no key, and `App::run_menu_command` runs those directly.
 //!
 //! AppKit offers a key event to the menu before the window. An enabled item
 //! whose key equivalent matches consumes the key and winit never sees it; a
@@ -17,6 +18,7 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{KeyCode, ModifiersState};
 
 use crate::app::App;
+use crate::catalog::ColorLabel;
 use crate::i18n::{self, Lang, MenuStrings};
 use crate::macos_delegate::UserEvent;
 
@@ -30,9 +32,14 @@ pub enum MenuCommand {
     Copy,
     Paste,
     SelectAll,
+    DeselectAll,
     CopySettings,
     PasteSettings,
     Rate(u8),
+    Pick,
+    Unflag,
+    Reject,
+    Label(ColorLabel),
     AutoTone,
     AutoToneSelection,
     ScorePhotos,
@@ -45,10 +52,12 @@ pub enum MenuCommand {
     DeleteGroup,
     Grid,
     Loupe,
+    Develop,
+    Crop,
+    CompareStack,
     InfoPanel,
     BeforeAfter,
-    ZoomToFit,
-    ActualSize,
+    ToggleZoom,
     ZoomIn,
     ZoomOut,
     BiggerText,
@@ -57,54 +66,60 @@ pub enum MenuCommand {
 }
 
 impl MenuCommand {
-    /// The chord `App::handle_key` binds to this command.
-    pub fn chord(self) -> (ModifiersState, KeyCode) {
+    /// The chord `App::handle_key` binds to this command, or `None` for a
+    /// command with no key.
+    pub fn chord(self) -> Option<(ModifiersState, KeyCode)> {
         use MenuCommand::*;
         let none = ModifiersState::empty();
         let cmd = ModifiersState::SUPER;
         let shift_cmd = ModifiersState::SUPER | ModifiersState::SHIFT;
         let alt = ModifiersState::ALT;
-        match self {
+        Some(match self {
             Settings => (cmd, KeyCode::Comma),
             OpenFolder => (cmd, KeyCode::KeyO),
-            Export => (none, KeyCode::KeyX),
+            Export => (shift_cmd, KeyCode::KeyE),
             Undo => (cmd, KeyCode::KeyZ),
             Cut => (cmd, KeyCode::KeyX),
             Copy => (cmd, KeyCode::KeyC),
             Paste => (cmd, KeyCode::KeyV),
             SelectAll => (cmd, KeyCode::KeyA),
+            DeselectAll => (cmd, KeyCode::KeyD),
             CopySettings => (shift_cmd, KeyCode::KeyC),
-            PasteSettings => (shift_cmd, KeyCode::KeyY),
+            PasteSettings => (shift_cmd, KeyCode::KeyV),
             Rate(stars) => (none, DIGITS[stars.min(5) as usize]),
+            Pick => (none, KeyCode::KeyP),
+            Unflag => (none, KeyCode::KeyU),
+            Reject => (none, KeyCode::KeyX),
+            Label(label) => (none, label_key(label)?),
             AutoTone => (cmd, KeyCode::KeyU),
-            AutoToneSelection => (shift_cmd, KeyCode::KeyU),
-            ScorePhotos => (shift_cmd, KeyCode::KeyS),
-            RotateLeft => (none, KeyCode::BracketLeft),
-            RotateRight => (none, KeyCode::BracketRight),
+            RotateLeft => (cmd, KeyCode::BracketLeft),
+            RotateRight => (cmd, KeyCode::BracketRight),
             MoveToTrash => (none, KeyCode::Delete),
             GroupSelected => (cmd, KeyCode::KeyG),
-            GroupBursts => (ModifiersState::SUPER | ModifiersState::ALT, KeyCode::KeyG),
             Ungroup => (shift_cmd, KeyCode::KeyG),
             DeleteGroup => (ModifiersState::SHIFT, KeyCode::Delete),
             Grid => (none, KeyCode::KeyG),
             Loupe => (none, KeyCode::KeyE),
+            Develop => (none, KeyCode::KeyD),
+            Crop => (none, KeyCode::KeyR),
+            CompareStack => (none, KeyCode::KeyC),
             InfoPanel => (none, KeyCode::KeyI),
             BeforeAfter => (none, KeyCode::KeyY),
-            ZoomToFit => (cmd, KeyCode::Digit0),
-            ActualSize => (cmd, KeyCode::Digit1),
+            ToggleZoom => (none, KeyCode::KeyZ),
             ZoomIn => (cmd, KeyCode::Equal),
             ZoomOut => (cmd, KeyCode::Minus),
             BiggerText => (alt, KeyCode::Equal),
             SmallerText => (alt, KeyCode::Minus),
             KeyboardShortcuts => (ModifiersState::SHIFT, KeyCode::Slash),
-        }
+            AutoToneSelection | ScorePhotos | GroupBursts => return None,
+        })
     }
 
     /// Only a chord with Cmd or Alt becomes a key equivalent. The menu sees
     /// keys before a focused text field does, so a bare letter or `?` there
     /// would stop the user typing it.
     fn accelerator(self) -> Option<Accelerator> {
-        let (mods, key) = self.chord();
+        let (mods, key) = self.chord()?;
         if !(mods.super_key() || mods.alt_key()) {
             return None;
         }
@@ -121,19 +136,19 @@ impl MenuCommand {
         let code = match key {
             KeyCode::KeyA => Code::KeyA,
             KeyCode::KeyC => Code::KeyC,
+            KeyCode::KeyD => Code::KeyD,
+            KeyCode::KeyE => Code::KeyE,
             KeyCode::KeyG => Code::KeyG,
             KeyCode::KeyO => Code::KeyO,
-            KeyCode::KeyS => Code::KeyS,
             KeyCode::KeyU => Code::KeyU,
             KeyCode::KeyV => Code::KeyV,
             KeyCode::KeyX => Code::KeyX,
-            KeyCode::KeyY => Code::KeyY,
             KeyCode::KeyZ => Code::KeyZ,
             KeyCode::Comma => Code::Comma,
-            KeyCode::Digit0 => Code::Digit0,
-            KeyCode::Digit1 => Code::Digit1,
             KeyCode::Equal => Code::Equal,
             KeyCode::Minus => Code::Minus,
+            KeyCode::BracketLeft => Code::BracketLeft,
+            KeyCode::BracketRight => Code::BracketRight,
             _ => return None,
         };
         Some(Accelerator::new(accel, code))
@@ -144,14 +159,25 @@ impl MenuCommand {
     }
 }
 
-const DIGITS: [KeyCode; 6] = [
+const DIGITS: [KeyCode; 10] = [
     KeyCode::Digit0,
     KeyCode::Digit1,
     KeyCode::Digit2,
     KeyCode::Digit3,
     KeyCode::Digit4,
     KeyCode::Digit5,
+    KeyCode::Digit6,
+    KeyCode::Digit7,
+    KeyCode::Digit8,
+    KeyCode::Digit9,
 ];
+
+/// The digit key `ColorLabel::from_digit` maps to `label`, if any.
+fn label_key(label: ColorLabel) -> Option<KeyCode> {
+    (6..=9u8)
+        .find(|&n| ColorLabel::from_digit(n) == Some(label))
+        .map(|n| DIGITS[n as usize])
+}
 
 type Label = fn(&MenuStrings) -> &'static str;
 
@@ -219,6 +245,7 @@ const MENUS: &[(Label, Role, &[Row])] = &[
             Command(C::Copy, |m| m.copy),
             Command(C::Paste, |m| m.paste),
             Command(C::SelectAll, |m| m.select_all),
+            Command(C::DeselectAll, |m| m.deselect_all),
             Separator,
             Command(C::CopySettings, |m| m.copy_settings),
             Command(C::PasteSettings, |m| m.paste_settings),
@@ -237,6 +264,23 @@ const MENUS: &[(Label, Role, &[Row])] = &[
                     Command(C::Rate(3), |_| "\u{2605}\u{2605}\u{2605}"),
                     Command(C::Rate(4), |_| "\u{2605}\u{2605}\u{2605}\u{2605}"),
                     Command(C::Rate(5), |_| "\u{2605}\u{2605}\u{2605}\u{2605}\u{2605}"),
+                ],
+            ),
+            Row::Submenu(
+                |m| m.set_flag,
+                &[
+                    Command(C::Pick, |m| m.flag_picked),
+                    Command(C::Unflag, |m| m.flag_unflagged),
+                    Command(C::Reject, |m| m.flag_rejected),
+                ],
+            ),
+            Row::Submenu(
+                |m| m.color_label,
+                &[
+                    Command(C::Label(ColorLabel::Red), |m| m.label_red),
+                    Command(C::Label(ColorLabel::Yellow), |m| m.label_yellow),
+                    Command(C::Label(ColorLabel::Green), |m| m.label_green),
+                    Command(C::Label(ColorLabel::Blue), |m| m.label_blue),
                 ],
             ),
             Command(C::AutoTone, |m| m.auto_tone),
@@ -258,11 +302,13 @@ const MENUS: &[(Label, Role, &[Row])] = &[
         &[
             Command(C::Grid, |m| m.grid),
             Command(C::Loupe, |m| m.loupe),
+            Command(C::Develop, |m| m.develop),
+            Command(C::Crop, |m| m.crop),
+            Command(C::CompareStack, |m| m.compare_stack),
             Command(C::InfoPanel, |m| m.info_panel),
             Command(C::BeforeAfter, |m| m.before_after),
             Separator,
-            Command(C::ZoomToFit, |m| m.zoom_to_fit),
-            Command(C::ActualSize, |m| m.actual_size),
+            Command(C::ToggleZoom, |m| m.toggle_zoom),
             Command(C::ZoomIn, |m| m.zoom_in),
             Command(C::ZoomOut, |m| m.zoom_out),
             Separator,
@@ -422,8 +468,9 @@ mod tests {
     #[test]
     fn only_cmd_and_alt_chords_become_key_equivalents() {
         for cmd in commands() {
-            let (mods, _) = cmd.chord();
-            let chorded = mods.super_key() || mods.alt_key();
+            let chorded = cmd
+                .chord()
+                .is_some_and(|(mods, _)| mods.super_key() || mods.alt_key());
             assert_eq!(
                 cmd.accelerator().is_some(),
                 chorded,
@@ -447,7 +494,9 @@ mod tests {
             if matches!(cmd, C::Cut | C::Copy | C::Paste) {
                 continue;
             }
-            let (mods, key) = cmd.chord();
+            let Some((mods, key)) = cmd.chord() else {
+                continue;
+            };
             let name = match key {
                 KeyCode::Slash if mods.shift_key() => "?".to_string(),
                 KeyCode::Comma => ",".into(),

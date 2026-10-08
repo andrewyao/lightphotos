@@ -1,5 +1,6 @@
 //! The App side of the macOS menu bar: whether each command's key would act
-//! right now, and running a command by replaying that key.
+//! right now, and running a command by replaying that key, or directly for
+//! the few commands with no key.
 
 use super::*;
 
@@ -23,9 +24,17 @@ impl App {
             SelectAll => typing || (free && self.mode == ViewMode::Grid),
             Undo => typing || (self.tool == LoupeTool::TouchUp && self.can_undo_touchup()),
             Settings => tool_free && !self.cropping(),
-            // X still opens the export form while cropping.
-            Export => tool_free && !self.show_settings,
-            OpenFolder | AutoTone | Rate(_) | Grid | KeyboardShortcuts => free,
+            Export => free,
+            OpenFolder | AutoTone | Rate(_) | Grid | Develop | Crop | KeyboardShortcuts => free,
+            Pick | Unflag | Reject | Label(_) => free && self.selected_path().is_some(),
+            DeselectAll => free && selected > 0,
+            CompareStack => {
+                free && if loupe {
+                    self.shown_in_group()
+                } else {
+                    self.sel.and_then(|pos| self.group_at(pos)).is_some()
+                }
+            }
             AutoToneSelection => free && selected > 0,
             ScorePhotos => free && selected > 0 && self.scoring_available(),
             MoveToTrash => free && selected > 0 && self.delete_available(),
@@ -37,15 +46,16 @@ impl App {
             PasteSettings => free && selected > 0 && self.has_copied_settings(),
             Loupe => free && self.mode == ViewMode::Grid,
             InfoPanel => free && matches!(self.mode, ViewMode::Grid | ViewMode::Loupe),
-            // [ and ] still rotate while cropping.
+            // Cmd+[ and Cmd+] still rotate while cropping.
             RotateLeft | RotateRight => tool_free && !self.show_settings && loupe,
-            BeforeAfter | ZoomToFit | ActualSize | ZoomIn | ZoomOut => free && loupe,
+            BeforeAfter | ToggleZoom | ZoomIn | ZoomOut => free && loupe,
         }
     }
 
     /// Runs `cmd` as the keyboard would: the edit commands go to egui, as
     /// egui_winit turns their keys into events, and the rest go to
-    /// `handle_key` with the command's modifiers held.
+    /// `handle_key` with the command's modifiers held. A command with no key
+    /// runs its action here.
     pub(crate) fn run_menu_command(&mut self, cmd: MenuCommand) {
         if let Some(event) = self.text_edit_event(cmd) {
             if let Some(state) = self.egui_state.as_mut() {
@@ -54,10 +64,20 @@ impl App {
             self.request_redraw();
             return;
         }
-        let (mods, code) = cmd.chord();
-        let held = std::mem::replace(&mut self.modifiers, mods);
-        self.handle_key(code);
-        self.modifiers = held;
+        match cmd.chord() {
+            Some((mods, code)) => {
+                let held = std::mem::replace(&mut self.modifiers, mods);
+                self.handle_key(code);
+                self.modifiers = held;
+            }
+            None if !self.menu_enabled(cmd) => {}
+            None => match cmd {
+                MenuCommand::AutoToneSelection => self.request_bulk(ui::BulkKind::AutoTone),
+                MenuCommand::ScorePhotos => self.score_selection(),
+                MenuCommand::GroupBursts => self.group_bursts(),
+                _ => {}
+            },
+        }
         self.request_redraw();
     }
 
@@ -121,6 +141,15 @@ mod tests {
         app.run_menu_command(MenuCommand::Settings);
         assert!(!app.show_settings);
         assert!(app.menu_enabled(MenuCommand::Rate(4)));
+    }
+
+    #[test]
+    fn a_command_with_no_key_runs_its_action() {
+        let (mut app, _, _) = folder_app("menu-unbound", 2);
+        app.selected = BTreeSet::from([0, 1]);
+        assert!(MenuCommand::AutoToneSelection.chord().is_none());
+        app.run_menu_command(MenuCommand::AutoToneSelection);
+        assert!(app.confirm_open(), "Auto Adjust Selection asks first");
     }
 
     #[test]

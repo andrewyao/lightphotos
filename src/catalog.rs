@@ -76,7 +76,7 @@ pub enum Flag {
     Reject,
 }
 
-/// A photo's color label, set with Shift+1..5 in Lightroom's order.
+/// A photo's color label. 6-9 set the first four, as in Lightroom.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ColorLabel {
@@ -88,16 +88,14 @@ pub enum ColorLabel {
 }
 
 impl ColorLabel {
-    /// The label Shift+`n` sets, for `n` in `1..=5`.
-    /// No key sets a color label yet; kept for the label UI still to come.
-    #[allow(dead_code)]
-    fn from_digit(n: u8) -> Option<ColorLabel> {
+    /// The label digit key `n` sets: 6 red, 7 yellow, 8 green, 9 blue.
+    /// Purple has no key, as in Lightroom.
+    pub fn from_digit(n: u8) -> Option<ColorLabel> {
         Some(match n {
-            1 => ColorLabel::Red,
-            2 => ColorLabel::Yellow,
-            3 => ColorLabel::Green,
-            4 => ColorLabel::Blue,
-            5 => ColorLabel::Purple,
+            6 => ColorLabel::Red,
+            7 => ColorLabel::Yellow,
+            8 => ColorLabel::Green,
+            9 => ColorLabel::Blue,
             _ => return None,
         })
     }

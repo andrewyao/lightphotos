@@ -115,6 +115,33 @@ impl App {
         }
     }
 
+    /// Lightroom's D: the Develop sliders for the photo under the cursor,
+    /// opened in the Loupe from the Grid. Unlike the rail icon, a second
+    /// press leaves them open.
+    pub(super) fn open_develop(&mut self) {
+        let sliders = RailItem::Develop(DevelopTab::Sliders);
+        if self.mode != ViewMode::Loupe {
+            self.enter_loupe();
+        }
+        if self.mode == ViewMode::Loupe && self.rail_lit() != Some(sliders) {
+            self.click_rail(sliders);
+        }
+    }
+
+    /// Lightroom's C: compare the photos in the stack under the cursor,
+    /// opened in the Loupe from the Grid. Does nothing off a stack.
+    pub(super) fn compare_stack(&mut self) {
+        if self.mode != ViewMode::Loupe {
+            if self.sel.and_then(|pos| self.group_at(pos)).is_none() {
+                return;
+            }
+            self.enter_loupe();
+        }
+        if self.mode == ViewMode::Loupe && self.rail_lit() != Some(RailItem::GroupCompare) {
+            self.click_rail(RailItem::GroupCompare);
+        }
+    }
+
     fn show_develop_page(&mut self, tab: DevelopTab) {
         self.set_group_view(GroupView::Edit);
         self.develop_open = true;

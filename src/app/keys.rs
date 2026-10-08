@@ -2,6 +2,7 @@ use super::*;
 
 use winit::keyboard::KeyCode;
 
+use crate::catalog::Flag;
 use crate::ui;
 
 impl App {
@@ -71,11 +72,11 @@ impl App {
         }
         if self.cropping() {
             match code {
-                KeyCode::KeyC | KeyCode::Enter | KeyCode::NumpadEnter => self.commit_crop(),
+                KeyCode::KeyR if !cmd && !alt => self.commit_crop(),
+                KeyCode::Enter | KeyCode::NumpadEnter => self.commit_crop(),
                 KeyCode::Escape => self.cancel_crop(),
-                KeyCode::BracketLeft if !cmd && !alt => self.rotate(false),
-                KeyCode::BracketRight if !cmd && !alt => self.rotate(true),
-                KeyCode::KeyX if !cmd && !alt => self.toggle_export_form(),
+                KeyCode::BracketLeft if cmd && !alt => self.rotate(false),
+                KeyCode::BracketRight if cmd && !alt => self.rotate(true),
                 _ => {}
             }
             return;
@@ -166,25 +167,32 @@ impl App {
             return;
         }
 
-        // Plain digits 1-5 set the rating, and 0 clears it. 6-9 do nothing.
-        if !shift && !cmd && !alt {
-            if let Some(n) = digit_of(code).filter(|&n| n <= crate::catalog::MAX_RATING) {
-                self.set_rating(n);
-                return;
+        // As in Lightroom: 0-5 rate (0 clears), and Shift+0-5 rates and moves
+        // on to the next photo. 6-9 toggle the red, yellow, green and blue
+        // labels.
+        if !cmd && !alt {
+            if let Some(n) = digit_of(code) {
+                if n <= crate::catalog::MAX_RATING {
+                    self.rate_key(n, shift);
+                    return;
+                }
+                if let Some(label) = crate::catalog::ColorLabel::from_digit(n).filter(|_| !shift) {
+                    self.toggle_label(label);
+                    return;
+                }
             }
         }
 
         let loupe = self.mode == ViewMode::Loupe;
         match code {
-            // Shift is allowed so `)`, `!` and `+` work on a US layout.
-            KeyCode::Digit0 | KeyCode::Numpad0 if cmd && loupe => self.fit_to_window(),
-            KeyCode::Digit1 | KeyCode::Numpad1 if cmd && loupe => self.reset_100(),
+            // Shift is allowed so `+` works on a US layout.
             KeyCode::Equal | KeyCode::NumpadAdd if cmd && loupe => self.zoom_by(1.2),
             KeyCode::Minus | KeyCode::NumpadSubtract if cmd && loupe => self.zoom_by(1.0 / 1.2),
-            KeyCode::BracketLeft if loupe => self.rotate(false),
-            KeyCode::BracketRight if loupe => self.rotate(true),
+            KeyCode::BracketLeft if cmd && !alt && loupe => self.rotate(false),
+            KeyCode::BracketRight if cmd && !alt && loupe => self.rotate(true),
             // `main.rs` sends Space only on a tap, not while it's held to pan.
             KeyCode::Space if loupe => self.cycle_zoom(),
+            KeyCode::KeyZ if loupe && !cmd && !alt => self.cycle_zoom(),
             KeyCode::Space if self.focus == Region::Grid => self.nav_enter(),
 
             // F6 cycles between the main region and the Toolbar and Filmstrip.
@@ -224,22 +232,23 @@ impl App {
                 self.toggle_touchup();
             }
 
-            KeyCode::KeyG if cmd && alt => self.group_bursts(),
-            KeyCode::KeyG if cmd && shift => self.ungroup_selected(),
-            KeyCode::KeyG if cmd => self.group_selected(),
-            KeyCode::KeyG if !alt => self.enter_grid(),
+            KeyCode::KeyG if cmd && shift && !alt => self.ungroup_selected(),
+            KeyCode::KeyG if cmd && !alt => self.group_selected(),
+            KeyCode::KeyG if !cmd && !alt => self.enter_grid(),
             KeyCode::KeyI if !cmd && !alt => self.click_rail(RailItem::Info),
+            KeyCode::KeyE if cmd && shift && !alt => self.toggle_export_form(),
             KeyCode::KeyE if !cmd && !alt && self.mode == ViewMode::Grid => self.enter_loupe(),
-            KeyCode::KeyC if !cmd && !alt => self.enter_crop(),
-            KeyCode::KeyX if !cmd && !alt => self.toggle_export_form(),
+            KeyCode::KeyD if cmd && !alt => self.deselect_all(),
+            KeyCode::KeyD if !alt => self.open_develop(),
+            KeyCode::KeyR if !cmd && !alt => self.enter_crop(),
+            KeyCode::KeyC if !cmd && !alt => self.compare_stack(),
+            KeyCode::KeyP if !cmd && !alt => self.set_flag(Some(Flag::Pick)),
+            KeyCode::KeyX if !cmd && !alt => self.set_flag(Some(Flag::Reject)),
+            KeyCode::KeyU if !cmd && !alt => self.set_flag(None),
+            KeyCode::Backquote if !cmd && !alt => self.toggle_pick(),
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
-            // Cmd+Shift+U tones the selection. It must come before plain Cmd+U.
-            KeyCode::KeyU if cmd && shift => self.request_bulk(ui::BulkKind::AutoTone),
-            KeyCode::KeyU if cmd => self.auto_tone_one(),
-            KeyCode::KeyS if cmd && shift => self.score_selection(),
-            // Cmd+Shift+Y pastes copied settings onto the selection. It must
-            // come before plain `Y`, which toggles the before/after view.
-            KeyCode::KeyY if cmd && shift && self.has_copied_settings() => {
+            KeyCode::KeyU if cmd && !shift && !alt => self.auto_tone_one(),
+            KeyCode::KeyV if cmd && shift && !alt && self.has_copied_settings() => {
                 self.request_bulk(ui::BulkKind::ApplySettings)
             }
             KeyCode::KeyY if self.mode == ViewMode::Loupe && !cmd && !alt => self.toggle_compare(),
@@ -276,7 +285,7 @@ impl App {
 
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
             KeyCode::KeyC if cmd && shift => self.copy_settings(),
-            KeyCode::KeyP if cmd && shift && crate::app::SHOW_PRESETS => self.prompt_save_preset(),
+            KeyCode::KeyN if cmd && shift && crate::app::SHOW_PRESETS => self.prompt_save_preset(),
             KeyCode::Delete if shift && self.selection_has_group() => self.request_delete_group(),
             KeyCode::Delete if !self.group_picks().is_empty() => self.request_delete_picks(),
             KeyCode::Delete => self.request_bulk(ui::BulkKind::Delete),
@@ -665,13 +674,8 @@ mod tests {
     fn primary_modifier_zoom_keys() {
         let (mut app, _) = editor_app();
         press(&mut app, CMD, KeyCode::Digit1);
-        assert_zoom(&app, 1.0);
         press(&mut app, CMD, KeyCode::Digit0);
-        assert!(app.fitted);
-        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::Digit1);
-        assert_zoom(&app, 1.0);
-        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::Digit0);
-        assert!(app.fitted);
+        assert!(app.fitted, "Cmd+1 and Cmd+0 are not zoom keys");
 
         press(&mut app, CMD, KeyCode::Equal);
         assert_zoom(&app, 0.6);
@@ -702,12 +706,14 @@ mod tests {
     }
 
     #[test]
-    fn brackets_rotate_without_a_modifier() {
+    fn cmd_brackets_rotate_and_bare_brackets_do_not() {
         let (mut app, paths) = editor_app();
         press(&mut app, ModifiersState::empty(), KeyCode::BracketRight);
+        assert_eq!(app.rotations.get(&paths[0]), None);
+        press(&mut app, CMD, KeyCode::BracketRight);
         assert_eq!(app.rotations.get(&paths[0]), Some(&1));
-        press(&mut app, ModifiersState::empty(), KeyCode::BracketLeft);
-        press(&mut app, ModifiersState::empty(), KeyCode::BracketLeft);
+        press(&mut app, CMD, KeyCode::BracketLeft);
+        press(&mut app, CMD, KeyCode::BracketLeft);
         assert_eq!(app.rotations.get(&paths[0]), Some(&3));
     }
 
@@ -747,7 +753,7 @@ mod tests {
         );
 
         press(&mut app, ModifiersState::empty(), KeyCode::Escape);
-        press(&mut app, ModifiersState::empty(), KeyCode::BracketRight);
+        press(&mut app, CMD, KeyCode::BracketRight);
         assert_eq!(app.rotations.get(&paths[0]), Some(&1));
     }
 
@@ -824,39 +830,130 @@ mod tests {
     }
 
     #[test]
-    fn digits_above_five_do_not_rate() {
+    fn six_to_nine_toggle_labels_and_keep_the_rating() {
+        use crate::catalog::ColorLabel;
         let (mut app, _) = folder_app(1);
         press(&mut app, ModifiersState::empty(), KeyCode::Digit3);
-        for code in [
-            KeyCode::Digit6,
-            KeyCode::Digit7,
-            KeyCode::Digit8,
-            KeyCode::Digit9,
-            KeyCode::Numpad9,
+        for (code, label) in [
+            (KeyCode::Digit6, ColorLabel::Red),
+            (KeyCode::Digit7, ColorLabel::Yellow),
+            (KeyCode::Digit8, ColorLabel::Green),
+            (KeyCode::Numpad9, ColorLabel::Blue),
         ] {
             press(&mut app, ModifiersState::empty(), code);
+            assert_eq!(app.selected_label(), Some(label), "{code:?}");
             assert_eq!(app.selected_rating(), 3, "{code:?} keeps the rating");
         }
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit9);
+        assert_eq!(app.selected_label(), None, "the same key again clears it");
         app.set_rating(9);
         assert_eq!(app.selected_rating(), 3, "set_rating ignores 9");
     }
 
-    /// Color labels have no UI yet, so the keys that used to set them are
-    /// gone and the overlay does not mention them.
     #[test]
-    fn shift_digits_do_nothing() {
-        let (mut app, _) = folder_app(1);
+    fn a_label_key_labels_every_selected_photo_then_clears_them() {
+        use crate::catalog::ColorLabel;
+        let (mut app, _) = folder_app(3);
+        press(&mut app, CMD, KeyCode::KeyA);
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit8);
+        assert!((0..3).all(|i| app.label_at(i) == Some(ColorLabel::Green)));
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit8);
+        assert!((0..3).all(|i| app.label_at(i).is_none()));
+    }
+
+    #[test]
+    fn shift_digit_rates_and_moves_to_the_next_photo() {
+        let (mut app, paths) = folder_app(3);
         press(&mut app, ModifiersState::SHIFT, KeyCode::Digit2);
-        assert_eq!(app.selected_label(), None);
-        assert_eq!(app.selected_rating(), 0, "Shift+digit is not a rating");
+        assert_eq!(app.rating_of(&paths[0]), 2);
+        assert_eq!(app.sel, Some(1), "moved on");
         assert!(app.filter.is_none(), "Shift+digit does not filter");
 
-        let advertised = crate::i18n::t()
-            .help
-            .iter()
-            .flat_map(|s| s.rows)
-            .any(|(keys, _)| keys.starts_with("Shift+0") || keys.starts_with("Shift+1"));
-        assert!(!advertised, "the overlay must not list the color labels");
+        press(&mut app, CMD, KeyCode::KeyA);
+        press(&mut app, ModifiersState::SHIFT, KeyCode::Digit4);
+        assert!(paths.iter().all(|p| app.rating_of(p) == 4));
+        assert_eq!(app.selection_count(), 3, "a multi-selection stays put");
+    }
+
+    #[test]
+    fn p_x_and_u_flag_and_backquote_toggles_pick() {
+        let (mut app, paths) = folder_app(3);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyP);
+        assert_eq!(app.flag_of(&paths[0]), Some(Flag::Pick));
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
+        assert_eq!(app.flag_of(&paths[0]), Some(Flag::Reject));
+        assert!(!app.export_form_open(), "X no longer exports");
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyU);
+        assert_eq!(app.flag_of(&paths[0]), None);
+
+        press(&mut app, ModifiersState::empty(), KeyCode::Backquote);
+        assert_eq!(app.flag_of(&paths[0]), Some(Flag::Pick));
+        press(&mut app, ModifiersState::empty(), KeyCode::Backquote);
+        assert_eq!(app.flag_of(&paths[0]), None);
+
+        press(&mut app, CMD, KeyCode::KeyA);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
+        assert!(
+            paths.iter().all(|p| app.flag_of(p) == Some(Flag::Reject)),
+            "a flag key marks the whole selection"
+        );
+        assert!(!app.confirm_open());
+    }
+
+    #[test]
+    fn d_opens_the_adjustments_for_the_photo_under_the_cursor() {
+        let (mut app, paths) = folder_app(2);
+        app.sel = Some(1);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyD);
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert_eq!(app.want.as_ref(), Some(&paths[1]));
+        assert_eq!(app.rail_lit(), Some(RailItem::Develop(DevelopTab::Sliders)));
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyD);
+        assert_eq!(
+            app.rail_lit(),
+            Some(RailItem::Develop(DevelopTab::Sliders)),
+            "a second D keeps them open"
+        );
+    }
+
+    #[test]
+    fn c_compares_the_stack_under_the_cursor_and_nothing_else() {
+        let (mut app, _) = folder_app(4);
+        group_photos(&mut app, &[1, 2], 1);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyC);
+        assert_eq!(app.mode, ViewMode::Grid, "C on a single photo does nothing");
+
+        app.sel = Some(1);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyC);
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert_eq!(app.rail_lit(), Some(RailItem::GroupCompare));
+    }
+
+    #[test]
+    fn cmd_d_deselects_everything() {
+        let (mut app, _) = folder_app(3);
+        press(&mut app, CMD, KeyCode::KeyA);
+        assert_eq!(app.selection_count(), 3);
+        press(&mut app, CMD, KeyCode::KeyD);
+        assert_eq!(app.selection_count(), 0);
+        assert_eq!(app.mode, ViewMode::Grid, "Cmd+D is not D");
+    }
+
+    #[test]
+    fn z_cycles_the_zoom_like_space() {
+        let (mut app, _) = editor_app();
+        assert!(app.fitted);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyZ);
+        assert!(!app.fitted);
+    }
+
+    #[test]
+    fn cmd_shift_v_pastes_the_copied_adjustment() {
+        let (mut app, _) = folder_app(2);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyC);
+        press(&mut app, CMD, KeyCode::KeyA);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyV);
+        assert!(app.confirm_open(), "pasting onto the selection asks first");
     }
 
     #[test]
@@ -892,20 +989,20 @@ mod tests {
     #[test]
     fn the_save_preset_shortcut_opens_the_name_prompt() {
         let (mut app, _) = editor_app();
-        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyP);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyN);
         if !crate::app::SHOW_PRESETS {
             assert!(
                 app.preset_name_edit().is_none(),
-                "Cmd+Shift+P does nothing while presets are hidden"
+                "Cmd+Shift+N does nothing while presets are hidden"
             );
             return;
         }
         assert!(
             app.preset_name_edit().is_some(),
-            "Cmd+Shift+P opens the prompt"
+            "Cmd+Shift+N opens the prompt"
         );
 
-        // The guard: while the prompt is open a stray key must not export or
+        // The guard: while the prompt is open a stray key must not flag or
         // re-rate behind it.
         press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
         press(&mut app, ModifiersState::empty(), KeyCode::Digit3);
@@ -919,10 +1016,10 @@ mod tests {
     /// guard, Escape would back the Grid out to Folders and drop the selection
     /// being exported, and Enter would open the Loupe.
     #[test]
-    fn x_opens_the_export_form_and_it_owns_escape_and_enter() {
+    fn cmd_shift_e_opens_the_export_form_and_it_owns_escape_and_enter() {
         let (mut app, _) = folder_app(2);
-        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
-        assert!(app.export_form_open(), "X opens the form");
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyE);
+        assert!(app.export_form_open(), "Cmd+Shift+E opens the form");
 
         press(&mut app, ModifiersState::empty(), KeyCode::Enter);
         assert_eq!(app.mode, ViewMode::Grid, "Enter did not open the Loupe");
@@ -932,9 +1029,9 @@ mod tests {
         assert_eq!(app.focus, Region::Grid, "and only the form");
         assert_eq!(app.sel, Some(0), "the selection survives");
 
-        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
-        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
-        assert!(!app.export_form_open(), "X again closes it");
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyE);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyE);
+        assert!(!app.export_form_open(), "Cmd+Shift+E again closes it");
     }
 
     #[test]
@@ -955,7 +1052,7 @@ mod tests {
     #[test]
     fn modified_scroll_pans_or_zooms() {
         let (mut app, _) = editor_app();
-        press(&mut app, CMD, KeyCode::Digit1);
+        app.reset_100();
         let pan = app.pan;
 
         app.modifiers = ModifiersState::SHIFT;
@@ -1005,7 +1102,7 @@ mod tests {
         );
 
         press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
-        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyE);
         assert_eq!(
             app.rail_lit(),
             Some(RailItem::Export),
