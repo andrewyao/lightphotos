@@ -12,6 +12,7 @@ use std::ffi::{OsStr, OsString};
 use web_time::SystemTime;
 
 use crate::hash::Fnv1a;
+use crate::navigation::Slot;
 
 /// A group's name, which is also its sidecar's file stem. The order of ids
 /// is the order groups were created in, and it decides a photo two sidecars
@@ -231,12 +232,18 @@ impl Groups {
         self.of.get(name)
     }
 
-    /// Whether `name` is a member that is not its group's representative,
-    /// so it has no cell of its own.
-    pub fn hides(&self, name: &OsStr) -> bool {
-        self.of
-            .get(name)
-            .is_some_and(|id| self.by_id[id].rep != name)
+    /// Where `name` sits among the stacks. `expanded` says which stacks
+    /// the Grid shows member by member.
+    pub fn slot(&self, name: &OsStr, expanded: impl Fn(&GroupId) -> bool) -> Slot<&GroupId> {
+        let Some(stack) = self.of.get(name) else {
+            return Slot::Single;
+        };
+        let expanded = expanded(stack);
+        if self.by_id[stack].rep == name {
+            Slot::Cover { stack, expanded }
+        } else {
+            Slot::Member { stack, expanded }
+        }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&GroupId, &Group)> {
@@ -442,18 +449,35 @@ mod tests {
     }
 
     #[test]
-    fn hides_only_non_representative_members() {
+    fn slot_tells_the_cover_from_the_other_members() {
         let groups = load(
             vec![(id("g-a"), saved(&["a", "b", "c"], "b"))],
             &["a", "b", "c", "d"],
         );
-        assert!(groups.hides("a".as_ref()));
-        assert!(groups.hides("c".as_ref()));
-        assert!(!groups.hides("b".as_ref()), "the representative has a cell");
-        assert!(
-            !groups.hides("d".as_ref()),
-            "a photo in no group has a cell"
+        let g = id("g-a");
+        let slot = |n: &str, expanded: bool| groups.slot(n.as_ref(), |_| expanded);
+        assert_eq!(
+            slot("a", false),
+            Slot::Member {
+                stack: &g,
+                expanded: false
+            }
         );
+        assert_eq!(
+            slot("b", true),
+            Slot::Cover {
+                stack: &g,
+                expanded: true
+            }
+        );
+        assert_eq!(
+            slot("c", true),
+            Slot::Member {
+                stack: &g,
+                expanded: true
+            }
+        );
+        assert_eq!(slot("d", false), Slot::Single, "a photo in no group");
     }
 
     #[test]

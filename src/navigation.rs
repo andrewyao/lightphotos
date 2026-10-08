@@ -4,7 +4,9 @@
 //! arrow-key movement.
 
 use crate::catalog::Flag;
+use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -33,7 +35,7 @@ pub enum Cmp {
 
 impl Cmp {
     /// `rating` is 0 when unset.
-    fn matches(self, rating: u8, value: u8) -> bool {
+    pub fn matches(self, rating: u8, value: u8) -> bool {
         match self {
             Cmp::Gte => rating >= value,
             Cmp::Eq => rating == value,
@@ -76,31 +78,55 @@ impl FlagFilter {
     }
 }
 
-/// Indices of `entries` that get a cell of their own, in order: every photo
-/// but the group members `hidden` names, which show through their group's
-/// representative. The rating and eyes filters run after this, so they judge
-/// a group by its representative alone and never see a hidden member.
-#[hotpath::measure]
-pub fn collapse_groups(entries: &[PathBuf], hidden: impl Fn(&OsStr) -> bool) -> Vec<usize> {
-    (0..entries.len())
-        .filter(|&i| entries[i].file_name().is_none_or(|n| !hidden(n)))
-        .collect()
+/// Where a folder entry sits among the stacks, keyed by stack id `K`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot<K> {
+    /// In no stack.
+    Single,
+    /// The stack's cover (its representative).
+    Cover { stack: K, expanded: bool },
+    /// Any other member of the stack.
+    Member { stack: K, expanded: bool },
 }
 
-/// The `cells` whose photo passes `filter`, in order. `rating_of` returns
-/// 0..=5, with 0 for unset, so unset photos never pass `Gte` or `Eq` with a
-/// positive value.
+/// The entries among `0..n` that get a Grid cell, in entry order. A single
+/// or a member of an expanded stack shows when it `passes`. A collapsed
+/// stack shows as its cover when any of its entries passes, so a stack whose
+/// cover fails the filters still shows when another member passes. The
+/// other members of a collapsed stack never show.
 #[hotpath::measure]
-pub fn visible_indices(
-    entries: &[PathBuf],
-    mut cells: Vec<usize>,
-    filter: Option<(Cmp, u8)>,
-    rating_of: impl Fn(&Path) -> u8,
+pub fn grid_cells<K: Eq + Hash>(
+    n: usize,
+    slot: impl Fn(usize) -> Slot<K>,
+    passes: impl Fn(usize) -> bool,
 ) -> Vec<usize> {
-    if let Some((cmp, value)) = filter {
-        cells.retain(|&i| cmp.matches(rating_of(&entries[i]), value));
+    let slots: Vec<(Slot<K>, bool)> = (0..n).map(|i| (slot(i), passes(i))).collect();
+    let mut stack_passes: HashMap<&K, bool> = HashMap::new();
+    for (s, pass) in &slots {
+        if let Slot::Cover {
+            stack,
+            expanded: false,
+        }
+        | Slot::Member {
+            stack,
+            expanded: false,
+        } = s
+        {
+            *stack_passes.entry(stack).or_default() |= *pass;
+        }
     }
-    cells
+    slots
+        .iter()
+        .enumerate()
+        .filter(|(_, (s, pass))| match s {
+            Slot::Single
+            | Slot::Cover { expanded: true, .. }
+            | Slot::Member { expanded: true, .. } => *pass,
+            Slot::Cover { stack, .. } => stack_passes[stack],
+            Slot::Member { .. } => false,
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// Frames this close to the one before belong to the same burst. A chain of
@@ -386,22 +412,83 @@ mod tests {
         names.iter().map(PathBuf::from).collect()
     }
 
-    fn all(e: &[PathBuf]) -> Vec<usize> {
-        (0..e.len()).collect()
+    use Slot::{Cover, Member, Single};
+
+    /// `grid_cells` over a fixed slot table, with `passes` per entry.
+    fn cells(slots: &[Slot<&str>], passes: &[bool]) -> Vec<usize> {
+        assert_eq!(slots.len(), passes.len());
+        grid_cells(slots.len(), |i| slots[i], |i| passes[i])
+    }
+
+    fn cover(stack: &str, expanded: bool) -> Slot<&str> {
+        Cover { stack, expanded }
+    }
+
+    fn member(stack: &str, expanded: bool) -> Slot<&str> {
+        Member { stack, expanded }
     }
 
     #[test]
-    fn visible_indices_no_filter_is_identity() {
-        let e = paths(&["a", "b", "c"]);
-        assert_eq!(visible_indices(&e, all(&e), None, |_| 0), vec![0, 1, 2]);
+    fn singles_show_exactly_when_they_pass() {
+        assert_eq!(cells(&[Single; 3], &[true; 3]), vec![0, 1, 2]);
+        assert_eq!(cells(&[Single; 3], &[false, true, false]), vec![1]);
     }
 
     #[test]
-    fn collapse_keeps_representatives_and_singles_in_order() {
-        let e = paths(&["a", "b", "c", "d", "e"]);
-        let hidden = |n: &OsStr| n == "b" || n == "d";
-        assert_eq!(collapse_groups(&e, hidden), vec![0, 2, 4]);
-        assert_eq!(collapse_groups(&e, |_| false), all(&e));
+    fn unfiltered_collapsed_stacks_show_covers_and_singles_in_order() {
+        let slots = [
+            cover("x", false),
+            member("x", false),
+            Single,
+            member("y", false),
+            cover("y", false),
+            Single,
+        ];
+        assert_eq!(cells(&slots, &[true; 6]), vec![0, 2, 4, 5]);
+    }
+
+    #[test]
+    fn a_collapsed_stack_shows_its_cover_when_only_a_member_passes() {
+        let slots = [
+            cover("x", false),
+            member("x", false),
+            member("x", false),
+            Single,
+        ];
+        assert_eq!(cells(&slots, &[false, false, true, false]), vec![0]);
+    }
+
+    #[test]
+    fn a_collapsed_stack_with_no_passing_entry_is_absent() {
+        let slots = [Single, cover("x", false), member("x", false), Single];
+        assert_eq!(cells(&slots, &[true, false, false, true]), vec![0, 3]);
+    }
+
+    #[test]
+    fn an_expanded_stack_shows_only_its_passing_entries_in_order() {
+        let slots = [
+            member("x", true),
+            Single,
+            cover("x", true),
+            member("x", true),
+            member("x", true),
+        ];
+        assert_eq!(
+            cells(&slots, &[true, true, false, true, false]),
+            vec![0, 1, 3]
+        );
+        assert_eq!(cells(&slots, &[true; 5]), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn expanding_one_stack_leaves_another_collapsed() {
+        let slots = [
+            cover("x", true),
+            member("x", true),
+            cover("y", false),
+            member("y", false),
+        ];
+        assert_eq!(cells(&slots, &[false, true, false, true]), vec![1, 2]);
     }
 
     fn playlist(names: &[&str]) -> Playlist {
@@ -480,51 +567,26 @@ mod tests {
     }
 
     #[test]
-    fn visible_indices_filters_per_cmp() {
-        let e = paths(&["a", "b", "c", "d"]);
-        let rating = |p: &Path| match p.to_str().unwrap() {
-            "b" => 3,
-            "c" => 5,
-            "d" => 1,
-            _ => 0,
+    fn rating_filter_matches_per_cmp() {
+        // Entries rated 0 (unset), 3, 5 and 1.
+        let ratings = [0, 3, 5, 1];
+        let shown = |cmp: Cmp, value: u8| {
+            grid_cells(
+                ratings.len(),
+                |_| Slot::<()>::Single,
+                |i| cmp.matches(ratings[i], value),
+            )
         };
-
         // Unset (0) never passes a positive Gte.
-        assert_eq!(
-            visible_indices(&e, all(&e), Some((Cmp::Gte, 3)), rating),
-            vec![1, 2]
-        );
-        assert_eq!(
-            visible_indices(&e, all(&e), Some((Cmp::Gte, 1)), rating),
-            vec![1, 2, 3]
-        );
-        assert_eq!(
-            visible_indices(&e, all(&e), Some((Cmp::Gte, 6)), rating),
-            Vec::<usize>::new()
-        );
-
-        assert_eq!(
-            visible_indices(&e, all(&e), Some((Cmp::Eq, 5)), rating),
-            vec![2]
-        );
-        assert_eq!(
-            visible_indices(&e, all(&e), Some((Cmp::Eq, 0)), rating),
-            vec![0]
-        );
-
+        assert_eq!(shown(Cmp::Gte, 3), vec![1, 2]);
+        assert_eq!(shown(Cmp::Gte, 1), vec![1, 2, 3]);
+        assert_eq!(shown(Cmp::Gte, 6), Vec::<usize>::new());
+        assert_eq!(shown(Cmp::Eq, 5), vec![2]);
+        assert_eq!(shown(Cmp::Eq, 0), vec![0]);
         // Unset (0) always passes Lte.
-        assert_eq!(
-            visible_indices(&e, all(&e), Some((Cmp::Lte, 1)), rating),
-            vec![0, 3]
-        );
-        assert_eq!(
-            visible_indices(&e, all(&e), Some((Cmp::Lte, 5)), rating),
-            vec![0, 1, 2, 3]
-        );
-        assert_eq!(
-            visible_indices(&e, all(&e), Some((Cmp::Lte, 0)), rating),
-            vec![0]
-        );
+        assert_eq!(shown(Cmp::Lte, 1), vec![0, 3]);
+        assert_eq!(shown(Cmp::Lte, 5), vec![0, 1, 2, 3]);
+        assert_eq!(shown(Cmp::Lte, 0), vec![0]);
     }
 
     fn t(secs: u64) -> Option<SystemTime> {

@@ -7,7 +7,7 @@ use crate::develop::{self};
 use crate::groups::GroupId;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::navigation::Playlist;
-use crate::navigation::{self, flatten_visible_tree, visible_indices};
+use crate::navigation::{self, flatten_visible_tree, Slot};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::thumbnail::THUMB_PX;
 use crate::ui::toolbar::ToolbarControl;
@@ -109,26 +109,30 @@ impl App {
         let ratings = &self.ratings;
         let entries = pl.entries();
         let groups = self.catalog.groups();
-        let cells = navigation::collapse_groups(entries, |n| groups.is_some_and(|g| g.hides(n)));
-        self.visible = visible_indices(entries, cells, self.filter, |p| {
-            ratings.get(p).copied().unwrap_or(0)
-        });
-        let (catalog, flag_filter, labels) = (&self.catalog, self.flag_filter, &self.label_filter);
-        self.visible.retain(|&i| {
+        let slot = |i: usize| {
+            entries
+                .get(i)
+                .and_then(|p| p.file_name())
+                .zip(groups)
+                .map_or(Slot::Single, |(name, groups)| groups.slot(name, |_| false))
+        };
+        let (catalog, filter, flag_filter, labels) = (
+            &self.catalog,
+            self.filter,
+            self.flag_filter,
+            &self.label_filter,
+        );
+        let eyes = self.eyes_filter_on();
+        let passes = |i: usize| {
             entries.get(i).is_some_and(|p| {
-                flag_filter.matches(catalog.flag(p))
+                filter.is_none_or(|(cmp, value)| {
+                    cmp.matches(ratings.get(p).copied().unwrap_or(0), value)
+                }) && flag_filter.matches(catalog.flag(p))
                     && (labels.is_empty() || catalog.label(p).is_some_and(|l| labels.contains(&l)))
+                    && (!eyes || self.eyes_closed(p))
             })
-        });
-        if self.eyes_filter_on() {
-            let keep: Vec<usize> = self
-                .visible
-                .iter()
-                .copied()
-                .filter(|&i| entries.get(i).is_some_and(|p| self.eyes_closed(p)))
-                .collect();
-            self.visible = keep;
-        }
+        };
+        self.visible = navigation::grid_cells(entries.len(), slot, passes);
         // A running delete has trashed these but not yet dropped them from the
         // playlist, so hiding them here is what lets the grid shrink without
         // invalidating anything indexed by playlist position.
@@ -1064,14 +1068,19 @@ pub(in crate::app) mod tests {
     }
 
     #[test]
-    fn a_filter_judges_the_representative_alone() {
-        let (mut app, dir, paths) = folder_app("nav-filter", 6);
+    fn a_collapsed_stack_shows_when_any_member_passes_the_filter() {
+        let (mut app, dir, paths) = folder_app("nav-filter", 7);
         group_photos(&mut app, &[1, 2], 1);
         group_photos(&mut app, &[3, 4], 4);
+        group_photos(&mut app, &[5, 6], 5);
         app.ratings.insert(paths[2].clone(), 5);
         app.ratings.insert(paths[4].clone(), 4);
         app.set_filter(Some((Cmp::Gte, 3)));
-        assert_eq!(cells(&app), vec![4]);
+        assert_eq!(
+            cells(&app),
+            vec![1, 4],
+            "photo 1 fails but its member 2 passes; no member of 5 and 6 passes"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1142,13 +1151,16 @@ pub(in crate::app) mod tests {
     }
 
     #[test]
-    fn a_member_whose_representative_is_filtered_out_is_gone() {
+    fn a_passing_member_keeps_its_filtered_out_cover_on_screen() {
         let (mut app, dir, paths) = folder_app("nav-gone", 4);
         group_photos(&mut app, &[1, 2], 1);
         assert_eq!(app.place_of(2), Place::Hidden(1));
         assert_eq!(app.place_of(1), Place::Cell(1));
         app.ratings.insert(paths[2].clone(), 5);
         app.set_filter(Some((Cmp::Gte, 3)));
+        assert_eq!(app.place_of(2), Place::Hidden(0));
+        assert_eq!(app.place_of(1), Place::Cell(0));
+        app.set_filter(Some((Cmp::Gte, 6)));
         assert_eq!(app.place_of(2), Place::Gone);
         assert_eq!(app.place_of(1), Place::Gone);
         let _ = std::fs::remove_dir_all(&dir);

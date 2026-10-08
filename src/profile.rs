@@ -380,13 +380,16 @@ impl Run {
         let groups = crate::groups::Groups::from_loaded(loaded.groups, |n| names.contains(n));
         let ratings: std::collections::HashMap<PathBuf, u8> = std::collections::HashMap::new();
         let t0 = Instant::now();
-        let cells = crate::navigation::collapse_groups(photos, |n| groups.hides(n));
-        let shown = crate::navigation::visible_indices(
-            photos,
-            cells,
-            Some((crate::navigation::Cmp::Gte, 0)),
-            |p| ratings.get(p).copied().unwrap_or(0),
-        );
+        let slot = |i: usize| {
+            photos[i]
+                .file_name()
+                .map_or(crate::navigation::Slot::Single, |n| {
+                    groups.slot(n, |_| false)
+                })
+        };
+        let shown = crate::navigation::grid_cells(photos.len(), slot, |i| {
+            crate::navigation::Cmp::Gte.matches(ratings.get(&photos[i]).copied().unwrap_or(0), 0)
+        });
         eprintln!(
             "[profile] view rebuild: {} photos in {} groups to {} cells in {:?}",
             photos.len(),
