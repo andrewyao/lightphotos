@@ -726,11 +726,11 @@ pub static EN: Strings = Strings {
     selected_photo: "Selected photo:",
     selected_n_photos: |n| format!("Selected {n} photos:"),
     score_all: "Score All",
-    score_all_tip: "Rate every photo here from 0 to 100, group members included",
-    group_all_bursts: "Group All Bursts",
-    group_all_bursts_tip: "Group the photos here that were shot within a second of each other",
+    score_all_tip: "Rate every photo here from 0 to 100, stack members included",
+    group_all_bursts: "Auto Stack by Capture Time",
+    group_all_bursts_tip: "Stack the photos here that were shot within a second of each other",
     auto_adjust_all: "Auto Adjust All",
-    auto_adjust_all_tip: "Set every photo's tone sliders from its own histogram, group members included",
+    auto_adjust_all_tip: "Set every photo's tone sliders from its own histogram, stack members included",
     update_score: "Update Score",
     n_selected: |n| format!("{n} selected"),
     rate_menu: "Rate \u{2605}",
@@ -784,8 +784,8 @@ pub static EN: Strings = Strings {
     bursts_reading: "Reading capture times\u{2026}",
     bursts_none: "No bursts found",
     bursts_grouped: |n, photos| match n {
-        1 => format!("Grouped 1 burst of {photos} photos"),
-        n => format!("Grouped {n} bursts, {photos} photos"),
+        1 => format!("Stacked 1 burst of {photos} photos"),
+        n => format!("Stacked {n} bursts, {photos} photos"),
     },
     delete: "Delete",
     delete_selection_tip: if WEB {
@@ -835,12 +835,12 @@ pub static EN: Strings = Strings {
                 ("Shift+Click", "Range-select"),
                 ("Cmd+Click", "Toggle individual selection"),
                 ("Shift+arrows", "Extend selection (library)"),
-                ("Cmd+G", "Group the selection"),
-                ("Cmd+Shift+G", "Ungroup the selected groups"),
-                ("Cmd+Alt+G", "Group the bursts in this folder"),
+                ("Cmd+G", "Stack the selection"),
+                ("Cmd+Shift+G", "Unstack the selected stacks"),
+                ("Cmd+Alt+G", "Auto stack this folder's bursts by capture time"),
                 (
                     "Shift+Delete",
-                    "Delete the selected groups, or remove them and keep the photos",
+                    "Delete the selected stacks, or unstack them and keep the photos",
                 ),
             ],
         },
@@ -951,21 +951,21 @@ pub static EN: Strings = Strings {
     confirm_delete_groups: if WEB {
         |n, g| {
             format!(
-                "Permanently delete {n} photo(s)? This includes every photo in {g} group(s). This cannot be undone."
+                "Permanently delete {n} photo(s)? This includes every photo in {g} stack(s). This cannot be undone."
             )
         }
     } else {
-        |n, g| format!("Move {n} photo(s) to the Trash? This includes every photo in {g} group(s).")
+        |n, g| format!("Move {n} photo(s) to the Trash? This includes every photo in {g} stack(s).")
     },
-    delete_group_title: "Delete Group",
+    delete_group_title: "Delete Stack",
     delete_group_prompt: |n, g| {
         if g == 1 {
-            format!("This group holds {n} photo(s). Remove Group keeps them as single photos.")
+            format!("This stack holds {n} photo(s). Unstack keeps them as single photos.")
         } else {
-            format!("These {g} groups hold {n} photo(s). Remove Group keeps them as single photos.")
+            format!("These {g} stacks hold {n} photo(s). Unstack keeps them as single photos.")
         }
     },
-    remove_group: "Remove Group",
+    remove_group: "Unstack",
     trash_group_photos: if WEB {
         |n| format!("Delete {n} Photos")
     } else {
@@ -1088,8 +1088,8 @@ pub static EN: Strings = Strings {
         |n, total, e| format!("Moved {n}/{total} \u{2014} last error: {e}")
     },
     delete_in_progress: "Another delete is still running\u{2026}",
-    group_refused_loading: "This folder's groups are still loading. Try again in a moment.",
-    group_name_unsaveable: "A file name here can't be saved in a group.",
+    group_refused_loading: "This folder's stacks are still loading. Try again in a moment.",
+    group_name_unsaveable: "A file name here can't be saved in a stack.",
     delete_no_handle: |dir| format!("Could not delete photos: no directory handle for {dir}"),
     copied_settings_from: |name| format!("Copied adjustment from {name}"),
     applied_settings: |n| format!("Applied the adjustment to {n} photo(s)"),
@@ -1186,8 +1186,8 @@ pub static EN: Strings = Strings {
     tile_full: "Fully (Slower)",
     set_as_rep: "Set as Representative",
     representative: "Representative",
-    view_compare: "Compare group",
-    view_compare_needs_group: "Compare group: select a photo in a group",
+    view_compare: "Compare Photos in Stack",
+    view_compare_needs_group: "Compare Photos in Stack: select a photo in a stack",
     folder_handle_missing: |dir| format!("Couldn't open {dir} \u{2014} folder handle missing"),
     list_folder_failed: |dir, e| format!("Couldn't list {dir}: {e}"),
     catalog_save_failed: |e| format!("Failed to save catalog entry: {e}"),
@@ -1223,10 +1223,10 @@ pub static EN: Strings = Strings {
         rotate_left: "Rotate Left",
         rotate_right: "Rotate Right",
         move_to_trash: "Move to Trash",
-        group_selected: "Group",
-        group_bursts: "Group Bursts",
-        ungroup: "Ungroup",
-        delete_group: "Delete Group\u{2026}",
+        group_selected: "Stack",
+        group_bursts: "Auto Stack by Capture Time",
+        ungroup: "Unstack",
+        delete_group: "Delete Stack\u{2026}",
         view: "View",
         grid: "Grid",
         loupe: "Loupe",
@@ -1348,11 +1348,11 @@ pub static ZH: Strings = Strings {
     selected_photo: "所选照片：",
     selected_n_photos: |n| format!("已选 {n} 张照片："),
     score_all: "全部评分",
-    score_all_tip: "为这里的每张照片打 0 到 100 分，包括编组内的照片",
-    group_all_bursts: "全部按连拍编组",
-    group_all_bursts_tip: "将这里一秒内连续拍摄的照片编组",
+    score_all_tip: "为这里的每张照片打 0 到 100 分，包括堆叠内的照片",
+    group_all_bursts: "按拍摄时间自动堆叠",
+    group_all_bursts_tip: "将这里一秒内连续拍摄的照片堆叠",
     auto_adjust_all: "全部自动调整",
-    auto_adjust_all_tip: "根据每张照片自身的直方图设置色调滑块，包括编组内的照片",
+    auto_adjust_all_tip: "根据每张照片自身的直方图设置色调滑块，包括堆叠内的照片",
     update_score: "更新评分",
     n_selected: |n| format!("已选 {n} 张"),
     rate_menu: "评分 \u{2605}",
@@ -1404,7 +1404,7 @@ pub static ZH: Strings = Strings {
     export_jpg_tip: "选择位置和尺寸，然后将所选照片导出为 JPG (X)",
     bursts_reading: "正在读取拍摄时间\u{2026}",
     bursts_none: "未找到连拍",
-    bursts_grouped: |n, photos| format!("已将 {photos} 张照片编为 {n} 组连拍"),
+    bursts_grouped: |n, photos| format!("已将 {photos} 张连拍照片堆叠为 {n} 个堆叠"),
     delete: "删除",
     delete_selection_tip: if WEB {
         "永久删除所选照片，无法撤销 (Delete)"
@@ -1453,10 +1453,10 @@ pub static ZH: Strings = Strings {
                 ("Shift+点按", "连续选择"),
                 ("Cmd+点按", "逐张加选或取消"),
                 ("Shift+方向键", "扩展选择（图库）"),
-                ("Cmd+G", "将所选照片编组"),
-                ("Cmd+Shift+G", "取消所选编组"),
-                ("Cmd+Alt+G", "将此文件夹中的连拍编组"),
-                ("Shift+Delete", "删除所选编组，或移除编组并保留照片"),
+                ("Cmd+G", "将所选照片堆叠"),
+                ("Cmd+Shift+G", "取消所选堆叠"),
+                ("Cmd+Alt+G", "按拍摄时间自动堆叠此文件夹中的连拍"),
+                ("Shift+Delete", "删除所选堆叠，或取消堆叠并保留照片"),
             ],
         },
         HelpSection {
@@ -1561,19 +1561,19 @@ pub static ZH: Strings = Strings {
         |n| format!("将 {n} 张照片移到废纸篓？")
     },
     confirm_delete_groups: if WEB {
-        |n, g| format!("永久删除 {n} 张照片？其中有 {g} 个编组中的全部照片。此操作无法撤销。")
+        |n, g| format!("永久删除 {n} 张照片？其中有 {g} 个堆叠中的全部照片。此操作无法撤销。")
     } else {
-        |n, g| format!("将 {n} 张照片移到废纸篓？其中有 {g} 个编组中的全部照片。")
+        |n, g| format!("将 {n} 张照片移到废纸篓？其中有 {g} 个堆叠中的全部照片。")
     },
-    delete_group_title: "删除编组",
+    delete_group_title: "删除堆叠",
     delete_group_prompt: |n, g| {
         if g == 1 {
-            format!("此编组有 {n} 张照片。移除编组后，照片会保留为单张。")
+            format!("此堆叠有 {n} 张照片。取消堆叠后，照片会保留为单张。")
         } else {
-            format!("这 {g} 个编组有 {n} 张照片。移除编组后，照片会保留为单张。")
+            format!("这 {g} 个堆叠有 {n} 张照片。取消堆叠后，照片会保留为单张。")
         }
     },
-    remove_group: "移除编组",
+    remove_group: "取消堆叠",
     trash_group_photos: if WEB {
         |n| format!("删除 {n} 张照片")
     } else {
@@ -1687,8 +1687,8 @@ pub static ZH: Strings = Strings {
         |n, total, e| format!("已移动 {n}/{total} 张 \u{2014} 最后的错误：{e}")
     },
     delete_in_progress: "已有删除正在进行\u{2026}",
-    group_refused_loading: "此文件夹的编组仍在载入，请稍后再试。",
-    group_name_unsaveable: "此文件夹中有文件名无法保存到编组中。",
+    group_refused_loading: "此文件夹的堆叠仍在载入，请稍后再试。",
+    group_name_unsaveable: "此文件夹中有文件名无法保存到堆叠中。",
     delete_no_handle: |dir| format!("无法删除照片：{dir} 没有目录句柄"),
     copied_settings_from: |name| format!("已从 {name} 拷贝调整"),
     applied_settings: |n| format!("已将调整应用到 {n} 张照片"),
@@ -1779,8 +1779,8 @@ pub static ZH: Strings = Strings {
     tile_full: "完整（较慢）",
     set_as_rep: "设为代表照片",
     representative: "代表照片",
-    view_compare: "组内比较",
-    view_compare_needs_group: "组内比较：请选择组内的照片",
+    view_compare: "比较堆叠内的照片",
+    view_compare_needs_group: "比较堆叠内的照片：请选择堆叠内的照片",
     folder_handle_missing: |dir| format!("无法打开 {dir} \u{2014} 缺少文件夹句柄"),
     list_folder_failed: |dir, e| format!("无法列出 {dir}：{e}"),
     catalog_save_failed: |e| format!("无法保存目录条目：{e}"),
@@ -1815,10 +1815,10 @@ pub static ZH: Strings = Strings {
         rotate_left: "向左旋转",
         rotate_right: "向右旋转",
         move_to_trash: "移到废纸篓",
-        group_selected: "编组",
-        group_bursts: "按连拍编组",
-        ungroup: "取消编组",
-        delete_group: "删除编组\u{2026}",
+        group_selected: "堆叠",
+        group_bursts: "按拍摄时间自动堆叠",
+        ungroup: "取消堆叠",
+        delete_group: "删除堆叠\u{2026}",
         view: "显示",
         grid: "网格",
         loupe: "单张视图",
