@@ -134,11 +134,18 @@ impl App {
                     && (!eyes || self.eyes_closed(p))
             })
         };
-        self.visible = navigation::grid_cells(entries.len(), slot, passes);
+        let gone = self.bulk_delete.as_ref().map(BulkDelete::gone);
+        // Every passing photo is on screen or behind a shown cover, so the
+        // count is the passing photos, not the members of each shown stack.
+        let shown_photos = (0..entries.len())
+            .filter(|&i| passes(i) && gone.is_none_or(|g| !g.contains(&entries[i])))
+            .count();
+        let visible = navigation::grid_cells(entries.len(), slot, passes);
+        self.visible = visible;
         // A running delete has trashed these but not yet dropped them from the
         // playlist, so hiding them here is what lets the grid shrink without
         // invalidating anything indexed by playlist position.
-        if let Some(gone) = self.bulk_delete.as_ref().map(BulkDelete::gone) {
+        if let Some(gone) = gone {
             if !gone.is_empty() {
                 self.visible
                     .retain(|&i| entries.get(i).is_none_or(|p| !gone.contains(p)));
@@ -188,12 +195,7 @@ impl App {
         self.sel = sel;
         self.selected = selected;
         self.anchor = anchor;
-        self.shown_photos = (0..self.visible.len())
-            .map(|p| {
-                self.group_at(p)
-                    .map_or(1, |(_, g)| self.present_member_paths(g).len())
-            })
-            .sum();
+        self.shown_photos = shown_photos;
         self.faces.mark_unscanned();
         // The title carries the visible count.
         self.update_window_title();
@@ -1191,6 +1193,7 @@ pub(in crate::app) mod tests {
         app.set_filter(Some((Cmp::Gte, 3)));
         assert_eq!(app.place_of(2), Place::Hidden(0));
         assert_eq!(app.place_of(1), Place::Cell(0));
+        assert_eq!(app.shown_photos(), 1, "only the passing member counts");
         app.set_filter(Some((Cmp::Gte, 6)));
         assert_eq!(app.place_of(2), Place::Gone);
         assert_eq!(app.place_of(1), Place::Gone);
