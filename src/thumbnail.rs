@@ -681,7 +681,10 @@ mod tests {
         );
 
         let img = decode_speed(&photo, 1024).unwrap();
-        assert_eq!((img.width, img.height), (1024, 683));
+        // 3:2 from the photo, not the thumbnail's 4:3 (768). 682.67 rounds
+        // up on macOS and down elsewhere.
+        assert_eq!(img.width, 1024);
+        assert!((682..=683).contains(&img.height), "height {}", img.height);
         fs::remove_dir_all(dir).unwrap();
     }
 
