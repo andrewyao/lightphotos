@@ -284,11 +284,22 @@ impl App {
         }
     }
 
-    /// Rates the selected photo (0 clears, above `MAX_RATING` is ignored).
-    /// Under a filter the photo may drop out of view, and the loupe then
-    /// follows the cursor to a neighbor.
+    /// Whether a rating or flag goes to `action_paths` rather than the one
+    /// selected photo: a multi-selection, or any Compare picks.
+    fn marks_action_paths(&self) -> bool {
+        self.action_count() > 1 || !self.group_picks().is_empty()
+    }
+
+    /// Rates the selected photo, or every photo `action_paths` names when
+    /// `marks_action_paths`, with no confirmation (0 clears, above
+    /// `MAX_RATING` is ignored). Under a filter the photo may drop out of
+    /// view, and the loupe then follows the cursor to a neighbor.
     pub(super) fn set_rating(&mut self, stars: u8) {
-        if let Some(path) = self.selected_path() {
+        if self.marks_action_paths() {
+            if stars <= crate::catalog::MAX_RATING {
+                self.apply_rating_to_selection(stars);
+            }
+        } else if let Some(path) = self.selected_path() {
             self.set_rating_of(path, stars);
         }
     }
@@ -315,10 +326,13 @@ impl App {
         self.request_redraw();
     }
 
-    /// Flags the selected photo (`None` clears). Under a flag filter the
-    /// photo may drop out of view, as under a star filter.
+    /// Flags the selected photo, or the photos `set_rating` would rate, with
+    /// no confirmation (`None` clears). Under a flag filter the photo may
+    /// drop out of view, as under a star filter.
     pub(super) fn set_flag(&mut self, flag: Option<Flag>) {
-        if let Some(path) = self.selected_path() {
+        if self.marks_action_paths() {
+            self.apply_flag_to_selection(flag);
+        } else if let Some(path) = self.selected_path() {
             self.set_flag_of(path, flag);
         }
     }
@@ -514,9 +528,6 @@ impl App {
         };
         let n = self.action_count();
         let prompt = match kind {
-            ui::BulkKind::Rate(0) => (t.confirm_clear_rating)(n),
-            ui::BulkKind::Rate(s) => (t.confirm_rate)(&"\u{2605}".repeat(s as usize), n),
-            ui::BulkKind::Flag(flag) => (t.confirm_flag)(flag_name(flag), n),
             ui::BulkKind::ApplySettings => (t.confirm_apply_settings)(n),
             ui::BulkKind::ApplyPreset(id) => {
                 let name = self.presets.get(id).map(|p| p.name.clone());
@@ -647,8 +658,6 @@ impl App {
 
     pub(super) fn run_bulk(&mut self, kind: ui::BulkKind) {
         match kind {
-            ui::BulkKind::Rate(stars) => self.apply_rating_to_selection(stars),
-            ui::BulkKind::Flag(flag) => self.apply_flag_to_selection(flag),
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
             ui::BulkKind::ApplyPreset(id) => self.apply_preset_to_selection(id),
             ui::BulkKind::AutoTone => self.auto_tone_selection(),
@@ -1031,14 +1040,8 @@ mod tests {
         let (mut app, dir, paths) = crate::app::test_support::folder_app("flag-sel", 3);
         app.selected = (0..3).collect();
         app.sel = Some(0);
-        app.apply_ui_actions(vec![ui::UiAction::RequestBulk(ui::BulkKind::Flag(Some(
-            Flag::Pick,
-        )))]);
-        assert!(
-            app.confirm_open(),
-            "a multi-photo flag asks first, as stars do"
-        );
-        app.confirm_pending();
+        app.apply_ui_actions(vec![ui::UiAction::SetFlag(Some(Flag::Pick))]);
+        assert!(!app.confirm_open(), "a multi-photo flag does not ask");
         assert!(paths.iter().all(|p| app.flag_of(p) == Some(Flag::Pick)));
         assert_eq!(
             coverage(&app),

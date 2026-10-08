@@ -470,11 +470,7 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             if resp.clicked() {
                 // Clicking the rating every photo already has clears it, as in Lightroom.
                 let stars = if lo == s && hi == s { 0 } else { s };
-                out.actions.push(if n == 1 {
-                    UiAction::SetRating(stars)
-                } else {
-                    UiAction::RequestBulk(BulkKind::Rate(stars))
-                });
+                out.actions.push(UiAction::SetRating(stars));
             }
         }
     });
@@ -487,11 +483,7 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 .on_hover_text((t.set_flag_tip)(crate::app::flag_name(flag)));
             // Marking photos with the state they all have already does nothing.
             if resp.clicked() && coverage != FlagCoverage::All {
-                out.actions.push(if n == 1 {
-                    UiAction::SetFlag(flag)
-                } else {
-                    UiAction::RequestBulk(BulkKind::Flag(flag))
-                });
+                out.actions.push(UiAction::SetFlag(flag));
             }
         }
     });
@@ -702,11 +694,11 @@ fn rate_menu(ui: &mut egui::Ui, out: &mut FrameOutput) {
         .show_ui(ui, |ui| {
             for s in (1u8..=5).rev() {
                 if ui.button(star_string(s)).clicked() {
-                    out.actions.push(UiAction::RequestBulk(BulkKind::Rate(s)));
+                    out.actions.push(UiAction::SetRating(s));
                 }
             }
             if ui.button(t.clear_rating).clicked() {
-                out.actions.push(UiAction::RequestBulk(BulkKind::Rate(0)));
+                out.actions.push(UiAction::SetRating(0));
             }
         });
 }

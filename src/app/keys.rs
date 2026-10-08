@@ -403,15 +403,45 @@ mod tests {
     }
 
     #[test]
+    fn a_digit_rates_every_selected_photo_without_asking() {
+        let (mut app, paths) = folder_app(3);
+        press(&mut app, CMD, KeyCode::KeyA);
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit4);
+        assert!(!app.confirm_open(), "no confirmation");
+        assert!(paths.iter().all(|p| app.rating_of(p) == 4));
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit0);
+        assert!(
+            paths.iter().all(|p| app.rating_of(p) == 0),
+            "0 clears them all"
+        );
+    }
+
+    #[test]
+    fn a_digit_with_one_photo_selected_rates_only_that_photo() {
+        let (mut app, paths) = folder_app(3);
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit3);
+        let ratings: Vec<u8> = paths.iter().map(|p| app.rating_of(p)).collect();
+        assert_eq!(ratings, [3, 0, 0]);
+    }
+
+    #[test]
     fn enter_runs_the_pending_bulk_action() {
         let (mut app, paths) = folder_app(3);
         press(&mut app, CMD, KeyCode::KeyA);
-        app.request_bulk(ui::BulkKind::Rate(4));
+        let look = crate::develop::Adjustments {
+            exposure: 0.5,
+            ..Default::default()
+        };
+        app.copied_settings = Some((paths[0].clone(), look));
+        app.request_bulk(ui::BulkKind::ApplySettings);
+        assert!(app.confirm_open(), "applying a look asks first");
         press(&mut app, ModifiersState::empty(), KeyCode::Enter);
         assert!(!app.confirm_open());
         assert!(
-            paths.iter().all(|p| app.rating_of(p) == 4),
-            "every photo is rated"
+            paths
+                .iter()
+                .all(|p| app.catalog.adjustments(p).exposure == 0.5),
+            "every photo got the look"
         );
         assert_eq!(
             app.mode,

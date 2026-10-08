@@ -321,9 +321,6 @@ pub struct Strings {
     pub help: &'static [HelpSection],
 
     // Bulk confirmations.
-    pub confirm_clear_rating: fn(usize) -> String,
-    pub confirm_rate: fn(&str, usize) -> String,
-    pub confirm_flag: fn(&str, usize) -> String,
     pub confirm_apply_settings: fn(usize) -> String,
     /// (preset name, photo count)
     pub confirm_apply_preset: fn(&str, usize) -> String,
@@ -335,7 +332,6 @@ pub struct Strings {
     pub remove_group: &'static str,
     pub trash_group_photos: fn(usize) -> String,
     /// Titles and confirm buttons of the bulk dialogs that no toolbar label fits.
-    pub bulk_rate: &'static str,
     pub bulk_apply_preset: &'static str,
     pub bulk_delete: &'static str,
 
@@ -954,9 +950,6 @@ pub static EN: Strings = Strings {
         },
     ],
 
-    confirm_clear_rating: |n| format!("Clear the rating on {n} photo(s)?"),
-    confirm_rate: |stars, n| format!("Apply {stars} to {n} photo(s)?"),
-    confirm_flag: |flag, n| format!("Mark {n} photo(s) as {flag}?"),
     confirm_apply_settings: |n| format!("Apply the copied adjustment to {n} photo(s)?"),
     confirm_apply_preset: |name, n| format!("Apply {name} to {n} photo(s)?"),
     confirm_auto_tone: |n| format!("Auto Adjust {n} photo(s)?"),
@@ -988,7 +981,6 @@ pub static EN: Strings = Strings {
     } else {
         |n| format!("Move {n} Photos to Trash")
     },
-    bulk_rate: "Rate",
     bulk_apply_preset: "Apply Preset",
     bulk_delete: if WEB { "Delete Photos" } else { "Move to Trash" },
 
@@ -1575,9 +1567,6 @@ pub static ZH: Strings = Strings {
         },
     ],
 
-    confirm_clear_rating: |n| format!("清除 {n} 张照片的评分？"),
-    confirm_rate: |stars, n| format!("将 {n} 张照片评为 {stars}？"),
-    confirm_flag: |flag, n| format!("将 {n} 张照片标为{flag}？"),
     confirm_apply_settings: |n| format!("将拷贝的调整应用到 {n} 张照片？"),
     confirm_apply_preset: |name, n| format!("将 {name} 应用到 {n} 张照片？"),
     confirm_auto_tone: |n| format!("对 {n} 张照片应用自动调整？"),
@@ -1605,7 +1594,6 @@ pub static ZH: Strings = Strings {
     } else {
         |n| format!("将 {n} 张照片移到废纸篓")
     },
-    bulk_rate: "评分",
     bulk_apply_preset: "应用预设",
     bulk_delete: if WEB {
         "删除照片"

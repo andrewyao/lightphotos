@@ -1146,18 +1146,26 @@ mod tests {
         let (mut app, dir, paths) = compare("rate-picks", 6, &[1, 2, 3, 4], 1);
         pick(&mut app, &paths[2], PickHow::Toggle);
         pick(&mut app, &paths[4], PickHow::Toggle);
-        act(
-            &mut app,
-            UiAction::RequestBulk(crate::ui::BulkKind::Rate(3)),
-        );
-        let (_, prompt) = app.pending_bulk_prompt().expect("it asks first");
-        assert_eq!(
-            prompt,
-            (crate::i18n::t().confirm_rate)("\u{2605}\u{2605}\u{2605}", 2)
-        );
-        act(&mut app, UiAction::ConfirmPending);
+        act(&mut app, UiAction::SetRating(3));
+        assert!(app.pending_bulk_prompt().is_none(), "it does not ask");
         let ratings: Vec<u8> = paths.iter().map(|p| app.member_rating(p)).collect();
         assert_eq!(ratings, [0, 0, 3, 0, 3, 0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rating_and_flagging_one_pick_marks_the_pick_not_the_shown_photo() {
+        let (mut app, dir, paths) = compare("rate-one-pick", 6, &[1, 2, 3, 4], 1);
+        pick(&mut app, &paths[3], PickHow::Toggle);
+        act(&mut app, UiAction::SetRating(2));
+        act(
+            &mut app,
+            UiAction::SetFlag(Some(crate::catalog::Flag::Pick)),
+        );
+        let ratings: Vec<u8> = paths.iter().map(|p| app.member_rating(p)).collect();
+        assert_eq!(ratings, [0, 0, 0, 2, 0, 0]);
+        assert_eq!(app.flag_of(&paths[3]), Some(crate::catalog::Flag::Pick));
+        assert_eq!(app.flag_of(&paths[1]), None, "the shown photo is untouched");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

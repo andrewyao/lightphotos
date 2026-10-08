@@ -12,9 +12,6 @@ pub(super) fn confirm_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     };
     let t = t();
     let action = match kind {
-        BulkKind::Rate(0) => t.clear_rating,
-        BulkKind::Rate(_) => t.bulk_rate,
-        BulkKind::Flag(flag) => crate::app::flag_name(flag),
         BulkKind::ApplySettings => t.apply_settings,
         BulkKind::ApplyPreset(_) => t.bulk_apply_preset,
         BulkKind::AutoTone | BulkKind::AutoToneAll => t.auto_tone,

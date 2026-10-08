@@ -188,10 +188,6 @@ pub enum UiAction {
 /// multi-selection after confirmation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BulkKind {
-    /// 0 clears the rating.
-    Rate(u8),
-    /// `None` clears the flag.
-    Flag(Option<crate::catalog::Flag>),
     /// Apply the copied develop settings.
     ApplySettings,
     /// Apply this saved preset.
