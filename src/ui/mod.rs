@@ -21,6 +21,15 @@ pub enum UiAction {
     GroupAllBursts,
     /// Group the bursts among the selected photos.
     GroupSelectedBursts,
+    /// Stack the selected photos into one.
+    GroupSelected,
+    /// Ask to trash every photo in the selected stacks.
+    RequestDeleteStack,
+    /// Open the stack under the cursor in the Compare pane.
+    CompareStack,
+    /// Give the selection this color label, or clear it when every photo
+    /// has it already.
+    ToggleLabel(crate::catalog::ColorLabel),
     /// Score every photo in the grid, group members included.
     ScoreAll,
     /// Show this page of the group's tiles.
@@ -217,6 +226,7 @@ mod grid;
 mod info_panel;
 mod loupe;
 mod modals;
+mod photo_menu;
 mod tabs;
 pub mod theme;
 /// `pub(crate)` so `app::nav` can walk `ToolbarControl`, the list the toolbar

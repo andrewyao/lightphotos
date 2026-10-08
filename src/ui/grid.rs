@@ -592,4 +592,5 @@ fn grid_cell(
     if response.double_clicked() {
         out.actions.push(UiAction::OpenLoupe(pos));
     }
+    super::photo_menu::on_cell(app, pos, Region::Grid, &response, out);
 }

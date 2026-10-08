@@ -125,6 +125,7 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
         }
     }
     out.loupe_rect = Some(central);
+    super::photo_menu::on_loupe(ui, app, central, out);
 
     // `region_focus_marker` uses `ui.min_rect()`, which doesn't cover this
     // unclaimed rect, so draw against `central` directly.
@@ -448,31 +449,40 @@ fn zoom_control(ui: &mut egui::Ui, app: &App, bar: egui::Rect, pad: f32, out: &m
 /// The zoom readout, as a button whose menu jumps to Fit or a preset
 /// percentage. The presets outside the zoom's range are left out.
 fn zoom_presets(ui: &mut egui::Ui, app: &App, (lo, hi): (f32, f32), out: &mut FrameOutput) {
-    const PRESETS: [f32; 6] = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
     let w = font_size::px(ui.style(), 64.0);
     // The bar sits at the window's bottom, so the menu opens upward.
     let text = format!("{} \u{23f6}", zoom_text(app));
     let button = ui.add_sized([w, ui.spacing().interact_size.y], egui::Button::new(text));
     egui::Popup::menu(&button)
         .align(egui::RectAlign::TOP_END)
-        .show(|ui| {
-            let fit = app.fitted;
-            if ui.selectable_label(fit, t().zoom_fit).clicked() && !fit {
-                out.actions.push(UiAction::SetZoom(lo));
-            }
-            let cur = app.zoom_percent() / 100.0;
-            for z in PRESETS.into_iter().filter(|&z| z > lo * 1.001 && z <= hi) {
-                let on = !fit && (cur - z).abs() < z * 0.005;
-                let label = if z == 1.0 {
-                    t().zoom_actual.to_string()
-                } else {
-                    format!("{:.0}%", z * 100.0)
-                };
-                if ui.selectable_label(on, label).clicked() && !on {
-                    out.actions.push(UiAction::SetZoom(z));
-                }
-            }
-        });
+        .show(|ui| zoom_items(ui, app, (lo, hi), out));
+}
+
+/// Fit and the preset percentages inside the zoom's range, the current one
+/// marked.
+pub(super) fn zoom_items(
+    ui: &mut egui::Ui,
+    app: &App,
+    (lo, hi): (f32, f32),
+    out: &mut FrameOutput,
+) {
+    const PRESETS: [f32; 6] = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
+    let fit = app.fitted;
+    if ui.selectable_label(fit, t().zoom_fit).clicked() && !fit {
+        out.actions.push(UiAction::SetZoom(lo));
+    }
+    let cur = app.zoom_percent() / 100.0;
+    for z in PRESETS.into_iter().filter(|&z| z > lo * 1.001 && z <= hi) {
+        let on = !fit && (cur - z).abs() < z * 0.005;
+        let label = if z == 1.0 {
+            t().zoom_actual.to_string()
+        } else {
+            format!("{:.0}%", z * 100.0)
+        };
+        if ui.selectable_label(on, label).clicked() && !on {
+            out.actions.push(UiAction::SetZoom(z));
+        }
+    }
 }
 
 /// "Fit" while the photo fits the window, else its zoom as a percentage of
@@ -970,6 +980,7 @@ fn filmstrip_cell(
         out.actions.push(click_action(ui, pos));
         out.actions.push(UiAction::Focus(Region::Filmstrip));
     }
+    super::photo_menu::on_cell(app, pos, Region::Filmstrip, &response, out);
 }
 
 /// The Compare pane's toolbar along its bottom: how to load the tiles on

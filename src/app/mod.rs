@@ -1114,6 +1114,10 @@ impl App {
             match action {
                 ui::UiAction::GroupAllBursts => self.group_all_bursts(),
                 ui::UiAction::GroupSelectedBursts => self.group_bursts(),
+                ui::UiAction::GroupSelected => self.group_selected(),
+                ui::UiAction::RequestDeleteStack => self.request_delete_group(),
+                ui::UiAction::CompareStack => self.compare_stack(),
+                ui::UiAction::ToggleLabel(label) => self.toggle_label(label),
                 ui::UiAction::ScoreAll => self.score_all(),
                 ui::UiAction::ComparePage(page) => self.set_compare_page(page),
                 ui::UiAction::SetTileFidelity(f) => self.set_tile_fidelity(f),

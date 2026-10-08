@@ -39,7 +39,6 @@ impl App {
         cells.len() >= 2 && cells.iter().all(|&p| self.group_at(p).is_none())
     }
 
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn selection_has_group(&self) -> bool {
         self.selected_cells()
             .into_iter()
@@ -142,6 +141,16 @@ impl App {
 
     pub(crate) fn show_settings(&self) -> bool {
         self.show_settings
+    }
+
+    /// Whether a right click on a photo opens its menu: nothing that holds
+    /// the keyboard is up, which is when the menu's keys would act too.
+    pub(crate) fn photo_menu_available(&self) -> bool {
+        self.tool == LoupeTool::None
+            && self.preset_name_edit.is_none()
+            && !self.confirm_open()
+            && !self.cropping()
+            && !self.show_settings
     }
 
     pub(crate) fn autotone_centering(&self) -> crate::autotone::Centering {

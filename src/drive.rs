@@ -15,6 +15,8 @@
 //! dblclick 40 60
 //! click-cell 2 [shift]     the Grid or filmstrip cell at that position, from the last frame's layout
 //! dblclick-cell 2
+//! rclick 40 60             a right click, which opens a photo's menu
+//! rclick-cell 2
 //! move 40 60               pointer to (x, y) points, no click
 //! scroll 0 5 [shift]       wheel lines; up is positive, so this zooms the Loupe in
 //! drag 100 100 300 200
@@ -109,6 +111,25 @@ impl Args {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum ClickKind {
+    Single,
+    Double,
+    Right,
+}
+
+impl ClickKind {
+    fn of(cmd: &str) -> ClickKind {
+        if cmd.starts_with("dbl") {
+            ClickKind::Double
+        } else if cmd.starts_with('r') {
+            ClickKind::Right
+        } else {
+            ClickKind::Single
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Step {
     Size(u32, u32),
@@ -116,7 +137,7 @@ pub(crate) enum Step {
     Type(String),
     Click {
         at: Target,
-        double: bool,
+        kind: ClickKind,
         mods: ModifiersState,
     },
     Move(f32, f32),
@@ -283,18 +304,18 @@ fn parse_step(line: &str) -> Result<Step, String> {
             }
             Step::Type(text.to_string())
         }
-        "click" | "dblclick" => {
+        "click" | "dblclick" | "rclick" => {
             let x = number(args.first().copied(), "x")?;
             let y = number(args.get(1).copied(), "y")?;
             Step::Click {
                 at: Target::Point(x, y),
-                double: *cmd == "dblclick",
+                kind: ClickKind::of(cmd),
                 mods: parse_mods(args.get(2..).unwrap_or_default())?,
             }
         }
-        "click-cell" | "dblclick-cell" => Step::Click {
+        "click-cell" | "dblclick-cell" | "rclick-cell" => Step::Click {
             at: Target::Cell(number(args.first().copied(), "cell position")?),
-            double: *cmd == "dblclick-cell",
+            kind: ClickKind::of(cmd),
             mods: parse_mods(args.get(1..).unwrap_or_default())?,
         },
         "move" => Step::Move(
@@ -476,9 +497,9 @@ impl Driver {
                 Step::Size(w, h) => self.resize(el, *w, *h),
                 Step::Key(chord) => self.key(el, *chord),
                 Step::Type(text) => self.push_egui(egui::Event::Text(text.clone())),
-                Step::Click { at, double, mods } => {
+                Step::Click { at, kind, mods } => {
                     let (x, y) = self.resolve(*at)?;
-                    self.click(el, x, y, *double, *mods);
+                    self.click(el, x, y, *kind, *mods);
                 }
                 Step::Move(x, y) => self.move_to(el, *x, *y),
                 Step::Scroll { dx, dy, mods } => {
@@ -642,18 +663,29 @@ impl Driver {
     }
 
     fn button(&mut self, el: &ActiveEventLoop, state: ElementState) {
+        self.press(el, MouseButton::Left, state);
+    }
+
+    fn press(&mut self, el: &ActiveEventLoop, button: MouseButton, state: ElementState) {
         self.window_event(
             el,
             WindowEvent::MouseInput {
                 device_id: DeviceId::dummy(),
                 state,
-                button: MouseButton::Left,
+                button,
             },
         );
         self.frame();
     }
 
-    fn click(&mut self, el: &ActiveEventLoop, x: f32, y: f32, double: bool, mods: ModifiersState) {
+    fn click(
+        &mut self,
+        el: &ActiveEventLoop,
+        x: f32,
+        y: f32,
+        kind: ClickKind,
+        mods: ModifiersState,
+    ) {
         if let Some(last) = self.last_click {
             while last.elapsed() < CLICK_GAP {
                 self.frame();
@@ -663,9 +695,14 @@ impl Driver {
         self.window_event(el, WindowEvent::ModifiersChanged(mods.into()));
         self.move_to(el, x, y);
         self.frame();
-        for _ in 0..if double { 2 } else { 1 } {
-            self.button(el, ElementState::Pressed);
-            self.button(el, ElementState::Released);
+        let (button, times) = match kind {
+            ClickKind::Single => (MouseButton::Left, 1),
+            ClickKind::Double => (MouseButton::Left, 2),
+            ClickKind::Right => (MouseButton::Right, 1),
+        };
+        for _ in 0..times {
+            self.press(el, button, ElementState::Pressed);
+            self.press(el, button, ElementState::Released);
         }
         self.window_event(
             el,
@@ -792,6 +829,8 @@ click 40 60
 dblclick 40.5 60 shift
 click-cell 2 shift
 dblclick-cell 3
+rclick 10 20
+rclick-cell 4
 scroll 0 -5 shift
 drag 100 100 300 200
 idle
@@ -808,22 +847,32 @@ quit
                 Step::Type("Holiday snaps".into()),
                 Step::Click {
                     at: Target::Point(40.0, 60.0),
-                    double: false,
+                    kind: ClickKind::Single,
                     mods: ModifiersState::empty(),
                 },
                 Step::Click {
                     at: Target::Point(40.5, 60.0),
-                    double: true,
+                    kind: ClickKind::Double,
                     mods: shift,
                 },
                 Step::Click {
                     at: Target::Cell(2),
-                    double: false,
+                    kind: ClickKind::Single,
                     mods: shift,
                 },
                 Step::Click {
                     at: Target::Cell(3),
-                    double: true,
+                    kind: ClickKind::Double,
+                    mods: ModifiersState::empty(),
+                },
+                Step::Click {
+                    at: Target::Point(10.0, 20.0),
+                    kind: ClickKind::Right,
+                    mods: ModifiersState::empty(),
+                },
+                Step::Click {
+                    at: Target::Cell(4),
+                    kind: ClickKind::Right,
                     mods: ModifiersState::empty(),
                 },
                 Step::Scroll {

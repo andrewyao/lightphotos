@@ -268,6 +268,11 @@ pub struct Strings {
     pub rate_menu: &'static str,
     /// Names each toolbar's Actions menu; the toolbar adds the arrow.
     pub actions_menu: &'static str,
+    /// Items of the menu a right click on a photo opens. The rest of that
+    /// menu shares the menu bar's strings.
+    pub open_in_loupe: &'static str,
+    pub group_into_stack: &'static str,
+    pub reset_adjustments: &'static str,
     /// Names the score in the filmstrip bar, before its value or range.
     pub score_label: &'static str,
     /// Heads the Actions menu over several selected photos.
@@ -537,11 +542,11 @@ pub struct Strings {
     pub presets_save_failed: fn(&str) -> String,
 
     // Native menu bar.
-    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub menu: MenuStrings,
 }
 
-/// Titles and items of the macOS menu bar.
+/// Titles and items of the macOS menu bar, which a photo's right-click
+/// menu borrows on every platform.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub struct MenuStrings {
     pub about: &'static str,
@@ -749,6 +754,9 @@ pub static EN: Strings = Strings {
     n_selected: |n| format!("{n} selected"),
     rate_menu: "Rate \u{2605}",
     actions_menu: "Actions",
+    open_in_loupe: "Open in Loupe",
+    group_into_stack: "Group into Stack",
+    reset_adjustments: "Reset Adjustments",
     score_label: "Score:",
     selected_n_photos_title: |n| format!("Selected {n} Photos"),
     update_scores: "Update Scores",
@@ -1386,6 +1394,9 @@ pub static ZH: Strings = Strings {
     n_selected: |n| format!("已选 {n} 张"),
     rate_menu: "评分 \u{2605}",
     actions_menu: "操作",
+    open_in_loupe: "在单张视图中打开",
+    group_into_stack: "将所选照片堆叠",
+    reset_adjustments: "复位调整",
     score_label: "得分：",
     selected_n_photos_title: |n| format!("已选 {n} 张照片"),
     update_scores: "更新得分",

@@ -1,0 +1,19 @@
+# A right click on an unselected cell selects it and opens the photo menu.
+# Rate > three stars rates it; the Loupe's photo opens the same menu with
+# Zoom, Reset and Rotate added.
+size 1200 800
+click-cell 1
+rclick-cell 3
+idle
+state
+move 945 258
+idle
+shot grid-menu
+click 1068 321
+idle
+shot rated
+dblclick-cell 3
+idle
+rclick 500 300
+idle
+shot loupe-menu
