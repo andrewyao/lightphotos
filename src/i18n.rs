@@ -192,13 +192,10 @@ pub struct Strings {
     /// The folder Reopen Session will open.
     pub reopen_session_tip: fn(&str) -> String,
     pub picker_title: &'static str,
-    /// The home page's left panel: its heading over Choose Folder, and the
-    /// hint under the buttons.
+    /// The home page's left panel heading.
     pub folders_heading: &'static str,
-    pub folder_tree_hint: &'static str,
     /// The home page's empty actions bar.
     pub select_photos_hint: &'static str,
-    pub close_note_tip: &'static str,
 
     // The guided tour.
     pub tour: &'static str,
@@ -752,9 +749,7 @@ pub static EN: Strings = Strings {
     reopen_session_tip: |folder| format!("Pick up where you left off in {folder}"),
     picker_title: "Choose a folder of photos",
     folders_heading: "Folders",
-    folder_tree_hint: "Once a folder is open, its subfolders are listed here.",
     select_photos_hint: "Select photos to rate, stack and export them here.",
-    close_note_tip: "Hide this note",
     tour: "Tour",
     tour_tip: "A quick tour of where everything is",
     take_tour: "Take the Tour",
@@ -1459,9 +1454,7 @@ pub static ZH: Strings = Strings {
     reopen_session_tip: |folder| format!("回到上次在 {folder} 的位置"),
     picker_title: "选择照片文件夹",
     folders_heading: "文件夹",
-    folder_tree_hint: "打开文件夹后，它的子文件夹会列在这里。",
     select_photos_hint: "选择照片后，可以在这里评分、堆叠和导出。",
-    close_note_tip: "隐藏此提示",
     tour: "导览",
     tour_tip: "快速了解各项功能的位置",
     take_tour: "开始导览",

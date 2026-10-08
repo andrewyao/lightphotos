@@ -1,6 +1,10 @@
-# Run with no folder: a first launch lands on the home page with the tour up.
-# Shoots each stop, then the home page once Esc skips the rest.
+# Run with no folder: a first launch lands on the home page, tour down.
+# Clicks the card's Take the Tour link, shoots each stop, then the home page
+# once Esc skips the rest.
 size 1200 800
+idle
+shot home-first
+click 686 470
 idle
 shot tour-1-folders
 key right

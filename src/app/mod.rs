@@ -561,9 +561,6 @@ pub(crate) struct App {
     show_settings: bool,
     /// The guided tour's shown stop, an index into `ui::tour::TourStep::ALL`.
     tour: Option<usize>,
-    /// Web only: whether the home page's note on the browser's file
-    /// permission is up. Session only, so it is back on the next visit.
-    allow_note_open: bool,
     /// The metadata page fills the right panel. Session only.
     info_open: bool,
 
@@ -658,7 +655,6 @@ impl App {
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
         let (renderer_init_tx, renderer_init_rx) = std::sync::mpsc::channel();
-        let auto_tour = tour::auto_start(initial.is_none(), tour::seen());
         Self {
             window: None,
             renderer: None,
@@ -763,8 +759,7 @@ impl App {
             preset_name_edit: None,
             show_help: false,
             show_settings: false,
-            tour: auto_tour.then_some(0),
-            allow_note_open: true,
+            tour: None,
             info_open: false,
             status: None,
             occluded: false,
@@ -1290,10 +1285,6 @@ impl App {
                 ui::UiAction::TourNext => self.tour_next(),
                 ui::UiAction::TourBack => self.tour_back(),
                 ui::UiAction::EndTour => self.end_tour(),
-                ui::UiAction::CloseAllowNote => {
-                    self.allow_note_open = false;
-                    self.request_redraw();
-                }
                 ui::UiAction::CropGrab(edge) => self.crop_grab(edge),
                 ui::UiAction::CropGrabMove(u, v) => self.crop_grab_move(u, v),
                 ui::UiAction::CropDragTo(u, v) => self.crop_drag_to(u, v),

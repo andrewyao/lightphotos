@@ -28,7 +28,7 @@
 //! ```
 //!
 //! With no photo or folder after the flags, the run starts on the home page.
-//! Settings start empty, so that is a first launch and the tour is up.
+//! Settings start empty, so that is a first launch.
 //!
 //! Keys cannot take the `WindowEvent::KeyboardInput` road: winit's `KeyEvent`
 //! has a private field, so nothing outside winit can build one. The driver

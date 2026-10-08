@@ -14,8 +14,7 @@ pub(super) fn draw_home(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     draw_develop_rail(ui, app, false, out);
     toolbar::placeholder_toolbar(ui, app);
     toolbar::placeholder_selection_bar(ui);
-    let open = content(ui, app, out);
-    allow_note(ui, app, open, out);
+    content(ui, app, out);
     status_toast(ui, app);
     help_modal(ui, app, out);
     settings_modal(ui, app, out);
@@ -25,7 +24,7 @@ pub(super) fn draw_home(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 const PANEL_WIDTH: f32 = 220.0;
 const PANEL_MARGIN: f32 = 12.0;
 
-/// "Folders" over a hint at the tree that will fill it.
+/// "Folders" over the empty space the folder tree will fill.
 fn left_panel(ui: &mut egui::Ui) {
     let width = font_size::px(ui.style(), PANEL_WIDTH);
     let panel = egui::Panel::left("folders")
@@ -35,8 +34,6 @@ fn left_panel(ui: &mut egui::Ui) {
             let margin = font_size::px(ui.style(), PANEL_MARGIN);
             ui.add_space(margin);
             ui.label(egui::RichText::new(t().folders_heading).strong());
-            ui.add_space(margin);
-            ui.weak(t().folder_tree_hint);
         });
     tour::anchor(ui.ctx(), tour::TourStep::Folders, panel.response.rect);
 }
@@ -46,9 +43,8 @@ const BUTTON_HEIGHT: f32 = 52.0;
 const BUTTON_GAP: f32 = 12.0;
 
 /// Open Folder, with Reopen Session beside it once a folder has been opened
-/// before, centred as a row. Returns Open Folder's rect, for the note that
-/// points at it.
-fn buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) -> egui::Rect {
+/// before, centred as a row.
+fn buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let style = ui.style().clone();
     let size = egui::vec2(
         font_size::px(&style, BUTTON_WIDTH),
@@ -66,7 +62,7 @@ fn buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) -> egui::Rect {
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            let open = open_folder_button(ui, app, size, out);
+            open_folder_button(ui, app, size, out);
             if let Some(session) = session {
                 let reopen = ui
                     .add_enabled(
@@ -86,20 +82,13 @@ fn buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) -> egui::Rect {
                     out.actions.push(UiAction::ReopenSession);
                 }
             }
-            open
         },
-    )
-    .inner
+    );
 }
 
 /// The home page's one call to action, filled in the brand blue so it reads
 /// as the thing to press.
-fn open_folder_button(
-    ui: &mut egui::Ui,
-    app: &App,
-    size: egui::Vec2,
-    out: &mut FrameOutput,
-) -> egui::Rect {
+fn open_folder_button(ui: &mut egui::Ui, app: &App, size: egui::Vec2, out: &mut FrameOutput) {
     let pending = app.folder_pick_pending();
     let label = if pending {
         t().opening
@@ -127,14 +116,12 @@ fn open_folder_button(
             egui::StrokeKind::Outside,
         );
     }
-    let rect = resp.rect;
     if resp
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
     {
         out.actions.push(UiAction::PickFolder);
     }
-    rect
 }
 
 const TILE: f32 = crate::app::GRID_CELL_PT;
@@ -147,9 +134,9 @@ const CARD_PAD: egui::Vec2 = egui::vec2(72.0, 64.0);
 const TILE_GAP: f32 = 8.0;
 
 /// Rows of empty tiles where the thumbnails will go, the whole layout
-/// dimmed, and a card over it holding the prompt, the buttons and a Take the
-/// Tour link. Returns Open Folder's rect.
-fn content(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) -> egui::Rect {
+/// dimmed, and a card over it holding the prompt, the buttons, on the web a
+/// note on the browser's file permission, and a Take the Tour link.
+fn content(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let pal = theme::colors(ui.ctx());
     let tile_fill = pal.panel.lerp_to_gamma(pal.value, 0.05);
     let panel = egui::CentralPanel::default().show_inside(ui, |ui| {
@@ -214,93 +201,29 @@ fn content(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) -> egui::Rect {
                             ui.add_space(font_size::px(ui.style(), 10.0));
                             ui.add(egui::Label::new(tagline).wrap());
                             ui.add_space(font_size::px(ui.style(), 40.0));
-                            let open = buttons(ui, app, out);
+                            buttons(ui, app, out);
                             ui.add_space(font_size::px(ui.style(), 20.0));
+                            allow_note(ui);
                             if ui.link(t().take_tour).on_hover_text(t().tour_tip).clicked() {
                                 out.actions.push(UiAction::StartTour);
                             }
-                            open
-                        })
-                        .inner
-                    })
-                    .inner
+                        });
+                    });
             },
-        )
-        .inner
+        );
     });
     tour::anchor(ui.ctx(), tour::TourStep::Content, panel.response.rect);
-    panel.inner
 }
 
 /// Web only: picking a folder hands the browser a File System Access
-/// permission, so a note under Open Folder says up front which button to
-/// press. It is open each time the home page shows until its × closes it,
-/// and steps aside while the tour runs.
-fn allow_note(ui: &egui::Ui, app: &App, open: egui::Rect, out: &mut FrameOutput) {
+/// permission, so the card says up front which button to press.
+fn allow_note(ui: &mut egui::Ui) {
     let note = t().landing_allow_note;
-    if note.is_empty() || !app.allow_note_open() || app.tour_step().is_some() {
+    if note.is_empty() {
         return;
     }
-    let ctx = ui.ctx();
-    let arrow = font_size::px(ui.style(), 10.0);
-    let fill = theme::colors(ctx)
-        .panel
-        .lerp_to_gamma(theme::BRAND_BLUE, 0.12);
-    let stroke = egui::Stroke::new(1.0_f32, theme::BRAND_BLUE.linear_multiply(0.6));
-    let max_w = font_size::px(ui.style(), 420.0);
-    let shown = egui::Area::new(egui::Id::new("allow_note"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(egui::pos2(open.min.x, open.max.y + 2.0 * arrow))
-        .constrain_to(ctx.content_rect())
-        .show(ctx, |ui| {
-            egui::Frame::popup(ui.style())
-                .fill(fill)
-                .stroke(stroke)
-                .corner_radius(10.0)
-                .inner_margin(egui::Margin::symmetric(16, 12))
-                .show(ui, |ui| {
-                    ui.set_max_width(max_w);
-                    ui.horizontal_top(|ui| {
-                        ui.add(egui::Label::new(note).wrap_mode(egui::TextWrapMode::Wrap));
-                        if ui
-                            .small_button("\u{d7}")
-                            .on_hover_text(t().close_note_tip)
-                            .clicked()
-                        {
-                            out.actions.push(UiAction::CloseAllowNote);
-                        }
-                    });
-                });
-        });
-    // A small triangle on the note's top edge, pointing up at the button.
-    let note_rect = shown.response.rect;
-    let tip_x = open
-        .center()
-        .x
-        .clamp(note_rect.min.x + arrow * 1.5, note_rect.max.x - arrow * 1.5);
-    let top = note_rect.min.y;
-    let painter = ctx.layer_painter(shown.response.layer_id);
-    painter.add(egui::Shape::convex_polygon(
-        vec![
-            egui::pos2(tip_x - arrow, top + 1.0),
-            egui::pos2(tip_x, top - arrow),
-            egui::pos2(tip_x + arrow, top + 1.0),
-        ],
-        fill,
-        egui::Stroke::NONE,
-    ));
-    painter.line_segment(
-        [
-            egui::pos2(tip_x - arrow, top),
-            egui::pos2(tip_x, top - arrow),
-        ],
-        stroke,
-    );
-    painter.line_segment(
-        [
-            egui::pos2(tip_x, top - arrow),
-            egui::pos2(tip_x + arrow, top),
-        ],
-        stroke,
-    );
+    let note = egui::RichText::new(note).color(theme::colors(ui.ctx()).label);
+    // Its lines start flush left, the block centred under the buttons.
+    ui.add(egui::Label::new(note).halign(egui::Align::LEFT).wrap());
+    ui.add_space(font_size::px(ui.style(), 20.0));
 }

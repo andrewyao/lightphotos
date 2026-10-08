@@ -207,8 +207,6 @@ pub enum UiAction {
     TourBack,
     /// Skip or finish the tour.
     EndTour,
-    /// Hide the web home page's note about the browser's file permission.
-    CloseAllowNote,
 }
 
 /// A bulk action requested from the toolbar, run against the current

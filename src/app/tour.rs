@@ -1,34 +1,15 @@
-//! The guided tour's state: which stop is shown, and whether it has run
-//! before. `ui::tour` draws it.
+//! The guided tour's state: which stop is shown. It runs only when asked,
+//! from the header's Tour button or the home page's Take the Tour link.
+//! `ui::tour` draws it.
 
 use super::*;
 
 use crate::ui::tour::TourStep;
 
-const PREF_KEY: &str = "tour_seen";
-
-/// Whether the tour has run, here or in an earlier launch. A test never
-/// reads the developer's own preference, and counts it as seen so a bare
-/// `App::new(None)` starts on the home page alone.
-pub(super) fn seen() -> bool {
-    cfg!(test) || crate::prefs::load(PREF_KEY).is_some()
-}
-
-/// The tour starts on its own once: on a first launch onto the home page.
-/// A launch onto a photo or folder goes straight to it.
-pub(super) fn auto_start(home: bool, seen: bool) -> bool {
-    home && !seen
-}
-
 impl App {
     /// The tour's shown stop, if it is running.
     pub(crate) fn tour_step(&self) -> Option<usize> {
         self.tour
-    }
-
-    /// Web only: whether the home page's file-permission note is up.
-    pub(crate) fn allow_note_open(&self) -> bool {
-        self.allow_note_open
     }
 
     /// Run the tour from its first stop. It points at the Grid's regions, so
@@ -61,16 +42,10 @@ impl App {
         }
     }
 
-    /// Skip or finish the tour, and don't start it on its own again.
+    /// Skip or finish the tour.
     pub(crate) fn end_tour(&mut self) {
         self.tour = None;
         self.request_redraw();
-        if cfg!(test) {
-            return;
-        }
-        if let Err(e) = crate::prefs::save(PREF_KEY, "1") {
-            eprintln!("[lightphotos] could not save the tour: {e}");
-        }
     }
 }
 
@@ -81,13 +56,6 @@ mod tests {
     use crate::i18n::t;
     use crate::ui::UiAction;
     use winit::keyboard::{KeyCode, ModifiersState};
-
-    #[test]
-    fn the_tour_starts_on_its_own_only_on_a_first_home_page() {
-        assert!(auto_start(true, false));
-        assert!(!auto_start(true, true), "it ran before");
-        assert!(!auto_start(false, false), "the launch opened a folder");
-    }
 
     #[test]
     fn next_and_back_walk_the_stops_and_next_on_the_last_ends_it() {
@@ -169,13 +137,5 @@ mod tests {
         app.modifiers = ModifiersState::empty();
         app.handle_key(KeyCode::Escape);
         assert_eq!(app.tour_step(), None);
-    }
-
-    #[test]
-    fn the_allow_note_closes_for_the_session() {
-        let mut app = App::new(None);
-        assert!(app.allow_note_open());
-        app.apply_ui_actions(vec![UiAction::CloseAllowNote]);
-        assert!(!app.allow_note_open());
     }
 }
