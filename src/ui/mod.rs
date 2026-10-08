@@ -181,8 +181,10 @@ pub enum UiAction {
     DeleteTouchUp,
     SetAdjustments(Adjustments),
     ResetAdjustments,
-    /// Pick develop settings for the loupe image from its own histogram.
+    /// Pick develop settings for each selected photo from its own histogram.
     AutoTone,
+    /// Turn the selection black and white, or back to color.
+    ToggleBlackAndWhite,
     Focus(Region),
     /// Focus the Toolbar with the keyboard cursor on this control index.
     FocusToolbar(usize),

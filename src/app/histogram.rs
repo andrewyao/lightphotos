@@ -161,8 +161,13 @@ impl App {
         self.hist.dirty = false;
     }
 
-    /// The cached histogram bins for the panel (`None` when no image is shown).
+    /// The cached histogram bins for the panel. `None` when no image is
+    /// shown, and while several photos are selected, since no one photo's
+    /// tones apply.
     pub(crate) fn histogram(&self) -> Option<&[[f32; 256]; 3]> {
+        if self.action_count() > 1 {
+            return None;
+        }
         self.hist.bins.as_ref()
     }
 

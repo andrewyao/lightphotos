@@ -386,8 +386,8 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     });
 }
 
-/// The Develop header with Reset, presets, and every tone, color, and detail
-/// slider in Lightroom's order, with Auto Tone on the Tone header.
+/// The Develop header with Reset, presets, a row of Auto Tone and B&W, and
+/// every tone, color, and detail slider in Lightroom's order.
 fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let mut adj = app.current_adjustments();
@@ -416,6 +416,28 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             } else {
                 None
             };
+
+        ui.horizontal(|ui| {
+            let auto = ui
+                .button(t.auto_tone)
+                .on_hover_text(crate::i18n::keys(t.auto_tone_tip));
+            if auto.clicked() {
+                out.actions.push(UiAction::AutoTone);
+                out.actions.push(UiAction::Focus(Region::Develop));
+            }
+            // Lightroom's B&W treatment, as the full desaturation that preset
+            // import maps `ConvertToGrayscale` to.
+            let mono = app.selection_is_monochrome();
+            if ui
+                .add(egui::Button::new(t.black_and_white).selected(mono))
+                .on_hover_text(crate::i18n::keys(t.black_and_white_tip))
+                .clicked()
+            {
+                out.actions.push(UiAction::ToggleBlackAndWhite);
+                out.actions.push(UiAction::Focus(Region::Develop));
+            }
+        });
+        form::divider(ui);
         ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
 
         let mut section = None;
@@ -432,15 +454,6 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                             .on_hover_text(t.pick_gray_tip);
                         if picker.clicked() {
                             out.actions.push(UiAction::ToggleWbPicker);
-                        }
-                    }
-                    crate::develop::Section::Tone => {
-                        let auto = ui
-                            .button(t.auto_tone)
-                            .on_hover_text(crate::i18n::keys(t.auto_tone_tip));
-                        if auto.clicked() {
-                            out.actions.push(UiAction::AutoTone);
-                            out.actions.push(UiAction::Focus(Region::Develop));
                         }
                     }
                     _ => {}

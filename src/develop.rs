@@ -252,6 +252,12 @@ impl Adjustments {
         *self == Self::default()
     }
 
+    /// True when Saturation is all the way down, which is the B&W toggle's
+    /// "on" state.
+    pub fn is_monochrome(&self) -> bool {
+        self.saturation <= -100.0
+    }
+
     /// A copy without the crop or straighten, for pasting settings onto
     /// other photos.
     pub fn tone_only(&self) -> Adjustments {

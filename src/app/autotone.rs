@@ -180,10 +180,15 @@ impl App {
         );
     }
 
-    /// Auto Tone the selected photo (Cmd+U). Target the selection, not
-    /// `shown`: in the Grid, `shown` is still the photo last opened in the
-    /// Loupe, not the one under the cursor.
-    pub(super) fn auto_tone_one(&mut self) {
+    /// Auto Tone the selection (Cmd+U and the Auto Adjust button). Several
+    /// photos run as a batch. One photo is the selection, not `shown`: in the
+    /// Grid, `shown` is still the photo last opened in the Loupe, not the one
+    /// under the cursor.
+    pub(super) fn auto_tone_selected(&mut self) {
+        if self.action_count() > 1 {
+            self.auto_tone_batch(self.action_paths(), DeferredAutoToneMode::Append);
+            return;
+        }
         let Some(path) = self.selected_path() else {
             return;
         };
@@ -509,7 +514,7 @@ mod tests {
             "test setup: B must be in the visible grid"
         );
 
-        app.auto_tone_one();
+        app.auto_tone_selected();
 
         assert!(
             !app.edits.contains_key(&a),
@@ -524,6 +529,17 @@ mod tests {
     }
 
     #[test]
+    fn cmd_u_with_several_selected_tones_every_one() {
+        let (mut app, dir, a, b) = grid_with_two_photos("autotone-several");
+        app.selected = (0..2).collect();
+        app.sel = Some(0);
+        app.auto_tone_selected();
+        assert_eq!(app.autotone_total(), 2);
+        assert!(app.autotone.pending.contains(&a) && app.autotone.pending.contains(&b));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn successive_single_photo_requests_preserve_pending_work() {
         let (mut app, dir, a, b) = grid_with_two_photos("autotone-successive");
         for path in [&a, &b, &a] {
@@ -531,7 +547,7 @@ mod tests {
                 app.playlist.as_ref().and_then(|pl| pl.entry(i)) == Some(path.as_path())
             });
             assert!(app.sel.is_some());
-            app.auto_tone_one();
+            app.auto_tone_selected();
         }
         assert_eq!(app.autotone.pending.len(), 2);
         assert_eq!(app.autotone_total(), 2);
@@ -735,7 +751,7 @@ mod tests {
         app.sel = None;
         app.want = Some(a.clone());
 
-        app.auto_tone_one();
+        app.auto_tone_selected();
 
         assert!(
             app.edits.contains_key(&a),
@@ -802,7 +818,7 @@ mod tests {
         assert!(app.sel.is_some());
         app.pretend_catalog_loading(&dir);
 
-        app.auto_tone_one();
+        app.auto_tone_selected();
 
         assert_eq!(app.autotone.deferred, Some(vec![b.clone()]));
         assert!(!app.edits.contains_key(&b));
@@ -819,7 +835,7 @@ mod tests {
                 app.playlist.as_ref().and_then(|pl| pl.entry(i)) == Some(path.as_path())
             });
             assert!(app.sel.is_some());
-            app.auto_tone_one();
+            app.auto_tone_selected();
         }
 
         assert_eq!(app.autotone.deferred, Some(vec![a.clone(), b.clone()]));
@@ -857,7 +873,7 @@ mod tests {
         app.hist.set_sample(Vec::new());
         app.pretend_catalog_loading(&dir);
 
-        app.auto_tone_one();
+        app.auto_tone_selected();
 
         assert_eq!(app.autotone.deferred, Some(vec![a.clone()]));
         assert!(!app.edits.contains_key(&a));

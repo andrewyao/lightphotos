@@ -734,12 +734,46 @@ impl App {
     }
 
     /// Writes one look onto every path, keeping each photo's own crop and
-    /// straighten, and returns how many were touched. An entry whose merge comes out identity
-    /// is removed rather than stored, matching how the catalog stores edits.
-    /// Grid and filmstrip thumbnails re-bake by themselves, because
-    /// `edit_sig_for` hashes the live edits into the thumbnail cache key.
-    /// Shared by the settings clipboard and by applying a preset.
+    /// straighten, and returns how many were touched. Shared by the settings
+    /// clipboard and by applying a preset.
     pub(super) fn apply_tone_to(&mut self, tone: Adjustments, paths: &[PathBuf]) -> usize {
+        self.edit_each(paths, |existing| Adjustments {
+            crop: existing.crop,
+            straighten: existing.straighten,
+            ..tone
+        })
+    }
+
+    /// Turns every selected photo black and white (V), or back to color when
+    /// all of them already are. Saturation is all B&W changes.
+    pub(super) fn toggle_black_and_white(&mut self) {
+        let saturation = if self.selection_is_monochrome() {
+            0.0
+        } else {
+            -100.0
+        };
+        self.edit_each(&self.action_paths(), |existing| Adjustments {
+            saturation,
+            ..existing
+        });
+    }
+
+    /// Whether every photo the toolbar acts on is black and white, which is
+    /// when the B&W button shows as on.
+    pub(crate) fn selection_is_monochrome(&self) -> bool {
+        let paths = self.action_paths();
+        !paths.is_empty()
+            && paths
+                .iter()
+                .all(|p| self.edits.get(p).is_some_and(Adjustments::is_monochrome))
+    }
+
+    /// Replaces each path's adjustments with `edit` of them, and returns how
+    /// many were touched. An entry that comes out identity is removed rather
+    /// than stored, matching how the catalog stores edits. Grid and filmstrip
+    /// thumbnails re-bake by themselves, because `edit_sig_for` hashes the
+    /// live edits into the thumbnail cache key.
+    fn edit_each(&mut self, paths: &[PathBuf], edit: impl Fn(Adjustments) -> Adjustments) -> usize {
         if paths.is_empty() {
             return 0;
         }
@@ -747,11 +781,7 @@ impl App {
         let mut changed = false;
         for path in paths {
             let existing = self.edits.get(path).copied().unwrap_or_default();
-            let merged = Adjustments {
-                crop: existing.crop,
-                straighten: existing.straighten,
-                ..tone
-            };
+            let merged = edit(existing);
             #[cfg(target_arch = "wasm32")]
             {
                 changed |= merged != existing;

@@ -243,10 +243,46 @@ impl App {
         (radius * min_dim / w, radius * min_dim / h)
     }
 
-    /// Save `adj` for the shown image and push it to the GPU. Identity edits are
+    /// Save `adj` for the shown image and push it to the GPU, and sync the
+    /// sliders it moved onto the rest of the selection. Identity edits are
     /// removed from the edits map rather than stored.
     pub(super) fn apply_adjustments(&mut self, adj: Adjustments) {
+        let before = self.current_adjustments();
         self.apply_adjustments_kind(adj, "adjustment");
+        self.sync_to_selection(before, adj);
+    }
+
+    /// Lightroom's Auto Sync: with several photos selected, a slider's new
+    /// value lands on every one of them. Only the sliders that moved are
+    /// copied, so each photo keeps the rest of its own look, and its crop.
+    fn sync_to_selection(&mut self, mut before: Adjustments, mut after: Adjustments) {
+        if self.action_count() < 2 {
+            return;
+        }
+        let moved: Vec<&develop::Slider> = develop::SLIDERS
+            .iter()
+            .filter(|s| *(s.field)(&mut before) != *(s.field)(&mut after))
+            .collect();
+        if moved.is_empty() {
+            return;
+        }
+        let shown = self.shown.path().map(Path::to_path_buf);
+        for path in self.action_paths() {
+            if shown.as_ref() == Some(&path) {
+                continue;
+            }
+            let mut adj = self.edits.get(&path).copied().unwrap_or_default();
+            for s in &moved {
+                *(s.field)(&mut adj) = *(s.field)(&mut after);
+            }
+            if adj.is_identity() {
+                self.edits.remove(&path);
+            } else {
+                self.edits.insert(path.clone(), adj);
+            }
+            self.unsaved_synced.insert(path);
+        }
+        self.save_edit_unless_dragging();
     }
 
     pub(super) fn apply_adjustments_kind(&mut self, adj: Adjustments, _kind: &'static str) {
@@ -289,6 +325,10 @@ impl App {
     }
 
     pub(crate) fn save_edit(&mut self) {
+        for path in std::mem::take(&mut self.unsaved_synced) {
+            let adj = self.edits.get(&path).copied().unwrap_or_default();
+            self.catalog.set_adjustments(&path, &adj);
+        }
         if let Some(path) = self.unsaved_edit.take() {
             let adj = self.edits.get(&path).copied().unwrap_or_default();
             self.catalog.set_adjustments(&path, &adj);
@@ -609,6 +649,101 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Three photos selected with the first one shown. Photo 1 has its own
+    /// exposure and is already black and white.
+    fn three_selected(tag: &str) -> (App, PathBuf, Vec<PathBuf>) {
+        let (mut app, dir, paths) = crate::app::test_support::folder_app(tag, 3);
+        app.shown = Shown::Preview(paths[0].clone(), 1024, 1024);
+        app.selected = (0..3).collect();
+        app.sel = Some(0);
+        app.edits.insert(
+            paths[1].clone(),
+            Adjustments {
+                exposure: 1.0,
+                saturation: -100.0,
+                ..Default::default()
+            },
+        );
+        (app, dir, paths)
+    }
+
+    #[test]
+    fn a_slider_change_syncs_only_that_slider_onto_the_selection() {
+        let (mut app, dir, paths) = three_selected("sync");
+        app.apply_adjustments(Adjustments {
+            contrast: 30.0,
+            ..Default::default()
+        });
+        for path in &paths {
+            assert_eq!(app.edits[path].contrast, 30.0, "{}", path.display());
+        }
+        assert_eq!(app.edits[&paths[1]].exposure, 1.0, "its own exposure stays");
+        assert!(app.edits[&paths[1]].is_monochrome());
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        let catalog = crate::catalog::Catalog::with_dir(dir.clone());
+        assert_eq!(catalog.adjustments(&paths[2]).contrast, 30.0);
+
+        app.selected = BTreeSet::from([0]);
+        app.apply_adjustments(Adjustments {
+            contrast: 50.0,
+            ..Default::default()
+        });
+        assert_eq!(app.edits[&paths[2]].contrast, 30.0, "one photo, no sync");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_synced_drag_writes_the_other_photos_on_release() {
+        let (mut app, dir, paths) = three_selected("sync-drag");
+        press(&app, true);
+        app.apply_adjustments(Adjustments {
+            contrast: 30.0,
+            ..Default::default()
+        });
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        let on_disk = || {
+            crate::catalog::Catalog::with_dir(dir.clone())
+                .adjustments(&paths[2])
+                .contrast
+        };
+        assert_eq!(on_disk(), 0.0, "nothing is written while the mouse is held");
+        press(&app, false);
+        app.save_edit_unless_dragging();
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        assert_eq!(on_disk(), 30.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v_turns_a_mixed_selection_black_and_white_then_back_to_color() {
+        let (mut app, dir, paths) = three_selected("bw");
+        assert!(!app.selection_is_monochrome());
+        app.handle_key(winit::keyboard::KeyCode::KeyV);
+        assert!(app.selection_is_monochrome());
+        for path in &paths {
+            assert!(app.edits[path].is_monochrome(), "{}", path.display());
+        }
+        app.handle_key(winit::keyboard::KeyCode::KeyV);
+        assert!(!app.edits.contains_key(&paths[0]), "back to no edit at all");
+        assert_eq!(app.edits[&paths[1]].saturation, 0.0);
+        assert_eq!(app.edits[&paths[1]].exposure, 1.0, "its own exposure stays");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_histogram_is_empty_while_several_photos_are_selected() {
+        let (mut app, dir, _) = three_selected("hist");
+        app.hist.set_sample(vec![[0.2f32; 3]; 64]);
+        app.recompute_histogram();
+        assert!(app.histogram().is_none());
+        app.selected = BTreeSet::from([0]);
+        assert!(app.histogram().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The Develop panel's tabs and Touch Up's brush, driven through the real
     /// widget tree with the presets module's pointer harness.
     mod develop_tabs {
@@ -712,16 +847,21 @@ mod tests {
         }
 
         #[test]
-        fn the_rail_opens_export_in_develops_place_and_auto_tone_sits_under_tone() {
+        fn the_rail_opens_export_in_develops_place_and_auto_tone_and_bw_sit_above_the_sections() {
             let mut app = loupe("export");
             let t = crate::i18n::t();
             let painted = settled(&mut app);
             assert!(painted.has(t.auto_tone), "{:?}", painted.texts());
-            let tone = painted.pos_of(t.section(crate::develop::Section::Tone));
             let auto = painted.pos_of(t.auto_tone);
+            let bw = painted.pos_of(t.black_and_white);
+            let first = painted.pos_of(t.section(crate::develop::Section::WhiteBalance));
             assert!(
-                (auto.y - tone.y).abs() < 4.0,
-                "Auto Tone shares the Tone header's row: {tone:?} vs {auto:?}"
+                (auto.y - bw.y).abs() < 4.0 && auto.x < bw.x,
+                "Auto Tone then B&W on one row: {auto:?} vs {bw:?}"
+            );
+            assert!(
+                auto.y < first.y,
+                "the row sits above the first section: {auto:?} vs {first:?}"
             );
             assert!(!painted.has(t.develop), "no Develop/Export tabs");
 

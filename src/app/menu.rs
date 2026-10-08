@@ -35,7 +35,7 @@ impl App {
                     self.sel.and_then(|pos| self.group_at(pos)).is_some()
                 }
             }
-            AutoToneSelection => free && selected > 0,
+            AutoToneSelection | BlackAndWhite => free && selected > 0,
             ScorePhotos => free && selected > 0 && self.scoring_available(),
             MoveToTrash => free && selected > 0 && self.delete_available(),
             GroupSelected => free && self.group_available(),

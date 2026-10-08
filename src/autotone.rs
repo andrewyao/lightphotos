@@ -530,8 +530,14 @@ fn lopsided(hist: &Histogram, original: &Original) -> Adjustments {
 }
 
 /// Copy Auto Tone's sliders onto `base`. Crop, white balance, saturation, and
-/// denoise keep the user's values.
+/// denoise keep the user's values, and so does vibrance on a B&W photo, where
+/// it has no effect and would only surface on switching back to color.
 pub(crate) fn merge(base: &Adjustments, auto: &Adjustments) -> Adjustments {
+    let vibrance = if base.is_monochrome() {
+        base.vibrance
+    } else {
+        auto.vibrance
+    };
     Adjustments {
         exposure: auto.exposure,
         contrast: auto.contrast,
@@ -539,7 +545,7 @@ pub(crate) fn merge(base: &Adjustments, auto: &Adjustments) -> Adjustments {
         shadows: auto.shadows,
         whites: auto.whites,
         blacks: auto.blacks,
-        vibrance: auto.vibrance,
+        vibrance,
         ..*base
     }
 }
@@ -1194,6 +1200,24 @@ mod tests {
         assert_eq!(out.denoise, 40.0);
         assert_eq!(out.exposure, -1.0);
         assert_eq!(out.blacks, -25.0);
+    }
+
+    #[test]
+    fn merge_on_a_black_and_white_photo_keeps_it_black_and_white() {
+        let base = Adjustments {
+            saturation: -100.0,
+            vibrance: 5.0,
+            ..Default::default()
+        };
+        let auto = Adjustments {
+            exposure: 0.5,
+            vibrance: 30.0,
+            ..Default::default()
+        };
+        let out = merge(&base, &auto);
+        assert!(out.is_monochrome());
+        assert_eq!(out.vibrance, 5.0);
+        assert_eq!(out.exposure, 0.5);
     }
 
     #[test]

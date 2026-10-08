@@ -433,6 +433,9 @@ pub(crate) struct App {
     /// Photo whose edit is not yet written to its sidecar. See
     /// `save_edit_unless_dragging`.
     unsaved_edit: Option<PathBuf>,
+    /// Other selected photos a slider change was synced onto, written with
+    /// `unsaved_edit`.
+    unsaved_synced: BTreeSet<PathBuf>,
     #[cfg(target_arch = "wasm32")]
     unsaved_edit_kind: &'static str,
     /// Active star filter. `None` shows all.
@@ -687,6 +690,7 @@ impl App {
             develop_tab: DevelopTab::Sliders,
             hist: histogram::Histogram::new(),
             unsaved_edit: None,
+            unsaved_synced: BTreeSet::new(),
             #[cfg(target_arch = "wasm32")]
             unsaved_edit_kind: "adjustment",
             filter: None,
@@ -1313,7 +1317,8 @@ impl App {
                 }
                 ui::UiAction::DeleteTouchUp => self.delete_selected_touchup(),
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
-                ui::UiAction::AutoTone => self.auto_tone_shown(),
+                ui::UiAction::AutoTone => self.auto_tone_selected(),
+                ui::UiAction::ToggleBlackAndWhite => self.toggle_black_and_white(),
                 ui::UiAction::ResetAdjustments => {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else {
                         continue;

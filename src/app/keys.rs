@@ -260,7 +260,8 @@ impl App {
             KeyCode::KeyU if !cmd && !alt => self.set_flag(None),
             KeyCode::Backquote if !cmd && !alt => self.toggle_pick(),
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
-            KeyCode::KeyU if cmd && !shift && !alt => self.auto_tone_one(),
+            KeyCode::KeyU if cmd && !shift && !alt => self.auto_tone_selected(),
+            KeyCode::KeyV if !cmd && !alt => self.toggle_black_and_white(),
             KeyCode::KeyV if cmd && shift && !alt && self.has_copied_settings() => {
                 self.request_bulk(ui::BulkKind::ApplySettings)
             }
