@@ -1,12 +1,10 @@
 use super::*;
 use std::path::Path;
 
-use super::info_panel::draw_info_panel;
 use crate::app::GRID_CELL_PT;
-use crate::app::{App, LeftTab, Region};
+use crate::app::{App, Region};
 
-/// The left sidebar. A footer strip picks its tab: the folder tree, rooted at
-/// the opened folder, or the focused photo's metadata.
+/// The left sidebar: the folder tree, rooted at the opened folder.
 pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let content_width = app
@@ -20,23 +18,12 @@ pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutpu
         .resizable(false)
         .exact_size(panel_width)
         .show_inside(ui, |ui| {
-            let t = t();
-            let tabs = [
-                (LeftTab::Folders, t.browse_tab, t.folders_tab_tip),
-                (LeftTab::Info, t.metadata_tab, t.info_tab_tip),
-            ];
-            if let Some(tab) = super::tabs::footer(ui, "left_tabs", &tabs, app.left_tab()) {
-                out.actions.push(UiAction::SetLeftTab(tab));
-            }
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| match app.left_tab() {
-                    LeftTab::Folders => {
-                        if let Some(root) = app.folder_root() {
-                            folder_node(ui, app, &root, 0, out);
-                        }
+                .show(ui, |ui| {
+                    if let Some(root) = app.folder_root() {
+                        folder_node(ui, app, &root, 0, out);
                     }
-                    LeftTab::Info => draw_info_panel(ui, app),
                 });
         });
 }

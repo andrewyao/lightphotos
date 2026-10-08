@@ -97,9 +97,10 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     ui.add_space(6.0);
 }
 
-/// Sliders, Crop, Cleanup, the group's Compare pane and Export as a column
-/// of icons, the one on screen lit. Compare is greyed out unless the photo is
-/// in a group.
+/// Sliders, Crop, Cleanup, the group's Compare pane, Info and Export as a
+/// column of icons, the one on screen lit. Compare is greyed out unless the
+/// photo is in a group. Crop, Cleanup and Compare work on the Loupe's photo,
+/// so the Grid's rail leaves them out.
 fn develop_rail(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let margin = font_size::px(ui.style(), RAIL_MARGIN);
     let inner = ui.max_rect().shrink(margin);
@@ -108,13 +109,18 @@ fn develop_rail(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         let t = t();
         let lit = app.rail_lit();
         let in_group = app.shown_in_group();
+        let loupe = app.mode() == ViewMode::Loupe;
         for (item, tip, enabled) in [
             (RailItem::Develop(DevelopTab::Sliders), t.tab_sliders, true),
             (RailItem::Develop(DevelopTab::Crop), t.tab_crop, true),
             (RailItem::Develop(DevelopTab::Masks), t.tab_masks, true),
             (RailItem::GroupCompare, t.view_compare, in_group),
+            (RailItem::Info, t.info_tab_tip, true),
             (RailItem::Export, t.export_jpg_tip, true),
         ] {
+            if !loupe && !item.in_grid() {
+                continue;
+            }
             let tip = if enabled {
                 tip
             } else {
@@ -174,6 +180,12 @@ fn rail_button(ui: &mut egui::Ui, item: RailItem, tip: &str, selected: bool) -> 
         );
     };
     match item {
+        // A lowercase i in a circle.
+        RailItem::Info => {
+            painter.circle_stroke(c, 10.0 * u, stroke);
+            painter.line_segment([p(0.0, -1.5), p(0.0, 5.5)], stroke);
+            painter.circle_filled(p(0.0, -5.0), 1.2 * u, stroke.color);
+        }
         // Three faders, each with its knob at a different height.
         RailItem::Develop(DevelopTab::Sliders) => {
             for (y, knob) in [(-6.0, 3.0), (0.0, -4.0), (6.0, 1.0)] {
@@ -382,7 +394,8 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 }
                 section = Some(s.section);
                 form::section_header(ui, t.section(s.section), |ui| match s.section {
-                    crate::develop::Section::WhiteBalance => {
+                    // The picker samples the Loupe's photo.
+                    crate::develop::Section::WhiteBalance if app.mode() == ViewMode::Loupe => {
                         let picker = eyedropper_button(ui, app.wb_picker_active())
                             .on_hover_text(t.pick_gray_tip);
                         if picker.clicked() {

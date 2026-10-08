@@ -228,11 +228,7 @@ impl App {
             KeyCode::KeyG if cmd && shift => self.ungroup_selected(),
             KeyCode::KeyG if cmd => self.group_selected(),
             KeyCode::KeyG if !alt => self.enter_grid(),
-            KeyCode::KeyI
-                if !cmd && !alt && matches!(self.mode, ViewMode::Grid | ViewMode::Loupe) =>
-            {
-                self.toggle_left_tab()
-            }
+            KeyCode::KeyI if !cmd && !alt => self.click_rail(RailItem::Info),
             KeyCode::KeyE if !cmd && !alt && self.mode == ViewMode::Grid => self.enter_loupe(),
             KeyCode::KeyC if !cmd && !alt => self.enter_crop(),
             KeyCode::KeyX if !cmd && !alt => self.toggle_export_form(),
@@ -326,6 +322,7 @@ mod tests {
     fn editor_app() -> (App, Vec<PathBuf>) {
         let (mut app, paths) = folder_app(2);
         app.mode = ViewMode::Loupe;
+        app.develop_open = true;
         app.focus = Region::Detail;
         app.want = Some(paths[0].clone());
         app.shown = Shown::Preview(paths[0].clone(), 1000, 1000);
@@ -555,8 +552,8 @@ mod tests {
         );
     }
 
-    /// The Info panel's File group is a form section: its header above rows
-    /// whose labels share one column, with values level beside them.
+    /// The Info page is a stacked form: each group's header above its rows,
+    /// each label over its value, sharing its left edge.
     #[test]
     fn info_panel_lays_out_as_a_form() {
         use crate::app::test_support::settled;
@@ -564,7 +561,7 @@ mod tests {
 
         let (mut app, _) = folder_app(2);
         app.sel = Some(0);
-        app.left_tab = LeftTab::Info;
+        app.info_open = true;
         let painted = settled(&mut app);
         let header = painted.pos_of(t().info_file);
         let name = painted.pos_of(t().info_name);
@@ -577,10 +574,10 @@ mod tests {
         );
 
         assert!(header.y < name.y, "the group title heads its rows");
-        assert!(value.x > name.x, "the value is right of its label");
+        assert!(value.y > name.y, "the value is under its label");
         assert!(
-            (value.y - name.y).abs() < 1.0,
-            "the value is level with its label"
+            (value.x - name.x).abs() < 1.0,
+            "the value shares its label's left edge"
         );
     }
 
@@ -984,32 +981,68 @@ mod tests {
     }
 
     #[test]
-    fn i_toggles_the_left_panel_tab_in_the_library_and_the_editor() {
+    fn i_toggles_the_info_page_in_the_library_and_the_editor() {
         let (mut app, _) = folder_app(2);
-        assert_eq!(app.left_tab(), LeftTab::Folders);
+        assert!(!app.info_open());
         press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
-        assert_eq!(app.left_tab(), LeftTab::Info);
+        assert_eq!(app.rail_lit(), Some(RailItem::Info));
         press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
-        assert_eq!(app.left_tab(), LeftTab::Folders);
+        assert!(!app.info_open());
 
         press(&mut app, CMD, KeyCode::KeyI);
         press(&mut app, ModifiersState::ALT, KeyCode::KeyI);
-        assert_eq!(
-            app.left_tab(),
-            LeftTab::Folders,
-            "modified I is not the toggle"
-        );
+        assert!(!app.info_open(), "modified I is not the toggle");
 
         let (mut app, _) = editor_app();
-        assert!(
-            !app.left_panel_visible(),
-            "the Loupe opens without the panel"
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        assert_eq!(app.rail_lit(), Some(RailItem::Info));
+        assert_eq!(app.develop_page_shown(), None, "Info takes Develop's place");
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
+        assert_eq!(
+            app.develop_page_shown(),
+            Some(DevelopTab::Sliders),
+            "and closing it brings Develop back"
         );
+
         press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
-        assert_eq!(app.left_tab(), LeftTab::Info);
-        assert!(app.left_panel_visible(), "I shows Metadata in the Loupe");
-        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
-        assert!(!app.left_panel_visible(), "and I again hides it");
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyX);
+        assert_eq!(
+            app.rail_lit(),
+            Some(RailItem::Export),
+            "Export replaces Info"
+        );
+        assert!(!app.info_open());
+    }
+
+    #[test]
+    fn the_grid_rail_edits_the_selection_without_the_loupe_pages() {
+        let (mut app, _) = folder_app(2);
+        assert_eq!(app.rail_lit(), None, "the Grid opens with no page");
+        app.click_rail(RailItem::Develop(DevelopTab::Masks));
+        app.click_rail(RailItem::GroupCompare);
+        assert_eq!(
+            app.rail_lit(),
+            None,
+            "Clean up and Compare stay in the Loupe"
+        );
+
+        assert!(!app.grid_develop_needs_load(), "Info and Export don't load");
+        app.click_rail(RailItem::Develop(DevelopTab::Sliders));
+        assert_eq!(app.develop_page_shown(), Some(DevelopTab::Sliders));
+        assert!(app.grid_develop_needs_load(), "Develop loads the selection");
+        app.load_selected();
+        assert!(!app.grid_develop_needs_load());
+        press(&mut app, ModifiersState::empty(), KeyCode::ArrowRight);
+        assert!(app.grid_develop_needs_load(), "and follows it");
+
+        app.enter_loupe();
+        app.set_develop_tab(DevelopTab::Masks);
+        app.enter_grid();
+        assert_eq!(
+            app.develop_page_shown(),
+            Some(DevelopTab::Sliders),
+            "leaving the Loupe brings Develop back on Sliders"
+        );
     }
 
     #[test]
@@ -1017,27 +1050,20 @@ mod tests {
         use crate::app::test_support::settled;
         use crate::i18n::t;
 
-        let (mut app, _) = folder_app(2);
-        assert!(settled(&mut app).has(t().browse_tab), "the Grid has it");
-
         let (mut app, _) = editor_app();
         let painted = settled(&mut app);
-        assert!(
-            !painted.has(t().browse_tab) && !painted.has(t().metadata_tab),
-            "{:?}",
-            painted.texts()
-        );
+        assert!(!painted.has(t().metadata_title), "{:?}", painted.texts());
         for _ in 0..4 {
             press(&mut app, ModifiersState::empty(), KeyCode::F6);
             assert_ne!(app.focus, Region::Folders, "F6 skips the hidden tree");
         }
 
         press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
-        assert!(settled(&mut app).has(t().metadata_tab));
+        assert!(settled(&mut app).has(t().metadata_title));
     }
 
     #[test]
-    fn the_grid_reads_metadata_only_while_the_info_tab_shows_it() {
+    fn the_grid_reads_metadata_only_while_the_info_page_shows_it() {
         let (mut app, paths) = folder_app(2);
         assert_eq!(
             app.metadata_to_read(),
@@ -1060,34 +1086,8 @@ mod tests {
         assert_eq!(
             app.metadata_to_read(),
             Some(paths[1].clone()),
-            "the Loupe's info bar reads on either tab"
+            "the Loupe's info bar reads either way"
         );
-    }
-
-    #[test]
-    fn the_info_tab_takes_the_folder_tree_out_of_keyboard_focus() {
-        let (mut app, _) = folder_app(2);
-        app.set_focus(Region::Folders, FocusLevel::Selected);
-        press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
-        assert_eq!(app.focus, Region::Grid, "focus leaves the hidden tree");
-
-        for _ in 0..4 {
-            press(&mut app, ModifiersState::empty(), KeyCode::F6);
-            assert_ne!(
-                app.focus,
-                Region::Folders,
-                "F6 never lands on the hidden tree"
-            );
-        }
-
-        app.set_focus(Region::Grid, FocusLevel::Selected);
-        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
-        assert_ne!(
-            app.focus,
-            Region::Folders,
-            "Escape does not back into the hidden tree"
-        );
-        assert_eq!(app.sel, Some(0), "and so keeps the selection");
     }
 
     #[test]

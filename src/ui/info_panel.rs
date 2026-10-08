@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The left panel's Info tab: the focused photo's file, camera, exposure,
-//! date, and location details.
+//! The right panel's Info page: the focused photo's size and format on one
+//! line, then its file, camera, exposure, date, and location details.
 
 use std::path::Path;
 
-use super::form::Form;
+use super::form::{self, Form};
 use super::loupe::{
     format_altitude, format_aperture, format_dimensions, format_exposure_bias, format_file_size,
     format_focal_length, format_latitude, format_longitude, format_shutter, maps_url,
@@ -33,12 +33,6 @@ fn info_groups(path: &Path, meta: Option<&ImageMetadata>) -> Vec<InfoGroup> {
             t.info_file,
             vec![
                 (t.info_name, name),
-                (t.info_size, m(|m| m.file_size.map(format_file_size))),
-                (
-                    t.info_dimensions,
-                    m(|m| m.source_size.map(|(w, h)| format_dimensions(w, h))),
-                ),
-                (t.info_format, m(|m| m.format.clone())),
                 (t.info_modified, m(|m| m.modified.map(date_text))),
             ],
         ),
@@ -105,6 +99,20 @@ fn info_groups(path: &Path, meta: Option<&ImageMetadata>) -> Vec<InfoGroup> {
         .collect()
 }
 
+/// Dimensions, file size and format, the ones the photo has, on one line.
+/// `None` until the background read lands.
+fn summary_line(meta: &ImageMetadata) -> Option<String> {
+    let parts: Vec<String> = [
+        meta.source_size.map(|(w, h)| format_dimensions(w, h)),
+        meta.file_size.map(format_file_size),
+        meta.format.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
+}
+
 fn date_text(d: crate::image_decode::CaptureDate) -> String {
     (t().capture_date)(d.year, d.month, d.day, d.hour, d.minute)
 }
@@ -125,8 +133,29 @@ fn wb_text(w: WhiteBalance) -> String {
     .to_string()
 }
 
-pub(super) fn draw_info_panel(ui: &mut egui::Ui, app: &App) {
-    ui.add_space(4.0);
+/// The Info page, beside the rail. In the Loupe it takes Develop's place and
+/// width, as Export does.
+pub(super) fn draw_info_panel(ui: &mut egui::Ui, app: &App, in_loupe: bool) {
+    let panel = if in_loupe {
+        egui::Panel::right("develop")
+            .resizable(true)
+            .default_size(340.0)
+    } else {
+        egui::Panel::right("info")
+            .resizable(false)
+            .default_size(300.0)
+    };
+    panel.show_inside(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                form::page_heading(ui, t().metadata_title, |_| {});
+                form::page(ui, |ui| draw_info_page(ui, app));
+            });
+    });
+}
+
+fn draw_info_page(ui: &mut egui::Ui, app: &App) {
     let Some(path) = app.selected_path() else {
         ui.label(egui::RichText::new(t().info_no_selection).weak());
         return;
@@ -137,14 +166,17 @@ pub(super) fn draw_info_panel(ui: &mut egui::Ui, app: &App) {
         ui.add_space(4.0);
     }
     let meta = app.current_metadata();
-    let groups = info_groups(&path, meta);
-
-    let labels: Vec<&str> = groups
-        .iter()
-        .flat_map(|g| g.rows.iter().map(|(label, _)| *label))
-        .collect();
-    let form = Form::new(ui, &labels);
-    for group in &groups {
+    let form = Form::stacked();
+    if let Some(line) = meta.and_then(summary_line) {
+        form.section(ui, "", |ui| {
+            ui.add(
+                egui::Label::new(egui::RichText::new(line).strong())
+                    .selectable(true)
+                    .wrap(),
+            );
+        });
+    }
+    for group in &info_groups(&path, meta) {
         form.section(ui, group.title, |ui| {
             for (label, value) in &group.rows {
                 form.row(ui, label, |ui| {
@@ -174,6 +206,22 @@ mod tests {
         let groups = info_groups(Path::new("/p/IMG_1.JPG"), None);
         assert_eq!(titles(&groups), [t().info_file]);
         assert_eq!(groups[0].rows, [(t().info_name, "IMG_1.JPG".to_string())]);
+    }
+
+    #[test]
+    fn size_and_format_share_one_line() {
+        assert_eq!(summary_line(&ImageMetadata::default()), None);
+        let meta = ImageMetadata {
+            source_size: Some((6000, 4000)),
+            format: Some("JPEG".into()),
+            ..Default::default()
+        };
+        let line = summary_line(&meta).unwrap();
+        assert_eq!(
+            line,
+            format!("{} \u{b7} JPEG", format_dimensions(6000, 4000)),
+            "a missing file size leaves no gap"
+        );
     }
 
     #[test]

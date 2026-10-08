@@ -181,6 +181,9 @@ impl App {
     /// the toolbar's Export button and `X` do; Export in the form runs it.
     pub(super) fn toggle_export_form(&mut self) {
         self.exports.form_open = !self.exports.form_open;
+        if self.exports.form_open {
+            self.info_open = false;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if self.exports.form_open {
             self.resume_immich();

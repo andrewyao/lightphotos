@@ -42,16 +42,22 @@ impl App {
         self.request_redraw();
     }
 
-    /// The Develop page on screen, if Develop is.
+    /// The Develop page on screen, if Develop is. The Grid has only Sliders.
     pub(crate) fn develop_page_shown(&self) -> Option<DevelopTab> {
-        (self.develop_visible() && !self.export_form_open()).then_some(self.develop_tab)
+        (self.develop_visible() && !self.export_form_open() && !self.info_open)
+            .then_some(self.develop_tab)
+            .filter(|&tab| self.mode == ViewMode::Loupe || tab == DevelopTab::Sliders)
     }
 
-    /// The rail icon to light: Export while its form is open, Compare while
-    /// the pane is, otherwise the Develop page on screen.
+    /// The rail icon to light: Export while its form is open, Info while its
+    /// page is, Compare while the pane is, otherwise the Develop page on
+    /// screen.
     pub(crate) fn rail_lit(&self) -> Option<RailItem> {
         if self.export_form_open() {
             return Some(RailItem::Export);
+        }
+        if self.info_open {
+            return Some(RailItem::Info);
         }
         if self.group_view() == GroupView::Compare {
             return Some(RailItem::GroupCompare);
@@ -62,11 +68,30 @@ impl App {
     /// The lit icon turns its page off; any other icon shows its page in
     /// place of the lit one. Leaving a Develop page ends its tool the way
     /// switching pages does: a crop is kept and the brush is put down.
-    /// Compare and Export stand in for Develop without closing it, so turning
-    /// either off brings back the page Develop had.
+    /// Info, Compare and Export stand in for Develop without closing it, so
+    /// turning one off brings back the page Develop had.
     pub(super) fn click_rail(&mut self, item: RailItem) {
+        if self.mode == ViewMode::Grid && !item.in_grid() {
+            return;
+        }
         let lit = self.rail_lit() == Some(item);
+        if item != RailItem::Info {
+            self.info_open = false;
+        }
         match item {
+            RailItem::Info if lit => {
+                self.info_open = false;
+                self.request_redraw();
+            }
+            RailItem::Info => {
+                self.put_down_develop_tools();
+                self.close_export_form();
+                if self.group_view() == GroupView::Compare {
+                    self.set_group_view(GroupView::Edit);
+                }
+                self.info_open = true;
+                self.normalize_focus();
+            }
             RailItem::GroupCompare if !self.shown_in_group() => {}
             RailItem::GroupCompare if lit => self.set_group_view(GroupView::Edit),
             RailItem::GroupCompare => {

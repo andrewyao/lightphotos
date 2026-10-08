@@ -168,15 +168,6 @@ pub enum GridSort {
     Quality,
 }
 
-/// Which view fills the left panel. Session only; every launch starts on
-/// `Folders`.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum LeftTab {
-    #[default]
-    Folders,
-    Info,
-}
-
 /// Chrome regions F6 steps through before wrapping back to the main region.
 const CHROME_ORDER: [Region; 2] = [Region::Toolbar, Region::Filmstrip];
 
@@ -303,13 +294,26 @@ pub(crate) enum DevelopTab {
     Masks,
 }
 
-/// An icon on the Loupe's right-edge rail: a Develop page, or the group's
-/// Compare pane. At most one is lit, and clicking the lit one turns it off.
+/// An icon on the right-edge rail: the photo's metadata, a Develop page, or
+/// the group's Compare pane. At most one is lit, and clicking the lit one
+/// turns it off.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum RailItem {
+    Info,
     Develop(DevelopTab),
     GroupCompare,
     Export,
+}
+
+impl RailItem {
+    /// Whether the Grid's rail has it. Crop, Masks and Compare work on the
+    /// Loupe's photo.
+    pub(crate) fn in_grid(self) -> bool {
+        matches!(
+            self,
+            RailItem::Info | RailItem::Develop(DevelopTab::Sliders) | RailItem::Export
+        )
+    }
 }
 
 impl From<DevelopTab> for RailItem {
@@ -542,7 +546,8 @@ pub(crate) struct App {
 
     show_help: bool,
     show_settings: bool,
-    left_tab: LeftTab,
+    /// The metadata page fills the right panel. Session only.
+    info_open: bool,
 
     /// Toast message and when it was set.
     status: Option<(StatusKind, String, Instant)>,
@@ -668,7 +673,7 @@ impl App {
             touchup_selected: None,
             touchup_spots_hidden: false,
             touchup_undo: HashMap::new(),
-            develop_open: true,
+            develop_open: false,
             develop_tab: DevelopTab::Sliders,
             hist: histogram::Histogram::new(),
             unsaved_edit: None,
@@ -732,7 +737,7 @@ impl App {
             preset_name_edit: None,
             show_help: false,
             show_settings: false,
-            left_tab: LeftTab::Folders,
+            info_open: false,
             status: None,
             occluded: false,
             repaint_at: None,
@@ -926,6 +931,10 @@ impl App {
 
         if self.hist.is_dirty() && self.develop_open {
             self.recompute_histogram();
+        }
+
+        if self.grid_develop_needs_load() {
+            self.load_selected();
         }
 
         // Both readers dedupe in-flight requests, so asking every frame is cheap.
@@ -1149,7 +1158,6 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::ImportLrPresets => self.import_lr_presets(),
-                ui::UiAction::SetLeftTab(tab) => self.set_left_tab(tab),
                 ui::UiAction::ToggleHelp => {
                     self.show_help = !self.show_help;
                     self.request_redraw();

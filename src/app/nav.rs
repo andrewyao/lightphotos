@@ -555,8 +555,16 @@ impl App {
         self.request_redraw();
     }
 
+    /// Crop, Masks and Compare stay in the Loupe, so leaving it ends them and
+    /// Develop comes back on Sliders.
     pub(super) fn enter_grid(&mut self) {
         if self.mode != ViewMode::Grid {
+            if self.develop_tab != DevelopTab::Sliders {
+                self.set_develop_tab(DevelopTab::Sliders);
+            }
+            if self.group_view() == GroupView::Compare {
+                self.set_group_view(GroupView::Edit);
+            }
             self.mode = ViewMode::Grid;
             self.update_window_title();
             self.normalize_focus();
@@ -564,44 +572,35 @@ impl App {
         }
     }
 
-    pub(crate) fn left_tab(&self) -> LeftTab {
-        self.left_tab
+    /// The Grid's Develop page edits the selection, so it loads the
+    /// selection whenever that moves. Checked every frame, as the Grid has
+    /// several ways to select.
+    pub(super) fn grid_develop_needs_load(&self) -> bool {
+        self.mode == ViewMode::Grid
+            && self.develop_page_shown().is_some()
+            && self
+                .selected_path()
+                .is_some_and(|p| self.want.as_ref() != Some(&p))
     }
 
-    pub(super) fn set_left_tab(&mut self, tab: LeftTab) {
-        if self.left_tab != tab {
-            self.left_tab = tab;
-            self.normalize_focus();
-            self.request_redraw();
-        }
+    pub(crate) fn info_open(&self) -> bool {
+        self.info_open
     }
 
     /// The focused photo, when something on screen shows its metadata and it
-    /// is not cached yet: the Loupe's info bar, or the Grid's Info tab.
+    /// is not cached yet: the Loupe's info bar, or the Info page.
     pub(super) fn metadata_to_read(&self) -> Option<PathBuf> {
         let shown = match self.mode {
             ViewMode::Loupe => true,
-            ViewMode::Grid => self.left_tab == LeftTab::Info,
+            ViewMode::Grid => self.info_open,
         };
         let path = self.selected_path().filter(|_| shown)?;
         (!self.exif_cache.contains_key(&path)).then_some(path)
     }
 
-    pub(super) fn toggle_left_tab(&mut self) {
-        self.set_left_tab(match self.left_tab {
-            LeftTab::Folders => LeftTab::Info,
-            LeftTab::Info => LeftTab::Folders,
-        });
-    }
-
-    /// The Grid always has the left panel. The Loupe gives its width to the
-    /// photo and shows the panel only for its Metadata tab, so `I` opens and
-    /// closes it there.
+    /// The folder tree. The Loupe gives its width to the photo.
     pub(crate) fn left_panel_visible(&self) -> bool {
-        match self.mode {
-            ViewMode::Grid => true,
-            ViewMode::Loupe => self.left_tab == LeftTab::Info,
-        }
+        self.mode == ViewMode::Grid
     }
 
     /// Develop gives way to the Compare pane while it is open.
@@ -625,8 +624,8 @@ impl App {
             Region::Grid => self.mode == ViewMode::Grid,
             Region::Detail => self.mode == ViewMode::Loupe,
             Region::Filmstrip => self.mode == ViewMode::Loupe,
-            Region::Folders => self.left_panel_visible() && self.left_tab == LeftTab::Folders,
-            Region::Develop => self.mode == ViewMode::Loupe && self.develop_visible(),
+            Region::Folders => self.left_panel_visible(),
+            Region::Develop => self.mode == ViewMode::Loupe && self.develop_page_shown().is_some(),
         }
     }
 

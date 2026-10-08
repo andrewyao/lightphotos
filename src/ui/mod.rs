@@ -181,7 +181,6 @@ pub enum UiAction {
     /// Open the Settings dialog, or close it if it is showing.
     ToggleSettings,
     CloseSettings,
-    SetLeftTab(crate::app::LeftTab),
 }
 
 /// A bulk action requested from the toolbar, run against the current
@@ -228,6 +227,7 @@ use develop_panel::{draw_develop_panel, draw_develop_rail};
 use export_panel::draw_export_panel;
 pub(crate) use form::Role;
 use grid::{draw_grid, draw_left_panel};
+use info_panel::draw_info_panel;
 use loupe::draw_loupe;
 pub(crate) use modals::delete_group_tab_order;
 use modals::{
@@ -258,15 +258,14 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     if app.left_panel_visible() {
         draw_left_panel(ui, app, &mut out);
     }
-    // In the Loupe, Develop and Export are two tabs of one right-hand panel,
-    // inside the rail that shows and hides Develop.
-    if mode == ViewMode::Loupe {
-        draw_develop_rail(ui, app, &mut out);
-    }
-    let develop_here = mode == ViewMode::Loupe && app.develop_visible();
+    // Info, Develop and Export are pages of one right-hand panel, inside the
+    // rail that switches between them.
+    draw_develop_rail(ui, app, &mut out);
     if app.export_form_open() {
         draw_export_panel(ui, app, mode == ViewMode::Loupe, &mut out);
-    } else if develop_here {
+    } else if app.info_open() {
+        draw_info_panel(ui, app, mode == ViewMode::Loupe);
+    } else if app.develop_page_shown().is_some() {
         draw_develop_panel(ui, app, &mut out);
     }
 
