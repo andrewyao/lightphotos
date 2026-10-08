@@ -287,18 +287,21 @@ fn badge_center(
     align.pos_in_rect(&rect.shrink(style.corner + badge_r))
 }
 
-/// Thumbnail cell shared by the grid and the filmstrip. `selected` means the
-/// cell is in the multi-selection; `primary` means it is the active cell and
-/// gets a thicker outline.
+/// Thumbnail cell shared by the grid and the filmstrip. A cell in the
+/// multi-selection gets an outline, and the active cell `sel` a thicker one.
+/// A click on the stack badge pushes [`UiAction::ToggleStack`] to `actions`
+/// and is not a click on the cell.
 pub(super) fn thumbnail_cell(
     ui: &mut egui::Ui,
     app: &App,
     pos: usize,
     cell: f32,
-    selected: bool,
-    primary: bool,
+    sel: Option<usize>,
     style: &CellStyle,
+    actions: &mut Vec<UiAction>,
 ) -> egui::Response {
+    let primary = sel == Some(pos);
+    let selected = app.is_selected(pos);
     let size = egui::vec2(cell, cell);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
@@ -312,9 +315,11 @@ pub(super) fn thumbnail_cell(
     };
     ui.painter().rect_filled(rect, style.corner, bg);
 
-    let members = app.group_at(pos).map(|(_, g)| g.members().len());
+    let badge = app
+        .stack_badge_at(pos)
+        .map(|(_, n, expanded)| (n, expanded));
     let card_step = font_size::px(ui.style(), 3.0);
-    let cards = members.is_some() && !style.strip;
+    let cards = badge.is_some_and(|(_, expanded)| !expanded) && !style.strip;
     let mut inner = rect.shrink(style.corner);
     if cards {
         inner.min.y += 2.0 * card_step;
@@ -363,8 +368,21 @@ pub(super) fn thumbnail_cell(
         );
     }
 
-    if let Some(n) = members {
-        count_pill(ui, pill_anchor, rect, n, &colors);
+    if let Some((n, expanded)) = badge {
+        let pill = stack_pill(ui, pill_anchor, rect, n, expanded, &colors);
+        let t = crate::i18n::t();
+        let tip = if expanded {
+            t.collapse_stack
+        } else {
+            t.expand_stack
+        };
+        if ui
+            .interact(pill, response.id.with("stack"), egui::Sense::click())
+            .on_hover_text(tip)
+            .clicked()
+        {
+            actions.push(UiAction::ToggleStack(pos));
+        }
     }
 
     // The top-left corner holds the flag, then the selection check, each only
@@ -519,36 +537,68 @@ pub(super) fn score_color(colors: &theme::Palette, stale: bool) -> egui::Color32
     }
 }
 
-fn count_pill(
+/// The stack badge: a stack icon and the stack's full size `count` on a
+/// pill, filled with the selection color while the stack is `expanded`.
+/// Returns the pill's rect.
+fn stack_pill(
     ui: &egui::Ui,
     anchor: egui::Rect,
     cell: egui::Rect,
     count: usize,
+    expanded: bool,
     colors: &theme::Palette,
-) {
+) -> egui::Rect {
+    let (fill, ink) = if expanded {
+        (colors.selection, egui::Color32::WHITE)
+    } else {
+        (colors.pill_fill, colors.pill_text)
+    };
     let font = egui::FontId::proportional(font_size::px(ui.style(), 11.0));
-    let galley = ui
-        .painter()
-        .layout_no_wrap(count.to_string(), font, colors.pill_text);
+    let galley = ui.painter().layout_no_wrap(count.to_string(), font, ink);
     let pad = egui::vec2(
         font_size::px(ui.style(), 5.0),
         font_size::px(ui.style(), 1.5),
     );
-    let size = galley.size() + 2.0 * pad;
-    let size = egui::vec2(size.x.max(size.y), size.y);
+    let icon = egui::Vec2::splat(galley.size().y * 0.7);
+    let gap = font_size::px(ui.style(), 3.0);
+    let size = egui::vec2(icon.x + gap + galley.size().x, galley.size().y) + 2.0 * pad;
     let inset = font_size::px(ui.style(), 4.0);
     let pill = PILL_CORNER.align_size_within_rect(size, anchor.shrink(inset));
     let pill = pill.translate(egui::vec2(
         (cell.left() + inset - pill.left()).max(0.0),
         0.0,
     ));
-    ui.painter()
-        .rect_filled(pill, size.y / 2.0, colors.pill_fill);
-    ui.painter().galley(
-        pill.center() - galley.size() / 2.0,
-        galley,
-        colors.pill_text,
+    ui.painter().rect_filled(pill, size.y / 2.0, fill);
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(pill.left() + pad.x, pill.center().y - icon.y / 2.0),
+        icon,
     );
+    stack_icon(ui.painter(), icon_rect, ink);
+    ui.painter().galley(
+        egui::pos2(
+            icon_rect.right() + gap,
+            pill.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        ink,
+    );
+    pill
+}
+
+/// Two offset cards, the back one outlined and the front one filled, drawn
+/// as shapes so they need no glyph from the bundled fonts.
+fn stack_icon(painter: &egui::Painter, rect: egui::Rect, ink: egui::Color32) {
+    let card = egui::vec2(rect.width() * 0.75, rect.height() * 0.65);
+    let corner = rect.height() * 0.12;
+    let back = egui::Rect::from_min_size(egui::pos2(rect.right() - card.x, rect.top()), card);
+    let front = egui::Rect::from_min_size(egui::pos2(rect.left(), rect.bottom() - card.y), card);
+    painter.rect_stroke(
+        back,
+        corner,
+        egui::Stroke::new((rect.height() * 0.1).max(1.0), ink),
+        egui::StrokeKind::Inside,
+    );
+    painter.rect_filled(front, corner, ink);
 }
 
 /// A blue disc with a white check, drawn as strokes so it needs no glyph from
@@ -586,9 +636,7 @@ fn grid_cell(
     sel: Option<usize>,
     out: &mut FrameOutput,
 ) {
-    let primary = sel == Some(pos);
-    let selected = app.is_selected(pos);
-    let response = thumbnail_cell(ui, app, pos, cell, selected, primary, &GRID_CELL_STYLE);
+    let response = thumbnail_cell(ui, app, pos, cell, sel, &GRID_CELL_STYLE, &mut out.actions);
     app.record_cell_rect(pos, response.rect);
     if response.clicked() {
         out.actions.push(click_action(ui, pos));

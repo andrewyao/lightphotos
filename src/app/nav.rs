@@ -1354,6 +1354,28 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn a_click_on_the_stack_badge_toggles_the_stack_and_not_the_selection() {
+        use crate::app::test_support::{click, settled};
+        use crate::ui::UiAction;
+        let (mut app, dir, _) = folder_app("nav-badge", 6);
+        group_photos(&mut app, &[1, 2, 3], 2);
+        let badge = settled(&mut app).pos_of("3");
+        let (actions, _) = click(&mut app, badge);
+        assert_eq!(actions, vec![UiAction::ToggleStack(1)]);
+        app.apply_ui_actions(actions);
+        assert_eq!(cells(&app), vec![0, 1, 2, 3, 4, 5]);
+
+        let painted = settled(&mut app);
+        let badges = painted.texts().iter().filter(|t| **t == "3").count();
+        assert_eq!(badges, 3, "every expanded member carries the full count");
+        let (actions, _) = click(&mut app, painted.pos_of("3"));
+        assert_eq!(actions, vec![UiAction::ToggleStack(1)]);
+        app.apply_ui_actions(actions);
+        assert_eq!(cells(&app), vec![0, 2, 4, 5]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The Loupe names its folder, and the arrow beside the name goes back to
     /// the Grid.
     #[test]

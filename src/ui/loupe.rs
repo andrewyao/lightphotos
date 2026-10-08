@@ -972,9 +972,7 @@ fn filmstrip_cell(
     sel: Option<usize>,
     out: &mut FrameOutput,
 ) {
-    let primary = sel == Some(pos);
-    let selected = app.is_selected(pos);
-    let response = thumbnail_cell(ui, app, pos, cell, selected, primary, &STRIP_CELL_STYLE);
+    let response = thumbnail_cell(ui, app, pos, cell, sel, &STRIP_CELL_STYLE, &mut out.actions);
     app.record_cell_rect(pos, response.rect);
     if response.clicked() {
         out.actions.push(click_action(ui, pos));
