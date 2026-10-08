@@ -136,8 +136,7 @@ impl App {
                 self.request_redraw();
                 return;
             };
-            let Some(group) = burst_group(&burst, |p| self.member_score(p).map(|(s, _)| s.value))
-            else {
+            let Some(group) = burst_group(&burst) else {
                 continue;
             };
             let writes = groups.create(group, web_time::SystemTime::now());
@@ -157,22 +156,14 @@ impl App {
     }
 }
 
-/// A burst as a group. Its representative is the highest-scored frame, the
-/// earliest of a tie, or the first frame when none is scored.
-fn burst_group(burst: &[PathBuf], score: impl Fn(&Path) -> Option<u8>) -> Option<Group> {
-    let rep = burst
-        .iter()
-        .filter_map(|p| Some((p, score(p)?)))
-        .fold(None, |best: Option<(&PathBuf, u8)>, (p, v)| match best {
-            Some((_, b)) if b >= v => best,
-            _ => Some((p, v)),
-        })
-        .map_or(burst.first()?, |(p, _)| p);
+/// A burst as a group, with no representative until one is chosen in
+/// Compare.
+fn burst_group(burst: &[PathBuf]) -> Option<Group> {
     let members = burst
         .iter()
         .filter_map(|p| p.file_name().map(|n| n.to_os_string()))
         .collect();
-    Group::new(members, rep.file_name()?.to_os_string())
+    Group::new(members, None)
 }
 
 #[cfg(test)]
@@ -264,23 +255,13 @@ mod tests {
     }
 
     #[test]
-    fn a_bursts_representative_is_its_best_scored_frame() {
-        let burst: Vec<PathBuf> = ["a", "b", "c"]
+    fn a_burst_stacks_with_no_representative_and_its_first_frame_as_cover() {
+        let burst: Vec<PathBuf> = ["b", "a", "c"]
             .iter()
             .map(|n| PathBuf::from(format!("/f/{n}.jpg")))
             .collect();
-        let rep = |score: &dyn Fn(&str) -> Option<u8>| {
-            burst_group(&burst, |p| score(p.file_stem()?.to_str()?))
-                .unwrap()
-                .rep()
-                .clone()
-        };
-        assert_eq!(rep(&|_| None), "a.jpg");
-        assert_eq!(rep(&|n| (n == "b").then_some(40)), "b.jpg");
-        assert_eq!(
-            rep(&|n| Some(if n == "a" { 50 } else { 70 })),
-            "b.jpg",
-            "the earliest of a tie"
-        );
+        let g = burst_group(&burst).unwrap();
+        assert_eq!(g.rep(), None);
+        assert_eq!(g.cover(), "a.jpg");
     }
 }

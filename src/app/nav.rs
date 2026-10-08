@@ -71,11 +71,11 @@ impl<'a> Placer<'a> {
         else {
             return Place::Gone;
         };
-        let rep = groups.get(id).and_then(|g| pl.index_of(g.rep()));
+        let cover = groups.get(id).and_then(|g| pl.index_of(g.cover()));
         let cell = match self.group_cells.get(id) {
             Some(&cell) => cell,
             None => {
-                let cell = rep.and_then(|rep| self.cell(rep));
+                let cell = cover.and_then(|cover| self.cell(cover));
                 self.group_cells.insert(id, cell);
                 cell
             }
@@ -589,15 +589,22 @@ impl App {
         self.request_redraw();
     }
 
-    /// Open the Loupe on the selection. Does nothing when nothing is selected.
+    /// Open the Loupe on the selection. Does nothing when nothing is
+    /// selected. A collapsed stack with no representative opens in Compare,
+    /// to choose one; any other photo opens in Edit.
     pub(super) fn enter_loupe(&mut self) {
         if self.selected_path().is_none() {
             return;
         }
+        let compare =
+            self.mode == ViewMode::Grid && self.sel.is_some_and(|pos| self.opens_in_compare(pos));
         self.mode = ViewMode::Loupe;
         self.develop_open = true;
         self.compare = false;
         self.load_selected();
+        if compare {
+            self.click_rail(super::RailItem::GroupCompare);
+        }
         self.request_neighbors();
         self.normalize_focus();
         self.request_redraw();
@@ -1077,7 +1084,7 @@ pub(in crate::app) mod tests {
 
     pub(in crate::app) fn group_photos(app: &mut App, members: &[usize], rep: usize) {
         let names = members.iter().map(|&i| name(app, i)).collect();
-        let group = Group::new(names, name(app, rep)).unwrap();
+        let group = Group::new(names, Some(name(app, rep))).unwrap();
         let groups = app.catalog.groups().expect("the folder's groups loaded");
         let writes = groups.create(group, std::time::SystemTime::now());
         app.catalog.apply_group_writes(writes).unwrap();

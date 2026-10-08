@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Saved photo groups for one folder. A group is two or more photos shown as
-//! one, its representative. This module is the pure model: it holds no UI,
+//! one, its cover: the representative when one was chosen, else the first
+//! member. This module is the pure model: it holds no UI,
 //! decode or filesystem state. Every mutation computes the sidecar writes it
 //! implies as [`GroupWrite`]s, and [`Groups::apply`] is the one place those
 //! writes change the index, so memory and disk go through the same values.
@@ -98,32 +99,30 @@ impl std::fmt::Display for GroupId {
 }
 
 /// Two or more distinct photos, sorted by file name the way the folder
-/// lists them, and the one that stands for them. [`Group::new`] is the only
-/// constructor, so a group of one, a representative from outside the group,
-/// or a member name a sidecar cannot hold cannot exist.
+/// lists them, and the one chosen to stand for them, if any. [`Group::new`]
+/// is the only constructor, so a group of one, a representative from outside
+/// the group, or a member name a sidecar cannot hold cannot exist.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group {
     members: Vec<OsString>,
-    rep: OsString,
+    rep: Option<OsString>,
 }
 
 impl Group {
     /// `None` also for a member name that is not UTF-8, since the sidecar's
     /// JSON strings cannot hold it.
-    pub fn new(members: Vec<OsString>, rep: OsString) -> Option<Group> {
+    pub fn new(members: Vec<OsString>, rep: Option<OsString>) -> Option<Group> {
         let members = sorted_members(members)?;
-        members.contains(&rep).then_some(Group { members, rep })
+        rep.as_ref()
+            .is_none_or(|r| members.contains(r))
+            .then_some(Group { members, rep })
     }
 
-    /// Like [`Group::new`], but a `rep` outside `members` moves to the
-    /// first member instead of refusing the group.
-    fn with_rep_or_first(members: Vec<OsString>, rep: &OsString) -> Option<Group> {
+    /// Like [`Group::new`], but a `rep` outside `members` is dropped
+    /// instead of refusing the group.
+    fn with_rep_if_member(members: Vec<OsString>, rep: Option<&OsString>) -> Option<Group> {
         let members = sorted_members(members)?;
-        let rep = if members.contains(rep) {
-            rep.clone()
-        } else {
-            members[0].clone()
-        };
+        let rep = rep.filter(|r| members.contains(r)).cloned();
         Some(Group { members, rep })
     }
 
@@ -131,13 +130,20 @@ impl Group {
         &self.members
     }
 
-    pub fn rep(&self) -> &OsString {
-        &self.rep
+    /// The representative, when one was chosen.
+    pub fn rep(&self) -> Option<&OsString> {
+        self.rep.as_ref()
+    }
+
+    /// The photo the collapsed stack shows: the representative, else the
+    /// first member.
+    pub fn cover(&self) -> &OsString {
+        self.rep.as_ref().unwrap_or(&self.members[0])
     }
 
     fn retain(&self, keep: impl Fn(&OsString) -> bool) -> Option<Group> {
         let members = self.members.iter().filter(|m| keep(m)).cloned().collect();
-        Group::with_rep_or_first(members, &self.rep)
+        Group::with_rep_if_member(members, self.rep.as_ref())
     }
 }
 
@@ -156,7 +162,7 @@ fn sorted_members(mut members: Vec<OsString>) -> Option<Vec<OsString>> {
 #[derive(Clone, Debug)]
 pub struct SavedGroup {
     pub members: Vec<OsString>,
-    pub rep: OsString,
+    pub rep: Option<OsString>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -190,8 +196,8 @@ impl Groups {
     /// The groups a folder's sidecars describe, reconciled against the
     /// folder's photos. A member that is not a photo in the folder is
     /// dropped, the newest id keeps a photo two sidecars claim, a group left
-    /// under two members is dropped, and a missing representative moves to
-    /// the first member. Nothing here writes, so opening a folder never
+    /// under two members is dropped, and a missing representative is
+    /// cleared. Nothing here writes, so opening a folder never
     /// changes it. Every group this changed is recorded for
     /// [`Groups::take_repairs`], so a dropped group cannot come back when
     /// its photos do.
@@ -210,7 +216,7 @@ impl Groups {
                 .cloned()
                 .collect();
             let intact = kept.len() == saved.members.len();
-            let repaired = Group::with_rep_or_first(kept, &saved.rep);
+            let repaired = Group::with_rep_if_member(kept, saved.rep.as_ref());
             match &repaired {
                 Some(g) if intact && g.rep == saved.rep => {}
                 _ => {
@@ -239,7 +245,7 @@ impl Groups {
             return Slot::Single;
         };
         let expanded = expanded(stack);
-        if self.by_id[stack].rep == name {
+        if self.by_id[stack].cover() == name {
             Slot::Cover { stack, expanded }
         } else {
             Slot::Member { stack, expanded }
@@ -264,12 +270,15 @@ impl Groups {
     /// that drops under two members is deleted. The new group's write comes
     /// first and its id is the newest, so a crash partway through still
     /// loads with the photos in the new group. Creating a group whose members
-    /// already form one only moves that group's representative, so repeating
-    /// a create changes nothing.
+    /// already form one only rewrites that group's representative, so
+    /// repeating a create changes nothing.
     pub fn create(&self, group: Group, at: SystemTime) -> Vec<GroupWrite> {
-        if let Some(id) = self.group_of(&group.rep) {
+        if let Some(id) = self.group_of(&group.members[0]) {
             if self.by_id[id].members == group.members {
-                return self.set_rep(id, &group.rep);
+                if self.by_id[id].rep == group.rep {
+                    return Vec::new();
+                }
+                return vec![GroupWrite::Put(id.clone(), group)];
             }
         }
         let newest = self
@@ -293,10 +302,10 @@ impl Groups {
         let Some(group) = self.by_id.get(id) else {
             return Vec::new();
         };
-        if group.rep == *rep {
+        if group.rep.as_ref() == Some(rep) {
             return Vec::new();
         }
-        match Group::new(group.members.clone(), rep.clone()) {
+        match Group::new(group.members.clone(), Some(rep.clone())) {
             Some(g) => vec![GroupWrite::Put(id.clone(), g)],
             None => Vec::new(),
         }
@@ -311,8 +320,8 @@ impl Groups {
     }
 
     /// Take `names` out of their groups, for photos that were trashed or
-    /// absorbed into another group. A group losing its representative moves
-    /// it to the first surviving member, and one left under two is deleted.
+    /// absorbed into another group. A group losing its representative is
+    /// left without one, and one left under two is deleted.
     pub fn forget(&self, names: &[OsString]) -> Vec<GroupWrite> {
         let gone: HashSet<&OsString> = names.iter().collect();
         let touched: BTreeSet<&GroupId> = names.iter().filter_map(|n| self.of.get(n)).collect();
@@ -387,7 +396,12 @@ mod tests {
     }
 
     fn group(ns: &[&str], rep: &str) -> Group {
-        Group::new(names(ns), rep.into()).expect("a valid group")
+        Group::new(names(ns), Some(rep.into())).expect("a valid group")
+    }
+
+    /// A group with no representative chosen.
+    fn bare(ns: &[&str]) -> Group {
+        Group::new(names(ns), None).expect("a valid group")
     }
 
     fn id(s: &str) -> GroupId {
@@ -405,7 +419,7 @@ mod tests {
     fn saved(ns: &[&str], rep: &str) -> SavedGroup {
         SavedGroup {
             members: names(ns),
-            rep: rep.into(),
+            rep: Some(rep.into()),
         }
     }
 
@@ -421,10 +435,10 @@ mod tests {
         groups
     }
 
-    fn shape_ignoring_ids(groups: &Groups) -> Vec<(Vec<OsString>, OsString)> {
+    fn shape_ignoring_ids(groups: &Groups) -> Vec<(Vec<OsString>, Option<OsString>)> {
         let mut out: Vec<_> = groups
             .iter()
-            .map(|(_, g)| (g.members().to_vec(), g.rep().clone()))
+            .map(|(_, g)| (g.members().to_vec(), g.rep().cloned()))
             .collect();
         out.sort();
         out
@@ -445,7 +459,35 @@ mod tests {
     fn grouping_a_name_a_sidecar_cannot_hold_is_refused() {
         use std::os::unix::ffi::OsStringExt;
         let bad = OsString::from_vec(vec![b'a', 0xff]);
-        assert_eq!(Group::new(vec![bad, "b".into()], "b".into()), None);
+        assert_eq!(Group::new(vec![bad, "b".into()], None), None);
+    }
+
+    #[test]
+    fn the_cover_is_the_representative_else_the_first_member() {
+        assert_eq!(group(&["a", "b", "c"], "b").cover(), "b");
+        assert_eq!(bare(&["c", "a", "b"]).cover(), "a");
+        let groups = load(vec![(id("g-a"), saved(&["a", "b"], "b"))], &["a", "b"]);
+        let cleared = applied(groups, &[GroupWrite::Put(id("g-a"), bare(&["a", "b"]))]);
+        assert_eq!(
+            cleared.slot("a".as_ref(), |_| false),
+            Slot::Cover {
+                stack: &id("g-a"),
+                expanded: false
+            }
+        );
+    }
+
+    #[test]
+    fn creating_a_stack_with_no_representative_twice_converges() {
+        let groups = Groups::default();
+        let writes = groups.create(bare(&["a", "b"]), at(1));
+        let once = applied(groups, &writes);
+        assert_eq!(once.create(bare(&["b", "a"]), at(2)), Vec::new());
+        assert!(
+            matches!(once.create(group(&["a", "b"], "b"), at(3)).as_slice(),
+                [GroupWrite::Put(_, g)] if g.rep().is_some_and(|r| r == "b")),
+            "choosing a representative for the same members rewrites only it"
+        );
     }
 
     #[test]
@@ -481,24 +523,28 @@ mod tests {
     }
 
     #[test]
-    fn a_group_needs_two_distinct_members_and_a_representative_among_them() {
+    fn a_group_needs_two_distinct_members_and_any_representative_among_them() {
         assert!(
-            Group::new(names(&["a"]), "a".into()).is_none(),
+            Group::new(names(&["a"]), Some("a".into())).is_none(),
             "one member"
         );
         assert!(
-            Group::new(names(&["a", "a"]), "a".into()).is_none(),
+            Group::new(names(&["a", "a"]), Some("a".into())).is_none(),
             "a duplicate member"
         );
         assert!(
-            Group::new(names(&["a", "b", "a"]), "a".into()).is_none(),
+            Group::new(names(&["a", "b", "a"]), Some("a".into())).is_none(),
             "a duplicate among three"
         );
         assert!(
-            Group::new(names(&["a", "b"]), "c".into()).is_none(),
+            Group::new(names(&["a", "b"]), Some("c".into())).is_none(),
             "a foreign representative"
         );
-        assert!(Group::new(names(&["a", "b"]), "b".into()).is_some());
+        assert!(Group::new(names(&["a", "b"]), Some("b".into())).is_some());
+        assert!(
+            Group::new(names(&["a", "b"]), None).is_some(),
+            "no representative chosen"
+        );
     }
 
     #[cfg(unix)]
@@ -506,8 +552,8 @@ mod tests {
     fn a_member_name_a_sidecar_cannot_hold_is_refused() {
         use std::os::unix::ffi::OsStringExt;
         let bad = OsString::from_vec(vec![b'a', 0xff]);
-        assert!(Group::new(vec![bad.clone(), "b".into()], "b".into()).is_none());
-        assert!(Group::new(vec!["b".into(), bad.clone()], bad).is_none());
+        assert!(Group::new(vec![bad.clone(), "b".into()], None).is_none());
+        assert!(Group::new(vec!["b".into(), bad.clone()], Some(bad)).is_none());
     }
 
     #[test]
@@ -519,7 +565,7 @@ mod tests {
             group(&["IMG_2.JPG", "IMG_3.JPG", "img_1.jpg"], "IMG_3.JPG")
         );
         assert!(
-            Group::new(names(&["a", "A", "a"]), "a".into()).is_none(),
+            Group::new(names(&["a", "A", "a"]), Some("a".into())).is_none(),
             "a duplicate that sorts apart from its twin"
         );
     }
@@ -556,30 +602,27 @@ mod tests {
             &["a", "b", "c", "d"],
         );
         let writes = loaded.create(group(&["a", "d"], "d"), at(1));
-        assert_eq!(
-            writes[1],
-            GroupWrite::Put(id("g-1"), group(&["b", "c"], "b"))
-        );
+        assert_eq!(writes[1], GroupWrite::Put(id("g-1"), bare(&["b", "c"])));
         let after = applied(loaded, &writes);
         assert_eq!(
             shape_ignoring_ids(&after),
             vec![
-                (names(&["a", "d"]), "d".into()),
-                (names(&["b", "c"]), "b".into())
+                (names(&["a", "d"]), Some("d".into())),
+                (names(&["b", "c"]), None)
             ]
         );
         assert_indexed(&after);
     }
 
     #[test]
-    fn forgetting_the_representative_promotes_the_first_survivor() {
+    fn forgetting_the_representative_leaves_the_group_without_one() {
         let groups = load(
             vec![(id("g-1"), saved(&["a", "b", "c"], "b"))],
             &["a", "b", "c"],
         );
         assert_eq!(
             groups.forget(&names(&["b"])),
-            vec![GroupWrite::Put(id("g-1"), group(&["a", "c"], "a"))]
+            vec![GroupWrite::Put(id("g-1"), bare(&["a", "c"]))]
         );
     }
 
@@ -657,8 +700,8 @@ mod tests {
         assert_eq!(groups.get(&newer), Some(&group(&["a", "x"], "x")));
         assert_eq!(
             groups.get(&older),
-            Some(&group(&["c", "d"], "c")),
-            "the older group loses the photo and its representative moves"
+            Some(&bare(&["c", "d"])),
+            "the older group loses the photo, which was its representative"
         );
         assert_indexed(&groups);
     }
@@ -697,7 +740,7 @@ mod tests {
             ],
             &["b", "c", "e"],
         );
-        assert_eq!(groups.get(&id("g-1")), Some(&group(&["b", "c"], "b")));
+        assert_eq!(groups.get(&id("g-1")), Some(&bare(&["b", "c"])));
         assert_eq!(groups.get(&id("g-2")), None);
         assert_eq!(groups.group_of("e".as_ref()), None);
         assert_indexed(&groups);
@@ -729,12 +772,12 @@ mod tests {
         assert_eq!(
             groups.take_repairs(),
             vec![
-                GroupWrite::Put(id("g-1"), group(&["b", "c"], "b")),
+                GroupWrite::Put(id("g-1"), bare(&["b", "c"])),
                 GroupWrite::Delete(id("g-2")),
                 GroupWrite::Delete(id("g-3")),
                 GroupWrite::Delete(id("g-5")),
                 GroupWrite::Put(id("g-6"), group(&["j", "k"], "j")),
-                GroupWrite::Put(id("g-7"), group(&["l", "m"], "l")),
+                GroupWrite::Put(id("g-7"), bare(&["l", "m"])),
             ],
             "g-4 only lists its members out of order, which needs no rewrite"
         );
@@ -791,12 +834,12 @@ mod tests {
         let twice = applied(once, &second);
         assert_eq!(
             shape_ignoring_ids(&twice),
-            vec![(names(&["a", "b", "c"]), "c".into())]
+            vec![(names(&["a", "b", "c"]), Some("c".into()))]
         );
 
         let moved = twice.create(group(&["c", "b", "a"], "a"), at(3));
         assert!(
-            matches!(moved.as_slice(), [GroupWrite::Put(_, g)] if g.rep() == "a"),
+            matches!(moved.as_slice(), [GroupWrite::Put(_, g)] if g.rep().is_some_and(|r| r == "a")),
             "the same members with another representative only move it: {moved:?}"
         );
     }

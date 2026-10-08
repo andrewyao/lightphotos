@@ -425,24 +425,9 @@ impl App {
             self.request_redraw();
             return;
         };
-        // The representative is the first photo with the highest score, or
-        // the cursor's when none is scored.
-        let scored = cells
-            .iter()
-            .filter_map(|&p| Some((p, self.score_at(p)?.0.value)))
-            .fold(None, |best: Option<(usize, u8)>, (p, v)| match best {
-                Some((_, b)) if b >= v => best,
-                _ => Some((p, v)),
-            });
-        let primary = scored
-            .map(|(p, _)| p)
-            .or_else(|| self.sel.filter(|s| cells.contains(s)))
-            .unwrap_or(cells[0]);
+        // No representative until one is chosen in Compare.
         let members = cells.iter().filter_map(|&p| self.cell_name(p)).collect();
-        let merged = self
-            .cell_name(primary)
-            .and_then(|rep| Group::new(members, rep));
-        let Some(group) = merged else {
+        let Some(group) = Group::new(members, None) else {
             self.set_status(StatusKind::Error, t.group_name_unsaveable.to_string());
             self.request_redraw();
             return;
@@ -457,9 +442,9 @@ impl App {
             .sel
             .filter(|s| cells.contains(s) && self.group_at(*s).is_some())
             .or_else(|| cells.iter().copied().find(|&p| self.group_at(p).is_some()));
-        let cursor_rep = cursor_stack
+        let cursor_cover = cursor_stack
             .and_then(|p| self.group_at(p))
-            .map(|(_, g)| g.rep().to_os_string());
+            .map(|(_, g)| g.cover().to_os_string());
         let targets = self.selected_groups();
         let Some(groups) = self.catalog.groups() else {
             return;
@@ -481,7 +466,7 @@ impl App {
             .flat_map(|(_, g)| g.members())
             .filter_map(|m| place(m))
             .collect();
-        let cursor = cursor_rep.as_deref().and_then(place);
+        let cursor = cursor_cover.as_deref().and_then(place);
         self.selected.extend(freed);
         if cursor.is_some() {
             self.sel = cursor;
@@ -973,9 +958,9 @@ mod tests {
             .groups()
             .unwrap()
             .iter()
-            .map(|(_, g)| g.rep().clone())
+            .map(|(_, g)| g.rep().cloned())
             .collect();
-        assert_eq!(reps, vec![paths[3].file_name().unwrap().to_os_string()]);
+        assert_eq!(reps, vec![paths[3].file_name().map(|n| n.to_os_string())]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1576,7 +1576,7 @@ mod tests {
     fn a_group_round_trips_through_writeback_and_reload() {
         let dir = temp_folder("catalog-test");
         let members = photos(&dir, &["IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG"]);
-        let group = Group::new(members, "IMG_0002.JPG".into()).unwrap();
+        let group = Group::new(members, Some("IMG_0002.JPG".into())).unwrap();
 
         let mut cat = Catalog::with_dir(dir.clone());
         let writes = cat
@@ -1609,6 +1609,32 @@ mod tests {
         flush(&mut cat);
         assert!(!file.exists(), "dissolving deletes the sidecar");
         assert!(Catalog::with_dir(dir.clone()).groups().unwrap().is_empty());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_group_with_no_representative_writes_none_and_reloads_without_one() {
+        let dir = temp_folder("catalog-test");
+        let members = photos(&dir, &["a.jpg", "b.jpg"]);
+        let group = Group::new(members, None).unwrap();
+
+        let mut cat = Catalog::with_dir(dir.clone());
+        let writes = cat
+            .groups()
+            .unwrap()
+            .create(group.clone(), std::time::SystemTime::now());
+        cat.apply_group_writes(writes).unwrap();
+        flush(&mut cat);
+        let (id, _) = only_group(&cat);
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(group_file::path(&dir, &id)).unwrap()).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({"v": 1, "members": ["a.jpg", "b.jpg"]})
+        );
+        assert_eq!(only_group(&Catalog::with_dir(dir.clone())), (id, group));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1650,11 +1676,7 @@ mod tests {
         let (id, group) = only_group(&cat);
         assert_eq!(id.to_string(), "g-2");
         assert_eq!(group.members(), ["a.jpg", "b.jpg"]);
-        assert_eq!(
-            group.rep(),
-            "a.jpg",
-            "a missing representative moves to the first member"
-        );
+        assert_eq!(group.rep(), None, "a missing representative is cleared");
         flush(&mut cat);
         assert_eq!(std::fs::read_to_string(&missing_file).unwrap(), missing);
         assert_eq!(std::fs::read_to_string(&rival_file).unwrap(), rival);
@@ -1766,7 +1788,7 @@ mod tests {
         flush(&mut cat);
         assert!(dropped.exists(), "loading never writes");
 
-        let unrelated = Group::new(names(&["c.jpg", "d.jpg"]), "c.jpg".into()).unwrap();
+        let unrelated = Group::new(names(&["c.jpg", "d.jpg"]), Some("c.jpg".into())).unwrap();
         let writes = cat
             .groups()
             .unwrap()
@@ -1797,7 +1819,7 @@ mod tests {
 
         let mut cat = Catalog::with_dir(dir.clone());
         let stale = load_sidecars(&dir);
-        let group = Group::new(members, "b.jpg".into()).unwrap();
+        let group = Group::new(members, Some("b.jpg".into())).unwrap();
         let writes = cat
             .groups()
             .unwrap()
@@ -1819,7 +1841,7 @@ mod tests {
     fn a_group_write_during_a_pending_load_is_refused_and_changes_nothing() {
         let dir = temp_folder("catalog-test");
         let members = photos(&dir, &["a.jpg", "b.jpg"]);
-        let group = Group::new(members, "a.jpg".into()).unwrap();
+        let group = Group::new(members, Some("a.jpg".into())).unwrap();
         let writes = Groups::default().create(group, std::time::SystemTime::now());
 
         let mut cat = Catalog::new();
@@ -1857,13 +1879,15 @@ mod tests {
             GroupId::from_stem("g-1".as_ref()).unwrap(),
             GroupId::from_stem("g-2".as_ref()).unwrap(),
         );
-        let second_group = Group::new(names(&["b.jpg", "c.jpg"]), "c.jpg".into()).unwrap();
+        let second_group = Group::new(names(&["b.jpg", "c.jpg"]), Some("c.jpg".into())).unwrap();
 
         let mut cat = Catalog::with_dir(dir.clone());
         let stale = load_sidecars(&dir);
         cat.enqueue(
             &group_file::path(&dir, &second),
-            WriteOp::PutGroup(Group::new(names(&["a.jpg", "b.jpg"]), "a.jpg".into()).unwrap()),
+            WriteOp::PutGroup(
+                Group::new(names(&["a.jpg", "b.jpg"]), Some("a.jpg".into())).unwrap(),
+            ),
         );
         cat.enqueue(
             &group_file::path(&dir, &first),

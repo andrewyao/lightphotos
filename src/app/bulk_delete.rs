@@ -904,18 +904,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir_b);
     }
 
+    /// Each group's members and the photo its collapsed stack shows.
     fn group_names(app: &App) -> Vec<(Vec<String>, String)> {
         let s = |n: &std::ffi::OsString| n.to_string_lossy().into_owned();
         app.catalog
             .groups()
             .unwrap()
             .iter()
-            .map(|(_, g)| (g.members().iter().map(s).collect(), s(g.rep())))
+            .map(|(_, g)| (g.members().iter().map(s).collect(), s(g.cover())))
             .collect()
     }
 
     #[test]
-    fn trashing_a_representative_in_the_loupe_promotes_the_next_member() {
+    fn trashing_a_representative_in_the_loupe_clears_it_and_the_next_member_covers() {
         use crate::app::nav::tests::group_photos;
         let (mut app, dir, paths) = grouped_app(&["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg"]);
         group_photos(&mut app, &[1, 2, 3], 1);
@@ -956,9 +957,9 @@ mod tests {
             .groups()
             .unwrap()
             .iter()
-            .map(|(_, g)| (g.members().len(), g.rep().clone()))
+            .map(|(_, g)| (g.members().len(), g.rep().cloned()))
             .collect();
-        assert_eq!(on_disk, vec![(2, "c.jpg".into())]);
+        assert_eq!(on_disk, vec![(2, None)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

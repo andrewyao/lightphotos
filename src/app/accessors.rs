@@ -28,6 +28,14 @@ impl App {
         (cover || expanded).then_some((id, group.members().len(), expanded))
     }
 
+    /// Opening cell `pos` opens Compare: it is a collapsed stack with no
+    /// representative chosen.
+    pub(super) fn opens_in_compare(&self, pos: usize) -> bool {
+        self.stack_at(pos).is_some_and(|(id, group, cover)| {
+            cover && group.rep().is_none() && !self.expanded_stacks.contains(id)
+        })
+    }
+
     /// The stack the photo in cell `pos` belongs to, collapsed or not, and
     /// whether the photo is its cover.
     fn stack_at(&self, pos: usize) -> Option<(&GroupId, &Group, bool)> {
@@ -36,7 +44,7 @@ impl App {
         let groups = self.catalog.groups()?;
         let id = groups.group_of(name)?;
         let group = groups.get(id)?;
-        Some((id, group, group.rep() == name))
+        Some((id, group, group.cover() == name))
     }
 
     pub(crate) fn selected_groups(&self) -> Vec<(GroupId, Group)> {

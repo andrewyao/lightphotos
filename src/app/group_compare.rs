@@ -518,8 +518,9 @@ impl App {
         }
     }
 
-    /// The shown photo's group's members' names and its representative's.
-    fn shown_group(&self) -> Option<(&[std::ffi::OsString], &std::ffi::OsString)> {
+    /// The shown photo's group's members' names and its representative's,
+    /// when one was chosen.
+    fn shown_group(&self) -> Option<(&[std::ffi::OsString], Option<&std::ffi::OsString>)> {
         let shown = self.selected_path()?;
         let groups = self.catalog.groups()?;
         let g = groups.get(groups.group_of(shown.file_name()?)?)?;
@@ -537,10 +538,22 @@ impl App {
         paths
     }
 
-    /// The members the pane shows, in its order: `by_score`, less those its
-    /// flag filter hides.
+    /// The shown group's representative, when one was chosen.
+    pub(crate) fn compare_rep(&self) -> Option<PathBuf> {
+        let rep = self.shown_group()?.1?;
+        Some(self.playlist.as_ref()?.dir().join(rep))
+    }
+
+    /// The members the pane shows, in its order: the representative, then
+    /// the rest `by_score`, less those its flag filter hides.
     pub(super) fn compare_order(&self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
         let mut order = self.by_score(paths);
+        if let Some(at) = self
+            .compare_rep()
+            .and_then(|rep| order.iter().position(|p| *p == rep))
+        {
+            order[..=at].rotate_right(1);
+        }
         let filter = self.group_compare.flag_filter;
         order.retain(|p| filter.matches(self.flag_of(p)));
         order
@@ -555,23 +568,28 @@ impl App {
         self.request_redraw();
     }
 
-    /// The shown group's members in the pane's order (`by_score`) and its
-    /// representative's path. `None` while the pane is closed.
-    fn pane_members(&self) -> Option<(Vec<PathBuf>, PathBuf)> {
+    /// The shown group's members in the pane's order (`compare_order`) and
+    /// its representative's path, if any. `None` while the pane is closed.
+    fn pane_members(&self) -> Option<(Vec<PathBuf>, Option<PathBuf>)> {
         if self.mode != ViewMode::Loupe || self.group_compare.view != GroupView::Compare {
             return None;
         }
         let dir = self.playlist.as_ref()?.dir();
         let (members, rep) = self.shown_group()?;
         let members = members.iter().map(|m| dir.join(m)).collect();
-        Some((self.compare_order(members), dir.join(rep)))
+        Some((self.compare_order(members), rep.map(|r| dir.join(r))))
     }
 
     /// The members a pick may name: the shown group's, in the pane's order,
     /// other than the representative. `None` while the pane is closed.
     fn pickable(&self) -> Option<Vec<PathBuf>> {
         let (members, rep) = self.pane_members()?;
-        Some(members.into_iter().filter(|m| *m != rep).collect())
+        Some(
+            members
+                .into_iter()
+                .filter(|m| Some(m) != rep.as_ref())
+                .collect(),
+        )
     }
 
     /// A member's stars, for its tile.
@@ -769,7 +787,7 @@ mod tests {
     }
 
     fn rep_name(app: &App) -> std::ffi::OsString {
-        app.shown_group().unwrap().1.to_os_string()
+        app.shown_group().unwrap().1.unwrap().to_os_string()
     }
 
     #[test]
@@ -1315,8 +1333,8 @@ mod tests {
         let (order, _) = app.pane_members().unwrap();
         assert_eq!(
             order,
-            [&paths[4], &paths[1], &paths[2], &paths[3]].map(|p| p.clone()),
-            "a tie keeps the group's order"
+            [&paths[1], &paths[4], &paths[2], &paths[3]].map(|p| p.clone()),
+            "the rep leads, then score, and a tie keeps the group's order"
         );
 
         pick(&mut app, &paths[4], PickHow::Only);
@@ -1330,41 +1348,54 @@ mod tests {
     }
 
     #[test]
-    fn grouping_makes_the_first_highest_scored_photo_the_representative() {
-        let (mut app, dir, paths) = folder_app("group-rep-score", 6);
-        // Scores count only where scoring is on offer.
-        app.score_pool = crate::score::ScorePool::with_runner(1, |_| Err("unused".into()));
-        set_score(&mut app, &paths[1], 50);
-        set_score(&mut app, &paths[2], 70);
-        set_score(&mut app, &paths[4], 70);
-        app.select_single(1);
-        for pos in [2, 3, 4] {
-            act(&mut app, UiAction::SelectToggle(pos));
-        }
+    fn a_new_stack_has_no_representative_and_opens_in_compare_until_it_has_one() {
+        let (mut app, dir, paths) = folder_app("group-no-rep", 6);
+        app.select_single(3);
+        act(&mut app, UiAction::SelectToggle(1));
+        act(&mut app, UiAction::SelectToggle(2));
         app.group_selected();
-        let groups = app.catalog.groups().unwrap();
-        let g = groups
-            .get(groups.group_of(paths[1].file_name().unwrap()).unwrap())
-            .unwrap();
-        assert_eq!(g.rep(), paths[2].file_name().unwrap());
+        let rep = |app: &App| {
+            let groups = app.catalog.groups().unwrap();
+            let g = groups.get(groups.group_of(paths[1].file_name().unwrap()).unwrap());
+            g.unwrap().rep().cloned()
+        };
+        assert_eq!(rep(&app), None, "grouping chooses no representative");
+        assert_eq!(cells(&app), vec![0, 1, 4, 5], "the first member covers it");
+
+        app.select_single(1);
+        app.enter_loupe();
+        assert_eq!(app.group_view(), GroupView::Compare);
+        assert_eq!(app.want.as_ref(), Some(&paths[1]));
+        assert_eq!(app.compare_rep(), None);
+
+        act(&mut app, UiAction::SetMemberAsRep(paths[2].clone()));
+        assert_eq!(rep(&app).as_deref(), paths[2].file_name());
+        app.enter_grid();
+        assert_eq!(
+            cells(&app),
+            vec![0, 2, 4, 5],
+            "the representative covers it"
+        );
+        app.enter_loupe();
+        assert_eq!(
+            app.group_view(),
+            GroupView::Edit,
+            "a chosen rep opens to edit"
+        );
+        assert_eq!(app.want.as_ref(), Some(&paths[2]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn grouping_unscored_photos_keeps_the_cursor_as_representative() {
-        let (mut app, dir, paths) = folder_app("group-rep-cursor", 6);
-        app.select_single(1);
-        act(&mut app, UiAction::SelectToggle(3));
-        act(&mut app, UiAction::SelectToggle(2));
+    fn an_expanded_stack_opens_its_member_in_edit() {
+        let (mut app, dir, _) = folder_app("group-no-rep-open", 4);
+        app.selected = std::collections::BTreeSet::from([1, 2]);
+        app.sel = Some(1);
         app.group_selected();
-        let groups = app.catalog.groups().unwrap();
-        let g = groups
-            .get(groups.group_of(paths[1].file_name().unwrap()).unwrap())
-            .unwrap();
-        let cursor = app
-            .selected_path()
-            .and_then(|p| p.file_name().map(|n| n.to_os_string()));
-        assert_eq!(Some(g.rep().to_os_string()), cursor);
+        app.select_single(1);
+        app.toggle_stack(1);
+        app.enter_loupe();
+        assert_eq!(app.group_view(), GroupView::Edit);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

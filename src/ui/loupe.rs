@@ -1075,6 +1075,7 @@ fn draw_compare_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let square = app.compare_square();
     let full = app.tile_fidelity() == TileFidelity::Full;
     let picks = app.group_picks();
+    let compare_rep = app.compare_rep();
     let fit = tiles.group_len().clamp(1, crate::app::COMPARE_PAGE);
     let cols = (fit as f32).sqrt().ceil().max(1.0) as usize;
     let rows = fit.div_ceil(cols);
@@ -1112,7 +1113,7 @@ fn draw_compare_tiles(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         .color(egui::Color32::WHITE)
                         .paint_at(ui, at);
                 }
-                let is_rep = m.path == tiles.shown;
+                let is_rep = compare_rep.as_ref() == Some(&m.path);
                 let hovered = !resp.dragged() && ui.rect_contains_pointer(rect);
                 tile_marks(ui, app, rect, &m.path, is_rep, hovered, out);
                 let picked = picks.contains(&m.path.as_path());

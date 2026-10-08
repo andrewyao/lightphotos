@@ -1,5 +1,5 @@
 # Stack expand and collapse, against a fresh make-fixture.sh folder of 12.
-# Stacks photos 1-4 with 4 as the cover, rates 2 and 3 above the cover,
+# Stacks photos 1-4, with no representative so 1 is the cover, rates 2 and 3,
 # then filters to 4 stars and up.
 size 1200 800
 idle

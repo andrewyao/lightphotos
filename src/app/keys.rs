@@ -1248,21 +1248,21 @@ mod tests {
         assert_eq!(app.develop_tab(), DevelopTab::Sliders);
     }
 
-    fn group_shapes(app: &App) -> Vec<(Vec<String>, String)> {
+    fn group_shapes(app: &App) -> Vec<(Vec<String>, Option<String>)> {
         let groups = app.catalog.groups().expect("groups loaded");
         groups
             .iter()
             .map(|(_, g)| {
                 let s = |n: &std::ffi::OsString| n.to_string_lossy().into_owned();
-                (g.members().iter().map(s).collect(), s(g.rep()))
+                (g.members().iter().map(s).collect(), g.rep().map(s))
             })
             .collect()
     }
 
-    fn shape(members: &[&str], rep: &str) -> (Vec<String>, String) {
+    fn shape(members: &[&str], rep: Option<&str>) -> (Vec<String>, Option<String>) {
         (
             members.iter().map(|m| m.to_string()).collect(),
-            rep.to_string(),
+            rep.map(str::to_string),
         )
     }
 
@@ -1295,22 +1295,22 @@ mod tests {
         press(&mut app, CMD, KeyCode::KeyG);
         assert_eq!(
             group_shapes(&app),
-            vec![shape(&["1.jpg", "2.jpg", "3.jpg"], "2.jpg")]
+            vec![shape(&["1.jpg", "2.jpg", "3.jpg"], Some("2.jpg"))]
         );
         assert_eq!(app.visible, vec![0, 2, 4, 5]);
     }
 
     #[test]
-    fn cmd_g_takes_the_primary_cells_photo_and_selects_the_new_cell() {
+    fn cmd_g_stacks_with_no_representative_and_selects_the_new_cell() {
         let (mut app, _) = folder_app(5);
         app.selected = BTreeSet::from([1, 2, 3]);
         app.sel = Some(3);
         press(&mut app, CMD, KeyCode::KeyG);
         assert_eq!(
             group_shapes(&app),
-            vec![shape(&["1.jpg", "2.jpg", "3.jpg"], "3.jpg")]
+            vec![shape(&["1.jpg", "2.jpg", "3.jpg"], None)]
         );
-        assert_eq!(app.visible, vec![0, 3, 4]);
+        assert_eq!(app.visible, vec![0, 1, 4], "the first member is the cover");
         assert_eq!(app.selected, BTreeSet::from([1]));
         assert_eq!(app.sel, Some(1));
     }
@@ -1325,19 +1325,21 @@ mod tests {
         assert!(group_shapes(&app).is_empty());
         assert_eq!(app.visible, vec![0, 1, 2, 3, 4]);
         assert_eq!(app.selected, BTreeSet::from([0, 1, 2, 3]));
-        assert_eq!(app.sel, Some(2), "the old representative is the cursor");
+        assert_eq!(app.sel, Some(2), "the old cover is the cursor");
     }
 
     #[test]
-    fn ungroup_then_group_restores_the_same_group() {
+    fn ungroup_then_group_restores_the_same_members() {
         let (mut app, _) = folder_app(5);
         group_photos(&mut app, &[1, 2, 3], 3);
-        let before = group_shapes(&app);
         app.select_single(1);
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyG);
         press(&mut app, CMD, KeyCode::KeyG);
-        assert_eq!(group_shapes(&app), before);
-        assert_eq!(app.visible, vec![0, 3, 4]);
+        assert_eq!(
+            group_shapes(&app),
+            vec![shape(&["1.jpg", "2.jpg", "3.jpg"], None)]
+        );
+        assert_eq!(app.visible, vec![0, 1, 4]);
     }
 
     #[test]

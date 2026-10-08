@@ -2,7 +2,8 @@
 
 //! One sidecar per photo group, `<dir>/.lightphotos/groups/<id>.json`, so a
 //! group's members and representative change together in one atomic write.
-//! The body is `{"v":1,"members":[...],"representative":"..."}`.
+//! The body is `{"v":1,"members":[...],"representative":"..."}`, with no
+//! `representative` while none is chosen.
 
 use std::path::{Path, PathBuf};
 
@@ -16,7 +17,8 @@ const FORMAT: u32 = 1;
 struct GroupFile {
     v: u32,
     members: Vec<String>,
-    representative: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    representative: Option<String>,
 }
 
 pub(super) fn path(dir: &Path, id: &GroupId) -> PathBuf {
@@ -41,7 +43,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<SavedGroup, String> {
     }
     Ok(SavedGroup {
         members: file.members.into_iter().map(Into::into).collect(),
-        rep: file.representative.into(),
+        rep: file.representative.map(Into::into),
     })
 }
 
@@ -52,7 +54,7 @@ pub(super) fn to_bytes(group: &Group) -> Result<Vec<u8>, String> {
     let file = GroupFile {
         v: FORMAT,
         members: group.members().iter().map(name).collect(),
-        representative: name(group.rep()),
+        representative: group.rep().map(name),
     };
     serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())
 }
