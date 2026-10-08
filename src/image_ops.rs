@@ -149,6 +149,7 @@ pub fn bake_edited(
             .collect()
     });
 
+    let dev = develop::Develop::new(adj);
     let mut cropped = vec![0u8; (cw * ch * 4) as usize];
     for y in 0..ch {
         for x in 0..cw {
@@ -169,7 +170,7 @@ pub fn bake_edited(
                 }
             };
             let retouched = apply_touchups(img, touchups, x0 + x, y0 + y, lin);
-            let out = develop::apply_linear(adj, retouched);
+            let out = dev.linear(retouched);
             let di = ((y * cw + x) * 4) as usize;
             cropped[di] = encode(out[0]);
             cropped[di + 1] = encode(out[1]);

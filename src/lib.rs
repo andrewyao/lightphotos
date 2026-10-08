@@ -7,6 +7,7 @@
 pub mod chroma;
 #[cfg(target_os = "macos")]
 pub mod coregraphics;
+pub mod curve;
 #[path = "raw/decode_budget.rs"]
 pub mod decode_budget;
 pub mod develop;

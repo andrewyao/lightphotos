@@ -28,7 +28,8 @@ struct Adjust {
     // Chromatic aberration scales. See `caUv`.
     ca_red: f32,
     ca_blue: f32,
-    _pad3: f32,
+    // 1 when `curve_lut` holds a bent point curve. See `toneCurve`.
+    curve_on: f32,
     _pad4: f32,
     _pad5: f32,
 };
@@ -44,6 +45,9 @@ struct TouchUp {
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 @group(2) @binding(0) var<uniform> adj: Adjust;
+// The baked point curve: entry i is the red, green and blue output for input
+// i / 255. Written from `GpuCurve` in develop.rs.
+@group(2) @binding(1) var<uniform> curve_lut: array<vec4<f32>, 256>;
 @group(3) @binding(0) var<storage, read> touchups: array<TouchUp>;
 
 // A straightened-canvas UV to the source texture's UV: the canvas offset from
@@ -145,6 +149,22 @@ fn tone(v: f32) -> f32 {
     }
 
     return x;
+}
+
+// The point curve on one gamma-space pixel, interpolating between table
+// entries. Must match `curve::apply` in curve.rs.
+fn toneCurve(c: vec3<f32>) -> vec3<f32> {
+    if (adj.curve_on == 0.0) {
+        return c;
+    }
+    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)) * 255.0;
+    let i = min(vec3<u32>(x), vec3<u32>(254u));
+    let t = x - vec3<f32>(i);
+    return vec3<f32>(
+        mix(curve_lut[i.r].r, curve_lut[i.r + 1u].r, t.r),
+        mix(curve_lut[i.g].g, curve_lut[i.g + 1u].g, t.g),
+        mix(curve_lut[i.b].b, curve_lut[i.b + 1u].b, t.b),
+    );
 }
 
 // Gaussian (sigma 1.0) weights for the 5x5 denoise kernel, by squared tap

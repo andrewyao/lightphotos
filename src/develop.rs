@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::curve::{self, ToneCurve};
+
 /// Range of every tone slider except exposure and denoise. 0 is no change.
 pub const TONE_RANGE: std::ops::RangeInclusive<f32> = -100.0..=100.0;
 /// Exposure range in stops.
@@ -42,6 +44,8 @@ pub enum Section {
     WhiteBalance,
     Tone,
     Presence,
+    /// The point curve, not sliders. See [`ToneCurve`].
+    Curve,
     Detail,
     /// Checkboxes, not sliders. See [`CaScale`].
     Optics,
@@ -175,6 +179,9 @@ pub struct Adjustments {
     /// measured from this photo, so every render agrees without re-measuring.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chromatic_aberration: Option<CaScale>,
+    /// The point curve, run after the tone sliders and before color.
+    #[serde(default, skip_serializing_if = "ToneCurve::is_linear")]
+    pub curve: ToneCurve,
 }
 
 /// Lateral chromatic aberration as a radial magnification of red and blue
@@ -367,6 +374,14 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
             h.write(&((v * 1e6).round() as i32).to_le_bytes());
         }
     }
+    if !adj.curve.is_linear() {
+        h.write(&[3]);
+        for c in curve::Channel::ALL {
+            let pts = adj.curve.get(c).points();
+            h.write(&[pts.len() as u8]);
+            h.write(pts.as_flattened());
+        }
+    }
 
     h.write(&[rot % 4]);
 
@@ -393,6 +408,19 @@ impl From<&TouchUp> for GpuTouchUp {
             _pad: 0.0,
             delta: [t.delta[0], t.delta[1], t.delta[2], 0.0],
         }
+    }
+}
+
+/// [`ToneCurve::lut`] as the shader's `curve_lut` uniform.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuCurve {
+    pub lut: curve::Lut,
+}
+
+impl From<&ToneCurve> for GpuCurve {
+    fn from(c: &ToneCurve) -> Self {
+        GpuCurve { lut: c.lut() }
     }
 }
 
@@ -427,7 +455,9 @@ pub struct GpuAdjust {
     pub ca_red: f32,
     /// [`CaScale::blue`], 0 when the correction is off.
     pub ca_blue: f32,
-    pub _pad3: f32,
+    /// 1 when [`Adjustments::curve`] is bent and the shader should read its
+    /// table, 0 to skip it.
+    pub curve_on: f32,
     pub _pad4: f32,
     pub _pad5: f32,
 }
@@ -456,7 +486,7 @@ impl Default for GpuAdjust {
             straighten: 0.0,
             ca_red: 0.0,
             ca_blue: 0.0,
-            _pad3: 0.0,
+            curve_on: 0.0,
             _pad4: 0.0,
             _pad5: 0.0,
         }
@@ -490,6 +520,7 @@ impl From<&Adjustments> for GpuAdjust {
             straighten: a.straighten.to_radians(),
             ca_red: ca.red,
             ca_blue: ca.blue,
+            curve_on: if a.curve.is_linear() { 0.0 } else { 1.0 },
             ..Self::default()
         }
     }
@@ -543,17 +574,46 @@ pub fn apply_raw_preview_boost(srgb: f32) -> f32 {
 /// linear RGB clamped to 0..1.
 ///
 /// Must match `fs_main` in shader.wgsl. Keep it simple so the two stay in sync.
+/// Bakes the tone curve on every call, so a loop over pixels uses
+/// [`Develop`] instead.
 pub fn apply_linear(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
-    apply_linear_impl(adj, rgb, false)
+    Develop::new(adj).linear(rgb)
 }
 
 /// `apply_linear` as raw_shader.wgsl runs it. Returns display values, not
 /// linear, because the RAW shader's render target is not an sRGB surface.
 pub fn apply_raw_display(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
-    apply_linear_impl(adj, rgb, true)
+    Develop::new(adj).raw_display(rgb)
 }
 
-fn apply_linear_impl(adj: &Adjustments, rgb: [f32; 3], raw_display: bool) -> [f32; 3] {
+/// [`apply_linear`] and [`apply_raw_display`] for one image, with the tone
+/// curve baked once instead of per pixel.
+pub struct Develop<'a> {
+    adj: &'a Adjustments,
+    curve: Option<Box<curve::Lut>>,
+}
+
+impl<'a> Develop<'a> {
+    pub fn new(adj: &'a Adjustments) -> Self {
+        let curve = (!adj.curve.is_linear()).then(|| Box::new(adj.curve.lut()));
+        Develop { adj, curve }
+    }
+
+    pub fn linear(&self, rgb: [f32; 3]) -> [f32; 3] {
+        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, false)
+    }
+
+    pub fn raw_display(&self, rgb: [f32; 3]) -> [f32; 3] {
+        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, true)
+    }
+}
+
+fn apply_linear_impl(
+    adj: &Adjustments,
+    curve: Option<&curve::Lut>,
+    rgb: [f32; 3],
+    raw_display: bool,
+) -> [f32; 3] {
     let [mut r, mut g, mut b] = rgb;
 
     // White balance as small per-channel gains, at most ±0.3.
@@ -623,6 +683,12 @@ fn apply_linear_impl(adj: &Adjustments, rgb: [f32; 3], raw_display: bool) -> [f3
     rg = tone(rg);
     gg = tone(gg);
     bg = tone(bg);
+
+    if let Some(lut) = curve {
+        rg = curve::apply(lut, 0, rg);
+        gg = curve::apply(lut, 1, gg);
+        bg = curve::apply(lut, 2, bg);
+    }
 
     // Vibrance and saturation scale chroma around Rec.601 luma. Vibrance is
     // weaker on pixels that are already saturated.
@@ -1390,5 +1456,55 @@ mod tests {
     #[test]
     fn neutralize_gray_none_when_too_dark() {
         assert_eq!(neutralize_gray([0.0, 0.0, 0.0]), None);
+    }
+
+    #[test]
+    fn edit_signature_differs_on_curve_only_when_bent() {
+        use crate::curve::Curve;
+        let mut adj = Adjustments::default();
+        let base = edit_signature(&adj, 0);
+        adj.curve.rgb = Curve::STRONG_CONTRAST;
+        let strong = edit_signature(&adj, 0);
+        assert_ne!(strong, base);
+        adj.curve.rgb = Curve::LINEAR;
+        adj.curve.blue = Curve::STRONG_CONTRAST;
+        assert_ne!(edit_signature(&adj, 0), strong, "the channel counts");
+        adj.curve.blue = Curve::LINEAR;
+        assert_eq!(edit_signature(&adj, 0), base);
+    }
+
+    #[test]
+    fn a_contrast_curve_spreads_tones_in_both_pipelines() {
+        use crate::curve::Curve;
+        let mut adj = Adjustments::default();
+        adj.curve.rgb = Curve::STRONG_CONTRAST;
+        for pipeline in [apply_linear, apply_raw_display] {
+            let plain = |v: f32| pipeline(&Adjustments::default(), [v; 3])[0];
+            let curved = |v: f32| pipeline(&adj, [v; 3])[0];
+            assert!(curved(0.02) < plain(0.02));
+            assert!(curved(0.7) > plain(0.7));
+        }
+    }
+
+    #[test]
+    fn a_red_curve_moves_only_red() {
+        use crate::curve::Curve;
+        let mut adj = Adjustments::default();
+        adj.curve.red = Curve::STRONG_CONTRAST;
+        let px = [0.6, 0.6, 0.6];
+        let plain = apply_linear(&Adjustments::default(), px);
+        let out = Develop::new(&adj).linear(px);
+        assert!(out[0] > plain[0]);
+        assert!((out[1] - plain[1]).abs() < 1e-5);
+        assert!((out[2] - plain[2]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn the_curve_table_fills_its_uniform() {
+        assert_eq!(std::mem::size_of::<GpuCurve>(), 4096);
+        let mut adj = Adjustments::default();
+        assert_eq!(GpuAdjust::from(&adj).curve_on, 0.0);
+        adj.curve.green.insert(100, 140);
+        assert_eq!(GpuAdjust::from(&adj).curve_on, 1.0);
     }
 }

@@ -129,6 +129,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = tone(g);
     b = tone(b);
 
+    // 4.25. The point curve, still in gamma space.
+    let curved = toneCurve(vec3<f32>(r, g, b));
+    r = curved.r;
+    g = curved.g;
+    b = curved.b;
+
     // 4.5. Vibrance/saturation: scale chroma around luma in gamma space.
     // Must match develop.rs `apply_linear` and shader.wgsl.
     let luma = 0.299 * r + 0.587 * g + 0.114 * b;

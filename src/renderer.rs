@@ -11,7 +11,8 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::develop::{GpuAdjust, GpuTouchUp};
+use crate::curve::ToneCurve;
+use crate::develop::{GpuAdjust, GpuCurve, GpuTouchUp};
 use crate::image_decode::{DecodedImage, PixelFormat};
 
 #[path = "raw/render.rs"]
@@ -87,10 +88,12 @@ pub struct Renderer {
     xform_bind: wgpu::BindGroup,
 
     adj_buf: wgpu::Buffer,
+    curve_buf: wgpu::Buffer,
     adj_bind: wgpu::BindGroup,
 
     /// Adjustments for the "after" half of the compare view.
     adj_buf_b: wgpu::Buffer,
+    curve_buf_b: wgpu::Buffer,
     adj_bind_b: wgpu::BindGroup,
     touch_buf: wgpu::Buffer,
     touch_bind: wgpu::BindGroup,
@@ -249,8 +252,8 @@ impl Renderer {
 
         let adj_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("adj_bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
+            entries: &[0, 1].map(|binding| wgpu::BindGroupLayoutEntry {
+                binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
@@ -258,7 +261,7 @@ impl Renderer {
                     min_binding_size: None,
                 },
                 count: None,
-            }],
+            }),
         });
 
         let touch_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -478,13 +481,24 @@ impl Renderer {
             contents: bytemuck::bytes_of(&GpuAdjust::default()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let curve_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("curve"),
+            contents: bytemuck::bytes_of(&GpuCurve::from(&ToneCurve::default())),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         let adj_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("adj_bg"),
             layout: &adj_bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: adj_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: adj_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: curve_buf.as_entire_binding(),
+                },
+            ],
         });
 
         let adj_buf_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -492,13 +506,24 @@ impl Renderer {
             contents: bytemuck::bytes_of(&GpuAdjust::default()),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let curve_buf_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("curve_b"),
+            contents: bytemuck::bytes_of(&GpuCurve::from(&ToneCurve::default())),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         let adj_bind_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("adj_bg_b"),
             layout: &adj_bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: adj_buf_b.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: adj_buf_b.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: curve_buf_b.as_entire_binding(),
+                },
+            ],
         });
 
         let touch_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -538,8 +563,10 @@ impl Renderer {
             xform_buf,
             xform_bind,
             adj_buf,
+            curve_buf,
             adj_bind,
             adj_buf_b,
+            curve_buf_b,
             adj_bind_b,
             touch_buf,
             touch_bind,
@@ -1017,15 +1044,28 @@ impl Renderer {
         );
     }
 
-    pub fn set_adjustments(&mut self, a: GpuAdjust) {
-        self.queue
-            .write_buffer(&self.adj_buf, 0, bytemuck::bytes_of(&a));
+    /// Uploads `a`, and `curve`'s table when `a.curve_on` says the shader
+    /// reads it.
+    pub fn set_adjustments(&mut self, a: GpuAdjust, curve: &ToneCurve) {
+        Self::write_adjustments(&self.queue, &self.adj_buf, &self.curve_buf, a, curve);
     }
 
     /// Adjustments for the "after" half of the compare view.
-    pub fn set_adjustments_b(&mut self, a: GpuAdjust) {
-        self.queue
-            .write_buffer(&self.adj_buf_b, 0, bytemuck::bytes_of(&a));
+    pub fn set_adjustments_b(&mut self, a: GpuAdjust, curve: &ToneCurve) {
+        Self::write_adjustments(&self.queue, &self.adj_buf_b, &self.curve_buf_b, a, curve);
+    }
+
+    fn write_adjustments(
+        queue: &wgpu::Queue,
+        adj_buf: &wgpu::Buffer,
+        curve_buf: &wgpu::Buffer,
+        a: GpuAdjust,
+        curve: &ToneCurve,
+    ) {
+        queue.write_buffer(adj_buf, 0, bytemuck::bytes_of(&a));
+        if a.curve_on != 0.0 {
+            queue.write_buffer(curve_buf, 0, bytemuck::bytes_of(&GpuCurve::from(curve)));
+        }
     }
 
     /// Upload a selection mask, or clear it with `None` to stop drawing the

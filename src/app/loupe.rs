@@ -322,8 +322,8 @@ impl App {
         let gpu_after = self.gpu_adjust(&after);
         if let Some(r) = &mut self.renderer {
             r.set_transform(scale, offset, rot);
-            r.set_adjustments(gpu_before);
-            r.set_adjustments_b(gpu_after);
+            r.set_adjustments(gpu_before, &before.curve);
+            r.set_adjustments_b(gpu_after, &after.curve);
         }
     }
 

@@ -9,6 +9,7 @@
 //! `rdf:Description`, and both spellings are read. A dozen keys do not earn an
 //! XML crate, least of all one that has to build for wasm32.
 
+use crate::curve::{Channel, Curve};
 use crate::develop::{Adjustments, SliderId, SLIDERS};
 
 /// What a preset file yielded.
@@ -36,10 +37,15 @@ enum Untouched {
     /// A field Camera Raw writes with a nonzero default, so only a value away
     /// from that default means the user moved it.
     Default(f32),
-    /// A tone curve whose every point sits on the diagonal. Lightroom writes
-    /// one into every sidecar.
-    Linear,
 }
+
+/// The point-curve keys, one per [`Channel`].
+const CURVE_KEYS: [(&str, Channel); 4] = [
+    ("ToneCurvePV2012", Channel::Rgb),
+    ("ToneCurvePV2012Red", Channel::Red),
+    ("ToneCurvePV2012Green", Channel::Green),
+    ("ToneCurvePV2012Blue", Channel::Blue),
+];
 
 /// The `crs:` keys that feed one slider.
 fn keys(id: SliderId) -> &'static [&'static str] {
@@ -122,16 +128,6 @@ const UNSUPPORTED: &[(&str, &[&str], Untouched)] = &[
         ],
         Untouched::Zero,
     ),
-    (
-        "ToneCurvePV2012*",
-        &[
-            "ToneCurvePV2012",
-            "ToneCurvePV2012Red",
-            "ToneCurvePV2012Green",
-            "ToneCurvePV2012Blue",
-        ],
-        Untouched::Linear,
-    ),
 ];
 
 /// Parse a Lightroom `.xmp` develop preset. `Err` for a file that is not one.
@@ -165,11 +161,19 @@ pub fn parse(xmp: &str) -> Result<Imported, String> {
         adj.saturation = -100.0;
     }
 
+    for (key, ch) in CURVE_KEYS {
+        if let Some(seq) = raw_value(body, key) {
+            match curve(seq) {
+                Some(c) => *adj.curve.get_mut(ch) = c,
+                None => dropped.push(key),
+            }
+        }
+    }
+
     for (label, keys, default) in UNSUPPORTED {
         let set = keys.iter().any(|key| match default {
             Untouched::Zero => is_set(number(body, key)),
             Untouched::Default(d) => is_away_from(number(body, key), *d),
-            Untouched::Linear => raw_value(body, key).is_some_and(curve_is_bent),
         });
         if set {
             dropped.push(label);
@@ -227,17 +231,21 @@ fn is_away_from(field: Field, default: f32) -> bool {
     }
 }
 
-/// A tone curve with some point off the diagonal. A point that does not read
-/// as `x, y` counts as bent, for the same reason an unreadable number counts
-/// as set.
-fn curve_is_bent(seq: &str) -> bool {
-    li_texts(seq).any(|point| {
-        let mut xy = point.split(',').map(|n| n.trim().parse::<f32>().ok());
-        match (xy.next().flatten(), xy.next().flatten()) {
-            (Some(x), Some(y)) => x != y,
-            _ => true,
-        }
-    })
+/// A point curve from its `rdf:Seq` of `x, y` items. Lightroom writes a
+/// diagonal into every sidecar, and that reads as [`Curve::LINEAR`]. `None`
+/// when a point does not read as two numbers.
+fn curve(seq: &str) -> Option<Curve> {
+    let level = |n: &str| Some(n.trim().parse::<f32>().ok()?.round().clamp(0.0, 255.0) as u8);
+    let points = li_texts(seq)
+        .map(|point| {
+            let (x, y) = point.split_once(',')?;
+            Some([level(x)?, level(y)?])
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if points.iter().all(|[x, y]| x == y) {
+        return Some(Curve::LINEAR);
+    }
+    Some(Curve::from(points))
 }
 
 /// The raw text of each `<rdf:li>` in an `rdf:Seq` or `rdf:Alt`.
@@ -409,6 +417,7 @@ mod tests {
             crop: None,
             straighten: 0.0,
             chromatic_aberration: None,
+            curve: Default::default(),
         }
     }
 
@@ -642,10 +651,10 @@ mod tests {
         assert_eq!(blank.name, None, "a blank name falls back to the caller");
     }
 
-    /// Catches a report that fires on the linear curve Lightroom writes into
-    /// every sidecar, and one that misses a bent curve.
+    /// Catches an import that bends the curve for the diagonal Lightroom
+    /// writes into every sidecar, and one that loses a bent curve.
     #[test]
-    fn a_linear_tone_curve_is_not_reported_but_a_bent_one_is() {
+    fn point_curves_import_and_a_linear_one_stays_linear() {
         fn curve(name: &str, points: &[&str]) -> String {
             let lis: String = points
                 .iter()
@@ -663,16 +672,24 @@ mod tests {
         ))
         .unwrap();
         assert!(linear.dropped.is_empty(), "{:?}", linear.dropped);
+        assert!(linear.adj.curve.is_linear());
 
         let bent = parse(&packet(
             "crs:Exposure2012=\"0\"",
             &format!(
-                "{}{}",
+                "{}{}{}",
                 curve("ToneCurvePV2012", &["0, 0", "255, 255"]),
                 curve("ToneCurvePV2012Blue", &["0, 0", "64, 80", "255, 255"]),
+                curve("ToneCurvePV2012Green", &["0, 0", "oops", "255, 255"]),
             ),
         ))
         .unwrap();
-        assert_eq!(bent.dropped, ["ToneCurvePV2012*"]);
+        assert_eq!(bent.dropped, ["ToneCurvePV2012Green"]);
+        assert!(bent.adj.curve.rgb.is_linear());
+        assert!(bent.adj.curve.green.is_linear());
+        assert_eq!(
+            bent.adj.curve.blue.points(),
+            &[[0, 0], [64, 80], [255, 255]]
+        );
     }
 }

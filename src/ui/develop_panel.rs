@@ -5,6 +5,7 @@ use crate::app::{
     App, CropAspect, CropOrientation, CropOverlay, DevelopTab, FocusLevel, RailItem, Region,
     StraightenTool,
 };
+use crate::curve::{Channel, Curve, ToneCurve};
 
 /// The right-hand Develop panel, with sliders in Lightroom's order. Pushes one
 /// `SetAdjustments` only on frames where a slider changed. Double-clicking a
@@ -446,6 +447,11 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 if section.is_some() {
                     form::divider(ui);
                 }
+                // Lightroom puts the curve between Presence and Detail.
+                if s.section == crate::develop::Section::Detail {
+                    changed |= draw_curve_section(ui, app, &mut adj.curve);
+                    form::divider(ui);
+                }
                 section = Some(s.section);
                 form::section_header(ui, t.section(s.section), |ui| match s.section {
                     // The picker samples the Loupe's photo.
@@ -807,75 +813,332 @@ fn draw_histogram(ui: &mut egui::Ui, app: &App) {
     );
 
     let Some(bins) = app.histogram() else { return };
+    let smoothed = smooth_bins(bins);
 
-    // `recompute_histogram` already spreads each sample across two bins, so
-    // tone stretches don't leave a comb. A radius-1 box blur fills the small
-    // gaps left by strong stretches without flattening peaks.
-    let smooth = |ch: &[f32; 256]| -> [f32; 256] {
-        let mut a = *ch;
-        const R: usize = 1;
-        let src = a;
-        for i in 0..256usize {
-            let lo = i.saturating_sub(R);
-            let hi = (i + R).min(255);
-            let mut sum = 0.0;
-            for j in lo..=hi {
-                sum += src[j];
-            }
-            a[i] = sum / (hi - lo + 1) as f32;
-        }
-        a
-    };
-    let smoothed: [[f32; 256]; 3] = [smooth(&bins[0]), smooth(&bins[1]), smooth(&bins[2])];
-
-    // One max across all channels keeps their heights comparable. Bins 0 and
-    // 255 are skipped because clipping spikes there would flatten the rest.
-    let mut max = 1f32;
-    for ch in &smoothed {
-        for (i, &c) in ch.iter().enumerate() {
-            if i == 0 || i == 255 {
-                continue;
-            }
-            max = max.max(c);
-        }
-    }
+    // One max across all channels keeps their heights comparable.
+    let max = smoothed.iter().map(bins_peak).fold(1f32, f32::max);
 
     let colors = [
         egui::Color32::from_rgba_unmultiplied(255, 70, 70, 120),
         egui::Color32::from_rgba_unmultiplied(70, 255, 70, 120),
         egui::Color32::from_rgba_unmultiplied(90, 120, 255, 120),
     ];
-
-    let x_at = |i: usize| rect.left() + (i as f32 / 255.0) * rect.width();
-    let y_at = |count: f32| {
-        let n = (count / max).min(1.0);
-        rect.bottom() - n * rect.height()
-    };
-
     for (ch, &color) in smoothed.iter().zip(colors.iter()) {
-        // A translucent filled area per channel, so overlaps look brighter,
-        // with an opaque line along the top.
-        let mut mesh = egui::Mesh::default();
-        let base = rect.bottom();
-        let mut top_line: Vec<egui::Pos2> = Vec::with_capacity(256);
-        for (i, &count) in ch.iter().enumerate() {
-            let x = x_at(i);
-            let top = y_at(count);
-            top_line.push(egui::pos2(x, top));
-            let idx = mesh.vertices.len() as u32;
-            mesh.colored_vertex(egui::pos2(x, base), color);
-            mesh.colored_vertex(egui::pos2(x, top), color);
-            if i > 0 {
-                let p = idx - 2; // previous (base, top) pair
-                mesh.add_triangle(p, p + 1, idx + 1);
-                mesh.add_triangle(p, idx + 1, idx);
-            }
+        // Translucent fills, so overlaps look brighter, each with an opaque
+        // line along its top.
+        paint_bins(&painter, rect, ch, max, color, Some(color.to_opaque()));
+    }
+}
+
+/// The histogram's channels with a radius-1 box blur. `recompute_histogram`
+/// already spreads each sample across two bins, so tone stretches don't
+/// leave a comb; the blur fills the small gaps left by strong stretches
+/// without flattening peaks.
+fn smooth_bins(bins: &[[f32; 256]; 3]) -> [[f32; 256]; 3] {
+    bins.map(|src| {
+        const R: usize = 1;
+        std::array::from_fn(|i| {
+            let (lo, hi) = (i.saturating_sub(R), (i + R).min(255));
+            src[lo..=hi].iter().sum::<f32>() / (hi - lo + 1) as f32
+        })
+    })
+}
+
+/// The tallest bin, skipping 0 and 255, whose clipping spikes would flatten
+/// the rest.
+fn bins_peak(ch: &[f32; 256]) -> f32 {
+    ch[1..255].iter().copied().fold(0.0, f32::max)
+}
+
+/// One channel as a filled area rising from `rect`'s bottom, `max` reaching
+/// its top, with an optional line along the top edge.
+fn paint_bins(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    ch: &[f32; 256],
+    max: f32,
+    fill: egui::Color32,
+    line: Option<egui::Color32>,
+) {
+    let x_at = |i: usize| rect.left() + (i as f32 / 255.0) * rect.width();
+    let y_at = |count: f32| rect.bottom() - (count / max).min(1.0) * rect.height();
+    let mut mesh = egui::Mesh::default();
+    let base = rect.bottom();
+    let mut top_line: Vec<egui::Pos2> = Vec::with_capacity(256);
+    for (i, &count) in ch.iter().enumerate() {
+        let x = x_at(i);
+        let top = y_at(count);
+        top_line.push(egui::pos2(x, top));
+        let idx = mesh.vertices.len() as u32;
+        mesh.colored_vertex(egui::pos2(x, base), fill);
+        mesh.colored_vertex(egui::pos2(x, top), fill);
+        if i > 0 {
+            let p = idx - 2; // previous (base, top) pair
+            mesh.add_triangle(p, p + 1, idx + 1);
+            mesh.add_triangle(p, idx + 1, idx);
         }
-        painter.add(egui::Shape::mesh(mesh));
-        let line_color = color.to_opaque();
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    if let Some(color) = line {
         painter.add(egui::Shape::line(
             top_line,
-            egui::Stroke::new(1.0f32, line_color),
+            egui::Stroke::new(1.0f32, color),
         ));
     }
+}
+
+/// How close, in points before font scaling, the pointer has to be to grab
+/// a curve point.
+const CURVE_GRAB: f32 = 8.0;
+/// A curve point's radius, in points before font scaling.
+const CURVE_DOT: f32 = 4.0;
+/// A channel button's side, in points before font scaling.
+const CURVE_CHANNEL: f32 = 24.0;
+
+/// Lightroom's point curve: the channel buttons, the graph, and the preset
+/// and Reset row, all for the channel picked. Edits `curve` in place and
+/// returns whether it changed. The picked channel is session state, kept in
+/// egui's memory.
+fn draw_curve_section(ui: &mut egui::Ui, app: &App, curve: &mut ToneCurve) -> bool {
+    let t = t();
+    form::section_header(ui, t.section(crate::develop::Section::Curve), |_| {});
+    let id = egui::Id::new("curve_channel");
+    let mut ch: Channel = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    if let Some(picked) = curve_channels(ui, ch, curve) {
+        ch = picked;
+        ui.data_mut(|d| d.insert_temp(id, ch));
+    }
+
+    let color = channel_color(ui, ch);
+    let mut changed = curve_graph(ui, curve.get_mut(ch), color, app.histogram());
+
+    let c = curve.get_mut(ch);
+    ui.horizontal(|ui| {
+        ui.label(t.point_curve);
+        let presets = [
+            (Curve::LINEAR, t.curve_linear),
+            (Curve::MEDIUM_CONTRAST, t.curve_medium_contrast),
+            (Curve::STRONG_CONTRAST, t.curve_strong_contrast),
+        ];
+        let shown = presets
+            .iter()
+            .find(|(p, _)| p == c)
+            .map_or(t.curve_custom, |(_, label)| label);
+        egui::ComboBox::from_id_salt("point_curve")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                for (p, label) in presets {
+                    if ui.selectable_label(*c == p, label).clicked() && *c != p {
+                        *c = p;
+                        changed = true;
+                    }
+                }
+            });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let reset = Button {
+                label: t.reset,
+                role: Role::Cancel,
+                enabled: !c.is_linear(),
+            };
+            if form::button(ui, &reset).clicked() {
+                *c = Curve::LINEAR;
+                changed = true;
+            }
+        });
+    });
+    changed
+}
+
+/// The color a channel's curve and button are drawn in. The master curve
+/// takes the text color, so it reads on either theme.
+fn channel_color(ui: &egui::Ui, ch: Channel) -> egui::Color32 {
+    match ch {
+        Channel::Rgb => ui.visuals().strong_text_color(),
+        Channel::Red => egui::Color32::from_rgb(230, 70, 70),
+        Channel::Green => egui::Color32::from_rgb(70, 190, 90),
+        Channel::Blue => egui::Color32::from_rgb(80, 130, 240),
+    }
+}
+
+/// A ring per channel in its color, underlined when picked and with a dot
+/// when its curve is bent. Returns the channel clicked.
+fn curve_channels(ui: &mut egui::Ui, current: Channel, curve: &ToneCurve) -> Option<Channel> {
+    let t = t();
+    let side = font_size::px(ui.style(), CURVE_CHANNEL);
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        for ch in Channel::ALL {
+            let (rect, resp) =
+                ui.allocate_exact_size(egui::vec2(side, side * 1.25), egui::Sense::click());
+            let color = channel_color(ui, ch);
+            let center = egui::pos2(rect.center().x, rect.top() + side / 2.0);
+            let r = side * 0.36;
+            let width: f32 = if resp.hovered() { 2.5 } else { 2.0 };
+            let painter = ui.painter();
+            painter.circle_stroke(center, r, egui::Stroke::new(width, color));
+            if !curve.get(ch).is_linear() {
+                painter.circle_filled(center, r * 0.4, color);
+            }
+            if ch == current {
+                let y = rect.bottom() - 1.0;
+                painter.line_segment(
+                    [egui::pos2(center.x - r, y), egui::pos2(center.x + r, y)],
+                    egui::Stroke::new(2.0f32, ui.visuals().text_color()),
+                );
+            }
+            let name = match ch {
+                Channel::Rgb => t.curve_rgb,
+                Channel::Red => t.curve_red,
+                Channel::Green => t.curve_green,
+                Channel::Blue => t.curve_blue,
+            };
+            if resp.on_hover_text(name).clicked() {
+                picked = Some(ch);
+            }
+        }
+    });
+    picked
+}
+
+/// The square curve graph over a faint histogram. Click adds a point, drag
+/// moves one (or adds one where the drag starts), and double-clicking a
+/// point or dragging it off the top or bottom removes it. The two end
+/// points move but stay. Returns whether `curve` changed.
+fn curve_graph(
+    ui: &mut egui::Ui,
+    curve: &mut Curve,
+    color: egui::Color32,
+    bins: Option<&[[f32; 256]; 3]>,
+) -> bool {
+    let side = ui.available_width();
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click_and_drag());
+    let grab = font_size::px(ui.style(), CURVE_GRAB);
+    let dot = font_size::px(ui.style(), CURVE_DOT);
+
+    let to_screen = |x: f32, y: f32| {
+        egui::pos2(
+            rect.left() + x * rect.width(),
+            rect.bottom() - y * rect.height(),
+        )
+    };
+    let level = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
+    let to_level = |p: egui::Pos2| {
+        (
+            level((p.x - rect.left()) / rect.width()),
+            level((rect.bottom() - p.y) / rect.height()),
+        )
+    };
+    let point_at = |q: [u8; 2]| to_screen(q[0] as f32 / 255.0, q[1] as f32 / 255.0);
+    let nearest = |c: &Curve, p: egui::Pos2| {
+        c.points()
+            .iter()
+            .enumerate()
+            .map(|(i, &q)| (i, point_at(q).distance(p)))
+            .filter(|&(_, d)| d <= grab)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+    };
+    let interior = |c: &Curve, i: usize| i > 0 && i + 1 < c.points().len();
+
+    let grab_id = resp.id.with("grabbed");
+    let mut grabbed: Option<usize> = ui.data(|d| d.get_temp(grab_id));
+    let mut changed = false;
+    if resp.drag_started() {
+        grabbed = ui.input(|i| i.pointer.press_origin()).and_then(|p| {
+            nearest(curve, p).or_else(|| {
+                let (x, y) = to_level(p);
+                let added = curve.insert(x, y);
+                changed |= added.is_some();
+                added
+            })
+        });
+    }
+    if let (Some(i), true, Some(p)) = (grabbed, resp.dragged(), resp.interact_pointer_pos()) {
+        let off = p.y < rect.top() - 2.0 * grab || p.y > rect.bottom() + 2.0 * grab;
+        let before = *curve;
+        if off && interior(curve, i) {
+            curve.remove(i);
+            grabbed = None;
+        } else {
+            let (x, y) = to_level(p);
+            curve.move_point(i, x, y);
+        }
+        changed |= *curve != before;
+    }
+    if resp.drag_stopped() {
+        grabbed = None;
+    }
+    if let Some(p) = resp.interact_pointer_pos() {
+        if resp.double_clicked() {
+            if let Some(i) = nearest(curve, p).filter(|&i| interior(curve, i)) {
+                curve.remove(i);
+                changed = true;
+            }
+        } else if resp.clicked() && nearest(curve, p).is_none() {
+            let (x, y) = to_level(p);
+            changed |= curve.insert(x, y).is_some();
+        }
+    }
+    ui.data_mut(|d| match grabbed {
+        Some(i) => {
+            d.insert_temp(grab_id, i);
+        }
+        None => d.remove::<usize>(grab_id),
+    });
+
+    let hovered = resp.hover_pos().and_then(|p| nearest(curve, p));
+    if grabbed.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    } else if hovered.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
+
+    let colors = theme::colors(ui.ctx());
+    // Wider than the graph, so a point on its edge is not cut in half.
+    let painter = ui.painter_at(rect.expand(dot + 1.0));
+    painter.rect_filled(rect, 3.0, colors.histogram_bg);
+    if let Some(bins) = bins {
+        let smoothed = smooth_bins(bins);
+        let sum: [f32; 256] = std::array::from_fn(|i| smoothed.iter().map(|c| c[i]).sum());
+        let fill = ui.visuals().weak_text_color().gamma_multiply(0.25);
+        paint_bins(&painter, rect, &sum, bins_peak(&sum).max(1.0), fill, None);
+    }
+    let grid = egui::Stroke::new(1.0f32, colors.histogram_border);
+    for k in 1..4 {
+        let f = k as f32 / 4.0;
+        painter.line_segment([to_screen(f, 0.0), to_screen(f, 1.0)], grid);
+        painter.line_segment([to_screen(0.0, f), to_screen(1.0, f)], grid);
+    }
+    painter.rect_stroke(rect, 3.0, grid, egui::StrokeKind::Inside);
+    if !curve.is_linear() {
+        painter.line_segment([to_screen(0.0, 0.0), to_screen(1.0, 1.0)], grid);
+    }
+
+    const STEPS: usize = 128;
+    let line: Vec<egui::Pos2> = (0..=STEPS)
+        .map(|i| {
+            let x = i as f32 / STEPS as f32;
+            to_screen(x, curve.eval(x))
+        })
+        .collect();
+    painter.add(egui::Shape::line(line, egui::Stroke::new(2.0f32, color)));
+    let active = grabbed.or(hovered);
+    for (i, &q) in curve.points().iter().enumerate() {
+        let r = if Some(i) == active { dot * 1.4 } else { dot };
+        painter.circle_filled(point_at(q), r, color);
+    }
+
+    // The active point's input and output, as Lightroom shows them.
+    if let Some(&[x, y]) = active.and_then(|i| curve.points().get(i)) {
+        let pad = font_size::px(ui.style(), 6.0);
+        painter.text(
+            rect.left_top() + egui::vec2(pad, pad),
+            egui::Align2::LEFT_TOP,
+            format!("{x} / {y}"),
+            egui::FontId::proportional(font_size::px(ui.style(), 11.0)),
+            ui.visuals().text_color(),
+        );
+    }
+    changed
 }

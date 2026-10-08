@@ -1,6 +1,7 @@
 use super::*;
 use std::path::Path;
 
+use crate::curve::Channel;
 use crate::develop::{self, Adjustments, GpuAdjust, GpuTouchUp, TouchUp};
 use crate::image_ops;
 
@@ -253,8 +254,9 @@ impl App {
     }
 
     /// Lightroom's Auto Sync: with several photos selected, a slider's new
-    /// value lands on every one of them. Only the sliders that moved are
-    /// copied, so each photo keeps the rest of its own look, and its crop.
+    /// value lands on every one of them. Only the sliders and curve channels
+    /// that moved are copied, so each photo keeps the rest of its own look,
+    /// and its crop.
     fn sync_to_selection(&mut self, mut before: Adjustments, mut after: Adjustments) {
         if self.action_count() < 2 {
             return;
@@ -263,7 +265,11 @@ impl App {
             .iter()
             .filter(|s| *(s.field)(&mut before) != *(s.field)(&mut after))
             .collect();
-        if moved.is_empty() {
+        let bent: Vec<Channel> = Channel::ALL
+            .into_iter()
+            .filter(|&c| before.curve.get(c) != after.curve.get(c))
+            .collect();
+        if moved.is_empty() && bent.is_empty() {
             return;
         }
         let shown = self.shown.path().map(Path::to_path_buf);
@@ -274,6 +280,9 @@ impl App {
             let mut adj = self.edits.get(&path).copied().unwrap_or_default();
             for s in &moved {
                 *(s.field)(&mut adj) = *(s.field)(&mut after);
+            }
+            for &c in &bent {
+                *adj.curve.get_mut(c) = *after.curve.get(c);
             }
             if adj.is_identity() {
                 self.edits.remove(&path);
@@ -344,14 +353,15 @@ impl App {
         {
             self.pushed_adj = Some(self.current_adjustments());
         }
-        let gpu = self.gpu_adjust(&self.current_adjustments());
+        let adj = self.current_adjustments();
+        let gpu = self.gpu_adjust(&adj);
         let gpu_touchups: Vec<GpuTouchUp> = self
             .current_touchups()
             .iter()
             .map(GpuTouchUp::from)
             .collect();
         if let Some(r) = &mut self.renderer {
-            r.set_adjustments(gpu);
+            r.set_adjustments(gpu, &adj.curve);
             r.set_touchups(&gpu_touchups);
         }
         self.request_redraw();
@@ -690,6 +700,25 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(app.edits[&paths[2]].contrast, 30.0, "one photo, no sync");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_curve_channel_change_syncs_only_that_channel() {
+        use crate::curve::Curve;
+        let (mut app, dir, paths) = three_selected("sync-curve");
+        let mut own = app.edits[&paths[1]];
+        own.curve.blue = Curve::MEDIUM_CONTRAST;
+        app.edits.insert(paths[1].clone(), own);
+
+        let mut adj = app.current_adjustments();
+        adj.curve.red = Curve::STRONG_CONTRAST;
+        app.apply_adjustments(adj);
+        for path in &paths {
+            assert_eq!(app.edits[path].curve.red, Curve::STRONG_CONTRAST);
+        }
+        assert_eq!(app.edits[&paths[1]].curve.blue, Curve::MEDIUM_CONTRAST);
+        assert_eq!(app.edits[&paths[1]].exposure, 1.0, "its own exposure stays");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

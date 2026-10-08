@@ -74,8 +74,8 @@ mod window_rect;
 #[cfg(not(target_arch = "wasm32"))]
 use lightphotos::immich;
 use lightphotos::{
-    chroma, develop, export, facequality, hash, image_decode, image_encode, image_ops, judge,
-    paths, quality, segmentation, worker_pool,
+    chroma, curve, develop, export, facequality, hash, image_decode, image_encode, image_ops,
+    judge, paths, quality, segmentation, worker_pool,
 };
 #[cfg(target_arch = "wasm32")]
 use lightphotos::{decode_budget, raw_preview};

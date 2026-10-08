@@ -1,0 +1,22 @@
+# The Curve section in Develop. Run against a folder from make-fixture.sh,
+# opened on its first photo. Dragging the RGB curve's middle up brightens the
+# photo and adds a point; double-clicking that point removes it. Then the
+# red channel takes the Strong Contrast preset.
+size 1300 1400
+key d
+idle
+move 1080 900
+scroll 0 -40
+idle
+shot curve
+drag 1082 906 1082 820
+idle
+shot brighter
+dblclick 1082 821
+idle
+click 976 723
+click 1052 1081
+idle
+click 1061 1148
+idle
+shot red-strong

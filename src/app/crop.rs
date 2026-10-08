@@ -455,7 +455,7 @@ impl App {
         }
         let gpu = self.gpu_adjust(&adj);
         if let Some(r) = &mut self.renderer {
-            r.set_adjustments(gpu);
+            r.set_adjustments(gpu, &adj.curve);
         }
         self.request_redraw();
     }
