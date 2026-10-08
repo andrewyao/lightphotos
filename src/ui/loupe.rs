@@ -973,7 +973,6 @@ fn filmstrip_cell(
     out: &mut FrameOutput,
 ) {
     let response = thumbnail_cell(ui, app, pos, cell, sel, &STRIP_CELL_STYLE, &mut out.actions);
-    app.record_cell_rect(pos, response.rect);
     if response.clicked() {
         out.actions.push(click_action(ui, pos));
         out.actions.push(UiAction::Focus(Region::Filmstrip));

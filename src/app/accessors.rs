@@ -222,6 +222,19 @@ impl App {
 
     pub(crate) fn clear_cell_rects(&mut self) {
         self.cell_rects.clear();
+        self.badge_rects.clear();
+    }
+
+    pub(crate) fn record_badge_rect(&mut self, pos: usize, rect: egui::Rect) {
+        self.badge_rects.push((pos, rect));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn badge_rect(&self, pos: usize) -> Option<egui::Rect> {
+        self.badge_rects
+            .iter()
+            .find(|(p, _)| *p == pos)
+            .map(|(_, r)| *r)
     }
 
     pub(crate) fn record_cell_rect(&mut self, pos: usize, rect: egui::Rect) {

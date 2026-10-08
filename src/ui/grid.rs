@@ -290,10 +290,11 @@ fn badge_center(
 /// Thumbnail cell shared by the grid and the filmstrip. A cell in the
 /// multi-selection gets an outline, and the active cell `sel` a thicker one.
 /// A click on the stack badge pushes [`UiAction::ToggleStack`] to `actions`
-/// and is not a click on the cell.
+/// and is not a click on the cell. Records where the cell and its badge
+/// landed.
 pub(super) fn thumbnail_cell(
     ui: &mut egui::Ui,
-    app: &App,
+    app: &mut App,
     pos: usize,
     cell: f32,
     sel: Option<usize>,
@@ -304,6 +305,7 @@ pub(super) fn thumbnail_cell(
     let selected = app.is_selected(pos);
     let size = egui::vec2(cell, cell);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    app.record_cell_rect(pos, rect);
 
     let colors = theme::colors(ui.ctx());
     let marked = selected || primary;
@@ -370,6 +372,7 @@ pub(super) fn thumbnail_cell(
 
     if let Some((n, expanded)) = badge {
         let pill = stack_pill(ui, pill_anchor, rect, n, expanded, &colors);
+        app.record_badge_rect(pos, pill);
         let t = crate::i18n::t();
         let tip = if expanded {
             t.collapse_stack
@@ -637,7 +640,6 @@ fn grid_cell(
     out: &mut FrameOutput,
 ) {
     let response = thumbnail_cell(ui, app, pos, cell, sel, &GRID_CELL_STYLE, &mut out.actions);
-    app.record_cell_rect(pos, response.rect);
     if response.clicked() {
         out.actions.push(click_action(ui, pos));
         out.actions.push(UiAction::Focus(Region::Grid));

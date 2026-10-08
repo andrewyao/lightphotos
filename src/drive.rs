@@ -17,6 +17,7 @@
 //! dblclick-cell 2
 //! rclick 40 60             a right click, which opens a photo's menu
 //! rclick-cell 2
+//! click-badge 2            the stack badge on the cell at that position, which expands or collapses the stack
 //! move 40 60               pointer to (x, y) points, no click
 //! scroll 0 5 [shift]       wheel lines; up is positive, so this zooms the Loupe in
 //! drag 100 100 300 200
@@ -165,6 +166,7 @@ pub(crate) enum Step {
 pub(crate) enum Target {
     Point(f32, f32),
     Cell(usize),
+    Badge(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +325,16 @@ fn parse_step(line: &str) -> Result<Step, String> {
             kind: ClickKind::of(cmd),
             mods: parse_mods(args.get(1..).unwrap_or_default())?,
         },
+        "click-badge" => {
+            let [pos] = args else {
+                return Err("click-badge takes a cell position".into());
+            };
+            Step::Click {
+                at: Target::Badge(number(Some(*pos), "cell position")?),
+                kind: ClickKind::Single,
+                mods: ModifiersState::empty(),
+            }
+        }
         "move" => Step::Move(
             number(args.first().copied(), "x")?,
             number(args.get(1).copied(), "y")?,
@@ -655,6 +667,13 @@ impl Driver {
                 })?;
                 Ok((rect.center().x, rect.center().y))
             }
+            Target::Badge(pos) => {
+                let rect = self
+                    .app
+                    .badge_rect(pos)
+                    .ok_or_else(|| format!("cell {pos} drew no stack badge"))?;
+                Ok((rect.center().x, rect.center().y))
+            }
         }
     }
 
@@ -771,8 +790,9 @@ struct State {
     visible: usize,
     /// Cell positions `[start, end)` the Grid drew last frame.
     grid_range: (usize, usize),
-    /// Each stacked cell in `grid_range`, as its position and member count.
-    stacks: Vec<(usize, usize)>,
+    /// Each cell in `grid_range` that carries a stack badge, as its
+    /// position, its stack's size, and whether the stack is expanded.
+    stacks: Vec<(usize, usize, bool)>,
     /// The primary photo's position among the visible ones.
     sel: Option<usize>,
     /// The multi-selection's positions.
@@ -799,7 +819,10 @@ impl State {
             stacks: {
                 let (start, end) = app.grid_range();
                 (start..end)
-                    .filter_map(|p| app.group_at(p).map(|(_, g)| (p, g.members().len())))
+                    .filter_map(|p| {
+                        app.stack_badge_at(p)
+                            .map(|(_, n, expanded)| (p, n, expanded))
+                    })
                     .collect()
             },
             sel: app.sel(),
@@ -838,6 +861,7 @@ click-cell 2 shift
 dblclick-cell 3
 rclick 10 20
 rclick-cell 4
+click-badge 5
 scroll 0 -5 shift
 drag 100 100 300 200
 idle
@@ -880,6 +904,11 @@ quit
                 Step::Click {
                     at: Target::Cell(4),
                     kind: ClickKind::Right,
+                    mods: ModifiersState::empty(),
+                },
+                Step::Click {
+                    at: Target::Badge(5),
+                    kind: ClickKind::Single,
                     mods: ModifiersState::empty(),
                 },
                 Step::Scroll {

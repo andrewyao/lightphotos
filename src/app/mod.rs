@@ -473,6 +473,8 @@ pub(crate) struct App {
     grid_scroll_reset: bool,
     /// Where the Grid or the filmstrip drew each cell last frame.
     cell_rects: Vec<(usize, egui::Rect)>,
+    /// Where each of those cells drew its stack badge.
+    badge_rects: Vec<(usize, egui::Rect)>,
     /// The filmstrip's equivalent of `grid_range`.
     strip_range: (usize, usize),
     /// Thumbnail textures keyed by (path, THUMB_PX), each carrying the edit
@@ -714,6 +716,7 @@ impl App {
             grid_cols: 1,
             grid_range: (0, 0),
             cell_rects: Vec::new(),
+            badge_rects: Vec::new(),
             grid_scroll_reset: true,
             strip_range: (0, 0),
             thumb_tex: HashMap::new(),

@@ -1,0 +1,32 @@
+# Stack expand and collapse, against a fresh make-fixture.sh folder of 12.
+# Stacks photos 1-4 with 4 as the cover, rates 2 and 3 above the cover,
+# then filters to 4 stars and up.
+size 1200 800
+idle
+click-cell 1
+key 4
+click-cell 2
+key 5
+click-cell 5
+key 5
+click-cell 0
+click-cell 3 shift
+key cmd+g
+idle
+state
+shot collapsed
+click-badge 0
+idle
+state
+shot expanded
+click-badge 2
+idle
+# The toolbar's fourth star, with the default >= comparator.
+click 542 90
+idle
+state
+shot filtered-collapsed
+click-badge 0
+idle
+state
+shot filtered-expanded
