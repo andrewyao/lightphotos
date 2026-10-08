@@ -104,23 +104,32 @@ impl App {
         self.request_redraw();
     }
 
+    /// "LightPhotos - Folder" in the Grid, "LightPhotos - Folder - File (x/y)"
+    /// in the Loupe.
     pub(super) fn update_window_title(&self) {
         let Some(w) = &self.window else { return };
-        match self.mode {
-            ViewMode::Loupe => {
-                if let (Some(p), Some(_pl)) = (self.shown.path(), &self.playlist) {
-                    let name = p
-                        .file_name()
-                        .map(|s| s.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    let pos = self.sel.unwrap_or(0) + 1;
-                    w.set_title(&format!("{}  ({}/{})", name, pos, self.visible.len()));
-                }
-            }
-            ViewMode::Grid => {
-                w.set_title(&(crate::i18n::t().grid_title)(self.visible.len()));
-            }
+        let mut title = String::from("LightPhotos");
+        let folder = self
+            .folder_sel
+            .as_deref()
+            .or(self.folder_root.as_deref())
+            .or_else(|| self.shown.path().and_then(|p| p.parent()))
+            .and_then(|d| d.file_name());
+        if let Some(folder) = folder {
+            title.push_str(" - ");
+            title.push_str(&folder.to_string_lossy());
         }
+        let name = self.shown.path().and_then(|p| p.file_name());
+        if let (ViewMode::Loupe, Some(_), Some(name)) = (self.mode, &self.playlist, name) {
+            let pos = self.sel.unwrap_or(0) + 1;
+            title.push_str(&format!(
+                " - {} ({}/{})",
+                name.to_string_lossy(),
+                pos,
+                self.visible.len()
+            ));
+        }
+        w.set_title(&title);
     }
 
     /// Image size in source pixels for all view math. Until the metadata

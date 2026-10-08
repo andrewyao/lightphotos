@@ -908,6 +908,7 @@ impl App {
         self.selected.clear();
         self.anchor = None;
         self.folder_sel = Some(dir);
+        self.update_window_title();
         // `redraw` syncs textures against `grid_range` before layout updates
         // it. A range left from the old folder's scroll depth would drop the
         // textures actually on screen for a frame, so start at the top.

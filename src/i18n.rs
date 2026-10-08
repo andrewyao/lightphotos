@@ -424,7 +424,6 @@ pub struct Strings {
     pub capture_date: fn(i32, u32, u32, u32, u32) -> String,
 
     // Window titles.
-    pub grid_title: fn(usize) -> String,
 
     // Status messages.
     pub deleting: fn(usize, usize) -> String,
@@ -1091,7 +1090,6 @@ pub static EN: Strings = Strings {
         format!("{mon} {day}, {year} {h12}:{minute:02} {ampm}")
     },
 
-    grid_title: |n| format!("Grid  ({n} photos)"),
 
     deleting: if WEB {
         |done, total| format!("Deleting {done}/{total}\u{2026}")
@@ -1707,8 +1705,6 @@ pub static ZH: Strings = Strings {
     capture_date: |year, month, day, hour, minute| {
         format!("{year}年{month}月{day}日 {hour:02}:{minute:02}")
     },
-
-    grid_title: |n| format!("网格  ({n} 张照片)"),
 
     deleting: if WEB {
         |done, total| format!("正在删除 {done}/{total}\u{2026}")
