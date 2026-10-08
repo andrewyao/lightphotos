@@ -18,8 +18,8 @@ the Vision-backed features (face/blink scoring, subject selection) are
 macOS-only.
 
 Keyboard shortcuts are in [`docs/KEYBOARD_SHORTCUTS.md`](docs/KEYBOARD_SHORTCUTS.md)
-(or press `?` in the app). The code layout is in
-[`docs/PROJECT_LAYOUT.md`](docs/PROJECT_LAYOUT.md).
+(or press `?` in the app). The architecture diagrams are in
+[`docs/SYSTEM_DIAGRAM.md`](docs/SYSTEM_DIAGRAM.md).
 
 ## How to build it from scratch
 

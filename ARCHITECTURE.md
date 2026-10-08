@@ -3,8 +3,8 @@
 This document explains **when** each piece of the codebase runs, in the order
 a photo actually moves through it, across the three platform targets: macOS,
 Linux/Windows ("non-mac"), and wasm32 (the browser build). It complements
-`CLAUDE.md` (module map), [`docs/PROJECT_LAYOUT.md`](docs/PROJECT_LAYOUT.md)
-(directory listing), and `plans/` (design history) — this file is about
+`CLAUDE.md`, [`docs/SYSTEM_DIAGRAM.md`](docs/SYSTEM_DIAGRAM.md)
+(architecture diagrams), and `plans/` (design history) — this file is about
 *sequencing*, not module boundaries.
 
 There are three pipelines a photo passes through, each triggered by a

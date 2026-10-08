@@ -1,14 +1,19 @@
 # System diagram
 
-Two views of LightPhotos. The component diagram shows which modules own what and how
-they talk. The sequence diagram walks one photo from a click to pixels on screen.
-[`PROJECT_LAYOUT.md`](PROJECT_LAYOUT.md) is the module map in prose; read it for the why.
+This page has two diagrams of LightPhotos. The component diagram shows the modules and
+the connections between them. The sequence diagram shows the path of one photo from a
+click to the screen.
 
 ## Components
 
-The app binary (`src/main.rs`, `src/app/`, `src/ui/`) sits on the lib (`src/lib.rs`),
-which has no egui, winit or wgpu. Dashed borders mark code that builds on one platform
-only: blue is macOS, orange is Linux, Windows and the browser, green is the browser alone.
+The app binary is `src/main.rs`, `src/app/` and `src/ui/`. It uses the lib, `src/lib.rs`.
+The lib does not use egui, winit or wgpu.
+
+A dashed border shows code that builds on one platform only:
+
+- Blue: macOS.
+- Orange: Linux, Windows and the browser.
+- Green: the browser.
 
 ```mermaid
 flowchart LR
@@ -132,16 +137,22 @@ flowchart LR
     class webshell,fsa,rawrender web
 ```
 
-`facequality.rs`, `segmentation.rs` and the aesthetics half of `judge.rs` build
-everywhere but return `Err` (or a flat base score) off macOS, so only `vision.rs` is marked.
-`raw/render.rs` compiles everywhere, but only the browser's Loupe RAW path produces the
-linear-light images it draws; every other path bakes the tonemap on the CPU.
+`facequality.rs`, `segmentation.rs` and the aesthetics part of `judge.rs` build on all
+platforms. On Linux, Windows and the browser, they return `Err` or a flat base score. Thus,
+the diagram marks only `vision.rs` as macOS code.
+
+`raw/render.rs` builds on all platforms. But only the browser Loupe RAW path gives it
+linear-light images. All other paths apply the tonemap on the CPU.
 
 ## Opening a photo
 
-What happens between a click on a grid cell and the photo in the Loupe, then a zoom and
-a star rating. The point of the shape: decoding never runs on the UI thread, and a zoom
-never decodes.
+This diagram shows three user actions in sequence:
+
+1. A double-click on a grid cell opens the photo in the Loupe.
+2. A scroll or pinch zooms the photo.
+3. A number key sets the star rating.
+
+Decode does not occur on the UI thread. A zoom does not cause a decode.
 
 ```mermaid
 sequenceDiagram

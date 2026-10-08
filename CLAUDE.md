@@ -99,7 +99,7 @@ Three processes, because lightphotos emits only half the picture by itself. The 
 
 ## Architecture
 
-See [docs/PROJECT_LAYOUT.md](docs/PROJECT_LAYOUT.md), and [docs/SYSTEM_DIAGRAM.md](docs/SYSTEM_DIAGRAM.md) for the same in Mermaid diagrams.
+See [docs/SYSTEM_DIAGRAM.md](docs/SYSTEM_DIAGRAM.md) for the Mermaid component and sequence diagrams.
 
 ## Forms
 
