@@ -534,6 +534,17 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             };
             score_button(ui, app, score, out);
             auto_adjust_button(ui, t.auto_tone, out);
+            // One photo has no bursts of its own; the Grid's Actions menu
+            // stacks the whole folder.
+            if n >= 2
+                && app.group_bursts_available()
+                && ui
+                    .button(t.group_all_bursts)
+                    .on_hover_text(t.group_selected_bursts_tip)
+                    .clicked()
+            {
+                out.actions.push(UiAction::GroupSelectedBursts);
+            }
             if ui
                 .button(t.export_jpg)
                 .on_hover_text(t.export_jpg_tip)

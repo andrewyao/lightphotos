@@ -1113,6 +1113,7 @@ impl App {
         for action in actions {
             match action {
                 ui::UiAction::GroupAllBursts => self.group_all_bursts(),
+                ui::UiAction::GroupSelectedBursts => self.group_bursts(),
                 ui::UiAction::ScoreAll => self.score_all(),
                 ui::UiAction::ComparePage(page) => self.set_compare_page(page),
                 ui::UiAction::SetTileFidelity(f) => self.set_tile_fidelity(f),

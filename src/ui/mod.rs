@@ -19,6 +19,8 @@ pub enum UiAction {
     /// Group the bursts among every photo in the grid. Native only.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     GroupAllBursts,
+    /// Group the bursts among the selected photos.
+    GroupSelectedBursts,
     /// Score every photo in the grid, group members included.
     ScoreAll,
     /// Show this page of the group's tiles.
