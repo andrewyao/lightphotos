@@ -27,6 +27,8 @@ pub enum UiAction {
     RequestDeleteStack,
     /// Open the stack under the cursor in the Compare pane.
     CompareStack,
+    /// Expand or collapse the stack whose badge this cell carries.
+    ToggleStack(usize),
     /// Give the selection this color label, or clear it when every photo
     /// has it already.
     ToggleLabel(crate::catalog::ColorLabel),

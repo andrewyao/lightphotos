@@ -445,6 +445,9 @@ pub(crate) struct App {
     /// The grid's color label filter: a photo with any of these labels
     /// shows. Empty shows all.
     label_filter: Vec<crate::catalog::ColorLabel>,
+    /// Stacks the Grid shows member by member. Kept for the folder's
+    /// session only.
+    expanded_stacks: std::collections::HashSet<crate::groups::GroupId>,
     /// Comparator used when a star level is clicked. Stays set across "All".
     filter_cmp: Cmp,
     grid_sort: GridSort,
@@ -699,6 +702,7 @@ impl App {
             filter: None,
             flag_filter: FlagFilter::All,
             label_filter: Vec::new(),
+            expanded_stacks: Default::default(),
             filter_cmp: Cmp::Gte,
             grid_sort: GridSort::Name,
             visible: Vec::new(),
@@ -904,6 +908,9 @@ impl App {
         self.cancel_scoring();
         self.cancel_delete();
         self.save_edit();
+        if self.playlist.as_ref().map(Playlist::dir) != Some(playlist.dir()) {
+            self.expanded_stacks.clear();
+        }
         self.adopt_signal_cache(playlist);
         self.request_catalog_load(playlist.dir());
     }
@@ -1139,6 +1146,7 @@ impl App {
                 ui::UiAction::GroupSelected => self.group_selected(),
                 ui::UiAction::RequestDeleteStack => self.request_delete_group(),
                 ui::UiAction::CompareStack => self.compare_stack(),
+                ui::UiAction::ToggleStack(pos) => self.toggle_stack(pos),
                 ui::UiAction::ToggleLabel(label) => self.toggle_label(label),
                 ui::UiAction::ScoreAll => self.score_all(),
                 ui::UiAction::ComparePage(page) => self.set_compare_page(page),

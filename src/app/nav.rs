@@ -114,7 +114,9 @@ impl App {
                 .get(i)
                 .and_then(|p| p.file_name())
                 .zip(groups)
-                .map_or(Slot::Single, |(name, groups)| groups.slot(name, |_| false))
+                .map_or(Slot::Single, |(name, groups)| {
+                    groups.slot(name, |id| self.expanded_stacks.contains(id))
+                })
         };
         let (catalog, filter, flag_filter, labels) = (
             &self.catalog,
@@ -336,6 +338,35 @@ impl App {
     pub(super) fn collapse_selection(&mut self) {
         self.selected = self.sel.into_iter().collect();
         self.anchor = self.sel;
+    }
+
+    /// Expand the stack whose badge cell `pos` carries, or collapse it when
+    /// expanded. The cursor follows its photo: a member that a collapse
+    /// hides lands on the cover, and a cover that an expand filters out
+    /// lands on the stack's first shown member, which then holds the
+    /// selection alone.
+    pub(super) fn toggle_stack(&mut self, pos: usize) {
+        let Some((id, _, expanded)) = self.stack_badge_at(pos) else {
+            return;
+        };
+        let id = id.clone();
+        let in_stack = |app: &App, p: usize| app.stack_badge_at(p).is_some_and(|(s, ..)| *s == id);
+        let cursor = self
+            .sel
+            .filter(|&s| in_stack(self, s))
+            .and_then(|_| self.selected_index());
+        if expanded {
+            self.expanded_stacks.remove(&id);
+        } else {
+            self.expanded_stacks.insert(id.clone());
+        }
+        self.recompute_visible();
+        if cursor.is_some() && self.selected_index() != cursor {
+            if let Some(p) = (0..self.visible.len()).find(|&p| in_stack(self, p)) {
+                self.select_single(p);
+            }
+        }
+        self.request_redraw();
     }
 
     pub(super) fn select_single(&mut self, pos: usize) {
@@ -1164,6 +1195,128 @@ pub(in crate::app) mod tests {
         assert_eq!(app.place_of(2), Place::Gone);
         assert_eq!(app.place_of(1), Place::Gone);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_expanded_stack_shows_each_member_as_a_single_with_a_badge() {
+        let (mut app, dir, _) = folder_app("nav-expand", 6);
+        group_photos(&mut app, &[1, 2, 3], 2);
+        assert_eq!(
+            app.stack_badge_at(1).map(|(_, n, e)| (n, e)),
+            Some((3, false))
+        );
+        app.toggle_stack(1);
+        assert_eq!(cells(&app), vec![0, 1, 2, 3, 4, 5]);
+        for p in 1..=3 {
+            assert!(app.group_at(p).is_none(), "cell {p} acts as one photo");
+            assert_eq!(
+                app.stack_badge_at(p).map(|(_, n, e)| (n, e)),
+                Some((3, true))
+            );
+        }
+        assert!(app.stack_badge_at(0).is_none());
+        app.toggle_stack(3);
+        assert_eq!(
+            cells(&app),
+            vec![0, 2, 4, 5],
+            "any member's badge collapses it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn collapsing_from_a_member_moves_the_cursor_to_the_cover() {
+        let (mut app, dir, _) = folder_app("nav-collapse-cursor", 6);
+        group_photos(&mut app, &[1, 2, 3], 2);
+        app.toggle_stack(1);
+        app.select_single(3);
+        app.toggle_stack(3);
+        assert_eq!(
+            app.sel,
+            Some(1),
+            "photo 3 is hidden, so its cover 2 holds the cursor"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_expanded_stack_under_a_filter_shows_only_its_passing_members() {
+        let (mut app, dir, paths) = folder_app("nav-expand-filter", 5);
+        group_photos(&mut app, &[1, 2, 3], 1);
+        app.ratings.insert(paths[2].clone(), 5);
+        app.ratings.insert(paths[3].clone(), 4);
+        app.set_filter(Some((Cmp::Gte, 4)));
+        assert_eq!(
+            cells(&app),
+            vec![1],
+            "the failing cover stands for the stack"
+        );
+        assert_eq!(
+            app.stack_badge_at(0).map(|(_, n, _)| n),
+            Some(3),
+            "the full size"
+        );
+        app.select_single(0);
+        app.toggle_stack(0);
+        assert_eq!(cells(&app), vec![2, 3]);
+        assert_eq!(
+            app.sel,
+            Some(0),
+            "the cover is filtered out, so its first member"
+        );
+        assert_eq!(
+            app.selected,
+            BTreeSet::from([0]),
+            "which holds the selection"
+        );
+        assert_eq!(
+            app.stack_badge_at(1).map(|(_, n, e)| (n, e)),
+            Some((3, true))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn expanding_past_a_filtered_out_cover_moves_the_cursor_into_the_stack() {
+        let (mut app, dir, paths) = folder_app("nav-expand-cursor", 5);
+        group_photos(&mut app, &[1, 3], 3);
+        for i in [0, 1, 2, 4] {
+            app.ratings.insert(paths[i].clone(), 5);
+        }
+        app.set_filter(Some((Cmp::Gte, 4)));
+        assert_eq!(cells(&app), vec![0, 2, 3, 4]);
+        app.select_single(2);
+        app.toggle_stack(2);
+        assert_eq!(cells(&app), vec![0, 1, 2, 4]);
+        assert_eq!(
+            app.sel,
+            Some(1),
+            "on member 1, not the single 2 left in place"
+        );
+        assert_eq!(app.selected, BTreeSet::from([1]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_another_folder_collapses_every_stack() {
+        use crate::app::test_support::load_folder;
+        let dir = folder_with_saved_group("nav-expand-reset", 4, &[1, 2], 1);
+        let (_, other, _) = folder_app("nav-expand-reset-other", 2);
+        let mut app = App::new(None);
+        load_folder(&mut app, &dir);
+        app.toggle_stack(1);
+        assert_eq!(cells(&app), vec![0, 1, 2, 3]);
+        load_folder(&mut app, &dir);
+        assert_eq!(
+            cells(&app),
+            vec![0, 1, 2, 3],
+            "reloading the same folder keeps it"
+        );
+        load_folder(&mut app, &other);
+        load_folder(&mut app, &dir);
+        assert_eq!(cells(&app), vec![0, 1, 3]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     #[test]

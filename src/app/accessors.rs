@@ -11,16 +11,32 @@ impl App {
         self.mode
     }
 
-    /// The group whose stack is the cell at `pos`. `None` for a single, and
-    /// for a cell whose photo is not its group's representative, which a
-    /// rebuilt view never shows.
+    /// The group whose collapsed stack is the cell at `pos`. `None` for a
+    /// single, and for any cell of an expanded stack, which acts as a single
+    /// photo.
     pub(crate) fn group_at(&self, pos: usize) -> Option<(&GroupId, &Group)> {
+        let (id, group, cover) = self.stack_at(pos)?;
+        (cover && !self.expanded_stacks.contains(id)).then_some((id, group))
+    }
+
+    /// The stack badge the cell at `pos` carries: its stack, the stack's
+    /// full size, and whether it is expanded. A collapsed stack's cover and
+    /// every cell of an expanded stack carry one.
+    pub(crate) fn stack_badge_at(&self, pos: usize) -> Option<(&GroupId, usize, bool)> {
+        let (id, group, cover) = self.stack_at(pos)?;
+        let expanded = self.expanded_stacks.contains(id);
+        (cover || expanded).then_some((id, group.members().len(), expanded))
+    }
+
+    /// The stack the photo in cell `pos` belongs to, collapsed or not, and
+    /// whether the photo is its cover.
+    fn stack_at(&self, pos: usize) -> Option<(&GroupId, &Group, bool)> {
         let idx = *self.visible.get(pos)?;
         let name = self.playlist.as_ref()?.entry(idx)?.file_name()?;
         let groups = self.catalog.groups()?;
         let id = groups.group_of(name)?;
         let group = groups.get(id)?;
-        (group.rep() == name).then_some((id, group))
+        Some((id, group, group.rep() == name))
     }
 
     pub(crate) fn selected_groups(&self) -> Vec<(GroupId, Group)> {
