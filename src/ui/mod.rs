@@ -194,6 +194,15 @@ pub enum UiAction {
     /// Open the Settings dialog, or close it if it is showing.
     ToggleSettings,
     CloseSettings,
+    /// Start the guided tour from its first stop.
+    StartTour,
+    /// The tour's next stop; past the last one, the tour ends.
+    TourNext,
+    TourBack,
+    /// Skip or finish the tour.
+    EndTour,
+    /// Hide the web home page's note about the browser's file permission.
+    CloseAllowNote,
 }
 
 /// A bulk action requested from the toolbar, run against the current
@@ -225,6 +234,7 @@ mod export_panel;
 pub mod font_size;
 mod form;
 mod grid;
+mod home;
 mod info_panel;
 mod loupe;
 mod modals;
@@ -234,6 +244,7 @@ pub mod theme;
 /// `pub(crate)` so `app::nav` can walk `ToolbarControl`, the list the toolbar
 /// row is drawn from.
 pub(crate) mod toolbar;
+pub(crate) mod tour;
 
 #[cfg(test)]
 pub(crate) use develop_panel::rail_button_rect;
@@ -260,7 +271,8 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 
     // Everything below assumes a folder is open.
     if !app.has_playlist() {
-        draw_landing_page(ui, app, &mut out);
+        home::draw_home(ui, app, &mut out);
+        tour::draw(ui, app, &mut out);
         return out;
     }
 
@@ -274,7 +286,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     }
     // Info, Develop and Export are pages of one right-hand panel, inside the
     // rail that switches between them.
-    draw_develop_rail(ui, app, &mut out);
+    draw_develop_rail(ui, app, true, &mut out);
     if app.export_form_open() {
         draw_export_panel(ui, app, mode == ViewMode::Loupe, &mut out);
     } else if app.info_open() {
@@ -302,268 +314,17 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     preset_name_modal(ui, app, &mut out);
     help_modal(ui, app, &mut out);
     settings_modal(ui, app, &mut out);
+    tour::draw(ui, app, &mut out);
     out
 }
 
-/// Shown when no folder is open: the prompt and Choose Folder button, three
-/// cards on what the app does, and a tip on how edits are stored.
-fn draw_landing_page(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    const MAX_COLUMN: f32 = 760.0;
-    const GUTTER: f32 = 16.0;
-    let pal = theme::colors(ui.ctx());
-    let card_fill = pal.panel.lerp_to_gamma(pal.value, 0.05);
-    let card_stroke = egui::Stroke::new(1.0_f32, pal.panel.lerp_to_gamma(pal.value, 0.14));
-
-    egui::CentralPanel::default().show_inside(ui, |ui| {
-        let top = (ui.available_height() * 0.10).max(24.0);
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let full = ui.available_rect_before_wrap();
-                let col_w = (full.width() - 2.0 * GUTTER).clamp(200.0, MAX_COLUMN);
-                let column = egui::Rect::from_min_size(
-                    egui::pos2(full.center().x - col_w / 2.0, full.top()),
-                    egui::vec2(col_w, full.height()),
-                );
-                ui.scope_builder(
-                    egui::UiBuilder::new()
-                        .max_rect(column)
-                        .layout(egui::Layout::top_down(egui::Align::Center)),
-                    |ui| {
-                        ui.add_space(top);
-                        ui.label(
-                            egui::RichText::new(t().landing_prompt)
-                                .size(font_size::px(ui.style(), 32.0))
-                                .color(pal.value)
-                                .strong(),
-                        );
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new(t().landing_tagline)
-                                .size(font_size::px(ui.style(), 18.0))
-                                .color(pal.label),
-                        );
-                        ui.add_space(28.0);
-                        landing_buttons(ui, app, out);
-
-                        // Web only: picking a folder hands the browser a File
-                        // System Access permission, so say up front which
-                        // button to press.
-                        let allow_note = t().landing_allow_note;
-                        if !allow_note.is_empty() {
-                            ui.add_space(20.0);
-                            egui::Frame::new()
-                                .fill(theme::BRAND_BLUE.linear_multiply(0.10))
-                                .stroke(egui::Stroke::new(
-                                    1.0_f32,
-                                    theme::BRAND_BLUE.linear_multiply(0.6),
-                                ))
-                                .corner_radius(10.0)
-                                .inner_margin(egui::Margin::symmetric(18, 12))
-                                .show(ui, |ui| {
-                                    ui.with_layout(
-                                        egui::Layout::top_down(egui::Align::Min),
-                                        |ui| {
-                                            ui.label(
-                                                egui::RichText::new(allow_note)
-                                                    .size(font_size::px(ui.style(), 18.0))
-                                                    .color(pal.value),
-                                            );
-                                        },
-                                    );
-                                });
-                        }
-
-                        ui.add_space(40.0);
-                        landing_steps(ui, col_w, card_fill, card_stroke, &pal);
-                        ui.add_space(32.0);
-                    },
-                );
-            });
-    });
-    status_toast(ui, app);
-    settings_modal(ui, app, out);
-}
-
-/// Choose Folder with quieter Reopen Session and Settings buttons beside it,
-/// centred as a row. Reopen Session shows only once a folder has been opened.
-fn landing_buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    const GAP: f32 = 12.0;
-    let session = app.saved_session();
-    let reopen_w = font_size::px(ui.style(), 170.0);
-    let settings_w = font_size::px(ui.style(), 120.0);
-    let row_w = 240.0
-        + GAP
-        + settings_w
-        + if session.is_some() {
-            GAP + reopen_w
-        } else {
-            0.0
-        };
-    let secondary = |ui: &mut egui::Ui, label: &str, width: f32, enabled: bool| {
-        ui.add_enabled(
-            enabled,
-            egui::Button::new(egui::RichText::new(label).size(font_size::px(ui.style(), 18.0)))
-                .corner_radius(10.0)
-                .min_size(egui::vec2(width, 52.0)),
-        )
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-    };
-    ui.allocate_ui_with_layout(
-        egui::vec2(row_w, 52.0),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = GAP;
-            choose_folder_button(ui, app, out);
-            if let Some(session) = session {
-                if secondary(ui, t().reopen_session, reopen_w, !app.folder_pick_pending())
-                    .on_hover_text((t().reopen_session_tip)(
-                        &session.root.display().to_string(),
-                    ))
-                    .clicked()
-                {
-                    out.actions.push(UiAction::ReopenSession);
-                }
-            }
-            if secondary(ui, t().settings, settings_w, true)
-                .on_hover_text(crate::i18n::keys(t().settings_tip))
-                .clicked()
-            {
-                out.actions.push(UiAction::ToggleSettings);
-            }
-        },
-    );
-}
-
-/// The landing page's one call to action, filled in the brand blue so it reads
-/// as the thing to press.
-fn choose_folder_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let pending = app.folder_pick_pending();
-    let label = if pending {
-        t().opening
-    } else {
-        t().choose_folder
-    };
-    let resp = ui.add_enabled(
-        !pending,
-        egui::Button::new(
-            egui::RichText::new(label)
-                .size(font_size::px(ui.style(), 20.0))
-                .color(egui::Color32::WHITE)
-                .strong(),
-        )
-        .fill(theme::BRAND_BLUE)
-        .corner_radius(10.0)
-        .min_size(egui::vec2(240.0, 52.0)),
-    );
-    if resp.hovered() && !pending {
-        // A fixed fill gives no hover feedback of its own.
-        ui.painter().rect_stroke(
-            resp.rect.expand(2.0),
-            12.0,
-            egui::Stroke::new(2.0_f32, theme::BRAND_BLUE.linear_multiply(0.5)),
-            egui::StrokeKind::Outside,
-        );
-    }
-    if resp
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .clicked()
-    {
-        out.actions.push(UiAction::PickFolder);
-    }
-}
-
-/// Three numbered cards, Browse / Rate / Develop: side by side when the column
-/// is wide enough, stacked otherwise.
-fn landing_steps(
-    ui: &mut egui::Ui,
-    col_w: f32,
-    fill: egui::Color32,
-    stroke: egui::Stroke,
-    pal: &theme::Palette,
-) {
-    const GAP: f32 = 12.0;
-    const MARGIN: i8 = 16;
-    let side_by_side = col_w >= 600.0;
-    let card_w = if side_by_side {
-        (col_w - 2.0 * GAP) / 3.0
-    } else {
-        col_w
-    };
-    let inner_w = card_w - 2.0 * MARGIN as f32 - 2.0 * stroke.width;
-    let min_h = font_size::px(ui.style(), 96.0);
-
-    let card = |ui: &mut egui::Ui, n: usize, (title, body): (&str, &str)| {
-        egui::Frame::new()
-            .fill(fill)
-            .stroke(stroke)
-            .corner_radius(12.0)
-            .inner_margin(egui::Margin::same(MARGIN))
-            .show(ui, |ui| {
-                ui.set_width(inner_w);
-                if side_by_side {
-                    ui.set_min_height(min_h);
-                }
-                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    ui.horizontal(|ui| {
-                        number_badge(ui, n);
-                        ui.label(
-                            egui::RichText::new(title)
-                                .size(font_size::px(ui.style(), 18.0))
-                                .color(pal.value)
-                                .strong(),
-                        );
-                    });
-                    ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new(body)
-                            .size(font_size::px(ui.style(), 15.0))
-                            .color(pal.label),
-                    );
-                });
-            });
-    };
-
-    let steps = t().landing_steps;
-    if side_by_side {
-        ui.horizontal_top(|ui| {
-            ui.spacing_mut().item_spacing.x = GAP;
-            for (i, step) in steps.into_iter().enumerate() {
-                card(ui, i + 1, step);
-            }
-        });
-    } else {
-        for (i, step) in steps.into_iter().enumerate() {
-            if i > 0 {
-                ui.add_space(GAP);
-            }
-            card(ui, i + 1, step);
-        }
-    }
-}
-
-/// A small brand-blue disc with a white step number in it.
-fn number_badge(ui: &mut egui::Ui, n: usize) {
-    let d = font_size::px(ui.style(), 22.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(d, d), egui::Sense::hover());
-    ui.painter()
-        .circle_filled(rect.center(), d / 2.0, theme::BRAND_BLUE);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        n.to_string(),
-        egui::FontId::proportional(font_size::px(ui.style(), 13.0)),
-        egui::Color32::WHITE,
-    );
-}
-
-/// The "LightPhotos" wordmark, the Open and help buttons, and Settings at the
-/// right. The wordmark copies the
+/// The "LightPhotos" wordmark and Open Folder at the left; help, Tour and
+/// Settings at the right, on every screen. The wordmark copies the
 /// lightphotos.app site's `.lp-wordmark` style: "Light" in the default text
 /// color, "Photos" in italic brand blue. The web canvas fills the viewport, so
 /// the site's HTML header can't wrap it; native draws the same header.
 fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    egui::Panel::top("lp_app_header").show_inside(ui, |ui| {
+    let panel = egui::Panel::top("lp_app_header").show_inside(ui, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(8.0);
@@ -592,36 +353,38 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             );
             ui.label(job);
 
-            // Not in the F6 focus cycle; `Cmd+O` and `?` are their keyboard
-            // routes. The landing page has its own "Choose Folder" button.
-            if app.has_playlist() {
-                ui.add_space(12.0);
+            // Not in the F6 focus cycle; `Cmd+O`, `?` and `Cmd+,` are their
+            // keyboard routes.
+            // The home page shows it switched off, as part of the layout
+            // behind its card; the card's own Open Folder is the one to press.
+            ui.add_space(12.0);
+            if ui
+                .add_enabled(app.has_playlist(), egui::Button::new(t().open_folder))
+                .on_hover_text(crate::i18n::keys(t().open_folder_tip))
+                .clicked()
+            {
+                out.actions.push(UiAction::PickFolder);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(8.0);
                 if ui
-                    .button(t().open_folder)
-                    .on_hover_text(crate::i18n::keys(t().open_folder_tip))
+                    .button(t().settings)
+                    .on_hover_text(crate::i18n::keys(t().settings_tip))
                     .clicked()
                 {
-                    out.actions.push(UiAction::PickFolder);
+                    out.actions.push(UiAction::ToggleSettings);
+                }
+                if ui.button(t().tour).on_hover_text(t().tour_tip).clicked() {
+                    out.actions.push(UiAction::StartTour);
                 }
                 if ui.button("?").on_hover_text(t().help_tip).clicked() {
                     out.actions.push(UiAction::ToggleHelp);
                 }
-                // The landing page has its own Settings button beside Choose
-                // Folder.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.add_space(8.0);
-                    if ui
-                        .button(t().settings)
-                        .on_hover_text(crate::i18n::keys(t().settings_tip))
-                        .clicked()
-                    {
-                        out.actions.push(UiAction::ToggleSettings);
-                    }
-                });
-            }
+            });
         });
         ui.add_space(4.0);
     });
+    tour::anchor(ui.ctx(), tour::TourStep::Header, panel.response.rect);
 }
 
 /// The shown folder's name above the Grid or Loupe. In the Loupe it adds a

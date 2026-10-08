@@ -1,0 +1,25 @@
+# Run with no folder: a first launch lands on the home page with the tour up.
+# Shoots each stop, then the home page once Esc skips the rest.
+size 1200 800
+idle
+shot tour-1-folders
+key right
+shot tour-2-filters
+key right
+shot tour-3-content
+key right
+shot tour-4-actions
+key right
+shot tour-5-adjustments
+key right
+shot tour-6-info
+key right
+shot tour-7-export
+key right
+shot tour-8-loupe-icons
+key right
+shot tour-9-header
+key escape
+idle
+shot home
+state

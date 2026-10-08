@@ -30,12 +30,19 @@ pub(super) fn draw_develop_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOu
 /// The rail of page icons at the window's right edge. It is its own panel,
 /// outside Develop, so it stays on screen to bring a page back after its own
 /// icon turned it off.
-pub(super) fn draw_develop_rail(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    egui::Panel::right("develop_rail")
+/// The home page draws it with every icon off, as a placeholder.
+pub(super) fn draw_develop_rail(
+    ui: &mut egui::Ui,
+    app: &App,
+    enabled: bool,
+    out: &mut FrameOutput,
+) {
+    let panel = egui::Panel::right("develop_rail")
         .resizable(false)
         .exact_size(rail_width(ui))
         .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
-        .show_inside(ui, |ui| develop_rail(ui, app, out));
+        .show_inside(ui, |ui| develop_rail(ui, app, enabled, out));
+    tour::anchor(ui.ctx(), tour::TourStep::RailLoupe, panel.response.rect);
 }
 
 /// The saved-look library. A plain section header like the slider sections
@@ -101,7 +108,7 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// column of icons, the one on screen lit. Compare is greyed out unless the
 /// photo is in a group. Crop, Cleanup and Compare work on the Loupe's photo,
 /// so the Grid's rail leaves them out.
-fn develop_rail(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+fn develop_rail(ui: &mut egui::Ui, app: &App, live: bool, out: &mut FrameOutput) {
     let margin = font_size::px(ui.style(), RAIL_MARGIN);
     let inner = ui.max_rect().shrink(margin);
     ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
@@ -111,17 +118,17 @@ fn develop_rail(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         let in_group = app.shown_in_group();
         let loupe = app.mode() == ViewMode::Loupe;
         for (item, tip, enabled) in [
-            (RailItem::Develop(DevelopTab::Sliders), t.tab_sliders, true),
-            (RailItem::Develop(DevelopTab::Crop), t.tab_crop, true),
-            (RailItem::Develop(DevelopTab::Masks), t.tab_masks, true),
-            (RailItem::GroupCompare, t.view_compare, in_group),
-            (RailItem::Info, t.info_tab_tip, true),
-            (RailItem::Export, t.export_jpg_tip, true),
+            (RailItem::Develop(DevelopTab::Sliders), t.tab_sliders, live),
+            (RailItem::Develop(DevelopTab::Crop), t.tab_crop, live),
+            (RailItem::Develop(DevelopTab::Masks), t.tab_masks, live),
+            (RailItem::GroupCompare, t.view_compare, live && in_group),
+            (RailItem::Info, t.info_tab_tip, live),
+            (RailItem::Export, t.export_jpg_tip, live),
         ] {
             if !loupe && !item.in_grid() {
                 continue;
             }
-            let tip = if enabled {
+            let tip = if enabled || !live {
                 tip
             } else {
                 t.view_compare_needs_group
@@ -130,6 +137,15 @@ fn develop_rail(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 ui.add_enabled_ui(enabled, |ui| rail_button(ui, item, tip, lit == Some(item)));
             if button.inner.clicked() {
                 out.actions.push(UiAction::ClickRail(item));
+            }
+            let stop = match item {
+                RailItem::Develop(DevelopTab::Sliders) => Some(tour::TourStep::RailAdjust),
+                RailItem::Info => Some(tour::TourStep::RailInfo),
+                RailItem::Export => Some(tour::TourStep::RailExport),
+                _ => None,
+            };
+            if let Some(stop) = stop {
+                tour::anchor(ui.ctx(), stop, button.inner.rect);
             }
         }
     });
@@ -167,10 +183,30 @@ fn rail_button(ui: &mut egui::Ui, item: RailItem, tip: &str, selected: bool) -> 
     if selected || response.hovered() {
         painter.rect_filled(rect, 6.0, visuals.weak_bg_fill);
     }
-    let u = font_size::px(ui.style(), 1.0);
-    let c = rect.center();
+    paint_rail_icon(
+        painter,
+        rect.center(),
+        font_size::px(ui.style(), 1.0),
+        item,
+        visuals.fg_stroke.color,
+    );
+    response
+        .on_hover_text(tip)
+        .on_disabled_hover_text(tip)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// Paint `item`'s icon centred on `c`, `u` points to a unit, in `color`.
+/// The tour draws them too, to show the Loupe's icons from the Grid.
+pub(super) fn paint_rail_icon(
+    painter: &egui::Painter,
+    c: egui::Pos2,
+    u: f32,
+    item: RailItem,
+    color: egui::Color32,
+) {
     let p = |x: f32, y: f32| egui::pos2(c.x + x * u, c.y + y * u);
-    let stroke = egui::Stroke::new(1.6 * u, visuals.fg_stroke.color);
+    let stroke = egui::Stroke::new(1.6 * u, color);
     let frame = |x0: f32, y0: f32, x1: f32, y1: f32| {
         painter.rect_stroke(
             egui::Rect::from_min_max(p(x0, y0), p(x1, y1)),
@@ -242,10 +278,6 @@ fn rail_button(ui: &mut egui::Ui, item: RailItem, tip: &str, selected: bool) -> 
             ));
         }
     }
-    response
-        .on_hover_text(tip)
-        .on_disabled_hover_text(tip)
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Crop mode's controls: Reset, rotation, straighten, the ratio and its

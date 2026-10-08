@@ -14,7 +14,7 @@ pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutpu
     let panel_width = (content_width + 24.0)
         .max(220.0)
         .min((ui.available_width() - 96.0).max(220.0));
-    egui::Panel::left("folders")
+    let panel = egui::Panel::left("folders")
         .resizable(false)
         .exact_size(panel_width)
         .show_inside(ui, |ui| {
@@ -26,6 +26,7 @@ pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutpu
                     }
                 });
         });
+    tour::anchor(ui.ctx(), tour::TourStep::Folders, panel.response.rect);
 }
 
 /// Width of the widest visible folder row, measured in the body font that
@@ -62,7 +63,7 @@ fn folder_content_width(
 pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let sel = app.sel();
 
-    egui::CentralPanel::default().show_inside(ui, |ui| {
+    let panel = egui::CentralPanel::default().show_inside(ui, |ui| {
         let cell = GRID_CELL_PT;
         let spacing = ui.spacing().item_spacing.x;
         // Leave room for the scrollbar, which narrows the scroll area's inner
@@ -138,6 +139,7 @@ pub(super) fn draw_grid(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput)
             )
         });
     });
+    tour::anchor(ui.ctx(), tour::TourStep::Content, panel.response.rect);
 }
 
 /// Stands in for a grid the filters emptied, so it doesn't read as a folder

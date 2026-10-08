@@ -65,7 +65,7 @@ Run the binary directly against a path (no bundling needed for dev iteration):
 ./target/release/lightphotos --drive scripts/drive-examples/rate.txt --drive-out /tmp/d /path/to/a/folder
 ```
 
-`--drive <script>` runs the real app against a hidden window with no OS input, feeds the script's steps (`key`, `click-cell`, `scroll`, `idle`, `shot`, `state`, and the rest listed at the top of `src/drive.rs`) into the same input handling a window's events take, writes each `shot` as a PNG under `--drive-out`, prints one JSON line per `state`, and exits non-zero on a bad script line or a 30 s `idle`. `scripts/drive-examples/` holds one script per checked feature and `make-fixture.sh`, which writes a numbered JPEG folder to drive against.
+`--drive <script>` runs the real app against a hidden window with no OS input, feeds the script's steps (`key`, `click-cell`, `scroll`, `idle`, `shot`, `state`, and the rest listed at the top of `src/drive.rs`) into the same input handling a window's events take, writes each `shot` as a PNG under `--drive-out`, prints one JSON line per `state`, and exits non-zero on a bad script line or a 30 s `idle`. With no path it starts on the home page as a first launch, tour up. `scripts/drive-examples/` holds one script per checked feature and `make-fixture.sh`, which writes a numbered JPEG folder to drive against.
 
 ## Profiling
 

@@ -184,17 +184,38 @@ pub struct Strings {
     pub landing_prompt: &'static str,
     /// One line under the prompt saying what the app is for.
     pub landing_tagline: &'static str,
-    /// The three "how it works" cards: (title, body).
-    pub landing_steps: [(&'static str, &'static str); 3],
     /// Web only: the File System Access permission the browser shows once a
     /// folder is picked. Empty off the web, where the picker is native.
     pub landing_allow_note: &'static str,
     pub opening: &'static str,
-    pub choose_folder: &'static str,
     pub reopen_session: &'static str,
     /// The folder Reopen Session will open.
     pub reopen_session_tip: fn(&str) -> String,
     pub picker_title: &'static str,
+    /// The home page's left panel: its heading over Choose Folder, and the
+    /// hint under the buttons.
+    pub folders_heading: &'static str,
+    pub folder_tree_hint: &'static str,
+    /// The home page's empty actions bar.
+    pub select_photos_hint: &'static str,
+    pub close_note_tip: &'static str,
+
+    // The guided tour.
+    pub tour: &'static str,
+    pub tour_tip: &'static str,
+    /// The home page's button under Open Folder.
+    pub take_tour: &'static str,
+    pub skip_tour: &'static str,
+    pub tour_back: &'static str,
+    pub tour_next: &'static str,
+    pub tour_done: &'static str,
+    /// "2 of 6" under a step.
+    pub tour_step_of: fn(usize, usize) -> String,
+    /// One (title, body) per stop, in `ui::tour::TourStep::ALL` order.
+    pub tour_steps: [(&'static str, &'static str); 9],
+    /// What the Loupe's own rail icons do, under its tour stop: Crop,
+    /// Cleanup and Compare, in that order. Their names are the rail's tips.
+    pub tour_loupe_icons: [&'static str; 3],
 
     // Left panel.
     pub metadata_title: &'static str,
@@ -661,8 +682,8 @@ pub static EN: Strings = Strings {
     lang_english: "English",
     lang_chinese: "中文",
 
-    open_folder: "Open\u{2026}",
-    open_folder_tip: "Open a different folder (Cmd+O)",
+    open_folder: "Open Folder",
+    open_folder_tip: "Open a folder of photos (Cmd+O)",
     back_to_grid_tip: "Back to the grid (G)",
     help_tip: "Keyboard shortcuts (?)",
     metadata_title: "Metadata",
@@ -696,20 +717,6 @@ pub static EN: Strings = Strings {
     wb_manual: "Manual",
     landing_prompt: "Choose a folder of photos to get started",
     landing_tagline: "Cull, rate and develop your raw photos, fast.",
-    landing_steps: [
-        (
-            "Browse",
-            "See every photo in the folder as a thumbnail. Press Enter to open one full size.",
-        ),
-        (
-            "Rate",
-            "Press 0-5 to give stars, then filter the library down to your keepers.",
-        ),
-        (
-            "Develop",
-            "Adjust tone and color, crop and rotate, then press Cmd+Shift+E to export JPEGs.",
-        ),
-    ],
     landing_allow_note: if WEB {
         "When the browser asks \u{201C}Allow this site to edit files? \u{2026}\u{201D}, click Allow.\n\
          This allows the application to save ratings and edits in a .lightphotos subfolder.\n\
@@ -718,10 +725,64 @@ pub static EN: Strings = Strings {
         ""
     },
     opening: "Opening\u{2026}",
-    choose_folder: "Choose Folder",
     reopen_session: "Reopen Session",
     reopen_session_tip: |folder| format!("Pick up where you left off in {folder}"),
     picker_title: "Choose a folder of photos",
+    folders_heading: "Folders",
+    folder_tree_hint: "Once a folder is open, its subfolders are listed here.",
+    select_photos_hint: "Select photos to rate, stack and export them here.",
+    close_note_tip: "Hide this note",
+    tour: "Tour",
+    tour_tip: "A quick tour of where everything is",
+    take_tour: "Take the Tour",
+    skip_tour: "Skip tour",
+    tour_back: "Back",
+    tour_next: "Next",
+    tour_done: "Done",
+    tour_step_of: |n, m| format!("{n} of {m}"),
+    tour_loupe_icons: [
+        "Crop, rotate and straighten the photo. Press R to open it.",
+        "Brush over spots and dust to remove them. Press Q to open it.",
+        "For a photo in a stack, set the stack's shots side by side to pick the best.",
+    ],
+    tour_steps: [
+        (
+            "Folders",
+            "Once a folder is open, it and its subfolders are listed here. Click one to show its photos.",
+        ),
+        (
+            "Filter toolbar",
+            "Show only the photos with a rating, flag or color label, and change the sort order.",
+        ),
+        (
+            "Photos",
+            "Thumbnails of the folder. Double-click a photo or press Enter to open it in the Loupe, and right-click it for more.",
+        ),
+        (
+            "Actions bar",
+            "Acts on the selection: rate it, copy or apply adjustments, and use the Actions menu to stack bursts, auto adjust or delete.",
+        ),
+        (
+            "Adjustments",
+            "The sliders icon opens tone and color sliders and your saved presets, for the selected photo.",
+        ),
+        (
+            "Info",
+            "The i icon shows the photo's metadata: camera, lens, exposure, when and where it was taken. Press I to show it too.",
+        ),
+        (
+            "Export",
+            "The export icon picks a folder and a size, then exports the selected photos as JPEGs. Press Cmd+Shift+E to open it too.",
+        ),
+        (
+            "More in the Loupe",
+            "With a photo open, the rail adds three more icons:",
+        ),
+        (
+            "Header",
+            "Open Folder opens another folder of photos at any time. The ? button lists the keyboard shortcuts, Settings changes the theme, language and text size, and Tour shows this guide again.",
+        ),
+    ],
 
     rating_filter: "Rating:",
     all: "All",
@@ -1306,8 +1367,8 @@ pub static ZH: Strings = Strings {
     lang_english: "English",
     lang_chinese: "中文",
 
-    open_folder: "打开\u{2026}",
-    open_folder_tip: "打开其他文件夹 (Cmd+O)",
+    open_folder: "打开文件夹",
+    open_folder_tip: "打开照片文件夹 (Cmd+O)",
     back_to_grid_tip: "返回网格 (G)",
     help_tip: "键盘快捷键 (?)",
     metadata_title: "元数据",
@@ -1341,17 +1402,6 @@ pub static ZH: Strings = Strings {
     wb_manual: "手动",
     landing_prompt: "选择一个照片文件夹开始",
     landing_tagline: "快速筛选、评分和冲印你的 RAW 照片。",
-    landing_steps: [
-        (
-            "浏览",
-            "以缩略图查看文件夹中的每张照片。按 Enter 打开大图。",
-        ),
-        ("评分", "按 0-5 打星，然后筛选图库，只留下你的精选。"),
-        (
-            "冲印",
-            "调整影调和色彩，裁剪和旋转，然后按 Cmd+Shift+E 导出 JPEG。",
-        ),
-    ],
     landing_allow_note: if WEB {
         "当浏览器提示\u{201C}Allow this site to edit files? \u{2026}\u{201D}时，请点击允许。\n\
          这样应用才能把评分和编辑保存在 .lightphotos 子文件夹中。\n\
@@ -1360,10 +1410,64 @@ pub static ZH: Strings = Strings {
         ""
     },
     opening: "正在打开\u{2026}",
-    choose_folder: "选择文件夹",
     reopen_session: "打开上次的文件夹",
     reopen_session_tip: |folder| format!("回到上次在 {folder} 的位置"),
     picker_title: "选择照片文件夹",
+    folders_heading: "文件夹",
+    folder_tree_hint: "打开文件夹后，它的子文件夹会列在这里。",
+    select_photos_hint: "选择照片后，可以在这里评分、堆叠和导出。",
+    close_note_tip: "隐藏此提示",
+    tour: "导览",
+    tour_tip: "快速了解各项功能的位置",
+    take_tour: "开始导览",
+    skip_tour: "跳过导览",
+    tour_back: "上一步",
+    tour_next: "下一步",
+    tour_done: "完成",
+    tour_step_of: |n, m| format!("{n} / {m}"),
+    tour_loupe_icons: [
+        "裁剪、旋转和拉直照片。按 R 打开。",
+        "涂抹斑点和灰尘即可去除。按 Q 打开。",
+        "照片在堆叠中时，并排查看堆叠内的照片，挑出最好的一张。",
+    ],
+    tour_steps: [
+        (
+            "文件夹",
+            "打开文件夹后，它和它的子文件夹会列在这里。点击一个文件夹即可显示其中的照片。",
+        ),
+        (
+            "筛选工具栏",
+            "只显示带有某个评分、旗标或颜色标签的照片，并更改排序方式。",
+        ),
+        (
+            "照片",
+            "文件夹中照片的缩略图。双击照片或按 Enter 在放大视图中打开，右键单击查看更多操作。",
+        ),
+        (
+            "操作栏",
+            "作用于所选照片：评分、复制或应用调整，并通过“操作”菜单堆叠连拍、自动调整或删除。",
+        ),
+        (
+            "调整",
+            "滑块图标打开影调和色彩滑块以及你保存的预设，作用于当前照片。",
+        ),
+        (
+            "信息",
+            "i 图标显示照片的元数据：相机、镜头、曝光、拍摄时间和地点。也可以按 I 打开。",
+        ),
+        (
+            "导出",
+            "导出图标可选择文件夹和尺寸，然后将所选照片导出为 JPEG。也可以按 Cmd+Shift+E 打开。",
+        ),
+        (
+            "放大视图中的更多功能",
+            "打开照片后，这一栏还会多出三个图标：",
+        ),
+        (
+            "顶栏",
+            "“打开文件夹”可随时打开另一个照片文件夹。? 按钮列出键盘快捷键，设置可更改主题、语言和文字大小，导览可再次显示本指南。",
+        ),
+    ],
 
     rating_filter: "评分：",
     all: "全部",

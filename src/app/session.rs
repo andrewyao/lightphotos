@@ -345,7 +345,7 @@ mod tests {
 
         let mut app = App::new(None);
         let painted = settled(&mut app);
-        assert!(painted.texts().contains(&t().choose_folder));
+        assert!(painted.texts().contains(&t().open_folder));
         assert!(!painted.texts().contains(&t().reopen_session));
     }
 

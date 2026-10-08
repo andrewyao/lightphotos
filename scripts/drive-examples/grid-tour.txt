@@ -1,0 +1,20 @@
+# Run against a folder: the header's Tour button runs the same tour over the
+# real Grid. Shoots its first and third stops, then Esc ends it.
+size 1200 800
+idle
+click-cell 1
+click 1106 17
+idle
+shot grid-tour-1
+key right
+key right
+shot grid-tour-3
+key right
+key right
+key right
+key right
+key right
+key right
+shot grid-tour-9
+key escape
+state

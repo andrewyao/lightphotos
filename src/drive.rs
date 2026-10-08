@@ -26,6 +26,9 @@
 //! quit
 //! ```
 //!
+//! With no photo or folder after the flags, the run starts on the home page.
+//! Settings start empty, so that is a first launch and the tour is up.
+//!
 //! Keys cannot take the `WindowEvent::KeyboardInput` road: winit's `KeyEvent`
 //! has a private field, so nothing outside winit can build one. The driver
 //! instead pushes the egui events `egui_winit` would have and calls
@@ -63,7 +66,9 @@ pub(crate) struct Args {
     script: PathBuf,
     steps: Vec<Step>,
     out_dir: PathBuf,
-    target: PathBuf,
+    /// The photo or folder to open. Without one the run starts on the home
+    /// page, as a launch with no path does.
+    target: Option<PathBuf>,
 }
 
 impl Args {
@@ -93,8 +98,8 @@ impl Args {
             }
         }
         let script = PathBuf::from(script.ok_or("--drive-out needs --drive")?);
-        let target = PathBuf::from(target.ok_or("--drive needs a photo or folder to open")?);
-        if !target.exists() {
+        let target = target.map(PathBuf::from);
+        if let Some(target) = target.as_ref().filter(|t| !t.exists()) {
             return Err(format!("no such path: {}", target.display()));
         }
         let text =
@@ -422,11 +427,13 @@ pub(crate) fn run(args: Args) -> i32 {
         "[drive] {} ({} steps) on {}, shots to {}",
         args.script.display(),
         args.steps.len(),
-        args.target.display(),
+        args.target
+            .as_deref()
+            .map_or("the home page".into(), |t| t.display().to_string()),
         args.out_dir.display()
     );
     let mut driver = Driver {
-        app: App::new(Some(args.target)),
+        app: App::new(args.target),
         steps: args.steps,
         out_dir: args.out_dir,
         size,
@@ -947,7 +954,7 @@ quit
     }
 
     #[test]
-    fn args_need_drive_and_a_target_and_read_the_script_up_front() {
+    fn args_need_drive_and_read_the_script_up_front() {
         let dir =
             std::env::temp_dir().join(format!("lightphotos-drive-args-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -970,12 +977,13 @@ quit
             .unwrap();
         assert_eq!(parsed.steps, vec![Step::Idle, Step::State]);
         assert_eq!(parsed.out_dir, dir);
-        assert_eq!(parsed.target, dir);
+        assert_eq!(parsed.target, Some(dir.clone()));
         let parsed = args(&[&d, "--drive", &s]).unwrap().unwrap();
         assert_eq!(parsed.out_dir, PathBuf::from("."));
 
         assert!(args(&["--drive"]).is_err());
-        assert!(args(&["--drive", &s]).is_err());
+        let parsed = args(&["--drive", &s]).unwrap().unwrap();
+        assert_eq!(parsed.target, None, "no path drives the home page");
         assert!(args(&["--drive-out", &d, &d]).is_err());
         assert!(args(&["--drive", &s, &d, &d]).is_err());
         assert!(args(&["--drive", &s, "/no/such/path"]).is_err());

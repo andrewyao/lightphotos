@@ -47,6 +47,19 @@ impl App {
             }
         }
 
+        // The tour dims the whole window, so it owns the keyboard: arrows and
+        // Enter step through it, Esc skips it, and every other key waits so a
+        // digit can't rate a photo behind it.
+        if self.tour_step().is_some() {
+            match code {
+                KeyCode::Escape => self.end_tour(),
+                KeyCode::ArrowRight | KeyCode::Enter | KeyCode::NumpadEnter => self.tour_next(),
+                KeyCode::ArrowLeft => self.tour_back(),
+                _ => {}
+            }
+            return;
+        }
+
         // A confirm dialog sits over every tool, so it owns the keyboard ahead
         // of them. Handling Esc here clears the dialog before its next frame,
         // so the modal's own Esc check never runs and nothing cancels twice.

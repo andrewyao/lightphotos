@@ -12,8 +12,9 @@ pub(super) const BUTTON_PAD: egui::Vec2 = egui::vec2(8.0, 3.0);
 const ROW_MARGIN: egui::Vec2 = egui::vec2(10.0, 6.0);
 
 /// A panel for one of the grid's rows of controls, on top or at the
-/// bottom, laid out with the spacing above.
-fn toolbar_row<R>(
+/// bottom, laid out with the spacing above. The top row is the tour's filter
+/// toolbar stop and the bottom row its actions bar.
+pub(super) fn toolbar_row<R>(
     ui: &mut egui::Ui,
     id: &'static str,
     bottom: bool,
@@ -33,7 +34,7 @@ fn toolbar_row<R>(
     } else {
         egui::Panel::top(id)
     };
-    panel
+    let shown = panel
         .frame(egui::Frame::side_top_panel(&style).inner_margin(margin))
         .show_inside(ui, |ui| {
             toolbar_spacing(ui);
@@ -54,8 +55,14 @@ fn toolbar_row<R>(
                 ui.ctx().request_repaint();
             }
             row.inner
-        })
-        .inner
+        });
+    let step = if bottom {
+        tour::TourStep::Actions
+    } else {
+        tour::TourStep::Filters
+    };
+    tour::anchor(ui.ctx(), step, shown.response.rect);
+    shown.inner
 }
 
 /// The toolbar rows' gaps and button padding, for a row drawn elsewhere.
@@ -451,6 +458,37 @@ pub(super) fn grid_toolbar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
             }
 
             region_focus_marker(ui, app, Region::Toolbar);
+        });
+    });
+}
+
+/// The home page's stand-in for `grid_toolbar`: the same controls, all off,
+/// over no photos.
+pub(super) fn placeholder_toolbar(ui: &mut egui::Ui, app: &App) {
+    // The controls are disabled, so nothing they would ask for can happen.
+    let mut ignored = FrameOutput::default();
+    toolbar_row(ui, "grid_toolbar", false, |ui| {
+        ui.disable();
+        ui.horizontal(|ui| {
+            let t = t();
+            ui.label(t.rating_filter);
+            for control in ToolbarControl::drawn() {
+                if control.starts_group() {
+                    ui.separator();
+                }
+                control.widget(ui, app, &mut ignored);
+            }
+            ui.weak((t.n_of_m_photos)(0, 0));
+        });
+    });
+}
+
+/// The home page's stand-in for `selection_bar`: a hint at what goes there.
+pub(super) fn placeholder_selection_bar(ui: &mut egui::Ui) {
+    toolbar_row(ui, "selection_bar", true, |ui| {
+        centered_row(ui, "selection_bar_w", |ui| {
+            ui.set_min_height(ui.spacing().interact_size.y);
+            ui.weak(t().select_photos_hint);
         });
     });
 }
