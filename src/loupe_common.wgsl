@@ -25,7 +25,12 @@ struct Adjust {
     _pad0: f32,
     // Radians. See `straightenUv`.
     straighten: f32,
-    _pad2: f32,
+    // Chromatic aberration scales. See `caUv`.
+    ca_red: f32,
+    ca_blue: f32,
+    _pad3: f32,
+    _pad4: f32,
+    _pad5: f32,
 };
 
 struct TouchUp {
@@ -54,6 +59,33 @@ fn straightenUv(uv: vec2<f32>) -> vec2<f32> {
     let s = sin(adj.straighten);
     let r = vec2<f32>(c * d.x - s * d.y, s * d.x + c * d.y);
     return r / px + vec2<f32>(0.5, 0.5);
+}
+
+// Where channel scale `k` reads for source `uv`: a radial magnification about
+// the center. Must match `develop::CaScale::source_uv`.
+fn caUv(uv: vec2<f32>, k: f32) -> vec2<f32> {
+    return (uv - vec2<f32>(0.5, 0.5)) * (1.0 + k) + vec2<f32>(0.5, 0.5);
+}
+
+// The source texel at `uv` with chromatic aberration removed: red and blue
+// read from their own scaled UVs. All three samples run unconditionally,
+// because `textureSample` must stay in uniform control flow.
+fn sampleSrc(uv: vec2<f32>) -> vec4<f32> {
+    let g = textureSample(tex, samp, uv);
+    let r = textureSample(tex, samp, caUv(uv, adj.ca_red)).r;
+    let b = textureSample(tex, samp, caUv(uv, adj.ca_blue)).b;
+    return vec4<f32>(r, g.g, b, g.a);
+}
+
+// `sampleSrc` at mip 0, for taps in non-uniform control flow.
+fn sampleSrcLevel(uv: vec2<f32>) -> vec4<f32> {
+    let g = textureSampleLevel(tex, samp, uv, 0.0);
+    if (adj.ca_red == 0.0 && adj.ca_blue == 0.0) {
+        return g;
+    }
+    let r = textureSampleLevel(tex, samp, caUv(uv, adj.ca_red), 0.0).r;
+    let b = textureSampleLevel(tex, samp, caUv(uv, adj.ca_blue), 0.0).b;
+    return vec4<f32>(r, g.g, b, g.a);
 }
 
 struct VsOut {

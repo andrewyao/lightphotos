@@ -733,13 +733,14 @@ impl App {
         self.set_status(StatusKind::Success, (crate::i18n::t().applied_settings)(n));
     }
 
-    /// Writes one look onto every path, keeping each photo's own crop and
-    /// straighten, and returns how many were touched. Shared by the settings
-    /// clipboard and by applying a preset.
+    /// Writes one look onto every path, keeping each photo's own crop,
+    /// straighten and chromatic aberration scales, and returns how many were
+    /// touched. Shared by the settings clipboard and by applying a preset.
     pub(super) fn apply_tone_to(&mut self, tone: Adjustments, paths: &[PathBuf]) -> usize {
         self.edit_each(paths, |existing| Adjustments {
             crop: existing.crop,
             straighten: existing.straighten,
+            chromatic_aberration: existing.chromatic_aberration,
             ..tone
         })
     }

@@ -104,6 +104,17 @@ pub fn bake_edited(
         return (0, 0, Vec::new());
     }
 
+    if let Some(ca) = adj.chromatic_aberration.filter(|ca| !ca.is_zero()) {
+        // Everything after reads the corrected photo, as the shader's
+        // `sampleSrc` does.
+        let fixed = remove_chromatic_aberration(img, ca);
+        let rest = Adjustments {
+            chromatic_aberration: None,
+            ..*adj
+        };
+        return bake_edited(&fixed, &rest, touchups, rot);
+    }
+
     if adj.straighten != 0.0 {
         // Touch-ups and denoise are in source pixels, so bake the whole
         // photo upright first, then turn and crop the result.
@@ -168,6 +179,46 @@ pub fn bake_edited(
     }
 
     rotate_rgba(&cropped, cw, ch, rot)
+}
+
+/// An opaque sRGB8 `img` with red and blue resampled through
+/// [`develop::CaScale::source_uv`], interpolated in linear light and clamped
+/// at the edge. Green and alpha are copied. Must match `sampleSrc` in
+/// loupe_common.wgsl.
+pub fn remove_chromatic_aberration(img: &DecodedImage, ca: develop::CaScale) -> DecodedImage {
+    let (w, h) = (img.width, img.height);
+    let lut = srgb8_to_linear_lut();
+    let at = |x: i64, y: i64, c: usize| {
+        let (x, y) = (x.clamp(0, w as i64 - 1), y.clamp(0, h as i64 - 1));
+        lut[img.rgba[((y * w as i64 + x) * 4) as usize + c] as usize]
+    };
+    let mut rgba = img.rgba.clone();
+    for (c, k) in [(0, ca.red), (2, ca.blue)] {
+        if k == 0.0 {
+            continue;
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let u = (x as f32 + 0.5) / w as f32;
+                let v = (y as f32 + 0.5) / h as f32;
+                let (su, sv) = develop::CaScale::source_uv(k, u, v);
+                let (sx, sy) = (su * w as f32 - 0.5, sv * h as f32 - 0.5);
+                let (fx, fy) = (sx.floor(), sy.floor());
+                let (tx, ty) = (sx - fx, sy - fy);
+                let (ix, iy) = (fx as i64, fy as i64);
+                let top = at(ix, iy, c) * (1.0 - tx) + at(ix + 1, iy, c) * tx;
+                let bottom = at(ix, iy + 1, c) * (1.0 - tx) + at(ix + 1, iy + 1, c) * tx;
+                rgba[((y * w + x) * 4) as usize + c] =
+                    linear_to_srgb8(top * (1.0 - ty) + bottom * ty);
+            }
+        }
+    }
+    DecodedImage::new_tracked(crate::image_decode::DecodedImageFields {
+        width: w,
+        height: h,
+        rgba,
+        pixel_format: img.pixel_format,
+    })
 }
 
 /// `adj`'s crop of the straightened canvas of an opaque `w x h` RGBA8
@@ -312,6 +363,12 @@ pub fn downsample_linear(img: &DecodedImage, target: usize) -> (Vec<[f32; 3]>, u
 pub fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
     let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
     let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;
+    pixel_linear(img, x, y)
+}
+
+/// Pixel `(x, y)` as linear RGB, in either pixel format. The caller keeps
+/// `x` and `y` inside the image.
+pub(crate) fn pixel_linear(img: &DecodedImage, x: u32, y: u32) -> [f32; 3] {
     let i = ((y * img.width + x) * 4) as usize;
     match img.pixel_format {
         PixelFormat::Srgb8 => unpremul_to_linear([
@@ -464,6 +521,55 @@ mod tests {
     use super::*;
     use crate::develop::Crop;
     use crate::image_decode::DecodedImageFields;
+
+    /// The largest red-green and blue-green gap, in sRGB8 steps, over the
+    /// outer part of an opaque `w x h` gray chart.
+    fn worst_fringe(rgba: &[u8], w: u32, h: u32) -> u8 {
+        let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
+        let mut worst = 0;
+        for y in 4..h - 4 {
+            for x in 4..w - 4 {
+                if (x as f32 - cx).hypot(y as f32 - cy) < 0.6 * cx.hypot(cy) {
+                    continue;
+                }
+                let i = ((y * w + x) * 4) as usize;
+                worst = worst
+                    .max(rgba[i].abs_diff(rgba[i + 1]))
+                    .max(rgba[i + 2].abs_diff(rgba[i + 1]));
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn baking_the_measured_scales_lines_up_the_channels() {
+        let truth = develop::CaScale {
+            red: 0.002,
+            blue: -0.0015,
+        };
+        let img = crate::chroma::fixture::photo(1200, 800, truth);
+        let before = worst_fringe(&img.rgba, 1200, 800);
+        let adj = Adjustments {
+            chromatic_aberration: Some(crate::chroma::measure(&img)),
+            ..Adjustments::default()
+        };
+        let (w, h, out) = bake_edited(&img, &adj, &[], 0);
+        assert_eq!((w, h), (1200, 800));
+        let after = worst_fringe(&out, w, h);
+        assert!(before > 20, "the fixture should fringe: {before}");
+        assert!(after <= 3, "fringe {before} -> {after}");
+    }
+
+    #[test]
+    fn zero_scales_bake_byte_identical_to_no_correction() {
+        let img = crate::chroma::fixture::photo(60, 40, develop::CaScale::default());
+        let off = bake_edited(&img, &Adjustments::default(), &[], 0);
+        let zero = Adjustments {
+            chromatic_aberration: Some(develop::CaScale::default()),
+            ..Adjustments::default()
+        };
+        assert_eq!(bake_edited(&img, &zero, &[], 0), off);
+    }
 
     #[test]
     fn fit_long_edge_scales_the_long_side_and_keeps_the_aspect() {

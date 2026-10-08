@@ -408,6 +408,7 @@ mod tests {
             denoise: 30.0,
             crop: None,
             straighten: 0.0,
+            chromatic_aberration: None,
         }
     }
 

@@ -73,12 +73,12 @@ mod window_rect;
 
 #[cfg(not(target_arch = "wasm32"))]
 use lightphotos::immich;
+use lightphotos::{
+    chroma, develop, export, facequality, hash, image_decode, image_encode, image_ops, judge,
+    paths, quality, segmentation, worker_pool,
+};
 #[cfg(target_arch = "wasm32")]
 use lightphotos::{decode_budget, raw_preview};
-use lightphotos::{
-    develop, export, facequality, hash, image_decode, image_encode, image_ops, judge, paths,
-    quality, segmentation, worker_pool,
-};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
@@ -497,6 +497,7 @@ impl App {
             .as_ref()
             .is_some_and(|l| l.has_pending_image() || l.has_pending_exif())
             || self.selection_pending()
+            || self.remove_ca_pending()
             || catalog_load_pending
             || self.compare_wake_at().is_some();
         if self
@@ -546,6 +547,7 @@ impl App {
 
         // Segmentation starts from user actions, so it has no `request_*` call.
         self.poll_selection_mask();
+        self.poll_remove_ca();
 
         // Worker threads don't wake winit, so poll on a timer while work is
         // pending. `WaitUntil` re-polls without redrawing every vsync. A loupe

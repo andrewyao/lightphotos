@@ -511,6 +511,8 @@ pub(crate) struct App {
     /// screen gets one, since segmentation is too heavy to run per folder.
     current_selection: Option<(PathBuf, crate::segmentation::Mask)>,
     selection_pending: Option<PathBuf>,
+    /// Remove Chromatic Aberration's measurement in flight.
+    optics: optics::Optics,
     selection_tx: Sender<SelectionOutcome>,
     selection_rx: Receiver<SelectionOutcome>,
 
@@ -625,6 +627,7 @@ mod loupe;
 #[cfg(target_os = "macos")]
 mod menu;
 mod nav;
+mod optics;
 mod presets;
 mod score;
 mod session;
@@ -725,6 +728,7 @@ impl App {
             selection_invert: false,
             current_selection: None,
             selection_pending: None,
+            optics: optics::Optics::new(),
             selection_tx,
             selection_rx,
             #[cfg(target_arch = "wasm32")]
@@ -1319,6 +1323,7 @@ impl App {
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
                 ui::UiAction::AutoTone => self.auto_tone_selected(),
                 ui::UiAction::ToggleBlackAndWhite => self.toggle_black_and_white(),
+                ui::UiAction::SetRemoveCa(on) => self.set_remove_ca(on),
                 ui::UiAction::ResetAdjustments => {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else {
                         continue;

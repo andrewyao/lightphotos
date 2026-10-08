@@ -43,6 +43,8 @@ pub enum Section {
     Tone,
     Presence,
     Detail,
+    /// Checkboxes, not sliders. See [`CaScale`].
+    Optics,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -169,6 +171,32 @@ pub struct Adjustments {
     /// [`STRAIGHTEN_RANGE`]. See [`Straighten`].
     #[serde(default, skip_serializing_if = "is_zero")]
     pub straighten: f32,
+    /// Remove Chromatic Aberration. `None` is off; `Some` holds the scales
+    /// measured from this photo, so every render agrees without re-measuring.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chromatic_aberration: Option<CaScale>,
+}
+
+/// Lateral chromatic aberration as a radial magnification of red and blue
+/// relative to green, about the photo's center. A source pixel for channel
+/// `c` at UV `p` is `0.5 + (p - 0.5) * (1 + k_c)`, in pixel space so the
+/// scale is the same along both axes. Must match `caUv` in loupe_common.wgsl.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+pub struct CaScale {
+    pub red: f32,
+    pub blue: f32,
+}
+
+impl CaScale {
+    /// The source UV that red (`k = self.red`) or blue reads for output `uv`.
+    pub fn source_uv(k: f32, u: f32, v: f32) -> (f32, f32) {
+        let s = 1.0 + k;
+        ((u - 0.5) * s + 0.5, (v - 0.5) * s + 0.5)
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.red == 0.0 && self.blue == 0.0
+    }
 }
 
 /// How far the Straighten tool can turn a photo, in degrees.
@@ -258,12 +286,14 @@ impl Adjustments {
         self.saturation <= -100.0
     }
 
-    /// A copy without the crop or straighten, for pasting settings onto
-    /// other photos.
+    /// A copy without the crop, straighten or chromatic aberration scales,
+    /// for pasting settings onto other photos. The CA scales were measured
+    /// from this photo's lens and framing, so they don't carry over.
     pub fn tone_only(&self) -> Adjustments {
         Adjustments {
             crop: None,
             straighten: 0.0,
+            chromatic_aberration: None,
             ..*self
         }
     }
@@ -331,6 +361,12 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
     if adj.straighten != 0.0 {
         h.write(&((adj.straighten * 1000.0).round() as i32).to_le_bytes());
     }
+    if let Some(ca) = adj.chromatic_aberration {
+        h.write(&[2]);
+        for v in [ca.red, ca.blue] {
+            h.write(&((v * 1e6).round() as i32).to_le_bytes());
+        }
+    }
 
     h.write(&[rot % 4]);
 
@@ -387,7 +423,13 @@ pub struct GpuAdjust {
     pub _pad0: f32,
     /// [`Adjustments::straighten`] in radians.
     pub straighten: f32,
-    pub _pad2: f32,
+    /// [`CaScale::red`], 0 when the correction is off.
+    pub ca_red: f32,
+    /// [`CaScale::blue`], 0 when the correction is off.
+    pub ca_blue: f32,
+    pub _pad3: f32,
+    pub _pad4: f32,
+    pub _pad5: f32,
 }
 
 impl Default for GpuAdjust {
@@ -412,7 +454,11 @@ impl Default for GpuAdjust {
             texel_h: 1.0,
             _pad0: 0.0,
             straighten: 0.0,
-            _pad2: 0.0,
+            ca_red: 0.0,
+            ca_blue: 0.0,
+            _pad3: 0.0,
+            _pad4: 0.0,
+            _pad5: 0.0,
         }
     }
 }
@@ -424,6 +470,7 @@ impl From<&Adjustments> for GpuAdjust {
             Some(c) => (c.left, c.top, c.right, c.bottom),
             None => (0.0, 0.0, 1.0, 1.0),
         };
+        let ca = a.chromatic_aberration.unwrap_or_default();
         Self {
             exposure: a.exposure,
             contrast: a.contrast,
@@ -441,6 +488,8 @@ impl From<&Adjustments> for GpuAdjust {
             vibrance: a.vibrance,
             saturation: a.saturation,
             straighten: a.straighten.to_radians(),
+            ca_red: ca.red,
+            ca_blue: ca.blue,
             ..Self::default()
         }
     }
@@ -1197,6 +1246,48 @@ mod tests {
             ..Default::default()
         };
         assert!(!a.is_identity());
+    }
+
+    #[test]
+    fn chromatic_aberration_is_a_per_photo_edit() {
+        let fixed = Adjustments {
+            chromatic_aberration: Some(CaScale {
+                red: 0.0012,
+                blue: -0.0008,
+            }),
+            ..Default::default()
+        };
+        assert!(!fixed.is_identity());
+        assert_ne!(
+            edit_signature(&fixed, 0),
+            edit_signature(&Adjustments::default(), 0)
+        );
+        assert_eq!(
+            fixed.tone_only().chromatic_aberration,
+            None,
+            "the scales were measured from this photo's lens"
+        );
+        let gpu = GpuAdjust::from(&fixed);
+        assert_eq!((gpu.ca_red, gpu.ca_blue), (0.0012, -0.0008));
+    }
+
+    #[test]
+    fn chromatic_aberration_round_trips_and_old_sidecars_still_load() {
+        let fixed = Adjustments {
+            chromatic_aberration: Some(CaScale {
+                red: 0.0012,
+                blue: 0.0,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&fixed).unwrap();
+        assert_eq!(serde_json::from_str::<Adjustments>(&json).unwrap(), fixed);
+        assert_eq!(
+            serde_json::to_string(&Adjustments::default()).unwrap(),
+            "{}"
+        );
+        let old: Adjustments = serde_json::from_str(r#"{"exposure":0.5}"#).unwrap();
+        assert_eq!(old.chromatic_aberration, None);
     }
 
     #[test]

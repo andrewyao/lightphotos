@@ -39,7 +39,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Sample before any early return. WebGPU rejects an implicit-LOD sample
     // after non-uniform control flow. Rgba16Float has no sRGB decode, so this
     // is linear.
-    let texel = textureSample(tex, samp, uv);
+    let texel = sampleSrc(uv);
 
     // Outside the image (UV beyond 0..1): draw the neutral background.
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
@@ -59,7 +59,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // textureSampleLevel at LOD 0; this skips mip antialiasing when zoomed
     // out. Must match `denoise_sample` in develop.rs.
     if (adj.denoise > 0.0) {
-        let center = textureSampleLevel(tex, samp, uv, 0.0).rgb;
+        let center = sampleSrcLevel(uv).rgb;
         let sigmaR = 0.02 + adj.denoise / 100.0 * 0.30;
         let sigmaR2 = sigmaR * sigmaR;
         var sum = vec3<f32>(0.0, 0.0, 0.0);
@@ -67,7 +67,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         for (var dy = -2; dy <= 2; dy = dy + 1) {
             for (var dx = -2; dx <= 2; dx = dx + 1) {
                 let tapUv = uv + vec2<f32>(f32(dx), f32(dy)) * vec2<f32>(adj.texel_w, adj.texel_h);
-                let tap = textureSampleLevel(tex, samp, tapUv, 0.0).rgb;
+                let tap = sampleSrcLevel(tapUv).rgb;
                 let diff = tap - center;
                 let diff2 = dot(diff, diff);
                 // wsum can't be 0: (dx,dy)=(0,0) always contributes weight 1.0.
@@ -98,7 +98,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             var mask = clamp((radius_px - distance_px) / feather_px, 0.0, 1.0);
             mask = mask * mask * (3.0 - 2.0 * mask);
             let source_uv = t.source + (uv - t.center_radius_feather.xy);
-            let source = textureSampleLevel(tex, samp, source_uv, 0.0).rgb + t.delta.xyz;
+            let source = sampleSrcLevel(source_uv).rgb + t.delta.xyz;
             r = r * (1.0 - mask) + clamp(source.r, 0.0, 1.0) * mask;
             g = g * (1.0 - mask) + clamp(source.g, 0.0, 1.0) * mask;
             b = b * (1.0 - mask) + clamp(source.b, 0.0, 1.0) * mask;

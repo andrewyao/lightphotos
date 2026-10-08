@@ -4,6 +4,7 @@
 //! app in `main.rs` and the probes in `src/bin/` share it, so none of these
 //! modules depends on egui, winit or wgpu.
 
+pub mod chroma;
 #[cfg(target_os = "macos")]
 pub mod coregraphics;
 #[path = "raw/decode_budget.rs"]

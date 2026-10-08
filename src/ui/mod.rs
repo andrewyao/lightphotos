@@ -180,6 +180,8 @@ pub enum UiAction {
     SelectTouchUp(usize),
     DeleteTouchUp,
     SetAdjustments(Adjustments),
+    /// Tick or clear Remove Chromatic Aberration for the loupe photo.
+    SetRemoveCa(bool),
     ResetAdjustments,
     /// Pick develop settings for each selected photo from its own histogram.
     AutoTone,
