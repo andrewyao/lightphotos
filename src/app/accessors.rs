@@ -130,6 +130,10 @@ impl App {
         self.flag_filter
     }
 
+    pub(crate) fn label_filter(&self) -> &[crate::catalog::ColorLabel] {
+        &self.label_filter
+    }
+
     /// The comparator the toolbar will apply to the next star-level click.
     pub(crate) fn filter_cmp(&self) -> Cmp {
         self.filter_cmp

@@ -150,6 +150,9 @@ fn no_matches(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         ui.add_space(8.0);
         if ui.button(t.show_all_photos).clicked() {
             out.actions.push(UiAction::SetFilter(None));
+            if !app.label_filter().is_empty() {
+                out.actions.push(UiAction::SetLabelFilter(Vec::new()));
+            }
             if app.eyes_filter_on() {
                 out.actions.push(UiAction::ToggleEyesClosed);
             }

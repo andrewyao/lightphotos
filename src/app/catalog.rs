@@ -506,6 +506,10 @@ impl App {
         for path in &paths {
             self.catalog.set_label(path, label);
         }
+        if !self.label_filter.is_empty() {
+            self.recompute_visible();
+            self.resync_loupe_selection();
+        }
         self.request_redraw();
     }
 
@@ -844,6 +848,17 @@ impl App {
         self.request_redraw();
     }
 
+    /// Sets the grid's color label filter. Does nothing in the Loupe, as
+    /// `set_filter` does not.
+    pub(super) fn set_label_filter(&mut self, labels: Vec<crate::catalog::ColorLabel>) {
+        if self.mode == ViewMode::Loupe {
+            return;
+        }
+        self.label_filter = labels;
+        self.recompute_visible();
+        self.request_redraw();
+    }
+
     /// Sets or clears the star filter. Does nothing in the Loupe, because a
     /// filter change there could hide the open photo from the selection
     /// cursor. This is the only mode check for both the toolbar and the
@@ -1137,6 +1152,34 @@ mod tests {
         assert_eq!(shown(&mut app, FlagFilter::Picked), 2);
         app.set_filter(Some((Cmp::Gte, 3)));
         assert_eq!(app.visible_len(), 1, "both filters apply");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_label_filter_shows_photos_with_any_lit_label() {
+        use crate::catalog::ColorLabel;
+        let (mut app, dir, paths) = crate::app::test_support::folder_app("label-filter", 4);
+        app.catalog.set_label(&paths[0], Some(ColorLabel::Red));
+        app.catalog.set_label(&paths[1], Some(ColorLabel::Purple));
+        app.catalog.set_label(&paths[2], Some(ColorLabel::Blue));
+
+        let shown = |app: &mut App, f: Vec<ColorLabel>| {
+            app.apply_ui_actions(vec![ui::UiAction::SetLabelFilter(f)]);
+            app.visible_len()
+        };
+        assert_eq!(shown(&mut app, vec![]), 4);
+        assert_eq!(shown(&mut app, vec![ColorLabel::Purple]), 1);
+        assert_eq!(shown(&mut app, vec![ColorLabel::Red, ColorLabel::Blue]), 2);
+        assert_eq!(shown(&mut app, vec![ColorLabel::Green]), 0);
+
+        shown(&mut app, vec![ColorLabel::Red]);
+        app.select_single(0);
+        app.toggle_label(ColorLabel::Red);
+        assert_eq!(
+            app.visible_len(),
+            0,
+            "clearing the label drops it from view"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

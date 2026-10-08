@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::app::{App, GridSort, Region, SHOW_EYES_FILTER};
+use crate::catalog::ColorLabel;
 use crate::navigation::{Cmp, FlagFilter};
 
 /// The grid's two rows of controls share these, in points before
@@ -109,6 +110,7 @@ pub(crate) enum ToolbarControl {
     Star(u8),
     Unrated,
     Flag(FlagFilter),
+    Label(ColorLabel),
     EyesClosed,
     Sort,
 }
@@ -127,6 +129,11 @@ impl ToolbarControl {
         Self::Flag(FlagFilter::Unflagged),
         Self::Flag(FlagFilter::Picked),
         Self::Flag(FlagFilter::Rejected),
+        Self::Label(ColorLabel::Red),
+        Self::Label(ColorLabel::Yellow),
+        Self::Label(ColorLabel::Green),
+        Self::Label(ColorLabel::Blue),
+        Self::Label(ColorLabel::Purple),
         Self::EyesClosed,
         Self::Sort,
     ];
@@ -163,6 +170,7 @@ impl ToolbarControl {
             Self::FilterCmp(Cmp::Gte)
                 | Self::Star(1)
                 | Self::Flag(FlagFilter::Unflagged)
+                | Self::Label(ColorLabel::Red)
                 | Self::EyesClosed
                 | Self::Sort
         )
@@ -184,6 +192,16 @@ impl ToolbarControl {
             // Like a star, clicking the shown flag again shows all.
             Self::Flag(f) if f == app.flag_filter() => UiAction::SetFlagFilter(FlagFilter::All),
             Self::Flag(f) => UiAction::SetFlagFilter(f),
+            // Each dot toggles on its own; a photo with any lit label shows.
+            Self::Label(label) => {
+                let mut labels = app.label_filter().to_vec();
+                if let Some(i) = labels.iter().position(|&l| l == label) {
+                    labels.remove(i);
+                } else {
+                    labels.push(label);
+                }
+                UiAction::SetLabelFilter(labels)
+            }
             Self::EyesClosed => UiAction::ToggleEyesClosed,
             // The keyboard steps to the next sort; a click opens the dropdown.
             Self::Sort => {
@@ -248,6 +266,13 @@ impl ToolbarControl {
                 super::flag_button(ui, state, on, side, (colors.value, colors.label))
                     .on_hover_text((t.show_flagged)(crate::app::flag_name(state)))
             }
+            Self::Label(label) => {
+                if label == ColorLabel::Red {
+                    ui.label(t.label_filter_label);
+                }
+                let on = app.label_filter().contains(&label);
+                label_dot(ui, label, on).on_hover_text((t.show_labeled)(super::label_name(label)))
+            }
             Self::Unrated => {
                 let on = matches!(app.filter(), Some((Cmp::Eq, 0)));
                 unrated_button(ui, on).on_hover_text(t.unrated_tip)
@@ -300,6 +325,32 @@ fn sort_choices(app: &App) -> Vec<GridSort> {
         sorts.push(GridSort::Quality);
     }
     sorts
+}
+
+/// A color label filter toggle: a dot of the label's color, ringed while
+/// the filter shows that label.
+fn label_dot(ui: &mut egui::Ui, label: ColorLabel, on: bool) -> egui::Response {
+    let side = font_size::px(ui.style(), 20.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(side * 0.8, side), egui::Sense::click());
+    let colors = theme::colors(ui.ctx());
+    let painter = ui.painter();
+    let r = side * 0.25;
+    painter.circle_filled(rect.center(), r, super::label_color(label));
+    let ring = if on {
+        Some(colors.value)
+    } else if resp.hovered() {
+        Some(colors.label)
+    } else {
+        None
+    };
+    if let Some(ring) = ring {
+        painter.circle_stroke(
+            rect.center(),
+            r + side * 0.1,
+            egui::Stroke::new((side * 0.08).max(1.0), ring),
+        );
+    }
+    resp
 }
 
 /// The Unrated filter as an icon toggle beside the flag ones: a hollow star

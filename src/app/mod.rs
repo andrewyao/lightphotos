@@ -439,6 +439,9 @@ pub(crate) struct App {
     filter: Option<(Cmp, u8)>,
     /// The grid's flag filter, applied with the star filter.
     flag_filter: FlagFilter,
+    /// The grid's color label filter: a photo with any of these labels
+    /// shows. Empty shows all.
+    label_filter: Vec<crate::catalog::ColorLabel>,
     /// Comparator used when a star level is clicked. Stays set across "All".
     filter_cmp: Cmp,
     grid_sort: GridSort,
@@ -681,6 +684,7 @@ impl App {
             unsaved_edit_kind: "adjustment",
             filter: None,
             flag_filter: FlagFilter::All,
+            label_filter: Vec::new(),
             filter_cmp: Cmp::Gte,
             grid_sort: GridSort::Name,
             visible: Vec::new(),
@@ -1201,6 +1205,7 @@ impl App {
                 ui::UiAction::SetRating(stars) => self.set_rating(stars),
                 ui::UiAction::SetFlag(flag) => self.set_flag(flag),
                 ui::UiAction::SetFlagFilter(f) => self.set_flag_filter(f),
+                ui::UiAction::SetLabelFilter(f) => self.set_label_filter(f),
                 ui::UiAction::SetCompareFlagFilter(f) => self.set_compare_flag_filter(f),
                 ui::UiAction::ScrollFilmstrip(delta) => self.scroll_filmstrip(delta),
                 ui::UiAction::ToggleEyesClosed => self.toggle_eyes_filter(),

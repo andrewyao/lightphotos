@@ -124,6 +124,8 @@ pub enum UiAction {
     SetFlag(Option<crate::catalog::Flag>),
     /// The grid's flag filter.
     SetFlagFilter(crate::navigation::FlagFilter),
+    /// The grid's color label filter. Empty shows all.
+    SetLabelFilter(Vec<crate::catalog::ColorLabel>),
     /// The Compare pane's flag filter.
     SetCompareFlagFilter(crate::navigation::FlagFilter),
     /// Raw per-frame wheel delta over the filmstrip (egui: positive is up or
@@ -717,6 +719,18 @@ fn status_toast(ui: &egui::Ui, app: &App) {
     // Keep repainting until the toast expires so it clears on its own.
     ui.ctx()
         .request_repaint_after(std::time::Duration::from_millis(250));
+}
+
+fn label_name(label: crate::catalog::ColorLabel) -> &'static str {
+    use crate::catalog::ColorLabel::*;
+    let m = &t().menu;
+    match label {
+        Red => m.label_red,
+        Yellow => m.label_yellow,
+        Green => m.label_green,
+        Blue => m.label_blue,
+        Purple => m.label_purple,
+    }
 }
 
 fn label_color(label: crate::catalog::ColorLabel) -> egui::Color32 {
