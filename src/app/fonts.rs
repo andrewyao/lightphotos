@@ -152,7 +152,7 @@ fn system_faces() -> (Vec<Face>, Vec<Face>) {
             .join("Fonts");
     let chinese = ["msyh.ttc", "simsun.ttc"]
         .into_iter()
-        .find_map(|file| read_face("system-cjk", &fonts.join(file), 0).filter(draws_chinese));
+        .find_map(|file| read_face("system-cjk", fonts.join(file), 0).filter(draws_chinese));
     (Vec::new(), chinese.into_iter().collect())
 }
 
