@@ -71,11 +71,7 @@ mod web_thumb_cache;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_rect;
 
-#[cfg(not(target_arch = "wasm32"))]
-use lightphotos::immich;
-use lightphotos::{
-    decode, develop, export, facequality, hash, judge, paths, quality, segmentation, worker_pool,
-};
+use lightphotos::{decode, develop, export, hash, paths, scoring, worker_pool};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;

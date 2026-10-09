@@ -1010,7 +1010,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_folder_opened_while_its_signals_load_keeps_both_old_and_new() {
-        use crate::facequality::FaceQuality;
+        use crate::scoring::facequality::FaceQuality;
         use crate::signalcache::{Signal, SignalCache};
 
         let dir = temp_folder("app-catalog-test");

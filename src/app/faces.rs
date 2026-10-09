@@ -5,7 +5,7 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
-use crate::facequality::{FacePool, FaceQuality};
+use crate::scoring::facequality::{FacePool, FaceQuality};
 use crate::signalcache::Signal;
 
 pub(super) struct Faces {
@@ -129,14 +129,17 @@ impl App {
 
     /// The face analysis for a path. `None` while pending, after a failure, or
     /// when never requested.
-    pub(super) fn face_quality_of(&self, path: &Path) -> Option<crate::facequality::FaceQuality> {
+    pub(super) fn face_quality_of(
+        &self,
+        path: &Path,
+    ) -> Option<crate::scoring::facequality::FaceQuality> {
         self.faces.quality.get(path).copied()
     }
 
     pub(super) fn eyes_closed(&self, path: &Path) -> bool {
         self.face_quality_of(path)
             .and_then(|q| q.eye_state())
-            .is_some_and(|s| s == crate::facequality::EyeState::Closed)
+            .is_some_and(|s| s == crate::scoring::facequality::EyeState::Closed)
     }
 
     pub(crate) fn eyes_filter_on(&self) -> bool {
@@ -165,7 +168,7 @@ mod tests {
         group_photos(&mut app, &[5, 6, 7], 7);
         app.faces.quality.insert(
             paths[6].clone(),
-            crate::facequality::FaceQuality {
+            crate::scoring::facequality::FaceQuality {
                 faces: 0,
                 min_eye_openness: None,
             },

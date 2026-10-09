@@ -8,10 +8,10 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 #[cfg(not(target_arch = "wasm32"))]
+use crate::export::immich::{Account, Album, ImmichServer};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::export::{AlbumChoice, ExportDest, ExportJob, ExportTarget, FolderChoice};
 use crate::export::{ExportLanding, ExportOutcome, ExportSettings};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::immich::{Account, Album, ImmichServer};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::paths;
 
@@ -109,7 +109,7 @@ pub(crate) struct Exports {
     /// finish the toast with.
     #[cfg(not(target_arch = "wasm32"))]
     album_add: Option<(
-        Receiver<Result<crate::immich::Album, String>>,
+        Receiver<Result<crate::export::immich::Album, String>>,
         String,
         StatusKind,
     )>,
@@ -1252,9 +1252,9 @@ mod form_tests {
     #[test]
     fn the_album_dropdown_lists_albums_and_new_asks_for_a_name() {
         use crate::app::test_support::{click, settled};
+        use crate::export::immich::{Account, Album, ImmichServer};
         use crate::export::{AlbumChoice, ExportTarget};
         use crate::i18n::t;
-        use crate::immich::{Account, Album, ImmichServer};
         use crate::ui::UiAction;
 
         let (mut app, _) = folder_app(2);

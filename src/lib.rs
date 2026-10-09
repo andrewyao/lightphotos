@@ -7,14 +7,7 @@
 pub mod decode;
 pub mod develop;
 pub mod export;
-pub mod facequality;
 pub mod hash;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod immich;
-pub mod judge;
 pub mod paths;
-pub mod quality;
-pub mod segmentation;
-#[cfg(target_os = "macos")]
-pub mod vision;
+pub mod scoring;
 pub mod worker_pool;

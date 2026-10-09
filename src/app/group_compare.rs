@@ -601,7 +601,7 @@ impl App {
     pub(crate) fn member_score(
         &self,
         path: &Path,
-    ) -> Option<(&crate::quality::QualityScore, bool)> {
+    ) -> Option<(&crate::scoring::quality::QualityScore, bool)> {
         self.catalog.score(path).map(|(s, stale)| (&s.score, stale))
     }
 
@@ -1315,9 +1315,9 @@ mod tests {
     }
 
     fn set_score(app: &mut App, path: &Path, value: u8) {
-        let score = crate::quality::QualityScore {
+        let score = crate::scoring::quality::QualityScore {
             value,
-            basis: crate::quality::Basis::TechnicalOnly,
+            basis: crate::scoring::quality::Basis::TechnicalOnly,
             base: None,
             deductions: Vec::new(),
         };

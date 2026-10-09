@@ -15,7 +15,7 @@ use objc2::ClassType;
 use objc2_vision::{VNDetectFaceLandmarksRequest, VNFaceLandmarkRegion2D};
 
 #[cfg(target_os = "macos")]
-use crate::vision;
+use crate::scoring::vision;
 
 /// Landmark points in Vision's normalized space: origin bottom-left, both axes
 /// 0..1 over the whole image, not the face box.
@@ -113,7 +113,7 @@ fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
 /// `src/bin/face_probe.rs` for that.
 pub const CLOSED_EYE_RATIO: f32 = 0.15;
 
-pub use crate::quality::EyeState;
+pub use crate::scoring::quality::EyeState;
 
 /// A photo's face-based culling signals.
 ///

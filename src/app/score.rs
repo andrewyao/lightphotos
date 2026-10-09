@@ -138,7 +138,10 @@ impl App {
     }
 
     /// The visible cell's stored score and whether it went stale.
-    pub(crate) fn score_at(&self, pos: usize) -> Option<(&crate::quality::QualityScore, bool)> {
+    pub(crate) fn score_at(
+        &self,
+        pos: usize,
+    ) -> Option<(&crate::scoring::quality::QualityScore, bool)> {
         if !self.scoring_available() {
             return None;
         }
@@ -148,7 +151,7 @@ impl App {
     }
 
     /// The shown photo's stored score and whether it went stale.
-    pub(crate) fn shown_score(&self) -> Option<(crate::quality::QualityScore, bool)> {
+    pub(crate) fn shown_score(&self) -> Option<(crate::scoring::quality::QualityScore, bool)> {
         if !self.scoring_available() {
             return None;
         }
@@ -201,8 +204,8 @@ impl App {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use crate::quality::{Basis, QualityScore};
     use crate::score::ScorePool;
+    use crate::scoring::quality::{Basis, QualityScore};
 
     fn folder_app(n: usize) -> (App, PathBuf, Vec<PathBuf>) {
         let names: Vec<String> = (0..n).map(|i| format!("p{i:02}.jpg")).collect();

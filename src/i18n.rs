@@ -310,7 +310,7 @@ pub struct Strings {
     pub base_aesthetics: fn(u8) -> String,
     pub score_no_breakdown: &'static str,
     pub no_penalties: &'static str,
-    pub penalty: fn(crate::quality::Penalty) -> &'static str,
+    pub penalty: fn(crate::scoring::quality::Penalty) -> &'static str,
     pub score_stale: &'static str,
     pub sort_by: &'static str,
     pub sort_name: &'static str,
@@ -857,7 +857,7 @@ pub static EN: Strings = Strings {
     score_no_breakdown: "Score again to see the breakdown",
     no_penalties: "No defects found",
     penalty: |p| {
-        use crate::quality::Penalty::*;
+        use crate::scoring::quality::Penalty::*;
         match p {
             SoftFocus => "Soft focus",
             HighlightsClipped => "Clipped highlights",
@@ -1561,7 +1561,7 @@ pub static ZH: Strings = Strings {
     score_no_breakdown: "重新评分以查看明细",
     no_penalties: "未发现缺陷",
     penalty: |p| {
-        use crate::quality::Penalty::*;
+        use crate::scoring::quality::Penalty::*;
         match p {
             SoftFocus => "对焦不实",
             HighlightsClipped => "高光溢出",

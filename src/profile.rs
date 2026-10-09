@@ -249,7 +249,7 @@ impl Run {
     fn select_subject(&self, photos: &[PathBuf]) {
         let wanted = photos.iter().take(self.opens);
         let masks: Vec<_> = wanted
-            .filter_map(|path| crate::segmentation::segment(path).ok())
+            .filter_map(|path| crate::scoring::segmentation::segment(path).ok())
             .collect();
         let pixels: usize = masks.iter().map(|m| m.alpha.len()).sum();
         eprintln!(
@@ -308,7 +308,7 @@ impl Run {
                 hits += 1;
                 continue;
             }
-            if let Ok(q) = crate::facequality::analyze(p) {
+            if let Ok(q) = crate::scoring::facequality::analyze(p) {
                 cache.record(p, crate::signalcache::Signal::Faces(q));
                 analysed += 1;
             }
@@ -324,7 +324,7 @@ impl Run {
         // phase reports the single wait the Loupe's overlay makes a user sit
         // through rather than a throughput number.
         let t0 = Instant::now();
-        let mask = crate::segmentation::segment(anchor);
+        let mask = crate::scoring::segmentation::segment(anchor);
         eprintln!(
             "[profile] segment {}: {:?} ({})",
             anchor.file_name().unwrap_or_default().to_string_lossy(),

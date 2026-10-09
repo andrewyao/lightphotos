@@ -7,7 +7,7 @@
 //! and, from macOS 15, the aesthetics score. Elsewhere, and when Vision
 //! fails, the score is technical only.
 
-use crate::quality::{self, Aesthetics, EyeState, QualityScore};
+use crate::scoring::quality::{self, Aesthetics, EyeState, QualityScore};
 
 /// Score opaque sRGB8 RGBA pixels.
 #[hotpath::measure]
@@ -46,19 +46,22 @@ pub fn vision_signals(rgba: &[u8], width: u32, height: u32) -> Result<VisionSign
     // autoreleases freely; without one each photo would leak until exit.
     objc2::rc::autoreleasepool(|_| {
         let faces = unsafe { VNDetectFaceLandmarksRequest::new() };
-        let aesthetics =
-            crate::vision::require_class(c"VNCalculateImageAestheticsScoresRequest", "15.0")
-                .ok()
-                .map(|()| unsafe { VNCalculateImageAestheticsScoresRequest::new() });
+        let aesthetics = crate::scoring::vision::require_class(
+            c"VNCalculateImageAestheticsScoresRequest",
+            "15.0",
+        )
+        .ok()
+        .map(|()| unsafe { VNCalculateImageAestheticsScoresRequest::new() });
 
         let mut requests = vec![faces.as_super().as_super()];
         if let Some(a) = &aesthetics {
             requests.push(a.as_super().as_super());
         }
-        crate::vision::perform(crate::vision::Source::Image(&image), &requests)?;
+        crate::scoring::vision::perform(crate::scoring::vision::Source::Image(&image), &requests)?;
 
-        let raw = crate::facequality::faces_from(&faces);
-        let eyes = crate::facequality::face_quality(&raw, width as f32 / height as f32).eye_state();
+        let raw = crate::scoring::facequality::faces_from(&faces);
+        let eyes = crate::scoring::facequality::face_quality(&raw, width as f32 / height as f32)
+            .eye_state();
         let aesthetics = aesthetics
             .and_then(|r| unsafe { r.results() })
             .and_then(|r| r.firstObject())
@@ -107,8 +110,11 @@ mod tests {
         match vision_signals(&rgba, w, h) {
             Ok(s) => {
                 assert_eq!(s.eyes, None, "no face, so no eye verdict");
-                if crate::vision::require_class(c"VNCalculateImageAestheticsScoresRequest", "15.0")
-                    .is_ok()
+                if crate::scoring::vision::require_class(
+                    c"VNCalculateImageAestheticsScoresRequest",
+                    "15.0",
+                )
+                .is_ok()
                 {
                     let a = s.aesthetics.expect("macOS 15 scores aesthetics");
                     assert!((-1.0..=1.0).contains(&a.overall), "{a:?}");

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::develop::{Adjustments, TouchUp};
 use crate::groups::{GroupId, GroupWrite, Groups, SavedGroup};
-use crate::quality::QualityScore;
+use crate::scoring::quality::QualityScore;
 
 pub(crate) mod group_file;
 mod writeback;
@@ -1057,10 +1057,10 @@ mod tests {
     fn sample_score() -> QualityScore {
         QualityScore {
             value: 73,
-            basis: crate::quality::Basis::WithAesthetics,
+            basis: crate::scoring::quality::Basis::WithAesthetics,
             base: Some(80),
-            deductions: vec![crate::quality::Deduction {
-                penalty: crate::quality::Penalty::Noisy,
+            deductions: vec![crate::scoring::quality::Deduction {
+                penalty: crate::scoring::quality::Penalty::Noisy,
                 points: 7,
             }],
         }

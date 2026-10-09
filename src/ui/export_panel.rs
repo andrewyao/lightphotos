@@ -4,10 +4,10 @@ use super::*;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::app::ImmichLink;
 #[cfg(not(target_arch = "wasm32"))]
+use crate::export::immich::Album;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::export::AlbumChoice;
 use crate::export::{ExportSettings, ExportSize, ExportTarget, FolderChoice};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::immich::Album;
 
 /// The right-hand export form. It takes the Develop panel's place while open,
 /// so the photos being exported stay in view. With `develop_tab`, it is the

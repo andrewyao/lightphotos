@@ -22,7 +22,7 @@ use objc2_vision::{
 };
 
 #[cfg(target_os = "macos")]
-use crate::vision;
+use crate::scoring::vision;
 
 /// `kCVPixelFormatType_OneComponent8`, requested from person segmentation.
 #[cfg(target_os = "macos")]
@@ -316,7 +316,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn the_availability_guard_names_classes_this_runtime_actually_has() {
-        use crate::vision::require_class;
+        use crate::scoring::vision::require_class;
         require_class(c"VNGeneratePersonSegmentationRequest", "12.0")
             .expect("this machine runs macOS 12 or later");
         require_class(c"VNGenerateForegroundInstanceMaskRequest", "14.0")

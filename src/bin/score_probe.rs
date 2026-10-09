@@ -17,7 +17,7 @@
 
 use lightphotos::decode::image_decode;
 use lightphotos::develop::{self, image_ops};
-use lightphotos::{judge, quality};
+use lightphotos::scoring::{judge, quality};
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

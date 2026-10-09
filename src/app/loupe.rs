@@ -380,7 +380,7 @@ impl App {
     }
 
     /// The mask for the photo currently on screen, if one has been computed.
-    pub(crate) fn current_selection(&self) -> Option<&crate::segmentation::Mask> {
+    pub(crate) fn current_selection(&self) -> Option<&crate::scoring::segmentation::Mask> {
         let want = self.want.as_ref()?;
         self.current_selection
             .as_ref()
@@ -477,7 +477,7 @@ impl App {
         if std::thread::Builder::new()
             .name("segmentation-worker".to_string())
             .spawn(move || {
-                let result = crate::segmentation::segment(&want);
+                let result = crate::scoring::segmentation::segment(&want);
                 let _ = tx.send((want, result));
             })
             .is_err()
@@ -759,8 +759,8 @@ mod tests {
     fn the_selection_control_is_offered_only_where_segmentation_runs() {
         let missing = std::env::temp_dir().join("lightphotos_selection_support_probe.jpg");
         let _ = std::fs::remove_file(&missing);
-        let err =
-            crate::segmentation::segment(&missing).expect_err("a missing file has no subject mask");
+        let err = crate::scoring::segmentation::segment(&missing)
+            .expect_err("a missing file has no subject mask");
         let has_backend = !err.contains("unsupported on this platform");
         assert_eq!(
             App::selection_supported(),

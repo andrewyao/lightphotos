@@ -27,7 +27,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::facequality::FaceQuality;
+use crate::scoring::facequality::FaceQuality;
 
 /// Cache file name, inside `<photo dir>/.lightphotos/`. Neither `.xmp` nor
 /// `.thumb.jpg`, so the sidecar scan and the thumbnail sweep both skip it.

@@ -6,6 +6,9 @@
 //! with `poll`. Each `ExportJob` carries everything its worker needs, so
 //! workers never touch `App`.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod immich;
+
 use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
@@ -161,7 +164,7 @@ pub enum ExportDest {
     /// never race on file names.
     Folder(PathBuf),
     Immich {
-        server: Arc<crate::immich::ImmichServer>,
+        server: Arc<crate::export::immich::ImmichServer>,
         filename: String,
         /// 0 leaves the asset unrated.
         stars: u8,

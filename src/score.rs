@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use crate::develop::{Adjustments, TouchUp};
-use crate::quality::QualityScore;
+use crate::scoring::quality::QualityScore;
 use crate::worker_pool::WorkerPool;
 
 /// Everything one worker needs to score one photo, owned so it never reads
@@ -44,7 +44,7 @@ pub fn score_photo(req: &ScoreRequest) -> Result<QualityScore, String> {
     if w == 0 || h == 0 {
         return Err("the edited preview is empty".into());
     }
-    Ok(crate::judge::judge(&rgba, w, h))
+    Ok(crate::scoring::judge::judge(&rgba, w, h))
 }
 
 /// A preview at the analysis size. The embedded preview is the fast path,
@@ -52,7 +52,7 @@ pub fn score_photo(req: &ScoreRequest) -> Result<QualityScore, String> {
 /// result is decoded again from the image itself.
 fn preview(path: &Path) -> Result<crate::decode::image_decode::DecodedImage, String> {
     use crate::thumbnail::{decode_at_size, EmbeddedPreview};
-    let px = crate::quality::ANALYSIS_PX;
+    let px = crate::scoring::quality::ANALYSIS_PX;
     let img = decode_at_size(path, px, EmbeddedPreview::UseIfPresent)?;
     if img.width.max(img.height) >= px {
         return Ok(img);
@@ -295,7 +295,7 @@ mod tests {
     fn fixed(_: &ScoreRequest) -> Result<QualityScore, String> {
         Ok(QualityScore {
             value: 42,
-            basis: crate::quality::Basis::TechnicalOnly,
+            basis: crate::scoring::quality::Basis::TechnicalOnly,
             base: None,
             deductions: Vec::new(),
         })

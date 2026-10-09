@@ -246,7 +246,7 @@ pub(crate) struct ExportProgress {
 
 /// A finished subject-segmentation run: the path it was computed for, and the
 /// mask or the reason there isn't one.
-pub(crate) type SelectionOutcome = (PathBuf, Result<crate::segmentation::Mask, String>);
+pub(crate) type SelectionOutcome = (PathBuf, Result<crate::scoring::segmentation::Mask, String>);
 
 /// An action waiting on its confirm dialog. While one is open it owns the
 /// keyboard, and only one can be open at a time.
@@ -515,7 +515,7 @@ pub(crate) struct App {
     /// Subject mask for the photo in the Loupe, tagged with its path so a stale
     /// result can be dropped. Never saved to the catalog. Only the photo on
     /// screen gets one, since segmentation is too heavy to run per folder.
-    current_selection: Option<(PathBuf, crate::segmentation::Mask)>,
+    current_selection: Option<(PathBuf, crate::scoring::segmentation::Mask)>,
     selection_pending: Option<PathBuf>,
     /// Remove Chromatic Aberration's measurement in flight.
     optics: optics::Optics,

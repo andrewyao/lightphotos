@@ -504,14 +504,14 @@ pub(super) fn thumbnail_cell(
 
 /// Why a photo got its score: the base it started from, each defect with
 /// the points it cost, and whether an edit has made it stale.
-pub(super) fn score_tip(score: &crate::quality::QualityScore, stale: bool) -> String {
+pub(super) fn score_tip(score: &crate::scoring::quality::QualityScore, stale: bool) -> String {
     let t = crate::i18n::t();
     let mut lines = vec![(t.quality_of)(score.value)];
     match score.base {
         Some(base) => {
             lines.push(match score.basis {
-                crate::quality::Basis::TechnicalOnly => (t.base_technical)(base),
-                crate::quality::Basis::WithAesthetics => (t.base_aesthetics)(base),
+                crate::scoring::quality::Basis::TechnicalOnly => (t.base_technical)(base),
+                crate::scoring::quality::Basis::WithAesthetics => (t.base_aesthetics)(base),
             });
             if score.deductions.is_empty() {
                 lines.push(t.no_penalties.to_string());
