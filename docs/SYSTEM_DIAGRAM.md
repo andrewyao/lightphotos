@@ -132,14 +132,17 @@ flowchart LR
     classDef mac stroke:#1f6feb,stroke-width:2px,stroke-dasharray:5 3
     classDef nonmac stroke:#d97706,stroke-width:2px,stroke-dasharray:5 3
     classDef web stroke:#16a34a,stroke-width:2px,stroke-dasharray:5 3
-    class delegate,menu,vision,imageio,applevision,keychain mac
+    class delegate,menu,vision,spool,imageio,applevision,keychain mac
     class nonmac,crates nonmac
     class webshell,fsa,rawrender web
 ```
 
 `facequality.rs`, `segmentation.rs` and the aesthetics part of `judge.rs` build on all
 platforms. On Linux, Windows and the browser, they return `Err` or a flat base score. Thus,
-the diagram marks only `vision.rs` as macOS code.
+the diagram does not mark them as macOS code.
+
+`score.rs` builds on all platforms. But `ScorePool::new` returns `None` off macOS, so
+scoring runs on macOS only. The diagram marks it as macOS code.
 
 `raw/render.rs` builds on all platforms. But only the browser Loupe RAW path gives it
 linear-light images. All other paths apply the tonemap on the CPU.

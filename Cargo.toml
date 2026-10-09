@@ -186,8 +186,7 @@ rawler = "0.7.2"
 kamadak-exif = "0.6.1"
 
 # `trash` (native OS trash/recycle-bin shell-out) has no wasm32 support and no
-# browser equivalent (File System Access has no trash primitive — see
-# plans/web-wasm-port-feasibility.md and the wasm port plan's scope notes).
+# browser equivalent (File System Access has no trash primitive).
 # Split out of the `not(macos)` block above so it only applies to real non-mac
 # desktop targets, not wasm32 too.
 [target.'cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
@@ -243,8 +242,7 @@ rayon = "1"
 console_error_panic_hook = "0.1"
 # `uuid` (pulled in transitively by both egui/accesskit and rawler) needs an
 # explicit randomness source on wasm32 — same fix already proven in the
-# tools/wasm-decode-probe spike (see plans/wasm-decode-verification-results.md
-# on the wasm-decode-probe-spike branch): the "js" feature wires it to the
+# tools/wasm-decode-probe spike: the "js" feature wires it to the
 # browser's crypto API. Declared at the top level so Cargo's feature
 # unification turns it on for every crate in the graph that pulls uuid in,
 # not just a direct dependency of this crate.

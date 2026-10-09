@@ -18,3 +18,6 @@
 # Full Noto Sans SC for the web build, fetched by scripts/fetch-cjk-font.sh.
 /assets/fonts/NotoSansSC-Regular.otf
 /.playwright-mcp/
+
+# Local working plans and run logs, not committed.
+/plans/

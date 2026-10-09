@@ -3,8 +3,8 @@
 This document explains **when** each piece of the codebase runs, in the order
 a photo actually moves through it, across the three platform targets: macOS,
 Linux/Windows ("non-mac"), and wasm32 (the browser build). It complements
-`CLAUDE.md`, [`docs/SYSTEM_DIAGRAM.md`](docs/SYSTEM_DIAGRAM.md)
-(architecture diagrams), and `plans/` (design history) — this file is about
+`CLAUDE.md` and [`docs/SYSTEM_DIAGRAM.md`](SYSTEM_DIAGRAM.md)
+(architecture diagrams) — this file is about
 *sequencing*, not module boundaries.
 
 There are three pipelines a photo passes through, each triggered by a
@@ -95,7 +95,7 @@ flowchart TD
 
     upload --> gpu{"pixel_format?"}
     gpu -- "Srgb8 (every path except one)" --> shader["shader.wgsl\nrenderer.rs::pipeline"]
-    gpu -- "LinearF16 (wasm32's Quality tier only)" --> rawshader["raw_shader.wgsl\nrenderer.rs::raw_pipeline\n(does the sRGB gamma + display boost on the GPU\ninstead of a CPU lookup table)"]
+    gpu -- "LinearF16 (wasm32's Quality tier only)" --> rawshader["raw/raw_shader.wgsl\nraw_pipeline, built by raw/render.rs\n(does the sRGB gamma + display boost on the GPU\ninstead of a CPU lookup table)"]
     shader --> screen["composited with egui's chrome,\npresented to the window"]
     rawshader --> screen
 ```
@@ -115,7 +115,7 @@ flowchart TD
   lookup table (the way every other RAW path does) would mean re-doing that
   work on every zoom/pan repaint.
 - Instead the decode stops at linear camera-RGB, uploads as an `Rgba16Float`
-  texture, and `raw_shader.wgsl` does that last step on the GPU once per
+  texture, and `raw/raw_shader.wgsl` does that last step on the GPU once per
   frame instead of once per decode.
 
 **Where full resolution comes from:**
@@ -200,7 +200,7 @@ Triggered by: File → Export, for one photo or a batch.
 flowchart TD
     exportbtn["User exports one or more photos"]
     exportbtn --> submit["app/export.rs submits one ExportJob per photo\n(native; wasm32 has its own start_export that bakes on the\nloader's threads and writes via File System Access)"]
-    submit --> pool["Exporter's worker pool, export.rs\n(same shape as loader.rs's pool)"]
+    submit --> pool["Exporter, export.rs\nruns on the generic worker_pool.rs pool"]
     pool --> decode["image_decode::decode(src, u32::MAX)\nfull-resolution decode\nImageIO on macOS, image/rawler on Linux/Windows"]
     decode --> bake["image_ops::bake_edited\ncrop -> develop::apply_linear (tone) -> rotate"]
     bake --> encode["image_encode::encode_jpeg\nImageIO on macOS, mozjpeg-rs elsewhere"]
@@ -230,23 +230,32 @@ with macOS. No model file lives in this repository, and nothing here is
 trained. The OS decides whether a request runs on the Neural Engine, the GPU,
 or the CPU, and the app has no say in it.
 
-This is not a fourth pipeline, because it never touches the decode path above.
-`src/vision.rs` hands Vision a file URL and Vision decodes the file itself, at
-full resolution, inside the framework. Nothing goes through `loader.rs`, its
-caches, or `image_decode.rs`.
+`vision::perform` (`src/vision.rs`) runs every request, over one of two
+sources:
+
+- `Source::File`: Vision decodes the file itself, at full resolution, inside
+  the framework. Nothing goes through `loader.rs`, its caches, or
+  `image_decode.rs`. Face quality and the selection mask use this.
+- `Source::Image`: pixels the app already decoded. The quality score uses
+  this, so its Vision pass costs no second decode.
 
 ```mermaid
 flowchart TD
     frame["Every frame\nrequest_face_quality (app/thumbs.rs)\nno candidates until photos can be grouped"]
     sel["User opens Show Selection in the Loupe\nrequest_selection_mask (app/loupe.rs)"]
-    frame --> fpool["FacePool: 2 workers"]
+    score["User asks to score photos\nscore_selected / score_all (app/score.rs)"]
+    frame --> fpool["FacePool: 1-2 workers"]
     sel --> sthread["segmentation: one thread per request"]
-    fpool --> vn["vision::perform_request\nVNImageRequestHandler decodes the file itself"]
-    sthread --> vn
-    vn --> fl["VNDetectFaceLandmarksRequest\nfacequality.rs"]
-    vn --> sg["VNGeneratePersonSegmentationRequest, then\nVNGenerateForegroundInstanceMaskRequest\nsegmentation.rs"]
+    score --> spool["ScorePool: 2-4 workers\npreview decode, edits baked in"]
+    fpool --> vfile["vision::perform(Source::File)\nVision decodes the file itself"]
+    sthread --> vfile
+    spool --> vimg["judge.rs\nvision::perform(Source::Image)"]
+    vfile --> fl["VNDetectFaceLandmarksRequest\nfacequality.rs"]
+    vfile --> sg["VNGeneratePersonSegmentationRequest, then\nVNGenerateForegroundInstanceMaskRequest\nsegmentation.rs"]
+    vimg --> jq["VNDetectFaceLandmarksRequest +\nVNCalculateImageAestheticsScoresRequest (macOS 15+)"]
     fl --> blink["eye-openness geometry -> EyeState\nfeeds the eyes-closed filter and burst::combined_score"]
     sg --> mask["Mask -> the Loupe's selection overlay"]
+    jq --> qs["QualityScore: technical score\nwith face and aesthetics penalties"]
 ```
 
 **What each request is for:**
@@ -254,35 +263,46 @@ flowchart TD
   and the scoring on top of them is plain geometry, testable with fabricated
   points.
 - Person segmentation, with the general foreground request as a fallback,
-  produces the "Show Selection" mask. Both requests postdate the app's own
-  floor. `Info.plist` declares `LSMinimumSystemVersion` 11.0, while
-  `VNGeneratePersonSegmentationRequest` needs macOS 12.0 and
-  `VNGenerateForegroundInstanceMaskRequest` needs macOS 14.0. The floor stays
-  at 11.0 and `segmentation.rs` asks the Objective-C runtime for each class by
-  name first, so an older system takes the ordinary `Err` path instead of
-  aborting the process.
+  produces the "Show Selection" mask.
+- The aesthetics score feeds the quality score. Without it, as on macOS 14
+  and earlier or when Vision fails, the score has no aesthetics part.
+- Three requests postdate the app's own floor. `Info.plist` declares
+  `LSMinimumSystemVersion` 11.0, while `VNGeneratePersonSegmentationRequest`
+  needs macOS 12.0, `VNGenerateForegroundInstanceMaskRequest` needs macOS
+  14.0 and `VNCalculateImageAestheticsScoresRequest` needs macOS 15.0. The
+  floor stays at 11.0, and `vision::require_class` asks the Objective-C
+  runtime for each class by name first, so an older system takes the ordinary
+  `Err` path instead of aborting the process.
+
+**What is persisted:**
+- Face quality and capture time go to `signalcache.rs`, in
+  `.lightphotos/signals.json`. They are derived state, so they stay out of
+  `ImageRecord`, the user's authored edits.
+- The quality score is the exception. `ImageRecord.score` holds it in the
+  photo's sidecar, keyed to the edits it was measured on, so a later edit
+  marks it stale.
+- The selection mask is not persisted.
 
 **What it costs:**
-- Every call is a second full-resolution decode of a file the app has usually
-  already decoded once. That decode happens inside Vision and cannot be
-  reused.
-- Nothing is persisted. `ImageRecord` stores `rating`, `label`,
-  `adjustments`, `touchups` and `rotation` and nothing else, so every signal
-  is recomputed from scratch on the next launch.
+- A `Source::File` call is a second full-resolution decode of a file the app
+  has usually already decoded once. That decode happens inside Vision and
+  cannot be reused. On 6016x6016 photos, one face analysis measures about
+  73 ms, against 32 ms for a whole thumbnail decode (`signalcache.rs`).
 - `FacePool` caps at two workers (`cores - 2`, clamped to `1..=2`) to keep
-  contention for Vision and the Neural Engine low.
-
-**What is not known.** None of this is a measurement. `vision.rs`,
-`facequality.rs`, `segmentation.rs` and `sharpness.rs` carry zero `hotpath::measure` call sites between
-them, against 40 across decode, thumbnail, catalog, navigation and autotone.
-No wall-clock figure for a Vision call exists anywhere in the repo, so every
-cost claim above is structural.
+  contention for Vision and the Neural Engine low. `ScorePool` uses
+  `cores / 4`, clamped to `2..=4`, apart from the decode pool, so scoring
+  never queues ahead of the thumbnails on screen.
+- `facequality.rs`, `segmentation.rs`, `judge.rs` and `score.rs` carry
+  `hotpath::measure` call sites, and the profiler's `vision` and
+  `select_subject` phases time them.
 
 Off macOS, every entry point here returns `Err`, and the UI keeps that out of
 the user's way rather than surfacing it. `App::selection_supported()` is
 `cfg!(target_os = "macos")`, so the Loupe's "Show Selection" button does not
-render on Linux, Windows or the browser at all. `FacePool::new` returns `None` when no worker thread starts, which is what
-happens on wasm32, and `App` then holds no pool to submit to.
+render on Linux, Windows or the browser at all. `FacePool::new` returns `None`
+when no worker thread starts, which is what happens on wasm32, and `App` then
+holds no pool to submit to. `ScorePool::new` returns `None` off macOS, so
+scoring does not run there.
 
 ## File index
 
@@ -292,14 +312,15 @@ happens on wasm32, and `App` then holds no pool to submit to.
 | `image_decode.rs` | Full decode + metadata read, mac arm | macOS |
 | `raw/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `rawler`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
 | `raw/preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | Linux, Windows, wasm32 |
-| `raw/render.rs` | Builds the GPU tonemap pipeline for `PixelFormat::LinearF16` images | all (only ever fed a linear image on wasm32) |
+| `raw/render.rs` | Builds the GPU tonemap pipeline (`raw/raw_shader.wgsl`) for `PixelFormat::LinearF16` images | all (only ever fed a linear image on wasm32) |
 | `thumbnail.rs` | Decode-at-size for both the Loupe's screen-fit preview and Grid thumbnails, plus the on-disk `.thumb.jpg` cache in `.lightphotos/` | macOS (ImageIO) + Linux/Windows (`kamadak-exif`/`rawler`); wasm32 keeps the same entry naming through `web/web_thumb_cache.rs` |
 | `image_encode.rs` | JPEG write for export | macOS (ImageIO) / Linux/Windows (`mozjpeg-rs`) |
 | `coregraphics.rs` | Shared CFURL/bitmap-context setup for `image_decode.rs`/`image_encode.rs` | macOS |
 | `renderer.rs` | GPU upload + draw of the currently-shown image | all (wgpu → Metal / Vulkan-GL / WebGPU) |
 | `develop.rs` | The tone pipeline (`apply_linear`), shared by the GPU shader and the CPU histogram/bake path | all |
 | `image_ops.rs` | Pure pixel math (crop/rotate/bake) shared by export and thumbnail baking | all |
-| `export.rs` | Worker pool that decodes, bakes, and encodes a full-resolution JPEG; `bake_jpeg` and the `ExportFs` seam are shared | native pool is native-only, wasm32 runs the same bake on the loader's threads |
+| `export.rs` | `Exporter`: decodes, bakes, and encodes a full-resolution JPEG on a `worker_pool.rs` pool; `bake_jpeg` and the `ExportFs` seam are shared | native pool is native-only, wasm32 runs the same bake on the loader's threads |
+| `worker_pool.rs` | Generic thread pool behind `Exporter` and `ScorePool` | builds everywhere; no thread starts on wasm32, so the pools run native only |
 | `web/web_decode.rs` | Decode and export jobs over a file's bytes, run on the loader's threads | wasm32 |
 | `web/web_exports.rs` | Main-thread side of a batch export: each JPEG's destination folder handle, by job id | wasm32 |
 | `web/web_canvas.rs` | Attaches winit's canvas into the DOM at the right backing-store resolution | wasm32 |
@@ -307,6 +328,9 @@ happens on wasm32, and `App` then holds no pool to submit to.
 | `web/web_catalog_fs.rs` | File System Access counterpart of `catalog.rs`'s sidecar I/O | wasm32 |
 | `app/loupe.rs` | View-state math (zoom/pan/fit) and the decision to fetch full resolution | all |
 | `app/thumbs.rs` | `try_show`'s tier-selection logic, thumbnail texture sync, capture-time and face signal hooks | all |
-| `vision.rs` | Runs one `VNRequest` against a file URL and blocks; Vision does its own decode | macOS (the module itself is `cfg(target_os = "macos")`) |
+| `vision.rs` | `perform` runs Vision requests over a file (Vision decodes it) or an in-memory image, and blocks | macOS (the module itself is `cfg(target_os = "macos")`) |
 | `facequality.rs` | Face landmarks from Vision, then eye-openness geometry for blink detection; owns `FacePool` | macOS; the non-mac arm returns `Err` |
 | `segmentation.rs` | Person mask, falling back to a general foreground mask, for the Loupe's selection overlay | macOS; the non-mac arm returns `Err`, and the button is hidden by `App::selection_supported()` |
+| `judge.rs` | Quality score: technical measures plus Vision face and aesthetics signals | all; Vision part macOS only, technical-only elsewhere |
+| `score.rs` | `ScorePool`: scores chosen photos on 2-4 low-priority workers | builds everywhere; `ScorePool::new` returns `None` off macOS, where a technical-only score would mislead |
+| `signalcache.rs` | Persists capture time and face quality to `.lightphotos/signals.json` | all |
