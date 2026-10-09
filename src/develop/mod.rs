@@ -858,7 +858,7 @@ mod tests {
 
     #[test]
     fn raw_shader_look_knots_match_cpu() {
-        let wgsl = include_str!("../raw/raw_shader.wgsl");
+        let wgsl = include_str!("../shaders/raw_shader.wgsl");
         let body = wgsl
             .split("const RAW_LOOK_KNOTS = array<f32, 17>(")
             .nth(1)

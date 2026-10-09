@@ -24,8 +24,8 @@ pub(super) fn create_raw_pipeline(
         label: Some("raw_shader"),
         source: wgpu::ShaderSource::Wgsl(
             concat!(
-                include_str!("../loupe_common.wgsl"),
-                include_str!("raw_shader.wgsl")
+                include_str!("../shaders/loupe_common.wgsl"),
+                include_str!("../shaders/raw_shader.wgsl")
             )
             .into(),
         ),

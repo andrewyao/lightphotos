@@ -15,7 +15,6 @@ use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::curve::ToneCurve;
 use crate::develop::{GpuAdjust, GpuCurve, GpuTouchUp};
 
-#[path = "raw/render.rs"]
 mod raw_render;
 
 /// Texture format for a `PixelFormat::Srgb8` photo. The mip-gen pipeline
@@ -215,8 +214,8 @@ impl Renderer {
             label: Some("shader"),
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
-                    include_str!("loupe_common.wgsl"),
-                    include_str!("shader.wgsl")
+                    include_str!("../shaders/loupe_common.wgsl"),
+                    include_str!("../shaders/shader.wgsl")
                 )
                 .into(),
             ),
@@ -404,7 +403,7 @@ impl Renderer {
         // Mip generation reuses `tex_bind_layout` (texture at 0, sampler at 1).
         let mip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mipgen_shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("mipgen.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/mipgen.wgsl").into()),
         });
         let mip_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mip_pl"),

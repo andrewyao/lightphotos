@@ -136,7 +136,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     b = curved.b;
 
     // 4.5. Vibrance/saturation: scale chroma around luma in gamma space.
-    // Must match develop.rs `apply_linear` and shader.wgsl.
+    // Must match develop `apply_linear` and shader.wgsl.
     let luma = 0.299 * r + 0.587 * g + 0.114 * b;
     let satTotal = 1.0 + adj.saturation / 100.0;
     let cmax = max(r, max(g, b));

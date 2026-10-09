@@ -12,7 +12,7 @@ struct Transform {
     rot: vec4<f32>,
 };
 
-// Must match `OverlayParams` in renderer.rs.
+// Must match `OverlayParams` in renderer/mod.rs.
 struct Overlay {
     tint: vec4<f32>,
     // 1.0 = highlight the background instead of the subject.
