@@ -177,14 +177,26 @@ fn content(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         let tagline = egui::RichText::new(t().landing_tagline)
             .size(font_size::px(ui.style(), 19.0))
             .color(pal.label);
-        let width = (area.width() - 32.0)
+        // The tiles pack to the left like the Grid's, so the card centres on
+        // the block they fill, not on the panel.
+        let tiles_w = cols as f32 * step - TILE_GAP;
+        let width = (tiles_w - 32.0)
             .min(font_size::px(ui.style(), CARD_WIDTH))
             .max(120.0);
-        ui.scope_builder(
+        // The card's height is known only once it is laid out, so it centres
+        // on last frame's and discards the frame when that changes.
+        let size_id = ui.id().with("home_card_size");
+        let last: Option<egui::Vec2> = ui.ctx().data(|d| d.get_temp(size_id));
+        let height = last.map_or(font_size::px(ui.style(), 420.0), |s| s.y);
+        let center = egui::pos2(
+            area.min.x + tiles_w.min(area.width()) / 2.0,
+            area.center().y,
+        );
+        let card = ui.scope_builder(
             egui::UiBuilder::new()
                 .max_rect(egui::Rect::from_center_size(
-                    area.center(),
-                    egui::vec2(width, font_size::px(ui.style(), 420.0)),
+                    center,
+                    egui::vec2(width, height),
                 ))
                 .layout(egui::Layout::top_down(egui::Align::Center)),
             |ui| {
@@ -208,9 +220,17 @@ fn content(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                                 out.actions.push(UiAction::StartTour);
                             }
                         });
-                    });
+                    })
+                    .response
+                    .rect
+                    .size()
             },
         );
+        let size = card.inner;
+        if last.is_none_or(|s| (s.y - size.y).abs() > 0.5) {
+            ui.ctx().data_mut(|d| d.insert_temp(size_id, size));
+            ui.ctx().request_discard("home card size");
+        }
     });
     tour::anchor(ui.ctx(), tour::TourStep::Content, panel.response.rect);
 }
