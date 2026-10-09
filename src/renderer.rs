@@ -868,7 +868,7 @@ impl Renderer {
         self.image_size = (w, h);
 
         // The user feels this UI-thread span as a freeze.
-        crate::loader::mark(&format!(
+        crate::jobs::loader::mark(&format!(
             "set_image {w}x{h} ({mip_count} mips): took {:?}",
             t0.elapsed()
         ));
@@ -1361,14 +1361,14 @@ impl Renderer {
         }
         #[cfg(target_arch = "wasm32")]
         crate::web::analytics::presented();
-        if crate::loader::timing_enabled() {
+        if crate::jobs::loader::timing_enabled() {
             // Only the first frames matter: time to first pixels, then time
             // to the sharp photo.
             use std::sync::atomic::{AtomicU32, Ordering};
             static FRAMES: AtomicU32 = AtomicU32::new(0);
             let n = FRAMES.fetch_add(1, Ordering::Relaxed);
             if n < 3 {
-                crate::loader::mark(&format!("frame {n} presented"));
+                crate::jobs::loader::mark(&format!("frame {n} presented"));
             }
         }
 

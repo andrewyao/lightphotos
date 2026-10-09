@@ -8,8 +8,8 @@ use std::time::SystemTime;
 
 use crate::decode::image_decode;
 use crate::develop::{self};
+use crate::jobs::thumbnail::THUMB_PX;
 use crate::persist::signalcache::Signal;
-use crate::thumbnail::THUMB_PX;
 
 impl App {
     pub(crate) fn request_redraw(&self) {
@@ -408,7 +408,7 @@ pub(crate) fn load_order(
 #[cfg(test)]
 mod tests {
     use super::{grid_working_range, load_order, strip_working_range};
-    use crate::loader::Loader;
+    use crate::jobs::loader::Loader;
     use std::path::PathBuf;
 
     fn sorted(mut v: Vec<usize>) -> Vec<usize> {

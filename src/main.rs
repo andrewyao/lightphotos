@@ -2,7 +2,7 @@
 // A console-subsystem program gets a console window of its own when launched
 // from Explorer. Debug builds keep it for their log output.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
-// The wasm32 build is on nightly. See `loader::panic_recovery::install`.
+// The wasm32 build is on nightly. See `jobs::loader::panic_recovery::install`.
 #![cfg_attr(target_arch = "wasm32", feature(alloc_error_hook))]
 
 //! LightPhotos, a fast Lightroom-lite photo culling and develop tool. This
@@ -11,15 +11,12 @@
 
 mod app;
 mod autotone;
-mod cache_limits;
 mod i18n;
-mod loader;
+mod jobs;
 mod navigation;
 mod persist;
 mod renderer;
-mod score;
 mod shell;
-mod thumbnail;
 mod ui;
 #[cfg(any(target_arch = "wasm32", test))]
 mod web;
@@ -37,7 +34,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use app::{App, ViewMode};
-use loader::Loader;
+use jobs::loader::Loader;
 use renderer::Renderer;
 use shell::macos_delegate::UserEvent;
 
@@ -50,7 +47,10 @@ fn finish_window_setup(
     renderer: Renderer,
     size: winit::dpi::PhysicalSize<u32>,
 ) {
-    let loader = Loader::new(renderer.max_dim, cache_limits::CacheLimits::from_env());
+    let loader = Loader::new(
+        renderer.max_dim,
+        jobs::cache_limits::CacheLimits::from_env(),
+    );
 
     let egui_state = egui_winit::State::new(
         app.egui_ctx.clone(),
@@ -73,9 +73,9 @@ fn finish_window_setup(
     web::analytics::started();
 
     if let Some(path) = app.pending_initial.take() {
-        loader::mark("opening initial path");
+        jobs::loader::mark("opening initial path");
         app.open(path);
-        loader::mark("initial open() returned");
+        jobs::loader::mark("initial open() returned");
     }
 }
 
@@ -95,9 +95,9 @@ impl ApplicationHandler<UserEvent> for App {
         // events that long gets a "not responding" dialog.
         #[cfg(not(target_arch = "wasm32"))]
         let attrs = attrs.with_visible(false);
-        loader::mark("resumed: creating window");
+        jobs::loader::mark("resumed: creating window");
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        loader::mark("window created; initializing wgpu");
+        jobs::loader::mark("window created; initializing wgpu");
 
         // `Renderer::new` is async because WebGPU device setup is a browser
         // Promise, and the browser main thread can't block on it. Native blocks
@@ -106,7 +106,7 @@ impl ApplicationHandler<UserEvent> for App {
         {
             let size = window.inner_size();
             let renderer = pollster::block_on(Renderer::new(window.clone(), size));
-            loader::mark("wgpu ready");
+            jobs::loader::mark("wgpu ready");
             finish_window_setup(self, window.clone(), renderer, size);
             window.set_visible(true);
             window.request_redraw();
@@ -323,7 +323,7 @@ impl ApplicationHandler<UserEvent> for App {
         // Finish wasm window setup once the async renderer init lands.
         #[cfg(target_arch = "wasm32")]
         if let Ok((renderer, size)) = self.renderer_init_rx.try_recv() {
-            loader::mark("wgpu ready (async)");
+            jobs::loader::mark("wgpu ready (async)");
             if let Some(window) = self.window.clone() {
                 finish_window_setup(self, window, renderer, size);
             }
@@ -546,7 +546,7 @@ fn main() {
             windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
         );
     }
-    loader::start_clock();
+    jobs::loader::start_clock();
 
     // Native only: `start_named` spawns the emit thread, and
     // wasm32-unknown-unknown has no thread to spawn, so on that target the
@@ -603,9 +603,9 @@ fn main() {
     }
 
     i18n::init();
-    loader::mark("event loop built; constructing App");
+    jobs::loader::mark("event loop built; constructing App");
     let mut app = App::new(initial);
-    loader::mark("App constructed; entering event loop");
+    jobs::loader::mark("App constructed; entering event loop");
     event_loop.run_app(&mut app).expect("run app");
 }
 
@@ -615,8 +615,8 @@ fn main() {
 fn main() {
     web::analytics::start();
     console_error_panic_hook::set_once();
-    loader::install_panic_recovery();
-    loader::start_clock();
+    jobs::loader::install_panic_recovery();
+    jobs::loader::start_clock();
 
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
@@ -624,9 +624,9 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     i18n::init();
-    loader::mark("event loop built; constructing App");
+    jobs::loader::mark("event loop built; constructing App");
     let app = App::new(None);
-    loader::mark("App constructed; entering event loop");
+    jobs::loader::mark("App constructed; entering event loop");
 
     use winit::platform::web::EventLoopExtWebSys;
     event_loop.spawn_app(app);

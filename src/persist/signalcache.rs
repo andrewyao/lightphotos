@@ -103,7 +103,7 @@ impl PhotoSignals {
 }
 
 /// Validity key from the source's mtime and length, the same shape as
-/// [`crate::thumbnail::cache_key`]. The path is not hashed, so moving a folder
+/// [`crate::jobs::thumbnail::cache_key`]. The path is not hashed, so moving a folder
 /// keeps its cache valid. Bump the version string to discard every entry.
 #[cfg(not(target_arch = "wasm32"))]
 fn signal_key(mtime_ms: u64, len: u64) -> u64 {

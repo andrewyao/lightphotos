@@ -4,8 +4,8 @@
 //! `loader.rs`'s caches through its `*_external` methods.
 
 use super::*;
+use crate::jobs::thumbnail::THUMB_PX;
 use crate::navigation::Playlist;
-use crate::thumbnail::THUMB_PX;
 use crate::web::web_decode::JobKind;
 use crate::web::web_fs;
 

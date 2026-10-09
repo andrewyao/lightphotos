@@ -15,7 +15,7 @@ use super::{App, PendingConfirm, ViewMode};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::loader::Loader;
+use crate::jobs::loader::Loader;
 use crate::navigation::FlagFilter;
 use crate::renderer::Renderer;
 

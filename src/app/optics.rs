@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use super::{App, StatusKind};
 use crate::develop::{Adjustments, CaScale};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::thumbnail::EmbeddedPreview;
+use crate::jobs::thumbnail::EmbeddedPreview;
 
 /// The size the measurement decodes at. `chroma`'s search window is sized
 /// for it: at full resolution the corner fringes run past `MAX_SHIFT`.
@@ -93,9 +93,12 @@ impl App {
         std::thread::Builder::new()
             .name("chroma-measure".to_string())
             .spawn(move || {
-                let scale =
-                    crate::thumbnail::decode_at_size(&path, MEASURE_PX, EmbeddedPreview::Never)
-                        .map(|img| crate::develop::chroma::measure(&img));
+                let scale = crate::jobs::thumbnail::decode_at_size(
+                    &path,
+                    MEASURE_PX,
+                    EmbeddedPreview::Never,
+                )
+                .map(|img| crate::develop::chroma::measure(&img));
                 let _ = tx.send((path, scale));
             })
             .map(drop)

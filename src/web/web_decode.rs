@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::decode::image_decode::{self, DecodedImage, ImageMetadata};
-use crate::thumbnail;
+use crate::jobs::thumbnail;
 
 /// What a decode is for. `Preview` and `Full` get the full RAW demosaic with
 /// linear output. `Thumb` and `Speed` (the Loupe's quick screen-fit first

@@ -32,11 +32,11 @@ pub(crate) struct Cleanup {
 /// Cache key from a `File`'s size and modified time. `last_modified` is
 /// already in milliseconds, the unit `thumbnail::cache_key` expects.
 pub(crate) fn key_for(file: &web_sys::File) -> u64 {
-    crate::thumbnail::cache_key(file.last_modified() as u64, file.size() as u64)
+    crate::jobs::thumbnail::cache_key(file.last_modified() as u64, file.size() as u64)
 }
 
 pub(crate) fn entry_name(filename: &OsStr, key: u64) -> String {
-    crate::thumbnail::cache_name(filename, key)
+    crate::jobs::thumbnail::cache_name(filename, key)
         .to_string_lossy()
         .into_owned()
 }
@@ -103,7 +103,7 @@ async fn remove_previous_versions(
     stored_name: &str,
     cleanup: &RefCell<Cleanup>,
 ) {
-    if crate::thumbnail::parse_cache_name(OsStr::new(stored_name)).is_none() {
+    if crate::jobs::thumbnail::parse_cache_name(OsStr::new(stored_name)).is_none() {
         return;
     }
     {
@@ -123,7 +123,7 @@ async fn remove_previous_versions(
     loop {
         let next = cleanup.borrow_mut().pending.pop_front();
         let Some(name) = next else { break };
-        let (photo, _) = crate::thumbnail::parse_cache_name(OsStr::new(&name)).unwrap();
+        let (photo, _) = crate::jobs::thumbnail::parse_cache_name(OsStr::new(&name)).unwrap();
         let doomed = {
             let mut state = cleanup.borrow_mut();
             let versions = state.versions.entry(photo.clone()).or_default();
@@ -173,7 +173,7 @@ async fn index_versions(dir: &FileSystemDirectoryHandle) -> HashMap<OsString, Ha
             continue;
         };
         let name = child.name();
-        if let Some((photo, _)) = crate::thumbnail::parse_cache_name(OsStr::new(&name)) {
+        if let Some((photo, _)) = crate::jobs::thumbnail::parse_cache_name(OsStr::new(&name)) {
             versions.entry(photo).or_default().insert(name);
         }
     }
@@ -221,7 +221,7 @@ pub(crate) async fn sweep_orphans(
         };
         let name = child.name();
         // Skip sidecars and anything else that is not a cache entry.
-        let Some((photo, key)) = crate::thumbnail::parse_cache_name(OsStr::new(&name)) else {
+        let Some((photo, key)) = crate::jobs::thumbnail::parse_cache_name(OsStr::new(&name)) else {
             continue;
         };
         let Some(handle) = live.get(&photo) else {

@@ -20,10 +20,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::SystemTime;
 
-use crate::cache_limits::CacheLimits;
 use crate::decode::image_decode::{self, DecodedImage, ImageMetadata};
 use crate::develop::{Adjustments, TouchUp};
-use crate::thumbnail::ThumbCache;
+use crate::jobs::cache_limits::CacheLimits;
+use crate::jobs::thumbnail::ThumbCache;
 
 /// True when `LIGHTPHOTOS_TIMING=1`, which prints decode and upload timings to
 /// stderr.
@@ -531,7 +531,7 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
         Job::Speed(path, target) => {
             let t0 = web_time::Instant::now();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::thumbnail::decode_speed(&path, target)
+                crate::jobs::thumbnail::decode_speed(&path, target)
             }))
             .unwrap_or_else(|_| Err(format!("speed decode panicked: {}", path.display())));
             report_decode("speed", &path, target, t0, &r);
@@ -542,10 +542,10 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
             // Not `image_decode::decode`: that decodes at full size and then
             // shrinks, which is slower than a decode at the target size.
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::thumbnail::decode_at_size(
+                crate::jobs::thumbnail::decode_at_size(
                     &path,
                     target,
-                    crate::thumbnail::EmbeddedPreview::Never,
+                    crate::jobs::thumbnail::EmbeddedPreview::Never,
                 )
             }))
             .unwrap_or_else(|_| Err(format!("preview decode panicked: {}", path.display())));
@@ -1918,7 +1918,7 @@ mod tests {
     #[test]
     fn thumbnail_cache_retains_large_grid_and_shrinks_after_resize() {
         let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
-        let px = crate::thumbnail::THUMB_PX;
+        let px = crate::jobs::thumbnail::THUMB_PX;
         // 18 columns, 10 visible rows, and three prefetch rows on either side.
         let working_set = 18 * (10 + 6);
         loader.set_thumb_working_set_size(working_set);

@@ -9,7 +9,7 @@ use std::path::Path;
 use crate::autotone;
 use crate::develop::image_ops;
 use crate::develop::Adjustments;
-use crate::thumbnail::THUMB_PX;
+use crate::jobs::thumbnail::THUMB_PX;
 
 /// Longest-side sample count for thumbnail analysis. Matches
 /// `build_hist_sample`, so the Loupe and a batch see the same statistics.
@@ -553,9 +553,9 @@ mod tests {
         assert_eq!(app.autotone_total(), 2);
         assert_eq!(app.autotone.done, 0);
 
-        app.loader = Some(crate::loader::Loader::new(
+        app.loader = Some(crate::jobs::loader::Loader::new(
             16384,
-            crate::cache_limits::CacheLimits::PLATFORM,
+            crate::jobs::cache_limits::CacheLimits::PLATFORM,
         ));
         for (index, path) in [&a, &b].into_iter().enumerate() {
             app.loader.as_mut().unwrap().insert_thumb_external(
@@ -595,9 +595,9 @@ mod tests {
         let mut app = App::new(None);
         load_folder(&mut app, &dir);
         app.mode = ViewMode::Grid;
-        app.loader = Some(crate::loader::Loader::new(
+        app.loader = Some(crate::jobs::loader::Loader::new(
             16384,
-            crate::cache_limits::CacheLimits::PLATFORM,
+            crate::jobs::cache_limits::CacheLimits::PLATFORM,
         ));
 
         app.auto_tone_batch(photos.clone(), DeferredAutoToneMode::Replace);
@@ -674,9 +674,9 @@ mod tests {
         let mut app = App::new(None);
         load_folder(&mut app, &dir);
         app.mode = ViewMode::Grid;
-        app.loader = Some(crate::loader::Loader::new(
+        app.loader = Some(crate::jobs::loader::Loader::new(
             16384,
-            crate::cache_limits::CacheLimits::PLATFORM,
+            crate::jobs::cache_limits::CacheLimits::PLATFORM,
         ));
         app.auto_tone_batch(photos.clone(), DeferredAutoToneMode::Replace);
 
@@ -718,8 +718,10 @@ mod tests {
     #[test]
     fn poisoned_thumbnail_queue_terminates_auto_tone_batch() {
         let (mut app, dir, a, b) = grid_with_two_photos("autotone-poison");
-        let mut loader =
-            crate::loader::Loader::new(16384, crate::cache_limits::CacheLimits::PLATFORM);
+        let mut loader = crate::jobs::loader::Loader::new(
+            16384,
+            crate::jobs::cache_limits::CacheLimits::PLATFORM,
+        );
         loader.poison_thumb_queue_for_test(a.clone(), THUMB_PX);
         app.loader = Some(loader);
         app.auto_tone_batch(vec![a.clone()], DeferredAutoToneMode::Replace);
@@ -898,9 +900,9 @@ mod tests {
         app.autotone.pending.remove(&a);
         app.autotone.base.remove(&a);
 
-        app.loader = Some(crate::loader::Loader::new(
+        app.loader = Some(crate::jobs::loader::Loader::new(
             16384,
-            crate::cache_limits::CacheLimits::PLATFORM,
+            crate::jobs::cache_limits::CacheLimits::PLATFORM,
         ));
         app.loader.as_mut().unwrap().insert_thumb_external(
             a.clone(),
@@ -939,9 +941,9 @@ mod tests {
         };
         app.edits.insert(a.clone(), manual);
 
-        app.loader = Some(crate::loader::Loader::new(
+        app.loader = Some(crate::jobs::loader::Loader::new(
             16384,
-            crate::cache_limits::CacheLimits::PLATFORM,
+            crate::jobs::cache_limits::CacheLimits::PLATFORM,
         ));
         app.loader.as_mut().unwrap().insert_thumb_external(
             a.clone(),

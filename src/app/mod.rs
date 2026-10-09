@@ -19,7 +19,7 @@ use winit::window::Window;
 use crate::decode::image_decode;
 use crate::develop::{Adjustments, Crop, TouchUp};
 use crate::export::Exporter;
-use crate::loader::Loader;
+use crate::jobs::loader::Loader;
 use crate::navigation::{Cmp, FlagFilter, Playlist};
 use crate::persist::catalog::Catalog;
 use crate::renderer::{EguiPaint, Renderer};
@@ -30,7 +30,7 @@ use crate::ui;
 const MAX_ZOOM: f32 = 64.0;
 
 /// Side of a grid cell, in egui points. Smaller than
-/// [`crate::thumbnail::THUMB_PX`] so HiDPI displays get real pixels to draw.
+/// [`crate::jobs::thumbnail::THUMB_PX`] so HiDPI displays get real pixels to draw.
 pub(crate) const GRID_CELL_PT: f32 = 192.0;
 
 /// Whether the Grid toolbar shows the Eyes-closed filter. Off because no real
@@ -375,9 +375,9 @@ pub(crate) struct App {
     pub(crate) loader: Option<Loader>,
     /// `None` until the window is created, and on targets that cannot spawn
     /// threads.
-    score_pool: Option<crate::score::ScorePool>,
+    score_pool: Option<crate::jobs::score::ScorePool>,
     /// The photos a "Score photos" run has left. `None` when none is running.
-    score_job: Option<crate::score::ScoreJob>,
+    score_job: Option<crate::jobs::score::ScoreJob>,
     /// The export form, its settings and the exports it started.
     exports: export::Exports,
     /// The running bulk delete, if any. `pub(crate)` because the frame loop

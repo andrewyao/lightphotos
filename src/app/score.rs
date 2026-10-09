@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! "Score photos": the App side of `crate::score`. It queues the selection,
+//! "Score photos": the App side of `crate::jobs::score`. It queues the selection,
 //! keeps the scoring pool fed one photo per free worker, and stores each
 //! score in the photo's sidecar as it lands.
 
 use super::*;
 
-use crate::score::{ScoreJob, ScoreRequest};
+use crate::jobs::score::{ScoreJob, ScoreRequest};
 
 impl App {
     /// Score the selection, every photo of a selected group included, or in
@@ -123,7 +123,7 @@ impl App {
     /// Starts the scoring workers. The window's setup calls it, so a test's
     /// App has none.
     pub(crate) fn start_score_pool(&mut self) {
-        self.score_pool = crate::score::ScorePool::new();
+        self.score_pool = crate::jobs::score::ScorePool::new();
     }
 
     /// `(done, total)` while a run is going.
@@ -204,7 +204,7 @@ impl App {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use crate::score::ScorePool;
+    use crate::jobs::score::ScorePool;
     use crate::scoring::quality::{Basis, QualityScore};
 
     fn folder_app(n: usize) -> (App, PathBuf, Vec<PathBuf>) {

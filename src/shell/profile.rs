@@ -36,9 +36,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::app::{grid_working_range, load_order, strip_working_range};
-use crate::loader::Loader;
+use crate::jobs::loader::Loader;
+use crate::jobs::thumbnail::THUMB_PX;
 use crate::navigation::Playlist;
-use crate::thumbnail::THUMB_PX;
 
 /// One scripted run. The counts are the shape of a real session rather than
 /// the whole folder: the grid paints a screenful before the user scrolls, and
@@ -75,7 +75,7 @@ struct Run {
     cold: bool,
     /// The loader's cache sizes, `LIGHTPHOTOS_CACHE_*` overrides included, so
     /// a tuning run profiles the limits it names.
-    limits: crate::cache_limits::CacheLimits,
+    limits: crate::jobs::cache_limits::CacheLimits,
 }
 
 impl Run {
@@ -98,7 +98,7 @@ impl Run {
             exports: count("LIGHTPHOTOS_PROFILE_EXPORTS", 5),
             vision: count("LIGHTPHOTOS_PROFILE_VISION", 8),
             cold: std::env::var("LIGHTPHOTOS_PROFILE_COLD").as_deref() == Ok("1"),
-            limits: crate::cache_limits::CacheLimits::from_env(),
+            limits: crate::jobs::cache_limits::CacheLimits::from_env(),
         }
     }
 }
@@ -265,7 +265,7 @@ impl Run {
     fn score_photos(&self, photos: &[PathBuf]) {
         let mut times = Vec::new();
         for path in photos.iter().take(self.vision) {
-            let req = crate::score::ScoreRequest {
+            let req = crate::jobs::score::ScoreRequest {
                 path: path.clone(),
                 adj: Default::default(),
                 touchups: Vec::new(),
@@ -273,7 +273,7 @@ impl Run {
                 edits: 0,
             };
             let t0 = Instant::now();
-            let scored = crate::score::score_photo(&req);
+            let scored = crate::jobs::score::score_photo(&req);
             times.push(t0.elapsed());
             if let Err(e) = scored {
                 eprintln!("[profile] score {}: {e}", path.display());
@@ -584,7 +584,7 @@ impl Run {
         crate::navigation::list_subdirs(&self.dir);
         crate::persist::catalog::load_sidecars(&self.dir);
         crate::persist::signalcache::SignalCache::load(&self.dir);
-        crate::thumbnail::sweep_orphans(&self.dir);
+        crate::jobs::thumbnail::sweep_orphans(&self.dir);
         playlist
     }
 
@@ -861,15 +861,15 @@ impl BackgroundScoring {
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stop.clone();
         let thread = std::thread::spawn(move || {
-            let Some(mut pool) = crate::score::ScorePool::new() else {
+            let Some(mut pool) = crate::jobs::score::ScorePool::new() else {
                 return 0;
             };
-            let mut job = crate::score::ScoreJob::default();
+            let mut job = crate::jobs::score::ScoreJob::default();
             job.add(photos.iter().cycle().take(photos.len() * 4).cloned());
             let mut scored = 0;
             while !flag.load(Ordering::Relaxed) {
                 for path in job.take(pool.capacity()) {
-                    pool.submit(crate::score::ScoreRequest {
+                    pool.submit(crate::jobs::score::ScoreRequest {
                         path,
                         adj: Default::default(),
                         touchups: Vec::new(),

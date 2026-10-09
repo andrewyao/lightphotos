@@ -51,7 +51,7 @@ pub fn score_photo(req: &ScoreRequest) -> Result<QualityScore, String> {
 /// but a JPEG's EXIF thumbnail is far too small to judge focus on, so a short
 /// result is decoded again from the image itself.
 fn preview(path: &Path) -> Result<crate::decode::image_decode::DecodedImage, String> {
-    use crate::thumbnail::{decode_at_size, EmbeddedPreview};
+    use crate::jobs::thumbnail::{decode_at_size, EmbeddedPreview};
     let px = crate::scoring::quality::ANALYSIS_PX;
     let img = decode_at_size(path, px, EmbeddedPreview::UseIfPresent)?;
     if img.width.max(img.height) >= px {

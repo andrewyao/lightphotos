@@ -166,7 +166,7 @@ impl App {
                     let _ = tx.send((for_thread.clone(), token, mark, loaded));
                     // Sweep after sending, because the UI waits on the catalog
                     // and nothing waits on the sweep.
-                    crate::thumbnail::sweep_orphans(&for_thread);
+                    crate::jobs::thumbnail::sweep_orphans(&for_thread);
                 });
             match spawned {
                 Ok(_) => self.catalog_load.pending = Some((dir, token)),

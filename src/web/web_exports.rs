@@ -14,7 +14,7 @@ use std::rc::Rc;
 use web_sys::FileSystemDirectoryHandle;
 
 use crate::develop::{Adjustments, TouchUp};
-use crate::loader::WebDecoder;
+use crate::jobs::loader::WebDecoder;
 
 /// Most exports in flight at once. Every thread shares one wasm heap of at
 /// most 4 GB, and a full-resolution RAW bake peaks somewhere near 1 GB, so

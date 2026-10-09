@@ -1268,8 +1268,10 @@ mod tests {
             let (w, h) = (400, 300);
             app.shown = Shown::Preview(path.clone(), w, h);
             app.source_size = Some((w, h));
-            let mut loader =
-                crate::loader::Loader::new(16384, crate::cache_limits::CacheLimits::PLATFORM);
+            let mut loader = crate::jobs::loader::Loader::new(
+                16384,
+                crate::jobs::cache_limits::CacheLimits::PLATFORM,
+            );
             loader.insert_full_external(
                 path,
                 std::sync::Arc::new(crate::decode::image_decode::DecodedImage::new_tracked(
