@@ -29,7 +29,7 @@ path = "src/bin/score_probe.rs"
 
 [[bin]]
 name = "decode_probe"
-path = "src/raw/probe.rs"
+path = "src/bin/decode_probe/main.rs"
 # Exercises the non-mac RAW decode path. On macOS it compiles to a stub that
 # exits, so its regression tests run in CI's Linux job.
 

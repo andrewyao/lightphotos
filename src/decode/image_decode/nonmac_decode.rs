@@ -178,7 +178,7 @@ pub fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, Stri
 }
 
 /// [`decode_raw_nonmac`] for an in-memory file. Export uses it, and a browser
-/// has no path to open. The parity test in `raw/probe.rs` checks both
+/// has no path to open. The parity test in `decode_probe` checks both
 /// produce identical bytes.
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]

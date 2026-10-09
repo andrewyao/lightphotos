@@ -9,7 +9,6 @@
 //! that exits.
 
 #[cfg(not(target_os = "macos"))]
-#[path = "probe_nonmac.rs"]
 mod nonmac;
 
 fn main() {
