@@ -10,6 +10,10 @@ open any photo in the Loupe to zoom, pan and edit. JPEG, PNG, TIFF, HEIC and
 camera RAW are supported. Ratings and edits are saved to a `.lightphotos` folder next to your photos, so
 the originals are never modified.
 
+![The Grid, with ratings on a folder of photos](assets/screenshots/grid.jpg)
+
+![The Loupe, editing a Sony RAW file](assets/screenshots/loupe.jpg)
+
 It runs on macOS, Linux and Windows, and in the browser. Downloads and the
 browser version are at **[lightphotos.app](https://lightphotos.app)**. HEIC and
 the Vision-backed features (face/blink scoring) are
