@@ -890,6 +890,33 @@ mod tests {
         app.loader.as_ref().is_some_and(|l| l.full_inflight(path))
     }
 
+    fn preview_wanted(app: &App, path: &Path) -> bool {
+        let target = app.preview_px();
+        app.loader
+            .as_ref()
+            .is_some_and(|l| l.escalates(path, target))
+    }
+
+    #[test]
+    fn the_neighbors_get_a_sharp_preview_once_the_current_photo_settles() {
+        let (mut app, paths) = fitted_app("loupe-neighbor-preview", (2880.0, 1800.0));
+        app.request_neighbors();
+        assert!(preview_wanted(&app, &paths[0]));
+        assert!(preview_wanted(&app, &paths[2]));
+    }
+
+    #[test]
+    fn the_neighbors_wait_on_the_cheap_pass_while_the_current_full_decodes() {
+        // The preview lane runs ahead of the full lane, so a neighbor's
+        // `Preview` would delay the current photo's full decode.
+        let (mut app, paths) = fitted_app("loupe-neighbor-wait", (6016.0, 3384.0));
+        app.try_show();
+        assert!(full_queued(&app, &paths[1]));
+        app.request_neighbors();
+        assert!(!preview_wanted(&app, &paths[0]));
+        assert!(!preview_wanted(&app, &paths[2]));
+    }
+
     #[test]
     fn the_title_bars_name_the_decode_on_screen() {
         let (mut app, paths) = fitted_app("loupe-tier", (1440.0, 900.0));

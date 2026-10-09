@@ -772,8 +772,9 @@ pub struct Loader {
     /// The same for the full tier: on wasm32 a RAF or CR3 full decode can be
     /// the camera's full-size embedded JPEG.
     embedded_fulls: HashSet<PathBuf>,
-    /// Keys the user has viewed, which get the `Preview` decode if their speed
-    /// pass came back short. Prefetched neighbors are not in this set.
+    /// Keys that get the `Preview` decode if their speed pass came back
+    /// short: the photo on screen, and its neighbors once it has settled.
+    /// Keys from `prefetch_preview` alone are not in this set.
     escalation_wanted: HashSet<(PathBuf, u32)>,
 
     thumb_cache: HashMap<(PathBuf, u32), Arc<DecodedImage>>,
@@ -916,15 +917,15 @@ impl Loader {
 
     /// Requests the screen-fit view the loupe shows for `path` at `target_px`.
     /// Runs a `Speed` pass first and follows with a `Preview` decode only if
-    /// the speed result is smaller than `target_px`.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// the speed result is smaller than `target_px`. On wasm32 this queues
+    /// nothing; `app/web.rs` submits the browser's decodes.
     pub fn request_preview(&mut self, path: PathBuf, target_px: u32) {
         self.enqueue_speed(path, target_px, true);
     }
 
-    /// Like `request_preview`, for a neighbor the user has not opened yet. Runs
-    /// only the `Speed` pass. `request_preview` adds the `Preview` decode once
-    /// the photo is viewed.
+    /// Like `request_preview`, for a neighbor that must not compete with the
+    /// photo on screen yet. Runs only the `Speed` pass. `request_preview`
+    /// adds the `Preview` decode later.
     pub fn prefetch_preview(&mut self, path: PathBuf, target_px: u32) {
         self.enqueue_speed(path, target_px, false);
     }
@@ -1166,6 +1167,14 @@ impl Loader {
             .collect()
     }
 
+    /// True when a short speed pass of `(path, target_px)` would be followed
+    /// by the `Preview` decode.
+    #[cfg(test)]
+    pub(crate) fn escalates(&self, path: &Path, target_px: u32) -> bool {
+        self.escalation_wanted
+            .contains(&(path.to_path_buf(), target_px))
+    }
+
     /// Reports one worker but spawns none, so enqueued jobs stay queued and
     /// tests can inspect them.
     #[cfg(test)]
@@ -1332,6 +1341,27 @@ impl Loader {
             Job::Full(path, _) if !keep(path) => {
                 // Else `request_full` would see it in flight and never queue it again.
                 inflight.remove(path);
+                false
+            }
+            _ => true,
+        });
+    }
+
+    /// Drops queued `Preview` decodes whose path `keep` rejects. Neighbors
+    /// get a `Preview` too, so without this, fast stepping leaves a decode
+    /// per photo passed queued ahead of the photo the user stops on.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn retain_previews(&mut self, keep: impl Fn(&Path) -> bool) {
+        let Ok(mut q) = lock_queue(&self.shared) else {
+            return;
+        };
+        let inflight = &mut self.preview_inflight;
+        let wanted = &mut self.escalation_wanted;
+        q.preview.retain(|job| match job {
+            Job::Preview(path, target) if !keep(path) => {
+                let key = (path.clone(), *target);
+                inflight.remove(&key);
+                wanted.remove(&key);
                 false
             }
             _ => true,
@@ -2158,6 +2188,32 @@ mod tests {
         assert!(!loader.full_inflight(&path("a")));
         assert!(!loader.full_inflight(&path("b")));
         assert!(loader.full_inflight(&path("c")));
+    }
+
+    #[test]
+    fn stepping_past_a_photo_drops_its_queued_preview_decode() {
+        let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
+        // No workers, so queue the jobs by hand as `escalate_if_short` would.
+        for p in ["a", "b", "c"] {
+            push_job(&loader.shared, Job::Preview(path(p), 2560));
+            loader.preview_inflight.insert((path(p), 2560));
+            loader.escalation_wanted.insert((path(p), 2560));
+        }
+        loader.retain_previews(|p| p == path("c"));
+        let queued: Vec<PathBuf> = lock_queue(&loader.shared)
+            .unwrap()
+            .preview
+            .iter()
+            .filter_map(|job| match job {
+                Job::Preview(p, _) => Some(p.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(queued, [path("c")]);
+        // Else stepping back would see it in flight and never queue it again.
+        assert_eq!(queued_previews(&loader), 1);
+        assert!(!loader.escalates(&path("a"), 2560));
+        assert!(loader.escalates(&path("c"), 2560));
     }
 
     #[test]

@@ -811,9 +811,13 @@ impl App {
         let tiles: Vec<PathBuf> = self
             .compare_tiles()
             .map_or(Vec::new(), |t| t.page_paths().to_vec());
+        let neighbors = self.neighbor_paths();
         if let Some(loader) = &mut self.loader {
             let keep = |p: &Path| {
-                p == path || selected.as_deref() == Some(p) || tiles.iter().any(|t| t == p)
+                p == path
+                    || selected.as_deref() == Some(p)
+                    || tiles.iter().any(|t| t == p)
+                    || neighbors.iter().any(|n| n == p)
             };
             for (kind, p, t) in loader.retain_web_loupe(keep) {
                 match kind {
@@ -840,7 +844,32 @@ impl App {
                 started |= self.start_web_preview_read(p, true, false);
             }
         }
+        if self.web_neighbors_may_start(&path) {
+            for p in neighbors {
+                if self.web.read_inflight.get() >= MAX_CONCURRENT_READS {
+                    break;
+                }
+                // `Preview` only: a `Speed` result shows only for the wanted
+                // photo and skips the cache, so a neighbor's would be lost.
+                if self.web_loupe_reads(&p).0 {
+                    started |= self.start_web_preview_read(p, true, false);
+                }
+            }
+        }
         started
+    }
+
+    /// True once the wanted photo has its preview and no full decode is
+    /// running. Only then do the neighbors' previews start, so they never
+    /// delay the photo on screen: one thread runs every `Preview` (see
+    /// `Worker::takes_previews`), and each read holds a whole file.
+    fn web_neighbors_may_start(&self, want: &Path) -> bool {
+        self.mode == ViewMode::Loupe
+            && self.web.full_inflight.is_empty()
+            && self
+                .loader
+                .as_ref()
+                .is_some_and(|l| l.get_preview(want, self.preview_px()).is_some())
     }
 
     /// Reads `path` and submits the `Preview` and `Speed` decodes asked for.

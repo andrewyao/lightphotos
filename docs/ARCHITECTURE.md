@@ -136,6 +136,16 @@ flowchart TD
   of other photos, and pins the current photo against eviction.
 - At fit on a normal window, browsing never triggers a full decode.
 
+**Neighbor previews:**
+- The previous and next photos get the full preview tier, so a step shows a
+  sharp image at once. Native: `request_neighbors` (`app/nav.rs`). Web:
+  `request_web_preview` (`app/web.rs`).
+- The neighbors start only when the current photo has its preview and no
+  full decode of it is in flight.
+- When the photo changes, `Loader::retain_previews` (native) and
+  `Loader::retain_web_loupe` (wasm32) drop the queued previews of photos
+  that are not the current photo or a neighbor.
+
 ---
 
 ## Pipeline 2 — Browsing a folder (Grid / filmstrip thumbnails)

@@ -483,9 +483,9 @@ impl App {
             let neighbors = self.neighbor_paths();
             if let Some(loader) = &mut self.loader {
                 // Drop queued full decodes of photos stepped past.
-                loader.retain_full(path.clone(), |p| {
-                    p == path || neighbors.iter().any(|n| n == p)
-                });
+                let keep = |p: &Path| p == path || neighbors.iter().any(|n| n == p);
+                loader.retain_full(path.clone(), keep);
+                loader.retain_previews(keep);
                 loader.request_preview(path.clone(), preview_px);
                 loader.request_thumb(path.clone(), px);
             }
@@ -502,10 +502,14 @@ impl App {
         self.try_show();
     }
 
-    /// Prefetch previews of the previous and next photos so stepping feels
-    /// instant. Waits until the current photo's preview is ready: otherwise all
-    /// three decode at once, and on 24MP RAW the open went from ~300ms to
-    /// ~970ms with the current photo finishing last.
+    /// Prepare the previous and next photos at the preview tier so a step
+    /// lands sharp. Waits until the current photo's preview is ready:
+    /// otherwise all three decode at once, and on 24MP RAW the open went from
+    /// ~300ms to ~970ms with the current photo finishing last. The neighbors'
+    /// `Preview` decodes also wait for the current photo's full decode, since
+    /// the preview lane runs ahead of the full lane.
+    ///
+    /// On wasm32 `request_web_preview` prefetches the neighbors instead.
     pub(crate) fn request_neighbors(&mut self) {
         // The frame loop calls this in any mode. Outside the Loupe, neighbors
         // mean nothing.
@@ -532,19 +536,27 @@ impl App {
                 (Some(want), Some(loader)) => loader.get_full(want).is_some(),
                 _ => false,
             };
+        let full_running = match (&self.want, self.loader.as_ref()) {
+            (Some(want), Some(loader)) => loader.full_inflight(want),
+            _ => false,
+        };
         if let Some(loader) = &mut self.loader {
             for p in paths {
                 #[cfg(not(target_arch = "wasm32"))]
                 if fulls {
                     loader.request_full(p.clone());
                 }
-                loader.prefetch_preview(p, target);
+                if full_running {
+                    loader.prefetch_preview(p, target);
+                } else {
+                    loader.request_preview(p, target);
+                }
             }
         }
     }
 
     /// The previous and next photos around the selection, wrapping.
-    fn neighbor_paths(&self) -> Vec<PathBuf> {
+    pub(super) fn neighbor_paths(&self) -> Vec<PathBuf> {
         let n = self.visible.len();
         let Some(cur) = self.sel.filter(|_| n > 1) else {
             return Vec::new();
