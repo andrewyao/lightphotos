@@ -9,7 +9,7 @@
 //! `rdf:Description`, and both spellings are read. A dozen keys do not earn an
 //! XML crate, least of all one that has to build for wasm32.
 
-use crate::curve::{Channel, Curve};
+use crate::develop::curve::{Channel, Curve};
 use crate::develop::{Adjustments, SliderId, SLIDERS};
 
 /// What a preset file yielded.

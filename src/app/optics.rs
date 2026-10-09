@@ -95,7 +95,7 @@ impl App {
             .spawn(move || {
                 let scale =
                     crate::thumbnail::decode_at_size(&path, MEASURE_PX, EmbeddedPreview::Never)
-                        .map(|img| crate::chroma::measure(&img));
+                        .map(|img| crate::develop::chroma::measure(&img));
                 let _ = tx.send((path, scale));
             })
             .map(drop)

@@ -2,8 +2,8 @@ use super::*;
 
 use crate::decode::image_decode;
 use crate::decode::image_decode::PixelFormat;
+use crate::develop::image_ops;
 use crate::develop::{self};
-use crate::image_ops;
 
 pub(super) struct Histogram {
     /// Small row-major grid (`dw` x `dh`) of the shown image in

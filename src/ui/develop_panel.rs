@@ -5,7 +5,7 @@ use crate::app::{
     App, CropAspect, CropOrientation, CropOverlay, DevelopTab, FocusLevel, RailItem, Region,
     StraightenTool,
 };
-use crate::curve::{Channel, Curve, ToneCurve};
+use crate::develop::curve::{Channel, Curve, ToneCurve};
 
 /// The right-hand Develop panel, with sliders in Lightroom's order. Pushes one
 /// `SetAdjustments` only on frames where a slider changed. Double-clicking a

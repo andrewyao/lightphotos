@@ -39,7 +39,8 @@ pub struct ScoreOutcome {
 #[hotpath::measure]
 pub fn score_photo(req: &ScoreRequest) -> Result<QualityScore, String> {
     let img = preview(&req.path)?;
-    let (w, h, rgba) = crate::image_ops::bake_edited(&img, &req.adj, &req.touchups, req.rot);
+    let (w, h, rgba) =
+        crate::develop::image_ops::bake_edited(&img, &req.adj, &req.touchups, req.rot);
     if w == 0 || h == 0 {
         return Err("the edited preview is empty".into());
     }

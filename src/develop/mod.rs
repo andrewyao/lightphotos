@@ -5,9 +5,13 @@
 //! used for export, edited thumbnails, and the histogram. The Loupe runs the
 //! same math in `shader.wgsl`; the two must stay in sync.
 
+pub mod chroma;
+pub mod curve;
+pub mod image_ops;
+
 use serde::{Deserialize, Serialize};
 
-use crate::curve::{self, ToneCurve};
+use curve::ToneCurve;
 
 /// Range of every tone slider except exposure and denoise. 0 is no change.
 pub const TONE_RANGE: std::ops::RangeInclusive<f32> = -100.0..=100.0;
@@ -854,7 +858,7 @@ mod tests {
 
     #[test]
     fn raw_shader_look_knots_match_cpu() {
-        let wgsl = include_str!("raw/raw_shader.wgsl");
+        let wgsl = include_str!("../raw/raw_shader.wgsl");
         let body = wgsl
             .split("const RAW_LOOK_KNOTS = array<f32, 17>(")
             .nth(1)
@@ -1460,7 +1464,7 @@ mod tests {
 
     #[test]
     fn edit_signature_differs_on_curve_only_when_bent() {
-        use crate::curve::Curve;
+        use crate::develop::curve::Curve;
         let mut adj = Adjustments::default();
         let base = edit_signature(&adj, 0);
         adj.curve.rgb = Curve::STRONG_CONTRAST;
@@ -1475,7 +1479,7 @@ mod tests {
 
     #[test]
     fn a_contrast_curve_spreads_tones_in_both_pipelines() {
-        use crate::curve::Curve;
+        use crate::develop::curve::Curve;
         let mut adj = Adjustments::default();
         adj.curve.rgb = Curve::STRONG_CONTRAST;
         for pipeline in [apply_linear, apply_raw_display] {
@@ -1488,7 +1492,7 @@ mod tests {
 
     #[test]
     fn a_red_curve_moves_only_red() {
-        use crate::curve::Curve;
+        use crate::develop::curve::Curve;
         let mut adj = Adjustments::default();
         adj.curve.red = Curve::STRONG_CONTRAST;
         let px = [0.6, 0.6, 0.6];

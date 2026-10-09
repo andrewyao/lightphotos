@@ -5,8 +5,8 @@
 //! shader and `image_ops::bake_edited` both undo the same way.
 
 use crate::decode::image_decode::DecodedImage;
+use crate::develop::image_ops::pixel_linear;
 use crate::develop::CaScale;
-use crate::image_ops::pixel_linear;
 
 /// The largest scale `measure` reports. Real lenses stay well inside it, so
 /// anything past it is a bad fit, not aberration.

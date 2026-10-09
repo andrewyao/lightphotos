@@ -4,14 +4,11 @@
 //! app in `main.rs` and the probes in `src/bin/` share it, so none of these
 //! modules depends on egui, winit or wgpu.
 
-pub mod chroma;
-pub mod curve;
 pub mod decode;
 pub mod develop;
 pub mod export;
 pub mod facequality;
 pub mod hash;
-pub mod image_ops;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod immich;
 pub mod judge;

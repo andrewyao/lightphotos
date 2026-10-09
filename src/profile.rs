@@ -361,7 +361,7 @@ impl Run {
             let Some(img) = loader.get_thumb(path, THUMB_PX) else {
                 continue;
             };
-            let (grid, _, _) = crate::image_ops::downsample_linear(&img, 256);
+            let (grid, _, _) = crate::develop::image_ops::downsample_linear(&img, 256);
             if !grid.is_empty() {
                 crate::autotone::analyze(&grid, img.pixel_format, Default::default());
                 analysed += 1;
@@ -427,7 +427,7 @@ impl Run {
                 continue;
             };
             let t0 = Instant::now();
-            let baked = crate::image_ops::bake_edited(&img, &adj, &[], 0);
+            let baked = crate::develop::image_ops::bake_edited(&img, &adj, &[], 0);
             bakes.push(t0.elapsed());
             std::hint::black_box(baked);
         }

@@ -7,8 +7,8 @@ use super::*;
 use std::path::Path;
 
 use crate::autotone;
+use crate::develop::image_ops;
 use crate::develop::Adjustments;
-use crate::image_ops;
 use crate::thumbnail::THUMB_PX;
 
 /// Longest-side sample count for thumbnail analysis. Matches

@@ -85,7 +85,7 @@ impl Mask {
         Mask::new_tracked(MaskFields {
             width,
             height,
-            alpha: crate::image_ops::resample_bilinear_u8(
+            alpha: crate::develop::image_ops::resample_bilinear_u8(
                 &self.alpha,
                 self.width,
                 self.height,
@@ -103,8 +103,12 @@ impl Mask {
         if orientation <= 1 {
             return self;
         }
-        let (width, height, alpha) =
-            crate::image_ops::orient_mask(&self.alpha, self.width, self.height, orientation);
+        let (width, height, alpha) = crate::develop::image_ops::orient_mask(
+            &self.alpha,
+            self.width,
+            self.height,
+            orientation,
+        );
         Mask::new_tracked(MaskFields {
             width,
             height,

@@ -1,9 +1,9 @@
 use super::*;
 use std::path::Path;
 
-use crate::curve::Channel;
+use crate::develop::curve::Channel;
+use crate::develop::image_ops;
 use crate::develop::{self, Adjustments, GpuAdjust, GpuTouchUp, TouchUp};
-use crate::image_ops;
 
 impl App {
     /// Develop adjustments of the image currently shown (identity if unset).
@@ -705,7 +705,7 @@ mod tests {
 
     #[test]
     fn a_curve_channel_change_syncs_only_that_channel() {
-        use crate::curve::Curve;
+        use crate::develop::curve::Curve;
         let (mut app, dir, paths) = three_selected("sync-curve");
         let mut own = app.edits[&paths[1]];
         own.curve.blue = Curve::MEDIUM_CONTRAST;

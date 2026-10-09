@@ -112,7 +112,7 @@ struct BakeJob {
 impl BakeJob {
     fn run(self) -> BakedThumb {
         let (width, height, rgba) =
-            crate::image_ops::bake_edited(&self.img, &self.adj, &self.touchups, self.rot);
+            crate::develop::image_ops::bake_edited(&self.img, &self.adj, &self.touchups, self.rot);
         BakedThumb {
             path: self.path,
             px: self.px,

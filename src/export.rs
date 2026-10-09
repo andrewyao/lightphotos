@@ -149,8 +149,8 @@ fn bake_sized(
     rot: u8,
     max_px: u32,
 ) -> (u32, u32, Vec<u8>) {
-    let (w, h, rgba) = crate::image_ops::bake_edited(img, adj, touchups, rot);
-    crate::image_ops::fit_long_edge(w, h, rgba, max_px)
+    let (w, h, rgba) = crate::develop::image_ops::bake_edited(img, adj, touchups, rot);
+    crate::develop::image_ops::fit_long_edge(w, h, rgba, max_px)
 }
 
 /// Where one photo's JPEG goes. The browser writes its exports from the Web

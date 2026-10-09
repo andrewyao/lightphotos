@@ -11,8 +11,8 @@ use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::curve::ToneCurve;
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
+use crate::develop::curve::ToneCurve;
 use crate::develop::{GpuAdjust, GpuCurve, GpuTouchUp};
 
 #[path = "raw/render.rs"]
@@ -943,7 +943,7 @@ impl Renderer {
         let rgba: std::borrow::Cow<[u8]> = match img.pixel_format {
             PixelFormat::Srgb8 => std::borrow::Cow::Borrowed(&img.rgba),
             PixelFormat::LinearF16 => {
-                std::borrow::Cow::Owned(crate::image_ops::linear_f16_to_srgb8(img))
+                std::borrow::Cow::Owned(crate::develop::image_ops::linear_f16_to_srgb8(img))
             }
         };
         let (w, h) = (img.width, img.height);

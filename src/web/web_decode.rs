@@ -219,7 +219,7 @@ impl WebMeasureJob {
         } else {
             image_decode::decode_nonraw_from_bytes(&self.bytes, self.max_px)?
         };
-        Ok(crate::chroma::measure(&img))
+        Ok(crate::develop::chroma::measure(&img))
     }
 }
 

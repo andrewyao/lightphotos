@@ -548,10 +548,10 @@ mod tests {
             red: 0.002,
             blue: -0.0015,
         };
-        let img = crate::chroma::fixture::photo(1200, 800, truth);
+        let img = crate::develop::chroma::fixture::photo(1200, 800, truth);
         let before = worst_fringe(&img.rgba, 1200, 800);
         let adj = Adjustments {
-            chromatic_aberration: Some(crate::chroma::measure(&img)),
+            chromatic_aberration: Some(crate::develop::chroma::measure(&img)),
             ..Adjustments::default()
         };
         let (w, h, out) = bake_edited(&img, &adj, &[], 0);
@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn zero_scales_bake_byte_identical_to_no_correction() {
-        let img = crate::chroma::fixture::photo(60, 40, develop::CaScale::default());
+        let img = crate::develop::chroma::fixture::photo(60, 40, develop::CaScale::default());
         let off = bake_edited(&img, &Adjustments::default(), &[], 0);
         let zero = Adjustments {
             chromatic_aberration: Some(develop::CaScale::default()),
