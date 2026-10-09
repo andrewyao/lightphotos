@@ -270,7 +270,7 @@ uuid = { version = "1", features = ["js"] }
 # `[patch.crates-io]` applies globally (Cargo has no way to scope a patch to
 # one target), so `vendor/rawler-0.7.2` must exist for every platform and
 # every Cargo entry point. It is NOT committed — `scripts/setup-vendor-rawler.sh`
-# materializes it (fetch 0.7.2 from crates.io + apply the patch below) and
+# materializes it (fetch 0.7.2 from crates.io + apply the patches above) and
 # must be run once per clone before any cargo command.
 [patch.crates-io]
 rawler = { path = "vendor/rawler-0.7.2" }
