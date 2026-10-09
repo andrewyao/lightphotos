@@ -1279,6 +1279,7 @@ mod tests {
                         pixel_format: Default::default(),
                     },
                 )),
+                crate::jobs::thumbnail::Origin::Decoded,
             );
             app.loader = Some(loader);
 

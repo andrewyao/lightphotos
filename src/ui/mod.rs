@@ -5,7 +5,7 @@
 //! returns the loupe rect plus the user's actions for `main.rs` to apply. The
 //! Loupe's central panel is transparent so the wgpu image shows through.
 
-use crate::app::{App, CropEdge, FlagCoverage, FocusLevel, Region, ViewMode};
+use crate::app::{App, CropEdge, FlagCoverage, FocusLevel, Region, ShownTier, ViewMode};
 use crate::develop::Adjustments;
 use crate::i18n::{t, Lang};
 use crate::navigation::Cmp;
@@ -430,9 +430,10 @@ fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     });
 }
 
-/// `fx / IMG_1.JPG   4032 × 3024` beside the Loupe's back arrow. The
-/// dimensions are smaller and wait for the photo's metadata. `ui.horizontal`
-/// centers each label on the row, so the sizes line up on one center line.
+/// `fx / IMG_1.JPG` beside the Loupe's back arrow, and at the row's right end
+/// the dimensions and the decode's signal bars. The dimensions are smaller
+/// and wait for the photo's metadata. `ui.horizontal` centers each label on
+/// the row, so the sizes line up on one center line.
 fn loupe_title(ui: &mut egui::Ui, app: &App, folder: String) {
     let size = font_size::px(ui.style(), 15.0);
     let gap = font_size::px(ui.style(), 6.0);
@@ -448,14 +449,56 @@ fn loupe_title(ui: &mut egui::Ui, app: &App, folder: String) {
     ui.label(egui::RichText::new("/").size(size).color(dim));
     ui.add_space(gap);
     ui.label(egui::RichText::new(name).size(size));
-    if let Some((w, h)) = app.current_metadata().and_then(|m| m.source_size) {
-        ui.add_space(3.0 * gap);
-        ui.label(
-            egui::RichText::new(format!("{w} \u{d7} {h}"))
-                .size(font_size::px(ui.style(), 12.0))
-                .color(dim),
+    // Right to left: the signal bars sit at the far right, the dimensions
+    // just before them.
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        ui.add_space(gap);
+        if let Some(tier) = app.shown_tier() {
+            shown_tier_bars(ui, tier, size);
+            ui.add_space(2.0 * gap);
+        }
+        if let Some((w, h)) = app.current_metadata().and_then(|m| m.source_size) {
+            ui.label(
+                egui::RichText::new(format!("{w} \u{d7} {h}"))
+                    .size(font_size::px(ui.style(), 12.0))
+                    .color(dim),
+            );
+        }
+    });
+}
+
+/// Four bars of rising height, like a phone's signal meter, that name the
+/// decode on screen. More bars is more detail: one for the thumbnail, two for
+/// the file's embedded JPEG, three for a smaller decode, four for full
+/// resolution. Unlit bars stay faint, so the meter keeps its shape at every
+/// level.
+fn shown_tier_bars(ui: &mut egui::Ui, tier: ShownTier, text_size: f32) {
+    const BARS: usize = 4;
+    let colors = theme::colors(ui.ctx());
+    let (lit, tip) = match tier {
+        ShownTier::Thumb => (1, t().shown_thumb_tip),
+        ShownTier::Embedded => (2, t().shown_embedded_tip),
+        ShownTier::Preview => (3, t().shown_preview_tip),
+        ShownTier::Full => (4, t().shown_full_tip),
+    };
+    let color = colors.value;
+    let unlit = colors.label.gamma_multiply(0.3);
+    let height = 0.75 * text_size;
+    let bar = (0.15 * text_size).max(2.0);
+    let gap = (0.08 * text_size).max(1.0);
+    let width = BARS as f32 * bar + (BARS - 1) as f32 * gap;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    for i in 0..BARS {
+        let h = height * (i + 1) as f32 / BARS as f32;
+        let x = rect.left() + i as f32 * (bar + gap);
+        let r = egui::Rect::from_min_max(
+            egui::pos2(x, rect.bottom() - h),
+            egui::pos2(x + bar, rect.bottom()),
         );
+        let fill = if i < lit { color } else { unlit };
+        ui.painter().rect_filled(r, 0.25 * bar, fill);
     }
+    response.on_hover_text(tip);
 }
 
 /// A status message (such as an export result) shown bottom-center for a few

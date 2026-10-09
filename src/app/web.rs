@@ -1012,6 +1012,7 @@ impl App {
             path,
             target,
             result,
+            origin,
             ..
         } in pending
         {
@@ -1029,6 +1030,7 @@ impl App {
                                     &path,
                                     &img,
                                     Shown::Preview(path.clone(), target, img.width.max(img.height)),
+                                    origin,
                                 );
                                 landed = true;
                             }
@@ -1094,6 +1096,7 @@ impl App {
                             path.clone(),
                             target,
                             std::sync::Arc::new(img),
+                            origin,
                         );
                     }
                     self.web.preview_retries.remove(&key);
@@ -1150,8 +1153,8 @@ impl App {
     /// Returns true if a read started.
     pub(crate) fn request_web_full(&mut self) -> bool {
         // Called every frame, so it needs the same zoom check as
-        // `ensure_full_for_zoom`, or every opened photo gets a full decode.
-        if !self.full_wanted_for_zoom() {
+        // `ensure_full`, or every opened photo gets a full decode.
+        if !self.full_wanted() {
             return false;
         }
         let Some(path) = self.want.clone() else {
@@ -1220,6 +1223,7 @@ impl App {
             path,
             target,
             result,
+            origin,
             ..
         } in pending
         {
@@ -1241,7 +1245,7 @@ impl App {
                         }
                     }
                     if let Some(loader) = &mut self.loader {
-                        loader.insert_full_external(path, std::sync::Arc::new(img));
+                        loader.insert_full_external(path, std::sync::Arc::new(img), origin);
                     }
                     landed = true;
                 }

@@ -468,8 +468,8 @@ impl App {
 
     /// Make the selection the loupe's wanted image. Requests the preview, with
     /// the thumbnail as an instant placeholder. Full resolution costs seconds
-    /// and hundreds of MB, so it waits until the user zooms
-    /// (`ensure_full_for_zoom`).
+    /// and hundreds of MB, so it waits until the photo shows larger than its
+    /// preview, after a zoom or on a large window (`ensure_full`).
     pub(super) fn load_selected(&mut self) {
         let Some(path) = self.selected_path() else {
             return;
@@ -480,7 +480,12 @@ impl App {
         {
             let px = THUMB_PX;
             let preview_px = self.preview_px();
+            let neighbors = self.neighbor_paths();
             if let Some(loader) = &mut self.loader {
+                // Drop queued full decodes of photos stepped past.
+                loader.retain_full(path.clone(), |p| {
+                    p == path || neighbors.iter().any(|n| n == p)
+                });
                 loader.request_preview(path.clone(), preview_px);
                 loader.request_thumb(path.clone(), px);
             }
@@ -515,20 +520,41 @@ impl App {
         if !current_ready {
             return;
         }
-        let Some(cur) = self.sel else { return };
-        let prev = (cur + self.visible.len() - 1) % self.visible.len();
-        let next = (cur + 1) % self.visible.len();
-        let paths: Vec<PathBuf> = [prev, next]
+        let paths = self.neighbor_paths();
+        // On a screen that shows a fitted photo larger than its preview,
+        // stepping would land on a soft preview, so prefetch the neighbors'
+        // full decodes too. Only once the current photo's own full decode has
+        // landed, so they never compete with it. The native full cache holds
+        // the current photo plus both neighbors. The web build keeps one.
+        #[cfg(not(target_arch = "wasm32"))]
+        let fulls = self.full_wanted_at_fit()
+            && match (&self.want, self.loader.as_ref()) {
+                (Some(want), Some(loader)) => loader.get_full(want).is_some(),
+                _ => false,
+            };
+        if let Some(loader) = &mut self.loader {
+            for p in paths {
+                #[cfg(not(target_arch = "wasm32"))]
+                if fulls {
+                    loader.request_full(p.clone());
+                }
+                loader.prefetch_preview(p, target);
+            }
+        }
+    }
+
+    /// The previous and next photos around the selection, wrapping.
+    fn neighbor_paths(&self) -> Vec<PathBuf> {
+        let n = self.visible.len();
+        let Some(cur) = self.sel.filter(|_| n > 1) else {
+            return Vec::new();
+        };
+        [(cur + n - 1) % n, (cur + 1) % n]
             .iter()
             .filter_map(|&p| self.visible.get(p).copied())
             .filter_map(|i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))
             .map(|p| p.to_path_buf())
-            .collect();
-        if let Some(loader) = &mut self.loader {
-            for p in paths {
-                loader.prefetch_preview(p, target);
-            }
-        }
+            .collect()
     }
 
     /// Wheel over the filmstrip steps through photos, since egui doesn't pan a

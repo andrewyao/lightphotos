@@ -47,6 +47,15 @@ pub enum EmbeddedPreview {
     Never,
 }
 
+/// Where a decode's pixels came from. The Loupe's title shows it as a dot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Origin {
+    /// The camera's JPEG stored inside the file.
+    Embedded,
+    /// Decoded from the image data itself.
+    Decoded,
+}
+
 /// Decode `path` with its longest side at most `max_px`. ImageIO scales
 /// during decode, which is much cheaper than `image_decode::decode`'s full
 /// decode followed by a downscale.
@@ -101,15 +110,25 @@ pub fn decode_at_size(
 ///
 /// ImageIO does not report whether it used the embedded preview, so a short
 /// result is retried with `Never`. ImageIO decodes a JPEG at a reduced size,
-/// so the retry is cheap.
+/// so the retry is cheap. For the same reason the origin is inferred: a kept
+/// result from a RAW file is its embedded JPEG, since a RAW without one would
+/// have been demosaiced, which ImageIO does only when there is no preview.
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
-pub fn decode_speed(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
+pub fn decode_speed(path: &Path, max_px: u32) -> Result<(DecodedImage, Origin), String> {
     let img = decode_at_size(path, max_px, EmbeddedPreview::UseIfPresent)?;
     if preview_is_large_enough(img.width, img.height, max_px) {
-        return Ok(img);
+        let origin = if crate::decode::image_decode::is_raw_extension(path) {
+            Origin::Embedded
+        } else {
+            Origin::Decoded
+        };
+        return Ok((img, origin));
     }
-    decode_at_size(path, max_px, EmbeddedPreview::Never)
+    Ok((
+        decode_at_size(path, max_px, EmbeddedPreview::Never)?,
+        Origin::Decoded,
+    ))
 }
 
 /// Off macOS, the same order as `web_decode::decode`: the EXIF thumbnail if it
@@ -117,16 +136,19 @@ pub fn decode_speed(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
 /// source decode. Small originals come back at their native size.
 #[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
-pub fn decode_speed(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
+pub fn decode_speed(path: &Path, max_px: u32) -> Result<(DecodedImage, Origin), String> {
     if let Ok(bytes) = fs::read(path) {
         let preview = embedded_preview_from_bytes(&bytes, max_px)
             .filter(|img| preview_is_large_enough(img.width, img.height, max_px))
             .or_else(|| crate::decode::rawler::rawler_full_image_from_bytes(&bytes, max_px));
         if let Some(img) = preview {
-            return Ok(img);
+            return Ok((img, Origin::Embedded));
         }
     }
-    crate::decode::image_decode::decode(path, max_px)
+    Ok((
+        crate::decode::image_decode::decode(path, max_px)?,
+        Origin::Decoded,
+    ))
 }
 
 /// The file's embedded preview, fit within `max_px` and never upscaled.
@@ -366,7 +388,7 @@ impl ThumbCache {
 
         // Entries last as long as the photo, so a tiny embedded preview must
         // not become one.
-        let img = decode_speed(path, THUMB_PX)?;
+        let (img, _) = decode_speed(path, THUMB_PX)?;
         if let Some(file) = &entry {
             let _ = write_entry(file, &img);
         }
@@ -621,7 +643,8 @@ mod tests {
             "fixture must carry a small EXIF thumbnail"
         );
 
-        let img = decode_speed(&photo, 1024).unwrap();
+        let (img, origin) = decode_speed(&photo, 1024).unwrap();
+        assert_eq!(origin, Origin::Decoded, "the EXIF thumbnail is too small");
         // 3:2 from the photo, not the thumbnail's 4:3 (768). 682.67 rounds
         // up on macOS and down elsewhere.
         assert_eq!(img.width, 1024);

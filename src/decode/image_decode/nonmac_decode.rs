@@ -13,18 +13,8 @@ use crate::decode::image_decode::{
     WhiteBalance,
 };
 
-/// True for camera RAW extensions, which the `image` crate cannot decode.
-/// Mirrors the RAW subset of `navigation.rs`'s `IMAGE_EXTS`.
 #[cfg(not(target_os = "macos"))]
-pub fn is_raw_extension(path: &Path) -> bool {
-    const RAW_EXTS: &[&str] = &[
-        "cr2", "cr3", "nef", "arw", "dng", "raf", "rw2", "orf", "pef", "srw",
-    ];
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| RAW_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-        .unwrap_or(false)
-}
+use crate::decode::image_decode::is_raw_extension;
 
 #[cfg(not(target_os = "macos"))]
 pub use crate::develop::apply_raw_preview_boost;

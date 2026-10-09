@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::decode::image_decode::{self, DecodedImage, ImageMetadata};
-use crate::jobs::thumbnail;
+use crate::jobs::thumbnail::{self, Origin};
 
 /// What a decode is for. `Preview` and `Full` get the full RAW demosaic with
 /// linear output. `Thumb` and `Speed` (the Loupe's quick screen-fit first
@@ -55,6 +55,8 @@ pub struct PoolResult {
     pub path: PathBuf,
     pub target: u32,
     pub result: Result<DecodedImage, Failure>,
+    /// Whether `result` is the file's embedded JPEG.
+    pub origin: Origin,
     /// The image as a JPEG for the disk cache. Set only for thumbnails decoded
     /// from the source, and only when JPEG can represent the pixels.
     pub jpeg: Option<Vec<u8>>,
@@ -98,6 +100,7 @@ impl WebJob {
             path: self.path.clone(),
             target: self.target,
             result: Err(failure),
+            origin: Origin::Decoded,
             jpeg: None,
             cache_name: self.cache_name.clone(),
             generation: self.generation,
@@ -106,8 +109,11 @@ impl WebJob {
     }
 
     pub fn run(self) -> PoolResult {
-        let result = decode(&self.bytes, self.target, self.is_raw, self.kind.quality())
-            .map_err(Failure::Decode);
+        let (result, origin) =
+            match decode(&self.bytes, self.target, self.is_raw, self.kind.quality()) {
+                Ok((img, origin)) => (Ok(img), origin),
+                Err(e) => (Err(Failure::Decode(e)), Origin::Decoded),
+            };
         // A thumbnail decoded from the source is also encoded for the disk
         // cache here, off the main thread. JPEG cannot hold alpha or
         // LinearF16, so those results are not cached.
@@ -132,6 +138,7 @@ impl WebJob {
             path: self.path,
             target: self.target,
             result,
+            origin,
             jpeg,
             cache_name: self.cache_name,
             generation: self.generation,
@@ -240,32 +247,33 @@ pub fn decode(
     max_px: u32,
     is_raw: bool,
     quality: bool,
-) -> Result<DecodedImage, String> {
+) -> Result<(DecodedImage, Origin), String> {
     if is_raw {
         if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
             // Use the same minimum resolution as native thumbnails. Tiny
             // EXIF previews must not enter the shared cache.
             if thumbnail::preview_is_large_enough(preview.width, preview.height, max_px) {
-                return Ok(preview);
+                return Ok((preview, Origin::Embedded));
             }
         }
         // No size gate here. This is the camera's full-resolution JPEG, and
         // Loupe jobs ask for 8192px on WebGPU, so a gate would reject a
         // 4000px embedded JPEG and force a full demosaic.
         if let Some(preview) = crate::decode::rawler::rawler_full_image_from_bytes(bytes, max_px) {
-            return Ok(preview);
+            return Ok((preview, Origin::Embedded));
         }
         return crate::decode::rawler::raw_preview::decode_raw_from_shared_vec(
             Arc::clone(bytes),
             max_px,
             quality,
-        );
+        )
+        .map(|img| (img, Origin::Decoded));
     }
     if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
         // Loupe jobs need more pixels than a small EXIF preview has.
         if thumbnail::preview_is_large_enough(preview.width, preview.height, max_px) {
-            return Ok(preview);
+            return Ok((preview, Origin::Embedded));
         }
     }
-    image_decode::decode_nonraw_from_bytes(bytes, max_px)
+    image_decode::decode_nonraw_from_bytes(bytes, max_px).map(|img| (img, Origin::Decoded))
 }

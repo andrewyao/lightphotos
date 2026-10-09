@@ -62,21 +62,21 @@ flowchart TD
         direction TB
         mq["Loader::request_preview\n-> Job::Speed"] --> mqd["thumbnail::decode_at_size\n(ImageIO, UseIfPresent)\nreturns the file's embedded preview if it has one"]
         mqd -- "short of the target size (a RAW's embedded preview)" --> mp["Job::Preview\nthumbnail::decode_at_size(Never)"]
-        mp -.->|user zooms past the preview's resolution| mf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(ImageIO, full resolution)"]
+        mp -.->|photo shows larger than the preview\n(zoom, or fit on a large window)| mf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(ImageIO, full resolution)"]
     end
 
     subgraph other["Linux / Windows"]
         direction TB
         lq["Loader::request_preview\n-> Job::Speed"] --> lqd["thumbnail::decode_at_size\nkamadak-exif embedded preview,\nor rawler::rawler_full_image_from_bytes\nfor RAF/CR3 (decode/rawler/)"]
         lqd -- "short of the target size" --> lp["Job::Preview\nimage_decode::decode\n(image crate; RAW via rawler::decode_raw_nonmac,\nrawler's RawDevelop pipeline, decode/rawler/)"]
-        lp -.->|user zooms past the preview's resolution| lf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(full resolution)"]
+        lp -.->|photo shows larger than the preview\n(zoom, or fit on a large window)| lf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(full resolution)"]
     end
 
     subgraph web["wasm32 (browser)"]
         direction TB
         wt["request_web_preview, app/web.rs\n-> JobKind::Speed"] --> wtd["web_decode.rs on a loader thread -> rawler::raw_preview\nquarter-res Fast tier, sRGB8 output\n(shown first — this is the Loupe's placeholder)"]
         wtd --> wp["JobKind::Preview\nrawler::raw_preview::decode_raw_quality_from_bytes\nfull PPG demosaic, LinearF16 output"]
-        wp -.->|user zooms past the preview's resolution| wf["request_web_full, app/web.rs\n-> JobKind::Full, full-resolution decode"]
+        wp -.->|photo shows larger than the preview\n(zoom, or fit on a large window)| wf["request_web_full, app/web.rs\n-> JobKind::Full, full-resolution decode"]
     end
 
     tryshow --> mq
@@ -120,9 +120,21 @@ flowchart TD
 
 **Where full resolution comes from:**
 - `Loader::request_full` (native) and `request_web_full` (wasm32) are only
-  called once `ensure_full_for_zoom` (`app/loupe.rs`) decides the current
-  zoom would show detail the preview doesn't have.
-- Normal browsing at "fit to window" never triggers it.
+  called once `full_wanted` (`app/loupe.rs`) decides the photo on screen
+  is larger than its preview. A zoom can cause this. A fit on a window
+  larger than `PREVIEW_MAX` (4096 px) can also cause it.
+- `full_wanted` counts panel pixels, not drawn pixels. In a macOS scaled
+  mode the system draws the window larger than the panel and then shrinks
+  it (`shell/display.rs`). For example, "looks like 3360x1890" on a 4K
+  panel draws 6720 px onto 3840.
+- At fit, the request waits until the preview has landed.
+- When the full decode is necessary at fit, the native build also prefetches
+  the full decodes of the previous and next photos
+  (`request_neighbors`, `app/nav.rs`). The web build does not, because its
+  full cache holds one image.
+- When the photo changes, `Loader::retain_full` drops the queued full decodes
+  of other photos, and pins the current photo against eviction.
+- At fit on a normal window, browsing never triggers a full decode.
 
 ---
 

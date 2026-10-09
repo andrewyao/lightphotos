@@ -5,6 +5,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod dialog;
+pub(crate) mod display;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod drive;
 pub(crate) mod macos_delegate;

@@ -214,6 +214,19 @@ impl Shown {
     }
 }
 
+/// Which decode the Loupe shows, for the signal bars beside the file name.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ShownTier {
+    /// The grid thumbnail, while a sharper decode loads.
+    Thumb,
+    /// The camera's JPEG stored inside the file, at any size.
+    Embedded,
+    /// A decode of the image data, smaller than full resolution.
+    Preview,
+    /// The full-resolution decode.
+    Full,
+}
+
 /// Native decode is fast enough that the loupe never blanks while loading.
 /// The wasm32 version lives in `app/web.rs`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -398,6 +411,8 @@ pub(crate) struct App {
     /// Path we want shown in the loupe (may still be decoding).
     want: Option<PathBuf>,
     shown: Shown,
+    /// Where `shown`'s pixels came from.
+    shown_origin: crate::jobs::thumbnail::Origin,
     /// A file or folder requested before the window and renderer existed.
     pub(crate) pending_initial: Option<PathBuf>,
     /// The last session saved, which the landing page's Reopen Session
@@ -527,6 +542,11 @@ pub(crate) struct App {
     zoom_rel: f32,
     pub(crate) pan: (f32, f32), // screen-space pixel coords of the image's top-left corner
     pub(crate) win_size: (f32, f32),
+    /// Panel pixels per drawn pixel, below 1.0 in a macOS scaled display
+    /// mode (`shell::display::panel_scale`).
+    pub(crate) panel_scale: f32,
+    /// The display `panel_scale` was read from.
+    pub(crate) panel_monitor: Option<winit::monitor::MonitorHandle>,
     /// True while the view is auto-fit, so a resize re-fits.
     pub(crate) fitted: bool,
     /// Per-image rotation, in 90° clockwise steps (0..=3).
@@ -669,6 +689,7 @@ impl App {
             playlist: None,
             want: None,
             shown: Shown::Nothing,
+            shown_origin: crate::jobs::thumbnail::Origin::Decoded,
             pending_initial: initial,
             // A test must never read the developer's own session.
             #[cfg(test)]
@@ -742,6 +763,8 @@ impl App {
             zoom_rel: 1.0,
             pan: (0.0, 0.0),
             win_size: (1.0, 1.0),
+            panel_scale: 1.0,
+            panel_monitor: None,
             fitted: false,
             rotations: HashMap::new(),
             loupe_viewport: None,

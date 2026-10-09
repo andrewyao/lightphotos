@@ -6,6 +6,7 @@ use super::*;
 use std::path::Path;
 
 use crate::develop::Adjustments;
+use crate::jobs::thumbnail::Origin;
 
 impl App {
     /// Image size after rotation, with w and h swapped for 90° and 270°.
@@ -71,23 +72,87 @@ impl App {
         self.fitted = false;
         self.center();
         self.push_transform();
-        self.ensure_full_for_zoom();
+        self.ensure_full();
     }
 
-    /// Whether the zoom has magnified the preview past its own pixels, so the
-    /// full-resolution decode is worth fetching.
-    pub(super) fn full_wanted_for_zoom(&self) -> bool {
-        if self.want.is_none() {
+    /// Whether the photo, at the current zoom or fit, spans more panel pixels
+    /// than its preview has, so the full-resolution decode is worth fetching.
+    /// At fit this is true only on a window larger than `PREVIEW_MAX` panel
+    /// pixels.
+    ///
+    /// False until the wanted photo is on screen: right after a step the
+    /// previous photo's zoom is still set, and the new photo fits only when
+    /// its first image uploads.
+    pub(super) fn full_wanted(&self) -> bool {
+        if self.want.is_none() || self.shown.path() != self.want.as_deref() {
             return false;
         }
-        let (iw, ih) = self.image_size();
-        zoom_outruns_preview(iw.max(ih), self.zoom(), self.preview_px())
+        self.outruns_preview_at(self.zoom()) && !self.preview_is_complete()
     }
 
-    /// Request the full-resolution decode if `full_wanted_for_zoom`. Cheap to
-    /// call on every zoom step because `Loader::request_full` de-duplicates.
-    fn ensure_full_for_zoom(&mut self) {
-        if !self.full_wanted_for_zoom() {
+    /// Whether the wanted photo's landed preview already holds every source
+    /// pixel, so a full decode would only return the same pixels again. True
+    /// for a photo no larger than its preview target.
+    fn preview_is_complete(&self) -> bool {
+        let (Some(want), Some(loader)) = (&self.want, &self.loader) else {
+            return false;
+        };
+        let target = self.preview_px();
+        loader.preview_origin(want, target) == Origin::Decoded
+            && loader
+                .get_preview(want, target)
+                .is_some_and(|img| self.covers_source(img.width.max(img.height)))
+    }
+
+    /// Whether a decode with this longest side holds every pixel of the
+    /// source. Native only: the web build learns `source_size` from the
+    /// preview itself, so there the two always match.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn covers_source(&self, longest: u32) -> bool {
+        self.source_size.is_some_and(|(w, h)| longest >= w.max(h))
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn covers_source(&self, _longest: u32) -> bool {
+        false
+    }
+
+    /// `full_wanted` as if the photo were fitted, which is how a neighbor
+    /// opens. Gates the neighbors' full-decode prefetch, so zooming into one
+    /// photo doesn't decode its neighbors at full size. Native only: the web
+    /// build keeps one full decode, so it never prefetches neighbors.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn full_wanted_at_fit(&self) -> bool {
+        self.want.is_some() && self.outruns_preview_at(self.fit_scale())
+    }
+
+    fn outruns_preview_at(&self, zoom: f32) -> bool {
+        let (iw, ih) = self.image_size();
+        // Count panel pixels, not drawn ones: a scaled display mode shrinks
+        // the drawn window onto fewer panel pixels.
+        zoom_outruns_preview(iw.max(ih), zoom * self.panel_scale, self.preview_px())
+    }
+
+    /// `ensure_full`, but only once the current photo's preview has landed,
+    /// so the preview reaches the screen first and the full decode doesn't
+    /// compete with it. `try_show` calls this every frame, which covers a
+    /// photo opening fitted, a window resize, and a re-fit when the source
+    /// size arrives. The web build makes the same check in `request_web_full`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn ensure_full_after_preview(&mut self) {
+        let (Some(want), Some(loader)) = (&self.want, &self.loader) else {
+            return;
+        };
+        if loader.get_preview(want, self.preview_px()).is_none() {
+            return;
+        }
+        self.ensure_full();
+    }
+
+    /// Request the full-resolution decode if `full_wanted`. Cheap to
+    /// call every frame because `Loader::request_full` de-duplicates.
+    fn ensure_full(&mut self) {
+        if !self.full_wanted() {
             return;
         }
         // The loader has no workers on wasm, so the web build decodes through
@@ -180,7 +245,7 @@ impl App {
         // Zooming all the way out lands on the fit, which a resize keeps.
         self.fitted = new_zoom <= lo * 1.0001;
         self.push_transform();
-        self.ensure_full_for_zoom();
+        self.ensure_full();
     }
 
     /// The manual zoom's range: the fit up to `MAX_ZOOM`, or just the fit
@@ -254,7 +319,7 @@ impl App {
             self.fitted = false;
             self.center();
             self.push_transform();
-            self.ensure_full_for_zoom();
+            self.ensure_full();
         } else if 1.0 > cur {
             self.reset_100();
         } else {
@@ -620,13 +685,14 @@ fn bounded_zoom(cur_zoom: f32, factor: f32, lo: f32, hi: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jobs::thumbnail::Origin;
 
     // A 24MP photo (6000x4000) in a 2560px preview.
     const SOURCE: f32 = 6000.0;
     const PREVIEW: u32 = 2560;
 
     #[test]
-    fn browsing_at_fit_never_asks_for_the_expensive_decode() {
+    fn browsing_at_fit_on_a_normal_window_skips_the_expensive_decode() {
         // Fit in a 2560px window is zoom ~0.43, and the preview covers it.
         assert!(!zoom_outruns_preview(SOURCE, 2560.0 / SOURCE, PREVIEW));
         assert!(!zoom_outruns_preview(SOURCE, 0.1, PREVIEW));
@@ -694,6 +760,243 @@ mod tests {
             before.1,
             after.1
         );
+    }
+
+    /// A 6000x4000 photo, the middle of three, fitted in the Loupe on a
+    /// `win` physical-pixel window, its preview landed.
+    fn fitted_app(tag: &str, win: (f32, f32)) -> (App, Vec<PathBuf>) {
+        use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
+        use crate::jobs::{cache_limits::CacheLimits, loader::Loader};
+        let (mut app, _, paths) = crate::app::test_support::folder_app(tag, 3);
+        app.mode = ViewMode::Loupe;
+        app.sel = Some(1);
+        app.win_size = win;
+        app.want = Some(paths[1].clone());
+        app.source_size = Some((6000, 4000));
+        let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
+        let preview = std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
+            width: 4,
+            height: 4,
+            rgba: vec![0; 64],
+            pixel_format: PixelFormat::Srgb8,
+        }));
+        loader.insert_preview_external(
+            paths[1].clone(),
+            app.preview_px(),
+            preview,
+            Origin::Decoded,
+        );
+        app.loader = Some(loader);
+        app.shown = Shown::Preview(paths[1].clone(), app.preview_px(), 4);
+        app.fit_to_window();
+        (app, paths)
+    }
+
+    fn land_preview(app: &mut App, path: &Path) {
+        let target = app.preview_px();
+        let img = app
+            .loader
+            .as_ref()
+            .and_then(|l| l.get_preview(&app.want.clone().unwrap(), target));
+        app.loader.as_mut().unwrap().insert_preview_external(
+            path.to_path_buf(),
+            target,
+            img.unwrap(),
+            Origin::Decoded,
+        );
+    }
+
+    /// `fitted_app`, but the photo is 1200x800 and its preview, which the
+    /// 1536px target can't shrink, holds the whole of it.
+    fn small_photo_app(tag: &str) -> (App, Vec<PathBuf>) {
+        use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
+        let (mut app, paths) = fitted_app(tag, (1440.0, 900.0));
+        app.source_size = Some((1200, 800));
+        let img = std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
+            width: 1200,
+            height: 800,
+            rgba: vec![0; 1200 * 800 * 4],
+            pixel_format: PixelFormat::Srgb8,
+        }));
+        let target = app.preview_px();
+        app.loader.as_mut().unwrap().insert_preview_external(
+            paths[1].clone(),
+            target,
+            img,
+            Origin::Decoded,
+        );
+        app.shown = Shown::Preview(paths[1].clone(), target, 1200);
+        app.shown_origin = Origin::Decoded;
+        app.fit_to_window();
+        (app, paths)
+    }
+
+    #[test]
+    fn a_small_photos_preview_shows_as_full_resolution() {
+        let (app, _) = small_photo_app("loupe-small-tier");
+        assert_eq!(app.shown_tier(), Some(ShownTier::Full));
+    }
+
+    #[test]
+    fn zooming_into_a_small_photo_skips_the_second_decode() {
+        let (mut app, paths) = small_photo_app("loupe-small-zoom");
+        app.set_zoom(5.0);
+        app.try_show();
+        assert!(!full_queued(&app, &paths[1]));
+    }
+
+    #[test]
+    fn a_large_photos_preview_stays_below_full_resolution() {
+        let (mut app, paths) = fitted_app("loupe-large-tier", (1440.0, 900.0));
+        app.shown = Shown::Preview(paths[1].clone(), app.preview_px(), 1536);
+        app.shown_origin = Origin::Decoded;
+        assert_eq!(app.shown_tier(), Some(ShownTier::Preview));
+    }
+
+    #[test]
+    fn zooming_in_on_a_normal_window_prefetches_no_neighbor_full_decodes() {
+        let (mut app, paths) = fitted_app("loupe-zoom-neighbors", (2880.0, 1800.0));
+        app.reset_100();
+        assert!(app.full_wanted(), "100% outruns the preview");
+        let full = app
+            .loader
+            .as_ref()
+            .unwrap()
+            .get_preview(&paths[1], app.preview_px());
+        app.loader.as_mut().unwrap().insert_full_external(
+            paths[1].clone(),
+            full.unwrap(),
+            Origin::Decoded,
+        );
+        app.request_neighbors();
+        assert!(!full_queued(&app, &paths[0]));
+        assert!(!full_queued(&app, &paths[2]));
+    }
+
+    #[test]
+    fn stepping_while_zoomed_does_not_fetch_the_next_photo_at_full() {
+        let (mut app, paths) = fitted_app("loupe-zoom-step", (2880.0, 1800.0));
+        app.reset_100();
+        // Step: the next photo is wanted and its preview has landed, but the
+        // previous photo, and its zoom, are still on screen.
+        app.sel = Some(2);
+        land_preview(&mut app, &paths[2]);
+        app.want = Some(paths[2].clone());
+        app.try_show();
+        assert!(!full_queued(&app, &paths[2]));
+    }
+
+    fn full_queued(app: &App, path: &Path) -> bool {
+        app.loader.as_ref().is_some_and(|l| l.full_inflight(path))
+    }
+
+    #[test]
+    fn the_title_bars_name_the_decode_on_screen() {
+        let (mut app, paths) = fitted_app("loupe-tier", (1440.0, 900.0));
+        let p = paths[1].clone();
+        let cases = [
+            (Shown::Thumb(p.clone()), Origin::Decoded, ShownTier::Thumb),
+            (
+                Shown::Preview(p.clone(), 2048, 1616),
+                Origin::Embedded,
+                ShownTier::Embedded,
+            ),
+            (
+                Shown::Preview(p.clone(), 2048, 2048),
+                Origin::Decoded,
+                ShownTier::Preview,
+            ),
+            (
+                Shown::Full(p.clone()),
+                Origin::Embedded,
+                ShownTier::Embedded,
+            ),
+            (Shown::Full(p.clone()), Origin::Decoded, ShownTier::Full),
+        ];
+        for (shown, origin, tier) in cases {
+            app.shown = shown;
+            app.shown_origin = origin;
+            assert_eq!(app.shown_tier(), Some(tier));
+        }
+        // Still showing the previous photo while the new one loads.
+        app.want = Some(paths[2].clone());
+        assert_eq!(app.shown_tier(), None);
+    }
+
+    #[test]
+    fn a_large_window_fetches_full_resolution_without_a_zoom() {
+        // A 6K display: the fitted photo spans ~5000px, more than the 4096 preview.
+        let (mut app, paths) = fitted_app("loupe-full-large", (6016.0, 3384.0));
+        assert!(app.full_wanted());
+        app.try_show();
+        assert!(full_queued(&app, &paths[1]));
+    }
+
+    #[test]
+    fn a_scaled_4k_display_stays_on_the_preview_at_fit() {
+        // "Looks like 3360x1890" on a 3840x2160 panel: the window is drawn at
+        // 6720x3780, but only 3840 panel pixels show it.
+        let (mut app, paths) = fitted_app("loupe-full-scaled", (6720.0, 3780.0));
+        assert!(app.full_wanted(), "the drawn window outruns the preview");
+        app.panel_scale = 3840.0 / 6720.0;
+        assert!(!app.full_wanted());
+        app.try_show();
+        app.request_neighbors();
+        assert!(paths.iter().all(|p| !full_queued(&app, p)));
+    }
+
+    #[test]
+    fn a_normal_window_stays_on_the_preview_at_fit() {
+        let (mut app, paths) = fitted_app("loupe-full-small", (2880.0, 1800.0));
+        assert!(!app.full_wanted());
+        app.try_show();
+        assert!(!full_queued(&app, &paths[1]));
+    }
+
+    #[test]
+    fn a_large_window_waits_for_the_preview_before_the_full_decode() {
+        let (mut app, paths) = fitted_app("loupe-full-wait", (6016.0, 3384.0));
+        app.want = Some(paths[0].clone());
+        app.try_show();
+        assert!(!full_queued(&app, &paths[0]), "no preview of 0 yet");
+    }
+
+    #[test]
+    fn a_large_window_prefetches_the_neighbors_once_the_current_full_lands() {
+        let (mut app, paths) = fitted_app("loupe-full-neighbors", (6016.0, 3384.0));
+        app.request_neighbors();
+        assert!(!full_queued(&app, &paths[0]), "current full not landed yet");
+        let full = app
+            .loader
+            .as_ref()
+            .unwrap()
+            .get_preview(&paths[1], app.preview_px());
+        app.loader.as_mut().unwrap().insert_full_external(
+            paths[1].clone(),
+            full.unwrap(),
+            Origin::Decoded,
+        );
+        app.request_neighbors();
+        assert!(full_queued(&app, &paths[0]));
+        assert!(full_queued(&app, &paths[2]));
+    }
+
+    #[test]
+    fn a_normal_window_prefetches_no_neighbor_full_decodes() {
+        let (mut app, paths) = fitted_app("loupe-full-no-neighbors", (2880.0, 1800.0));
+        let full = app
+            .loader
+            .as_ref()
+            .unwrap()
+            .get_preview(&paths[1], app.preview_px());
+        app.loader.as_mut().unwrap().insert_full_external(
+            paths[1].clone(),
+            full.unwrap(),
+            Origin::Decoded,
+        );
+        app.request_neighbors();
+        assert!(!full_queued(&app, &paths[0]));
+        assert!(!full_queued(&app, &paths[2]));
     }
 
     #[test]

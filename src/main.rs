@@ -73,6 +73,8 @@ fn finish_window_setup(
     );
 
     app.win_size = (size.width.max(1) as f32, size.height.max(1) as f32);
+    app.panel_scale = shell::display::panel_scale(&window);
+    app.panel_monitor = window.current_monitor();
     app.window = Some(window);
     app.renderer = Some(renderer);
     app.loader = Some(loader);
@@ -245,6 +247,11 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::Resized(size) => {
                 self.win_size = (size.width.max(1) as f32, size.height.max(1) as f32);
+                // A display mode change or a move to another display resizes.
+                if let Some(w) = &self.window {
+                    self.panel_scale = shell::display::panel_scale(w);
+                    self.panel_monitor = w.current_monitor();
+                }
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                 }
@@ -256,6 +263,18 @@ impl ApplicationHandler<UserEvent> for App {
 
             WindowEvent::RedrawRequested => {
                 self.redraw();
+            }
+
+            // A move fires on every frame of a drag, so only a move onto
+            // another display reads its modes again.
+            WindowEvent::Moved(_) => {
+                if let Some(w) = &self.window {
+                    let monitor = w.current_monitor();
+                    if monitor != self.panel_monitor {
+                        self.panel_scale = shell::display::panel_scale(w);
+                        self.panel_monitor = monitor;
+                    }
+                }
             }
 
             WindowEvent::Occluded(occluded) => {

@@ -23,7 +23,7 @@ use std::time::SystemTime;
 use crate::decode::image_decode::{self, DecodedImage, ImageMetadata};
 use crate::develop::{Adjustments, TouchUp};
 use crate::jobs::cache_limits::CacheLimits;
-use crate::jobs::thumbnail::ThumbCache;
+use crate::jobs::thumbnail::{Origin, ThumbCache};
 
 /// True when `LIGHTPHOTOS_TIMING=1`, which prints decode and upload timings to
 /// stderr.
@@ -145,7 +145,9 @@ enum Enqueued {
 
 /// A finished job, carrying its tier back to the poller.
 enum JobResult {
-    Speed(PathBuf, u32, Result<DecodedImage, String>),
+    /// The last field is true when the image already holds every source
+    /// pixel (see `speed_is_whole_photo`).
+    Speed(PathBuf, u32, Result<DecodedImage, String>, Origin, bool),
     Preview(PathBuf, u32, Result<DecodedImage, String>),
     Full(PathBuf, Result<DecodedImage, String>),
     Thumb(PathBuf, u32, Result<Arc<DecodedImage>, String>),
@@ -534,8 +536,15 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
                 crate::jobs::thumbnail::decode_speed(&path, target)
             }))
             .unwrap_or_else(|_| Err(format!("speed decode panicked: {}", path.display())));
+            let (r, origin) = match r {
+                Ok((img, origin)) => (Ok(img), origin),
+                Err(e) => (Err(e), Origin::Decoded),
+            };
             report_decode("speed", &path, target, t0, &r);
-            JobResult::Speed(path, target, r)
+            let whole = r
+                .as_ref()
+                .is_ok_and(|img| speed_is_whole_photo(&path, target, img, origin));
+            JobResult::Speed(path, target, r, origin, whole)
         }
         Job::Preview(path, target) => {
             let t0 = web_time::Instant::now();
@@ -686,6 +695,17 @@ mod panic_recovery {
 #[cfg(target_arch = "wasm32")]
 pub(crate) use panic_recovery::install as install_panic_recovery;
 
+/// Whether a speed result short of `target` is short only because the photo
+/// itself is that small, so a `Preview` decode would return the same pixels.
+/// An embedded JPEG never counts: the decode can differ. Reads the file's
+/// header only for a short result, which is rare.
+fn speed_is_whole_photo(path: &Path, target: u32, img: &DecodedImage, origin: Origin) -> bool {
+    let longest = img.width.max(img.height);
+    origin == Origin::Decoded
+        && longest < target
+        && image_decode::pixel_size(path).is_some_and(|(w, h)| longest >= w.max(h))
+}
+
 fn report_decode(
     tier: &str,
     path: &Path,
@@ -732,6 +752,9 @@ pub struct Loader {
     cache: HashMap<PathBuf, Arc<DecodedImage>>,
     order: VecDeque<PathBuf>,
     inflight: HashSet<PathBuf>,
+    /// The loupe's photo, set by `retain_full`. Eviction skips it, so a
+    /// neighbor's prefetched full decode never pushes out the photo on screen.
+    pinned_full: Option<PathBuf>,
 
     // Preview tier, keyed by `(path, target_px)` so a window resize does not
     // serve a smaller stale decode.
@@ -743,6 +766,12 @@ pub struct Loader {
     // short speed result show at once and be replaced when the preview lands.
     speed_cache: HashMap<(PathBuf, u32), Arc<DecodedImage>>,
     speed_inflight: HashSet<(PathBuf, u32)>,
+    /// Speed and preview keys whose image is the file's embedded JPEG. Every
+    /// insert into either map clears the key, and eviction drops it.
+    embedded_previews: HashSet<(PathBuf, u32)>,
+    /// The same for the full tier: on wasm32 a RAF or CR3 full decode can be
+    /// the camera's full-size embedded JPEG.
+    embedded_fulls: HashSet<PathBuf>,
     /// Keys the user has viewed, which get the `Preview` decode if their speed
     /// pass came back short. Prefetched neighbors are not in this set.
     escalation_wanted: HashSet<(PathBuf, u32)>,
@@ -853,10 +882,13 @@ impl Loader {
             cache: HashMap::new(),
             order: VecDeque::new(),
             inflight: HashSet::new(),
+            pinned_full: None,
             preview_cache: HashMap::new(),
             preview_order: VecDeque::new(),
             preview_inflight: HashSet::new(),
             speed_cache: HashMap::new(),
+            embedded_previews: HashSet::new(),
+            embedded_fulls: HashSet::new(),
             speed_inflight: HashSet::new(),
             escalation_wanted: HashSet::new(),
             thumb_cache: HashMap::new(),
@@ -968,8 +1000,9 @@ impl Loader {
         }
     }
 
-    /// Requests the full-resolution decode of `path`. Call only when the user
-    /// zooms past the preview, because this is the expensive tier.
+    /// Requests the full-resolution decode of `path`. Call only when the photo
+    /// shows larger on screen than its preview, at fit or after a zoom,
+    /// because this is the expensive tier.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn request_full(&mut self, path: PathBuf) {
         if self.cache.contains_key(&path) || self.inflight.contains(&path) {
@@ -1014,6 +1047,27 @@ impl Loader {
             .get(&key)
             .or_else(|| self.speed_cache.get(&key))
             .cloned()
+    }
+
+    /// Where `get_preview`'s image came from.
+    pub fn preview_origin(&self, path: &Path, target_px: u32) -> Origin {
+        if self
+            .embedded_previews
+            .contains(&(path.to_path_buf(), target_px))
+        {
+            Origin::Embedded
+        } else {
+            Origin::Decoded
+        }
+    }
+
+    /// Where `get_full`'s image came from.
+    pub fn full_origin(&self, path: &Path) -> Origin {
+        if self.embedded_fulls.contains(path) {
+            Origin::Embedded
+        } else {
+            Origin::Decoded
+        }
     }
 
     /// The full-resolution decode if present, else the preview.
@@ -1263,6 +1317,27 @@ impl Loader {
         dropped
     }
 
+    /// Points the full tier at the loupe's photo `current`. Drops queued full
+    /// decodes whose path `keep` rejects, so a photo stepped past doesn't
+    /// decode after the user leaves it. A decode already running finishes and
+    /// lands in the cache as usual. `current` is also pinned against eviction.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn retain_full(&mut self, current: PathBuf, keep: impl Fn(&Path) -> bool) {
+        self.pinned_full = Some(current);
+        let Ok(mut q) = lock_queue(&self.shared) else {
+            return;
+        };
+        let inflight = &mut self.inflight;
+        q.full.retain(|job| match job {
+            Job::Full(path, _) if !keep(path) => {
+                // Else `request_full` would see it in flight and never queue it again.
+                inflight.remove(path);
+                false
+            }
+            _ => true,
+        });
+    }
+
     /// Bake `img` with these edits off the frame. The result comes back
     /// through [`take_baked`](Self::take_baked). A bake already queued for an
     /// older `sig` of the same thumbnail is replaced, so a slider drag leaves
@@ -1400,21 +1475,29 @@ impl Loader {
     /// Inserts a wasm32 `Preview` decode into the preview tier. wasm32 `Speed`
     /// results skip this cache and go straight to the screen (see
     /// `poll_web_preview`).
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     pub fn insert_preview_external(
         &mut self,
         path: PathBuf,
         target_px: u32,
         img: Arc<DecodedImage>,
+        origin: Origin,
     ) {
-        self.insert_preview((path, target_px), img);
+        let key = (path, target_px);
+        self.insert_preview(key.clone(), img);
+        if origin == Origin::Embedded {
+            self.embedded_previews.insert(key);
+        }
     }
 
     /// Inserts a wasm32 zoom-triggered full decode (from `poll_web_full`) into
     /// the full-resolution tier.
     #[cfg(any(target_arch = "wasm32", test))]
-    pub fn insert_full_external(&mut self, path: PathBuf, img: Arc<DecodedImage>) {
-        self.insert(path, img);
+    pub fn insert_full_external(&mut self, path: PathBuf, img: Arc<DecodedImage>, origin: Origin) {
+        self.insert(path.clone(), img);
+        if origin == Origin::Embedded && self.cache.contains_key(&path) {
+            self.embedded_fulls.insert(path);
+        }
     }
 
     /// Drains every finished job into its cache and returns what arrived:
@@ -1479,13 +1562,20 @@ impl Loader {
         let mut exifs = vec![];
         while let Ok(result) = self.res_rx.try_recv() {
             match result {
-                JobResult::Speed(path, target, r) => {
+                JobResult::Speed(path, target, r, origin, whole) => {
                     let key = (path.clone(), target);
                     self.speed_inflight.remove(&key);
                     match r {
+                        // A small photo's speed pass is already its preview.
+                        // Filing it there means no `Preview` decode is queued,
+                        // now or when a prefetched neighbor is viewed.
+                        Ok(img) if whole => {
+                            self.insert_preview(key, Arc::new(img));
+                            full.push(path);
+                        }
                         Ok(img) => {
                             let longest = img.width.max(img.height);
-                            self.insert_speed(key, Arc::new(img));
+                            self.insert_speed(key, Arc::new(img), origin);
                             self.escalate_from_speed(&path, target, longest);
                             full.push(path);
                         }
@@ -1563,10 +1653,16 @@ impl Loader {
         if !self.cache.contains_key(&path) {
             self.order.push_back(path.clone());
         }
+        self.embedded_fulls.remove(&path);
         self.cache.insert(path, img);
         while self.order.len() > self.limits.fulls {
-            if let Some(old) = self.order.pop_front() {
+            let pinned = self.pinned_full.as_deref();
+            let Some(i) = self.order.iter().position(|p| Some(p.as_path()) != pinned) else {
+                break;
+            };
+            if let Some(old) = self.order.remove(i) {
                 self.cache.remove(&old);
+                self.embedded_fulls.remove(&old);
             }
         }
     }
@@ -1574,12 +1670,17 @@ impl Loader {
     // Speed and preview results share `preview_order` and one budget. A key
     // lives in at most one of the two maps: a landed preview replaces the
     // speed result, which `get_preview` would never return again.
-    fn insert_speed(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>) {
+    fn insert_speed(&mut self, key: (PathBuf, u32), img: Arc<DecodedImage>, origin: Origin) {
         if self.preview_cache.contains_key(&key) {
             return;
         }
         if !self.speed_cache.contains_key(&key) {
             self.preview_order.push_back(key.clone());
+        }
+        if origin == Origin::Embedded {
+            self.embedded_previews.insert(key.clone());
+        } else {
+            self.embedded_previews.remove(&key);
         }
         self.speed_cache.insert(key, img);
         self.evict_previews();
@@ -1591,6 +1692,7 @@ impl Loader {
         if !known {
             self.preview_order.push_back(key.clone());
         }
+        self.embedded_previews.remove(&key);
         self.preview_cache.insert(key, img);
         self.evict_previews();
     }
@@ -1600,6 +1702,7 @@ impl Loader {
             if let Some(old) = self.preview_order.pop_front() {
                 self.preview_cache.remove(&old);
                 self.speed_cache.remove(&old);
+                self.embedded_previews.remove(&old);
             }
         }
     }
@@ -1902,7 +2005,7 @@ mod tests {
     fn speed_and_preview_results_share_one_budget() {
         let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
         for i in 0..CacheLimits::PLATFORM.previews {
-            loader.insert_speed((path(&i.to_string()), 2560), image(2, 2));
+            loader.insert_speed((path(&i.to_string()), 2560), image(2, 2), Origin::Decoded);
         }
         // The sharper preview replaces its own speed result.
         loader.insert_preview((path("0"), 2560), image(4, 4));
@@ -1958,6 +2061,118 @@ mod tests {
         assert!(loader
             .get_full(&path(&(CacheLimits::PLATFORM.fulls + 1).to_string()))
             .is_some());
+    }
+
+    #[test]
+    fn a_small_photos_speed_pass_is_its_whole_preview() {
+        use crate::decode::image_encode::{encode_jpeg, JpegQuality};
+        let dir = std::env::temp_dir().join(format!("lp-speed-whole-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let jpg = dir.join("small.jpg");
+        encode_jpeg(&jpg, 64, 48, &vec![200; 64 * 48 * 4], JpegQuality::Export).unwrap();
+
+        // Short of the target only because the photo is 64x48.
+        assert!(speed_is_whole_photo(
+            &jpg,
+            1536,
+            &image(64, 48),
+            Origin::Decoded
+        ));
+        // A downscaled decode, an embedded JPEG, or a result that met the
+        // target all keep the usual path.
+        assert!(!speed_is_whole_photo(
+            &jpg,
+            1536,
+            &image(32, 24),
+            Origin::Decoded
+        ));
+        assert!(!speed_is_whole_photo(
+            &jpg,
+            1536,
+            &image(64, 48),
+            Origin::Embedded
+        ));
+        assert!(!speed_is_whole_photo(
+            &jpg,
+            64,
+            &image(64, 48),
+            Origin::Decoded
+        ));
+        // An unreadable header can't prove anything.
+        assert!(!speed_is_whole_photo(
+            &dir.join("gone.jpg"),
+            1536,
+            &image(64, 48),
+            Origin::Decoded
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_embedded_speed_result_reads_embedded_until_the_preview_replaces_it() {
+        let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
+        let key = (path("a"), 2560);
+        loader.insert_speed(key.clone(), image(1616, 1080), Origin::Embedded);
+        assert_eq!(loader.preview_origin(&path("a"), 2560), Origin::Embedded);
+        loader.insert_preview(key, image(2560, 1707));
+        assert_eq!(loader.preview_origin(&path("a"), 2560), Origin::Decoded);
+    }
+
+    #[test]
+    fn an_evicted_embedded_entry_leaves_no_mark_behind() {
+        let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
+        loader.insert_speed((path("a"), 2560), image(2, 2), Origin::Embedded);
+        loader.insert_full_external(path("a"), image(2, 2), Origin::Embedded);
+        assert_eq!(loader.full_origin(&path("a")), Origin::Embedded);
+        for i in 0..CacheLimits::PLATFORM
+            .previews
+            .max(CacheLimits::PLATFORM.fulls)
+        {
+            loader.insert_speed((path(&i.to_string()), 2560), image(2, 2), Origin::Decoded);
+            loader.insert(path(&i.to_string()), image(2, 2));
+        }
+        assert!(loader.embedded_previews.is_empty());
+        assert!(loader.embedded_fulls.is_empty());
+    }
+
+    #[test]
+    fn stepping_past_a_photo_drops_its_queued_full_decode() {
+        let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
+        // No workers, so queue the jobs by hand as `request_full` would.
+        for p in ["a", "b", "c"] {
+            push_job(&loader.shared, Job::Full(path(p), 16384));
+            loader.inflight.insert(path(p));
+        }
+        loader.retain_full(path("c"), |p| p == path("c"));
+        let queued: Vec<PathBuf> = lock_queue(&loader.shared)
+            .unwrap()
+            .full
+            .iter()
+            .filter_map(|job| match job {
+                Job::Full(p, _) => Some(p.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(queued, [path("c")]);
+        assert!(!loader.full_inflight(&path("a")));
+        assert!(!loader.full_inflight(&path("b")));
+        assert!(loader.full_inflight(&path("c")));
+    }
+
+    #[test]
+    fn a_prefetched_full_decode_never_evicts_the_photo_on_screen() {
+        let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
+        let fulls = CacheLimits::PLATFORM.fulls;
+        // The shown photo lands first, so it is the oldest entry.
+        loader.insert(path("shown"), image(1, 1));
+        loader.retain_full(path("shown"), |_| true);
+        for i in 0..fulls + 2 {
+            loader.insert(path(&i.to_string()), image(1, 1));
+        }
+        assert_eq!(loader.cache.len(), fulls);
+        assert!(loader.get_full(&path("shown")).is_some());
+        assert!(loader.get_full(&path(&(fulls + 1).to_string())).is_some());
     }
 
     #[test]
@@ -2058,7 +2273,7 @@ mod tests {
         // Escalating prefetches would compete with the viewed photo's decode.
         let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.prefetch_preview(path("neighbor"), 2560);
-        loader.insert_speed((path("neighbor"), 2560), image(1616, 1080));
+        loader.insert_speed((path("neighbor"), 2560), image(1616, 1080), Origin::Decoded);
         loader.escalate_from_speed(&path("neighbor"), 2560, 1616);
         assert_eq!(queued_previews(&loader), 0);
     }
@@ -2067,7 +2282,7 @@ mod tests {
     fn navigating_onto_a_prefetched_photo_escalates_it_after_all() {
         let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
         loader.prefetch_preview(path("a"), 2560);
-        loader.insert_speed((path("a"), 2560), image(1616, 1080));
+        loader.insert_speed((path("a"), 2560), image(1616, 1080), Origin::Decoded);
         loader.request_preview(path("a"), 2560);
         assert_eq!(queued_previews(&loader), 1);
     }
@@ -2079,7 +2294,7 @@ mod tests {
         loader.prefetch_preview(path("a"), 2560);
         loader.request_preview(path("a"), 2560); // still in flight
         loader.speed_inflight.remove(&(path("a"), 2560));
-        loader.insert_speed((path("a"), 2560), image(1616, 1080));
+        loader.insert_speed((path("a"), 2560), image(1616, 1080), Origin::Decoded);
         loader.escalate_from_speed(&path("a"), 2560, 1616);
         assert_eq!(queued_previews(&loader), 1);
     }
@@ -2087,7 +2302,7 @@ mod tests {
     #[test]
     fn the_preview_getter_prefers_the_forced_decode_over_the_speed_pass() {
         let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
-        loader.insert_speed((path("a"), 2560), image(1616, 1080));
+        loader.insert_speed((path("a"), 2560), image(1616, 1080), Origin::Decoded);
         assert_eq!(loader.get_preview(&path("a"), 2560).unwrap().width, 1616);
         loader.insert_preview((path("a"), 2560), image(2560, 1707));
         assert_eq!(loader.get_preview(&path("a"), 2560).unwrap().width, 2560);
@@ -2096,7 +2311,7 @@ mod tests {
     #[test]
     fn requesting_a_preview_that_is_already_answered_enqueues_nothing() {
         let mut loader = Loader::new(16384, CacheLimits::PLATFORM);
-        loader.insert_speed((path("a"), 2560), image(2560, 1707));
+        loader.insert_speed((path("a"), 2560), image(2560, 1707), Origin::Decoded);
         loader.request_preview(path("a"), 2560);
         assert!(!loader.has_pending_image());
     }

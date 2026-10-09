@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use crate::decode::image_decode;
 use crate::develop::{self};
-use crate::jobs::thumbnail::THUMB_PX;
+use crate::jobs::thumbnail::{Origin, THUMB_PX};
 use crate::persist::signalcache::Signal;
 
 impl App {
@@ -26,25 +26,39 @@ impl App {
         };
         let target = self.preview_px();
 
-        if let Some(img) = self.loader.as_ref().and_then(|l| l.get_full(&want)) {
-            if !self.shown.is_full_of(&want) {
-                self.upload_shown(&want, &img, Shown::Full(want.clone()));
+        #[cfg(not(target_arch = "wasm32"))]
+        self.ensure_full_after_preview();
+
+        if let Some(loader) = &self.loader {
+            if let Some(img) = loader.get_full(&want) {
+                let origin = loader.full_origin(&want);
+                if !self.shown.is_full_of(&want) {
+                    self.upload_shown(&want, &img, Shown::Full(want.clone()), origin);
+                }
+                return;
             }
-            return;
         }
 
         // The size check lets the full-quality decode replace the Speed pass.
         // Never downgrade a full-resolution image already on screen.
-        if let Some(img) = self
-            .loader
-            .as_ref()
-            .and_then(|l| l.get_preview(&want, target))
-        {
-            let actual = img.width.max(img.height);
-            if !self.shown.is_preview_of(&want, target, actual) && !self.shown.is_full_of(&want) {
-                self.upload_shown(&want, &img, Shown::Preview(want.clone(), target, actual));
+        if let Some(loader) = &self.loader {
+            if let Some(img) = loader.get_preview(&want, target) {
+                let origin = loader.preview_origin(&want, target);
+                let actual = img.width.max(img.height);
+                // An embedded JPEG and a decode can share a size, so the
+                // origin counts too.
+                let same =
+                    self.shown.is_preview_of(&want, target, actual) && self.shown_origin == origin;
+                if !same && !self.shown.is_full_of(&want) {
+                    self.upload_shown(
+                        &want,
+                        &img,
+                        Shown::Preview(want.clone(), target, actual),
+                        origin,
+                    );
+                }
+                return;
             }
-            return;
         }
 
         // Re-request every frame: a resize can change the target and the LRU
@@ -64,17 +78,19 @@ impl App {
                 .as_ref()
                 .and_then(|l| l.get_thumb(&want, THUMB_PX))
             {
-                self.upload_shown(&want, &thumb, Shown::Thumb(want.clone()));
+                self.upload_shown(&want, &thumb, Shown::Thumb(want.clone()), Origin::Decoded);
             }
         }
     }
 
-    /// Upload `img` as the loupe image. `tier` records which decode it came from.
+    /// Upload `img` as the loupe image. `tier` records which decode it came
+    /// from, and `origin` whether that decode is the file's embedded JPEG.
     pub(super) fn upload_shown(
         &mut self,
         path: &Path,
         img: &image_decode::DecodedImage,
         tier: Shown,
+        origin: Origin,
     ) {
         // Read before `self.shown` is reassigned.
         let same_photo = self.shown.path() == Some(path);
@@ -84,6 +100,7 @@ impl App {
         };
         renderer.set_image(img);
         self.shown = tier;
+        self.shown_origin = origin;
         self.build_hist_sample(img);
         self.push_adjustments();
         // A new photo starts fitted. A sharper tier of the same photo keeps a
@@ -130,6 +147,25 @@ impl App {
             ));
         }
         w.set_title(&title);
+    }
+
+    /// Which decode the Loupe shows for the selected photo, or `None` while
+    /// it shows another photo or nothing.
+    pub(crate) fn shown_tier(&self) -> Option<ShownTier> {
+        if self.shown.path() != self.want.as_deref() {
+            return None;
+        }
+        Some(match (&self.shown, self.shown_origin) {
+            (Shown::Nothing, _) => return None,
+            (Shown::Thumb(_), _) => ShownTier::Thumb,
+            (_, Origin::Embedded) => ShownTier::Embedded,
+            // A preview of a small photo already holds every pixel.
+            (Shown::Preview(_, _, actual), Origin::Decoded) if self.covers_source(*actual) => {
+                ShownTier::Full
+            }
+            (Shown::Preview(..), Origin::Decoded) => ShownTier::Preview,
+            (Shown::Full(_), Origin::Decoded) => ShownTier::Full,
+        })
     }
 
     /// Image size in source pixels for all view math. Until the metadata

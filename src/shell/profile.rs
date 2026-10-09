@@ -6,7 +6,8 @@
 //! the shape of their working set, and the scroll phase is the grid's working
 //! set on the move, which is where a stale backlog shows. Opening a photo splits into the first
 //! pixels on screen and the preview escalation that sharpens them. The
-//! full-resolution decode is what zooming past the preview costs. Auto Tone,
+//! full-resolution decode is what zooming past the preview, or a window
+//! larger than it, costs. Auto Tone,
 //! a batch export and the Vision signals, quality scoring among them, are the
 //! jobs a user starts and then waits out. Subject selection is the wait behind the Loupe's "Show
 //! selection" button. Compiled only under the `hotpath` feature.
@@ -733,8 +734,9 @@ impl Run {
         }
     }
 
-    /// The tier above the preview, which the app reaches only when the user
-    /// zooms past the preview's own pixels (`App::ensure_full_for_zoom`).
+    /// The tier above the preview, which the app reaches only when the photo
+    /// shows larger than the preview's own pixels, after a zoom or at fit on a
+    /// large window (`App::ensure_full`).
     /// `Loader::new(16384, _)` sets `full_target` to the renderer's `max_dim`,
     /// so nothing here downscales and the decode is the whole frame. That
     /// makes it the phase `hotpath-alloc` says the most about, and the reason

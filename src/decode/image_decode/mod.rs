@@ -35,6 +35,18 @@ use objc2_image_io::{
 #[cfg(target_os = "macos")]
 use crate::decode::coregraphics;
 
+/// True for camera RAW extensions, which the `image` crate cannot decode.
+/// Mirrors the RAW subset of `navigation.rs`'s `IMAGE_EXTS`.
+pub fn is_raw_extension(path: &Path) -> bool {
+    const RAW_EXTS: &[&str] = &[
+        "cr2", "cr3", "nef", "arw", "dng", "raf", "rw2", "orf", "pef", "srw",
+    ];
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| RAW_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
 /// The non-mac decode and metadata functions, re-exported so callers use
 /// `image_decode::decode` on every platform.
 #[cfg(not(target_os = "macos"))]

@@ -206,7 +206,7 @@ sequenceDiagram
     A->>R: set_image (upload GPU texture)
     A->>R: set_adjustments(GpuAdjust)
     R-->>U: loupe frame
-    A->>L: request_full(path) when zoom needs it
+    A->>L: request_full(path) when zoom or a large fit needs it
 
     U->>M: scroll / pinch to zoom
     M->>A: window_event
