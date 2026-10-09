@@ -67,15 +67,15 @@ flowchart TD
 
     subgraph other["Linux / Windows"]
         direction TB
-        lq["Loader::request_preview\n-> Job::Speed"] --> lqd["thumbnail::decode_at_size\nkamadak-exif embedded preview,\nor rawler full_image() for RAF/CR3"]
-        lqd -- "short of the target size" --> lp["Job::Preview\nimage_decode::decode\n(image crate; RAW via nonmac_decode::decode_raw_nonmac,\nrawler's RawDevelop pipeline)"]
+        lq["Loader::request_preview\n-> Job::Speed"] --> lqd["thumbnail::decode_at_size\nkamadak-exif embedded preview,\nor rawler::rawler_full_image_from_bytes\nfor RAF/CR3 (decode/rawler/)"]
+        lqd -- "short of the target size" --> lp["Job::Preview\nimage_decode::decode\n(image crate; RAW via rawler::decode_raw_nonmac,\nrawler's RawDevelop pipeline, decode/rawler/)"]
         lp -.->|user zooms past the preview's resolution| lf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(full resolution)"]
     end
 
     subgraph web["wasm32 (browser)"]
         direction TB
-        wt["request_web_preview, app/web.rs\n-> JobKind::Speed"] --> wtd["web_decode.rs on a loader thread -> raw_preview\nquarter-res Fast tier, sRGB8 output\n(shown first — this is the Loupe's placeholder)"]
-        wtd --> wp["JobKind::Preview\nraw_preview::decode_raw_quality_from_bytes\nfull PPG demosaic, LinearF16 output"]
+        wt["request_web_preview, app/web.rs\n-> JobKind::Speed"] --> wtd["web_decode.rs on a loader thread -> rawler::raw_preview\nquarter-res Fast tier, sRGB8 output\n(shown first — this is the Loupe's placeholder)"]
+        wtd --> wp["JobKind::Preview\nrawler::raw_preview::decode_raw_quality_from_bytes\nfull PPG demosaic, LinearF16 output"]
         wp -.->|user zooms past the preview's resolution| wf["request_web_full, app/web.rs\n-> JobKind::Full, full-resolution decode"]
     end
 
@@ -147,7 +147,7 @@ flowchart TD
         nativeq --> othct["ThumbCache::get_or_make\n-> thumbnail::decode_at_size(EmbeddedPreview::UseIfPresent)\n(kamadak-exif embedded preview,\nfallback: full image_decode::decode)"]
     end
     subgraph web2["wasm32"]
-        webq --> webct["web_decode.rs on a loader thread:\nembedded_preview_from_bytes, then\nrawler_full_image_from_bytes, then\nraw_preview (Fast tier)"]
+        webq --> webct["web_decode.rs on a loader thread:\nembedded_preview_from_bytes, then\nrawler::rawler_full_image_from_bytes, then\nrawler::raw_preview (Fast tier)"]
     end
 
     mact --> disk["on-disk JPEG cache\n<photo dir>/.lightphotos/<photo>.<key>.thumb.jpg\nThumbCache (native) / web_thumb_cache.rs (wasm32)"]
@@ -201,7 +201,7 @@ flowchart TD
     exportbtn["User exports one or more photos"]
     exportbtn --> submit["app/export.rs submits one ExportJob per photo\n(native; wasm32 has its own start_export that bakes on the\nloader's threads and writes via File System Access)"]
     submit --> pool["Exporter, export/mod.rs\nruns on the generic worker_pool.rs pool"]
-    pool --> decode["image_decode::decode(src, u32::MAX)\nfull-resolution decode\nImageIO on macOS, image/rawler on Linux/Windows"]
+    pool --> decode["image_decode::decode(src, u32::MAX)\nfull-resolution decode\nImageIO on macOS, image crate or\ndecode/rawler/ on Linux/Windows"]
     decode --> bake["image_ops::bake_edited\ncrop -> develop::apply_linear (tone) -> rotate"]
     bake --> encode["image_encode::encode_jpeg\nImageIO on macOS, mozjpeg-rs elsewhere"]
     encode --> write["write to a .jpg.tmp sibling,\nthen atomically rename to the destination"]

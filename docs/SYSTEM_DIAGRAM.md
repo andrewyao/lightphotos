@@ -63,7 +63,8 @@ flowchart LR
 
     subgraph lib["Lib (lib.rs)"]
         decode["decode/<br/>image_decode, image_encode,<br/>coregraphics"]
-        nonmac["decode/image_decode/nonmac_decode.rs (image, exif)<br/>decode/rawler/ (every rawler call,<br/>raw_preview Fast / Quality)"]
+        nonmac["decode/image_decode/nonmac_decode.rs<br/>non-RAW decode (image crate), EXIF"]
+        rawlerdir["decode/rawler/<br/>every rawler call: RAW decode,<br/>RAW metadata, CR3/RAF preview,<br/>raw_preview (Fast / Quality)"]
         develop["develop/mod.rs<br/>Adjustments → GpuAdjust<br/>apply_linear (CPU mirror)"]
         imgops["develop/image_ops.rs<br/>crop / tone / rotate, bake_edited"]
         export["export/mod.rs<br/>ExportJob → ExportDest"]
@@ -86,7 +87,8 @@ flowchart LR
         sidecars[(".lightphotos/<br/>*.xmp JSON sidecars<br/>groups/*.json")]
         imageio["Apple ImageIO /<br/>CoreGraphics"]
         applevision["Apple Vision"]
-        crates["image · rawler · mozjpeg-rs<br/>kamadak-exif"]
+        crates["image · mozjpeg-rs<br/>kamadak-exif"]
+        rawlercrate["rawler (LGPL-2.1)"]
         fsa["Browser File System<br/>Access API"]
         gpu["GPU (wgpu)"]
         immichsrv["Immich server"]
@@ -117,6 +119,9 @@ flowchart LR
     thumbs --> decode
     decode --> imageio
     decode --> nonmac --> crates
+    nonmac -- "RAW files" --> rawlerdir --> rawlercrate
+    thumbs -- "CR3/RAF preview" --> rawlerdir
+    webshell -- "raw_preview" --> rawlerdir
 
     app -- "ExportJob" --> wpool --> export
     export --> imgops
@@ -146,7 +151,7 @@ flowchart LR
     classDef nonmac stroke:#d97706,stroke-width:2px,stroke-dasharray:5 3
     classDef web stroke:#16a34a,stroke-width:2px,stroke-dasharray:5 3
     class delegate,menu,vision,spool,imageio,applevision,keychain mac
-    class nonmac,crates nonmac
+    class nonmac,rawlerdir,crates,rawlercrate nonmac
     class webshell,fsa,rawrender web
 ```
 
@@ -156,6 +161,9 @@ flowchart LR
 
 `jobs/score.rs` builds on all platforms. But `ScorePool::new` returns `None` off macOS, so
 scoring runs on macOS only. The diagram marks it as macOS code.
+
+`decode/rawler/` is the only code that calls rawler. It does not build on macOS, so the
+macOS app never links rawler (LGPL-2.1).
 
 `renderer/raw_render.rs` builds on all platforms. But only the browser Loupe RAW path gives
 it linear-light images. All other paths apply the tonemap on the CPU.
