@@ -143,7 +143,7 @@ impl Renderer {
         // is ever reached, so this is the report that covers "can't run".
         let surface = instance.create_surface(window).unwrap_or_else(|e| {
             #[cfg(target_arch = "wasm32")]
-            crate::analytics::property("webgpu_unsupported", "reason", "surface_unavailable");
+            crate::web::analytics::property("webgpu_unsupported", "reason", "surface_unavailable");
             panic!("create surface: {e}");
         });
 
@@ -156,7 +156,11 @@ impl Renderer {
             .await
             .unwrap_or_else(|e| {
                 #[cfg(target_arch = "wasm32")]
-                crate::analytics::property("webgpu_unsupported", "reason", "adapter_unavailable");
+                crate::web::analytics::property(
+                    "webgpu_unsupported",
+                    "reason",
+                    "adapter_unavailable",
+                );
                 panic!("no adapter: {e}");
             });
 
@@ -176,7 +180,11 @@ impl Renderer {
             .await
             .unwrap_or_else(|e| {
                 #[cfg(target_arch = "wasm32")]
-                crate::analytics::property("webgpu_unsupported", "reason", "device_unavailable");
+                crate::web::analytics::property(
+                    "webgpu_unsupported",
+                    "reason",
+                    "device_unavailable",
+                );
                 panic!("request device: {e}");
             });
 
@@ -1288,7 +1296,7 @@ impl Renderer {
                     pass.set_bind_group(3, &self.touch_bind, &[]);
                     pass.draw(0..6, 0..1);
                     #[cfg(target_arch = "wasm32")]
-                    crate::analytics::photo_drawn();
+                    crate::web::analytics::photo_drawn();
 
                     if let Some(overlay) = overlay_bind {
                         pass.set_pipeline(overlay_pipeline);
@@ -1352,7 +1360,7 @@ impl Renderer {
             frame.present();
         }
         #[cfg(target_arch = "wasm32")]
-        crate::analytics::presented();
+        crate::web::analytics::presented();
         if crate::loader::timing_enabled() {
             // Only the first frames matter: time to first pixels, then time
             // to the sharp photo.

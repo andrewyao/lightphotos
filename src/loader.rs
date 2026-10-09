@@ -84,17 +84,17 @@ enum Job {
     /// wasm32: a decode of bytes the main thread already read, since a
     /// thread cannot open a File System Access handle by path.
     #[cfg(target_arch = "wasm32")]
-    Web(Box<crate::web_decode::WebJob>),
+    Web(Box<crate::web::web_decode::WebJob>),
     /// wasm32: a batch export. Native exports run on `export.rs`'s own pool.
     #[cfg(target_arch = "wasm32")]
-    WebExport(Box<crate::web_decode::WebExportJob>),
+    WebExport(Box<crate::web::web_decode::WebExportJob>),
     /// wasm32: `Exif` over bytes the main thread already read.
     #[cfg(target_arch = "wasm32")]
-    WebExif(Box<crate::web_decode::WebExifJob>),
+    WebExif(Box<crate::web::web_decode::WebExifJob>),
     /// wasm32: a Remove Chromatic Aberration measurement over bytes the main
     /// thread already read.
     #[cfg(target_arch = "wasm32")]
-    WebMeasure(Box<crate::web_decode::WebMeasureJob>),
+    WebMeasure(Box<crate::web::web_decode::WebMeasureJob>),
 }
 
 /// Everything a worker needs to bake one edited thumbnail, owned so the
@@ -154,7 +154,7 @@ enum JobResult {
     /// `None` when the bake panicked.
     Baked(PathBuf, u32, u64, Option<BakedThumb>),
     #[cfg(target_arch = "wasm32")]
-    Web(Box<crate::web_decode::PoolResult>),
+    Web(Box<crate::web::web_decode::PoolResult>),
     /// The export's id, its source, and the JPEG.
     #[cfg(target_arch = "wasm32")]
     WebExport(u64, PathBuf, Result<Vec<u8>, String>),
@@ -236,10 +236,10 @@ fn push_job(shared: &Shared, job: Job) -> Enqueued {
         // and `retain_web_thumbs` prunes the ones that scroll away.
         #[cfg(target_arch = "wasm32")]
         Job::Web(web) => match web.kind {
-            crate::web_decode::JobKind::Speed => &mut q.speed,
-            crate::web_decode::JobKind::Preview => &mut q.preview,
-            crate::web_decode::JobKind::Full => &mut q.full,
-            crate::web_decode::JobKind::Thumb => &mut q.thumbs_viewport,
+            crate::web::web_decode::JobKind::Speed => &mut q.speed,
+            crate::web::web_decode::JobKind::Preview => &mut q.preview,
+            crate::web::web_decode::JobKind::Full => &mut q.full,
+            crate::web::web_decode::JobKind::Thumb => &mut q.thumbs_viewport,
         },
         #[cfg(target_arch = "wasm32")]
         Job::WebExport(..) => &mut q.export,
@@ -312,8 +312,8 @@ impl WebDecoder {
         generation: u64,
         from_cache: bool,
     ) {
-        self.push(crate::web_decode::WebJob {
-            kind: crate::web_decode::JobKind::Thumb,
+        self.push(crate::web::web_decode::WebJob {
+            kind: crate::web::web_decode::JobKind::Thumb,
             path,
             target: px,
             bytes: Arc::new(js_sys::Uint8Array::new(&bytes).to_vec()),
@@ -331,9 +331,9 @@ impl WebDecoder {
         target: u32,
         bytes: Arc<Vec<u8>>,
         is_raw: bool,
-        kind: crate::web_decode::JobKind,
+        kind: crate::web::web_decode::JobKind,
     ) {
-        self.push(crate::web_decode::WebJob {
+        self.push(crate::web::web_decode::WebJob {
             kind,
             path,
             target,
@@ -347,7 +347,7 @@ impl WebDecoder {
 
     /// Queue an export. Its JPEG comes back through
     /// `Loader::take_web_exports` under `job.id`.
-    pub fn submit_export(&self, job: crate::web_decode::WebExportJob) {
+    pub fn submit_export(&self, job: crate::web::web_decode::WebExportJob) {
         let (id, path) = (job.id, job.path.clone());
         if self.workers == 0
             || push_job(&self.shared, Job::WebExport(Box::new(job))) != Enqueued::Yes
@@ -362,7 +362,7 @@ impl WebDecoder {
 
     /// Queue a Remove Chromatic Aberration measurement. Its scales come back
     /// through `Loader::take_web_measures`.
-    pub fn submit_measure(&self, job: crate::web_decode::WebMeasureJob) {
+    pub fn submit_measure(&self, job: crate::web::web_decode::WebMeasureJob) {
         let path = job.path.clone();
         if self.workers == 0
             || push_job(&self.shared, Job::WebMeasure(Box::new(job))) != Enqueued::Yes
@@ -378,7 +378,7 @@ impl WebDecoder {
     /// `Preview` decodes. Submit it before the photo's `Preview`, which it
     /// then runs ahead of. With no thread to take it, the file facts it
     /// already holds are the result.
-    pub fn submit_exif(&self, job: crate::web_decode::WebExifJob) {
+    pub fn submit_exif(&self, job: crate::web::web_decode::WebExifJob) {
         let (path, failed) = (job.path.clone(), job.failed());
         if self.workers == 0 || push_job(&self.shared, Job::WebExif(Box::new(job))) != Enqueued::Yes
         {
@@ -404,11 +404,11 @@ impl WebDecoder {
         &self,
         path: PathBuf,
         target: u32,
-        kind: crate::web_decode::JobKind,
+        kind: crate::web::web_decode::JobKind,
         generation: Option<u64>,
         error: String,
     ) {
-        let job = crate::web_decode::WebJob {
+        let job = crate::web::web_decode::WebJob {
             kind,
             path,
             target,
@@ -419,13 +419,13 @@ impl WebDecoder {
             from_cache: false,
         };
         let _ = self.res_tx.send(JobResult::Web(Box::new(
-            job.failed(crate::web_decode::Failure::Read(error)),
+            job.failed(crate::web::web_decode::Failure::Read(error)),
         )));
     }
 
-    fn push(&self, job: crate::web_decode::WebJob) {
+    fn push(&self, job: crate::web::web_decode::WebJob) {
         let failed = (self.workers == 0).then(|| {
-            job.failed(crate::web_decode::Failure::Decode(
+            job.failed(crate::web::web_decode::Failure::Decode(
                 "no decode threads started".to_string(),
             ))
         });
@@ -433,7 +433,7 @@ impl WebDecoder {
             let _ = self.res_tx.send(JobResult::Web(Box::new(failed)));
             return;
         }
-        let failed = job.failed(crate::web_decode::Failure::Decode(
+        let failed = job.failed(crate::web::web_decode::Failure::Decode(
             "the decode queue is poisoned".to_string(),
         ));
         if push_job(&self.shared, Job::Web(Box::new(job))) != Enqueued::Yes {
@@ -644,7 +644,7 @@ mod panic_recovery {
     pub(super) fn start(job: &Job) {
         let failure = match job {
             Job::Web(j) => Some(JobResult::Web(Box::new(j.failed(
-                crate::web_decode::Failure::Decode("decoder panicked".to_string()),
+                crate::web::web_decode::Failure::Decode("decoder panicked".to_string()),
             )))),
             Job::Bake(b) => Some(JobResult::Baked(b.path.clone(), b.px, b.sig, None)),
             Job::WebExport(e) => Some(JobResult::WebExport(
@@ -775,7 +775,7 @@ pub struct Loader {
     baked: Vec<BakedThumb>,
     /// wasm32: finished browser decodes not yet taken by `take_web_results`.
     #[cfg(target_arch = "wasm32")]
-    web_results: Vec<crate::web_decode::PoolResult>,
+    web_results: Vec<crate::web::web_decode::PoolResult>,
     /// wasm32: finished exports not yet taken by `take_web_exports`.
     #[cfg(target_arch = "wasm32")]
     web_exports: Vec<(u64, PathBuf, Result<Vec<u8>, String>)>,
@@ -1176,7 +1176,7 @@ impl Loader {
     /// wasm32: finished browser decodes since the last call. Filled by
     /// `poll_all`, so call it after that.
     #[cfg(target_arch = "wasm32")]
-    pub fn take_web_results(&mut self) -> Vec<crate::web_decode::PoolResult> {
+    pub fn take_web_results(&mut self) -> Vec<crate::web::web_decode::PoolResult> {
         std::mem::take(&mut self.web_results)
     }
 
@@ -1205,7 +1205,7 @@ impl Loader {
         };
         let mut dropped = Vec::new();
         q.thumbs_viewport.retain(|job| match job {
-            Job::Web(w) if w.kind == crate::web_decode::JobKind::Thumb && !keep(&w.path) => {
+            Job::Web(w) if w.kind == crate::web::web_decode::JobKind::Thumb && !keep(&w.path) => {
                 dropped.push((w.path.clone(), w.target));
                 false
             }
@@ -1226,7 +1226,7 @@ impl Loader {
     pub fn retain_web_loupe(
         &mut self,
         keep: impl Fn(&Path) -> bool,
-    ) -> Vec<(crate::web_decode::JobKind, PathBuf, u32)> {
+    ) -> Vec<(crate::web::web_decode::JobKind, PathBuf, u32)> {
         let Ok(mut q) = lock_queue(&self.shared) else {
             return Vec::new();
         };

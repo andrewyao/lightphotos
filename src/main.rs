@@ -9,9 +9,6 @@
 //! crate root owns `main()` and the winit event loop, which turns window events
 //! into `App` calls. Viewer state and behavior live in [`app`].
 
-#[cfg(any(target_arch = "wasm32", test))]
-#[path = "web/analytics.rs"]
-mod analytics;
 mod app;
 mod autotone;
 mod cache_limits;
@@ -47,27 +44,8 @@ mod signalcache;
 mod thumbnail;
 mod trash;
 mod ui;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_canvas.rs"]
-mod web_canvas;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_catalog_fs.rs"]
-mod web_catalog_fs;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_decode.rs"]
-mod web_decode;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_export_fs.rs"]
-mod web_export_fs;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_exports.rs"]
-mod web_exports;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_fs.rs"]
-mod web_fs;
-#[cfg(target_arch = "wasm32")]
-#[path = "web/web_thumb_cache.rs"]
-mod web_thumb_cache;
+#[cfg(any(target_arch = "wasm32", test))]
+mod web;
 #[cfg(not(target_arch = "wasm32"))]
 mod window_rect;
 
@@ -117,7 +95,7 @@ fn finish_window_setup(
     app.start_score_pool();
     app.egui_state = Some(egui_state);
     #[cfg(target_arch = "wasm32")]
-    analytics::started();
+    web::analytics::started();
 
     if let Some(path) = app.pending_initial.take() {
         loader::mark("opening initial path");
@@ -162,7 +140,7 @@ impl ApplicationHandler<UserEvent> for App {
         {
             // winit creates a <canvas> on wasm but doesn't add it to the page.
             // `attach` adds it and returns the real size.
-            let size = web_canvas::attach(&window);
+            let size = web::web_canvas::attach(&window);
             self.window = Some(window.clone());
             let tx = self.renderer_init_tx.clone();
             wasm_bindgen_futures::spawn_local(async move {
@@ -660,7 +638,7 @@ fn main() {
 /// the browser main thread must return to the browser's event loop.
 #[cfg(target_arch = "wasm32")]
 fn main() {
-    analytics::start();
+    web::analytics::start();
     console_error_panic_hook::set_once();
     loader::install_panic_recovery();
     loader::start_clock();

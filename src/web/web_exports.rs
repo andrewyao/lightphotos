@@ -79,7 +79,7 @@ impl WebExports {
                 filename: export.filename,
             },
         );
-        decoder.submit_export(crate::web_decode::WebExportJob {
+        decoder.submit_export(crate::web::web_decode::WebExportJob {
             id,
             path: export.path,
             bytes: js_sys::Uint8Array::new(&export.bytes).to_vec(),

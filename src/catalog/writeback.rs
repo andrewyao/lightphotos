@@ -479,7 +479,7 @@ impl Writeback {
             self.in_flight.insert(path.clone());
             let done_tx = self.done_tx.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                use crate::web_catalog_fs as fs;
+                use crate::web::web_catalog_fs as fs;
                 let result = match (is_group, body) {
                     (false, Some(bytes)) => fs::write_sidecar(&dir_handle, &name, &bytes).await,
                     (false, None) => fs::delete_sidecar(&dir_handle, &name).await,

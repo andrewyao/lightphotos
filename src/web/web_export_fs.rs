@@ -138,7 +138,7 @@ impl WebFs {
             .file_handles
             .get(src)
             .ok_or_else(|| format!("no file handle for {}", src.display()))?;
-        crate::web_fs::read_array_buffer(handle).await
+        crate::web::web_fs::read_array_buffer(handle).await
     }
 }
 

@@ -120,8 +120,8 @@ impl App {
             .ok_or("no decode threads started")?;
         let tx = self.optics.tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            match crate::web_fs::read_bytes(&handle).await {
-                Ok(bytes) => pool.submit_measure(crate::web_decode::WebMeasureJob {
+            match crate::web::web_fs::read_bytes(&handle).await {
+                Ok(bytes) => pool.submit_measure(crate::web::web_decode::WebMeasureJob {
                     is_raw: crate::decode::image_decode::is_raw_extension(&path),
                     path,
                     bytes: std::sync::Arc::new(bytes),

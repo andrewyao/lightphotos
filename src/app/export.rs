@@ -455,7 +455,8 @@ impl App {
         self.request_redraw();
 
         let pool = self.web.exports();
-        let fs = crate::web_export_fs::WebFs::new(folder_handle, self.web.file_handles().clone());
+        let fs =
+            crate::web::web_export_fs::WebFs::new(folder_handle, self.web.file_handles().clone());
         wasm_bindgen_futures::spawn_local(async move {
             let existing = match fs.existing_export_names().await {
                 Ok(existing) => existing,
@@ -484,7 +485,7 @@ impl App {
                 match fs.read_source_array_buffer(&src).await {
                     Ok(bytes) => pool.submit(
                         &decoder,
-                        crate::web_exports::Export {
+                        crate::web::web_exports::Export {
                             path: src,
                             folder: output_folder.clone(),
                             dest_dir: dest_dir.clone(),
@@ -640,12 +641,12 @@ impl App {
                         }
                     }
                     #[cfg(target_arch = "wasm32")]
-                    crate::analytics::event("photo_exported");
+                    crate::web::analytics::event("photo_exported");
                 }
                 Err(e) => {
                     eprintln!("[lightphotos] export failed for {}: {e}", src.display());
                     #[cfg(target_arch = "wasm32")]
-                    crate::analytics::property("export_failed", "reason", "export_pipeline");
+                    crate::web::analytics::property("export_failed", "reason", "export_pipeline");
                     prog.errors += 1;
                     prog.last_err = Some(e);
                 }

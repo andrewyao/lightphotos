@@ -6,8 +6,8 @@
 use super::*;
 use crate::navigation::Playlist;
 use crate::thumbnail::THUMB_PX;
-use crate::web_decode::JobKind;
-use crate::web_fs;
+use crate::web::web_decode::JobKind;
+use crate::web::web_fs;
 
 /// Cap on concurrent file reads from the picked folder, shared by thumbnails,
 /// the loupe, and the cache sweep. Chrome throws `NotReadableError` when too
@@ -98,8 +98,8 @@ pub(crate) struct Web {
     /// Set while `fonts::fetch_full_cjk` is running or once it has succeeded,
     /// so the font downloads at most once a session. A failed fetch clears it.
     full_cjk_requested: Arc<std::sync::atomic::AtomicBool>,
-    folder_tx: Sender<Result<crate::web_fs::PickedFolder, String>>,
-    folder_rx: Receiver<Result<crate::web_fs::PickedFolder, String>>,
+    folder_tx: Sender<Result<crate::web::web_fs::PickedFolder, String>>,
+    folder_rx: Receiver<Result<crate::web::web_fs::PickedFolder, String>>,
     /// File handles for the open folder's images, keyed like the playlist
     /// entries. A picked folder has no OS path, so every read goes through these.
     file_handles: HashMap<PathBuf, web_sys::FileSystemFileHandle>,
@@ -109,11 +109,11 @@ pub(crate) struct Web {
     dir_handles: HashMap<PathBuf, web_sys::FileSystemDirectoryHandle>,
     /// Per-folder thumbnail cache index, shared by that folder's async writes.
     thumb_cleanup:
-        HashMap<PathBuf, std::rc::Rc<std::cell::RefCell<crate::web_thumb_cache::Cleanup>>>,
+        HashMap<PathBuf, std::rc::Rc<std::cell::RefCell<crate::web::web_thumb_cache::Cleanup>>>,
     /// Async subfolder listings, tagged with the navigation generation that
     /// asked for them. `poll_dir_listing` drops stale generations.
-    dirlist_tx: Sender<(u64, PathBuf, Result<crate::web_fs::DirListing, String>)>,
-    dirlist_rx: Receiver<(u64, PathBuf, Result<crate::web_fs::DirListing, String>)>,
+    dirlist_tx: Sender<(u64, PathBuf, Result<crate::web::web_fs::DirListing, String>)>,
+    dirlist_rx: Receiver<(u64, PathBuf, Result<crate::web::web_fs::DirListing, String>)>,
     /// `(directory, generation)` pairs with a listing in flight. Stops per-frame
     /// polling from re-requesting, while a newer generation may retry.
     dirlist_inflight: std::collections::HashSet<(PathBuf, u64)>,
@@ -142,7 +142,7 @@ pub(crate) struct Web {
     /// Failed cached decodes waiting for a slot to read the source file. Their
     /// keys stay in `thumb_inflight` so normal requests don't retry the
     /// corrupt cache.
-    thumb_recovery_pending: Vec<crate::web_decode::PoolResult>,
+    thumb_recovery_pending: Vec<crate::web::web_decode::PoolResult>,
     /// `get_file()` reads in flight across all decode tiers. Chrome throws
     /// `NotReadableError` when too many reads are open against one folder, so
     /// `MAX_CONCURRENT_READS` caps this. A key that can't start this frame
@@ -177,13 +177,13 @@ pub(crate) struct Web {
 
     /// Where each running export's JPEG goes. The loader's threads bake it;
     /// the destination folder handle cannot leave the main thread.
-    exports: crate::web_exports::WebExports,
+    exports: crate::web::web_exports::WebExports,
     /// `Preview` and `Speed` results that `poll_web_thumbs` pulled off the
     /// pool's single shared channel. `poll_web_preview` consumes them in the
     /// same frame.
-    preview_pending: Vec<crate::web_decode::PoolResult>,
+    preview_pending: Vec<crate::web::web_decode::PoolResult>,
     /// `Full` results set aside the same way, for `poll_web_full`.
-    full_pending: Vec<crate::web_decode::PoolResult>,
+    full_pending: Vec<crate::web::web_decode::PoolResult>,
 }
 
 impl Web {
@@ -255,7 +255,7 @@ impl Web {
         self.read_inflight.clone()
     }
 
-    pub(super) fn exports(&self) -> crate::web_exports::WebExports {
+    pub(super) fn exports(&self) -> crate::web::web_exports::WebExports {
         self.exports.clone()
     }
 
@@ -303,7 +303,7 @@ impl App {
             .map(|l| l.take_web_exports())
             .unwrap_or_default();
         for r in self.web.exports.land(baked) {
-            let crate::web_exports::ExportResult {
+            let crate::web::web_exports::ExportResult {
                 path,
                 folder,
                 dest_dir,
@@ -316,7 +316,7 @@ impl App {
                     let file_handles = self.web.file_handles.clone();
                     let dest = dest_dir.join(&filename);
                     wasm_bindgen_futures::spawn_local(async move {
-                        let result = crate::web_export_fs::WebFs::new(folder, file_handles)
+                        let result = crate::web::web_export_fs::WebFs::new(folder, file_handles)
                             .write_atomic(&dest, &jpeg)
                             .await
                             .map(|()| crate::export::ExportLanding::File(dest.clone()));
@@ -578,9 +578,9 @@ impl App {
                 // The cache entry is named by size and mtime, which `stat`
                 // reads without reading the file's bytes.
                 let entry = match (web_fs::stat(&handle).await, path.file_name()) {
-                    (Ok(file), Some(name)) => Some(crate::web_thumb_cache::entry_name(
+                    (Ok(file), Some(name)) => Some(crate::web::web_thumb_cache::entry_name(
                         name,
-                        crate::web_thumb_cache::key_for(&file),
+                        crate::web::web_thumb_cache::key_for(&file),
                     )),
                     _ => None,
                 };
@@ -588,7 +588,7 @@ impl App {
                 // A cache hit decodes a ~45 KB JPEG and never reads the
                 // multi-megabyte source.
                 if let (Some(name), Some(root)) = (&entry, &cache_dir) {
-                    if let Some(cached) = crate::web_thumb_cache::load(root, name).await {
+                    if let Some(cached) = crate::web::web_thumb_cache::load(root, name).await {
                         read_inflight.set(read_inflight.get().saturating_sub(1));
                         let buf = js_sys::Uint8Array::from(cached.as_slice()).buffer();
                         pool.submit_thumb(path, px, buf, false, entry, generation, true);
@@ -639,7 +639,8 @@ impl App {
             .clone();
         let display = path.to_path_buf();
         wasm_bindgen_futures::spawn_local(async move {
-            if let Err(e) = crate::web_thumb_cache::store(&root, &name, &bytes, &cleanup).await {
+            if let Err(e) = crate::web::web_thumb_cache::store(&root, &name, &bytes, &cleanup).await
+            {
                 web_sys::console::warn_1(
                     &format!(
                         "[web] could not cache thumbnail for {}: {e}",
@@ -684,7 +685,7 @@ impl App {
                 self.web.thumb_recovery_pending.push(r);
                 continue;
             }
-            let crate::web_decode::PoolResult {
+            let crate::web::web_decode::PoolResult {
                 path,
                 target,
                 result,
@@ -783,7 +784,7 @@ impl App {
                             .into(),
                         );
                         self.web.thumb_retries.remove(&(path.clone(), target));
-                        crate::analytics::decode_failed(&path, "thumbnail");
+                        crate::web::analytics::decode_failed(&path, "thumbnail");
                         if let Some(loader) = &mut self.loader {
                             loader.mark_thumb_failed_external(path.clone(), target);
                         }
@@ -893,7 +894,7 @@ impl App {
                 Ok(bytes) => {
                     let bytes = std::sync::Arc::new(bytes);
                     if let Some(meta) = meta {
-                        pool.submit_exif(crate::web_decode::WebExifJob {
+                        pool.submit_exif(crate::web::web_decode::WebExifJob {
                             path: path.clone(),
                             bytes: bytes.clone(),
                             is_raw,
@@ -990,7 +991,7 @@ impl App {
             let read = web_fs::read_bytes(&handle).await;
             read_inflight.set(read_inflight.get().saturating_sub(1));
             match read {
-                Ok(bytes) => decoder.submit_exif(crate::web_decode::WebExifJob {
+                Ok(bytes) => decoder.submit_exif(crate::web::web_decode::WebExifJob {
                     is_raw: image_decode::is_raw_extension(&path),
                     path,
                     bytes: std::sync::Arc::new(bytes),
@@ -1014,7 +1015,7 @@ impl App {
     pub(crate) fn poll_web_preview(&mut self) -> bool {
         let mut landed = false;
         let pending = std::mem::take(&mut self.web.preview_pending);
-        for crate::web_decode::PoolResult {
+        for crate::web::web_decode::PoolResult {
             kind,
             path,
             target,
@@ -1070,7 +1071,7 @@ impl App {
                                 );
                                 self.web.speed_retries.remove(&key);
                                 if self.want.as_deref() == Some(path.as_path()) {
-                                    crate::analytics::decode_failed(&path, "speed");
+                                    crate::web::analytics::decode_failed(&path, "speed");
                                 }
                                 self.web.speed_failed.insert(key);
                             }
@@ -1135,7 +1136,7 @@ impl App {
                         self.web.preview_retries.remove(&key);
                         self.web.preview_failed.insert(key);
                         if self.want.as_deref() == Some(path.as_path()) {
-                            crate::analytics::decode_failed(&path, "preview");
+                            crate::web::analytics::decode_failed(&path, "preview");
                             self.set_status(
                                 StatusKind::Error,
                                 (crate::i18n::t().preview_failed)(&path.display().to_string()),
@@ -1223,7 +1224,7 @@ impl App {
     pub(crate) fn poll_web_full(&mut self) -> bool {
         let mut landed = false;
         let pending = std::mem::take(&mut self.web.full_pending);
-        for crate::web_decode::PoolResult {
+        for crate::web::web_decode::PoolResult {
             path,
             target,
             result,
@@ -1280,7 +1281,7 @@ impl App {
                         );
                         self.web.full_retries.remove(&key);
                         if self.want.as_deref() == Some(path.as_path()) {
-                            crate::analytics::decode_failed(&path, "full");
+                            crate::web::analytics::decode_failed(&path, "full");
                         }
                         self.web.full_failed.insert(key);
                     }

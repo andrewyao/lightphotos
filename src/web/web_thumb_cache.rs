@@ -16,7 +16,7 @@ use web_sys::{
     FileSystemWritableFileStream,
 };
 
-use crate::web_catalog_fs::{is_not_found, js_error_string, sidecar_dir};
+use crate::web::web_catalog_fs::{is_not_found, js_error_string, sidecar_dir};
 
 /// Shared by all writes to one directory while that folder is open. One
 /// task at a time (`running`) builds the index and deletes old versions.
@@ -49,7 +49,7 @@ pub(crate) async fn load(root: &FileSystemDirectoryHandle, name: &str) -> Option
         Ok(v) => v.unchecked_into(),
         Err(_) => return None,
     };
-    crate::web_fs::read_bytes(&handle).await.ok()
+    crate::web::web_fs::read_bytes(&handle).await.ok()
 }
 
 /// Write `bytes` to `root/.lightphotos/<name>`, then delete older cache
@@ -232,7 +232,10 @@ pub(crate) async fn sweep_orphans(
             Some(key) => *key,
             None => {
                 reads.set(reads.get() + 1);
-                let key = crate::web_fs::stat(handle).await.ok().map(|f| key_for(&f));
+                let key = crate::web::web_fs::stat(handle)
+                    .await
+                    .ok()
+                    .map(|f| key_for(&f));
                 reads.set(reads.get().saturating_sub(1));
                 keys.insert(photo, key);
                 key

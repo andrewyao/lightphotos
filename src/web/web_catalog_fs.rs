@@ -118,7 +118,7 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
         let Some(stem) = strip_xmp(&name) else {
             continue;
         };
-        let parsed = crate::web_fs::read_bytes(&file_handle)
+        let parsed = crate::web::web_fs::read_bytes(&file_handle)
             .await
             .and_then(|bytes| {
                 serde_json::from_slice::<ImageRecord>(&bytes).map_err(|e| e.to_string())
@@ -148,7 +148,7 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
             continue;
         }
         let parsed = match group_file::id_of(&name) {
-            Some(id) => crate::web_fs::read_bytes(&file_handle)
+            Some(id) => crate::web::web_fs::read_bytes(&file_handle)
                 .await
                 .and_then(|bytes| group_file::parse(&bytes))
                 .map(|saved| (id, saved)),

@@ -427,7 +427,7 @@ impl App {
         self.catalog.set_adjustments(path, &merged);
         #[cfg(target_arch = "wasm32")]
         if merged != base {
-            crate::analytics::property("develop_edit_applied", "edit_kind", "auto_tone");
+            crate::web::analytics::property("develop_edit_applied", "edit_kind", "auto_tone");
         }
         self.autotone.done += 1;
         if self.shown.path() == Some(path) {

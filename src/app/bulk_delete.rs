@@ -173,7 +173,7 @@ impl BulkDelete {
             let tx = self.done_tx.clone();
             self.in_flight.insert(path.clone());
             wasm_bindgen_futures::spawn_local(async move {
-                let result = crate::web_catalog_fs::remove_file(&handle, &name).await;
+                let result = crate::web::web_catalog_fs::remove_file(&handle, &name).await;
                 let _ = tx.send((path, result));
             });
         }

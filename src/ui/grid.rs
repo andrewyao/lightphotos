@@ -352,7 +352,7 @@ pub(super) fn thumbnail_cell(
         pill_anchor = img_rect;
         #[cfg(target_arch = "wasm32")]
         if ui.is_rect_visible(img_rect) {
-            crate::analytics::photo_drawn();
+            crate::web::analytics::photo_drawn();
         }
     } else if style.show_placeholder {
         // A failed decode must not look like one still loading.

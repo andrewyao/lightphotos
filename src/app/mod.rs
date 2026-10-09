@@ -924,7 +924,7 @@ impl App {
     /// playlist from directory handles, since it can't call `read_dir`.
     fn load_playlist(&mut self, playlist: Playlist, dir: PathBuf) {
         #[cfg(target_arch = "wasm32")]
-        crate::analytics::folder_opened(playlist.entries().len());
+        crate::web::analytics::folder_opened(playlist.entries().len());
         self.teardown_loupe_state();
         self.burst_scan = None;
         self.seed_mirrors(&playlist);
@@ -952,7 +952,7 @@ impl App {
         // early return below: `presented` reads this frame's flag, and a
         // frame that never cleared it would report the last frame's photo.
         #[cfg(target_arch = "wasm32")]
-        crate::analytics::begin_frame();
+        crate::web::analytics::begin_frame();
         // Upload thumbnails before egui references them.
         self.sync_thumb_textures();
         self.sync_compare_tiles();
@@ -1344,7 +1344,11 @@ impl App {
                     if !self.current_adjustments().is_identity()
                         || !self.current_touchups().is_empty()
                     {
-                        crate::analytics::property("develop_edit_applied", "edit_kind", "reset");
+                        crate::web::analytics::property(
+                            "develop_edit_applied",
+                            "edit_kind",
+                            "reset",
+                        );
                     }
                     self.edits.remove(&path);
                     self.touchups.remove(&path);

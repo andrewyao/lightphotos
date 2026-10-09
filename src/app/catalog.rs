@@ -204,9 +204,9 @@ impl App {
                     .collect();
                 let reads = self.web.read_inflight();
                 wasm_bindgen_futures::spawn_local(async move {
-                    let loaded = crate::web_catalog_fs::load_sidecars(&handle).await;
+                    let loaded = crate::web::web_catalog_fs::load_sidecars(&handle).await;
                     let _ = tx.send((for_task, token, mark, loaded));
-                    crate::web_thumb_cache::sweep_orphans(&handle, &live, reads).await;
+                    crate::web::web_thumb_cache::sweep_orphans(&handle, &live, reads).await;
                 });
                 self.catalog_load.pending = Some((dir, token));
             }
@@ -311,7 +311,7 @@ impl App {
         }
         #[cfg(target_arch = "wasm32")]
         if self.rating_of(&path) != stars {
-            crate::analytics::event("photo_rated");
+            crate::web::analytics::event("photo_rated");
         }
         if stars == 0 {
             self.ratings.remove(&path);
@@ -781,7 +781,7 @@ impl App {
         }
         #[cfg(target_arch = "wasm32")]
         if changed {
-            crate::analytics::property("develop_edit_applied", "edit_kind", "adjustment");
+            crate::web::analytics::property("develop_edit_applied", "edit_kind", "adjustment");
         }
         if let Some(shown) = self.shown.path().map(Path::to_path_buf) {
             if paths.contains(&shown) {
@@ -810,7 +810,7 @@ impl App {
         }
         #[cfg(target_arch = "wasm32")]
         if paths.iter().any(|p| self.rating_of(p) != stars) {
-            crate::analytics::event("photo_rated");
+            crate::web::analytics::event("photo_rated");
         }
         for path in &paths {
             if stars == 0 {
@@ -885,7 +885,7 @@ impl App {
         }
         #[cfg(target_arch = "wasm32")]
         if self.filter != filter {
-            crate::analytics::property(
+            crate::web::analytics::property(
                 "filter_used",
                 "filter_kind",
                 if filter.is_some() { "rating" } else { "clear" },

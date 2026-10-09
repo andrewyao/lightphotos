@@ -342,7 +342,11 @@ impl App {
             let adj = self.edits.get(&path).copied().unwrap_or_default();
             self.catalog.set_adjustments(&path, &adj);
             #[cfg(target_arch = "wasm32")]
-            crate::analytics::property("develop_edit_applied", "edit_kind", self.unsaved_edit_kind);
+            crate::web::analytics::property(
+                "develop_edit_applied",
+                "edit_kind",
+                self.unsaved_edit_kind,
+            );
         }
     }
 
@@ -396,7 +400,7 @@ impl App {
         self.catalog.set_touchups(&path, &touchups);
         #[cfg(target_arch = "wasm32")]
         if changed {
-            crate::analytics::property("develop_edit_applied", "edit_kind", "touch_up");
+            crate::web::analytics::property("develop_edit_applied", "edit_kind", "touch_up");
         }
         self.touchup_selected = None;
         self.push_adjustments();
