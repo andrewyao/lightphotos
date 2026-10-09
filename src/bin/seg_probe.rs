@@ -15,7 +15,8 @@
 // Off macOS only the stub `main` below is built.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
 
-use lightphotos::{image_decode, image_encode, segmentation};
+use lightphotos::decode::{image_decode, image_encode};
+use lightphotos::segmentation;
 
 #[cfg(target_os = "macos")]
 use std::path::{Path, PathBuf};

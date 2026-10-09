@@ -431,7 +431,7 @@ impl App {
             .map(|src| {
                 (
                     src.clone(),
-                    crate::image_decode::is_raw_extension(src),
+                    crate::decode::image_decode::is_raw_extension(src),
                     self.edits.get(src).copied().unwrap_or_default(),
                     self.touchups.get(src).cloned().unwrap_or_default(),
                     self.rotations.get(src).copied().unwrap_or(0),
@@ -862,20 +862,25 @@ mod status_tests {
             let rgba: Vec<u8> = (0..300 * 200)
                 .flat_map(|p| [(p % 251) as u8, seed, 40 * i as u8, 255])
                 .collect();
-            crate::image_encode::encode_jpeg(
+            crate::decode::image_encode::encode_jpeg(
                 &dir.join(name),
                 300,
                 200,
                 &rgba,
-                crate::image_encode::JpegQuality::Export,
+                crate::decode::image_encode::JpegQuality::Export,
             )
             .unwrap();
         }
         // A camera time in UTC-7: the server should see 2024-06-02T01:00Z.
         let a = dir.join("a.jpg");
-        let stamp = crate::image_decode::CaptureStamp::new("2024:06:01 18:00:00", Some("-07:00"));
-        let tagged =
-            crate::image_encode::with_exif(&std::fs::read(&a).unwrap(), 300, 200, stamp.as_ref());
+        let stamp =
+            crate::decode::image_decode::CaptureStamp::new("2024:06:01 18:00:00", Some("-07:00"));
+        let tagged = crate::decode::image_encode::with_exif(
+            &std::fs::read(&a).unwrap(),
+            300,
+            200,
+            stamp.as_ref(),
+        );
         std::fs::write(&a, tagged).unwrap();
 
         let mut app = App::new(None);

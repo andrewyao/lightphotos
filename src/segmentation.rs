@@ -156,7 +156,7 @@ pub fn segment(path: &Path) -> Result<Mask, String> {
         // No person, or the person request failed. Report the fallback's error.
         _ => segment_foreground(path)?,
     };
-    Ok(mask.oriented(crate::image_decode::orientation_of(path)))
+    Ok(mask.oriented(crate::decode::image_decode::orientation_of(path)))
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -325,7 +325,7 @@ mod tests {
             "the error should say which macOS the caller needs, got {missing:?}"
         );
     }
-    use crate::image_encode::encode_jpeg;
+    use crate::decode::image_encode::encode_jpeg;
 
     // Per process, because two `cargo test` runs on one machine otherwise
     // share these fixture names and one truncates a file while the other's
@@ -334,8 +334,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lp-vision-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         let path = dir.join(name);
-        encode_jpeg(&path, w, h, rgba, crate::image_encode::JpegQuality::Export)
-            .expect("encode fixture jpeg");
+        encode_jpeg(
+            &path,
+            w,
+            h,
+            rgba,
+            crate::decode::image_encode::JpegQuality::Export,
+        )
+        .expect("encode fixture jpeg");
         path
     }
 

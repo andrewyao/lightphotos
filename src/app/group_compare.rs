@@ -13,7 +13,7 @@ use web_time::Instant;
 
 use super::{App, PendingConfirm, ViewMode};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
+use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::loader::Loader;
 use crate::navigation::FlagFilter;

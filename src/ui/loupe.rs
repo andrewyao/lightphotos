@@ -7,7 +7,7 @@ use crate::app::{
     compare_zoom_uv, App, CropEdge, CropOverlay, FocusLevel, PickHow, Region, StraightenTool,
     TileFidelity,
 };
-use crate::image_decode;
+use crate::decode::image_decode;
 
 pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput) {
     let sel = app.sel();

@@ -674,7 +674,7 @@ fn region_focus_marker(ui: &egui::Ui, app: &App, region: Region) {
 #[cfg(test)]
 mod tests {
     use super::loupe::*;
-    use crate::image_decode::Gps;
+    use crate::decode::image_decode::Gps;
 
     #[test]
     fn file_sizes_use_decimal_units() {
@@ -749,7 +749,7 @@ mod tests {
 
     #[test]
     fn exposure_parts_follow_lightroom_order() {
-        let meta = crate::image_decode::ImageMetadata {
+        let meta = crate::decode::image_decode::ImageMetadata {
             f_number: Some(2.8),
             iso: Some(200),
             exposure_time: Some(1.0 / 125.0),
@@ -764,7 +764,7 @@ mod tests {
 
     #[test]
     fn exposure_parts_omit_missing_fields() {
-        let meta = crate::image_decode::ImageMetadata {
+        let meta = crate::decode::image_decode::ImageMetadata {
             exposure_time: Some(2.0),
             ..Default::default()
         };

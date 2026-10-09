@@ -12,8 +12,8 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 use crate::curve::ToneCurve;
+use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::{GpuAdjust, GpuCurve, GpuTouchUp};
-use crate::image_decode::{DecodedImage, PixelFormat};
 
 #[path = "raw/render.rs"]
 mod raw_render;

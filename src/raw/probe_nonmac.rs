@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
+use lightphotos::decode::{image_decode, raw_preview};
 #[cfg(test)]
 use lightphotos::hash;
-use lightphotos::{image_decode, raw_preview};
 
 use std::path::Path;
 use std::path::PathBuf;

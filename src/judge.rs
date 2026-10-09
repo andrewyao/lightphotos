@@ -84,9 +84,14 @@ fn cgimage(
     // SAFETY: `buffer` holds `row * height` bytes and outlives the context,
     // and `bitmap_context_image` copies the pixels out before it drops.
     let ctx = unsafe {
-        crate::coregraphics::srgb_bitmap_context(buffer.as_mut_ptr().cast(), width, height, row)?
+        crate::decode::coregraphics::srgb_bitmap_context(
+            buffer.as_mut_ptr().cast(),
+            width,
+            height,
+            row,
+        )?
     };
-    crate::coregraphics::bitmap_context_image(&ctx)
+    crate::decode::coregraphics::bitmap_context_image(&ctx)
 }
 
 #[cfg(all(test, target_os = "macos"))]

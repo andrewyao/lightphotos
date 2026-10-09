@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Decode and metadata for Linux, Windows, and wasm32, mounted into
-//! `image_decode` with `#[path]` and a glob re-export. Also owns the RAW
-//! display boost and auto-denoise strength shared with `raw/preview.rs`.
+//! `image_decode` as a child module with a glob re-export. Also owns the RAW
+//! display boost and auto-denoise strength shared with `raw_preview.rs`.
 
 use std::path::Path;
 
 #[cfg(not(target_os = "macos"))]
-use crate::image_decode::{
+use crate::decode::image_decode::{
     apply_exif_orientation, fit_within, DecodedImage, DecodedImageFields, Flash, Gps,
     ImageMetadata, PixelFormat, WhiteBalance,
 };
@@ -382,8 +382,8 @@ fn exif_capture_time(path: &Path) -> Option<std::time::SystemTime> {
             _ => None,
         }
     };
-    let t = crate::image_decode::parse_exif_datetime(&ascii(exif::Tag::DateTimeOriginal)?)?;
-    Some(crate::image_decode::with_subsec(
+    let t = crate::decode::image_decode::parse_exif_datetime(&ascii(exif::Tag::DateTimeOriginal)?)?;
+    Some(crate::decode::image_decode::with_subsec(
         t,
         ascii(exif::Tag::SubSecTimeOriginal).as_deref(),
     ))
@@ -392,7 +392,7 @@ fn exif_capture_time(path: &Path) -> Option<std::time::SystemTime> {
 /// EXIF `DateTimeOriginal` with `OffsetTimeOriginal`, else `DateTime` with
 /// `OffsetTime`. Reads JPEG and TIFF-based RAW containers.
 #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-pub fn capture_stamp(path: &Path) -> Option<crate::image_decode::CaptureStamp> {
+pub fn capture_stamp(path: &Path) -> Option<crate::decode::image_decode::CaptureStamp> {
     let file = std::fs::File::open(path).ok()?;
     let exif = exif::Reader::new()
         .read_from_container(&mut std::io::BufReader::new(file))
@@ -402,14 +402,14 @@ pub fn capture_stamp(path: &Path) -> Option<crate::image_decode::CaptureStamp> {
 
 /// [`capture_stamp`] for a source the caller already holds in memory, which is
 /// how the browser's export worker gets its photos.
-pub fn capture_stamp_from_bytes(bytes: &[u8]) -> Option<crate::image_decode::CaptureStamp> {
+pub fn capture_stamp_from_bytes(bytes: &[u8]) -> Option<crate::decode::image_decode::CaptureStamp> {
     let exif = exif::Reader::new()
         .read_from_container(&mut std::io::Cursor::new(bytes))
         .ok()?;
     stamp_from_exif(&exif)
 }
 
-fn stamp_from_exif(exif: &exif::Exif) -> Option<crate::image_decode::CaptureStamp> {
+fn stamp_from_exif(exif: &exif::Exif) -> Option<crate::decode::image_decode::CaptureStamp> {
     let ascii = |tag| {
         let field = exif.get_field(tag, exif::In::PRIMARY)?;
         match &field.value {
@@ -418,7 +418,7 @@ fn stamp_from_exif(exif: &exif::Exif) -> Option<crate::image_decode::CaptureStam
         }
     };
     let stamp = |time, offset| {
-        crate::image_decode::CaptureStamp::new(&ascii(time)?, ascii(offset).as_deref())
+        crate::decode::image_decode::CaptureStamp::new(&ascii(time)?, ascii(offset).as_deref())
     };
     stamp(exif::Tag::DateTimeOriginal, exif::Tag::OffsetTimeOriginal)
         .or_else(|| stamp(exif::Tag::DateTime, exif::Tag::OffsetTime))
@@ -430,7 +430,7 @@ fn stamp_from_exif(exif: &exif::Exif) -> Option<crate::image_decode::CaptureStam
 #[hotpath::measure]
 pub fn read_metadata(path: &Path) -> ImageMetadata {
     let mut meta = ImageMetadata::default();
-    crate::image_decode::fill_file_facts(&mut meta, path);
+    crate::decode::image_decode::fill_file_facts(&mut meta, path);
     meta.source_size = pixel_size(path).map(|(w, h)| {
         if matches!(orientation_of(path), 5..=8) {
             (h, w)
@@ -513,7 +513,7 @@ fn fill_from_rawler(meta: &mut ImageMetadata, raw: &rawler::decoders::RawMetadat
         .date_time_original
         .as_deref()
         .or(exif.create_date.as_deref())
-        .and_then(crate::image_decode::parse_exif_datetime_display);
+        .and_then(crate::decode::image_decode::parse_exif_datetime_display);
     meta.gps = exif.gps.as_ref().and_then(|gps| {
         let dms = |v: &[Rational; 3]| {
             finite(dms_to_degrees(
@@ -569,7 +569,7 @@ fn fill_from_exif(meta: &mut ImageMetadata, exif: &exif::Exif) {
     meta.white_balance = uint(Tag::WhiteBalance).and_then(WhiteBalance::from_exif);
     meta.capture_date = text(Tag::DateTimeOriginal)
         .or_else(|| text(Tag::DateTime))
-        .and_then(|s| crate::image_decode::parse_exif_datetime_display(&s));
+        .and_then(|s| crate::decode::image_decode::parse_exif_datetime_display(&s));
     if let (Some(lat), Some(lon)) = (degrees(Tag::GPSLatitude), degrees(Tag::GPSLongitude)) {
         meta.gps = Gps::from_exif(
             lat,
@@ -722,7 +722,7 @@ mod tests {
         assert_eq!(meta.white_balance, Some(WhiteBalance::Manual));
         assert_eq!(
             meta.capture_date,
-            Some(crate::image_decode::CaptureDate {
+            Some(crate::decode::image_decode::CaptureDate {
                 year: 2026,
                 month: 7,
                 day: 14,

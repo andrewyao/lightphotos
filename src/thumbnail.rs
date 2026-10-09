@@ -30,10 +30,10 @@ use objc2_image_io::{
 };
 
 #[cfg(target_os = "macos")]
-use crate::image_decode::cgimage_to_rgba;
+use crate::decode::image_decode::cgimage_to_rgba;
 #[cfg(not(target_os = "macos"))]
-use crate::image_decode::DecodedImageFields;
-use crate::image_decode::{DecodedImage, PixelFormat};
+use crate::decode::image_decode::DecodedImageFields;
+use crate::decode::image_decode::{DecodedImage, PixelFormat};
 
 /// Whether ImageIO may substitute the file's embedded preview for a real
 /// decode-at-size.
@@ -57,7 +57,7 @@ pub fn decode_at_size(
     max_px: u32,
     embedded: EmbeddedPreview,
 ) -> Result<DecodedImage, String> {
-    let source = crate::image_decode::open_image_source(path)?;
+    let source = crate::decode::image_decode::open_image_source(path)?;
 
     let options = build_thumbnail_options(max_px, embedded)?;
 
@@ -86,10 +86,10 @@ pub fn decode_at_size(
     embedded: EmbeddedPreview,
 ) -> Result<DecodedImage, String> {
     match embedded {
-        EmbeddedPreview::Never => crate::image_decode::decode(path, max_px),
+        EmbeddedPreview::Never => crate::decode::image_decode::decode(path, max_px),
         EmbeddedPreview::UseIfPresent => try_extract_embedded_preview(path, max_px)
             .map(Ok)
-            .unwrap_or_else(|| crate::image_decode::decode(path, max_px)),
+            .unwrap_or_else(|| crate::decode::image_decode::decode(path, max_px)),
     }
 }
 
@@ -126,7 +126,7 @@ pub fn decode_speed(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
             return Ok(img);
         }
     }
-    crate::image_decode::decode(path, max_px)
+    crate::decode::image_decode::decode(path, max_px)
 }
 
 /// The file's embedded preview, fit within `max_px` and never upscaled.
@@ -184,13 +184,13 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
         .and_then(|f| f.value.get_uint(0))
         .unwrap_or(1) as u8;
 
-    let (nw, nh) = crate::image_decode::fit_within(w, h, max_px);
+    let (nw, nh) = crate::decode::image_decode::fit_within(w, h, max_px);
     let rgba = if (nw, nh) == (w, h) {
         img.into_raw()
     } else {
         image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
     };
-    Some(crate::image_decode::apply_exif_orientation(
+    Some(crate::decode::image_decode::apply_exif_orientation(
         DecodedImage::new_tracked(DecodedImageFields {
             width: nw,
             height: nh,
@@ -236,19 +236,19 @@ pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<
             .ok()
             .and_then(|meta| meta.exif.orientation)
             .map(|code| {
-                crate::image_decode::exif_code_from_rawler_orientation(
+                crate::decode::image_decode::exif_code_from_rawler_orientation(
                     rawler::Orientation::from_u16(code),
                 )
             })
             .unwrap_or(1);
 
-        let (nw, nh) = crate::image_decode::fit_within(w, h, max_px);
+        let (nw, nh) = crate::decode::image_decode::fit_within(w, h, max_px);
         let rgba = if (nw, nh) == (w, h) {
             img.into_raw()
         } else {
             image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
         };
-        Some(crate::image_decode::apply_exif_orientation(
+        Some(crate::decode::image_decode::apply_exif_orientation(
             DecodedImage::new_tracked(DecodedImageFields {
                 width: nw,
                 height: nh,
@@ -487,11 +487,11 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
 
     #[cfg(not(target_os = "macos"))]
     {
-        let jpeg = crate::image_encode::encode_jpeg_to_vec(
+        let jpeg = crate::decode::image_encode::encode_jpeg_to_vec(
             img.width,
             img.height,
             &img.rgba,
-            crate::image_encode::JpegQuality::Thumbnail,
+            crate::decode::image_encode::JpegQuality::Thumbnail,
         )?;
         crate::paths::write_atomic(file, &jpeg).map_err(|e| format!("write: {e}"))
     }
@@ -504,12 +504,12 @@ fn write_entry(file: &Path, img: &DecodedImage) -> Result<(), String> {
         tmp.push(".tmp");
         let tmp = PathBuf::from(tmp);
 
-        crate::image_encode::encode_jpeg(
+        crate::decode::image_encode::encode_jpeg(
             &tmp,
             img.width,
             img.height,
             &img.rgba,
-            crate::image_encode::JpegQuality::Thumbnail,
+            crate::decode::image_encode::JpegQuality::Thumbnail,
         )?;
         if let Err(e) = fs::rename(&tmp, file) {
             let _ = fs::remove_file(&tmp);
@@ -624,12 +624,12 @@ mod tests {
         let encode = |name: &str, w: u32, h: u32| {
             let file = dir.join(name);
             let pixels = vec![128u8; (w * h * 4) as usize];
-            crate::image_encode::encode_jpeg(
+            crate::decode::image_encode::encode_jpeg(
                 &file,
                 w,
                 h,
                 &pixels,
-                crate::image_encode::JpegQuality::Export,
+                crate::decode::image_encode::JpegQuality::Export,
             )
             .unwrap();
             fs::read(file).unwrap()

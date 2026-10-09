@@ -2,7 +2,7 @@
 
 //! Decode images to RGBA8 and read their metadata. macOS uses ImageIO for
 //! every format, RAW included. Other targets use the `image` crate,
-//! `rawler`, and `kamadak-exif`, in `raw/nonmac_decode.rs`.
+//! `rawler`, and `kamadak-exif`, in `nonmac_decode.rs`.
 
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
@@ -33,12 +33,11 @@ use objc2_image_io::{
 };
 
 #[cfg(target_os = "macos")]
-use crate::coregraphics;
+use crate::decode::coregraphics;
 
 /// The non-mac decode and metadata functions, re-exported so callers use
 /// `image_decode::decode` on every platform.
 #[cfg(not(target_os = "macos"))]
-#[path = "raw/nonmac_decode.rs"]
 mod nonmac_decode;
 #[cfg(not(target_os = "macos"))]
 pub use nonmac_decode::*;
@@ -837,12 +836,12 @@ mod tests {
     #[test]
     fn the_bitmap_draw_refuses_a_size_over_budget_before_allocating() {
         let path = std::env::temp_dir().join(format!("lp-budget-{}.jpg", std::process::id()));
-        crate::image_encode::encode_jpeg(
+        crate::decode::image_encode::encode_jpeg(
             &path,
             16,
             16,
             &[128u8; 16 * 16 * 4],
-            crate::image_encode::JpegQuality::Export,
+            crate::decode::image_encode::JpegQuality::Export,
         )
         .unwrap();
         let source = open_image_source(&path).unwrap();

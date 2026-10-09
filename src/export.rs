@@ -12,8 +12,8 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
 
+use crate::decode::{image_decode, image_encode};
 use crate::develop::{Adjustments, TouchUp};
-use crate::{image_decode, image_encode};
 
 /// Subfolder of the current folder that exports go to, on every platform.
 pub const EXPORTS_DIR: &str = "Exports";

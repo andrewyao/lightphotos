@@ -122,7 +122,7 @@ impl App {
         wasm_bindgen_futures::spawn_local(async move {
             match crate::web_fs::read_bytes(&handle).await {
                 Ok(bytes) => pool.submit_measure(crate::web_decode::WebMeasureJob {
-                    is_raw: crate::image_decode::is_raw_extension(&path),
+                    is_raw: crate::decode::image_decode::is_raw_extension(&path),
                     path,
                     bytes: std::sync::Arc::new(bytes),
                     max_px: MEASURE_PX,

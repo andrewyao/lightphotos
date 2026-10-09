@@ -15,7 +15,8 @@
 //! embedded preview. That module drags in the catalog, so the probe decodes
 //! the image itself at the same size instead; RAW renders may differ a little.
 
-use lightphotos::{develop, image_decode, image_ops, judge, quality};
+use lightphotos::decode::image_decode;
+use lightphotos::{develop, image_ops, judge, quality};
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

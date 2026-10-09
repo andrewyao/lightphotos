@@ -49,7 +49,7 @@ pub fn score_photo(req: &ScoreRequest) -> Result<QualityScore, String> {
 /// A preview at the analysis size. The embedded preview is the fast path,
 /// but a JPEG's EXIF thumbnail is far too small to judge focus on, so a short
 /// result is decoded again from the image itself.
-fn preview(path: &Path) -> Result<crate::image_decode::DecodedImage, String> {
+fn preview(path: &Path) -> Result<crate::decode::image_decode::DecodedImage, String> {
     use crate::thumbnail::{decode_at_size, EmbeddedPreview};
     let px = crate::quality::ANALYSIS_PX;
     let img = decode_at_size(path, px, EmbeddedPreview::UseIfPresent)?;

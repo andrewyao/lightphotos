@@ -11,8 +11,8 @@
 //! ([`develop::apply_linear`], or `apply_raw_display` for RAW), so results
 //! match what the shader draws.
 
+use crate::decode::image_decode::PixelFormat;
 use crate::develop::{self, Adjustments, EXPOSURE_RANGE, TONE_RANGE};
-use crate::image_decode::PixelFormat;
 
 /// One bin per 8-bit display level.
 const BINS: usize = 256;
@@ -932,7 +932,7 @@ mod tests {
         assert_lands(range_under(&photo, &adj), 0.06);
     }
 
-    /// `saturated` in linear camera RGB, as `raw/preview.rs` returns it.
+    /// `saturated` in linear camera RGB, as `decode::raw_preview` returns it.
     fn raw_saturated(lo: f32, hi: f32, n: usize) -> Vec<[f32; 3]> {
         let hues = [
             [1.0, 0.15, 0.15],

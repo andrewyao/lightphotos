@@ -11,7 +11,7 @@
 //!   light as `PixelFormat::LinearF16`. `raw_shader.wgsl` applies gamma and
 //!   the display boost on the GPU.
 
-use crate::image_decode::{fit_within, DecodedImage, DecodedImageFields, PixelFormat};
+use crate::decode::image_decode::{fit_within, DecodedImage, DecodedImageFields, PixelFormat};
 
 /// `Fast` is rawler's `Superpixel3Channel` (quarter-res 2x2 bin) with
 /// `Srgb8` output. `Quality` is rawler's `PPGDemosaic` (full-res,
@@ -44,7 +44,8 @@ fn to_srgb_u8(v: f32) -> u8 {
         for (i, entry) in table.iter_mut().enumerate() {
             let linear = i as f32 / (GAMMA_LUT_SIZE - 1) as f32;
             let srgb = rawler::imgop::srgb::srgb_apply_gamma(linear);
-            *entry = (crate::image_decode::apply_raw_preview_boost(srgb) * 255.0).round() as u8;
+            *entry =
+                (crate::decode::image_decode::apply_raw_preview_boost(srgb) * 255.0).round() as u8;
         }
         table
     });
@@ -107,7 +108,7 @@ fn decode_raw_preview(
 ) -> Result<DecodedImage, String> {
     use rawler::rawimage::RawPhotometricInterpretation;
 
-    crate::image_decode::check_rawler_size_limit(&source)?;
+    crate::decode::image_decode::check_rawler_size_limit(&source)?;
     let params = rawler::decoders::RawDecodeParams::default();
     let orientation = real_orientation(&source, &params);
 
@@ -115,7 +116,7 @@ fn decode_raw_preview(
     // size, and held until this decode returns. The sensor size is unknown
     // until rawler has decoded, so this first ask is sized from the file.
     #[cfg(target_arch = "wasm32")]
-    let grant = crate::decode_budget::acquire(file_estimate(source.len(), mode));
+    let grant = crate::decode::decode_budget::acquire(file_estimate(source.len(), mode));
 
     let mut raw = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         rawler::decode(&source, &params)
@@ -136,7 +137,7 @@ fn decode_raw_preview(
         ));
     }
 
-    crate::image_decode::normalize_linear_levels(&mut raw)?;
+    crate::decode::image_decode::normalize_linear_levels(&mut raw)?;
     // A file smaller than its sensor (a lossy RAW) asked for too little.
     // Asking again for the whole amount, rather than the difference while
     // holding the first grant, keeps two decodes from each waiting on the
@@ -146,7 +147,7 @@ fn decode_raw_preview(
         let needed = scratch_estimate(&raw, mode);
         if needed > grant.bytes() {
             drop(grant);
-            crate::decode_budget::acquire(needed)
+            crate::decode::decode_budget::acquire(needed)
         } else {
             grant
         }
@@ -798,7 +799,7 @@ pub fn demosaic_cfa(
             // straight into `rgba` rather than a second full-size buffer.
             for i in 0..w * h {
                 let rgb = crate::develop::denoise_linear_rgb_pixel(
-                    crate::image_decode::AUTO_RAW_DENOISE_STRENGTH,
+                    crate::decode::image_decode::AUTO_RAW_DENOISE_STRENGTH,
                     w,
                     h,
                     &demosaic_pixels,
@@ -940,7 +941,7 @@ fn decimate_linear_rgb(
     // unlike `demosaic_cfa`; both still denoise before the color matrix.
     if mode == DemosaicMode::Quality {
         linear = crate::develop::denoise_linear_rgb_buffer(
-            crate::image_decode::AUTO_RAW_DENOISE_STRENGTH,
+            crate::decode::image_decode::AUTO_RAW_DENOISE_STRENGTH,
             out_w,
             out_h,
             &linear,

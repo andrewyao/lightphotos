@@ -4,8 +4,8 @@
 //! place edits are burned into pixels, for both export and edited thumbnails,
 //! so the two always match. The Loupe applies edits on the GPU instead.
 
+use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::{self, Adjustments, Crop, TouchUp};
-use crate::image_decode::{DecodedImage, PixelFormat};
 
 /// Normalized crop (`None` = full frame) to pixel bounds `(x0, y0, x1, y1)`,
 /// at least 1x1.
@@ -214,7 +214,7 @@ pub fn remove_chromatic_aberration(img: &DecodedImage, ca: develop::CaScale) -> 
             }
         }
     }
-    DecodedImage::new_tracked(crate::image_decode::DecodedImageFields {
+    DecodedImage::new_tracked(crate::decode::image_decode::DecodedImageFields {
         width: w,
         height: h,
         rgba,
@@ -520,8 +520,8 @@ pub(crate) fn orient_mask(src: &[u8], w: u32, h: u32, orientation: u8) -> (u32, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::decode::image_decode::DecodedImageFields;
     use crate::develop::Crop;
-    use crate::image_decode::DecodedImageFields;
 
     /// The largest red-green and blue-green gap, in sRGB8 steps, over the
     /// outer part of an opaque `w x h` gray chart.

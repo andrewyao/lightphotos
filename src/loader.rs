@@ -21,8 +21,8 @@ use std::thread;
 use std::time::SystemTime;
 
 use crate::cache_limits::CacheLimits;
+use crate::decode::image_decode::{self, DecodedImage, ImageMetadata};
 use crate::develop::{Adjustments, TouchUp};
-use crate::image_decode::{self, DecodedImage, ImageMetadata};
 use crate::thumbnail::ThumbCache;
 
 /// True when `LIGHTPHOTOS_TIMING=1`, which prints decode and upload timings to
@@ -667,7 +667,7 @@ mod panic_recovery {
     }
 
     fn on_panic() {
-        crate::decode_budget::release_held_by_this_thread();
+        crate::decode::decode_budget::release_held_by_this_thread();
         let Some(worker) = WORKER.with(|w| w.borrow_mut().take()) else {
             return;
         };
@@ -1638,7 +1638,7 @@ impl Drop for Loader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_decode::DecodedImageFields;
+    use crate::decode::image_decode::DecodedImageFields;
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(format!("/nonexistent/{name}.jpg"))

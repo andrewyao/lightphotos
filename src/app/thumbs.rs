@@ -6,8 +6,8 @@ use super::*;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::decode::image_decode;
 use crate::develop::{self};
-use crate::image_decode;
 use crate::signalcache::Signal;
 use crate::thumbnail::THUMB_PX;
 

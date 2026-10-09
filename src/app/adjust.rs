@@ -1268,8 +1268,8 @@ mod tests {
                 crate::loader::Loader::new(16384, crate::cache_limits::CacheLimits::PLATFORM);
             loader.insert_full_external(
                 path,
-                std::sync::Arc::new(crate::image_decode::DecodedImage::new_tracked(
-                    crate::image_decode::DecodedImageFields {
+                std::sync::Arc::new(crate::decode::image_decode::DecodedImage::new_tracked(
+                    crate::decode::image_decode::DecodedImageFields {
                         width: w,
                         height: h,
                         rgba: vec![128; (w * h * 4) as usize],

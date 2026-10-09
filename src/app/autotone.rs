@@ -468,7 +468,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::test_support::{folder_of, load_folder, temp_folder};
-    use crate::image_decode::{DecodedImage, DecodedImageFields};
+    use crate::decode::image_decode::{DecodedImage, DecodedImageFields};
 
     /// An app showing a real folder of two empty photos in the Grid. Nothing
     /// decodes them, so neither has a thumbnail in memory.
@@ -565,7 +565,7 @@ mod tests {
                     width: 8,
                     height: 8,
                     rgba: [32, 32, 32, 255].repeat(64),
-                    pixel_format: crate::image_decode::PixelFormat::Srgb8,
+                    pixel_format: crate::decode::image_decode::PixelFormat::Srgb8,
                 })),
             );
             app.poll_auto_tone();
@@ -635,7 +635,7 @@ mod tests {
                     width: 8,
                     height: 8,
                     rgba: [32, 32, 32, 255].repeat(64),
-                    pixel_format: crate::image_decode::PixelFormat::Srgb8,
+                    pixel_format: crate::decode::image_decode::PixelFormat::Srgb8,
                 })),
             );
         }
@@ -694,7 +694,7 @@ mod tests {
             width: side as u32,
             height: side as u32,
             rgba,
-            pixel_format: crate::image_decode::PixelFormat::Srgb8,
+            pixel_format: crate::decode::image_decode::PixelFormat::Srgb8,
         }));
         for path in app.autotone.window.clone() {
             app.loader
@@ -909,7 +909,7 @@ mod tests {
                 width: 8,
                 height: 8,
                 rgba: [32, 32, 32, 255].repeat(64),
-                pixel_format: crate::image_decode::PixelFormat::Srgb8,
+                pixel_format: crate::decode::image_decode::PixelFormat::Srgb8,
             })),
         );
         app.poll_auto_tone();
@@ -950,7 +950,7 @@ mod tests {
                 width: 8,
                 height: 8,
                 rgba: [32, 32, 32, 255].repeat(64),
-                pixel_format: crate::image_decode::PixelFormat::Srgb8,
+                pixel_format: crate::decode::image_decode::PixelFormat::Srgb8,
             })),
         );
         app.poll_auto_tone();

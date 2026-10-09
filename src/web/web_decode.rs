@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::image_decode::{self, DecodedImage, ImageMetadata};
+use crate::decode::image_decode::{self, DecodedImage, ImageMetadata};
 use crate::thumbnail;
 
 /// What a decode is for. `Preview` and `Full` get the full RAW demosaic with
@@ -117,11 +117,11 @@ impl WebJob {
                     && !self.from_cache
                     && thumbnail::jpeg_cacheable(img) =>
             {
-                crate::image_encode::encode_jpeg_to_vec(
+                crate::decode::image_encode::encode_jpeg_to_vec(
                     img.width,
                     img.height,
                     &img.rgba,
-                    crate::image_encode::JpegQuality::Thumbnail,
+                    crate::decode::image_encode::JpegQuality::Thumbnail,
                 )
                 .ok()
             }
@@ -215,7 +215,7 @@ pub struct WebMeasureJob {
 impl WebMeasureJob {
     pub fn run(self) -> Result<crate::develop::CaScale, String> {
         let img = if self.is_raw {
-            crate::raw_preview::decode_raw_from_shared_vec(self.bytes, self.max_px, true)?
+            crate::decode::raw_preview::decode_raw_from_shared_vec(self.bytes, self.max_px, true)?
         } else {
             image_decode::decode_nonraw_from_bytes(&self.bytes, self.max_px)?
         };
@@ -251,7 +251,11 @@ pub fn decode(
         if let Some(preview) = thumbnail::rawler_full_image_from_bytes(bytes, max_px) {
             return Ok(preview);
         }
-        return crate::raw_preview::decode_raw_from_shared_vec(Arc::clone(bytes), max_px, quality);
+        return crate::decode::raw_preview::decode_raw_from_shared_vec(
+            Arc::clone(bytes),
+            max_px,
+            quality,
+        );
     }
     if let Some(preview) = thumbnail::embedded_preview_from_bytes(bytes, max_px) {
         // Loupe jobs need more pixels than a small EXIF preview has.

@@ -573,7 +573,7 @@ impl App {
             let read_inflight = self.web.read_inflight.clone();
             let pool = decoder.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let is_raw = crate::image_decode::is_raw_extension(&path);
+                let is_raw = crate::decode::image_decode::is_raw_extension(&path);
 
                 // The cache entry is named by size and mtime, which `stat`
                 // reads without reading the file's bytes.
@@ -709,7 +709,7 @@ impl App {
                         read_inflight.set(read_inflight.get().saturating_sub(1));
                         match source {
                             Ok(bytes) => {
-                                let is_raw = crate::image_decode::is_raw_extension(&path);
+                                let is_raw = crate::decode::image_decode::is_raw_extension(&path);
                                 pool.submit_thumb(
                                     path,
                                     target,
@@ -860,7 +860,7 @@ impl App {
     ) -> bool {
         let target = self.preview_px();
         let key = (path.clone(), target);
-        let is_raw = crate::image_decode::is_raw_extension(&path);
+        let is_raw = crate::decode::image_decode::is_raw_extension(&path);
         // Shares the read budget with thumbnails. Callers retry every frame.
         if self.web.read_inflight.get() >= MAX_CONCURRENT_READS {
             return false;
@@ -931,7 +931,7 @@ impl App {
     fn web_loupe_reads(&self, path: &Path) -> (bool, bool) {
         let target = self.preview_px();
         let key = (path.to_path_buf(), target);
-        let is_raw = crate::image_decode::is_raw_extension(path);
+        let is_raw = crate::decode::image_decode::is_raw_extension(path);
         let already_have = self
             .loader
             .as_ref()
@@ -1196,7 +1196,7 @@ impl App {
         self.web.read_inflight.set(self.web.read_inflight.get() + 1);
         let read_inflight = self.web.read_inflight.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let is_raw = crate::image_decode::is_raw_extension(&path);
+            let is_raw = crate::decode::image_decode::is_raw_extension(&path);
             let result = web_fs::read_bytes(&handle).await;
             read_inflight.set(read_inflight.get().saturating_sub(1));
             match result {
@@ -1312,7 +1312,7 @@ impl App {
         let Some(path) = self.want.clone() else {
             return false;
         };
-        if !crate::image_decode::is_raw_extension(&path) {
+        if !crate::decode::image_decode::is_raw_extension(&path) {
             return false;
         }
         let target = self.preview_px();

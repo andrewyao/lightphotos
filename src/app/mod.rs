@@ -17,12 +17,13 @@ use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::Window;
 
 use crate::catalog::Catalog;
+use crate::decode::image_decode;
 use crate::develop::{Adjustments, Crop, TouchUp};
 use crate::export::Exporter;
 use crate::loader::Loader;
 use crate::navigation::{Cmp, FlagFilter, Playlist};
 use crate::renderer::{EguiPaint, Renderer};
-use crate::{image_decode, ui};
+use crate::ui;
 
 /// The closest manual zoom, in screen pixels per source pixel. The farthest
 /// is the fit, so zooming out never shrinks the photo below the window.

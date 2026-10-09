@@ -11,7 +11,7 @@ use super::loupe::{
     format_focal_length, format_latitude, format_longitude, format_shutter, maps_url,
 };
 use super::*;
-use crate::image_decode::{Flash, ImageMetadata, WhiteBalance};
+use crate::decode::image_decode::{Flash, ImageMetadata, WhiteBalance};
 
 /// One heading and its rows of (label, value). Rows exist only for fields
 /// the photo has. `link` is a map URL, shown under the location rows.
@@ -113,7 +113,7 @@ fn summary_line(meta: &ImageMetadata) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
 }
 
-fn date_text(d: crate::image_decode::CaptureDate) -> String {
+fn date_text(d: crate::decode::image_decode::CaptureDate) -> String {
     (t().capture_date)(d.year, d.month, d.day, d.hour, d.minute)
 }
 
@@ -195,7 +195,7 @@ fn draw_info_page(ui: &mut egui::Ui, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_decode::Gps;
+    use crate::decode::image_decode::Gps;
 
     fn titles(groups: &[InfoGroup]) -> Vec<&'static str> {
         groups.iter().map(|g| g.title).collect()

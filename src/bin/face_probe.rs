@@ -11,7 +11,8 @@
 // Off macOS only the stub `main` below is built.
 #![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
 
-use lightphotos::{facequality, image_decode};
+use lightphotos::decode::image_decode;
+use lightphotos::facequality;
 
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;

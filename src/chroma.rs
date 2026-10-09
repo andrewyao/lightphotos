@@ -4,8 +4,8 @@
 //! and blue relative to green. The result is a [`CaScale`] that the Loupe
 //! shader and `image_ops::bake_edited` both undo the same way.
 
+use crate::decode::image_decode::DecodedImage;
 use crate::develop::CaScale;
-use crate::image_decode::DecodedImage;
 use crate::image_ops::pixel_linear;
 
 /// The largest scale `measure` reports. Real lenses stay well inside it, so
@@ -203,8 +203,8 @@ fn bilinear(img: &DecodedImage, x: f32, y: f32, c: usize) -> f32 {
 /// Test photos with known aberration, shared with `image_ops`'s tests.
 #[cfg(test)]
 pub(crate) mod fixture {
+    use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
     use crate::develop::CaScale;
-    use crate::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
 
     /// A soft gray checkerboard in linear light, about 0.15..0.85.
     pub(crate) fn chart(x: f32, y: f32) -> f32 {
@@ -243,7 +243,7 @@ pub(crate) mod fixture {
 mod tests {
     use super::fixture::photo;
     use super::*;
-    use crate::image_decode::{DecodedImageFields, PixelFormat};
+    use crate::decode::image_decode::{DecodedImageFields, PixelFormat};
 
     #[test]
     fn recovers_the_red_and_blue_magnification() {

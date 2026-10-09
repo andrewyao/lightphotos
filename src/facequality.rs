@@ -206,7 +206,7 @@ pub fn face_quality(faces: &[RawFace], aspect_wh: f32) -> FaceQuality {
 #[hotpath::measure]
 pub fn analyze(path: &Path) -> Result<FaceQuality, String> {
     let faces = detect_faces(path)?;
-    let aspect_wh = crate::image_decode::pixel_size(path)
+    let aspect_wh = crate::decode::image_decode::pixel_size(path)
         .map(|(w, h)| w as f32 / h as f32)
         .unwrap_or(1.0);
     Ok(face_quality(&faces, aspect_wh))
@@ -270,7 +270,7 @@ impl FacePool {
 mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
-    use crate::image_encode::encode_jpeg;
+    use crate::decode::image_encode::encode_jpeg;
 
     // Per process, because two `cargo test` runs on one machine otherwise
     // share these fixture names and one truncates a file while the other's
@@ -280,8 +280,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lp-vision-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create fixture dir");
         let path = dir.join(name);
-        encode_jpeg(&path, w, h, rgba, crate::image_encode::JpegQuality::Export)
-            .expect("encode fixture jpeg");
+        encode_jpeg(
+            &path,
+            w,
+            h,
+            rgba,
+            crate::decode::image_encode::JpegQuality::Export,
+        )
+        .expect("encode fixture jpeg");
         path
     }
 

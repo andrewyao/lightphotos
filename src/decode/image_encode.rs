@@ -19,7 +19,7 @@ use objc2_core_foundation::{
 use objc2_image_io::{kCGImageDestinationLossyCompressionQuality, CGImageDestination};
 
 #[cfg(target_os = "macos")]
-use crate::coregraphics;
+use crate::decode::coregraphics;
 
 /// What a JPEG is for, which sets its quality. The cache holds one entry per
 /// photo for as long as the photo exists, so it trades quality for disk.
@@ -174,7 +174,7 @@ pub fn with_exif(
     jpeg: &[u8],
     width: u32,
     height: u32,
-    taken: Option<&crate::image_decode::CaptureStamp>,
+    taken: Option<&crate::decode::image_decode::CaptureStamp>,
 ) -> Vec<u8> {
     const ASCII: u16 = 2;
     const SHORT: u16 = 3;
@@ -279,7 +279,7 @@ fn splice_app1(jpeg: &[u8], app1: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::image_decode;
+    use crate::decode::image_decode;
 
     /// Encode solid red, decode the bytes back, and check that the size and
     /// the approximate color survive.
