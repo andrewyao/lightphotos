@@ -484,7 +484,7 @@ fn spawn_trash_worker(
                 if stop.load(std::sync::atomic::Ordering::Relaxed) {
                     return;
                 }
-                let result = crate::trash::move_to_trash(&path);
+                let result = crate::shell::trash::move_to_trash(&path);
                 if done_tx.send((path, result)).is_err() {
                     return;
                 }
@@ -1122,7 +1122,7 @@ mod tests {
         app.selected = BTreeSet::from([1, 2]);
         app.sel = Some(1);
         #[cfg(target_os = "macos")]
-        assert!(app.menu_enabled(crate::menu::MenuCommand::DeleteGroup));
+        assert!(app.menu_enabled(crate::shell::menu::MenuCommand::DeleteGroup));
         app.modifiers = ModifiersState::SHIFT;
         app.handle_key(winit::keyboard::KeyCode::Delete);
         app.modifiers = ModifiersState::empty();
@@ -1292,7 +1292,7 @@ mod tests {
         app.request_bulk(crate::ui::BulkKind::Delete);
         assert!(app.pending_confirm.is_none(), "no confirm is offered");
         #[cfg(target_os = "macos")]
-        assert!(!app.menu_enabled(crate::menu::MenuCommand::MoveToTrash));
+        assert!(!app.menu_enabled(crate::shell::menu::MenuCommand::MoveToTrash));
         app.confirm_pending();
         assert!(app.bulk_delete.is_none());
         assert!(paths.iter().all(|p| p.exists()));

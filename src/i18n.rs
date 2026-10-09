@@ -2196,7 +2196,7 @@ mod tests {
             };
         }
         let files = sources!(
-            "dialog.rs",
+            "shell/dialog.rs",
             "ui/mod.rs",
             "ui/develop_panel.rs",
             "ui/grid.rs",

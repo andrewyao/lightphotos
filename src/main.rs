@@ -13,10 +13,6 @@ mod app;
 mod autotone;
 mod cache_limits;
 mod catalog;
-#[cfg(not(target_arch = "wasm32"))]
-mod dialog;
-#[cfg(not(target_arch = "wasm32"))]
-mod drive;
 mod groups;
 mod i18n;
 mod loader;
@@ -24,30 +20,19 @@ mod loader;
 // no caller until a wasm file picker exists.
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 mod lr_preset;
-mod macos_delegate;
-#[cfg(target_os = "macos")]
-mod menu;
 mod navigation;
 mod prefs;
 mod presets;
-// Profiling drives the real `navigation`, `catalog`, `Loader` and `export`
-// code, none of which the browser build has, and the driver runs from the
-// native `main`. Gating the module the same way keeps `--features hotpath`
-// building for wasm32 instead of failing on APIs that target cannot have.
-#[cfg(all(feature = "hotpath", not(target_arch = "wasm32")))]
-mod profile;
 mod renderer;
 mod score;
 #[cfg(not(target_arch = "wasm32"))]
 mod secret;
+mod shell;
 mod signalcache;
 mod thumbnail;
-mod trash;
 mod ui;
 #[cfg(any(target_arch = "wasm32", test))]
 mod web;
-#[cfg(not(target_arch = "wasm32"))]
-mod window_rect;
 
 use lightphotos::{decode, develop, export, hash, paths, scoring, worker_pool};
 
@@ -63,8 +48,8 @@ use winit::window::{Window, WindowId};
 
 use app::{App, ViewMode};
 use loader::Loader;
-use macos_delegate::UserEvent;
 use renderer::Renderer;
+use shell::macos_delegate::UserEvent;
 
 /// Finish window setup once a `Renderer` exists. Native calls it from
 /// `resumed`; wasm calls it from `about_to_wait` when the async renderer init
@@ -111,7 +96,7 @@ impl ApplicationHandler<UserEvent> for App {
         }
         let attrs = Window::default_attributes().with_title("LightPhotos");
         #[cfg(not(target_arch = "wasm32"))]
-        let attrs = window_rect::apply(attrs, event_loop);
+        let attrs = shell::window_rect::apply(attrs, event_loop);
         #[cfg(target_arch = "wasm32")]
         let attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(1100.0, 800.0));
         // Create the window hidden and show it once the renderer is ready. wgpu
@@ -322,7 +307,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(window) = &self.window {
-            window_rect::save(window);
+            shell::window_rect::save(window);
         }
         self.save_edit();
         // AppKit delivers this from `applicationWillTerminate:` and then calls
@@ -343,7 +328,7 @@ impl ApplicationHandler<UserEvent> for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
-        menu::refresh(self);
+        shell::menu::refresh(self);
 
         // Finish wasm window setup once the async renderer init lands.
         #[cfg(target_arch = "wasm32")]
@@ -582,12 +567,12 @@ fn main() {
     // Returning rather than exiting: that drops the hotpath guard, which is
     // what prints the report.
     #[cfg(feature = "hotpath")]
-    if profile::run_from_args() {
+    if shell::profile::run_from_args() {
         return;
     }
 
-    match drive::Args::from_env() {
-        Ok(Some(args)) => std::process::exit(drive::run(args)),
+    match shell::drive::Args::from_env() {
+        Ok(Some(args)) => std::process::exit(shell::drive::run(args)),
         Ok(None) => {}
         Err(e) => {
             eprintln!("[drive] {e}");
@@ -614,16 +599,16 @@ fn main() {
     #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut builder = EventLoop::<UserEvent>::with_user_event();
     // winit installs its default menu when the app finishes launching, which
-    // would replace `menu::install`'s.
+    // would replace `shell::menu::install`'s.
     #[cfg(target_os = "macos")]
     winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut builder, false);
     let event_loop = builder.build().expect("build event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    macos_delegate::set_proxy(event_loop.create_proxy());
+    shell::macos_delegate::set_proxy(event_loop.create_proxy());
     #[cfg(target_os = "macos")]
-    menu::install(event_loop.create_proxy());
-    if !macos_delegate::install_open_handler() {
+    shell::menu::install(event_loop.create_proxy());
+    if !shell::macos_delegate::install_open_handler() {
         eprintln!("[lightphotos] warning: could not install Finder open handler");
     }
 

@@ -4,7 +4,7 @@
 
 use super::*;
 
-use crate::menu::MenuCommand;
+use crate::shell::menu::MenuCommand;
 
 impl App {
     /// Whether `cmd`'s key would act right now. Mirrors the early returns in

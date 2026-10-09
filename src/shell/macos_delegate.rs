@@ -32,7 +32,7 @@ pub enum UserEvent {
     OpenFile(PathBuf),
     /// The user chose a command from the menu bar.
     #[cfg(target_os = "macos")]
-    Menu(crate::menu::MenuCommand),
+    Menu(crate::shell::menu::MenuCommand),
 }
 
 /// Set once in `main`; read by the injected Objective-C method.

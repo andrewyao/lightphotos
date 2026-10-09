@@ -50,8 +50,8 @@ use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::{Window, WindowId};
 
 use crate::app::{App, Region, ViewMode};
-use crate::macos_delegate::UserEvent;
 use crate::renderer::{Renderer, RgbFrame};
+use crate::shell::macos_delegate::UserEvent;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_SIZE: (u32, u32) = (1200, 800);
@@ -413,7 +413,7 @@ impl std::fmt::Display for ParseError {
 pub(crate) fn run(args: Args) -> i32 {
     let config_dir = std::env::temp_dir().join(format!("lightphotos-drive-{}", std::process::id()));
     crate::prefs::override_config_dir(config_dir.clone());
-    crate::dialog::cancel_all_pickers();
+    crate::shell::dialog::cancel_all_pickers();
     crate::i18n::init();
 
     let mut builder = EventLoop::<UserEvent>::with_user_event();

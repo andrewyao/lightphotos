@@ -273,7 +273,7 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn choose_export_folder(&mut self) {
-        if let Some(dir) = crate::dialog::pick_folder() {
+        if let Some(dir) = crate::shell::dialog::pick_folder() {
             self.set_export_settings(ExportSettings {
                 target: ExportTarget::Folder(FolderChoice::Custom(dir)),
                 ..self.exports.settings.clone()

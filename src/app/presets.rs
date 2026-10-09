@@ -127,7 +127,7 @@ impl App {
     /// Opens the Lightroom preset picker and imports what the user chose.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn import_lr_presets(&mut self) {
-        let paths = crate::dialog::pick_xmp_files();
+        let paths = crate::shell::dialog::pick_xmp_files();
         self.add_lr_presets(&paths);
     }
 

@@ -868,7 +868,7 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         self.request_folder_pick();
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(path) = crate::dialog::pick_folder() {
+        if let Some(path) = crate::shell::dialog::pick_folder() {
             self.open(path);
         }
     }
