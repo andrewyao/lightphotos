@@ -56,10 +56,13 @@ impl CaptureTime {
         let Some(t) = t else {
             return CaptureTime::Unreadable;
         };
+        // The time can be a file's mtime, which any program can set, so a
+        // value past i64 milliseconds saturates rather than wraps.
+        let ms = |d: std::time::Duration| i64::try_from(d.as_millis()).unwrap_or(i64::MAX);
         match t.duration_since(UNIX_EPOCH) {
-            Ok(d) => CaptureTime::At(d.as_millis() as i64),
+            Ok(d) => CaptureTime::At(ms(d)),
             // Older than 1970. Rare, but it must round-trip rather than clamp.
-            Err(e) => CaptureTime::At(-(e.duration().as_millis() as i64)),
+            Err(e) => CaptureTime::At(ms(e.duration()).saturating_neg()),
         }
     }
 
@@ -629,6 +632,20 @@ mod tests {
             "a failed read is recorded, so the next session does not retry it"
         );
         assert_eq!(CaptureTime::Unreadable.to_system_time(), None);
+    }
+
+    /// 2^63 ms before 1970 is a settable mtime whose millisecond count does
+    /// not fit an i64; a wrapping cast turned it into `i64::MIN`, and negating
+    /// that overflowed.
+    #[test]
+    fn a_capture_time_past_i64_milliseconds_saturates() {
+        let Some(t) = UNIX_EPOCH.checked_sub(Duration::from_millis(1 << 63)) else {
+            return; // a platform whose SystemTime cannot hold it cannot hit this
+        };
+        assert_eq!(
+            CaptureTime::from_system_time(Some(t)),
+            CaptureTime::At(-i64::MAX)
+        );
     }
 
     /// A face analysis submitted in the previous folder can finish after the

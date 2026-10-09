@@ -42,13 +42,9 @@ pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<
     ) else {
         return Ok(());
     };
-    let padded = |n: usize, tile: Option<usize>| match tile {
-        Some(t) if t > 0 => n.div_ceil(t) * t,
-        _ => n,
-    };
     let cpp = tag(TiffCommonTag::SamplesPerPixel).unwrap_or(1).max(1);
-    let row = padded(width, tag(TiffCommonTag::TileWidth)).saturating_mul(cpp);
-    let rows = padded(height, tag(TiffCommonTag::TileLength));
+    let row = padded_to_tiles(width, tag(TiffCommonTag::TileWidth)).saturating_mul(cpp);
+    let rows = padded_to_tiles(height, tag(TiffCommonTag::TileLength));
     if width == 0
         || height == 0
         || row > 50_000
@@ -60,6 +56,16 @@ pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<
         ));
     }
     Ok(())
+}
+
+/// `n` rounded up to whole tiles of `tile`. Saturating, because both come
+/// from tags and a wrapped product on wasm32's 32-bit `usize` would slip a
+/// huge image past [`check_rawler_size_limit`].
+fn padded_to_tiles(n: usize, tile: Option<usize>) -> usize {
+    match tile {
+        Some(t) if t > 0 => n.div_ceil(t).saturating_mul(t),
+        _ => n,
+    }
 }
 
 /// rawler 0.7.2's `apply_scaling` panics on a Linear DNG whose black level
@@ -413,4 +419,16 @@ pub fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<Decoded
         ))
     });
     std::panic::catch_unwind(run).ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::padded_to_tiles;
+
+    #[test]
+    fn tile_padding_of_a_huge_tag_saturates_instead_of_wrapping() {
+        assert_eq!(padded_to_tiles(100, Some(64)), 128);
+        assert_eq!(padded_to_tiles(100, Some(0)), 100);
+        assert_eq!(padded_to_tiles(usize::MAX, Some(2)), usize::MAX);
+    }
 }

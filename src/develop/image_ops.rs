@@ -206,9 +206,12 @@ pub fn remove_chromatic_aberration(img: &DecodedImage, ca: develop::CaScale) -> 
                 let (sx, sy) = (su * w as f32 - 0.5, sv * h as f32 - 0.5);
                 let (fx, fy) = (sx.floor(), sy.floor());
                 let (tx, ty) = (sx - fx, sy - fy);
+                // Saturating: a sidecar's huge or infinite scale casts to
+                // `i64::MAX`, and `at` clamps to the edge anyway.
                 let (ix, iy) = (fx as i64, fy as i64);
-                let top = at(ix, iy, c) * (1.0 - tx) + at(ix + 1, iy, c) * tx;
-                let bottom = at(ix, iy + 1, c) * (1.0 - tx) + at(ix + 1, iy + 1, c) * tx;
+                let (ix1, iy1) = (ix.saturating_add(1), iy.saturating_add(1));
+                let top = at(ix, iy, c) * (1.0 - tx) + at(ix1, iy, c) * tx;
+                let bottom = at(ix, iy1, c) * (1.0 - tx) + at(ix1, iy1, c) * tx;
                 rgba[((y * w + x) * 4) as usize + c] =
                     linear_to_srgb8(top * (1.0 - ty) + bottom * ty);
             }
@@ -557,6 +560,21 @@ mod tests {
         let after = worst_fringe(&out, w, h);
         assert!(before > 20, "the fixture should fringe: {before}");
         assert!(after <= 3, "fringe {before} -> {after}");
+    }
+
+    /// The scales come from the sidecar, and serde reads `1e39` as an f32
+    /// infinity. The neighbor index must not overflow on either.
+    #[test]
+    fn a_sidecar_with_runaway_scales_bakes_without_overflow() {
+        let img = crate::develop::chroma::fixture::photo(9, 7, develop::CaScale::default());
+        for json in [
+            r#"{"chromatic_aberration": {"red": 1e30, "blue": -1e30}}"#,
+            r#"{"chromatic_aberration": {"red": 1e39, "blue": -1e39}}"#,
+        ] {
+            let adj: Adjustments = serde_json::from_str(json).unwrap();
+            let (w, h, out) = bake_edited(&img, &adj, &[], 0);
+            assert_eq!((w, h, out.len()), (9, 7, 9 * 7 * 4));
+        }
     }
 
     #[test]

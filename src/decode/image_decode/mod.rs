@@ -323,7 +323,15 @@ fn parse_exif_datetime_parts(s: &str) -> Option<DateTimeParts> {
     let h: u64 = t.next()?.parse().ok()?;
     let mi: u64 = t.next()?.parse().ok()?;
     let se: u64 = t.next()?.parse().ok()?;
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&da) || h > 23 || mi > 59 || se > 60 {
+    // EXIF writes a 4-digit year. Bounding it keeps `days_from_civil` from
+    // overflowing on a tag like `99999999999999999:01:01`.
+    if !(0..=9999).contains(&y)
+        || !(1..=12).contains(&mo)
+        || !(1..=31).contains(&da)
+        || h > 23
+        || mi > 59
+        || se > 60
+    {
         return None;
     }
     Some(DateTimeParts {
@@ -439,7 +447,9 @@ fn offset_seconds(s: &str) -> Option<i64> {
     };
     let (h, m) = rest.split_once(':')?;
     let (h, m): (i64, i64) = (h.parse().ok()?, m.parse().ok()?);
-    (h <= 14 && m < 60 && rest.len() == 5).then_some(sign * (h * 3600 + m * 60))
+    // `then`, not `then_some`: the product must not be computed for an
+    // out-of-range `h`, where it overflows.
+    (h <= 14 && m < 60 && rest.len() == 5).then(|| sign * (h * 3600 + m * 60))
 }
 
 /// Capture time from EXIF or TIFF, else the file's mtime so grouping always
@@ -973,6 +983,23 @@ mod tests {
         assert_eq!(parse_exif_datetime("2026:13:01 00:00:00"), None); // bad month
         assert_eq!(parse_exif_datetime("garbage"), None);
         assert_eq!(parse_exif_datetime("2026:07:15"), None); // no time part
+    }
+
+    #[test]
+    fn an_out_of_range_exif_year_or_offset_is_rejected_without_overflow() {
+        let huge_year = "9223372036854775807:01:01 00:00:00";
+        assert_eq!(parse_exif_datetime(huge_year), None);
+        assert_eq!(
+            parse_exif_datetime("-9223372036854775808:01:01 00:00:00"),
+            None
+        );
+        assert_eq!(parse_exif_datetime_display(huge_year), None);
+        assert!(parse_exif_datetime("9999:12:31 23:59:59").is_some());
+
+        assert_eq!(offset_seconds("+9223372036854775807:00"), None);
+        assert_eq!(offset_seconds("-99999999999999:00"), None);
+        let stamp = CaptureStamp::new("2024:02:29 13:05:09", Some("+9223372036854775807:00"));
+        assert_eq!(stamp.and_then(|s| s.offset), None);
     }
 
     /// Needs a solid-color image at /tmp/iv-test/a.png. Skips when it is

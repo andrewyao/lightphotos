@@ -285,6 +285,17 @@ fn number<T: std::str::FromStr>(word: Option<&str>, what: &str) -> Result<T, Str
         .map_err(|_| format!("bad {what} `{}`", word.unwrap_or_default()))
 }
 
+/// A point or wheel amount. `f32` parses `inf` and `NaN`, which would leave
+/// the app's pointer and zoom state non-finite.
+fn coord(word: Option<&str>, what: &str) -> Result<f32, String> {
+    let v: f32 = number(word, what)?;
+    if v.is_finite() {
+        Ok(v)
+    } else {
+        Err(format!("bad {what} `{v}`"))
+    }
+}
+
 fn parse_step(line: &str) -> Result<Step, String> {
     let words: Vec<&str> = line.split_whitespace().collect();
     let (cmd, args) = words.split_first().ok_or("empty step")?;
@@ -312,8 +323,8 @@ fn parse_step(line: &str) -> Result<Step, String> {
             Step::Type(text.to_string())
         }
         "click" | "dblclick" | "rclick" => {
-            let x = number(args.first().copied(), "x")?;
-            let y = number(args.get(1).copied(), "y")?;
+            let x = coord(args.first().copied(), "x")?;
+            let y = coord(args.get(1).copied(), "y")?;
             Step::Click {
                 at: Target::Point(x, y),
                 kind: ClickKind::of(cmd),
@@ -336,12 +347,12 @@ fn parse_step(line: &str) -> Result<Step, String> {
             }
         }
         "move" => Step::Move(
-            number(args.first().copied(), "x")?,
-            number(args.get(1).copied(), "y")?,
+            coord(args.first().copied(), "x")?,
+            coord(args.get(1).copied(), "y")?,
         ),
         "scroll" => Step::Scroll {
-            dx: number(args.first().copied(), "dx")?,
-            dy: number(args.get(1).copied(), "dy")?,
+            dx: coord(args.first().copied(), "dx")?,
+            dy: coord(args.get(1).copied(), "dy")?,
             mods: parse_mods(args.get(2..).unwrap_or_default())?,
         },
         "drag" => {
@@ -349,8 +360,8 @@ fn parse_step(line: &str) -> Result<Step, String> {
                 return Err("drag takes x0 y0 x1 y1".into());
             }
             Step::Drag {
-                from: (number(Some(args[0]), "x0")?, number(Some(args[1]), "y0")?),
-                to: (number(Some(args[2]), "x1")?, number(Some(args[3]), "y1")?),
+                from: (coord(Some(args[0]), "x0")?, coord(Some(args[1]), "y0")?),
+                to: (coord(Some(args[2]), "x1")?, coord(Some(args[3]), "y1")?),
             }
         }
         "idle" => Step::Idle,
@@ -959,6 +970,10 @@ quit
             ("click 1", 1),
             ("idle now", 1),
             ("drag 1 2 3", 1),
+            ("click NaN 5", 1),
+            ("move 5 inf", 1),
+            ("scroll 0 1e39", 1),
+            ("drag 0 0 -inf 1", 1),
         ] {
             let err = parse_script(script).unwrap_err();
             assert_eq!(err.line, line, "{script:?}: {}", err.message);

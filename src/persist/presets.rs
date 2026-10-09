@@ -97,7 +97,11 @@ impl PresetStore {
         }
         match parse(text) {
             Ok(mut presets) => {
-                store.next_id = presets.iter().map(|p| p.id + 1).max().unwrap_or(1);
+                store.next_id = presets
+                    .iter()
+                    .map(|p| p.id.saturating_add(1))
+                    .max()
+                    .unwrap_or(1);
                 presets.sort_by_key(sort_key);
                 store.presets = presets;
             }
@@ -119,7 +123,7 @@ impl PresetStore {
     }
 
     /// Adds a look under a free name, returning the stored name. `None` when
-    /// the name is blank or the library is not writable.
+    /// the name is blank, the library is not writable, or it has no id left.
     pub fn add(
         &mut self,
         name: &str,
@@ -162,7 +166,8 @@ impl PresetStore {
             return None;
         }
         let id = self.next_id;
-        self.next_id += 1;
+        // A hand-edited library can hold `u64::MAX`; no id is left after it.
+        self.next_id = id.checked_add(1)?;
         self.presets.push(Preset {
             id,
             name: name.clone(),
@@ -460,6 +465,17 @@ mod tests {
             store.add(name, tone(0.4), vec![]).unwrap();
         }
         assert_eq!(store.writes, 4, "a single add still writes once each");
+    }
+
+    #[test]
+    fn a_stored_id_at_the_top_of_the_range_refuses_new_presets() {
+        let mut store = reload(&format!(
+            "{{\"presets\": [{{\"id\": {}, \"name\": \"Last\", \"adjustments\": {{}}}}]}}",
+            u64::MAX
+        ));
+        assert_eq!(store.presets().len(), 1);
+        assert_eq!(store.add("Next", tone(0.1), vec![]), None);
+        assert_eq!(store.presets().len(), 1, "no second preset shares the id");
     }
 
     fn names(store: &PresetStore) -> Vec<String> {

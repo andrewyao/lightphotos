@@ -212,8 +212,8 @@ impl Renderer {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: size.width.min(max_dim).max(1),
+            height: size.height.min(max_dim).max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode,
             view_formats: vec![],
@@ -768,8 +768,11 @@ impl Renderer {
         if w == 0 || h == 0 {
             return;
         }
-        self.config.width = w;
-        self.config.height = h;
+        // wgpu panics on a surface past the texture limit. A window that
+        // large (or a `--drive` `size` step) gets a surface at the limit,
+        // stretched to fill.
+        self.config.width = w.min(self.max_dim);
+        self.config.height = h.min(self.max_dim);
         self.surface.configure(&self.device, &self.config);
         #[cfg(not(target_arch = "wasm32"))]
         if self.offscreen.is_some() {

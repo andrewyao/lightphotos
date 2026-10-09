@@ -571,6 +571,34 @@ fn area_fits(area: rawler::imgop::Rect, width: usize, height: usize) -> bool {
             .is_some_and(|y1| y1 <= height)
 }
 
+/// `crop`, in sensor coordinates, moved into the demosaiced buffer that starts
+/// at `active` and is `width * height`, or `None` when it does not fit or is
+/// empty. Checked here because `crop_area` comes from file tags (DNG
+/// `DefaultCropSize`), and `Rect::adapt` asserts on a crop larger than the
+/// active area.
+fn crop_in_demosaiced(
+    crop: rawler::imgop::Rect,
+    active: rawler::imgop::Rect,
+    half_res: bool,
+    width: usize,
+    height: usize,
+) -> Option<rawler::imgop::Rect> {
+    if crop.d.w > active.d.w || crop.d.h > active.d.h {
+        return None;
+    }
+    let mut crop = rawler::imgop::Rect::new(
+        rawler::imgop::Point::new(
+            crop.p.x.checked_sub(active.p.x)?,
+            crop.p.y.checked_sub(active.p.y)?,
+        ),
+        crop.d,
+    );
+    if half_res {
+        crop.scale(0.5);
+    }
+    (area_fits(crop, width, height) && !crop.is_empty()).then_some(crop)
+}
+
 fn map_xtrans_coord(coord: usize, tile_step: usize) -> usize {
     let tile = coord / tile_step;
     let offset = coord % tile_step;
@@ -688,23 +716,22 @@ pub fn demosaic_cfa(
         .then(|| raw.crop_area.or(Some(original_active_area)))
         .flatten()
     {
-        Some(mut crop)
-            if crop.d != rawler::imgop::Dim2::new(demosaiced.width, demosaiced.height) =>
-        {
-            crop = crop.adapt(&original_active_area);
-            if half_res {
-                crop.scale(0.5);
-            }
+        Some(crop) if crop.d != rawler::imgop::Dim2::new(demosaiced.width, demosaiced.height) => {
             // A crop that does not fit (bad metadata) means no crop.
-            let fits =
-                crop.p.x + crop.d.w <= demosaiced.width && crop.p.y + crop.d.h <= demosaiced.height;
-            if fits && !crop.is_empty() {
-                let width = demosaiced.width;
-                let mut data = demosaiced.into_inner();
-                crop_in_place(&mut data, width, crop);
-                rawler::pixarray::Color2D::new_with(data, crop.d.w, crop.d.h)
-            } else {
-                demosaiced
+            match crop_in_demosaiced(
+                crop,
+                original_active_area,
+                half_res,
+                demosaiced.width,
+                demosaiced.height,
+            ) {
+                Some(crop) => {
+                    let width = demosaiced.width;
+                    let mut data = demosaiced.into_inner();
+                    crop_in_place(&mut data, width, crop);
+                    rawler::pixarray::Color2D::new_with(data, crop.d.w, crop.d.h)
+                }
+                None => demosaiced,
             }
         }
         _ => demosaiced,
@@ -915,7 +942,42 @@ fn decimate_linear_rgb(
 
 #[cfg(test)]
 mod tests {
-    use super::{downsample_xtrans_mosaic, map_xtrans_coord, neutral_if_non_finite};
+    use super::{
+        crop_in_demosaiced, downsample_xtrans_mosaic, map_xtrans_coord, neutral_if_non_finite,
+    };
+    use rawler::imgop::{Dim2, Point, Rect};
+
+    fn rect(x: usize, y: usize, w: usize, h: usize) -> Rect {
+        Rect::new(Point::new(x, y), Dim2::new(w, h))
+    }
+
+    #[test]
+    fn a_crop_from_bad_tags_is_skipped_instead_of_panicking() {
+        let active = rect(8, 8, 100, 80);
+        // DefaultCropSize wider than the active area: `Rect::adapt` asserts.
+        assert_eq!(
+            crop_in_demosaiced(rect(8, 8, 101, 80), active, false, 100, 80),
+            None
+        );
+        // An origin before the active area would underflow.
+        assert_eq!(
+            crop_in_demosaiced(rect(4, 8, 50, 40), active, false, 100, 80),
+            None
+        );
+        // An origin so large its end wraps.
+        assert_eq!(
+            crop_in_demosaiced(rect(usize::MAX, 8, 50, 40), active, false, 100, 80),
+            None
+        );
+        assert_eq!(
+            crop_in_demosaiced(rect(10, 12, 50, 40), active, false, 100, 80),
+            Some(rect(2, 4, 50, 40))
+        );
+        assert_eq!(
+            crop_in_demosaiced(rect(10, 12, 50, 40), active, true, 50, 40),
+            Some(rect(1, 2, 25, 20))
+        );
+    }
 
     #[test]
     fn missing_or_partial_white_balance_is_neutral() {

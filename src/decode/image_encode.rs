@@ -255,11 +255,14 @@ fn splice_app1(jpeg: &[u8], app1: &[u8]) -> Vec<u8> {
     // Walk the APPn segments; the first other marker ends the header.
     while i + 4 <= jpeg.len() && jpeg[i] == 0xFF && (0xE0..=0xEF).contains(&jpeg[i + 1]) {
         let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
-        let Some(segment) = jpeg.get(i..i + 2 + len) else {
+        // A length under 2 is malformed; it would leave no room for itself.
+        let (Some(segment), Some(payload)) =
+            (jpeg.get(i..i + 2 + len), jpeg.get(i + 4..i + 2 + len))
+        else {
             return jpeg.to_vec();
         };
-        let is_jfif = jpeg[i + 1] == 0xE0 && segment[4..].starts_with(b"JFIF\0");
-        let is_exif = jpeg[i + 1] == 0xE1 && segment[4..].starts_with(b"Exif\0\0");
+        let is_jfif = jpeg[i + 1] == 0xE0 && payload.starts_with(b"JFIF\0");
+        let is_exif = jpeg[i + 1] == 0xE1 && payload.starts_with(b"Exif\0\0");
         if !is_jfif && !placed {
             head.extend_from_slice(app1);
             placed = true;
@@ -455,6 +458,14 @@ mod tests {
         assert!(out.ends_with(&[0xFF, 0xDB, 0x00, 0x02, 0xFF, 0xD9]));
 
         assert_eq!(with_exif(b"not a jpeg", 1, 1, None), b"not a jpeg");
+    }
+
+    #[test]
+    fn an_app_segment_too_short_to_hold_its_length_passes_through() {
+        for len in [0u8, 1] {
+            let jpeg = [0xFF, 0xD8, 0xFF, 0xE1, 0x00, len, 0xFF, 0xD9];
+            assert_eq!(with_exif(&jpeg, 1, 1, None), jpeg);
+        }
     }
 
     /// The browser's export path: its worker holds only the source bytes, so
