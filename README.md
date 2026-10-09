@@ -10,11 +10,9 @@ open any photo in the Loupe to zoom, pan and edit. JPEG, PNG, TIFF, HEIC and
 camera RAW are supported. Ratings and edits are saved to a `.lightphotos` folder next to your photos, so
 the originals are never modified.
 
-<img src="assets/demo.gif" alt="Rating RAW photos with the number keys, opening one in the Loupe, zooming to 100%, and returning to the rated grid" width="800">
-
 It runs on macOS, Linux and Windows, and in the browser. Downloads and the
 browser version are at **[lightphotos.app](https://lightphotos.app)**. HEIC and
-the Vision-backed features (face/blink scoring, subject selection) are
+the Vision-backed features (face/blink scoring) are
 macOS-only.
 
 Keyboard shortcuts are in [`docs/KEYBOARD_SHORTCUTS.md`](docs/KEYBOARD_SHORTCUTS.md)
