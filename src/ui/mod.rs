@@ -184,7 +184,11 @@ pub enum UiAction {
     SetAdjustments(Adjustments),
     /// Tick or clear Remove Chromatic Aberration for the loupe photo.
     SetRemoveCa(bool),
+    /// The Sliders tab's Reset: tone, color, detail and curve back to
+    /// default. Crop, straighten and touch-ups belong to other tabs and stay.
     ResetAdjustments,
+    /// The photo menu's Reset: the shown photo's whole edit, touch-ups too.
+    ResetAllEdits,
     /// Pick develop settings for each selected photo from its own histogram.
     AutoTone,
     /// Turn the selection black and white, or back to color.

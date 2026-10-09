@@ -186,7 +186,7 @@ fn photo_menu(ui: &mut egui::Ui, app: &App, cell: Option<usize>, out: &mut Frame
     }
     // Reset clears the shown photo's edits, which only the Loupe has.
     if loupe && ui.button(t.reset_adjustments).clicked() {
-        out.actions.push(UiAction::ResetAdjustments);
+        out.actions.push(UiAction::ResetAllEdits);
     }
     if ui.button(m.auto_tone).clicked() {
         out.actions.push(UiAction::RequestBulk(BulkKind::AutoTone));

@@ -1327,6 +1327,15 @@ impl App {
                 ui::UiAction::ToggleBlackAndWhite => self.toggle_black_and_white(),
                 ui::UiAction::SetRemoveCa(on) => self.set_remove_ca(on),
                 ui::UiAction::ResetAdjustments => {
+                    let cur = self.current_adjustments();
+                    let adj = Adjustments {
+                        crop: cur.crop,
+                        straighten: cur.straighten,
+                        ..Adjustments::default()
+                    };
+                    self.apply_adjustments_kind(adj, "reset");
+                }
+                ui::UiAction::ResetAllEdits => {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else {
                         continue;
                     };

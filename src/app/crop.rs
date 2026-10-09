@@ -1083,6 +1083,48 @@ mod tests {
     }
 
     #[test]
+    fn each_tab_reset_leaves_the_other_tabs_edits() {
+        use winit::keyboard::KeyCode;
+        let crop = Crop {
+            left: 0.1,
+            top: 0.1,
+            right: 0.9,
+            bottom: 0.9,
+        };
+        let mut app = photo_app(0, Some(crop));
+        let photo = PathBuf::from(PHOTO);
+        app.edits.get_mut(&photo).unwrap().straighten = 3.0;
+        app.edits.get_mut(&photo).unwrap().exposure = 1.0;
+        let spot = crate::develop::TouchUp {
+            center: [0.5, 0.5],
+            radius: 0.05,
+            source: [0.3, 0.3],
+            feather: 0.5,
+            delta: [0.0; 3],
+            opacity: 1.0,
+        };
+        app.touchups.insert(photo.clone(), vec![spot]);
+
+        app.apply_ui_actions(vec![ui::UiAction::ResetAdjustments]);
+        let adj = app.current_adjustments();
+        assert_eq!(adj.exposure, 0.0, "Sliders' Reset clears the tone");
+        assert_eq!((adj.crop, adj.straighten), (Some(crop), 3.0));
+        assert_eq!(app.current_touchups(), &[spot]);
+
+        app.apply_adjustments(Adjustments {
+            exposure: 1.0,
+            ..adj
+        });
+        app.enter_crop();
+        app.apply_ui_actions(vec![ui::UiAction::ResetCrop]);
+        app.handle_key(KeyCode::Enter);
+        let adj = app.current_adjustments();
+        assert_eq!((adj.crop, adj.straighten), (None, 0.0));
+        assert_eq!(adj.exposure, 1.0, "Crop's Reset keeps the tone");
+        assert_eq!(app.current_touchups(), &[spot]);
+    }
+
+    #[test]
     fn nothing_saves_until_enter() {
         use winit::keyboard::KeyCode;
         let mut app = photo_app(0, None);
