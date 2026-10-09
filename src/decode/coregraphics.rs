@@ -52,6 +52,8 @@ pub(crate) unsafe fn srgb_bitmap_context(
     height: u32,
     bytes_per_row: usize,
 ) -> Result<CFRetained<CGContext>, String> {
+    // SAFETY: `kCGColorSpaceSRGB` is an immutable CoreGraphics constant that
+    // lives for the whole process.
     let color_space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
         .ok_or("could not create sRGB color space")?;
     let bitmap_info: u32 =

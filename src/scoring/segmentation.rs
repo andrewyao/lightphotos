@@ -174,6 +174,8 @@ pub fn segment(_path: &Path) -> Result<Mask, String> {
 #[hotpath::measure]
 fn segment_person(path: &Path) -> Result<Mask, String> {
     vision::require_class(c"VNGeneratePersonSegmentationRequest", "12.0")?;
+    // SAFETY: the class exists (checked above); the setters take valid enum and
+    // format constants, and the result getters are nil-checked by objc2.
     unsafe {
         let request = VNGeneratePersonSegmentationRequest::new();
         request.setQualityLevel(VNGeneratePersonSegmentationRequestQualityLevel::Accurate);
@@ -198,6 +200,8 @@ fn segment_person(path: &Path) -> Result<Mask, String> {
 #[hotpath::measure]
 fn segment_foreground(path: &Path) -> Result<Mask, String> {
     vision::require_class(c"VNGenerateForegroundInstanceMaskRequest", "14.0")?;
+    // SAFETY: the class exists (checked above); `allInstances` comes from the
+    // same observation it is passed back to, and errors surface as `Err`.
     unsafe {
         let request = VNGenerateForegroundInstanceMaskRequest::new();
         vision::perform(vision::Source::File(path), &[request.as_super().as_super()])?;

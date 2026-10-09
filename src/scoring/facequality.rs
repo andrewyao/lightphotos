@@ -38,6 +38,8 @@ pub struct RawFace {
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
 pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
+    // SAFETY: `new` takes no arguments; objc2 marks it unsafe only because
+    // every Vision method is. It returns an owned, initialized request.
     let request = unsafe { VNDetectFaceLandmarksRequest::new() };
     vision::perform(vision::Source::File(path), &[request.as_super().as_super()])?;
     Ok(faces_from(&request))
@@ -46,6 +48,8 @@ pub fn detect_faces(path: &Path) -> Result<Vec<RawFace>, String> {
 /// The faces a finished landmarks request found.
 #[cfg(target_os = "macos")]
 pub fn faces_from(request: &VNDetectFaceLandmarksRequest) -> Vec<RawFace> {
+    // SAFETY: plain getters on a live request and its retained observations;
+    // `results` is nil-checked and every returned object is owned by objc2.
     unsafe {
         // Some Vision revisions return nil instead of an empty list for no faces.
         let Some(results) = request.results() else {
@@ -97,6 +101,8 @@ pub fn detect_faces(_path: &Path) -> Result<Vec<RawFace>, String> {
 /// them before returning, so no caller holds the borrow.
 #[cfg(target_os = "macos")]
 fn region_points(region: &VNFaceLandmarkRegion2D) -> Points {
+    // SAFETY: `normalizedPoints` points at `pointCount` CGPoints owned by
+    // `region`, which `&region` keeps alive; null and empty are rejected first.
     unsafe {
         let count = region.pointCount();
         let ptr = region.normalizedPoints();
@@ -148,7 +154,7 @@ impl FaceQuality {
 /// taken as the eye corners, which ignores Vision's point order (it differs
 /// between the 65- and 76-point sets) and handles a tilted head.
 pub fn eye_openness(points: &[(f32, f32)], aspect_wh: f32) -> Option<f32> {
-    if points.len() < 3 || !(aspect_wh > 0.0) {
+    if points.len() < 3 || aspect_wh.is_nan() || aspect_wh <= 0.0 {
         return None;
     }
     let pts: Vec<(f32, f32)> = points.iter().map(|&(x, y)| (x, y / aspect_wh)).collect();

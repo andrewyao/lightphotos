@@ -45,12 +45,15 @@ pub fn vision_signals(rgba: &[u8], width: u32, height: u32) -> Result<VisionSign
     // Worker threads have no autorelease pool of their own, and Vision
     // autoreleases freely; without one each photo would leak until exit.
     objc2::rc::autoreleasepool(|_| {
+        // SAFETY: argument-free initializer returning an owned request.
         let faces = unsafe { VNDetectFaceLandmarksRequest::new() };
         let aesthetics = crate::scoring::vision::require_class(
             c"VNCalculateImageAestheticsScoresRequest",
             "15.0",
         )
         .ok()
+        // SAFETY: `require_class` just confirmed the class exists at runtime,
+        // so `new` cannot message a missing class.
         .map(|()| unsafe { VNCalculateImageAestheticsScoresRequest::new() });
 
         let mut requests = vec![faces.as_super().as_super()];
@@ -63,8 +66,11 @@ pub fn vision_signals(rgba: &[u8], width: u32, height: u32) -> Result<VisionSign
         let eyes = crate::scoring::facequality::face_quality(&raw, width as f32 / height as f32)
             .eye_state();
         let aesthetics = aesthetics
+            // SAFETY: getter on a request `perform` has finished with; nil maps
+            // to `None`.
             .and_then(|r| unsafe { r.results() })
             .and_then(|r| r.firstObject())
+            // SAFETY: plain property getters on a retained observation.
             .map(|o| unsafe {
                 Aesthetics {
                     overall: o.overallScore(),

@@ -83,12 +83,23 @@ impl lightwatch::Measured for DecodedImage {
 // CoreFoundation type IDs, used to check a value's type before casting it.
 #[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn CFGetTypeID(cf: *const c_void) -> core::ffi::c_ulong;
-    fn CFNumberGetTypeID() -> core::ffi::c_ulong;
-    fn CFStringGetTypeID() -> core::ffi::c_ulong;
-    fn CFDictionaryGetTypeID() -> core::ffi::c_ulong;
-    fn CFArrayGetTypeID() -> core::ffi::c_ulong;
+    // No arguments and no preconditions, so these are safe to call.
+    safe fn CFNumberGetTypeID() -> core::ffi::c_ulong;
+    safe fn CFStringGetTypeID() -> core::ffi::c_ulong;
+    safe fn CFDictionaryGetTypeID() -> core::ffi::c_ulong;
+    safe fn CFArrayGetTypeID() -> core::ffi::c_ulong;
+}
+
+/// Read an ImageIO property-key constant, which Rust sees as an extern static.
+#[cfg(target_os = "macos")]
+macro_rules! key {
+    ($name:ident) => {
+        // SAFETY: ImageIO's `kCGImageProperty*` keys are immutable CFString
+        // constants that live for the whole process.
+        unsafe { $name }
+    };
 }
 
 /// File facts, camera, lens, exposure, capture date, and location for
@@ -269,6 +280,8 @@ pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, Strin
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let source = open_image_source(path)?;
 
+    // SAFETY: no options are passed; an index past the end returns NULL,
+    // which objc2 maps to `None`.
     let image: CFRetained<CGImage> =
         unsafe { source.image_at_index(0, None) }.ok_or("ImageIO could not decode image")?;
 
@@ -445,17 +458,17 @@ fn read_capture_time(source: &CGImageSource) -> Option<SystemTime> {
     // SAFETY: index 0 exists and no options are passed.
     let props = unsafe { source.properties_at_index(0, None) }?;
 
-    if let Some(exif) = dict_dictionary(&props, unsafe { kCGImagePropertyExifDictionary }) {
-        if let Some(t) = dict_string(exif, unsafe { kCGImagePropertyExifDateTimeOriginal })
+    if let Some(exif) = dict_dictionary(&props, key!(kCGImagePropertyExifDictionary)) {
+        if let Some(t) = dict_string(exif, key!(kCGImagePropertyExifDateTimeOriginal))
             .and_then(|s| parse_exif_datetime(&s))
         {
-            let subsec = dict_string(exif, unsafe { kCGImagePropertyExifSubsecTimeOriginal });
+            let subsec = dict_string(exif, key!(kCGImagePropertyExifSubsecTimeOriginal));
             return Some(with_subsec(t, subsec.as_deref()));
         }
     }
 
-    dict_dictionary(&props, unsafe { kCGImagePropertyTIFFDictionary })
-        .and_then(|tiff| dict_string(tiff, unsafe { kCGImagePropertyTIFFDateTime }))
+    dict_dictionary(&props, key!(kCGImagePropertyTIFFDictionary))
+        .and_then(|tiff| dict_string(tiff, key!(kCGImagePropertyTIFFDateTime)))
         .and_then(|s| parse_exif_datetime(&s))
 }
 
@@ -467,20 +480,20 @@ pub fn capture_stamp(path: &Path) -> Option<CaptureStamp> {
     let source = open_image_source(path).ok()?;
     // SAFETY: index 0 exists and no options are passed.
     let props = unsafe { source.properties_at_index(0, None) }?;
-    let exif = dict_dictionary(&props, unsafe { kCGImagePropertyExifDictionary });
+    let exif = dict_dictionary(&props, key!(kCGImagePropertyExifDictionary));
     let exif_str = |key| exif.and_then(|e| dict_string(e, key));
-    if let Some(stamp) = exif_str(unsafe { kCGImagePropertyExifDateTimeOriginal }).and_then(|t| {
+    if let Some(stamp) = exif_str(key!(kCGImagePropertyExifDateTimeOriginal)).and_then(|t| {
         CaptureStamp::new(
             &t,
-            exif_str(unsafe { kCGImagePropertyExifOffsetTimeOriginal }).as_deref(),
+            exif_str(key!(kCGImagePropertyExifOffsetTimeOriginal)).as_deref(),
         )
     }) {
         return Some(stamp);
     }
-    let t = dict_string(&props, unsafe { kCGImagePropertyTIFFDateTime })?;
+    let t = dict_string(&props, key!(kCGImagePropertyTIFFDateTime))?;
     CaptureStamp::new(
         &t,
-        exif_str(unsafe { kCGImagePropertyExifOffsetTime }).as_deref(),
+        exif_str(key!(kCGImagePropertyExifOffsetTime)).as_deref(),
     )
 }
 
@@ -488,18 +501,19 @@ pub fn capture_stamp(path: &Path) -> Option<CaptureStamp> {
 /// mtime is not a capture date and should not be shown as one.
 #[cfg(target_os = "macos")]
 fn read_capture_date(source: &CGImageSource) -> Option<CaptureDate> {
+    // SAFETY: no options are passed; a missing index returns NULL, mapped to `None`.
     let props = unsafe { source.properties_at_index(0, None) }?;
 
-    if let Some(exif) = dict_dictionary(&props, unsafe { kCGImagePropertyExifDictionary }) {
-        if let Some(d) = dict_string(exif, unsafe { kCGImagePropertyExifDateTimeOriginal })
+    if let Some(exif) = dict_dictionary(&props, key!(kCGImagePropertyExifDictionary)) {
+        if let Some(d) = dict_string(exif, key!(kCGImagePropertyExifDateTimeOriginal))
             .and_then(|s| parse_exif_datetime_display(&s))
         {
             return Some(d);
         }
     }
 
-    dict_dictionary(&props, unsafe { kCGImagePropertyTIFFDictionary })
-        .and_then(|tiff| dict_string(tiff, unsafe { kCGImagePropertyTIFFDateTime }))
+    dict_dictionary(&props, key!(kCGImagePropertyTIFFDictionary))
+        .and_then(|tiff| dict_string(tiff, key!(kCGImagePropertyTIFFDateTime)))
         .and_then(|s| parse_exif_datetime_display(&s))
 }
 
@@ -514,19 +528,20 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
     };
     meta.capture_date = read_capture_date(&source);
 
+    // SAFETY: no options are passed; a missing index returns NULL, mapped to `None`.
     let Some(props) = (unsafe { source.properties_at_index(0, None) }) else {
         return meta;
     };
 
-    if let Some(tiff) = dict_dictionary(&props, unsafe { kCGImagePropertyTIFFDictionary }) {
-        meta.camera_make = dict_string(tiff, unsafe { kCGImagePropertyTIFFMake });
-        meta.camera_model = dict_string(tiff, unsafe { kCGImagePropertyTIFFModel });
+    if let Some(tiff) = dict_dictionary(&props, key!(kCGImagePropertyTIFFDictionary)) {
+        meta.camera_make = dict_string(tiff, key!(kCGImagePropertyTIFFMake));
+        meta.camera_model = dict_string(tiff, key!(kCGImagePropertyTIFFModel));
     }
 
     // Swap to display orientation for EXIF 5..=8, matching `decode`.
     if let (Some(w), Some(h)) = (
-        dict_f64(&props, unsafe { kCGImagePropertyPixelWidth }),
-        dict_f64(&props, unsafe { kCGImagePropertyPixelHeight }),
+        dict_f64(&props, key!(kCGImagePropertyPixelWidth)),
+        dict_f64(&props, key!(kCGImagePropertyPixelHeight)),
     ) {
         if w > 0.0 && h > 0.0 {
             let (w, h) = (w as u32, h as u32);
@@ -538,31 +553,31 @@ pub fn read_metadata(path: &Path) -> ImageMetadata {
         }
     }
 
-    if let Some(exif) = dict_dictionary(&props, unsafe { kCGImagePropertyExifDictionary }) {
-        meta.lens_model = dict_string(exif, unsafe { kCGImagePropertyExifLensModel });
-        meta.f_number = dict_f64(exif, unsafe { kCGImagePropertyExifFNumber });
-        meta.exposure_time = dict_f64(exif, unsafe { kCGImagePropertyExifExposureTime });
-        meta.focal_length = dict_f64(exif, unsafe { kCGImagePropertyExifFocalLength });
-        meta.iso = dict_first_u32(exif, unsafe { kCGImagePropertyExifISOSpeedRatings });
-        meta.exposure_bias = dict_f64(exif, unsafe { kCGImagePropertyExifExposureBiasValue });
-        meta.flash = dict_f64(exif, unsafe { kCGImagePropertyExifFlash })
+    if let Some(exif) = dict_dictionary(&props, key!(kCGImagePropertyExifDictionary)) {
+        meta.lens_model = dict_string(exif, key!(kCGImagePropertyExifLensModel));
+        meta.f_number = dict_f64(exif, key!(kCGImagePropertyExifFNumber));
+        meta.exposure_time = dict_f64(exif, key!(kCGImagePropertyExifExposureTime));
+        meta.focal_length = dict_f64(exif, key!(kCGImagePropertyExifFocalLength));
+        meta.iso = dict_first_u32(exif, key!(kCGImagePropertyExifISOSpeedRatings));
+        meta.exposure_bias = dict_f64(exif, key!(kCGImagePropertyExifExposureBiasValue));
+        meta.flash = dict_f64(exif, key!(kCGImagePropertyExifFlash))
             .and_then(|v| Flash::from_exif(v as u32));
-        meta.white_balance = dict_f64(exif, unsafe { kCGImagePropertyExifWhiteBalance })
+        meta.white_balance = dict_f64(exif, key!(kCGImagePropertyExifWhiteBalance))
             .and_then(|v| WhiteBalance::from_exif(v as u32));
     }
 
-    if let Some(gps) = dict_dictionary(&props, unsafe { kCGImagePropertyGPSDictionary }) {
+    if let Some(gps) = dict_dictionary(&props, key!(kCGImagePropertyGPSDictionary)) {
         if let (Some(lat), Some(lon)) = (
-            dict_f64(gps, unsafe { kCGImagePropertyGPSLatitude }),
-            dict_f64(gps, unsafe { kCGImagePropertyGPSLongitude }),
+            dict_f64(gps, key!(kCGImagePropertyGPSLatitude)),
+            dict_f64(gps, key!(kCGImagePropertyGPSLongitude)),
         ) {
             meta.gps = Gps::from_exif(
                 lat,
-                dict_string(gps, unsafe { kCGImagePropertyGPSLatitudeRef }).as_deref(),
+                dict_string(gps, key!(kCGImagePropertyGPSLatitudeRef)).as_deref(),
                 lon,
-                dict_string(gps, unsafe { kCGImagePropertyGPSLongitudeRef }).as_deref(),
-                dict_f64(gps, unsafe { kCGImagePropertyGPSAltitude }),
-                dict_f64(gps, unsafe { kCGImagePropertyGPSAltitudeRef }) == Some(1.0),
+                dict_string(gps, key!(kCGImagePropertyGPSLongitudeRef)).as_deref(),
+                dict_f64(gps, key!(kCGImagePropertyGPSAltitude)),
+                dict_f64(gps, key!(kCGImagePropertyGPSAltitudeRef)) == Some(1.0),
             );
         }
     }
@@ -582,7 +597,8 @@ fn dict_raw(dict: &CFDictionary, key: &CFString) -> *const c_void {
 #[cfg(target_os = "macos")]
 fn dict_string(dict: &CFDictionary, key: &CFString) -> Option<String> {
     let ptr = dict_raw(dict, key);
-    if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFStringGetTypeID() } {
+    // SAFETY: non-null, and a live CF object owned by `dict`.
+    if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != CFStringGetTypeID() {
         return None;
     }
     // SAFETY: confirmed the value is a CFString.
@@ -592,7 +608,8 @@ fn dict_string(dict: &CFDictionary, key: &CFString) -> Option<String> {
 #[cfg(target_os = "macos")]
 fn dict_dictionary<'a>(dict: &'a CFDictionary, key: &CFString) -> Option<&'a CFDictionary> {
     let ptr = dict_raw(dict, key);
-    if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFDictionaryGetTypeID() } {
+    // SAFETY: non-null, and a live CF object owned by `dict`.
+    if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != CFDictionaryGetTypeID() {
         return None;
     }
     // SAFETY: confirmed the value is a CFDictionary.
@@ -601,12 +618,15 @@ fn dict_dictionary<'a>(dict: &'a CFDictionary, key: &CFString) -> Option<&'a CFD
 
 #[cfg(target_os = "macos")]
 fn number_f64(ptr: *const c_void) -> Option<f64> {
-    if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != unsafe { CFNumberGetTypeID() } {
+    // SAFETY: non-null, and callers pass a live CF object borrowed from a
+    // dictionary or array they hold.
+    if ptr.is_null() || unsafe { CFGetTypeID(ptr) } != CFNumberGetTypeID() {
         return None;
     }
     // SAFETY: confirmed the value is a CFNumber.
     let number = unsafe { &*(ptr as *const CFNumber) };
     let mut out: f64 = 0.0;
+    // SAFETY: `Float64Type` writes exactly one f64 into `out`.
     let ok = unsafe {
         number.value(
             CFNumberType::Float64Type,
@@ -629,11 +649,12 @@ fn dict_first_u32(dict: &CFDictionary, key: &CFString) -> Option<u32> {
     if ptr.is_null() {
         return None;
     }
+    // SAFETY: non-null, and a live CF object owned by `dict`.
     let type_id = unsafe { CFGetTypeID(ptr) };
-    if type_id == unsafe { CFNumberGetTypeID() } {
+    if type_id == CFNumberGetTypeID() {
         return number_f64(ptr).map(|v| v as u32);
     }
-    if type_id == unsafe { CFArrayGetTypeID() } {
+    if type_id == CFArrayGetTypeID() {
         // SAFETY: confirmed the value is a CFArray.
         let array = unsafe { &*(ptr as *const CFArray) };
         if array.count() == 0 {
@@ -654,8 +675,8 @@ pub fn pixel_size(path: &Path) -> Option<(u32, u32)> {
     let source = open_image_source(path).ok()?;
     // SAFETY: index 0 exists for any image the source opened.
     let props = unsafe { source.properties_at_index(0, None) }?;
-    let w = dict_f64(&props, unsafe { kCGImagePropertyPixelWidth })?;
-    let h = dict_f64(&props, unsafe { kCGImagePropertyPixelHeight })?;
+    let w = dict_f64(&props, key!(kCGImagePropertyPixelWidth))?;
+    let h = dict_f64(&props, key!(kCGImagePropertyPixelHeight))?;
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
@@ -687,12 +708,14 @@ fn read_orientation(source: &CGImageSource) -> u8 {
     }
     // A crafted file can store any CF type here, and reading a non-CFNumber
     // as one is UB.
-    if unsafe { CFGetTypeID(ptr) } != unsafe { CFNumberGetTypeID() } {
+    // SAFETY: non-null, and a live CF object owned by `props`.
+    if unsafe { CFGetTypeID(ptr) } != CFNumberGetTypeID() {
         return 1;
     }
     // SAFETY: the type check above confirmed a CFNumber.
     let number = unsafe { &*(ptr as *const CFNumber) };
     let mut out: i32 = 0;
+    // SAFETY: `SInt32Type` writes exactly one i32 into `out`.
     let ok = unsafe {
         number.value(
             CFNumberType::SInt32Type,
@@ -717,7 +740,7 @@ pub fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImag
     // orients its own output and never calls this.
     debug_assert_eq!(img.pixel_format, PixelFormat::Srgb8);
     let (w, h) = (img.width, img.height);
-    let swaps = matches!(orientation, 5 | 6 | 7 | 8);
+    let swaps = matches!(orientation, 5..=8);
     let (nw, nh) = if swaps { (h, w) } else { (w, h) };
     let mut dst = vec![0u8; (nw * nh * 4) as usize];
     let src_idx = |x: u32, y: u32| ((y * w + x) * 4) as usize;
@@ -845,6 +868,7 @@ mod tests {
         )
         .unwrap();
         let source = open_image_source(&path).unwrap();
+        // SAFETY: no options are passed; a missing index returns `None`.
         let image = unsafe { source.image_at_index(0, None) }.unwrap();
         let _ = std::fs::remove_file(&path);
 
@@ -964,8 +988,13 @@ mod tests {
         assert!(img.width > 0 && img.height > 0, "non-zero dimensions");
         assert_eq!(img.rgba.len(), (img.width * img.height * 4) as usize);
         // All-zero RGB would mean nothing was drawn.
-        let any_color = img.rgba.chunks_exact(4).any(|p| p[0] | p[1] | p[2] != 0);
-        let opaque = img.rgba.chunks_exact(4).all(|p| p[3] == 255);
+        let any_color = img
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|p| p[0] | p[1] | p[2] != 0);
+        let opaque = img.rgba.as_chunks::<4>().0.iter().all(|p| p[3] == 255);
         assert!(any_color, "decoded pixels are all black -> draw failed");
         assert!(opaque, "expected opaque alpha for a solid-color image");
     }
