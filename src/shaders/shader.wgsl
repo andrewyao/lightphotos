@@ -64,7 +64,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // antialiasing when zoomed out.
     //
     // An Rgba8UnormSrgb texture samples as linear light. The math below must
-    // match `apply_linear` in develop.rs.
+    // match `apply_linear` in develop/mod.rs.
     let texel = sampleSrc(uv);
 
     // Outside the image or the crop: the neutral background.
@@ -82,7 +82,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // 0. Edge-aware denoise over a 5x5 neighborhood, weighted by distance and
     // color similarity. The taps use `textureSampleLevel` because the loop is
     // not uniform control flow, so denoise loses mip antialiasing when zoomed
-    // out. Must match `denoise_sample` in develop.rs.
+    // out. Must match `denoise_sample` in develop/mod.rs.
     if (adj.denoise > 0.0) {
         let center = sampleSrcLevel(uv).rgb;
         let sigmaR = 0.02 + adj.denoise / 100.0 * 0.30;
@@ -160,7 +160,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     b = curved.b;
 
     // 4.5. Vibrance and saturation scale chroma around luma, in gamma space.
-    // Must match `apply_linear` in develop.rs.
+    // Must match `apply_linear` in develop/mod.rs.
     let luma = 0.299 * r + 0.587 * g + 0.114 * b;
     let satTotal = 1.0 + adj.saturation / 100.0;
     let cmax = max(r, max(g, b));

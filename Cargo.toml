@@ -13,8 +13,8 @@ rust-version = "1.92"
 name = "lightphotos"
 path = "src/main.rs"
 
-# Manual validation harnesses for `facequality.rs`, `segmentation.rs` and
-# `quality.rs` (see each module's docs). They link the lib target.
+# Manual validation harnesses for `scoring/facequality.rs`, `scoring/segmentation.rs` and
+# `scoring/quality.rs` (see each module's docs). They link the lib target.
 [[bin]]
 name = "face_probe"
 path = "src/bin/face_probe.rs"
@@ -67,7 +67,7 @@ web-time = "1.1"
 # and with the crate's own features off its macros hand the function body back
 # untouched (`hotpath-macros`' `lib_off`), so the default build links nothing
 # but an empty shim. Turned on by this crate's `hotpath` / `hotpath-alloc`
-# features — see the `[features]` block and `src/profile.rs`.
+# features — see the `[features]` block and `src/shell/profile.rs`.
 hotpath = "0.26"
 
 # Live-object census: how many DecodedImages and Masks exist right now and how
@@ -84,7 +84,7 @@ hotpath = "0.26"
 lightwatch = { package = "lightwatch-probe", git = "https://github.com/andrewyao/lightwatch", default-features = false }
 
 # Linear half-float pixels: `PixelFormat::LinearF16`, which
-# `image_ops` reads on every platform and `raw/preview.rs`'s `Quality` tier
+# `image_ops` reads on every platform and `decode/raw_preview.rs`'s `Quality` tier
 # writes for the renderer's `Rgba16Float` texture.
 half = "2"
 # Local wall-clock fields for a file's modified time. Already in the tree via
@@ -94,7 +94,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 [features]
 # Profiling. Both are off by default and `hotpath`'s own macros expand to the
 # untouched function body when its `hotpath` feature is off, so a default build
-# carries no instrumentation at all — see `src/profile.rs`.
+# carries no instrumentation at all — see `src/shell/profile.rs`.
 hotpath = ["hotpath/hotpath"]
 # Per-function allocation totals. Installs hotpath's counting global allocator,
 # which adds a thread-local increment to every alloc/dealloc in the process, so
@@ -121,17 +121,17 @@ png = "0.18"
 # target_os = "linux"-gated inside rfd, so macOS/Windows builds never compile
 # it. wasm has its own picker (`web_fs::pick_and_list_folder`).
 rfd = "0.15"
-# Blocking HTTP for the Immich export destination (`immich.rs`). Blocking fits:
+# Blocking HTTP for the Immich export destination (`export/immich.rs`). Blocking fits:
 # uploads run on the export pool's OS threads, and it keeps an async runtime
 # out of a crate whose only executor is `pollster`. The browser can't reach an
 # Immich server (no CORS), so wasm32 never needs it.
 ureq = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# The Immich API key lives in the login Keychain (`secret.rs`).
+# The Immich API key lives in the login Keychain (`persist/secret.rs`).
 security-framework = "3"
 objc2 = "0.6.4"
-# Native menu bar (`menu.rs`).
+# Native menu bar (`shell/menu.rs`).
 muda = { version = "0.20", default-features = false }
 objc2-foundation = { version = "0.3.2", features = ["NSString", "NSArray", "NSURL", "NSEnumerator", "NSObject", "NSThread", "NSFileManager", "NSError", "NSLocale"] }
 objc2-app-kit = { version = "0.3.2", features = ["NSApplication", "NSResponder"] }
@@ -147,7 +147,7 @@ objc2-vision = { version = "0.3.2", default-features = false, features = [
     "VNFaceLandmarks",
     "VNGeneratePersonSegmentationRequest",
     "VNGenerateForegroundInstanceMaskRequest",
-    # macOS 15 and later; `judge.rs` checks for the class before using it.
+    # macOS 15 and later; `scoring/judge.rs` checks for the class before using it.
     "VNCalculateImageAestheticsScoresRequest",
     "VNStatefulRequest",
     "objc2-core-video",
@@ -159,7 +159,7 @@ objc2-vision = { version = "0.3.2", default-features = false, features = [
     "objc2-core-foundation",
 ] }
 # Vision hands segmentation masks back as CVPixelBuffers; this is what reads
-# their bytes (see `segmentation.rs`).
+# their bytes (see `scoring/segmentation.rs`).
 objc2-core-video = { version = "0.3.2", default-features = false, features = [
     "std",
     "CVBase",
@@ -181,7 +181,7 @@ rawler = "0.7.2"
 # are TIFF-based, so a generic TIFF/EXIF reader can open them directly and
 # read the baseline IFD1 thumbnail tags every EXIF-aware viewer relies on.
 # `kamadak-exif` explicitly supports "TIFF and some RAW image formats based on
-# it" per its own docs, so thumbnail.rs's non-mac `try_extract_embedded_preview`
+# it" per its own docs, so jobs/thumbnail.rs's non-mac `try_extract_embedded_preview`
 # uses it.
 kamadak-exif = "0.6.1"
 
@@ -195,7 +195,7 @@ trash = "5"
 # Release builds run as GUI apps with no console of their own (see
 # `windows_subsystem` in main.rs); `AttachConsole` borrows the terminal's when
 # launched from one, so `--help`, `--profile` and diagnostics still print.
-# Threading lowers the scoring workers' priority (`score.rs`).
+# Threading lowers the scoring workers' priority (`jobs/score.rs`).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_System_Threading"] }
 
@@ -237,7 +237,7 @@ web-sys = { version = "0.3", features = [
 js-sys = "0.3"
 wasm_thread = "0.3"
 # Already in the graph through rawler. Named here so each wasm decode thread
-# can give rawler a rayon pool of its own; see `Worker::run` in loader.rs.
+# can give rawler a rayon pool of its own; see `Worker::run` in jobs/loader.rs.
 rayon = "1"
 console_error_panic_hook = "0.1"
 # `uuid` (pulled in transitively by both egui/accesskit and rawler) needs an
@@ -251,7 +251,7 @@ uuid = { version = "1", features = ["js"] }
 # Local patch, standard rawler 0.7.2 only (no third-party fork): `rawler`
 # unconditionally calls `std::time::Instant::now()` in a few places (PPG
 # demosaic's `imgop/sensor/bayer/ppg.rs`, notably — the code path
-# `raw/preview.rs`'s `DemosaicMode::Quality` runs) purely for a debug!
+# `decode/raw_preview.rs`'s `DemosaicMode::Quality` runs) purely for a debug!
 # timing log, which panics unconditionally on bare wasm32-unknown-unknown
 # ("time not implemented on this platform" — no clock source there, hit live
 # in a real Web Worker once `Quality` actually ran there, not guessed at).

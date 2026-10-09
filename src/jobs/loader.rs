@@ -85,7 +85,7 @@ enum Job {
     /// thread cannot open a File System Access handle by path.
     #[cfg(target_arch = "wasm32")]
     Web(Box<crate::web::web_decode::WebJob>),
-    /// wasm32: a batch export. Native exports run on `export.rs`'s own pool.
+    /// wasm32: a batch export. Native exports run on `export`'s own pool.
     #[cfg(target_arch = "wasm32")]
     WebExport(Box<crate::web::web_decode::WebExportJob>),
     /// wasm32: `Exif` over bytes the main thread already read.

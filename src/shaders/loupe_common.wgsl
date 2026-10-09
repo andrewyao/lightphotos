@@ -3,7 +3,7 @@
 // Declarations shared by the two loupe fragment shaders. Rust prepends this
 // file to `shader.wgsl` and `raw_shader.wgsl`, so each is one module.
 
-// Field order must match `GpuAdjust` in develop.rs.
+// Field order must match `GpuAdjust` in develop/mod.rs.
 struct Adjust {
     exposure: f32,
     contrast: f32,
@@ -46,7 +46,7 @@ struct TouchUp {
 @group(0) @binding(1) var samp: sampler;
 @group(2) @binding(0) var<uniform> adj: Adjust;
 // The baked point curve: entry i is the red, green and blue output for input
-// i / 255. Written from `GpuCurve` in develop.rs.
+// i / 255. Written from `GpuCurve` in develop/mod.rs.
 @group(2) @binding(1) var<uniform> curve_lut: array<vec4<f32>, 256>;
 @group(3) @binding(0) var<storage, read> touchups: array<TouchUp>;
 
@@ -101,7 +101,7 @@ struct VsOut {
 // recovers above-white RAW highlights. Brightening maps luma through the
 // standard rational tone curve x*g / (1 + x*(g - 1)), which keeps black at
 // black and white at white, and colors keep 1 / (1 + x*(g - 1)) of their
-// chroma relative to luma. Must match `exposure_curve` in develop.rs.
+// chroma relative to luma. Must match `exposure_curve` in develop/mod.rs.
 fn exposureCurve(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
     let gain = exp2(stops);
     if (stops <= 0.0) {
@@ -117,7 +117,7 @@ fn exposureCurve(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
 }
 
 // Gamma-space tone ops, per channel. Must match the `tone` closure in
-// `apply_linear` in develop.rs.
+// `apply_linear` in develop/mod.rs.
 fn tone(v: f32) -> f32 {
     var x = v;
 
@@ -168,7 +168,7 @@ fn toneCurve(c: vec3<f32>) -> vec3<f32> {
 }
 
 // Gaussian (sigma 1.0) weights for the 5x5 denoise kernel, by squared tap
-// distance. Must match `spatial_weight` in develop.rs.
+// distance. Must match `spatial_weight` in develop/mod.rs.
 fn spatialWeight(d2: i32) -> f32 {
     if (d2 == 0) { return 1.0; }
     if (d2 == 1) { return 0.606531; }

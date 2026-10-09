@@ -3,7 +3,7 @@
 // Fragment shader for linear-light RAW images (`PixelFormat::LinearF16`, the
 // wasm32 Loupe path). The CPU demosaics to linear camera RGB and this shader
 // does the rest: sRGB gamma, the RAW display boost, and the Develop sliders.
-// `apply_raw_preview_boost` in `develop.rs` is the CPU twin that
+// `apply_raw_preview_boost` in `develop/mod.rs` is the CPU twin that
 // every other RAW path bakes into u8 sRGB at decode time.
 //
 // Order: denoise -> touch-ups -> WB -> exposure -> sRGB gamma + boost ->
@@ -18,7 +18,7 @@
 //    display-ready.
 
 // RAW display look curve, fitted to Apple ImageIO's render. Knots must match
-// `RAW_LOOK_KNOTS` in develop.rs.
+// `RAW_LOOK_KNOTS` in develop/mod.rs.
 const RAW_LOOK_KNOTS = array<f32, 17>(
     0.000, 0.027, 0.122, 0.220, 0.337, 0.463, 0.576, 0.678, 0.757, 0.824, 0.878, 0.918, 0.949,
     0.976, 0.992, 1.000, 1.000,
@@ -57,7 +57,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // 0. Edge-aware denoise over a 5x5 neighborhood, weighted by distance and
     // color similarity. The loop is not uniform control flow, so taps use
     // textureSampleLevel at LOD 0; this skips mip antialiasing when zoomed
-    // out. Must match `denoise_sample` in develop.rs.
+    // out. Must match `denoise_sample` in develop/mod.rs.
     if (adj.denoise > 0.0) {
         let center = sampleSrcLevel(uv).rgb;
         let sigmaR = 0.02 + adj.denoise / 100.0 * 0.30;

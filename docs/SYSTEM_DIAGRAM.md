@@ -6,8 +6,21 @@ click to the screen.
 
 ## Components
 
-The app binary is `src/main.rs`, `src/app/` and `src/ui/`. It uses the lib, `src/lib.rs`.
-The lib does not use egui, winit or wgpu.
+The app binary is `src/main.rs` and its folders. It uses the lib, `src/lib.rs`. The lib
+does not use egui, winit or wgpu. Each folder under `src/` is one module, in one crate:
+
+| Folder | Crate | Diagram group |
+|---|---|---|
+| `shell/`, `web/` | app | Platform shell |
+| `app/` | app | App coordinator |
+| `ui/`, `renderer/`, `shaders/` | app | Drawing |
+| `jobs/` | app | Background work |
+| `persist/` | app | Persistence |
+| `decode/`, `develop/`, `export/`, `scoring/` | lib | Lib |
+| `bin/` | probes | not shown |
+
+`navigation.rs`, `autotone.rs` and `i18n.rs` are in the app root. `hash.rs`, `paths.rs`
+and `worker_pool.rs` are in the lib root. In the diagram, a path starts at `src/`.
 
 A dashed border shows code that builds on one platform only:
 
@@ -19,53 +32,53 @@ A dashed border shows code that builds on one platform only:
 flowchart LR
     user([User])
 
-    subgraph shell["Platform shell"]
+    subgraph shell["Platform shell (shell/, web/)"]
         main["main.rs<br/>winit event loop"]
-        delegate["macos_delegate.rs<br/>Finder open-document"]
-        menu["menu.rs<br/>native menu bar"]
-        drive["drive.rs<br/>--drive headless scripts"]
-        profile["profile.rs<br/>--profile (hotpath)"]
-        webshell["src/web/*<br/>web_fs, web_canvas, analytics"]
+        delegate["shell/macos_delegate.rs<br/>Finder open-document"]
+        menu["shell/menu.rs<br/>native menu bar"]
+        drive["shell/drive.rs<br/>--drive headless scripts"]
+        profile["shell/profile.rs<br/>--profile (hotpath)"]
+        webshell["web/*<br/>web_fs, web_canvas, analytics"]
     end
 
-    subgraph appg["App coordinator (src/app/)"]
-        app["App (mod.rs)<br/>per-frame pump"]
+    subgraph appg["App coordinator (app/)"]
+        app["App (app/mod.rs)<br/>per-frame pump"]
         appmods["nav · keys · loupe · thumbs · adjust · crop<br/>autotone · score · faces · bursts · group_compare<br/>export · presets · histogram · session · web"]
     end
 
-    subgraph uig["Drawing"]
-        ui["src/ui/*<br/>egui chrome: grid, filmstrip,<br/>toolbar, panels, form.rs"]
-        renderer["renderer.rs + shader.wgsl<br/>wgpu loupe image"]
-        rawrender["raw/render.rs<br/>linear RAW tonemap (browser Loupe)"]
+    subgraph uig["Drawing (ui/, renderer/, shaders/)"]
+        ui["ui/*<br/>egui chrome: grid, filmstrip,<br/>toolbar, panels, form.rs"]
+        renderer["renderer/mod.rs + shaders/shader.wgsl<br/>wgpu loupe image"]
+        rawrender["renderer/raw_render.rs<br/>linear RAW tonemap (browser Loupe)"]
     end
 
-    subgraph bg["Background work"]
-        loader["loader.rs<br/>priority queue, reserved worker<br/>preview/full LRU + thumb LRU"]
-        thumbs["thumbnail.rs<br/>ThumbCache on disk"]
-        wpool["worker_pool.rs<br/>export jobs"]
-        spool["score.rs<br/>ScorePool, 2-4 workers"]
-        fpool["facequality.rs<br/>FacePool, 2 workers"]
-        seg["segmentation.rs<br/>one thread per request"]
+    subgraph bg["Background work (jobs/)"]
+        loader["jobs/loader.rs<br/>priority queue, reserved worker<br/>preview/full LRU + thumb LRU"]
+        thumbs["jobs/thumbnail.rs<br/>ThumbCache on disk"]
+        wpool["worker_pool.rs (lib)<br/>export jobs"]
+        spool["jobs/score.rs<br/>ScorePool, 2-4 workers"]
+        fpool["scoring/facequality.rs (lib)<br/>FacePool, 2 workers"]
+        seg["scoring/segmentation.rs (lib)<br/>one thread per request"]
     end
 
-    subgraph lib["Lib (src/lib.rs)"]
-        decode["image_decode.rs / image_encode.rs<br/>coregraphics.rs"]
-        nonmac["raw/nonmac_decode.rs<br/>raw_preview (Fast / Quality)"]
-        develop["develop.rs<br/>Adjustments → GpuAdjust<br/>apply_linear (CPU mirror)"]
-        imgops["image_ops.rs<br/>crop / tone / rotate, bake_edited"]
-        export["export.rs<br/>ExportJob → ExportDest"]
-        immich["immich.rs<br/>HTTP upload client"]
-        judge["quality.rs + judge.rs<br/>technical score × penalty curves"]
-        vision["vision.rs<br/>VNRequest plumbing"]
+    subgraph lib["Lib (lib.rs)"]
+        decode["decode/<br/>image_decode, image_encode,<br/>coregraphics"]
+        nonmac["decode/image_decode/nonmac_decode.rs<br/>decode/raw_preview.rs (Fast / Quality)"]
+        develop["develop/mod.rs<br/>Adjustments → GpuAdjust<br/>apply_linear (CPU mirror)"]
+        imgops["develop/image_ops.rs<br/>crop / tone / rotate, bake_edited"]
+        export["export/mod.rs<br/>ExportJob → ExportDest"]
+        immich["export/immich.rs<br/>HTTP upload client"]
+        judge["scoring/quality.rs + judge.rs<br/>technical score × penalty curves"]
+        vision["scoring/vision.rs<br/>VNRequest plumbing"]
     end
 
-    subgraph persist["Persistence"]
-        catalog["catalog.rs<br/>ratings, flags, labels, edits"]
-        writeback["catalog/writeback.rs<br/>off-frame write queue"]
-        groups["groups.rs<br/>photo groups / bursts"]
-        signal["signalcache.rs<br/>capture time, face quality"]
-        prefs["prefs.rs · presets.rs"]
-        secret["secret.rs<br/>Immich API key"]
+    subgraph persist["Persistence (persist/)"]
+        catalog["persist/catalog.rs<br/>ratings, flags, labels, edits"]
+        writeback["persist/catalog/writeback.rs<br/>off-frame write queue"]
+        groups["persist/groups.rs<br/>photo groups / bursts"]
+        signal["persist/signalcache.rs<br/>capture time, face quality"]
+        prefs["persist/prefs.rs · presets.rs"]
+        secret["persist/secret.rs<br/>Immich API key"]
     end
 
     subgraph ext["Outside the process"]
@@ -137,15 +150,15 @@ flowchart LR
     class webshell,fsa,rawrender web
 ```
 
-`facequality.rs`, `segmentation.rs` and the aesthetics part of `judge.rs` build on all
-platforms. On Linux, Windows and the browser, they return `Err` or a flat base score. Thus,
-the diagram does not mark them as macOS code.
+`scoring/facequality.rs`, `scoring/segmentation.rs` and the aesthetics part of
+`scoring/judge.rs` build on all platforms. On Linux, Windows and the browser, they return
+`Err` or a flat base score. Thus, the diagram does not mark them as macOS code.
 
-`score.rs` builds on all platforms. But `ScorePool::new` returns `None` off macOS, so
+`jobs/score.rs` builds on all platforms. But `ScorePool::new` returns `None` off macOS, so
 scoring runs on macOS only. The diagram marks it as macOS code.
 
-`raw/render.rs` builds on all platforms. But only the browser Loupe RAW path gives it
-linear-light images. All other paths apply the tonemap on the CPU.
+`renderer/raw_render.rs` builds on all platforms. But only the browser Loupe RAW path gives
+it linear-light images. All other paths apply the tonemap on the CPU.
 
 ## Opening a photo
 
@@ -163,10 +176,10 @@ sequenceDiagram
     participant M as main.rs (winit)
     participant A as App
     participant UI as ui/ (egui)
-    participant L as loader.rs
+    participant L as jobs/loader.rs
     participant W as Decode worker
     participant D as image_decode
-    participant R as renderer.rs
+    participant R as renderer/
     participant C as Catalog
     participant Q as writeback queue
 

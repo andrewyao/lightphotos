@@ -78,7 +78,7 @@ struct Histogram {
 }
 
 /// Rec.601 luma for display-space values, the same weights as Vibrance in
-/// `develop.rs`. Linear-light code uses Rec.709 instead.
+/// `develop/mod.rs`. Linear-light code uses Rec.709 instead.
 fn luma(px: [f32; 3]) -> f32 {
     0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2]
 }

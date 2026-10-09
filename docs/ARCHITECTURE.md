@@ -26,22 +26,22 @@ trees. Two independent `cfg` axes combine into three realized cases
 (macOS+wasm32 never occurs):
 
 - **`cfg(target_os = "macos")`** — gates everything built on Apple's
-  ImageIO/CoreGraphics (`image_decode.rs`, `image_encode.rs`, `thumbnail.rs`,
-  `coregraphics.rs`). The `not(macos)` arm of each is Linux/Windows *and*
+  ImageIO/CoreGraphics (`decode/image_decode/mod.rs`, `decode/image_encode.rs`, `jobs/thumbnail.rs`,
+  `decode/coregraphics.rs`). The `not(macos)` arm of each is Linux/Windows *and*
   wasm32's fallback code.
 - **`cfg(target_arch = "wasm32")`** — gates the browser-only plumbing
-  (`web/*.rs`) and the parts of `loader.rs`/`export.rs` that can't use real OS
+  (`web/*.rs`) and the parts of `jobs/loader.rs`/`export/mod.rs` that can't use real OS
   threads there.
 
 What that means in practice:
 
 - "Non-mac" in a doc comment usually means "Linux, Windows, *and* wasm32."
-- wasm32 reuses the non-mac decode *functions* (`raw/nonmac_decode.rs`,
-  `raw/preview.rs`) and runs them on `loader.rs`'s own worker threads, which
+- wasm32 reuses the non-mac decode *functions* (`decode/image_decode/nonmac_decode.rs`,
+  `decode/raw_preview.rs`) and runs them on `jobs/loader.rs`'s own worker threads, which
   are wasm threads over one shared memory there. A thread cannot open a File
   System Access handle, so the main thread reads each file and queues its
   bytes (`Job::Web`, through `WebDecoder`).
-- wasm32 feeds those results into `loader.rs`'s caches through a side door
+- wasm32 feeds those results into `jobs/loader.rs`'s caches through a side door
   (`insert_*_external`), because `app/web.rs` owns their retries and disk
   cache.
 
@@ -83,7 +83,7 @@ flowchart TD
     tryshow --> lq
     tryshow --> wt
 
-    mqd --> upload["App::upload_shown\n-> Renderer::set_image\napp/thumbs.rs, renderer.rs"]
+    mqd --> upload["App::upload_shown\n-> Renderer::set_image\napp/thumbs.rs, renderer/mod.rs"]
     mp --> upload
     mf --> upload
     lqd --> upload
@@ -94,8 +94,8 @@ flowchart TD
     wf --> upload
 
     upload --> gpu{"pixel_format?"}
-    gpu -- "Srgb8 (every path except one)" --> shader["shader.wgsl\nrenderer.rs::pipeline"]
-    gpu -- "LinearF16 (wasm32's Quality tier only)" --> rawshader["raw/raw_shader.wgsl\nraw_pipeline, built by raw/render.rs\n(does the sRGB gamma + display boost on the GPU\ninstead of a CPU lookup table)"]
+    gpu -- "Srgb8 (every path except one)" --> shader["shaders/shader.wgsl\nrenderer/mod.rs (pipeline)"]
+    gpu -- "LinearF16 (wasm32's Quality tier only)" --> rawshader["shaders/raw_shader.wgsl\nraw_pipeline, built by renderer/raw_render.rs\n(does the sRGB gamma + display boost on the GPU\ninstead of a CPU lookup table)"]
     shader --> screen["composited with egui's chrome,\npresented to the window"]
     rawshader --> screen
 ```
@@ -115,7 +115,7 @@ flowchart TD
   lookup table (the way every other RAW path does) would mean re-doing that
   work on every zoom/pan repaint.
 - Instead the decode stops at linear camera-RGB, uploads as an `Rgba16Float`
-  texture, and `raw/raw_shader.wgsl` does that last step on the GPU once per
+  texture, and `shaders/raw_shader.wgsl` does that last step on the GPU once per
   frame instead of once per decode.
 
 **Where full resolution comes from:**
@@ -161,7 +161,7 @@ flowchart TD
     sync --> bake{"has this photo\nbeen edited?"}
     bake -- "no" --> rawtex["upload the raw thumbnail\nstraight to an egui texture"]
     bake -- "yes" --> baked["image_ops::bake_edited\n(crop -> tone -> rotate)\n-> egui texture"]
-    rawtex --> grid["drawn by ui.rs's Grid / filmstrip"]
+    rawtex --> grid["drawn by ui/grid.rs's Grid / filmstrip"]
     baked --> grid
 ```
 
@@ -200,7 +200,7 @@ Triggered by: File → Export, for one photo or a batch.
 flowchart TD
     exportbtn["User exports one or more photos"]
     exportbtn --> submit["app/export.rs submits one ExportJob per photo\n(native; wasm32 has its own start_export that bakes on the\nloader's threads and writes via File System Access)"]
-    submit --> pool["Exporter, export.rs\nruns on the generic worker_pool.rs pool"]
+    submit --> pool["Exporter, export/mod.rs\nruns on the generic worker_pool.rs pool"]
     pool --> decode["image_decode::decode(src, u32::MAX)\nfull-resolution decode\nImageIO on macOS, image/rawler on Linux/Windows"]
     decode --> bake["image_ops::bake_edited\ncrop -> develop::apply_linear (tone) -> rotate"]
     bake --> encode["image_encode::encode_jpeg\nImageIO on macOS, mozjpeg-rs elsewhere"]
@@ -230,12 +230,12 @@ with macOS. No model file lives in this repository, and nothing here is
 trained. The OS decides whether a request runs on the Neural Engine, the GPU,
 or the CPU, and the app has no say in it.
 
-`vision::perform` (`src/vision.rs`) runs every request, over one of two
+`vision::perform` (`src/scoring/vision.rs`) runs every request, over one of two
 sources:
 
 - `Source::File`: Vision decodes the file itself, at full resolution, inside
-  the framework. Nothing goes through `loader.rs`, its caches, or
-  `image_decode.rs`. Face quality and the selection mask use this.
+  the framework. Nothing goes through `jobs/loader.rs`, its caches, or
+  `decode/image_decode/mod.rs`. Face quality and the selection mask use this.
 - `Source::Image`: pixels the app already decoded. The quality score uses
   this, so its Vision pass costs no second decode.
 
@@ -249,9 +249,9 @@ flowchart TD
     score --> spool["ScorePool: 2-4 workers\npreview decode, edits baked in"]
     fpool --> vfile["vision::perform(Source::File)\nVision decodes the file itself"]
     sthread --> vfile
-    spool --> vimg["judge.rs\nvision::perform(Source::Image)"]
-    vfile --> fl["VNDetectFaceLandmarksRequest\nfacequality.rs"]
-    vfile --> sg["VNGeneratePersonSegmentationRequest, then\nVNGenerateForegroundInstanceMaskRequest\nsegmentation.rs"]
+    spool --> vimg["scoring/judge.rs\nvision::perform(Source::Image)"]
+    vfile --> fl["VNDetectFaceLandmarksRequest\nscoring/facequality.rs"]
+    vfile --> sg["VNGeneratePersonSegmentationRequest, then\nVNGenerateForegroundInstanceMaskRequest\nscoring/segmentation.rs"]
     vimg --> jq["VNDetectFaceLandmarksRequest +\nVNCalculateImageAestheticsScoresRequest (macOS 15+)"]
     fl --> blink["eye-openness geometry -> EyeState\nfeeds the eyes-closed filter and burst::combined_score"]
     sg --> mask["Mask -> the Loupe's selection overlay"]
@@ -275,7 +275,7 @@ flowchart TD
   `Err` path instead of aborting the process.
 
 **What is persisted:**
-- Face quality and capture time go to `signalcache.rs`, in
+- Face quality and capture time go to `persist/signalcache.rs`, in
   `.lightphotos/signals.json`. They are derived state, so they stay out of
   `ImageRecord`, the user's authored edits.
 - The quality score is the exception. `ImageRecord.score` holds it in the
@@ -287,12 +287,12 @@ flowchart TD
 - A `Source::File` call is a second full-resolution decode of a file the app
   has usually already decoded once. That decode happens inside Vision and
   cannot be reused. On 6016x6016 photos, one face analysis measures about
-  73 ms, against 32 ms for a whole thumbnail decode (`signalcache.rs`).
+  73 ms, against 32 ms for a whole thumbnail decode (`persist/signalcache.rs`).
 - `FacePool` caps at two workers (`cores - 2`, clamped to `1..=2`) to keep
   contention for Vision and the Neural Engine low. `ScorePool` uses
   `cores / 4`, clamped to `2..=4`, apart from the decode pool, so scoring
   never queues ahead of the thumbnails on screen.
-- `facequality.rs`, `segmentation.rs`, `judge.rs` and `score.rs` carry
+- `scoring/facequality.rs`, `scoring/segmentation.rs`, `scoring/judge.rs` and `jobs/score.rs` carry
   `hotpath::measure` call sites, and the profiler's `vision` and
   `select_subject` phases time them.
 
@@ -308,29 +308,29 @@ scoring does not run there.
 
 | File | Pipeline stage | Platform |
 |---|---|---|
-| `loader.rs` | Job queue + LRU caches for both the Loupe and Grid tiers | native (macOS + Linux/Windows); wasm32 shares its caches via `insert_*_external` but bypasses its queue |
-| `image_decode.rs` | Full decode + metadata read, mac arm | macOS |
-| `raw/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `rawler`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
-| `raw/preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | Linux, Windows, wasm32 |
-| `raw/render.rs` | Builds the GPU tonemap pipeline (`raw/raw_shader.wgsl`) for `PixelFormat::LinearF16` images | all (only ever fed a linear image on wasm32) |
-| `thumbnail.rs` | Decode-at-size for both the Loupe's screen-fit preview and Grid thumbnails, plus the on-disk `.thumb.jpg` cache in `.lightphotos/` | macOS (ImageIO) + Linux/Windows (`kamadak-exif`/`rawler`); wasm32 keeps the same entry naming through `web/web_thumb_cache.rs` |
-| `image_encode.rs` | JPEG write for export | macOS (ImageIO) / Linux/Windows (`mozjpeg-rs`) |
-| `coregraphics.rs` | Shared CFURL/bitmap-context setup for `image_decode.rs`/`image_encode.rs` | macOS |
-| `renderer.rs` | GPU upload + draw of the currently-shown image | all (wgpu → Metal / Vulkan-GL / WebGPU) |
-| `develop.rs` | The tone pipeline (`apply_linear`), shared by the GPU shader and the CPU histogram/bake path | all |
-| `image_ops.rs` | Pure pixel math (crop/rotate/bake) shared by export and thumbnail baking | all |
-| `export.rs` | `Exporter`: decodes, bakes, and encodes a full-resolution JPEG on a `worker_pool.rs` pool; `bake_jpeg` and the `ExportFs` seam are shared | native pool is native-only, wasm32 runs the same bake on the loader's threads |
+| `jobs/loader.rs` | Job queue + LRU caches for both the Loupe and Grid tiers | native (macOS + Linux/Windows); wasm32 shares its caches via `insert_*_external` but bypasses its queue |
+| `decode/image_decode/mod.rs` | Full decode + metadata read, mac arm | macOS |
+| `decode/image_decode/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `rawler`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
+| `decode/raw_preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | Linux, Windows, wasm32 |
+| `renderer/raw_render.rs` | Builds the GPU tonemap pipeline (`shaders/raw_shader.wgsl`) for `PixelFormat::LinearF16` images | all (only ever fed a linear image on wasm32) |
+| `jobs/thumbnail.rs` | Decode-at-size for both the Loupe's screen-fit preview and Grid thumbnails, plus the on-disk `.thumb.jpg` cache in `.lightphotos/` | macOS (ImageIO) + Linux/Windows (`kamadak-exif`/`rawler`); wasm32 keeps the same entry naming through `web/web_thumb_cache.rs` |
+| `decode/image_encode.rs` | JPEG write for export | macOS (ImageIO) / Linux/Windows (`mozjpeg-rs`) |
+| `decode/coregraphics.rs` | Shared CFURL/bitmap-context setup for `decode/image_decode/mod.rs`/`decode/image_encode.rs` | macOS |
+| `renderer/mod.rs` | GPU upload + draw of the currently-shown image | all (wgpu → Metal / Vulkan-GL / WebGPU) |
+| `develop/mod.rs` | The tone pipeline (`apply_linear`), shared by the GPU shader and the CPU histogram/bake path | all |
+| `develop/image_ops.rs` | Pure pixel math (crop/rotate/bake) shared by export and thumbnail baking | all |
+| `export/mod.rs` | `Exporter`: decodes, bakes, and encodes a full-resolution JPEG on a `worker_pool.rs` pool; `bake_jpeg` and the `ExportFs` seam are shared | native pool is native-only, wasm32 runs the same bake on the loader's threads |
 | `worker_pool.rs` | Generic thread pool behind `Exporter` and `ScorePool` | builds everywhere; no thread starts on wasm32, so the pools run native only |
 | `web/web_decode.rs` | Decode and export jobs over a file's bytes, run on the loader's threads | wasm32 |
 | `web/web_exports.rs` | Main-thread side of a batch export: each JPEG's destination folder handle, by job id | wasm32 |
 | `web/web_canvas.rs` | Attaches winit's canvas into the DOM at the right backing-store resolution | wasm32 |
 | `web/web_fs.rs` | File System Access folder picking/listing/byte reads | wasm32 |
-| `web/web_catalog_fs.rs` | File System Access counterpart of `catalog.rs`'s sidecar I/O | wasm32 |
+| `web/web_catalog_fs.rs` | File System Access counterpart of `persist/catalog.rs`'s sidecar I/O | wasm32 |
 | `app/loupe.rs` | View-state math (zoom/pan/fit) and the decision to fetch full resolution | all |
 | `app/thumbs.rs` | `try_show`'s tier-selection logic, thumbnail texture sync, capture-time and face signal hooks | all |
-| `vision.rs` | `perform` runs Vision requests over a file (Vision decodes it) or an in-memory image, and blocks | macOS (the module itself is `cfg(target_os = "macos")`) |
-| `facequality.rs` | Face landmarks from Vision, then eye-openness geometry for blink detection; owns `FacePool` | macOS; the non-mac arm returns `Err` |
-| `segmentation.rs` | Person mask, falling back to a general foreground mask, for the Loupe's selection overlay | macOS; the non-mac arm returns `Err`, and the button is hidden by `App::selection_supported()` |
-| `judge.rs` | Quality score: technical measures plus Vision face and aesthetics signals | all; Vision part macOS only, technical-only elsewhere |
-| `score.rs` | `ScorePool`: scores chosen photos on 2-4 low-priority workers | builds everywhere; `ScorePool::new` returns `None` off macOS, where a technical-only score would mislead |
-| `signalcache.rs` | Persists capture time and face quality to `.lightphotos/signals.json` | all |
+| `scoring/vision.rs` | `perform` runs Vision requests over a file (Vision decodes it) or an in-memory image, and blocks | macOS (the module itself is `cfg(target_os = "macos")`) |
+| `scoring/facequality.rs` | Face landmarks from Vision, then eye-openness geometry for blink detection; owns `FacePool` | macOS; the non-mac arm returns `Err` |
+| `scoring/segmentation.rs` | Person mask, falling back to a general foreground mask, for the Loupe's selection overlay | macOS; the non-mac arm returns `Err`, and the button is hidden by `App::selection_supported()` |
+| `scoring/judge.rs` | Quality score: technical measures plus Vision face and aesthetics signals | all; Vision part macOS only, technical-only elsewhere |
+| `jobs/score.rs` | `ScorePool`: scores chosen photos on 2-4 low-priority workers | builds everywhere; `ScorePool::new` returns `None` off macOS, where a technical-only score would mislead |
+| `persist/signalcache.rs` | Persists capture time and face quality to `.lightphotos/signals.json` | all |
