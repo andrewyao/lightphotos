@@ -26,7 +26,8 @@ trees. Two independent `cfg` axes combine into three realized cases
 (macOS+wasm32 never occurs):
 
 - **`cfg(target_os = "macos")`** — gates everything built on Apple's
-  ImageIO/CoreGraphics (`decode/image_decode/mod.rs`, `decode/image_encode.rs`, `jobs/thumbnail.rs`,
+  ImageIO/CoreGraphics/CoreImage (`decode/image_decode/mod.rs`,
+  `decode/image_decode/raw_filter.rs`, `decode/image_encode.rs`, `jobs/thumbnail.rs`,
   `decode/coregraphics.rs`). The `not(macos)` arm of each is Linux/Windows *and*
   wasm32's fallback code.
 - **`cfg(target_arch = "wasm32")`** — gates the browser-only plumbing
@@ -62,7 +63,7 @@ flowchart TD
         direction TB
         mq["Loader::request_preview\n-> Job::Speed"] --> mqd["thumbnail::decode_at_size\n(ImageIO, UseIfPresent)\nreturns the file's embedded preview if it has one"]
         mqd -- "short of the target size (a RAW's embedded preview)" --> mp["Job::Preview\nthumbnail::decode_at_size(Never)"]
-        mp -.->|photo shows larger than the preview\n(zoom, or fit on a large window)| mf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(ImageIO, full resolution)"]
+        mp -.->|photo shows larger than the preview\n(zoom, or fit on a large window)| mf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(CIRAWFilter for RAW, else ImageIO;\nfull resolution)"]
     end
 
     subgraph other["Linux / Windows"]
@@ -223,7 +224,7 @@ flowchart TD
     exportbtn["User exports one or more photos"]
     exportbtn --> submit["app/export.rs submits one ExportJob per photo\n(native; wasm32 has its own start_export that bakes on the\nloader's threads and writes via File System Access)"]
     submit --> pool["Exporter, export/mod.rs\nruns on the generic worker_pool.rs pool"]
-    pool --> decode["image_decode::decode(src, u32::MAX)\nfull-resolution decode\nImageIO on macOS, image crate or\ndecode/rawler/ on Linux/Windows"]
+    pool --> decode["image_decode::decode(src, u32::MAX)\nfull-resolution decode\nImageIO (CIRAWFilter for RAW) on macOS, image crate or\ndecode/rawler/ on Linux/Windows"]
     decode --> bake["image_ops::bake_edited\ncrop -> develop::apply_linear (tone) -> rotate"]
     bake --> encode["image_encode::encode_jpeg\nImageIO on macOS, mozjpeg-rs elsewhere"]
     encode --> write["write to a .jpg.tmp sibling,\nthen atomically rename to the destination"]

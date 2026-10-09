@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Decode images to RGBA8 and read their metadata. macOS uses ImageIO for
-//! every format, RAW included. Other targets use the `image` crate and
+//! every format and CoreImage's `CIRAWFilter` (`raw_filter.rs`) for full RAW
+//! decodes. Other targets use the `image` crate and
 //! `kamadak-exif` in `nonmac_decode.rs`, and `decode::rawler` for RAW.
 
 #[cfg(target_os = "macos")]
@@ -53,6 +54,9 @@ pub fn is_raw_extension(path: &Path) -> bool {
 mod nonmac_decode;
 #[cfg(not(target_os = "macos"))]
 pub use nonmac_decode::*;
+
+#[cfg(target_os = "macos")]
+mod raw_filter;
 
 /// How `DecodedImage::rgba` is laid out. Every decoder produces `Srgb8`
 /// except `raw_preview::decode_raw_quality_from_bytes` (the wasm32 Loupe RAW
@@ -290,6 +294,18 @@ pub fn open_image_source(path: &Path) -> Result<CFRetained<CGImageSource>, Strin
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
 pub fn decode(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
+    if is_raw_extension(path) {
+        match raw_filter::decode(path, max_dim) {
+            Ok(img) => return Ok(img),
+            Err(e) => eprintln!("[decode] {}: {e}; using ImageIO", path.display()),
+        }
+    }
+    decode_imageio(path, max_dim)
+}
+
+/// [`decode`] through ImageIO, for every format.
+#[cfg(target_os = "macos")]
+fn decode_imageio(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
     let source = open_image_source(path)?;
 
     // SAFETY: no options are passed; an index past the end returns NULL,
