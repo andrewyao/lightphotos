@@ -70,14 +70,14 @@ pub fn init() {
 }
 
 fn saved_lang() -> Option<Lang> {
-    Lang::from_tag(crate::prefs::load(LANGUAGE_KEY)?.trim())
+    Lang::from_tag(crate::persist::prefs::load(LANGUAGE_KEY)?.trim())
 }
 
 /// Switch language and remember the choice for the next launch. A storage
 /// failure costs one relaunch's language, so it is logged, not surfaced.
 pub fn choose(lang: Lang) {
     set_lang(lang);
-    if let Err(e) = crate::prefs::save(LANGUAGE_KEY, lang.code()) {
+    if let Err(e) = crate::persist::prefs::save(LANGUAGE_KEY, lang.code()) {
         eprintln!("[lightphotos] could not save the language: {e}");
     }
 }

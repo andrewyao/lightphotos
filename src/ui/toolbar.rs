@@ -1,8 +1,8 @@
 use super::*;
 
 use crate::app::{App, GridSort, Region, SHOW_EYES_FILTER};
-use crate::catalog::ColorLabel;
 use crate::navigation::{Cmp, FlagFilter};
+use crate::persist::catalog::ColorLabel;
 
 /// The grid's two rows of controls share these, in points before
 /// `font_size::px` scales them: the gap between items, the room inside each

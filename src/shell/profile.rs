@@ -300,7 +300,7 @@ impl Run {
         // it: a photo whose analysis was seeded from disk is never submitted.
         // A cold run analyses every photo, a warm one none, which is the whole
         // claim `signalcache` makes.
-        let mut cache = crate::signalcache::SignalCache::load(&self.dir);
+        let mut cache = crate::persist::signalcache::SignalCache::load(&self.dir);
         let t0 = Instant::now();
         let (mut hits, mut analysed) = (0usize, 0usize);
         for p in &wanted {
@@ -309,7 +309,7 @@ impl Run {
                 continue;
             }
             if let Ok(q) = crate::scoring::facequality::analyze(p) {
-                cache.record(p, crate::signalcache::Signal::Faces(q));
+                cache.record(p, crate::persist::signalcache::Signal::Faces(q));
                 analysed += 1;
             }
         }
@@ -374,10 +374,11 @@ impl Run {
     }
 
     fn view_rebuild(&self, photos: &[PathBuf]) {
-        let loaded = crate::catalog::load_sidecars(&self.dir);
+        let loaded = crate::persist::catalog::load_sidecars(&self.dir);
         let names: HashSet<&std::ffi::OsStr> =
             photos.iter().filter_map(|p| p.file_name()).collect();
-        let groups = crate::groups::Groups::from_loaded(loaded.groups, |n| names.contains(n));
+        let groups =
+            crate::persist::groups::Groups::from_loaded(loaded.groups, |n| names.contains(n));
         let ratings: std::collections::HashMap<PathBuf, u8> = std::collections::HashMap::new();
         let t0 = Instant::now();
         let slot = |i: usize| {
@@ -497,11 +498,11 @@ impl Run {
             .filter(|p| std::fs::write(p, []).is_ok())
             .collect();
         {
-            let mut cache = crate::signalcache::SignalCache::load(&scratch);
+            let mut cache = crate::persist::signalcache::SignalCache::load(&scratch);
             let now = std::time::SystemTime::now();
             let t0 = Instant::now();
             for p in &stand_ins {
-                cache.record(p, crate::signalcache::Signal::Capture(Some(now)));
+                cache.record(p, crate::persist::signalcache::Signal::Capture(Some(now)));
             }
             let recorded = t0.elapsed();
             let t0 = Instant::now();
@@ -581,8 +582,8 @@ impl Run {
     fn folder_load(&self) -> Playlist {
         let playlist = Playlist::from_dir(&self.dir);
         crate::navigation::list_subdirs(&self.dir);
-        crate::catalog::load_sidecars(&self.dir);
-        crate::signalcache::SignalCache::load(&self.dir);
+        crate::persist::catalog::load_sidecars(&self.dir);
+        crate::persist::signalcache::SignalCache::load(&self.dir);
         crate::thumbnail::sweep_orphans(&self.dir);
         playlist
     }
@@ -822,8 +823,8 @@ fn wait_for_thumbs(loader: &mut Loader, photos: &[PathBuf]) {
 /// visit. Reports whether there was one.
 fn drop_signal_cache(dir: &Path) -> bool {
     let file = dir
-        .join(crate::catalog::SIDECAR_DIR)
-        .join(crate::signalcache::CACHE_FILE);
+        .join(crate::persist::catalog::SIDECAR_DIR)
+        .join(crate::persist::signalcache::CACHE_FILE);
     std::fs::remove_file(file).is_ok()
 }
 
@@ -831,7 +832,7 @@ fn drop_signal_cache(dir: &Path) -> bool {
 /// user's ratings and edits and share the folder, so the suffix match has to
 /// be exact.
 fn drop_thumb_cache(dir: &Path) -> usize {
-    let cache = dir.join(crate::catalog::SIDECAR_DIR);
+    let cache = dir.join(crate::persist::catalog::SIDECAR_DIR);
     let Ok(entries) = std::fs::read_dir(&cache) else {
         return 0;
     };

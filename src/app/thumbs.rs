@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use crate::decode::image_decode;
 use crate::develop::{self};
-use crate::signalcache::Signal;
+use crate::persist::signalcache::Signal;
 use crate::thumbnail::THUMB_PX;
 
 impl App {

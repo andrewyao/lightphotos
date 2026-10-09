@@ -4,7 +4,7 @@
 //! saved once and applied to any photo afterwards.
 //!
 //! Presets are global to the app, not per folder, so they live in
-//! [`crate::prefs`] rather than in a catalog sidecar. `Catalog` is scoped to
+//! [`crate::persist::prefs`] rather than in a catalog sidecar. `Catalog` is scoped to
 //! one active directory and keys its records by filename.
 
 use serde::{Deserialize, Serialize};
@@ -81,7 +81,7 @@ impl PresetStore {
     /// the developer's own library.
     #[cfg_attr(test, allow(dead_code))]
     pub fn load() -> PresetStore {
-        PresetStore::from_text(&crate::prefs::load(KEY).unwrap_or_default(), true)
+        PresetStore::from_text(&crate::persist::prefs::load(KEY).unwrap_or_default(), true)
     }
 
     /// Adopts a stored document. A document that will not parse yields an
@@ -257,7 +257,7 @@ impl PresetStore {
         }
         // A failure leaves the change in memory and reports itself. The next
         // mutation rewrites the whole document, which is the retry.
-        if let Err(cause) = crate::prefs::save(KEY, &self.to_text()) {
+        if let Err(cause) = crate::persist::prefs::save(KEY, &self.to_text()) {
             self.last_error = Some((crate::i18n::t().presets_save_failed)(&cause));
         }
     }

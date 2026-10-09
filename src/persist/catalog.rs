@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::develop::{Adjustments, TouchUp};
-use crate::groups::{GroupId, GroupWrite, Groups, SavedGroup};
+use crate::persist::groups::{GroupId, GroupWrite, Groups, SavedGroup};
 use crate::scoring::quality::QualityScore;
 
 pub(crate) mod group_file;
@@ -661,7 +661,7 @@ fn skipped_message(skipped: usize) -> String {
 mod tests {
     use super::*;
     use crate::app::test_support::temp_folder;
-    use crate::groups::{Group, GroupId};
+    use crate::persist::groups::{Group, GroupId};
 
     /// Sidecar writes are queued, so a test that reads the disk waits here
     /// first. A timeout rather than an unbounded wait, so a stuck writer

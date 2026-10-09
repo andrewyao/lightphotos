@@ -18,7 +18,7 @@
 use super::*;
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::groups::GroupId;
+use crate::persist::groups::GroupId;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -721,7 +721,7 @@ mod tests {
         let new_dir = temp_folder("bulk-delete-test");
         let survivor = new_dir.join(&doomed[0]);
         std::fs::write(&survivor, b"").unwrap();
-        crate::catalog::Catalog::with_dir(new_dir.clone()).set(&survivor, 4);
+        crate::persist::catalog::Catalog::with_dir(new_dir.clone()).set(&survivor, 4);
 
         app.selected = (0..old_paths.len()).collect();
         app.delete_selection();
@@ -750,7 +750,7 @@ mod tests {
         app.catalog
             .flush_blocking(std::time::Duration::from_secs(10));
         assert_eq!(
-            crate::catalog::Catalog::with_dir(new_dir.clone()).get(&survivor),
+            crate::persist::catalog::Catalog::with_dir(new_dir.clone()).get(&survivor),
             Some(4),
             "and must keep it on disk"
         );
@@ -952,7 +952,7 @@ mod tests {
         );
 
         app.catalog.flush_blocking(Duration::from_secs(10));
-        let reloaded = crate::catalog::Catalog::with_dir(dir.clone());
+        let reloaded = crate::persist::catalog::Catalog::with_dir(dir.clone());
         let on_disk: Vec<_> = reloaded
             .groups()
             .unwrap()
@@ -1071,7 +1071,9 @@ mod tests {
         assert!(paths.iter().all(|p| !p.exists()));
         assert!(app.catalog.groups().unwrap().is_empty());
         app.catalog.flush_blocking(Duration::from_secs(10));
-        let groups_dir = dir.join(crate::catalog::SIDECAR_DIR).join("groups");
+        let groups_dir = dir
+            .join(crate::persist::catalog::SIDECAR_DIR)
+            .join("groups");
         let left = std::fs::read_dir(&groups_dir).map_or(0, |d| d.count());
         assert_eq!(left, 0, "the group's sidecar is deleted");
         let _ = std::fs::remove_dir_all(&dir);

@@ -18,8 +18,8 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::{KeyCode, ModifiersState};
 
 use crate::app::App;
-use crate::catalog::ColorLabel;
 use crate::i18n::{self, Lang, MenuStrings};
+use crate::persist::catalog::ColorLabel;
 use crate::shell::macos_delegate::UserEvent;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

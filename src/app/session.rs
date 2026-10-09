@@ -35,7 +35,7 @@ impl Session {
     /// The saved session, if one parses.
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn load() -> Option<Session> {
-        serde_json::from_str(&crate::prefs::load(SESSION_PREF)?).ok()
+        serde_json::from_str(&crate::persist::prefs::load(SESSION_PREF)?).ok()
     }
 
     fn save(&self) {
@@ -45,7 +45,7 @@ impl Session {
         }
         let saved = serde_json::to_string(self)
             .map_err(|e| e.to_string())
-            .and_then(|json| crate::prefs::save(SESSION_PREF, &json));
+            .and_then(|json| crate::persist::prefs::save(SESSION_PREF, &json));
         if let Err(e) = saved {
             eprintln!("[session] could not save the session: {e}");
         }

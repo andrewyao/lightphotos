@@ -3,7 +3,7 @@
 //! Folder listing, rating filters, burst grouping by time, and grid/tree
 //! arrow-key movement.
 
-use crate::catalog::Flag;
+use crate::persist::catalog::Flag;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::hash::Hash;

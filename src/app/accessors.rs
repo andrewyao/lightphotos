@@ -1,9 +1,9 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
-use crate::catalog::Flag;
-use crate::groups::{Group, GroupId};
 use crate::navigation::Cmp;
+use crate::persist::catalog::Flag;
+use crate::persist::groups::{Group, GroupId};
 use crate::thumbnail::THUMB_PX;
 
 impl App {
@@ -88,7 +88,7 @@ impl App {
     }
 
     /// The saved looks, in the order rows render.
-    pub(crate) fn presets(&self) -> &[crate::presets::Preset] {
+    pub(crate) fn presets(&self) -> &[crate::persist::presets::Preset] {
         self.presets.presets()
     }
 
@@ -154,7 +154,7 @@ impl App {
         self.flag_filter
     }
 
-    pub(crate) fn label_filter(&self) -> &[crate::catalog::ColorLabel] {
+    pub(crate) fn label_filter(&self) -> &[crate::persist::catalog::ColorLabel] {
         &self.label_filter
     }
 
@@ -296,7 +296,7 @@ impl App {
     }
 
     /// Color label of the visible cell at `pos`.
-    pub(crate) fn label_at(&self, pos: usize) -> Option<crate::catalog::ColorLabel> {
+    pub(crate) fn label_at(&self, pos: usize) -> Option<crate::persist::catalog::ColorLabel> {
         self.visible
             .get(pos)
             .and_then(|&i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))
@@ -323,7 +323,7 @@ impl App {
         }
     }
 
-    pub(crate) fn selected_label(&self) -> Option<crate::catalog::ColorLabel> {
+    pub(crate) fn selected_label(&self) -> Option<crate::persist::catalog::ColorLabel> {
         self.selected_path().and_then(|p| self.catalog.label(&p))
     }
 

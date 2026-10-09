@@ -6,7 +6,7 @@
 use super::*;
 use std::path::PathBuf;
 
-use crate::groups::Group;
+use crate::persist::groups::Group;
 
 impl App {
     /// Group the bursts among the selection, or the whole folder when one

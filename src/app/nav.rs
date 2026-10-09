@@ -4,10 +4,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::develop::{self};
-use crate::groups::GroupId;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::navigation::Playlist;
 use crate::navigation::{self, flatten_visible_tree, Slot};
+use crate::persist::groups::GroupId;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::thumbnail::THUMB_PX;
 use crate::ui::toolbar::ToolbarControl;
@@ -303,7 +303,10 @@ impl App {
         paths
     }
 
-    pub(super) fn present_member_paths(&self, group: &crate::groups::Group) -> Vec<PathBuf> {
+    pub(super) fn present_member_paths(
+        &self,
+        group: &crate::persist::groups::Group,
+    ) -> Vec<PathBuf> {
         let Some(pl) = self.playlist.as_ref() else {
             return Vec::new();
         };
@@ -1070,8 +1073,8 @@ impl App {
 pub(in crate::app) mod tests {
     use super::*;
     use crate::app::test_support::{folder_app, wait_for_catalog};
-    use crate::groups::Group;
     use crate::navigation::Cmp;
+    use crate::persist::groups::Group;
 
     pub(in crate::app) fn cells(app: &App) -> Vec<usize> {
         app.visible.clone()

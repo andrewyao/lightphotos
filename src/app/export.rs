@@ -31,7 +31,7 @@ const STATUS_SECS: f32 = 3.0;
 /// export.
 #[cfg_attr(test, allow(dead_code))]
 pub(super) fn load_export_settings() -> ExportSettings {
-    let saved: ExportSettings = crate::prefs::load(EXPORT_SETTINGS_PREF)
+    let saved: ExportSettings = crate::persist::prefs::load(EXPORT_SETTINGS_PREF)
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
     match &saved.target {
@@ -51,7 +51,7 @@ fn save_export_settings(settings: &ExportSettings) {
     }
     let saved = serde_json::to_string(settings)
         .map_err(|e| e.to_string())
-        .and_then(|json| crate::prefs::save(EXPORT_SETTINGS_PREF, &json));
+        .and_then(|json| crate::persist::prefs::save(EXPORT_SETTINGS_PREF, &json));
     if let Err(e) = saved {
         eprintln!("[export] could not save export settings: {e}");
     }
@@ -131,7 +131,7 @@ impl Exports {
                 #[cfg(test)]
                 url: String::new(),
                 #[cfg(not(test))]
-                url: crate::prefs::load(IMMICH_SERVER_PREF).unwrap_or_default(),
+                url: crate::persist::prefs::load(IMMICH_SERVER_PREF).unwrap_or_default(),
                 key: String::new(),
                 error: None,
             },
@@ -315,7 +315,7 @@ impl App {
             let Ok(origin) = ImmichServer::normalized(url) else {
                 return;
             };
-            if let Some(saved) = crate::secret::load_api_key(&origin) {
+            if let Some(saved) = crate::persist::secret::load_api_key(&origin) {
                 *key = saved;
                 self.connect_immich();
             }
@@ -353,7 +353,7 @@ impl App {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn disconnect_immich(&mut self) {
         if let ImmichLink::Connected { server, .. } = &self.exports.immich {
-            crate::secret::delete_api_key(server.origin());
+            crate::persist::secret::delete_api_key(server.origin());
             self.exports.immich = ImmichLink::Disconnected {
                 url: server.origin().to_string(),
                 key: String::new(),
@@ -379,10 +379,10 @@ impl App {
         };
         self.exports.immich = match result {
             Ok((server, account, albums)) => {
-                if let Err(e) = crate::prefs::save(IMMICH_SERVER_PREF, server.origin()) {
+                if let Err(e) = crate::persist::prefs::save(IMMICH_SERVER_PREF, server.origin()) {
                     eprintln!("[immich] could not save the server URL: {e}");
                 }
-                if let Err(e) = crate::secret::save_api_key(server.origin(), key) {
+                if let Err(e) = crate::persist::secret::save_api_key(server.origin(), key) {
                     eprintln!("[immich] could not save the API key: {e}");
                 }
                 ImmichLink::Connected {

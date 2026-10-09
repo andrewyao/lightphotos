@@ -344,14 +344,14 @@ pub fn colors(ctx: &egui::Context) -> Palette {
 
 /// Apply the saved theme, or Dark when none is saved.
 pub fn init(ctx: &egui::Context) {
-    let saved = crate::prefs::load(PREF_KEY).and_then(|s| Theme::parse(&s));
+    let saved = crate::persist::prefs::load(PREF_KEY).and_then(|s| Theme::parse(&s));
     apply(ctx, saved.unwrap_or_default());
 }
 
 /// Switch to `theme` and remember it for the next launch.
 pub fn set(ctx: &egui::Context, theme: Theme) {
     apply(ctx, theme);
-    if let Err(e) = crate::prefs::save(PREF_KEY, theme.as_str()) {
+    if let Err(e) = crate::persist::prefs::save(PREF_KEY, theme.as_str()) {
         eprintln!("[lightphotos] could not save the theme: {e}");
     }
 }

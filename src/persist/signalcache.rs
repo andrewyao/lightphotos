@@ -8,7 +8,7 @@
 //! full resolution, against 32 ms for a whole thumbnail decode. Recomputing
 //! them on every folder visit would make grouping too heavy to run unasked.
 //!
-//! These are deliberately *not* fields on [`ImageRecord`](crate::catalog::ImageRecord).
+//! These are deliberately *not* fields on [`ImageRecord`](crate::persist::catalog::ImageRecord).
 //! That record is the user's authored edit state, the thing worth backing up,
 //! and its sidecar is deleted once it holds nothing. A cached signal living
 //! there would keep the sidecar alive forever, would rewrite it on every
@@ -317,7 +317,8 @@ impl SignalCache {
             return;
         };
         writer.submit(
-            dir.join(crate::catalog::SIDECAR_DIR).join(CACHE_FILE),
+            dir.join(crate::persist::catalog::SIDECAR_DIR)
+                .join(CACHE_FILE),
             bytes,
         );
         self.dirty = false;
@@ -348,7 +349,9 @@ impl Drop for SignalCache {
 /// Read `dir`'s cache file. Every failure is a miss.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_file(dir: &Path) -> HashMap<OsString, PhotoSignals> {
-    let path = dir.join(crate::catalog::SIDECAR_DIR).join(CACHE_FILE);
+    let path = dir
+        .join(crate::persist::catalog::SIDECAR_DIR)
+        .join(CACHE_FILE);
     let Ok(bytes) = std::fs::read(&path) else {
         return HashMap::new();
     };
@@ -531,7 +534,7 @@ mod tests {
         let dir = unique_dir("old-fields");
         let photo = write_photo(&dir, "a.jpg", b"pixels");
         let key = current_key(&photo).expect("the photo has a key");
-        let cache_dir = dir.join(crate::catalog::SIDECAR_DIR);
+        let cache_dir = dir.join(crate::persist::catalog::SIDECAR_DIR);
         std::fs::create_dir_all(&cache_dir).unwrap();
         let file = cache_dir.join(CACHE_FILE);
         std::fs::write(
@@ -567,7 +570,7 @@ mod tests {
     fn a_corrupt_cache_file_recomputes_instead_of_failing() {
         let dir = unique_dir("corrupt");
         let photo = write_photo(&dir, "a.jpg", b"pixels");
-        let cache_dir = dir.join(crate::catalog::SIDECAR_DIR);
+        let cache_dir = dir.join(crate::persist::catalog::SIDECAR_DIR);
         std::fs::create_dir_all(&cache_dir).unwrap();
         std::fs::write(cache_dir.join(CACHE_FILE), b"{not json at all").unwrap();
 

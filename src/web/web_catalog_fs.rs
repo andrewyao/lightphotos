@@ -14,8 +14,8 @@ use web_sys::{
     FileSystemGetFileOptions, FileSystemHandleKind, FileSystemWritableFileStream,
 };
 
-use crate::catalog::group_file::{self, GROUPS_DIR};
-use crate::catalog::{ImageRecord, SidecarLoad, SIDECAR_DIR, SIDECAR_EXT};
+use crate::persist::catalog::group_file::{self, GROUPS_DIR};
+use crate::persist::catalog::{ImageRecord, SidecarLoad, SIDECAR_DIR, SIDECAR_EXT};
 
 /// The `.lightphotos` directory under `root`, created if `create` is set.
 /// Returns `Ok(None)` when it is missing and `create` is false.

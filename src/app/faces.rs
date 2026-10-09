@@ -5,8 +5,8 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+use crate::persist::signalcache::Signal;
 use crate::scoring::facequality::{FacePool, FaceQuality};
-use crate::signalcache::Signal;
 
 pub(super) struct Faces {
     /// `None` until the window is created, and on targets that cannot spawn

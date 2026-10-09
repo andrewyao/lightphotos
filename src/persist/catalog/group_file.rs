@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::groups::{Group, GroupId, SavedGroup};
+use crate::persist::groups::{Group, GroupId, SavedGroup};
 
 pub(crate) const GROUPS_DIR: &str = "groups";
 const EXT: &str = "json";

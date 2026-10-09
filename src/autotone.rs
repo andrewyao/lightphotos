@@ -333,7 +333,7 @@ impl Centering {
     /// The saved choice, or [`Centering::Range`] when none is saved.
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn load() -> Centering {
-        crate::prefs::load(Centering::PREF_KEY)
+        crate::persist::prefs::load(Centering::PREF_KEY)
             .and_then(|s| Centering::parse(&s))
             .unwrap_or_default()
     }
@@ -345,7 +345,7 @@ impl Centering {
         if cfg!(test) {
             return;
         }
-        if let Err(e) = crate::prefs::save(Centering::PREF_KEY, self.as_str()) {
+        if let Err(e) = crate::persist::prefs::save(Centering::PREF_KEY, self.as_str()) {
             eprintln!("[lightphotos] could not save the Auto Tone centering: {e}");
         }
     }

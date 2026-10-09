@@ -73,7 +73,7 @@ pub(crate) fn apply(attrs: WindowAttributes, event_loop: &ActiveEventLoop) -> Wi
         .available_monitors()
         .map(|m| Rect::of_monitor(&m))
         .collect();
-    let saved = crate::prefs::load(PREF_KEY)
+    let saved = crate::persist::prefs::load(PREF_KEY)
         .and_then(|s| Rect::parse(&s))
         .filter(|r| monitors.iter().any(|m| r.intersects(*m)));
     if let Some(r) = saved {
@@ -112,7 +112,7 @@ pub(crate) fn save(window: &Window) {
         w: size.width,
         h: size.height,
     };
-    if let Err(e) = crate::prefs::save(PREF_KEY, &rect.to_pref()) {
+    if let Err(e) = crate::persist::prefs::save(PREF_KEY, &rect.to_pref()) {
         eprintln!("[lightphotos] could not save the window size: {e}");
     }
 }

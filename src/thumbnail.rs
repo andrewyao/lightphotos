@@ -380,7 +380,7 @@ fn entry_path(photo: &Path) -> Option<PathBuf> {
     let dir = photo.parent()?;
     let name = photo.file_name()?;
     Some(
-        dir.join(crate::catalog::SIDECAR_DIR)
+        dir.join(crate::persist::catalog::SIDECAR_DIR)
             .join(cache_name(name, current_key(photo)?)),
     )
 }
@@ -529,7 +529,7 @@ const TMP_REAP_AFTER: std::time::Duration = std::time::Duration::from_secs(3600)
 #[cfg(not(target_arch = "wasm32"))]
 #[hotpath::measure]
 pub(crate) fn sweep_orphans(dir: &Path) {
-    let cache_dir = dir.join(crate::catalog::SIDECAR_DIR);
+    let cache_dir = dir.join(crate::persist::catalog::SIDECAR_DIR);
     let Ok(entries) = fs::read_dir(&cache_dir) else {
         return;
     };
@@ -771,7 +771,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     fn sweep_keeps_current_entries_and_sidecars() {
         let dir = std::env::temp_dir().join(format!("lp-sweep-test-{}", std::process::id()));
-        let cache = dir.join(crate::catalog::SIDECAR_DIR);
+        let cache = dir.join(crate::persist::catalog::SIDECAR_DIR);
         fs::create_dir_all(&cache).unwrap();
 
         let photo = dir.join("IMG_0001.ARW");

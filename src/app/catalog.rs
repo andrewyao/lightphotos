@@ -1,10 +1,10 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
-use crate::catalog::{Flag, GroupWriteRefused};
 use crate::develop::Adjustments;
-use crate::groups::{Group, GroupWrite};
 use crate::navigation::{Cmp, FlagFilter};
+use crate::persist::catalog::{Flag, GroupWriteRefused};
+use crate::persist::groups::{Group, GroupWrite};
 use crate::ui;
 
 pub(super) struct CatalogLoad {
@@ -72,14 +72,14 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         {
             // Nothing persists on wasm, so there is no file to read.
-            self.signals = crate::signalcache::SignalCache::load(dir);
+            self.signals = crate::persist::signalcache::SignalCache::load(dir);
         }
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             let old = std::mem::replace(
                 &mut self.signals,
-                crate::signalcache::SignalCache::detached(dir),
+                crate::persist::signalcache::SignalCache::detached(dir),
             );
             let (tx, rx) = std::sync::mpsc::channel();
             let dir = dir.to_path_buf();
@@ -90,7 +90,7 @@ impl App {
                     // Before the load, so a folder left and re-entered reads
                     // what it just wrote.
                     drop(old);
-                    let cache = crate::signalcache::SignalCache::load(&dir);
+                    let cache = crate::persist::signalcache::SignalCache::load(&dir);
                     let seeds = entries
                         .into_iter()
                         .filter_map(|p| cache.get(&p).copied().map(|s| (p, s)))
@@ -121,8 +121,10 @@ impl App {
             }
         };
         self.signal_load_rx = None;
-        let recorded =
-            std::mem::replace(&mut self.signals, crate::signalcache::SignalCache::empty());
+        let recorded = std::mem::replace(
+            &mut self.signals,
+            crate::persist::signalcache::SignalCache::empty(),
+        );
         cache.absorb(recorded);
         self.signals = cache;
 
@@ -160,7 +162,7 @@ impl App {
             let spawned = std::thread::Builder::new()
                 .name("catalog-load".into())
                 .spawn(move || {
-                    let loaded = crate::catalog::load_sidecars(&for_thread);
+                    let loaded = crate::persist::catalog::load_sidecars(&for_thread);
                     let _ = tx.send((for_thread.clone(), token, mark, loaded));
                     // Sweep after sending, because the UI waits on the catalog
                     // and nothing waits on the sweep.
@@ -296,7 +298,7 @@ impl App {
     /// view, and the loupe then follows the cursor to a neighbor.
     pub(super) fn set_rating(&mut self, stars: u8) {
         if self.marks_action_paths() {
-            if stars <= crate::catalog::MAX_RATING {
+            if stars <= crate::persist::catalog::MAX_RATING {
                 self.apply_rating_to_selection(stars);
             }
         } else if let Some(path) = self.selected_path() {
@@ -306,7 +308,7 @@ impl App {
 
     /// Rates `path`, as `set_rating` does the selected photo.
     pub(super) fn set_rating_of(&mut self, path: PathBuf, stars: u8) {
-        if stars > crate::catalog::MAX_RATING {
+        if stars > crate::persist::catalog::MAX_RATING {
             return;
         }
         #[cfg(target_arch = "wasm32")]
@@ -477,7 +479,7 @@ impl App {
 
     /// Gives `label` to the selected photo, or to the photos `set_rating`
     /// would rate, or clears it when every one of them has it already.
-    pub(super) fn toggle_label(&mut self, label: crate::catalog::ColorLabel) {
+    pub(super) fn toggle_label(&mut self, label: crate::persist::catalog::ColorLabel) {
         let paths = if self.marks_action_paths() {
             self.action_paths()
         } else {
@@ -866,7 +868,7 @@ impl App {
 
     /// Sets the grid's color label filter. Does nothing in the Loupe, as
     /// `set_filter` does not.
-    pub(super) fn set_label_filter(&mut self, labels: Vec<crate::catalog::ColorLabel>) {
+    pub(super) fn set_label_filter(&mut self, labels: Vec<crate::persist::catalog::ColorLabel>) {
         if self.mode == ViewMode::Loupe {
             return;
         }
@@ -953,7 +955,7 @@ mod tests {
         assert_eq!(app.want.as_ref(), Some(&paths[3]), "the Loupe shows it");
         app.catalog
             .flush_blocking(std::time::Duration::from_secs(10));
-        let reloaded = crate::catalog::Catalog::with_dir(dir.clone());
+        let reloaded = crate::persist::catalog::Catalog::with_dir(dir.clone());
         let reps: Vec<_> = reloaded
             .groups()
             .unwrap()
@@ -1010,8 +1012,8 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_folder_opened_while_its_signals_load_keeps_both_old_and_new() {
+        use crate::persist::signalcache::{Signal, SignalCache};
         use crate::scoring::facequality::FaceQuality;
-        use crate::signalcache::{Signal, SignalCache};
 
         let dir = temp_folder("app-catalog-test");
         let other = temp_folder("app-catalog-test");
@@ -1173,7 +1175,7 @@ mod tests {
 
     #[test]
     fn the_label_filter_shows_photos_with_any_lit_label() {
-        use crate::catalog::ColorLabel;
+        use crate::persist::catalog::ColorLabel;
         let (mut app, dir, paths) = crate::app::test_support::folder_app("label-filter", 4);
         app.catalog.set_label(&paths[0], Some(ColorLabel::Red));
         app.catalog.set_label(&paths[1], Some(ColorLabel::Purple));

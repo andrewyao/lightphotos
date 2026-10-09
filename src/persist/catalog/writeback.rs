@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use super::ImageRecord;
-use crate::groups::{Group, GroupId, GroupWrite, Groups};
+use crate::persist::groups::{Group, GroupId, GroupWrite, Groups};
 
 /// One queued sidecar mutation.
 ///

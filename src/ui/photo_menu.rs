@@ -4,8 +4,8 @@
 
 use super::{BulkKind, FrameOutput, UiAction};
 use crate::app::{App, FlagCoverage, Region, ViewMode};
-use crate::catalog::{ColorLabel, Flag};
 use crate::i18n::t;
+use crate::persist::catalog::{ColorLabel, Flag};
 
 /// A right click on cell `pos` selects it, unless it is already part of the
 /// selection, and opens the menu at the pointer.

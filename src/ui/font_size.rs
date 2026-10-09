@@ -15,7 +15,7 @@ const PREF_KEY: &str = "font_size";
 
 /// Apply the saved base size, or the default when none is saved.
 pub fn init(ctx: &egui::Context) {
-    let saved = crate::prefs::load(PREF_KEY).and_then(|s| s.trim().parse::<f32>().ok());
+    let saved = crate::persist::prefs::load(PREF_KEY).and_then(|s| s.trim().parse::<f32>().ok());
     apply(ctx, saved.unwrap_or(DEFAULT));
 }
 
@@ -24,7 +24,7 @@ pub fn init(ctx: &egui::Context) {
 pub fn step(ctx: &egui::Context, steps: i32) {
     let size = base(&ctx.global_style()) + steps as f32;
     let size = apply(ctx, size);
-    if let Err(e) = crate::prefs::save(PREF_KEY, &size.to_string()) {
+    if let Err(e) = crate::persist::prefs::save(PREF_KEY, &size.to_string()) {
         eprintln!("[lightphotos] could not save the font size: {e}");
     }
 }

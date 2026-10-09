@@ -12,23 +12,13 @@
 mod app;
 mod autotone;
 mod cache_limits;
-mod catalog;
-mod groups;
 mod i18n;
 mod loader;
-// The importer is native-only, so the browser build compiles the parser with
-// no caller until a wasm file picker exists.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-mod lr_preset;
 mod navigation;
-mod prefs;
-mod presets;
+mod persist;
 mod renderer;
 mod score;
-#[cfg(not(target_arch = "wasm32"))]
-mod secret;
 mod shell;
-mod signalcache;
 mod thumbnail;
 mod ui;
 #[cfg(any(target_arch = "wasm32", test))]

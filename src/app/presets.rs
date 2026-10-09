@@ -145,7 +145,7 @@ impl App {
         for path in paths {
             let imported = std::fs::read_to_string(path)
                 .map_err(|e| e.to_string())
-                .and_then(|xmp| crate::lr_preset::parse(&xmp));
+                .and_then(|xmp| crate::persist::lr_preset::parse(&xmp));
             let imported = match imported {
                 Ok(imported) => imported,
                 Err(reason) => {
@@ -208,8 +208,8 @@ impl App {
 pub(in crate::app) mod tests {
     use super::*;
     use crate::app::test_support::*;
-    use crate::catalog::Catalog;
     use crate::develop::Crop;
+    use crate::persist::catalog::Catalog;
 
     const CROP: Crop = Crop {
         left: 0.1,

@@ -695,7 +695,7 @@ mod tests {
         assert!(app.edits[&paths[1]].is_monochrome());
         app.catalog
             .flush_blocking(std::time::Duration::from_secs(10));
-        let catalog = crate::catalog::Catalog::with_dir(dir.clone());
+        let catalog = crate::persist::catalog::Catalog::with_dir(dir.clone());
         assert_eq!(catalog.adjustments(&paths[2]).contrast, 30.0);
 
         app.selected = BTreeSet::from([0]);
@@ -737,7 +737,7 @@ mod tests {
         app.catalog
             .flush_blocking(std::time::Duration::from_secs(10));
         let on_disk = || {
-            crate::catalog::Catalog::with_dir(dir.clone())
+            crate::persist::catalog::Catalog::with_dir(dir.clone())
                 .adjustments(&paths[2])
                 .contrast
         };

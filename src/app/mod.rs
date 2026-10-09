@@ -16,12 +16,12 @@ use web_time::Instant;
 use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::Window;
 
-use crate::catalog::Catalog;
 use crate::decode::image_decode;
 use crate::develop::{Adjustments, Crop, TouchUp};
 use crate::export::Exporter;
 use crate::loader::Loader;
 use crate::navigation::{Cmp, FlagFilter, Playlist};
+use crate::persist::catalog::Catalog;
 use crate::renderer::{EguiPaint, Renderer};
 use crate::ui;
 
@@ -351,16 +351,16 @@ pub(crate) struct ThumbTexture {
 pub(crate) type CatalogLoadResult = (
     PathBuf,
     u64,
-    crate::catalog::LoadMark,
-    crate::catalog::SidecarLoad,
+    crate::persist::catalog::LoadMark,
+    crate::persist::catalog::SidecarLoad,
 );
 
 /// A folder's signal cache as loaded off the UI thread, with what it knows
 /// about each playlist photo whose file has not changed since.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) type SignalLoad = (
-    crate::signalcache::SignalCache,
-    Vec<(PathBuf, crate::signalcache::PhotoSignals)>,
+    crate::persist::signalcache::SignalCache,
+    Vec<(PathBuf, crate::persist::signalcache::PhotoSignals)>,
 );
 
 pub(crate) struct App {
@@ -445,10 +445,10 @@ pub(crate) struct App {
     flag_filter: FlagFilter,
     /// The grid's color label filter: a photo with any of these labels
     /// shows. Empty shows all.
-    label_filter: Vec<crate::catalog::ColorLabel>,
+    label_filter: Vec<crate::persist::catalog::ColorLabel>,
     /// Stacks the Grid shows member by member. Kept for the folder's
     /// session only.
-    expanded_stacks: std::collections::HashSet<crate::groups::GroupId>,
+    expanded_stacks: std::collections::HashSet<crate::persist::groups::GroupId>,
     /// Comparator used when a star level is clicked. Stays set across "All".
     filter_cmp: Cmp,
     grid_sort: GridSort,
@@ -491,7 +491,7 @@ pub(crate) struct App {
     /// into the four maps below when a folder opens, and written back as new
     /// ones are computed. A cache, never user data: see `src/signalcache.rs`
     /// for why it is not part of `ImageRecord`.
-    pub(crate) signals: crate::signalcache::SignalCache,
+    pub(crate) signals: crate::persist::signalcache::SignalCache,
     /// The folder's cache file loading on another thread, with the entries it
     /// holds for the playlist already checked against the files. While this is
     /// `Some`, `signals` is a detached stand-in. See `adopt_signal_cache`.
@@ -553,7 +553,7 @@ pub(crate) struct App {
     copied_settings: Option<(PathBuf, Adjustments)>,
 
     /// The named-look library, global to the app rather than per folder.
-    presets: crate::presets::PresetStore,
+    presets: crate::persist::presets::PresetStore,
     /// Open name prompt: the edit buffer, and which preset it renames (`None`
     /// is a new one).
     preset_name_edit: Option<(String, Option<u64>)>,
@@ -717,7 +717,7 @@ impl App {
             grid_scroll_reset: true,
             strip_range: (0, 0),
             thumb_tex: HashMap::new(),
-            signals: crate::signalcache::SignalCache::empty(),
+            signals: crate::persist::signalcache::SignalCache::empty(),
             #[cfg(not(target_arch = "wasm32"))]
             signal_load_rx: None,
             capture_times: HashMap::new(),
@@ -754,9 +754,9 @@ impl App {
             copied_settings: None,
             // A test must never write the developer's own preset library.
             #[cfg(test)]
-            presets: crate::presets::PresetStore::in_memory(),
+            presets: crate::persist::presets::PresetStore::in_memory(),
             #[cfg(not(test))]
-            presets: crate::presets::PresetStore::load(),
+            presets: crate::persist::presets::PresetStore::load(),
             preset_name_edit: None,
             show_help: false,
             show_settings: false,

@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn without_a_scoring_pool_no_score_or_quality_sort_shows() {
         let (mut app, _dir, paths) = folder_app(2);
-        let unedited = crate::catalog::ImageRecord::default().edit_signature();
+        let unedited = crate::persist::catalog::ImageRecord::default().edit_signature();
         app.catalog.set_score(&paths[0], scored(80), unedited);
         app.select_single(0);
         assert!(app.score_pool.is_none());
@@ -409,7 +409,7 @@ mod tests {
     fn the_quality_sort_puts_the_best_first_and_the_unscored_last_and_keeps_the_selection() {
         let (mut app, dir, paths) = folder_app(4);
         app.score_pool = ScorePool::with_runner(2, slow_fixed);
-        let unedited = crate::catalog::ImageRecord::default().edit_signature();
+        let unedited = crate::persist::catalog::ImageRecord::default().edit_signature();
         app.catalog.set_score(&paths[1], scored(30), unedited);
         app.catalog.set_score(&paths[2], scored(80), unedited);
         app.catalog.set_score(&paths[3], scored(30), unedited);

@@ -412,7 +412,7 @@ impl std::fmt::Display for ParseError {
 
 pub(crate) fn run(args: Args) -> i32 {
     let config_dir = std::env::temp_dir().join(format!("lightphotos-drive-{}", std::process::id()));
-    crate::prefs::override_config_dir(config_dir.clone());
+    crate::persist::prefs::override_config_dir(config_dir.clone());
     crate::shell::dialog::cancel_all_pickers();
     crate::i18n::init();
 
