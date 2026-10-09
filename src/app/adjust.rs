@@ -244,6 +244,59 @@ impl App {
         (radius * min_dim / w, radius * min_dim / h)
     }
 
+    /// How many photos the Develop sliders act on.
+    pub(crate) fn develop_scope(&self) -> DevelopScope {
+        match self.action_count() {
+            0 => DevelopScope::None,
+            1 => DevelopScope::One,
+            _ => DevelopScope::Many,
+        }
+    }
+
+    /// Move slider `idx` on every photo the panel acts on, each from its own
+    /// value and clamped to the slider's range, or set it to 0 on all of them.
+    pub(super) fn step_slider(&mut self, idx: usize, step: SliderStep) {
+        let Some(slider) = develop::SLIDERS.get(idx) else {
+            return;
+        };
+        let paths = self.action_paths();
+        self.edit_each(&paths, |mut adj| {
+            let field = (slider.field)(&mut adj);
+            *field = match step.steps() {
+                Some(n) => {
+                    (*field + n * slider.step).clamp(*slider.range.start(), *slider.range.end())
+                }
+                None => 0.0,
+            };
+            adj
+        });
+    }
+
+    /// The Sliders tab's Reset: tone, color, detail and curve back to default
+    /// on every photo the panel acts on, each keeping its crop and straighten.
+    pub(super) fn reset_adjustments(&mut self) {
+        match self.develop_scope() {
+            DevelopScope::None => return,
+            DevelopScope::One => {}
+            DevelopScope::Many => {
+                let paths = self.action_paths();
+                self.edit_each(&paths, |cur| Adjustments {
+                    crop: cur.crop,
+                    straighten: cur.straighten,
+                    ..Adjustments::default()
+                });
+                return;
+            }
+        }
+        let cur = self.current_adjustments();
+        let adj = Adjustments {
+            crop: cur.crop,
+            straighten: cur.straighten,
+            ..Adjustments::default()
+        };
+        self.apply_adjustments_kind(adj, "reset");
+    }
+
     /// Save `adj` for the shown image and push it to the GPU, and sync the
     /// sliders it moved onto the rest of the selection. Identity edits are
     /// removed from the edits map rather than stored.
@@ -774,6 +827,79 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_scope_follows_the_selection() {
+        let (mut app, dir, _) = three_selected("scope");
+        assert_eq!(app.develop_scope(), DevelopScope::Many);
+        app.selected = BTreeSet::from([0]);
+        assert_eq!(app.develop_scope(), DevelopScope::One);
+        app.selected.clear();
+        app.sel = None;
+        assert_eq!(app.develop_scope(), DevelopScope::None);
+        assert!(
+            app.histogram().is_none(),
+            "no histogram with nothing selected"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_step_moves_each_photo_from_its_own_value() {
+        let (mut app, dir, paths) = three_selected("step");
+        let exposure = 2;
+        let saturation = 9;
+        app.step_slider(exposure, SliderStep::BigUp);
+        app.step_slider(saturation, SliderStep::Down);
+        let adj = |app: &App, i: usize| app.edits.get(&paths[i]).copied().unwrap_or_default();
+        assert_eq!(adj(&app, 0).exposure, 0.25);
+        assert_eq!(adj(&app, 1).exposure, 1.25);
+        assert_eq!(adj(&app, 0).saturation, -1.0);
+        assert_eq!(
+            adj(&app, 1).saturation,
+            -100.0,
+            "clamped at the range's end"
+        );
+
+        app.step_slider(exposure, SliderStep::Reset);
+        assert_eq!(adj(&app, 1).exposure, 0.0);
+        assert_eq!(
+            adj(&app, 1).saturation,
+            -100.0,
+            "Reset leaves other sliders"
+        );
+        let saved = app.catalog.adjustments(&paths[2]);
+        assert_eq!(saved.saturation, -1.0, "steps are saved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_keyboard_nudge_on_several_photos_is_a_step() {
+        let (mut app, dir, paths) = three_selected("step-key");
+        app.develop_focus = 2;
+        app.develop_adjust(1);
+        let exposure = |i: usize| app.edits.get(&paths[i]).map_or(0.0, |a| a.exposure);
+        assert_eq!(exposure(0), 0.05);
+        assert_eq!(exposure(1), 1.05);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reset_on_several_photos_resets_each_and_keeps_its_crop() {
+        let (mut app, dir, paths) = three_selected("reset-many");
+        let crop = crate::develop::Crop {
+            left: 0.1,
+            top: 0.1,
+            right: 0.6,
+            bottom: 0.6,
+        };
+        app.edits.get_mut(&paths[1]).unwrap().crop = Some(crop);
+        app.reset_adjustments();
+        let adj = app.edits.get(&paths[1]).copied().unwrap();
+        assert_eq!(adj.exposure, 0.0);
+        assert_eq!(adj.crop, Some(crop));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The Develop panel's tabs and Touch Up's brush, driven through the real
     /// widget tree with the presets module's pointer harness.
     mod develop_tabs {
@@ -796,6 +922,59 @@ mod tests {
             crate::ui::rail_button_rect(&app.egui_ctx, item)
                 .unwrap_or_else(|| panic!("the rail drew no {item:?} icon"))
                 .center()
+        }
+
+        #[test]
+        fn with_nothing_selected_the_panel_says_so_and_is_off() {
+            let (mut app, dir, paths) = folder_app("panel-none", 2);
+            // The last photo shown, with an edit of its own, is still loaded.
+            app.shown = Shown::Preview(paths[0].clone(), 1024, 1024);
+            app.edits.insert(
+                paths[0].clone(),
+                Adjustments {
+                    contrast: 42.0,
+                    ..Default::default()
+                },
+            );
+            app.develop_open = true;
+            app.sel = None;
+            app.selected.clear();
+            let t = crate::i18n::t();
+            let painted = settled(&mut app);
+            assert!(painted.has(t.no_photo_selected), "{:?}", painted.texts());
+            assert!(!painted.has("42"), "the old photo's value is not shown");
+            let (actions, _) = click(&mut app, painted.pos_of(t.auto_tone));
+            assert!(
+                !actions.iter().any(|a| matches!(a, UiAction::AutoTone)),
+                "Auto Tone is off: {actions:?}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn with_several_selected_each_slider_is_a_row_of_steps() {
+            let (mut app, dir, paths) = folder_app("panel-many", 3);
+            app.shown = Shown::Preview(paths[0].clone(), 1024, 1024);
+            app.develop_open = true;
+            app.selected = (0..3).collect();
+            app.sel = Some(0);
+            let t = crate::i18n::t();
+            let painted = settled(&mut app);
+            assert!(painted.has(t.multiple_photos_selected));
+            let contrast = painted.pos_of(t.slider(crate::develop::SliderId::Contrast));
+            let up = painted.pos_of_near("\u{203a}", contrast);
+            assert!(
+                (up.y - contrast.y).abs() < 4.0,
+                "the steps share the label's row"
+            );
+            let (actions, _) = click(&mut app, up);
+            assert!(
+                actions
+                    .iter()
+                    .any(|a| matches!(a, UiAction::StepSlider(3, SliderStep::Up))),
+                "{actions:?}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
         }
 
         #[test]

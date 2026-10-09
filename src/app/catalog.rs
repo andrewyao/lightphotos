@@ -761,7 +761,11 @@ impl App {
     /// than stored, matching how the catalog stores edits. Grid and filmstrip
     /// thumbnails re-bake by themselves, because `edit_sig_for` hashes the
     /// live edits into the thumbnail cache key.
-    fn edit_each(&mut self, paths: &[PathBuf], edit: impl Fn(Adjustments) -> Adjustments) -> usize {
+    pub(super) fn edit_each(
+        &mut self,
+        paths: &[PathBuf],
+        edit: impl Fn(Adjustments) -> Adjustments,
+    ) -> usize {
         if paths.is_empty() {
             return 0;
         }

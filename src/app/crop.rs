@@ -686,6 +686,7 @@ mod tests {
         let mut app = App::new(None);
         app.mode = ViewMode::Loupe;
         app.shown = Shown::Preview(photo.clone(), 4000, 3000);
+        app.want = Some(photo.clone());
         app.source_size = Some((4000, 3000));
         app.loupe_viewport = Some((0, 0, 800, 600));
         if rot != 0 {

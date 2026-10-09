@@ -1094,8 +1094,17 @@ impl App {
     }
 
     /// Nudge the focused Develop slider one step in direction `dir` (-1 or +1).
-    fn develop_adjust(&mut self, dir: isize) {
+    pub(super) fn develop_adjust(&mut self, dir: isize) {
         self.set_develop_tab(DevelopTab::Sliders);
+        if self.develop_scope() == DevelopScope::Many {
+            let step = if dir < 0 {
+                SliderStep::Down
+            } else {
+                SliderStep::Up
+            };
+            self.step_slider(self.develop_focus, step);
+            return;
+        }
         let Some(slider) = develop::SLIDERS.get(self.develop_focus) else {
             return;
         };

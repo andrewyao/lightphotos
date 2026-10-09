@@ -187,6 +187,8 @@ pub enum UiAction {
     /// The Sliders tab's Reset: tone, color, detail and curve back to
     /// default. Crop, straighten and touch-ups belong to other tabs and stay.
     ResetAdjustments,
+    /// A step button of slider `.0` while several photos are selected.
+    StepSlider(usize, crate::app::SliderStep),
     /// The photo menu's Reset: the shown photo's whole edit, touch-ups too.
     ResetAllEdits,
     /// Pick develop settings for each selected photo from its own histogram.

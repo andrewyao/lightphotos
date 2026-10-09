@@ -2,10 +2,11 @@ use super::*;
 
 use super::form::{self, Button, Form, Role};
 use crate::app::{
-    App, CropAspect, CropOrientation, CropOverlay, DevelopTab, FocusLevel, RailItem, Region,
-    StraightenTool,
+    App, CaState, CropAspect, CropOrientation, CropOverlay, DevelopScope, DevelopTab, FocusLevel,
+    RailItem, Region, SliderStep, StraightenTool,
 };
 use crate::develop::curve::{Channel, Curve, ToneCurve};
+use crate::develop::Adjustments;
 
 /// The right-hand Develop panel, with sliders in Lightroom's order. Pushes one
 /// `SetAdjustments` only on frames where a slider changed. Double-clicking a
@@ -388,12 +389,21 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 }
 
 /// The Develop header with Reset, presets, a row of Auto Tone and B&W, and
-/// every tone, color, and detail slider in Lightroom's order.
+/// every tone, color, and detail slider in Lightroom's order. With nothing
+/// selected every control is off; with several photos selected each slider
+/// is a row of step buttons that move every photo from its own value.
 fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    let mut adj = app.current_adjustments();
+    let scope = app.develop_scope();
+    let live = scope != DevelopScope::None;
+    // Only one photo has values to show. Defaults keep the previous photo's
+    // values off the panel when nothing, or several, are selected.
+    let mut adj = match scope {
+        DevelopScope::One => app.current_adjustments(),
+        DevelopScope::None | DevelopScope::Many => Adjustments::default(),
+    };
     form::page_heading(ui, t.tab_sliders, |ui| {
-        if ui.button(t.reset).clicked() {
+        if ui.add_enabled(live, egui::Button::new(t.reset)).clicked() {
             out.actions.push(UiAction::ResetAdjustments);
             out.actions.push(UiAction::Focus(Region::Develop));
         }
@@ -401,105 +411,210 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     form::page(ui, |ui| {
         // Only this page has the histogram: Crop and Masks work on the frame,
         // not its tones.
-        draw_histogram(ui, app);
-        draw_exposure_row(ui, app);
-        ui.add_space(6.0);
-        if crate::app::SHOW_PRESETS {
-            draw_presets(ui, app, out);
+        match scope {
+            DevelopScope::One => draw_histogram(ui, app),
+            DevelopScope::None => histogram_note(ui, t.no_photo_selected),
+            DevelopScope::Many => histogram_note(ui, t.multiple_photos_selected),
         }
-        // `interacted_idx` is the slider the mouse touched this frame, so the
-        // keyboard cursor can follow it.
-        let mut changed = false;
-        let mut interacted_idx: Option<usize> = None;
-        let focus_idx =
-            if app.focus() == Region::Develop && app.focus_level() == FocusLevel::Entered {
-                Some(app.develop_focus())
-            } else {
-                None
-            };
+        draw_exposure_row(ui, app, scope == DevelopScope::One);
+        ui.add_space(6.0);
+        ui.add_enabled_ui(live, |ui| draw_sliders_body(ui, app, scope, &mut adj, out));
+    });
+}
 
-        ui.horizontal(|ui| {
-            let auto = ui
-                .button(t.auto_tone)
-                .on_hover_text(crate::i18n::keys(t.auto_tone_tip));
-            if auto.clicked() {
-                out.actions.push(UiAction::AutoTone);
-                out.actions.push(UiAction::Focus(Region::Develop));
-            }
-            // Lightroom's B&W treatment, as the full desaturation that preset
-            // import maps `ConvertToGrayscale` to.
-            let mono = app.selection_is_monochrome();
-            if ui
-                .add(egui::Button::new(t.black_and_white).selected(mono))
-                .on_hover_text(crate::i18n::keys(t.black_and_white_tip))
-                .clicked()
-            {
-                out.actions.push(UiAction::ToggleBlackAndWhite);
-                out.actions.push(UiAction::Focus(Region::Develop));
-            }
-        });
-        form::divider(ui);
-        ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
+/// Everything under the histogram on the Sliders page.
+fn draw_sliders_body(
+    ui: &mut egui::Ui,
+    app: &App,
+    scope: DevelopScope,
+    adj: &mut Adjustments,
+    out: &mut FrameOutput,
+) {
+    let t = t();
+    if crate::app::SHOW_PRESETS {
+        draw_presets(ui, app, out);
+    }
+    // `interacted_idx` is the slider the mouse touched this frame, so the
+    // keyboard cursor can follow it.
+    let mut changed = false;
+    let mut interacted_idx: Option<usize> = None;
+    let focus_idx = if app.focus() == Region::Develop && app.focus_level() == FocusLevel::Entered {
+        Some(app.develop_focus())
+    } else {
+        None
+    };
 
-        let mut section = None;
-        for (idx, s) in crate::develop::SLIDERS.iter().enumerate() {
-            if section != Some(s.section) {
-                if section.is_some() {
-                    form::divider(ui);
-                }
-                // Lightroom puts the curve between Presence and Detail.
-                if s.section == crate::develop::Section::Detail {
-                    changed |= draw_curve_section(ui, app, &mut adj.curve);
-                    form::divider(ui);
-                }
-                section = Some(s.section);
-                form::section_header(ui, t.section(s.section), |ui| match s.section {
-                    // The picker samples the Loupe's photo.
-                    crate::develop::Section::WhiteBalance if app.mode() == ViewMode::Loupe => {
-                        let picker = eyedropper_button(ui, app.wb_picker_active())
-                            .on_hover_text(t.pick_gray_tip);
-                        if picker.clicked() {
-                            out.actions.push(UiAction::ToggleWbPicker);
-                        }
+    ui.horizontal(|ui| {
+        let auto = ui
+            .button(t.auto_tone)
+            .on_hover_text(crate::i18n::keys(t.auto_tone_tip));
+        if auto.clicked() {
+            out.actions.push(UiAction::AutoTone);
+            out.actions.push(UiAction::Focus(Region::Develop));
+        }
+        // Lightroom's B&W treatment, as the full desaturation that preset
+        // import maps `ConvertToGrayscale` to.
+        let mono = app.selection_is_monochrome();
+        if ui
+            .add(egui::Button::new(t.black_and_white).selected(mono))
+            .on_hover_text(crate::i18n::keys(t.black_and_white_tip))
+            .clicked()
+        {
+            out.actions.push(UiAction::ToggleBlackAndWhite);
+            out.actions.push(UiAction::Focus(Region::Develop));
+        }
+    });
+    form::divider(ui);
+    ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
+
+    let one = scope == DevelopScope::One;
+    let mut section = None;
+    for (idx, s) in crate::develop::SLIDERS.iter().enumerate() {
+        if section != Some(s.section) {
+            if section.is_some() {
+                form::divider(ui);
+            }
+            // Lightroom puts the curve between Presence and Detail. Several
+            // photos have no one curve to bend, so it is off for them.
+            if s.section == crate::develop::Section::Detail {
+                changed |= ui
+                    .add_enabled_ui(one, |ui| draw_curve_section(ui, app, one, &mut adj.curve))
+                    .inner;
+                form::divider(ui);
+            }
+            section = Some(s.section);
+            form::section_header(ui, t.section(s.section), |ui| match s.section {
+                // The picker samples the Loupe's photo.
+                crate::develop::Section::WhiteBalance if one && app.mode() == ViewMode::Loupe => {
+                    let picker = eyedropper_button(ui, app.wb_picker_active())
+                        .on_hover_text(t.pick_gray_tip);
+                    if picker.clicked() {
+                        out.actions.push(UiAction::ToggleWbPicker);
                     }
-                    _ => {}
-                });
+                }
+                _ => {}
+            });
+        }
+        let focused = focus_idx == Some(idx);
+        let interacted = if scope == DevelopScope::Many {
+            match step_slider_row(ui, t.slider(s.id), focused) {
+                Some(step) => {
+                    out.actions.push(UiAction::StepSlider(idx, step));
+                    true
+                }
+                None => false,
             }
-            let field = (s.field)(&mut adj);
+        } else {
+            let field = (s.field)(adj);
             let (c, i) = develop_slider(
                 ui,
                 t.slider(s.id),
                 field,
                 s.range.clone(),
                 s.decimals,
-                focus_idx == Some(idx),
+                focused,
             );
             changed |= c;
-            if i {
-                interacted_idx = Some(idx);
+            i
+        };
+        if interacted {
+            interacted_idx = Some(idx);
+        }
+    }
+
+    form::divider(ui);
+    form::section_header(ui, t.section(crate::develop::Section::Optics), |_| {});
+    let state = if scope == DevelopScope::None {
+        CaState::Off
+    } else {
+        app.remove_ca_state()
+    };
+    let clicked = ui
+        .add_enabled_ui(!app.remove_ca_pending(), |ui| {
+            tri_state_checkbox(ui, state, t.remove_ca)
+        })
+        .inner
+        .on_hover_text(t.remove_ca_tip)
+        .clicked();
+    if clicked {
+        // Off or mixed turns every photo on; all on turns them all off.
+        out.actions
+            .push(UiAction::SetRemoveCa(state != CaState::On));
+    }
+
+    if changed {
+        out.actions.push(UiAction::SetAdjustments(*adj));
+    }
+    if let Some(idx) = interacted_idx {
+        out.actions.push(UiAction::FocusDevelop(idx));
+    }
+}
+
+/// A checkbox for a setting that can be on for some photos and off for
+/// others: empty when off for all, a grey tick when mixed, a solid tick when
+/// on for all. Returns the response for the box and its label together.
+fn tri_state_checkbox(ui: &mut egui::Ui, state: CaState, label: &str) -> egui::Response {
+    ui.horizontal(|ui| {
+        let mut checked = state != CaState::Off;
+        let tick = ui
+            .scope(|ui| {
+                if state == CaState::Mixed {
+                    let weak = ui.visuals().weak_text_color();
+                    let w = &mut ui.visuals_mut().widgets;
+                    for v in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+                        v.fg_stroke.color = weak;
+                    }
+                }
+                ui.add(egui::Checkbox::without_text(&mut checked))
+            })
+            .inner;
+        let text = ui.add(egui::Label::new(label).sense(egui::Sense::click()));
+        let mut response = tick.union(text.clone());
+        // `union` keeps `tick`'s click only; a click on the words counts too.
+        if text.clicked() {
+            response.flags |= egui::response::Flags::CLICKED;
+        }
+        response
+    })
+    .inner
+}
+
+/// One slider's row while several photos are selected: its name, then
+/// buttons that lower each photo's value by a large or small step, reset it,
+/// or raise it. Returns the button clicked.
+fn step_slider_row(ui: &mut egui::Ui, label: &str, focused: bool) -> Option<SliderStep> {
+    let t = t();
+    let row = ui.horizontal(|ui| {
+        ui.label(label);
+        let mut picked = None;
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // Right to left, so the last button goes first.
+            for step in SliderStep::ALL.into_iter().rev() {
+                let (glyph, tip) = match step {
+                    SliderStep::BigDown => ("\u{ab}", t.step_big_down),
+                    SliderStep::Down => ("\u{2039}", t.step_down),
+                    SliderStep::Reset => ("0", t.step_reset),
+                    SliderStep::Up => ("\u{203a}", t.step_up),
+                    SliderStep::BigUp => ("\u{bb}", t.step_big_up),
+                };
+                let button = egui::Button::new(glyph)
+                    .min_size(egui::vec2(font_size::px(ui.style(), 24.0), 0.0));
+                if ui.add(button).on_hover_text(tip).clicked() {
+                    picked = Some(step);
+                }
             }
-        }
-
-        form::divider(ui);
-        form::section_header(ui, t.section(crate::develop::Section::Optics), |_| {});
-        let mut remove_ca = app.remove_ca_on();
-        let ca_box = ui
-            .add_enabled(
-                !app.remove_ca_pending(),
-                egui::Checkbox::new(&mut remove_ca, t.remove_ca),
-            )
-            .on_hover_text(t.remove_ca_tip);
-        if ca_box.changed() {
-            out.actions.push(UiAction::SetRemoveCa(remove_ca));
-        }
-
-        if changed {
-            out.actions.push(UiAction::SetAdjustments(adj));
-        }
-        if let Some(idx) = interacted_idx {
-            out.actions.push(UiAction::FocusDevelop(idx));
-        }
+        });
+        picked
     });
+    if focused {
+        ui.painter().rect_stroke(
+            row.response.rect.expand(3.0),
+            2.0,
+            egui::Stroke::new(2.0f32, theme::colors(ui.ctx()).cursor),
+            egui::StrokeKind::Outside,
+        );
+    }
+    row.inner
 }
 
 /// One Develop slider, its value typed or dragged in the readout. Double-
@@ -747,10 +862,10 @@ fn brush_slider(
 }
 
 /// ISO, focal length, aperture and shutter spread across the histogram's
-/// width, as Lightroom shows them. The row keeps its height without EXIF
+/// width, as Lightroom shows them, when `show` (one photo selected). The row keeps its height without EXIF
 /// exposure, so the panel below doesn't jump while metadata loads or between
 /// photos that have it and photos that don't.
-fn draw_exposure_row(ui: &mut egui::Ui, app: &App) {
+fn draw_exposure_row(ui: &mut egui::Ui, app: &App, show: bool) {
     let font = egui::FontId::proportional(font_size::px(ui.style(), 12.0));
     let height = ui.fonts_mut(|f| f.row_height(&font)) + 6.0;
     let (rect, _) = ui.allocate_exact_size(
@@ -759,6 +874,7 @@ fn draw_exposure_row(ui: &mut egui::Ui, app: &App) {
     );
     let parts = app
         .current_metadata()
+        .filter(|_| show)
         .map(super::loupe::exposure_parts)
         .unwrap_or_default();
     if parts.is_empty() {
@@ -794,20 +910,7 @@ fn draw_exposure_row(ui: &mut egui::Ui, app: &App) {
 /// The R, G, B histogram of the image after develop adjustments. `App`
 /// re-bins it on every adjustment change.
 fn draw_histogram(ui: &mut egui::Ui, app: &App) {
-    let height = 120.0;
-    let width = ui.available_width();
-    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    let painter = ui.painter_at(rect);
-
-    let colors = theme::colors(ui.ctx());
-    painter.rect_filled(rect, 3.0, colors.histogram_bg);
-    painter.rect_stroke(
-        rect,
-        3.0,
-        egui::Stroke::new(1.0f32, colors.histogram_border),
-        egui::StrokeKind::Inside,
-    );
-
+    let (painter, rect) = histogram_box(ui);
     let Some(bins) = app.histogram() else { return };
     let smoothed = smooth_bins(bins);
 
@@ -824,6 +927,37 @@ fn draw_histogram(ui: &mut egui::Ui, app: &App) {
         // line along its top.
         paint_bins(&painter, rect, ch, max, color, Some(color.to_opaque()));
     }
+}
+
+/// The empty histogram box with `note` in its middle, in place of a
+/// histogram when no one photo is selected.
+fn histogram_note(ui: &mut egui::Ui, note: &str) {
+    let (painter, rect) = histogram_box(ui);
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        note,
+        egui::FontId::proportional(font_size::px(ui.style(), 13.0)),
+        ui.visuals().weak_text_color(),
+    );
+}
+
+/// The histogram's framed box, the same size whatever fills it so the panel
+/// does not jump as the selection changes.
+fn histogram_box(ui: &mut egui::Ui) -> (egui::Painter, egui::Rect) {
+    let height = 120.0;
+    let width = ui.available_width();
+    let (rect, _resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let colors = theme::colors(ui.ctx());
+    painter.rect_filled(rect, 3.0, colors.histogram_bg);
+    painter.rect_stroke(
+        rect,
+        3.0,
+        egui::Stroke::new(1.0f32, colors.histogram_border),
+        egui::StrokeKind::Inside,
+    );
+    (painter, rect)
 }
 
 /// The histogram's channels with a radius-1 box blur. `recompute_histogram`
@@ -895,7 +1029,7 @@ const CURVE_CHANNEL: f32 = 24.0;
 /// and Reset row, all for the channel picked. Edits `curve` in place and
 /// returns whether it changed. The picked channel is session state, kept in
 /// egui's memory.
-fn draw_curve_section(ui: &mut egui::Ui, app: &App, curve: &mut ToneCurve) -> bool {
+fn draw_curve_section(ui: &mut egui::Ui, app: &App, one: bool, curve: &mut ToneCurve) -> bool {
     let t = t();
     form::section_header(ui, t.section(crate::develop::Section::Curve), |_| {});
     let id = egui::Id::new("curve_channel");
@@ -906,7 +1040,8 @@ fn draw_curve_section(ui: &mut egui::Ui, app: &App, curve: &mut ToneCurve) -> bo
     }
 
     let color = channel_color(ui, ch);
-    let mut changed = curve_graph(ui, curve.get_mut(ch), color, app.histogram());
+    let bins = app.histogram().filter(|_| one);
+    let mut changed = curve_graph(ui, curve.get_mut(ch), color, bins);
 
     let c = curve.get_mut(ch);
     ui.horizontal(|ui| {

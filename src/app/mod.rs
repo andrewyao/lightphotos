@@ -308,6 +308,59 @@ pub(crate) enum DevelopTab {
     Masks,
 }
 
+/// How many photos the Develop sliders act on, which sets how they draw.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DevelopScope {
+    /// Nothing selected: every control is off.
+    None,
+    /// One photo: the sliders show and set its values.
+    One,
+    /// Several photos: each slider steps every photo's own value.
+    Many,
+}
+
+/// One of the step buttons a slider has while several photos are selected.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SliderStep {
+    BigDown,
+    Down,
+    Reset,
+    Up,
+    BigUp,
+}
+
+impl SliderStep {
+    pub(crate) const ALL: [SliderStep; 5] = [
+        SliderStep::BigDown,
+        SliderStep::Down,
+        SliderStep::Reset,
+        SliderStep::Up,
+        SliderStep::BigUp,
+    ];
+
+    /// How many of the slider's keyboard steps this button moves, or `None`
+    /// for Reset.
+    pub(crate) fn steps(self) -> Option<f32> {
+        match self {
+            SliderStep::BigDown => Some(-5.0),
+            SliderStep::Down => Some(-1.0),
+            SliderStep::Reset => None,
+            SliderStep::Up => Some(1.0),
+            SliderStep::BigUp => Some(5.0),
+        }
+    }
+}
+
+/// Whether Remove Chromatic Aberration is on for the photos the panel acts
+/// on. A photo being measured counts as on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CaState {
+    Off,
+    /// On for some of the photos.
+    Mixed,
+    On,
+}
+
 /// An icon on the right-edge rail: the photo's metadata, a Develop page, or
 /// the group's Compare pane. At most one is lit, and clicking the lit one
 /// turns it off.
@@ -1348,15 +1401,8 @@ impl App {
                 ui::UiAction::AutoTone => self.auto_tone_selected(),
                 ui::UiAction::ToggleBlackAndWhite => self.toggle_black_and_white(),
                 ui::UiAction::SetRemoveCa(on) => self.set_remove_ca(on),
-                ui::UiAction::ResetAdjustments => {
-                    let cur = self.current_adjustments();
-                    let adj = Adjustments {
-                        crop: cur.crop,
-                        straighten: cur.straighten,
-                        ..Adjustments::default()
-                    };
-                    self.apply_adjustments_kind(adj, "reset");
-                }
+                ui::UiAction::ResetAdjustments => self.reset_adjustments(),
+                ui::UiAction::StepSlider(idx, step) => self.step_slider(idx, step),
                 ui::UiAction::ResetAllEdits => {
                     let Some(path) = self.shown.path().map(Path::to_path_buf) else {
                         continue;
