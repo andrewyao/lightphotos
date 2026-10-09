@@ -142,9 +142,9 @@ const MIN_CROP: f32 = 0.02;
 
 /// The UI region that receives arrow and Enter keys. `Toolbar` and `Filmstrip`
 /// are chrome, reached only with F6 / Shift+F6, which toggles between them and
-/// the last focused main region. The main chain (`Folders` > `Grid` > `Detail`
-/// > `Develop`) is walked with Enter and Escape. `Detail` is the Loupe with the
-/// Develop panel closed. Region cycling uses F6, not Tab, because egui_winit
+/// the last focused main region. The main chain
+/// (`Folders` > `Grid` > `Detail` > `Develop`) is walked with Enter and
+/// Escape. `Detail` is the Loupe with the Develop panel closed. Region cycling uses F6, not Tab, because egui_winit
 /// always consumes Tab for its own widget focus.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -982,7 +982,7 @@ impl App {
             return;
         };
 
-        let mut raw_input = state.take_egui_input(&*window);
+        let mut raw_input = state.take_egui_input(&window);
         // Drop Tab before egui sees it. Otherwise egui moves its own widget
         // focus and draws a focus ring, while Tab is already how the keyboard
         // moves between the controls of the focused region. The preset name
@@ -1022,7 +1022,7 @@ impl App {
 
         #[cfg(target_arch = "wasm32")]
         web::write_web_clipboard(&full_output.platform_output.commands);
-        state.handle_platform_output(&*window, full_output.platform_output);
+        state.handle_platform_output(&window, full_output.platform_output);
         self.egui_state = Some(state);
 
         self.apply_ui_actions(out.actions);
@@ -1071,26 +1071,24 @@ impl App {
             ViewMode::Grid => Some((0, 0, 0, 0)),
         };
 
-        if self.mode == ViewMode::Loupe {
-            if image_viewport != self.loupe_viewport {
-                if self.fitted {
-                    self.loupe_viewport = image_viewport;
-                    if self.cropping() {
-                        self.fit_for_crop();
-                    } else {
-                        self.fit_to_window();
-                    }
+        if self.mode == ViewMode::Loupe && image_viewport != self.loupe_viewport {
+            if self.fitted {
+                self.loupe_viewport = image_viewport;
+                if self.cropping() {
+                    self.fit_for_crop();
                 } else {
-                    // Manually zoomed: a resize should reveal more or less of
-                    // the image, not rescale it. Keep absolute `zoom()` fixed.
-                    let keep = self.zoom();
-                    self.loupe_viewport = image_viewport;
-                    let fs = self.fit_scale();
-                    if fs > 0.0 {
-                        self.zoom_rel = keep / fs;
-                    }
-                    self.push_transform();
+                    self.fit_to_window();
                 }
+            } else {
+                // Manually zoomed: a resize should reveal more or less of
+                // the image, not rescale it. Keep absolute `zoom()` fixed.
+                let keep = self.zoom();
+                self.loupe_viewport = image_viewport;
+                let fs = self.fit_scale();
+                if fs > 0.0 {
+                    self.zoom_rel = keep / fs;
+                }
+                self.push_transform();
             }
         }
 

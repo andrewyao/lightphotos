@@ -791,6 +791,18 @@ pub struct Loader {
     workers: usize,
 }
 
+/// What one `Loader::poll_all` drained from the workers.
+pub struct Arrivals {
+    /// Photos whose loupe image arrived or improved.
+    pub full: Vec<PathBuf>,
+    /// Thumbnails that landed, keyed by their longest side in pixels.
+    pub thumbs: Vec<(PathBuf, u32)>,
+    /// Capture times read from file metadata.
+    pub metas: Vec<(PathBuf, Option<SystemTime>)>,
+    /// EXIF read for `App::on_exif_info`.
+    pub exifs: Vec<(PathBuf, ImageMetadata)>,
+}
+
 impl Loader {
     pub fn new(max_dim: u32, limits: CacheLimits) -> Self {
         #[cfg(target_arch = "wasm32")]
@@ -1412,14 +1424,7 @@ impl Loader {
     ///
     /// After a worker panic poisons the queue, it also clears every pending
     /// marker that can no longer complete, and marks pending thumbnails failed.
-    pub fn poll_all(
-        &mut self,
-    ) -> (
-        Vec<PathBuf>,
-        Vec<(PathBuf, u32)>,
-        Vec<(PathBuf, Option<SystemTime>)>,
-        Vec<(PathBuf, ImageMetadata)>,
-    ) {
+    pub fn poll_all(&mut self) -> Arrivals {
         let arrivals = self.drain();
         if self.shared.queue.is_poisoned() {
             // Queued image jobs will never run, so clear their markers. Jobs
@@ -1467,14 +1472,7 @@ impl Loader {
         arrivals
     }
 
-    fn drain(
-        &mut self,
-    ) -> (
-        Vec<PathBuf>,
-        Vec<(PathBuf, u32)>,
-        Vec<(PathBuf, Option<SystemTime>)>,
-        Vec<(PathBuf, ImageMetadata)>,
-    ) {
+    fn drain(&mut self) -> Arrivals {
         let mut full = vec![];
         let mut thumbs = vec![];
         let mut metas = vec![];
@@ -1553,7 +1551,12 @@ impl Loader {
                 JobResult::WebMeasure(path, r) => self.web_measures.push((path, r)),
             }
         }
-        (full, thumbs, metas, exifs)
+        Arrivals {
+            full,
+            thumbs,
+            metas,
+            exifs,
+        }
     }
 
     fn insert(&mut self, path: PathBuf, img: Arc<DecodedImage>) {
@@ -1674,7 +1677,7 @@ mod tests {
             .iter()
             .map(|job| match job {
                 Job::Bake(b) => (b.path.clone(), b.sig),
-                _ => unreachable!(),
+                _ => panic!("not a bake"),
             })
             .collect()
     }
@@ -1782,7 +1785,9 @@ mod tests {
             .bake
             .pop_front()
             .unwrap();
-        let Job::Bake(job) = job else { unreachable!() };
+        let Job::Bake(job) = job else {
+            panic!("not a bake")
+        };
         loader.land_bake(a.clone(), 512, 1, Some(job.run()));
         assert!(loader.take_baked().is_empty());
         assert!(!loader.bakes_pending());
@@ -1803,7 +1808,7 @@ mod tests {
         let names: Vec<PathBuf> = std::iter::from_fn(|| q.take_next(false, true))
             .map(|job| match job {
                 Job::Thumb(p, _) => p,
-                _ => unreachable!(),
+                _ => panic!("not a thumb"),
             })
             .collect();
         assert_eq!(names, [path("viewport"), path("background")]);
@@ -1997,7 +2002,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut exifs = Vec::new();
         while exifs.is_empty() && std::time::Instant::now() < deadline {
-            exifs = loader.poll_all().3;
+            exifs = loader.poll_all().exifs;
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert_eq!(exifs.len(), 1, "the worker reported the read");

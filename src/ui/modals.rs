@@ -155,20 +155,23 @@ pub(super) fn preset_name_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput)
                 );
             });
         });
-        let field = field.expect("the row draws its value");
-        if field.changed() {
-            out.actions.push(UiAction::SetPresetNameText(text.clone()));
-        }
-        // Enter is how a singleline field reports itself done. It surrenders
-        // focus that frame. This has to be read before asking for focus again,
-        // because `request_focus` makes the field focused for the frame it runs
-        // in, and `lost_focus` would then report nothing.
-        let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        // Tab is stripped before egui sees it, so the prompt focuses its own
-        // field. Asking only while unfocused also recovers a prompt whose focus
-        // was lost, without fighting a click inside the modal every frame.
-        if !entered && !field.has_focus() {
-            field.request_focus();
+        let mut entered = false;
+        if let Some(field) = field {
+            if field.changed() {
+                out.actions.push(UiAction::SetPresetNameText(text.clone()));
+            }
+            // Enter is how a singleline field reports itself done. It surrenders
+            // focus that frame. This has to be read before asking for focus again,
+            // because `request_focus` makes the field focused for the frame it runs
+            // in, and `lost_focus` would then report nothing.
+            entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            // Tab is stripped before egui sees it, so the prompt focuses its own
+            // field. Asking only while unfocused also recovers a prompt whose
+            // focus was lost, without fighting a click inside the modal every
+            // frame.
+            if !entered && !field.has_focus() {
+                field.request_focus();
+            }
         }
         let save = if renaming { t.rename } else { t.save };
         let buttons = [

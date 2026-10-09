@@ -145,11 +145,12 @@ pub(crate) fn bursts(mut photos: Vec<(PathBuf, SystemTime)>, gap: Duration) -> V
     let mut runs: Vec<Vec<PathBuf>> = Vec::new();
     let mut last = None;
     for ((path, _), id) in photos.into_iter().zip(ids) {
-        if last == Some(id) {
-            runs.last_mut().expect("a run per id").push(path);
-        } else {
-            runs.push(vec![path]);
-            last = Some(id);
+        match runs.last_mut() {
+            Some(run) if last == Some(id) => run.push(path),
+            _ => {
+                runs.push(vec![path]);
+                last = Some(id);
+            }
         }
     }
     runs.retain(|r| r.len() >= 2);

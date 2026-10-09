@@ -260,19 +260,15 @@ impl App {
     /// plus at most one `recompute_visible`. It does not depend on how fast
     /// the trash calls run, which is why it needs no wall-clock budget.
     pub(crate) fn poll_delete(&mut self) {
-        if self.bulk_delete.is_none() {
+        let Some(d) = self.bulk_delete.as_mut() else {
             return;
-        }
-        #[cfg(target_arch = "wasm32")]
-        let origin = {
-            let d = self.bulk_delete.as_ref().unwrap();
-            (d.origin_dir.clone(), d.origin_handle.clone())
         };
+        #[cfg(target_arch = "wasm32")]
+        let origin = (d.origin_dir.clone(), d.origin_handle.clone());
 
         let mut trashed: Vec<PathBuf> = Vec::new();
         let mut forget: Vec<PathBuf> = Vec::new();
         {
-            let d = self.bulk_delete.as_mut().unwrap();
             d.admit();
             while let Some((path, result)) = d.take_result() {
                 d.in_flight.remove(&path);
@@ -317,17 +313,22 @@ impl App {
             self.catalog.forget_group_members(&forget);
         }
 
-        let view_dirty = std::mem::take(&mut self.bulk_delete.as_mut().unwrap().view_dirty);
-        if view_dirty {
+        let Some(d) = self.bulk_delete.as_mut() else {
+            return;
+        };
+        if std::mem::take(&mut d.view_dirty) {
             self.recompute_visible();
             self.after_visible_shrank();
         }
 
-        if self.bulk_delete.as_ref().unwrap().finished() {
-            let d = self.bulk_delete.take().unwrap();
-            self.prune_deleted(d);
+        let Some(d) = self.bulk_delete.as_ref() else {
+            return;
+        };
+        if d.finished() {
+            if let Some(d) = self.bulk_delete.take() {
+                self.prune_deleted(d);
+            }
         } else {
-            let d = self.bulk_delete.as_ref().unwrap();
             self.set_status(
                 StatusKind::Progress,
                 (crate::i18n::t().deleting)(d.done(), d.total),

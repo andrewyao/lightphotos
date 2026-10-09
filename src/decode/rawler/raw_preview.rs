@@ -559,58 +559,6 @@ fn neutral_if_non_finite(wb: [f32; 4]) -> [f32; 4] {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{downsample_xtrans_mosaic, map_xtrans_coord, neutral_if_non_finite};
-
-    #[test]
-    fn missing_or_partial_white_balance_is_neutral() {
-        assert_eq!(neutral_if_non_finite([f32::NAN; 4]), [1.0; 4]);
-        let rgb_with_unused_nan = neutral_if_non_finite([2.0, 1.0, 0.5, f32::NAN]);
-        assert_eq!(rgb_with_unused_nan[..3], [2.0, 1.0, 0.5]);
-        assert!(rgb_with_unused_nan[3].is_nan());
-        assert_eq!(
-            neutral_if_non_finite([2.0, 1.0, 0.5, 1.0]),
-            [2.0, 1.0, 0.5, 1.0]
-        );
-    }
-
-    #[test]
-    fn xtrans_bounded_sampling_preserves_all_cfa_phases() {
-        // Column-independent so each output column's average collapses to
-        // the same expression as the row it belongs to.
-        let (width, height) = (72, 72);
-        let source: Vec<f32> = (0..width * height)
-            .map(|index| (index / width) as f32)
-            .collect();
-        let (reduced, reduced_width, reduced_height) =
-            downsample_xtrans_mosaic(&source, width, height, 12);
-
-        assert_eq!((reduced_width, reduced_height), (12, 12));
-
-        // reduction = 6, tile_step = 36: tile row 0's phase row `p` averages
-        // source rows {p, p+6, .., p+30}; tile row 1's averages {36+p, ..,
-        // 66+p}. Reading only row `p` would fail this.
-        for phase_row in 0..6 {
-            let block0_mean: f32 = (0..6).map(|i| (phase_row + i * 6) as f32).sum::<f32>() / 6.0;
-            let block1_mean: f32 =
-                (0..6).map(|i| (36 + phase_row + i * 6) as f32).sum::<f32>() / 6.0;
-            assert_eq!(reduced[phase_row * reduced_width], block0_mean);
-            assert_eq!(reduced[(6 + phase_row) * reduced_width], block1_mean);
-        }
-    }
-
-    #[test]
-    fn xtrans_active_area_bounds_skip_unretained_tile_rows() {
-        assert_eq!(map_xtrans_coord(0, 12), 0);
-        assert_eq!(map_xtrans_coord(5, 12), 5);
-        assert_eq!(map_xtrans_coord(6, 12), 6);
-        assert_eq!(map_xtrans_coord(11, 12), 6);
-        assert_eq!(map_xtrans_coord(12, 12), 6);
-        assert_eq!(map_xtrans_coord(18, 12), 12);
-    }
-}
-
 /// `area` lies inside a `width * height` buffer. `checked_add` because
 /// `usize` is 32 bits on wasm32, and a garbage active-area tag could wrap a
 /// plain addition back into range.
@@ -918,10 +866,9 @@ fn decimate_linear_rgb(
                 (ox * step, ox * step + 1, oy * step, oy * step + 1)
             };
             let mut count: f32 = 0.0;
-            for sy in sy0..sy1.min(area.d.h as usize) {
-                for sx in sx0..sx1.min(area.d.w as usize) {
-                    let base =
-                        ((y0 as usize + sy) * width as usize + x0 as usize + sx) * cpp as usize;
+            for sy in sy0..sy1.min(area.d.h) {
+                for sx in sx0..sx1.min(area.d.w) {
+                    let base = ((y0 + sy) * width + x0 + sx) * cpp;
                     for (ch, slot) in rgb.iter_mut().enumerate() {
                         *slot += data[base + ch] * wb.get(ch).copied().unwrap_or(1.0);
                     }
@@ -964,4 +911,56 @@ fn decimate_linear_rgb(
     }
 
     Some((out_w as u32, out_h as u32, rgba))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{downsample_xtrans_mosaic, map_xtrans_coord, neutral_if_non_finite};
+
+    #[test]
+    fn missing_or_partial_white_balance_is_neutral() {
+        assert_eq!(neutral_if_non_finite([f32::NAN; 4]), [1.0; 4]);
+        let rgb_with_unused_nan = neutral_if_non_finite([2.0, 1.0, 0.5, f32::NAN]);
+        assert_eq!(rgb_with_unused_nan[..3], [2.0, 1.0, 0.5]);
+        assert!(rgb_with_unused_nan[3].is_nan());
+        assert_eq!(
+            neutral_if_non_finite([2.0, 1.0, 0.5, 1.0]),
+            [2.0, 1.0, 0.5, 1.0]
+        );
+    }
+
+    #[test]
+    fn xtrans_bounded_sampling_preserves_all_cfa_phases() {
+        // Column-independent so each output column's average collapses to
+        // the same expression as the row it belongs to.
+        let (width, height) = (72, 72);
+        let source: Vec<f32> = (0..width * height)
+            .map(|index| (index / width) as f32)
+            .collect();
+        let (reduced, reduced_width, reduced_height) =
+            downsample_xtrans_mosaic(&source, width, height, 12);
+
+        assert_eq!((reduced_width, reduced_height), (12, 12));
+
+        // reduction = 6, tile_step = 36: tile row 0's phase row `p` averages
+        // source rows {p, p+6, .., p+30}; tile row 1's averages {36+p, ..,
+        // 66+p}. Reading only row `p` would fail this.
+        for phase_row in 0..6 {
+            let block0_mean: f32 = (0..6).map(|i| (phase_row + i * 6) as f32).sum::<f32>() / 6.0;
+            let block1_mean: f32 =
+                (0..6).map(|i| (36 + phase_row + i * 6) as f32).sum::<f32>() / 6.0;
+            assert_eq!(reduced[phase_row * reduced_width], block0_mean);
+            assert_eq!(reduced[(6 + phase_row) * reduced_width], block1_mean);
+        }
+    }
+
+    #[test]
+    fn xtrans_active_area_bounds_skip_unretained_tile_rows() {
+        assert_eq!(map_xtrans_coord(0, 12), 0);
+        assert_eq!(map_xtrans_coord(5, 12), 5);
+        assert_eq!(map_xtrans_coord(6, 12), 6);
+        assert_eq!(map_xtrans_coord(11, 12), 6);
+        assert_eq!(map_xtrans_coord(12, 12), 6);
+        assert_eq!(map_xtrans_coord(18, 12), 12);
+    }
 }

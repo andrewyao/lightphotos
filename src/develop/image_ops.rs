@@ -263,7 +263,7 @@ pub fn linear_f16_to_srgb8(img: &DecodedImage) -> Vec<u8> {
     let adj = Adjustments::default();
     let f = |b: &[u8]| half::f16::from_le_bytes([b[0], b[1]]).to_f32();
     let mut out = Vec::with_capacity(n * 4);
-    for px in img.rgba.chunks_exact(8).take(n) {
+    for px in img.rgba.as_chunks::<8>().0.iter().take(n) {
         let d = develop::apply_raw_display(&adj, [f(&px[0..]), f(&px[2..]), f(&px[4..])]);
         out.extend(d.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
         out.push(255);
@@ -412,12 +412,10 @@ fn apply_touchups(
         let mask = mask * mask * (3.0 - 2.0 * mask) * t.opacity;
         let source_u = t.source[0] + (u - t.center[0]);
         let source_v = t.source[1] + (v - t.center[1]);
-        let mut src = sample_linear(img, source_u, source_v);
-        for c in 0..3 {
-            src[c] = (src[c] + t.delta[c]).clamp(0.0, 1.0);
-        }
-        for c in 0..3 {
-            out[c] = out[c] * (1.0 - mask) + src[c] * mask;
+        let src = sample_linear(img, source_u, source_v);
+        for ((o, s), d) in out.iter_mut().zip(src).zip(t.delta) {
+            let s = (s + d).clamp(0.0, 1.0);
+            *o = *o * (1.0 - mask) + s * mask;
         }
     }
     out
@@ -497,7 +495,7 @@ pub(crate) fn orient_mask(src: &[u8], w: u32, h: u32, orientation: u8) -> (u32, 
     if orientation <= 1 || src.len() < (w * h) as usize {
         return (w, h, src.to_vec());
     }
-    let swaps = matches!(orientation, 5 | 6 | 7 | 8);
+    let swaps = matches!(orientation, 5..=8);
     let (nw, nh) = if swaps { (h, w) } else { (w, h) };
     let mut dst = vec![0u8; (nw * nh) as usize];
     for yo in 0..nh {
@@ -657,13 +655,15 @@ mod tests {
             rgba: src,
             pixel_format: PixelFormat::Srgb8,
         });
-        let mut adj = Adjustments::default();
-        adj.crop = Some(Crop {
-            left: 0.5,
-            top: 0.0,
-            right: 1.0,
-            bottom: 1.0,
-        });
+        let adj = Adjustments {
+            crop: Some(Crop {
+                left: 0.5,
+                top: 0.0,
+                right: 1.0,
+                bottom: 1.0,
+            }),
+            ..Default::default()
+        };
         let (w, h, out) = bake_edited(&img, &adj, &[], 0);
         assert_eq!((w, h), (2, 1));
         assert_eq!(&out[0..4], &px(3));
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn bake_touchup_replaces_a_soft_spot_from_source_region() {
-        let mut src = vec![0u8; 5 * 1 * 4];
+        let mut src = vec![0u8; 5 * 4];
         for x in 0..5 {
             let value = if x == 2 { 255 } else { 0 };
             src[x * 4..x * 4 + 4].copy_from_slice(&px(value));

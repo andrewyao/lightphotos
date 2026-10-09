@@ -105,14 +105,18 @@ pub(crate) struct Exports {
     /// sees a Keychain prompt.
     #[cfg(not(target_arch = "wasm32"))]
     key_looked_up: bool,
-    /// The album add that ends an Immich batch, with the batch's summary to
-    /// finish the toast with.
+    /// The album add that ends an Immich batch.
     #[cfg(not(target_arch = "wasm32"))]
-    album_add: Option<(
-        Receiver<Result<crate::export::immich::Album, String>>,
-        String,
-        StatusKind,
-    )>,
+    album_add: Option<AlbumAdd>,
+}
+
+/// An album add in flight, with the batch's summary and status kind to
+/// finish the toast with.
+#[cfg(not(target_arch = "wasm32"))]
+struct AlbumAdd {
+    rx: Receiver<Result<crate::export::immich::Album, String>>,
+    summary: String,
+    kind: StatusKind,
 }
 
 impl Exports {
@@ -700,20 +704,22 @@ impl App {
         let ImmichLink::Connected { server, .. } = &self.exports.immich else {
             return Err(summary);
         };
-        let name = match &album {
+        // `existing` is `None` for an album still to be created.
+        let (name, existing) = match album {
             AlbumChoice::None => return Err(summary),
             _ if ids.is_empty() => return Err(summary),
-            AlbumChoice::Existing { name, .. } | AlbumChoice::New(name) => name.clone(),
+            AlbumChoice::Existing { id, name } => (name.clone(), Some(Album { id, name })),
+            AlbumChoice::New(name) => (name, None),
         };
         let server = Arc::clone(server);
+        let new_name = name.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new()
             .name("immich-album".into())
             .spawn(move || {
-                let result = match album {
-                    AlbumChoice::Existing { id, name } => Ok(Album { id, name }),
-                    AlbumChoice::New(name) => server.create_album(name.trim()),
-                    AlbumChoice::None => unreachable!("returned above"),
+                let result = match existing {
+                    Some(album) => Ok(album),
+                    None => server.create_album(new_name.trim()),
                 }
                 .and_then(|album| server.add_to_album(&album.id, &ids).map(|()| album));
                 let _ = tx.send(result);
@@ -722,7 +728,7 @@ impl App {
             return Err((crate::i18n::t().album_failed)(&summary, &e.to_string()));
         }
         let adding = (crate::i18n::t().adding_to_album)(&summary, &name);
-        self.exports.album_add = Some((rx, summary, kind));
+        self.exports.album_add = Some(AlbumAdd { rx, summary, kind });
         Ok(adding)
     }
 
@@ -731,7 +737,7 @@ impl App {
     /// into the same album rather than a second one of the same name.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn poll_album_add(&mut self) -> bool {
-        let Some((rx, ..)) = &self.exports.album_add else {
+        let Some(AlbumAdd { rx, .. }) = &self.exports.album_add else {
             return false;
         };
         let result = match rx.try_recv() {
@@ -739,7 +745,12 @@ impl App {
             Err(std::sync::mpsc::TryRecvError::Empty) => return true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the album add stopped".into()),
         };
-        let Some((_, summary, export_kind)) = self.exports.album_add.take() else {
+        let Some(AlbumAdd {
+            summary,
+            kind: export_kind,
+            ..
+        }) = self.exports.album_add.take()
+        else {
             return false;
         };
         let summary = &summary;
@@ -1046,7 +1057,11 @@ mod status_tests {
         app.exports.settings.target = ExportTarget::Immich;
         app.exports.settings.album = AlbumChoice::New("Trip".into());
         let (tx, rx) = std::sync::mpsc::channel();
-        app.exports.album_add = Some((rx, "Uploaded 2".into(), StatusKind::Success));
+        app.exports.album_add = Some(AlbumAdd {
+            rx,
+            summary: "Uploaded 2".into(),
+            kind: StatusKind::Success,
+        });
         assert!(app.poll_album_add(), "still waiting before a reply");
         assert!(
             app.batch_running(),
@@ -1095,7 +1110,11 @@ mod status_tests {
         assert_eq!(app.export_blocker(), None);
 
         let (_tx, rx) = std::sync::mpsc::channel();
-        app.exports.album_add = Some((rx, "Uploaded 1".into(), StatusKind::Success));
+        app.exports.album_add = Some(AlbumAdd {
+            rx,
+            summary: "Uploaded 1".into(),
+            kind: StatusKind::Success,
+        });
         assert_eq!(
             app.export_blocker(),
             Some(crate::i18n::t().export_in_progress),
@@ -1125,7 +1144,11 @@ mod status_tests {
         ];
         for (export_kind, result, expected) in cases {
             let (tx, rx) = std::sync::mpsc::channel();
-            app.exports.album_add = Some((rx, "Uploaded 1".into(), export_kind));
+            app.exports.album_add = Some(AlbumAdd {
+                rx,
+                summary: "Uploaded 1".into(),
+                kind: export_kind,
+            });
             tx.send(result).unwrap();
             assert!(!app.poll_album_add());
             assert_eq!(app.status().map(|(kind, _)| kind), Some(expected));

@@ -403,7 +403,9 @@ fn build(lang: Lang) -> MenuBar {
     for (title, role, rows) in MENUS {
         let submenu = Submenu::new(title(m), true);
         append(&submenu, rows, m, &mut items);
-        menu.append(&submenu).expect("append menu");
+        if let Err(e) = menu.append(&submenu) {
+            eprintln!("[lightphotos] append menu: {e}");
+        }
         match role {
             Role::Windows => submenu.set_as_windows_menu_for_nsapp(),
             Role::Help => submenu.set_as_help_menu_for_nsapp(),
@@ -440,7 +442,9 @@ fn append(
                 parent.append(&submenu)
             }
         };
-        appended.expect("append menu item");
+        if let Err(e) = appended {
+            eprintln!("[lightphotos] append menu item: {e}");
+        }
     }
 }
 

@@ -12,17 +12,15 @@ use winit::window::Window;
 /// `window.inner_size()` is not reliable yet at this point. Styling sets only
 /// `width`/`height`/`display`, because winit's size math breaks with
 /// `transform`, `border`, or `padding` on the canvas.
-pub fn attach(window: &Window) -> PhysicalSize<u32> {
-    let canvas = window
-        .canvas()
-        .expect("window has no canvas (not running on web?)");
+pub fn attach(window: &Window) -> Result<PhysicalSize<u32>, String> {
+    let canvas = window.canvas().ok_or("window has no canvas")?;
     canvas.set_id("lightphotos-canvas");
 
     // The backing store (the width/height attributes, not the CSS size)
     // defaults to 300x150, so set it to the viewport in physical pixels.
     // egui computes scissor rects in physical pixels from the scale factor,
     // and WebGPU rejects a scissor rect larger than the surface.
-    let browser_window = web_sys::window().expect("no window");
+    let browser_window = web_sys::window().ok_or("no browser window")?;
     let dpr = browser_window.device_pixel_ratio();
     let dpr = if dpr > 0.0 { dpr } else { 1.0 };
     let logical_w = browser_window
@@ -46,11 +44,12 @@ pub fn attach(window: &Window) -> PhysicalSize<u32> {
         let _ = js_sys::Reflect::set(&style, &"display".into(), &"block".into());
     }
 
-    let document = web_sys::window()
-        .and_then(|w| w.document())
-        .expect("no document");
-    let body = document.body().expect("document has no body");
-    body.append_child(&canvas).expect("append canvas to body");
+    let body = browser_window
+        .document()
+        .and_then(|d| d.body())
+        .ok_or("document has no body")?;
+    body.append_child(&canvas)
+        .map_err(|e| format!("append canvas to body: {e:?}"))?;
 
-    PhysicalSize::new(w.max(1), h.max(1))
+    Ok(PhysicalSize::new(w.max(1), h.max(1)))
 }

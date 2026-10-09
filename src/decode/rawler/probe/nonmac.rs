@@ -9,56 +9,56 @@ use std::path::Path;
 use std::path::PathBuf;
 
 pub(super) fn main() {
+    if let Err(e) = run() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // One decode, then exit: lets `/usr/bin/time -l` report that decode's
     // own peak RSS instead of the whole fixture suite's.
-    match args.first().map(String::as_str) {
-        Some("--nonmac-decode") => return run_nonmac_decode_probe(&args[1..]),
-        Some("--wasm-quality-decode") => return run_wasm_quality_decode_probe(&args[1..]),
-        Some("--compare") => return run_compare_png(&args[1..]),
+    match args.split_first() {
+        Some((flag, rest)) if flag == "--nonmac-decode" => return run_nonmac_decode_probe(rest),
+        Some((flag, rest)) if flag == "--wasm-quality-decode" => {
+            return run_wasm_quality_decode_probe(rest)
+        }
+        Some((flag, rest)) if flag == "--compare" => return run_compare_png(rest),
         _ => {}
     }
 
     let dir = std::env::temp_dir().join("lightphotos-decode-probe");
-    std::fs::create_dir_all(&dir).expect("create probe fixture dir");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create probe fixture dir: {e}"))?;
     let dng_path = dir.join("linear_test.dng");
     let (width, height) = (256u32, 192u32);
-    write_linear_dng(&dng_path, width, height).expect("write fixture DNG");
+    write_linear_dng(&dng_path, width, height).map_err(|e| format!("write fixture DNG: {e}"))?;
 
     println!("--- Synthetic Linear DNG: rawler decode vs analytic gradient ground truth ---");
-    match decode_via_rawler(&dng_path) {
-        Ok(raw) => match compare_against_gradient_ground_truth(&raw, width, height) {
-            Ok(report) => {
-                println!(
-                    "rawler decoded {}x{} cpp={} bps={}: {report}",
-                    raw.width, raw.height, raw.cpp, raw.bps
-                );
-                println!("PASS: rawler's Linear DNG decode matches the analytic gradient ground truth exactly.");
-            }
-            Err(e) => {
-                eprintln!("FAIL: rawler decoded the fixture but its pixels diverge from ground truth: {e}");
-                std::process::exit(1);
-            }
-        },
-        Err(e) => {
-            eprintln!("FAIL: rawler could not decode the synthetic Linear DNG fixture: {e}");
-            std::process::exit(1);
-        }
-    }
+    let raw = decode_via_rawler(&dng_path).map_err(|e| {
+        format!("FAIL: rawler could not decode the synthetic Linear DNG fixture: {e}")
+    })?;
+    let report = compare_against_gradient_ground_truth(&raw, width, height).map_err(|e| {
+        format!("FAIL: rawler decoded the fixture but its pixels diverge from ground truth: {e}")
+    })?;
+    println!(
+        "rawler decoded {}x{} cpp={} bps={}: {report}",
+        raw.width, raw.height, raw.cpp, raw.bps
+    );
+    println!(
+        "PASS: rawler's Linear DNG decode matches the analytic gradient ground truth exactly."
+    );
 
     println!("--- Synthetic Linear DNG: rawler's RawDevelop pipeline (Task 10's decode_raw_nonmac path) ---");
-    match develop_smoke_check(&dng_path, width, height) {
-        Ok(()) => println!(
-            "PASS: RawDevelop::develop_intermediate -> to_dynamic_image ran end-to-end and \
-             produced a {width}x{height} image, same shape decode_raw_nonmac's non-mac RAW \
-             path builds on."
-        ),
-        Err(e) => {
-            eprintln!("FAIL: RawDevelop pipeline did not complete on the synthetic fixture: {e}");
-            std::process::exit(1);
-        }
-    }
+    develop_smoke_check(&dng_path, width, height).map_err(|e| {
+        format!("FAIL: RawDevelop pipeline did not complete on the synthetic fixture: {e}")
+    })?;
+    println!(
+        "PASS: RawDevelop::develop_intermediate -> to_dynamic_image ran end-to-end and \
+         produced a {width}x{height} image, same shape decode_raw_nonmac's non-mac RAW \
+         path builds on."
+    );
 
     // Real RAW files from the CLI have no ground truth, so this only reports
     // decode success, shape, and timing.
@@ -77,24 +77,30 @@ pub(super) fn main() {
             Err(e) => println!("{}: FAILED: {e}", path.display()),
         }
     }
+    Ok(())
+}
+
+/// Parses the `<path> <n> [png_out]` arguments shared by the single-decode
+/// probes.
+fn path_and_limit<'a>(args: &'a [String], usage: &str) -> Result<(&'a str, u32), String> {
+    let (Some(path), Some(n)) = (args.first(), args.get(1)) else {
+        return Err(format!("usage: {usage}"));
+    };
+    let n = n
+        .parse()
+        .map_err(|e| format!("{n:?} is not a number ({e}); usage: {usage}"))?;
+    Ok((path, n))
 }
 
 /// `decode_probe --nonmac-decode <path> <max_dim> [png_out]`: one call to the
 /// native non-mac RAW decode path, for peak-RSS and wall-time measurement.
-fn run_nonmac_decode_probe(args: &[String]) {
-    let path = args
-        .first()
-        .expect("usage: --nonmac-decode <path> <max_dim> [png_out]");
-    let max_dim: u32 = args
-        .get(1)
-        .expect("max_dim required")
-        .parse()
-        .expect("max_dim must be a number");
+fn run_nonmac_decode_probe(args: &[String]) -> Result<(), String> {
+    let (path, max_dim) = path_and_limit(args, "--nonmac-decode <path> <max_dim> [png_out]")?;
 
-    let bytes = std::fs::read(path).expect("read RAW file");
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let t0 = std::time::Instant::now();
     let img = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, max_dim)
-        .expect("decode_raw_nonmac_from_bytes failed");
+        .map_err(|e| format!("decode_raw_nonmac_from_bytes failed: {e}"))?;
     println!(
         "nonmac-decode {}x{} in {:?}",
         img.width,
@@ -102,28 +108,22 @@ fn run_nonmac_decode_probe(args: &[String]) {
         t0.elapsed()
     );
 
-    if let Some(out) = args.get(2) {
-        save_decoded_png(&img, out);
+    match args.get(2) {
+        Some(out) => save_decoded_png(&img, out),
+        None => Ok(()),
     }
 }
 
 /// `decode_probe --wasm-quality-decode <path> <max_px> [png_out]`: one call
 /// to the wasm32-shared `Quality` preview tier, runnable natively since it
 /// has no wasm-only dependency.
-fn run_wasm_quality_decode_probe(args: &[String]) {
-    let path = args
-        .first()
-        .expect("usage: --wasm-quality-decode <path> <max_px> [png_out]");
-    let max_px: u32 = args
-        .get(1)
-        .expect("max_px required")
-        .parse()
-        .expect("max_px must be a number");
+fn run_wasm_quality_decode_probe(args: &[String]) -> Result<(), String> {
+    let (path, max_px) = path_and_limit(args, "--wasm-quality-decode <path> <max_px> [png_out]")?;
 
-    let bytes = std::fs::read(path).expect("read RAW file");
+    let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
     let t0 = std::time::Instant::now();
     let img = raw_preview::decode_raw_quality_from_bytes(&bytes, max_px)
-        .expect("decode_raw_quality_from_bytes failed");
+        .map_err(|e| format!("decode_raw_quality_from_bytes failed: {e}"))?;
     println!(
         "wasm-quality-decode {}x{} in {:?}",
         img.width,
@@ -131,26 +131,32 @@ fn run_wasm_quality_decode_probe(args: &[String]) {
         t0.elapsed()
     );
 
-    if let Some(out) = args.get(2) {
-        save_decoded_png(&img, out);
+    match args.get(2) {
+        Some(out) => save_decoded_png(&img, out),
+        None => Ok(()),
     }
 }
 
 /// `decode_probe --compare <a.png> <b.png>`: mean absolute difference and
 /// PSNR between two same-size PNGs, for the raw-decode-memory task's
 /// before/after quality check.
-fn run_compare_png(args: &[String]) {
-    let a = image::open(args.first().expect("usage: --compare <a.png> <b.png>"))
-        .expect("open a.png")
-        .into_rgb8();
-    let b = image::open(args.get(1).expect("usage: --compare <a.png> <b.png>"))
-        .expect("open b.png")
-        .into_rgb8();
-    assert_eq!(
-        (a.width(), a.height()),
-        (b.width(), b.height()),
-        "compared images must be the same size"
-    );
+fn run_compare_png(args: &[String]) -> Result<(), String> {
+    let [a, b, ..] = args else {
+        return Err("usage: --compare <a.png> <b.png>".to_string());
+    };
+    let open = |p: &str| {
+        image::open(p)
+            .map(|img| img.into_rgb8())
+            .map_err(|e| format!("open {p}: {e}"))
+    };
+    let (a, b) = (open(a)?, open(b)?);
+    if a.dimensions() != b.dimensions() {
+        return Err(format!(
+            "compared images must be the same size: {:?} vs {:?}",
+            a.dimensions(),
+            b.dimensions()
+        ));
+    }
 
     let (mut sum_abs, mut sum_sq, mut max_abs, mut n) = (0f64, 0f64, 0f64, 0f64);
     for (pa, pb) in a.pixels().zip(b.pixels()) {
@@ -174,16 +180,17 @@ fn run_compare_png(args: &[String]) {
         a.width(),
         a.height()
     );
+    Ok(())
 }
 
 /// Writes a `DecodedImage` as PNG, applying the same gamma and display boost
 /// as the loupe shader for `LinearF16` so both pixel formats look right.
-fn save_decoded_png(img: &image_decode::DecodedImage, out: &str) {
-    match img.pixel_format {
+fn save_decoded_png(img: &image_decode::DecodedImage, out: &str) -> Result<(), String> {
+    let saved = match img.pixel_format {
         image_decode::PixelFormat::Srgb8 => {
             let buf = image::RgbaImage::from_raw(img.width, img.height, img.rgba.clone())
-                .expect("rgba buffer size mismatch");
-            buf.save(out).expect("save png");
+                .ok_or("rgba buffer size mismatch")?;
+            buf.save(out)
         }
         image_decode::PixelFormat::LinearF16 => {
             let mut buf = image::RgbImage::new(img.width, img.height);
@@ -193,17 +200,19 @@ fn save_decoded_png(img: &image_decode::DecodedImage, out: &str) {
                     .round()
                     .clamp(0.0, 255.0) as u8
             };
-            for (i, px) in img.rgba.chunks_exact(8).enumerate() {
+            for (i, px) in img.rgba.as_chunks::<8>().0.iter().enumerate() {
                 let r = half::f16::from_le_bytes([px[0], px[1]]).to_f32();
                 let g = half::f16::from_le_bytes([px[2], px[3]]).to_f32();
                 let b = half::f16::from_le_bytes([px[4], px[5]]).to_f32();
                 let (x, y) = (i as u32 % img.width, i as u32 / img.width);
                 buf.put_pixel(x, y, image::Rgb([enc(r), enc(g), enc(b)]));
             }
-            buf.save(out).expect("save png");
+            buf.save(out)
         }
-    }
+    };
+    saved.map_err(|e| format!("save {out}: {e}"))?;
     println!("wrote {out}");
+    Ok(())
 }
 
 /// Decodes with rawler, returning its native `RawImage` so the ground-truth
@@ -314,8 +323,7 @@ fn compare_against_gradient_ground_truth(
         sum_abs_diff as f64 / expected_len as f64
     );
 
-    if mismatches > 0 {
-        let (x, y, expected, got) = first_mismatch.unwrap();
+    if let Some((x, y, expected, got)) = first_mismatch {
         return Err(format!(
             "{report} (first mismatch at pixel ({x},{y}): expected {expected}, got {got})"
         ));
@@ -375,7 +383,7 @@ fn write_linear_dng_with_wb(
     }
     /// TIFF out-of-line values start on a word boundary.
     fn pad_to_even(buf: &mut Vec<u8>) {
-        if buf.len() % 2 != 0 {
+        if !buf.len().is_multiple_of(2) {
             buf.push(0);
         }
     }
@@ -388,29 +396,25 @@ fn write_linear_dng_with_wb(
 
     let bits_per_sample_offset = after_ifd as u32; // 3 x SHORT = 6 bytes
     let mut off = after_ifd + 6;
-    if off % 2 != 0 {
+    if !off.is_multiple_of(2) {
         off += 1;
     }
     let color_matrix_offset = off as u32; // 9 x SRATIONAL = 72 bytes
     off += 72;
-    if off % 2 != 0 {
+    if !off.is_multiple_of(2) {
         off += 1;
     }
     let as_shot_neutral_offset = off as u32; // 3 x RATIONAL = 24 bytes
     if as_shot_neutral.is_some() {
         off += 24;
-        if off % 2 != 0 {
+        if !off.is_multiple_of(2) {
             off += 1;
         }
     }
     let pixel_offset = off as u32;
 
-    let strip_byte_count_u64 = (width as u64) * (height as u64) * 3 * 2;
-    assert!(
-        strip_byte_count_u64 <= u32::MAX as u64,
-        "fixture too large for a LONG StripByteCounts"
-    );
-    let strip_byte_count = strip_byte_count_u64 as u32;
+    let strip_byte_count = u32::try_from((width as u64) * (height as u64) * 3 * 2)
+        .map_err(|_| std::io::Error::other("fixture too large for a LONG StripByteCounts"))?;
 
     let mut buf: Vec<u8> = Vec::with_capacity(pixel_offset as usize + strip_byte_count as usize);
 
@@ -557,7 +561,7 @@ fn write_dng_with_preview_subifd(
     }
     /// TIFF out-of-line values start on a word boundary.
     fn pad_to_even(buf: &mut Vec<u8>) {
-        if buf.len() % 2 != 0 {
+        if !buf.len().is_multiple_of(2) {
             buf.push(0);
         }
     }
@@ -736,13 +740,13 @@ fn write_bayer_dng_with_cfa(
         buf.extend_from_slice(&value);
     }
     fn pad_to_even(buf: &mut Vec<u8>) {
-        if buf.len() % 2 != 0 {
+        if !buf.len().is_multiple_of(2) {
             buf.push(0);
         }
     }
 
     assert!(
-        width % 2 == 0 && height % 2 == 0,
+        width.is_multiple_of(2) && height.is_multiple_of(2),
         "Bayer fixture needs even dimensions"
     );
 
@@ -753,17 +757,17 @@ fn write_bayer_dng_with_cfa(
     // ColorMatrix1 (9x SRATIONAL), AsShotNeutral (3x RATIONAL).
     let blacklevels_offset = after_ifd as u32; // 4 x SHORT = 8 bytes
     let mut off = after_ifd + 8;
-    if off % 2 != 0 {
+    if !off.is_multiple_of(2) {
         off += 1;
     }
     let colormatrix_offset = off as u32; // 9 x SRATIONAL = 72 bytes
     off += 72;
-    if off % 2 != 0 {
+    if !off.is_multiple_of(2) {
         off += 1;
     }
     let asshotneutral_offset = off as u32; // 3 x RATIONAL = 24 bytes
     off += 24;
-    if off % 2 != 0 {
+    if !off.is_multiple_of(2) {
         off += 1;
     }
     let pixel_offset = off as u32;
@@ -1092,7 +1096,9 @@ mod tests {
         assert!(
             decoded
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|p| p[0] != 0 || p[1] != 0 || p[2] != 0),
             "decoded image has no non-zero color channel anywhere - the golden hash \
              below would then discriminate nothing but the output dimensions"
@@ -1119,7 +1125,9 @@ mod tests {
         assert!(
             decoded
                 .rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|p| p[0] != 0 || p[1] != 0 || p[2] != 0),
             "missing white balance metadata must use neutral coefficients"
         );
@@ -1186,7 +1194,7 @@ mod tests {
         // Check color channels only. Alpha is always 1, so checking any byte
         // would pass on a black image.
         let mut any_nonzero = false;
-        for px in rgba.chunks_exact(8) {
+        for px in rgba.as_chunks::<8>().0 {
             let r = half::f16::from_le_bytes([px[0], px[1]]).to_f32();
             let g = half::f16::from_le_bytes([px[2], px[3]]).to_f32();
             let b = half::f16::from_le_bytes([px[4], px[5]]).to_f32();
@@ -1263,7 +1271,7 @@ mod tests {
         );
         // The resize must not zero the image.
         let mut any_nonzero = false;
-        for px in bounded.rgba.chunks_exact(8) {
+        for px in bounded.rgba.as_chunks::<8>().0 {
             let r = half::f16::from_le_bytes([px[0], px[1]]).to_f32();
             let g = half::f16::from_le_bytes([px[2], px[3]]).to_f32();
             let b = half::f16::from_le_bytes([px[4], px[5]]).to_f32();
@@ -1394,7 +1402,9 @@ mod tests {
         );
         let wasm_pixels: Vec<[f32; 3]> = wasm_decoded
             .rgba
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|px| {
                 [
                     half::f16::from_le_bytes([px[0], px[1]]).to_f32(),
@@ -1459,7 +1469,7 @@ mod tests {
             );
             let mut sum = [0f64; 3];
             let mut n = 0u64;
-            for px in embedded.rgba.chunks_exact(4) {
+            for px in embedded.rgba.as_chunks::<4>().0 {
                 sum[0] += px[0] as f64 / 255.0;
                 sum[1] += px[1] as f64 / 255.0;
                 sum[2] += px[2] as f64 / 255.0;
@@ -1520,7 +1530,7 @@ mod tests {
                 .round()
                 .clamp(0.0, 255.0) as u8
         };
-        for (i, px) in decoded.rgba.chunks_exact(8).enumerate() {
+        for (i, px) in decoded.rgba.as_chunks::<8>().0.iter().enumerate() {
             let r = half::f16::from_le_bytes([px[0], px[1]]).to_f32();
             let g = half::f16::from_le_bytes([px[2], px[3]]).to_f32();
             let b = half::f16::from_le_bytes([px[4], px[5]]).to_f32();

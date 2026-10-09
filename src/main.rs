@@ -1,4 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Non-test code never panics, and every `unsafe` block says why it is sound.
+// See CLAUDE.md → Rust rules.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unimplemented,
+    clippy::todo,
+    clippy::unreachable,
+    clippy::undocumented_unsafe_blocks
+)]
 // A console-subsystem program gets a console window of its own when launched
 // from Explorer. Debug builds keep it for their log output.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
@@ -79,6 +90,15 @@ fn finish_window_setup(
     }
 }
 
+/// Reports a failure that leaves no window to show and stops the event loop.
+fn startup_failed(event_loop: &ActiveEventLoop, msg: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("[lightphotos] can't start: {msg}");
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::error_1(&format!("[lightphotos] can't start: {msg}").into());
+    event_loop.exit();
+}
+
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -96,7 +116,10 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(not(target_arch = "wasm32"))]
         let attrs = attrs.with_visible(false);
         jobs::loader::mark("resumed: creating window");
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => return startup_failed(event_loop, &format!("create window: {e}")),
+        };
         jobs::loader::mark("window created; initializing wgpu");
 
         // `Renderer::new` is async because WebGPU device setup is a browser
@@ -105,7 +128,10 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let size = window.inner_size();
-            let renderer = pollster::block_on(Renderer::new(window.clone(), size));
+            let renderer = match pollster::block_on(Renderer::new(window.clone(), size)) {
+                Ok(r) => r,
+                Err(e) => return startup_failed(event_loop, &e),
+            };
             jobs::loader::mark("wgpu ready");
             finish_window_setup(self, window.clone(), renderer, size);
             window.set_visible(true);
@@ -115,12 +141,21 @@ impl ApplicationHandler<UserEvent> for App {
         {
             // winit creates a <canvas> on wasm but doesn't add it to the page.
             // `attach` adds it and returns the real size.
-            let size = web::web_canvas::attach(&window);
+            let size = match web::web_canvas::attach(&window) {
+                Ok(size) => size,
+                Err(e) => return startup_failed(event_loop, &e),
+            };
             self.window = Some(window.clone());
             let tx = self.renderer_init_tx.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                let renderer = Renderer::new(window, size).await;
-                let _ = tx.send((renderer, size));
+                match Renderer::new(window, size).await {
+                    Ok(renderer) => {
+                        let _ = tx.send((renderer, size));
+                    }
+                    Err(e) => {
+                        web_sys::console::error_1(&format!("[lightphotos] can't start: {e}").into())
+                    }
+                }
             });
         }
     }
@@ -157,7 +192,7 @@ impl ApplicationHandler<UserEvent> for App {
         // egui sees each event first. Events it consumes skip the app.
         let consumed =
             if let (Some(window), Some(state)) = (self.window.clone(), self.egui_state.as_mut()) {
-                let response = state.on_window_event(&*window, &event);
+                let response = state.on_window_event(&window, &event);
                 #[cfg(target_arch = "wasm32")]
                 if let WindowEvent::ModifiersChanged(m) = &event {
                     App::use_mac_command_key(&mut state.egui_input_mut().modifiers, m.state());
@@ -403,7 +438,12 @@ impl App {
         };
 
         if let Some(loader) = &mut self.loader {
-            let (full, thumbs, metas, exifs) = loader.poll_all();
+            let jobs::loader::Arrivals {
+                full,
+                thumbs,
+                metas,
+                exifs,
+            } = loader.poll_all();
             let any = !full.is_empty()
                 || !thumbs.is_empty()
                 || !metas.is_empty()
@@ -541,6 +581,8 @@ fn main() {
     // print to it; launched from Explorer, there is no parent console and the
     // call fails harmlessly.
     #[cfg(all(windows, not(debug_assertions)))]
+    // SAFETY: AttachConsole takes a process id by value and touches no Rust
+    // memory; failure is reported through its return value, ignored here.
     unsafe {
         windows_sys::Win32::System::Console::AttachConsole(
             windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
@@ -592,7 +634,13 @@ fn main() {
     // would replace `shell::menu::install`'s.
     #[cfg(target_os = "macos")]
     winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut builder, false);
-    let event_loop = builder.build().expect("build event loop");
+    let event_loop = match builder.build() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[lightphotos] can't start: build event loop: {e}");
+            std::process::exit(1);
+        }
+    };
     event_loop.set_control_flow(ControlFlow::Wait);
 
     shell::macos_delegate::set_proxy(event_loop.create_proxy());
@@ -606,7 +654,10 @@ fn main() {
     jobs::loader::mark("event loop built; constructing App");
     let mut app = App::new(initial);
     jobs::loader::mark("App constructed; entering event loop");
-    event_loop.run_app(&mut app).expect("run app");
+    if let Err(e) = event_loop.run_app(&mut app) {
+        eprintln!("[lightphotos] event loop failed: {e}");
+        std::process::exit(1);
+    }
 }
 
 /// wasm entry point. Uses `spawn_app`, not the blocking `run_app`, because
@@ -618,9 +669,13 @@ fn main() {
     jobs::loader::install_panic_recovery();
     jobs::loader::start_clock();
 
-    let event_loop = EventLoop::<UserEvent>::with_user_event()
-        .build()
-        .expect("build event loop");
+    let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
+        Ok(l) => l,
+        Err(e) => {
+            web_sys::console::error_1(&format!("[lightphotos] can't start: {e}").into());
+            return;
+        }
+    };
     event_loop.set_control_flow(ControlFlow::Wait);
 
     i18n::init();

@@ -136,15 +136,20 @@ impl Renderer {
     /// The caller passes `size` because on wasm32 winit's `inner_size()` is
     /// `(0, 0)` until the browser's `ResizeObserver` first fires. A 1x1 surface
     /// makes every render pass fail WebGPU's scissor-rect validation.
-    pub async fn new(window: Arc<Window>, size: winit::dpi::PhysicalSize<u32>) -> Self {
+    ///
+    /// Errs when the platform has no usable GPU surface, adapter or device.
+    pub async fn new(
+        window: Arc<Window>,
+        size: winit::dpi::PhysicalSize<u32>,
+    ) -> Result<Self, String> {
         let instance = wgpu::Instance::default();
         // A browser with no WebGPU at all fails here, before `request_adapter`
         // is ever reached, so this is the report that covers "can't run".
-        let surface = instance.create_surface(window).unwrap_or_else(|e| {
+        let surface = instance.create_surface(window).map_err(|e| {
             #[cfg(target_arch = "wasm32")]
             crate::web::analytics::property("webgpu_unsupported", "reason", "surface_unavailable");
-            panic!("create surface: {e}");
-        });
+            format!("create surface: {e}")
+        })?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -153,15 +158,15 @@ impl Renderer {
                 force_fallback_adapter: false,
             })
             .await
-            .unwrap_or_else(|e| {
+            .map_err(|e| {
                 #[cfg(target_arch = "wasm32")]
                 crate::web::analytics::property(
                     "webgpu_unsupported",
                     "reason",
                     "adapter_unavailable",
                 );
-                panic!("no adapter: {e}");
-            });
+                format!("no adapter: {e}")
+            })?;
 
         // Request the adapter's real limits; the defaults cap textures at 8192.
         let limits = adapter.limits();
@@ -177,15 +182,15 @@ impl Renderer {
                 trace: wgpu::Trace::Off,
             })
             .await
-            .unwrap_or_else(|e| {
+            .map_err(|e| {
                 #[cfg(target_arch = "wasm32")]
                 crate::web::analytics::property(
                     "webgpu_unsupported",
                     "reason",
                     "device_unavailable",
                 );
-                panic!("request device: {e}");
-            });
+                format!("request device: {e}")
+            })?;
 
         // A plain, non-sRGB surface on every platform, because WebGPU canvases
         // never offer an sRGB one. Every shader therefore writes sRGB-encoded
@@ -196,7 +201,13 @@ impl Renderer {
             .iter()
             .copied()
             .find(|f| !f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+            .or(caps.formats.first().copied())
+            .ok_or("the surface supports no texture format")?;
+        let alpha_mode = caps
+            .alpha_modes
+            .first()
+            .copied()
+            .ok_or("the surface supports no alpha mode")?;
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -204,7 +215,7 @@ impl Renderer {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -557,7 +568,7 @@ impl Renderer {
         let egui_renderer =
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
 
-        Self {
+        Ok(Self {
             clear_color: wgpu::Color::BLACK,
             surface,
             device,
@@ -591,7 +602,7 @@ impl Renderer {
             egui_renderer,
             offscreen: None,
             thumb_textures: HashMap::new(),
-        }
+        })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -658,7 +669,7 @@ impl Renderer {
         let mut rgb = Vec::with_capacity((w * h * 3) as usize);
         for y in 0..h as usize {
             let row = &mapped[y * padded_row as usize..][..(w * 4) as usize];
-            for px in row.chunks_exact(4) {
+            for px in row.as_chunks::<4>().0 {
                 let (r, b) = if swap_rb {
                     (px[2], px[0])
                 } else {
@@ -1227,12 +1238,15 @@ impl Renderer {
                 }
             },
         };
-        let view = frame
+        let Some(target) = frame
             .as_ref()
             .map(|f| &f.texture)
             .or(self.offscreen.as_ref())
-            .expect("a surface frame or the offscreen texture")
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        else {
+            self.free_egui_textures(&egui);
+            return false;
+        };
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });

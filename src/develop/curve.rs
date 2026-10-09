@@ -155,9 +155,9 @@ fn thin(v: &mut Vec<[u8; 2]>) {
             let t = (x as f32 - x0 as f32) / (x1 as f32 - x0 as f32);
             (y0 as f32 + (y1 as f32 - y0 as f32) * t - y as f32).abs()
         };
-        let i = (1..v.len() - 1)
-            .min_by(|&a, &b| off(a).total_cmp(&off(b)))
-            .expect("more than MAX_POINTS points");
+        let Some(i) = (1..v.len() - 1).min_by(|&a, &b| off(a).total_cmp(&off(b))) else {
+            break;
+        };
         v.remove(i);
     }
 }

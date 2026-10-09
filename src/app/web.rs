@@ -624,17 +624,16 @@ impl App {
     /// cost a re-decode next session, and a full disk would toast once per
     /// photo.
     fn store_web_thumb(&mut self, path: &Path, name: String, bytes: Vec<u8>) {
-        let Some(root) = path
-            .parent()
-            .and_then(|d| self.web.dir_handles.get(d))
-            .cloned()
-        else {
+        let Some(dir) = path.parent() else {
+            return;
+        };
+        let Some(root) = self.web.dir_handles.get(dir).cloned() else {
             return;
         };
         let cleanup = self
             .web
             .thumb_cleanup
-            .entry(path.parent().unwrap().to_path_buf())
+            .entry(dir.to_path_buf())
             .or_default()
             .clone();
         let display = path.to_path_buf();
@@ -675,9 +674,9 @@ impl App {
             // Browser paths start at the picked folder's name, so two picks of
             // same-named folders share paths. Drop results from before the
             // last pick so they cannot resolve the new folder's handles.
-            if r.generation != Some(self.web.handle_generation) {
+            let Some(generation) = r.generation.filter(|g| *g == self.web.handle_generation) else {
                 continue;
-            }
+            };
             let recover_source = r.needs_source_decode();
             // A corrupt cache entry needs a source read. With no read slot
             // free, park the result for next frame without using a retry.
@@ -691,7 +690,6 @@ impl App {
                 result,
                 jpeg,
                 cache_name,
-                generation,
                 ..
             } = r;
             let key = (path.clone(), target);
@@ -712,16 +710,10 @@ impl App {
                             Ok(bytes) => {
                                 let is_raw = crate::decode::image_decode::is_raw_extension(&path);
                                 pool.submit_thumb(
-                                    path,
-                                    target,
-                                    bytes,
-                                    is_raw,
-                                    cache_name,
-                                    generation.expect("validated thumbnail generation"),
-                                    false,
+                                    path, target, bytes, is_raw, cache_name, generation, false,
                                 );
                             }
-                            Err(e) => pool.fail(path, target, JobKind::Thumb, generation, e),
+                            Err(e) => pool.fail(path, target, JobKind::Thumb, Some(generation), e),
                         }
                     });
                     continue;
@@ -1459,7 +1451,9 @@ impl App {
             return;
         }
         self.web.session_restore = None;
-        let dir = chain.last().expect("the chain starts at the root").clone();
+        let Some(dir) = chain.last().cloned() else {
+            return;
+        };
         if chain.len() > 1 {
             self.expanded.extend(chain);
             self.apply_web_load_folder(dir);

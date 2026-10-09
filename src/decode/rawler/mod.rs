@@ -81,7 +81,7 @@ pub fn normalize_linear_levels(raw: &mut rawler::RawImage) -> Result<(), String>
     if black.len() == white.len() {
         return Ok(());
     }
-    if cpp == 0 || black.len() % cpp != 0 || !(white.len() == 1 || white.len() == cpp) {
+    if cpp == 0 || !black.len().is_multiple_of(cpp) || !(white.len() == 1 || white.len() == cpp) {
         return Err(format!(
             "unsupported RAW levels ({} black, {} white, cpp={cpp})",
             black.len(),

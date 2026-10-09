@@ -1,4 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Non-test code never panics, and every `unsafe` block says why it is sound.
+// See CLAUDE.md → Rust rules.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unimplemented,
+    clippy::todo,
+    clippy::unreachable,
+    clippy::undocumented_unsafe_blocks
+)]
 
 //! `decode_probe`: a RAW decode test harness for the non-mac decode path. It
 //! writes synthetic DNG fixtures (Linear DNG, Bayer, and DNG with a preview

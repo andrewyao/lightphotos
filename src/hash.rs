@@ -29,6 +29,12 @@ impl Fnv1a {
     }
 }
 
+impl Default for Fnv1a {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

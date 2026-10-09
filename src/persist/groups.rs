@@ -57,7 +57,9 @@ impl GroupId {
         let ms = newest
             .map_or(now, |n| now.max(n.saturating_add(1)))
             .min(MAX_MINTED_MS);
-        for salt in 0u32.. {
+        // A folder can't hold 2^32 groups, so some salt is free.
+        let mut salt = 0u32;
+        loop {
             let mut h = Fnv1a::new();
             for m in &group.members {
                 h.write(m.as_encoded_bytes());
@@ -71,8 +73,8 @@ impl GroupId {
             if !taken(&id) {
                 return id;
             }
+            salt = salt.wrapping_add(1);
         }
-        unreachable!("a folder cannot hold 2^32 groups")
     }
 }
 

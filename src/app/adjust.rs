@@ -434,10 +434,7 @@ impl App {
                     sum[c] += p[c];
                 }
             }
-            for c in 0..3 {
-                sum[c] /= 8.0;
-            }
-            sum
+            sum.map(|s| s / 8.0)
         };
         let target_ring = ring(u, v);
         let (unit_radius_u, unit_radius_v) = self.touchup_uv_radii(1.0);
@@ -455,7 +452,7 @@ impl App {
                 .map(|c| (sr[c] - target_ring[c]).powi(2))
                 .sum::<f32>()
                 + distance * 0.002;
-            if best.map_or(true, |(s, _, _)| score < s) {
+            if best.is_none_or(|(s, _, _)| score < s) {
                 best = Some((score, su, sv));
             }
         }

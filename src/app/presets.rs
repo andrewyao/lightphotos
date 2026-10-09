@@ -299,7 +299,7 @@ pub(in crate::app) mod tests {
             "the sidecar on disk carries the new values"
         );
         assert!(
-            app.edits.get(&paths[1]).is_none(),
+            !app.edits.contains_key(&paths[1]),
             "only the photo on screen changed"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -351,7 +351,7 @@ pub(in crate::app) mod tests {
         app.apply_preset(id);
 
         assert!(
-            app.edits.get(&paths[0]).is_none(),
+            !app.edits.contains_key(&paths[0]),
             "an identity merge removes the entry rather than storing a no-op"
         );
         flush(&mut app);
@@ -453,7 +453,7 @@ pub(in crate::app) mod tests {
         );
         for path in &paths {
             assert!(
-                app.edits.get(path).is_none(),
+                !app.edits.contains_key(path),
                 "nothing is written before the confirmation"
             );
         }
@@ -518,7 +518,7 @@ pub(in crate::app) mod tests {
             "and the look lands on the photo on screen"
         );
         assert!(
-            app.edits.get(&paths[1]).is_none(),
+            !app.edits.contains_key(&paths[1]),
             "only the photo on screen changed"
         );
 

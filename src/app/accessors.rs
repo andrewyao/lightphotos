@@ -387,6 +387,9 @@ fn preview_target_px(longest_physical: f32) -> u32 {
     quantized.clamp(PREVIEW_MIN, PREVIEW_MAX)
 }
 
+// A preview no larger than a thumbnail would add no detail when swapped in.
+const _: () = assert!(PREVIEW_MIN > THUMB_PX);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,12 +445,6 @@ mod tests {
             assert_eq!(preview_target_px(longest as f32), 2048, "at {longest}");
         }
         assert_eq!(preview_target_px(2049.0), 2560);
-    }
-
-    #[test]
-    fn a_preview_is_always_sharper_than_the_largest_thumbnail() {
-        // A preview no larger than a thumbnail would add no detail when swapped in.
-        assert!(PREVIEW_MIN > THUMB_PX);
     }
 }
 

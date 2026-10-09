@@ -229,7 +229,7 @@ pub fn score(t: &Technical, a: Option<&Aesthetics>, eyes: Option<EyeState>) -> Q
         }
     }
     // Stable, so equal deductions keep CURVES order.
-    deductions.sort_by(|a, b| b.points.cmp(&a.points));
+    deductions.sort_by_key(|d| std::cmp::Reverse(d.points));
     QualityScore {
         value: points(value),
         basis,
@@ -297,7 +297,7 @@ fn analysis_luma(rgba: &[u8], width: u32, height: u32) -> Option<(Vec<f32>, usiz
             let mut acc = 0.0f32;
             for y in oy * block..(oy + 1) * block {
                 let base = (y * sw + ox * block) * 4;
-                for p in rgba[base..base + block * 4].chunks_exact(4) {
+                for p in rgba[base..base + block * 4].as_chunks::<4>().0 {
                     acc += 0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32;
                 }
             }
@@ -608,7 +608,12 @@ mod tests {
             }
             out
         };
-        let gray: Vec<f32> = rgba.chunks_exact(4).map(|p| p[0] as f32).collect();
+        let gray: Vec<f32> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|p| p[0] as f32)
+            .collect();
         let blurred = pass(&pass(&gray, true), false);
         blurred
             .iter()
@@ -621,7 +626,9 @@ mod tests {
 
     fn push_exposure(rgba: &[u8], stops: f32) -> Vec<u8> {
         let gain = 2f32.powf(stops);
-        rgba.chunks_exact(4)
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| {
                 let lin = (p[0] as f32 / 255.0).powf(2.2) * gain;
                 let v = (lin.min(1.0).powf(1.0 / 2.2) * 255.0).round() as u8;
@@ -632,7 +639,9 @@ mod tests {
 
     fn add_noise(rgba: &[u8], amplitude: f32) -> Vec<u8> {
         let mut seed = 0x9e37_79b9_u32;
-        rgba.chunks_exact(4)
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| {
                 // Sum of uniforms, roughly Gaussian.
                 let mut n = 0.0;
@@ -698,8 +707,10 @@ mod tests {
         let big: Vec<u8> = (0..H * 2)
             .flat_map(|y| {
                 let row = &small[((y / 2) * W * 4) as usize..((y / 2 + 1) * W * 4) as usize];
-                row.chunks_exact(4)
-                    .flat_map(|p| [p, p].concat())
+                row.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .flat_map(|p| [*p, *p].concat())
                     .collect::<Vec<u8>>()
             })
             .collect();

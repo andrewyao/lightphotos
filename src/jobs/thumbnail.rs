@@ -411,7 +411,8 @@ impl Default for ThumbCache {
 /// JPEG cannot preserve transparency or linear floating-point pixels.
 #[hotpath::measure]
 pub(crate) fn jpeg_cacheable(img: &DecodedImage) -> bool {
-    img.pixel_format == PixelFormat::Srgb8 && img.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255)
+    img.pixel_format == PixelFormat::Srgb8
+        && img.rgba.as_chunks::<4>().0.iter().all(|[.., a]| *a == 255)
 }
 
 /// Write `img` to `file` as a JPEG via a `.tmp` sibling and rename. Refuses

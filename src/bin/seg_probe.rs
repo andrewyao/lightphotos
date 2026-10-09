@@ -1,4 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Non-test code never panics, and every `unsafe` block says why it is sound.
+// See CLAUDE.md → Rust rules.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unimplemented,
+    clippy::todo,
+    clippy::unreachable,
+    clippy::undocumented_unsafe_blocks
+)]
 
 //! `seg_probe`: writes Vision subject masks as images so a person can check
 //! `segmentation.rs` on real photos. For each input it writes, into the
@@ -123,7 +134,7 @@ fn gray_to_rgba(alpha: &[u8]) -> Vec<u8> {
 /// a soft tint.
 fn tint_foreground(rgba: &[u8], alpha: &[u8]) -> Vec<u8> {
     let mut out = rgba.to_vec();
-    for (i, chunk) in out.chunks_exact_mut(4).enumerate() {
+    for (i, chunk) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let a = alpha.get(i).copied().unwrap_or(0) as f32 / 255.0 * 0.5;
         chunk[0] = (chunk[0] as f32 * (1.0 - a) + 255.0 * a) as u8;
         chunk[1] = (chunk[1] as f32 * (1.0 - a)) as u8;

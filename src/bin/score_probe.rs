@@ -1,4 +1,15 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Non-test code never panics, and every `unsafe` block says why it is sound.
+// See CLAUDE.md → Rust rules.
+#![deny(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::unimplemented,
+    clippy::todo,
+    clippy::unreachable,
+    clippy::undocumented_unsafe_blocks
+)]
 
 //! `score_probe`: does the quality score agree with the user? Given a folder,
 //! it scores every photo through `quality.rs` and `judge.rs`, the same

@@ -595,7 +595,7 @@ mod tests {
         let reopened = SignalCache::load(&dir);
         assert!(reopened.get(&kept).is_some(), "the live photo is kept");
         assert!(
-            reopened.entries.get(gone.file_name().unwrap()).is_none(),
+            !reopened.entries.contains_key(gone.file_name().unwrap()),
             "the deleted photo's entry is swept"
         );
 

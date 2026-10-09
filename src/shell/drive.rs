@@ -425,7 +425,13 @@ pub(crate) fn run(args: Args) -> i32 {
             .with_activate_ignoring_other_apps(false)
             .with_default_menu(false);
     }
-    let event_loop = builder.build().expect("build event loop");
+    let event_loop = match builder.build() {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[drive] failed: build event loop: {e}");
+            return 1;
+        }
+    };
 
     let size = args
         .steps
@@ -452,9 +458,9 @@ pub(crate) fn run(args: Args) -> i32 {
         last_click: None,
         outcome: Ok(()),
     };
-    event_loop.run_app(&mut driver).expect("run app");
+    let ran = event_loop.run_app(&mut driver);
     let _ = std::fs::remove_dir_all(&config_dir);
-    match driver.outcome {
+    match ran.map_err(|e| e.to_string()).and(driver.outcome) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("[drive] failed: {e}");
@@ -484,9 +490,23 @@ impl ApplicationHandler<UserEvent> for Driver {
             .with_title("LightPhotos")
             .with_visible(false)
             .with_inner_size(LogicalSize::new(self.size.0, self.size.1));
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        let size = window.inner_size();
-        let mut renderer = pollster::block_on(Renderer::new(window.clone(), size));
+        let started = event_loop
+            .create_window(attrs)
+            .map_err(|e| format!("create window: {e}"))
+            .map(Arc::new)
+            .and_then(|window| {
+                let size = window.inner_size();
+                let renderer = pollster::block_on(Renderer::new(window.clone(), size))?;
+                Ok((window, size, renderer))
+            });
+        let (window, size, mut renderer) = match started {
+            Ok(started) => started,
+            Err(e) => {
+                self.outcome = Err(e);
+                event_loop.exit();
+                return;
+            }
+        };
         renderer.render_offscreen();
         crate::finish_window_setup(&mut self.app, window, renderer, size);
         // A blinking caret would ask for a repaint forever and make two
@@ -573,19 +593,14 @@ impl Driver {
         quiet_before && quiet_after && !self.app.batch_running() && self.app.repaint_at.is_none()
     }
 
-    fn window(&self) -> &Arc<Window> {
-        self.app
-            .window
-            .as_ref()
-            .expect("window exists after resumed")
-    }
-
     fn scale(&self) -> f64 {
-        self.window().scale_factor()
+        self.app.window.as_ref().map_or(1.0, |w| w.scale_factor())
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, event: WindowEvent) {
-        let id = self.window().id();
+        let Some(id) = self.app.window.as_ref().map(|w| w.id()) else {
+            return;
+        };
         ApplicationHandler::window_event(&mut self.app, el, id, event);
     }
 
@@ -596,7 +611,9 @@ impl Driver {
     }
 
     fn resize(&mut self, el: &ActiveEventLoop, w: u32, h: u32) {
-        let window = self.window().clone();
+        let Some(window) = self.app.window.clone() else {
+            return;
+        };
         // A hidden macOS window applies the size without returning it, and no
         // Resized event reaches a script, so forward the size it now has.
         let size = window

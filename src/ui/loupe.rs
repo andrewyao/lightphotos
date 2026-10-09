@@ -946,7 +946,7 @@ fn nearest_edge(
     let mut best: Option<(CropEdge, f32)> = None;
     for &(edge, a, b) in edges {
         let d = dist_to_segment(p, a, b);
-        if best.map_or(true, |(_, bd)| d < bd) {
+        if best.is_none_or(|(_, bd)| d < bd) {
             best = Some((edge, d));
         }
     }

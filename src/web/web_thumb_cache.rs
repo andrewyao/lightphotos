@@ -123,7 +123,9 @@ async fn remove_previous_versions(
     loop {
         let next = cleanup.borrow_mut().pending.pop_front();
         let Some(name) = next else { break };
-        let (photo, _) = crate::jobs::thumbnail::parse_cache_name(OsStr::new(&name)).unwrap();
+        let Some((photo, _)) = crate::jobs::thumbnail::parse_cache_name(OsStr::new(&name)) else {
+            continue;
+        };
         let doomed = {
             let mut state = cleanup.borrow_mut();
             let versions = state.versions.entry(photo.clone()).or_default();
@@ -137,12 +139,9 @@ async fn remove_previous_versions(
         for old in doomed {
             // Failed deletions stay indexed for a later successful write.
             if JsFuture::from(dir.remove_entry(&old)).await.is_ok() {
-                cleanup
-                    .borrow_mut()
-                    .versions
-                    .get_mut(&photo)
-                    .unwrap()
-                    .remove(&old);
+                if let Some(versions) = cleanup.borrow_mut().versions.get_mut(&photo) {
+                    versions.remove(&old);
+                }
             }
         }
     }

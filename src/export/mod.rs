@@ -262,6 +262,107 @@ impl Exporter {
         Vec::new()
     }
 }
+impl Default for Exporter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Decode `job.src` at full resolution, bake in its edits and size, and
+/// deliver the JPEG to `job.dest`.
+#[cfg(not(target_arch = "wasm32"))]
+#[hotpath::measure]
+fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
+    let (w, h, rgba) = bake_job(job)?;
+    let stamp = image_decode::capture_stamp(&job.src);
+    let jpeg = image_encode::with_exif(&jpeg_bytes(w, h, &rgba)?, w, h, stamp.as_ref());
+    match &job.dest {
+        ExportDest::Folder(dest) => {
+            crate::paths::write_atomic(dest, &jpeg).map_err(|e| format!("write: {e}"))?;
+            Ok(ExportLanding::File(dest.clone()))
+        }
+        ExportDest::Immich {
+            server,
+            filename,
+            stars,
+        } => {
+            // Immich dates an asset by its EXIF, which now carries the
+            // camera's clock. This is the fallback it uses when that is
+            // missing, so it has to be a real instant: the capture time when
+            // the camera recorded its offset, else when the file was written.
+            let taken = stamp
+                .and_then(|s| s.instant())
+                .or_else(|| std::fs::metadata(&job.src).and_then(|m| m.modified()).ok())
+                .unwrap_or_else(SystemTime::now);
+            let asset = server.upload(&jpeg, filename, taken)?;
+            // The photo is on the server either way, so a rating the key
+            // isn't allowed to set is a warning, not a failed export.
+            let rating_error = (1..=5)
+                .contains(stars)
+                .then(|| server.set_rating(&asset.id, *stars).err())
+                .flatten();
+            Ok(ExportLanding::Asset {
+                id: asset.id,
+                duplicate: asset.duplicate,
+                rating_error,
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
+    let img = image_decode::decode(&job.src, u32::MAX)?;
+    Ok(bake_sized(
+        &img,
+        &job.adj,
+        &job.touchups,
+        job.rot,
+        job.max_px,
+    ))
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
+    let img = if image_decode::is_raw_extension(&job.src) {
+        // rawler's path-based decoder memory-maps the file, which avoids
+        // reading the whole RAW into a Vec first.
+        crate::decode::rawler::decode_raw_nonmac(&job.src, u32::MAX)?
+    } else {
+        let bytes = std::fs::read(&job.src).map_err(|e| e.to_string())?;
+        image_decode::decode_nonraw_from_bytes(&bytes, u32::MAX)?
+    };
+    Ok(bake_sized(
+        &img,
+        &job.adj,
+        &job.touchups,
+        job.rot,
+        job.max_px,
+    ))
+}
+
+/// The macOS encoder only writes to a path, so bake to a staging file, read it
+/// back, and remove it before returning. The bytes are then identical to what
+/// a folder export writes, and nothing is left behind whatever the upload does.
+#[cfg(target_os = "macos")]
+fn jpeg_bytes(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let staging = std::env::temp_dir().join(format!(
+        "lightphotos-upload-{}-{}.jpg",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let read = image_encode::encode_jpeg(&staging, w, h, rgba, image_encode::JpegQuality::Export)
+        .and_then(|()| std::fs::read(&staging).map_err(|e| format!("read staged JPEG: {e}")));
+    let _ = std::fs::remove_file(&staging);
+    read
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+fn jpeg_bytes(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+    image_encode::encode_jpeg_to_vec(w, h, rgba, image_encode::JpegQuality::Export)
+}
 
 #[cfg(test)]
 mod tests {
@@ -436,100 +537,4 @@ mod tests {
         let out = image::load_from_memory(&jpeg).expect("decode").into_rgba8();
         assert_eq!(out.dimensions(), (h, w), "90 deg rotation swaps dimensions");
     }
-}
-
-/// Decode `job.src` at full resolution, bake in its edits and size, and
-/// deliver the JPEG to `job.dest`.
-#[cfg(not(target_arch = "wasm32"))]
-#[hotpath::measure]
-fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
-    let (w, h, rgba) = bake_job(job)?;
-    let stamp = image_decode::capture_stamp(&job.src);
-    let jpeg = image_encode::with_exif(&jpeg_bytes(w, h, &rgba)?, w, h, stamp.as_ref());
-    match &job.dest {
-        ExportDest::Folder(dest) => {
-            crate::paths::write_atomic(dest, &jpeg).map_err(|e| format!("write: {e}"))?;
-            Ok(ExportLanding::File(dest.clone()))
-        }
-        ExportDest::Immich {
-            server,
-            filename,
-            stars,
-        } => {
-            // Immich dates an asset by its EXIF, which now carries the
-            // camera's clock. This is the fallback it uses when that is
-            // missing, so it has to be a real instant: the capture time when
-            // the camera recorded its offset, else when the file was written.
-            let taken = stamp
-                .and_then(|s| s.instant())
-                .or_else(|| std::fs::metadata(&job.src).and_then(|m| m.modified()).ok())
-                .unwrap_or_else(SystemTime::now);
-            let asset = server.upload(&jpeg, filename, taken)?;
-            // The photo is on the server either way, so a rating the key
-            // isn't allowed to set is a warning, not a failed export.
-            let rating_error = (1..=5)
-                .contains(stars)
-                .then(|| server.set_rating(&asset.id, *stars).err())
-                .flatten();
-            Ok(ExportLanding::Asset {
-                id: asset.id,
-                duplicate: asset.duplicate,
-                rating_error,
-            })
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
-    let img = image_decode::decode(&job.src, u32::MAX)?;
-    Ok(bake_sized(
-        &img,
-        &job.adj,
-        &job.touchups,
-        job.rot,
-        job.max_px,
-    ))
-}
-
-#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
-    let img = if image_decode::is_raw_extension(&job.src) {
-        // rawler's path-based decoder memory-maps the file, which avoids
-        // reading the whole RAW into a Vec first.
-        crate::decode::rawler::decode_raw_nonmac(&job.src, u32::MAX)?
-    } else {
-        let bytes = std::fs::read(&job.src).map_err(|e| e.to_string())?;
-        image_decode::decode_nonraw_from_bytes(&bytes, u32::MAX)?
-    };
-    Ok(bake_sized(
-        &img,
-        &job.adj,
-        &job.touchups,
-        job.rot,
-        job.max_px,
-    ))
-}
-
-/// The macOS encoder only writes to a path, so bake to a staging file, read it
-/// back, and remove it before returning. The bytes are then identical to what
-/// a folder export writes, and nothing is left behind whatever the upload does.
-#[cfg(target_os = "macos")]
-fn jpeg_bytes(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let staging = std::env::temp_dir().join(format!(
-        "lightphotos-upload-{}-{}.jpg",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let read = image_encode::encode_jpeg(&staging, w, h, rgba, image_encode::JpegQuality::Export)
-        .and_then(|()| std::fs::read(&staging).map_err(|e| format!("read staged JPEG: {e}")));
-    let _ = std::fs::remove_file(&staging);
-    read
-}
-
-#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-fn jpeg_bytes(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    image_encode::encode_jpeg_to_vec(w, h, rgba, image_encode::JpegQuality::Export)
 }

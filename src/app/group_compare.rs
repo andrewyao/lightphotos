@@ -345,13 +345,12 @@ impl App {
         let (Some(loader), Some(r)) = (self.loader.as_mut(), self.renderer.as_mut()) else {
             return;
         };
-        if self
+        if let Some(stale) = self
             .group_compare
             .tiles
-            .as_ref()
-            .is_some_and(|t| t.key != (paths.clone(), px))
+            .take_if(|t| t.key != (paths.clone(), px))
         {
-            self.group_compare.tiles.take().unwrap().free(r);
+            stale.free(r);
             self.group_compare.picks = GroupPicks::default();
         }
         if paths.is_empty() {
@@ -766,6 +765,74 @@ impl App {
             .collect();
         self.clear_group_picks();
         self.start_delete(paths);
+    }
+}
+
+/// `LIGHTPHOTOS_COMPARE_PANE=paint` draws the pane with a bare painter
+/// as the first version did; anything else allocates it inside a ScrollArea.
+pub(crate) fn compare_claims_pane() -> bool {
+    std::env::var("LIGHTPHOTOS_COMPARE_PANE").as_deref() != Ok("paint")
+}
+
+pub(crate) struct CompareTiles {
+    /// Every member of the group, and the preview size the textures were made at.
+    key: (Vec<PathBuf>, u32),
+    /// The members as the pane lays them out, highest score first
+    /// (`App::by_score`). Pages cut this, not `key`, so a score landing
+    /// reorders the tiles without reloading them.
+    order: Vec<PathBuf>,
+    /// The member the Loupe shows, which the marker and the tile outline follow.
+    pub(crate) shown: PathBuf,
+    /// Which `COMPARE_PAGE`-sized run of the members the pane shows. It starts
+    /// on the shown photo's run, but paging away leaves the representative
+    /// with no tile.
+    pub(crate) page: usize,
+    /// One slot per member of `page_paths`, filled once its texture uploads.
+    pub(crate) members: Vec<Option<Tile>>,
+    /// The page `members` holds, so a page turn frees the old textures.
+    loaded_page: usize,
+    /// Pixel size of every member uploaded so far, which keeps the marker on
+    /// the shown photo when its tile is on another page.
+    pub(crate) sizes: HashMap<PathBuf, (u32, u32)>,
+    /// The zoom square as of the last sync, and when it last changed, which
+    /// Full waits on before cutting new crops.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    square: Square,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    square_moved: Instant,
+    wake_at: Option<Instant>,
+    opened: Instant,
+    bytes: u64,
+    upload_ms: f32,
+    reported: bool,
+}
+
+/// Tiles per page. The web build keeps fewer textures and decodes.
+#[cfg(target_arch = "wasm32")]
+pub(crate) const COMPARE_PAGE: usize = 4;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const COMPARE_PAGE: usize = 9;
+
+impl CompareTiles {
+    fn free(self, r: &mut Renderer) {
+        for t in self.members.into_iter().flatten() {
+            t.textures().for_each(|id| r.free_thumb(id));
+        }
+    }
+
+    /// The members the pane lays out, after its flag filter.
+    pub(crate) fn group_len(&self) -> usize {
+        self.order.len()
+    }
+
+    pub(crate) fn pages(&self) -> usize {
+        self.group_len().div_ceil(COMPARE_PAGE)
+    }
+
+    /// The members on `page`, the last page possibly short.
+    pub(crate) fn page_paths(&self) -> &[PathBuf] {
+        let start = (self.page * COMPARE_PAGE).min(self.group_len());
+        &self.order[start..(start + COMPARE_PAGE).min(self.group_len())]
     }
 }
 
@@ -1416,73 +1483,5 @@ mod tests {
         assert_eq!(crop_px(100, 100, r(-0.2, -0.1, 1.3, 1.2)), (0, 0, 100, 100));
         assert_eq!(crop_px(100, 100, r(1.0, 1.0, 1.0, 1.0)), (99, 99, 1, 1));
         assert_eq!(crop_px(10, 10, r(0.31, 0.31, 0.31, 0.31)), (3, 3, 1, 1));
-    }
-}
-
-/// `LIGHTPHOTOS_COMPARE_PANE=paint` draws the pane with a bare painter
-/// as the first version did; anything else allocates it inside a ScrollArea.
-pub(crate) fn compare_claims_pane() -> bool {
-    std::env::var("LIGHTPHOTOS_COMPARE_PANE").as_deref() != Ok("paint")
-}
-
-pub(crate) struct CompareTiles {
-    /// Every member of the group, and the preview size the textures were made at.
-    key: (Vec<PathBuf>, u32),
-    /// The members as the pane lays them out, highest score first
-    /// (`App::by_score`). Pages cut this, not `key`, so a score landing
-    /// reorders the tiles without reloading them.
-    order: Vec<PathBuf>,
-    /// The member the Loupe shows, which the marker and the tile outline follow.
-    pub(crate) shown: PathBuf,
-    /// Which `COMPARE_PAGE`-sized run of the members the pane shows. It starts
-    /// on the shown photo's run, but paging away leaves the representative
-    /// with no tile.
-    pub(crate) page: usize,
-    /// One slot per member of `page_paths`, filled once its texture uploads.
-    pub(crate) members: Vec<Option<Tile>>,
-    /// The page `members` holds, so a page turn frees the old textures.
-    loaded_page: usize,
-    /// Pixel size of every member uploaded so far, which keeps the marker on
-    /// the shown photo when its tile is on another page.
-    pub(crate) sizes: HashMap<PathBuf, (u32, u32)>,
-    /// The zoom square as of the last sync, and when it last changed, which
-    /// Full waits on before cutting new crops.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    square: Square,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    square_moved: Instant,
-    wake_at: Option<Instant>,
-    opened: Instant,
-    bytes: u64,
-    upload_ms: f32,
-    reported: bool,
-}
-
-/// Tiles per page. The web build keeps fewer textures and decodes.
-#[cfg(target_arch = "wasm32")]
-pub(crate) const COMPARE_PAGE: usize = 4;
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) const COMPARE_PAGE: usize = 9;
-
-impl CompareTiles {
-    fn free(self, r: &mut Renderer) {
-        for t in self.members.into_iter().flatten() {
-            t.textures().for_each(|id| r.free_thumb(id));
-        }
-    }
-
-    /// The members the pane lays out, after its flag filter.
-    pub(crate) fn group_len(&self) -> usize {
-        self.order.len()
-    }
-
-    pub(crate) fn pages(&self) -> usize {
-        self.group_len().div_ceil(COMPARE_PAGE)
-    }
-
-    /// The members on `page`, the last page possibly short.
-    pub(crate) fn page_paths(&self) -> &[PathBuf] {
-        let start = (self.page * COMPARE_PAGE).min(self.group_len());
-        &self.order[start..(start + COMPARE_PAGE).min(self.group_len())]
     }
 }

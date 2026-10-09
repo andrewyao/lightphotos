@@ -950,9 +950,11 @@ mod tests {
 
     #[test]
     fn edit_signature_stable() {
-        let mut a = Adjustments::default();
-        a.exposure = 1.5;
-        a.crop = Some(crop(0.1, 0.2, 0.8, 0.9));
+        let a = Adjustments {
+            exposure: 1.5,
+            crop: Some(crop(0.1, 0.2, 0.8, 0.9)),
+            ..Default::default()
+        };
         assert_eq!(edit_signature(&a, 1), edit_signature(&a, 1));
     }
 

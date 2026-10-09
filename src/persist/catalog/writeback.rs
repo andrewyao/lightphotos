@@ -30,7 +30,7 @@ use crate::persist::groups::{Group, GroupId, GroupWrite, Groups};
 /// sidecar's path, since a group has no photo of its own.
 #[derive(Clone)]
 pub(super) enum WriteOp {
-    Put(ImageRecord),
+    Put(Box<ImageRecord>),
     Delete,
     PutGroup(Group),
     DeleteGroup,
@@ -202,7 +202,7 @@ impl Writeback {
                 WriteOp::Put(_) | WriteOp::Delete if path.parent() != Some(dir) => {}
                 WriteOp::Put(rec) => {
                     if let Some(name) = path.file_name() {
-                        images.insert(name.to_os_string(), rec.clone());
+                        images.insert(name.to_os_string(), (**rec).clone());
                     }
                 }
                 WriteOp::Delete => {
@@ -452,7 +452,9 @@ impl Writeback {
             if self.in_flight.contains(path) {
                 return;
             }
-            let (path, seq, op, dir_handle) = self.queue.pop_front().unwrap();
+            let Some((path, seq, op, dir_handle)) = self.queue.pop_front() else {
+                return;
+            };
             let Some(name) = path.file_name().map(std::ffi::OsString::from) else {
                 let _ = self
                     .done_tx
@@ -507,17 +509,17 @@ mod tests {
         let path = PathBuf::from("/photos/a.jpg");
         wb.enqueue(
             &path,
-            WriteOp::Put(ImageRecord {
+            WriteOp::Put(Box::new(ImageRecord {
                 rating: Some(1),
                 ..Default::default()
-            }),
+            })),
         );
         wb.enqueue(
             &path,
-            WriteOp::Put(ImageRecord {
+            WriteOp::Put(Box::new(ImageRecord {
                 rating: Some(4),
                 ..Default::default()
-            }),
+            })),
         );
 
         let mut images = HashMap::new();
@@ -542,10 +544,10 @@ mod tests {
         let mark = wb.begin_load();
         wb.enqueue(
             Path::new("/photos/a/x.jpg"),
-            WriteOp::Put(ImageRecord {
+            WriteOp::Put(Box::new(ImageRecord {
                 rating: Some(5),
                 ..Default::default()
-            }),
+            })),
         );
 
         let mut images = HashMap::new();
@@ -601,10 +603,10 @@ mod tests {
         let older = wb.begin_load();
         wb.enqueue(
             &path,
-            WriteOp::Put(ImageRecord {
+            WriteOp::Put(Box::new(ImageRecord {
                 rating: Some(2),
                 ..Default::default()
-            }),
+            })),
         );
         wb.flush_blocking(std::time::Duration::from_secs(10));
         let newer = wb.begin_load();

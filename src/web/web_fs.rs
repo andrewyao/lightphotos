@@ -195,15 +195,11 @@ pub async fn list_dir(
         let name = child.name();
         let path = base.join(&name);
         match child.kind() {
-            FileSystemHandleKind::File => {
-                if is_image(&path) {
-                    images.push((path, child.unchecked_into()));
-                }
+            FileSystemHandleKind::File if is_image(&path) => {
+                images.push((path, child.unchecked_into()));
             }
-            FileSystemHandleKind::Directory => {
-                if is_listable_subdir(&name) {
-                    subdirs.push((path, child.unchecked_into()));
-                }
+            FileSystemHandleKind::Directory if is_listable_subdir(&name) => {
+                subdirs.push((path, child.unchecked_into()));
             }
             _ => {}
         }

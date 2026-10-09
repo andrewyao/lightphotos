@@ -507,7 +507,7 @@ impl Catalog {
         if rec.is_empty() {
             self.enqueue(path, WriteOp::Delete);
         } else {
-            self.enqueue(path, WriteOp::Put(rec.clone()));
+            self.enqueue(path, WriteOp::Put(Box::new(rec.clone())));
             self.images.insert(name, rec);
         }
     }
@@ -757,9 +757,11 @@ mod tests {
         let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
-        let mut adj = Adjustments::default();
-        adj.exposure = 1.5;
-        adj.contrast = 25.0;
+        let adj = Adjustments {
+            exposure: 1.5,
+            contrast: 25.0,
+            ..Default::default()
+        };
 
         {
             let mut cat = Catalog::with_dir(dir.clone());
@@ -778,8 +780,10 @@ mod tests {
         let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
-        let mut adj = Adjustments::default();
-        adj.denoise = 40.0;
+        let adj = Adjustments {
+            denoise: 40.0,
+            ..Default::default()
+        };
 
         {
             let mut cat = Catalog::with_dir(dir.clone());
@@ -843,9 +847,11 @@ mod tests {
         let dir = temp_folder("catalog-test");
         let p = dir.join("photo.jpg");
 
-        let mut adj = Adjustments::default();
-        adj.temp = -30.0;
-        adj.whites = 15.0;
+        let adj = Adjustments {
+            temp: -30.0,
+            whites: 15.0,
+            ..Default::default()
+        };
 
         {
             let mut cat = Catalog::with_dir(dir.clone());
@@ -882,8 +888,10 @@ mod tests {
         // A non-identity edit stores an "adjustments" object.
         {
             let mut cat = Catalog::with_dir(dir.clone());
-            let mut adj = Adjustments::default();
-            adj.shadows = 40.0;
+            let adj = Adjustments {
+                shadows: 40.0,
+                ..Default::default()
+            };
             cat.set_adjustments(&p, &adj);
         }
         let bytes = std::fs::read(sidecar_for(&dir, "photo.jpg")).unwrap();
@@ -1014,23 +1022,28 @@ mod tests {
     /// check is the serde attributes rather than a second hand-written list.
     #[test]
     fn every_persisted_field_on_its_own_makes_a_record_non_empty() {
-        let mut populated = ImageRecord::default();
-        populated.rating = Some(3);
-        populated.label = Some(ColorLabel::Red);
-        populated.adjustments.exposure = 0.5;
-        populated.touchups.push(TouchUp {
-            center: [0.4, 0.5],
-            radius: 0.02,
-            source: [0.6, 0.5],
-            feather: 0.5,
-            delta: [0.01, -0.02, 0.0],
-            opacity: 1.0,
-        });
-        populated.rotation = 1;
-        populated.score = Some(StoredScore {
-            score: sample_score(),
-            edits: 7,
-        });
+        let populated = ImageRecord {
+            rating: Some(3),
+            label: Some(ColorLabel::Red),
+            adjustments: Adjustments {
+                exposure: 0.5,
+                ..Default::default()
+            },
+            touchups: vec![TouchUp {
+                center: [0.4, 0.5],
+                radius: 0.02,
+                source: [0.6, 0.5],
+                feather: 0.5,
+                delta: [0.01, -0.02, 0.0],
+                opacity: 1.0,
+            }],
+            rotation: 1,
+            score: Some(StoredScore {
+                score: sample_score(),
+                edits: 7,
+            }),
+            ..Default::default()
+        };
 
         let serde_json::Value::Object(fields) = serde_json::to_value(&populated).unwrap() else {
             panic!("a record serializes to an object");

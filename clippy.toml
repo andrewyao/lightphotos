@@ -1,0 +1,6 @@
+# Tests may unwrap, expect, panic and index. Production code may not; the
+# crate roots deny those lints. See CLAUDE.md → Rust rules.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true

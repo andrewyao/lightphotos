@@ -98,7 +98,7 @@ impl PresetStore {
         match parse(text) {
             Ok(mut presets) => {
                 store.next_id = presets.iter().map(|p| p.id + 1).max().unwrap_or(1);
-                presets.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+                presets.sort_by_key(sort_key);
                 store.presets = presets;
             }
             Err(cause) => {
@@ -169,7 +169,7 @@ impl PresetStore {
             adjustments,
             notes,
         });
-        self.presets.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+        self.presets.sort_by_key(sort_key);
         Some(name)
     }
 
@@ -186,7 +186,7 @@ impl PresetStore {
             return;
         };
         p.name = name;
-        self.presets.sort_by(|a, b| sort_key(a).cmp(&sort_key(b)));
+        self.presets.sort_by_key(sort_key);
         self.flush();
     }
 
