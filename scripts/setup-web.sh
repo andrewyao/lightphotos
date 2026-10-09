@@ -22,6 +22,6 @@ fi
 
 "$ROOT/scripts/setup.sh"
 
-echo "==> Ensuring $WEB_TOOLCHAIN with rust-src and wasm32-unknown-unknown"
+echo "==> Ensuring $WEB_TOOLCHAIN with rust-src, clippy and wasm32-unknown-unknown"
 rustup toolchain install "$WEB_TOOLCHAIN" --profile minimal \
-  --component rust-src --target wasm32-unknown-unknown
+  --component rust-src --component clippy --target wasm32-unknown-unknown

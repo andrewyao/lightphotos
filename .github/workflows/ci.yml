@@ -74,11 +74,10 @@ jobs:
             exit 1
           fi
 
-      # No `-D warnings`. The tree still carries clippy warnings, so
-      # denying them would fail every run from the first one. They print in this
-      # step's log regardless. Once they are cleared, append `-- -D warnings`.
+      # The crate roots deny the panic lints; `-D warnings` makes the rest
+      # block too. See CLAUDE.md → Rust rules.
       - name: Clippy
-        run: cargo clippy --all-targets
+        run: cargo clippy --all-targets -- -D warnings
 
   # Nothing else here compiles for a non-Apple target, and the tag-triggered
   # release.yml is the only thing that ever has. Its last green cross-platform
@@ -95,6 +94,8 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       # winit's link step needs this. rfd's folder dialog goes through the XDG
       # desktop portal over D-Bus, so no GTK development package is required.
@@ -118,6 +119,9 @@ jobs:
       - name: Test
         run: cargo test
 
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
   # Same gap and same reasoning as the Linux job. README.md calls Windows
   # experimental and says no runtime testing has happened there, which makes the
   # compile the only claim about Windows anyone can actually check.
@@ -128,6 +132,8 @@ jobs:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache vendored rawler
         uses: actions/cache@v4
@@ -145,6 +151,9 @@ jobs:
 
       - name: Build
         run: cargo build --bin lightphotos
+
+      - name: Clippy
+        run: cargo clippy --bin lightphotos -- -D warnings
 
   fmt:
     name: rustfmt
@@ -243,3 +252,6 @@ jobs:
       # produces a ~10x larger bg.wasm, so it is not the artifact worth gating.
       - name: Build
         run: source scripts/web-env.sh && trunk build --release --config Trunk.toml
+
+      - name: Clippy
+        run: source scripts/web-env.sh && cargo clippy --target wasm32-unknown-unknown --bin lightphotos -- -D warnings
