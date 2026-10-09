@@ -121,7 +121,7 @@ pub fn decode_speed(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
     if let Ok(bytes) = fs::read(path) {
         let preview = embedded_preview_from_bytes(&bytes, max_px)
             .filter(|img| preview_is_large_enough(img.width, img.height, max_px))
-            .or_else(|| rawler_full_image_from_bytes(&bytes, max_px));
+            .or_else(|| crate::decode::rawler::rawler_full_image_from_bytes(&bytes, max_px));
         if let Some(img) = preview {
             return Ok(img);
         }
@@ -140,7 +140,7 @@ pub fn decode_speed(path: &Path, max_px: u32) -> Result<DecodedImage, String> {
 fn try_extract_embedded_preview(path: &Path, max_px: u32) -> Option<DecodedImage> {
     let bytes = fs::read(path).ok()?;
     embedded_preview_from_bytes(&bytes, max_px)
-        .or_else(|| rawler_full_image_from_bytes(&bytes, max_px))
+        .or_else(|| crate::decode::rawler::rawler_full_image_from_bytes(&bytes, max_px))
 }
 
 /// The EXIF IFD1 thumbnail from file bytes. wasm32 calls this directly
@@ -199,66 +199,6 @@ pub(crate) fn embedded_preview_from_bytes(bytes: &[u8], max_px: u32) -> Option<D
         }),
         orientation,
     ))
-}
-
-/// The embedded preview of a CR3 or RAF file, via rawler's
-/// `Decoder::full_image()`. `kamadak-exif` cannot open those containers.
-///
-/// Only CR3 and RAF. rawler also returns a preview for TIFF-based RAWs, but
-/// that camera JPEG has the camera's own tone and color and looks very
-/// different from our RAW develop, so it must not stand in for it.
-/// `catch_unwind` guards against panics inside rawler.
-#[cfg(not(target_os = "macos"))]
-#[hotpath::measure]
-pub(crate) fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<DecodedImage> {
-    let run = std::panic::AssertUnwindSafe(|| -> Option<DecodedImage> {
-        let source = rawler::rawsource::RawSource::new_from_slice(bytes);
-        let params = rawler::decoders::RawDecodeParams::default();
-        let decoder = rawler::get_decoder(&source).ok()?;
-        if !matches!(
-            decoder.format_hint(),
-            rawler::decoders::FormatHint::RAF | rawler::decoders::FormatHint::CR3
-        ) {
-            return None;
-        }
-
-        let dynamic = decoder.full_image(&source, &params).ok().flatten()?;
-        let img = dynamic.into_rgba8();
-        let (w, h) = (img.width(), img.height());
-        if w == 0 || h == 0 {
-            return None;
-        }
-
-        // Take orientation from the RAW metadata, as `decode_raw_nonmac`
-        // does. The embedded image's own EXIF may lack it.
-        let orientation = decoder
-            .raw_metadata(&source, &params)
-            .ok()
-            .and_then(|meta| meta.exif.orientation)
-            .map(|code| {
-                crate::decode::image_decode::exif_code_from_rawler_orientation(
-                    rawler::Orientation::from_u16(code),
-                )
-            })
-            .unwrap_or(1);
-
-        let (nw, nh) = crate::decode::image_decode::fit_within(w, h, max_px);
-        let rgba = if (nw, nh) == (w, h) {
-            img.into_raw()
-        } else {
-            image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
-        };
-        Some(crate::decode::image_decode::apply_exif_orientation(
-            DecodedImage::new_tracked(DecodedImageFields {
-                width: nw,
-                height: nh,
-                rgba,
-                pixel_format: PixelFormat::Srgb8,
-            }),
-            orientation,
-        ))
-    });
-    std::panic::catch_unwind(run).ok().flatten()
 }
 
 /// Options for `CGImageSourceCreateThumbnailAtIndex`. `WithTransform` makes

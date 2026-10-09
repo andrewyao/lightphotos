@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Decode images to RGBA8 and read their metadata. macOS uses ImageIO for
-//! every format, RAW included. Other targets use the `image` crate,
-//! `rawler`, and `kamadak-exif`, in `nonmac_decode.rs`.
+//! every format, RAW included. Other targets use the `image` crate and
+//! `kamadak-exif` in `nonmac_decode.rs`, and `decode::rawler` for RAW.
 
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
@@ -154,7 +154,7 @@ pub enum Flash {
 impl Flash {
     /// Bit 0 of the EXIF `Flash` bitfield is "fired" and bit 5 is "no flash
     /// function". The other bits describe the mode and return light.
-    fn from_exif(bits: u32) -> Option<Flash> {
+    pub(crate) fn from_exif(bits: u32) -> Option<Flash> {
         if bits & 0x01 != 0 {
             Some(Flash::Fired)
         } else if bits & 0x20 != 0 {
@@ -173,7 +173,7 @@ pub enum WhiteBalance {
 
 impl WhiteBalance {
     /// EXIF `WhiteBalance`: 0 is auto and 1 is manual.
-    fn from_exif(value: u32) -> Option<WhiteBalance> {
+    pub(crate) fn from_exif(value: u32) -> Option<WhiteBalance> {
         match value {
             0 => Some(WhiteBalance::Auto),
             1 => Some(WhiteBalance::Manual),
@@ -195,7 +195,7 @@ impl Gps {
     /// EXIF stores unsigned magnitudes and puts the sign in the Ref tags:
     /// `S` and `W` are negative, and an altitude ref of 1 is below sea level.
     /// `None` for coordinates off the globe.
-    fn from_exif(
+    pub(crate) fn from_exif(
         lat: f64,
         lat_ref: Option<&str>,
         lon: f64,
@@ -352,7 +352,7 @@ pub(crate) fn with_subsec(t: SystemTime, subsec: Option<&str>) -> SystemTime {
     t + Duration::from_nanos(u64::from(nanos))
 }
 
-fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
+pub(crate) fn parse_exif_datetime_display(s: &str) -> Option<CaptureDate> {
     let p = parse_exif_datetime_parts(s)?;
     Some(CaptureDate {
         year: p.y as i32,
@@ -795,7 +795,7 @@ pub fn cgimage_to_rgba(
 /// file's header, and a tiny crafted file can claim 65535x65535.
 pub(crate) const MAX_DECODE_PIXELS: u64 = 500_000_000;
 
-fn check_decode_size(w: u32, h: u32) -> Result<(), String> {
+pub(crate) fn check_decode_size(w: u32, h: u32) -> Result<(), String> {
     if w as u64 * h as u64 > MAX_DECODE_PIXELS {
         return Err(format!(
             "{w}x{h} is over the {} megapixel limit",

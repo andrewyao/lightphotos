@@ -17,7 +17,7 @@ does not use egui, winit or wgpu. Each folder under `src/` is one module, in one
 | `jobs/` | app | Background work |
 | `persist/` | app | Persistence |
 | `decode/`, `develop/`, `export/`, `scoring/` | lib | Lib |
-| `bin/` | probes | not shown |
+| `bin/`, `decode/rawler/probe/` | probes | not shown |
 
 `navigation.rs`, `autotone.rs` and `i18n.rs` are in the app root. `hash.rs`, `paths.rs`
 and `worker_pool.rs` are in the lib root. In the diagram, a path starts at `src/`.
@@ -63,7 +63,7 @@ flowchart LR
 
     subgraph lib["Lib (lib.rs)"]
         decode["decode/<br/>image_decode, image_encode,<br/>coregraphics"]
-        nonmac["decode/image_decode/nonmac_decode.rs<br/>decode/raw_preview.rs (Fast / Quality)"]
+        nonmac["decode/image_decode/nonmac_decode.rs (image, exif)<br/>decode/rawler/ (every rawler call,<br/>raw_preview Fast / Quality)"]
         develop["develop/mod.rs<br/>Adjustments → GpuAdjust<br/>apply_linear (CPU mirror)"]
         imgops["develop/image_ops.rs<br/>crop / tone / rotate, bake_edited"]
         export["export/mod.rs<br/>ExportJob → ExportDest"]

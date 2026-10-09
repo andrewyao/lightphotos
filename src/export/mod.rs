@@ -106,7 +106,7 @@ pub fn bake_jpeg(
     max_px: u32,
 ) -> Result<Vec<u8>, String> {
     let img = if is_raw {
-        image_decode::decode_raw_nonmac_from_bytes(src_bytes, u32::MAX)?
+        crate::decode::rawler::decode_raw_nonmac_from_bytes(src_bytes, u32::MAX)?
     } else {
         image_decode::decode_nonraw_from_bytes(src_bytes, u32::MAX)?
     };
@@ -131,7 +131,7 @@ pub fn bake_jpeg_from_shared_vec(
     max_px: u32,
 ) -> Result<Vec<u8>, String> {
     let img = if is_raw {
-        image_decode::decode_raw_nonmac_from_shared_vec(src_bytes.clone(), u32::MAX)?
+        crate::decode::rawler::decode_raw_nonmac_from_shared_vec(src_bytes.clone(), u32::MAX)?
     } else {
         image_decode::decode_nonraw_from_bytes(src_bytes.as_slice(), u32::MAX)?
     };
@@ -497,7 +497,7 @@ fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
     let img = if image_decode::is_raw_extension(&job.src) {
         // rawler's path-based decoder memory-maps the file, which avoids
         // reading the whole RAW into a Vec first.
-        image_decode::decode_raw_nonmac(&job.src, u32::MAX)?
+        crate::decode::rawler::decode_raw_nonmac(&job.src, u32::MAX)?
     } else {
         let bytes = std::fs::read(&job.src).map_err(|e| e.to_string())?;
         image_decode::decode_nonraw_from_bytes(&bytes, u32::MAX)?

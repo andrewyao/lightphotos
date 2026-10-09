@@ -932,7 +932,7 @@ mod tests {
         assert_lands(range_under(&photo, &adj), 0.06);
     }
 
-    /// `saturated` in linear camera RGB, as `decode::raw_preview` returns it.
+    /// `saturated` in linear camera RGB, as `decode::rawler::raw_preview` returns it.
     fn raw_saturated(lo: f32, hi: f32, n: usize) -> Vec<[f32; 3]> {
         let hues = [
             [1.0, 0.15, 0.15],

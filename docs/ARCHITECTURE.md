@@ -37,7 +37,7 @@ What that means in practice:
 
 - "Non-mac" in a doc comment usually means "Linux, Windows, *and* wasm32."
 - wasm32 reuses the non-mac decode *functions* (`decode/image_decode/nonmac_decode.rs`,
-  `decode/raw_preview.rs`) and runs them on `jobs/loader.rs`'s own worker threads, which
+  `decode/rawler/`) and runs them on `jobs/loader.rs`'s own worker threads, which
   are wasm threads over one shared memory there. A thread cannot open a File
   System Access handle, so the main thread reads each file and queues its
   bytes (`Job::Web`, through `WebDecoder`).
@@ -310,8 +310,9 @@ scoring does not run there.
 |---|---|---|
 | `jobs/loader.rs` | Job queue + LRU caches for both the Loupe and Grid tiers | native (macOS + Linux/Windows); wasm32 shares its caches via `insert_*_external` but bypasses its queue |
 | `decode/image_decode/mod.rs` | Full decode + metadata read, mac arm | macOS |
-| `decode/image_decode/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `rawler`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
-| `decode/raw_preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | Linux, Windows, wasm32 |
+| `decode/image_decode/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `kamadak-exif`; RAW goes to `decode/rawler/`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
+| `decode/rawler/mod.rs` | Every rawler call: full RAW decode (`RawDevelop`), RAW metadata, CR3/RAF embedded preview. `probe/` holds `decode_probe` | Linux, Windows, wasm32; never built on macOS |
+| `decode/rawler/raw_preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | Linux, Windows, wasm32 |
 | `renderer/raw_render.rs` | Builds the GPU tonemap pipeline (`shaders/raw_shader.wgsl`) for `PixelFormat::LinearF16` images | all (only ever fed a linear image on wasm32) |
 | `jobs/thumbnail.rs` | Decode-at-size for both the Loupe's screen-fit preview and Grid thumbnails, plus the on-disk `.thumb.jpg` cache in `.lightphotos/` | macOS (ImageIO) + Linux/Windows (`kamadak-exif`/`rawler`); wasm32 keeps the same entry naming through `web/web_thumb_cache.rs` |
 | `decode/image_encode.rs` | JPEG write for export | macOS (ImageIO) / Linux/Windows (`mozjpeg-rs`) |

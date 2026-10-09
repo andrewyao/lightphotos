@@ -29,7 +29,7 @@ path = "src/bin/score_probe.rs"
 
 [[bin]]
 name = "decode_probe"
-path = "src/bin/decode_probe/main.rs"
+path = "src/decode/rawler/probe/main.rs"
 # Exercises the non-mac RAW decode path. On macOS it compiles to a stub that
 # exits, so its regression tests run in CI's Linux job.
 
@@ -84,7 +84,7 @@ hotpath = "0.26"
 lightwatch = { package = "lightwatch-probe", git = "https://github.com/andrewyao/lightwatch", default-features = false }
 
 # Linear half-float pixels: `PixelFormat::LinearF16`, which
-# `image_ops` reads on every platform and `decode/raw_preview.rs`'s `Quality` tier
+# `image_ops` reads on every platform and `decode/rawler/raw_preview.rs`'s `Quality` tier
 # writes for the renderer's `Rgba16Float` texture.
 half = "2"
 # Local wall-clock fields for a file's modified time. Already in the tree via
@@ -251,7 +251,7 @@ uuid = { version = "1", features = ["js"] }
 # Local patch, standard rawler 0.7.2 only (no third-party fork): `rawler`
 # unconditionally calls `std::time::Instant::now()` in a few places (PPG
 # demosaic's `imgop/sensor/bayer/ppg.rs`, notably — the code path
-# `decode/raw_preview.rs`'s `DemosaicMode::Quality` runs) purely for a debug!
+# `decode/rawler/raw_preview.rs`'s `DemosaicMode::Quality` runs) purely for a debug!
 # timing log, which panics unconditionally on bare wasm32-unknown-unknown
 # ("time not implemented on this platform" — no clock source there, hit live
 # in a real Web Worker once `Quality` actually ran there, not guessed at).

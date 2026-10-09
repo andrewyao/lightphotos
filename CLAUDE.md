@@ -30,7 +30,9 @@ Their `#[cfg(test)]` blocks run as `cargo test --lib`, which `cargo test` includ
 
 rawler (LGPL-2.1) is a non-mac dependency only, and the macOS build, which ships to the
 App Store, must never contain it. So the non-mac decode path and its tests compile only
-off macOS, and a Mac cannot run them.
+off macOS, and a Mac cannot run them. Every rawler call lives in `src/decode/rawler/`, which
+`decode/mod.rs` builds only off macOS. `decode_probe`, the harness for that path, is in
+`src/decode/rawler/probe/`. Keep new rawler code there.
 
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request. On macOS
 it runs `cargo build --bins`, `cargo test` and clippy, and fails if rawler enters the

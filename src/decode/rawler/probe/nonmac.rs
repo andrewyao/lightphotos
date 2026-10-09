@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use lightphotos::decode::{image_decode, raw_preview};
+use lightphotos::decode::image_decode;
+use lightphotos::decode::rawler::{self as lp_rawler, raw_preview};
 #[cfg(test)]
 use lightphotos::hash;
 
@@ -92,7 +93,7 @@ fn run_nonmac_decode_probe(args: &[String]) {
 
     let bytes = std::fs::read(path).expect("read RAW file");
     let t0 = std::time::Instant::now();
-    let img = image_decode::decode_raw_nonmac_from_bytes(&bytes, max_dim)
+    let img = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, max_dim)
         .expect("decode_raw_nonmac_from_bytes failed");
     println!(
         "nonmac-decode {}x{} in {:?}",
@@ -205,58 +206,11 @@ fn save_decoded_png(img: &image_decode::DecodedImage, out: &str) {
     println!("wrote {out}");
 }
 
-/// Copy of `thumbnail.rs`'s `rawler_full_image_from_bytes`, so this binary
-/// avoids `thumbnail.rs`'s cfg split and its `crate::paths` dependency.
-#[cfg(test)]
-fn rawler_full_image_diag(bytes: &[u8], max_px: u32) -> Option<image_decode::DecodedImage> {
-    let source = rawler::rawsource::RawSource::new_from_slice(bytes);
-    let params = rawler::decoders::RawDecodeParams::default();
-    let decoder = rawler::get_decoder(&source).ok()?;
-    if !matches!(
-        decoder.format_hint(),
-        rawler::decoders::FormatHint::RAF | rawler::decoders::FormatHint::CR3
-    ) {
-        return None;
-    }
-
-    let dynamic = decoder.full_image(&source, &params).ok().flatten()?;
-    let img = dynamic.into_rgba8();
-    let (w, h) = (img.width(), img.height());
-    if w == 0 || h == 0 {
-        return None;
-    }
-
-    let orientation = decoder
-        .raw_metadata(&source, &params)
-        .ok()
-        .and_then(|meta| meta.exif.orientation)
-        .map(|code| {
-            image_decode::exif_code_from_rawler_orientation(rawler::Orientation::from_u16(code))
-        })
-        .unwrap_or(1);
-
-    let (nw, nh) = image_decode::fit_within(w, h, max_px);
-    let rgba = if (nw, nh) == (w, h) {
-        img.into_raw()
-    } else {
-        image::imageops::resize(&img, nw, nh, image::imageops::FilterType::Lanczos3).into_raw()
-    };
-    Some(image_decode::apply_exif_orientation(
-        image_decode::DecodedImage::new_tracked(image_decode::DecodedImageFields {
-            width: nw,
-            height: nh,
-            rgba,
-            pixel_format: image_decode::PixelFormat::Srgb8,
-        }),
-        orientation,
-    ))
-}
-
 /// Decodes with rawler, returning its native `RawImage` so the ground-truth
 /// check sees the raw 16-bit samples. For the fixture's uncompressed LinearRaw
 /// strips, rawler unpacks samples directly with no resampling or color math.
 fn decode_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
-    image_decode::decode_raw_via_rawler(path)
+    lp_rawler::decode_raw_via_rawler(path)
 }
 
 /// Runs `RawDevelop::default().develop_intermediate` and `to_dynamic_image`,
@@ -1005,7 +959,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read fixture");
         let _ = std::fs::remove_file(&path);
 
-        let img = image_decode::decode_raw_nonmac_from_bytes(&bytes, u32::MAX)
+        let img = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, u32::MAX)
             .expect("bytes-core RAW decode should succeed");
 
         assert_eq!((img.width, img.height), (w, h));
@@ -1031,9 +985,9 @@ mod tests {
         write_linear_dng(&path, w, h).expect("write_linear_dng failed");
         let bytes = std::fs::read(&path).expect("read fixture");
 
-        let via_path = image_decode::decode_raw_nonmac(&path, u32::MAX).expect("path decode");
+        let via_path = lp_rawler::decode_raw_nonmac(&path, u32::MAX).expect("path decode");
         let via_bytes =
-            image_decode::decode_raw_nonmac_from_bytes(&bytes, u32::MAX).expect("bytes decode");
+            lp_rawler::decode_raw_nonmac_from_bytes(&bytes, u32::MAX).expect("bytes decode");
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(
@@ -1192,7 +1146,7 @@ mod tests {
         raw.blacklevel = rawler::rawimage::BlackLevel::new(&levels, 2, 2, 3);
         raw.whitelevel = rawler::rawimage::WhiteLevel(vec![65535; 3]);
 
-        image_decode::normalize_linear_levels(&mut raw).expect("levels should normalize");
+        lp_rawler::normalize_linear_levels(&mut raw).expect("levels should normalize");
         assert_eq!(raw.blacklevel.as_vec(), vec![13.0, 23.0, 33.0]);
         raw.apply_scaling().expect("apply_scaling failed");
     }
@@ -1375,7 +1329,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert!(
-            rawler_full_image_diag(&bytes, u32::MAX).is_none(),
+            lp_rawler::rawler_full_image_from_bytes(&bytes, u32::MAX).is_none(),
             "DNG must be excluded by the RAF/CR3 format gate even with a valid preview sub-IFD present"
         );
     }
@@ -1392,7 +1346,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
 
         assert!(
-            rawler_full_image_diag(&bytes, u32::MAX).is_none(),
+            lp_rawler::rawler_full_image_from_bytes(&bytes, u32::MAX).is_none(),
             "expected None for a DNG fixture with no preview sub-IFD"
         );
     }
@@ -1498,7 +1452,7 @@ mod tests {
         println!("wasm mean boosted sRGB:               {wasm_boosted:?}");
 
         // Compare against the camera's embedded JPEG, when rawler has one.
-        if let Some(embedded) = rawler_full_image_diag(&bytes, u32::MAX) {
+        if let Some(embedded) = lp_rawler::rawler_full_image_from_bytes(&bytes, u32::MAX) {
             println!(
                 "embedded full_image() JPEG: {}x{}, format {:?}",
                 embedded.width, embedded.height, embedded.pixel_format
@@ -1522,7 +1476,7 @@ mod tests {
                 "  vs native-equivalent boosted sRGB:  {native_boosted:?}  <- compare these two"
             );
         } else {
-            println!("rawler_full_image_diag returned None for this file — full_image() fallback does NOT apply here");
+            println!("rawler_full_image_from_bytes returned None for this file — full_image() fallback does NOT apply here");
         }
     }
 

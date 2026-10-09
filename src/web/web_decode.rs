@@ -215,7 +215,11 @@ pub struct WebMeasureJob {
 impl WebMeasureJob {
     pub fn run(self) -> Result<crate::develop::CaScale, String> {
         let img = if self.is_raw {
-            crate::decode::raw_preview::decode_raw_from_shared_vec(self.bytes, self.max_px, true)?
+            crate::decode::rawler::raw_preview::decode_raw_from_shared_vec(
+                self.bytes,
+                self.max_px,
+                true,
+            )?
         } else {
             image_decode::decode_nonraw_from_bytes(&self.bytes, self.max_px)?
         };
@@ -248,10 +252,10 @@ pub fn decode(
         // No size gate here. This is the camera's full-resolution JPEG, and
         // Loupe jobs ask for 8192px on WebGPU, so a gate would reject a
         // 4000px embedded JPEG and force a full demosaic.
-        if let Some(preview) = thumbnail::rawler_full_image_from_bytes(bytes, max_px) {
+        if let Some(preview) = crate::decode::rawler::rawler_full_image_from_bytes(bytes, max_px) {
             return Ok(preview);
         }
-        return crate::decode::raw_preview::decode_raw_from_shared_vec(
+        return crate::decode::rawler::raw_preview::decode_raw_from_shared_vec(
             Arc::clone(bytes),
             max_px,
             quality,

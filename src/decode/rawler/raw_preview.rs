@@ -108,7 +108,7 @@ fn decode_raw_preview(
 ) -> Result<DecodedImage, String> {
     use rawler::rawimage::RawPhotometricInterpretation;
 
-    crate::decode::image_decode::check_rawler_size_limit(&source)?;
+    super::check_rawler_size_limit(&source)?;
     let params = rawler::decoders::RawDecodeParams::default();
     let orientation = real_orientation(&source, &params);
 
@@ -137,7 +137,7 @@ fn decode_raw_preview(
         ));
     }
 
-    crate::decode::image_decode::normalize_linear_levels(&mut raw)?;
+    super::normalize_linear_levels(&mut raw)?;
     // A file smaller than its sensor (a lossy RAW) asked for too little.
     // Asking again for the whole amount, rather than the difference while
     // holding the first grant, keeps two decodes from each waiting on the
@@ -537,7 +537,7 @@ fn is_supported_bayer_layout(
 // `downsample_xtrans_mosaic` clamps a partial trailing block to a row or
 // column of a different CFA phase, corrupting color at the bottom and right
 // edges. It only runs for RAF files with no usable embedded image, since
-// `thumbnail.rs`'s `rawler_full_image_from_bytes` handles the common case.
+// `rawler_full_image_from_bytes` handles the common case.
 fn is_supported_xtrans_layout(
     cfa: &rawler::CFA,
     colors: &rawler::cfa::PlaneColor,
@@ -799,7 +799,7 @@ pub fn demosaic_cfa(
             // straight into `rgba` rather than a second full-size buffer.
             for i in 0..w * h {
                 let rgb = crate::develop::denoise_linear_rgb_pixel(
-                    crate::decode::image_decode::AUTO_RAW_DENOISE_STRENGTH,
+                    super::AUTO_RAW_DENOISE_STRENGTH,
                     w,
                     h,
                     &demosaic_pixels,
@@ -941,7 +941,7 @@ fn decimate_linear_rgb(
     // unlike `demosaic_cfa`; both still denoise before the color matrix.
     if mode == DemosaicMode::Quality {
         linear = crate::develop::denoise_linear_rgb_buffer(
-            crate::decode::image_decode::AUTO_RAW_DENOISE_STRENGTH,
+            super::AUTO_RAW_DENOISE_STRENGTH,
             out_w,
             out_h,
             &linear,
