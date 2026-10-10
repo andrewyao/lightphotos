@@ -58,14 +58,13 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // `in.uv` is the straightened canvas, which the crop is in.
     let uv = straightenUv(in.uv);
-    // Sample before any early return. WebGPU requires `textureSample` under
-    // uniform control flow and rejects the shader module otherwise.
-    // `textureSampleLevel(0.0)` would also pass but skips mips, which breaks
-    // antialiasing when zoomed out.
+    // Derivatives before any early return: WebGPU requires `dpdx` under
+    // uniform control flow. `textureSampleLevel(0.0)` would avoid them but
+    // skips mips, which breaks antialiasing when zoomed out.
     //
     // An Rgba8UnormSrgb texture samples as linear light. The math below must
     // match `apply_linear` in develop/mod.rs.
-    let texel = sampleSrc(uv);
+    let texel = sampleSrc(uv, dpdx(in.uv), dpdy(in.uv));
 
     // Outside the image or the crop: the neutral background.
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {

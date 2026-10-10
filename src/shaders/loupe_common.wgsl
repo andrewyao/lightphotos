@@ -72,12 +72,14 @@ fn caUv(uv: vec2<f32>, k: f32) -> vec2<f32> {
 }
 
 // The source texel at `uv` with chromatic aberration removed: red and blue
-// read from their own scaled UVs. All three samples run unconditionally,
-// because `textureSample` must stay in uniform control flow.
-fn sampleSrc(uv: vec2<f32>) -> vec4<f32> {
-    let g = textureSample(tex, samp, uv);
-    let r = textureSample(tex, samp, caUv(uv, adj.ca_red)).r;
-    let b = textureSample(tex, samp, caUv(uv, adj.ca_blue)).b;
+// read from their own scaled UVs. `ddx` and `ddy` are the screen derivatives
+// of the canvas UV, before the turn: a turn keeps the footprint's size, and
+// the hardware's own derivative of a turned UV picks a level of detail above
+// 0 at 1:1, which blends in mip 1 and softens the photo.
+fn sampleSrc(uv: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
+    let g = textureSampleGrad(tex, samp, uv, ddx, ddy);
+    let r = textureSampleGrad(tex, samp, caUv(uv, adj.ca_red), ddx, ddy).r;
+    let b = textureSampleGrad(tex, samp, caUv(uv, adj.ca_blue), ddx, ddy).b;
     return vec4<f32>(r, g.g, b, g.a);
 }
 

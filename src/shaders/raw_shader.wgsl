@@ -36,10 +36,10 @@ fn apply_raw_preview_boost(v: f32) -> f32 {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // `in.uv` is the straightened canvas, which the crop is in.
     let uv = straightenUv(in.uv);
-    // Sample before any early return. WebGPU rejects an implicit-LOD sample
-    // after non-uniform control flow. Rgba16Float has no sRGB decode, so this
-    // is linear.
-    let texel = sampleSrc(uv);
+    // Derivatives before any early return: WebGPU rejects `dpdx` after
+    // non-uniform control flow. Rgba16Float has no sRGB decode, so this is
+    // linear.
+    let texel = sampleSrc(uv, dpdx(in.uv), dpdy(in.uv));
 
     // Outside the image (UV beyond 0..1): draw the neutral background.
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
