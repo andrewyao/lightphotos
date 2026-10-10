@@ -273,6 +273,11 @@ impl Web {
         self.folder_pending
     }
 
+    /// True until the kept folders' names have landed in the Folders list.
+    pub(super) fn saved_folders_pending(&self) -> bool {
+        self.saved_folders_rx.is_some()
+    }
+
     /// Text pasted since the last frame.
     pub(super) fn take_pastes(&self) -> impl Iterator<Item = String> + '_ {
         std::iter::from_fn(|| self.paste_rx.try_recv().ok())
