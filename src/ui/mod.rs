@@ -141,6 +141,8 @@ pub enum UiAction {
     ToggleSelectionInvert,
     /// Load this folder's images and toggle its expansion.
     OpenFolder(std::path::PathBuf),
+    /// Drop this root from the Folders list. Its files stay as they are.
+    RemoveFolder(std::path::PathBuf),
     /// Open the folder picker (`App::open_folder_picker`).
     PickFolder,
     /// Reopen where the user left off, or the folder picker when that folder
@@ -277,7 +279,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     app.clear_cell_rects();
 
     // Drawn first and on every screen, so the Open button never moves.
-    app_header(ui, app, &mut out);
+    app_header(ui, &mut out);
 
     // Everything below assumes a folder is open.
     if !app.has_playlist() {
@@ -333,7 +335,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 /// lightphotos.app site's `.lp-wordmark` style: "Light" in the default text
 /// color, "Photos" in italic brand blue. The web canvas fills the viewport, so
 /// the site's HTML header can't wrap it; native draws the same header.
-fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+fn app_header(ui: &mut egui::Ui, out: &mut FrameOutput) {
     let panel = egui::Panel::top("lp_app_header").show_inside(ui, |ui| {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -363,18 +365,8 @@ fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             );
             ui.label(job);
 
-            // Not in the F6 focus cycle; `Cmd+O`, `?` and `Cmd+,` are their
-            // keyboard routes.
-            // The home page shows it switched off, as part of the layout
-            // behind its card; the card's own Open Folder is the one to press.
-            ui.add_space(12.0);
-            if ui
-                .add_enabled(app.has_playlist(), egui::Button::new(t().open_folder))
-                .on_hover_text(crate::i18n::keys(t().open_folder_tip))
-                .clicked()
-            {
-                out.actions.push(UiAction::PickFolder);
-            }
+            // Not in the F6 focus cycle; `?` and `Cmd+,` are their keyboard
+            // routes. Open Folder lives in the Folders panel.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
                 if ui

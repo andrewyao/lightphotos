@@ -1,16 +1,16 @@
 //! The home page, shown when no folder is open. It draws the Grid's own
 //! layout with nothing in it, so the window looks the way it will once a
-//! folder opens and the tour can point at each region: the left panel waits
-//! for the folder tree, the toolbars and rail are switched off, and the
-//! content area is a field of empty tiles under the prompt and the Open
-//! Folder and Reopen Session buttons.
+//! folder opens and the tour can point at each region: the left panel lists
+//! the folders added before under its Open Folder or + button, the toolbars and
+//! rail are switched off, and the content area is a field of empty tiles
+//! under the prompt and the Open Folder and Reopen Session buttons.
 
 use super::*;
 
 /// Panels claim space in the order `ui::draw` claims them for the Grid, so
 /// every region sits where it will once a folder is open.
 pub(super) fn draw_home(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    left_panel(ui);
+    left_panel(ui, app, out);
     draw_develop_rail(ui, app, false, out);
     toolbar::placeholder_toolbar(ui, app);
     toolbar::placeholder_selection_bar(ui);
@@ -24,16 +24,26 @@ pub(super) fn draw_home(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 const PANEL_WIDTH: f32 = 220.0;
 const PANEL_MARGIN: f32 = 12.0;
 
-/// "Folders" over the empty space the folder tree will fill.
-fn left_panel(ui: &mut egui::Ui) {
+/// The folders added before, each a row that opens it, as the Grid's tree
+/// lists them, under the panel's Open Folder or + button.
+fn left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let width = font_size::px(ui.style(), PANEL_WIDTH);
     let panel = egui::Panel::left("folders")
         .resizable(false)
         .exact_size(width)
         .show_inside(ui, |ui| {
-            let margin = font_size::px(ui.style(), PANEL_MARGIN);
-            ui.add_space(margin);
-            ui.label(egui::RichText::new(t().folders_heading).strong());
+            if app.folder_roots().is_empty() {
+                let margin = font_size::px(ui.style(), PANEL_MARGIN);
+                ui.add_space(margin);
+            }
+            grid::add_folder_button(ui, app, out);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for root in app.folder_roots() {
+                        grid::folder_node(ui, app, root, 0, out);
+                    }
+                });
         });
     tour::anchor(ui.ctx(), tour::TourStep::Folders, panel.response.rect);
 }
@@ -158,14 +168,20 @@ fn content(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 
         // One dim layer over every placeholder region below the header, so
         // the layout reads as a preview behind the card. It paints on the
-        // panels' own layer after them and before the card's widgets.
+        // panels' own layer after them and before the card's widgets. It
+        // leaves out the Folders panel when that lists folders to open.
         let screen = ui.ctx().content_rect();
         let top =
             tour::anchored(ui.ctx(), tour::TourStep::Header).map_or(screen.min.y, |h| h.max.y);
+        let left = if app.folder_roots().is_empty() {
+            screen.min.x
+        } else {
+            tour::anchored(ui.ctx(), tour::TourStep::Folders).map_or(screen.min.x, |f| f.max.x)
+        };
         ui.ctx()
             .layer_painter(egui::LayerId::background())
             .rect_filled(
-                egui::Rect::from_min_max(egui::pos2(screen.min.x, top), screen.max),
+                egui::Rect::from_min_max(egui::pos2(left, top), screen.max),
                 0.0,
                 egui::Color32::from_black_alpha(OVERLAY_ALPHA),
             );

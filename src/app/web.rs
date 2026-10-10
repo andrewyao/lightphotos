@@ -475,7 +475,7 @@ impl App {
                     let playlist = Playlist::from_entries(root.clone(), picked.entries);
                     self.load_playlist(playlist, root.clone());
                     // Show the folder tree only once the playlist is loaded.
-                    self.folder_root = Some(root.clone());
+                    self.folder_roots = vec![root.clone()];
                     self.expanded = std::collections::HashSet::from([root.clone()]);
                     self.mode = ViewMode::Grid;
                     // The picker fallback may have opened a different folder.

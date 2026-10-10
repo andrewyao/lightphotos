@@ -129,7 +129,7 @@ impl App {
         let folder = self
             .folder_sel
             .as_deref()
-            .or(self.folder_root.as_deref())
+            .or(self.folder_roots.first().map(PathBuf::as_path))
             .or_else(|| self.shown.path().and_then(|p| p.parent()))
             .and_then(|d| d.file_name());
         if let Some(folder) = folder {

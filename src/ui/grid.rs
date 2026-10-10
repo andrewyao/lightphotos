@@ -4,13 +4,14 @@ use std::path::Path;
 use crate::app::GRID_CELL_PT;
 use crate::app::{App, Region};
 
-/// The left sidebar: the folder tree, rooted at the opened folder.
+/// The left sidebar: the folder tree, one root per added folder.
 pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let content_width = app
-        .folder_root()
-        .map(|root| folder_content_width(ui, app, root.as_path(), 0, &font))
-        .unwrap_or(0.0);
+        .folder_roots()
+        .iter()
+        .map(|root| folder_content_width(ui, app, root, 0, &font))
+        .fold(0.0, f32::max);
     let panel_width = (content_width + 24.0)
         .max(220.0)
         .min((ui.available_width() - 96.0).max(220.0));
@@ -18,15 +19,47 @@ pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutpu
         .resizable(false)
         .exact_size(panel_width)
         .show_inside(ui, |ui| {
+            add_folder_button(ui, app, out);
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    if let Some(root) = app.folder_root() {
-                        folder_node(ui, app, &root, 0, out);
+                    for root in app.folder_roots() {
+                        folder_node(ui, app, root, 0, out);
                     }
                 });
         });
     tour::anchor(ui.ctx(), tour::TourStep::Folders, panel.response.rect);
+}
+
+/// The Folders panel's way to add a folder: Open Folder before there is
+/// any, then a + in the panel's top-right corner. The web has one folder,
+/// which a pick replaces, so it keeps Open Folder.
+pub(super) fn add_folder_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = crate::i18n::t();
+    let pending = app.folder_pick_pending();
+    let clicked = if cfg!(target_arch = "wasm32") || app.folder_roots().is_empty() {
+        let label = if pending { t.opening } else { t.open_folder };
+        let b = form::Button {
+            label,
+            role: form::Role::Primary,
+            enabled: !pending,
+        };
+        form::button(ui, &b)
+            .on_hover_text(crate::i18n::keys(t.open_folder_tip))
+            .clicked()
+    } else {
+        let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+        let corner = egui::Layout::right_to_left(egui::Align::Center);
+        ui.allocate_ui_with_layout(row, corner, |ui| {
+            ui.add_enabled(!pending, egui::Button::new("+"))
+                .on_hover_text(crate::i18n::keys(t.add_folder_tip))
+                .clicked()
+        })
+        .inner
+    };
+    if clicked {
+        out.actions.push(UiAction::PickFolder);
+    }
 }
 
 /// Width of the widest visible folder row, measured in the body font that
@@ -198,8 +231,16 @@ fn disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
     response
 }
 
-/// One folder row. Recurses into expanded folders.
-fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mut FrameOutput) {
+/// One folder row. Recurses into expanded folders. A root's row also has a
+/// right-click menu to remove it, and a root that isn't there right now is
+/// greyed out and doesn't open.
+pub(super) fn folder_node(
+    ui: &mut egui::Ui,
+    app: &App,
+    path: &Path,
+    depth: usize,
+    out: &mut FrameOutput,
+) {
     let selected = app.folder_sel().as_deref() == Some(path);
     let row = ui.horizontal(|ui| {
         ui.add_space(depth as f32 * disclosure_w(ui.style()));
@@ -207,10 +248,30 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        if depth == 0 && app.is_missing_root(path) {
+            ui.add_space(disclosure_w(ui.style()));
+            let label = ui
+                .add(egui::Button::selectable(
+                    false,
+                    egui::RichText::new(name).weak(),
+                ))
+                .on_hover_text((crate::i18n::t().folder_missing)(
+                    &path.display().to_string(),
+                ));
+            if label.clicked() {
+                // Checks again, in case the drive is back.
+                out.actions.push(UiAction::OpenFolder(path.to_path_buf()));
+            }
+            root_menu(path, &label, out);
+            return;
+        }
         let triangle = disclosure_triangle(ui, app.is_expanded(path));
         let label = ui.selectable_label(selected, name);
         if triangle.clicked() || label.clicked() {
             out.actions.push(UiAction::OpenFolder(path.to_path_buf()));
+        }
+        if depth == 0 {
+            root_menu(path, &label, out);
         }
     });
 
@@ -228,6 +289,16 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
             folder_node(ui, app, child, depth + 1, out);
         }
     }
+}
+
+/// A root row's right-click menu.
+fn root_menu(root: &Path, row: &egui::Response, out: &mut FrameOutput) {
+    egui::Popup::context_menu(row).show(|ui| {
+        if ui.button(crate::i18n::t().remove_folder).clicked() {
+            out.actions.push(UiAction::RemoveFolder(root.to_path_buf()));
+            ui.close();
+        }
+    });
 }
 
 /// What differs between a grid cell and a filmstrip cell.

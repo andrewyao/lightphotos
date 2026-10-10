@@ -351,6 +351,7 @@ scoring does not run there.
 | `web/web_fs.rs` | File System Access folder picking/listing/byte reads | wasm32 |
 | `web/web_catalog_fs.rs` | File System Access counterpart of `persist/catalog.rs`'s sidecar I/O | wasm32 |
 | `app/loupe.rs` | View-state math (zoom/pan/fit) and the decision to fetch full resolution | all |
+| `app/folders.rs` | The Folders tree's roots: add, remove, remember them (prefs key `folders`, native only). The Grid shows one folder at a time | all |
 | `app/thumbs.rs` | `try_show`'s tier-selection logic, thumbnail texture sync, capture-time and face signal hooks | all |
 | `scoring/vision.rs` | `perform` runs Vision requests over a file (Vision decodes it) or an in-memory image, and blocks | macOS (the module itself is `cfg(target_os = "macos")`) |
 | `scoring/facequality.rs` | Face landmarks from Vision, then eye-openness geometry for blink detection; owns `FacePool` | macOS; the non-mac arm returns `Err` |

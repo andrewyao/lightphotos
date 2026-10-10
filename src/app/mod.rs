@@ -648,8 +648,13 @@ pub(crate) struct App {
     /// fade, a collapsing header) finishes with no input to wake the loop.
     pub(crate) repaint_at: Option<Instant>,
 
-    /// Top of the folder tree: the opened folder, or an opened file's parent.
-    folder_root: Option<PathBuf>,
+    /// Tops of the folder tree, sorted: every folder the user has added, and
+    /// an opened file's parent. Remembered across launches natively; on the
+    /// web, just the picked folder.
+    folder_roots: Vec<PathBuf>,
+    /// Roots that weren't a folder when last checked, such as an unplugged
+    /// drive's. They stay listed so the user can remove them.
+    missing_roots: HashSet<PathBuf>,
     /// The folder shown in the grid, and also the tree's keyboard cursor.
     /// Moving in the tree loads the folder in the same step.
     folder_sel: Option<PathBuf>,
@@ -693,6 +698,7 @@ pub(crate) use group_compare::{
 };
 mod export;
 mod faces;
+mod folders;
 mod fonts;
 mod group_compare;
 #[cfg(not(target_arch = "wasm32"))]
@@ -729,6 +735,7 @@ impl App {
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
         let (renderer_init_tx, renderer_init_rx) = std::sync::mpsc::channel();
+        let (folder_roots, missing_roots) = folders::remembered();
         Self {
             window: None,
             renderer: None,
@@ -841,7 +848,8 @@ impl App {
             status: None,
             occluded: false,
             repaint_at: None,
-            folder_root: None,
+            folder_roots,
+            missing_roots,
             folder_sel: None,
             expanded: HashSet::new(),
             subdirs: HashMap::new(),
@@ -878,13 +886,17 @@ impl App {
         );
 
         if is_dir {
-            self.folder_root = Some(path.clone());
-            self.expanded = HashSet::from([path.clone()]);
-            self.ensure_subdirs(&path);
             #[cfg(not(target_arch = "wasm32"))]
-            self.load_folder(path);
+            {
+                self.add_root(&path);
+                self.reveal_folder(&path);
+                self.load_folder(path);
+            }
             #[cfg(target_arch = "wasm32")]
             {
+                self.folder_roots = vec![path.clone()];
+                self.expanded = HashSet::from([path.clone()]);
+                self.ensure_subdirs(&path);
                 // Browser paths are synthetic, backed by directory handles
                 // whose listing is async, so `Playlist::from_dir` can't run.
                 if !self.subdirs.contains_key(&path) {
@@ -905,10 +917,18 @@ impl App {
             // Root the tree at the parent so the Grid has a sidebar.
             if let Some(parent) = path.parent() {
                 let parent = parent.to_path_buf();
-                self.folder_root = Some(parent.clone());
-                self.folder_sel = Some(parent.clone());
-                self.expanded = HashSet::from([parent.clone()]);
-                self.ensure_subdirs(&parent);
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    self.add_root(&parent);
+                    self.reveal_folder(&parent);
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    self.folder_roots = vec![parent.clone()];
+                    self.expanded = HashSet::from([parent.clone()]);
+                    self.ensure_subdirs(&parent);
+                }
+                self.folder_sel = Some(parent);
             }
 
             let playlist = Playlist::from_file(&path);
@@ -1314,6 +1334,7 @@ impl App {
                     self.set_focus(Region::Folders, FocusLevel::Entered);
                     self.open_folder(p);
                 }
+                ui::UiAction::RemoveFolder(p) => self.remove_root(&p),
                 ui::UiAction::PickFolder => self.open_folder_picker(),
                 ui::UiAction::ReopenSession => self.reopen_session(),
                 ui::UiAction::EnterGrid => self.enter_grid(),

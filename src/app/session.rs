@@ -54,27 +54,18 @@ impl Session {
     /// `root`, then each folder below it down to the one showing. Just `root`
     /// when `dir` isn't inside it.
     pub(crate) fn folder_chain(&self) -> Vec<PathBuf> {
-        let Some(dir) = self.dir.as_deref().filter(|d| d.starts_with(&self.root)) else {
-            return vec![self.root.clone()];
-        };
-        let mut chain: Vec<PathBuf> = dir
-            .ancestors()
-            .take_while(|a| a.starts_with(&self.root))
-            .map(Path::to_path_buf)
-            .collect();
-        chain.reverse();
-        chain
+        match self.dir.as_deref() {
+            Some(dir) => super::folders::folder_chain(&self.root, dir),
+            None => vec![self.root.clone()],
+        }
     }
 }
 
 impl App {
     /// The session as it stands, or `None` on the landing page.
     fn current_session(&self) -> Option<Session> {
-        let root = self.folder_root.clone()?;
         let dir = self.playlist.as_ref()?.dir();
-        if !dir.starts_with(&root) {
-            return None;
-        }
+        let root = self.root_of(dir)?.to_path_buf();
         let dir = (dir != root).then(|| dir.to_path_buf());
         let view = match self.mode {
             ViewMode::Loupe => SessionView::Loupe,
@@ -242,7 +233,7 @@ mod tests {
         app.session = Some(saved.clone());
         app.reopen_session();
 
-        assert_eq!(app.folder_root.as_deref(), Some(root.as_path()));
+        assert_eq!(app.folder_roots(), std::slice::from_ref(&root));
         assert_eq!(app.folder_sel.as_deref(), Some(root.join("sub").as_path()));
         assert!(app.expanded.contains(&root));
         assert_eq!(app.mode, ViewMode::Loupe);
@@ -309,6 +300,20 @@ mod tests {
     }
 
     #[test]
+    fn a_session_in_a_second_folder_records_that_folder_as_its_root() {
+        let (first, second) = (tree("root-one"), tree("root-two"));
+        let mut app = App::new(None);
+        app.open(first);
+        app.open(second.clone());
+        app.open_folder(second.join("sub"));
+        app.select_single(0);
+        assert_eq!(
+            app.current_session(),
+            Some(session(&second, Some("sub/c.jpg"), SessionView::Grid))
+        );
+    }
+
+    #[test]
     fn reopening_restores_the_folder_photo_and_loupe() {
         let root = tree("restore");
         let saved = session(&root, Some("b.jpg"), SessionView::Loupe);
@@ -316,7 +321,7 @@ mod tests {
         app.session = Some(saved.clone());
         app.reopen_session();
 
-        assert_eq!(app.folder_root.as_deref(), Some(root.as_path()));
+        assert_eq!(app.folder_roots(), std::slice::from_ref(&root));
         assert_eq!(app.mode, ViewMode::Loupe);
         assert_eq!(app.current_session(), Some(saved));
     }

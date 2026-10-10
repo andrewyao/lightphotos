@@ -198,7 +198,13 @@ pub struct Strings {
     pub reopen_session_tip: fn(&str) -> String,
     pub picker_title: &'static str,
     /// The home page's left panel heading.
-    pub folders_heading: &'static str,
+    /// Hover text on the Folders panel's + button.
+    pub add_folder_tip: &'static str,
+    /// A Folders root's right-click item. The folder's files stay.
+    pub remove_folder: &'static str,
+    /// Hover text on a Folders root that isn't there, such as on an
+    /// unplugged drive. Takes the folder's path.
+    pub folder_missing: fn(&str) -> String,
     /// The home page's empty actions bar.
     pub select_photos_hint: &'static str,
 
@@ -716,7 +722,7 @@ pub static EN: Strings = Strings {
     lang_chinese: "中文",
 
     open_folder: "Open Folder",
-    open_folder_tip: "Open a folder of photos (Cmd+O)",
+    open_folder_tip: "Add a folder of photos to Folders and open it (Cmd+O)",
     back_to_grid_tip: "Back to the grid (G)",
     shown_thumb_tip: "Showing the thumbnail",
     shown_embedded_tip: "Showing the JPEG embedded in the file",
@@ -765,7 +771,9 @@ pub static EN: Strings = Strings {
     reopen_session: "Reopen Session",
     reopen_session_tip: |folder| format!("Pick up where you left off in {folder}"),
     picker_title: "Choose a folder of photos",
-    folders_heading: "Folders",
+    add_folder_tip: "Add a folder of photos (Cmd+O)",
+    remove_folder: "Remove Folder",
+    folder_missing: |folder| format!("{folder} can't be found. Reconnect its drive, or right-click to remove it."),
     select_photos_hint: "Select photos to rate, stack and export them here.",
     tour: "Tour",
     tour_tip: "A quick tour of where everything is",
@@ -783,7 +791,7 @@ pub static EN: Strings = Strings {
     tour_steps: [
         (
             "Folders",
-            "Once a folder is open, it and its subfolders are listed here. Click one to show its photos.",
+            "Open Folder adds a folder of photos here, and the + button at the top adds another. Each one is listed with its subfolders. Click one to show its photos; right-click a folder to remove it from the list.",
         ),
         (
             "Filter toolbar",
@@ -815,7 +823,7 @@ pub static EN: Strings = Strings {
         ),
         (
             "Header",
-            "Open Folder opens another folder of photos at any time. The ? button lists the keyboard shortcuts, Settings changes the theme, language and text size, and Tour shows this guide again.",
+            "The ? button lists the keyboard shortcuts, Settings changes the theme, language and text size, and Tour shows this guide again.",
         ),
     ],
 
@@ -1433,7 +1441,7 @@ pub static ZH: Strings = Strings {
     lang_chinese: "中文",
 
     open_folder: "打开文件夹",
-    open_folder_tip: "打开照片文件夹 (Cmd+O)",
+    open_folder_tip: "将照片文件夹添加到“文件夹”并打开 (Cmd+O)",
     back_to_grid_tip: "返回网格 (G)",
     shown_thumb_tip: "正在显示缩略图",
     shown_embedded_tip: "正在显示文件自带的 JPEG",
@@ -1482,7 +1490,9 @@ pub static ZH: Strings = Strings {
     reopen_session: "打开上次的文件夹",
     reopen_session_tip: |folder| format!("回到上次在 {folder} 的位置"),
     picker_title: "选择照片文件夹",
-    folders_heading: "文件夹",
+    add_folder_tip: "添加照片文件夹 (Cmd+O)",
+    remove_folder: "移除文件夹",
+    folder_missing: |folder| format!("找不到 {folder}。请重新连接，或右键点按将其移除。"),
     select_photos_hint: "选择照片后，可以在这里评分、堆叠和导出。",
     tour: "导览",
     tour_tip: "快速了解各项功能的位置",
@@ -1500,7 +1510,7 @@ pub static ZH: Strings = Strings {
     tour_steps: [
         (
             "文件夹",
-            "打开文件夹后，它和它的子文件夹会列在这里。点击一个文件夹即可显示其中的照片。",
+            "“打开文件夹”会把照片文件夹添加到这里，顶部的 + 按钮可再添加一个。每个文件夹下面列出其子文件夹。点击一个文件夹即可显示其中的照片；右键点按文件夹可将其从列表中移除。",
         ),
         (
             "筛选工具栏",
@@ -1532,7 +1542,7 @@ pub static ZH: Strings = Strings {
         ),
         (
             "顶栏",
-            "“打开文件夹”可随时打开另一个照片文件夹。? 按钮列出键盘快捷键，设置可更改主题、语言和文字大小，导览可再次显示本指南。",
+            "? 按钮列出键盘快捷键，设置可更改主题、语言和文字大小，导览可再次显示本指南。",
         ),
     ],
 

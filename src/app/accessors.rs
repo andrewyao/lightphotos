@@ -127,9 +127,14 @@ impl App {
         self.toolbar_focus
     }
 
-    /// The root of the folder tree: the opened folder, or a file's parent.
-    pub(crate) fn folder_root(&self) -> Option<PathBuf> {
-        self.folder_root.clone()
+    /// The tops of the folder tree, in the order the tree shows them.
+    pub(crate) fn folder_roots(&self) -> &[PathBuf] {
+        &self.folder_roots
+    }
+
+    /// Whether `root` wasn't a folder when last checked.
+    pub(crate) fn is_missing_root(&self, root: &Path) -> bool {
+        self.missing_roots.contains(root)
     }
 
     /// The folder whose images are in the grid.

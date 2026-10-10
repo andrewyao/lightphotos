@@ -806,13 +806,13 @@ impl App {
     }
 
     /// The tree's visible rows, top to bottom.
-    fn visible_tree(&self) -> Vec<PathBuf> {
-        let Some(root) = self.folder_root.clone() else {
-            return Vec::new();
-        };
+    pub(super) fn visible_tree(&self) -> Vec<PathBuf> {
         let is_expanded = |p: &Path| self.expanded.contains(p);
         let children = |p: &Path| self.subdirs.get(p).cloned().unwrap_or_default();
-        flatten_visible_tree(&root, &is_expanded, &children)
+        self.folder_roots
+            .iter()
+            .flat_map(|root| flatten_visible_tree(root, &is_expanded, &children))
+            .collect()
     }
 
     /// Load `dir` into the grid without changing expansion. On wasm32 this
@@ -879,8 +879,8 @@ impl App {
     }
 
     /// Left arrow in the tree: collapse the folder, or load its parent if
-    /// already collapsed. Stops at the root.
-    fn folder_collapse(&mut self) {
+    /// already collapsed. Stops at a root.
+    pub(super) fn folder_collapse(&mut self) {
         #[cfg(target_arch = "wasm32")]
         self.supersede_web_pending_nav();
         let Some(cur) = self.folder_sel.clone() else {
@@ -889,7 +889,7 @@ impl App {
         if self.expanded.contains(&cur) {
             self.expanded.remove(&cur);
             self.request_redraw();
-        } else if Some(cur.as_path()) != self.folder_root.as_deref() {
+        } else if !self.folder_roots.contains(&cur) {
             if let Some(parent) = cur.parent() {
                 self.nav_to_folder(parent.to_path_buf());
             }
@@ -908,6 +908,15 @@ impl App {
     pub(super) fn open_folder(&mut self, path: PathBuf) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            // A root on an unplugged drive stays listed but can't open.
+            if self.folder_roots.contains(&path) {
+                if !path.is_dir() {
+                    self.missing_roots.insert(path);
+                    self.request_redraw();
+                    return;
+                }
+                self.missing_roots.remove(&path);
+            }
             self.ensure_subdirs(&path);
             let subdirs = self.subdirs(&path).to_vec();
             let pure_container =
