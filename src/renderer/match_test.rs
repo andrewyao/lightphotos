@@ -2,13 +2,14 @@
 
 //! Renders a matrix of edits through the Loupe shader and through
 //! `bake_edited` on the same synthetic photos, and checks that the two agree.
+//! A second matrix draws the base layer through `BaseProbe` on both sides.
 
 use super::Renderer;
 use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
 use crate::develop::curve::Curve;
-use crate::develop::image_ops::bake_edited;
+use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
-    Adjustments, CaScale, Crop, GpuAdjust, GpuTouchUp, Straighten, TouchUp, SLIDERS,
+    Adjustments, BaseProbe, CaScale, Crop, GpuAdjust, GpuTouchUp, Straighten, TouchUp, SLIDERS,
 };
 
 const W: u32 = 96;
@@ -217,23 +218,31 @@ fn cases() -> Vec<Case> {
 }
 
 /// The most any channel of a case may differ, in 8-bit steps. Measured on an
-/// Apple M-series GPU (Metal) on 2026-10-10. The one entry above 2 is the
+/// Apple M-series GPU (Metal) on 2026-10-10. The entries above 2 are the
 /// GPU's own: its bilinear weights have 8 bits, which shows on two pixels of
-/// the hard-edged chart when red and blue read between texels.
+/// the hard-edged chart when red and blue read between texels. The detail
+/// view multiplies the pixel's own error by 8, so a turned photo, whose
+/// every read falls between texels, shows it on the noise chart (13 on 16
+/// pixels). The layer itself holds at 2 there: `straighten/mid`, `/wide`
+/// and `/dark` hold.
 fn tolerance(case: &str) -> u8 {
     match case {
-        "ca" => 3,
+        "ca" | "ca/detail" => 3,
+        "straighten/detail" => 16,
         _ => 2,
     }
 }
 
-fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case) -> Diff {
+fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case, probe: BaseProbe) -> Diff {
     let (w, h) = (fixture.img.width, fixture.img.height);
     r.resize(w, h);
     r.set_image(&fixture.img);
     r.set_transform([1.0, 1.0], [0.0, 0.0], [1.0, 0.0, 0.0, 1.0]);
     r.set_adjustments(
-        GpuAdjust::for_image(&case.adj, w as f32, h as f32, case.touchups.len()),
+        GpuAdjust {
+            base_probe: probe.gpu(),
+            ..GpuAdjust::for_image(&case.adj, w as f32, h as f32, case.touchups.len())
+        },
         &case.adj.curve,
     );
     let gpu_touchups: Vec<GpuTouchUp> = case.touchups.iter().map(GpuTouchUp::from).collect();
@@ -242,7 +251,7 @@ fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case) -> Diff {
     let gpu = r.read_offscreen_blocking().expect("offscreen readback");
     assert_eq!((gpu.width, gpu.height), (w, h));
 
-    let (cw, ch, cpu) = bake_edited(&fixture.img, &case.adj, &case.touchups, 0);
+    let (cw, ch, cpu) = bake_edited_probe(&fixture.img, &case.adj, &case.touchups, 0, probe);
     let crop = case.adj.crop.unwrap_or(Crop {
         left: 0.0,
         top: 0.0,
@@ -279,28 +288,28 @@ fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case) -> Diff {
     }
     Diff {
         fixture: fixture.name,
-        case: case.name.clone(),
+        case: match probe {
+            BaseProbe::Off => case.name.clone(),
+            _ => format!("{}/{probe:?}", case.name).to_lowercase(),
+        },
         max,
         over_2,
         pixels: (cw * ch) as usize,
     }
 }
 
-#[test]
-fn loupe_shader_matches_cpu_bake() {
-    let mut r = match Renderer::new_headless(W, H) {
-        Ok(r) => r,
+fn headless(w: u32, h: u32) -> Option<Renderer> {
+    match Renderer::new_headless(w, h) {
+        Ok(r) => Some(r),
         Err(e) => {
             eprintln!("match_test: skipped, no GPU adapter: {e}");
-            return;
+            None
         }
-    };
-    let cases = cases();
-    let mut diffs: Vec<Diff> = fixtures()
-        .iter()
-        .flat_map(|f| cases.iter().map(|c| (f, c)).collect::<Vec<_>>())
-        .map(|(f, c)| measure(&mut r, f, c))
-        .collect();
+    }
+}
+
+/// Print every pair, worst first, and fail on any over its tolerance.
+fn report(mut diffs: Vec<Diff>) {
     diffs.sort_by_key(|d| std::cmp::Reverse(d.max));
     for d in &diffs {
         eprintln!(
@@ -317,4 +326,170 @@ fn loupe_shader_matches_cpu_bake() {
         .map(|d| format!("{} {} max {}", d.fixture, d.case, d.max))
         .collect();
     assert!(failing.is_empty(), "over tolerance: {failing:#?}");
+}
+
+#[test]
+fn loupe_shader_matches_cpu_bake() {
+    let Some(mut r) = headless(W, H) else {
+        return;
+    };
+    let cases = cases();
+    let diffs = fixtures()
+        .iter()
+        .flat_map(|f| cases.iter().map(move |c| (f, c)))
+        .map(|(f, c)| measure(&mut r, f, c, BaseProbe::Off))
+        .collect();
+    report(diffs);
+}
+
+/// The GPU base layer, read through `baseAt`, against `BaseLayer`, read
+/// through `at_uv`, for every field and the 8x detail view.
+#[test]
+fn loupe_base_layer_matches_cpu_base() {
+    let Some(mut r) = headless(W, H) else {
+        return;
+    };
+    let cases: Vec<Case> = cases()
+        .into_iter()
+        .filter(|c| ["identity", "ca", "touchup", "straighten", "everything"].contains(&&*c.name))
+        .collect();
+    assert_eq!(cases.len(), 5);
+    let probes = [
+        BaseProbe::Mid,
+        BaseProbe::Wide,
+        BaseProbe::Dark,
+        BaseProbe::Detail,
+    ];
+    let mut diffs = Vec::new();
+    for f in &fixtures() {
+        for c in &cases {
+            for p in probes {
+                diffs.push(measure(&mut r, f, c, p));
+            }
+        }
+    }
+    report(diffs);
+}
+
+/// A slider drag rewrites only the adjustments, and the app re-sends the
+/// same spots with each, so no frame of it may rebuild the base layer.
+/// Changing the spots or the CA scales must.
+#[test]
+fn only_the_spots_and_the_ca_scales_rebuild_the_base_layer() {
+    let Some(mut r) = headless(W, H) else {
+        return;
+    };
+    let fixtures = fixtures();
+    let img = &fixtures[0].img;
+    let spot = GpuTouchUp::from(&TouchUp {
+        center: [0.5, 0.5],
+        radius: 0.1,
+        source: [0.2, 0.2],
+        feather: 0.5,
+        delta: [0.0; 3],
+        opacity: 1.0,
+    });
+    let push = |r: &mut Renderer, adj: &Adjustments, spots: &[GpuTouchUp]| {
+        let gpu = GpuAdjust::for_image(adj, W as f32, H as f32, spots.len());
+        r.set_adjustments(gpu, &adj.curve);
+        r.set_touchups(spots);
+        assert!(r.render(None, None, None));
+    };
+    r.set_image(img);
+    push(&mut r, &Adjustments::default(), &[spot]);
+    let built = r.base_builds;
+    for i in 0..30 {
+        let adj = Adjustments {
+            exposure: i as f32 * 0.1,
+            temp: -(i as f32),
+            ..Default::default()
+        };
+        push(&mut r, &adj, &[spot]);
+    }
+    assert_eq!(r.base_builds, built, "a slider drag rebuilt the base layer");
+
+    let moved = GpuTouchUp {
+        source: [0.3, 0.2],
+        ..spot
+    };
+    push(&mut r, &Adjustments::default(), &[moved]);
+    assert_eq!(r.base_builds, built + 1, "a moved spot");
+    let ca = Adjustments {
+        chromatic_aberration: Some(CaScale {
+            red: 0.002,
+            blue: 0.0,
+        }),
+        ..Default::default()
+    };
+    push(&mut r, &ca, &[moved]);
+    assert_eq!(r.base_builds, built + 2, "a new CA scale");
+    r.set_image(img);
+    push(&mut r, &ca, &[moved]);
+    assert_eq!(r.base_builds, built + 3, "a new image");
+}
+
+/// Frame times on a 24 MP photo, with the base layer cached (a slider
+/// drag) and rebuilt every frame. Prints; asserts nothing. Run it with
+/// `cargo test --release frame_time -- --ignored --nocapture`.
+#[test]
+#[ignore = "a timing report, not a check"]
+fn frame_time_with_and_without_a_base_rebuild() {
+    let (sw, sh) = (1600, 1067);
+    let Some(mut r) = headless(sw, sh) else {
+        return;
+    };
+    let (w, h) = (6000u32, 4000u32);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            rgba.extend([
+                (x * 255 / w) as u8,
+                (y * 255 / h) as u8,
+                ((x ^ y) & 255) as u8,
+                255,
+            ]);
+        }
+    }
+    let img = DecodedImage::new_tracked(DecodedImageFields {
+        width: w,
+        height: h,
+        rgba,
+        pixel_format: PixelFormat::Srgb8,
+    });
+    let wait = |r: &Renderer| {
+        r.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("poll");
+    };
+    r.set_image(&img);
+    r.set_transform([1.0, 1.0], [0.0, 0.0], [1.0, 0.0, 0.0, 1.0]);
+    let frames = |r: &mut Renderer, rebuild: bool| {
+        let t0 = std::time::Instant::now();
+        let built = r.base_builds;
+        for i in 0..60 {
+            let adj = Adjustments {
+                exposure: (i % 20) as f32 * 0.05,
+                ..Default::default()
+            };
+            r.set_adjustments(
+                GpuAdjust::for_image(&adj, w as f32, h as f32, 0),
+                &adj.curve,
+            );
+            r.set_touchups(&[]);
+            if rebuild {
+                r.base_built_for = None;
+            }
+            assert!(r.render(None, None, None));
+            wait(r);
+        }
+        (t0.elapsed() / 60, r.base_builds - built)
+    };
+    // The first frame builds the layer; time the ones after it.
+    assert!(r.render(None, None, None));
+    wait(&r);
+    let (cached, cached_builds) = frames(&mut r, false);
+    let (rebuilt, rebuilds) = frames(&mut r, true);
+    eprintln!("frame_time: {w}x{h} source, {sw}x{sh} target, 60 frames each");
+    eprintln!("frame_time: cached base   {cached:?}/frame, {cached_builds} base builds");
+    eprintln!("frame_time: rebuilt base  {rebuilt:?}/frame, {rebuilds} base builds");
 }

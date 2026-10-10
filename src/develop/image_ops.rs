@@ -5,7 +5,7 @@
 //! so the two always match. The Loupe applies edits on the GPU instead.
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
-use crate::develop::{self, Adjustments, Crop, TouchUp};
+use crate::develop::{self, Adjustments, BaseLayer, BaseProbe, Crop, TouchUp};
 
 /// Normalized crop (`None` = full frame) to pixel bounds `(x0, y0, x1, y1)`,
 /// at least 1x1.
@@ -173,6 +173,19 @@ pub fn bake_edited(
     touchups: &[TouchUp],
     rot: u8,
 ) -> (u32, u32, Vec<u8>) {
+    bake_edited_probe(img, adj, touchups, rot, BaseProbe::Off)
+}
+
+/// [`bake_edited`] with the base layer drawn in place of the photo as
+/// `probe` says, as the Loupe does for `GpuAdjust::base_probe`. Only `Off`
+/// skips building the layer.
+pub fn bake_edited_probe(
+    img: &DecodedImage,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+    probe: BaseProbe,
+) -> (u32, u32, Vec<u8>) {
     let (w, h) = (img.width, img.height);
     let ca = adj.chromatic_aberration.unwrap_or_default();
     let Some(src) = Source::new(img, ca, adj.denoise > 0.0) else {
@@ -188,6 +201,11 @@ pub fn bake_edited(
     let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
     let (cw, ch) = (x1 - x0, y1 - y0);
     let dev = develop::Develop::new(adj);
+    let base = if probe == BaseProbe::Off {
+        None
+    } else {
+        base_layer(&src, touchups)
+    };
     let mut cropped = vec![0u8; (cw * ch * 4) as usize];
     for y in 0..ch {
         for x in 0..cw {
@@ -201,7 +219,12 @@ pub fn bake_edited(
                     src.at_uv(u + dx as f32 * texel_w, v + dy as f32 * texel_h)
                 }
             });
-            let out = dev.linear(apply_touchups(&src, touchups, u, v, lin));
+            let pre = apply_touchups(&src, touchups, u, v, lin);
+            let pre = match &base {
+                Some(base) => probe.apply(base.at_uv(u, v), pre),
+                None => pre,
+            };
+            let out = dev.linear(pre);
             let di = ((y * cw + x) * 4) as usize;
             cropped[di] = linear_to_srgb8(out[0]);
             cropped[di + 1] = linear_to_srgb8(out[1]);
@@ -211,6 +234,23 @@ pub fn bake_edited(
     }
 
     rotate_rgba(&cropped, cw, ch, rot)
+}
+
+/// The base layer of the pre-tone image `bake_edited` reads: each texel at
+/// its center with CA removed and the touch-ups blended, without denoise.
+/// Must match `preAt` in base.wgsl.
+fn base_layer(src: &Source, touchups: &[TouchUp]) -> Option<BaseLayer> {
+    let (w, h) = (src.img.width, src.img.height);
+    BaseLayer::build(w, h, |x, y| {
+        let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+        // A texel center reads that texel exactly, so skip the bilinear.
+        let px = if src.ca.is_zero() {
+            src.at_px(x as i64, y as i64)
+        } else {
+            src.at_uv(u, v)
+        };
+        apply_touchups(src, touchups, u, v, px)
+    })
 }
 
 /// A `LinearF16` image as opaque sRGB8 RGBA, with no edits, as

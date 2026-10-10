@@ -228,6 +228,47 @@ impl BaseLayer {
     }
 }
 
+/// A test view of the base layer, drawn in place of the photo after the
+/// touch-ups so the match test can compare the layer with no slider. Never
+/// stored: it is not part of [`Adjustments`](super::Adjustments).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BaseProbe {
+    Off,
+    Mid,
+    Wide,
+    Dark,
+    Detail,
+}
+
+impl BaseProbe {
+    /// `GpuAdjust::base_probe`.
+    pub fn gpu(self) -> f32 {
+        match self {
+            BaseProbe::Off => 0.0,
+            BaseProbe::Mid => 1.0,
+            BaseProbe::Wide => 2.0,
+            BaseProbe::Dark => 3.0,
+            BaseProbe::Detail => 4.0,
+        }
+    }
+
+    /// The gray linear pixel that replaces `pre`, the pre-tone pixel whose
+    /// base is `base`. `dark` goes through gamma 2.2 like the other fields;
+    /// `Detail` amplifies the pixel's luma over `mid` 8x, so a half-cell
+    /// shift or a wrong weight shows. Must match `baseProbe` in
+    /// loupe_common.wgsl.
+    pub fn apply(self, base: BaseTexel, pre: [f32; 3]) -> [f32; 3] {
+        let v = match self {
+            BaseProbe::Off => return pre,
+            BaseProbe::Mid => base.mid,
+            BaseProbe::Wide => base.wide,
+            BaseProbe::Dark => base.dark.max(0.0).powf(1.0 / 2.2),
+            BaseProbe::Detail => 0.5 + 8.0 * (luma_gamma(pre) - base.mid),
+        };
+        [v; 3]
+    }
+}
+
 /// One separable pass of the half-kernel `kernel` along x (`horizontal`) or
 /// y, taps clamped at the edge, summed from the most negative tap up. Must
 /// match `fs_base_blur_h` and `fs_base_blur_v` in base.wgsl.

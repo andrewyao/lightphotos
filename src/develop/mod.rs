@@ -12,7 +12,7 @@ pub mod image_ops;
 
 use serde::{Deserialize, Serialize};
 
-pub use base::{BaseLayer, BaseTexel, Grid};
+pub use base::{BaseLayer, BaseProbe, BaseTexel, Grid};
 
 use curve::ToneCurve;
 
