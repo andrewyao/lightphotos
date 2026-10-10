@@ -1000,16 +1000,28 @@ impl App {
     /// background. `poll_catalog_load` copies them in when they land, so first
     /// paint never waits on the sidecars.
     fn seed_mirrors(&mut self, playlist: &Playlist) {
-        // Finish pending edits before replacing the catalog they write to.
-        self.cancel_auto_tone();
-        self.cancel_scoring();
-        self.cancel_delete();
-        self.save_edit();
+        self.finish_folder_jobs();
         if self.playlist.as_ref().map(Playlist::dir) != Some(playlist.dir()) {
             self.expanded_stacks.clear();
         }
         self.adopt_signal_cache(playlist);
         self.request_catalog_load(playlist.dir());
+    }
+
+    /// Finish the jobs that write to the folder showing, before the catalog
+    /// they write to is replaced or closed.
+    fn finish_folder_jobs(&mut self) {
+        self.cancel_auto_tone();
+        self.cancel_scoring();
+        self.cancel_delete();
+        self.save_edit();
+    }
+
+    /// Leave the grid with nothing selected and no anchor.
+    fn clear_selection(&mut self) {
+        self.sel = None;
+        self.selected.clear();
+        self.anchor = None;
     }
 
     /// Show `dir`'s images in the grid with nothing selected.
@@ -1029,9 +1041,7 @@ impl App {
         self.playlist = Some(playlist);
         self.reset_eyes_filter();
         self.recompute_visible();
-        self.sel = None;
-        self.selected.clear();
-        self.anchor = None;
+        self.clear_selection();
         self.folder_sel = Some(dir);
         self.update_window_title();
         // `redraw` syncs textures against `grid_range` before layout updates

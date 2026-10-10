@@ -127,21 +127,15 @@ impl App {
         }
     }
 
-    /// Back to the landing page with no folder showing, finishing the jobs
-    /// that write to the folder first, as `seed_mirrors` does.
+    /// Back to the landing page with no folder showing.
     fn close_folder(&mut self) {
         self.teardown_loupe_state();
-        self.cancel_auto_tone();
-        self.cancel_scoring();
-        self.cancel_delete();
-        self.save_edit();
+        self.finish_folder_jobs();
         self.burst_scan = None;
         self.expanded_stacks.clear();
         self.playlist = None;
         self.recompute_visible();
-        self.sel = None;
-        self.selected.clear();
-        self.anchor = None;
+        self.clear_selection();
         self.folder_sel = None;
         self.mode = ViewMode::Grid;
         self.update_window_title();
