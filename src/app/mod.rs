@@ -621,8 +621,12 @@ pub(crate) struct App {
 
     pending_confirm: Option<PendingConfirm>,
 
-    /// Copied tone settings (no crop) and the path they came from.
-    copied_settings: Option<(PathBuf, Adjustments)>,
+    /// What Copy Settings last copied.
+    copied_settings: Option<catalog::CopiedSettings>,
+    /// The open Copy Settings dialog: the photo and the sections ticked.
+    copy_dialog: Option<(PathBuf, crate::develop::copy::CopySections)>,
+    /// The sections Copy Settings opens with: the preference, read once.
+    copy_sections: Option<crate::develop::copy::CopySections>,
 
     /// The named-look library, global to the app rather than per folder.
     presets: crate::persist::presets::PresetStore,
@@ -835,6 +839,8 @@ impl App {
             source_size: None,
             pending_confirm: None,
             copied_settings: None,
+            copy_dialog: None,
+            copy_sections: None,
             // A test must never write the developer's own preset library.
             #[cfg(test)]
             presets: crate::persist::presets::PresetStore::in_memory(),
@@ -1418,6 +1424,9 @@ impl App {
                 }
                 ui::UiAction::DeleteTouchUp => self.delete_selected_touchup(),
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(*adj),
+                ui::UiAction::SetCopySections(s) => self.set_copy_sections(s),
+                ui::UiAction::CommitCopySettings => self.commit_copy_settings(),
+                ui::UiAction::CancelCopySettings => self.cancel_copy_settings(),
                 ui::UiAction::AutoTone => self.auto_tone_selected(),
                 ui::UiAction::ToggleBlackAndWhite => self.toggle_black_and_white(),
                 ui::UiAction::SetRemoveCa(on) => self.set_remove_ca(on),

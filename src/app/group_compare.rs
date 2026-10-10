@@ -1266,8 +1266,9 @@ mod tests {
         let (mut app, dir, paths) = compare("copy-pick", 6, &[1, 2, 3], 1);
         pick(&mut app, &paths[3], PickHow::Only);
         act(&mut app, UiAction::CopySettings);
+        act(&mut app, UiAction::CommitCopySettings);
         assert_eq!(
-            app.copied_settings.as_ref().map(|(p, _)| p),
+            app.copied_settings.as_ref().map(|c| &c.path),
             Some(&paths[3])
         );
         let _ = std::fs::remove_dir_all(&dir);

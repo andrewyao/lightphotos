@@ -61,7 +61,7 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 | `Y` | Before / after compare |
 | `Cmd`+`U` | Auto Tone this photo |
 | `Cmd`+`Shift`+`U` | Auto Tone the selection (after a confirm) |
-| `Cmd`+`Shift`+`C` | Copy develop settings |
+| `Cmd`+`Shift`+`C` | Copy develop settings: choose the sections to carry, then `Enter` copies and `Esc` cancels. The choice is remembered |
 | `Cmd`+`Shift`+`Y` | Apply settings to the selection (after a confirm) |
 | `X` | Open or close the export form: a folder (`Exports/` by default) or an Immich server, and an output size. `Enter` exports, `Esc` closes. Edits are baked in and files are never overwritten |
 | `Delete` | Move the selection to the Trash, after a confirm; a selected stack counts as all its photos. In the browser, deletes permanently |

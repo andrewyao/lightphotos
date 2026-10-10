@@ -73,6 +73,17 @@ impl App {
             return;
         }
 
+        // Copy Settings sits over every tool too: Enter copies, Escape
+        // closes, and every other key waits.
+        if self.copy_dialog.is_some() {
+            match code {
+                KeyCode::Escape => self.cancel_copy_settings(),
+                KeyCode::Enter | KeyCode::NumpadEnter => self.commit_copy_settings(),
+                _ => {}
+            }
+            return;
+        }
+
         // While cropping, other keys do nothing, so a stray arrow or digit
         // can't move the selection out from under the crop.
         if self.straighten_tool() != StraightenTool::Off {
@@ -454,7 +465,11 @@ mod tests {
             exposure: 0.5,
             ..Default::default()
         };
-        app.copied_settings = Some((paths[0].clone(), look));
+        app.copied_settings = Some(crate::app::catalog::CopiedSettings {
+            path: paths[0].clone(),
+            adj: look,
+            sections: crate::develop::copy::CopySections::LOOK,
+        });
         app.request_bulk(ui::BulkKind::ApplySettings);
         assert!(app.confirm_open(), "applying a look asks first");
         press(&mut app, ModifiersState::empty(), KeyCode::Enter);
@@ -967,9 +982,35 @@ mod tests {
     fn cmd_shift_v_pastes_the_copied_adjustment() {
         let (mut app, _) = folder_app(2);
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyC);
+        assert!(app.copy_dialog().is_some(), "copy asks what to carry");
+        press(&mut app, ModifiersState::empty(), KeyCode::Digit3);
+        assert_eq!(app.rating_of(&app.action_paths()[0]), 0, "keys wait");
+        press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        assert!(app.copy_dialog().is_none() && app.has_copied_settings());
         press(&mut app, CMD, KeyCode::KeyA);
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyV);
         assert!(app.confirm_open(), "pasting onto the selection asks first");
+    }
+
+    /// Paste carries only the sections ticked in Copy Settings.
+    #[test]
+    fn paste_carries_only_the_ticked_sections() {
+        use crate::develop::copy::{CopySection, CopySections};
+        let (mut app, paths) = folder_app(2);
+        let source = crate::develop::Adjustments {
+            temp: 30.0,
+            exposure: 1.0,
+            ..Default::default()
+        };
+        app.edits.insert(paths[0].clone(), source);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyC);
+        app.set_copy_sections(CopySections::NONE.with(CopySection::Tone, true));
+        press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        press(&mut app, CMD, KeyCode::KeyA);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyV);
+        press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        let pasted = app.catalog.adjustments(&paths[1]);
+        assert_eq!((pasted.exposure, pasted.temp), (1.0, 0.0));
     }
 
     #[test]

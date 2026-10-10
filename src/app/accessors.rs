@@ -172,6 +172,11 @@ impl App {
         self.show_help
     }
 
+    /// The sections ticked in the open Copy Settings, `None` when closed.
+    pub(crate) fn copy_dialog(&self) -> Option<crate::develop::copy::CopySections> {
+        self.copy_dialog.as_ref().map(|(_, s)| *s)
+    }
+
     pub(crate) fn show_settings(&self) -> bool {
         self.show_settings
     }

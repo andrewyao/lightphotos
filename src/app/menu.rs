@@ -12,10 +12,13 @@ impl App {
     pub(crate) fn menu_enabled(&self, cmd: MenuCommand) -> bool {
         use MenuCommand::*;
         let typing = self.egui_ctx.text_edit_focused();
-        // Crop, the WB picker, Touch Up, the preset-name prompt and a confirm
-        // dialog each hold the keyboard. Settings holds it too, except for Cmd+,.
-        let tool_free =
-            self.tool == LoupeTool::None && self.preset_name_edit.is_none() && !self.confirm_open();
+        // Crop, the WB picker, Touch Up, the preset-name prompt, a confirm
+        // dialog and Copy Settings each hold the keyboard. Settings holds it
+        // too, except for Cmd+,.
+        let tool_free = self.tool == LoupeTool::None
+            && self.preset_name_edit.is_none()
+            && !self.confirm_open()
+            && self.copy_dialog.is_none();
         let free = tool_free && !self.cropping() && !self.show_settings;
         let loupe = self.mode == ViewMode::Loupe;
         let selected = self.selection_count();
@@ -159,6 +162,11 @@ mod tests {
         assert!(app.menu_enabled(MenuCommand::CopySettings));
         assert!(!app.menu_enabled(MenuCommand::PasteSettings));
         app.run_menu_command(MenuCommand::CopySettings);
+        assert!(
+            !app.menu_enabled(MenuCommand::PasteSettings),
+            "not before Copy Settings is confirmed"
+        );
+        app.commit_copy_settings();
         assert!(app.menu_enabled(MenuCommand::PasteSettings));
         app.selected = BTreeSet::from([0, 1]);
         assert!(

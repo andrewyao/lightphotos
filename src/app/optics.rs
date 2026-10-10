@@ -77,7 +77,12 @@ impl App {
     /// Turn Remove Chromatic Aberration on or off for every photo the panel
     /// acts on. Turning it on measures the photos that lack it, one by one.
     pub(super) fn set_remove_ca(&mut self, on: bool) {
-        let paths = self.action_paths();
+        self.set_ca_for(&self.action_paths(), on);
+    }
+
+    /// Turn the correction on or off for `paths`. Turning it off also drops
+    /// their queued measurements, so none lands later and turns it back on.
+    pub(super) fn set_ca_for(&mut self, paths: &[PathBuf], on: bool) {
         if paths.is_empty() {
             return;
         }
@@ -91,7 +96,7 @@ impl App {
             {
                 self.optics.pending = None;
             }
-            self.edit_each(&paths, |adj| Adjustments {
+            self.edit_each(paths, |adj| Adjustments {
                 chromatic_aberration: None,
                 ..adj
             });
@@ -101,7 +106,7 @@ impl App {
         if !self.remove_ca_pending() {
             self.optics.done = 0;
         }
-        for path in paths {
+        for path in paths.iter().cloned() {
             let has = self
                 .edits
                 .get(&path)
@@ -248,6 +253,20 @@ mod tests {
 
     /// Remove CA measures every photo that lacks it, one at a time, skipping
     /// a photo it cannot decode, and clears them all again.
+    /// Pasting Optics off a photo without the correction drops queued
+    /// measurements, so none lands later and undoes the paste.
+    #[test]
+    fn pasting_optics_off_cancels_queued_measurements() {
+        use crate::develop::copy::{CopySection, CopySections};
+        let (mut app, dir, paths) = crate::app::test_support::folder_app("ca-paste", 3);
+        app.set_ca_for(&paths, true);
+        assert!(app.remove_ca_pending());
+        let optics = CopySections::NONE.with(CopySection::Optics, true);
+        app.apply_look_to(&Adjustments::default(), optics, &paths);
+        assert!(!app.remove_ca_pending());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn remove_ca_measures_the_selection_in_turn() {
         let (mut app, dir, paths) = crate::app::test_support::folder_app("ca-many", 3);

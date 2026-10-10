@@ -1,11 +1,24 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+use crate::develop::copy::{self, CopySection, CopySections};
 use crate::develop::Adjustments;
 use crate::navigation::{Cmp, FlagFilter};
 use crate::persist::catalog::{Flag, GroupWriteRefused};
 use crate::persist::groups::{Group, GroupWrite};
 use crate::ui;
+
+/// The Copy Settings sections chosen last, as `CopySections::to_pref`.
+const COPY_SECTIONS_PREF: &str = "copy-sections";
+
+/// What Copy put on the in-app clipboard.
+#[derive(Clone)]
+pub(super) struct CopiedSettings {
+    pub(super) path: PathBuf,
+    /// The photo's whole edit; Paste takes `sections` of it.
+    pub(super) adj: Adjustments,
+    pub(super) sections: CopySections,
+}
 
 pub(super) struct CatalogLoad {
     /// Directory and token of the background sidecar scan in flight, if any.
@@ -686,21 +699,62 @@ impl App {
         }
     }
 
-    /// Copies the selected photo's tone settings (not crop) to the in-app
-    /// clipboard. Does nothing unless exactly one photo is selected.
+    /// Opens Copy Settings for the selected photo, with the sections chosen
+    /// last time ticked. Does nothing unless exactly one photo is selected.
     pub(super) fn copy_settings(&mut self) {
         let [path] = &self.action_paths()[..] else {
             return;
         };
-        let path = path.clone();
-        let tone = self
-            .edits
-            .get(&path)
-            .copied()
-            .unwrap_or_default()
-            .tone_only();
+        let sections = *self.copy_sections.get_or_insert_with(|| {
+            let saved = (!cfg!(test))
+                .then(|| crate::persist::prefs::load(COPY_SECTIONS_PREF))
+                .flatten();
+            saved
+                .map(|text| CopySections::from_pref(&text))
+                .filter(|s| *s != CopySections::NONE)
+                .unwrap_or(CopySections::LOOK)
+        });
+        self.copy_dialog = Some((path.clone(), sections));
+        self.request_redraw();
+    }
+
+    /// The sections ticked in the open Copy Settings.
+    pub(super) fn set_copy_sections(&mut self, sections: CopySections) {
+        if let Some((_, chosen)) = &mut self.copy_dialog {
+            *chosen = sections;
+            self.request_redraw();
+        }
+    }
+
+    pub(super) fn cancel_copy_settings(&mut self) {
+        self.copy_dialog = None;
+        self.request_redraw();
+    }
+
+    /// Copies the open dialog's photo and sections to the in-app clipboard,
+    /// and remembers the sections for next time.
+    pub(super) fn commit_copy_settings(&mut self) {
+        let Some((path, sections)) = self.copy_dialog.take() else {
+            return;
+        };
+        if sections == CopySections::NONE {
+            self.copy_dialog = Some((path, sections));
+            return;
+        }
+        self.copy_sections = Some(sections);
+        // A test must never write the developer's own settings.
+        if !cfg!(test) {
+            if let Err(e) = crate::persist::prefs::save(COPY_SECTIONS_PREF, &sections.to_pref()) {
+                eprintln!("copy settings: could not remember the sections: {e}");
+            }
+        }
+        let adj = self.edits.get(&path).copied().unwrap_or_default();
         let name = file_label(&path);
-        self.copied_settings = Some((path, tone));
+        self.copied_settings = Some(CopiedSettings {
+            path,
+            adj,
+            sections,
+        });
         self.set_status(
             StatusKind::Success,
             (crate::i18n::t().copied_settings_from)(&name),
@@ -708,28 +762,33 @@ impl App {
         self.request_redraw();
     }
 
-    /// Applies the copied tone settings to every selected photo.
+    /// Applies the copied sections to every selected photo.
     pub(super) fn apply_settings_to_selection(&mut self) {
-        let Some((_, tone)) = self.copied_settings.clone() else {
+        let Some(copied) = self.copied_settings.clone() else {
             return;
         };
-        let n = self.apply_tone_to(tone, &self.action_paths());
+        let n = self.apply_look_to(&copied.adj, copied.sections, &self.action_paths());
         if n == 0 {
             return;
         }
         self.set_status(StatusKind::Success, (crate::i18n::t().applied_settings)(n));
     }
 
-    /// Writes one look onto every path, keeping each photo's own crop,
-    /// straighten and chromatic aberration scales, and returns how many were
-    /// touched. Shared by the settings clipboard and by applying a preset.
-    pub(super) fn apply_tone_to(&mut self, tone: Adjustments, paths: &[PathBuf]) -> usize {
-        self.edit_each(paths, |existing| Adjustments {
-            crop: existing.crop,
-            straighten: existing.straighten,
-            chromatic_aberration: existing.chromatic_aberration,
-            ..tone
-        })
+    /// Lays `sections` of `look` over every path through [`copy::merge`],
+    /// and returns how many were touched. Shared by Paste and by applying a
+    /// preset. Pasting Optics turns Remove Chromatic Aberration on or off as
+    /// the checkbox does, measuring each photo that lacks its own scales.
+    pub(super) fn apply_look_to(
+        &mut self,
+        look: &Adjustments,
+        sections: CopySections,
+        paths: &[PathBuf],
+    ) -> usize {
+        let n = self.edit_each(paths, |existing| copy::merge(existing, look, sections));
+        if sections.has(CopySection::Optics) {
+            self.set_ca_for(paths, look.chromatic_aberration.is_some());
+        }
+        n
     }
 
     /// Turns every selected photo black and white (V), or back to color when
@@ -801,7 +860,7 @@ impl App {
 
     /// File name the copied settings came from, if any.
     pub(crate) fn copied_settings_name(&self) -> Option<String> {
-        self.copied_settings.as_ref().map(|(p, _)| file_label(p))
+        self.copied_settings.as_ref().map(|c| file_label(&c.path))
     }
 
     pub(crate) fn has_copied_settings(&self) -> bool {

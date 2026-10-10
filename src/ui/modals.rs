@@ -231,6 +231,55 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
+/// Copy Settings: a checkbox per section, Check All and Check None, then
+/// Copy. Opened by Copy Adjustment and Cmd+Shift+C; Esc, Cancel or a
+/// backdrop click closes it without copying.
+pub(super) fn copy_settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    use crate::develop::copy::{CopySection, CopySections};
+    let Some(chosen) = app.copy_dialog() else {
+        return;
+    };
+    let t = t();
+    let resp = form::dialog(ui.ctx(), "copy_settings", form::DIALOG_WIDTH, |ui| {
+        form::title(ui, t.copy_settings);
+        ui.label(t.copy_settings_prompt);
+        ui.add_space(font_size::px(ui.style(), form::SLIDER_GAP));
+        let mut next = chosen;
+        for section in CopySection::ALL {
+            let mut on = chosen.has(section);
+            if ui.checkbox(&mut on, t.copy_section(section)).changed() {
+                next = next.with(section, on);
+            }
+        }
+        ui.horizontal(|ui| {
+            if form::button(ui, &Button::new(t.check_all, Role::Cancel)).clicked() {
+                next = CopySections::all();
+            }
+            if form::button(ui, &Button::new(t.check_none, Role::Cancel)).clicked() {
+                next = CopySections::NONE;
+            }
+        });
+        if next != chosen {
+            out.actions.push(UiAction::SetCopySections(next));
+        }
+        let buttons = [
+            Button::new(t.cancel, Role::Cancel),
+            Button {
+                enabled: chosen != CopySections::NONE,
+                ..Button::new(t.copy_button, Role::Primary)
+            },
+        ];
+        match form::footer(ui, &buttons) {
+            Some(Role::Cancel) => out.actions.push(UiAction::CancelCopySettings),
+            Some(_) => out.actions.push(UiAction::CommitCopySettings),
+            None => {}
+        }
+    });
+    if resp.should_close() {
+        out.actions.push(UiAction::CancelCopySettings);
+    }
+}
+
 /// Theme as a segmented choice and language as a list of radios. Opened
 /// from the landing page, the header, or Cmd+,; Close, Esc, or a backdrop click
 /// dismisses it.

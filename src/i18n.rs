@@ -331,6 +331,13 @@ pub struct Strings {
     pub sort_quality_tip: &'static str,
     pub copy_settings: &'static str,
     pub copy_settings_tip: &'static str,
+    /// Copy Settings' line over its section checkboxes.
+    pub copy_settings_prompt: &'static str,
+    pub copy_button: &'static str,
+    pub check_all: &'static str,
+    pub check_none: &'static str,
+    pub effects: &'static str,
+    pub crop_section: &'static str,
     pub apply_settings: &'static str,
     pub apply_settings_needs_copy: &'static str,
     pub preset_menu: &'static str,
@@ -691,6 +698,20 @@ impl Strings {
         }
     }
 
+    pub fn copy_section(&self, section: crate::develop::copy::CopySection) -> &'static str {
+        use crate::develop::copy::CopySection as C;
+        match section {
+            C::WhiteBalance => self.white_balance,
+            C::Tone => self.tone,
+            C::Presence => self.presence,
+            C::Curve => self.curve,
+            C::Detail => self.detail,
+            C::Effects => self.effects,
+            C::Optics => self.optics,
+            C::Crop => self.crop_section,
+        }
+    }
+
     pub fn slider(&self, id: SliderId) -> &'static str {
         match id {
             SliderId::Temp => self.temp,
@@ -923,6 +944,12 @@ pub static EN: Strings = Strings {
     sort_quality_tip: "Highest score first, unscored photos last",
     copy_settings: "Copy Adjustment",
     copy_settings_tip: "Copy this photo's adjustment (Cmd+Shift+C)",
+    copy_settings_prompt: "Choose what Apply Adjustment carries to other photos.",
+    copy_button: "Copy",
+    check_all: "Check All",
+    check_none: "Check None",
+    effects: "Effects",
+    crop_section: "Crop",
     apply_settings: "Apply Adjustment",
     apply_settings_needs_copy: "Copy the adjustment from a photo first",
     preset_menu: "Preset",
@@ -1650,6 +1677,12 @@ pub static ZH: Strings = Strings {
     sort_quality_tip: "得分最高的在前，未打分的在后",
     copy_settings: "拷贝调整",
     copy_settings_tip: "拷贝这张照片的调整 (Cmd+Shift+C)",
+    copy_settings_prompt: "选择应用调整时要带到其他照片的部分。",
+    copy_button: "拷贝",
+    check_all: "全选",
+    check_none: "全不选",
+    effects: "效果",
+    crop_section: "裁剪",
     apply_settings: "应用调整",
     apply_settings_needs_copy: "请先从一张照片拷贝调整",
     preset_menu: "预设",

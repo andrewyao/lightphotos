@@ -181,6 +181,10 @@ pub enum UiAction {
     SelectTouchUp(usize),
     DeleteTouchUp,
     SetAdjustments(Box<Adjustments>),
+    /// The sections ticked in the open Copy Settings.
+    SetCopySections(crate::develop::copy::CopySections),
+    CommitCopySettings,
+    CancelCopySettings,
     /// Tick or clear Remove Chromatic Aberration for the loupe photo.
     SetRemoveCa(bool),
     /// The Sliders tab's Reset: tone, color, detail and curve back to
@@ -265,8 +269,8 @@ use info_panel::draw_info_panel;
 use loupe::draw_loupe;
 pub(crate) use modals::delete_group_tab_order;
 use modals::{
-    confirm_modal, delete_group_modal, delete_preset_modal, help_modal, preset_name_modal,
-    settings_modal,
+    confirm_modal, copy_settings_modal, delete_group_modal, delete_preset_modal, help_modal,
+    preset_name_modal, settings_modal,
 };
 use toolbar::{grid_toolbar, selection_bar};
 
@@ -323,6 +327,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     preset_name_modal(ui, app, &mut out);
     help_modal(ui, app, &mut out);
     settings_modal(ui, app, &mut out);
+    copy_settings_modal(ui, app, &mut out);
     tour::draw(ui, app, &mut out);
     out
 }

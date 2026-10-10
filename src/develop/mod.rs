@@ -7,6 +7,7 @@
 
 pub mod base;
 pub mod chroma;
+pub mod copy;
 pub mod curve;
 pub mod effects;
 pub mod image_ops;

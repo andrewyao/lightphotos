@@ -1,4 +1,5 @@
 use super::*;
+use crate::develop::copy::CopySections;
 
 impl App {
     /// Opens the name prompt for a new preset, seeded with a suggestion. Both
@@ -94,11 +95,11 @@ impl App {
             return;
         };
         let name = preset.name.clone();
-        let tone = preset.adjustments.tone_only();
+        let look = preset.adjustments;
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
         };
-        let n = self.apply_tone_to(tone, &[path]);
+        let n = self.apply_look_to(&look, CopySections::LOOK, &[path]);
         self.set_status(
             StatusKind::Success,
             (crate::i18n::t().applied_preset)(&name, n),
@@ -113,8 +114,8 @@ impl App {
             return;
         };
         let name = preset.name.clone();
-        let tone = preset.adjustments.tone_only();
-        let n = self.apply_tone_to(tone, &self.action_paths());
+        let look = preset.adjustments;
+        let n = self.apply_look_to(&look, CopySections::LOOK, &self.action_paths());
         if n == 0 {
             return;
         }
@@ -316,7 +317,11 @@ pub(in crate::app) mod tests {
         app.edits.insert(paths[1].clone(), cropped);
         app.catalog.set_adjustments(&paths[1], &cropped);
         app.selected = (0..3).collect();
-        app.copied_settings = Some((paths[0].clone(), tone(0.25, 5.0)));
+        app.copied_settings = Some(crate::app::catalog::CopiedSettings {
+            path: paths[0].clone(),
+            adj: tone(0.25, 5.0),
+            sections: CopySections::LOOK,
+        });
 
         app.apply_settings_to_selection();
 
