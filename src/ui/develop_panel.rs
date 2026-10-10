@@ -482,6 +482,11 @@ fn draw_sliders_body(
                     .inner;
                 form::divider(ui);
             }
+            // And Optics between Detail and the effects.
+            if s.section == crate::develop::Section::Vignette {
+                draw_optics(ui, app, scope, out);
+                form::divider(ui);
+            }
             section = Some(s.section);
             form::section_header(ui, t.section(s.section), |ui| match s.section {
                 // The picker samples the Loupe's photo.
@@ -497,7 +502,7 @@ fn draw_sliders_body(
         }
         let focused = focus_idx == Some(idx);
         let interacted = if scope == DevelopScope::Many {
-            match step_slider_row(ui, t.slider(s.id), focused) {
+            match step_slider_row(ui, t.slider(s.id), s.default, focused) {
                 Some(step) => {
                     out.actions.push(UiAction::StepSlider(idx, step));
                     true
@@ -511,6 +516,7 @@ fn draw_sliders_body(
                 t.slider(s.id),
                 field,
                 s.range.clone(),
+                s.default,
                 s.decimals,
                 focused,
             );
@@ -522,7 +528,17 @@ fn draw_sliders_body(
         }
     }
 
-    form::divider(ui);
+    if changed {
+        out.actions.push(UiAction::SetAdjustments(Box::new(*adj)));
+    }
+    if let Some(idx) = interacted_idx {
+        out.actions.push(UiAction::FocusDevelop(idx));
+    }
+}
+
+/// Remove Chromatic Aberration, ticked for all, some or none of the photos.
+fn draw_optics(ui: &mut egui::Ui, app: &App, scope: DevelopScope, out: &mut FrameOutput) {
+    let t = t();
     form::section_header(ui, t.section(crate::develop::Section::Optics), |_| {});
     let state = if scope == DevelopScope::None {
         CaState::Off
@@ -540,13 +556,6 @@ fn draw_sliders_body(
         // Off or mixed turns every photo on; all on turns them all off.
         out.actions
             .push(UiAction::SetRemoveCa(state != CaState::On));
-    }
-
-    if changed {
-        out.actions.push(UiAction::SetAdjustments(*adj));
-    }
-    if let Some(idx) = interacted_idx {
-        out.actions.push(UiAction::FocusDevelop(idx));
     }
 }
 
@@ -580,10 +589,17 @@ fn tri_state_checkbox(ui: &mut egui::Ui, state: CaState, label: &str) -> egui::R
 }
 
 /// One slider's row while several photos are selected: its name, then
-/// buttons that lower each photo's value by a large or small step, reset it,
-/// or raise it. Returns the button clicked.
-fn step_slider_row(ui: &mut egui::Ui, label: &str, focused: bool) -> Option<SliderStep> {
+/// buttons that lower each photo's value by a large or small step, reset it
+/// to `default`, which the reset button shows, or raise it. Returns the
+/// button clicked.
+fn step_slider_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    default: f32,
+    focused: bool,
+) -> Option<SliderStep> {
     let t = t();
+    let reset = default.to_string();
     let row = ui.horizontal(|ui| {
         ui.label(label);
         let mut picked = None;
@@ -593,7 +609,7 @@ fn step_slider_row(ui: &mut egui::Ui, label: &str, focused: bool) -> Option<Slid
                 let (glyph, tip) = match step {
                     SliderStep::BigDown => ("\u{ab}", t.step_big_down),
                     SliderStep::Down => ("\u{2039}", t.step_down),
-                    SliderStep::Reset => ("0", t.step_reset),
+                    SliderStep::Reset => (reset.as_str(), t.step_reset),
                     SliderStep::Up => ("\u{203a}", t.step_up),
                     SliderStep::BigUp => ("\u{bb}", t.step_big_up),
                 };
@@ -618,13 +634,14 @@ fn step_slider_row(ui: &mut egui::Ui, label: &str, focused: bool) -> Option<Slid
 }
 
 /// One Develop slider, its value typed or dragged in the readout. Double-
-/// clicking the track resets it to 0. Returns (value changed, mouse
+/// clicking the track resets it to `default`. Returns (value changed, mouse
 /// interacted).
 fn develop_slider(
     ui: &mut egui::Ui,
     label: &str,
     field: &mut f32,
     range: std::ops::RangeInclusive<f32>,
+    default: f32,
     decimals: usize,
     focused: bool,
 ) -> (bool, bool) {
@@ -662,7 +679,7 @@ fn develop_slider(
         changed = true;
     }
     if track.double_clicked() {
-        *field = 0.0;
+        *field = default;
         changed = true;
     }
     if focused {

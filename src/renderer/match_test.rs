@@ -9,7 +9,8 @@ use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat}
 use crate::develop::curve::Curve;
 use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
-    Adjustments, BaseProbe, CaScale, Crop, GpuAdjust, GpuTouchUp, Straighten, TouchUp, SLIDERS,
+    Adjustments, BaseProbe, CaScale, Crop, GpuAdjust, GpuTouchUp, Grain, Straighten, TouchUp,
+    Vignette, SLIDERS,
 };
 
 const W: u32 = 96;
@@ -192,6 +193,54 @@ fn cases() -> Vec<Case> {
             ..Default::default()
         },
     ));
+    let vignette = |amount, midpoint, roundness, feather| Vignette {
+        amount,
+        midpoint,
+        roundness,
+        feather,
+    };
+    for (name, v) in [
+        ("vignette_round", vignette(-100.0, 20.0, 100.0, 0.0)),
+        ("vignette_square", vignette(70.0, 80.0, -100.0, 100.0)),
+    ] {
+        out.push(case(
+            name.into(),
+            Adjustments {
+                vignette: v,
+                ..Default::default()
+            },
+        ));
+    }
+    out.push(case(
+        "vignette+crop".into(),
+        Adjustments {
+            vignette: vignette(-80.0, 30.0, 0.0, 30.0),
+            crop,
+            ..Default::default()
+        },
+    ));
+    out.push(case(
+        "vignette+straighten".into(),
+        Adjustments {
+            vignette: vignette(-80.0, 30.0, 0.0, 30.0),
+            straighten: 7.0,
+            crop: straighten_crop,
+            ..Default::default()
+        },
+    ));
+    for (name, size, roughness) in [("grain_coarse", 100.0, 0.0), ("grain_rough", 100.0, 100.0)] {
+        out.push(case(
+            name.into(),
+            Adjustments {
+                grain: Grain {
+                    amount: 100.0,
+                    size,
+                    roughness,
+                },
+                ..Default::default()
+            },
+        ));
+    }
     let mut everything = Adjustments {
         temp: 30.0,
         tint: -20.0,
@@ -206,6 +255,11 @@ fn cases() -> Vec<Case> {
         denoise: 30.0,
         chromatic_aberration: ca,
         crop,
+        vignette: vignette(-40.0, 50.0, 0.0, 50.0),
+        grain: Grain {
+            amount: 40.0,
+            ..Default::default()
+        },
         ..Default::default()
     };
     everything.curve.rgb = Curve::STRONG_CONTRAST;
@@ -368,6 +422,48 @@ fn loupe_base_layer_matches_cpu_base() {
             }
         }
     }
+    report(diffs);
+}
+
+/// Grain at full strength: on the small charts every pixel covers several
+/// grain cells, which fades it, so this frame is large enough for the
+/// coarse grain to land at about one cell per pixel or more.
+#[test]
+fn loupe_grain_matches_cpu_bake_at_full_strength() {
+    let (w, h) = (768, 512);
+    let Some(mut r) = headless(w, h) else {
+        return;
+    };
+    let fixture = Fixture {
+        name: "gray",
+        img: DecodedImage::new_tracked(DecodedImageFields {
+            width: w,
+            height: h,
+            rgba: [118, 118, 118, 255].repeat((w * h) as usize),
+            pixel_format: PixelFormat::Srgb8,
+        }),
+    };
+    let grain = |amount, size, roughness| Case {
+        name: format!("grain {amount}/{size}/{roughness}"),
+        adj: Adjustments {
+            grain: Grain {
+                amount,
+                size,
+                roughness,
+            },
+            ..Default::default()
+        },
+        touchups: Vec::new(),
+    };
+    let cases = [
+        grain(100.0, 100.0, 0.0),
+        grain(100.0, 100.0, 100.0),
+        grain(100.0, 25.0, 50.0),
+    ];
+    let diffs = cases
+        .iter()
+        .map(|c| measure(&mut r, &fixture, c, BaseProbe::Off))
+        .collect();
     report(diffs);
 }
 

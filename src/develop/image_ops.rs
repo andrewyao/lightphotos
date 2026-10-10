@@ -188,7 +188,7 @@ pub fn bake_edited_probe(
 
     let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
     let (cw, ch) = (x1 - x0, y1 - y0);
-    let dev = develop::Develop::new(adj);
+    let dev = develop::Develop::framed(adj, w, h);
     let base = if probe == BaseProbe::Off {
         None
     } else {
@@ -212,7 +212,7 @@ pub fn bake_edited_probe(
                 Some(base) => probe.apply(base.at_uv(u, v), pre),
                 None => pre,
             };
-            let out = dev.linear(pre);
+            let out = dev.linear_at(pre, canvas.0, canvas.1);
             let di = ((y * cw + x) * 4) as usize;
             cropped[di] = linear_to_srgb8(out[0]);
             cropped[di + 1] = linear_to_srgb8(out[1]);

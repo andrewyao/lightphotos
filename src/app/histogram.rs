@@ -63,6 +63,13 @@ impl Histogram {
     pub(super) fn set_sample(&mut self, sample: Vec<[f32; 3]>) {
         self.sample = sample;
     }
+
+    /// A `dw x dh` linear sample, which the bins read.
+    pub(super) fn set_grid(&mut self, sample: Vec<[f32; 3]>, dw: usize, dh: usize) {
+        self.sample = sample;
+        self.dw = dw;
+        self.dh = dh;
+    }
 }
 
 impl App {
@@ -106,7 +113,7 @@ impl App {
         let grid = &self.hist.sample;
         let turn = (adj.straighten != 0.0)
             .then(|| develop::Straighten::new(adj.straighten, dw as f32, dh as f32));
-        let dev = develop::Develop::new(&adj);
+        let dev = develop::Develop::framed(&adj, dw as u32, dh as u32);
         let mut bins = [[0f32; 256]; 3];
         for cy in 0..dh {
             for cx in 0..dw {
@@ -135,8 +142,8 @@ impl App {
                     grid[sy * dw + sx]
                 });
                 let out = match self.hist.pixel_format {
-                    image_decode::PixelFormat::Srgb8 => dev.linear(px),
-                    image_decode::PixelFormat::LinearF16 => dev.raw_display(px),
+                    image_decode::PixelFormat::Srgb8 => dev.linear_at(px, u, v),
+                    image_decode::PixelFormat::LinearF16 => dev.raw_display_at(px, u, v),
                 };
                 for ch in 0..3 {
                     // `apply_raw_display` already returns display space. The

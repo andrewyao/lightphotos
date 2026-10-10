@@ -433,6 +433,8 @@ pub struct Strings {
     pub presence: &'static str,
     pub detail: &'static str,
     pub optics: &'static str,
+    pub vignette: &'static str,
+    pub grain: &'static str,
     pub curve: &'static str,
     pub point_curve: &'static str,
     pub curve_linear: &'static str,
@@ -463,6 +465,11 @@ pub struct Strings {
     pub vibrance: &'static str,
     pub saturation: &'static str,
     pub denoise: &'static str,
+    pub amount: &'static str,
+    pub midpoint: &'static str,
+    pub roundness: &'static str,
+    pub grain_size: &'static str,
+    pub roughness: &'static str,
 
     // Loupe.
     pub before: &'static str,
@@ -675,6 +682,8 @@ impl Strings {
             Section::Presence => self.presence,
             Section::Detail => self.detail,
             Section::Optics => self.optics,
+            Section::Vignette => self.vignette,
+            Section::Grain => self.grain,
             Section::Curve => self.curve,
         }
     }
@@ -692,6 +701,12 @@ impl Strings {
             SliderId::Vibrance => self.vibrance,
             SliderId::Saturation => self.saturation,
             SliderId::Denoise => self.denoise,
+            SliderId::VignetteAmount | SliderId::GrainAmount => self.amount,
+            SliderId::VignetteMidpoint => self.midpoint,
+            SliderId::VignetteRoundness => self.roundness,
+            SliderId::VignetteFeather => self.feather,
+            SliderId::GrainSize => self.grain_size,
+            SliderId::GrainRoughness => self.roughness,
         }
     }
 }
@@ -1165,6 +1180,8 @@ pub static EN: Strings = Strings {
     presence: "Presence",
     detail: "Detail",
     optics: "Optics",
+    vignette: "Vignette",
+    grain: "Grain",
     curve: "Curve",
     point_curve: "Point Curve",
     curve_linear: "Linear",
@@ -1195,6 +1212,11 @@ pub static EN: Strings = Strings {
     vibrance: "Vibrance",
     saturation: "Saturation",
     denoise: "Denoise",
+    amount: "Amount",
+    midpoint: "Midpoint",
+    roundness: "Roundness",
+    grain_size: "Size",
+    roughness: "Roughness",
 
     before: "Before",
     after: "After",
@@ -1873,6 +1895,8 @@ pub static ZH: Strings = Strings {
     presence: "偏好",
     detail: "细节",
     optics: "光学",
+    vignette: "暗角",
+    grain: "颗粒",
     curve: "曲线",
     point_curve: "点曲线",
     curve_linear: "线性",
@@ -1903,6 +1927,11 @@ pub static ZH: Strings = Strings {
     vibrance: "自然饱和度",
     saturation: "饱和度",
     denoise: "降噪",
+    amount: "数量",
+    midpoint: "中点",
+    roundness: "圆度",
+    grain_size: "大小",
+    roughness: "粗糙度",
 
     before: "调整前",
     after: "调整后",

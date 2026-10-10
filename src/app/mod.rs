@@ -1417,7 +1417,7 @@ impl App {
                     self.request_redraw();
                 }
                 ui::UiAction::DeleteTouchUp => self.delete_selected_touchup(),
-                ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(adj),
+                ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(*adj),
                 ui::UiAction::AutoTone => self.auto_tone_selected(),
                 ui::UiAction::ToggleBlackAndWhite => self.toggle_black_and_white(),
                 ui::UiAction::SetRemoveCa(on) => self.set_remove_ca(on),

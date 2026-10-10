@@ -39,7 +39,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Derivatives before any early return: WebGPU rejects `dpdx` after
     // non-uniform control flow. Rgba16Float has no sRGB decode, so this is
     // linear.
-    let texel = sampleSrc(uv, dpdx(in.uv), dpdy(in.uv));
+    let ddx = dpdx(in.uv);
+    let ddy = dpdy(in.uv);
+    let texel = sampleSrc(uv, ddx, ddy);
 
     // Outside the image (UV beyond 0..1): draw the neutral background.
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
@@ -136,6 +138,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     r = luma + (r - luma) * total;
     g = luma + (g - luma) * total;
     b = luma + (b - luma) * total;
+
+    // 4.75. Post-crop Vignette and Grain, by canvas position.
+    let fx = effects(vec3<f32>(r, g, b), in.uv, footprintOf(ddx, ddy));
+    r = fx.r;
+    g = fx.g;
+    b = fx.b;
 
     // 5. Clamp and keep alpha. No return to linear (difference 2 in the header).
     return vec4<f32>(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), texel.a);

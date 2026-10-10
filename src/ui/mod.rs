@@ -180,7 +180,7 @@ pub enum UiAction {
     TouchUpClick(f32, f32),
     SelectTouchUp(usize),
     DeleteTouchUp,
-    SetAdjustments(Adjustments),
+    SetAdjustments(Box<Adjustments>),
     /// Tick or clear Remove Chromatic Aberration for the loupe photo.
     SetRemoveCa(bool),
     /// The Sliders tab's Reset: tone, color, detail and curve back to

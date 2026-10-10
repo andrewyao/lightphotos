@@ -34,6 +34,17 @@ struct Adjust {
     base_probe: f32,
     // 1 when an edit reads the base layer; the renderer builds it only then.
     base_on: f32,
+    // Vignette and Grain, derived on the CPU by `develop::Effects`. See
+    // `effects`.
+    vig_amount: f32,
+    vig_exponent: f32,
+    vig_lo: f32,
+    vig_hi: f32,
+    vig_axis: vec2<f32>,
+    vig_center: vec2<f32>,
+    grain_amount: f32,
+    grain_rough: f32,
+    grain_scale: vec2<f32>,
 };
 
 struct TouchUp {
@@ -264,6 +275,91 @@ fn toneCurve(c: vec3<f32>) -> vec3<f32> {
         mix(curve_lut[i.g].g, curve_lut[i.g + 1u].g, t.g),
         mix(curve_lut[i.b].b, curve_lut[i.b + 1u].b, t.b),
     );
+}
+
+// 0 inside the vignette, 1 past its falloff, at canvas `uv`. Must match
+// `Effects::vignette_mask` in develop/effects.rs.
+fn vignetteMask(uv: vec2<f32>) -> f32 {
+    let n = adj.vig_exponent;
+    let p = max(abs((uv - adj.vig_center) / adj.vig_axis), vec2<f32>(1e-6));
+    var d = sqrt(p.x * p.x + p.y * p.y);
+    if (n != 2.0) {
+        d = pow(pow(p.x, n) + pow(p.y, n), 1.0 / n);
+    }
+    let t = clamp((d - adj.vig_lo) / (adj.vig_hi - adj.vig_lo), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// PCG's output hash. Must match `pcg_hash` in develop/effects.rs.
+fn pcgHash(v: u32) -> u32 {
+    let state = v * 747796405u + 2891336453u;
+    let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+
+// A value in -1..1 for lattice point `i` of the octave salted `salt`. Must
+// match `lattice` in develop/effects.rs.
+fn lattice(i: vec2<i32>, salt: u32) -> f32 {
+    let h = pcgHash(bitcast<u32>(i.x) ^ pcgHash(bitcast<u32>(i.y) ^ salt));
+    return f32(h >> 8u) * (2.0 / 16777215.0) - 1.0;
+}
+
+// Smooth value noise at lattice coordinates `p`. Must match `value_noise`
+// in develop/effects.rs.
+fn valueNoise(p: vec2<f32>, salt: u32) -> f32 {
+    let f = floor(p);
+    let i = vec2<i32>(f);
+    let t = p - f;
+    let s = t * t * (3.0 - 2.0 * t);
+    let a = lattice(i, salt);
+    let b = lattice(i + vec2<i32>(1, 0), salt);
+    let c = lattice(i + vec2<i32>(0, 1), salt);
+    let d = lattice(i + vec2<i32>(1, 1), salt);
+    let top = a + (b - a) * s.x;
+    let bottom = c + (d - c) * s.x;
+    return top + (bottom - top) * s.y;
+}
+
+// Two octaves of grain at canvas `uv`, each faded by `fp`, the cells one
+// screen pixel covers. Must match `Effects::grain_noise`.
+fn grainNoise(uv: vec2<f32>, fp: f32) -> f32 {
+    let p = uv * adj.grain_scale;
+    let octave = 2.31;
+    let n1 = valueNoise(p, 0u) / max(fp, 1.0);
+    let r = adj.grain_rough;
+    if (r == 0.0) {
+        return n1;
+    }
+    // The salt must match `OCTAVE_SALT`.
+    let n2 = valueNoise(p * octave, 0x9e3779b9u) / max(fp * octave, 1.0);
+    return (n1 + r * n2) / sqrt(1.0 + r * r);
+}
+
+// Vignette, then Grain, on gamma-space `c` at canvas `uv`. `footprint` is one
+// screen pixel's size in canvas UV along x and y. Must match
+// `Effects::apply` in develop/effects.rs.
+fn effects(rgb: vec3<f32>, uv: vec2<f32>, footprint: vec2<f32>) -> vec3<f32> {
+    var c = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+    if (adj.vig_amount != 0.0) {
+        let m = vignetteMask(uv);
+        let dark = 1.0 + min(adj.vig_amount, 0.0) * m;
+        let light = max(adj.vig_amount, 0.0) * m;
+        c = c * dark + (vec3<f32>(1.0) - c) * light;
+    }
+    if (adj.grain_amount != 0.0) {
+        let cells = footprint * adj.grain_scale;
+        let n = grainNoise(uv, max(cells.x, cells.y));
+        let luma = clamp(0.299 * c.r + 0.587 * c.g + 0.114 * c.b, 0.0, 1.0);
+        let weight = 0.25 + 3.0 * luma * (1.0 - luma);
+        c = c + vec3<f32>(adj.grain_amount * n * weight);
+    }
+    return c;
+}
+
+// One screen pixel's size in canvas UV along x and y, from the canvas UV's
+// screen derivatives. Any turn of the view keeps it right.
+fn footprintOf(ddx: vec2<f32>, ddy: vec2<f32>) -> vec2<f32> {
+    return max(abs(ddx), abs(ddy));
 }
 
 // Gaussian (sigma 1.0) weights for the 5x5 denoise kernel, by squared tap

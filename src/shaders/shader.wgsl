@@ -64,7 +64,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     //
     // An Rgba8UnormSrgb texture samples as linear light. The math below must
     // match `apply_linear` in develop/mod.rs.
-    let texel = sampleSrc(uv, dpdx(in.uv), dpdy(in.uv));
+    let ddx = dpdx(in.uv);
+    let ddy = dpdy(in.uv);
+    let texel = sampleSrc(uv, ddx, ddy);
 
     // Outside the image or the crop: the neutral background.
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
@@ -159,6 +161,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     r = luma + (r - luma) * total;
     g = luma + (g - luma) * total;
     b = luma + (b - luma) * total;
+
+    // 4.75. Post-crop Vignette and Grain, by canvas position.
+    let fx = effects(vec3<f32>(r, g, b), in.uv, footprintOf(ddx, ddy));
+    r = fx.r;
+    g = fx.g;
+    b = fx.b;
 
     // 5. Back to linear, then sRGB-encode for the surface.
     let lin = clamp(pow(max(vec3<f32>(r, g, b), vec3<f32>(0.0)), vec3<f32>(2.2)), vec3<f32>(0.0), vec3<f32>(1.0));

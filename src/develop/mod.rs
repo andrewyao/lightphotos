@@ -8,11 +8,13 @@
 pub mod base;
 pub mod chroma;
 pub mod curve;
+pub mod effects;
 pub mod image_ops;
 
 use serde::{Deserialize, Serialize};
 
 pub use base::{BaseLayer, BaseProbe, BaseTexel, Grid};
+pub use effects::{Effects, Grain, Vignette};
 
 use curve::ToneCurve;
 
@@ -20,8 +22,8 @@ use curve::ToneCurve;
 pub const TONE_RANGE: std::ops::RangeInclusive<f32> = -100.0..=100.0;
 /// Exposure range in stops.
 pub const EXPOSURE_RANGE: std::ops::RangeInclusive<f32> = -5.0..=5.0;
-/// Denoise strength range. 0 is off.
-pub const DENOISE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=100.0;
+/// Range of Denoise and the 0..100 Vignette and Grain sliders.
+pub const PERCENT_RANGE: std::ops::RangeInclusive<f32> = 0.0..=100.0;
 
 /// One Develop slider. The panel draws `SLIDERS` in order and keyboard focus
 /// indexes it, so both always agree.
@@ -30,6 +32,8 @@ pub struct Slider {
     pub id: SliderId,
     pub field: fn(&mut Adjustments) -> &mut f32,
     pub range: std::ops::RangeInclusive<f32>,
+    /// The value Reset and a double-click put back.
+    pub default: f32,
     pub decimals: usize,
     /// Keyboard nudge size.
     pub step: f32,
@@ -41,8 +45,23 @@ const fn tone(section: Section, id: SliderId, field: fn(&mut Adjustments) -> &mu
         id,
         field,
         range: TONE_RANGE,
+        default: 0.0,
         decimals: 0,
         step: 1.0,
+    }
+}
+
+/// A 0..100 slider that rests at `default`.
+const fn percent(
+    section: Section,
+    id: SliderId,
+    field: fn(&mut Adjustments) -> &mut f32,
+    default: f32,
+) -> Slider {
+    Slider {
+        range: PERCENT_RANGE,
+        default,
+        ..tone(section, id, field)
     }
 }
 
@@ -56,6 +75,10 @@ pub enum Section {
     Detail,
     /// Checkboxes, not sliders. See [`CaScale`].
     Optics,
+    /// Post-crop. See [`Vignette`].
+    Vignette,
+    /// See [`Grain`].
+    Grain,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -71,9 +94,16 @@ pub enum SliderId {
     Vibrance,
     Saturation,
     Denoise,
+    VignetteAmount,
+    VignetteMidpoint,
+    VignetteRoundness,
+    VignetteFeather,
+    GrainAmount,
+    GrainSize,
+    GrainRoughness,
 }
 
-pub const SLIDERS: [Slider; 11] = [
+pub const SLIDERS: [Slider; 18] = [
     tone(Section::WhiteBalance, SliderId::Temp, |a| &mut a.temp),
     tone(Section::WhiteBalance, SliderId::Tint, |a| &mut a.tint),
     Slider {
@@ -81,6 +111,7 @@ pub const SLIDERS: [Slider; 11] = [
         id: SliderId::Exposure,
         field: |a| &mut a.exposure,
         range: EXPOSURE_RANGE,
+        default: 0.0,
         decimals: 2,
         step: 0.05,
     },
@@ -93,14 +124,43 @@ pub const SLIDERS: [Slider; 11] = [
     tone(Section::Presence, SliderId::Saturation, |a| {
         &mut a.saturation
     }),
-    Slider {
-        section: Section::Detail,
-        id: SliderId::Denoise,
-        field: |a| &mut a.denoise,
-        range: DENOISE_RANGE,
-        decimals: 0,
-        step: 1.0,
-    },
+    percent(Section::Detail, SliderId::Denoise, |a| &mut a.denoise, 0.0),
+    tone(Section::Vignette, SliderId::VignetteAmount, |a| {
+        &mut a.vignette.amount
+    }),
+    percent(
+        Section::Vignette,
+        SliderId::VignetteMidpoint,
+        |a| &mut a.vignette.midpoint,
+        50.0,
+    ),
+    tone(Section::Vignette, SliderId::VignetteRoundness, |a| {
+        &mut a.vignette.roundness
+    }),
+    percent(
+        Section::Vignette,
+        SliderId::VignetteFeather,
+        |a| &mut a.vignette.feather,
+        50.0,
+    ),
+    percent(
+        Section::Grain,
+        SliderId::GrainAmount,
+        |a| &mut a.grain.amount,
+        0.0,
+    ),
+    percent(
+        Section::Grain,
+        SliderId::GrainSize,
+        |a| &mut a.grain.size,
+        25.0,
+    ),
+    percent(
+        Section::Grain,
+        SliderId::GrainRoughness,
+        |a| &mut a.grain.roughness,
+        50.0,
+    ),
 ];
 
 /// The most touch-ups one photo can hold: the GPU buffer's size.
@@ -189,6 +249,11 @@ pub struct Adjustments {
     /// The point curve, run after the tone sliders and before color.
     #[serde(default, skip_serializing_if = "ToneCurve::is_linear")]
     pub curve: ToneCurve,
+    /// Post-crop: it follows the crop, not the photo's frame.
+    #[serde(default, skip_serializing_if = "Vignette::is_default")]
+    pub vignette: Vignette,
+    #[serde(default, skip_serializing_if = "Grain::is_default")]
+    pub grain: Grain,
 }
 
 /// Lateral chromatic aberration as a radial magnification of red and blue
@@ -396,6 +461,23 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
         }
     }
 
+    // Only a vignette or grain that shows writes, so older hashes hold and
+    // a sub-slider moved at Amount 0 doesn't re-bake.
+    if adj.vignette.amount != 0.0 {
+        h.write(&[4]);
+        let v = adj.vignette;
+        for x in [v.amount, v.midpoint, v.roundness, v.feather] {
+            h.write(&((x * 1000.0).round() as i32).to_le_bytes());
+        }
+    }
+    if adj.grain.amount != 0.0 {
+        h.write(&[5]);
+        let g = adj.grain;
+        for x in [g.amount, g.size, g.roughness] {
+            h.write(&((x * 1000.0).round() as i32).to_le_bytes());
+        }
+    }
+
     h.write(&[rot % 4]);
 
     h.finish()
@@ -478,6 +560,8 @@ pub struct GpuAdjust {
     /// 1 when [`Adjustments::needs_base`]: the renderer builds the base
     /// layer only then, or for a probe.
     pub base_on: f32,
+    /// Set by [`GpuAdjust::for_image`], which knows the image size.
+    pub effects: Effects,
 }
 
 impl Default for GpuAdjust {
@@ -507,6 +591,7 @@ impl Default for GpuAdjust {
             curve_on: 0.0,
             base_probe: 0.0,
             base_on: 0.0,
+            effects: Effects::default(),
         }
     }
 }
@@ -520,6 +605,7 @@ impl GpuAdjust {
             texel_w: 1.0 / width,
             texel_h: 1.0 / height,
             _pad0: touchups as f32,
+            effects: Effects::new(&adj.vignette, &adj.grain, adj.crop, width, height),
             ..Self::from(adj)
         }
     }
@@ -642,24 +728,63 @@ pub fn apply_raw_display(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
 }
 
 /// [`apply_linear`] and [`apply_raw_display`] for one image, with the tone
-/// curve baked once instead of per pixel.
+/// curve baked once instead of per pixel. Without a frame
+/// ([`Develop::framed`]) it leaves out Vignette and Grain, which depend on
+/// where a pixel sits; Auto Tone measures tone without them.
 pub struct Develop<'a> {
     adj: &'a Adjustments,
     curve: Option<Box<curve::Lut>>,
+    frame: Option<Frame>,
+}
+
+/// The canvas a framed [`Develop`] renders: its [`Effects`] and one output
+/// pixel's size in canvas UV.
+struct Frame {
+    effects: Effects,
+    texel: [f32; 2],
 }
 
 impl<'a> Develop<'a> {
     pub fn new(adj: &'a Adjustments) -> Self {
         let curve = (!adj.curve.is_linear()).then(|| Box::new(adj.curve.lut()));
-        Develop { adj, curve }
+        Develop {
+            adj,
+            curve,
+            frame: None,
+        }
+    }
+
+    /// A render of a `w x h` canvas, one output pixel per canvas pixel, as
+    /// the bake does: Vignette and Grain included.
+    pub fn framed(adj: &'a Adjustments, w: u32, h: u32) -> Self {
+        let effects = Effects::new(&adj.vignette, &adj.grain, adj.crop, w as f32, h as f32);
+        Develop {
+            frame: (!effects.is_off()).then_some(Frame {
+                effects,
+                texel: [1.0 / w as f32, 1.0 / h as f32],
+            }),
+            ..Develop::new(adj)
+        }
     }
 
     pub fn linear(&self, rgb: [f32; 3]) -> [f32; 3] {
-        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, false)
+        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, None, false)
     }
 
     pub fn raw_display(&self, rgb: [f32; 3]) -> [f32; 3] {
-        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, true)
+        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, None, true)
+    }
+
+    /// [`Develop::linear`] for the pixel at canvas UV `(u, v)`.
+    pub fn linear_at(&self, rgb: [f32; 3], u: f32, v: f32) -> [f32; 3] {
+        let at = self.frame.as_ref().map(|f| (f, u, v));
+        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, at, false)
+    }
+
+    /// [`Develop::raw_display`] for the pixel at canvas UV `(u, v)`.
+    pub fn raw_display_at(&self, rgb: [f32; 3], u: f32, v: f32) -> [f32; 3] {
+        let at = self.frame.as_ref().map(|f| (f, u, v));
+        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, at, true)
     }
 }
 
@@ -667,6 +792,7 @@ fn apply_linear_impl(
     adj: &Adjustments,
     curve: Option<&curve::Lut>,
     rgb: [f32; 3],
+    at: Option<(&Frame, f32, f32)>,
     raw_display: bool,
 ) -> [f32; 3] {
     let [mut r, mut g, mut b] = rgb;
@@ -756,6 +882,10 @@ fn apply_linear_impl(
     rg = luma + (rg - luma) * total;
     gg = luma + (gg - luma) * total;
     bg = luma + (bg - luma) * total;
+
+    if let Some((frame, u, v)) = at {
+        [rg, gg, bg] = frame.effects.apply([rg, gg, bg], u, v, frame.texel);
+    }
 
     if raw_display {
         return [rg.clamp(0.0, 1.0), gg.clamp(0.0, 1.0), bg.clamp(0.0, 1.0)];

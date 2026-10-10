@@ -64,6 +64,13 @@ fn keys(id: SliderId) -> &'static [&'static str] {
         // to 25, so reading it would put denoise on every import that carries
         // the Detail panel at all, which nobody asked for.
         SliderId::Denoise => &["LuminanceSmoothing"],
+        SliderId::VignetteAmount => &["PostCropVignetteAmount"],
+        SliderId::VignetteMidpoint => &["PostCropVignetteMidpoint"],
+        SliderId::VignetteRoundness => &["PostCropVignetteRoundness"],
+        SliderId::VignetteFeather => &["PostCropVignetteFeather"],
+        SliderId::GrainAmount => &["GrainAmount"],
+        SliderId::GrainSize => &["GrainSize"],
+        SliderId::GrainRoughness => &["GrainFrequency"],
     }
 }
 
@@ -418,7 +425,37 @@ mod tests {
             straighten: 0.0,
             chromatic_aberration: None,
             curve: Default::default(),
+            vignette: Default::default(),
+            grain: Default::default(),
         }
+    }
+
+    #[test]
+    fn effects_keys_fill_vignette_and_grain() {
+        let xmp = "<x:xmpmeta><rdf:RDF><rdf:Description \
+            crs:PostCropVignetteAmount=\"-35\" crs:PostCropVignetteMidpoint=\"40\" \
+            crs:PostCropVignetteRoundness=\"+20\" crs:PostCropVignetteFeather=\"70\" \
+            crs:GrainAmount=\"25\" crs:GrainSize=\"30\" crs:GrainFrequency=\"60\"/>\
+            </rdf:RDF></x:xmpmeta>";
+        let got = parse(xmp).unwrap();
+        assert_eq!(
+            got.adj.vignette,
+            crate::develop::Vignette {
+                amount: -35.0,
+                midpoint: 40.0,
+                roundness: 20.0,
+                feather: 70.0,
+            }
+        );
+        assert_eq!(
+            got.adj.grain,
+            crate::develop::Grain {
+                amount: 25.0,
+                size: 30.0,
+                roughness: 60.0,
+            }
+        );
+        assert!(got.dropped.is_empty(), "{:?}", got.dropped);
     }
 
     /// Catches a scanner that reads only the spelling its author looked at.

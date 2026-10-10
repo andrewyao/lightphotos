@@ -254,7 +254,7 @@ impl App {
     }
 
     /// Move slider `idx` on every photo the panel acts on, each from its own
-    /// value and clamped to the slider's range, or set it to 0 on all of them.
+    /// value and clamped to the slider's range, or reset it on all of them.
     pub(super) fn step_slider(&mut self, idx: usize, step: SliderStep) {
         let Some(slider) = develop::SLIDERS.get(idx) else {
             return;
@@ -266,14 +266,15 @@ impl App {
                 Some(n) => {
                     (*field + n * slider.step).clamp(*slider.range.start(), *slider.range.end())
                 }
-                None => 0.0,
+                None => slider.default,
             };
             adj
         });
     }
 
-    /// The Sliders tab's Reset: tone, color, detail and curve back to default
-    /// on every photo the panel acts on, each keeping its crop and straighten.
+    /// The Sliders tab's Reset: every slider, the curve, Vignette and Grain
+    /// back to default on every photo the panel acts on, each keeping its
+    /// crop and straighten.
     pub(super) fn reset_adjustments(&mut self) {
         match self.develop_scope() {
             DevelopScope::None => return,
@@ -817,6 +818,34 @@ mod tests {
         assert!(app.histogram().is_none());
         app.selected = BTreeSet::from([0]);
         assert!(app.histogram().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The histogram counts what the Loupe shows, so a dark vignette moves
+    /// the corners' samples down.
+    #[test]
+    fn the_histogram_sees_the_vignette() {
+        let (mut app, dir, paths) = three_selected("hist-vignette");
+        app.selected = BTreeSet::from([0]);
+        app.hist.set_grid(vec![[0.2f32; 3]; 32 * 32], 32, 32);
+        let darkest = |app: &mut App| {
+            app.recompute_histogram();
+            let bins = app.histogram().expect("one photo selected");
+            bins[1].iter().position(|&n| n > 0.0)
+        };
+        let plain = darkest(&mut app);
+        app.edits.insert(
+            paths[0].clone(),
+            Adjustments {
+                vignette: crate::develop::Vignette {
+                    amount: -100.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        let vignetted = darkest(&mut app);
+        assert!(vignetted < plain, "{vignetted:?} vs {plain:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

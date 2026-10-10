@@ -443,9 +443,12 @@ impl App {
 
     /// Push the current edits to the GPU with the crop removed and the
     /// draft's angle, so the whole turned frame shows under the overlay.
+    /// The post-crop vignette hides until the crop is done: it would center
+    /// on the whole frame, not the crop being drawn.
     fn push_crop_preview(&mut self) {
         let mut adj = self.current_adjustments();
         adj.crop = None;
+        adj.vignette = Default::default();
         if let Some(d) = &self.crop.edit {
             adj.straighten = d.straighten;
         }
@@ -619,10 +622,15 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::develop::Vignette;
 
     #[test]
     fn leaving_crop_mode_restores_the_cropped_view() {
         let photo = PathBuf::from("/photos/a.jpg");
+        let vignette = Vignette {
+            amount: -50.0,
+            ..Default::default()
+        };
         let crop = Crop {
             left: 0.1,
             top: 0.1,
@@ -636,13 +644,16 @@ mod tests {
             photo,
             Adjustments {
                 crop: Some(crop),
+                vignette,
                 ..Default::default()
             },
         );
 
-        // Crop mode shows the whole frame under the overlay.
+        // Crop mode shows the whole frame under the overlay, without the
+        // post-crop vignette.
         app.enter_crop();
         assert_eq!(app.pushed_adj.unwrap().crop, None);
+        assert_eq!(app.pushed_adj.unwrap().vignette, Vignette::default());
 
         // Leaving without touching a handle stores the same crop it started
         // from, so nothing changes -- but the GPU still holds the full frame
@@ -650,6 +661,7 @@ mod tests {
         app.commit_crop();
         assert_eq!(app.current_adjustments().crop, Some(crop));
         assert_eq!(app.pushed_adj.unwrap().crop, Some(crop));
+        assert_eq!(app.pushed_adj.unwrap().vignette, vignette);
     }
 
     #[test]
