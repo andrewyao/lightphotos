@@ -54,7 +54,6 @@ pub(super) fn folder_chain(root: &Path, dir: &Path) -> Vec<PathBuf> {
 impl App {
     /// Add `dir` to the tree's roots, unless a root already holds it. The
     /// session saves the list.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn add_root(&mut self, dir: &Path) {
         self.missing_roots.remove(dir);
         if add_root(&mut self.folder_roots, dir) {
@@ -64,7 +63,6 @@ impl App {
 
     /// Expand the tree from `dir`'s root down to `dir`, listing each folder
     /// on the way, so `dir` shows as a row.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn reveal_folder(&mut self, dir: &Path) {
         let Some(root) = self
             .folder_roots
@@ -99,12 +97,16 @@ impl App {
             .as_ref()
             .is_some_and(|pl| pl.dir().starts_with(root));
         if showing {
-            let next = self
-                .folder_roots
-                .iter()
-                .find(|r| self.root_ready(r))
-                .cloned();
-            match next {
+            // The roots passed over weren't there; a drive unplugged since
+            // launch isn't in `missing_roots` yet.
+            let next = self.folder_roots.iter().position(|r| self.root_ready(r));
+            #[cfg(not(target_arch = "wasm32"))]
+            self.missing_roots.extend(
+                self.folder_roots[..next.unwrap_or(self.folder_roots.len())]
+                    .iter()
+                    .cloned(),
+            );
+            match next.and_then(|i| self.folder_roots.get(i).cloned()) {
                 Some(next) => self.open(next),
                 None => self.close_folder(),
             }
@@ -117,7 +119,7 @@ impl App {
     fn root_ready(&self, root: &Path) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            !self.missing_roots.contains(root)
+            root.is_dir()
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -125,21 +127,15 @@ impl App {
         }
     }
 
-    /// Back to the landing page with no folder showing, finishing the jobs
-    /// that write to the folder first, as `seed_mirrors` does.
+    /// Back to the landing page with no folder showing.
     fn close_folder(&mut self) {
         self.teardown_loupe_state();
-        self.cancel_auto_tone();
-        self.cancel_scoring();
-        self.cancel_delete();
-        self.save_edit();
+        self.finish_folder_jobs();
         self.burst_scan = None;
         self.expanded_stacks.clear();
         self.playlist = None;
         self.recompute_visible();
-        self.sel = None;
-        self.selected.clear();
-        self.anchor = None;
+        self.clear_selection();
         self.folder_sel = None;
         self.mode = ViewMode::Grid;
         self.update_window_title();
@@ -274,6 +270,35 @@ mod tests {
         );
     }
 
+    /// The other root's drive was unplugged after launch, so `missing_roots`
+    /// doesn't know yet. It must not open as a photo with its parent as a
+    /// new root.
+    #[test]
+    fn removing_the_root_showing_skips_a_root_that_has_gone() {
+        let (gone, b) = (photos("roots-rm-gone"), photos("roots-rm-stay"));
+        let mut app = App::new(None);
+        app.open(gone.clone());
+        app.open(b.clone());
+        std::fs::remove_dir_all(&gone).unwrap();
+        app.remove_root(&b);
+        assert_eq!(app.folder_roots(), std::slice::from_ref(&gone));
+        assert!(app.is_missing_root(&gone));
+        assert!(!app.has_playlist());
+        assert_eq!(app.mode, ViewMode::Grid);
+    }
+
+    /// A path that is neither a folder nor a file, such as a photo deleted
+    /// between Finder's open and ours, opens nothing.
+    #[test]
+    fn opening_a_path_that_is_gone_changes_nothing() {
+        let gone = temp_folder("open-gone").join("x.jpg");
+        let mut app = App::new(None);
+        app.open(gone);
+        assert!(app.folder_roots().is_empty());
+        assert!(!app.has_playlist());
+        assert_eq!(app.mode, ViewMode::Grid);
+    }
+
     #[test]
     fn a_missing_root_stays_listed_and_does_not_open() {
         let gone = temp_folder("roots-gone");
@@ -296,6 +321,19 @@ mod tests {
         app.open_folder(back.clone());
         assert!(app.has_playlist());
         assert!(!app.is_missing_root(&back));
+    }
+
+    /// With folders listed but none open, the title names no folder; once
+    /// one is open it names that one, not the first in the list.
+    #[test]
+    fn the_title_names_the_folder_showing_not_the_first_root() {
+        let (a, b) = (photos("title-a"), photos("title-b"));
+        let mut app = App::new(None);
+        app.folder_roots = vec![a, b.clone()];
+        assert_eq!(app.window_title(), "LightPhotos");
+        app.open(b.clone());
+        let name = b.file_name().unwrap().to_string_lossy();
+        assert_eq!(app.window_title(), format!("LightPhotos - {name}"));
     }
 
     /// A real click on Add Folder under the Grid's folder list.

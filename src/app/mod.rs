@@ -879,13 +879,29 @@ impl App {
     /// Open a directory in the Grid with nothing selected, or a file in the
     /// Loupe with its folder as the playlist.
     pub(crate) fn open(&mut self, path: PathBuf) {
-        self.teardown_loupe_state();
         #[cfg(not(target_arch = "wasm32"))]
-        let is_dir = std::fs::metadata(&path)
-            .map(|m| m.is_dir())
-            .unwrap_or(false);
+        let is_dir = match std::fs::metadata(&path) {
+            Ok(m) => m.is_dir(),
+            // Neither a folder nor a file: an unplugged drive, or a photo
+            // deleted since the path was chosen. A listed root greys out in
+            // the tree; anything else gets the error.
+            Err(e) => {
+                eprintln!("[lightphotos] open {}: {e}", path.display());
+                if self.folder_roots.contains(&path) {
+                    self.missing_roots.insert(path);
+                } else {
+                    self.set_status(
+                        StatusKind::Error,
+                        (crate::i18n::t().open_folder_failed)(&e.to_string()),
+                    );
+                }
+                self.request_redraw();
+                return;
+            }
+        };
         #[cfg(target_arch = "wasm32")]
         let is_dir = self.web.has_dir(&path) || self.subdirs.contains_key(&path);
+        self.teardown_loupe_state();
         eprintln!(
             "[lightphotos] open {}: {}",
             if is_dir { "dir" } else { "file" },
@@ -893,17 +909,12 @@ impl App {
         );
 
         if is_dir {
+            self.add_root(&path);
+            self.reveal_folder(&path);
             #[cfg(not(target_arch = "wasm32"))]
-            {
-                self.add_root(&path);
-                self.reveal_folder(&path);
-                self.load_folder(path);
-            }
+            self.load_folder(path);
             #[cfg(target_arch = "wasm32")]
             {
-                folders::add_root(&mut self.folder_roots, &path);
-                self.expanded.insert(path.clone());
-                self.ensure_subdirs(&path);
                 // Browser paths are synthetic, backed by directory handles
                 // whose listing is async, so `Playlist::from_dir` can't run.
                 if !self.subdirs.contains_key(&path) {
@@ -924,17 +935,8 @@ impl App {
             // Root the tree at the parent so the Grid has a sidebar.
             if let Some(parent) = path.parent() {
                 let parent = parent.to_path_buf();
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    self.add_root(&parent);
-                    self.reveal_folder(&parent);
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    folders::add_root(&mut self.folder_roots, &parent);
-                    self.expanded.insert(parent.clone());
-                    self.ensure_subdirs(&parent);
-                }
+                self.add_root(&parent);
+                self.reveal_folder(&parent);
                 self.folder_sel = Some(parent);
             }
 
@@ -1005,16 +1007,28 @@ impl App {
     /// background. `poll_catalog_load` copies them in when they land, so first
     /// paint never waits on the sidecars.
     fn seed_mirrors(&mut self, playlist: &Playlist) {
-        // Finish pending edits before replacing the catalog they write to.
-        self.cancel_auto_tone();
-        self.cancel_scoring();
-        self.cancel_delete();
-        self.save_edit();
+        self.finish_folder_jobs();
         if self.playlist.as_ref().map(Playlist::dir) != Some(playlist.dir()) {
             self.expanded_stacks.clear();
         }
         self.adopt_signal_cache(playlist);
         self.request_catalog_load(playlist.dir());
+    }
+
+    /// Finish the jobs that write to the folder showing, before the catalog
+    /// they write to is replaced or closed.
+    fn finish_folder_jobs(&mut self) {
+        self.cancel_auto_tone();
+        self.cancel_scoring();
+        self.cancel_delete();
+        self.save_edit();
+    }
+
+    /// Leave the grid with nothing selected and no anchor.
+    fn clear_selection(&mut self) {
+        self.sel = None;
+        self.selected.clear();
+        self.anchor = None;
     }
 
     /// Show `dir`'s images in the grid with nothing selected.
@@ -1034,9 +1048,7 @@ impl App {
         self.playlist = Some(playlist);
         self.reset_eyes_filter();
         self.recompute_visible();
-        self.sel = None;
-        self.selected.clear();
-        self.anchor = None;
+        self.clear_selection();
         self.folder_sel = Some(dir);
         self.update_window_title();
         // `redraw` syncs textures against `grid_range` before layout updates

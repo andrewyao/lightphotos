@@ -154,6 +154,13 @@ impl App {
     /// Save the session when it has changed since the last save. Cheap enough
     /// to run once per event-loop turn.
     pub(crate) fn save_session_if_changed(&mut self) {
+        // The web's Folders list fills once the kept names land. A save
+        // before then would record no folders, and the startup restore
+        // would then find no folder to reopen.
+        #[cfg(target_arch = "wasm32")]
+        if self.web.saved_folders_pending() {
+            return;
+        }
         let Some(now) = self.current_session() else {
             return;
         };
