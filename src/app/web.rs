@@ -300,9 +300,11 @@ impl App {
         self.web.session_restore = None;
     }
 
-    /// Invalidate thumbnail work after a pick replaces the handle maps.
-    /// `poll_web_thumbs` drops the old results on arrival. Clearing their keys
-    /// lets the new pick request the same browser paths again.
+    /// Invalidate thumbnail work when a pick replaces a root that still has
+    /// thumbnails decoding: the same paths may now name other files, as
+    /// when a kept name was freed and taken again. `poll_web_thumbs` drops
+    /// the old results on arrival, and clearing their keys lets the new
+    /// root request those paths.
     pub(crate) fn invalidate_web_thumb_handles(&mut self) {
         self.web.handle_generation = self.web.handle_generation.wrapping_add(1);
         self.web.thumb_inflight.clear();
@@ -554,14 +556,21 @@ impl App {
             let restore = self.web.session_restore.take();
             match result {
                 Ok(picked) => {
-                    // A pick invalidates pending listings, deferred
-                    // navigation, and thumbnail decodes using old handles.
-                    // It replaces only its own root's handles; other roots
-                    // keep theirs.
+                    // A pick invalidates pending listings and deferred
+                    // navigation. It replaces only its own root's handles;
+                    // other roots keep theirs, and their thumbnails in
+                    // flight land as usual.
                     self.supersede_web_pending_nav();
-                    self.invalidate_web_thumb_handles();
                     self.fetch_cjk_font_for(picked.handles.keys().chain(picked.dir_handles.keys()));
                     let root = picked.dir.clone();
+                    if self
+                        .web
+                        .thumb_inflight
+                        .iter()
+                        .any(|(p, _)| p.starts_with(&root))
+                    {
+                        self.invalidate_web_thumb_handles();
+                    }
                     self.drop_web_root_handles(&root);
                     self.web.file_handles.extend(picked.handles);
                     self.web.dir_handles.extend(picked.dir_handles);
@@ -783,9 +792,8 @@ impl App {
                 self.web.preview_pending.push(r);
                 continue;
             }
-            // Browser paths start at the picked folder's name, so two picks of
-            // same-named folders share paths. Drop results from before the
-            // last pick so they cannot resolve the new folder's handles.
+            // A pick since this decode started replaced its root, so its
+            // path may now name another file.
             let Some(generation) = r.generation.filter(|g| *g == self.web.handle_generation) else {
                 continue;
             };
