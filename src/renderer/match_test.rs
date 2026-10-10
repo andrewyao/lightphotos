@@ -221,10 +221,9 @@ fn cases() -> Vec<Case> {
 fn tolerance(case: &str) -> u8 {
     match case {
         "touchup_opaque" => 111,
-        "everything" => 83,
+        "everything" => 104,
         "touchup" => 82,
-        "straighten" => 57,
-        "denoise+straighten" => 46,
+        "straighten" => 9,
         "ca" => 3,
         _ => 2,
     }

@@ -104,9 +104,81 @@ fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
     [r, g, b].map(|c| srgb_to_linear(c / 255.0))
 }
 
+/// The photo as the shader samples it: linear light, bilinear, clamped at the
+/// edge, red and blue read through the chromatic-aberration scales.
+struct Source<'a> {
+    img: &'a DecodedImage,
+    ca: develop::CaScale,
+    /// Every texel in linear light, for denoise, which reads each one 25
+    /// times.
+    linear: Option<Vec<[f32; 3]>>,
+}
+
+impl<'a> Source<'a> {
+    /// The caller has checked that `img` holds `width * height` sRGB8 pixels.
+    fn new(img: &'a DecodedImage, ca: develop::CaScale, cache: bool) -> Self {
+        let n = img.width as usize * img.height as usize;
+        let linear = cache.then(|| {
+            let px = img.rgba.as_chunks::<4>().0.iter().take(n);
+            px.map(|&p| unpremul_to_linear(p)).collect()
+        });
+        Self { img, ca, linear }
+    }
+
+    /// Texel `(x, y)` clamped to the image, for the exact path.
+    fn at_px(&self, x: i64, y: i64) -> [f32; 3] {
+        let (w, h) = (self.img.width as i64, self.img.height as i64);
+        let i = (y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) as usize;
+        match &self.linear {
+            Some(buf) => buf[i],
+            None => {
+                let p = &self.img.rgba[i * 4..i * 4 + 4];
+                unpremul_to_linear([p[0], p[1], p[2], p[3]])
+            }
+        }
+    }
+
+    /// All three channels at source UV, as `textureSample` filters them:
+    /// the four texels around `uv * size - 0.5`, clamped at the edge.
+    fn bilinear(&self, u: f32, v: f32) -> [f32; 3] {
+        let sx = u * self.img.width as f32 - 0.5;
+        let sy = v * self.img.height as f32 - 0.5;
+        let (fx, fy) = (sx.floor(), sy.floor());
+        let (tx, ty) = (sx - fx, sy - fy);
+        // Saturating: a sidecar's huge or infinite CA scale casts to
+        // `i64::MAX`, and `at_px` clamps to the edge anyway.
+        let (ix, iy) = (fx as i64, fy as i64);
+        let (ix1, iy1) = (ix.saturating_add(1), iy.saturating_add(1));
+        let (a, b) = (self.at_px(ix, iy), self.at_px(ix1, iy));
+        let (c, d) = (self.at_px(ix, iy1), self.at_px(ix1, iy1));
+        std::array::from_fn(|k| {
+            let top = a[k] * (1.0 - tx) + b[k] * tx;
+            let bottom = c[k] * (1.0 - tx) + d[k] * tx;
+            top * (1.0 - ty) + bottom * ty
+        })
+    }
+
+    /// The source at UV with chromatic aberration removed. Must match
+    /// `sampleSrc` and `sampleSrcLevel` in loupe_common.wgsl.
+    fn at_uv(&self, u: f32, v: f32) -> [f32; 3] {
+        let g = self.bilinear(u, v);
+        if self.ca.is_zero() {
+            return g;
+        }
+        let channel = |k: f32, c: usize| {
+            let (u, v) = develop::CaScale::source_uv(k, u, v);
+            self.bilinear(u, v)[c]
+        };
+        [channel(self.ca.red, 0), g[1], channel(self.ca.blue, 2)]
+    }
+}
+
 /// Burn edits into an opaque sRGB8 RGBA buffer: crop, then touch-ups and tone
 /// per pixel, then rotate by `rot` 90-degree clockwise steps. Returns
-/// `(w, h, rgba)`. Tone uses `develop::apply_linear`, which matches the shader.
+/// `(w, h, rgba)`. Each pixel reads the source the way `fs_main` in
+/// shader.wgsl does, and tone uses `develop::apply_linear`, which matches the
+/// shader. Where the turned photo leaves the frame the shader draws
+/// background but this clamps to the edge, so an export never shows grey.
 #[hotpath::measure]
 pub fn bake_edited(
     img: &DecodedImage,
@@ -118,157 +190,42 @@ pub fn bake_edited(
     if w == 0 || h == 0 || img.rgba.len() < (w * h * 4) as usize {
         return (0, 0, Vec::new());
     }
-
-    if let Some(ca) = adj.chromatic_aberration.filter(|ca| !ca.is_zero()) {
-        // Everything after reads the corrected photo, as the shader's
-        // `sampleSrc` does.
-        let fixed = remove_chromatic_aberration(img, ca);
-        let rest = Adjustments {
-            chromatic_aberration: None,
-            ..*adj
-        };
-        return bake_edited(&fixed, &rest, touchups, rot);
-    }
-
-    if adj.straighten != 0.0 {
-        // Touch-ups and denoise are in source pixels, so bake the whole
-        // photo upright first, then turn and crop the result.
-        let upright = Adjustments {
-            crop: None,
-            straighten: 0.0,
-            ..*adj
-        };
-        let (_, _, full) = bake_edited(img, &upright, touchups, 0);
-        let (cw, ch, turned) = straightened(&full, w, h, adj);
-        return rotate_rgba(&turned, cw, ch, rot);
-    }
+    let ca = adj.chromatic_aberration.unwrap_or_default();
+    let src = Source::new(img, ca, adj.denoise > 0.0);
+    let turn = (adj.straighten != 0.0)
+        .then(|| develop::Straighten::new(adj.straighten, w as f32, h as f32));
+    // Upright with no aberration, every read lands on a texel center, so
+    // read texels directly: bit-exact, and the fast path for export.
+    let exact = turn.is_none() && ca.is_zero();
+    let (texel_w, texel_h) = (1.0 / w as f32, 1.0 / h as f32);
 
     let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
     let (cw, ch) = (x1 - x0, y1 - y0);
-    let encode = linear_to_srgb8;
-
-    // Denoise reads 25 neighbors per pixel, so convert the whole image to
-    // linear once. Neighbors come from the full image, clamped at its edges,
-    // to match the shader's clamp-to-edge sampling of the uncropped texture.
-    let full_linear: Option<Vec<[f32; 3]>> = (adj.denoise > 0.0).then(|| {
-        (0..(w * h) as usize)
-            .map(|i| {
-                let si = i * 4;
-                unpremul_to_linear([
-                    img.rgba[si],
-                    img.rgba[si + 1],
-                    img.rgba[si + 2],
-                    img.rgba[si + 3],
-                ])
-            })
-            .collect()
-    });
-
     let dev = develop::Develop::new(adj);
     let mut cropped = vec![0u8; (cw * ch * 4) as usize];
     for y in 0..ch {
         for x in 0..cw {
-            let lin = match &full_linear {
-                Some(buf) => develop::denoise_sample(adj, |dx, dy| {
-                    let sx = (x0 as i64 + x as i64 + dx as i64).clamp(0, w as i64 - 1) as u32;
-                    let sy = (y0 as i64 + y as i64 + dy as i64).clamp(0, h as i64 - 1) as u32;
-                    buf[(sy * w + sx) as usize]
-                }),
-                None => {
-                    let si = (((y0 + y) * w + (x0 + x)) * 4) as usize;
-                    unpremul_to_linear([
-                        img.rgba[si],
-                        img.rgba[si + 1],
-                        img.rgba[si + 2],
-                        img.rgba[si + 3],
-                    ])
+            let (px, py) = (x0 + x, y0 + y);
+            let canvas = ((px as f32 + 0.5) / w as f32, (py as f32 + 0.5) / h as f32);
+            let (u, v) = turn.map_or(canvas, |t| t.to_source(canvas.0, canvas.1));
+            let lin = develop::denoise_sample(adj, |dx, dy| {
+                if exact {
+                    src.at_px(px as i64 + dx as i64, py as i64 + dy as i64)
+                } else {
+                    src.at_uv(u + dx as f32 * texel_w, v + dy as f32 * texel_h)
                 }
-            };
-            let retouched = apply_touchups(img, touchups, x0 + x, y0 + y, lin);
-            let out = dev.linear(retouched);
+            });
+            let (tu, tv) = (u - 0.5 * texel_w, v - 0.5 * texel_h);
+            let out = dev.linear(apply_touchups(img, touchups, tu, tv, lin));
             let di = ((y * cw + x) * 4) as usize;
-            cropped[di] = encode(out[0]);
-            cropped[di + 1] = encode(out[1]);
-            cropped[di + 2] = encode(out[2]);
+            cropped[di] = linear_to_srgb8(out[0]);
+            cropped[di + 1] = linear_to_srgb8(out[1]);
+            cropped[di + 2] = linear_to_srgb8(out[2]);
             cropped[di + 3] = 255;
         }
     }
 
     rotate_rgba(&cropped, cw, ch, rot)
-}
-
-/// An opaque sRGB8 `img` with red and blue resampled through
-/// [`develop::CaScale::source_uv`], interpolated in linear light and clamped
-/// at the edge. Green and alpha are copied. Must match `sampleSrc` in
-/// loupe_common.wgsl.
-pub fn remove_chromatic_aberration(img: &DecodedImage, ca: develop::CaScale) -> DecodedImage {
-    let (w, h) = (img.width, img.height);
-    let lut = srgb8_to_linear_lut();
-    let at = |x: i64, y: i64, c: usize| {
-        let (x, y) = (x.clamp(0, w as i64 - 1), y.clamp(0, h as i64 - 1));
-        lut[img.rgba[((y * w as i64 + x) * 4) as usize + c] as usize]
-    };
-    let mut rgba = img.rgba.clone();
-    for (c, k) in [(0, ca.red), (2, ca.blue)] {
-        if k == 0.0 {
-            continue;
-        }
-        for y in 0..h {
-            for x in 0..w {
-                let u = (x as f32 + 0.5) / w as f32;
-                let v = (y as f32 + 0.5) / h as f32;
-                let (su, sv) = develop::CaScale::source_uv(k, u, v);
-                let (sx, sy) = (su * w as f32 - 0.5, sv * h as f32 - 0.5);
-                let (fx, fy) = (sx.floor(), sy.floor());
-                let (tx, ty) = (sx - fx, sy - fy);
-                // Saturating: a sidecar's huge or infinite scale casts to
-                // `i64::MAX`, and `at` clamps to the edge anyway.
-                let (ix, iy) = (fx as i64, fy as i64);
-                let (ix1, iy1) = (ix.saturating_add(1), iy.saturating_add(1));
-                let top = at(ix, iy, c) * (1.0 - tx) + at(ix1, iy, c) * tx;
-                let bottom = at(ix, iy1, c) * (1.0 - tx) + at(ix1, iy1, c) * tx;
-                rgba[((y * w + x) * 4) as usize + c] =
-                    linear_to_srgb8(top * (1.0 - ty) + bottom * ty);
-            }
-        }
-    }
-    DecodedImage::new_tracked(crate::decode::image_decode::DecodedImageFields {
-        width: w,
-        height: h,
-        rgba,
-        pixel_format: img.pixel_format,
-    })
-}
-
-/// `adj`'s crop of the straightened canvas of an opaque `w x h` RGBA8
-/// buffer, sampled bilinearly and clamped at the photo's edge.
-fn straightened(src: &[u8], w: u32, h: u32, adj: &Adjustments) -> (u32, u32, Vec<u8>) {
-    let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
-    let (cw, ch) = (x1 - x0, y1 - y0);
-    let turn = develop::Straighten::new(adj.straighten, w as f32, h as f32);
-    let at = |x: i64, y: i64, c: usize| {
-        let (x, y) = (x.clamp(0, w as i64 - 1), y.clamp(0, h as i64 - 1));
-        src[((y * w as i64 + x) * 4) as usize + c] as f32
-    };
-    let mut out = vec![255u8; (cw * ch * 4) as usize];
-    for y in 0..ch {
-        for x in 0..cw {
-            let u = (x0 + x) as f32 + 0.5;
-            let v = (y0 + y) as f32 + 0.5;
-            let (su, sv) = turn.to_source(u / w as f32, v / h as f32);
-            let (sx, sy) = (su * w as f32 - 0.5, sv * h as f32 - 0.5);
-            let (fx, fy) = (sx.floor(), sy.floor());
-            let (tx, ty) = (sx - fx, sy - fy);
-            let (ix, iy) = (fx as i64, fy as i64);
-            let di = ((y * cw + x) * 4) as usize;
-            for c in 0..3 {
-                let top = at(ix, iy, c) * (1.0 - tx) + at(ix + 1, iy, c) * tx;
-                let bottom = at(ix, iy + 1, c) * (1.0 - tx) + at(ix + 1, iy + 1, c) * tx;
-                out[di + c] = (top * (1.0 - ty) + bottom * ty).round() as u8;
-            }
-        }
-    }
-    (cw, ch, out)
 }
 
 /// A `LinearF16` image as opaque sRGB8 RGBA, with no edits, as
@@ -400,15 +357,13 @@ pub(crate) fn pixel_linear(img: &DecodedImage, x: u32, y: u32) -> [f32; 3] {
 fn apply_touchups(
     img: &DecodedImage,
     touchups: &[TouchUp],
-    x: u32,
-    y: u32,
+    u: f32,
+    v: f32,
     base: [f32; 3],
 ) -> [f32; 3] {
     if touchups.is_empty() {
         return base;
     }
-    let u = x as f32 / img.width.max(1) as f32;
-    let v = y as f32 / img.height.max(1) as f32;
     let mut out = base;
     for t in touchups {
         let dx = (u - t.center[0]) * img.width as f32;
