@@ -86,8 +86,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
     // Spot healing, after denoise to match the CPU export path.
     var pre = applyTouchups(uv, vec3<f32>(r, g, b));
+    // The probe shows the base layer itself, so nothing reads it after.
     if (adj.base_probe > 0.0) {
         pre = baseProbe(uv, pre, adj.base_probe);
+    } else {
+        pre = localAdjust(uv, pre);
     }
     r = pre.r;
     g = pre.g;

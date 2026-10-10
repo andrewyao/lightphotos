@@ -1478,7 +1478,7 @@ pub(in crate::app) mod tests {
     fn keyboard_nudges_follow_the_develop_panel_order() {
         let mut app = App::new(None);
         app.shown = Shown::Preview(PathBuf::from("/nonexistent/a.jpg"), 1024, 1024);
-        let order: [fn(&Adjustments) -> f32; 11] = [
+        let order: [fn(&Adjustments) -> f32; 21] = [
             |a| a.temp,
             |a| a.tint,
             |a| a.exposure,
@@ -1487,9 +1487,19 @@ pub(in crate::app) mod tests {
             |a| a.shadows,
             |a| a.whites,
             |a| a.blacks,
+            |a| a.texture,
+            |a| a.clarity,
+            |a| a.dehaze,
             |a| a.vibrance,
             |a| a.saturation,
             |a| a.denoise,
+            |a| a.vignette.amount,
+            |a| a.vignette.midpoint,
+            |a| a.vignette.roundness,
+            |a| a.vignette.feather,
+            |a| a.grain.amount,
+            |a| a.grain.size,
+            |a| a.grain.roughness,
         ];
         for (i, read) in order.iter().enumerate() {
             app.develop_focus = i;

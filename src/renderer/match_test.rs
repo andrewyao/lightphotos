@@ -241,6 +241,44 @@ fn cases() -> Vec<Case> {
             },
         ));
     }
+    let presence = |texture, clarity, dehaze| Adjustments {
+        texture,
+        clarity,
+        dehaze,
+        ..Default::default()
+    };
+    out.push(Case {
+        name: "texture+touchup".into(),
+        adj: presence(100.0, 0.0, 0.0),
+        touchups: vec![touchup],
+    });
+    out.push(Case {
+        name: "clarity+touchup".into(),
+        adj: presence(0.0, 100.0, 0.0),
+        touchups: vec![touchup],
+    });
+    out.push(case(
+        "presence+straighten".into(),
+        Adjustments {
+            straighten: 7.0,
+            crop: straighten_crop,
+            ..presence(-60.0, 60.0, 50.0)
+        },
+    ));
+    out.push(case(
+        "presence+ca".into(),
+        Adjustments {
+            chromatic_aberration: ca,
+            ..presence(70.0, -70.0, -50.0)
+        },
+    ));
+    out.push(case(
+        "presence+denoise".into(),
+        Adjustments {
+            denoise: 50.0,
+            ..presence(80.0, 40.0, 0.0)
+        },
+    ));
     let mut everything = Adjustments {
         temp: 30.0,
         tint: -20.0,
@@ -250,6 +288,9 @@ fn cases() -> Vec<Case> {
         shadows: 30.0,
         whites: 10.0,
         blacks: -10.0,
+        texture: 30.0,
+        clarity: 40.0,
+        dehaze: 25.0,
         vibrance: 20.0,
         saturation: 15.0,
         denoise: 30.0,
@@ -413,6 +454,7 @@ fn loupe_base_layer_matches_cpu_base() {
         BaseProbe::Wide,
         BaseProbe::Dark,
         BaseProbe::Detail,
+        BaseProbe::Fine,
     ];
     let mut diffs = Vec::new();
     for f in &fixtures() {
@@ -459,6 +501,60 @@ fn loupe_grain_matches_cpu_bake_at_full_strength() {
         grain(100.0, 100.0, 0.0),
         grain(100.0, 100.0, 100.0),
         grain(100.0, 25.0, 50.0),
+    ];
+    let diffs = cases
+        .iter()
+        .map(|c| measure(&mut r, &fixture, c, BaseProbe::Off))
+        .collect();
+    report(diffs);
+}
+
+/// Texture, Clarity and Dehaze on a frame large enough that the fine grid
+/// is its full 768 cells, coarser than a pixel's neighbours, as on a real
+/// photo.
+#[test]
+fn loupe_presence_matches_cpu_bake_on_a_large_frame() {
+    let (w, h) = (1152, 768);
+    let Some(mut r) = headless(w, h) else {
+        return;
+    };
+    let mut seed: u32 = 7;
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let n = ((seed >> 16) % 61) as f32 - 30.0;
+            let (u, v) = (x as f32 / w as f32, y as f32 / h as f32);
+            let base = [40.0 + 170.0 * u, 60.0 + 120.0 * v, 200.0 - 150.0 * u * v];
+            rgba.extend(base.map(|c| (c + n).clamp(0.0, 255.0) as u8));
+            rgba.push(255);
+        }
+    }
+    let fixture = Fixture {
+        name: "large",
+        img: DecodedImage::new_tracked(DecodedImageFields {
+            width: w,
+            height: h,
+            rgba,
+            pixel_format: PixelFormat::Srgb8,
+        }),
+    };
+    let presence = |name: &str, texture, clarity, dehaze| Case {
+        name: name.into(),
+        adj: Adjustments {
+            texture,
+            clarity,
+            dehaze,
+            ..Default::default()
+        },
+        touchups: Vec::new(),
+    };
+    let cases = [
+        presence("texture=100", 100.0, 0.0, 0.0),
+        presence("texture=-100", -100.0, 0.0, 0.0),
+        presence("clarity=100", 0.0, 100.0, 0.0),
+        presence("dehaze=100", 0.0, 0.0, 100.0),
+        presence("presence", 60.0, -40.0, -50.0),
     ];
     let diffs = cases
         .iter()
@@ -529,6 +625,38 @@ fn only_the_spots_and_the_ca_scales_rebuild_the_base_layer() {
     assert_eq!(r.base_builds, built + 3, "a new image");
 }
 
+/// Each layer builds only for an edit that reads it, and turning one on
+/// leaves the other alone.
+#[test]
+fn each_layer_builds_only_for_its_reader() {
+    let Some(mut r) = headless(W, H) else {
+        return;
+    };
+    let fixtures = fixtures();
+    r.set_image(&fixtures[0].img);
+    let mut push = |adj: Adjustments| {
+        r.set_adjustments(
+            GpuAdjust::for_image(&adj, W as f32, H as f32, 0),
+            &adj.curve,
+        );
+        r.set_touchups(&[]);
+        assert!(r.render(None, None, None));
+        (r.base_builds, r.fine.is_some())
+    };
+    assert_eq!(push(Adjustments::default()), (0, false), "no reader");
+    let texture = Adjustments {
+        texture: 50.0,
+        ..Default::default()
+    };
+    assert_eq!(push(texture), (1, true), "Texture builds the fine layer");
+    let both = Adjustments {
+        clarity: 30.0,
+        ..texture
+    };
+    assert_eq!(push(both), (2, true), "Clarity adds the base layer only");
+    assert_eq!(push(both), (2, true), "nothing changed");
+}
+
 /// Frame times on a 24 MP photo, with the base layer cached (a slider
 /// drag) and rebuilt every frame. Prints; asserts nothing. Run it with
 /// `cargo test --release frame_time -- --ignored --nocapture`.
@@ -574,12 +702,13 @@ fn frame_time_with_and_without_a_base_rebuild() {
             };
             let gpu = GpuAdjust {
                 base_on: 1.0,
+                fine_on: 1.0,
                 ..GpuAdjust::for_image(&adj, w as f32, h as f32, 0)
             };
             r.set_adjustments(gpu, &adj.curve);
             r.set_touchups(&[]);
             if rebuild {
-                r.base_built_for = None;
+                r.layers_built_for = [None; 2];
             }
             assert!(r.render(None, None, None));
             wait(r);
@@ -590,6 +719,7 @@ fn frame_time_with_and_without_a_base_rebuild() {
     r.set_adjustments(
         GpuAdjust {
             base_on: 1.0,
+            fine_on: 1.0,
             ..GpuAdjust::for_image(&Adjustments::default(), w as f32, h as f32, 0)
         },
         &Adjustments::default().curve,

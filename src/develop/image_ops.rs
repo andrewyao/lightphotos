@@ -5,7 +5,8 @@
 //! so the two always match. The Loupe applies edits on the GPU instead.
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
-use crate::develop::{self, Adjustments, BaseLayer, BaseProbe, Crop, TouchUp};
+use crate::develop::base::Fields;
+use crate::develop::{self, local, Adjustments, BaseLayer, BaseProbe, Crop, TouchUp};
 
 /// Normalized crop (`None` = full frame) to pixel bounds `(x0, y0, x1, y1)`,
 /// at least 1x1.
@@ -164,9 +165,9 @@ pub fn bake_edited(
     bake_edited_probe(img, adj, touchups, rot, BaseProbe::Off)
 }
 
-/// [`bake_edited`] with the base layer drawn in place of the photo as
-/// `probe` says, as the Loupe does for `GpuAdjust::base_probe`. Only `Off`
-/// skips building the layer.
+/// [`bake_edited`] with a layer drawn in place of the photo as `probe`
+/// says, as the Loupe does for `GpuAdjust::base_probe`. A layer is built
+/// only for an edit or probe that reads it.
 pub fn bake_edited_probe(
     img: &DecodedImage,
     adj: &Adjustments,
@@ -189,11 +190,18 @@ pub fn bake_edited_probe(
     let (x0, y0, x1, y1) = crop_bounds(adj.crop, w, h);
     let (cw, ch) = (x1 - x0, y1 - y0);
     let dev = develop::Develop::framed(adj, w, h);
-    let base = if probe == BaseProbe::Off {
-        None
+    let pre = |x: u32, y: u32| pre_at(&src, touchups, x, y);
+    // Each layer only for an edit or probe that reads it.
+    let base = if probe.reads_base() {
+        BaseLayer::build(w, h, Fields::All, pre)
+    } else if adj.needs_base() {
+        BaseLayer::build(w, h, Fields::MidDark, pre)
     } else {
-        base_layer(&src, touchups)
+        None
     };
+    let fine = (probe == BaseProbe::Fine || adj.texture != 0.0)
+        .then(|| BaseLayer::build_fine(w, h, pre))
+        .flatten();
     let mut cropped = vec![0u8; (cw * ch * 4) as usize];
     for y in 0..ch {
         for x in 0..cw {
@@ -208,9 +216,17 @@ pub fn bake_edited_probe(
                 }
             });
             let pre = apply_touchups(&src, touchups, u, v, lin);
-            let pre = match &base {
-                Some(base) => probe.apply(base.at_uv(u, v), pre),
-                None => pre,
+            let base_here = base.as_ref().map(|b| b.at_uv(u, v));
+            let fine_here = fine.as_ref().map(|f| f.at_uv(u, v));
+            // The probe shows a layer itself, so nothing reads it after.
+            let pre = if probe == BaseProbe::Off {
+                local::apply(adj, pre, base_here, fine_here.map(|f| f.mid))
+            } else {
+                probe.apply(
+                    base_here.unwrap_or_default(),
+                    fine_here.unwrap_or_default(),
+                    pre,
+                )
             };
             let out = dev.linear_at(pre, canvas.0, canvas.1);
             let di = ((y * cw + x) * 4) as usize;
@@ -224,21 +240,19 @@ pub fn bake_edited_probe(
     rotate_rgba(&cropped, cw, ch, rot)
 }
 
-/// The base layer of the pre-tone image `bake_edited` reads: each texel at
+/// The pre-tone pixel the base and fine layers average: texel `(x, y)` at
 /// its center with CA removed and the touch-ups blended, without denoise.
 /// Must match `preAt` in base.wgsl.
-fn base_layer(src: &Source, touchups: &[TouchUp]) -> Option<BaseLayer> {
+fn pre_at(src: &Source, touchups: &[TouchUp], x: u32, y: u32) -> [f32; 3] {
     let (w, h) = (src.img.width, src.img.height);
-    BaseLayer::build(w, h, |x, y| {
-        let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
-        // A texel center reads that texel exactly, so skip the bilinear.
-        let px = if src.ca.is_zero() {
-            src.at_px(x as i64, y as i64)
-        } else {
-            src.at_uv(u, v)
-        };
-        apply_touchups(src, touchups, u, v, px)
-    })
+    let (u, v) = ((x as f32 + 0.5) / w as f32, (y as f32 + 0.5) / h as f32);
+    // A texel center reads that texel exactly, so skip the bilinear.
+    let px = if src.ca.is_zero() {
+        src.at_px(x as i64, y as i64)
+    } else {
+        src.at_uv(u, v)
+    };
+    apply_touchups(src, touchups, u, v, px)
 }
 
 /// A `LinearF16` image as opaque sRGB8 RGBA, with no edits, as

@@ -822,20 +822,24 @@ mod tests {
     }
 
     /// The histogram counts what the Loupe shows, so a dark vignette moves
-    /// the corners' samples down.
+    /// the corners' samples down, and Dehaze, which reads the base layer,
+    /// moves every sample of a flat gray down.
     #[test]
-    fn the_histogram_sees_the_vignette() {
+    fn the_histogram_sees_the_vignette_and_dehaze() {
         let (mut app, dir, paths) = three_selected("hist-vignette");
         app.selected = BTreeSet::from([0]);
         app.hist.set_grid(vec![[0.2f32; 3]; 32 * 32], 32, 32);
-        let darkest = |app: &mut App| {
+        let bounds = |app: &mut App, adj: Adjustments| {
+            app.edits.insert(paths[0].clone(), adj);
             app.recompute_histogram();
             let bins = app.histogram().expect("one photo selected");
-            bins[1].iter().position(|&n| n > 0.0)
+            let darkest = bins[1].iter().position(|&n| n > 0.0);
+            let lightest = bins[1].iter().rposition(|&n| n > 0.0);
+            (darkest, lightest)
         };
-        let plain = darkest(&mut app);
-        app.edits.insert(
-            paths[0].clone(),
+        let plain = bounds(&mut app, Adjustments::default());
+        let vignetted = bounds(
+            &mut app,
             Adjustments {
                 vignette: crate::develop::Vignette {
                     amount: -100.0,
@@ -844,8 +848,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        let vignetted = darkest(&mut app);
-        assert!(vignetted < plain, "{vignetted:?} vs {plain:?}");
+        assert!(vignetted.0 < plain.0, "{vignetted:?} vs {plain:?}");
+        let dehazed = bounds(
+            &mut app,
+            Adjustments {
+                dehaze: 100.0,
+                ..Default::default()
+            },
+        );
+        assert!(dehazed.1 < plain.0, "{dehazed:?} vs {plain:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -868,8 +879,14 @@ mod tests {
     #[test]
     fn a_step_moves_each_photo_from_its_own_value() {
         let (mut app, dir, paths) = three_selected("step");
-        let exposure = 2;
-        let saturation = 9;
+        let at = |id| {
+            develop::SLIDERS
+                .iter()
+                .position(|s| s.id == id)
+                .expect("a slider")
+        };
+        let exposure = at(develop::SliderId::Exposure);
+        let saturation = at(develop::SliderId::Saturation);
         app.step_slider(exposure, SliderStep::BigUp);
         app.step_slider(saturation, SliderStep::Down);
         let adj = |app: &App, i: usize| app.edits.get(&paths[i]).copied().unwrap_or_default();

@@ -13,7 +13,7 @@ use winit::window::Window;
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::curve::ToneCurve;
-use crate::develop::{GpuAdjust, GpuCurve, GpuTouchUp, Grid};
+use crate::develop::{BaseProbe, GpuAdjust, GpuCurve, GpuTouchUp, Grid};
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
@@ -36,8 +36,8 @@ struct BasePass {
     src: [u32; 2],
 }
 
-/// What the base layer is built from besides the image: it changes only
-/// when one of these does, so a slider drag never rebuilds it.
+/// What the base and fine layers are built from besides the image: a layer
+/// rebuilds only when one of these changes, so a slider drag never does.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 struct BaseInputs {
     ca_red: f32,
@@ -49,25 +49,39 @@ struct BaseInputs {
     /// which the passes then bind. The layer follows the edited photo;
     /// the "before" half never reads it.
     from_b: bool,
-    /// Something reads the layer: an `Adjustments` field that needs it, or
-    /// the match test's probe. Nothing builds it otherwise.
-    wanted: bool,
+    /// Which layers something reads, base then fine: an `Adjustments`
+    /// field that needs one, or the match test's probe. Nothing builds a
+    /// layer otherwise.
+    wanted: [bool; 2],
 }
 
 impl BaseInputs {
     fn of(a: &GpuAdjust, from_b: bool, touch_gen: u64) -> Self {
+        let probe = BaseProbe::from_gpu(a.base_probe);
         BaseInputs {
             ca_red: a.ca_red,
             ca_blue: a.ca_blue,
             touch_count: a._pad0 as u32,
             touch_gen,
             from_b,
-            wanted: a.base_on != 0.0 || a.base_probe != 0.0,
+            wanted: [
+                a.base_on != 0.0 || probe.reads_base(),
+                a.fine_on != 0.0 || probe == BaseProbe::Fine,
+            ],
+        }
+    }
+
+    /// What a layer is built from, without which layers are wanted.
+    fn source(self) -> Self {
+        BaseInputs {
+            wanted: [false; 2],
+            ..self
         }
     }
 }
 
-/// The current image's base layer on the GPU. `fs_base_reduce` writes `a`,
+/// One of the current image's layer grids on the GPU, the base or the fine
+/// one. `fs_base_reduce` writes `a`,
 /// `fs_base_blur_h` reads `a` into `b`, and `fs_base_blur_v` reads `b` back
 /// into `a`, which the Loupe binds.
 struct BaseGpu {
@@ -145,7 +159,8 @@ pub struct Renderer {
 
     sampler: wgpu::Sampler,
     tex_bind_layout: wgpu::BindGroupLayout,
-    /// `tex_bind_layout` plus the base layer at binding 2, for the Loupe.
+    /// `tex_bind_layout` plus the base layer at binding 2 and the fine layer
+    /// at 3, for the Loupe.
     image_bind_layout: wgpu::BindGroupLayout,
 
     xform_buf: wgpu::Buffer,
@@ -188,16 +203,24 @@ pub struct Renderer {
     base_blur_h: wgpu::RenderPipeline,
     base_blur_v: wgpu::RenderPipeline,
     base_grid_layout: wgpu::BindGroupLayout,
-    /// `None` until the first image loads.
+    /// The base layer. `None` until the first image loads.
     base: Option<BaseGpu>,
+    /// The fine layer, made the first time an edit reads it: about 28 MB on
+    /// a 3:2 photo, which most photos never need. Until then binding 3
+    /// holds `fine_placeholder`.
+    fine: Option<BaseGpu>,
+    /// The current image's level-0 view and fine grid, to make `fine`.
+    image_view: Option<(wgpu::TextureView, Grid)>,
+    fine_placeholder: wgpu::TextureView,
     /// The inputs the last `set_adjustments` and `set_touchups` asked for.
     base_wanted: BaseInputs,
-    /// The inputs `base` was last built from; `None` forces a build.
-    base_built_for: Option<BaseInputs>,
+    /// The `source()` each layer, base then fine, was last built from;
+    /// `None` forces a build.
+    layers_built_for: [Option<BaseInputs>; 2],
     /// The spots `set_touchups` last uploaded, to tell a change from a
     /// repeat.
     touchups: Vec<GpuTouchUp>,
-    /// Base builds encoded so far.
+    /// Layer builds encoded so far, base and fine.
     base_builds: u64,
 
     egui_renderer: egui_wgpu::Renderer,
@@ -422,6 +445,7 @@ impl Renderer {
                     count: None,
                 },
                 base_entry(2),
+                base_entry(3),
             ],
         });
         let base_grid_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -688,6 +712,22 @@ impl Renderer {
         let base_reduce = base_pipeline("fs_base_reduce");
         let base_blur_h = base_pipeline("fs_base_blur_h");
         let base_blur_v = base_pipeline("fs_base_blur_v");
+        let fine_placeholder = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("fine_placeholder"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: BASE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Not the main `sampler`: it must not read the mip chain it is still
         // building, so its mipmap filter is nearest and each view it reads is
@@ -843,8 +883,11 @@ impl Renderer {
             base_blur_v,
             base_grid_layout,
             base: None,
+            fine: None,
+            image_view: None,
+            fine_placeholder,
             base_wanted: BaseInputs::default(),
-            base_built_for: None,
+            layers_built_for: [None; 2],
             touchups: Vec::new(),
             base_builds: 0,
             egui_renderer,
@@ -1039,7 +1082,10 @@ impl Renderer {
         // `std::time::Instant::now()` panics on wasm32.
         let t0 = web_time::Instant::now();
         let (w, h) = (img.width, img.height);
-        let Some(grid) = Grid::for_image(w, h) else {
+        self.fine = None;
+        self.image_view = None;
+        self.layers_built_for = [None; 2];
+        let Some((grid, fine_grid)) = Grid::for_image(w, h).zip(Grid::fine(w, h)) else {
             eprintln!("set_image: nothing to draw in an empty {w}x{h} image");
             self.image_bind = None;
             self.base = None;
@@ -1121,27 +1167,9 @@ impl Renderer {
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let base = self.create_base(&view, grid, (w, h));
-        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("image_bg"),
-            layout: &self.image_bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&base.view_a),
-                },
-            ],
-        });
-        self.image_bind = Some(bind);
+        self.image_bind = Some(self.bind_image(&view, &base.view_a, &self.fine_placeholder));
         self.base = Some(base);
-        self.base_built_for = None;
+        self.image_view = Some((view, fine_grid));
         self.image_size = (w, h);
 
         // The user feels this UI-thread span as a freeze.
@@ -1149,6 +1177,52 @@ impl Renderer {
             "set_image {w}x{h} ({mip_count} mips): took {:?}",
             t0.elapsed()
         ));
+    }
+
+    /// The Loupe's group 0: the image, its sampler, and the base and fine
+    /// layers.
+    fn bind_image(
+        &self,
+        image: &wgpu::TextureView,
+        base: &wgpu::TextureView,
+        fine: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("image_bg"),
+            layout: &self.image_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(image),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(base),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(fine),
+                },
+            ],
+        })
+    }
+
+    /// Make the fine layer for the current image and bind it, unless it
+    /// exists.
+    fn ensure_fine(&mut self) {
+        if self.fine.is_some() {
+            return;
+        }
+        let (Some((view, grid)), Some(base)) = (&self.image_view, &self.base) else {
+            return;
+        };
+        let fine = self.create_base(view, *grid, self.image_size);
+        self.image_bind = Some(self.bind_image(view, &base.view_a, &fine.view_a));
+        self.fine = Some(fine);
     }
 
     /// The grid textures and bind groups for an image whose level-0 view is
@@ -1638,13 +1712,21 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
 
-        let base_stale = self.base_wanted.wanted && self.base_built_for != Some(self.base_wanted);
-        if let Some(base) = self.base.as_ref().filter(|_| base_stale) {
-            self.encode_base(&mut encoder, base);
-            self.base_built_for = Some(self.base_wanted);
-            self.base_builds += 1;
-            if crate::jobs::loader::timing_enabled() {
-                crate::jobs::loader::mark(&format!("base layer build {}", self.base_builds));
+        let source = self.base_wanted.source();
+        let stale =
+            |i: usize| self.base_wanted.wanted[i] && self.layers_built_for[i] != Some(source);
+        let (base_stale, fine_stale) = (stale(0), stale(1));
+        if fine_stale {
+            self.ensure_fine();
+        }
+        for (i, layer) in [(0, &self.base), (1, &self.fine)] {
+            if let Some(layer) = layer.as_ref().filter(|_| [base_stale, fine_stale][i]) {
+                self.encode_base(&mut encoder, layer);
+                self.layers_built_for[i] = Some(source);
+                self.base_builds += 1;
+                if crate::jobs::loader::timing_enabled() {
+                    crate::jobs::loader::mark(&format!("layer build {}", self.base_builds));
+                }
             }
         }
 

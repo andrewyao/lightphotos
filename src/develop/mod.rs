@@ -10,6 +10,7 @@ pub mod chroma;
 pub mod curve;
 pub mod effects;
 pub mod image_ops;
+pub mod local;
 
 use serde::{Deserialize, Serialize};
 
@@ -91,6 +92,9 @@ pub enum SliderId {
     Shadows,
     Whites,
     Blacks,
+    Texture,
+    Clarity,
+    Dehaze,
     Vibrance,
     Saturation,
     Denoise,
@@ -103,7 +107,7 @@ pub enum SliderId {
     GrainRoughness,
 }
 
-pub const SLIDERS: [Slider; 18] = [
+pub const SLIDERS: [Slider; 21] = [
     tone(Section::WhiteBalance, SliderId::Temp, |a| &mut a.temp),
     tone(Section::WhiteBalance, SliderId::Tint, |a| &mut a.tint),
     Slider {
@@ -120,6 +124,9 @@ pub const SLIDERS: [Slider; 18] = [
     tone(Section::Tone, SliderId::Shadows, |a| &mut a.shadows),
     tone(Section::Tone, SliderId::Whites, |a| &mut a.whites),
     tone(Section::Tone, SliderId::Blacks, |a| &mut a.blacks),
+    tone(Section::Presence, SliderId::Texture, |a| &mut a.texture),
+    tone(Section::Presence, SliderId::Clarity, |a| &mut a.clarity),
+    tone(Section::Presence, SliderId::Dehaze, |a| &mut a.dehaze),
     tone(Section::Presence, SliderId::Vibrance, |a| &mut a.vibrance),
     tone(Section::Presence, SliderId::Saturation, |a| {
         &mut a.saturation
@@ -227,6 +234,18 @@ pub struct Adjustments {
     pub whites: f32,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub blacks: f32,
+    /// Fine detail against the fine layer; negative smooths it. See
+    /// [`local`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub texture: f32,
+    /// Midtone contrast against the base layer's local mean; negative
+    /// softens.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub clarity: f32,
+    /// Removes a haze veil estimated from the local dark channel; negative
+    /// adds haze.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dehaze: f32,
     /// Saturation that acts mostly on dull pixels, sparing vivid colours and skin.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub vibrance: f32,
@@ -365,10 +384,10 @@ impl Adjustments {
         self.saturation <= -100.0
     }
 
-    /// True when a render must build the [`BaseLayer`] first. No field reads
-    /// it yet: Texture, Clarity and Dehaze (plan item 1.2) will.
+    /// True when a render must build the [`BaseLayer`] first: Clarity and
+    /// Dehaze read it. Texture reads the fine layer instead.
     pub fn needs_base(&self) -> bool {
-        false
+        self.clarity != 0.0 || self.dehaze != 0.0
     }
 
     /// A copy without the crop, straighten or chromatic aberration scales,
@@ -461,6 +480,13 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
         }
     }
 
+    // Only a set slider writes, so older hashes hold.
+    for (tag, v) in [(6u8, adj.texture), (7, adj.clarity), (8, adj.dehaze)] {
+        if v != 0.0 {
+            h.write(&[tag]);
+            h.write(&((v * 1000.0).round() as i32).to_le_bytes());
+        }
+    }
     // Only a vignette or grain that shows writes, so older hashes hold and
     // a sub-slider moved at Amount 0 doesn't re-bake.
     if adj.vignette.amount != 0.0 {
@@ -553,13 +579,19 @@ pub struct GpuAdjust {
     /// 1 when [`Adjustments::curve`] is bent and the shader should read its
     /// table, 0 to skip it.
     pub curve_on: f32,
-    /// A test view of the base layer in place of the photo: 0 off, then 1
-    /// to 4 for `mid`, `wide`, `dark` and the detail. See `baseProbe` in
-    /// loupe_common.wgsl.
+    /// A test view of a layer in place of the photo: 0 off, then 1 to 5 for
+    /// `mid`, `wide`, `dark`, the detail and the fine layer's `mid`. See
+    /// [`BaseProbe::gpu`] and `baseProbe` in loupe_common.wgsl.
     pub base_probe: f32,
     /// 1 when [`Adjustments::needs_base`]: the renderer builds the base
     /// layer only then, or for a probe.
     pub base_on: f32,
+    pub texture: f32,
+    pub clarity: f32,
+    pub dehaze: f32,
+    /// 1 when Texture reads the fine layer: the renderer builds it only
+    /// then, or for a probe.
+    pub fine_on: f32,
     /// Set by [`GpuAdjust::for_image`], which knows the image size.
     pub effects: Effects,
 }
@@ -591,6 +623,10 @@ impl Default for GpuAdjust {
             curve_on: 0.0,
             base_probe: 0.0,
             base_on: 0.0,
+            texture: 0.0,
+            clarity: 0.0,
+            dehaze: 0.0,
+            fine_on: 0.0,
             effects: Effects::default(),
         }
     }
@@ -640,6 +676,10 @@ impl From<&Adjustments> for GpuAdjust {
             ca_blue: ca.blue,
             curve_on: if a.curve.is_linear() { 0.0 } else { 1.0 },
             base_on: if a.needs_base() { 1.0 } else { 0.0 },
+            fine_on: if a.texture != 0.0 { 1.0 } else { 0.0 },
+            texture: a.texture.clamp(-100.0, 100.0),
+            clarity: a.clarity.clamp(-100.0, 100.0),
+            dehaze: a.dehaze.clamp(-100.0, 100.0),
             ..Self::default()
         }
     }

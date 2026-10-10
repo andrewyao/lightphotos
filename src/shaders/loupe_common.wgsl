@@ -34,6 +34,12 @@ struct Adjust {
     base_probe: f32,
     // 1 when an edit reads the base layer; the renderer builds it only then.
     base_on: f32,
+    // -100..100 each. See `localAdjust`.
+    texture: f32,
+    clarity: f32,
+    dehaze: f32,
+    // 1 when Texture reads the fine layer; the renderer builds it only then.
+    fine_on: f32,
     // Vignette and Grain, derived on the CPU by `develop::Effects`. See
     // `effects`.
     vig_amount: f32,
@@ -60,6 +66,8 @@ struct TouchUp {
 // The base layer: one texel per grid cell, Rgba32Float, (mid, wide, dark).
 // base.wgsl builds it. Read only through `baseAt`.
 @group(0) @binding(2) var base_tex: texture_2d<f32>;
+// The fine layer: the same build on a finer grid. Texture reads its `mid`.
+@group(0) @binding(3) var fine_tex: texture_2d<f32>;
 @group(2) @binding(0) var<uniform> adj: Adjust;
 // The baked point curve: entry i is the red, green and blue output for input
 // i / 255. Written from `GpuCurve` in develop/mod.rs.
@@ -160,33 +168,38 @@ struct BaseTexel {
     dark: f32,
 };
 
-// The base layer at source `uv`: the four cells around `uv * grid - 0.5`,
+// A layer grid `t` at source `uv`: the four cells around `uv * grid - 0.5`,
 // clamped at the edge, blended in f32. `textureLoad` throughout, because
 // Rgba32Float doesn't filter and the CPU can't model hardware weights. Must
 // match `BaseLayer::at_uv` in develop/base.rs.
-fn baseAt(uv: vec2<f32>) -> BaseTexel {
-    let size = vec2<i32>(textureDimensions(base_tex));
+fn fieldAt(t: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
+    let size = vec2<i32>(textureDimensions(t));
     let p = uv * vec2<f32>(size) - vec2<f32>(0.5);
     let f = floor(p);
-    let t = p - f;
+    let w = p - f;
     let hi = size - vec2<i32>(1);
     let i0 = clamp(vec2<i32>(f), vec2<i32>(0), hi);
     let i1 = clamp(vec2<i32>(f) + vec2<i32>(1), vec2<i32>(0), hi);
-    let a = textureLoad(base_tex, vec2<i32>(i0.x, i0.y), 0).rgb;
-    let b = textureLoad(base_tex, vec2<i32>(i1.x, i0.y), 0).rgb;
-    let c = textureLoad(base_tex, vec2<i32>(i0.x, i1.y), 0).rgb;
-    let d = textureLoad(base_tex, vec2<i32>(i1.x, i1.y), 0).rgb;
-    let top = a * (1.0 - t.x) + b * t.x;
-    let bottom = c * (1.0 - t.x) + d * t.x;
-    let v = top * (1.0 - t.y) + bottom * t.y;
+    let a = textureLoad(t, vec2<i32>(i0.x, i0.y), 0).rgb;
+    let b = textureLoad(t, vec2<i32>(i1.x, i0.y), 0).rgb;
+    let c = textureLoad(t, vec2<i32>(i0.x, i1.y), 0).rgb;
+    let d = textureLoad(t, vec2<i32>(i1.x, i1.y), 0).rgb;
+    let top = a * (1.0 - w.x) + b * w.x;
+    let bottom = c * (1.0 - w.x) + d * w.x;
+    return top * (1.0 - w.y) + bottom * w.y;
+}
+
+fn baseAt(uv: vec2<f32>) -> BaseTexel {
+    let v = fieldAt(base_tex, uv);
     return BaseTexel(v.r, v.g, v.b);
 }
 
 // The base layer as a gray pixel in place of the photo, for the match test:
 // 1 `mid`, 2 `wide`, 3 `dark` (through gamma 2.2 like the others), 4 the
 // detail `0.5 + 8 * (lumaGamma(pre) - mid)`, whose gain makes a half-cell
-// shift or a wrong weight show. The rest of the pipeline treats the value as
-// a linear pixel. Must match `base_probe` in develop/image_ops.rs.
+// shift or a wrong weight show, 5 the fine layer's `mid`. The rest of the
+// pipeline treats the value as a linear pixel. Must match `BaseProbe::apply`
+// in develop/base.rs.
 fn baseProbe(uv: vec2<f32>, pre: vec3<f32>, mode: f32) -> vec3<f32> {
     let base = baseAt(uv);
     let m = u32(mode);
@@ -199,7 +212,46 @@ fn baseProbe(uv: vec2<f32>, pre: vec3<f32>, mode: f32) -> vec3<f32> {
     if (m == 3u) {
         return vec3<f32>(pow(max(base.dark, 0.0), 1.0 / 2.2));
     }
+    if (m == 5u) {
+        return vec3<f32>(fieldAt(fine_tex, uv).r);
+    }
     return vec3<f32>(0.5 + 8.0 * (lumaGamma(pre) - base.mid));
+}
+
+// Texture, Clarity and Dehaze on `pre`, the linear pre-tone pixel at source
+// `uv`. Must match `local::apply` in develop/local.rs.
+fn localAdjust(uv: vec2<f32>, pre: vec3<f32>) -> vec3<f32> {
+    let texture = adj.texture / 100.0;
+    let clarity = adj.clarity / 100.0;
+    let dehaze = adj.dehaze / 100.0;
+    var out = pre;
+    var gain = 0.0;
+    if (clarity != 0.0 || dehaze != 0.0) {
+        let base = baseAt(uv);
+        if (clarity != 0.0) {
+            let d = clamp(log2Detail(pre, base.mid), -1.5, 1.5);
+            let m = clamp(base.mid, 0.0, 1.0);
+            let weight = 1.0 - (2.0 * m - 1.0) * (2.0 * m - 1.0);
+            gain = gain + clarity * d * weight;
+        }
+        if (dehaze > 0.0) {
+            let darkest = max(min(out.r, min(out.g, out.b)), 0.0);
+            let veil = min(0.8 * dehaze * clamp(base.dark, 0.0, 1.0), darkest);
+            let t = max(1.0 - veil, 0.2);
+            out = (out - vec3<f32>(veil)) / t;
+        } else if (dehaze < 0.0) {
+            let k = -dehaze * 0.5;
+            out = out + (vec3<f32>(0.7) - out) * k;
+        }
+    }
+    if (texture != 0.0) {
+        let fine = fieldAt(fine_tex, uv).r;
+        gain = gain + texture * clamp(log2Detail(pre, fine), -1.5, 1.5);
+    }
+    if (gain != 0.0) {
+        out = out * exp2(2.2 * gain);
+    }
+    return out;
 }
 
 struct VsOut {

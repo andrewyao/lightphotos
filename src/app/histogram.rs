@@ -19,6 +19,17 @@ pub(super) struct Histogram {
     /// across neighboring bins, so a tone stretch doesn't leave a comb of gaps.
     bins: Option<[[f32; 256]; 3]>,
     dirty: bool,
+    /// The base and fine layers of `sample`, for Clarity and Dehaze and for
+    /// Texture. Each is built on the first edit that reads it and dropped
+    /// with the sample.
+    layers: Layers,
+}
+
+/// See [`Histogram::layers`].
+#[derive(Default)]
+struct Layers {
+    base: Option<develop::BaseLayer>,
+    fine: Option<develop::BaseLayer>,
 }
 
 impl Histogram {
@@ -30,6 +41,7 @@ impl Histogram {
             dh: 0,
             bins: None,
             dirty: false,
+            layers: Layers::default(),
         }
     }
 
@@ -62,11 +74,13 @@ impl Histogram {
 impl Histogram {
     pub(super) fn set_sample(&mut self, sample: Vec<[f32; 3]>) {
         self.sample = sample;
+        self.layers = Layers::default();
     }
 
     /// A `dw x dh` linear sample, which the bins read.
     pub(super) fn set_grid(&mut self, sample: Vec<[f32; 3]>, dw: usize, dh: usize) {
         self.sample = sample;
+        self.layers = Layers::default();
         self.dw = dw;
         self.dh = dh;
     }
@@ -80,6 +94,7 @@ impl App {
         // Auto Tone uses the same helper, so both analyze the same pixels.
         const TARGET: usize = 256;
         let (sample, dw, dh) = image_ops::downsample_linear(img, TARGET);
+        self.hist.layers = Layers::default();
         if sample.is_empty() {
             self.hist.sample.clear();
             self.hist.dw = 0;
@@ -113,6 +128,18 @@ impl App {
         let grid = &self.hist.sample;
         let turn = (adj.straighten != 0.0)
             .then(|| develop::Straighten::new(adj.straighten, dw as f32, dh as f32));
+        let sample = &self.hist.sample;
+        let pre = |x: u32, y: u32| sample[y as usize * dw + x as usize];
+        let (w, h) = (dw as u32, dh as u32);
+        let layers = &mut self.hist.layers;
+        if adj.needs_base() && layers.base.is_none() {
+            layers.base = develop::BaseLayer::build(w, h, develop::base::Fields::MidDark, pre);
+        }
+        if adj.texture != 0.0 && layers.fine.is_none() {
+            layers.fine = develop::BaseLayer::build_fine(w, h, pre);
+        }
+        let base = layers.base.as_ref().filter(|_| adj.needs_base());
+        let fine = layers.fine.as_ref().filter(|_| adj.texture != 0.0);
         let dev = develop::Develop::framed(&adj, dw as u32, dh as u32);
         let mut bins = [[0f32; 256]; 3];
         for cy in 0..dh {
@@ -141,6 +168,13 @@ impl App {
                     let sy = (gy as i64 + dy as i64).clamp(0, dh as i64 - 1) as usize;
                     grid[sy * dw + sx]
                 });
+                let (su, sv) = ((gx as f32 + 0.5) / dw as f32, (gy as f32 + 0.5) / dh as f32);
+                let px = develop::local::apply(
+                    &adj,
+                    px,
+                    base.map(|b| b.at_uv(su, sv)),
+                    fine.map(|f| f.at_uv(su, sv).mid),
+                );
                 let out = match self.hist.pixel_format {
                     image_decode::PixelFormat::Srgb8 => dev.linear_at(px, u, v),
                     image_decode::PixelFormat::LinearF16 => dev.raw_display_at(px, u, v),

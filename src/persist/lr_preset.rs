@@ -58,6 +58,9 @@ fn keys(id: SliderId) -> &'static [&'static str] {
         SliderId::Shadows => &["Shadows2012"],
         SliderId::Whites => &["Whites2012"],
         SliderId::Blacks => &["Blacks2012"],
+        SliderId::Texture => &["Texture"],
+        SliderId::Clarity => &["Clarity2012"],
+        SliderId::Dehaze => &["Dehaze"],
         SliderId::Vibrance => &["Vibrance"],
         SliderId::Saturation => &["Saturation"],
         // `LuminanceSmoothing` alone. Camera Raw defaults `ColorNoiseReduction`
@@ -89,8 +92,6 @@ const UNSUPPORTED: &[(&str, &[&str], Untouched)] = &[
         &["ColorNoiseReduction"],
         Untouched::Default(25.0),
     ),
-    ("Clarity2012", &["Clarity2012"], Untouched::Zero),
-    ("Dehaze", &["Dehaze"], Untouched::Zero),
     ("Sharpness", &["Sharpness"], Untouched::Zero),
     ("CropAngle", &["CropAngle"], Untouched::Zero),
     (
@@ -422,12 +423,30 @@ mod tests {
             saturation: -5.0,
             denoise: 30.0,
             crop: None,
+            texture: 0.0,
+            clarity: 0.0,
+            dehaze: 0.0,
             straighten: 0.0,
             chromatic_aberration: None,
             curve: Default::default(),
             vignette: Default::default(),
             grain: Default::default(),
         }
+    }
+
+    /// Catches Texture, Clarity or Dehaze still reported as dropped.
+    #[test]
+    fn presence_keys_fill_texture_clarity_and_dehaze() {
+        let got = parse(&packet(
+            "crs:Texture=\"+20\" crs:Clarity2012=\"-15\" crs:Dehaze=\"+30\"",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(
+            (got.adj.texture, got.adj.clarity, got.adj.dehaze),
+            (20.0, -15.0, 30.0)
+        );
+        assert!(got.dropped.is_empty(), "{:?}", got.dropped);
     }
 
     #[test]
@@ -593,7 +612,7 @@ mod tests {
     #[test]
     fn a_zero_unsupported_field_is_not_reported_while_a_nonzero_one_is() {
         let zero = parse(&packet(
-            "crs:Clarity2012=\"0\" crs:Dehaze=\"+0\" crs:HueAdjustmentRed=\"0\" \
+            "crs:Temperature=\"0\" crs:Tint=\"+0\" crs:HueAdjustmentRed=\"0\" \
              crs:CropAngle=\"0\"",
             "",
         ))
@@ -601,11 +620,11 @@ mod tests {
         assert!(zero.dropped.is_empty(), "{:?}", zero.dropped);
 
         let set = parse(&packet(
-            "crs:Clarity2012=\"+15\" crs:HueAdjustmentBlue=\"0\" crs:HueAdjustmentAqua=\"-3\"",
+            "crs:CropAngle=\"+15\" crs:HueAdjustmentBlue=\"0\" crs:HueAdjustmentAqua=\"-3\"",
             "",
         ))
         .unwrap();
-        assert_eq!(set.dropped, ["Clarity2012", "HueAdjustment*"]);
+        assert_eq!(set.dropped, ["CropAngle", "HueAdjustment*"]);
     }
 
     /// Catches a parser that turns a stray file into an empty preset.
@@ -642,7 +661,7 @@ mod tests {
     fn an_unparseable_mapped_value_is_dropped_and_left_at_zero() {
         let got = parse(&packet(
             "crs:Saturation=\"lots\" crs:Exposure2012=\"\" crs:Temperature=\"5000\" \
-             crs:Clarity2012=\"+5\" crs:LuminanceSmoothing=\"NaN\"",
+             crs:CropAngle=\"+5\" crs:LuminanceSmoothing=\"NaN\"",
             "<crs:Vibrance/>",
         ))
         .unwrap();
@@ -658,7 +677,7 @@ mod tests {
                 "Saturation",
                 "LuminanceSmoothing",
                 "Temperature",
-                "Clarity2012",
+                "CropAngle",
             ],
             "mapped keys in slider order, then the unsupported table in its order"
         );

@@ -224,7 +224,7 @@ pub(in crate::app) mod tests {
         <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
         <rdf:Description rdf:about=\"\" \
         xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
-        crs:Exposure2012=\"+0.35\" crs:Contrast2012=\"+15\" crs:Clarity2012=\"+22\">\
+        crs:Exposure2012=\"+0.35\" crs:Contrast2012=\"+15\" crs:CropAngle=\"+22\">\
         <crs:Name><rdf:Alt><rdf:li xml:lang=\"x-default\">Warm Film</rdf:li></rdf:Alt></crs:Name>\
         </rdf:Description></rdf:RDF></x:xmpmeta>";
 
@@ -658,7 +658,7 @@ pub(in crate::app) mod tests {
         );
         assert_eq!(
             warm.notes,
-            [(t.preset_import_note)("Clarity2012")],
+            [(t.preset_import_note)("CropAngle")],
             "what Lightroom set and we cannot represent is stored with the look"
         );
 
