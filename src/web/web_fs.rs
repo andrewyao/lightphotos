@@ -57,8 +57,13 @@ pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
     .map_err(|e| js_error_string(&e))?
     .unchecked_into();
     // The Folders list needs this handle after a reload. Losing it costs
-    // only that, so it doesn't fail the pick.
-    let name = match JsFuture::from(keep_folder(&handle)).await {
+    // only that, so it doesn't fail the pick. The keep runs in IndexedDB
+    // while the listing runs: the promise starts as soon as it is made, and
+    // `JsFuture` attaches its handlers now, so a keep that fails after a
+    // failed listing is no unhandled rejection.
+    let kept = JsFuture::from(keep_folder(&handle));
+    let listing = list_dir(Path::new(""), &handle).await?;
+    let name = match kept.await {
         Ok(name) => name.as_string().unwrap_or_else(|| handle.name()),
         Err(e) => {
             web_sys::console::warn_1(
@@ -71,7 +76,7 @@ pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
             handle.name()
         }
     };
-    list_root(handle, name).await
+    Ok(picked_folder(PathBuf::from(name), handle, listing))
 }
 
 /// List a kept folder again. When the browser has dropped `readwrite`
@@ -114,28 +119,37 @@ async fn list_root(
     handle: FileSystemDirectoryHandle,
     name: String,
 ) -> Result<PickedFolder, String> {
-    let root = PathBuf::from(name);
-    let listing = list_dir(&root, &handle).await?;
+    let listing = list_dir(Path::new(""), &handle).await?;
+    Ok(picked_folder(PathBuf::from(name), handle, listing))
+}
 
+/// `handle`'s `listing`, taken relative to the folder itself, as the root
+/// called `root`.
+fn picked_folder(
+    root: PathBuf,
+    handle: FileSystemDirectoryHandle,
+    listing: DirListing,
+) -> PickedFolder {
     let mut handles = HashMap::new();
     let mut entries = Vec::with_capacity(listing.images.len());
     for (path, fh) in listing.images {
+        let path = root.join(path);
         handles.insert(path.clone(), fh);
         entries.push(path);
     }
 
     let mut dir_handles = HashMap::new();
-    dir_handles.insert(root.clone(), handle);
     for (p, h) in listing.subdirs {
-        dir_handles.insert(p, h);
+        dir_handles.insert(root.join(p), h);
     }
+    dir_handles.insert(root.clone(), handle);
 
-    Ok(PickedFolder {
+    PickedFolder {
         dir: root,
         entries,
         handles,
         dir_handles,
-    })
+    }
 }
 
 // A directory handle survives a reload only in IndexedDB, which stores it by
