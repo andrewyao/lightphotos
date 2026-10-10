@@ -217,12 +217,11 @@ fn cases() -> Vec<Case> {
 }
 
 /// The most any channel of a case may differ, in 8-bit steps. Measured on an
-/// Apple M-series GPU (Metal) on 2026-10-10; each entry above 2 is a bug.
+/// Apple M-series GPU (Metal) on 2026-10-10. The two entries above 2 are the
+/// GPU's own: `textureSample` picks a level of detail just above 0 on a
+/// turned photo and blends in mip 1, and its bilinear weights are 8-bit.
 fn tolerance(case: &str) -> u8 {
     match case {
-        "touchup_opaque" => 111,
-        "everything" => 104,
-        "touchup" => 82,
         "straighten" => 9,
         "ca" => 3,
         _ => 2,

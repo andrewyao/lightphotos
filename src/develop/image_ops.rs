@@ -215,8 +215,7 @@ pub fn bake_edited(
                     src.at_uv(u + dx as f32 * texel_w, v + dy as f32 * texel_h)
                 }
             });
-            let (tu, tv) = (u - 0.5 * texel_w, v - 0.5 * texel_h);
-            let out = dev.linear(apply_touchups(img, touchups, tu, tv, lin));
+            let out = dev.linear(apply_touchups(&src, touchups, u, v, lin));
             let di = ((y * cw + x) * 4) as usize;
             cropped[di] = linear_to_srgb8(out[0]);
             cropped[di + 1] = linear_to_srgb8(out[1]);
@@ -354,32 +353,25 @@ pub(crate) fn pixel_linear(img: &DecodedImage, x: u32, y: u32) -> [f32; 3] {
     }
 }
 
-fn apply_touchups(
-    img: &DecodedImage,
-    touchups: &[TouchUp],
-    u: f32,
-    v: f32,
-    base: [f32; 3],
-) -> [f32; 3] {
-    if touchups.is_empty() {
-        return base;
-    }
+/// Blend each spot over `base`, the pixel at source UV `(u, v)`. Must match
+/// the `touch_count` loop in shader.wgsl.
+fn apply_touchups(src: &Source, touchups: &[TouchUp], u: f32, v: f32, base: [f32; 3]) -> [f32; 3] {
+    let (w, h) = (src.img.width as f32, src.img.height as f32);
     let mut out = base;
     for t in touchups {
-        let dx = (u - t.center[0]) * img.width as f32;
-        let dy = (v - t.center[1]) * img.height as f32;
-        let distance = (dx * dx + dy * dy).sqrt();
-        let radius = (t.radius * img.width.min(img.height) as f32).max(1.0);
+        let distance = ((u - t.center[0]) * w).hypot((v - t.center[1]) * h);
+        let radius = t.radius * w.min(h);
         if distance >= radius {
             continue;
         }
         let feather = (radius * t.feather.clamp(0.02, 1.0)).max(1.0);
         let mask = ((radius - distance) / feather).clamp(0.0, 1.0);
         let mask = mask * mask * (3.0 - 2.0 * mask) * t.opacity;
-        let source_u = t.source[0] + (u - t.center[0]);
-        let source_v = t.source[1] + (v - t.center[1]);
-        let src = sample_linear(img, source_u, source_v);
-        for ((o, s), d) in out.iter_mut().zip(src).zip(t.delta) {
+        let patch = src.at_uv(
+            t.source[0] + (u - t.center[0]),
+            t.source[1] + (v - t.center[1]),
+        );
+        for ((o, s), d) in out.iter_mut().zip(patch).zip(t.delta) {
             let s = (s + d).clamp(0.0, 1.0);
             *o = *o * (1.0 - mask) + s * mask;
         }
@@ -729,10 +721,12 @@ mod tests {
             rgba: src,
             pixel_format: PixelFormat::Srgb8,
         });
+        // Centered on the bright pixel, one pixel in radius, copying the
+        // first pixel's black.
         let touchup = TouchUp {
-            center: [0.4, 0.0],
-            radius: 0.4,
-            source: [0.0, 0.0],
+            center: [0.5, 0.5],
+            radius: 1.0,
+            source: [0.1, 0.5],
             feather: 0.5,
             delta: [0.0; 3],
             opacity: 1.0,
