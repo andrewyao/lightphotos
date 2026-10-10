@@ -624,36 +624,54 @@ mod tests {
     /// The grid has to shrink while a long delete runs, or the user watches a
     /// toast climb over a grid full of photos that are already in the Trash.
     ///
-    /// macOS only: it needs the trash worker to be slower than the poll loop.
-    /// Finder's Trash is. Linux's freedesktop Trash is a rename, which can
-    /// finish all six before the first poll, so there it fails about one run
-    /// in three.
+    /// The test feeds the results one at a time in place of the trash worker,
+    /// so the half-done state does not depend on how fast the OS trashes.
     #[test]
-    #[cfg(target_os = "macos")]
     fn trashed_photos_leave_the_grid_without_touching_the_playlist() {
         let names = ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg"];
         let (mut app, dir, paths) = app_with_photos(&names);
         app.start_delete(paths.clone());
 
-        // No sleep: polling far faster than the trash worker runs is what
-        // makes the half-done state observable rather than a coin flip.
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut saw_a_shrunken_grid = false;
-        while app.bulk_delete.is_some() {
-            assert!(Instant::now() < deadline, "the delete batch never finished");
+        // Stop the real worker and take over its result channel. Results it
+        // already sent were collected by the poll in `start_delete`; any it
+        // sends later go to the dropped receiver.
+        let (results, pending) = {
+            let d = app.bulk_delete.as_mut().unwrap();
+            d.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            d.submit = None;
+            d.worker.take().unwrap().join().unwrap();
+            let (tx, rx) = channel();
+            d.done_tx = tx.clone();
+            d.done_rx = rx;
+            let mut pending: Vec<PathBuf> = d.in_flight.iter().cloned().collect();
+            pending.sort();
+            (tx, pending)
+        };
+        assert!(
+            pending.len() > 1,
+            "the worker must not finish the batch inside `start_delete`"
+        );
+
+        let (last, before_last) = pending.split_last().unwrap();
+        for (fed, path) in before_last.iter().enumerate() {
+            results.send((path.clone(), Ok(()))).unwrap();
+            app.poll_delete();
+            assert!(app.bulk_delete.is_some(), "the batch is still running");
+            assert_eq!(
+                app.visible.len(),
+                pending.len() - fed - 1,
+                "a trashed photo must leave the grid before the batch ends"
+            );
             assert_eq!(
                 app.playlist.as_ref().unwrap().entries().len(),
                 names.len(),
                 "hiding a trashed photo must not edit the playlist"
             );
-            saw_a_shrunken_grid |= app.visible.len() < names.len();
-            app.poll_delete();
         }
 
-        assert!(
-            saw_a_shrunken_grid,
-            "a trashed photo must leave the grid before the batch ends"
-        );
+        results.send((last.clone(), Ok(()))).unwrap();
+        app.poll_delete();
+        assert!(app.bulk_delete.is_none());
         assert!(app.playlist.as_ref().unwrap().entries().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
