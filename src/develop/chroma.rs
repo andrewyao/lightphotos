@@ -216,7 +216,7 @@ pub(crate) mod fixture {
     /// magnified by `1 + ca.red` and `1 + ca.blue` about the center.
     pub(crate) fn photo(w: u32, h: u32, ca: CaScale) -> DecodedImage {
         let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-        let encode = |v: f32| (v.powf(1.0 / 2.2) * 255.0).round() as u8;
+        let encode = crate::develop::image_ops::linear_to_srgb8;
         let mut rgba = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             for x in 0..w {

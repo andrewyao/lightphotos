@@ -21,18 +21,40 @@ fn crop_bounds(crop: Option<Crop>, w: u32, h: u32) -> (u32, u32, u32, u32) {
     (x0, y0, x1, y1)
 }
 
-/// `(c / 255)^2.2` for every 8-bit `c`: the same floats the `powf` gives,
-/// computed once. A 512px edited thumbnail makes half a million of these.
-fn srgb8_to_linear_lut() -> &'static [f32; 256] {
-    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
-    LUT.get_or_init(|| std::array::from_fn(|c| (c as f32 / 255.0).powf(2.2)))
+/// The sRGB transfer curve from an encoded value in 0..1 to linear light.
+/// The hardware applies the same curve when the Loupe samples its
+/// `Rgba8UnormSrgb` texture.
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
-/// Linear light to an sRGB8 channel with the 2.2 gamma, rounded. Bit for bit
-/// what `(v.max(0.0).powf(1.0 / 2.2) * 255.0).round().clamp(0.0, 255.0)`
-/// gives, found by a search over the 255 inputs where that output steps up
-/// rather than a `powf` per channel.
-fn linear_to_srgb8(v: f32) -> u8 {
+/// Linear light to an sRGB8 channel, rounded: `linear_to_srgb` in
+/// loupe_common.wgsl, quantized as the Loupe's 8-bit surface stores it.
+fn encode_srgb8_curve(v: f32) -> u8 {
+    let v = v.max(0.0);
+    let c = if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (c * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// [`srgb_to_linear`] for every 8-bit `c`: the same floats, computed once. A
+/// 512px edited thumbnail makes half a million of these.
+fn srgb8_to_linear_lut() -> &'static [f32; 256] {
+    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| std::array::from_fn(|c| srgb_to_linear(c as f32 / 255.0)))
+}
+
+/// Linear light to an sRGB8 channel, rounded. Bit for bit what
+/// [`encode_srgb8_curve`] gives, found by a search over the 255 inputs where
+/// that output steps up rather than a `powf` per channel.
+pub(crate) fn linear_to_srgb8(v: f32) -> u8 {
     static STEPS: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
     let steps = STEPS.get_or_init(|| {
         // Positive floats order the same as their bit patterns, so each step
@@ -42,7 +64,7 @@ fn linear_to_srgb8(v: f32) -> u8 {
             let (mut lo, mut hi) = (0u32, 1.0f32.to_bits());
             while lo < hi {
                 let mid = lo + (hi - lo) / 2;
-                if encode_srgb8_powf(f32::from_bits(mid)) >= k {
+                if encode_srgb8_curve(f32::from_bits(mid)) >= k {
                     hi = mid;
                 } else {
                     lo = mid + 1;
@@ -54,14 +76,8 @@ fn linear_to_srgb8(v: f32) -> u8 {
     steps.partition_point(|&step| step <= v) as u8
 }
 
-fn encode_srgb8_powf(v: f32) -> u8 {
-    (v.max(0.0).powf(1.0 / 2.2) * 255.0)
-        .round()
-        .clamp(0.0, 255.0) as u8
-}
-
-/// Premultiplied sRGB8 pixel (as decoded) to linear RGB, using the 2.2 gamma
-/// that `develop::apply_linear` assumes. Every CPU reader of decoded pixels
+/// Premultiplied sRGB8 pixel (as decoded) to linear RGB, through the sRGB
+/// curve the Loupe's texture sampler uses. Every CPU reader of decoded pixels
 /// goes through this so they all see the same values.
 fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
     let [r, g, b, a] = px;
@@ -85,8 +101,7 @@ fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
             lut[px[2] as usize],
         ];
     }
-    let srgb_to_linear = |c: f32| (c / 255.0).powf(2.2);
-    [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b)]
+    [r, g, b].map(|c| srgb_to_linear(c / 255.0))
 }
 
 /// Burn edits into an opaque sRGB8 RGBA buffer: crop, then touch-ups and tone
@@ -288,15 +303,8 @@ pub(crate) fn fit_long_edge(w: u32, h: u32, rgba: Vec<u8>, max_px: u32) -> (u32,
     let dw = ((w as f64 * scale).round() as u32).clamp(1, max_px);
     let dh = ((h as f64 * scale).round() as u32).clamp(1, max_px);
 
-    let mut to_linear = [0f32; 256];
-    for (i, v) in to_linear.iter_mut().enumerate() {
-        *v = (i as f32 / 255.0).powf(2.2);
-    }
-    let encode = |v: f32| {
-        (v.max(0.0).powf(1.0 / 2.2) * 255.0)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
+    let to_linear = srgb8_to_linear_lut();
+    let encode = linear_to_srgb8;
     // Source span `[start, end)` covered by output index `o` of `d` over `s`.
     let span = |o: u32, d: u32, s: u32| {
         let start = (o as u64 * s as u64 / d as u64) as usize;
@@ -609,7 +617,7 @@ mod tests {
     }
 
     /// A one-pixel black/white checkerboard halved is 50% light, which is
-    /// about 186 in 2.2 gamma, not the 128 a gamma-space average would give.
+    /// about 188 in sRGB, not the 128 a gamma-space average would give.
     #[test]
     fn fit_long_edge_averages_in_linear_light() {
         let (w, h) = (64u32, 64u32);
@@ -838,16 +846,16 @@ mod tests {
         let out = unpremul_to_linear([255, 0, 128, 255]);
         assert!((out[0] - 1.0).abs() < 1e-6);
         assert!((out[1] - 0.0).abs() < 1e-6);
-        assert!((out[2] - (128.0f32 / 255.0).powf(2.2)).abs() < 1e-6);
+        assert!((out[2] - srgb_to_linear(128.0 / 255.0)).abs() < 1e-6);
     }
 
     #[test]
-    fn the_srgb8_lookups_match_the_powf_they_replace_bit_for_bit() {
+    fn the_srgb8_lookups_match_the_srgb_curve_bit_for_bit() {
         for c in 0..=255u8 {
             let lin = unpremul_to_linear([c, c, c, 255])[0];
             assert_eq!(
                 lin.to_bits(),
-                (c as f32 / 255.0).powf(2.2).to_bits(),
+                srgb_to_linear(c as f32 / 255.0).to_bits(),
                 "decode {c}"
             );
         }
@@ -858,13 +866,13 @@ mod tests {
             .map(|i| i as f32 / 1_000_000.0)
             .collect();
         for k in 0..=255u32 {
-            let edge = ((k as f32 - 0.5) / 255.0).max(0.0).powf(2.2);
+            let edge = srgb_to_linear(((k as f32 - 0.5) / 255.0).max(0.0));
             let bits = edge.to_bits();
             probes.extend((bits.saturating_sub(4)..bits + 4).map(f32::from_bits));
         }
         probes.extend([f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0]);
         for v in probes {
-            assert_eq!(linear_to_srgb8(v), encode_srgb8_powf(v), "encode {v:e}");
+            assert_eq!(linear_to_srgb8(v), encode_srgb8_curve(v), "encode {v:e}");
         }
     }
 
