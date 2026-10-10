@@ -117,20 +117,8 @@ impl<'a> Source<'a> {
     /// All three channels at source UV, as `textureSample` filters them:
     /// the four texels around `uv * size - 0.5`, clamped at the edge.
     fn bilinear(&self, u: f32, v: f32) -> [f32; 3] {
-        let sx = u * self.img.width as f32 - 0.5;
-        let sy = v * self.img.height as f32 - 0.5;
-        let (fx, fy) = (sx.floor(), sy.floor());
-        let (tx, ty) = (sx - fx, sy - fy);
-        // Saturating: a sidecar's huge or infinite CA scale casts to
-        // `i64::MAX`, and `at_px` clamps to the edge anyway.
-        let (ix, iy) = (fx as i64, fy as i64);
-        let (ix1, iy1) = (ix.saturating_add(1), iy.saturating_add(1));
-        let (a, b) = (self.at_px(ix, iy), self.at_px(ix1, iy));
-        let (c, d) = (self.at_px(ix, iy1), self.at_px(ix1, iy1));
-        std::array::from_fn(|k| {
-            let top = a[k] * (1.0 - tx) + b[k] * tx;
-            let bottom = c[k] * (1.0 - tx) + d[k] * tx;
-            top * (1.0 - ty) + bottom * ty
+        develop::base::bilinear(self.img.width, self.img.height, u, v, |x, y| {
+            self.at_px(x, y)
         })
     }
 

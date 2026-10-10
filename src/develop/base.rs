@@ -138,7 +138,16 @@ impl BaseLayer {
         let grid = Grid::for_image(w, h)?;
         let (gw, gh) = (grid.w as usize, grid.h as usize);
         let (w64, h64, gw64, gh64) = (w as u64, h as u64, grid.w as u64, grid.h as u64);
-        let columns: Vec<(u64, u64)> = (0..gw64).map(|i| cell_span(i, gw64, w64)).collect();
+        // Each cell's texels along x and their overlap weights, the same for
+        // every row.
+        let columns: Vec<Vec<(usize, f32)>> = (0..gw64)
+            .map(|i| {
+                let (x0, x1) = cell_span(i, gw64, w64);
+                (x0..x1)
+                    .map(|x| (x as usize, overlap(x, i, gw64, w64) as f32))
+                    .collect()
+            })
+            .collect();
 
         let mut sums = vec![[0f32; 3]; gw * gh];
         let mut row = vec![[0f32; 3]; w as usize];
@@ -147,11 +156,10 @@ impl BaseLayer {
             for (x, px) in row.iter_mut().enumerate() {
                 *px = pre(x as u32, y);
             }
-            for (i, (&(x0, x1), rs)) in columns.iter().zip(row_sums.iter_mut()).enumerate() {
+            for (column, rs) in columns.iter().zip(row_sums.iter_mut()) {
                 *rs = [0.0; 3];
-                for x in x0..x1 {
-                    let ox = overlap(x, i as u64, gw64, w64) as f32;
-                    let p = row[x as usize];
+                for &(x, ox) in column {
+                    let p = row[x];
                     for c in 0..3 {
                         rs[c] += ox * p[c];
                     }
@@ -199,33 +207,42 @@ impl BaseLayer {
     /// clamped at the edge, blended in f32. Must match `baseAt` in
     /// loupe_common.wgsl.
     pub fn at_uv(&self, u: f32, v: f32) -> BaseTexel {
-        let (gw, gh) = (self.grid.w as i64, self.grid.h as i64);
-        let sx = u * gw as f32 - 0.5;
-        let sy = v * gh as f32 - 0.5;
-        let (fx, fy) = (sx.floor(), sy.floor());
-        let (tx, ty) = (sx - fx, sy - fy);
-        // Saturating casts: a NaN or huge UV lands on an edge cell.
-        let (ix, iy) = (fx as i64, fy as i64);
-        let at = |x: i64, y: i64| {
-            let (x, y) = (x.clamp(0, gw - 1), y.clamp(0, gh - 1));
-            self.cells[(y * gw + x) as usize]
-        };
-        let (a, b) = (at(ix, iy), at(ix.saturating_add(1), iy));
-        let (c, d) = (
-            at(ix, iy.saturating_add(1)),
-            at(ix.saturating_add(1), iy.saturating_add(1)),
-        );
-        let lerp = |f: fn(&BaseTexel) -> f32| {
-            let top = f(&a) * (1.0 - tx) + f(&b) * tx;
-            let bottom = f(&c) * (1.0 - tx) + f(&d) * tx;
-            top * (1.0 - ty) + bottom * ty
-        };
-        BaseTexel {
-            mid: lerp(|t| t.mid),
-            wide: lerp(|t| t.wide),
-            dark: lerp(|t| t.dark),
-        }
+        let gw = self.grid.w as i64;
+        let [mid, wide, dark] = bilinear(self.grid.w, self.grid.h, u, v, |x, y| {
+            let t = self.cells[(y * gw + x) as usize];
+            [t.mid, t.wide, t.dark]
+        });
+        BaseTexel { mid, wide, dark }
     }
+}
+
+/// The four texels around `uv * size - 0.5` of a `w x h` field, clamped at
+/// the edge and blended in f32, as `textureSample` filters and `baseAt` in
+/// loupe_common.wgsl loads. `at` gets coordinates inside the field.
+pub(crate) fn bilinear(
+    w: u32,
+    h: u32,
+    u: f32,
+    v: f32,
+    at: impl Fn(i64, i64) -> [f32; 3],
+) -> [f32; 3] {
+    let (w, h) = (w as i64, h as i64);
+    let sx = u * w as f32 - 0.5;
+    let sy = v * h as f32 - 0.5;
+    let (fx, fy) = (sx.floor(), sy.floor());
+    let (tx, ty) = (sx - fx, sy - fy);
+    // Saturating casts: a NaN, infinite or huge coordinate (a sidecar's
+    // runaway CA scale) lands on an edge texel.
+    let (ix, iy) = (fx as i64, fy as i64);
+    let (ix1, iy1) = (ix.saturating_add(1), iy.saturating_add(1));
+    let at = |x: i64, y: i64| at(x.clamp(0, w - 1), y.clamp(0, h - 1));
+    let (a, b) = (at(ix, iy), at(ix1, iy));
+    let (c, d) = (at(ix, iy1), at(ix1, iy1));
+    std::array::from_fn(|k| {
+        let top = a[k] * (1.0 - tx) + b[k] * tx;
+        let bottom = c[k] * (1.0 - tx) + d[k] * tx;
+        top * (1.0 - ty) + bottom * ty
+    })
 }
 
 /// A test view of the base layer, drawn in place of the photo after the

@@ -32,7 +32,8 @@ struct Adjust {
     curve_on: f32,
     // 0, or the base-layer view `baseProbe` draws instead of the photo.
     base_probe: f32,
-    _pad5: f32,
+    // 1 when an edit reads the base layer; the renderer builds it only then.
+    base_on: f32,
 };
 
 struct TouchUp {

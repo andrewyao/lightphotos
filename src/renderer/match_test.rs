@@ -228,7 +228,7 @@ fn cases() -> Vec<Case> {
 fn tolerance(case: &str) -> u8 {
     match case {
         "ca" | "ca/detail" => 3,
-        "straighten/detail" => 16,
+        "straighten/detail" => 13,
         _ => 2,
     }
 }
@@ -389,8 +389,13 @@ fn only_the_spots_and_the_ca_scales_rebuild_the_base_layer() {
         delta: [0.0; 3],
         opacity: 1.0,
     });
+    // A reader of the layer, as item 1.2's sliders will be: nothing builds
+    // it otherwise.
     let push = |r: &mut Renderer, adj: &Adjustments, spots: &[GpuTouchUp]| {
-        let gpu = GpuAdjust::for_image(adj, W as f32, H as f32, spots.len());
+        let gpu = GpuAdjust {
+            base_on: 1.0,
+            ..GpuAdjust::for_image(adj, W as f32, H as f32, spots.len())
+        };
         r.set_adjustments(gpu, &adj.curve);
         r.set_touchups(spots);
         assert!(r.render(None, None, None));
@@ -471,10 +476,11 @@ fn frame_time_with_and_without_a_base_rebuild() {
                 exposure: (i % 20) as f32 * 0.05,
                 ..Default::default()
             };
-            r.set_adjustments(
-                GpuAdjust::for_image(&adj, w as f32, h as f32, 0),
-                &adj.curve,
-            );
+            let gpu = GpuAdjust {
+                base_on: 1.0,
+                ..GpuAdjust::for_image(&adj, w as f32, h as f32, 0)
+            };
+            r.set_adjustments(gpu, &adj.curve);
             r.set_touchups(&[]);
             if rebuild {
                 r.base_built_for = None;
@@ -485,6 +491,13 @@ fn frame_time_with_and_without_a_base_rebuild() {
         (t0.elapsed() / 60, r.base_builds - built)
     };
     // The first frame builds the layer; time the ones after it.
+    r.set_adjustments(
+        GpuAdjust {
+            base_on: 1.0,
+            ..GpuAdjust::for_image(&Adjustments::default(), w as f32, h as f32, 0)
+        },
+        &Adjustments::default().curve,
+    );
     assert!(r.render(None, None, None));
     wait(&r);
     let (cached, cached_builds) = frames(&mut r, false);

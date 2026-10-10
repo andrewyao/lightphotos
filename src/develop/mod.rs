@@ -475,7 +475,9 @@ pub struct GpuAdjust {
     /// to 4 for `mid`, `wide`, `dark` and the detail. See `baseProbe` in
     /// loupe_common.wgsl.
     pub base_probe: f32,
-    pub _pad5: f32,
+    /// 1 when [`Adjustments::needs_base`]: the renderer builds the base
+    /// layer only then, or for a probe.
+    pub base_on: f32,
 }
 
 impl Default for GpuAdjust {
@@ -504,7 +506,7 @@ impl Default for GpuAdjust {
             ca_blue: 0.0,
             curve_on: 0.0,
             base_probe: 0.0,
-            _pad5: 0.0,
+            base_on: 0.0,
         }
     }
 }
@@ -551,6 +553,7 @@ impl From<&Adjustments> for GpuAdjust {
             ca_red: ca.red,
             ca_blue: ca.blue,
             curve_on: if a.curve.is_linear() { 0.0 } else { 1.0 },
+            base_on: if a.needs_base() { 1.0 } else { 0.0 },
             ..Self::default()
         }
     }

@@ -45,6 +45,26 @@ struct BaseInputs {
     touch_count: u32,
     /// Bumped by `set_touchups` when the spots change.
     touch_gen: u64,
+    /// The inputs came from the compare view's edited half (`adj_bind_b`),
+    /// which the passes then bind. The layer follows the edited photo;
+    /// the "before" half never reads it.
+    from_b: bool,
+    /// Something reads the layer: an `Adjustments` field that needs it, or
+    /// the match test's probe. Nothing builds it otherwise.
+    wanted: bool,
+}
+
+impl BaseInputs {
+    fn of(a: &GpuAdjust, from_b: bool, touch_gen: u64) -> Self {
+        BaseInputs {
+            ca_red: a.ca_red,
+            ca_blue: a.ca_blue,
+            touch_count: a._pad0 as u32,
+            touch_gen,
+            from_b,
+            wanted: a.base_on != 0.0 || a.base_probe != 0.0,
+        }
+    }
 }
 
 /// The current image's base layer on the GPU. `fs_base_reduce` writes `a`,
@@ -1020,7 +1040,10 @@ impl Renderer {
         let t0 = web_time::Instant::now();
         let (w, h) = (img.width, img.height);
         let Some(grid) = Grid::for_image(w, h) else {
-            eprintln!("set_image: skipped an empty {w}x{h} image");
+            eprintln!("set_image: nothing to draw in an empty {w}x{h} image");
+            self.image_bind = None;
+            self.base = None;
+            self.image_size = (0, 0);
             return;
         };
         let mip_count = (32 - (w.max(h)).leading_zeros()).max(1); // floor(log2(max))+1
@@ -1227,7 +1250,12 @@ impl Renderer {
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &base.image_bind, &[]);
             pass.set_bind_group(1, grid_in, &[]);
-            pass.set_bind_group(2, &self.adj_bind, &[]);
+            let adj = if self.base_wanted.from_b {
+                &self.adj_bind_b
+            } else {
+                &self.adj_bind
+            };
+            pass.set_bind_group(2, adj, &[]);
             pass.set_bind_group(3, &self.touch_bind, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -1415,17 +1443,14 @@ impl Renderer {
     /// reads it.
     pub fn set_adjustments(&mut self, a: GpuAdjust, curve: &ToneCurve) {
         Self::write_adjustments(&self.queue, &self.adj_buf, &self.curve_buf, a, curve);
-        self.base_wanted = BaseInputs {
-            ca_red: a.ca_red,
-            ca_blue: a.ca_blue,
-            touch_count: a._pad0 as u32,
-            ..self.base_wanted
-        };
+        self.base_wanted = BaseInputs::of(&a, false, self.base_wanted.touch_gen);
     }
 
-    /// Adjustments for the "after" half of the compare view.
+    /// Adjustments for the "after" half of the compare view. The base layer
+    /// follows this half while compare is on.
     pub fn set_adjustments_b(&mut self, a: GpuAdjust, curve: &ToneCurve) {
         Self::write_adjustments(&self.queue, &self.adj_buf_b, &self.curve_buf_b, a, curve);
+        self.base_wanted = BaseInputs::of(&a, true, self.base_wanted.touch_gen);
     }
 
     fn write_adjustments(
@@ -1613,7 +1638,7 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
 
-        let base_stale = self.base_built_for != Some(self.base_wanted);
+        let base_stale = self.base_wanted.wanted && self.base_built_for != Some(self.base_wanted);
         if let Some(base) = self.base.as_ref().filter(|_| base_stale) {
             self.encode_base(&mut encoder, base);
             self.base_built_for = Some(self.base_wanted);
