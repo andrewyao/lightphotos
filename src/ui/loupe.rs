@@ -1339,7 +1339,10 @@ fn tile_marks(
             ui.painter()
                 .galley(egui::pos2(x, y - g.size().y / 2.0), g, egui::Color32::WHITE);
         }
-    } else if tools && x + form::compact_button_width(ui, t.set_as_rep) <= right {
+    } else if tools
+        && !app.comparing_selection()
+        && x + form::compact_button_width(ui, t.set_as_rep) <= right
+    {
         let mut start = ui.new_child(
             egui::UiBuilder::new()
                 .max_rect(egui::Rect::from_x_y_ranges(x..=right, band.y_range()))

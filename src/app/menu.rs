@@ -32,11 +32,13 @@ impl App {
             Pick | Unflag | Reject | Label(_) => free && self.selected_path().is_some(),
             DeselectAll => free && selected > 0,
             CompareStack => {
-                free && if loupe {
-                    self.shown_in_group()
+                let on_stack = if loupe {
+                    self.has_compare_set()
                 } else {
                     self.sel.and_then(|pos| self.group_at(pos)).is_some()
-                }
+                };
+                let few = (2..=super::group_compare::COMPARE_SELECTION_MAX).contains(&selected);
+                free && (few || on_stack)
             }
             AutoToneSelection | BlackAndWhite => free && selected > 0,
             ScorePhotos => free && selected > 0 && self.scoring_available(),

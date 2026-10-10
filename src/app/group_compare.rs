@@ -287,6 +287,20 @@ pub(crate) struct GroupCompare {
     picks: GroupPicks,
     /// The Compare pane's own flag filter over the shown group's tiles.
     flag_filter: FlagFilter,
+    /// The photos Compare opened on from a selection rather than a group.
+    /// It stands in for the group while the shown photo is one of them, and
+    /// goes when Compare closes or the Loupe leaves them.
+    adhoc: Option<AdhocSet>,
+}
+
+/// See [`GroupCompare::adhoc`].
+#[derive(Debug)]
+struct AdhocSet {
+    /// In the Grid's order.
+    paths: Vec<PathBuf>,
+    /// The selection Compare opened from, put back when Compare closes on
+    /// one of `paths`, so C opens it again.
+    selected: std::collections::BTreeSet<usize>,
 }
 
 impl GroupCompare {
@@ -304,6 +318,7 @@ impl GroupCompare {
             fidelity: TileFidelity::default(),
             picks: GroupPicks::default(),
             flag_filter: FlagFilter::NotRejected,
+            adhoc: None,
         }
     }
 }
@@ -331,16 +346,10 @@ impl App {
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| self.preview_px());
         let square = self.compare_square();
-        let (Some(shown), Some(pl)) = (self.selected_path(), self.playlist.as_ref()) else {
+        let Some(shown) = self.selected_path() else {
             return;
         };
-        let group = shown
-            .file_name()
-            .zip(self.catalog.groups())
-            .and_then(|(name, gs)| gs.get(gs.group_of(name)?));
-        let paths: Vec<PathBuf> = group
-            .map(|g| g.members().iter().map(|m| pl.dir().join(m)).collect())
-            .unwrap_or_default();
+        let paths: Vec<PathBuf> = self.compare_set().map(|(m, _)| m).unwrap_or_default();
         let order = self.compare_order(paths.clone());
         let (Some(loader), Some(r)) = (self.loader.as_mut(), self.renderer.as_mut()) else {
             return;
@@ -526,8 +535,91 @@ impl App {
         Some((g.members(), g.rep()))
     }
 
-    pub(crate) fn shown_in_group(&self) -> bool {
-        self.shown_group().is_some()
+    /// The selection Compare opened on, while the shown photo is one of it.
+    fn shown_adhoc(&self) -> Option<&AdhocSet> {
+        let shown = self.selected_path()?;
+        self.group_compare
+            .adhoc
+            .as_ref()
+            .filter(|s| s.paths.contains(&shown))
+    }
+
+    /// What Compare shows for the shown photo: the selection it opened on
+    /// while the photo is one of those, else the photo's group, as paths
+    /// with the representative's. A selection has no representative, and
+    /// loses a photo once it leaves the folder.
+    fn compare_set(&self) -> Option<(Vec<PathBuf>, Option<PathBuf>)> {
+        let pl = self.playlist.as_ref()?;
+        if let Some(set) = self.shown_adhoc() {
+            let present = |p: &&PathBuf| p.file_name().and_then(|n| pl.index_of(n)).is_some();
+            return Some((set.paths.iter().filter(present).cloned().collect(), None));
+        }
+        let (members, rep) = self.shown_group()?;
+        Some((
+            members.iter().map(|m| pl.dir().join(m)).collect(),
+            rep.map(|r| pl.dir().join(r)),
+        ))
+    }
+
+    /// Whether the shown photo has a set to compare: a group, or the
+    /// selection Compare opened on.
+    pub(crate) fn has_compare_set(&self) -> bool {
+        self.shown_adhoc().is_some() || self.shown_group().is_some()
+    }
+
+    /// True while Compare shows a selection rather than a group, which has
+    /// no representative to set.
+    pub(crate) fn comparing_selection(&self) -> bool {
+        self.group_compare.view == GroupView::Compare && self.shown_adhoc().is_some()
+    }
+
+    /// Drop the selection Compare opened on once the Loupe shows a photo
+    /// outside it.
+    pub(super) fn forget_adhoc_off_set(&mut self) {
+        if self.group_compare.adhoc.is_some() && self.shown_adhoc().is_none() {
+            self.group_compare.adhoc = None;
+        }
+    }
+
+    /// The Grid position of `path`, when it is visible.
+    fn position_of(&self, path: &Path) -> Option<usize> {
+        let pl = self.playlist.as_ref()?;
+        self.visible.iter().position(|&i| pl.entry(i) == Some(path))
+    }
+
+    /// Open Compare on `paths`, 2 to [`COMPARE_SELECTION_MAX`] photos that
+    /// need not share a group, showing the first of them that is shown or
+    /// selected.
+    pub(super) fn compare_selection(&mut self, paths: Vec<PathBuf>) {
+        let shown = self
+            .selected_path()
+            .filter(|p| paths.contains(p))
+            .or_else(|| paths.first().cloned());
+        let Some(pos) = shown.and_then(|p| self.position_of(&p)) else {
+            return;
+        };
+        // The shown photo alone is selected, so a rating or flag with no
+        // tile picked lands on it, as in a group. Closing Compare puts the
+        // selection back.
+        let set = AdhocSet {
+            paths,
+            selected: std::mem::replace(
+                &mut self.selected,
+                std::collections::BTreeSet::from([pos]),
+            ),
+        };
+        self.sel = Some(pos);
+        self.anchor = Some(pos);
+        self.group_compare.adhoc = Some(set);
+        if self.mode == ViewMode::Loupe {
+            self.load_selected();
+        } else {
+            self.enter_loupe();
+        }
+        if self.rail_lit() != Some(super::RailItem::GroupCompare) {
+            self.click_rail(super::RailItem::GroupCompare);
+        }
+        self.request_redraw();
     }
 
     /// `paths` in the pane's order: highest score first, unscored last, and
@@ -537,8 +629,12 @@ impl App {
         paths
     }
 
-    /// The shown group's representative, when one was chosen.
+    /// The shown group's representative, when one was chosen. A selection
+    /// has none.
     pub(crate) fn compare_rep(&self) -> Option<PathBuf> {
+        if self.shown_adhoc().is_some() {
+            return None;
+        }
         let rep = self.shown_group()?.1?;
         Some(self.playlist.as_ref()?.dir().join(rep))
     }
@@ -573,10 +669,8 @@ impl App {
         if self.mode != ViewMode::Loupe || self.group_compare.view != GroupView::Compare {
             return None;
         }
-        let dir = self.playlist.as_ref()?.dir();
-        let (members, rep) = self.shown_group()?;
-        let members = members.iter().map(|m| dir.join(m)).collect();
-        Some((self.compare_order(members), rep.map(|r| dir.join(r))))
+        let (members, rep) = self.compare_set()?;
+        Some((self.compare_order(members), rep))
     }
 
     /// The members a pick may name: the shown group's, in the pane's order,
@@ -655,6 +749,13 @@ impl App {
         self.group_compare.view = view;
         if view == GroupView::Edit {
             self.clear_group_picks();
+            let shown = self.selected_path();
+            if let Some(set) = self.group_compare.adhoc.take() {
+                if shown.is_some_and(|p| set.paths.contains(&p)) {
+                    self.selected = set.selected;
+                    self.selected.extend(self.sel);
+                }
+            }
         }
         self.request_redraw();
     }
@@ -725,7 +826,7 @@ impl App {
     /// Make `path`, a member the pane shows other than the representative,
     /// the representative, from its tile's hover button. Clears the picks.
     pub(super) fn set_member_as_rep(&mut self, path: PathBuf) {
-        if !self.pickable().is_some_and(|m| m.contains(&path)) {
+        if self.comparing_selection() || !self.pickable().is_some_and(|m| m.contains(&path)) {
             return;
         }
         self.clear_group_picks();
@@ -807,6 +908,9 @@ pub(crate) struct CompareTiles {
     reported: bool,
 }
 
+/// The most photos Compare opens on from a selection.
+pub(crate) const COMPARE_SELECTION_MAX: usize = 6;
+
 /// Tiles per page. The web build keeps fewer textures and decodes.
 #[cfg(target_arch = "wasm32")]
 pub(crate) const COMPARE_PAGE: usize = 4;
@@ -861,11 +965,116 @@ mod tests {
         app.shown_group().unwrap().1.unwrap().to_os_string()
     }
 
+    /// C on 2 to 6 selected photos in no group compares them: their tiles,
+    /// flags on a tile, no representative to set, and stepping to a photo
+    /// outside them closes Compare.
+    #[test]
+    fn c_compares_a_selection_of_photos_in_no_group() {
+        let (mut app, dir, paths) = folder_app("compare-any", 6);
+        app.selected = std::collections::BTreeSet::from([0, 2, 4]);
+        app.sel = Some(2);
+        act(&mut app, UiAction::CompareStack);
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert_eq!(app.group_view(), GroupView::Compare);
+        assert!(app.comparing_selection());
+        assert_eq!(
+            app.selected_path(),
+            Some(paths[2].clone()),
+            "the cursor's photo shows"
+        );
+        assert_eq!(app.selection_count(), 1, "a key acts on the shown photo");
+        let chosen = vec![paths[0].clone(), paths[2].clone(), paths[4].clone()];
+        assert_eq!(
+            app.pane_members().map(|(m, rep)| (m.len(), rep)),
+            Some((3, None))
+        );
+        assert_eq!(app.pickable(), Some(chosen.clone()), "no representative");
+
+        app.flag_group_member(
+            paths[4].clone(),
+            Some(crate::persist::catalog::Flag::Reject),
+        );
+        assert_eq!(
+            app.flag_of(&paths[4]),
+            Some(crate::persist::catalog::Flag::Reject)
+        );
+        app.flag_group_member(paths[1].clone(), Some(crate::persist::catalog::Flag::Pick));
+        assert_eq!(app.flag_of(&paths[1]), None, "not one of the compared");
+        app.set_member_as_rep(paths[4].clone());
+        assert!(app
+            .catalog
+            .groups()
+            .is_none_or(|g| g.group_of(paths[4].file_name().unwrap()).is_none()));
+
+        app.select_single(1);
+        app.load_selected();
+        assert_eq!(
+            app.group_view(),
+            GroupView::Edit,
+            "a photo outside closes Compare"
+        );
+        assert!(app.group_compare.adhoc.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Compare on a selection takes the right panel from Info, and closing
+    /// it puts the selection back, so C opens the same photos again.
+    #[test]
+    fn closing_a_selection_compare_restores_the_selection() {
+        let (mut app, dir, _) = folder_app("compare-restore", 6);
+        app.selected = std::collections::BTreeSet::from([1, 3]);
+        app.sel = Some(1);
+        app.info_open = true;
+        act(&mut app, UiAction::CompareStack);
+        assert_eq!(app.rail_lit(), Some(crate::app::RailItem::GroupCompare));
+        assert!(!app.info_open);
+        act(
+            &mut app,
+            UiAction::ClickRail(crate::app::RailItem::GroupCompare),
+        );
+        assert_eq!(app.group_view(), GroupView::Edit);
+        assert_eq!(app.selected, std::collections::BTreeSet::from([1, 3]));
+        act(&mut app, UiAction::CompareStack);
+        assert!(app.comparing_selection(), "C opens the same photos again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stepping from a compared photo to one in a group compares the group
+    /// and forgets the selection.
+    #[test]
+    fn stepping_to_a_grouped_photo_forgets_the_selection() {
+        let (mut app, dir, paths) = folder_app("compare-to-group", 6);
+        group_photos(&mut app, &[4, 5], 4);
+        app.selected = std::collections::BTreeSet::from([0, 2]);
+        app.sel = Some(0);
+        act(&mut app, UiAction::CompareStack);
+        assert!(app.comparing_selection());
+        let pos = app.visible.iter().position(|&i| i == 4).unwrap();
+        app.select_single(pos);
+        app.load_selected();
+        assert!(app.group_compare.adhoc.is_none());
+        assert_eq!(app.group_view(), GroupView::Compare);
+        assert!(app.pane_members().unwrap().0.contains(&paths[5]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn c_on_more_than_six_photos_says_so_and_stays() {
+        let (mut app, dir, _) = folder_app("compare-seven", 8);
+        app.selected = (0..7).collect();
+        app.sel = Some(0);
+        act(&mut app, UiAction::CompareStack);
+        assert_eq!(app.mode, ViewMode::Grid);
+        assert_eq!(app.group_view(), GroupView::Edit);
+        assert!(app.status_text().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_grouped_photo_opens_in_edit_without_tiles_and_compare_turns_the_pane_on() {
         let (mut app, dir, _) = grouped_loupe("group-view");
         assert_eq!(app.group_view(), GroupView::Edit);
-        assert!(app.shown_in_group(), "the Edit/Compare toggle shows");
+        assert!(app.has_compare_set(), "the Edit/Compare toggle shows");
         assert!(app.group_compare.tiles.is_none(), "Edit loads no tiles");
 
         act(
@@ -908,7 +1117,7 @@ mod tests {
 
         act(&mut app, group());
         act(&mut app, UiAction::Select(0));
-        assert!(!app.shown_in_group());
+        assert!(!app.has_compare_set());
         assert_eq!(
             app.group_view(),
             GroupView::Edit,
@@ -929,7 +1138,7 @@ mod tests {
     fn an_ungrouped_photo_has_no_group_view_toggle() {
         let (mut app, dir, _) = grouped_loupe("group-view-single");
         act(&mut app, UiAction::Select(0));
-        assert!(!app.shown_in_group());
+        assert!(!app.has_compare_set());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1190,7 +1399,7 @@ mod tests {
         act(&mut app, UiAction::ConfirmPending);
         drain_delete(&mut app);
         assert!(!paths[2].exists() && paths[1].exists());
-        assert!(!app.shown_in_group());
+        assert!(!app.has_compare_set());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -698,6 +698,7 @@ pub(crate) use catalog::flag_name;
 pub(crate) use crop::{CropAspect, CropOrientation, CropOverlay};
 pub(crate) use group_compare::{
     compare_claims_pane, compare_zoom_uv, GroupView, PickHow, TileFidelity, COMPARE_PAGE,
+    COMPARE_SELECTION_MAX,
 };
 mod export;
 mod faces;

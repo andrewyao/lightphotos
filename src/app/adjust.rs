@@ -93,7 +93,7 @@ impl App {
                 self.info_open = true;
                 self.normalize_focus();
             }
-            RailItem::GroupCompare if !self.shown_in_group() => {}
+            RailItem::GroupCompare if !self.has_compare_set() => {}
             RailItem::GroupCompare if lit => self.set_group_view(GroupView::Edit),
             RailItem::GroupCompare => {
                 self.put_down_develop_tools();
@@ -129,9 +129,25 @@ impl App {
         }
     }
 
-    /// Lightroom's C: compare the photos in the stack under the cursor,
-    /// opened in the Loupe from the Grid. Does nothing off a stack.
+    /// Lightroom's C: compare 2 to 6 selected photos, grouped or not, or
+    /// else the photos in the stack under the cursor, opened in the Loupe
+    /// from the Grid. Does nothing for one photo off a stack.
     pub(super) fn compare_stack(&mut self) {
+        let chosen = self.selected_member_paths();
+        if (2..=super::group_compare::COMPARE_SELECTION_MAX).contains(&chosen.len()) {
+            self.compare_selection(chosen);
+            return;
+        }
+        let on_stack = if self.mode == ViewMode::Loupe {
+            self.has_compare_set()
+        } else {
+            self.sel.and_then(|pos| self.group_at(pos)).is_some()
+        };
+        if chosen.len() > super::group_compare::COMPARE_SELECTION_MAX && !on_stack {
+            let tip = crate::i18n::t().compare_too_many.to_string();
+            self.set_status(StatusKind::Info, tip);
+            return;
+        }
         if self.mode != ViewMode::Loupe {
             if self.sel.and_then(|pos| self.group_at(pos)).is_none() {
                 return;
@@ -161,7 +177,8 @@ impl App {
     /// Compare needs a group, so moving to a photo in none goes back to
     /// the sliders.
     pub(super) fn leave_compare_off_group(&mut self) {
-        if self.group_view() == GroupView::Compare && !self.shown_in_group() {
+        self.forget_adhoc_off_set();
+        if self.group_view() == GroupView::Compare && !self.has_compare_set() {
             self.show_develop_page(DevelopTab::Sliders);
         }
     }

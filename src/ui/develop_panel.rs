@@ -108,8 +108,8 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 
 /// Sliders, Crop, Cleanup, the group's Compare pane, Info and Export as a
 /// column of icons, the one on screen lit. Compare is greyed out unless the
-/// photo is in a group. Crop, Cleanup and Compare work on the Loupe's photo,
-/// so the Grid's rail leaves them out.
+/// photo is in a group or among the photos Compare opened on. Crop, Cleanup
+/// and Compare work on the Loupe's photo, so the Grid's rail leaves them out.
 fn develop_rail(ui: &mut egui::Ui, app: &App, live: bool, out: &mut FrameOutput) {
     let margin = font_size::px(ui.style(), RAIL_MARGIN);
     let inner = ui.max_rect().shrink(margin);
@@ -117,7 +117,7 @@ fn develop_rail(ui: &mut egui::Ui, app: &App, live: bool, out: &mut FrameOutput)
         ui.spacing_mut().item_spacing.y = margin;
         let t = t();
         let lit = app.rail_lit();
-        let in_group = app.shown_in_group();
+        let in_group = app.has_compare_set();
         let loupe = app.mode() == ViewMode::Loupe;
         for (item, tip, enabled) in [
             (RailItem::Develop(DevelopTab::Sliders), t.tab_sliders, live),

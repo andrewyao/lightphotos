@@ -75,11 +75,14 @@ fn photo_menu(ui: &mut egui::Ui, app: &App, cell: Option<usize>, out: &mut Frame
     }
     let stack = match cell {
         Some(pos) => app.group_at(pos).is_some(),
-        None => app.shown_in_group(),
+        None => app.has_compare_set(),
     };
-    if stack {
+    // A click inside a selection of 2 to 6 compares the selection.
+    let many = (2..=crate::app::COMPARE_SELECTION_MAX).contains(&n)
+        && cell.is_none_or(|pos| app.is_selected(pos));
+    if stack || many {
         if ui.button(m.compare_stack).clicked() {
-            if let Some(pos) = cell {
+            if let Some(pos) = cell.filter(|_| !many) {
                 out.actions.push(UiAction::Select(pos));
             }
             out.actions.push(UiAction::CompareStack);

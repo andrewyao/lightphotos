@@ -57,13 +57,14 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 | Key | Action |
 | --- | --- |
 | `[` / `]` | Rotate image −90° / +90° |
-| `C` | Crop |
+| `R` | Crop |
+| `C` | Compare: 2 to 6 selected photos, grouped or not, or else the photos in the selected stack, with a shared zoom square |
 | `Y` | Before / after compare |
 | `Cmd`+`U` | Auto Tone this photo |
 | `Cmd`+`Shift`+`U` | Auto Tone the selection (after a confirm) |
 | `Cmd`+`Shift`+`C` | Copy develop settings: choose the sections to carry, then `Enter` copies and `Esc` cancels. The choice is remembered |
 | `Cmd`+`Shift`+`Y` | Apply settings to the selection (after a confirm) |
-| `X` | Open or close the export form: a folder (`Exports/` by default) or an Immich server, and an output size. `Enter` exports, `Esc` closes. Edits are baked in and files are never overwritten |
+| `Cmd`+`Shift`+`E` | Open or close the export form: a folder (`Exports/` by default) or an Immich server, and an output size. `Enter` exports, `Esc` closes. Edits are baked in and files are never overwritten |
 | `Delete` | Move the selection to the Trash, after a confirm; a selected stack counts as all its photos. In the browser, deletes permanently |
 
 ## Keyboard focus
@@ -82,10 +83,9 @@ edit.
 
 | Key | Action |
 | --- | --- |
-| `C` / `Enter` | Commit the crop |
+| `R` / `Enter` | Commit the crop |
 | `Esc` | Cancel the crop, or leave Touch Up |
 | `Delete` / `Backspace` | Delete the selected touch-up |
 | `Cmd`+`Z` | Delete the selected touch-up, or the last one if none is selected |
 
-While cropping, drag the edges to resize, hold `Shift` to keep the ratio, and
-press `X` to open the export form.
+While cropping, drag the edges to resize and hold `Shift` to keep the ratio.
