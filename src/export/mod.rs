@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::decode::{image_decode, image_encode};
+use crate::develop::sharpen::OutputSharpening;
 use crate::develop::{Adjustments, TouchUp};
 
 /// Subfolder of the current folder that exports go to, on every platform.
@@ -30,6 +31,38 @@ pub struct ExportSettings {
     /// from `target` so settings saved before albums existed still load.
     #[serde(default)]
     pub album: AlbumChoice,
+    /// Sharpening for the medium, after the resize.
+    #[serde(default)]
+    pub sharpen: OutputSharpening,
+}
+
+impl ExportSettings {
+    pub fn output(&self) -> Output {
+        Output {
+            max_px: self.size.max_px(),
+            sharpen: self.sharpen,
+        }
+    }
+}
+
+/// What a baked export is shaped into after its edits: its size, then its
+/// output sharpening.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Output {
+    /// Long-edge limit; `u32::MAX` keeps full size.
+    pub max_px: u32,
+    pub sharpen: OutputSharpening,
+}
+
+impl Output {
+    /// Full size, no output sharpening.
+    pub const FULL: Output = Output {
+        max_px: u32::MAX,
+        sharpen: OutputSharpening {
+            media: crate::develop::sharpen::OutputMedia::Off,
+            amount: crate::develop::sharpen::OutputAmount::Standard,
+        },
+    };
 }
 
 /// The Immich album an upload goes into.
@@ -103,14 +136,14 @@ pub fn bake_jpeg(
     adj: &Adjustments,
     touchups: &[TouchUp],
     rot: u8,
-    max_px: u32,
+    output: Output,
 ) -> Result<Vec<u8>, String> {
     let img = if is_raw {
         crate::decode::rawler::decode_raw_nonmac_from_bytes(src_bytes, u32::MAX)?
     } else {
         image_decode::decode_nonraw_from_bytes(src_bytes, u32::MAX)?
     };
-    let (w, h, rgba) = bake_sized(&img, adj, touchups, rot, max_px);
+    let (w, h, rgba) = bake_sized(&img, adj, touchups, rot, output);
     let jpeg = image_encode::encode_jpeg_to_vec(w, h, &rgba, image_encode::JpegQuality::Export)?;
     let stamp = image_decode::capture_stamp_from_bytes(src_bytes);
     Ok(image_encode::with_exif(&jpeg, w, h, stamp.as_ref()))
@@ -128,32 +161,35 @@ pub fn bake_jpeg_from_shared_vec(
     adj: &Adjustments,
     touchups: &[TouchUp],
     rot: u8,
-    max_px: u32,
+    output: Output,
 ) -> Result<Vec<u8>, String> {
     let img = if is_raw {
         crate::decode::rawler::decode_raw_nonmac_from_shared_vec(src_bytes.clone(), u32::MAX)?
     } else {
         image_decode::decode_nonraw_from_bytes(src_bytes.as_slice(), u32::MAX)?
     };
-    let (w, h, rgba) = bake_sized(&img, adj, touchups, rot, max_px);
+    let (w, h, rgba) = bake_sized(&img, adj, touchups, rot, output);
     let jpeg = image_encode::encode_jpeg_to_vec(w, h, &rgba, image_encode::JpegQuality::Export)?;
     let stamp = image_decode::capture_stamp_from_bytes(&src_bytes);
     Ok(image_encode::with_exif(&jpeg, w, h, stamp.as_ref()))
 }
 
-/// Bake the edits into a full-resolution decode, then shrink the result to
-/// `max_px` on its long side. The limit applies after crop and rotation
-/// because that is what "2048 px" means to someone exporting, so the decode
-/// itself can't be the smaller one.
+/// Bake the edits into a full-resolution decode, shrink the result to
+/// `output.max_px` on its long side, then sharpen it for its medium. The
+/// limit applies after crop and rotation because that is what "2048 px"
+/// means to someone exporting, so the decode itself can't be the smaller
+/// one; output sharpening comes last because it is tuned to output pixels.
 fn bake_sized(
     img: &image_decode::DecodedImage,
     adj: &Adjustments,
     touchups: &[TouchUp],
     rot: u8,
-    max_px: u32,
+    output: Output,
 ) -> (u32, u32, Vec<u8>) {
     let (w, h, rgba) = crate::develop::image_ops::bake_edited(img, adj, touchups, rot);
-    crate::develop::image_ops::fit_long_edge(w, h, rgba, max_px)
+    let (w, h, mut rgba) = crate::develop::image_ops::fit_long_edge(w, h, rgba, output.max_px);
+    output.sharpen.apply(w, h, &mut rgba);
+    (w, h, rgba)
 }
 
 /// Where one photo's JPEG goes. The browser writes its exports from the Web
@@ -179,8 +215,7 @@ pub struct ExportJob {
     pub adj: Adjustments,
     pub touchups: Vec<TouchUp>,
     pub rot: u8,
-    /// Long-edge limit; `u32::MAX` keeps full size.
-    pub max_px: u32,
+    pub output: Output,
 }
 
 /// What an export produced.
@@ -318,7 +353,7 @@ fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
         &job.adj,
         &job.touchups,
         job.rot,
-        job.max_px,
+        job.output,
     ))
 }
 
@@ -337,7 +372,7 @@ fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
         &job.adj,
         &job.touchups,
         job.rot,
-        job.max_px,
+        job.output,
     ))
 }
 
@@ -389,7 +424,7 @@ mod tests {
             adj: Default::default(),
             touchups: Vec::new(),
             rot: 0,
-            max_px: u32::MAX,
+            output: Output::FULL,
         };
 
         let exporter = Exporter::with_runner(panics_on_bad);
@@ -460,7 +495,10 @@ mod tests {
             adj,
             touchups: Vec::new(),
             rot: 1,
-            max_px: 50,
+            output: Output {
+                max_px: 50,
+                ..Output::FULL
+            },
         })
         .unwrap();
 
@@ -493,6 +531,52 @@ mod tests {
         assert_eq!(staged(), 0);
     }
 
+    /// Output sharpening runs on the resized bake, and a settings file
+    /// saved before it existed loads with it off.
+    #[test]
+    fn output_sharpening_runs_after_the_resize_and_defaults_off() {
+        use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
+        use crate::develop::sharpen::{OutputAmount, OutputMedia, OutputSharpening};
+        let (w, h) = (64u32, 32u32);
+        let mut rgba = Vec::new();
+        for _ in 0..h {
+            for x in 0..w {
+                let v = if x < w / 2 { 60 } else { 190 };
+                rgba.extend([v, v, v, 255]);
+            }
+        }
+        let img = DecodedImage::new_tracked(DecodedImageFields {
+            width: w,
+            height: h,
+            rgba,
+            pixel_format: PixelFormat::Srgb8,
+        });
+        let small = Output {
+            max_px: 32,
+            ..Output::FULL
+        };
+        let sharp = Output {
+            sharpen: OutputSharpening {
+                media: OutputMedia::Screen,
+                amount: OutputAmount::High,
+            },
+            ..small
+        };
+        let (pw, ph, plain) = bake_sized(&img, &Adjustments::default(), &[], 0, small);
+        let (sw, sh, sharpened) = bake_sized(&img, &Adjustments::default(), &[], 0, sharp);
+        assert_eq!((pw, ph), (32, 16));
+        assert_eq!((sw, sh), (32, 16));
+        let mut after_resize = plain.clone();
+        sharp.sharpen.apply(pw, ph, &mut after_resize);
+        assert_ne!(after_resize, plain);
+        assert_eq!(sharpened, after_resize, "sharpened at the output size");
+
+        let old: ExportSettings =
+            serde_json::from_str(r#"{"target":{"Folder":"ExportsSubfolder"},"size":"Full"}"#)
+                .unwrap();
+        assert_eq!(old.sharpen.media, OutputMedia::Off);
+    }
+
     /// With no edits, a solid-color source keeps its size and roughly its
     /// color.
     #[cfg(not(target_os = "macos"))]
@@ -505,7 +589,7 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encode source png");
 
-        let jpeg = bake_jpeg(&png, false, &Adjustments::default(), &[], 0, u32::MAX)
+        let jpeg = bake_jpeg(&png, false, &Adjustments::default(), &[], 0, Output::FULL)
             .expect("bake_jpeg should succeed");
 
         let out = image::load_from_memory(&jpeg)
@@ -532,7 +616,7 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encode source png");
 
-        let jpeg = bake_jpeg(&png, false, &Adjustments::default(), &[], 1, u32::MAX)
+        let jpeg = bake_jpeg(&png, false, &Adjustments::default(), &[], 1, Output::FULL)
             .expect("bake_jpeg should succeed");
         let out = image::load_from_memory(&jpeg).expect("decode").into_rgba8();
         assert_eq!(out.dimensions(), (h, w), "90 deg rotation swaps dimensions");

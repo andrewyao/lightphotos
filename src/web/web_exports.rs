@@ -54,7 +54,7 @@ pub struct Export {
     pub adj: Adjustments,
     pub touchups: Vec<TouchUp>,
     pub rot: u8,
-    pub max_px: u32,
+    pub output: crate::export::Output,
 }
 
 impl WebExports {
@@ -87,7 +87,7 @@ impl WebExports {
             adj: export.adj,
             touchups: export.touchups,
             rot: export.rot,
-            max_px: export.max_px,
+            output: export.output,
         });
     }
 

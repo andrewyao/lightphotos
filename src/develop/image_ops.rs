@@ -177,6 +177,7 @@ pub fn bake_edited_probe(
 ) -> (u32, u32, Vec<u8>) {
     let (w, h) = (img.width, img.height);
     let ca = adj.chromatic_aberration.unwrap_or_default();
+    let sharpen = develop::Sharpen::new(&adj.sharpening, w as f32, h as f32);
     let Some(src) = Source::new(img, ca, adj.denoise > 0.0) else {
         return (0, 0, Vec::new());
     };
@@ -220,7 +221,23 @@ pub fn bake_edited_probe(
             let fine_here = fine.as_ref().map(|f| f.at_uv(u, v));
             // The probe shows a layer itself, so nothing reads it after.
             let pre = if probe == BaseProbe::Off {
-                local::apply(adj, pre, base_here, fine_here.map(|f| f.mid))
+                let out = local::apply(adj, pre, base_here, fine_here.map(|f| f.mid));
+                if sharpen.is_off() {
+                    out
+                } else {
+                    let step = (sharpen.step * texel_w, sharpen.step * texel_h);
+                    // A pixel no spot reaches needs no touch-up on its taps.
+                    let spots = if near_a_spot(&src, touchups, u, v, 3.0 * sharpen.step) {
+                        touchups
+                    } else {
+                        &[]
+                    };
+                    let blur = develop::sharpen::blur(|dx, dy| {
+                        let (tu, tv) = (u + dx as f32 * step.0, v + dy as f32 * step.1);
+                        apply_touchups(&src, spots, tu, tv, src.at_uv(tu, tv))
+                    });
+                    sharpen.apply(out, pre, blur)
+                }
             } else {
                 probe.apply(
                     base_here.unwrap_or_default(),
@@ -375,6 +392,16 @@ pub(crate) fn pixel_linear(img: &DecodedImage, x: u32, y: u32) -> [f32; 3] {
             half::f16::from_le_bytes([img.rgba[i * 2 + 4], img.rgba[i * 2 + 5]]).to_f32(),
         ],
     }
+}
+
+/// Whether any spot's circle comes within `reach` texels of source UV
+/// `(u, v)`, as `apply_touchups` measures it.
+fn near_a_spot(src: &Source, touchups: &[TouchUp], u: f32, v: f32, reach: f32) -> bool {
+    let (w, h) = (src.img.width as f32, src.img.height as f32);
+    touchups.iter().any(|t| {
+        let distance = ((u - t.center[0]) * w).hypot((v - t.center[1]) * h);
+        distance < t.radius * w.min(h) + reach + 1.0
+    })
 }
 
 /// Blend each spot over `base`, the pixel at source UV `(u, v)`. Must match

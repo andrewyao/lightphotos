@@ -1478,7 +1478,7 @@ pub(in crate::app) mod tests {
     fn keyboard_nudges_follow_the_develop_panel_order() {
         let mut app = App::new(None);
         app.shown = Shown::Preview(PathBuf::from("/nonexistent/a.jpg"), 1024, 1024);
-        let order: [fn(&Adjustments) -> f32; 21] = [
+        let order: [fn(&Adjustments) -> f32; 25] = [
             |a| a.temp,
             |a| a.tint,
             |a| a.exposure,
@@ -1492,6 +1492,10 @@ pub(in crate::app) mod tests {
             |a| a.dehaze,
             |a| a.vibrance,
             |a| a.saturation,
+            |a| a.sharpening.amount,
+            |a| a.sharpening.radius,
+            |a| a.sharpening.detail,
+            |a| a.sharpening.masking,
             |a| a.denoise,
             |a| a.vignette.amount,
             |a| a.vignette.midpoint,
@@ -1505,7 +1509,7 @@ pub(in crate::app) mod tests {
             app.develop_focus = i;
             let before = read(&app.current_adjustments());
             app.develop_adjust(1);
-            let step = if i == 2 { 0.05 } else { 1.0 };
+            let step = crate::develop::SLIDERS[i].step;
             assert!(
                 (read(&app.current_adjustments()) - before - step).abs() < 1e-6,
                 "slider {i}"

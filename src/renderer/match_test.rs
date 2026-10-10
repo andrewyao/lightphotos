@@ -9,8 +9,8 @@ use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat}
 use crate::develop::curve::Curve;
 use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
-    Adjustments, BaseProbe, CaScale, Crop, GpuAdjust, GpuTouchUp, Grain, Straighten, TouchUp,
-    Vignette, SLIDERS,
+    Adjustments, BaseProbe, CaScale, Crop, GpuAdjust, GpuTouchUp, Grain, Sharpening, Straighten,
+    TouchUp, Vignette, SLIDERS,
 };
 
 const W: u32 = 96;
@@ -279,6 +279,42 @@ fn cases() -> Vec<Case> {
             ..presence(80.0, 40.0, 0.0)
         },
     ));
+    let sharp = |amount, radius, detail, masking| Sharpening {
+        amount,
+        radius,
+        detail,
+        masking,
+    };
+    for (name, s) in [
+        ("sharpen_fine", sharp(150.0, 0.5, 100.0, 0.0)),
+        ("sharpen_wide", sharp(150.0, 3.0, 25.0, 0.0)),
+        ("sharpen_masked", sharp(100.0, 1.5, 50.0, 80.0)),
+    ] {
+        out.push(case(
+            name.into(),
+            Adjustments {
+                sharpening: s,
+                ..Default::default()
+            },
+        ));
+    }
+    out.push(Case {
+        name: "sharpen+touchup".into(),
+        adj: Adjustments {
+            sharpening: sharp(120.0, 2.0, 60.0, 0.0),
+            ..Default::default()
+        },
+        touchups: vec![touchup],
+    });
+    out.push(case(
+        "sharpen+straighten".into(),
+        Adjustments {
+            sharpening: sharp(120.0, 2.0, 60.0, 0.0),
+            straighten: 7.0,
+            crop: straighten_crop,
+            ..Default::default()
+        },
+    ));
     let mut everything = Adjustments {
         temp: 30.0,
         tint: -20.0,
@@ -291,6 +327,7 @@ fn cases() -> Vec<Case> {
         texture: 30.0,
         clarity: 40.0,
         dehaze: 25.0,
+        sharpening: sharp(80.0, 1.0, 40.0, 20.0),
         vibrance: 20.0,
         saturation: 15.0,
         denoise: 30.0,
@@ -555,6 +592,79 @@ fn loupe_presence_matches_cpu_bake_on_a_large_frame() {
         presence("clarity=100", 0.0, 100.0, 0.0),
         presence("dehaze=100", 0.0, 0.0, 100.0),
         presence("presence", 60.0, -40.0, -50.0),
+    ];
+    let diffs = cases
+        .iter()
+        .map(|c| measure(&mut r, &fixture, c, BaseProbe::Off))
+        .collect();
+    report(diffs);
+}
+
+/// Sharpening at the frame size its Radius is measured on, a 4000 px
+/// square, where the taps step whole texels apart. A crop keeps the CPU
+/// side small.
+#[test]
+fn loupe_sharpening_matches_cpu_bake_at_full_size() {
+    let (w, h) = (4000, 4000);
+    let Some(mut r) = headless(w, h) else {
+        return;
+    };
+    let mut seed: u32 = 11;
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let n = ((seed >> 16) % 41) as u8;
+            let checker = if (x / 3 + y / 5) % 2 == 0 { 70 } else { 170 };
+            rgba.extend([checker + n, checker, 200 - n, 255]);
+        }
+    }
+    let fixture = Fixture {
+        name: "4000px",
+        img: DecodedImage::new_tracked(DecodedImageFields {
+            width: w,
+            height: h,
+            rgba,
+            pixel_format: PixelFormat::Srgb8,
+        }),
+    };
+    let crop = Some(Crop {
+        left: 0.45,
+        top: 0.45,
+        right: 0.55,
+        bottom: 0.55,
+    });
+    let sharp = |name: &str, amount, radius, detail, masking| Case {
+        name: name.into(),
+        adj: Adjustments {
+            sharpening: Sharpening {
+                amount,
+                radius,
+                detail,
+                masking,
+            },
+            crop,
+            ..Default::default()
+        },
+        touchups: Vec::new(),
+    };
+    let spot = Case {
+        touchups: vec![TouchUp {
+            center: [0.5, 0.5],
+            radius: 0.01,
+            source: [0.47, 0.48],
+            feather: 0.3,
+            delta: [0.0; 3],
+            opacity: 1.0,
+        }],
+        ..sharp("sharpen+touchup", 150.0, 2.0, 80.0, 0.0)
+    };
+    let cases = [
+        sharp("sharpen r=0.5", 150.0, 0.5, 100.0, 0.0),
+        sharp("sharpen r=1.4", 150.0, 1.4, 50.0, 0.0),
+        sharp("sharpen r=3", 150.0, 3.0, 25.0, 0.0),
+        sharp("sharpen masked", 100.0, 1.0, 60.0, 70.0),
+        spot,
     ];
     let diffs = cases
         .iter()

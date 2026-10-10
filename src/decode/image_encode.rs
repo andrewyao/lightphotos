@@ -483,7 +483,10 @@ mod tests {
                 &Default::default(),
                 &[],
                 0,
-                8,
+                crate::export::Output {
+                    max_px: 8,
+                    ..crate::export::Output::FULL
+                },
             )
             .unwrap()
         };

@@ -67,6 +67,10 @@ fn keys(id: SliderId) -> &'static [&'static str] {
         // to 25, so reading it would put denoise on every import that carries
         // the Detail panel at all, which nobody asked for.
         SliderId::Denoise => &["LuminanceSmoothing"],
+        SliderId::SharpenAmount => &["Sharpness"],
+        SliderId::SharpenRadius => &["SharpenRadius"],
+        SliderId::SharpenDetail => &["SharpenDetail"],
+        SliderId::SharpenMasking => &["SharpenEdgeMasking"],
         SliderId::VignetteAmount => &["PostCropVignetteAmount"],
         SliderId::VignetteMidpoint => &["PostCropVignetteMidpoint"],
         SliderId::VignetteRoundness => &["PostCropVignetteRoundness"],
@@ -92,7 +96,6 @@ const UNSUPPORTED: &[(&str, &[&str], Untouched)] = &[
         &["ColorNoiseReduction"],
         Untouched::Default(25.0),
     ),
-    ("Sharpness", &["Sharpness"], Untouched::Zero),
     ("CropAngle", &["CropAngle"], Untouched::Zero),
     (
         "HueAdjustment*",
@@ -159,6 +162,17 @@ pub fn parse(xmp: &str) -> Result<Imported, String> {
         if let Some(v) = found {
             *(slider.field)(&mut adj) = v.clamp(*slider.range.start(), *slider.range.end());
         }
+    }
+
+    // Camera Raw writes its raw default sharpening into every preset that
+    // saves the Detail panel, chosen or not. Only a change from it counts.
+    if adj.sharpening
+        == (crate::develop::Sharpening {
+            amount: 40.0,
+            ..Default::default()
+        })
+    {
+        adj.sharpening = Default::default();
     }
 
     // Our closest monochrome. Lightroom's B&W mode ignores its own
@@ -422,6 +436,7 @@ mod tests {
             vibrance: 20.0,
             saturation: -5.0,
             denoise: 30.0,
+            sharpening: Default::default(),
             crop: None,
             texture: 0.0,
             clarity: 0.0,
@@ -432,6 +447,26 @@ mod tests {
             vignette: Default::default(),
             grain: Default::default(),
         }
+    }
+
+    /// Camera Raw's raw default sharpening, saved into every Detail panel,
+    /// is not taken as a choice; anything else is.
+    #[test]
+    fn default_sharpening_is_not_imported_and_a_change_is() {
+        let at = |amount: &str| {
+            parse(&packet(
+                &format!(
+                    "crs:Sharpness=\"{amount}\" crs:SharpenRadius=\"+1.0\" \
+                     crs:SharpenDetail=\"25\" crs:SharpenEdgeMasking=\"0\""
+                ),
+                "",
+            ))
+            .unwrap()
+            .adj
+            .sharpening
+        };
+        assert_eq!(at("40"), crate::develop::Sharpening::default());
+        assert_eq!(at("60").amount, 60.0);
     }
 
     /// Catches Texture, Clarity or Dehaze still reported as dropped.

@@ -12,11 +12,13 @@ pub mod curve;
 pub mod effects;
 pub mod image_ops;
 pub mod local;
+pub mod sharpen;
 
 use serde::{Deserialize, Serialize};
 
 pub use base::{BaseLayer, BaseProbe, BaseTexel, Grid};
 pub use effects::{Effects, Grain, Vignette};
+pub use sharpen::{Sharpen, Sharpening};
 
 use curve::ToneCurve;
 
@@ -98,6 +100,10 @@ pub enum SliderId {
     Dehaze,
     Vibrance,
     Saturation,
+    SharpenAmount,
+    SharpenRadius,
+    SharpenDetail,
+    SharpenMasking,
     Denoise,
     VignetteAmount,
     VignetteMidpoint,
@@ -108,7 +114,7 @@ pub enum SliderId {
     GrainRoughness,
 }
 
-pub const SLIDERS: [Slider; 21] = [
+pub const SLIDERS: [Slider; 25] = [
     tone(Section::WhiteBalance, SliderId::Temp, |a| &mut a.temp),
     tone(Section::WhiteBalance, SliderId::Tint, |a| &mut a.tint),
     Slider {
@@ -132,6 +138,36 @@ pub const SLIDERS: [Slider; 21] = [
     tone(Section::Presence, SliderId::Saturation, |a| {
         &mut a.saturation
     }),
+    Slider {
+        range: sharpen::AMOUNT_RANGE,
+        ..percent(
+            Section::Detail,
+            SliderId::SharpenAmount,
+            |a| &mut a.sharpening.amount,
+            0.0,
+        )
+    },
+    Slider {
+        section: Section::Detail,
+        id: SliderId::SharpenRadius,
+        field: |a| &mut a.sharpening.radius,
+        range: sharpen::RADIUS_RANGE,
+        default: 1.0,
+        decimals: 1,
+        step: 0.1,
+    },
+    percent(
+        Section::Detail,
+        SliderId::SharpenDetail,
+        |a| &mut a.sharpening.detail,
+        25.0,
+    ),
+    percent(
+        Section::Detail,
+        SliderId::SharpenMasking,
+        |a| &mut a.sharpening.masking,
+        0.0,
+    ),
     percent(Section::Detail, SliderId::Denoise, |a| &mut a.denoise, 0.0),
     tone(Section::Vignette, SliderId::VignetteAmount, |a| {
         &mut a.vignette.amount
@@ -253,6 +289,8 @@ pub struct Adjustments {
     /// -100 is grayscale.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub saturation: f32,
+    #[serde(default, skip_serializing_if = "Sharpening::is_default")]
+    pub sharpening: Sharpening,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub denoise: f32,
     /// `None` means the full frame of the straightened photo.
@@ -488,6 +526,13 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
             h.write(&((v * 1000.0).round() as i32).to_le_bytes());
         }
     }
+    if adj.sharpening.amount != 0.0 {
+        h.write(&[9]);
+        let s = adj.sharpening;
+        for x in [s.amount, s.radius, s.detail, s.masking] {
+            h.write(&((x * 1000.0).round() as i32).to_le_bytes());
+        }
+    }
     // Only a vignette or grain that shows writes, so older hashes hold and
     // a sub-slider moved at Amount 0 doesn't re-bake.
     if adj.vignette.amount != 0.0 {
@@ -594,6 +639,8 @@ pub struct GpuAdjust {
     /// then, or for a probe.
     pub fine_on: f32,
     /// Set by [`GpuAdjust::for_image`], which knows the image size.
+    pub sharpen: Sharpen,
+    /// Set by [`GpuAdjust::for_image`], which knows the image size.
     pub effects: Effects,
 }
 
@@ -628,6 +675,7 @@ impl Default for GpuAdjust {
             clarity: 0.0,
             dehaze: 0.0,
             fine_on: 0.0,
+            sharpen: Sharpen::default(),
             effects: Effects::default(),
         }
     }
@@ -642,6 +690,7 @@ impl GpuAdjust {
             texel_w: 1.0 / width,
             texel_h: 1.0 / height,
             _pad0: touchups as f32,
+            sharpen: Sharpen::new(&adj.sharpening, width, height),
             effects: Effects::new(&adj.vignette, &adj.grain, adj.crop, width, height),
             ..Self::from(adj)
         }

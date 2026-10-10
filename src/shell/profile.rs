@@ -547,7 +547,7 @@ impl Run {
                 adj: crate::develop::Adjustments::default(),
                 touchups: Vec::new(),
                 rot: 0,
-                max_px: u32::MAX,
+                output: crate::export::Output::FULL,
             });
         }
 

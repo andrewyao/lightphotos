@@ -3,6 +3,7 @@ use super::*;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::app::ImmichLink;
+use crate::develop::sharpen::{OutputAmount, OutputMedia, OutputSharpening};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::export::immich::Album;
 #[cfg(not(target_arch = "wasm32"))]
@@ -45,6 +46,62 @@ pub(super) fn draw_export_panel(
     if let Some(changed) = next {
         out.actions.push(UiAction::SetExportSettings(changed));
     }
+}
+
+/// Output sharpening: the medium as a ComboBox, then its amount as a
+/// segmented choice once a medium is picked.
+fn sharpen_rows(
+    ui: &mut egui::Ui,
+    form: &Form,
+    settings: &ExportSettings,
+    next: &mut Option<ExportSettings>,
+) {
+    let t = t();
+    let sharpen = settings.sharpen;
+    let set = |next: &mut Option<ExportSettings>, sharpen| {
+        *next = Some(ExportSettings {
+            sharpen,
+            ..settings.clone()
+        });
+    };
+    let media_label = |m: OutputMedia| match m {
+        OutputMedia::Off => t.export_sharpen_off,
+        OutputMedia::Screen => t.export_sharpen_screen,
+        OutputMedia::Matte => t.export_sharpen_matte,
+        OutputMedia::Glossy => t.export_sharpen_glossy,
+    };
+    form.row(ui, t.export_sharpen, |ui| {
+        egui::ComboBox::from_id_salt("export_sharpen")
+            .selected_text(media_label(sharpen.media))
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for media in [
+                    OutputMedia::Off,
+                    OutputMedia::Screen,
+                    OutputMedia::Matte,
+                    OutputMedia::Glossy,
+                ] {
+                    let picked = ui.selectable_label(sharpen.media == media, media_label(media));
+                    if picked.clicked() && sharpen.media != media {
+                        set(next, OutputSharpening { media, ..sharpen });
+                    }
+                }
+            });
+    });
+    if sharpen.media == OutputMedia::Off {
+        return;
+    }
+    form.button_row(ui, t.amount, |ui| {
+        let amounts = [
+            (OutputAmount::Low, t.export_sharpen_low, None),
+            (OutputAmount::Standard, t.export_sharpen_standard, None),
+            (OutputAmount::High, t.export_sharpen_high, None),
+        ];
+        let picked = form::segmented(ui, &amounts, sharpen.amount);
+        if let Some(amount) = picked.filter(|&a| a != sharpen.amount) {
+            set(next, OutputSharpening { amount, ..sharpen });
+        }
+    });
 }
 
 /// The export page under its heading: where to, how big, and the footer.
@@ -117,6 +174,7 @@ fn draw_export_form(
                         }
                     });
             });
+            sharpen_rows(ui, &form, settings, next);
         });
     }
 

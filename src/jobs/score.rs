@@ -40,9 +40,11 @@ pub struct ScoreOutcome {
 pub fn score_photo(req: &ScoreRequest) -> Result<QualityScore, String> {
     let img = preview(&req.path)?;
     // Grain and Vignette are looks, not faults: grain would score as noise.
+    // Sharpening would score as focus the camera never had.
     let adj = crate::develop::Adjustments {
         vignette: Default::default(),
         grain: Default::default(),
+        sharpening: Default::default(),
         ..req.adj
     };
     let (w, h, rgba) = crate::develop::image_ops::bake_edited(&img, &adj, &req.touchups, req.rot);

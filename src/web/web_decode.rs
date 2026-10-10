@@ -179,7 +179,7 @@ impl WebExifJob {
 }
 
 /// One export: the source's bytes and its edits, baked into a JPEG at full
-/// resolution and then fit to `max_px`. `id` finds the destination folder,
+/// resolution and then shaped by `output`. `id` finds the destination folder,
 /// which is a JS object and stays on the main thread.
 pub struct WebExportJob {
     pub id: u64,
@@ -189,7 +189,7 @@ pub struct WebExportJob {
     pub adj: crate::develop::Adjustments,
     pub touchups: Vec<crate::develop::TouchUp>,
     pub rot: u8,
-    pub max_px: u32,
+    pub output: crate::export::Output,
 }
 
 impl WebExportJob {
@@ -200,7 +200,7 @@ impl WebExportJob {
             &self.adj,
             &self.touchups,
             self.rot,
-            self.max_px,
+            self.output,
         )
     }
 }

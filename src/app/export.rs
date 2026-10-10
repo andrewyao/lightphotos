@@ -444,7 +444,7 @@ impl App {
             .collect();
 
         let total = jobs.len();
-        let max_px = self.exports.settings.size.max_px();
+        let output = self.exports.settings.output();
         self.exports.progress = Some(ExportProgress {
             done: 0,
             total,
@@ -499,7 +499,7 @@ impl App {
                             adj,
                             touchups,
                             rot,
-                            max_px,
+                            output,
                         },
                     ),
                     Err(e) => pool.fail(src, output_folder.clone(), dest_dir.clone(), filename, e),
@@ -533,14 +533,14 @@ impl App {
             return;
         };
         let settings = &self.exports.settings;
-        let max_px = settings.size.max_px();
+        let output = settings.output();
         let job = |src: PathBuf, dest: ExportDest| ExportJob {
             adj: self.edits.get(&src).copied().unwrap_or_default(),
             touchups: self.touchups.get(&src).cloned().unwrap_or_default(),
             rot: self.rotations.get(&src).copied().unwrap_or(0),
             src,
             dest,
-            max_px,
+            output,
         };
 
         let total = paths.len();
@@ -906,6 +906,7 @@ mod status_tests {
             target: ExportTarget::Immich,
             size: ExportSize::LongEdge(120),
             album: AlbumChoice::None,
+            sharpen: Default::default(),
         };
         // Connected directly: `connect_immich` would save the key to the
         // developer's own Keychain.

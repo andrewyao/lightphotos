@@ -114,7 +114,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (adj.base_probe > 0.0) {
         pre = baseProbe(uv, pre, adj.base_probe);
     } else {
-        pre = localAdjust(uv, pre);
+        pre = sharpenAdjust(uv, pre, localAdjust(uv, pre));
     }
     r = pre.r;
     g = pre.g;

@@ -40,6 +40,12 @@ struct Adjust {
     dehaze: f32,
     // 1 when Texture reads the fine layer; the renderer builds it only then.
     fine_on: f32,
+    // Sharpening, derived on the CPU by `develop::Sharpen`. See
+    // `sharpenAdjust`.
+    sharp_gain: f32,
+    sharp_step: f32,
+    sharp_limit: f32,
+    sharp_mask: f32,
     // Vignette and Grain, derived on the CPU by `develop::Effects`. See
     // `effects`.
     vig_amount: f32,
@@ -252,6 +258,57 @@ fn localAdjust(uv: vec2<f32>, pre: vec3<f32>) -> vec3<f32> {
         out = out * exp2(2.2 * gain);
     }
     return out;
+}
+
+// Gaussian weights for Sharpening's 5x5 blur, by squared grid distance.
+// Must match `tap_weight` in develop/sharpen.rs.
+fn sharpenWeight(d2: i32) -> f32 {
+    if (d2 == 0) { return 1.0; }
+    if (d2 == 1) { return 0.7548403; }
+    if (d2 == 2) { return 0.5697828; }
+    if (d2 == 4) { return 0.3246525; }
+    if (d2 == 5) { return 0.2450614; }
+    if (d2 == 8) { return 0.1053992; }
+    return 0.0;
+}
+
+// Sharpening on `out`, the pixel at source `uv` after the other local edits,
+// against a blur of the pre-tone source around it: taps `sharp_step` texels
+// apart with CA removed and the touch-ups blended. Must match
+// `Sharpen::apply` and `sharpen::blur` as `bake_edited` feeds them.
+fn sharpenAdjust(uv: vec2<f32>, pre: vec3<f32>, out: vec3<f32>) -> vec3<f32> {
+    if (adj.sharp_gain == 0.0) {
+        return out;
+    }
+    // The pixel's luma from mip 0, like the taps: zoomed out, `pre` is a mip
+    // average, and comparing it with a mip-0 blur would subtract detail
+    // rather than add it. Denoise already read mip 0.
+    var center = pre;
+    if (adj.denoise == 0.0) {
+        center = applyTouchups(uv, sampleSrcLevel(uv).rgb);
+    }
+    var sum = vec3<f32>(0.0);
+    var wsum = 0.0;
+    let step = adj.sharp_step * vec2<f32>(adj.texel_w, adj.texel_h);
+    for (var dy = -2; dy <= 2; dy = dy + 1) {
+        for (var dx = -2; dx <= 2; dx = dx + 1) {
+            let tapUv = uv + vec2<f32>(f32(dx), f32(dy)) * step;
+            let tap = applyTouchups(tapUv, sampleSrcLevel(tapUv).rgb);
+            let w = sharpenWeight(dx * dx + dy * dy);
+            sum = sum + w * tap;
+            wsum = wsum + w;
+        }
+    }
+    let l = lumaGamma(center);
+    let diff = l - lumaGamma(sum / wsum);
+    var d = clamp(diff, -adj.sharp_limit, adj.sharp_limit);
+    if (adj.sharp_mask > 0.0) {
+        let t = clamp((abs(diff) - adj.sharp_mask * 0.5) / (adj.sharp_mask * 0.5), 0.0, 1.0);
+        d = d * t * t * (3.0 - 2.0 * t);
+    }
+    let goal = max(l + adj.sharp_gain * d, 0.0);
+    let eps = 1.0 / 255.0;
+    return out * pow((goal + eps) / (l + eps), 2.2);
 }
 
 struct VsOut {
