@@ -1,72 +1,31 @@
 //! The folders the user has added: the tops of the folder tree, remembered
-//! across launches natively so the landing page can list them. The web has
-//! one root, the picked folder; removing it closes it.
+//! across launches so the landing page can list them. Natively the list is
+//! the session's `folders`; on the web it is the folders `web_fs` keeps in
+//! IndexedDB, each of which the browser must allow again on a later visit.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::*;
 
-/// `prefs` key for the added folders.
-#[cfg(not(target_arch = "wasm32"))]
-const FOLDERS_PREF: &str = "folders";
-
-/// The remembered roots, and those of them that aren't a folder right now.
-/// Empty in tests, which must never read the developer's own list, and on
-/// the web, whose folders come back only through the picker.
-pub(super) fn remembered() -> (Vec<PathBuf>, HashSet<PathBuf>) {
-    #[cfg(any(test, target_arch = "wasm32"))]
-    {
-        (Vec::new(), HashSet::new())
+/// The saved session's folders, tidied by `add_root`, and those of them
+/// that aren't a folder right now. Empty on the web, whose kept folders
+/// `poll_saved_folders` adds once they load.
+pub(super) fn remembered(session: Option<&session::Session>) -> (Vec<PathBuf>, HashSet<PathBuf>) {
+    if cfg!(target_arch = "wasm32") {
+        return (Vec::new(), HashSet::new());
     }
-    #[cfg(not(any(test, target_arch = "wasm32")))]
-    {
-        let roots = crate::persist::prefs::load(FOLDERS_PREF)
-            .map(|json| parse_roots(&json))
-            .unwrap_or_default();
-        let missing = roots.iter().filter(|r| !r.is_dir()).cloned().collect();
-        (roots, missing)
-    }
-}
-
-/// The saved list, tidied by `add_root`. An unreadable list is dropped
-/// rather than stopping the launch.
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg_attr(test, allow(dead_code))]
-fn parse_roots(json: &str) -> Vec<PathBuf> {
-    let saved: Vec<PathBuf> = match serde_json::from_str(json) {
-        Ok(saved) => saved,
-        Err(e) => {
-            eprintln!("[folders] could not read the saved folders: {e}");
-            return Vec::new();
-        }
-    };
     let mut roots = Vec::new();
-    for root in &saved {
+    for root in session.map_or(&[][..], |s| s.folders.as_slice()) {
         add_root(&mut roots, root);
     }
-    roots
-}
-
-/// The web keeps its one folder through the picker's handle instead.
-#[cfg(not(target_arch = "wasm32"))]
-fn save_roots(roots: &[PathBuf]) {
-    // A test must never write the developer's own list.
-    if cfg!(test) {
-        return;
-    }
-    let saved = serde_json::to_string(roots)
-        .map_err(|e| e.to_string())
-        .and_then(|json| crate::persist::prefs::save(FOLDERS_PREF, &json));
-    if let Err(e) = saved {
-        eprintln!("[folders] could not save the folders: {e}");
-    }
+    let missing = roots.iter().filter(|r| !r.is_dir()).cloned().collect();
+    (roots, missing)
 }
 
 /// Add `dir` to `roots`, which stays sorted with no root inside another.
 /// A folder already in the tree changes nothing; a folder holding roots
 /// takes their place. Returns whether `roots` changed.
-#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn add_root(roots: &mut Vec<PathBuf>, dir: &Path) -> bool {
     if roots.iter().any(|r| dir.starts_with(r)) {
         return false;
@@ -93,22 +52,13 @@ pub(super) fn folder_chain(root: &Path, dir: &Path) -> Vec<PathBuf> {
 }
 
 impl App {
-    /// The root whose tree holds `dir`.
-    pub(super) fn root_of(&self, dir: &Path) -> Option<&Path> {
-        self.folder_roots
-            .iter()
-            .find(|r| dir.starts_with(r))
-            .map(PathBuf::as_path)
-    }
-
-    /// Add `dir` to the tree's roots and remember it, unless a root already
-    /// holds it.
+    /// Add `dir` to the tree's roots, unless a root already holds it. The
+    /// session saves the list.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn add_root(&mut self, dir: &Path) {
         self.missing_roots.remove(dir);
         if add_root(&mut self.folder_roots, dir) {
             self.missing_roots.retain(|r| !r.starts_with(dir));
-            save_roots(&self.folder_roots);
         }
     }
 
@@ -116,7 +66,12 @@ impl App {
     /// on the way, so `dir` shows as a row.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn reveal_folder(&mut self, dir: &Path) {
-        let Some(root) = self.root_of(dir).map(Path::to_path_buf) else {
+        let Some(root) = self
+            .folder_roots
+            .iter()
+            .find(|r| dir.starts_with(r))
+            .cloned()
+        else {
             return;
         };
         for folder in folder_chain(&root, dir) {
@@ -134,8 +89,8 @@ impl App {
         if self.folder_roots.len() == before {
             return;
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        save_roots(&self.folder_roots);
+        #[cfg(target_arch = "wasm32")]
+        self.forget_web_root(root);
         self.missing_roots.remove(root);
         self.expanded.retain(|p| !p.starts_with(root));
         self.subdirs.retain(|p, _| !p.starts_with(root));
@@ -147,7 +102,7 @@ impl App {
             let next = self
                 .folder_roots
                 .iter()
-                .find(|r| !self.missing_roots.contains(*r))
+                .find(|r| self.root_ready(r))
                 .cloned();
             match next {
                 Some(next) => self.open(next),
@@ -155,6 +110,19 @@ impl App {
             }
         }
         self.request_redraw();
+    }
+
+    /// Whether `root` can open without asking: natively, it is there; on
+    /// the web, the browser has allowed it on this visit.
+    fn root_ready(&self, root: &Path) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            !self.missing_roots.contains(root)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.web_root_allowed(root)
+        }
     }
 
     /// Back to the landing page with no folder showing, finishing the jobs
@@ -222,10 +190,17 @@ mod tests {
     }
 
     #[test]
-    fn an_unreadable_saved_list_gives_no_folders() {
-        assert_eq!(parse_roots("not json"), Vec::<PathBuf>::new());
-        assert_eq!(parse_roots(r#"{"root":3}"#), Vec::<PathBuf>::new());
-        assert_eq!(parse_roots(r#"["/b","/a","/a/x"]"#), paths(&["/a", "/b"]));
+    fn the_saved_folders_are_tidied_and_missing_ones_marked() {
+        let saved = session::Session {
+            folders: paths(&["/lp-gone/b", "/lp-gone/a", "/lp-gone/a/x"]),
+            dir: None,
+            photo: None,
+            view: session::SessionView::Grid,
+        };
+        let (roots, missing) = remembered(Some(&saved));
+        assert_eq!(roots, paths(&["/lp-gone/a", "/lp-gone/b"]));
+        assert_eq!(missing, roots.iter().cloned().collect());
+        assert_eq!(remembered(None), (Vec::new(), HashSet::new()));
     }
 
     #[test]
@@ -323,19 +298,26 @@ mod tests {
         assert!(!app.is_missing_root(&back));
     }
 
-    /// A real click on the + in the Grid's Folders panel.
+    /// A real click on Add Folder under the Grid's folder list.
     #[test]
-    fn the_folders_plus_opens_the_picker() {
+    fn add_folder_opens_the_picker() {
         use crate::app::test_support::{click, settled};
 
+        let folder = photos("roots-plus");
         let mut app = App::new(None);
-        app.open(photos("roots-plus"));
+        app.open(folder.clone());
         let painted = settled(&mut app);
+        let name = folder.file_name().unwrap().to_string_lossy().into_owned();
         assert!(
             !painted.texts().contains(&crate::i18n::t().open_folder),
             "the Grid's header no longer has Open Folder"
         );
-        let (actions, _) = click(&mut app, painted.pos_of("+"));
+        let add = painted.pos_of(crate::i18n::t().add_folder);
+        assert!(
+            add.y > painted.pos_of(&name).y,
+            "Add Folder sits under the folder it would add after"
+        );
+        let (actions, _) = click(&mut app, add);
         assert_eq!(actions, vec![crate::ui::UiAction::PickFolder]);
     }
 
@@ -351,9 +333,8 @@ mod tests {
         let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
         assert!(painted.texts().contains(&name(&a).as_str()));
         assert!(
-            painted.texts().contains(&"+"),
-            "a + adds another folder: {:?}",
-            painted.texts()
+            painted.texts().contains(&crate::i18n::t().add_folder),
+            "Add Folder adds another folder"
         );
         let open_folder = crate::i18n::t().open_folder;
         assert_eq!(

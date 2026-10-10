@@ -89,8 +89,8 @@ async fn file_facts(
 }
 
 pub(crate) struct Web {
-    /// A Reopen Session waiting on its folder's listing, then on each
-    /// listing down to its subfolder.
+    /// The startup session restore waiting on its folder's listing, then on
+    /// each listing down to its subfolder.
     session_restore: Option<session::Session>,
     /// True while `showDirectoryPicker` and its listing are in flight. Disables
     /// the landing page's "Choose Folder" button so a second picker can't open.
@@ -100,11 +100,16 @@ pub(crate) struct Web {
     full_cjk_requested: Arc<std::sync::atomic::AtomicBool>,
     folder_tx: Sender<Result<crate::web::web_fs::PickedFolder, String>>,
     folder_rx: Receiver<Result<crate::web::web_fs::PickedFolder, String>>,
-    /// File handles for the open folder's images, keyed like the playlist
+    /// The names of the folders kept from earlier visits, read once at
+    /// startup so the Folders list shows them before any is allowed. `None`
+    /// once they have landed.
+    saved_folders_rx: Option<Receiver<Result<Vec<PathBuf>, String>>>,
+    /// File handles for the listed folders' images, keyed like the playlist
     /// entries. A picked folder has no OS path, so every read goes through these.
     file_handles: HashMap<PathBuf, web_sys::FileSystemFileHandle>,
     /// Directory handles for every folder browsed so far, keyed by relative
-    /// path with the picked root's name first. The catalog's sidecar handle
+    /// path with the root's kept name first. A kept root has none until the
+    /// user allows it again on this visit. The catalog's sidecar handle
     /// switches to the current folder's entry on each navigation.
     dir_handles: HashMap<PathBuf, web_sys::FileSystemDirectoryHandle>,
     /// Per-folder thumbnail cache index, shared by that folder's async writes.
@@ -130,9 +135,9 @@ pub(crate) struct Web {
     /// deferred by the latest action.
     nav_generation: u64,
     pending_nav_generation: u64,
-    /// Bumped only when a folder pick replaces the handle maps. Thumbnail jobs
+    /// Bumped only when a pick replaces a root's handles. Thumbnail jobs
     /// carry it so results for an old pick are dropped: browser paths start
-    /// with the folder's name, so re-picking a same-named folder would
+    /// with the root's name, so picking the same folder again would
     /// otherwise match stale jobs. Not `nav_generation`, which bumps on
     /// every tree action and would cancel decodes while arrowing through the tree.
     handle_generation: u64,
@@ -192,7 +197,12 @@ impl Web {
         let (dirlist_tx, dirlist_rx) = std::sync::mpsc::channel();
         let (export_tx, export_rx) = std::sync::mpsc::channel();
         let (paste_tx, paste_rx) = std::sync::mpsc::channel();
+        let (saved_tx, saved_rx) = std::sync::mpsc::channel();
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = saved_tx.send(web_fs::saved_folder_names().await);
+        });
         Self {
+            saved_folders_rx: Some(saved_rx),
             session_restore: None,
             folder_pending: false,
             full_cjk_requested: Default::default(),
@@ -413,51 +423,114 @@ impl App {
         self.request_redraw();
     }
 
-    /// Reopen Session: list the last picked folder again, or show the picker
-    /// if it can't be. `poll_folder_pick` restores the rest of `session`.
-    /// Must run inside the click's user activation, which the browser's
-    /// permission prompt and the fallback picker both need.
-    pub(crate) fn request_session_reopen(&mut self, session: super::session::Session) {
+    /// List the last session's folder again at startup, if the browser
+    /// still allows it without asking. `poll_folder_pick` restores the rest
+    /// of `session`; when access is gone the home page stays, its kept
+    /// folders one click from being allowed.
+    pub(crate) fn request_session_restore(&mut self, session: super::session::Session) {
         if self.web.folder_pending {
             return;
         }
+        let Some(name) = session
+            .place()
+            .map(|(root, _)| root.to_string_lossy().into_owned())
+        else {
+            return;
+        };
         self.web.folder_pending = true;
         self.web.session_restore = Some(session);
         let tx = self.web.folder_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = match web_fs::reopen_saved_folder().await {
-                Ok(picked) => Ok(picked),
-                Err(e) => {
-                    web_sys::console::warn_1(
-                        &format!("[web] Reopen Session falls back to the picker: {e}").into(),
-                    );
-                    web_fs::pick_and_list_folder().await
-                }
-            };
-            let _ = tx.send(result);
+            let _ = tx.send(web_fs::reopen_saved_folder(name, false).await);
         });
         self.request_redraw();
     }
 
+    /// A kept root the browser hasn't allowed on this visit: ask for access
+    /// and list it, as a pick does. Must run inside a click or key press's
+    /// user activation, which the permission prompt needs.
+    pub(super) fn request_root_grant(&mut self, root: &Path) {
+        if self.web.folder_pending {
+            return;
+        }
+        self.web.folder_pending = true;
+        self.web.session_restore = None;
+        let name = root.to_string_lossy().into_owned();
+        let tx = self.web.folder_tx.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = tx.send(web_fs::reopen_saved_folder(name, true).await);
+        });
+        self.request_redraw();
+    }
+
+    /// Whether `root`'s handles are here, so it can open without asking.
+    pub(super) fn web_root_allowed(&self, root: &Path) -> bool {
+        self.web.dir_handles.contains_key(root)
+    }
+
+    /// Drop every handle, listing and cache index under `root`, and stop
+    /// keeping it for later visits. Its files stay.
+    pub(super) fn forget_web_root(&mut self, root: &Path) {
+        self.drop_web_root_handles(root);
+        let name = root.to_string_lossy().into_owned();
+        wasm_bindgen_futures::spawn_local(web_fs::forget_folder(name));
+    }
+
+    fn drop_web_root_handles(&mut self, root: &Path) {
+        self.web.file_handles.retain(|p, _| !p.starts_with(root));
+        self.web.dir_handles.retain(|p, _| !p.starts_with(root));
+        self.web.thumb_cleanup.retain(|p, _| !p.starts_with(root));
+        self.subdirs.retain(|p, _| !p.starts_with(root));
+    }
+
+    /// Adds the folders kept from earlier visits to the Folders list once
+    /// their names land. Returns true until they have.
+    fn poll_saved_folders(&mut self) -> bool {
+        let Some(rx) = &self.web.saved_folders_rx else {
+            return false;
+        };
+        let names = match rx.try_recv() {
+            Ok(names) => names,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(Vec::new()),
+        };
+        self.web.saved_folders_rx = None;
+        match names {
+            Ok(names) => {
+                for name in &names {
+                    super::folders::add_root(&mut self.folder_roots, name);
+                }
+                self.request_redraw();
+            }
+            Err(e) => web_sys::console::warn_1(
+                &format!("[web] could not read the kept folders: {e}").into(),
+            ),
+        }
+        false
+    }
+
     /// Loads a finished pick through `load_playlist`, like native
-    /// `load_folder`. Returns true while a pick is still open.
+    /// `load_folder`. Returns true while a pick is still open or the kept
+    /// folders' names are still loading.
     pub(crate) fn poll_folder_pick(&mut self) -> bool {
+        let saved_pending = self.poll_saved_folders();
         if let Ok(result) = self.web.folder_rx.try_recv() {
             self.web.folder_pending = false;
             let restore = self.web.session_restore.take();
             match result {
                 Ok(picked) => {
-                    // A new folder invalidates pending listings, deferred
-                    // navigation, and thumbnail decodes using the old handles.
+                    // A pick invalidates pending listings, deferred
+                    // navigation, and thumbnail decodes using old handles.
+                    // It replaces only its own root's handles; other roots
+                    // keep theirs.
                     self.supersede_web_pending_nav();
                     self.invalidate_web_thumb_handles();
                     self.fetch_cjk_font_for(picked.handles.keys().chain(picked.dir_handles.keys()));
-                    self.web.file_handles = picked.handles;
-                    self.web.dir_handles = picked.dir_handles;
-                    self.web.thumb_cleanup.clear();
-                    self.subdirs.clear();
-
                     let root = picked.dir.clone();
+                    self.drop_web_root_handles(&root);
+                    self.web.file_handles.extend(picked.handles);
+                    self.web.dir_handles.extend(picked.dir_handles);
+
                     let mut first_level: Vec<PathBuf> = self
                         .web
                         .dir_handles
@@ -474,14 +547,18 @@ impl App {
                     self.catalog.set_wasm_dir_handle(root_handle);
                     let playlist = Playlist::from_entries(root.clone(), picked.entries);
                     self.load_playlist(playlist, root.clone());
-                    // Show the folder tree only once the playlist is loaded.
-                    self.folder_roots = vec![root.clone()];
-                    self.expanded = std::collections::HashSet::from([root.clone()]);
+                    // Show the root in the tree only once the playlist is loaded.
+                    super::folders::add_root(&mut self.folder_roots, &root);
+                    self.expanded.insert(root.clone());
                     self.mode = ViewMode::Grid;
-                    // The picker fallback may have opened a different folder.
-                    self.web.session_restore = restore.filter(|s| s.root == root);
+                    self.web.session_restore = restore;
                     self.continue_web_session_restore();
                 }
+                // The startup restore asked for nothing, so its failure
+                // leaves the home page without an error.
+                Err(e) if restore.is_some() => web_sys::console::warn_1(
+                    &format!("[web] the last session's folder needs a click: {e}").into(),
+                ),
                 Err(e) => {
                     // Usually a cancelled picker, but a permission or listing
                     // failure lands here too, so always show it.
@@ -493,7 +570,7 @@ impl App {
             }
             self.request_redraw();
         }
-        self.web.folder_pending
+        self.web.folder_pending || saved_pending
     }
 
     /// The wasm32 version of `request_working_thumbs`. Reads each missing
@@ -1368,6 +1445,13 @@ impl App {
                 .dirlist_inflight
                 .contains(&(dir.clone(), generation))
         {
+            return;
+        }
+        if self.folder_roots.contains(&dir) && !self.web_root_allowed(&dir) {
+            // A kept root from an earlier visit. The grant lists it and
+            // loads it into the grid.
+            self.supersede_web_pending_nav();
+            self.request_root_grant(&dir);
             return;
         }
         let Some(handle) = self.web.dir_handles.get(&dir).cloned() else {

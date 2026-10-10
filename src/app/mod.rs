@@ -468,8 +468,7 @@ pub(crate) struct App {
     shown_origin: crate::jobs::thumbnail::Origin,
     /// A file or folder requested before the window and renderer existed.
     pub(crate) pending_initial: Option<PathBuf>,
-    /// The last session saved, which the landing page's Reopen Session
-    /// button restores.
+    /// The last session saved, which the next launch restores.
     session: Option<session::Session>,
     /// The browser build's file handles, channels and decode bookkeeping.
     #[cfg(target_arch = "wasm32")]
@@ -735,7 +734,12 @@ impl App {
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
         let (renderer_init_tx, renderer_init_rx) = std::sync::mpsc::channel();
-        let (folder_roots, missing_roots) = folders::remembered();
+        // A test must never read the developer's own session.
+        #[cfg(test)]
+        let session = None;
+        #[cfg(not(test))]
+        let session = session::Session::load();
+        let (folder_roots, missing_roots) = folders::remembered(session.as_ref());
         Self {
             window: None,
             renderer: None,
@@ -751,11 +755,7 @@ impl App {
             shown: Shown::Nothing,
             shown_origin: crate::jobs::thumbnail::Origin::Decoded,
             pending_initial: initial,
-            // A test must never read the developer's own session.
-            #[cfg(test)]
-            session: None,
-            #[cfg(not(test))]
-            session: session::Session::load(),
+            session,
             #[cfg(target_arch = "wasm32")]
             web: web::Web::new(),
             mode: ViewMode::Grid,
@@ -894,8 +894,8 @@ impl App {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                self.folder_roots = vec![path.clone()];
-                self.expanded = HashSet::from([path.clone()]);
+                folders::add_root(&mut self.folder_roots, &path);
+                self.expanded.insert(path.clone());
                 self.ensure_subdirs(&path);
                 // Browser paths are synthetic, backed by directory handles
                 // whose listing is async, so `Playlist::from_dir` can't run.
@@ -924,8 +924,8 @@ impl App {
                 }
                 #[cfg(target_arch = "wasm32")]
                 {
-                    self.folder_roots = vec![parent.clone()];
-                    self.expanded = HashSet::from([parent.clone()]);
+                    folders::add_root(&mut self.folder_roots, &parent);
+                    self.expanded.insert(parent.clone());
                     self.ensure_subdirs(&parent);
                 }
                 self.folder_sel = Some(parent);
@@ -1336,7 +1336,6 @@ impl App {
                 }
                 ui::UiAction::RemoveFolder(p) => self.remove_root(&p),
                 ui::UiAction::PickFolder => self.open_folder_picker(),
-                ui::UiAction::ReopenSession => self.reopen_session(),
                 ui::UiAction::EnterGrid => self.enter_grid(),
                 ui::UiAction::Focus(region) => {
                     self.focus = region;

@@ -89,6 +89,8 @@ fn finish_window_setup(
         jobs::loader::mark("opening initial path");
         app.open(path);
         jobs::loader::mark("initial open() returned");
+    } else {
+        app.restore_last_session();
     }
 }
 

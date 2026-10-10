@@ -31,16 +31,19 @@ pub struct PickedFolder {
     pub dir_handles: HashMap<PathBuf, FileSystemDirectoryHandle>,
 }
 
-/// Show the folder picker and list the chosen folder's images and
-/// subdirectories. Requests `readwrite` so catalog sidecars can be saved.
-/// A cancelled picker and a listing failure both return `Err`.
+/// Show the folder picker, keep the chosen folder for later visits, and
+/// list its images and subdirectories. Requests `readwrite` so catalog
+/// sidecars can be saved. A cancelled picker and a listing failure both
+/// return `Err`.
 pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
     let window = web_sys::window().ok_or("no window")?;
     // tools/web-bench hands over an OPFS folder here, since an automated
     // browser cannot drive the native picker.
     if let Ok(root) = js_sys::Reflect::get(&window, &"__lpTestRoot".into()) {
         if !root.is_undefined() {
-            return list_root(root.unchecked_into()).await;
+            let handle: FileSystemDirectoryHandle = root.unchecked_into();
+            let name = handle.name();
+            return list_root(handle, name).await;
         }
     }
     let opts = DirectoryPickerOptions::new();
@@ -53,33 +56,65 @@ pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
     .await
     .map_err(|e| js_error_string(&e))?
     .unchecked_into();
-    // Reopen Session needs this handle after a reload. Losing it costs only
-    // that button, so it doesn't fail the pick.
-    if let Err(e) = JsFuture::from(save_root_handle(&handle)).await {
-        web_sys::console::warn_1(
-            &format!(
-                "[web] could not keep the folder for Reopen Session: {}",
-                js_error_string(&e)
-            )
-            .into(),
-        );
-    }
-    list_root(handle).await
+    // The Folders list needs this handle after a reload. Losing it costs
+    // only that, so it doesn't fail the pick.
+    let name = match JsFuture::from(keep_folder(&handle)).await {
+        Ok(name) => name.as_string().unwrap_or_else(|| handle.name()),
+        Err(e) => {
+            web_sys::console::warn_1(
+                &format!(
+                    "[web] could not keep the folder for the next visit: {}",
+                    js_error_string(&e)
+                )
+                .into(),
+            );
+            handle.name()
+        }
+    };
+    list_root(handle, name).await
 }
 
-/// List the last picked folder again, asking for `readwrite` access if the
-/// browser has dropped it. Fails when no folder was kept, access is denied,
-/// or the listing fails.
-pub async fn reopen_saved_folder() -> Result<PickedFolder, String> {
-    let handle: FileSystemDirectoryHandle = JsFuture::from(saved_root_handle())
+/// List a kept folder again. When the browser has dropped `readwrite`
+/// access, `ask` asks for it again, which needs a click's user activation;
+/// without `ask` that fails. Fails too when no folder of that name was kept,
+/// access is denied, or the listing fails.
+pub async fn reopen_saved_folder(name: String, ask: bool) -> Result<PickedFolder, String> {
+    let handle: FileSystemDirectoryHandle = JsFuture::from(granted_folder(&name, ask))
         .await
         .map_err(|e| js_error_string(&e))?
         .unchecked_into();
-    list_root(handle).await
+    list_root(handle, name).await
 }
 
-async fn list_root(handle: FileSystemDirectoryHandle) -> Result<PickedFolder, String> {
-    let root = PathBuf::from(handle.name());
+/// The names of the folders kept from earlier visits, each the first
+/// component of its photos' paths. Reading them needs no permission.
+pub async fn saved_folder_names() -> Result<Vec<PathBuf>, String> {
+    let names = JsFuture::from(saved_folder_names_js())
+        .await
+        .map_err(|e| js_error_string(&e))?;
+    Ok(js_sys::Array::from(&names)
+        .iter()
+        .filter_map(|n| n.as_string())
+        .map(PathBuf::from)
+        .collect())
+}
+
+/// Stop keeping a folder. Its files stay as they are.
+pub async fn forget_folder(name: String) {
+    if let Err(e) = JsFuture::from(forget_folder_js(&name)).await {
+        web_sys::console::warn_1(
+            &format!("[web] could not forget the folder: {}", js_error_string(&e)).into(),
+        );
+    }
+}
+
+/// List `handle` as the root called `name`, which is unique among the
+/// kept folders so two folders both called Photos don't share paths.
+async fn list_root(
+    handle: FileSystemDirectoryHandle,
+    name: String,
+) -> Result<PickedFolder, String> {
+    let root = PathBuf::from(name);
     let listing = list_dir(&root, &handle).await?;
 
     let mut handles = HashMap::new();
@@ -104,9 +139,13 @@ async fn list_root(handle: FileSystemDirectoryHandle) -> Result<PickedFolder, St
 }
 
 // A directory handle survives a reload only in IndexedDB, which stores it by
-// structured clone. `localStorage` holds only strings.
+// structured clone. `localStorage` holds only strings. Each kept folder is
+// stored under `folder:<name>`; before there were several, the one kept
+// folder sat under `root`, which the first read moves.
 #[wasm_bindgen(inline_js = r#"
 const STORE = "handles";
+const PREFIX = "folder:";
+const LEGACY = "root";
 function openDb() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open("lightphotos-folders", 1);
@@ -115,45 +154,97 @@ function openDb() {
     req.onerror = () => reject(req.error);
   });
 }
-export async function saveRootHandle(handle) {
+function request(req) {
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+// One transaction. `body` must issue its requests without awaiting anything
+// else, or the transaction commits under it.
+async function run(mode, body) {
   const db = await openDb();
   try {
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put(handle, "root");
+    const tx = db.transaction(STORE, mode);
+    const done = new Promise((resolve, reject) => {
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
     });
+    const out = await body(tx.objectStore(STORE));
+    await done;
+    return out;
   } finally {
     db.close();
   }
 }
-export async function savedRootHandle() {
-  const db = await openDb();
-  let handle;
-  try {
-    handle = await new Promise((resolve, reject) => {
-      const req = db.transaction(STORE).objectStore(STORE).get("root");
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-  } finally {
-    db.close();
+function uniqueName(base, taken) {
+  if (!taken.includes(base)) return base;
+  for (let n = 2; ; n++) {
+    const name = `${base} (${n})`;
+    if (!taken.includes(name)) return name;
   }
+}
+// Every kept folder as [name, handle], after moving the legacy entry.
+async function keptFolders() {
+  const [keys, handles] = await run("readonly", (s) =>
+    Promise.all([request(s.getAllKeys()), request(s.getAll())]));
+  const kept = [];
+  let legacy = null;
+  keys.forEach((key, i) => {
+    if (key === LEGACY) legacy = handles[i];
+    else if (typeof key === "string" && key.startsWith(PREFIX)) {
+      kept.push([key.slice(PREFIX.length), handles[i]]);
+    }
+  });
+  if (legacy) {
+    const name = uniqueName(legacy.name, kept.map(([n]) => n));
+    await run("readwrite", (s) => {
+      s.put(legacy, PREFIX + name);
+      s.delete(LEGACY);
+    });
+    kept.push([name, legacy]);
+  }
+  return kept;
+}
+export async function savedFolderNames() {
+  return (await keptFolders()).map(([name]) => name);
+}
+// The kept name of `handle`'s folder, keeping it under a new unique name
+// if it isn't kept yet.
+export async function keepFolder(handle) {
+  const kept = await keptFolders();
+  for (const [name, other] of kept) {
+    if (await other.isSameEntry(handle)) return name;
+  }
+  const name = uniqueName(handle.name, kept.map(([n]) => n));
+  await run("readwrite", (s) => { s.put(handle, PREFIX + name); });
+  return name;
+}
+export async function grantedFolder(name, ask) {
+  await keptFolders();
+  const handle = await run("readonly", (s) => request(s.get(PREFIX + name)));
   if (!handle) throw new Error("no saved folder");
   const mode = { mode: "readwrite" };
   if ((await handle.queryPermission(mode)) !== "granted"
-      && (await handle.requestPermission(mode)) !== "granted") {
+      && (!ask || (await handle.requestPermission(mode)) !== "granted")) {
     throw new Error("folder access denied");
   }
   return handle;
 }
+export async function forgetFolder(name) {
+  await run("readwrite", (s) => { s.delete(PREFIX + name); });
+}
 "#)]
 extern "C" {
-    #[wasm_bindgen(js_name = saveRootHandle)]
-    fn save_root_handle(handle: &FileSystemDirectoryHandle) -> js_sys::Promise;
-    #[wasm_bindgen(js_name = savedRootHandle)]
-    fn saved_root_handle() -> js_sys::Promise;
+    #[wasm_bindgen(js_name = keepFolder)]
+    fn keep_folder(handle: &FileSystemDirectoryHandle) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = grantedFolder)]
+    fn granted_folder(name: &str, ask: bool) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = savedFolderNames)]
+    fn saved_folder_names_js() -> js_sys::Promise;
+    #[wasm_bindgen(js_name = forgetFolder)]
+    fn forget_folder_js(name: &str) -> js_sys::Promise;
 }
 
 /// The image files and immediate subdirectories of one directory handle.

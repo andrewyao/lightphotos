@@ -145,9 +145,6 @@ pub enum UiAction {
     RemoveFolder(std::path::PathBuf),
     /// Open the folder picker (`App::open_folder_picker`).
     PickFolder,
-    /// Reopen where the user left off, or the folder picker when that folder
-    /// is gone (`App::reopen_session`).
-    ReopenSession,
     /// Leave the Loupe for the Grid, as the G key does.
     EnterGrid,
     CropGrab(CropEdge),
@@ -330,11 +327,11 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     out
 }
 
-/// The "LightPhotos" wordmark and Open Folder at the left; help, Tour and
-/// Settings at the right, on every screen. The wordmark copies the
-/// lightphotos.app site's `.lp-wordmark` style: "Light" in the default text
-/// color, "Photos" in italic brand blue. The web canvas fills the viewport, so
-/// the site's HTML header can't wrap it; native draws the same header.
+/// The "LightPhotos" wordmark at the left; help, Tour and Settings at the
+/// right, on every screen. The wordmark copies the lightphotos.app site's
+/// `.lp-wordmark` style: "Light" in the default text color, "Photos" in
+/// italic brand blue. The web canvas fills the viewport, so the site's HTML
+/// header can't wrap it; native draws the same header.
 fn app_header(ui: &mut egui::Ui, out: &mut FrameOutput) {
     let panel = egui::Panel::top("lp_app_header").show_inside(ui, |ui| {
         ui.add_space(4.0);

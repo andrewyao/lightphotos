@@ -1,9 +1,9 @@
 //! The home page, shown when no folder is open. It draws the Grid's own
 //! layout with nothing in it, so the window looks the way it will once a
 //! folder opens and the tour can point at each region: the left panel lists
-//! the folders added before under its Open Folder or + button, the toolbars and
-//! rail are switched off, and the content area is a field of empty tiles
-//! under the prompt and the Open Folder and Reopen Session buttons.
+//! the folders added before with Add Folder under them, or Open Folder, the
+//! toolbars and rail are switched off, and the content area is a field of
+//! empty tiles under the prompt and the Open Folder button.
 
 use super::*;
 
@@ -25,7 +25,7 @@ const PANEL_WIDTH: f32 = 220.0;
 const PANEL_MARGIN: f32 = 12.0;
 
 /// The folders added before, each a row that opens it, as the Grid's tree
-/// lists them, under the panel's Open Folder or + button.
+/// lists them, with Add Folder under them; Open Folder before there are any.
 fn left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let width = font_size::px(ui.style(), PANEL_WIDTH);
     let panel = egui::Panel::left("folders")
@@ -36,65 +36,13 @@ fn left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 let margin = font_size::px(ui.style(), PANEL_MARGIN);
                 ui.add_space(margin);
             }
-            grid::add_folder_button(ui, app, out);
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for root in app.folder_roots() {
-                        grid::folder_node(ui, app, root, 0, out);
-                    }
-                });
+            grid::folder_list(ui, app, out);
         });
     tour::anchor(ui.ctx(), tour::TourStep::Folders, panel.response.rect);
 }
 
 const BUTTON_WIDTH: f32 = 220.0;
 const BUTTON_HEIGHT: f32 = 52.0;
-const BUTTON_GAP: f32 = 12.0;
-
-/// Open Folder, with Reopen Session beside it once a folder has been opened
-/// before, centred as a row.
-fn buttons(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
-    let style = ui.style().clone();
-    let size = egui::vec2(
-        font_size::px(&style, BUTTON_WIDTH),
-        font_size::px(&style, BUTTON_HEIGHT),
-    );
-    let gap = font_size::px(&style, BUTTON_GAP);
-    let session = app.saved_session();
-    let row_w = if session.is_some() {
-        2.0 * size.x + gap
-    } else {
-        size.x
-    };
-    ui.allocate_ui_with_layout(
-        egui::vec2(row_w, size.y),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = gap;
-            open_folder_button(ui, app, size, out);
-            if let Some(session) = session {
-                let reopen = ui
-                    .add_enabled(
-                        !app.folder_pick_pending(),
-                        egui::Button::new(
-                            egui::RichText::new(t().reopen_session)
-                                .size(font_size::px(&style, 18.0)),
-                        )
-                        .corner_radius(10.0)
-                        .min_size(size),
-                    )
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .on_hover_text((t().reopen_session_tip)(
-                        &session.root.display().to_string(),
-                    ));
-                if reopen.clicked() {
-                    out.actions.push(UiAction::ReopenSession);
-                }
-            }
-        },
-    );
-}
 
 /// The home page's one call to action, filled in the brand blue so it reads
 /// as the thing to press.
@@ -229,7 +177,11 @@ fn content(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                             ui.add_space(font_size::px(ui.style(), 10.0));
                             ui.add(egui::Label::new(tagline).wrap());
                             ui.add_space(font_size::px(ui.style(), 40.0));
-                            buttons(ui, app, out);
+                            let size = egui::vec2(
+                                font_size::px(ui.style(), BUTTON_WIDTH),
+                                font_size::px(ui.style(), BUTTON_HEIGHT),
+                            );
+                            open_folder_button(ui, app, size, out);
                             ui.add_space(font_size::px(ui.style(), 20.0));
                             allow_note(ui);
                             if ui.link(t().take_tour).on_hover_text(t().tour_tip).clicked() {

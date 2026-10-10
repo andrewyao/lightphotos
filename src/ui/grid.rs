@@ -18,48 +18,49 @@ pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutpu
     let panel = egui::Panel::left("folders")
         .resizable(false)
         .exact_size(panel_width)
-        .show_inside(ui, |ui| {
-            add_folder_button(ui, app, out);
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for root in app.folder_roots() {
-                        folder_node(ui, app, root, 0, out);
-                    }
-                });
-        });
+        .show_inside(ui, |ui| folder_list(ui, app, out));
     tour::anchor(ui.ctx(), tour::TourStep::Folders, panel.response.rect);
 }
 
-/// The Folders panel's way to add a folder: Open Folder before there is
-/// any, then a + in the panel's top-right corner. The web has one folder,
-/// which a pick replaces, so it keeps Open Folder.
-pub(super) fn add_folder_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+/// The Folders panel's body: Open Folder before there is any folder, then
+/// the folder tree with Add Folder under its last row, where an added
+/// folder shows.
+pub(super) fn folder_list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
     let pending = app.folder_pick_pending();
-    let clicked = if cfg!(target_arch = "wasm32") || app.folder_roots().is_empty() {
-        let label = if pending { t.opening } else { t.open_folder };
+    let pick = |ui: &mut egui::Ui, out: &mut FrameOutput, label, role, tip| {
         let b = form::Button {
-            label,
-            role: form::Role::Primary,
+            label: if pending { t.opening } else { label },
+            role,
             enabled: !pending,
         };
-        form::button(ui, &b)
-            .on_hover_text(crate::i18n::keys(t.open_folder_tip))
+        let tip = crate::i18n::keys(tip);
+        if form::button(ui, &b)
+            .on_hover_text(tip.as_ref())
+            .on_disabled_hover_text(tip.as_ref())
             .clicked()
-    } else {
-        let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
-        let corner = egui::Layout::right_to_left(egui::Align::Center);
-        ui.allocate_ui_with_layout(row, corner, |ui| {
-            ui.add_enabled(!pending, egui::Button::new("+"))
-                .on_hover_text(crate::i18n::keys(t.add_folder_tip))
-                .clicked()
-        })
-        .inner
+        {
+            out.actions.push(UiAction::PickFolder);
+        }
     };
-    if clicked {
-        out.actions.push(UiAction::PickFolder);
+    if app.folder_roots().is_empty() {
+        pick(
+            ui,
+            out,
+            t.open_folder,
+            form::Role::Primary,
+            t.open_folder_tip,
+        );
+        return;
     }
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for root in app.folder_roots() {
+                folder_node(ui, app, root, 0, out);
+            }
+            pick(ui, out, t.add_folder, form::Role::Cancel, t.add_folder_tip);
+        });
 }
 
 /// Width of the widest visible folder row, measured in the body font that
@@ -234,13 +235,7 @@ fn disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
 /// One folder row. Recurses into expanded folders. A root's row also has a
 /// right-click menu to remove it, and a root that isn't there right now is
 /// greyed out and doesn't open.
-pub(super) fn folder_node(
-    ui: &mut egui::Ui,
-    app: &App,
-    path: &Path,
-    depth: usize,
-    out: &mut FrameOutput,
-) {
+fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mut FrameOutput) {
     let selected = app.folder_sel().as_deref() == Some(path);
     let row = ui.horizontal(|ui| {
         ui.add_space(depth as f32 * disclosure_w(ui.style()));

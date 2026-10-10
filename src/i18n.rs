@@ -193,12 +193,9 @@ pub struct Strings {
     /// folder is picked. Empty off the web, where the picker is native.
     pub landing_allow_note: &'static str,
     pub opening: &'static str,
-    pub reopen_session: &'static str,
-    /// The folder Reopen Session will open.
-    pub reopen_session_tip: fn(&str) -> String,
     pub picker_title: &'static str,
-    /// The home page's left panel heading.
-    /// Hover text on the Folders panel's + button.
+    /// The Folders panel's button under the list, once it lists a folder.
+    pub add_folder: &'static str,
     pub add_folder_tip: &'static str,
     /// A Folders root's right-click item. The folder's files stay.
     pub remove_folder: &'static str,
@@ -768,11 +765,10 @@ pub static EN: Strings = Strings {
         ""
     },
     opening: "Opening\u{2026}",
-    reopen_session: "Reopen Session",
-    reopen_session_tip: |folder| format!("Pick up where you left off in {folder}"),
     picker_title: "Choose a folder of photos",
+    add_folder: "Add Folder",
     add_folder_tip: "Add a folder of photos (Cmd+O)",
-    remove_folder: "Remove Folder",
+    remove_folder: "Remove Folder from LightPhotos",
     folder_missing: |folder| format!("{folder} can't be found. Reconnect its drive, or right-click to remove it."),
     select_photos_hint: "Select photos to rate, stack and export them here.",
     tour: "Tour",
@@ -791,7 +787,7 @@ pub static EN: Strings = Strings {
     tour_steps: [
         (
             "Folders",
-            "Open Folder adds a folder of photos here, and the + button at the top adds another. Each one is listed with its subfolders. Click one to show its photos; right-click a folder to remove it from the list.",
+            "Open Folder adds a folder of photos here, and Add Folder under the list adds another. Each one is listed with its subfolders. Click one to show its photos; right-click a folder to remove it from the list.",
         ),
         (
             "Filter toolbar",
@@ -1487,11 +1483,10 @@ pub static ZH: Strings = Strings {
         ""
     },
     opening: "正在打开\u{2026}",
-    reopen_session: "打开上次的文件夹",
-    reopen_session_tip: |folder| format!("回到上次在 {folder} 的位置"),
     picker_title: "选择照片文件夹",
+    add_folder: "添加文件夹",
     add_folder_tip: "添加照片文件夹 (Cmd+O)",
-    remove_folder: "移除文件夹",
+    remove_folder: "从 LightPhotos 中移除文件夹",
     folder_missing: |folder| format!("找不到 {folder}。请重新连接，或右键点按将其移除。"),
     select_photos_hint: "选择照片后，可以在这里评分、堆叠和导出。",
     tour: "导览",
@@ -1510,7 +1505,7 @@ pub static ZH: Strings = Strings {
     tour_steps: [
         (
             "文件夹",
-            "“打开文件夹”会把照片文件夹添加到这里，顶部的 + 按钮可再添加一个。每个文件夹下面列出其子文件夹。点击一个文件夹即可显示其中的照片；右键点按文件夹可将其从列表中移除。",
+            "“打开文件夹”会把照片文件夹添加到这里，列表下方的“添加文件夹”可再添加一个。每个文件夹下面列出其子文件夹。点击一个文件夹即可显示其中的照片；右键点按文件夹可将其从列表中移除。",
         ),
         (
             "筛选工具栏",
