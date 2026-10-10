@@ -30,7 +30,8 @@ struct Adjust {
     ca_blue: f32,
     // 1 when `curve_lut` holds a bent point curve. See `toneCurve`.
     curve_on: f32,
-    _pad4: f32,
+    // 0, or the base-layer view `baseProbe` draws instead of the photo.
+    base_probe: f32,
     _pad5: f32,
 };
 
@@ -44,6 +45,9 @@ struct TouchUp {
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
+// The base layer: one texel per grid cell, Rgba32Float, (mid, wide, dark).
+// base.wgsl builds it. Read only through `baseAt`.
+@group(0) @binding(2) var base_tex: texture_2d<f32>;
 @group(2) @binding(0) var<uniform> adj: Adjust;
 // The baked point curve: entry i is the red, green and blue output for input
 // i / 255. Written from `GpuCurve` in develop/mod.rs.
@@ -92,6 +96,98 @@ fn sampleSrcLevel(uv: vec2<f32>) -> vec4<f32> {
     let r = textureSampleLevel(tex, samp, caUv(uv, adj.ca_red), 0.0).r;
     let b = textureSampleLevel(tex, samp, caUv(uv, adj.ca_blue), 0.0).b;
     return vec4<f32>(r, g.g, b, g.a);
+}
+
+// Blend each spot-heal patch over `rgb`, the pixel at source `uv`. The CPU
+// picks each source patch and color correction; the GPU blends the feathered
+// patches. The touch-up count is packed into `adj._pad0`. Must match
+// `apply_touchups` in develop/image_ops.rs.
+fn applyTouchups(uv: vec2<f32>, rgb: vec3<f32>) -> vec3<f32> {
+    var r = rgb.r;
+    var g = rgb.g;
+    var b = rgb.b;
+    let touch_count = u32(adj._pad0);
+    for (var i = 0u; i < touch_count; i = i + 1u) {
+        let t = touchups[i];
+        let d = (uv - t.center_radius_feather.xy) /
+            vec2<f32>(adj.texel_w, adj.texel_h);
+        // Radii are fractions of the image's shorter side, as on the CPU.
+        let radius_px = t.center_radius_feather.z / max(adj.texel_w, adj.texel_h);
+        let distance_px = length(d);
+        if (distance_px < radius_px) {
+            let feather_px = max(radius_px * clamp(t.center_radius_feather.w, 0.02, 1.0), 1.0);
+            var mask = clamp((radius_px - distance_px) / feather_px, 0.0, 1.0);
+            mask = mask * mask * (3.0 - 2.0 * mask) * t.opacity;
+            let source_uv = t.source + (uv - t.center_radius_feather.xy);
+            let source = sampleSrcLevel(source_uv).rgb + t.delta.xyz;
+            r = r * (1.0 - mask) + clamp(source.r, 0.0, 1.0) * mask;
+            g = g * (1.0 - mask) + clamp(source.g, 0.0, 1.0) * mask;
+            b = b * (1.0 - mask) + clamp(source.b, 0.0, 1.0) * mask;
+        }
+    }
+    return vec3<f32>(r, g, b);
+}
+
+// Gamma-2.2 Rec.709 luma of a linear pixel. Must match
+// `develop::base::luma_gamma`.
+fn lumaGamma(rgb: vec3<f32>) -> f32 {
+    let luma = dot(rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return pow(max(luma, 0.0), 1.0 / 2.2);
+}
+
+// log2 of a pixel's luma over its local base, both gamma 2.2. Must match
+// `develop::base::log2_detail`.
+fn log2Detail(pre: vec3<f32>, base: f32) -> f32 {
+    let eps = 1.0 / 255.0;
+    return log2((lumaGamma(pre) + eps) / (base + eps));
+}
+
+struct BaseTexel {
+    mid: f32,
+    wide: f32,
+    dark: f32,
+};
+
+// The base layer at source `uv`: the four cells around `uv * grid - 0.5`,
+// clamped at the edge, blended in f32. `textureLoad` throughout, because
+// Rgba32Float doesn't filter and the CPU can't model hardware weights. Must
+// match `BaseLayer::at_uv` in develop/base.rs.
+fn baseAt(uv: vec2<f32>) -> BaseTexel {
+    let size = vec2<i32>(textureDimensions(base_tex));
+    let p = uv * vec2<f32>(size) - vec2<f32>(0.5);
+    let f = floor(p);
+    let t = p - f;
+    let hi = size - vec2<i32>(1);
+    let i0 = clamp(vec2<i32>(f), vec2<i32>(0), hi);
+    let i1 = clamp(vec2<i32>(f) + vec2<i32>(1), vec2<i32>(0), hi);
+    let a = textureLoad(base_tex, vec2<i32>(i0.x, i0.y), 0).rgb;
+    let b = textureLoad(base_tex, vec2<i32>(i1.x, i0.y), 0).rgb;
+    let c = textureLoad(base_tex, vec2<i32>(i0.x, i1.y), 0).rgb;
+    let d = textureLoad(base_tex, vec2<i32>(i1.x, i1.y), 0).rgb;
+    let top = a * (1.0 - t.x) + b * t.x;
+    let bottom = c * (1.0 - t.x) + d * t.x;
+    let v = top * (1.0 - t.y) + bottom * t.y;
+    return BaseTexel(v.r, v.g, v.b);
+}
+
+// The base layer as a gray pixel in place of the photo, for the match test:
+// 1 `mid`, 2 `wide`, 3 `dark` (through gamma 2.2 like the others), 4 the
+// detail `0.5 + 8 * (lumaGamma(pre) - mid)`, whose gain makes a half-cell
+// shift or a wrong weight show. The rest of the pipeline treats the value as
+// a linear pixel. Must match `base_probe` in develop/image_ops.rs.
+fn baseProbe(uv: vec2<f32>, pre: vec3<f32>, mode: f32) -> vec3<f32> {
+    let base = baseAt(uv);
+    let m = u32(mode);
+    if (m == 1u) {
+        return vec3<f32>(base.mid);
+    }
+    if (m == 2u) {
+        return vec3<f32>(base.wide);
+    }
+    if (m == 3u) {
+        return vec3<f32>(pow(max(base.dark, 0.0), 1.0 / 2.2));
+    }
+    return vec3<f32>(0.5 + 8.0 * (lumaGamma(pre) - base.mid));
 }
 
 struct VsOut {

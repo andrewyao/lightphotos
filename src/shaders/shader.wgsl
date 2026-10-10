@@ -106,28 +106,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         b = denoised.z;
     }
 
-    // Spot healing. The CPU picks each source patch and color correction; the
-    // GPU blends the feathered patches. Keep this after denoise to match the
-    // CPU export path. The touch-up count is packed into `adj._pad0`.
-    let touch_count = u32(adj._pad0);
-    for (var i = 0u; i < touch_count; i = i + 1u) {
-        let t = touchups[i];
-        let d = (uv - t.center_radius_feather.xy) /
-            vec2<f32>(adj.texel_w, adj.texel_h);
-        // Radii are fractions of the image's shorter side, as on the CPU.
-        let radius_px = t.center_radius_feather.z / max(adj.texel_w, adj.texel_h);
-        let distance_px = length(d);
-        if (distance_px < radius_px) {
-            let feather_px = max(radius_px * clamp(t.center_radius_feather.w, 0.02, 1.0), 1.0);
-            var mask = clamp((radius_px - distance_px) / feather_px, 0.0, 1.0);
-            mask = mask * mask * (3.0 - 2.0 * mask) * t.opacity;
-            let source_uv = t.source + (uv - t.center_radius_feather.xy);
-            let source = sampleSrcLevel(source_uv).rgb + t.delta.xyz;
-            r = r * (1.0 - mask) + clamp(source.r, 0.0, 1.0) * mask;
-            g = g * (1.0 - mask) + clamp(source.g, 0.0, 1.0) * mask;
-            b = b * (1.0 - mask) + clamp(source.b, 0.0, 1.0) * mask;
-        }
+    // Spot healing, after denoise to match the CPU export path.
+    var pre = applyTouchups(uv, vec3<f32>(r, g, b));
+    if (adj.base_probe > 0.0) {
+        pre = baseProbe(uv, pre, adj.base_probe);
     }
+    r = pre.r;
+    g = pre.g;
+    b = pre.b;
 
     // 1. White balance: temp and tint (-100..100) as per-channel gains.
     let t = adj.temp / 100.0;

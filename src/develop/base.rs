@@ -287,6 +287,24 @@ mod tests {
     }
 
     #[test]
+    fn the_shader_kernels_are_the_cpu_kernels() {
+        let wgsl = include_str!("../shaders/base.wgsl");
+        let table = |name: &str| -> Vec<f32> {
+            wgsl.split(&format!("const {name} = array<f32, "))
+                .nth(1)
+                .and_then(|rest| rest.split_once(">(")?.1.split(')').next())
+                .unwrap_or_else(|| panic!("{name} in base.wgsl"))
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.parse().expect("kernel literal"))
+                .collect()
+        };
+        assert_eq!(table("GAUSS_MID"), GAUSS_MID);
+        assert_eq!(table("GAUSS_WIDE"), GAUSS_WIDE);
+    }
+
+    #[test]
     fn the_grid_keeps_the_short_side_and_the_aspect() {
         let size = |w, h| Grid::for_image(w, h).map(|g| (g.width(), g.height()));
         assert_eq!(size(6000, 4000), Some((384, 256)));

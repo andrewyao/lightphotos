@@ -13,7 +13,7 @@ use winit::window::Window;
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::curve::ToneCurve;
-use crate::develop::{GpuAdjust, GpuCurve, GpuTouchUp};
+use crate::develop::{GpuAdjust, GpuCurve, GpuTouchUp, Grid};
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
@@ -23,6 +23,45 @@ mod raw_render;
 /// Texture format for a `PixelFormat::Srgb8` photo. The mip-gen pipeline
 /// renders into the image's mip levels, so its target must match this.
 const IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// The base layer's grid textures. Core WebGPU renders to it but can't
+/// filter it, so every read is a `textureLoad`.
+const BASE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+
+/// The base-layer passes' uniform. Must match `BasePass` in base.wgsl.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct BasePass {
+    grid: [u32; 2],
+    src: [u32; 2],
+}
+
+/// What the base layer is built from besides the image: it changes only
+/// when one of these does, so a slider drag never rebuilds it.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+struct BaseInputs {
+    ca_red: f32,
+    ca_blue: f32,
+    touch_count: u32,
+    /// Bumped by `set_touchups` when the spots change.
+    touch_gen: u64,
+}
+
+/// The current image's base layer on the GPU. `fs_base_reduce` writes `a`,
+/// `fs_base_blur_h` reads `a` into `b`, and `fs_base_blur_v` reads `b` back
+/// into `a`, which the Loupe binds.
+struct BaseGpu {
+    view_a: wgpu::TextureView,
+    view_b: wgpu::TextureView,
+    /// The image and the main sampler, without the base texture, so `a` is
+    /// never bound while it is a render target.
+    image_bind: wgpu::BindGroup,
+    /// `grid_in` = `a`, for the horizontal blur.
+    read_a: wgpu::BindGroup,
+    /// `grid_in` = `b`, for the vertical blur. The reduce binds it too and
+    /// ignores it.
+    read_b: wgpu::BindGroup,
+}
 
 /// Subject-selection overlay uniform. Must match `Overlay` in `shader.wgsl`.
 #[repr(C)]
@@ -86,6 +125,8 @@ pub struct Renderer {
 
     sampler: wgpu::Sampler,
     tex_bind_layout: wgpu::BindGroupLayout,
+    /// `tex_bind_layout` plus the base layer at binding 2, for the Loupe.
+    image_bind_layout: wgpu::BindGroupLayout,
 
     xform_buf: wgpu::Buffer,
     xform_bind: wgpu::BindGroup,
@@ -122,6 +163,22 @@ pub struct Renderer {
     /// The same mip-gen shader, targeting `LINEAR_IMAGE_FORMAT`.
     mip_pipeline_linear: wgpu::RenderPipeline,
     mip_sampler: wgpu::Sampler,
+
+    base_reduce: wgpu::RenderPipeline,
+    base_blur_h: wgpu::RenderPipeline,
+    base_blur_v: wgpu::RenderPipeline,
+    base_grid_layout: wgpu::BindGroupLayout,
+    /// `None` until the first image loads.
+    base: Option<BaseGpu>,
+    /// The inputs the last `set_adjustments` and `set_touchups` asked for.
+    base_wanted: BaseInputs,
+    /// The inputs `base` was last built from; `None` forces a build.
+    base_built_for: Option<BaseInputs>,
+    /// The spots `set_touchups` last uploaded, to tell a change from a
+    /// repeat.
+    touchups: Vec<GpuTouchUp>,
+    /// Base builds encoded so far.
+    base_builds: u64,
 
     egui_renderer: egui_wgpu::Renderer,
 
@@ -315,6 +372,55 @@ impl Renderer {
             ],
         });
 
+        let base_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let image_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                base_entry(2),
+            ],
+        });
+        let base_grid_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("base_grid_bgl"),
+            entries: &[
+                base_entry(0),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
         let xform_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("xform_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -395,7 +501,7 @@ impl Renderer {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pl"),
             bind_group_layouts: &[
-                Some(&tex_bind_layout),
+                Some(&image_bind_layout),
                 Some(&xform_bind_layout),
                 Some(&adj_bind_layout),
                 Some(&touch_bind_layout),
@@ -511,6 +617,57 @@ impl Renderer {
 
         let mip_pipeline_linear =
             raw_render::create_mip_pipeline_linear(&device, &mip_pipeline_layout, &mip_shader);
+
+        let base_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("base_shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(
+                    include_str!("../shaders/loupe_common.wgsl"),
+                    include_str!("../shaders/base.wgsl")
+                )
+                .into(),
+            ),
+        });
+        let base_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("base_pl"),
+            bind_group_layouts: &[
+                Some(&tex_bind_layout),
+                Some(&base_grid_layout),
+                Some(&adj_bind_layout),
+                Some(&touch_bind_layout),
+            ],
+            immediate_size: 0,
+        });
+        let base_pipeline = |entry_point: &str| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(entry_point),
+                layout: Some(&base_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &base_shader,
+                    entry_point: Some("vs_base"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &base_shader,
+                    entry_point: Some(entry_point),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: BASE_FORMAT,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let base_reduce = base_pipeline("fs_base_reduce");
+        let base_blur_h = base_pipeline("fs_base_blur_h");
+        let base_blur_v = base_pipeline("fs_base_blur_v");
 
         // Not the main `sampler`: it must not read the mip chain it is still
         // building, so its mipmap filter is nearest and each view it reads is
@@ -639,6 +796,7 @@ impl Renderer {
             raw_pipeline,
             sampler,
             tex_bind_layout,
+            image_bind_layout,
             xform_buf,
             xform_bind,
             adj_buf,
@@ -660,6 +818,15 @@ impl Renderer {
             mip_pipeline,
             mip_pipeline_linear,
             mip_sampler,
+            base_reduce,
+            base_blur_h,
+            base_blur_v,
+            base_grid_layout,
+            base: None,
+            base_wanted: BaseInputs::default(),
+            base_built_for: None,
+            touchups: Vec::new(),
+            base_builds: 0,
             egui_renderer,
             offscreen: None,
             thumb_textures: HashMap::new(),
@@ -852,6 +1019,10 @@ impl Renderer {
         // `std::time::Instant::now()` panics on wasm32.
         let t0 = web_time::Instant::now();
         let (w, h) = (img.width, img.height);
+        let Some(grid) = Grid::for_image(w, h) else {
+            eprintln!("set_image: skipped an empty {w}x{h} image");
+            return;
+        };
         let mip_count = (32 - (w.max(h)).leading_zeros()).max(1); // floor(log2(max))+1
 
         let (format, bytes_per_pixel, mip_pipeline): (
@@ -926,9 +1097,10 @@ impl Renderer {
         self.build_mips(&texture, mip_count, mip_pipeline);
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let base = self.create_base(&view, grid, (w, h));
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("image_bg"),
-            layout: &self.tex_bind_layout,
+            layout: &self.image_bind_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -938,9 +1110,15 @@ impl Renderer {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&base.view_a),
+                },
             ],
         });
         self.image_bind = Some(bind);
+        self.base = Some(base);
+        self.base_built_for = None;
         self.image_size = (w, h);
 
         // The user feels this UI-thread span as a freeze.
@@ -948,6 +1126,111 @@ impl Renderer {
             "set_image {w}x{h} ({mip_count} mips): took {:?}",
             t0.elapsed()
         ));
+    }
+
+    /// The grid textures and bind groups for an image whose level-0 view is
+    /// `image`. The passes run in `render()`.
+    fn create_base(&self, image: &wgpu::TextureView, grid: Grid, src: (u32, u32)) -> BaseGpu {
+        let grid_texture = |label| {
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: grid.width(),
+                    height: grid.height(),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: BASE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            })
+        };
+        let view_a = grid_texture("base_a").create_view(&wgpu::TextureViewDescriptor::default());
+        let view_b = grid_texture("base_b").create_view(&wgpu::TextureViewDescriptor::default());
+        let pass = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("base_pass"),
+                contents: bytemuck::bytes_of(&BasePass {
+                    grid: [grid.width(), grid.height()],
+                    src: [src.0, src.1],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let read = |view: &wgpu::TextureView| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("base_grid_bg"),
+                layout: &self.base_grid_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: pass.as_entire_binding(),
+                    },
+                ],
+            })
+        };
+        let image_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("base_image_bg"),
+            layout: &self.tex_bind_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(image),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        BaseGpu {
+            read_a: read(&view_a),
+            read_b: read(&view_b),
+            view_a,
+            view_b,
+            image_bind,
+        }
+    }
+
+    /// Encode the base layer's three passes for the current adjustments and
+    /// touch-ups. They read the same uniforms as the Loupe's image pass.
+    fn encode_base(&self, encoder: &mut wgpu::CommandEncoder, base: &BaseGpu) {
+        let passes = [
+            (&self.base_reduce, &base.read_b, &base.view_a),
+            (&self.base_blur_h, &base.read_a, &base.view_b),
+            (&self.base_blur_v, &base.read_b, &base.view_a),
+        ];
+        for (pipeline, grid_in, target) in passes {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("base_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &base.image_bind, &[]);
+            pass.set_bind_group(1, grid_in, &[]);
+            pass.set_bind_group(2, &self.adj_bind, &[]);
+            pass.set_bind_group(3, &self.touch_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
     }
 
     /// Render each mip level from the one above with `mip_pipeline`.
@@ -1132,6 +1415,12 @@ impl Renderer {
     /// reads it.
     pub fn set_adjustments(&mut self, a: GpuAdjust, curve: &ToneCurve) {
         Self::write_adjustments(&self.queue, &self.adj_buf, &self.curve_buf, a, curve);
+        self.base_wanted = BaseInputs {
+            ca_red: a.ca_red,
+            ca_blue: a.ca_blue,
+            touch_count: a._pad0 as u32,
+            ..self.base_wanted
+        };
     }
 
     /// Adjustments for the "after" half of the compare view.
@@ -1245,11 +1534,18 @@ impl Renderer {
         );
     }
 
+    /// Uploads the spots. The app calls this on every slider change, so the
+    /// base layer rebuilds only when the spots differ from the last upload.
     pub fn set_touchups(&mut self, touchups: &[GpuTouchUp]) {
-        if !touchups.is_empty() {
-            self.queue
-                .write_buffer(&self.touch_buf, 0, bytemuck::cast_slice(touchups));
+        let bytes: &[u8] = bytemuck::cast_slice(touchups);
+        if bytes == bytemuck::cast_slice::<GpuTouchUp, u8>(&self.touchups) {
+            return;
         }
+        if !touchups.is_empty() {
+            self.queue.write_buffer(&self.touch_buf, 0, bytes);
+        }
+        self.touchups = touchups.to_vec();
+        self.base_wanted.touch_gen += 1;
     }
 
     /// Render the image pass, then the egui pass, in one submission.
@@ -1316,6 +1612,16 @@ impl Renderer {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("enc") });
+
+        let base_stale = self.base_built_for != Some(self.base_wanted);
+        if let Some(base) = self.base.as_ref().filter(|_| base_stale) {
+            self.encode_base(&mut encoder, base);
+            self.base_built_for = Some(self.base_wanted);
+            self.base_builds += 1;
+            if crate::jobs::loader::timing_enabled() {
+                crate::jobs::loader::mark(&format!("base layer build {}", self.base_builds));
+            }
+        }
 
         if let Some(paint) = &egui {
             self.egui_renderer.update_buffers(

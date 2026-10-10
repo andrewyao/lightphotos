@@ -471,7 +471,10 @@ pub struct GpuAdjust {
     /// 1 when [`Adjustments::curve`] is bent and the shader should read its
     /// table, 0 to skip it.
     pub curve_on: f32,
-    pub _pad4: f32,
+    /// A test view of the base layer in place of the photo: 0 off, then 1
+    /// to 4 for `mid`, `wide`, `dark` and the detail. See `baseProbe` in
+    /// loupe_common.wgsl.
+    pub base_probe: f32,
     pub _pad5: f32,
 }
 
@@ -500,7 +503,7 @@ impl Default for GpuAdjust {
             ca_red: 0.0,
             ca_blue: 0.0,
             curve_on: 0.0,
-            _pad4: 0.0,
+            base_probe: 0.0,
             _pad5: 0.0,
         }
     }
