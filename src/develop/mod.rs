@@ -5,11 +5,14 @@
 //! used for export, edited thumbnails, and the histogram. The Loupe runs the
 //! same math in `shader.wgsl`; the two must stay in sync.
 
+pub mod base;
 pub mod chroma;
 pub mod curve;
 pub mod image_ops;
 
 use serde::{Deserialize, Serialize};
+
+pub use base::{BaseLayer, BaseTexel, Grid};
 
 use curve::ToneCurve;
 
@@ -295,6 +298,12 @@ impl Adjustments {
     /// "on" state.
     pub fn is_monochrome(&self) -> bool {
         self.saturation <= -100.0
+    }
+
+    /// True when a render must build the [`BaseLayer`] first. No field reads
+    /// it yet: Texture, Clarity and Dehaze (plan item 1.2) will.
+    pub fn needs_base(&self) -> bool {
+        false
     }
 
     /// A copy without the crop, straighten or chromatic aberration scales,
