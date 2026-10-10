@@ -462,15 +462,13 @@ impl App {
         let img = self.loader.as_ref()?.get_best(path, self.preview_px())?;
         let radius = self.touchup_radius();
         let (radius_u, radius_v) = self.touchup_uv_radii(radius);
-        let sample = |u: f32, v: f32| {
-            let x = (u.clamp(0.0, 1.0) * (img.width.saturating_sub(1)) as f32).round() as u32;
-            let y = (v.clamp(0.0, 1.0) * (img.height.saturating_sub(1)) as f32).round() as u32;
-            image_ops::sample_linear(
-                &img,
-                x as f32 / img.width.saturating_sub(1).max(1) as f32,
-                y as f32 / img.height.saturating_sub(1).max(1) as f32,
-            )
-        };
+        // The same read the shader and the bake blend the patch from, so the
+        // delta is measured on the pixels it corrects.
+        let ca = self
+            .current_adjustments()
+            .chromatic_aberration
+            .unwrap_or_default();
+        let sample = image_ops::bilinear_sampler(&img, ca)?;
         // Compare colors on the patch boundary itself. A ring outside the
         // patch leaves a color step at the edge that shows as a halo.
         let ring = |cx: f32, cy: f32| -> [f32; 3] {

@@ -75,6 +75,15 @@ pub enum PixelFormat {
     LinearF16,
 }
 
+impl PixelFormat {
+    pub fn bytes_per_pixel(self) -> usize {
+        match self {
+            PixelFormat::Srgb8 => 4,
+            PixelFormat::LinearF16 => 8,
+        }
+    }
+}
+
 #[lightwatch::track(manual_measured)]
 pub struct DecodedImage {
     pub width: u32,

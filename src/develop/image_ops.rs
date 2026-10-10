@@ -66,27 +66,15 @@ pub(crate) fn linear_to_srgb8(v: f32) -> u8 {
 /// goes through this so they all see the same values.
 fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
     let [r, g, b, a] = px;
-    let (r, g, b) = if a == 0 {
-        (0.0, 0.0, 0.0)
-    } else if a == 255 {
-        (r as f32, g as f32, b as f32)
-    } else {
-        let inv = 255.0 / a as f32;
-        (
-            (r as f32 * inv).min(255.0),
-            (g as f32 * inv).min(255.0),
-            (b as f32 * inv).min(255.0),
-        )
-    };
     if a == 255 {
         let lut = srgb8_to_linear_lut();
-        return [
-            lut[px[0] as usize],
-            lut[px[1] as usize],
-            lut[px[2] as usize],
-        ];
+        return [lut[r as usize], lut[g as usize], lut[b as usize]];
     }
-    [r, g, b].map(|c| srgb_decode(c / 255.0))
+    if a == 0 {
+        return [0.0; 3];
+    }
+    let inv = 255.0 / a as f32;
+    [r, g, b].map(|c| srgb_decode((c as f32 * inv).min(255.0) / 255.0))
 }
 
 /// The photo as the shader samples it: linear light, bilinear, clamped at the
@@ -100,26 +88,29 @@ struct Source<'a> {
 }
 
 impl<'a> Source<'a> {
-    /// The caller has checked that `img` holds `width * height` sRGB8 pixels.
-    fn new(img: &'a DecodedImage, ca: develop::CaScale, cache: bool) -> Self {
-        let n = img.width as usize * img.height as usize;
+    /// `None` for an empty image or one short of `width * height` pixels in
+    /// its format, so every read below stays inside the buffer.
+    fn new(img: &'a DecodedImage, ca: develop::CaScale, cache: bool) -> Option<Self> {
+        let (w, h) = (img.width as usize, img.height as usize);
+        let n = w.checked_mul(h)?;
+        if n == 0 || img.rgba.len() < n.checked_mul(img.pixel_format.bytes_per_pixel())? {
+            return None;
+        }
         let linear = cache.then(|| {
-            let px = img.rgba.as_chunks::<4>().0.iter().take(n);
-            px.map(|&p| unpremul_to_linear(p)).collect()
+            (0..n)
+                .map(|i| pixel_linear(img, (i % w) as u32, (i / w) as u32))
+                .collect()
         });
-        Self { img, ca, linear }
+        Some(Self { img, ca, linear })
     }
 
     /// Texel `(x, y)` clamped to the image, for the exact path.
     fn at_px(&self, x: i64, y: i64) -> [f32; 3] {
         let (w, h) = (self.img.width as i64, self.img.height as i64);
-        let i = (y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) as usize;
+        let (x, y) = (x.clamp(0, w - 1), y.clamp(0, h - 1));
         match &self.linear {
-            Some(buf) => buf[i],
-            None => {
-                let p = &self.img.rgba[i * 4..i * 4 + 4];
-                unpremul_to_linear([p[0], p[1], p[2], p[3]])
-            }
+            Some(buf) => buf[(y * w + x) as usize],
+            None => pixel_linear(self.img, x as u32, y as u32),
         }
     }
 
@@ -158,6 +149,17 @@ impl<'a> Source<'a> {
     }
 }
 
+/// A bilinear read of `img` at UV in linear light through the aberration
+/// scales `ca`, the way the shader and the bake read a touch-up's source
+/// patch. `None` for a short image.
+pub fn bilinear_sampler(
+    img: &DecodedImage,
+    ca: develop::CaScale,
+) -> Option<impl Fn(f32, f32) -> [f32; 3] + '_> {
+    let src = Source::new(img, ca, false)?;
+    Some(move |u, v| src.at_uv(u, v))
+}
+
 /// Burn edits into an opaque sRGB8 RGBA buffer: crop, then touch-ups and tone
 /// per pixel, then rotate by `rot` 90-degree clockwise steps. Returns
 /// `(w, h, rgba)`. Each pixel reads the source the way `fs_main` in
@@ -172,11 +174,10 @@ pub fn bake_edited(
     rot: u8,
 ) -> (u32, u32, Vec<u8>) {
     let (w, h) = (img.width, img.height);
-    if w == 0 || h == 0 || img.rgba.len() < (w * h * 4) as usize {
-        return (0, 0, Vec::new());
-    }
     let ca = adj.chromatic_aberration.unwrap_or_default();
-    let src = Source::new(img, ca, adj.denoise > 0.0);
+    let Some(src) = Source::new(img, ca, adj.denoise > 0.0) else {
+        return (0, 0, Vec::new());
+    };
     let turn = (adj.straighten != 0.0)
         .then(|| develop::Straighten::new(adj.straighten, w as f32, h as f32));
     // Upright with no aberration, every read lands on a texel center, so
@@ -285,11 +286,7 @@ pub(crate) fn fit_long_edge(w: u32, h: u32, rgba: Vec<u8>, max_px: u32) -> (u32,
 #[hotpath::measure]
 pub fn downsample_linear(img: &DecodedImage, target: usize) -> (Vec<[f32; 3]>, usize, usize) {
     let (w, h) = (img.width as usize, img.height as usize);
-    let bytes_per_px = match img.pixel_format {
-        PixelFormat::Srgb8 => 4,
-        PixelFormat::LinearF16 => 8,
-    };
-    if w == 0 || h == 0 || img.rgba.len() < w * h * bytes_per_px {
+    if w == 0 || h == 0 || img.rgba.len() < w * h * img.pixel_format.bytes_per_pixel() {
         return (Vec::new(), 0, 0);
     }
     let step = (w.max(h) / target.max(1)).max(1);
@@ -322,7 +319,7 @@ pub fn sample_linear(img: &DecodedImage, u: f32, v: f32) -> [f32; 3] {
 /// Pixel `(x, y)` as linear RGB, in either pixel format. The caller keeps
 /// `x` and `y` inside the image.
 pub(crate) fn pixel_linear(img: &DecodedImage, x: u32, y: u32) -> [f32; 3] {
-    let i = ((y * img.width + x) * 4) as usize;
+    let i = (y as usize * img.width as usize + x as usize) * 4;
     match img.pixel_format {
         PixelFormat::Srgb8 => unpremul_to_linear([
             img.rgba[i],
@@ -570,6 +567,44 @@ mod tests {
 
     fn px(v: u8) -> [u8; 4] {
         [v, v, v, 255]
+    }
+
+    /// A decode that claims more pixels than its buffer holds bakes to
+    /// nothing and samples as nothing, instead of reading past the end.
+    #[test]
+    fn a_truncated_image_bakes_to_nothing() {
+        for (format, bytes) in [(PixelFormat::Srgb8, 4), (PixelFormat::LinearF16, 8)] {
+            let img = DecodedImage::new_tracked(DecodedImageFields {
+                width: 4,
+                height: 3,
+                rgba: vec![0; 4 * 3 * bytes - 1],
+                pixel_format: format,
+            });
+            assert_eq!(
+                bake_edited(&img, &Adjustments::default(), &[], 0),
+                (0, 0, vec![])
+            );
+            assert!(bilinear_sampler(&img, develop::CaScale::default()).is_none());
+        }
+    }
+
+    /// Linear half-float pixels bake through the same sRGB encode as the
+    /// Loupe's `linear_to_srgb`.
+    #[test]
+    fn a_linear_f16_image_bakes_to_its_srgb8_value() {
+        let v = half::f16::from_f32(0.18).to_le_bytes();
+        let one = half::f16::ONE.to_le_bytes();
+        let px: Vec<u8> = [v, v, v, one].concat();
+        let img = DecodedImage::new_tracked(DecodedImageFields {
+            width: 2,
+            height: 2,
+            rgba: px.repeat(4),
+            pixel_format: PixelFormat::LinearF16,
+        });
+        let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], 0);
+        assert_eq!((w, h), (2, 2));
+        let want = linear_to_srgb8(half::f16::from_f32(0.18).to_f32());
+        assert_eq!(out, [want, want, want, 255].repeat(4));
     }
 
     #[test]
