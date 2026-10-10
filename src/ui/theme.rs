@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The three color themes and the accent colors they share. Dark and Light
+//! Layered studio chrome with neutral photo surrounds. Dark and Light
 //! fix their text colors; Medium derives its text from its gray, so text stays
 //! light while the gray sits on the dark side and turns dark past the middle.
 //! Every theme has two text tiers: a label color for names and captions, and a
@@ -58,6 +58,10 @@ impl Theme {
 pub struct Palette {
     pub panel: Color32,
     pub window: Color32,
+    /// The app header, distinct from the working panels.
+    pub header: Color32,
+    /// Control bars and side-panel page headings.
+    pub toolbar: Color32,
     /// Behind the loupe image; the renderer clears to it.
     pub loupe_bg: Color32,
     pub grid_cell: Color32,
@@ -93,7 +97,7 @@ pub struct Palette {
     pub pill_fill: Color32,
     pub pill_text: Color32,
     /// Button backgrounds: idle, hovered, pressed, open menu.
-    widget: [u8; 4],
+    widget: [Color32; 4],
     separator: Color32,
     /// Text field backgrounds.
     field: Color32,
@@ -183,8 +187,10 @@ fn contrast_ratio(a: Color32, b: Color32) -> f32 {
 pub fn palette(theme: Theme) -> Palette {
     match theme {
         Theme::Dark => Palette {
-            panel: Color32::from_gray(27),
-            window: Color32::from_gray(27),
+            panel: Color32::from_rgb(27, 30, 36),
+            window: Color32::from_rgb(30, 34, 41),
+            header: Color32::from_rgb(20, 23, 29),
+            toolbar: Color32::from_rgb(31, 35, 43),
             loupe_bg: Color32::from_gray(38),
             grid_cell: Color32::from_gray(30),
             strip_cell: Color32::from_gray(24),
@@ -208,15 +214,22 @@ pub fn palette(theme: Theme) -> Palette {
             stack_card: Color32::from_gray(130),
             pill_fill: Color32::from_gray(225),
             pill_text: Color32::from_gray(20),
-            widget: [60, 70, 55, 45],
-            separator: Color32::from_gray(60),
-            field: Color32::from_gray(10),
+            widget: [
+                Color32::from_rgb(45, 51, 63),
+                Color32::from_rgb(57, 70, 91),
+                Color32::from_rgb(35, 57, 87),
+                Color32::from_rgb(38, 47, 62),
+            ],
+            separator: Color32::from_rgb(62, 70, 84),
+            field: Color32::from_rgb(18, 21, 27),
             dark_base: true,
         },
         Theme::Medium => medium(Color32::from_gray(96)),
         Theme::Light => Palette {
-            panel: Color32::from_gray(236),
-            window: Color32::from_gray(244),
+            panel: Color32::from_rgb(239, 242, 247),
+            window: Color32::WHITE,
+            header: Color32::from_rgb(250, 251, 253),
+            toolbar: Color32::from_rgb(230, 235, 243),
             loupe_bg: Color32::from_gray(214),
             grid_cell: Color32::from_gray(222),
             strip_cell: Color32::from_gray(214),
@@ -240,23 +253,31 @@ pub fn palette(theme: Theme) -> Palette {
             stack_card: Color32::from_gray(110),
             pill_fill: Color32::from_gray(40),
             pill_text: Color32::WHITE,
-            widget: [214, 204, 190, 212],
-            separator: Color32::from_gray(190),
+            widget: [
+                Color32::from_rgb(224, 230, 239),
+                Color32::from_rgb(208, 221, 242),
+                Color32::from_rgb(190, 209, 236),
+                Color32::from_rgb(216, 226, 241),
+            ],
+            separator: Color32::from_rgb(193, 202, 216),
             field: Color32::from_gray(255),
             dark_base: false,
         },
     }
 }
 
-/// The Medium theme around a neutral `panel` gray. Its text takes the polarity
+/// The Medium theme uses slate chrome around a neutral photo gray. Its text takes the polarity
 /// the gray calls for, so moving the gray past the middle flips the text.
 fn medium(panel: Color32) -> Palette {
     let p = panel.r();
     let shift = |d: i16| (p as i16 + d).clamp(0, 255) as u8;
     let gray = |d: i16| Color32::from_gray(shift(d));
+    let slate = |d: i16| Color32::from_rgb(shift(d - 4), shift(d), shift(d + 6));
     let base = Palette {
-        panel,
-        window: panel,
+        panel: slate(0),
+        window: slate(-8),
+        header: slate(-18),
+        toolbar: slate(-10),
         loupe_bg: gray(14),
         grid_cell: gray(-8),
         strip_cell: gray(-14),
@@ -280,7 +301,7 @@ fn medium(panel: Color32) -> Palette {
         stack_card: Color32::PLACEHOLDER,
         pill_fill: Color32::PLACEHOLDER,
         pill_text: Color32::PLACEHOLDER,
-        widget: [shift(-24), shift(-32), shift(-40), shift(-16)],
+        widget: [slate(-24), slate(-18), slate(-36), slate(-28)],
         separator: gray(32),
         field: gray(-32),
         dark_base: true,
@@ -301,6 +322,9 @@ fn medium(panel: Color32) -> Palette {
             ..base
         },
         Polarity::DarkText => Palette {
+            window: slate(8),
+            header: slate(18),
+            toolbar: slate(10),
             label: Color32::from_gray(24),
             value: Color32::BLACK,
             star: Color32::from_rgb(120, 80, 0),
@@ -318,7 +342,7 @@ fn medium(panel: Color32) -> Palette {
             stack_card: Color32::from_gray(40),
             pill_fill: Color32::from_gray(30),
             pill_text: Color32::WHITE,
-            widget: [shift(24), shift(32), shift(40), shift(16)],
+            widget: [slate(24), slate(32), slate(40), slate(16)],
             divider: gray(-44),
             separator: gray(-32),
             field: gray(32),
@@ -374,16 +398,20 @@ fn apply(ctx: &egui::Context, theme: Theme) {
     w.noninteractive.weak_bg_fill = p.panel;
     w.noninteractive.bg_stroke.color = p.separator;
     w.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.value);
-    for (visuals, gray) in [
+    for (visuals, fill) in [
         (&mut w.inactive, p.widget[0]),
         (&mut w.hovered, p.widget[1]),
         (&mut w.active, p.widget[2]),
         (&mut w.open, p.widget[3]),
     ] {
-        visuals.bg_fill = Color32::from_gray(gray);
-        visuals.weak_bg_fill = Color32::from_gray(gray);
+        visuals.bg_fill = fill;
+        visuals.weak_bg_fill = fill;
         visuals.fg_stroke.color = p.value;
+        visuals.bg_stroke = Stroke::new(1.0_f32, p.separator);
+        visuals.corner_radius = egui::CornerRadius::same(6);
     }
+    v.window_corner_radius = egui::CornerRadius::same(12);
+    v.window_stroke = Stroke::new(1.0_f32, p.separator);
     v.selection.bg_fill = p.selection_bg;
     v.selection.stroke.color = p.value;
 
@@ -400,9 +428,8 @@ mod tests {
 
     #[test]
     fn labels_and_values_meet_aa_contrast_on_their_panels() {
-        for theme in ALL {
-            let p = palette(theme);
-            for bg in [p.panel, p.window] {
+        for (theme, p) in every_palette() {
+            for bg in [p.panel, p.window, p.header, p.toolbar] {
                 let label = contrast_ratio(p.label, bg);
                 let value = contrast_ratio(p.value, bg);
                 assert!(label >= 4.5, "{theme:?} label {label:.2}:1");
@@ -416,11 +443,10 @@ mod tests {
 
     #[test]
     fn button_text_meets_aa_contrast_on_every_button_state() {
-        for theme in ALL {
-            let p = palette(theme);
-            for gray in p.widget {
-                let ratio = contrast_ratio(p.value, Color32::from_gray(gray));
-                assert!(ratio >= 4.5, "{theme:?} button {gray}: {ratio:.2}:1");
+        for (theme, p) in every_palette() {
+            for fill in p.widget {
+                let ratio = contrast_ratio(p.value, fill);
+                assert!(ratio >= 4.5, "{theme:?} button {fill:?}: {ratio:.2}:1");
             }
         }
     }
@@ -441,7 +467,7 @@ mod tests {
                     assert!(ratio >= 3.0, "{theme:?} {name} {ratio:.2}:1");
                 }
             }
-            let ratio = contrast_ratio(p.danger, Color32::from_gray(p.widget[0]));
+            let ratio = contrast_ratio(p.danger, p.widget[0]);
             assert!(ratio >= 3.0, "{theme:?} danger {ratio:.2}:1");
         }
     }
@@ -466,7 +492,7 @@ mod tests {
             ] {
                 let ratio = contrast_ratio(text, fill);
                 assert!(ratio >= 4.5, "{name} {role} text {ratio:.2}:1");
-                for bg in [p.panel, p.window] {
+                for bg in [p.panel, p.window, p.header, p.toolbar] {
                     let edge = contrast_ratio(fill, bg);
                     assert!(edge >= 3.0, "{name} {role} fill {edge:.2}:1");
                 }

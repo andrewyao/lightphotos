@@ -35,7 +35,11 @@ pub(super) fn toolbar_row<R>(
         egui::Panel::top(id)
     };
     let shown = panel
-        .frame(egui::Frame::side_top_panel(&style).inner_margin(margin))
+        .frame(
+            egui::Frame::side_top_panel(&style)
+                .fill(theme::colors(ui.ctx()).toolbar)
+                .inner_margin(margin),
+        )
         .show_inside(ui, |ui| {
             toolbar_spacing(ui);
             if !bottom {

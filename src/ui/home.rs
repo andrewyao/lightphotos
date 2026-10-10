@@ -47,6 +47,7 @@ const BUTTON_HEIGHT: f32 = 52.0;
 /// The home page's one call to action, filled in the brand blue so it reads
 /// as the thing to press.
 fn open_folder_button(ui: &mut egui::Ui, app: &App, size: egui::Vec2, out: &mut FrameOutput) {
+    let colors = theme::colors(ui.ctx());
     let pending = app.folder_pick_pending();
     let label = if pending {
         t().opening
@@ -58,10 +59,10 @@ fn open_folder_button(ui: &mut egui::Ui, app: &App, size: egui::Vec2, out: &mut 
         egui::Button::new(
             egui::RichText::new(label)
                 .size(font_size::px(ui.style(), 20.0))
-                .color(egui::Color32::WHITE)
+                .color(colors.primary_text)
                 .strong(),
         )
-        .fill(theme::BRAND_BLUE)
+        .fill(colors.primary_fill)
         .corner_radius(10.0)
         .min_size(size),
     );
@@ -70,7 +71,7 @@ fn open_folder_button(ui: &mut egui::Ui, app: &App, size: egui::Vec2, out: &mut 
         ui.painter().rect_stroke(
             resp.rect.expand(2.0),
             12.0,
-            egui::Stroke::new(2.0_f32, theme::BRAND_BLUE.linear_multiply(0.5)),
+            egui::Stroke::new(2.0_f32, colors.selection),
             egui::StrokeKind::Outside,
         );
     }
@@ -165,7 +166,7 @@ fn content(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 .layout(egui::Layout::top_down(egui::Align::Center)),
             |ui| {
                 egui::Frame::popup(ui.style())
-                    .fill(pal.panel)
+                    .fill(pal.window)
                     .corner_radius(14.0)
                     .inner_margin(egui::Margin::symmetric(
                         font_size::px(ui.style(), CARD_PAD.x).min(127.0) as i8,

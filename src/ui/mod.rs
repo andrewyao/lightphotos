@@ -338,56 +338,59 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
 /// italic brand blue. The web canvas fills the viewport, so the site's HTML
 /// header can't wrap it; native draws the same header.
 fn app_header(ui: &mut egui::Ui, out: &mut FrameOutput) {
-    let panel = egui::Panel::top("lp_app_header").show_inside(ui, |ui| {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.add_space(8.0);
-            let font_id = egui::TextStyle::Heading.resolve(ui.style());
-            let mut job = egui::text::LayoutJob::default();
-            job.append(
-                "Light",
-                0.0,
-                egui::TextFormat {
-                    font_id: font_id.clone(),
-                    // egui paints PLACEHOLDER glyphs in the widget's normal
-                    // text color.
-                    color: egui::Color32::PLACEHOLDER,
-                    ..Default::default()
-                },
-            );
-            job.append(
-                "Photos",
-                0.0,
-                egui::TextFormat {
-                    font_id,
-                    color: theme::BRAND_BLUE,
-                    italics: true,
-                    ..Default::default()
-                },
-            );
-            ui.label(job);
+    let panel = egui::Panel::top("lp_app_header")
+        .frame(egui::Frame::side_top_panel(ui.style()).fill(theme::colors(ui.ctx()).header))
+        .show_inside(ui, |ui| {
+            toolbar::toolbar_spacing(ui);
+            ui.add_space(font_size::px(ui.style(), 4.0));
+            ui.horizontal(|ui| {
+                ui.add_space(font_size::px(ui.style(), 8.0));
+                let font_id = egui::TextStyle::Heading.resolve(ui.style());
+                let mut job = egui::text::LayoutJob::default();
+                job.append(
+                    "Light",
+                    0.0,
+                    egui::TextFormat {
+                        font_id: font_id.clone(),
+                        // egui paints PLACEHOLDER glyphs in the widget's normal
+                        // text color.
+                        color: egui::Color32::PLACEHOLDER,
+                        ..Default::default()
+                    },
+                );
+                job.append(
+                    "Photos",
+                    0.0,
+                    egui::TextFormat {
+                        font_id,
+                        color: theme::BRAND_BLUE,
+                        italics: true,
+                        ..Default::default()
+                    },
+                );
+                ui.label(job);
 
-            // Not in the F6 focus cycle; `?` and `Cmd+,` are their keyboard
-            // routes. Open Folder lives in the Folders panel.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                if ui
-                    .button(t().settings)
-                    .on_hover_text(crate::i18n::keys(t().settings_tip))
-                    .clicked()
-                {
-                    out.actions.push(UiAction::ToggleSettings);
-                }
-                if ui.button(t().tour).on_hover_text(t().tour_tip).clicked() {
-                    out.actions.push(UiAction::StartTour);
-                }
-                if ui.button("?").on_hover_text(t().help_tip).clicked() {
-                    out.actions.push(UiAction::ToggleHelp);
-                }
+                // Not in the F6 focus cycle; `?` and `Cmd+,` are their keyboard
+                // routes. Open Folder lives in the Folders panel.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_space(font_size::px(ui.style(), 8.0));
+                    if ui
+                        .button(t().settings)
+                        .on_hover_text(crate::i18n::keys(t().settings_tip))
+                        .clicked()
+                    {
+                        out.actions.push(UiAction::ToggleSettings);
+                    }
+                    if ui.button(t().tour).on_hover_text(t().tour_tip).clicked() {
+                        out.actions.push(UiAction::StartTour);
+                    }
+                    if ui.button("?").on_hover_text(t().help_tip).clicked() {
+                        out.actions.push(UiAction::ToggleHelp);
+                    }
+                });
             });
+            ui.add_space(font_size::px(ui.style(), 4.0));
         });
-        ui.add_space(4.0);
-    });
     tour::anchor(ui.ctx(), tour::TourStep::Header, panel.response.rect);
 }
 
@@ -399,7 +402,7 @@ fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_default();
     egui::Panel::top("folder_title").show_inside(ui, |ui| {
-        ui.add_space(4.0);
+        ui.add_space(font_size::px(ui.style(), 4.0));
         ui.horizontal(|ui| {
             if app.mode() == ViewMode::Loupe
                 && ui
@@ -422,7 +425,7 @@ fn folder_title_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 loupe_title(ui, app, name);
             }
         });
-        ui.add_space(4.0);
+        ui.add_space(font_size::px(ui.style(), 4.0));
     });
 }
 

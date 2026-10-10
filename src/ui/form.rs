@@ -10,7 +10,7 @@ use std::cell::Cell;
 
 use super::{font_size, theme};
 
-const HEADER: f32 = 15.0;
+const HEADER: f32 = 16.0;
 const HEADER_GAP: f32 = 8.0;
 const ROW_GAP: f32 = 10.0;
 const SPACIOUS_ROW_GAP: f32 = 24.0;
@@ -198,12 +198,15 @@ pub(super) fn page_heading(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce
         top: y,
         bottom: y / 2,
     };
-    egui::Frame::NONE.inner_margin(margin).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.heading(title);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+    egui::Frame::NONE
+        .fill(theme::colors(ui.ctx()).toolbar)
+        .inner_margin(margin)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading(title);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+            });
         });
-    });
     ui.separator();
 }
 
@@ -397,7 +400,9 @@ pub(super) fn button(ui: &mut egui::Ui, b: &Button) -> egui::Response {
     let min = egui::vec2(font_size::px(ui.style(), BUTTON_MIN_WIDTH), 0.0);
     ui.scope(|ui| {
         ui.spacing_mut().button_padding = BUTTON_PAD * font_size::px(ui.style(), 1.0);
-        ui.add_enabled(b.enabled, widget.min_size(min))
+        let response = ui.add_enabled(b.enabled, widget.min_size(min));
+        filled_feedback(ui, &response, b.role);
+        response
     })
     .inner
 }
@@ -417,9 +422,35 @@ pub(super) fn compact_button(ui: &mut egui::Ui, b: &Button) -> egui::Response {
     };
     ui.scope(|ui| {
         ui.spacing_mut().button_padding = COMPACT_PAD * font_size::px(ui.style(), 1.0);
-        ui.add_enabled(b.enabled, widget)
+        let response = ui.add_enabled(b.enabled, widget);
+        filled_feedback(ui, &response, b.role);
+        response
     })
     .inner
+}
+
+/// Fixed role fills retain their contrast; an inset outline gives pointer feedback.
+fn filled_feedback(ui: &egui::Ui, response: &egui::Response, role: Role) {
+    if role == Role::Cancel || !response.enabled() || !response.hovered() {
+        return;
+    }
+    let colors = theme::colors(ui.ctx());
+    let text = if role == Role::Danger {
+        colors.danger_text
+    } else {
+        colors.primary_text
+    };
+    let width: f32 = if response.is_pointer_button_down_on() {
+        2.0
+    } else {
+        1.0
+    };
+    ui.painter().rect_stroke(
+        response.rect.shrink(1.0),
+        5.0,
+        egui::Stroke::new(width, text),
+        egui::StrokeKind::Inside,
+    );
 }
 
 /// The width `compact_button` takes for `label`, to decide before drawing
