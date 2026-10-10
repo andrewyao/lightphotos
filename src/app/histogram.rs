@@ -140,9 +140,9 @@ impl App {
                 };
                 for ch in 0..3 {
                     // `apply_raw_display` already returns display space. The
-                    // sRGB path returns linear, so approximate with gamma 2.2.
+                    // sRGB path returns linear, so encode it as the Loupe does.
                     let v = match self.hist.pixel_format {
-                        image_decode::PixelFormat::Srgb8 => out[ch].max(0.0).powf(1.0 / 2.2),
+                        image_decode::PixelFormat::Srgb8 => develop::srgb_encode(out[ch]),
                         image_decode::PixelFormat::LinearF16 => out[ch],
                     }
                     .clamp(0.0, 1.0);

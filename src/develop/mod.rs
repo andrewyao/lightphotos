@@ -581,6 +581,28 @@ pub(crate) const RAW_LOOK_KNOTS: [f32; 17] = [
     0.976, 0.992, 1.000, 1.000,
 ];
 
+/// The sRGB transfer curve, encoded 0..1 to linear light. The Loupe's
+/// `Rgba8UnormSrgb` texture decodes with this same curve in hardware, so
+/// every CPU reader of sRGB8 pixels must use it too.
+pub fn srgb_decode(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Linear light to the sRGB encoding, 0 for anything at or below black.
+/// Must match `linear_to_srgb` in loupe_common.wgsl.
+pub fn srgb_encode(v: f32) -> f32 {
+    let v = v.max(0.0);
+    if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 pub fn apply_raw_preview_boost(srgb: f32) -> f32 {
     let x = srgb.clamp(0.0, 1.0) * (RAW_LOOK_KNOTS.len() - 1) as f32;
     let i = (x as usize).min(RAW_LOOK_KNOTS.len() - 2);
@@ -653,12 +675,7 @@ fn apply_linear_impl(
     // raw_shader.wgsl's display curve instead of plain 2.2 gamma.
     let to_gamma = |x: f32| {
         if raw_display {
-            let srgb = if x <= 0.0031308 {
-                x.max(0.0) * 12.92
-            } else {
-                1.055 * x.max(0.0).powf(1.0 / 2.4) - 0.055
-            };
-            apply_raw_preview_boost(srgb)
+            apply_raw_preview_boost(srgb_encode(x))
         } else {
             x.max(0.0).powf(1.0 / 2.2)
         }

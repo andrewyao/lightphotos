@@ -87,14 +87,7 @@ fn luma(px: [f32; 3]) -> f32 {
 /// `recompute_histogram` plots in the Develop panel.
 fn display(adj: &Adjustments, format: PixelFormat, px: [f32; 3]) -> [f32; 3] {
     match format {
-        PixelFormat::Srgb8 => {
-            let out = develop::apply_linear(adj, px);
-            [
-                out[0].max(0.0).powf(1.0 / 2.2),
-                out[1].max(0.0).powf(1.0 / 2.2),
-                out[2].max(0.0).powf(1.0 / 2.2),
-            ]
-        }
+        PixelFormat::Srgb8 => develop::apply_linear(adj, px).map(develop::srgb_encode),
         PixelFormat::LinearF16 => develop::apply_raw_display(adj, px),
     }
 }
@@ -560,14 +553,13 @@ mod tests {
             .map(|i| {
                 let t = i as f32 / (n - 1) as f32;
                 let display = lo + (hi - lo) * t;
-                let linear = display.powf(2.2);
-                [linear; 3]
+                [develop::srgb_decode(display); 3]
             })
             .collect()
     }
 
     fn flat(display: f32, n: usize) -> Vec<[f32; 3]> {
-        vec![[display.powf(2.2); 3]; n]
+        vec![[develop::srgb_decode(display); 3]; n]
     }
 
     /// A dark pile with a long tail toward bright: display luma
@@ -576,7 +568,7 @@ mod tests {
         (0..n)
             .map(|i| {
                 let t = i as f32 / (n - 1) as f32;
-                [(top * t.powi(steep)).powf(2.2); 3]
+                [develop::srgb_decode(top * t.powi(steep)); 3]
             })
             .collect()
     }
@@ -586,7 +578,7 @@ mod tests {
         (0..n)
             .map(|i| {
                 let t = i as f32 / (n - 1) as f32;
-                [(1.0 - (1.0 - bottom) * t.powi(steep)).powf(2.2); 3]
+                [develop::srgb_decode(1.0 - (1.0 - bottom) * t.powi(steep)); 3]
             })
             .collect()
     }
@@ -785,14 +777,7 @@ mod tests {
     fn percentile_under(samples: &[[f32; 3]], adj: &Adjustments, p: f32) -> f32 {
         let mut out: Vec<f32> = samples
             .iter()
-            .map(|&px| {
-                let o = develop::apply_linear(adj, px);
-                luma([
-                    o[0].max(0.0).powf(1.0 / 2.2),
-                    o[1].max(0.0).powf(1.0 / 2.2),
-                    o[2].max(0.0).powf(1.0 / 2.2),
-                ])
-            })
+            .map(|&px| luma(develop::apply_linear(adj, px).map(develop::srgb_encode)))
             .collect();
         out.sort_by(|a, b| a.partial_cmp(b).unwrap());
         out[((out.len() as f32 * p) as usize).min(out.len() - 1)]
@@ -819,11 +804,7 @@ mod tests {
                 let t = i as f32 / (n - 1) as f32;
                 let display = lo + (hi - lo) * t;
                 let h = hues[i % hues.len()];
-                [
-                    (display * h[0]).powf(2.2),
-                    (display * h[1]).powf(2.2),
-                    (display * h[2]).powf(2.2),
-                ]
+                h.map(|c| develop::srgb_decode(display * c))
             })
             .collect()
     }

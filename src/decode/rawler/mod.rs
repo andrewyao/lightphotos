@@ -252,23 +252,17 @@ fn develop_raw_image_to_srgb8(
     }
 
     // `RawDevelop` has no mid-pipeline hook, so denoise runs on the finished
-    // sRGB8 image. It decodes with the 2.2 gamma approximation because that
-    // is the space `denoise_linear_rgb_buffer` expects.
+    // sRGB8 image, decoded to the linear light `denoise_linear_rgb_buffer`
+    // expects and encoded back.
     let (dw, dh) = (img.width() as usize, img.height() as usize);
     let linear: Vec<[f32; 3]> = img
         .pixels()
-        .map(|p| {
-            [
-                (p[0] as f32 / 255.0).powf(2.2),
-                (p[1] as f32 / 255.0).powf(2.2),
-                (p[2] as f32 / 255.0).powf(2.2),
-            ]
-        })
+        .map(|p| [p[0], p[1], p[2]].map(|c| crate::develop::srgb_decode(c as f32 / 255.0)))
         .collect();
     let denoised =
         crate::develop::denoise_linear_rgb_buffer(AUTO_RAW_DENOISE_STRENGTH, dw, dh, &linear);
     let encode = |v: f32| {
-        (v.max(0.0).powf(1.0 / 2.2) * 255.0)
+        (crate::develop::srgb_encode(v) * 255.0)
             .round()
             .clamp(0.0, 255.0) as u8
     };

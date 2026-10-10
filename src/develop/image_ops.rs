@@ -21,34 +21,19 @@ fn crop_bounds(crop: Option<Crop>, w: u32, h: u32) -> (u32, u32, u32, u32) {
     (x0, y0, x1, y1)
 }
 
-/// The sRGB transfer curve from an encoded value in 0..1 to linear light.
-/// The hardware applies the same curve when the Loupe samples its
-/// `Rgba8UnormSrgb` texture.
-fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
+use develop::{srgb_decode, srgb_encode};
 
-/// Linear light to an sRGB8 channel, rounded: `linear_to_srgb` in
-/// loupe_common.wgsl, quantized as the Loupe's 8-bit surface stores it.
+/// Linear light to an sRGB8 channel, rounded as the Loupe's 8-bit surface
+/// stores `linear_to_srgb`'s output.
 fn encode_srgb8_curve(v: f32) -> u8 {
-    let v = v.max(0.0);
-    let c = if v <= 0.0031308 {
-        v * 12.92
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
-    };
-    (c * 255.0).round().clamp(0.0, 255.0) as u8
+    (srgb_encode(v) * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
-/// [`srgb_to_linear`] for every 8-bit `c`: the same floats, computed once. A
+/// [`srgb_decode`] for every 8-bit `c`: the same floats, computed once. A
 /// 512px edited thumbnail makes half a million of these.
 fn srgb8_to_linear_lut() -> &'static [f32; 256] {
     static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
-    LUT.get_or_init(|| std::array::from_fn(|c| srgb_to_linear(c as f32 / 255.0)))
+    LUT.get_or_init(|| std::array::from_fn(|c| srgb_decode(c as f32 / 255.0)))
 }
 
 /// Linear light to an sRGB8 channel, rounded. Bit for bit what
@@ -101,7 +86,7 @@ fn unpremul_to_linear(px: [u8; 4]) -> [f32; 3] {
             lut[px[2] as usize],
         ];
     }
-    [r, g, b].map(|c| srgb_to_linear(c / 255.0))
+    [r, g, b].map(|c| srgb_decode(c / 255.0))
 }
 
 /// The photo as the shader samples it: linear light, bilinear, clamped at the
@@ -795,7 +780,7 @@ mod tests {
         let out = unpremul_to_linear([255, 0, 128, 255]);
         assert!((out[0] - 1.0).abs() < 1e-6);
         assert!((out[1] - 0.0).abs() < 1e-6);
-        assert!((out[2] - srgb_to_linear(128.0 / 255.0)).abs() < 1e-6);
+        assert!((out[2] - srgb_decode(128.0 / 255.0)).abs() < 1e-6);
     }
 
     #[test]
@@ -804,7 +789,7 @@ mod tests {
             let lin = unpremul_to_linear([c, c, c, 255])[0];
             assert_eq!(
                 lin.to_bits(),
-                srgb_to_linear(c as f32 / 255.0).to_bits(),
+                srgb_decode(c as f32 / 255.0).to_bits(),
                 "decode {c}"
             );
         }
@@ -815,7 +800,7 @@ mod tests {
             .map(|i| i as f32 / 1_000_000.0)
             .collect();
         for k in 0..=255u32 {
-            let edge = srgb_to_linear(((k as f32 - 0.5) / 255.0).max(0.0));
+            let edge = srgb_decode(((k as f32 - 0.5) / 255.0).max(0.0));
             let bits = edge.to_bits();
             probes.extend((bits.saturating_sub(4)..bits + 4).map(f32::from_bits));
         }
