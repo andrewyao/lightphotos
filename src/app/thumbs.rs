@@ -121,15 +121,19 @@ impl App {
         self.request_redraw();
     }
 
-    /// "LightPhotos - Folder" in the Grid, "LightPhotos - Folder - File (x/y)"
-    /// in the Loupe.
     pub(super) fn update_window_title(&self) {
         let Some(w) = &self.window else { return };
+        w.set_title(&self.window_title());
+    }
+
+    /// "LightPhotos - Folder" in the Grid, "LightPhotos - Folder - File (x/y)"
+    /// in the Loupe, "LightPhotos" on the landing page.
+    pub(super) fn window_title(&self) -> String {
         let mut title = String::from("LightPhotos");
         let folder = self
             .folder_sel
             .as_deref()
-            .or(self.folder_roots.first().map(PathBuf::as_path))
+            .or_else(|| self.playlist.as_ref().map(Playlist::dir))
             .or_else(|| self.shown.path().and_then(|p| p.parent()))
             .and_then(|d| d.file_name());
         if let Some(folder) = folder {
@@ -146,7 +150,7 @@ impl App {
                 self.visible.len()
             ));
         }
-        w.set_title(&title);
+        title
     }
 
     /// Which decode the Loupe shows for the selected photo, or `None` while

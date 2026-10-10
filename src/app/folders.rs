@@ -331,6 +331,19 @@ mod tests {
         assert!(!app.is_missing_root(&back));
     }
 
+    /// With folders listed but none open, the title names no folder; once
+    /// one is open it names that one, not the first in the list.
+    #[test]
+    fn the_title_names_the_folder_showing_not_the_first_root() {
+        let (a, b) = (photos("title-a"), photos("title-b"));
+        let mut app = App::new(None);
+        app.folder_roots = vec![a, b.clone()];
+        assert_eq!(app.window_title(), "LightPhotos");
+        app.open(b.clone());
+        let name = b.file_name().unwrap().to_string_lossy();
+        assert_eq!(app.window_title(), format!("LightPhotos - {name}"));
+    }
+
     /// A real click on Add Folder under the Grid's folder list.
     #[test]
     fn add_folder_opens_the_picker() {
