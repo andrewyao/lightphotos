@@ -902,17 +902,12 @@ impl App {
         );
 
         if is_dir {
+            self.add_root(&path);
+            self.reveal_folder(&path);
             #[cfg(not(target_arch = "wasm32"))]
-            {
-                self.add_root(&path);
-                self.reveal_folder(&path);
-                self.load_folder(path);
-            }
+            self.load_folder(path);
             #[cfg(target_arch = "wasm32")]
             {
-                folders::add_root(&mut self.folder_roots, &path);
-                self.expanded.insert(path.clone());
-                self.ensure_subdirs(&path);
                 // Browser paths are synthetic, backed by directory handles
                 // whose listing is async, so `Playlist::from_dir` can't run.
                 if !self.subdirs.contains_key(&path) {
@@ -933,17 +928,8 @@ impl App {
             // Root the tree at the parent so the Grid has a sidebar.
             if let Some(parent) = path.parent() {
                 let parent = parent.to_path_buf();
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    self.add_root(&parent);
-                    self.reveal_folder(&parent);
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    folders::add_root(&mut self.folder_roots, &parent);
-                    self.expanded.insert(parent.clone());
-                    self.ensure_subdirs(&parent);
-                }
+                self.add_root(&parent);
+                self.reveal_folder(&parent);
                 self.folder_sel = Some(parent);
             }
 

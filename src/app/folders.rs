@@ -54,7 +54,6 @@ pub(super) fn folder_chain(root: &Path, dir: &Path) -> Vec<PathBuf> {
 impl App {
     /// Add `dir` to the tree's roots, unless a root already holds it. The
     /// session saves the list.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn add_root(&mut self, dir: &Path) {
         self.missing_roots.remove(dir);
         if add_root(&mut self.folder_roots, dir) {
@@ -64,7 +63,6 @@ impl App {
 
     /// Expand the tree from `dir`'s root down to `dir`, listing each folder
     /// on the way, so `dir` shows as a row.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn reveal_folder(&mut self, dir: &Path) {
         let Some(root) = self
             .folder_roots
