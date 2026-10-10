@@ -92,14 +92,19 @@ pub(crate) struct Web {
     /// The startup session restore waiting on its folder's listing, then on
     /// each listing down to its subfolder.
     session_restore: Option<session::Session>,
-    /// True while `showDirectoryPicker` and its listing are in flight. Disables
-    /// the landing page's "Choose Folder" button so a second picker can't open.
+    /// True while a pick, a grant or the startup probe and its listing are
+    /// in flight. Disables the Add Folder button so a second picker can't
+    /// open.
     folder_pending: bool,
+    /// Counts the folder requests. `poll_folder_pick` drops a result from
+    /// an earlier one, so a click on a kept root can supersede the startup
+    /// probe.
+    folder_generation: u64,
     /// Set while `fonts::fetch_full_cjk` is running or once it has succeeded,
     /// so the font downloads at most once a session. A failed fetch clears it.
     full_cjk_requested: Arc<std::sync::atomic::AtomicBool>,
-    folder_tx: Sender<Result<crate::web::web_fs::PickedFolder, String>>,
-    folder_rx: Receiver<Result<crate::web::web_fs::PickedFolder, String>>,
+    folder_tx: Sender<(u64, Result<crate::web::web_fs::PickedFolder, String>)>,
+    folder_rx: Receiver<(u64, Result<crate::web::web_fs::PickedFolder, String>)>,
     /// The names of the folders kept from earlier visits, read once at
     /// startup so the Folders list shows them before any is allowed. `None`
     /// once they have landed.
@@ -205,6 +210,7 @@ impl Web {
             saved_folders_rx: Some(saved_rx),
             session_restore: None,
             folder_pending: false,
+            folder_generation: 0,
             full_cjk_requested: Default::default(),
             file_handles: HashMap::new(),
             dir_handles: HashMap::new(),
@@ -415,17 +421,39 @@ impl App {
 
     /// Opens the browser's folder picker unless one is already open.
     pub(crate) fn request_folder_pick(&mut self) {
-        if self.web.folder_pending {
+        let Some(generation) = self.begin_folder_request() else {
             return;
-        }
-        self.web.folder_pending = true;
-        self.web.session_restore = None;
+        };
         let tx = self.web.folder_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let result = web_fs::pick_and_list_folder().await;
-            let _ = tx.send(result);
+            let _ = tx.send((generation, web_fs::pick_and_list_folder().await));
         });
         self.request_redraw();
+    }
+
+    /// Starts a pick or a grant the user asked for. It supersedes the
+    /// startup probe, whose result is then dropped. While a picker or a
+    /// permission prompt the user opened is up, the browser shows it over
+    /// the page, so a second request is refused with `None`.
+    fn begin_folder_request(&mut self) -> Option<u64> {
+        if self.web.folder_pending && !self.probe_pending() {
+            return None;
+        }
+        self.web.session_restore = None;
+        Some(self.start_folder_request())
+    }
+
+    /// Whether the request in flight is the startup probe.
+    fn probe_pending(&self) -> bool {
+        self.web.folder_pending && self.web.session_restore.is_some()
+    }
+
+    /// Marks a folder request open and returns the generation that tags
+    /// its result.
+    fn start_folder_request(&mut self) -> u64 {
+        self.web.folder_pending = true;
+        self.web.folder_generation = self.web.folder_generation.wrapping_add(1);
+        self.web.folder_generation
     }
 
     /// List the last session's folder again at startup, if the browser
@@ -442,11 +470,11 @@ impl App {
         else {
             return;
         };
-        self.web.folder_pending = true;
         self.web.session_restore = Some(session);
+        let generation = self.start_folder_request();
         let tx = self.web.folder_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = tx.send(web_fs::reopen_saved_folder(name, false).await);
+            let _ = tx.send((generation, web_fs::reopen_saved_folder(name, false).await));
         });
         self.request_redraw();
     }
@@ -455,15 +483,13 @@ impl App {
     /// and list it, as a pick does. Must run inside a click or key press's
     /// user activation, which the permission prompt needs.
     pub(super) fn request_root_grant(&mut self, root: &Path) {
-        if self.web.folder_pending {
+        let Some(generation) = self.begin_folder_request() else {
             return;
-        }
-        self.web.folder_pending = true;
-        self.web.session_restore = None;
+        };
         let name = root.to_string_lossy().into_owned();
         let tx = self.web.folder_tx.clone();
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = tx.send(web_fs::reopen_saved_folder(name, true).await);
+            let _ = tx.send((generation, web_fs::reopen_saved_folder(name, true).await));
         });
         self.request_redraw();
     }
@@ -519,7 +545,11 @@ impl App {
     /// folders' names are still loading.
     pub(crate) fn poll_folder_pick(&mut self) -> bool {
         let saved_pending = self.poll_saved_folders();
-        if let Ok(result) = self.web.folder_rx.try_recv() {
+        while let Ok((generation, result)) = self.web.folder_rx.try_recv() {
+            // A request the user made since superseded this one.
+            if generation != self.web.folder_generation {
+                continue;
+            }
             self.web.folder_pending = false;
             let restore = self.web.session_restore.take();
             match result {
@@ -1454,9 +1484,10 @@ impl App {
         }
         if self.folder_roots.contains(&dir) && !self.web_root_allowed(&dir) {
             // A kept root from an earlier visit. The grant lists it and
-            // loads it into the grid.
-            self.supersede_web_pending_nav();
+            // loads it into the grid. It goes first: the supersede clears
+            // the probe marker the grant reads.
             self.request_root_grant(&dir);
+            self.supersede_web_pending_nav();
             return;
         }
         let Some(handle) = self.web.dir_handles.get(&dir).cloned() else {
