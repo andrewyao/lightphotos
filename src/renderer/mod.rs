@@ -15,6 +15,9 @@ use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::curve::ToneCurve;
 use crate::develop::{GpuAdjust, GpuCurve, GpuTouchUp};
 
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod match_test;
 mod raw_render;
 
 /// Texture format for a `PixelFormat::Srgb8` photo. The mip-gen pipeline
@@ -72,7 +75,8 @@ pub struct Renderer {
     /// The loupe backdrop, sRGB-encoded since the surface does no encoding of
     /// its own. The theme sets it.
     clear_color: wgpu::Color,
-    surface: wgpu::Surface<'static>,
+    /// `None` for a headless renderer, which draws only into `offscreen`.
+    surface: Option<wgpu::Surface<'static>>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
@@ -221,6 +225,63 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
+        Ok(Self::build(device, queue, Some(surface), config, max_dim))
+    }
+
+    /// A renderer with no window that draws into an `Rgba8Unorm` offscreen
+    /// texture, for tests that read the Loupe's pixels back.
+    #[cfg(test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_headless(width: u32, height: u32) -> Result<Self, String> {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::default();
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                })
+                .await
+                .map_err(|e| format!("no adapter: {e}"))?;
+            let limits = adapter.limits();
+            let max_dim = limits.max_texture_dimension_2d;
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: limits,
+                    experimental_features: wgpu::ExperimentalFeatures::default(),
+                    memory_hints: wgpu::MemoryHints::Performance,
+                    trace: wgpu::Trace::Off,
+                })
+                .await
+                .map_err(|e| format!("request device: {e}"))?;
+            let config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                width: width.min(max_dim).max(1),
+                height: height.min(max_dim).max(1),
+                present_mode: wgpu::PresentMode::AutoVsync,
+                alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            };
+            let mut r = Self::build(device, queue, None, config, max_dim);
+            r.render_offscreen();
+            Ok(r)
+        })
+    }
+
+    /// Everything past the device and the surface format: shaders,
+    /// pipelines, buffers and the egui renderer.
+    fn build(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        surface: Option<wgpu::Surface<'static>>,
+        config: wgpu::SurfaceConfiguration,
+        max_dim: u32,
+    ) -> Self {
+        let format = config.format;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shader"),
             source: wgpu::ShaderSource::Wgsl(
@@ -568,7 +629,7 @@ impl Renderer {
         let egui_renderer =
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
 
-        Ok(Self {
+        Self {
             clear_color: wgpu::Color::BLACK,
             surface,
             device,
@@ -602,7 +663,7 @@ impl Renderer {
             egui_renderer,
             offscreen: None,
             thumb_textures: HashMap::new(),
-        })
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -773,7 +834,9 @@ impl Renderer {
         // stretched to fill.
         self.config.width = w.min(self.max_dim);
         self.config.height = h.min(self.max_dim);
-        self.surface.configure(&self.device, &self.config);
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if self.offscreen.is_some() {
             self.render_offscreen();
@@ -1226,12 +1289,12 @@ impl Renderer {
             }
         }
 
-        let frame = match &self.offscreen {
-            Some(_) => None,
-            None => match self.surface.get_current_texture() {
+        let frame = match (&self.offscreen, &self.surface) {
+            (Some(_), _) | (None, None) => None,
+            (None, Some(surface)) => match surface.get_current_texture() {
                 C::Success(f) | C::Suboptimal(f) => Some(f),
                 C::Outdated | C::Lost => {
-                    self.surface.configure(&self.device, &self.config);
+                    surface.configure(&self.device, &self.config);
                     self.free_egui_textures(&egui);
                     return false;
                 }

@@ -424,15 +424,10 @@ impl App {
         self.request_redraw();
     }
 
-    /// Convert `adj` to the GPU uniform. Also fills `texel_w`/`texel_h` from the
-    /// image size, which denoise needs to step by whole texels.
+    /// Convert `adj` to the GPU uniform for the shown image.
     pub(super) fn gpu_adjust(&self, adj: &Adjustments) -> GpuAdjust {
         let (w, h) = self.image_size();
-        let mut g = GpuAdjust::from(adj);
-        g.texel_w = 1.0 / w;
-        g.texel_h = 1.0 / h;
-        g._pad0 = self.current_touchups().len() as f32;
-        g
+        GpuAdjust::for_image(adj, w, h, self.current_touchups().len())
     }
 
     pub(super) fn apply_touchups(&mut self, touchups: Vec<TouchUp>) {

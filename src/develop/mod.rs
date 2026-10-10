@@ -497,8 +497,22 @@ impl Default for GpuAdjust {
     }
 }
 
+impl GpuAdjust {
+    /// The uniform for `adj` on a `width x height` image with `touchups`
+    /// spot-heals. Denoise steps by whole texels, and the shader reads the
+    /// touch-up count from `_pad0`.
+    pub fn for_image(adj: &Adjustments, width: f32, height: f32, touchups: usize) -> Self {
+        Self {
+            texel_w: 1.0 / width,
+            texel_h: 1.0 / height,
+            _pad0: touchups as f32,
+            ..Self::from(adj)
+        }
+    }
+}
+
 impl From<&Adjustments> for GpuAdjust {
-    /// Leaves `texel_w`/`texel_h` at 1.0; `App::gpu_adjust` sets them.
+    /// Leaves `texel_w`/`texel_h` at 1.0; [`GpuAdjust::for_image`] sets them.
     fn from(a: &Adjustments) -> Self {
         let (crop_l, crop_t, crop_r, crop_b) = match a.crop {
             Some(c) => (c.left, c.top, c.right, c.bottom),
