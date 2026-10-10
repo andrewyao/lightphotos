@@ -99,12 +99,16 @@ impl App {
             .as_ref()
             .is_some_and(|pl| pl.dir().starts_with(root));
         if showing {
-            let next = self
-                .folder_roots
-                .iter()
-                .find(|r| self.root_ready(r))
-                .cloned();
-            match next {
+            // The roots passed over weren't there; a drive unplugged since
+            // launch isn't in `missing_roots` yet.
+            let next = self.folder_roots.iter().position(|r| self.root_ready(r));
+            #[cfg(not(target_arch = "wasm32"))]
+            self.missing_roots.extend(
+                self.folder_roots[..next.unwrap_or(self.folder_roots.len())]
+                    .iter()
+                    .cloned(),
+            );
+            match next.and_then(|i| self.folder_roots.get(i).cloned()) {
                 Some(next) => self.open(next),
                 None => self.close_folder(),
             }
@@ -117,7 +121,7 @@ impl App {
     fn root_ready(&self, root: &Path) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            !self.missing_roots.contains(root)
+            root.is_dir()
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -272,6 +276,35 @@ mod tests {
             a.join("a.jpg").exists(),
             "removing a folder keeps its files"
         );
+    }
+
+    /// The other root's drive was unplugged after launch, so `missing_roots`
+    /// doesn't know yet. It must not open as a photo with its parent as a
+    /// new root.
+    #[test]
+    fn removing_the_root_showing_skips_a_root_that_has_gone() {
+        let (gone, b) = (photos("roots-rm-gone"), photos("roots-rm-stay"));
+        let mut app = App::new(None);
+        app.open(gone.clone());
+        app.open(b.clone());
+        std::fs::remove_dir_all(&gone).unwrap();
+        app.remove_root(&b);
+        assert_eq!(app.folder_roots(), std::slice::from_ref(&gone));
+        assert!(app.is_missing_root(&gone));
+        assert!(!app.has_playlist());
+        assert_eq!(app.mode, ViewMode::Grid);
+    }
+
+    /// A path that is neither a folder nor a file, such as a photo deleted
+    /// between Finder's open and ours, opens nothing.
+    #[test]
+    fn opening_a_path_that_is_gone_changes_nothing() {
+        let gone = temp_folder("open-gone").join("x.jpg");
+        let mut app = App::new(None);
+        app.open(gone);
+        assert!(app.folder_roots().is_empty());
+        assert!(!app.has_playlist());
+        assert_eq!(app.mode, ViewMode::Grid);
     }
 
     #[test]

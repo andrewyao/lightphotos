@@ -872,13 +872,29 @@ impl App {
     /// Open a directory in the Grid with nothing selected, or a file in the
     /// Loupe with its folder as the playlist.
     pub(crate) fn open(&mut self, path: PathBuf) {
-        self.teardown_loupe_state();
         #[cfg(not(target_arch = "wasm32"))]
-        let is_dir = std::fs::metadata(&path)
-            .map(|m| m.is_dir())
-            .unwrap_or(false);
+        let is_dir = match std::fs::metadata(&path) {
+            Ok(m) => m.is_dir(),
+            // Neither a folder nor a file: an unplugged drive, or a photo
+            // deleted since the path was chosen. A listed root greys out in
+            // the tree; anything else gets the error.
+            Err(e) => {
+                eprintln!("[lightphotos] open {}: {e}", path.display());
+                if self.folder_roots.contains(&path) {
+                    self.missing_roots.insert(path);
+                } else {
+                    self.set_status(
+                        StatusKind::Error,
+                        (crate::i18n::t().open_folder_failed)(&e.to_string()),
+                    );
+                }
+                self.request_redraw();
+                return;
+            }
+        };
         #[cfg(target_arch = "wasm32")]
         let is_dir = self.web.has_dir(&path) || self.subdirs.contains_key(&path);
+        self.teardown_loupe_state();
         eprintln!(
             "[lightphotos] open {}: {}",
             if is_dir { "dir" } else { "file" },
