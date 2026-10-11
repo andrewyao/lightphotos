@@ -905,6 +905,46 @@ mod tests {
     }
 
     #[test]
+    fn undo_of_reset_all_puts_back_the_touch_ups() {
+        let (mut app, _, paths) = folder_app("cmd-undo-reset-all", 1);
+        app.select_single(0);
+        app.shown = Shown::Preview(paths[0].clone(), 100, 100);
+        let spot = crate::develop::TouchUp {
+            center: [0.5, 0.5],
+            radius: 0.05,
+            source: [0.3, 0.3],
+            feather: 0.5,
+            delta: [0.0; 3],
+            opacity: 1.0,
+        };
+        app.apply_touchups(vec![spot]);
+        run(
+            &mut app,
+            r#"{"id":"develop.set","params":{"controls":{"exposure":1}}}"#,
+        )
+        .unwrap();
+
+        app.apply_ui_actions(vec![ui::UiAction::ResetAllEdits]);
+        app.save_edit_unless_dragging();
+        assert!(app.catalog.touchups(&paths[0]).is_empty());
+
+        assert_eq!(
+            run(&mut app, r#"{"id":"edit.undo"}"#).map(|o| o.photos),
+            Ok(1)
+        );
+        assert_eq!(app.catalog.adjustments(&paths[0]).exposure, 1.0);
+        assert_eq!(app.catalog.touchups(&paths[0]), vec![spot]);
+        assert_eq!(app.current_touchups(), &[spot]);
+
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert_eq!(
+            app.catalog.touchups(&paths[0]),
+            vec![spot],
+            "undoing the exposure leaves the spots"
+        );
+    }
+
+    #[test]
     fn undo_puts_back_a_crop_and_skips_ratings() {
         let (mut app, _, paths) = folder_app("cmd-undo-crop", 1);
         sized(&mut app, &paths, (4000, 3000));

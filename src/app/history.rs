@@ -1,10 +1,10 @@
 //! Develop undo. Each step holds the edit every photo had before the step's
-//! first change to it. One command is one step, and so is one slider drag:
+//! first change to it, and its touch-ups when the step cleared them. One command is one step, and so is one slider drag:
 //! a step stays open until the pointer is up at the end of a frame.
 
 use std::path::{Path, PathBuf};
 
-use crate::develop::Adjustments;
+use crate::develop::{Adjustments, TouchUp};
 
 /// Steps older than this are dropped.
 const MAX_STEPS: usize = 100;
@@ -19,7 +19,15 @@ pub(crate) struct EditHistory {
 
 #[derive(Default)]
 pub(crate) struct EditStep {
-    pub(crate) before: Vec<(PathBuf, Adjustments)>,
+    pub(crate) before: Vec<Before>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct Before {
+    pub(crate) path: PathBuf,
+    pub(crate) adj: Adjustments,
+    /// `None` when the step left the touch-ups alone.
+    pub(crate) touchups: Option<Vec<TouchUp>>,
 }
 
 impl EditHistory {
@@ -36,10 +44,31 @@ impl EditHistory {
     /// Records `before` as `path`'s edit ahead of a change, unless the open
     /// step already holds an earlier one. Opens a step if none is.
     pub(super) fn note(&mut self, path: &Path, before: Adjustments) {
+        self.entry(path, before);
+    }
+
+    /// As [`note`](Self::note), and records `touchups` as `path`'s spots
+    /// ahead of a change to them, unless the open step already holds some.
+    pub(super) fn note_touchups(&mut self, path: &Path, adj: Adjustments, touchups: &[TouchUp]) {
+        self.entry(path, adj)
+            .touchups
+            .get_or_insert_with(|| touchups.to_vec());
+    }
+
+    fn entry(&mut self, path: &Path, adj: Adjustments) -> &mut Before {
         let step = self.open.get_or_insert_with(EditStep::default);
-        if !step.before.iter().any(|(p, _)| p == path) {
-            step.before.push((path.to_path_buf(), before));
-        }
+        let i = match step.before.iter().position(|b| b.path == path) {
+            Some(i) => i,
+            None => {
+                step.before.push(Before {
+                    path: path.to_path_buf(),
+                    adj,
+                    touchups: None,
+                });
+                step.before.len() - 1
+            }
+        };
+        &mut step.before[i]
     }
 
     /// Closes the open step, unless a `begin` holds it.
@@ -98,12 +127,10 @@ mod tests {
         h.note(a, exposure(0.5));
         h.note(Path::new("/b.jpg"), exposure(1.0));
         let step = h.pop().unwrap();
+        let firsts: Vec<_> = step.before.iter().map(|b| (&*b.path, b.adj)).collect();
         assert_eq!(
-            step.before,
-            vec![
-                (a.to_path_buf(), exposure(0.0)),
-                (PathBuf::from("/b.jpg"), exposure(1.0))
-            ]
+            firsts,
+            vec![(a, exposure(0.0)), (Path::new("/b.jpg"), exposure(1.0))]
         );
         assert!(!h.can_undo());
     }
@@ -119,8 +146,8 @@ mod tests {
         h.seal();
         h.note(Path::new("/a.jpg"), exposure(0.4));
         h.seal();
-        assert_eq!(h.pop().unwrap().before[0].1, exposure(0.4));
-        assert_eq!(h.pop().unwrap().before[0].1, exposure(0.0), "one step");
+        assert_eq!(h.pop().unwrap().before[0].adj, exposure(0.4));
+        assert_eq!(h.pop().unwrap().before[0].adj, exposure(0.0), "one step");
         assert!(h.pop().is_none());
     }
 
@@ -131,8 +158,8 @@ mod tests {
         h.seal();
         h.begin();
         h.note(Path::new("/a.jpg"), exposure(0.3));
-        assert_eq!(h.pop().unwrap().before[0].1, exposure(0.3));
-        assert_eq!(h.pop().unwrap().before[0].1, exposure(0.0));
+        assert_eq!(h.pop().unwrap().before[0].adj, exposure(0.3));
+        assert_eq!(h.pop().unwrap().before[0].adj, exposure(0.0));
     }
 
     #[test]
@@ -145,7 +172,7 @@ mod tests {
         let mut n = 0;
         while let Some(step) = h.pop() {
             n += 1;
-            assert_ne!(step.before[0].1, exposure(0.0), "the first step is gone");
+            assert_ne!(step.before[0].adj, exposure(0.0), "the first step is gone");
         }
         assert_eq!(n, MAX_STEPS);
     }

@@ -1487,6 +1487,10 @@ impl App {
                             "reset",
                         );
                     }
+                    if let Some(spots) = self.touchups.get(&path) {
+                        let adj = self.edits.get(&path).copied().unwrap_or_default();
+                        self.history.note_touchups(&path, adj, spots);
+                    }
                     self.put_edit(&path, Adjustments::default());
                     self.touchups.remove(&path);
                     self.catalog.set_adjustments(&path, &Adjustments::default());

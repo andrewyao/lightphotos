@@ -424,7 +424,8 @@ impl App {
         };
         let shown = self.shown.path().map(Path::to_path_buf);
         let mut n = 0;
-        for (path, adj) in step.before {
+        for before in step.before {
+            let path = before.path;
             let in_folder = self
                 .playlist
                 .as_ref()
@@ -432,8 +433,16 @@ impl App {
             if !in_folder {
                 continue;
             }
-            self.store_edit(&path, adj);
-            self.catalog.set_adjustments(&path, &adj);
+            self.store_edit(&path, before.adj);
+            self.catalog.set_adjustments(&path, &before.adj);
+            if let Some(touchups) = before.touchups {
+                self.catalog.set_touchups(&path, &touchups);
+                if touchups.is_empty() {
+                    self.touchups.remove(&path);
+                } else {
+                    self.touchups.insert(path.clone(), touchups);
+                }
+            }
             n += 1;
             if shown.as_ref() == Some(&path) {
                 self.push_adjustments();
