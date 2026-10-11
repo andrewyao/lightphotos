@@ -430,7 +430,7 @@ impl App {
             return;
         }
         let now = self.rotations.get(path).copied().unwrap_or(0);
-        let step = (now + if cw { 1 } else { 3 }) % 4;
+        let step = (now % 4 + if cw { 1 } else { 3 }) % 4;
         if step == 0 {
             self.rotations.remove(path);
         } else {
@@ -561,6 +561,21 @@ mod tests {
             assert_eq!(saved, settled, "{json}");
             assert_eq!(saved[0], saved[1], "one value for the set: {json}");
         }
+    }
+
+    /// A sidecar comes from whoever supplied the folder, and its rotation is
+    /// any u8. Turning such a photo wraps instead of overflowing.
+    #[test]
+    fn rotating_a_photo_with_a_hostile_saved_rotation_wraps() {
+        let (mut app, dir, paths) = folder_app("cmd-rotate-hostile", 1);
+        let side = dir.join(crate::sidecar::SIDECAR_DIR);
+        std::fs::create_dir_all(&side).unwrap();
+        std::fs::write(side.join("0.jpg.xmp"), r#"{"rotation":255}"#).unwrap();
+        crate::app::test_support::load_folder(&mut app, &dir);
+
+        let cw = r#"{"id":"photo.rotate","params":{"clockwise":true,"photos":["0.jpg"]}}"#;
+        assert_eq!(run(&mut app, cw).map(|o| o.photos), Ok(1));
+        assert_eq!(app.catalog.rotation(&paths[0]), 0, "3 and a quarter turn");
     }
 
     #[test]

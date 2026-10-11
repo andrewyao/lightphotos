@@ -175,7 +175,7 @@ impl App {
             return;
         };
         let old_zoom = self.zoom();
-        let step = (self.current_rotation() + if cw { 1 } else { 3 }) % 4;
+        let step = (self.current_rotation() % 4 + if cw { 1 } else { 3 }) % 4;
         if step == 0 {
             self.rotations.remove(&path);
         } else {

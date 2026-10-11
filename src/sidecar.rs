@@ -80,7 +80,11 @@ pub struct ImageRecord {
     )]
     pub touchups: Vec<TouchUp>,
     /// Manual rotation in 90° clockwise steps, `0..=3`.
-    #[serde(default, skip_serializing_if = "is_zero_rot")]
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero_rot",
+        deserialize_with = "quarter_turns"
+    )]
     pub rotation: u8,
     /// Kept here rather than in `signals.json` because it is measured on the
     /// edited photo, so it travels with the edits it describes.
@@ -112,6 +116,15 @@ where
     let mut touchups = Vec::<TouchUp>::deserialize(deserializer)?;
     touchups.truncate(crate::develop::MAX_TOUCHUPS);
     Ok(touchups)
+}
+
+/// A sidecar's rotation is whatever u8 its writer put there; only `0..=3`
+/// is a rotation, so the rest wraps on load.
+fn quarter_turns<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(u8::deserialize(deserializer)? % 4)
 }
 
 fn is_zero_rot(v: &u8) -> bool {
@@ -295,6 +308,12 @@ mod tests {
                 points: 7,
             }],
         }
+    }
+
+    #[test]
+    fn a_saved_rotation_past_three_quarter_turns_wraps_on_load() {
+        let rec = parse_record(br#"{"rotation":255}"#, || None).unwrap();
+        assert_eq!(rec.rotation, 3);
     }
 
     #[cfg(unix)]
