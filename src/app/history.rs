@@ -44,9 +44,12 @@ impl EditHistory {
 
     /// Closes the open step, unless a `begin` holds it.
     pub(super) fn seal(&mut self) {
-        if self.depth > 0 {
-            return;
+        if self.depth == 0 {
+            self.close();
         }
+    }
+
+    fn close(&mut self) {
         if let Some(step) = self.open.take().filter(|s| !s.before.is_empty()) {
             if self.done.len() == MAX_STEPS {
                 self.done.remove(0);
@@ -55,9 +58,10 @@ impl EditHistory {
         }
     }
 
-    /// The last step, sealing an open one first.
+    /// The last step. An open one is the last, even while a drag or a
+    /// `begin` still holds it.
     pub(super) fn pop(&mut self) -> Option<EditStep> {
-        self.seal();
+        self.close();
         self.done.pop()
     }
 
@@ -118,6 +122,17 @@ mod tests {
         assert_eq!(h.pop().unwrap().before[0].1, exposure(0.4));
         assert_eq!(h.pop().unwrap().before[0].1, exposure(0.0), "one step");
         assert!(h.pop().is_none());
+    }
+
+    #[test]
+    fn pop_takes_a_step_still_held_open() {
+        let mut h = EditHistory::default();
+        h.note(Path::new("/a.jpg"), exposure(0.0));
+        h.seal();
+        h.begin();
+        h.note(Path::new("/a.jpg"), exposure(0.3));
+        assert_eq!(h.pop().unwrap().before[0].1, exposure(0.3));
+        assert_eq!(h.pop().unwrap().before[0].1, exposure(0.0));
     }
 
     #[test]

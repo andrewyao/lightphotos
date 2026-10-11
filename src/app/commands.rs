@@ -13,6 +13,11 @@ impl App {
     /// Runs `cmd` if [`check`](Self::check) allows it.
     pub(crate) fn run(&mut self, cmd: Command) -> Result<Outcome, CommandError> {
         self.check(&cmd)?;
+        if cmd == Command::Undo {
+            let out = self.apply_command(cmd);
+            self.request_redraw();
+            return out;
+        }
         // Every develop write of one command is one undo step.
         self.history.begin();
         let out = self.apply_command(cmd);
@@ -875,6 +880,28 @@ mod tests {
             Ok(0),
             "nothing left to undo"
         );
+    }
+
+    #[test]
+    fn undo_takes_back_a_step_the_pointer_still_holds_open() {
+        let (mut app, _, paths) = folder_app("cmd-undo-open", 1);
+        app.select_single(0);
+        run(
+            &mut app,
+            r#"{"id":"develop.set","params":{"controls":{"exposure":1}}}"#,
+        )
+        .unwrap();
+        let dragged = Adjustments {
+            exposure: 2.0,
+            ..Default::default()
+        };
+        app.put_edit(&paths[0], dragged);
+        assert_eq!(
+            run(&mut app, r#"{"id":"edit.undo"}"#).map(|o| o.photos),
+            Ok(1)
+        );
+        assert_eq!(app.catalog.adjustments(&paths[0]).exposure, 1.0);
+        assert_eq!(app.edits.get(&paths[0]).map(|a| a.exposure), Some(1.0));
     }
 
     #[test]
