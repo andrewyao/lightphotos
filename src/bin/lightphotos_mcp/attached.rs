@@ -3,7 +3,7 @@
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
@@ -155,14 +155,15 @@ impl App {
         })
     }
 
+    /// Sends `request` and reads the reply line, all within `patience`.
     fn exchange(&self, request: &str, patience: Duration) -> std::io::Result<Vec<u8>> {
+        let until = Instant::now() + patience;
         let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, self.port));
         let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)?;
-        stream.set_read_timeout(Some(patience))?;
         stream.set_write_timeout(Some(CONNECT_TIMEOUT))?;
         stream.write_all(format!("{request}\n").as_bytes())?;
         let mut line = Vec::new();
-        BufReader::new(stream)
+        BufReader::new(Deadline { stream, until })
             .take(MAX_REPLY)
             .read_until(b'\n', &mut line)?;
         if line.last() != Some(&b'\n') {
@@ -195,5 +196,63 @@ impl App {
             ),
             _ => format!("cannot reach the app on 127.0.0.1:{port}: {e}"),
         }
+    }
+}
+
+/// A stream whose reads all end by `until`, so a peer that sends a byte at
+/// a time cannot stretch one request past its patience.
+struct Deadline {
+    stream: TcpStream,
+    until: Instant,
+}
+
+impl Read for Deadline {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                "the reply did not arrive in time",
+            ));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        self.stream.read(buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn a_peer_that_drips_its_reply_is_cut_off_at_the_deadline() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            BufReader::new(conn.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            for _ in 0..30 {
+                if conn.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+
+        let start = Instant::now();
+        let result = App::new(port, None).exchange("{}", Duration::from_millis(400));
+        let took = start.elapsed();
+        peer.join().unwrap();
+
+        let kind = result.as_ref().map_err(std::io::Error::kind).err();
+        assert!(
+            matches!(kind, Some(ErrorKind::TimedOut | ErrorKind::WouldBlock)),
+            "{result:?}"
+        );
+        assert!(took < Duration::from_millis(1500), "took {took:?}");
     }
 }
