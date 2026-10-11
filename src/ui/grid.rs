@@ -59,7 +59,10 @@ pub(super) fn folder_list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             for root in app.folder_roots() {
                 folder_node(ui, app, root, 0, out);
             }
-            pick(ui, out, t.add_folder, form::Role::Cancel, t.add_folder_tip);
+            ui.add_space(font_size::px(ui.style(), form::ROW_GAP));
+            ui.vertical_centered(|ui| {
+                pick(ui, out, t.add_folder, form::Role::Cancel, t.add_folder_tip);
+            });
         });
 }
 

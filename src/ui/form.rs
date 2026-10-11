@@ -12,7 +12,7 @@ use super::{font_size, theme};
 
 const HEADER: f32 = 16.0;
 const HEADER_GAP: f32 = 8.0;
-const ROW_GAP: f32 = 10.0;
+pub(super) const ROW_GAP: f32 = 10.0;
 const SPACIOUS_ROW_GAP: f32 = 24.0;
 const PAGE_MARGIN: egui::Vec2 = egui::vec2(12.0, 18.0);
 const BEFORE_DIVIDER: f32 = 14.0;
