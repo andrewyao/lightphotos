@@ -157,7 +157,7 @@ impl Folder {
             max_px: max,
             ..Output::FULL
         };
-        let jpeg = export::export_file(
+        let jpeg = export::preview_file(
             &path,
             &rec.adjustments,
             &rec.touchups,

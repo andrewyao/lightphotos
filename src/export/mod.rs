@@ -456,11 +456,11 @@ fn within_limit(
     best.ok_or_else(|| format!("over the {kb} KB limit even at the lowest JPEG quality"))
 }
 
-/// Bake the edits into a full-resolution decode, shrink the result to
-/// `output.max_px` on its long side, then sharpen it for its medium. The
-/// limit applies after crop and rotation because that is what "2048 px"
-/// means to someone exporting, so the decode itself can't be the smaller
-/// one; output sharpening comes last because it is tuned to output pixels.
+/// Bake the edits into the decode, shrink the result to `output.max_px` on
+/// its long side, then sharpen it for its medium. The limit applies after
+/// crop and rotation because that is what "2048 px" means to someone
+/// exporting, so an export decodes at full size; output sharpening comes
+/// last because it is tuned to output pixels.
 fn bake_sized<S: crate::develop::image_ops::Sample>(
     img: &image_decode::DecodedImage,
     adj: &Adjustments,
@@ -640,7 +640,34 @@ pub fn export_file(
     rot: u8,
     output: &Output,
 ) -> Result<Vec<u8>, String> {
-    let img = decode_full(src)?;
+    decode_and_render(src, u32::MAX, adj, touchups, rot, output)
+}
+
+/// [`export_file`] decoded only as large as `output.max_px` needs, for a
+/// look at the edited photo rather than a file to keep. The shrink happens
+/// before the bake, so memory follows `output.max_px`, not the source.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn preview_file(
+    src: &Path,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+    output: &Output,
+) -> Result<Vec<u8>, String> {
+    let decode_px = preview_decode_px(output.max_px, adj.crop);
+    decode_and_render(src, decode_px, adj, touchups, rot, output)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_and_render(
+    src: &Path,
+    decode_px: u32,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+    output: &Output,
+) -> Result<Vec<u8>, String> {
+    let img = image_decode::decode(src, decode_px)?;
     render(
         &img,
         adj,
@@ -651,21 +678,22 @@ pub fn export_file(
     )
 }
 
-#[cfg(target_os = "macos")]
-fn decode_full(src: &Path) -> Result<image_decode::DecodedImage, String> {
-    image_decode::decode(src, u32::MAX)
-}
-
-#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-fn decode_full(src: &Path) -> Result<image_decode::DecodedImage, String> {
-    if image_decode::is_raw_extension(src) {
-        // rawler's path-based decoder memory-maps the file, which avoids
-        // reading the whole RAW into a Vec first.
-        crate::decode::rawler::decode_raw_nonmac(src, u32::MAX)
-    } else {
-        let bytes = std::fs::read(src).map_err(|e| e.to_string())?;
-        image_decode::decode_nonraw_from_bytes(&bytes, u32::MAX)
+/// The long edge to decode at so the crop still holds `max_px` pixels on
+/// its long edge. The crop is a fraction of the decoded canvas, and the
+/// photo's long edge is one of its sides, so a crop whose narrower fraction
+/// is `f` keeps at least `f` of the decode's long edge. Straighten turns the
+/// canvas without scaling it and quarter turns only swap sides, so neither
+/// changes the size needed. A crop from a hostile sidecar decodes in full.
+#[cfg(not(target_arch = "wasm32"))]
+fn preview_decode_px(max_px: u32, crop: Option<crate::develop::Crop>) -> u32 {
+    let (w, h) = crop.map_or((1.0, 1.0), |c| (c.right - c.left, c.bottom - c.top));
+    if !(w > 0.0 && h > 0.0) {
+        return u32::MAX;
     }
+    let fraction = w.min(h).min(1.0);
+    // Two pixels over, for the floor in each resize on the way. The cast
+    // saturates, so a sliver of a crop asks for the full size.
+    ((f64::from(max_px) / f64::from(fraction)).ceil() + 2.0) as u32
 }
 
 #[cfg(test)]
@@ -779,6 +807,81 @@ mod tests {
             "200x200 crop, rotated, fit to 50"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_preview_decodes_only_what_the_crop_needs() {
+        use crate::develop::Crop;
+        let crop = |left, top, right, bottom| {
+            Some(Crop {
+                left,
+                top,
+                right,
+                bottom,
+            })
+        };
+        assert_eq!(preview_decode_px(256, None), 258);
+        assert_eq!(preview_decode_px(256, crop(0.0, 0.0, 0.5, 1.0)), 514);
+        assert_eq!(preview_decode_px(256, crop(0.0, 0.25, 0.75, 0.5)), 1026);
+        for hostile in [
+            crop(0.5, 0.0, 0.5, 1.0),
+            crop(0.9, 0.0, 0.1, 1.0),
+            crop(f32::NAN, 0.0, 1.0, 1.0),
+            crop(0.0, 0.0, 1e-30, 1.0),
+        ] {
+            assert_eq!(preview_decode_px(256, hostile), u32::MAX, "{hostile:?}");
+        }
+        assert_eq!(preview_decode_px(256, crop(-1.0, -1.0, 2.0, 2.0)), 258);
+    }
+
+    /// A preview of a big photo shrinks before the bake, yet a tight crop
+    /// still fills `max_px`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_preview_of_a_cropped_photo_still_fills_max_px() {
+        let dir = scratch_dir("preview");
+        let src = dir.join("src.jpg");
+        let (w, h) = (3000u32, 2000u32);
+        image_encode::encode_jpeg(
+            &src,
+            w,
+            h,
+            &vec![128u8; (w * h * 4) as usize],
+            image_encode::JpegQuality::Export,
+        )
+        .unwrap();
+        let adj = Adjustments {
+            crop: Some(crate::develop::Crop {
+                left: 0.375,
+                top: 0.25,
+                right: 0.5,
+                bottom: 0.5,
+            }),
+            straighten: 3.0,
+            ..Adjustments::default()
+        };
+        let output = Output {
+            max_px: 200,
+            ..Output::FULL
+        };
+        assert_eq!(
+            preview_decode_px(200, adj.crop),
+            1602,
+            "about half the source"
+        );
+
+        let jpeg = preview_file(&src, &adj, &[], 1, &output).unwrap();
+        std::fs::write(dir.join("out.jpg"), &jpeg).unwrap();
+        let out = image_decode::decode(&dir.join("out.jpg"), u32::MAX).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            out.width.max(out.height),
+            200,
+            "{}x{}",
+            out.width,
+            out.height
+        );
     }
 
     /// Output sharpening runs on the resized bake, and a settings file
