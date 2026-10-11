@@ -67,10 +67,14 @@ impl App {
     }
 
     /// True when nothing is in flight before and after one frame: decodes,
-    /// sidecar writes, batches and animations.
+    /// sidecar writes, batches and animations. An occluded window gets no
+    /// frame here: on Metal its surface can block the main thread for a
+    /// second, and `Occluded(false)` draws it again once revealed.
     pub(crate) fn settled_across_a_frame(&mut self) -> bool {
         let quiet_before = self.pump().is_none();
-        self.redraw();
+        if !self.occluded {
+            self.redraw();
+        }
         let quiet_after = self.pump().is_none();
         quiet_before && quiet_after && !self.batch_running() && self.repaint_at.is_none()
     }
@@ -138,5 +142,20 @@ mod tests {
         assert!(json_of(rx.try_recv().unwrap())
             .unwrap_err()
             .contains("not ready"));
+    }
+
+    #[test]
+    fn the_settle_check_does_no_frame_work_while_the_window_is_occluded() {
+        // A frame here loads the selected photo for the Develop page.
+        let frame_work = |occluded| {
+            let (mut app, _, _) = crate::app::test_support::folder_app("settle-occluded", 1);
+            app.select_single(0);
+            app.develop_open = true;
+            app.occluded = occluded;
+            app.settled_across_a_frame();
+            app.want.is_some()
+        };
+        assert!(frame_work(false), "a visible window draws a frame");
+        assert!(!frame_work(true), "an occluded window draws none");
     }
 }
