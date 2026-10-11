@@ -124,6 +124,7 @@ pub(crate) enum ToolbarControl {
     Label(ColorLabel),
     EyesClosed,
     Sort,
+    SortDirection,
 }
 
 impl ToolbarControl {
@@ -147,6 +148,7 @@ impl ToolbarControl {
         Self::Label(ColorLabel::Purple),
         Self::EyesClosed,
         Self::Sort,
+        Self::SortDirection,
     ];
 
     /// How far the F6 cursor walks. Bulk actions are excluded because their
@@ -217,9 +219,10 @@ impl ToolbarControl {
             // The keyboard steps to the next sort; a click opens the dropdown.
             Self::Sort => {
                 let sorts = sort_choices(app);
-                let at = sorts.iter().position(|&s| s == app.grid_sort());
+                let at = sorts.iter().position(|&s| s == app.sort_order().key);
                 UiAction::SetSort(sorts[at.map_or(0, |i| (i + 1) % sorts.len())])
             }
+            Self::SortDirection => UiAction::ReverseSort,
         }
     }
 
@@ -296,7 +299,7 @@ impl ToolbarControl {
                 .on_hover_text(t.eyes_closed_tip),
             Self::Sort => {
                 ui.label(t.sort_by);
-                let current = app.grid_sort();
+                let current = app.sort_order().key;
                 let name = |sort| match sort {
                     GridSort::Name => t.sort_name,
                     GridSort::Time => t.sort_time,
@@ -304,6 +307,8 @@ impl ToolbarControl {
                     GridSort::Size => t.sort_size,
                     GridSort::Shutter => t.sort_shutter,
                     GridSort::Quality => t.sort_quality,
+                    GridSort::Rating => t.sort_rating,
+                    GridSort::Edited => t.sort_edited,
                 };
                 egui::ComboBox::from_id_salt("grid_sort")
                     .selected_text(name(current))
@@ -318,6 +323,8 @@ impl ToolbarControl {
                                 GridSort::Size => Some(t.sort_size_tip),
                                 GridSort::Shutter => Some(t.sort_shutter_tip),
                                 GridSort::Quality => Some(t.sort_quality_tip),
+                                GridSort::Rating => Some(t.sort_rating_tip),
+                                GridSort::Edited => Some(t.sort_edited_tip),
                             };
                             if let Some(tip) = tip {
                                 item = item.on_hover_text(tip);
@@ -329,6 +336,14 @@ impl ToolbarControl {
                     })
                     .response
             }
+            Self::SortDirection => {
+                let (glyph, tip) = if app.sort_order().descending {
+                    ("\u{2193}", t.sort_descending_tip)
+                } else {
+                    ("\u{2191}", t.sort_ascending_tip)
+                };
+                ui.selectable_label(false, glyph).on_hover_text(tip)
+            }
         }
     }
 }
@@ -337,19 +352,22 @@ impl ToolbarControl {
 /// new score would reorder the Grid, and the browser can't read a file's
 /// metadata by path.
 fn sort_choices(app: &App) -> Vec<GridSort> {
-    let mut sorts = vec![GridSort::Name];
-    if !cfg!(target_arch = "wasm32") {
-        sorts.extend([
-            GridSort::Time,
-            GridSort::Modified,
-            GridSort::Size,
-            GridSort::Shutter,
-        ]);
-    }
-    if app.quality_sort_available() {
-        sorts.push(GridSort::Quality);
-    }
-    sorts
+    [
+        GridSort::Name,
+        GridSort::Time,
+        GridSort::Modified,
+        GridSort::Edited,
+        GridSort::Rating,
+        GridSort::Size,
+        GridSort::Shutter,
+        GridSort::Quality,
+    ]
+    .into_iter()
+    .filter(|&sort| match sort {
+        GridSort::Quality => app.quality_sort_available(),
+        _ => !(cfg!(target_arch = "wasm32") && sort.reads_files()),
+    })
+    .collect()
 }
 
 /// A color label filter toggle: a dot of the label's color, ringed while

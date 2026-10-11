@@ -32,7 +32,7 @@ struct Placer<'a> {
     app: &'a App,
     group_cells: HashMap<&'a GroupId, Option<usize>>,
     /// Playlist index to cell, built on first use when `visible` is not in
-    /// playlist order and so cannot be binary-searched.
+    /// playlist order.
     cells: Option<HashMap<usize, usize>>,
 }
 
@@ -47,7 +47,7 @@ impl<'a> Placer<'a> {
 
     fn cell(&mut self, idx: usize) -> Option<usize> {
         let visible = &self.app.visible;
-        if self.app.grid_sort == GridSort::Name {
+        if self.app.visible_in_order {
             return visible.binary_search(&idx).ok();
         }
         self.cells
@@ -84,9 +84,31 @@ impl<'a> Placer<'a> {
     }
 }
 
+/// How [`App::recompute_cells`] orders the cells it keeps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reorder {
+    /// By the Grid's sort.
+    Sort,
+    /// As they were, with any newly shown cell last.
+    Keep,
+}
+
 impl App {
-    #[hotpath::measure]
     pub(super) fn recompute_visible(&mut self) {
+        self.recompute_cells(Reorder::Sort);
+    }
+
+    /// Reapplies the filters after a photo's stars, flag or label changed.
+    /// Under a Rating or Edit Time sort the Loupe keeps its order, so the
+    /// photo under the cursor doesn't jump; the Grid sorts again when it
+    /// shows.
+    pub(super) fn refilter_after_catalog_change(&mut self) {
+        let keep = self.mode == ViewMode::Loupe && self.sort_order.key.reads_catalog();
+        self.recompute_cells(if keep { Reorder::Keep } else { Reorder::Sort });
+    }
+
+    #[hotpath::measure]
+    fn recompute_cells(&mut self, reorder: Reorder) {
         let selected_pl: Vec<usize> = self
             .selected
             .iter()
@@ -95,11 +117,12 @@ impl App {
         let anchor_pl = self.anchor.and_then(|p| self.visible.get(p).copied());
         let sel_pl = self.selected_index();
 
-        if self.grid_sort.reads_files() {
+        if self.sort_order.key.reads_files() {
             self.request_sort_meta();
         }
         let Some(pl) = &self.playlist else {
             self.visible.clear();
+            self.visible_in_order = true;
             self.shown_photos = 0;
             self.sel = None;
             self.selected.clear();
@@ -140,53 +163,110 @@ impl App {
         let shown_photos = (0..entries.len())
             .filter(|&i| passes(i) && gone.is_none_or(|g| !g.contains(&entries[i])))
             .count();
-        let visible = navigation::grid_cells(entries.len(), slot, passes);
-        self.visible = visible;
+        let mut visible = navigation::grid_cells(entries.len(), slot, passes);
         // A running delete has trashed these but not yet dropped them from the
         // playlist, so hiding them here is what lets the grid shrink without
         // invalidating anything indexed by playlist position.
         if let Some(gone) = gone {
             if !gone.is_empty() {
-                self.visible
-                    .retain(|&i| entries.get(i).is_none_or(|p| !gone.contains(p)));
+                visible.retain(|&i| entries.get(i).is_none_or(|p| !gone.contains(p)));
             }
         }
-        // Each sort is stable, so ties and the unknown tail keep name order.
-        let meta = |i: usize| entries.get(i).and_then(|p| self.sort_meta.get(p));
-        match self.grid_sort {
-            GridSort::Name | GridSort::Quality => {}
-            GridSort::Time => {
-                let times = &self.capture_times;
-                self.visible.sort_by_key(|&i| {
-                    let t = entries.get(i).and_then(|p| times.get(p).copied().flatten());
-                    (t.is_none(), t)
-                });
+        // An expanded stack sorts as one, by its cover or, when the cover is
+        // filtered out, its first member left.
+        let mut stack_heads: HashMap<&GroupId, usize> = HashMap::new();
+        for &i in &visible {
+            match slot(i) {
+                Slot::Cover {
+                    stack,
+                    expanded: true,
+                } => {
+                    stack_heads.insert(stack, i);
+                }
+                Slot::Member {
+                    stack,
+                    expanded: true,
+                } => {
+                    stack_heads.entry(stack).or_insert(i);
+                }
+                _ => {}
             }
-            GridSort::Modified => self.visible.sort_by_key(|&i| {
-                let t = meta(i).and_then(|m| m.modified);
-                (t.is_none(), t.map(std::cmp::Reverse))
-            }),
-            GridSort::Size => self.visible.sort_by_key(|&i| {
-                let s = meta(i).and_then(|m| m.size);
-                (s.is_none(), s.map(std::cmp::Reverse))
-            }),
+        }
+        let head = |i: usize| match slot(i) {
+            Slot::Cover {
+                stack,
+                expanded: true,
+            }
+            | Slot::Member {
+                stack,
+                expanded: true,
+            } => stack_heads.get(stack).copied().unwrap_or(i),
+            _ => i,
+        };
+        let path = |i: usize| entries.get(i);
+        let meta = |i: usize| path(i).and_then(|p| self.sort_meta.get(p));
+        let times = &self.capture_times;
+        let descending = self.sort_order.descending;
+        let cells = &mut visible;
+        let in_name_order = self.sort_order == SortOrder::default() && stack_heads.is_empty();
+        match (reorder, self.sort_order.key) {
+            (Reorder::Sort, _) if in_name_order => {}
+            (Reorder::Keep, _) => {
+                let rank: HashMap<usize, usize> = self
+                    .visible
+                    .iter()
+                    .enumerate()
+                    .map(|(p, &i)| (i, p))
+                    .collect();
+                navigation::sort_cells(
+                    cells,
+                    |i| i,
+                    |i| rank.get(&i).or_else(|| rank.get(&head(i))).copied(),
+                    false,
+                );
+            }
+            (Reorder::Sort, GridSort::Name) => {
+                navigation::sort_cells(cells, head, Some, descending)
+            }
+            (Reorder::Sort, GridSort::Time) => navigation::sort_cells(
+                cells,
+                head,
+                |i| path(i).and_then(|p| times.get(p).copied().flatten()),
+                descending,
+            ),
+            (Reorder::Sort, GridSort::Modified) => {
+                navigation::sort_cells(cells, head, |i| meta(i)?.modified, descending)
+            }
+            (Reorder::Sort, GridSort::Size) => {
+                navigation::sort_cells(cells, head, |i| meta(i)?.size, descending)
+            }
             // A positive finite f64's bits order as the number does.
-            GridSort::Shutter => self.visible.sort_by_key(|&i| {
-                let t = meta(i).and_then(|m| m.shutter).map(f64::to_bits);
-                (t.is_none(), t)
-            }),
+            (Reorder::Sort, GridSort::Shutter) => navigation::sort_cells(
+                cells,
+                head,
+                |i| meta(i)?.shutter.map(f64::to_bits),
+                descending,
+            ),
+            (Reorder::Sort, GridSort::Quality) => navigation::sort_cells(
+                cells,
+                head,
+                |i| catalog.score(path(i)?).map(|(s, _)| s.score.value),
+                descending,
+            ),
+            (Reorder::Sort, GridSort::Rating) => navigation::sort_cells(
+                cells,
+                head,
+                |i| path(i).map(|p| ratings.get(p).copied().unwrap_or(0)),
+                descending,
+            ),
+            (Reorder::Sort, GridSort::Edited) => {
+                navigation::sort_cells(cells, head, |i| catalog.edited(path(i)?), descending)
+            }
         }
-        if self.grid_sort == GridSort::Quality {
-            let catalog = &self.catalog;
-            // Stable, so equal scores and the unscored tail keep name order.
-            self.visible.sort_by_cached_key(|&i| {
-                std::cmp::Reverse(
-                    entries
-                        .get(i)
-                        .and_then(|p| catalog.score(p))
-                        .map(|(s, _)| s.score.value),
-                )
-            });
+        self.visible_in_order = in_name_order || visible.is_sorted();
+        self.visible = visible;
+        if reorder == Reorder::Sort {
+            self.sorted_revision = self.catalog.sort_revision();
         }
         let clamped = match self.visible.len() {
             0 => None,

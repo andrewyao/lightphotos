@@ -157,37 +157,6 @@ pub enum Region {
     Develop,
 }
 
-/// The Grid's order. Session only; every launch starts on `Name`.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub enum GridSort {
-    /// The folder's file-name order.
-    #[default]
-    Name,
-    /// Oldest capture time first, photos without one last in name order.
-    Time,
-    /// Most recently modified file first.
-    Modified,
-    /// Largest file first.
-    Size,
-    /// Fastest shutter speed first.
-    Shutter,
-    /// Highest quality score first, unscored photos last in name order.
-    Quality,
-}
-
-impl GridSort {
-    /// Whether this order needs the file's [`SortMeta`] read, so the Grid
-    /// waits on the metadata jobs.
-    ///
-    /// [`SortMeta`]: crate::decode::image_decode::SortMeta
-    pub(crate) fn reads_files(self) -> bool {
-        matches!(
-            self,
-            Self::Time | Self::Modified | Self::Size | Self::Shutter
-        )
-    }
-}
-
 /// Chrome regions F6 steps through before wrapping back to the main region.
 const CHROME_ORDER: [Region; 2] = [Region::Toolbar, Region::Filmstrip];
 
@@ -537,7 +506,11 @@ pub(crate) struct App {
     expanded_stacks: std::collections::HashSet<crate::persist::groups::GroupId>,
     /// Comparator used when a star level is clicked. Stays set across "All".
     filter_cmp: Cmp,
-    grid_sort: GridSort,
+    sort_order: SortOrder,
+    /// Whether `visible` is in playlist order, so it can be binary-searched.
+    visible_in_order: bool,
+    /// [`Catalog::sort_revision`] when the Grid was last ordered.
+    sorted_revision: u64,
     /// Indices into `playlist.entries()` that pass the current filter.
     visible: Vec<usize>,
     /// The photos behind `visible`, a group's cell counting each member.
@@ -744,6 +717,8 @@ mod optics;
 mod presets;
 mod score;
 mod session;
+mod sort;
+pub(crate) use sort::{GridSort, SortOrder};
 #[cfg(test)]
 pub(crate) mod test_support;
 mod thumbs;
@@ -816,7 +791,13 @@ impl App {
             label_filter: Vec::new(),
             expanded_stacks: Default::default(),
             filter_cmp: Cmp::Gte,
-            grid_sort: GridSort::Name,
+            // A test must never read the developer's own settings.
+            #[cfg(test)]
+            sort_order: SortOrder::default(),
+            #[cfg(not(test))]
+            sort_order: SortOrder::load(),
+            visible_in_order: true,
+            sorted_revision: 0,
             visible: Vec::new(),
             shown_photos: 0,
             sel: None,
@@ -1359,6 +1340,7 @@ impl App {
                 ui::UiAction::ScoreSelection => self.score_selection(),
                 ui::UiAction::CancelScoring => self.cancel_scoring(),
                 ui::UiAction::SetSort(sort) => self.set_sort(sort),
+                ui::UiAction::ReverseSort => self.reverse_sort(),
                 ui::UiAction::SetZoom(zoom) => self.set_zoom(zoom),
                 ui::UiAction::ConfirmPending => self.confirm_pending(),
                 ui::UiAction::CancelPending => self.cancel_pending(),

@@ -297,7 +297,7 @@ impl App {
             self.signals.record(&path, Signal::Capture(t));
             self.capture_times.insert(path, t);
         }
-        if self.grid_sort.reads_files() {
+        if self.sort_order.key.reads_files() {
             self.recompute_visible();
         }
         self.poll_bursts();

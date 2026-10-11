@@ -350,7 +350,14 @@ pub async fn stat(handle: &FileSystemFileHandle) -> Result<web_sys::File, String
 
 /// Read a file's full contents into wasm memory.
 pub async fn read_bytes(handle: &FileSystemFileHandle) -> Result<Vec<u8>, String> {
-    let buf = read_array_buffer(handle).await?;
+    file_bytes(&stat(handle).await?).await
+}
+
+/// The contents of a `File` already resolved with [`stat`].
+pub async fn file_bytes(file: &web_sys::File) -> Result<Vec<u8>, String> {
+    let buf = JsFuture::from(file.array_buffer())
+        .await
+        .map_err(|e| js_error_string(&e))?;
     Ok(js_sys::Uint8Array::new(&buf).to_vec())
 }
 

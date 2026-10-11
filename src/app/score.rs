@@ -38,9 +38,8 @@ impl App {
         // against the catalog, so the two must agree before it starts.
         self.save_edit();
         // Each new score would reorder the Grid under the pointer.
-        if self.grid_sort == GridSort::Quality {
-            self.grid_sort = GridSort::Name;
-            self.recompute_visible();
+        if self.sort_order.key == GridSort::Quality {
+            self.apply_sort(SortOrder::default());
         }
         self.score_job
             .get_or_insert_with(ScoreJob::default)
@@ -124,6 +123,7 @@ impl App {
     /// App has none.
     pub(crate) fn start_score_pool(&mut self) {
         self.score_pool = crate::jobs::score::ScorePool::new();
+        self.drop_unavailable_sort();
     }
 
     /// `(done, total)` while a run is going.
@@ -177,26 +177,10 @@ impl App {
             })
     }
 
-    pub(crate) fn grid_sort(&self) -> GridSort {
-        self.grid_sort
-    }
-
     /// Whether the Grid may sort by Quality: only where scoring is, and not
     /// while a run is going, since each new score would reorder the Grid.
     pub(crate) fn quality_sort_available(&self) -> bool {
         self.scoring_available() && self.score_job.is_none()
-    }
-
-    pub(super) fn set_sort(&mut self, sort: GridSort) {
-        if self.mode == ViewMode::Loupe || self.grid_sort == sort {
-            return;
-        }
-        if sort == GridSort::Quality && !self.quality_sort_available() {
-            return;
-        }
-        self.grid_sort = sort;
-        self.recompute_visible();
-        self.request_redraw();
     }
 }
 
@@ -280,11 +264,15 @@ mod tests {
         app.score_all();
         assert!(!app.quality_sort_available());
         app.set_sort(GridSort::Quality);
-        assert_eq!(app.grid_sort(), GridSort::Name, "no Quality sort mid-run");
+        assert_eq!(
+            app.sort_order().key,
+            GridSort::Name,
+            "no Quality sort mid-run"
+        );
         run_until_idle(&mut app);
         assert!(app.quality_sort_available());
         app.set_sort(GridSort::Quality);
-        assert_eq!(app.grid_sort(), GridSort::Quality);
+        assert_eq!(app.sort_order().key, GridSort::Quality);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -294,7 +282,7 @@ mod tests {
         app.score_pool = ScorePool::with_runner(2, slow_fixed);
         app.set_sort(GridSort::Quality);
         app.score_all();
-        assert_eq!(app.grid_sort(), GridSort::Name);
+        assert_eq!(app.sort_order().key, GridSort::Name);
         run_until_idle(&mut app);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -446,7 +434,7 @@ mod tests {
 
         assert!(!app.quality_sort_available());
         app.set_sort(GridSort::Quality);
-        assert_eq!(app.grid_sort(), GridSort::Name);
+        assert_eq!(app.sort_order().key, GridSort::Name);
         assert!(app.score_at(0).is_none());
         assert!(app.shown_score().is_none());
         assert!(app.selection_score_span().is_none());

@@ -488,6 +488,7 @@ impl App {
             }
         }
         let catalog_load_pending = self.poll_catalog_load();
+        self.resort_after_catalog_change();
         #[cfg(not(target_arch = "wasm32"))]
         let catalog_load_pending = self.poll_signal_load() || catalog_load_pending;
 

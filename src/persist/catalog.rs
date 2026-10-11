@@ -56,6 +56,10 @@ pub struct ImageRecord {
     /// edited photo, so it travels with the edits it describes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub score: Option<StoredScore>,
+    /// Unix seconds when the edits last changed, for the Grid's Edit Time
+    /// sort. `None` while the photo has no edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited: Option<u64>,
 }
 
 /// A quality score and the edits it was measured on.
@@ -130,10 +134,9 @@ impl ImageRecord {
         let empty = self.rating.is_none()
             && self.flag.is_none()
             && self.label.is_none()
-            && self.adjustments.is_identity()
-            && self.touchups.is_empty()
-            && self.rotation == 0
-            && self.score.is_none();
+            && !self.has_edits()
+            && self.score.is_none()
+            && self.edited.is_none();
         debug_assert_eq!(
             empty,
             self.serializes_to_nothing(),
@@ -150,6 +153,33 @@ impl ImageRecord {
             &self.touchups,
             self.rotation,
         )
+    }
+
+    fn has_edits(&self) -> bool {
+        !self.adjustments.is_identity() || !self.touchups.is_empty() || self.rotation != 0
+    }
+
+    /// Run `edit`, then stamp `edited` with `now` if it changed how the
+    /// photo renders, or clear it if no edit is left.
+    fn edit(&mut self, now: u64, edit: impl FnOnce(&mut ImageRecord)) {
+        let before = self.edit_signature();
+        edit(self);
+        if !self.has_edits() {
+            self.edited = None;
+        } else if self.edit_signature() != before {
+            self.edited = Some(now);
+        }
+    }
+
+    /// Bring a record read from disk in line with its edits: no edits, no
+    /// edit time. A sidecar written before edit times were kept takes
+    /// `saved_at`, when the file was last written.
+    pub(crate) fn settle_edited(&mut self, saved_at: impl FnOnce() -> Option<u64>) {
+        if !self.has_edits() {
+            self.edited = None;
+        } else if self.edited.is_none() {
+            self.edited = saved_at();
+        }
     }
 
     /// Whether this record's sidecar would be `{}`, read off the serde
@@ -179,6 +209,8 @@ pub struct Catalog {
     /// The latest persist failure, drained by [`Catalog::take_error`] into a
     /// toast.
     last_error: Option<String>,
+    /// See [`Catalog::sort_revision`].
+    sort_revision: u64,
     /// Sidecar mutations on their way to disk. Every write goes through here,
     /// so no caller blocks a frame on the filesystem.
     writeback: Writeback,
@@ -198,6 +230,7 @@ impl Catalog {
             dirty: HashSet::new(),
             dir: None,
             last_error: None,
+            sort_revision: 0,
             writeback: Writeback::new(),
             #[cfg(target_arch = "wasm32")]
             wasm_dir_handle: None,
@@ -312,6 +345,7 @@ impl Catalog {
             self.last_error = Some(skipped_message(loaded.skipped));
         }
         if self.dir.as_deref() == Some(dir) {
+            self.sort_revision += 1;
             for (name, rec) in loaded.images {
                 if !self.dirty.contains(&name) {
                     self.images.insert(name, rec);
@@ -368,6 +402,12 @@ impl Catalog {
         self.last_error = Some(e.to_string());
     }
 
+    /// Counts changes to the stars and edit times, the catalog's inputs to the
+    /// Grid's order, so the Grid knows when to sort again.
+    pub(crate) fn sort_revision(&self) -> u64 {
+        self.sort_revision
+    }
+
     /// The cache key for `path`: its filename, when `path` is in the active
     /// directory. Camera filenames repeat across folders, so a photo elsewhere
     /// must never read or overwrite the active directory's same-named record.
@@ -415,7 +455,7 @@ impl Catalog {
 
     pub fn set_adjustments(&mut self, path: &Path, adj: &Adjustments) {
         let adj = *adj;
-        self.update(path, |rec| rec.adjustments = adj);
+        self.update_edits(path, |rec| rec.adjustments = adj);
     }
 
     pub fn touchups(&self, path: &Path) -> Vec<TouchUp> {
@@ -426,7 +466,7 @@ impl Catalog {
 
     pub fn set_touchups(&mut self, path: &Path, touchups: &[TouchUp]) {
         let touchups = touchups.to_vec();
-        self.update(path, |rec| rec.touchups = touchups);
+        self.update_edits(path, |rec| rec.touchups = touchups);
     }
 
     pub fn rotation(&self, path: &Path) -> u8 {
@@ -435,7 +475,17 @@ impl Catalog {
 
     pub fn set_rotation(&mut self, path: &Path, rotation: u8) {
         let rotation = rotation % 4;
-        self.update(path, |rec| rec.rotation = rotation);
+        self.update_edits(path, |rec| rec.rotation = rotation);
+    }
+
+    /// Unix seconds when the photo's edits last changed; `None` if it has none.
+    pub fn edited(&self, path: &Path) -> Option<u64> {
+        self.record(path).and_then(|r| r.edited)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_edited(&mut self, path: &Path, secs: u64) {
+        self.update(path, |rec| rec.edited = Some(secs));
     }
 
     /// The stored score and whether the photo was edited after it was taken.
@@ -490,6 +540,13 @@ impl Catalog {
         }
     }
 
+    fn update_edits(&mut self, path: &Path, edit: impl FnOnce(&mut ImageRecord)) {
+        let now = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        self.update(path, |rec| rec.edit(now, edit));
+    }
+
     /// Apply `mutate` to the record for `path`, then queue its sidecar write,
     /// or its deletion if the record became empty.
     ///
@@ -503,7 +560,11 @@ impl Catalog {
         };
         self.dirty.insert(name.clone());
         let mut rec = self.images.remove(&name).unwrap_or_default();
+        let sorted_by = (rec.rating, rec.edited);
         mutate(&mut rec);
+        if (rec.rating, rec.edited) != sorted_by {
+            self.sort_revision += 1;
+        }
         if rec.is_empty() {
             self.enqueue(path, WriteOp::Delete);
         } else {
@@ -625,10 +686,15 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
         };
         match std::fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<ImageRecord>(&bytes) {
-                Ok(rec) if !rec.is_empty() => {
-                    images.insert(stem.to_os_string(), rec);
+                Ok(mut rec) => {
+                    rec.settle_edited(|| {
+                        let saved = entry.metadata().ok()?.modified().ok()?;
+                        Some(saved.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
+                    });
+                    if !rec.is_empty() {
+                        images.insert(stem.to_os_string(), rec);
+                    }
                 }
-                Ok(_) => {}
                 Err(e) => {
                     eprintln!("[catalog] unreadable sidecar {}: {e}", path.display());
                     skipped += 1;
@@ -1548,6 +1614,85 @@ mod tests {
             Some(4)
         );
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_edit_stamps_its_time_and_undoing_every_edit_clears_it() {
+        let mut rec = ImageRecord {
+            rating: Some(3),
+            ..ImageRecord::default()
+        };
+        rec.edit(100, |r| r.adjustments.exposure = 0.5);
+        assert_eq!(rec.edited, Some(100));
+        rec.edit(200, |r| r.adjustments.exposure = 0.5);
+        assert_eq!(
+            rec.edited,
+            Some(100),
+            "an edit that changes nothing keeps the time"
+        );
+        rec.edit(300, |r| r.rotation = 1);
+        assert_eq!(rec.edited, Some(300));
+        rec.edit(400, |r| {
+            r.adjustments = Adjustments::default();
+            r.rotation = 0;
+        });
+        assert_eq!(rec.edited, None);
+        rec.rating = None;
+        assert!(rec.is_empty(), "an undone edit leaves no sidecar behind");
+    }
+
+    #[test]
+    fn the_edit_time_does_not_count_as_an_edit() {
+        let mut rec = ImageRecord::default();
+        rec.adjustments.exposure = 0.5;
+        let signature = rec.edit_signature();
+        rec.edited = Some(1);
+        assert_eq!(rec.edit_signature(), signature);
+    }
+
+    #[test]
+    fn ratings_flags_and_labels_leave_the_edit_time_alone() {
+        let dir = temp_folder("catalog-test");
+        let p = dir.join("photo.jpg");
+        let mut cat = Catalog::with_dir(dir.clone());
+        cat.set(&p, 2);
+        cat.set_flag(&p, Some(Flag::Pick));
+        cat.set_label(&p, Some(ColorLabel::Red));
+        assert_eq!(cat.edited(&p), None);
+        cat.set_rotation(&p, 1);
+        let stamped = cat.edited(&p);
+        assert!(stamped.is_some());
+        cat.set(&p, 4);
+        assert_eq!(cat.edited(&p), stamped);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_edited_sidecar_without_an_edit_time_takes_the_file_time() {
+        let dir = temp_folder("catalog-test");
+        let side = dir.join(SIDECAR_DIR);
+        std::fs::create_dir_all(&side).unwrap();
+        std::fs::write(side.join("old.jpg.xmp"), r#"{"rotation":1}"#).unwrap();
+        std::fs::write(side.join("odd.jpg.xmp"), r#"{"rating":2,"edited":5}"#).unwrap();
+        std::fs::write(side.join("bare.jpg.xmp"), r#"{"edited":5}"#).unwrap();
+        let file_time = std::fs::metadata(side.join("old.jpg.xmp"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let loaded = load_sidecars(&dir);
+        let edited = |n: &str| loaded.images.get(std::ffi::OsStr::new(n)).unwrap().edited;
+        assert_eq!(edited("old.jpg"), Some(file_time));
+        assert_eq!(edited("odd.jpg"), None, "no edits, no edit time");
+        assert!(
+            !loaded.images.contains_key(std::ffi::OsStr::new("bare.jpg")),
+            "a sidecar holding only an edit time is empty"
+        );
+        assert_eq!(loaded.skipped, 0);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

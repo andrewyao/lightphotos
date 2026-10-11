@@ -4,6 +4,7 @@
 //! arrow-key movement.
 
 use crate::persist::catalog::Flag;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::hash::Hash;
@@ -127,6 +128,39 @@ pub fn grid_cells<K: Eq + Hash>(
         })
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Orders Grid `cells` by `key`, each cell taking the key of the entry
+/// `anchor` names, so the members of an expanded stack sort by their cover
+/// and stay together in their order. Cells with no key go last whichever
+/// way the sort runs. Ties and that tail keep their anchors' entry order.
+#[hotpath::measure]
+pub fn sort_cells<K: Ord>(
+    cells: &mut Vec<usize>,
+    anchor: impl Fn(usize) -> usize,
+    key: impl Fn(usize) -> Option<K>,
+    descending: bool,
+) {
+    let mut keyed: Vec<(Option<K>, usize, usize)> = cells
+        .iter()
+        .map(|&i| {
+            let a = anchor(i);
+            (key(a), a, i)
+        })
+        .collect();
+    // Stable, so a stack's members, which share a key and an anchor, keep
+    // the order they came in.
+    keyed.sort_by(|(ka, aa, _), (kb, ab, _)| {
+        let by_key = match (ka, kb) {
+            (Some(x), Some(y)) if descending => y.cmp(x),
+            (Some(x), Some(y)) => x.cmp(y),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        by_key.then(aa.cmp(ab))
+    });
+    *cells = keyed.into_iter().map(|(_, _, i)| i).collect();
 }
 
 /// Frames this close to the one before belong to the same burst. A chain of
@@ -427,6 +461,28 @@ mod tests {
 
     fn member(stack: &str, expanded: bool) -> Slot<&str> {
         Member { stack, expanded }
+    }
+
+    #[test]
+    fn sorted_cells_put_the_keyless_last_in_entry_order_either_way() {
+        let keys = [None, Some(2), Some(1), None, Some(2)];
+        for (descending, want) in [(false, [2, 1, 4, 0, 3]), (true, [1, 4, 2, 0, 3])] {
+            let mut cells = vec![0, 1, 2, 3, 4];
+            sort_cells(&mut cells, |i| i, |i| keys[i], descending);
+            assert_eq!(cells, want, "descending: {descending}");
+        }
+    }
+
+    #[test]
+    fn sorted_cells_keep_a_stack_together_under_its_cover() {
+        // Entries 1, 3 and 4 are a stack with cover 3; 0 and 2 are singles.
+        let anchor = |i| if i == 1 || i == 4 { 3 } else { i };
+        let keys = [Some(5), Some(9), Some(1), Some(3), Some(0)];
+        let mut cells = vec![0, 1, 2, 3, 4];
+        sort_cells(&mut cells, anchor, |i| keys[i], false);
+        assert_eq!(cells, [2, 1, 3, 4, 0]);
+        sort_cells(&mut cells, anchor, |i| keys[i], true);
+        assert_eq!(cells, [0, 1, 3, 4, 2]);
     }
 
     #[test]

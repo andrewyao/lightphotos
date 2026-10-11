@@ -152,7 +152,7 @@ impl App {
                 self.faces.seed(p, q);
             }
         }
-        if self.eyes_filter_on() || self.grid_sort == GridSort::Time {
+        if self.eyes_filter_on() || self.sort_order.key == GridSort::Time {
             self.recompute_visible();
         }
         self.request_redraw();
@@ -335,7 +335,7 @@ impl App {
         }
         self.catalog.set(&path, stars);
         if self.filter.is_some() {
-            self.recompute_visible();
+            self.refilter_after_catalog_change();
             self.resync_loupe_selection();
         }
         self.request_redraw();
@@ -360,7 +360,7 @@ impl App {
 
     fn after_flag_change(&mut self) {
         if self.flag_filter != FlagFilter::All {
-            self.recompute_visible();
+            self.refilter_after_catalog_change();
             self.resync_loupe_selection();
         }
         self.request_redraw();
@@ -507,7 +507,7 @@ impl App {
             self.catalog.set_label(path, label);
         }
         if !self.label_filter.is_empty() {
-            self.recompute_visible();
+            self.refilter_after_catalog_change();
             self.resync_loupe_selection();
         }
         self.request_redraw();
@@ -886,7 +886,7 @@ impl App {
             self.catalog.set(path, stars);
         }
         if self.filter.is_some() {
-            self.recompute_visible();
+            self.refilter_after_catalog_change();
             self.resync_loupe_selection();
         }
         let n = paths.len();

@@ -31,7 +31,7 @@ impl App {
             return;
         };
         // The signal cache seeds capture times without the rest.
-        let time = self.grid_sort == GridSort::Time;
+        let time = self.sort_order.key == GridSort::Time;
         for path in pl.entries() {
             let known = if time {
                 self.capture_times.contains_key(path)

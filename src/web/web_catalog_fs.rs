@@ -118,16 +118,23 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
         let Some(stem) = strip_xmp(&name) else {
             continue;
         };
-        let parsed = crate::web::web_fs::read_bytes(&file_handle)
-            .await
-            .and_then(|bytes| {
-                serde_json::from_slice::<ImageRecord>(&bytes).map_err(|e| e.to_string())
-            });
+        let parsed = match crate::web::web_fs::stat(&file_handle).await {
+            Ok(file) => crate::web::web_fs::file_bytes(&file)
+                .await
+                .and_then(|bytes| {
+                    serde_json::from_slice::<ImageRecord>(&bytes).map_err(|e| e.to_string())
+                })
+                .map(|rec| (rec, file)),
+            Err(e) => Err(e),
+        };
         match parsed {
-            Ok(rec) if !rec.is_empty() => {
-                load.images.insert(stem, rec);
+            Ok((mut rec, file)) => {
+                // Milliseconds; `as` saturates, so a bad value can't wrap.
+                rec.settle_edited(|| Some((file.last_modified() / 1000.0) as u64));
+                if !rec.is_empty() {
+                    load.images.insert(stem, rec);
+                }
             }
-            Ok(_) => {}
             Err(e) => {
                 web_sys::console::error_1(&format!("[web] unreadable sidecar {name}: {e}").into());
                 load.skipped += 1;
