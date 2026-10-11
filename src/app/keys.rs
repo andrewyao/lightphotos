@@ -127,7 +127,7 @@ impl App {
                     self.request_redraw();
                 }
                 KeyCode::Delete | KeyCode::Backspace => self.delete_selected_touchup(),
-                KeyCode::KeyZ if cmd => self.undo_touchup(),
+                KeyCode::KeyZ if cmd && !shift => self.undo_touchup(),
                 // Brackets size the brush here instead of rotating.
                 KeyCode::BracketLeft | KeyCode::BracketRight if !cmd && !alt => {
                     let up = code == KeyCode::BracketRight;
@@ -329,7 +329,7 @@ impl App {
                 self.request_redraw();
             }
 
-            KeyCode::KeyZ if cmd && !alt => self.run_ui(Command::Undo),
+            KeyCode::KeyZ if cmd && !alt && !shift => self.run_ui(Command::Undo),
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => {
                 self.run_ui(select(SelectWord::All))
             }
@@ -1019,6 +1019,20 @@ mod tests {
         press(&mut app, CMD, KeyCode::KeyD);
         assert_eq!(app.selection_count(), 0);
         assert_eq!(app.mode, ViewMode::Grid, "Cmd+D is not D");
+    }
+
+    #[test]
+    fn cmd_z_undoes_and_cmd_shift_z_does_not() {
+        let (mut app, paths) = folder_app(1);
+        app.select_single(0);
+        app.run(
+            Command::parse(r#"{"id":"develop.set","params":{"controls":{"exposure":1}}}"#).unwrap(),
+        )
+        .unwrap();
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyZ);
+        assert_eq!(app.catalog.adjustments(&paths[0]).exposure, 1.0);
+        press(&mut app, CMD, KeyCode::KeyZ);
+        assert_eq!(app.catalog.adjustments(&paths[0]).exposure, 0.0);
     }
 
     #[test]
