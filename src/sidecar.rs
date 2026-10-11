@@ -229,8 +229,12 @@ pub fn sidecar_path(photo: &Path) -> Option<PathBuf> {
 /// refused without reading it whole.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_sidecar_file(sidecar: &Path) -> Result<ImageRecord, String> {
+    read_open_sidecar(std::fs::File::open(sidecar).map_err(|e| e.to_string())?)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_open_sidecar(file: std::fs::File) -> Result<ImageRecord, String> {
     use std::io::Read;
-    let file = std::fs::File::open(sidecar).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     (&file)
         .take(MAX_SIDECAR_BYTES as u64 + 1)
@@ -243,12 +247,15 @@ pub fn read_sidecar_file(sidecar: &Path) -> Result<ImageRecord, String> {
 }
 
 /// The record saved for `photo`, or an empty one when it has no sidecar.
+/// A sidecar that is there but cannot be opened is an error, so a caller
+/// never writes over a record it could not read.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn read_record(photo: &Path) -> Result<ImageRecord, String> {
     let sidecar = sidecar_path(photo).ok_or("cannot determine sidecar path")?;
-    match read_sidecar_file(&sidecar) {
-        Err(_) if !sidecar.exists() => Ok(ImageRecord::default()),
-        read => read,
+    match std::fs::File::open(&sidecar) {
+        Ok(file) => read_open_sidecar(file),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ImageRecord::default()),
+        Err(e) => Err(format!("{}: {e}", sidecar.display())),
     }
 }
 
@@ -288,6 +295,27 @@ mod tests {
                 points: 7,
             }],
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_sidecar_that_cannot_be_opened_is_an_error_not_an_empty_record() {
+        let dir =
+            std::env::temp_dir().join(format!("lightphotos-sidecar-eloop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(SIDECAR_DIR)).unwrap();
+        let photo = dir.join("a.jpg");
+        assert_eq!(
+            read_record(&photo),
+            Ok(ImageRecord::default()),
+            "no sidecar"
+        );
+
+        let sidecar = sidecar_path(&photo).unwrap();
+        std::os::unix::fs::symlink(&sidecar, &sidecar).unwrap();
+        let read = read_record(&photo);
+        assert!(read.is_err(), "a looping sidecar link: {read:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The defect this guards is a new `ImageRecord` field that `is_empty`
