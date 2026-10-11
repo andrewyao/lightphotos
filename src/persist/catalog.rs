@@ -1631,6 +1631,7 @@ mod tests {
         assert!(stamped.is_some());
         cat.set(&p, 4);
         assert_eq!(cat.edited(&p), stamped);
+        cat.flush_blocking(std::time::Duration::from_secs(10));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
