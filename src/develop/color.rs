@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use super::is_zero;
 
 /// The eight hue bands, in Lightroom's order.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Band {
     Red,
     Orange,
@@ -46,7 +46,7 @@ impl Band {
 
 /// Which of hue, saturation and luminance a Color Mixer or Color Grading
 /// slider moves.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum ColorAxis {
     Hue,
     Saturation,

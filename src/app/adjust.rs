@@ -353,11 +353,7 @@ impl App {
             for &c in &bent {
                 *adj.curve.get_mut(c) = *after.curve.get(c);
             }
-            if adj.is_identity() {
-                self.edits.remove(&path);
-            } else {
-                self.edits.insert(path.clone(), adj);
-            }
+            self.put_edit(&path, adj);
             self.unsaved_synced.insert(path);
         }
         self.save_edit_unless_dragging();
@@ -375,11 +371,7 @@ impl App {
             self.push_adjustments();
             return;
         }
-        if adj.is_identity() {
-            self.edits.remove(&path);
-        } else {
-            self.edits.insert(path.clone(), adj);
-        }
+        self.put_edit(&path, adj);
         if self.unsaved_edit.as_ref().is_some_and(|p| *p != path) {
             self.save_edit();
         }
@@ -392,6 +384,16 @@ impl App {
         self.push_adjustments();
         self.hist.invalidate();
         self.request_redraw();
+    }
+
+    /// The one writer of a photo's develop edit in `edits`. An identity edit
+    /// is removed rather than stored, matching how the catalog stores edits.
+    pub(super) fn put_edit(&mut self, path: &Path, adj: Adjustments) {
+        if adj.is_identity() {
+            self.edits.remove(path);
+        } else {
+            self.edits.insert(path.to_path_buf(), adj);
+        }
     }
 
     /// A slider drag changes the edit every frame. Writing the sidecar each

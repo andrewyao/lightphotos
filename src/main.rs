@@ -32,7 +32,7 @@ mod ui;
 #[cfg(any(target_arch = "wasm32", test))]
 mod web;
 
-use lightphotos::{decode, develop, export, hash, paths, scoring, worker_pool};
+use lightphotos::{decode, develop, export, hash, paths, scoring, sidecar, worker_pool};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;

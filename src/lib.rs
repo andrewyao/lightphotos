@@ -21,4 +21,5 @@ pub mod export;
 pub mod hash;
 pub mod paths;
 pub mod scoring;
+pub mod sidecar;
 pub mod worker_pool;

@@ -16,7 +16,7 @@ use super::color::{hue_rgb, oklab, oklab_to_linear};
 use super::is_zero;
 
 /// One Color Grading wheel.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Zone {
     Shadows,
     Midtones,

@@ -419,11 +419,7 @@ impl App {
     fn tone_one(&mut self, path: &Path, auto: &crate::develop::Adjustments) {
         let base = self.edits.get(path).copied().unwrap_or_default();
         let merged = autotone::merge(&base, auto);
-        if merged.is_identity() {
-            self.edits.remove(path);
-        } else {
-            self.edits.insert(path.to_path_buf(), merged);
-        }
+        self.put_edit(path, merged);
         self.catalog.set_adjustments(path, &merged);
         #[cfg(target_arch = "wasm32")]
         if merged != base {

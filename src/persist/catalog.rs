@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::develop::{Adjustments, TouchUp};
 use crate::persist::groups::{GroupId, GroupWrite, Groups, SavedGroup};
 use crate::scoring::quality::QualityScore;
+use crate::sidecar::{ColorLabel, Flag, MAX_RATING};
 
 pub(crate) mod group_file;
 mod writeback;
@@ -28,8 +29,6 @@ use writeback::{WriteOp, Writeback};
 pub(crate) const SIDECAR_DIR: &str = ".lightphotos";
 /// Sidecar file extension. Cosmetic; see the module docs.
 pub(crate) const SIDECAR_EXT: &str = "xmp";
-/// Highest star rating. Ratings run `0..=MAX_RATING`, with 0 for unrated.
-pub(crate) const MAX_RATING: u8 = 5;
 
 /// Persisted state for one photo. Default fields are skipped on write, so a
 /// rated but unedited photo's sidecar stays small.
@@ -70,39 +69,6 @@ pub struct StoredScore {
     /// [`ImageRecord::edit_signature`] when scored. A different signature
     /// now means the photo was edited since, and the score is stale.
     pub edits: u64,
-}
-
-/// A culling decision on a photo, apart from its stars. Unflagged is `None`.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
-pub enum Flag {
-    Pick,
-    Reject,
-}
-
-/// A photo's color label. 6-9 set the first four, as in Lightroom.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum ColorLabel {
-    Red,
-    Yellow,
-    Green,
-    Blue,
-    Purple,
-}
-
-impl ColorLabel {
-    /// The label digit key `n` sets: 6 red, 7 yellow, 8 green, 9 blue.
-    /// Purple has no key, as in Lightroom.
-    pub fn from_digit(n: u8) -> Option<ColorLabel> {
-        Some(match n {
-            6 => ColorLabel::Red,
-            7 => ColorLabel::Yellow,
-            8 => ColorLabel::Green,
-            9 => ColorLabel::Blue,
-            _ => return None,
-        })
-    }
 }
 
 /// A sidecar comes from whoever supplied the folder, and past

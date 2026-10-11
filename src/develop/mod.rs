@@ -171,7 +171,7 @@ pub enum Section {
     Grain,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum SliderId {
     Temp,
     Tint,
@@ -426,6 +426,145 @@ pub const SLIDERS: [Slider; 71] = [
         50.0,
     ),
 ];
+
+/// A slider's stable name, the id the command layer and sidecar-free callers
+/// use: lower snake parts joined by `.`, such as `exposure`,
+/// `mix.blue.saturation` or `grade.shadows.hue`.
+impl std::fmt::Display for SliderId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use SliderId::*;
+        let plain = match *self {
+            Mix(axis, band) => return write!(f, "mix.{}.{}", band_name(band), axis_name(axis)),
+            Gray(band) => return write!(f, "gray.{}", band_name(band)),
+            Grade(zone, axis) => {
+                return write!(f, "grade.{}.{}", zone_name(zone), axis_name(axis));
+            }
+            Temp => "temp",
+            Tint => "tint",
+            Exposure => "exposure",
+            Contrast => "contrast",
+            Highlights => "highlights",
+            Shadows => "shadows",
+            Whites => "whites",
+            Blacks => "blacks",
+            Texture => "texture",
+            Clarity => "clarity",
+            Dehaze => "dehaze",
+            Vibrance => "vibrance",
+            Saturation => "saturation",
+            GradeBlending => "grade.blending",
+            GradeBalance => "grade.balance",
+            SharpenAmount => "sharpen.amount",
+            SharpenRadius => "sharpen.radius",
+            SharpenDetail => "sharpen.detail",
+            SharpenMasking => "sharpen.masking",
+            Denoise => "denoise",
+            VignetteAmount => "vignette.amount",
+            VignetteMidpoint => "vignette.midpoint",
+            VignetteRoundness => "vignette.roundness",
+            VignetteFeather => "vignette.feather",
+            GrainAmount => "grain.amount",
+            GrainSize => "grain.size",
+            GrainRoughness => "grain.roughness",
+        };
+        f.write_str(plain)
+    }
+}
+
+/// Parses a name `Display` wrote. It scans [`SLIDERS`], so a name exists
+/// exactly when its slider does.
+impl std::str::FromStr for SliderId {
+    type Err = UnknownSlider;
+
+    fn from_str(name: &str) -> Result<SliderId, UnknownSlider> {
+        SLIDERS
+            .iter()
+            .map(|s| s.id)
+            .find(|id| id.to_string() == name)
+            .ok_or_else(|| UnknownSlider(name.to_string()))
+    }
+}
+
+/// A name no slider has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownSlider(pub String);
+
+impl std::fmt::Display for UnknownSlider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no develop control is named `{}`", self.0)
+    }
+}
+
+impl std::error::Error for UnknownSlider {}
+
+impl Serialize for SliderId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for SliderId {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<SliderId, D::Error> {
+        let name = std::borrow::Cow::<str>::deserialize(d)?;
+        name.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl SliderId {
+    /// This id's row in [`SLIDERS`].
+    pub fn slider(self) -> Option<&'static Slider> {
+        SLIDERS.iter().find(|s| s.id == self)
+    }
+}
+
+fn band_name(band: Band) -> &'static str {
+    match band {
+        Band::Red => "red",
+        Band::Orange => "orange",
+        Band::Yellow => "yellow",
+        Band::Green => "green",
+        Band::Aqua => "aqua",
+        Band::Blue => "blue",
+        Band::Purple => "purple",
+        Band::Magenta => "magenta",
+    }
+}
+
+fn axis_name(axis: ColorAxis) -> &'static str {
+    match axis {
+        ColorAxis::Hue => "hue",
+        ColorAxis::Saturation => "saturation",
+        ColorAxis::Luminance => "luminance",
+    }
+}
+
+fn zone_name(zone: Zone) -> &'static str {
+    match zone {
+        Zone::Shadows => "shadows",
+        Zone::Midtones => "midtones",
+        Zone::Highlights => "highlights",
+        Zone::Global => "global",
+    }
+}
+
+impl Section {
+    /// The section's stable name, for the `commands` listing.
+    pub fn name(self) -> &'static str {
+        match self {
+            Section::WhiteBalance => "white_balance",
+            Section::Tone => "tone",
+            Section::Presence => "presence",
+            Section::Curve => "curve",
+            Section::ColorMixer => "color_mixer",
+            Section::GrayMix => "gray_mix",
+            Section::ColorGrading => "color_grading",
+            Section::Detail => "detail",
+            Section::Optics => "optics",
+            Section::Vignette => "vignette",
+            Section::Grain => "grain",
+        }
+    }
+}
 
 /// The most touch-ups one photo can hold: the GPU buffer's size.
 pub const MAX_TOUCHUPS: usize = 64;
@@ -1375,6 +1514,45 @@ pub(crate) fn denoise_linear_rgb_pixel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_slider_name_parses_back_to_its_own_slider() {
+        for slider in &SLIDERS {
+            let name = slider.id.to_string();
+            assert_eq!(name.parse::<SliderId>(), Ok(slider.id), "{name}");
+            let json = serde_json::to_string(&slider.id).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<SliderId>(&json).unwrap(), slider.id);
+        }
+    }
+
+    #[test]
+    fn no_two_sliders_share_a_name() {
+        let names: std::collections::BTreeSet<String> =
+            SLIDERS.iter().map(|s| s.id.to_string()).collect();
+        assert_eq!(names.len(), SLIDERS.len());
+    }
+
+    #[test]
+    fn slider_names_are_the_documented_wire_names() {
+        for (id, name) in [
+            (SliderId::Exposure, "exposure"),
+            (
+                SliderId::Mix(ColorAxis::Saturation, Band::Blue),
+                "mix.blue.saturation",
+            ),
+            (SliderId::Gray(Band::Aqua), "gray.aqua"),
+            (
+                SliderId::Grade(Zone::Shadows, ColorAxis::Hue),
+                "grade.shadows.hue",
+            ),
+            (SliderId::VignetteAmount, "vignette.amount"),
+        ] {
+            assert_eq!(id.to_string(), name);
+        }
+        assert!("Exposure".parse::<SliderId>().is_err(), "names are exact");
+        assert!("mix.blue".parse::<SliderId>().is_err());
+    }
 
     fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
         edit_signature_with_touchups(adj, &[], rot)

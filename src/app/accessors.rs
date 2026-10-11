@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use crate::jobs::thumbnail::THUMB_PX;
 use crate::navigation::Cmp;
-use crate::persist::catalog::Flag;
 use crate::persist::groups::{Group, GroupId};
+use crate::sidecar::Flag;
 
 impl App {
     pub(crate) fn mode(&self) -> ViewMode {
@@ -169,7 +169,7 @@ impl App {
         self.flag_filter
     }
 
-    pub(crate) fn label_filter(&self) -> &[crate::persist::catalog::ColorLabel] {
+    pub(crate) fn label_filter(&self) -> &[crate::sidecar::ColorLabel] {
         &self.label_filter
     }
 
@@ -316,7 +316,7 @@ impl App {
     }
 
     /// Color label of the visible cell at `pos`.
-    pub(crate) fn label_at(&self, pos: usize) -> Option<crate::persist::catalog::ColorLabel> {
+    pub(crate) fn label_at(&self, pos: usize) -> Option<crate::sidecar::ColorLabel> {
         self.visible
             .get(pos)
             .and_then(|&i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))
@@ -343,7 +343,7 @@ impl App {
         }
     }
 
-    pub(crate) fn selected_label(&self) -> Option<crate::persist::catalog::ColorLabel> {
+    pub(crate) fn selected_label(&self) -> Option<crate::sidecar::ColorLabel> {
         self.selected_path().and_then(|p| self.catalog.label(&p))
     }
 

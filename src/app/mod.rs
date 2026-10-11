@@ -500,7 +500,7 @@ pub(crate) struct App {
     flag_filter: FlagFilter,
     /// The grid's color label filter: a photo with any of these labels
     /// shows. Empty shows all.
-    label_filter: Vec<crate::persist::catalog::ColorLabel>,
+    label_filter: Vec<crate::sidecar::ColorLabel>,
     /// Stacks the Grid shows member by member. Kept for the folder's
     /// session only.
     expanded_stacks: std::collections::HashSet<crate::persist::groups::GroupId>,
@@ -1477,7 +1477,7 @@ impl App {
                             "reset",
                         );
                     }
-                    self.edits.remove(&path);
+                    self.put_edit(&path, Adjustments::default());
                     self.touchups.remove(&path);
                     self.catalog.set_adjustments(&path, &Adjustments::default());
                     self.catalog.set_touchups(&path, &[]);

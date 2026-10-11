@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use crate::develop::copy::{self, CopySection, CopySections};
 use crate::develop::Adjustments;
 use crate::navigation::{Cmp, FlagFilter};
-use crate::persist::catalog::{Flag, GroupWriteRefused};
+use crate::persist::catalog::GroupWriteRefused;
 use crate::persist::groups::{Group, GroupWrite};
+use crate::sidecar::Flag;
 use crate::ui;
 
 /// The Copy Settings sections chosen last, as `CopySections::to_pref`.
@@ -311,7 +312,7 @@ impl App {
     /// view, and the loupe then follows the cursor to a neighbor.
     pub(super) fn set_rating(&mut self, stars: u8) {
         if self.marks_action_paths() {
-            if stars <= crate::persist::catalog::MAX_RATING {
+            if stars <= crate::sidecar::MAX_RATING {
                 self.apply_rating_to_selection(stars);
             }
         } else if let Some(path) = self.selected_path() {
@@ -321,7 +322,7 @@ impl App {
 
     /// Rates `path`, as `set_rating` does the selected photo.
     pub(super) fn set_rating_of(&mut self, path: PathBuf, stars: u8) {
-        if stars > crate::persist::catalog::MAX_RATING {
+        if stars > crate::sidecar::MAX_RATING {
             return;
         }
         #[cfg(target_arch = "wasm32")]
@@ -492,7 +493,7 @@ impl App {
 
     /// Gives `label` to the selected photo, or to the photos `set_rating`
     /// would rate, or clears it when every one of them has it already.
-    pub(super) fn toggle_label(&mut self, label: crate::persist::catalog::ColorLabel) {
+    pub(super) fn toggle_label(&mut self, label: crate::sidecar::ColorLabel) {
         let paths = if self.marks_action_paths() {
             self.action_paths()
         } else {
@@ -816,8 +817,7 @@ impl App {
     }
 
     /// Replaces each path's adjustments with `edit` of them, and returns how
-    /// many were touched. An entry that comes out identity is removed rather
-    /// than stored, matching how the catalog stores edits. Grid and filmstrip
+    /// many were touched. Grid and filmstrip
     /// thumbnails re-bake by themselves, because `edit_sig_for` hashes the
     /// live edits into the thumbnail cache key.
     pub(super) fn edit_each(
@@ -837,11 +837,7 @@ impl App {
             {
                 changed |= merged != existing;
             }
-            if merged.is_identity() {
-                self.edits.remove(path);
-            } else {
-                self.edits.insert(path.clone(), merged);
-            }
+            self.put_edit(path, merged);
             self.catalog.set_adjustments(path, &merged);
         }
         #[cfg(target_arch = "wasm32")]
@@ -931,7 +927,7 @@ impl App {
 
     /// Sets the grid's color label filter. Does nothing in the Loupe, as
     /// `set_filter` does not.
-    pub(super) fn set_label_filter(&mut self, labels: Vec<crate::persist::catalog::ColorLabel>) {
+    pub(super) fn set_label_filter(&mut self, labels: Vec<crate::sidecar::ColorLabel>) {
         if self.mode == ViewMode::Loupe {
             return;
         }
@@ -1243,7 +1239,7 @@ mod tests {
 
     #[test]
     fn the_label_filter_shows_photos_with_any_lit_label() {
-        use crate::persist::catalog::ColorLabel;
+        use crate::sidecar::ColorLabel;
         let (mut app, dir, paths) = crate::app::test_support::folder_app("label-filter", 4);
         app.catalog.set_label(&paths[0], Some(ColorLabel::Red));
         app.catalog.set_label(&paths[1], Some(ColorLabel::Purple));

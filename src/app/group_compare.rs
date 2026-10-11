@@ -742,17 +742,13 @@ impl App {
     }
 
     /// A member's flag, for its tile.
-    pub(crate) fn member_flag(&self, path: &Path) -> Option<crate::persist::catalog::Flag> {
+    pub(crate) fn member_flag(&self, path: &Path) -> Option<crate::sidecar::Flag> {
         self.flag_of(path)
     }
 
     /// Flag a member of the shown group from its tile, as
     /// `rate_group_member` rates one.
-    pub(super) fn flag_group_member(
-        &mut self,
-        path: PathBuf,
-        flag: Option<crate::persist::catalog::Flag>,
-    ) {
+    pub(super) fn flag_group_member(&mut self, path: PathBuf, flag: Option<crate::sidecar::Flag>) {
         if self
             .pane_members()
             .is_some_and(|(members, _)| members.contains(&path))
@@ -1022,15 +1018,9 @@ mod tests {
         );
         assert_eq!(app.pickable(), Some(chosen.clone()), "no representative");
 
-        app.flag_group_member(
-            paths[4].clone(),
-            Some(crate::persist::catalog::Flag::Reject),
-        );
-        assert_eq!(
-            app.flag_of(&paths[4]),
-            Some(crate::persist::catalog::Flag::Reject)
-        );
-        app.flag_group_member(paths[1].clone(), Some(crate::persist::catalog::Flag::Pick));
+        app.flag_group_member(paths[4].clone(), Some(crate::sidecar::Flag::Reject));
+        assert_eq!(app.flag_of(&paths[4]), Some(crate::sidecar::Flag::Reject));
+        app.flag_group_member(paths[1].clone(), Some(crate::sidecar::Flag::Pick));
         assert_eq!(app.flag_of(&paths[1]), None, "not one of the compared");
         app.set_member_as_rep(paths[4].clone());
         assert!(app
@@ -1490,14 +1480,11 @@ mod tests {
         act(&mut app, UiAction::SetRating(2));
         act(
             &mut app,
-            UiAction::SetFlag(Some(crate::persist::catalog::Flag::Pick)),
+            UiAction::SetFlag(Some(crate::sidecar::Flag::Pick)),
         );
         let ratings: Vec<u8> = paths.iter().map(|p| app.member_rating(p)).collect();
         assert_eq!(ratings, [0, 0, 0, 2, 0, 0]);
-        assert_eq!(
-            app.flag_of(&paths[3]),
-            Some(crate::persist::catalog::Flag::Pick)
-        );
+        assert_eq!(app.flag_of(&paths[3]), Some(crate::sidecar::Flag::Pick));
         assert_eq!(app.flag_of(&paths[1]), None, "the shown photo is untouched");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1583,7 +1570,7 @@ mod tests {
 
     #[test]
     fn a_tiles_flags_flag_only_a_member_of_the_shown_group() {
-        use crate::persist::catalog::Flag;
+        use crate::sidecar::Flag;
         let (mut app, dir, paths) = compare("flag-member", 6, &[1, 2, 3], 1);
         let flag = |app: &mut App, path: &Path, flag| {
             let path = path.to_path_buf();
@@ -1602,7 +1589,7 @@ mod tests {
     #[test]
     fn the_panes_flag_filter_hides_rejected_tiles_by_default() {
         use crate::navigation::FlagFilter;
-        use crate::persist::catalog::Flag;
+        use crate::sidecar::Flag;
         let (mut app, dir, paths) = compare("flag-pane", 6, &[1, 2, 3], 1);
         let shown = |app: &App| app.pane_members().unwrap().0;
         assert_eq!(shown(&app).len(), 3);

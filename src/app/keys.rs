@@ -2,7 +2,7 @@ use super::*;
 
 use winit::keyboard::KeyCode;
 
-use crate::persist::catalog::Flag;
+use crate::sidecar::Flag;
 use crate::ui;
 
 impl App {
@@ -196,13 +196,11 @@ impl App {
         // labels.
         if !cmd && !alt {
             if let Some(n) = digit_of(code) {
-                if n <= crate::persist::catalog::MAX_RATING {
+                if n <= crate::sidecar::MAX_RATING {
                     self.rate_key(n, shift);
                     return;
                 }
-                if let Some(label) =
-                    crate::persist::catalog::ColorLabel::from_digit(n).filter(|_| !shift)
-                {
+                if let Some(label) = crate::sidecar::ColorLabel::from_digit(n).filter(|_| !shift) {
                     self.toggle_label(label);
                     return;
                 }
@@ -862,7 +860,7 @@ mod tests {
 
     #[test]
     fn six_to_nine_toggle_labels_and_keep_the_rating() {
-        use crate::persist::catalog::ColorLabel;
+        use crate::sidecar::ColorLabel;
         let (mut app, _) = folder_app(1);
         press(&mut app, ModifiersState::empty(), KeyCode::Digit3);
         for (code, label) in [
@@ -883,7 +881,7 @@ mod tests {
 
     #[test]
     fn a_label_key_labels_every_selected_photo_then_clears_them() {
-        use crate::persist::catalog::ColorLabel;
+        use crate::sidecar::ColorLabel;
         let (mut app, _) = folder_app(3);
         press(&mut app, CMD, KeyCode::KeyA);
         press(&mut app, ModifiersState::empty(), KeyCode::Digit8);

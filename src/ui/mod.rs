@@ -9,7 +9,7 @@ use crate::app::{App, CropEdge, FlagCoverage, FocusLevel, Region, ShownTier, Vie
 use crate::develop::Adjustments;
 use crate::i18n::{t, Lang};
 use crate::navigation::Cmp;
-use crate::persist::catalog::Flag;
+use crate::sidecar::Flag;
 
 /// An action the UI wants `App` to perform after the frame is built. Positions
 /// are indices into the *visible* list (same space as `App::sel`).
@@ -31,7 +31,7 @@ pub enum UiAction {
     ToggleStack(usize),
     /// Give the selection this color label, or clear it when every photo
     /// has it already.
-    ToggleLabel(crate::persist::catalog::ColorLabel),
+    ToggleLabel(crate::sidecar::ColorLabel),
     /// Score every photo in the grid, group members included.
     ScoreAll,
     /// Show this page of the group's tiles.
@@ -53,7 +53,7 @@ pub enum UiAction {
     /// A flag on a member's tile in the Compare pane (`None` clears).
     FlagGroupMember {
         path: std::path::PathBuf,
-        flag: Option<crate::persist::catalog::Flag>,
+        flag: Option<crate::sidecar::Flag>,
     },
     /// Move Compare's focus square to center on this point of the photo.
     SetCompareCenter(egui::Pos2),
@@ -126,11 +126,11 @@ pub enum UiAction {
     /// Rate the current selection/shown image (0 clears).
     SetRating(u8),
     /// Flag the selected photo (`None` clears).
-    SetFlag(Option<crate::persist::catalog::Flag>),
+    SetFlag(Option<crate::sidecar::Flag>),
     /// The grid's flag filter.
     SetFlagFilter(crate::navigation::FlagFilter),
     /// The grid's color label filter. Empty shows all.
-    SetLabelFilter(Vec<crate::persist::catalog::ColorLabel>),
+    SetLabelFilter(Vec<crate::sidecar::ColorLabel>),
     /// The Compare pane's flag filter.
     SetCompareFlagFilter(crate::navigation::FlagFilter),
     /// Raw per-frame wheel delta over the filmstrip (egui: positive is up or
@@ -544,8 +544,8 @@ fn status_toast(ui: &egui::Ui, app: &App) {
         .request_repaint_after(std::time::Duration::from_millis(250));
 }
 
-fn label_name(label: crate::persist::catalog::ColorLabel) -> &'static str {
-    use crate::persist::catalog::ColorLabel::*;
+fn label_name(label: crate::sidecar::ColorLabel) -> &'static str {
+    use crate::sidecar::ColorLabel::*;
     let m = &t().menu;
     match label {
         Red => m.label_red,
@@ -556,8 +556,8 @@ fn label_name(label: crate::persist::catalog::ColorLabel) -> &'static str {
     }
 }
 
-fn label_color(label: crate::persist::catalog::ColorLabel) -> egui::Color32 {
-    use crate::persist::catalog::ColorLabel::*;
+fn label_color(label: crate::sidecar::ColorLabel) -> egui::Color32 {
+    use crate::sidecar::ColorLabel::*;
     match label {
         Red => egui::Color32::from_rgb(230, 70, 70),
         Yellow => egui::Color32::from_rgb(235, 200, 60),

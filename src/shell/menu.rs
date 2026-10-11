@@ -19,8 +19,8 @@ use winit::keyboard::{KeyCode, ModifiersState};
 
 use crate::app::App;
 use crate::i18n::{self, Lang, MenuStrings};
-use crate::persist::catalog::ColorLabel;
 use crate::shell::macos_delegate::UserEvent;
+use crate::sidecar::ColorLabel;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuCommand {
