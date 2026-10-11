@@ -465,6 +465,47 @@ mod tests {
         }
     }
 
+    /// Headless mode edits a sidecar through the lib. It must leave the same
+    /// sidecar the app leaves for the same command on the same photo.
+    #[test]
+    fn develop_set_on_a_record_matches_the_app() {
+        use crate::sidecar::{self, ImageRecord};
+        let (mut app, dir, paths) = folder_app("cmd-headless-parity", 2);
+        let mut start = ImageRecord {
+            rating: Some(3),
+            ..ImageRecord::default()
+        };
+        start.edit(1_700_000_000, |r| {
+            r.adjustments.exposure = 0.5;
+            r.adjustments.contrast = 10.0;
+        });
+        sidecar::write_record(&paths[0], &start).unwrap();
+        crate::app::test_support::load_folder(&mut app, &dir);
+
+        let json = r#"{"id":"develop.set","params":{"photos":["0.jpg"],
+            "controls":{"exposure":{"by":0.3},"contrast":"default","highlights":-20}}}"#;
+        let cmd = Command::parse(json).unwrap();
+        let mut headless = start.clone();
+        command::apply_to_record(&cmd, &mut headless, || Ok((4000.0, 3000.0))).unwrap();
+        assert_eq!(app.run(cmd).map(|o| o.photos), Ok(1));
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+
+        let saved = sidecar::read_record(&paths[0]).unwrap();
+        assert_ne!(saved.adjustments, start.adjustments, "the app edited it");
+        assert!(saved.edited.is_some() && headless.edited.is_some());
+        assert_eq!(
+            ImageRecord {
+                edited: None,
+                ..saved
+            },
+            ImageRecord {
+                edited: None,
+                ..headless
+            }
+        );
+    }
+
     #[test]
     fn a_crop_set_that_fails_one_photo_writes_none() {
         let (mut app, _, paths) = folder_app("cmd-crop-atomic", 2);

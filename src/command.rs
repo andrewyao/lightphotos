@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::develop::{Adjustments, Crop, SliderId, Straighten, SLIDERS, STRAIGHTEN_RANGE};
 use crate::export::ExportSettings;
-use crate::sidecar::{ColorLabel, MAX_RATING};
+use crate::sidecar::{ColorLabel, ImageRecord, MAX_RATING};
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "id", content = "params", deny_unknown_fields)]
@@ -317,6 +317,69 @@ pub fn reset(adj: Adjustments) -> Adjustments {
     }
 }
 
+/// Runs `cmd` on one photo's sidecar record, with the result the app gives
+/// that photo, for a caller with no running app. The caller resolves
+/// `photos` to records and saves each. `size` gives the photo's pixel size,
+/// asked for only by a crop on a straightened photo. A command that
+/// [`Command::about`] does not mark headless is refused with
+/// [`CommandError::NeedsApp`], and a refused command leaves `rec` as it was.
+pub fn apply_to_record(
+    cmd: &Command,
+    rec: &mut ImageRecord,
+    size: impl FnOnce() -> Result<(f32, f32), CommandError>,
+) -> Result<(), CommandError> {
+    use crate::sidecar::Flag;
+    let now = crate::sidecar::unix_now();
+    let adj = rec.adjustments;
+    let develop = |rec: &mut ImageRecord, adj: Adjustments| rec.edit(now, |r| r.adjustments = adj);
+    match cmd {
+        Command::Rate(p) => rec.rating = Some(p.stars.get()).filter(|&n| n > 0),
+        Command::Flag(p) => {
+            rec.flag = match p.flag {
+                FlagChange::Pick => Some(Flag::Pick),
+                FlagChange::Reject => Some(Flag::Reject),
+                FlagChange::None => None,
+                FlagChange::TogglePick => (rec.flag != Some(Flag::Pick)).then_some(Flag::Pick),
+            }
+        }
+        Command::Label(p) => {
+            if p.on.unwrap_or(rec.label != Some(p.label)) {
+                rec.label = Some(p.label);
+            } else if rec.label == Some(p.label) {
+                rec.label = None;
+            }
+        }
+        Command::Rotate(p) => {
+            let turn = if p.clockwise { 1 } else { 3 };
+            rec.edit(now, |r| r.rotation = (r.rotation % 4 + turn) % 4);
+        }
+        Command::Develop(p) => {
+            p.validate()?;
+            develop(rec, p.apply(adj));
+        }
+        Command::Reset(_) => develop(rec, reset(adj)),
+        Command::Monochrome(p) => {
+            let on = p.on.unwrap_or(!adj.is_monochrome());
+            let saturation = if on { -100.0 } else { 0.0 };
+            develop(rec, Adjustments { saturation, ..adj });
+        }
+        Command::Crop(p) => {
+            p.validate()?;
+            develop(rec, p.apply(adj, size)?);
+        }
+        Command::OpenFolder(_)
+        | Command::View(_)
+        | Command::Zoom(_)
+        | Command::Select(_)
+        | Command::Navigate(_)
+        | Command::AutoTone(_)
+        | Command::Preset(_)
+        | Command::Export(_)
+        | Command::Undo => return Err(CommandError::NeedsApp),
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct MonochromeParams {
@@ -395,6 +458,11 @@ impl CropParams {
             return Ok(adj);
         }
         let (w, h) = size()?;
+        if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
+            return Err(CommandError::Failed {
+                reason: format!("a straightened crop needs the photo's size, not {w}x{h}"),
+            });
+        }
         let turn = Straighten::new(adj.straighten, w, h);
         let Some(r) = adj.crop else {
             adj.crop = Some(turn.largest_crop(w / h));
@@ -1128,5 +1196,147 @@ mod tests {
             .all(|c| c.value.is_none()));
         let json = serde_json::to_value(&listing).unwrap();
         assert_eq!(json["commands"][0]["id"], "folder.open");
+    }
+
+    fn on_record(rec: &mut ImageRecord, json: serde_json::Value) -> Result<(), CommandError> {
+        let size = || Ok((4000.0, 3000.0));
+        apply_to_record(&Command::from_json(&json)?, rec, size)
+    }
+
+    /// The listing's `headless` flag is the promise a headless caller reads,
+    /// so it must name exactly the commands `apply_to_record` runs.
+    #[test]
+    fn apply_to_record_runs_exactly_the_commands_listed_as_headless() {
+        for cmd in Command::examples() {
+            let mut rec = ImageRecord::default();
+            let ran = apply_to_record(&cmd, &mut rec, || Ok((4000.0, 3000.0)));
+            assert_eq!(
+                ran != Err(CommandError::NeedsApp),
+                cmd.about().1,
+                "{}: {ran:?}",
+                cmd.id()
+            );
+        }
+    }
+
+    #[test]
+    fn ratings_flags_and_labels_toggle_on_a_record_as_the_keys_do() {
+        let mut rec = ImageRecord::default();
+        on_record(
+            &mut rec,
+            json!({"id": "photo.rate", "params": {"stars": 4}}),
+        )
+        .unwrap();
+        assert_eq!(rec.rating, Some(4));
+        on_record(
+            &mut rec,
+            json!({"id": "photo.rate", "params": {"stars": 0}}),
+        )
+        .unwrap();
+        assert_eq!(rec.rating, None, "0 clears the rating");
+
+        let toggle = json!({"id": "photo.flag", "params": {"flag": "toggle_pick"}});
+        on_record(&mut rec, toggle.clone()).unwrap();
+        assert_eq!(rec.flag, Some(crate::sidecar::Flag::Pick));
+        on_record(&mut rec, toggle).unwrap();
+        assert_eq!(rec.flag, None);
+
+        let red = json!({"id": "photo.label", "params": {"label": "red"}});
+        on_record(&mut rec, red.clone()).unwrap();
+        assert_eq!(rec.label, Some(ColorLabel::Red));
+        on_record(&mut rec, red).unwrap();
+        assert_eq!(rec.label, None);
+        rec.label = Some(ColorLabel::Blue);
+        on_record(
+            &mut rec,
+            json!({"id": "photo.label", "params": {"label": "red", "on": false}}),
+        )
+        .unwrap();
+        assert_eq!(
+            rec.label,
+            Some(ColorLabel::Blue),
+            "off clears only that label"
+        );
+        assert_eq!(rec.edited, None, "culling is not an edit");
+    }
+
+    #[test]
+    fn a_develop_edit_on_a_record_stamps_its_edit_time() {
+        let mut rec = ImageRecord::default();
+        on_record(
+            &mut rec,
+            json!({"id": "develop.set", "params": {"controls": {"exposure": 0.7}}}),
+        )
+        .unwrap();
+        assert_eq!(rec.adjustments.exposure, 0.7);
+        assert!(rec.edited.is_some());
+    }
+
+    #[test]
+    fn a_refused_edit_leaves_the_record_as_it_was() {
+        let mut rec = ImageRecord {
+            rating: Some(2),
+            ..ImageRecord::default()
+        };
+        let before = rec.clone();
+        let err = on_record(
+            &mut rec,
+            json!({"id": "develop.set", "params": {"controls": {"exposure": 99}}}),
+        );
+        assert!(
+            matches!(err, Err(CommandError::OutOfRange { .. })),
+            "{err:?}"
+        );
+        let sizeless = apply_to_record(
+            &Command::from_json(&json!({"id": "crop.set", "params": {"straighten": 3}})).unwrap(),
+            &mut rec,
+            || Ok((0.0, 0.0)),
+        );
+        assert!(
+            matches!(sizeless, Err(CommandError::Failed { .. })),
+            "{sizeless:?}"
+        );
+        assert_eq!(rec, before);
+    }
+
+    #[test]
+    fn rotating_a_record_wraps_even_from_a_hostile_rotation() {
+        let mut rec = ImageRecord {
+            rotation: 255,
+            ..ImageRecord::default()
+        };
+        let ccw = json!({"id": "photo.rotate", "params": {"clockwise": false}});
+        on_record(&mut rec, ccw.clone()).unwrap();
+        assert_eq!(rec.rotation, 2);
+        on_record(&mut rec, ccw.clone()).unwrap();
+        on_record(&mut rec, ccw).unwrap();
+        assert_eq!(rec.rotation, 0);
+        assert_eq!(rec.edited, None, "a full turn back is no edit");
+    }
+
+    #[test]
+    fn a_reset_on_a_record_keeps_its_crop_straighten_and_spots() {
+        let mut rec = ImageRecord::default();
+        on_record(
+            &mut rec,
+            json!({"id": "crop.set", "params": {"straighten": 2}}),
+        )
+        .unwrap();
+        rec.adjustments.exposure = 1.0;
+        rec.touchups = vec![crate::develop::TouchUp {
+            center: [0.5, 0.5],
+            radius: 0.05,
+            source: [0.3, 0.3],
+            feather: 0.5,
+            delta: [0.0; 3],
+            opacity: 1.0,
+        }];
+        let kept = (rec.adjustments.crop, rec.touchups.clone());
+        assert!(kept.0.is_some(), "a straighten picks the largest crop");
+
+        on_record(&mut rec, json!({"id": "develop.reset"})).unwrap();
+        assert_eq!(rec.adjustments.exposure, 0.0);
+        assert_eq!(rec.adjustments.straighten, 2.0);
+        assert_eq!((rec.adjustments.crop, rec.touchups), kept);
     }
 }
