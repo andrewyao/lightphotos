@@ -12,8 +12,8 @@ use std::ffi::c_void;
 
 #[cfg(target_os = "macos")]
 use objc2_core_foundation::{
-    kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionary, CFNumber,
-    CFNumberType, CFRetained, CFString,
+    kCFTypeDictionaryKeyCallBacks, kCFTypeDictionaryValueCallBacks, CFDictionary, CFMutableData,
+    CFNumber, CFNumberType, CFRetained, CFString,
 };
 #[cfg(target_os = "macos")]
 use objc2_image_io::{kCGImageDestinationLossyCompressionQuality, CGImageDestination};
@@ -140,7 +140,7 @@ pub fn encode_jpeg_to_vec(
     }
 
     let quality = match quality {
-        JpegQuality::Export => 90,
+        JpegQuality::Export => EXPORT_QUALITY,
         JpegQuality::Thumbnail => 60,
     };
     mozjpeg_rs::Encoder::new(mozjpeg_rs::Preset::default())
@@ -163,6 +163,298 @@ pub fn encode_jpeg(
 ) -> Result<(), String> {
     let jpeg_data = encode_jpeg_to_vec(width, height, rgba, quality)?;
     std::fs::write(out, jpeg_data).map_err(|e| e.to_string())
+}
+
+/// Baked pixels to encode: tightly packed sRGB RGBA, row-major, opaque.
+#[derive(Clone, Copy)]
+pub enum Pixels<'a> {
+    Rgba8(&'a [u8]),
+    Rgba16(&'a [u16]),
+}
+
+impl Pixels<'_> {
+    fn check(self, width: u32, height: u32) -> Result<(), String> {
+        if width == 0 || height == 0 {
+            return Err("cannot encode a zero-sized image".into());
+        }
+        let need = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or("image too large to encode")?;
+        let have = match self {
+            Pixels::Rgba8(p) => p.len(),
+            Pixels::Rgba16(p) => p.len(),
+        };
+        if have < need {
+            return Err("pixel buffer too small for the given dimensions".into());
+        }
+        Ok(())
+    }
+
+    /// RGB without the alpha byte, 8 bits per channel; a 16-bit sample keeps
+    /// its high byte.
+    fn rgb8(self, width: u32, height: u32) -> Vec<u8> {
+        let n = width as usize * height as usize;
+        match self {
+            Pixels::Rgba8(p) => p
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .take(n)
+                .flat_map(|&[r, g, b, _]| [r, g, b])
+                .collect(),
+            Pixels::Rgba16(p) => p
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .take(n)
+                .flat_map(|&[r, g, b, _]| [r, g, b].map(|c| (c >> 8) as u8))
+                .collect(),
+        }
+    }
+}
+
+/// A file format to encode an export as. Which ones a build can write is
+/// [`can_encode`]'s answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Encoding {
+    /// Quality 1 to 100, or `None` for the export default.
+    Jpeg(Option<u8>),
+    Png,
+    /// 16 bits per channel when given [`Pixels::Rgba16`].
+    Tiff,
+    /// Lossless.
+    Webp,
+    Avif,
+}
+
+/// Whether this build, on this machine, can write `enc`. macOS asks ImageIO,
+/// which writes AVIF only on recent systems.
+pub fn can_encode(enc: Encoding) -> bool {
+    match enc {
+        Encoding::Jpeg(_) | Encoding::Png | Encoding::Webp => true,
+        #[cfg(not(target_arch = "wasm32"))]
+        Encoding::Tiff => true,
+        // A 16-bit bake and its TIFF copies, per export in flight, can run
+        // the tab's one 4 GB heap out on a 24 MP RAW.
+        #[cfg(target_arch = "wasm32")]
+        Encoding::Tiff => false,
+        #[cfg(target_os = "macos")]
+        Encoding::Avif => {
+            static AVIF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *AVIF.get_or_init(|| imageio_writes("public.avif"))
+        }
+        #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+        Encoding::Avif => true,
+        // rav1e in a browser tab runs one 24 MP frame for minutes.
+        #[cfg(target_arch = "wasm32")]
+        Encoding::Avif => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn imageio_writes(uti: &str) -> bool {
+    // SAFETY: returns a +1 CFArray of CFStrings, owned by the CFRetained.
+    let types = unsafe { CGImageDestination::type_identifiers() };
+    // SAFETY: CGImageDestinationCopyTypeIdentifiers returns an array of
+    // CFStrings, so viewing it as one is sound.
+    let types = unsafe { types.cast_unchecked::<CFString>() };
+    (0..types.len()).any(|i| types.get(i).is_some_and(|t| t.to_string() == uti))
+}
+
+/// Encode `pixels` as `enc`. JPEG, PNG and WebP keep 8 bits per channel;
+/// TIFF keeps 16 when given them.
+pub fn encode(enc: Encoding, width: u32, height: u32, pixels: Pixels) -> Result<Vec<u8>, String> {
+    Prepared::new(width, height, pixels)?.encode(enc)
+}
+
+/// Pixels checked and ready to encode, more than once if need be: a JPEG
+/// held to a size limit is encoded at several qualities, and on macOS the
+/// `CGImage` behind each try is built only once.
+pub struct Prepared<'a> {
+    width: u32,
+    height: u32,
+    pixels: Pixels<'a>,
+    #[cfg(target_os = "macos")]
+    image: std::cell::OnceCell<CFRetained<objc2_core_graphics::CGImage>>,
+}
+
+impl<'a> Prepared<'a> {
+    pub fn new(width: u32, height: u32, pixels: Pixels<'a>) -> Result<Prepared<'a>, String> {
+        pixels.check(width, height)?;
+        Ok(Prepared {
+            width,
+            height,
+            pixels,
+            #[cfg(target_os = "macos")]
+            image: std::cell::OnceCell::new(),
+        })
+    }
+
+    pub fn encode(&self, enc: Encoding) -> Result<Vec<u8>, String> {
+        if !can_encode(enc) {
+            return Err(format!("this build cannot write {enc:?}"));
+        }
+        let (width, height, pixels) = (self.width, self.height, self.pixels);
+        match enc {
+            Encoding::Webp => encode_webp(width, height, &pixels.rgb8(width, height)),
+            #[cfg(target_os = "macos")]
+            Encoding::Jpeg(q) => self.encode_imageio("public.jpeg", q),
+            #[cfg(target_os = "macos")]
+            Encoding::Png => self.encode_imageio("public.png", None),
+            #[cfg(target_os = "macos")]
+            Encoding::Tiff => self.encode_imageio("public.tiff", None),
+            #[cfg(target_os = "macos")]
+            Encoding::Avif => self.encode_imageio("public.avif", None),
+            #[cfg(not(target_os = "macos"))]
+            Encoding::Jpeg(q) => {
+                let rgba = match pixels {
+                    Pixels::Rgba8(p) => std::borrow::Cow::Borrowed(p),
+                    Pixels::Rgba16(p) => {
+                        std::borrow::Cow::Owned(p.iter().map(|c| (c >> 8) as u8).collect())
+                    }
+                };
+                mozjpeg_rs::Encoder::new(mozjpeg_rs::Preset::default())
+                    .quality(q.unwrap_or(EXPORT_QUALITY))
+                    .encode_rgba(&rgba, width, height)
+                    .map_err(|e| e.to_string())
+            }
+            #[cfg(not(target_os = "macos"))]
+            Encoding::Png => encode_with_image(
+                image::ImageFormat::Png,
+                image::DynamicImage::ImageRgb8(rgb8_image(width, height, pixels)?),
+            ),
+            #[cfg(not(target_os = "macos"))]
+            Encoding::Tiff => {
+                let img = match pixels {
+                    Pixels::Rgba16(p) => {
+                        let n = width as usize * height as usize;
+                        let rgb: Vec<u16> = p
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .take(n)
+                            .flat_map(|&[r, g, b, _]| [r, g, b])
+                            .collect();
+                        image::DynamicImage::ImageRgb16(
+                            image::ImageBuffer::from_raw(width, height, rgb)
+                                .ok_or("pixel buffer does not fit the image")?,
+                        )
+                    }
+                    Pixels::Rgba8(_) => {
+                        image::DynamicImage::ImageRgb8(rgb8_image(width, height, pixels)?)
+                    }
+                };
+                encode_with_image(image::ImageFormat::Tiff, img)
+            }
+            #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+            Encoding::Avif => encode_avif(width, height, &pixels.rgb8(width, height)),
+            #[cfg(target_arch = "wasm32")]
+            Encoding::Avif => Err("this build cannot write AVIF".into()),
+        }
+    }
+
+    /// Encode through ImageIO into memory. `quality` is 1 to 100, for a
+    /// lossy format; `None` keeps ImageIO's default.
+    #[cfg(target_os = "macos")]
+    fn encode_imageio(&self, uti: &str, quality: Option<u8>) -> Result<Vec<u8>, String> {
+        let image = match self.image.get() {
+            Some(image) => image,
+            None => {
+                let _ = self.image.set(self.cg_image()?);
+                self.image.get().ok_or("could not keep the CGImage")?
+            }
+        };
+        let data = CFMutableData::new(None, 0).ok_or("could not allocate CFData")?;
+        // SAFETY: data and type are valid; one image follows.
+        let dest =
+            unsafe { CGImageDestination::with_data(&data, &CFString::from_str(uti), 1, None) }
+                .ok_or_else(|| format!("ImageIO cannot write {uti}"))?;
+        let properties = quality
+            .map(|q| lossy_quality_properties(f64::from(q.clamp(1, 100)) / 100.0))
+            .transpose()?;
+        // SAFETY: dest/image are valid; properties, if any, map a documented
+        // destination key to a CFNumber.
+        unsafe { CGImageDestination::add_image(&dest, image, properties.as_deref()) };
+        // SAFETY: dest is valid; returns false if encoding failed.
+        if !unsafe { CGImageDestination::finalize(&dest) } {
+            return Err(format!("ImageIO could not encode {uti}"));
+        }
+        Ok(data.to_vec())
+    }
+
+    /// The pixels as an opaque sRGB `CGImage`. 16-bit samples go in
+    /// little-endian, which is every Mac's own order.
+    #[cfg(target_os = "macos")]
+    fn cg_image(&self) -> Result<CFRetained<objc2_core_graphics::CGImage>, String> {
+        let (mut buffer, bits): (Vec<u8>, usize) = match self.pixels {
+            Pixels::Rgba8(p) => (p.to_vec(), 8),
+            Pixels::Rgba16(p) => (bytemuck::cast_slice::<u16, u8>(p).to_vec(), 16),
+        };
+        let bytes_per_row = self.width as usize * 4 * bits / 8;
+        // SAFETY: buffer holds width*height RGBX samples of `bits` each,
+        // checked by `Pixels::check`, and outlives `ctx`.
+        let ctx = unsafe {
+            coregraphics::srgb_opaque_context(
+                buffer.as_mut_ptr() as *mut c_void,
+                self.width,
+                self.height,
+                bytes_per_row,
+                bits,
+            )?
+        };
+        coregraphics::bitmap_context_image(&ctx)
+    }
+}
+
+/// The quality of an export JPEG with no size limit. macOS passes none and
+/// keeps ImageIO's default.
+#[cfg(not(target_os = "macos"))]
+const EXPORT_QUALITY: u8 = 90;
+
+fn encode_webp(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    image_webp::WebPEncoder::new(&mut out)
+        .encode(rgb, width, height, image_webp::ColorType::Rgb8)
+        .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn rgb8_image(width: u32, height: u32, pixels: Pixels) -> Result<image::RgbImage, String> {
+    image::RgbImage::from_raw(width, height, pixels.rgb8(width, height))
+        .ok_or_else(|| "pixel buffer does not fit the image".into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn encode_with_image(
+    format: image::ImageFormat,
+    img: image::DynamicImage,
+) -> Result<Vec<u8>, String> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut out, format).map_err(|e| e.to_string())?;
+    Ok(out.into_inner())
+}
+
+/// AVIF through rav1e at quality 80 and speed 6, the middle of its range.
+#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
+fn encode_avif(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
+    let px: Vec<ravif::RGB8> = rgb
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|&[r, g, b]| ravif::RGB8 { r, g, b })
+        .collect();
+    ravif::Encoder::new()
+        .with_quality(80.0)
+        .with_speed(6)
+        .encode_rgb(ravif::Img::new(
+            px.as_slice(),
+            width as usize,
+            height as usize,
+        ))
+        .map(|encoded| encoded.avif_file)
+        .map_err(|e| e.to_string())
 }
 
 /// `jpeg` with its EXIF block replaced by one this app writes: sRGB, the pixel
@@ -477,7 +769,7 @@ mod tests {
         let plain = encode_jpeg_to_vec(16, 8, &[120u8; 16 * 8 * 4], JpegQuality::Export).unwrap();
         let tagged = with_exif(&plain, 16, 8, Some(&stamp));
         let bake = |src: Vec<u8>| {
-            crate::export::bake_jpeg_from_shared_vec(
+            crate::export::bake_export_from_shared_vec(
                 std::sync::Arc::new(src),
                 false,
                 &Default::default(),

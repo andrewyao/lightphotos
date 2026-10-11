@@ -17,22 +17,25 @@ pub fn export_stem(src: &Path) -> String {
         .unwrap_or_else(|| "export".into())
 }
 
-/// The first free `<stem>.jpg`, `<stem>-1.jpg`, ... name for `src`, skipping
-/// names in `existing` (already in `Exports/`) or `taken` (handed out earlier in
-/// this batch). The wasm32 version of [`jpg_export_target`], since the browser
-/// has no `Path::exists()`.
+/// The first free `<stem>.<ext>`, `<stem>-1.<ext>`, ... name, skipping names
+/// in `existing` (already in `Exports/`) or `taken` (handed out earlier in this
+/// batch). The wasm32 version of [`export_target`], since the browser has no
+/// `Path::exists()`.
 #[cfg(any(target_arch = "wasm32", test))]
-pub fn jpg_export_name(src: &Path, existing: &HashSet<String>, taken: &HashSet<String>) -> String {
-    let stem = export_stem(src);
+pub fn export_name(
+    stem: &str,
+    ext: &str,
+    existing: &HashSet<String>,
+    taken: &HashSet<String>,
+) -> String {
     let free = |name: &str| !existing.contains(name) && !taken.contains(name);
-
-    let base = format!("{stem}.jpg");
+    let base = format!("{stem}.{ext}");
     if free(&base) {
         return base;
     }
     let mut n = 1u32;
     loop {
-        let candidate = format!("{stem}-{n}.jpg");
+        let candidate = format!("{stem}-{n}.{ext}");
         if free(&candidate) {
             return candidate;
         }
@@ -40,23 +43,20 @@ pub fn jpg_export_name(src: &Path, existing: &HashSet<String>, taken: &HashSet<S
     }
 }
 
-/// The first free `stem.jpg`, `stem-1.jpg`, ... path in `dest_dir` for `src`.
-/// Skips files on disk and paths in `taken` (handed out earlier in this batch,
-/// not yet written), so same-stem sources like `photo.raw` and `photo.jpg`
-/// don't collide.
+/// The first free `<stem>.<ext>`, `<stem>-1.<ext>`, ... path in `dest_dir`.
+/// Skips files on disk and paths in `taken` (handed out earlier in this
+/// batch, not yet written), so same-stem sources like `photo.raw` and
+/// `photo.jpg` don't collide.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn jpg_export_target(src: &Path, dest_dir: &Path, taken: &HashSet<PathBuf>) -> PathBuf {
-    let stem = export_stem(src);
-
+pub fn export_target(stem: &str, ext: &str, dest_dir: &Path, taken: &HashSet<PathBuf>) -> PathBuf {
     let free = |candidate: &Path| !candidate.exists() && !taken.contains(candidate);
-
-    let base = dest_dir.join(format!("{stem}.jpg"));
+    let base = dest_dir.join(format!("{stem}.{ext}"));
     if free(&base) {
         return base;
     }
     let mut n = 1u32;
     loop {
-        let candidate = dest_dir.join(format!("{stem}-{n}.jpg"));
+        let candidate = dest_dir.join(format!("{stem}-{n}.{ext}"));
         if free(&candidate) {
             return candidate;
         }
@@ -128,24 +128,29 @@ mod tests {
 
     #[test]
     fn export_name_avoids_existing_and_taken() {
-        let src = Path::new("/photos/DSC_1000.NEF");
         let mut existing = HashSet::new();
         let taken = HashSet::new();
-        assert_eq!(jpg_export_name(src, &existing, &taken), "DSC_1000.jpg");
+        assert_eq!(
+            export_name("DSC_1000", "jpg", &existing, &taken),
+            "DSC_1000.jpg"
+        );
 
         existing.insert("DSC_1000.jpg".to_string());
-        assert_eq!(jpg_export_name(src, &existing, &taken), "DSC_1000-1.jpg");
+        assert_eq!(
+            export_name("DSC_1000", "jpg", &existing, &taken),
+            "DSC_1000-1.jpg"
+        );
+        assert_eq!(
+            export_name("DSC_1000", "png", &existing, &taken),
+            "DSC_1000.png",
+            "another format's name is free"
+        );
 
         let mut taken = HashSet::new();
         taken.insert("DSC_1000-1.jpg".to_string());
-        assert_eq!(jpg_export_name(src, &existing, &taken), "DSC_1000-2.jpg");
-    }
-
-    #[test]
-    fn export_name_falls_back_when_stemless() {
         assert_eq!(
-            jpg_export_name(Path::new("/x/.."), &HashSet::new(), &HashSet::new()),
-            "export.jpg"
+            export_name("DSC_1000", "jpg", &existing, &taken),
+            "DSC_1000-2.jpg"
         );
     }
 
@@ -156,20 +161,22 @@ mod tests {
         std::fs::create_dir_all(&out).unwrap();
         let none = HashSet::new();
 
-        let src = dir.join("photo.png");
-        assert_eq!(jpg_export_target(&src, &out, &none), out.join("photo.jpg"));
+        assert_eq!(
+            export_target("photo", "jpg", &out, &none),
+            out.join("photo.jpg")
+        );
 
         std::fs::write(out.join("photo.jpg"), b"x").unwrap();
         assert_eq!(
-            jpg_export_target(&src, &out, &none),
+            export_target("photo", "jpg", &out, &none),
             out.join("photo-1.jpg")
         );
 
         // `taken` reserves names that aren't on disk yet.
         let mut taken = HashSet::new();
-        let first = jpg_export_target(&src, &out, &taken);
+        let first = export_target("photo", "jpg", &out, &taken);
         taken.insert(first.clone());
-        let second = jpg_export_target(&src, &out, &taken);
+        let second = export_target("photo", "jpg", &out, &taken);
         assert_eq!(first, out.join("photo-1.jpg"));
         assert_eq!(second, out.join("photo-2.jpg"));
 

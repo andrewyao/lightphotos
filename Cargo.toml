@@ -87,6 +87,9 @@ lightwatch = { package = "lightwatch-probe", git = "https://github.com/andrewyao
 # `image_ops` reads on every platform and `decode/rawler/raw_preview.rs`'s `Quality` tier
 # writes for the renderer's `Rgba16Float` texture.
 half = "2"
+# Lossless WebP export on every target (`decode/image_encode.rs`). Pure Rust,
+# and the same encoder the `image` crate uses; ImageIO cannot write WebP.
+image-webp = "0.2"
 # Local wall-clock fields for a file's modified time. Already in the tree via
 # rawler and trash; `wasmbind` reads the browser's time zone.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "wasmbind"] }
@@ -202,6 +205,10 @@ kamadak-exif = "0.6.1"
 # desktop targets, not wasm32 too.
 [target.'cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))'.dependencies]
 trash = "5"
+# AVIF export off macOS, which writes it through ImageIO. rav1e is pure Rust
+# with its assembly off, so no nasm. Not on wasm32: one 24 MP frame takes
+# minutes on a browser's threads, so the browser build hides AVIF.
+ravif = { version = "0.13", default-features = false, features = ["threading"] }
 
 # Release builds run as GUI apps with no console of their own (see
 # `windows_subsystem` in main.rs); `AttachConsole` borrows the terminal's when

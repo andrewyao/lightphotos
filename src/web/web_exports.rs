@@ -21,7 +21,7 @@ use crate::jobs::loader::WebDecoder;
 /// this is kept below what the old pool of separate heaps allowed.
 const MAX_IN_FLIGHT: usize = 2;
 
-/// A finished or failed export and where its JPEG goes.
+/// A finished or failed export and where its file goes.
 pub struct ExportResult {
     pub path: PathBuf,
     pub folder: FileSystemDirectoryHandle,

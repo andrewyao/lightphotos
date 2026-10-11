@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Background JPEG export. Each export decodes at full resolution, bakes in
-//! the edits, and encodes a JPEG, which takes hundreds of milliseconds. A
+//! Background export. Each export decodes at full resolution, bakes in the
+//! edits, and encodes the chosen format, which takes hundreds of
+//! milliseconds. A
 //! worker pool does that off the UI thread, and the frame loop drains results
 //! with `poll`. Each `ExportJob` carries everything its worker needs, so
 //! workers never touch `App`.
@@ -15,6 +16,7 @@ use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
 
+use crate::decode::image_encode::{Encoding, Pixels};
 use crate::decode::{image_decode, image_encode};
 use crate::develop::sharpen::OutputSharpening;
 use crate::develop::{Adjustments, TouchUp};
@@ -34,6 +36,13 @@ pub struct ExportSettings {
     /// Sharpening for the medium, after the resize.
     #[serde(default)]
     pub sharpen: OutputSharpening,
+    #[serde(default)]
+    pub format: ExportFormat,
+    /// Largest JPEG to write, in KB. Ignored for the other formats.
+    #[serde(default)]
+    pub jpeg_limit_kb: Option<u32>,
+    #[serde(default)]
+    pub naming: NameTemplate,
 }
 
 impl ExportSettings {
@@ -41,28 +50,180 @@ impl ExportSettings {
         Output {
             max_px: self.size.max_px(),
             sharpen: self.sharpen,
+            format: self.format.or_jpeg(),
+            jpeg_limit_kb: self.jpeg_limit_kb,
         }
     }
 }
 
 /// What a baked export is shaped into after its edits: its size, then its
-/// output sharpening.
+/// output sharpening, then its file format.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Output {
     /// Long-edge limit; `u32::MAX` keeps full size.
     pub max_px: u32,
     pub sharpen: OutputSharpening,
+    pub format: ExportFormat,
+    pub jpeg_limit_kb: Option<u32>,
 }
 
 impl Output {
-    /// Full size, no output sharpening.
+    /// Full size, no output sharpening, a JPEG at the default quality.
     pub const FULL: Output = Output {
         max_px: u32::MAX,
         sharpen: OutputSharpening {
             media: crate::develop::sharpen::OutputMedia::Off,
             amount: crate::develop::sharpen::OutputAmount::Standard,
         },
+        format: ExportFormat::Jpeg,
+        jpeg_limit_kb: None,
     };
+}
+
+/// The file an export writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ExportFormat {
+    #[default]
+    Jpeg,
+    Png,
+    /// 16 bits per channel from the edit math; see `image_ops::bake_edited_as`.
+    Tiff16,
+    /// Lossless.
+    Webp,
+    Avif,
+}
+
+impl ExportFormat {
+    pub const ALL: [ExportFormat; 5] = [
+        ExportFormat::Jpeg,
+        ExportFormat::Png,
+        ExportFormat::Tiff16,
+        ExportFormat::Webp,
+        ExportFormat::Avif,
+    ];
+
+    /// The formats this build can write, in menu order.
+    pub fn available() -> impl Iterator<Item = ExportFormat> {
+        Self::ALL.into_iter().filter(|f| f.can_encode())
+    }
+
+    pub fn can_encode(self) -> bool {
+        image_encode::can_encode(self.encoding(None))
+    }
+
+    /// `self`, or JPEG when this build cannot write it, such as settings
+    /// saved by a build that could.
+    pub fn or_jpeg(self) -> ExportFormat {
+        if self.can_encode() {
+            self
+        } else {
+            ExportFormat::Jpeg
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Jpeg => "jpg",
+            ExportFormat::Png => "png",
+            ExportFormat::Tiff16 => "tif",
+            ExportFormat::Webp => "webp",
+            ExportFormat::Avif => "avif",
+        }
+    }
+
+    /// The media type an upload labels the file with.
+    pub fn mime(self) -> &'static str {
+        match self {
+            ExportFormat::Jpeg => "image/jpeg",
+            ExportFormat::Png => "image/png",
+            ExportFormat::Tiff16 => "image/tiff",
+            ExportFormat::Webp => "image/webp",
+            ExportFormat::Avif => "image/avif",
+        }
+    }
+
+    fn encoding(self, jpeg_quality: Option<u8>) -> Encoding {
+        match self {
+            ExportFormat::Jpeg => Encoding::Jpeg(jpeg_quality),
+            ExportFormat::Png => Encoding::Png,
+            ExportFormat::Tiff16 => Encoding::Tiff,
+            ExportFormat::Webp => Encoding::Webp,
+            ExportFormat::Avif => Encoding::Avif,
+        }
+    }
+}
+
+/// The longest stem a name template makes, in bytes: room under the common
+/// 255-byte file name limit for a `-NNNN` collision suffix and an extension.
+pub const MAX_STEM_BYTES: usize = 240;
+
+/// How an export's file is named, before the extension. `{name}` is the
+/// photo's own name and `{seq}` its place in the batch, from 1; everything
+/// else is kept as typed.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NameTemplate(pub String);
+
+impl Default for NameTemplate {
+    fn default() -> Self {
+        NameTemplate("{name}".into())
+    }
+}
+
+impl NameTemplate {
+    /// The stem for `src`, number `seq` of `total`. `{seq}` is padded to the
+    /// width of `total`, at least 3 digits, so the files sort in order.
+    /// Tokens are read from the template only, never from the photo's own
+    /// name. Path separators and characters Windows refuses become `_`, a
+    /// Windows device name gets a `_` after it, the stem is cut to
+    /// [`MAX_STEM_BYTES`], and a name that comes out empty is `export`.
+    pub fn stem(&self, src: &std::path::Path, seq: usize, total: usize) -> String {
+        let width = total.to_string().len().max(3);
+        let mut text = String::new();
+        let mut rest = self.0.as_str();
+        while let Some(at) = rest.find('{') {
+            text.push_str(&rest[..at]);
+            let tail = &rest[at..];
+            if let Some(after) = tail.strip_prefix("{name}") {
+                text.push_str(&crate::paths::export_stem(src));
+                rest = after;
+            } else if let Some(after) = tail.strip_prefix("{seq}") {
+                text.push_str(&format!("{seq:0width$}"));
+                rest = after;
+            } else {
+                text.push('{');
+                rest = &tail[1..];
+            }
+        }
+        text.push_str(rest);
+        let clean: String = text
+            .chars()
+            .map(|c| match c {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                c if c.is_control() => '_',
+                c => c,
+            })
+            .collect();
+        let mut clean = clean.trim().trim_matches('.').to_string();
+        if clean.len() > MAX_STEM_BYTES {
+            let mut cut = MAX_STEM_BYTES;
+            while !clean.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            clean.truncate(cut);
+        }
+        if clean.is_empty() {
+            return "export".into();
+        }
+        const DEVICES: [&str; 22] = [
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        ];
+        let device = clean.split('.').next().unwrap_or_default();
+        if DEVICES.iter().any(|d| d.eq_ignore_ascii_case(device)) {
+            clean.push('_');
+        }
+        clean
+    }
 }
 
 /// The Immich album an upload goes into.
@@ -125,12 +286,12 @@ impl ExportSize {
     }
 }
 
-/// Decode `src_bytes` at full resolution, bake in the edits, and encode JPEG
-/// bytes. Used by non-mac native export for non-RAW files.
+/// Decode `src_bytes` at full resolution, bake in the edits, and encode
+/// the export. Used by non-mac native export for non-RAW files.
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
-pub fn bake_jpeg(
+pub fn bake_export(
     src_bytes: &[u8],
     is_raw: bool,
     adj: &Adjustments,
@@ -143,19 +304,17 @@ pub fn bake_jpeg(
     } else {
         image_decode::decode_nonraw_from_bytes(src_bytes, u32::MAX)?
     };
-    let (w, h, rgba) = bake_sized(&img, adj, touchups, rot, output);
-    let jpeg = image_encode::encode_jpeg_to_vec(w, h, &rgba, image_encode::JpegQuality::Export)?;
     let stamp = image_decode::capture_stamp_from_bytes(src_bytes);
-    Ok(image_encode::with_exif(&jpeg, w, h, stamp.as_ref()))
+    render(&img, adj, touchups, rot, output, stamp.as_ref())
 }
 
-/// [`bake_jpeg`] for the wasm32 export worker, which already owns the bytes
-/// in an `Arc` and passes it to rawler without copying. Like the desktop
-/// exporter, it writes the source's capture date into the export's EXIF.
+/// [`bake_export`] for the wasm32 export worker, which already owns the
+/// bytes in an `Arc` and passes it to rawler without copying. Like the
+/// desktop exporter, it writes the source's capture date into a JPEG's EXIF.
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
-pub fn bake_jpeg_from_shared_vec(
+pub fn bake_export_from_shared_vec(
     src_bytes: std::sync::Arc<Vec<u8>>,
     is_raw: bool,
     adj: &Adjustments,
@@ -168,10 +327,65 @@ pub fn bake_jpeg_from_shared_vec(
     } else {
         image_decode::decode_nonraw_from_bytes(src_bytes.as_slice(), u32::MAX)?
     };
-    let (w, h, rgba) = bake_sized(&img, adj, touchups, rot, output);
-    let jpeg = image_encode::encode_jpeg_to_vec(w, h, &rgba, image_encode::JpegQuality::Export)?;
     let stamp = image_decode::capture_stamp_from_bytes(&src_bytes);
-    Ok(image_encode::with_exif(&jpeg, w, h, stamp.as_ref()))
+    render(&img, adj, touchups, rot, output, stamp.as_ref())
+}
+
+/// Bake `img`'s edits, shape it per `output`, and encode it. A JPEG carries
+/// `taken` in its EXIF.
+fn render(
+    img: &image_decode::DecodedImage,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+    output: Output,
+    taken: Option<&image_decode::CaptureStamp>,
+) -> Result<Vec<u8>, String> {
+    if output.format == ExportFormat::Tiff16 {
+        let (w, h, rgba) = bake_sized::<u16>(img, adj, touchups, rot, output);
+        return image_encode::encode(Encoding::Tiff, w, h, Pixels::Rgba16(&rgba));
+    }
+    let (w, h, rgba) = bake_sized::<u8>(img, adj, touchups, rot, output);
+    let prepared = image_encode::Prepared::new(w, h, Pixels::Rgba8(&rgba))?;
+    if output.format != ExportFormat::Jpeg {
+        return prepared.encode(output.format.encoding(None));
+    }
+    let jpeg = |quality| {
+        let bytes = prepared.encode(Encoding::Jpeg(quality))?;
+        Ok::<_, String>(image_encode::with_exif(&bytes, w, h, taken))
+    };
+    match output.jpeg_limit_kb {
+        None => jpeg(None),
+        Some(kb) => within_limit(kb, jpeg),
+    }
+}
+
+/// The highest-quality JPEG `encode` makes at or under `kb`, trying the
+/// default quality first. A JPEG only shrinks as its quality drops, so the
+/// rest is a bisection.
+fn within_limit(
+    kb: u32,
+    encode: impl Fn(Option<u8>) -> Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
+    let fits = |bytes: &[u8]| bytes.len() as u64 <= u64::from(kb) * 1024;
+    let default = encode(None)?;
+    if fits(&default) {
+        return Ok(default);
+    }
+    let (mut lo, mut hi, mut best) = (1u8, 95u8, None);
+    while lo <= hi {
+        let q = lo + (hi - lo) / 2;
+        let bytes = encode(Some(q))?;
+        if fits(&bytes) {
+            best = Some(bytes);
+            lo = q + 1;
+        } else if q == 1 {
+            break;
+        } else {
+            hi = q - 1;
+        }
+    }
+    best.ok_or_else(|| format!("over the {kb} KB limit even at the lowest JPEG quality"))
 }
 
 /// Bake the edits into a full-resolution decode, shrink the result to
@@ -179,24 +393,24 @@ pub fn bake_jpeg_from_shared_vec(
 /// limit applies after crop and rotation because that is what "2048 px"
 /// means to someone exporting, so the decode itself can't be the smaller
 /// one; output sharpening comes last because it is tuned to output pixels.
-fn bake_sized(
+fn bake_sized<S: crate::develop::image_ops::Sample>(
     img: &image_decode::DecodedImage,
     adj: &Adjustments,
     touchups: &[TouchUp],
     rot: u8,
     output: Output,
-) -> (u32, u32, Vec<u8>) {
-    let (w, h, rgba) = crate::develop::image_ops::bake_edited(img, adj, touchups, rot);
+) -> (u32, u32, Vec<S>) {
+    let (w, h, rgba) = crate::develop::image_ops::bake_edited_as::<S>(img, adj, touchups, rot);
     let (w, h, mut rgba) = crate::develop::image_ops::fit_long_edge(w, h, rgba, output.max_px);
     output.sharpen.apply(w, h, &mut rgba);
     (w, h, rgba)
 }
 
-/// Where one photo's JPEG goes. The browser writes its exports from the Web
+/// Where one photo's export goes. The browser writes its exports from the Web
 /// Worker pool instead, so it has no jobs.
 #[cfg(not(target_arch = "wasm32"))]
 pub enum ExportDest {
-    /// Already collision-free (see `paths::jpg_export_target`), so workers
+    /// Already collision-free (see `paths::export_target`), so workers
     /// never race on file names.
     Folder(PathBuf),
     Immich {
@@ -304,16 +518,23 @@ impl Default for Exporter {
 }
 
 /// Decode `job.src` at full resolution, bake in its edits and size, and
-/// deliver the JPEG to `job.dest`.
+/// deliver the encoded file to `job.dest`.
 #[cfg(not(target_arch = "wasm32"))]
 #[hotpath::measure]
 fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
-    let (w, h, rgba) = bake_job(job)?;
+    let img = decode_job(job)?;
     let stamp = image_decode::capture_stamp(&job.src);
-    let jpeg = image_encode::with_exif(&jpeg_bytes(w, h, &rgba)?, w, h, stamp.as_ref());
+    let file = render(
+        &img,
+        &job.adj,
+        &job.touchups,
+        job.rot,
+        job.output,
+        stamp.as_ref(),
+    )?;
     match &job.dest {
         ExportDest::Folder(dest) => {
-            crate::paths::write_atomic(dest, &jpeg).map_err(|e| format!("write: {e}"))?;
+            crate::paths::write_atomic(dest, &file).map_err(|e| format!("write: {e}"))?;
             Ok(ExportLanding::File(dest.clone()))
         }
         ExportDest::Immich {
@@ -329,7 +550,7 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
                 .and_then(|s| s.instant())
                 .or_else(|| std::fs::metadata(&job.src).and_then(|m| m.modified()).ok())
                 .unwrap_or_else(SystemTime::now);
-            let asset = server.upload(&jpeg, filename, taken)?;
+            let asset = server.upload(&file, filename, job.output.format.mime(), taken)?;
             // The photo is on the server either way, so a rating the key
             // isn't allowed to set is a warning, not a failed export.
             let rating_error = (1..=5)
@@ -346,57 +567,20 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
-    let img = image_decode::decode(&job.src, u32::MAX)?;
-    Ok(bake_sized(
-        &img,
-        &job.adj,
-        &job.touchups,
-        job.rot,
-        job.output,
-    ))
+fn decode_job(job: &ExportJob) -> Result<image_decode::DecodedImage, String> {
+    image_decode::decode(&job.src, u32::MAX)
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-fn bake_job(job: &ExportJob) -> Result<(u32, u32, Vec<u8>), String> {
-    let img = if image_decode::is_raw_extension(&job.src) {
+fn decode_job(job: &ExportJob) -> Result<image_decode::DecodedImage, String> {
+    if image_decode::is_raw_extension(&job.src) {
         // rawler's path-based decoder memory-maps the file, which avoids
         // reading the whole RAW into a Vec first.
-        crate::decode::rawler::decode_raw_nonmac(&job.src, u32::MAX)?
+        crate::decode::rawler::decode_raw_nonmac(&job.src, u32::MAX)
     } else {
         let bytes = std::fs::read(&job.src).map_err(|e| e.to_string())?;
-        image_decode::decode_nonraw_from_bytes(&bytes, u32::MAX)?
-    };
-    Ok(bake_sized(
-        &img,
-        &job.adj,
-        &job.touchups,
-        job.rot,
-        job.output,
-    ))
-}
-
-/// The macOS encoder only writes to a path, so bake to a staging file, read it
-/// back, and remove it before returning. The bytes are then identical to what
-/// a folder export writes, and nothing is left behind whatever the upload does.
-#[cfg(target_os = "macos")]
-fn jpeg_bytes(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let staging = std::env::temp_dir().join(format!(
-        "lightphotos-upload-{}-{}.jpg",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let read = image_encode::encode_jpeg(&staging, w, h, rgba, image_encode::JpegQuality::Export)
-        .and_then(|()| std::fs::read(&staging).map_err(|e| format!("read staged JPEG: {e}")));
-    let _ = std::fs::remove_file(&staging);
-    read
-}
-
-#[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-fn jpeg_bytes(w: u32, h: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    image_encode::encode_jpeg_to_vec(w, h, rgba, image_encode::JpegQuality::Export)
+        image_decode::decode_nonraw_from_bytes(&bytes, u32::MAX)
+    }
 }
 
 #[cfg(test)]
@@ -512,25 +696,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn bytes_for_an_upload_leave_no_staging_file_behind() {
-        let staged = || {
-            std::fs::read_dir(std::env::temp_dir())
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .starts_with(&format!("lightphotos-upload-{}-", std::process::id()))
-                })
-                .count()
-        };
-        let jpeg = jpeg_bytes(8, 4, &[200u8; 8 * 4 * 4]).unwrap();
-        assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "JPEG SOI marker");
-        assert_eq!(staged(), 0);
-    }
-
     /// Output sharpening runs on the resized bake, and a settings file
     /// saved before it existed loads with it off.
     #[test]
@@ -562,8 +727,8 @@ mod tests {
             },
             ..small
         };
-        let (pw, ph, plain) = bake_sized(&img, &Adjustments::default(), &[], 0, small);
-        let (sw, sh, sharpened) = bake_sized(&img, &Adjustments::default(), &[], 0, sharp);
+        let (pw, ph, plain) = bake_sized::<u8>(&img, &Adjustments::default(), &[], 0, small);
+        let (sw, sh, sharpened) = bake_sized::<u8>(&img, &Adjustments::default(), &[], 0, sharp);
         assert_eq!((pw, ph), (32, 16));
         assert_eq!((sw, sh), (32, 16));
         let mut after_resize = plain.clone();
@@ -575,13 +740,156 @@ mod tests {
             serde_json::from_str(r#"{"target":{"Folder":"ExportsSubfolder"},"size":"Full"}"#)
                 .unwrap();
         assert_eq!(old.sharpen.media, OutputMedia::Off);
+        assert_eq!(old.format, ExportFormat::Jpeg);
+        assert_eq!(old.jpeg_limit_kb, None);
+        assert_eq!(old.naming, NameTemplate::default());
+    }
+
+    fn gradient(w: u32, h: u32) -> image_decode::DecodedImage {
+        use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
+        let mut rgba = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let v = (x * 255 / (w - 1)) as u8;
+                rgba.extend([v, (y * 7 % 256) as u8, 255 - v, 255]);
+            }
+        }
+        DecodedImage::new_tracked(DecodedImageFields {
+            width: w,
+            height: h,
+            rgba,
+            pixel_format: PixelFormat::Srgb8,
+        })
+    }
+
+    /// Every format this build offers writes a file whose own signature says
+    /// so, at the baked size.
+    #[test]
+    fn each_available_format_writes_its_own_kind_of_file() {
+        let img = gradient(48, 32);
+        let mut seen = Vec::new();
+        for format in ExportFormat::available() {
+            let output = Output {
+                format,
+                ..Output::FULL
+            };
+            let bytes = render(&img, &Adjustments::default(), &[], 1, output, None)
+                .unwrap_or_else(|e| panic!("{format:?}: {e}"));
+            let magic_ok = match format {
+                ExportFormat::Jpeg => bytes.starts_with(&[0xFF, 0xD8]),
+                ExportFormat::Png => bytes.starts_with(b"\x89PNG"),
+                ExportFormat::Tiff16 => bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*"),
+                ExportFormat::Webp => bytes.get(8..12) == Some(b"WEBP"),
+                ExportFormat::Avif => bytes.get(4..12) == Some(b"ftypavif"),
+            };
+            assert!(
+                magic_ok,
+                "{format:?} starts {:?}",
+                &bytes[..12.min(bytes.len())]
+            );
+            seen.push(format);
+        }
+        assert!(seen.contains(&ExportFormat::Png) && seen.contains(&ExportFormat::Tiff16));
+    }
+
+    /// A 16-bit TIFF holds the edit math's in-between levels: a smooth ramp
+    /// pushed by an exposure edit lands on 16-bit values that are not just
+    /// 8-bit ones scaled up.
+    #[test]
+    fn a_16_bit_bake_keeps_levels_between_8_bit_steps() {
+        let img = gradient(256, 4);
+        let adj = Adjustments {
+            exposure: 0.37,
+            ..Adjustments::default()
+        };
+        let (w, h, deep) = bake_sized::<u16>(&img, &adj, &[], 0, Output::FULL);
+        let (_, _, shallow) = bake_sized::<u8>(&img, &adj, &[], 0, Output::FULL);
+        assert_eq!((w, h), (256, 4));
+        let between = deep.iter().filter(|&&v| v % 257 != 0).count();
+        assert!(
+            between > deep.len() / 2,
+            "{between} of {} off the 8-bit grid",
+            deep.len()
+        );
+        for (d, s) in deep.iter().zip(&shallow) {
+            assert!((f32::from(*d) / 257.0 - f32::from(*s)).abs() <= 0.5 + 1e-3);
+        }
+    }
+
+    /// A size limit lowers JPEG quality until the file fits, and a limit no
+    /// quality meets is an error, not an oversized file.
+    #[test]
+    fn a_jpeg_size_limit_is_met_or_refused() {
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rgba = Vec::new();
+        for _ in 0..256 * 256 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let [r, g, b, ..] = seed.to_le_bytes();
+            rgba.extend([r, g, b, 255]);
+        }
+        let img = image_decode::DecodedImage::new_tracked(
+            crate::decode::image_decode::DecodedImageFields {
+                width: 256,
+                height: 256,
+                rgba,
+                pixel_format: crate::decode::image_decode::PixelFormat::Srgb8,
+            },
+        );
+        let at = |kb| {
+            render(
+                &img,
+                &Adjustments::default(),
+                &[],
+                0,
+                Output {
+                    jpeg_limit_kb: kb,
+                    ..Output::FULL
+                },
+                None,
+            )
+        };
+        let free = at(None).unwrap();
+        let limit = (free.len() / 1024 / 2) as u32;
+        let held = at(Some(limit)).unwrap();
+        assert!(
+            held.len() <= limit as usize * 1024,
+            "{} > {limit} KB",
+            held.len()
+        );
+        assert!(
+            held.len() * 4 > limit as usize * 1024,
+            "not needlessly small"
+        );
+        assert!(at(Some(1)).is_err(), "noise does not fit in 1 KB");
+    }
+
+    #[test]
+    fn a_name_template_fills_its_tokens_and_stays_a_file_name() {
+        let src = std::path::Path::new("/p/DSC_0042.ARW");
+        let named = |t: &str, seq, total| NameTemplate(t.into()).stem(src, seq, total);
+        assert_eq!(named("{name}", 1, 1), "DSC_0042");
+        assert_eq!(named("trip-{seq}", 7, 12), "trip-007");
+        assert_eq!(named("{seq}_{name}", 7, 1200), "0007_DSC_0042");
+        assert_eq!(named("a/b:c", 1, 1), "a_b_c");
+        assert_eq!(named("  ", 1, 1), "export");
+        assert_eq!(named("..", 1, 1), "export");
+        assert_eq!(NameTemplate::default().stem(src, 1, 1), "DSC_0042");
+        let braced = std::path::Path::new("/p/shot_{seq}.jpg");
+        assert_eq!(NameTemplate::default().stem(braced, 9, 9), "shot_{seq}");
+        assert_eq!(named("{nope}-{seq}", 2, 2), "{nope}-002");
+        assert_eq!(named("nul", 1, 1), "nul_");
+        assert_eq!(named("Com1.x", 1, 1), "Com1.x_");
+        let long = named(&"é".repeat(200), 1, 1);
+        assert!(long.len() <= MAX_STEM_BYTES && long.chars().all(|c| c == 'é'));
     }
 
     /// With no edits, a solid-color source keeps its size and roughly its
     /// color.
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn bake_jpeg_nonraw_round_trips_identity_edit() {
+    fn bake_export_nonraw_round_trips_identity_edit() {
         let (w, h) = (10u32, 8u32);
         let src = image::RgbaImage::from_pixel(w, h, image::Rgba([200, 40, 40, 255]));
         let mut png = Vec::new();
@@ -589,8 +897,8 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encode source png");
 
-        let jpeg = bake_jpeg(&png, false, &Adjustments::default(), &[], 0, Output::FULL)
-            .expect("bake_jpeg should succeed");
+        let jpeg = bake_export(&png, false, &Adjustments::default(), &[], 0, Output::FULL)
+            .expect("bake_export should succeed");
 
         let out = image::load_from_memory(&jpeg)
             .expect("decode baked jpeg")
@@ -608,7 +916,7 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn bake_jpeg_applies_rotation() {
+    fn bake_export_applies_rotation() {
         let (w, h) = (12u32, 6u32);
         let src = image::RgbaImage::from_pixel(w, h, image::Rgba([120, 120, 120, 255]));
         let mut png = Vec::new();
@@ -616,8 +924,8 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encode source png");
 
-        let jpeg = bake_jpeg(&png, false, &Adjustments::default(), &[], 1, Output::FULL)
-            .expect("bake_jpeg should succeed");
+        let jpeg = bake_export(&png, false, &Adjustments::default(), &[], 1, Output::FULL)
+            .expect("bake_export should succeed");
         let out = image::load_from_memory(&jpeg).expect("decode").into_rgba8();
         assert_eq!(out.dimensions(), (h, w), "90 deg rotation swaps dimensions");
     }

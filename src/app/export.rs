@@ -208,6 +208,16 @@ impl App {
         self.request_redraw();
     }
 
+    /// The file name the selected photo would export as, for the form to
+    /// show as an example, before any `-1` that keeps it from replacing a
+    /// file already there. Its `{seq}` is 1.
+    pub(crate) fn export_example_name(&self) -> Option<String> {
+        let path = self.selected_path()?;
+        let settings = &self.exports.settings;
+        let stem = settings.naming.stem(&path, 1, self.action_count());
+        Some(format!("{stem}.{}", settings.output().format.extension()))
+    }
+
     /// Why Export can't run right now, shown under the disabled button.
     pub(crate) fn export_blocker(&self) -> Option<&'static str> {
         let t = crate::i18n::t();
@@ -405,8 +415,8 @@ impl App {
         false
     }
 
-    /// Web export. Runs the native `bake_jpeg` pipeline on the loader's decode
-    /// threads and writes each JPEG through the File System Access API. Reading sources
+    /// Web export. Runs the native `bake_export` pipeline on the loader's decode
+    /// threads and writes each file through the File System Access API. Reading sources
     /// and listing `Exports/` are async, so the batch setup runs in `spawn_local`.
     #[cfg(target_arch = "wasm32")]
     pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
@@ -445,6 +455,7 @@ impl App {
 
         let total = jobs.len();
         let output = self.exports.settings.output();
+        let naming = self.exports.settings.naming.clone();
         self.exports.progress = Some(ExportProgress {
             done: 0,
             total,
@@ -478,13 +489,15 @@ impl App {
                 }
             };
             let mut taken: HashSet<String> = HashSet::new();
-            for (src, is_raw, adj, touchups, rot) in jobs {
+            for (seq, (src, is_raw, adj, touchups, rot)) in jobs.into_iter().enumerate() {
                 // Each export in flight holds its source's bytes and a
                 // full-resolution decode in the one shared heap.
                 while pool.in_flight() >= pool.capacity(&decoder) {
                     Self::wait_for_export_capacity().await;
                 }
-                let filename = crate::paths::jpg_export_name(&src, &existing, &taken);
+                let stem = naming.stem(&src, seq + 1, total);
+                let filename =
+                    crate::paths::export_name(&stem, output.format.extension(), &existing, &taken);
                 taken.insert(filename.clone());
                 match fs.read_source_array_buffer(&src).await {
                     Ok(bytes) => pool.submit(
@@ -534,6 +547,7 @@ impl App {
         };
         let settings = &self.exports.settings;
         let output = settings.output();
+        let ext = output.format.extension();
         let job = |src: PathBuf, dest: ExportDest| ExportJob {
             adj: self.edits.get(&src).copied().unwrap_or_default(),
             touchups: self.touchups.get(&src).cloned().unwrap_or_default(),
@@ -560,8 +574,9 @@ impl App {
                 // Pick destinations one at a time so `taken` keeps same-stem
                 // sources apart.
                 let mut taken: HashSet<PathBuf> = HashSet::new();
-                for src in paths {
-                    let dest = paths::jpg_export_target(&src, &dir, &taken);
+                for (seq, src) in paths.into_iter().enumerate() {
+                    let stem = settings.naming.stem(&src, seq + 1, total);
+                    let dest = paths::export_target(&stem, ext, &dir, &taken);
                     taken.insert(dest.clone());
                     exporter.submit(job(src, ExportDest::Folder(dest)));
                 }
@@ -570,10 +585,11 @@ impl App {
                 let ImmichLink::Connected { server, .. } = &self.exports.immich else {
                     return;
                 };
-                for src in paths {
+                for (seq, src) in paths.into_iter().enumerate() {
+                    let stem = settings.naming.stem(&src, seq + 1, total);
                     let dest = ExportDest::Immich {
                         server: Arc::clone(server),
-                        filename: format!("{}.jpg", paths::export_stem(&src)),
+                        filename: format!("{stem}.{ext}"),
                         stars: self.rating_of(&src),
                     };
                     exporter.submit(job(src, dest));
@@ -906,7 +922,7 @@ mod status_tests {
             target: ExportTarget::Immich,
             size: ExportSize::LongEdge(120),
             album: AlbumChoice::None,
-            sharpen: Default::default(),
+            ..Default::default()
         };
         // Connected directly: `connect_immich` would save the key to the
         // developer's own Keychain.
@@ -1319,7 +1335,8 @@ mod form_tests {
         );
 
         app.exports.settings.album = AlbumChoice::New(String::new());
-        let painted = settled(&mut app);
+        // Tall enough that the footer is on screen under the File section.
+        let painted = crate::app::test_support::settled_at(&mut app, egui::vec2(1200.0, 1100.0));
         assert!(painted.has(t().album_name), "{:?}", painted.texts());
         assert_eq!(app.export_blocker(), Some(t().album_name_needed));
         assert!(

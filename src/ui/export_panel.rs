@@ -8,7 +8,9 @@ use crate::develop::sharpen::{OutputAmount, OutputMedia, OutputSharpening};
 use crate::export::immich::Album;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::export::AlbumChoice;
-use crate::export::{ExportSettings, ExportSize, ExportTarget, FolderChoice};
+use crate::export::{
+    ExportFormat, ExportSettings, ExportSize, ExportTarget, FolderChoice, NameTemplate,
+};
 
 /// The right-hand export form. It takes the Develop panel's place while open,
 /// so the photos being exported stay in view. With `develop_tab`, it is the
@@ -104,6 +106,81 @@ fn sharpen_rows(
     });
 }
 
+/// Size limits a JPEG export can be held to, in KB.
+const JPEG_LIMITS_KB: [u32; 5] = [250, 500, 1024, 2048, 5120];
+
+/// The file: its name, its format, and a size limit for a JPEG, in
+/// Lightroom's order.
+fn file_rows(
+    ui: &mut egui::Ui,
+    form: &Form,
+    app: &App,
+    settings: &ExportSettings,
+    next: &mut Option<ExportSettings>,
+) {
+    let t = t();
+    let format_label = |f: ExportFormat| match f {
+        ExportFormat::Jpeg => "JPEG",
+        ExportFormat::Png => "PNG",
+        ExportFormat::Tiff16 => t.export_format_tiff16,
+        ExportFormat::Webp => t.export_format_webp,
+        ExportFormat::Avif => "AVIF",
+    };
+    form.row(ui, t.export_naming, |ui| {
+        let mut text = settings.naming.0.clone();
+        let field = ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY));
+        if field.changed() {
+            *next = Some(ExportSettings {
+                naming: NameTemplate(text),
+                ..settings.clone()
+            });
+        }
+        form::hint(ui, t.export_naming_hint);
+        if let Some(example) = app.export_example_name() {
+            form::hint(ui, &(t.export_naming_example)(&example));
+        }
+    });
+    let format = settings.output().format;
+    form.row(ui, t.export_format, |ui| {
+        egui::ComboBox::from_id_salt("export_format")
+            .selected_text(format_label(format))
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for f in ExportFormat::available() {
+                    if ui.selectable_label(format == f, format_label(f)).clicked() && format != f {
+                        *next = Some(ExportSettings {
+                            format: f,
+                            ..settings.clone()
+                        });
+                    }
+                }
+            });
+    });
+    if format == ExportFormat::Jpeg {
+        let limit_label = |kb: Option<u32>| match kb {
+            None => t.export_limit_none.to_string(),
+            Some(kb) => (t.export_limit_kb)(kb),
+        };
+        form.row(ui, t.export_limit, |ui| {
+            egui::ComboBox::from_id_salt("export_limit")
+                .selected_text(limit_label(settings.jpeg_limit_kb))
+                .width(ui.available_width())
+                .show_ui(ui, |ui| {
+                    let choices = std::iter::once(None).chain(JPEG_LIMITS_KB.map(Some));
+                    for kb in choices {
+                        let on = settings.jpeg_limit_kb == kb;
+                        if ui.selectable_label(on, limit_label(kb)).clicked() && !on {
+                            *next = Some(ExportSettings {
+                                jpeg_limit_kb: kb,
+                                ..settings.clone()
+                            });
+                        }
+                    }
+                });
+        });
+    }
+}
+
 /// The export page under its heading: where to, how big, and the footer.
 fn draw_export_form(
     ui: &mut egui::Ui,
@@ -151,6 +228,9 @@ fn draw_export_form(
     let immich_unavailable =
         cfg!(target_arch = "wasm32") && settings.target == ExportTarget::Immich;
     if !immich_unavailable {
+        form.section(ui, t.export_file, |ui| {
+            file_rows(ui, &form, app, settings, next)
+        });
         form.section(ui, t.export_output, |ui| {
             form.row(ui, t.export_size, |ui| {
                 let size_label = |size: ExportSize| match size {

@@ -343,7 +343,7 @@ scoring does not run there.
 | `renderer/mod.rs` | GPU upload + draw of the currently-shown image | all (wgpu → Metal / Vulkan-GL / WebGPU) |
 | `develop/mod.rs` | The tone pipeline (`apply_linear`), shared by the GPU shader and the CPU histogram/bake path | all |
 | `develop/image_ops.rs` | Pure pixel math (crop/rotate/bake) shared by export and thumbnail baking | all |
-| `export/mod.rs` | `Exporter`: decodes, bakes, and encodes a full-resolution JPEG on a `worker_pool.rs` pool; `bake_jpeg` and the `ExportFs` seam are shared | native pool is native-only, wasm32 runs the same bake on the loader's threads |
+| `export/mod.rs` | `Exporter`: decodes, bakes, and encodes an export (JPEG, PNG, 16-bit TIFF, WebP or AVIF) on a `worker_pool.rs` pool; `bake_export` and the `ExportFs` seam are shared | native pool is native-only, wasm32 runs the same bake on the loader's threads |
 | `worker_pool.rs` | Generic thread pool behind `Exporter` and `ScorePool` | builds everywhere; no thread starts on wasm32, so the pools run native only |
 | `web/web_decode.rs` | Decode and export jobs over a file's bytes, run on the loader's threads | wasm32 |
 | `web/web_exports.rs` | Main-thread side of a batch export: each JPEG's destination folder handle, by job id | wasm32 |

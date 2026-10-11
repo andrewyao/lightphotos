@@ -194,7 +194,7 @@ pub struct WebExportJob {
 
 impl WebExportJob {
     pub fn run(self) -> Result<Vec<u8>, String> {
-        crate::export::bake_jpeg_from_shared_vec(
+        crate::export::bake_export_from_shared_vec(
             std::sync::Arc::new(self.bytes),
             self.is_raw,
             &self.adj,

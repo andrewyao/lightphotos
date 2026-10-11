@@ -550,6 +550,16 @@ pub struct Strings {
     pub immich_account: &'static str,
     pub export_size_full: &'static str,
     pub export_size_long_edge: fn(u32) -> String,
+    pub export_file: &'static str,
+    pub export_format: &'static str,
+    pub export_format_tiff16: &'static str,
+    pub export_format_webp: &'static str,
+    pub export_limit: &'static str,
+    pub export_limit_none: &'static str,
+    pub export_limit_kb: fn(u32) -> String,
+    pub export_naming: &'static str,
+    pub export_naming_hint: &'static str,
+    pub export_naming_example: fn(&str) -> String,
     pub export_sharpen: &'static str,
     pub export_sharpen_off: &'static str,
     pub export_sharpen_screen: &'static str,
@@ -1412,6 +1422,22 @@ pub static EN: Strings = Strings {
     immich_account: "Account",
     export_size_full: "Full resolution",
     export_size_long_edge: |px| format!("{px} px long edge"),
+    export_file: "File",
+    export_format: "Format",
+    export_format_tiff16: "TIFF (16-bit)",
+    export_format_webp: "WebP (lossless)",
+    export_limit: "File size",
+    export_limit_none: "No limit",
+    export_limit_kb: |kb| {
+        if kb >= 1024 && kb % 1024 == 0 {
+            format!("Up to {} MB", kb / 1024)
+        } else {
+            format!("Up to {kb} KB")
+        }
+    },
+    export_naming: "File name",
+    export_naming_hint: "{name} is the photo's name and {seq} its number in this export.",
+    export_naming_example: |name| format!("For example: {name}"),
     export_sharpen: "Sharpen For",
     export_sharpen_off: "None",
     export_sharpen_screen: "Screen",
@@ -2142,6 +2168,22 @@ pub static ZH: Strings = Strings {
     immich_account: "账户",
     export_size_full: "原始分辨率",
     export_size_long_edge: |px| format!("长边 {px} 像素"),
+    export_file: "文件",
+    export_format: "格式",
+    export_format_tiff16: "TIFF（16 位）",
+    export_format_webp: "WebP（无损）",
+    export_limit: "文件大小",
+    export_limit_none: "不限",
+    export_limit_kb: |kb| {
+        if kb >= 1024 && kb % 1024 == 0 {
+            format!("最大 {} MB", kb / 1024)
+        } else {
+            format!("最大 {kb} KB")
+        }
+    },
+    export_naming: "文件名",
+    export_naming_hint: "{name} 是照片的名称，{seq} 是它在这次导出中的序号。",
+    export_naming_example: |name| format!("例如：{name}"),
     export_sharpen: "锐化用于",
     export_sharpen_off: "无",
     export_sharpen_screen: "屏幕",

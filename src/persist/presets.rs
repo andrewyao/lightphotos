@@ -213,7 +213,7 @@ impl PresetStore {
     }
 
     /// `name`, or `name 2`, `name 3`, ... when another preset already has it.
-    /// The collision idiom `paths::jpg_export_name` uses for export filenames,
+    /// The collision idiom `paths::export_name` uses for export filenames,
     /// which beats a "name taken" error state and is the only policy that also
     /// works for a non-interactive import of thirty files at once. `keep` is
     /// the preset being renamed, which does not collide with itself.

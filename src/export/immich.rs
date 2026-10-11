@@ -124,10 +124,12 @@ impl ImmichServer {
         &self.origin
     }
 
+    /// Upload `file`, a `mime` image, as `filename`.
     pub fn upload(
         &self,
-        jpeg: &[u8],
+        file: &[u8],
         filename: &str,
+        mime: &str,
         taken: SystemTime,
     ) -> Result<UploadedAsset, String> {
         let boundary = format!(
@@ -137,7 +139,7 @@ impl ImmichServer {
                 .unwrap_or_default()
                 .as_nanos()
         );
-        let body = multipart_body(&boundary, jpeg, filename, &iso8601(taken));
+        let body = multipart_body(&boundary, file, filename, mime, &iso8601(taken));
         let resp = self
             .agent
             .post(format!("{}/assets", self.api))
@@ -305,8 +307,8 @@ fn api_endpoint(origin: &str, well_known: Option<&str>) -> String {
     }
 }
 
-fn multipart_body(boundary: &str, jpeg: &[u8], filename: &str, date: &str) -> Vec<u8> {
-    let mut body = Vec::with_capacity(jpeg.len() + 1024);
+fn multipart_body(boundary: &str, file: &[u8], filename: &str, mime: &str, date: &str) -> Vec<u8> {
+    let mut body = Vec::with_capacity(file.len() + 1024);
     for (name, value) in [
         ("fileCreatedAt", date),
         ("fileModifiedAt", date),
@@ -322,11 +324,11 @@ fn multipart_body(boundary: &str, jpeg: &[u8], filename: &str, date: &str) -> Ve
     let quoted = filename.replace(['"', '\r', '\n'], "_");
     body.extend_from_slice(
         format!(
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"assetData\"; filename=\"{quoted}\"\r\nContent-Type: image/jpeg\r\n\r\n"
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"assetData\"; filename=\"{quoted}\"\r\nContent-Type: {mime}\r\n\r\n"
         )
         .as_bytes(),
     );
-    body.extend_from_slice(jpeg);
+    body.extend_from_slice(file);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     body
 }
@@ -463,7 +465,13 @@ mod tests {
     #[test]
     fn multipart_body_carries_the_fields_and_the_jpeg_intact() {
         let jpeg = [0xFF, 0xD8, 0x00, 0x0D, 0x0A, 0xFF, 0xD9];
-        let body = multipart_body("B", &jpeg, "IMG_1.jpg", "2024-01-02T03:04:05.000Z");
+        let body = multipart_body(
+            "B",
+            &jpeg,
+            "IMG_1.jpg",
+            "image/jpeg",
+            "2024-01-02T03:04:05.000Z",
+        );
         let mut want = b"--B\r\nContent-Disposition: form-data; name=\"fileCreatedAt\"\r\n\r\n2024-01-02T03:04:05.000Z\r\n\
 --B\r\nContent-Disposition: form-data; name=\"fileModifiedAt\"\r\n\r\n2024-01-02T03:04:05.000Z\r\n\
 --B\r\nContent-Disposition: form-data; name=\"filename\"\r\n\r\nIMG_1.jpg\r\n\
@@ -472,6 +480,9 @@ mod tests {
         want.extend_from_slice(&jpeg);
         want.extend_from_slice(b"\r\n--B--\r\n");
         assert_eq!(body, want);
+
+        let png = multipart_body("B", b"x", "a.png", "image/png", "d");
+        assert!(png.windows(23).any(|w| w == b"Content-Type: image/png"));
     }
 
     #[test]

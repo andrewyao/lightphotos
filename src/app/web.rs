@@ -185,7 +185,7 @@ pub(crate) struct Web {
     full_retries: HashMap<(PathBuf, u32), (u8, Instant)>,
     full_failed: HashSet<(PathBuf, u32)>,
 
-    /// Where each running export's JPEG goes. The loader's threads bake it;
+    /// Where each running export's file goes. The loader's threads bake it;
     /// the destination folder handle cannot leave the main thread.
     exports: crate::web::web_exports::WebExports,
     /// `Preview` and `Speed` results that `poll_web_thumbs` pulled off the

@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::base::luma_gamma;
+use super::image_ops::Sample;
 
 /// The short side the Radius slider's pixels are measured on.
 pub const REF_SHORT: f32 = 4000.0;
@@ -193,10 +194,10 @@ impl OutputSharpening {
         Some((sigma, base * scale))
     }
 
-    /// Sharpen opaque sRGB8 RGBA in place: an unsharp mask on the encoded
-    /// bytes' luma, blurred by two 5-tap passes clamped at the edges, and
+    /// Sharpen opaque sRGB RGBA in place: an unsharp mask on the encoded
+    /// samples' luma, blurred by two 5-tap passes clamped at the edges, and
     /// applied to each pixel as one gain. A short buffer is left alone.
-    pub fn apply(self, w: u32, h: u32, rgba: &mut [u8]) {
+    pub fn apply<S: Sample>(self, w: u32, h: u32, rgba: &mut [S]) {
         let Some((sigma, gain)) = self.kernel() else {
             return;
         };
@@ -212,7 +213,9 @@ impl OutputSharpening {
             .0
             .iter()
             .take(n)
-            .map(|[r, g, b, _]| (0.299 * *r as f32 + 0.587 * *g as f32 + 0.114 * *b as f32) / 255.0)
+            .map(|[r, g, b, _]| {
+                (0.299 * r.level() + 0.587 * g.level() + 0.114 * b.level()) / S::MAX
+            })
             .collect();
         let weights: [f32; 5] = std::array::from_fn(|k| {
             let d = k as f32 - 2.0;
@@ -247,7 +250,7 @@ impl OutputSharpening {
                 let g = (target + EPS) / (l + EPS);
                 let i = (y * w + x) * 4;
                 for c in &mut rgba[i..i + 3] {
-                    *c = (*c as f32 * g).round().clamp(0.0, 255.0) as u8;
+                    *c = c.scaled(g);
                 }
             }
         }

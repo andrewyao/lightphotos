@@ -62,6 +62,65 @@ pub(crate) fn linear_to_srgb8(v: f32) -> u8 {
     steps.partition_point(|&step| step <= v) as u8
 }
 
+/// One sRGB-encoded channel of a baked image: 8 bits for JPEG, the Loupe
+/// and thumbnails, 16 for a TIFF export, which keeps the edit math's
+/// in-between levels instead of rounding them to 256.
+pub trait Sample: Copy + Default {
+    /// The value of full white.
+    const MAX: f32;
+    /// Linear light to this sample, rounded.
+    fn encode(linear: f32) -> Self;
+    /// Every sample's linear light, indexed by [`Sample::index`].
+    fn linear_lut() -> &'static [f32];
+    fn index(self) -> usize;
+    /// `self` scaled by `g`, rounded and clamped to the sample's range.
+    fn scaled(self, g: f32) -> Self;
+    fn level(self) -> f32;
+}
+
+impl Sample for u8 {
+    const MAX: f32 = 255.0;
+    fn encode(linear: f32) -> u8 {
+        linear_to_srgb8(linear)
+    }
+    fn linear_lut() -> &'static [f32] {
+        srgb8_to_linear_lut()
+    }
+    fn index(self) -> usize {
+        self as usize
+    }
+    fn scaled(self, g: f32) -> u8 {
+        (self as f32 * g).round().clamp(0.0, 255.0) as u8
+    }
+    fn level(self) -> f32 {
+        self as f32
+    }
+}
+
+impl Sample for u16 {
+    const MAX: f32 = 65535.0;
+    fn encode(linear: f32) -> u16 {
+        (srgb_encode(linear) * 65535.0).round().clamp(0.0, 65535.0) as u16
+    }
+    fn linear_lut() -> &'static [f32] {
+        static LUT: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
+        LUT.get_or_init(|| {
+            (0..=65535u32)
+                .map(|c| srgb_decode(c as f32 / 65535.0))
+                .collect()
+        })
+    }
+    fn index(self) -> usize {
+        self as usize
+    }
+    fn scaled(self, g: f32) -> u16 {
+        (self as f32 * g).round().clamp(0.0, 65535.0) as u16
+    }
+    fn level(self) -> f32 {
+        self as f32
+    }
+}
+
 /// Premultiplied sRGB8 pixel (as decoded) to linear RGB, through the sRGB
 /// curve the Loupe's texture sampler uses. Every CPU reader of decoded pixels
 /// goes through this so they all see the same values.
@@ -165,6 +224,18 @@ pub fn bake_edited(
     bake_edited_probe(img, adj, touchups, rot, BaseProbe::Off)
 }
 
+/// [`bake_edited`] at any sample depth. At 16 bits the decode is still
+/// 8-bit sRGB, but every edit runs in floats, so the extra bits hold the
+/// levels a curve or exposure push lands between two 8-bit steps.
+pub fn bake_edited_as<S: Sample>(
+    img: &DecodedImage,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+) -> (u32, u32, Vec<S>) {
+    bake_samples(img, adj, touchups, rot, BaseProbe::Off)
+}
+
 /// [`bake_edited`] with a layer drawn in place of the photo as `probe`
 /// says, as the Loupe does for `GpuAdjust::base_probe`. A layer is built
 /// only for an edit or probe that reads it.
@@ -175,6 +246,16 @@ pub fn bake_edited_probe(
     rot: u8,
     probe: BaseProbe,
 ) -> (u32, u32, Vec<u8>) {
+    bake_samples(img, adj, touchups, rot, probe)
+}
+
+fn bake_samples<S: Sample>(
+    img: &DecodedImage,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+    probe: BaseProbe,
+) -> (u32, u32, Vec<S>) {
     let (w, h) = (img.width, img.height);
     let ca = adj.chromatic_aberration.unwrap_or_default();
     let sharpen = develop::Sharpen::new(&adj.sharpening, w as f32, h as f32);
@@ -203,7 +284,8 @@ pub fn bake_edited_probe(
     let fine = (probe == BaseProbe::Fine || adj.texture != 0.0)
         .then(|| BaseLayer::build_fine(w, h, pre))
         .flatten();
-    let mut cropped = vec![0u8; (cw * ch * 4) as usize];
+    let mut cropped = vec![S::default(); (cw * ch * 4) as usize];
+    let opaque = S::encode(1.0);
     for y in 0..ch {
         for x in 0..cw {
             let (px, py) = (x0 + x, y0 + y);
@@ -247,10 +329,10 @@ pub fn bake_edited_probe(
             };
             let out = dev.linear_at(pre, canvas.0, canvas.1);
             let di = ((y * cw + x) * 4) as usize;
-            cropped[di] = linear_to_srgb8(out[0]);
-            cropped[di + 1] = linear_to_srgb8(out[1]);
-            cropped[di + 2] = linear_to_srgb8(out[2]);
-            cropped[di + 3] = 255;
+            cropped[di] = S::encode(out[0]);
+            cropped[di + 1] = S::encode(out[1]);
+            cropped[di + 2] = S::encode(out[2]);
+            cropped[di + 3] = opaque;
         }
     }
 
@@ -296,7 +378,12 @@ pub fn linear_f16_to_srgb8(img: &DecodedImage) -> Vec<u8> {
 /// 3-6x reductions an export sees, and averaging in linear keeps fine
 /// light-dark texture from darkening. Returns the input untouched when it
 /// already fits. Never upscales.
-pub(crate) fn fit_long_edge(w: u32, h: u32, rgba: Vec<u8>, max_px: u32) -> (u32, u32, Vec<u8>) {
+pub(crate) fn fit_long_edge<S: Sample>(
+    w: u32,
+    h: u32,
+    rgba: Vec<S>,
+    max_px: u32,
+) -> (u32, u32, Vec<S>) {
     if w.max(h) <= max_px || max_px == 0 || rgba.len() < (w as usize * h as usize * 4) {
         return (w, h, rgba);
     }
@@ -304,8 +391,6 @@ pub(crate) fn fit_long_edge(w: u32, h: u32, rgba: Vec<u8>, max_px: u32) -> (u32,
     let dw = ((w as f64 * scale).round() as u32).clamp(1, max_px);
     let dh = ((h as f64 * scale).round() as u32).clamp(1, max_px);
 
-    let to_linear = srgb8_to_linear_lut();
-    let encode = linear_to_srgb8;
     // Source span `[start, end)` covered by output index `o` of `d` over `s`.
     let span = |o: u32, d: u32, s: u32| {
         let start = (o as u64 * s as u64 / d as u64) as usize;
@@ -314,7 +399,9 @@ pub(crate) fn fit_long_edge(w: u32, h: u32, rgba: Vec<u8>, max_px: u32) -> (u32,
     };
     let xspans: Vec<(usize, usize)> = (0..dw).map(|x| span(x, dw, w)).collect();
 
-    let mut out = vec![0u8; dw as usize * dh as usize * 4];
+    let mut out = vec![S::default(); dw as usize * dh as usize * 4];
+    let opaque = S::encode(1.0);
+    let to_linear = S::linear_lut();
     for yo in 0..dh {
         let (y0, y1) = span(yo, dh, h);
         for (xo, &(x0, x1)) in xspans.iter().enumerate() {
@@ -323,17 +410,17 @@ pub(crate) fn fit_long_edge(w: u32, h: u32, rgba: Vec<u8>, max_px: u32) -> (u32,
                 let row = y * w as usize * 4;
                 for x in x0..x1 {
                     let i = row + x * 4;
-                    sum[0] += to_linear[rgba[i] as usize];
-                    sum[1] += to_linear[rgba[i + 1] as usize];
-                    sum[2] += to_linear[rgba[i + 2] as usize];
+                    sum[0] += to_linear[rgba[i].index()];
+                    sum[1] += to_linear[rgba[i + 1].index()];
+                    sum[2] += to_linear[rgba[i + 2].index()];
                 }
             }
             let n = ((y1 - y0) * (x1 - x0)) as f32;
             let d = (yo as usize * dw as usize + xo) * 4;
-            out[d] = encode(sum[0] / n);
-            out[d + 1] = encode(sum[1] / n);
-            out[d + 2] = encode(sum[2] / n);
-            out[d + 3] = 255;
+            out[d] = S::encode(sum[0] / n);
+            out[d + 1] = S::encode(sum[1] / n);
+            out[d + 2] = S::encode(sum[2] / n);
+            out[d + 3] = opaque;
         }
     }
     (dw, dh, out)
@@ -433,13 +520,13 @@ fn apply_touchups(src: &Source, touchups: &[TouchUp], u: f32, v: f32, base: [f32
 /// Rotate packed RGBA8 by `steps` 90-degree clockwise turns. Returns the new
 /// `(width, height, rgba)`.
 #[hotpath::measure]
-fn rotate_rgba(src: &[u8], w: u32, h: u32, steps: u8) -> (u32, u32, Vec<u8>) {
+fn rotate_rgba<S: Sample>(src: &[S], w: u32, h: u32, steps: u8) -> (u32, u32, Vec<S>) {
     let steps = steps % 4;
     if steps == 0 {
         return (w, h, src.to_vec());
     }
     let (nw, nh) = if steps == 2 { (w, h) } else { (h, w) };
-    let mut dst = vec![0u8; (nw * nh * 4) as usize];
+    let mut dst = vec![S::default(); (nw * nh * 4) as usize];
     let px = |x: u32, y: u32| ((y * w + x) * 4) as usize;
     for yo in 0..nh {
         for xo in 0..nw {
@@ -597,7 +684,7 @@ mod tests {
     #[test]
     fn fit_long_edge_scales_the_long_side_and_keeps_the_aspect() {
         let (w, h) = (400, 300);
-        let (dw, dh, out) = fit_long_edge(w, h, vec![128; (w * h * 4) as usize], 205);
+        let (dw, dh, out) = fit_long_edge(w, h, vec![128u8; (w * h * 4) as usize], 205);
         assert_eq!((dw, dh), (205, 154));
         assert_eq!(out.len(), (dw * dh * 4) as usize);
         assert!(
@@ -622,7 +709,7 @@ mod tests {
         let mut rgba = Vec::with_capacity((w * h * 4) as usize);
         for y in 0..h {
             for x in 0..w {
-                let v = if (x + y) % 2 == 0 { 255 } else { 0 };
+                let v: u8 = if (x + y) % 2 == 0 { 255 } else { 0 };
                 rgba.extend_from_slice(&[v, v, v, 255]);
             }
         }
