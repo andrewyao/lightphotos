@@ -92,10 +92,7 @@ impl Output {
         },
         format: ExportFormat::Jpeg,
         jpeg_limit_kb: None,
-        keep: Keep {
-            location: false,
-            identity: false,
-        },
+        keep: Keep::NONE,
         copyright: String::new(),
     };
 }

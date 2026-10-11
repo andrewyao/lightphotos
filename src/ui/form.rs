@@ -255,6 +255,22 @@ pub(super) fn page<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) 
     egui::Frame::NONE.inner_margin(margin).show(ui, body).inner
 }
 
+/// A footer pinned under a scrolling [`page`], with the page's side and
+/// bottom margins, so its buttons line up with the rows above.
+pub(super) fn page_footer<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let (x, y) = (
+        font_size::px(ui.style(), PAGE_MARGIN.x) as i8,
+        font_size::px(ui.style(), PAGE_MARGIN.y) as i8,
+    );
+    let margin = egui::Margin {
+        left: x,
+        right: x,
+        top: 0,
+        bottom: y,
+    };
+    egui::Frame::NONE.inner_margin(margin).show(ui, body).inner
+}
+
 /// A modal dialog `width` wide, before scaling, with the forms' margin.
 pub(super) fn dialog<R>(
     ctx: &egui::Context,

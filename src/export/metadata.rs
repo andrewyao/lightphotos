@@ -19,14 +19,26 @@ pub struct Keep {
     /// The GPS block.
     #[serde(default)]
     pub location: bool,
-    /// [`IDENTIFYING_TAGS`]: serial numbers, the owner and the artist.
+    /// [`IDENTIFYING_TAGS`]: serial numbers, the owner, the artist, and
+    /// the free-text caption and comment, which can say anything.
     #[serde(default)]
     pub identity: bool,
 }
 
-/// Tags that name a person or one physical camera or lens.
-pub const IDENTIFYING_TAGS: [Tag; 5] = [
+impl Keep {
+    /// Neither: the default.
+    pub const NONE: Keep = Keep {
+        location: false,
+        identity: false,
+    };
+}
+
+/// Tags that name a person or one physical camera or lens, or hold free
+/// text that might.
+pub const IDENTIFYING_TAGS: [Tag; 7] = [
     Tag::Artist,
+    Tag::ImageDescription,
+    Tag::UserComment,
     Tag::CameraOwnerName,
     Tag::BodySerialNumber,
     Tag::LensSerialNumber,
@@ -150,18 +162,7 @@ pub fn fields(
         ifd_num: In::PRIMARY,
         value,
     };
-    let copyright: String = copyright
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_COPYRIGHT_CHARS)
-        .collect();
-    let copyright = copyright.trim();
-    let own_copyright = (!copyright.is_empty()).then(|| {
-        field(
-            Tag::Copyright,
-            Value::Ascii(vec![copyright.as_bytes().to_vec()]),
-        )
-    });
+    let own_copyright = copyright_line(copyright).map(|c| field(Tag::Copyright, c));
 
     let mut out: Vec<Field> = src
         .exif
@@ -178,6 +179,9 @@ pub fn fields(
             )
         })
         .filter(|f| keep.identity || !IDENTIFYING_TAGS.contains(&f.tag))
+        // A tag the `exif` crate has no name for, such as EXIF 3.0's
+        // Photographer, could name anyone.
+        .filter(|f| f.tag.description().is_some())
         .filter(|f| match f.tag.context() {
             Context::Tiff => KEPT_TIFF_TAGS.contains(&f.tag),
             Context::Exif => !DROPPED_EXIF_TAGS.contains(&f.tag),
@@ -188,6 +192,12 @@ pub fn fields(
             _ => false,
         })
         .cloned()
+        .filter_map(|mut f| {
+            if f.tag == Tag::Copyright {
+                f.value = copyright_text(&f.value).and_then(|t| copyright_line(&t))?;
+            }
+            Some(f)
+        })
         .collect();
     out.extend(own_copyright);
 
@@ -236,6 +246,21 @@ pub fn essential(fields: &[Field]) -> Vec<Field> {
         })
         .cloned()
         .collect()
+}
+
+/// `text` as a copyright value: control characters out, trimmed, then cut
+/// to [`MAX_COPYRIGHT_CHARS`]. `None` when nothing is left.
+fn copyright_line(text: &str) -> Option<Value> {
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    let line: String = clean.trim().chars().take(MAX_COPYRIGHT_CHARS).collect();
+    (!line.is_empty()).then(|| Value::Ascii(vec![line.into_bytes()]))
+}
+
+fn copyright_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Ascii(v) => Some(String::from_utf8_lossy(v.first()?).into_owned()),
+        _ => None,
+    }
 }
 
 /// When the photo was taken, as EXIF fields: the source's own
@@ -312,6 +337,9 @@ mod tests {
             f(Tag::BodySerialNumber, ascii("123456")),
             f(Tag::Artist, ascii("Ada")),
             f(Tag::LensModel, ascii("35mm")),
+            f(Tag::ImageDescription, ascii("Home, kids' room")),
+            // EXIF 3.0's Photographer, which the exif crate cannot name.
+            f(Tag(Context::Exif, 0xA437), ascii("Ada")),
         ];
         let blob = block(&fields).unwrap().unwrap();
         SourceMeta::from_parts(Some(exif::Reader::new().read_raw(blob).unwrap()), None)
@@ -347,6 +375,14 @@ mod tests {
         assert!(!tags(&plain).contains(&Tag::BodySerialNumber));
         assert!(!tags(&plain).contains(&Tag::Artist));
         assert!(
+            !tags(&plain).contains(&Tag::ImageDescription),
+            "captions are opt-in"
+        );
+        assert!(
+            !tags(&plain).contains(&Tag(Context::Exif, 0xA437)),
+            "unnamed tags never go"
+        );
+        assert!(
             !tags(&plain).contains(&Tag::MakerNote),
             "maker notes cannot move"
         );
@@ -365,13 +401,7 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(
-            Keep::default(),
-            Keep {
-                location: false,
-                identity: false
-            }
-        );
+        assert_eq!(Keep::default(), Keep::NONE);
 
         let located = fields(
             &src,
@@ -398,6 +428,8 @@ mod tests {
         );
         assert!(tags(&known).contains(&Tag::BodySerialNumber));
         assert!(tags(&known).contains(&Tag::Artist));
+        assert!(tags(&known).contains(&Tag::ImageDescription));
+        assert!(!tags(&known).contains(&Tag(Context::Exif, 0xA437)));
         assert!(!known.iter().any(|f| f.tag.context() == Context::Gps));
         assert_eq!(block(&[]).unwrap(), None);
     }
@@ -413,6 +445,31 @@ mod tests {
         let mine = fields(&src, Keep::default(), " © Ada\u{0} ", 1, 1);
         assert_eq!(text(&mine, Tag::Copyright).as_deref(), Some("© Ada"));
         assert_eq!(mine.iter().filter(|f| f.tag == Tag::Copyright).count(), 1);
+        let padded = fields(
+            &src,
+            Keep::default(),
+            &format!("   {}", "y".repeat(300)),
+            1,
+            1,
+        );
+        assert_eq!(
+            text(&padded, Tag::Copyright).map(|t| t.len()),
+            Some(MAX_COPYRIGHT_CHARS)
+        );
+        let theirs_long = {
+            let f = Field {
+                tag: Tag::Copyright,
+                ifd_num: In::PRIMARY,
+                value: Value::Ascii(vec![vec![b'z'; 70_000]]),
+            };
+            let blob = block(&[f]).unwrap().unwrap();
+            SourceMeta::from_parts(exif::Reader::new().read_raw(blob).ok(), None)
+        };
+        let capped = fields(&theirs_long, Keep::default(), "", 1, 1);
+        assert_eq!(
+            text(&capped, Tag::Copyright).map(|t| t.len()),
+            Some(MAX_COPYRIGHT_CHARS)
+        );
         let long = fields(&src, Keep::default(), &"x".repeat(5000), 1, 1);
         assert_eq!(
             text(&long, Tag::Copyright).map(|t| t.len()),

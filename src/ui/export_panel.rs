@@ -42,7 +42,9 @@ pub(super) fn draw_export_panel(
         // The footer stays on screen however long the form scrolls.
         egui::Panel::bottom("export_footer")
             .show_separator_line(false)
-            .show_inside(ui, |ui| export_footer(ui, app, settings, out));
+            .show_inside(ui, |ui| {
+                form::page_footer(ui, |ui| export_footer(ui, app, settings, out))
+            });
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -55,11 +57,15 @@ pub(super) fn draw_export_panel(
     }
 }
 
+/// The browser can't reach an Immich server. The form's notice says so,
+/// and there is nothing left to set or explain below it.
+fn immich_unavailable(settings: &ExportSettings) -> bool {
+    cfg!(target_arch = "wasm32") && settings.target == ExportTarget::Immich
+}
+
 /// Cancel and Export, with why Export is off under them.
 fn export_footer(ui: &mut egui::Ui, app: &App, settings: &ExportSettings, out: &mut FrameOutput) {
     let t = t();
-    let immich_unavailable =
-        cfg!(target_arch = "wasm32") && settings.target == ExportTarget::Immich;
     let blocker = app.export_blocker();
     let buttons = [
         Button::new(t.cancel, Role::Cancel),
@@ -74,7 +80,7 @@ fn export_footer(ui: &mut egui::Ui, app: &App, settings: &ExportSettings, out: &
         None => {}
     }
     // Under the buttons, because it says why Export is off.
-    if let Some(why) = blocker.filter(|_| !immich_unavailable) {
+    if let Some(why) = blocker.filter(|_| !immich_unavailable(settings)) {
         ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
             form::hint(ui, why)
         });
@@ -255,7 +261,8 @@ fn metadata_rows(
     });
 }
 
-/// The export page under its heading: where to, how big, and the footer.
+/// The export page under its heading: where to, the file, how big, and
+/// its metadata.
 fn draw_export_form(
     ui: &mut egui::Ui,
     app: &App,
@@ -297,11 +304,7 @@ fn draw_export_form(
         }
     });
 
-    // The browser can't reach an Immich server. The notice above says so,
-    // and there is nothing left to set or explain below it.
-    let immich_unavailable =
-        cfg!(target_arch = "wasm32") && settings.target == ExportTarget::Immich;
-    if !immich_unavailable {
+    if !immich_unavailable(settings) {
         form.section(ui, t.export_file, |ui| {
             file_rows(ui, &form, app, settings, next)
         });
