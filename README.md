@@ -84,6 +84,32 @@ The page shows function timings and live-object counts while you use the app.
 
 Three processes run, because lightphotos emits only half the picture by itself. The daemon ingests and serves both the API and the UI; `lightwatch-hotpath` polls the app's hotpath server on `:6770` and re-emits function calls and timings; the app's own `lightwatch-probe` emits the live-object census that `#[lightwatch::track]` collects (`DecodedImage`, `Mask`). The daemon joins the two emitters into one session at `GET /api/sessions`. `LIGHTWATCH_REPO` points at the lightwatch checkout (default `../lightwatch`), `LIGHTWATCH_PORT` moves the UI, and pids and logs live under `$TMPDIR/lightphotos-lightwatch`.
 
+### Control channel (optional)
+
+`--control <port>` lets another program on the same computer drive the desktop app. The app listens on 127.0.0.1 only. `--control 0` picks a free port. At startup the app prints the port and an access token to stderr:
+
+```sh
+./target/release/lightphotos --control 0 /path/to/a/folder
+# [control] listening on 127.0.0.1:52113 token 3f9c…
+```
+
+Set `LIGHTPHOTOS_CONTROL_TOKEN` (16 characters or more) to choose the token. Send one JSON object per line on a TCP connection. Each request gets one JSON line back:
+
+```json
+{"token": "…", "op": "run", "command": {"id": "photo.rate", "params": {"stars": 3}}}
+{"token": "…", "op": "commands"}
+{"token": "…", "op": "state"}
+{"token": "…", "op": "wait", "timeout_ms": 10000}
+{"token": "…", "op": "screenshot"}
+```
+
+- `run` runs one command. `commands` lists every command id with an example, and every develop control with its range and current value.
+- `state` returns the view, the selection, and the current photo's rating, flag and label.
+- `wait` returns the state when decodes, sidecar writes, batches and animations are done, or a `timeout` error. The default is 10 s and the limit is 60 s.
+- `screenshot` returns the window as a PNG: `{"png_base64", "width", "height"}`.
+
+A reply is `{"ok": true, "result": …}` or `{"ok": false, "error": {"error": "<code>", …}, "message": "…"}`. The codes are the command errors and `bad_json`, `bad_token`, `unknown_op`, `too_long`, `too_many_connections`, `timeout`, `app_closed` and `failed`. A bad line gets an error and the connection stays open. A line over 1 MiB closes the connection. The app accepts 4 connections at a time.
+
 ## Releasing and packaging
 
 ```sh

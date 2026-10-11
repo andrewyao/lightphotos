@@ -137,6 +137,22 @@ pub struct RgbFrame {
     pub rgb: Vec<u8>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl RgbFrame {
+    pub fn to_png(&self) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut bytes, self.width, self.height);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+        writer
+            .write_image_data(&self.rgb)
+            .map_err(|e| e.to_string())?;
+        writer.finish().map_err(|e| e.to_string())?;
+        Ok(bytes)
+    }
+}
+
 /// Everything egui needs to paint one frame.
 pub struct EguiPaint {
     pub textures_delta: egui::TexturesDelta,
@@ -912,6 +928,12 @@ impl Renderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         }));
+    }
+
+    /// Present to the window again after `render_offscreen`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn end_offscreen(&mut self) {
+        self.offscreen = None;
     }
 
     #[cfg(not(target_arch = "wasm32"))]

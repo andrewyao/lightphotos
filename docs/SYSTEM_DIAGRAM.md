@@ -37,6 +37,7 @@ flowchart LR
         delegate["shell/macos_delegate.rs<br/>Finder open-document"]
         menu["shell/menu.rs<br/>native menu bar"]
         drive["shell/drive.rs<br/>--drive headless scripts"]
+        control["shell/control.rs<br/>--control loopback JSON"]
         profile["shell/profile.rs<br/>--profile (hotpath)"]
         webshell["web/*<br/>web_fs, web_canvas, analytics"]
     end
@@ -100,6 +101,7 @@ flowchart LR
     menu --> app
     main -- "window_event / key_input" --> app
     drive -- "synthetic events" --> app
+    control -- "UserEvent::Control" --> main
     profile -- "headless phases" --> loader
     webshell --> app
     webshell --> fsa
@@ -154,6 +156,9 @@ flowchart LR
     class nonmac,rawlerdir,crates,rawlercrate nonmac
     class webshell,fsa,rawrender web
 ```
+
+`shell/control.rs` runs only with `--control <port>`, and not in the browser.
+Its threads read the requests. The main thread runs them (`app/control.rs`).
 
 `scoring/facequality.rs`, `scoring/segmentation.rs` and the aesthetics part of
 `scoring/judge.rs` build on all platforms. On Linux, Windows and the browser, they return

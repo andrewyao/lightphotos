@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The platform shell around `App`: the macOS menu bar and Finder open
-//! handler, native dialogs, the saved window rect, the system trash, and the
-//! `--drive` and `--profile` headless runners.
+//! handler, native dialogs, the saved window rect, the system trash, the
+//! `--control` loopback channel, and the `--drive` and `--profile` headless
+//! runners.
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod control;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod dialog;
 pub(crate) mod display;

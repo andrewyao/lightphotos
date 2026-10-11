@@ -175,6 +175,8 @@ impl ApplicationHandler<UserEvent> for App {
             }
             #[cfg(target_os = "macos")]
             UserEvent::Menu(cmd) => self.run_menu_command(cmd),
+            #[cfg(not(target_arch = "wasm32"))]
+            UserEvent::Control(op, reply) => self.answer_control(op, reply),
         }
     }
 
@@ -388,6 +390,8 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         let poll_delay = self.pump();
+        #[cfg(not(target_arch = "wasm32"))]
+        let poll_delay = poll_delay.into_iter().chain(self.poll_control()).min();
         let now = web_time::Instant::now();
         if self.repaint_at.is_some_and(|at| at <= now) {
             // Cleared here rather than left for `redraw` to replace, so a
@@ -588,12 +592,14 @@ impl App {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn print_usage_and_exit(code: i32) -> ! {
-    eprintln!("Usage: lightphotos [photo-or-folder]");
+    eprintln!("Usage: lightphotos [--control <port>] [photo-or-folder]");
     eprintln!();
     eprintln!("  photo-or-folder  Optional path to a folder of photos (opens in");
     eprintln!("                   Grid) or a single photo (opens in Loupe). With");
     eprintln!("                   no path, the app opens on a landing page with a");
     eprintln!("                   \"Choose Folder\" button.");
+    eprintln!("  --control <port> Accept JSON requests on 127.0.0.1:<port> (0 picks");
+    eprintln!("                   a free port). See README.md, \"Control channel\".");
     std::process::exit(code);
 }
 
@@ -637,7 +643,14 @@ fn main() {
 
     // The path argument is optional. Without one the app opens on the landing
     // page. A packaged .app may instead get its path from Finder later.
-    let initial = match std::env::args().nth(1).as_deref() {
+    let (control_port, args) = match shell::control::split_args(std::env::args().skip(1)) {
+        Ok(split) => split,
+        Err(e) => {
+            eprintln!("[control] {e}");
+            std::process::exit(2);
+        }
+    };
+    let initial = match args.first().map(String::as_str) {
         Some("-h" | "--help") => print_usage_and_exit(0),
         Some(s) => {
             let p = PathBuf::from(s);
@@ -667,6 +680,12 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     shell::macos_delegate::set_proxy(event_loop.create_proxy());
+    if let Some(port) = control_port {
+        if let Err(e) = shell::control::start(port, event_loop.create_proxy()) {
+            eprintln!("[control] {e}");
+            std::process::exit(2);
+        }
+    }
     #[cfg(target_os = "macos")]
     shell::menu::install(event_loop.create_proxy());
     if !shell::macos_delegate::install_open_handler() {

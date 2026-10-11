@@ -135,6 +135,8 @@ rfd = "0.15"
 # out of a crate whose only executor is `pollster`. The browser can't reach an
 # Immich server (no CORS), so wasm32 never needs it.
 ureq = "3"
+# The `--control` channel's access token (`shell/control.rs`).
+getrandom = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # The Immich API key lives in the login Keychain (`persist/secret.rs`).

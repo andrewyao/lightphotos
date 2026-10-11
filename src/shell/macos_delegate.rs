@@ -33,6 +33,12 @@ pub enum UserEvent {
     /// The user chose a command from the menu bar.
     #[cfg(target_os = "macos")]
     Menu(crate::shell::menu::MenuCommand),
+    /// A `--control` request, answered on the sender.
+    #[cfg(not(target_arch = "wasm32"))]
+    Control(
+        crate::shell::control::Op,
+        std::sync::mpsc::Sender<crate::shell::control::Answer>,
+    ),
 }
 
 /// Set once in `main`; read by the injected Objective-C method.

@@ -27,6 +27,10 @@ pub(crate) struct State {
     selected: Vec<usize>,
     /// File name of the photo single-photo actions apply to.
     photo: Option<String>,
+    /// That photo's stars (0 when unrated), flag and color label.
+    rating: Option<u8>,
+    flag: Option<crate::sidecar::Flag>,
+    label: Option<crate::sidecar::ColorLabel>,
     /// The keyboard-focused region.
     focus: Region,
     /// Loupe zoom relative to fit-to-window; absent in the Grid.
@@ -44,6 +48,7 @@ pub(crate) struct State {
 impl State {
     pub(crate) fn of(app: &App) -> State {
         let mode = app.mode();
+        let path = app.selected_path();
         State {
             mode,
             visible: app.visible_len(),
@@ -61,9 +66,12 @@ impl State {
             folder: app.folder_sel(),
             sel: app.sel(),
             selected: app.selected_positions(),
-            photo: app
-                .selected_path()
+            photo: path
+                .as_ref()
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
+            rating: path.as_ref().map(|p| app.rating_of(p)),
+            flag: path.as_ref().and_then(|p| app.flag_of(p)),
+            label: path.as_ref().and_then(|p| app.catalog.label(p)),
             focus: app.focus(),
             zoom: (mode == ViewMode::Loupe).then(|| app.zoom_rel()),
             status: app.status().map(|(_, text)| text.to_string()),
@@ -84,7 +92,7 @@ mod tests {
         let json = serde_json::to_string(&State::of(&app)).unwrap();
         assert_eq!(
             json,
-            r#"{"mode":"grid","visible":0,"grid_range":[0,0],"stacks":[],"sel":null,"selected":[],"photo":null,"focus":"folders","zoom":null,"status":null,"failed_thumbs":0,"folder_roots":[],"folder":null}"#
+            r#"{"mode":"grid","visible":0,"grid_range":[0,0],"stacks":[],"sel":null,"selected":[],"photo":null,"rating":null,"flag":null,"label":null,"focus":"folders","zoom":null,"status":null,"failed_thumbs":0,"folder_roots":[],"folder":null}"#
         );
     }
 }

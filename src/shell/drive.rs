@@ -39,7 +39,7 @@
 //! `App::key_input`, the half of `main.rs`'s handler that runs after egui.
 //! Pointer events are built whole and go through `App::window_event`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -54,7 +54,7 @@ use winit::window::{Window, WindowId};
 
 use crate::app::{App, State, ViewMode};
 use crate::command::Command;
-use crate::renderer::{Renderer, RgbFrame};
+use crate::renderer::Renderer;
 use crate::shell::macos_delegate::UserEvent;
 
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -619,7 +619,7 @@ impl Driver {
     fn idle(&mut self) -> Result<(), String> {
         let start = Instant::now();
         loop {
-            if self.settled_across_a_frame() {
+            if self.app.settled_across_a_frame() {
                 self.app.signals.flush_blocking(IDLE_TIMEOUT);
                 return Ok(());
             }
@@ -628,13 +628,6 @@ impl Driver {
             }
             std::thread::sleep(Duration::from_millis(2));
         }
-    }
-
-    fn settled_across_a_frame(&mut self) -> bool {
-        let quiet_before = self.app.pump().is_none();
-        self.app.redraw();
-        let quiet_after = self.app.pump().is_none();
-        quiet_before && quiet_after && !self.app.batch_running() && self.app.repaint_at.is_none()
     }
 
     fn scale(&self) -> f64 {
@@ -818,7 +811,9 @@ impl Driver {
             .and_then(|r| r.read_offscreen_blocking())
             .ok_or("shot: no offscreen frame to read")?;
         let path = self.out_dir.join(format!("{slug}.png"));
-        write_png(&path, &frame)?;
+        let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+        let png = frame.to_png().map_err(|e| err(&e))?;
+        std::fs::write(&path, png).map_err(|e| err(&e))?;
         eprintln!(
             "[drive] wrote {} ({}x{})",
             path.display(),
@@ -831,17 +826,6 @@ impl Driver {
     fn state_json(&self) -> Result<String, String> {
         serde_json::to_string(&State::of(&self.app)).map_err(|e| e.to_string())
     }
-}
-
-fn write_png(path: &Path, frame: &RgbFrame) -> Result<(), String> {
-    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    let file = std::fs::File::create(path).map_err(|e| err(&e))?;
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), frame.width, frame.height);
-    encoder.set_color(png::ColorType::Rgb);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().map_err(|e| err(&e))?;
-    writer.write_image_data(&frame.rgb).map_err(|e| err(&e))?;
-    writer.finish().map_err(|e| err(&e))
 }
 
 #[cfg(test)]

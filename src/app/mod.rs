@@ -646,6 +646,9 @@ pub(crate) struct App {
     /// `about_to_wait` redraws once it passes, so an animation (a modal's
     /// fade, a collapsing header) finishes with no input to wake the loop.
     pub(crate) repaint_at: Option<Instant>,
+    /// `--control` requests waiting on the frame loop.
+    #[cfg(not(target_arch = "wasm32"))]
+    control: control::Pending,
 
     /// Tops of the folder tree, sorted: every folder the user has added, and
     /// an opened file's parent. Remembered across launches natively; on the
@@ -695,6 +698,8 @@ mod bulk_delete;
 mod bursts;
 mod catalog;
 mod commands;
+#[cfg(not(target_arch = "wasm32"))]
+mod control;
 mod crop;
 pub(crate) use accessors::FlagCoverage;
 pub(crate) use catalog::flag_name;
@@ -873,6 +878,8 @@ impl App {
             status: None,
             occluded: false,
             repaint_at: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            control: control::Pending::default(),
             folder_roots,
             missing_roots,
             folder_sel: None,
