@@ -1,36 +1,41 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! What an export says about itself: an EXIF block built from the source's
-//! own, filtered by the user's [`MetadataPolicy`], with their copyright line.
-//! One block serves every format; `image_encode` puts it where each format
-//! keeps EXIF.
+//! own. The capture date, camera and lens model, exposure settings, size and
+//! colour space always go in. Location and identifying camera data go in
+//! only when the user turns them on ([`Keep`]), and a copyright line set
+//! once replaces the photo's own. One block serves every format;
+//! `image_encode` puts it where each format keeps EXIF.
 
 use exif::{Context, Field, In, Tag, Value};
 
 use crate::decode::image_decode::CaptureStamp;
 
-/// How much of the source's metadata an export keeps.
+/// The sensitive parts of a photo's metadata an export keeps. Both off by
+/// default, so sharing a photo shares neither where it was taken nor whose
+/// camera took it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum MetadataPolicy {
-    All,
-    /// Everything but the GPS block.
-    AllButLocation,
-    /// The copyright, plus the capture date, colour space and size. The
-    /// default: exports before this setting carried just those (less the
-    /// copyright), so no camera serial or owner name starts leaking out.
-    #[default]
-    CopyrightOnly,
-    None,
+pub struct Keep {
+    /// The GPS block.
+    #[serde(default)]
+    pub location: bool,
+    /// [`IDENTIFYING_TAGS`]: serial numbers, the owner and the artist.
+    #[serde(default)]
+    pub identity: bool,
 }
 
-impl MetadataPolicy {
-    pub const ALL: [MetadataPolicy; 4] = [
-        MetadataPolicy::All,
-        MetadataPolicy::AllButLocation,
-        MetadataPolicy::CopyrightOnly,
-        MetadataPolicy::None,
-    ];
-}
+/// Tags that name a person or one physical camera or lens.
+pub const IDENTIFYING_TAGS: [Tag; 5] = [
+    Tag::Artist,
+    Tag::CameraOwnerName,
+    Tag::BodySerialNumber,
+    Tag::LensSerialNumber,
+    Tag::ImageUniqueID,
+];
+
+/// The longest copyright line written, in characters. EXIF has room for
+/// more, but a JPEG's whole EXIF segment is 64 KB.
+pub const MAX_COPYRIGHT_CHARS: usize = 200;
 
 /// What a source file says about itself, read once per export.
 #[derive(Default)]
@@ -131,48 +136,32 @@ const DROPPED_EXIF_TAGS: [Tag; 6] = [
     Tag::SubjectDistanceRange,
 ];
 
-/// The EXIF fields an export of `src` at `width` x `height` carries under
-/// `policy`. `copyright`, when not blank, replaces the source's own.
+/// The EXIF fields an export of `src` at `width` x `height` carries.
+/// `copyright`, when not blank, replaces the source's own.
 pub fn fields(
     src: &SourceMeta,
-    policy: MetadataPolicy,
+    keep: Keep,
     copyright: &str,
     width: u32,
     height: u32,
 ) -> Vec<Field> {
-    let ascii = |s: &str| Value::Ascii(vec![s.as_bytes().to_vec()]);
     let field = |tag, value| Field {
         tag,
         ifd_num: In::PRIMARY,
         value,
     };
-    let source_copyright = || {
-        src.exif.as_ref().and_then(|e| {
-            e.get_field(Tag::Copyright, In::PRIMARY)
-                .filter(|f| matches!(f.value, Value::Ascii(_)))
-                .cloned()
-        })
-    };
-    let copyright: String = copyright.chars().filter(|c| !c.is_control()).collect();
+    let copyright: String = copyright
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_COPYRIGHT_CHARS)
+        .collect();
     let copyright = copyright.trim();
-    let own_copyright = (!copyright.is_empty()).then(|| field(Tag::Copyright, ascii(copyright)));
-
-    let keep_gps = match policy {
-        MetadataPolicy::None => return Vec::new(),
-        // The capture date stays: without it a library files the photo
-        // under the day it was exported.
-        MetadataPolicy::CopyrightOnly => {
-            let mut out: Vec<Field> = own_copyright
-                .or_else(source_copyright)
-                .into_iter()
-                .chain(capture_date(src))
-                .collect();
-            out.extend(technical(width, height));
-            return out;
-        }
-        MetadataPolicy::All => true,
-        MetadataPolicy::AllButLocation => false,
-    };
+    let own_copyright = (!copyright.is_empty()).then(|| {
+        field(
+            Tag::Copyright,
+            Value::Ascii(vec![copyright.as_bytes().to_vec()]),
+        )
+    });
 
     let mut out: Vec<Field> = src
         .exif
@@ -188,10 +177,11 @@ pub fn fields(
                 Tag::ExifVersion | Tag::ColorSpace | Tag::PixelXDimension | Tag::PixelYDimension
             )
         })
+        .filter(|f| keep.identity || !IDENTIFYING_TAGS.contains(&f.tag))
         .filter(|f| match f.tag.context() {
             Context::Tiff => KEPT_TIFF_TAGS.contains(&f.tag),
             Context::Exif => !DROPPED_EXIF_TAGS.contains(&f.tag),
-            Context::Gps => keep_gps,
+            Context::Gps => keep.location,
             // Its index can name Adobe RGB, which the export is not.
             Context::Interop => false,
             // A context a later `exif` adds; nothing here knows it is safe.
@@ -319,6 +309,9 @@ mod tests {
             f(Tag::MakerNote, Value::Undefined(vec![1, 2, 3, 4], 0)),
             f(Tag::GPSLatitudeRef, ascii("N")),
             f(Tag::PixelXDimension, Value::Long(vec![6000])),
+            f(Tag::BodySerialNumber, ascii("123456")),
+            f(Tag::Artist, ascii("Ada")),
+            f(Tag::LensModel, ascii("35mm")),
         ];
         let blob = block(&fields).unwrap().unwrap();
         SourceMeta::from_parts(Some(exif::Reader::new().read_raw(blob).unwrap()), None)
@@ -339,71 +332,92 @@ mod tests {
     }
 
     #[test]
-    fn each_policy_keeps_what_it_says() {
+    fn location_and_identity_go_in_only_when_kept() {
         let src = source();
-        let all = fields(&src, MetadataPolicy::All, "", 300, 200);
-        assert!(tags(&all).contains(&Tag::GPSLatitudeRef));
-        assert_eq!(text(&all, Tag::Make).as_deref(), Some("TestCam"));
-        assert_eq!(
-            text(&all, Tag::Copyright).as_deref(),
-            Some("Source Copyright")
-        );
+        let plain = fields(&src, Keep::default(), "", 300, 200);
+        for tag in [
+            Tag::Make,
+            Tag::LensModel,
+            Tag::DateTimeOriginal,
+            Tag::Copyright,
+        ] {
+            assert!(tags(&plain).contains(&tag), "{tag} always goes in");
+        }
+        assert!(!plain.iter().any(|f| f.tag.context() == Context::Gps));
+        assert!(!tags(&plain).contains(&Tag::BodySerialNumber));
+        assert!(!tags(&plain).contains(&Tag::Artist));
         assert!(
-            !tags(&all).contains(&Tag::MakerNote),
+            !tags(&plain).contains(&Tag::MakerNote),
             "maker notes cannot move"
         );
         assert!(
-            !tags(&all).contains(&Tag::Orientation),
+            !tags(&plain).contains(&Tag::Orientation),
             "pixels are upright"
         );
         assert_eq!(
-            text(&all, Tag::PixelXDimension).as_deref(),
+            text(&plain, Tag::PixelXDimension).as_deref(),
             Some("Long([300])")
         );
         assert_eq!(
-            all.iter().filter(|f| f.tag == Tag::PixelXDimension).count(),
+            plain
+                .iter()
+                .filter(|f| f.tag == Tag::PixelXDimension)
+                .count(),
             1
         );
+        assert_eq!(
+            Keep::default(),
+            Keep {
+                location: false,
+                identity: false
+            }
+        );
 
-        let no_gps = fields(&src, MetadataPolicy::AllButLocation, "", 300, 200);
-        assert!(!no_gps.iter().any(|f| f.tag.context() == Context::Gps));
-        assert_eq!(text(&no_gps, Tag::Make).as_deref(), Some("TestCam"));
-
-        let mine = fields(
+        let located = fields(
             &src,
-            MetadataPolicy::CopyrightOnly,
-            " © 2026 Ada ",
-            300,
-            200,
+            Keep {
+                location: true,
+                identity: false,
+            },
+            "",
+            1,
+            1,
         );
-        assert_eq!(
-            tags(&mine),
-            vec![
-                Tag::Copyright,
-                Tag::DateTimeOriginal,
-                Tag::ExifVersion,
-                Tag::ColorSpace,
-                Tag::PixelXDimension,
-                Tag::PixelYDimension
-            ]
-        );
-        assert_eq!(MetadataPolicy::default(), MetadataPolicy::CopyrightOnly);
-        assert_eq!(text(&mine, Tag::Copyright).as_deref(), Some("© 2026 Ada"));
-        let theirs = fields(&src, MetadataPolicy::CopyrightOnly, "", 300, 200);
-        assert_eq!(
-            text(&theirs, Tag::Copyright).as_deref(),
-            Some("Source Copyright")
-        );
+        assert!(tags(&located).contains(&Tag::GPSLatitudeRef));
+        assert!(!tags(&located).contains(&Tag::BodySerialNumber));
 
-        assert!(fields(&src, MetadataPolicy::None, "© Ada", 300, 200).is_empty());
+        let known = fields(
+            &src,
+            Keep {
+                location: false,
+                identity: true,
+            },
+            "",
+            1,
+            1,
+        );
+        assert!(tags(&known).contains(&Tag::BodySerialNumber));
+        assert!(tags(&known).contains(&Tag::Artist));
+        assert!(!known.iter().any(|f| f.tag.context() == Context::Gps));
         assert_eq!(block(&[]).unwrap(), None);
     }
 
     #[test]
     fn a_line_set_once_replaces_the_source_copyright() {
-        let all = fields(&source(), MetadataPolicy::All, "© Ada", 1, 1);
-        assert_eq!(text(&all, Tag::Copyright).as_deref(), Some("© Ada"));
-        assert_eq!(all.iter().filter(|f| f.tag == Tag::Copyright).count(), 1);
+        let src = source();
+        let theirs = fields(&src, Keep::default(), "", 1, 1);
+        assert_eq!(
+            text(&theirs, Tag::Copyright).as_deref(),
+            Some("Source Copyright")
+        );
+        let mine = fields(&src, Keep::default(), " © Ada\u{0} ", 1, 1);
+        assert_eq!(text(&mine, Tag::Copyright).as_deref(), Some("© Ada"));
+        assert_eq!(mine.iter().filter(|f| f.tag == Tag::Copyright).count(), 1);
+        let long = fields(&src, Keep::default(), &"x".repeat(5000), 1, 1);
+        assert_eq!(
+            text(&long, Tag::Copyright).map(|t| t.len()),
+            Some(MAX_COPYRIGHT_CHARS)
+        );
     }
 
     /// A source with no readable EXIF still gets its capture time, from the
@@ -413,7 +427,7 @@ mod tests {
         let stamp = CaptureStamp::new("2023:12:31 23:59:59", Some("+09:00"));
         let out = fields(
             &SourceMeta::from_parts(None, stamp),
-            MetadataPolicy::AllButLocation,
+            Keep::default(),
             "",
             40,
             30,
@@ -436,7 +450,7 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_malformed_source_reads_as_no_metadata() {
-        let blob = block(&fields(&source(), MetadataPolicy::All, "", 1, 1))
+        let blob = block(&fields(&source(), Keep::default(), "", 1, 1))
             .unwrap()
             .unwrap();
         for bad in [
@@ -450,7 +464,7 @@ mod tests {
             jpeg.extend(bad);
             jpeg.extend([0xFF, 0xD9]);
             let meta = SourceMeta::read_bytes(&jpeg);
-            let out = fields(&meta, MetadataPolicy::All, "", 1, 1);
+            let out = fields(&meta, Keep::default(), "", 1, 1);
             assert!(!tags(&out).contains(&Tag::Make));
         }
     }

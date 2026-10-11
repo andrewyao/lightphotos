@@ -23,7 +23,7 @@ use crate::decode::image_encode::{Encoding, Pixels};
 use crate::decode::{image_decode, image_encode};
 use crate::develop::sharpen::OutputSharpening;
 use crate::develop::{Adjustments, TouchUp};
-use metadata::{MetadataPolicy, SourceMeta};
+use metadata::{Keep, SourceMeta};
 
 /// Subfolder of the current folder that exports go to, on every platform.
 pub const EXPORTS_DIR: &str = "Exports";
@@ -47,8 +47,9 @@ pub struct ExportSettings {
     pub jpeg_limit_kb: Option<u32>,
     #[serde(default)]
     pub naming: NameTemplate,
+    /// Location and identifying camera data, both off unless chosen.
     #[serde(default)]
-    pub metadata: MetadataPolicy,
+    pub keep: Keep,
     /// Written into every export's EXIF in place of the photo's own, when
     /// not blank.
     #[serde(default)]
@@ -62,7 +63,7 @@ impl ExportSettings {
             sharpen: self.sharpen,
             format: self.format.or_jpeg(),
             jpeg_limit_kb: self.jpeg_limit_kb,
-            metadata: self.metadata,
+            keep: self.keep,
             copyright: self.copyright.clone(),
         }
     }
@@ -77,7 +78,7 @@ pub struct Output {
     pub sharpen: OutputSharpening,
     pub format: ExportFormat,
     pub jpeg_limit_kb: Option<u32>,
-    pub metadata: MetadataPolicy,
+    pub keep: Keep,
     pub copyright: String,
 }
 
@@ -91,7 +92,10 @@ impl Output {
         },
         format: ExportFormat::Jpeg,
         jpeg_limit_kb: None,
-        metadata: MetadataPolicy::AllButLocation,
+        keep: Keep {
+            location: false,
+            identity: false,
+        },
         copyright: String::new(),
     };
 }
@@ -377,7 +381,7 @@ fn render(
     source: &SourceMeta,
 ) -> Result<Vec<u8>, String> {
     let exif = |w, h| {
-        let fields = metadata::fields(source, output.metadata, &output.copyright, w, h);
+        let fields = metadata::fields(source, output.keep, &output.copyright, w, h);
         let block = metadata::block(&fields)?;
         // A JPEG's EXIF segment, and the carrier macOS reads AVIF's from,
         // hold 64 KB; past that the date and copyright still go in.
@@ -917,11 +921,11 @@ mod tests {
         assert!(at(Some(1)).is_err(), "noise does not fit in 1 KB");
     }
 
-    /// Every format this build writes carries the metadata its policy
-    /// keeps, read back by a reader that is not ours: GPS only under All,
-    /// the copyright line under all but None, and nothing under None.
+    /// Every format this build writes carries the date, the camera and the
+    /// copyright line, and location and serial numbers only when kept, read
+    /// back by a reader that is not ours.
     #[test]
-    fn every_format_carries_what_the_metadata_policy_keeps() {
+    fn every_format_carries_the_metadata_its_toggles_keep() {
         use exif::{Field, In, Tag, Value};
         let f = |tag, value| Field {
             tag,
@@ -933,6 +937,7 @@ mod tests {
             f(Tag::Make, ascii("TestCam")),
             f(Tag::DateTimeOriginal, ascii("2024:06:01 18:04:05")),
             f(Tag::GPSLatitudeRef, ascii("N")),
+            f(Tag::BodySerialNumber, ascii("123456")),
             f(Tag::Copyright, ascii("Source")),
         ];
         let blob = metadata::block(&camera).unwrap().unwrap();
@@ -940,58 +945,40 @@ mod tests {
             || SourceMeta::from_parts(exif::Reader::new().read_raw(blob.clone()).ok(), None);
         let img = gradient(40, 30);
         for format in ExportFormat::available() {
-            for policy in MetadataPolicy::ALL {
+            for (location, identity) in [(false, false), (true, false), (false, true), (true, true)]
+            {
                 let output = Output {
                     format,
-                    metadata: policy,
+                    keep: Keep { location, identity },
                     copyright: "© 2026 Ada".into(),
                     ..Output::FULL
                 };
+                let what = format!("{format:?} location {location} identity {identity}");
                 let bytes = render(&img, &Adjustments::default(), &[], 0, &output, &source())
-                    .unwrap_or_else(|e| panic!("{format:?} {policy:?}: {e}"));
-                let read =
-                    exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&bytes));
+                    .unwrap_or_else(|e| panic!("{what}: {e}"));
                 // The exif crate reads no AVIF; macOS's ImageIO checks those.
                 if format == ExportFormat::Avif {
-                    assert!(
-                        bytes.windows(4).any(|w| w == b"Exif") == (policy != MetadataPolicy::None)
-                    );
+                    assert!(bytes.windows(4).any(|w| w == b"Exif"), "{what}");
                     continue;
                 }
-                let has = |tag| {
-                    read.as_ref()
-                        .is_ok_and(|e| e.get_field(tag, In::PRIMARY).is_some())
-                };
-                let what = format!("{format:?} {policy:?}");
+                let read = exif::Reader::new()
+                    .read_from_container(&mut std::io::Cursor::new(&bytes))
+                    .unwrap_or_else(|e| panic!("{what}: {e}"));
+                let has = |tag| read.get_field(tag, In::PRIMARY).is_some();
+                assert_eq!(has(Tag::GPSLatitudeRef), location, "{what}");
+                assert_eq!(has(Tag::BodySerialNumber), identity, "{what}");
+                assert!(has(Tag::Make) && has(Tag::DateTimeOriginal), "{what}");
+                let copyright = read
+                    .get_field(Tag::Copyright, In::PRIMARY)
+                    .and_then(|c| match &c.value {
+                        Value::Ascii(v) => v.first().cloned(),
+                        _ => None,
+                    });
                 assert_eq!(
-                    has(Tag::GPSLatitudeRef),
-                    policy == MetadataPolicy::All,
+                    copyright.as_deref(),
+                    Some("© 2026 Ada".as_bytes()),
                     "{what}"
                 );
-                assert_eq!(
-                    has(Tag::Make),
-                    matches!(policy, MetadataPolicy::All | MetadataPolicy::AllButLocation),
-                    "{what}"
-                );
-                assert_eq!(
-                    has(Tag::Copyright),
-                    policy != MetadataPolicy::None,
-                    "{what}"
-                );
-                assert_eq!(
-                    has(Tag::DateTimeOriginal),
-                    policy != MetadataPolicy::None,
-                    "{what}: every policy but None keeps the capture date"
-                );
-                if let Ok(e) = &read {
-                    if let Some(c) = e.get_field(Tag::Copyright, In::PRIMARY) {
-                        let text = match &c.value {
-                            Value::Ascii(v) => v.first().cloned().unwrap_or_default(),
-                            _ => Vec::new(),
-                        };
-                        assert_eq!(text, "© 2026 Ada".as_bytes(), "{what}");
-                    }
-                }
             }
         }
     }
@@ -1060,7 +1047,10 @@ mod tests {
         let blob = metadata::block(&camera).unwrap().unwrap();
         let source = SourceMeta::from_parts(exif::Reader::new().read_raw(blob).ok(), None);
         let output = Output {
-            metadata: MetadataPolicy::All,
+            keep: Keep {
+                location: true,
+                identity: true,
+            },
             copyright: "Ada".into(),
             ..Output::FULL
         };

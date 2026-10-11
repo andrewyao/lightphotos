@@ -905,9 +905,9 @@ mod status_tests {
             crate::decode::image_decode::CaptureStamp::new("2024:06:01 18:00:00", Some("-07:00"));
         let tagged = {
             use crate::decode::image_encode::{Encoding, Pixels, Prepared};
-            use crate::export::metadata::{block, fields, MetadataPolicy, SourceMeta};
+            use crate::export::metadata::{block, fields, Keep, SourceMeta};
             let source = SourceMeta::from_parts(None, stamp);
-            let exif = block(&fields(&source, MetadataPolicy::All, "", 300, 200)).unwrap();
+            let exif = block(&fields(&source, Keep::default(), "", 300, 200)).unwrap();
             let rgba = crate::decode::image_decode::decode(&a, u32::MAX)
                 .unwrap()
                 .rgba;
@@ -1217,12 +1217,12 @@ mod form_tests {
     /// its value, flush with the page's left edge.
     #[test]
     fn export_lays_out_as_a_form() {
-        use crate::app::test_support::settled;
         use crate::i18n::t;
 
         let (mut app, _) = folder_app(2);
         app.exports.form_open = true;
-        let painted = settled(&mut app);
+        // Tall enough for the Output section under File.
+        let painted = crate::app::test_support::settled_at(&mut app, egui::vec2(1200.0, 1400.0));
         let destination = painted.pos_of(t().export_destination);
         let output = painted.pos_of(t().export_output);
         let size = painted.pos_of(t().export_size);
@@ -1237,6 +1237,25 @@ mod form_tests {
             destination.y < folder_tab.y && folder_tab.y < folder.y,
             "the Folder/Immich choice sits between the header and the rows"
         );
+    }
+
+    /// The Metadata toggles start off, and ticking one asks for it alone.
+    #[test]
+    fn the_metadata_toggles_start_off_and_set_one_field() {
+        use crate::app::test_support::click;
+        use crate::i18n::t;
+        use crate::ui::UiAction;
+
+        let (mut app, _) = folder_app(2);
+        app.exports.form_open = true;
+        let painted = crate::app::test_support::settled_at(&mut app, egui::vec2(1200.0, 1400.0));
+        assert_eq!(app.exports.settings.keep, Default::default());
+        let (actions, _) = click(&mut app, painted.pos_of(t().export_keep_location));
+        let [UiAction::SetExportSettings(picked)] = &actions[..] else {
+            panic!("{actions:?}");
+        };
+        assert!(picked.keep.location && !picked.keep.identity);
+        assert_eq!(picked.copyright, app.exports.settings.copyright);
     }
 
     /// Typing a server URL and an API key into the Immich rows enables
@@ -1342,8 +1361,7 @@ mod form_tests {
         );
 
         app.exports.settings.album = AlbumChoice::New(String::new());
-        // Tall enough that the footer is on screen under the File section.
-        let painted = crate::app::test_support::settled_at(&mut app, egui::vec2(1200.0, 1400.0));
+        let painted = settled(&mut app);
         assert!(painted.has(t().album_name), "{:?}", painted.texts());
         assert_eq!(app.export_blocker(), Some(t().album_name_needed));
         assert!(

@@ -813,9 +813,9 @@ mod tests {
     /// A `w` x `h` grey JPEG whose EXIF holds `stamp`, as an export of a
     /// photo taken then would.
     pub(crate) fn dated_jpeg(w: u32, h: u32, stamp: Option<image_decode::CaptureStamp>) -> Vec<u8> {
-        use crate::export::metadata::{block, fields, MetadataPolicy, SourceMeta};
+        use crate::export::metadata::{block, fields, Keep, SourceMeta};
         let source = SourceMeta::from_parts(None, stamp);
-        let exif = block(&fields(&source, MetadataPolicy::All, "", w, h)).unwrap();
+        let exif = block(&fields(&source, Keep::default(), "", w, h)).unwrap();
         let rgba = vec![90u8; (w * h * 4) as usize];
         Prepared::new(w, h, Pixels::Rgba8(&rgba))
             .unwrap()

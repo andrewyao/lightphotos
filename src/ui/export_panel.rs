@@ -6,7 +6,7 @@ use crate::app::ImmichLink;
 use crate::develop::sharpen::{OutputAmount, OutputMedia, OutputSharpening};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::export::immich::Album;
-use crate::export::metadata::MetadataPolicy;
+use crate::export::metadata::MAX_COPYRIGHT_CHARS;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::export::AlbumChoice;
 use crate::export::{
@@ -39,6 +39,10 @@ pub(super) fn draw_export_panel(
             .default_size(300.0)
     };
     panel.show_inside(ui, |ui| {
+        // The footer stays on screen however long the form scrolls.
+        egui::Panel::bottom("export_footer")
+            .show_separator_line(false)
+            .show_inside(ui, |ui| export_footer(ui, app, settings, out));
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -48,6 +52,32 @@ pub(super) fn draw_export_panel(
     });
     if let Some(changed) = next {
         out.actions.push(UiAction::SetExportSettings(changed));
+    }
+}
+
+/// Cancel and Export, with why Export is off under them.
+fn export_footer(ui: &mut egui::Ui, app: &App, settings: &ExportSettings, out: &mut FrameOutput) {
+    let t = t();
+    let immich_unavailable =
+        cfg!(target_arch = "wasm32") && settings.target == ExportTarget::Immich;
+    let blocker = app.export_blocker();
+    let buttons = [
+        Button::new(t.cancel, Role::Cancel),
+        Button {
+            enabled: blocker.is_none(),
+            ..Button::new(t.export_run, Role::Primary)
+        },
+    ];
+    match form::footer(ui, &buttons) {
+        Some(Role::Cancel) => out.actions.push(UiAction::ToggleExportForm),
+        Some(_) => out.actions.push(UiAction::RunExport),
+        None => {}
+    }
+    // Under the buttons, because it says why Export is off.
+    if let Some(why) = blocker.filter(|_| !immich_unavailable) {
+        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+            form::hint(ui, why)
+        });
     }
 }
 
@@ -129,7 +159,11 @@ fn file_rows(
     };
     form.row(ui, t.export_naming, |ui| {
         let mut text = settings.naming.0.clone();
-        let field = ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY));
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .id_salt("export_naming")
+                .desired_width(f32::INFINITY),
+        );
         if field.changed() {
             *next = Some(ExportSettings {
                 naming: NameTemplate(text),
@@ -182,8 +216,8 @@ fn file_rows(
     }
 }
 
-/// What the files say about themselves: how much of each photo's metadata
-/// they keep, and a copyright line set once for every export.
+/// What the files say about themselves: the two sensitive parts of each
+/// photo's metadata, off unless chosen, and a copyright line set once.
 fn metadata_rows(
     ui: &mut egui::Ui,
     form: &Form,
@@ -191,34 +225,26 @@ fn metadata_rows(
     next: &mut Option<ExportSettings>,
 ) {
     let t = t();
-    let label = |p: MetadataPolicy| match p {
-        MetadataPolicy::All => t.export_metadata_all,
-        MetadataPolicy::AllButLocation => t.export_metadata_no_location,
-        MetadataPolicy::CopyrightOnly => t.export_metadata_copyright_only,
-        MetadataPolicy::None => t.export_metadata_none,
-    };
     form.row(ui, t.export_metadata_include, |ui| {
-        egui::ComboBox::from_id_salt("export_metadata")
-            .selected_text(label(settings.metadata))
-            .width(ui.available_width())
-            .show_ui(ui, |ui| {
-                for policy in MetadataPolicy::ALL {
-                    let on = settings.metadata == policy;
-                    if ui.selectable_label(on, label(policy)).clicked() && !on {
-                        *next = Some(ExportSettings {
-                            metadata: policy,
-                            ..settings.clone()
-                        });
-                    }
-                }
+        let mut keep = settings.keep;
+        let location = ui.checkbox(&mut keep.location, t.export_keep_location);
+        let identity = ui.checkbox(&mut keep.identity, t.export_keep_identity);
+        if location.changed() || identity.changed() {
+            *next = Some(ExportSettings {
+                keep,
+                ..settings.clone()
             });
+        }
+        form::hint(ui, t.export_keep_hint);
     });
-    if settings.metadata == MetadataPolicy::None {
-        return;
-    }
     form.row(ui, t.export_copyright, |ui| {
         let mut text = settings.copyright.clone();
-        let field = ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY));
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .id_salt("export_copyright")
+                .char_limit(MAX_COPYRIGHT_CHARS)
+                .desired_width(f32::INFINITY),
+        );
         if field.changed() {
             *next = Some(ExportSettings {
                 copyright: text,
@@ -306,26 +332,6 @@ fn draw_export_form(
         });
         form.section(ui, t.export_metadata, |ui| {
             metadata_rows(ui, &form, settings, next)
-        });
-    }
-
-    let blocker = app.export_blocker();
-    let buttons = [
-        Button::new(t.cancel, Role::Cancel),
-        Button {
-            enabled: blocker.is_none(),
-            ..Button::new(t.export_run, Role::Primary)
-        },
-    ];
-    match form::footer(ui, &buttons) {
-        Some(Role::Cancel) => out.actions.push(UiAction::ToggleExportForm),
-        Some(_) => out.actions.push(UiAction::RunExport),
-        None => {}
-    }
-    // Under the buttons, because it says why Export is off.
-    if let Some(why) = blocker.filter(|_| !immich_unavailable) {
-        ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
-            form::hint(ui, why)
         });
     }
 }

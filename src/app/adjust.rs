@@ -1136,7 +1136,7 @@ mod tests {
             };
             app.set_develop_tab(DevelopTab::Masks);
             let painted = press(&mut app, RailItem::Export);
-            assert!(painted.has(t.export_destination), "{:?}", painted.texts());
+            assert!(painted.has(t.export_run), "{:?}", painted.texts());
             assert_eq!(app.rail_lit(), Some(RailItem::Export));
             assert!(
                 rail_icon(&app, RailItem::Export).y > rail_icon(&app, RailItem::GroupCompare).y,
