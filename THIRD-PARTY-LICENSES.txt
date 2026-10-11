@@ -8322,6 +8322,12 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
 --------------------------------------------------------------------------------
 
+sRGB ICC profile (assets/icc/sRGB-v2-micro.icc), embedded in exported TIFF and
+WebP files. From https://github.com/saucecontrol/Compact-ICC-Profiles, released
+under CC0 1.0 Universal (public domain dedication).
+
+--------------------------------------------------------------------------------
+
 rawler 0.7.2 (LGPL-2.1, full text above). LightPhotos ships a modified copy.
 scripts/setup-vendor-rawler.sh fetches rawler 0.7.2 from crates.io and applies
 these patches from the patches/ directory:

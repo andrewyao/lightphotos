@@ -78,9 +78,9 @@ pub(crate) unsafe fn srgb_bitmap_context(
     Ok(unsafe { CFRetained::from_raw(std::ptr::NonNull::new_unchecked(ctx_ptr)) })
 }
 
-/// Create an sRGB bitmap context over opaque RGBX `data`, 8 or 16 bits per
-/// channel, the fourth channel ignored. 16-bit samples are little-endian.
-/// An encoder given this writes RGB with no alpha channel.
+/// Create an sRGB bitmap context over opaque RGBX `data`, 8 bits per
+/// channel, the fourth byte ignored. An encoder given this writes RGB with
+/// no alpha channel.
 ///
 /// # Safety
 /// `data` must hold at least `bytes_per_row * height` bytes and stay alive and
@@ -90,25 +90,19 @@ pub(crate) unsafe fn srgb_opaque_context(
     width: u32,
     height: u32,
     bytes_per_row: usize,
-    bits_per_channel: usize,
 ) -> Result<CFRetained<CGContext>, String> {
     // SAFETY: `kCGColorSpaceSRGB` is an immutable CoreGraphics constant that
     // lives for the whole process.
     let color_space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))
         .ok_or("could not create sRGB color space")?;
-    let order = match bits_per_channel {
-        8 => CGImageByteOrderInfo::Order32Big,
-        16 => CGImageByteOrderInfo::Order16Little,
-        _ => return Err(format!("no {bits_per_channel}-bit bitmap context")),
-    };
-    let bitmap_info: u32 = CGImageAlphaInfo::NoneSkipLast.0 | order.0;
+    let bitmap_info: u32 = CGImageAlphaInfo::NoneSkipLast.0 | CGImageByteOrderInfo::Order32Big.0;
     // SAFETY: the caller guarantees `data` covers `bytes_per_row * height`.
     let ctx_ptr = unsafe {
         CGBitmapContextCreate(
             data,
             width as usize,
             height as usize,
-            bits_per_channel,
+            8,
             bytes_per_row,
             &*color_space as *const CGColorSpace,
             bitmap_info,

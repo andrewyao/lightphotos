@@ -63,8 +63,12 @@ impl WebExports {
     }
 
     /// How many exports may run at once. One thread is left for the grid
-    /// and the Loupe.
-    pub fn capacity(&self, decoder: &WebDecoder) -> usize {
+    /// and the Loupe. A 16-bit TIFF holds its bake and the file at twice an
+    /// 8-bit export's size, so only one runs at a time.
+    pub fn capacity(&self, decoder: &WebDecoder, format: crate::export::ExportFormat) -> usize {
+        if format == crate::export::ExportFormat::Tiff16 {
+            return 1;
+        }
         decoder.threads().saturating_sub(1).clamp(1, MAX_IN_FLIGHT)
     }
 

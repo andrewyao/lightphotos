@@ -9,10 +9,13 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod immich;
+pub mod metadata;
 
 use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Mutex, PoisonError};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
 
@@ -20,6 +23,7 @@ use crate::decode::image_encode::{Encoding, Pixels};
 use crate::decode::{image_decode, image_encode};
 use crate::develop::sharpen::OutputSharpening;
 use crate::develop::{Adjustments, TouchUp};
+use metadata::{MetadataPolicy, SourceMeta};
 
 /// Subfolder of the current folder that exports go to, on every platform.
 pub const EXPORTS_DIR: &str = "Exports";
@@ -43,6 +47,12 @@ pub struct ExportSettings {
     pub jpeg_limit_kb: Option<u32>,
     #[serde(default)]
     pub naming: NameTemplate,
+    #[serde(default)]
+    pub metadata: MetadataPolicy,
+    /// Written into every export's EXIF in place of the photo's own, when
+    /// not blank.
+    #[serde(default)]
+    pub copyright: String,
 }
 
 impl ExportSettings {
@@ -52,19 +62,23 @@ impl ExportSettings {
             sharpen: self.sharpen,
             format: self.format.or_jpeg(),
             jpeg_limit_kb: self.jpeg_limit_kb,
+            metadata: self.metadata,
+            copyright: self.copyright.clone(),
         }
     }
 }
 
 /// What a baked export is shaped into after its edits: its size, then its
-/// output sharpening, then its file format.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// output sharpening, then its file format and what it says about itself.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Output {
     /// Long-edge limit; `u32::MAX` keeps full size.
     pub max_px: u32,
     pub sharpen: OutputSharpening,
     pub format: ExportFormat,
     pub jpeg_limit_kb: Option<u32>,
+    pub metadata: MetadataPolicy,
+    pub copyright: String,
 }
 
 impl Output {
@@ -77,6 +91,8 @@ impl Output {
         },
         format: ExportFormat::Jpeg,
         jpeg_limit_kb: None,
+        metadata: MetadataPolicy::AllButLocation,
+        copyright: String::new(),
     };
 }
 
@@ -304,13 +320,19 @@ pub fn bake_export(
     } else {
         image_decode::decode_nonraw_from_bytes(src_bytes, u32::MAX)?
     };
-    let stamp = image_decode::capture_stamp_from_bytes(src_bytes);
-    render(&img, adj, touchups, rot, output, stamp.as_ref())
+    render(
+        &img,
+        adj,
+        touchups,
+        rot,
+        &output,
+        &SourceMeta::read_bytes(src_bytes),
+    )
 }
 
 /// [`bake_export`] for the wasm32 export worker, which already owns the
 /// bytes in an `Arc` and passes it to rawler without copying. Like the
-/// desktop exporter, it writes the source's capture date into a JPEG's EXIF.
+/// desktop exporter, it carries the source's metadata as `output` says.
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
@@ -327,33 +349,58 @@ pub fn bake_export_from_shared_vec(
     } else {
         image_decode::decode_nonraw_from_bytes(src_bytes.as_slice(), u32::MAX)?
     };
-    let stamp = image_decode::capture_stamp_from_bytes(&src_bytes);
-    render(&img, adj, touchups, rot, output, stamp.as_ref())
+    render(
+        &img,
+        adj,
+        touchups,
+        rot,
+        &output,
+        &SourceMeta::read_bytes(&src_bytes),
+    )
 }
 
-/// Bake `img`'s edits, shape it per `output`, and encode it. A JPEG carries
-/// `taken` in its EXIF.
+/// Held while a 16-bit TIFF decodes, bakes and encodes. Its u16 bake, RGB
+/// copy and file are each twice an 8-bit export's, about 600 MB at 24 MP,
+/// so the desktop pool runs them one at a time. The browser holds them to
+/// one in flight instead (`WebExports::capacity`).
+#[cfg(not(target_arch = "wasm32"))]
+static TIFF16_GATE: Mutex<()> = Mutex::new(());
+
+/// Bake `img`'s edits, shape it per `output`, and encode it with the EXIF
+/// block `output`'s policy makes of `source`.
 fn render(
     img: &image_decode::DecodedImage,
     adj: &Adjustments,
     touchups: &[TouchUp],
     rot: u8,
-    output: Output,
-    taken: Option<&image_decode::CaptureStamp>,
+    output: &Output,
+    source: &SourceMeta,
 ) -> Result<Vec<u8>, String> {
+    let exif = |w, h| {
+        let fields = metadata::fields(source, output.metadata, &output.copyright, w, h);
+        let block = metadata::block(&fields)?;
+        // A JPEG's EXIF segment, and the carrier macOS reads AVIF's from,
+        // hold 64 KB; past that the date and copyright still go in.
+        let capped = matches!(output.format, ExportFormat::Jpeg | ExportFormat::Avif);
+        match block {
+            Some(b) if capped && b.len() > image_encode::MAX_JPEG_EXIF => {
+                metadata::block(&metadata::essential(&fields))
+            }
+            block => Ok(block),
+        }
+    };
     if output.format == ExportFormat::Tiff16 {
         let (w, h, rgba) = bake_sized::<u16>(img, adj, touchups, rot, output);
-        return image_encode::encode(Encoding::Tiff, w, h, Pixels::Rgba16(&rgba));
+        let prepared = image_encode::Prepared::new(w, h, Pixels::Rgba16(&rgba))?;
+        return prepared.encode(Encoding::Tiff, exif(w, h)?.as_deref());
     }
     let (w, h, rgba) = bake_sized::<u8>(img, adj, touchups, rot, output);
     let prepared = image_encode::Prepared::new(w, h, Pixels::Rgba8(&rgba))?;
+    let exif = exif(w, h)?;
     if output.format != ExportFormat::Jpeg {
-        return prepared.encode(output.format.encoding(None));
+        return prepared.encode(output.format.encoding(None), exif.as_deref());
     }
-    let jpeg = |quality| {
-        let bytes = prepared.encode(Encoding::Jpeg(quality))?;
-        Ok::<_, String>(image_encode::with_exif(&bytes, w, h, taken))
-    };
+    let jpeg = |quality| prepared.encode(Encoding::Jpeg(quality), exif.as_deref());
     match output.jpeg_limit_kb {
         None => jpeg(None),
         Some(kb) => within_limit(kb, jpeg),
@@ -398,7 +445,7 @@ fn bake_sized<S: crate::develop::image_ops::Sample>(
     adj: &Adjustments,
     touchups: &[TouchUp],
     rot: u8,
-    output: Output,
+    output: &Output,
 ) -> (u32, u32, Vec<S>) {
     let (w, h, rgba) = crate::develop::image_ops::bake_edited_as::<S>(img, adj, touchups, rot);
     let (w, h, mut rgba) = crate::develop::image_ops::fit_long_edge(w, h, rgba, output.max_px);
@@ -522,16 +569,13 @@ impl Default for Exporter {
 #[cfg(not(target_arch = "wasm32"))]
 #[hotpath::measure]
 fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
+    // Taken before the decode, so the workers waiting their turn hold no
+    // full-size image either.
+    let _one_at_a_time = (job.output.format == ExportFormat::Tiff16)
+        .then(|| TIFF16_GATE.lock().unwrap_or_else(PoisonError::into_inner));
     let img = decode_job(job)?;
-    let stamp = image_decode::capture_stamp(&job.src);
-    let file = render(
-        &img,
-        &job.adj,
-        &job.touchups,
-        job.rot,
-        job.output,
-        stamp.as_ref(),
-    )?;
+    let source = SourceMeta::read_path(&job.src);
+    let file = render(&img, &job.adj, &job.touchups, job.rot, &job.output, &source)?;
     match &job.dest {
         ExportDest::Folder(dest) => {
             crate::paths::write_atomic(dest, &file).map_err(|e| format!("write: {e}"))?;
@@ -546,7 +590,8 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
             // camera's clock. This is the fallback it uses when that is
             // missing, so it has to be a real instant: the capture time when
             // the camera recorded its offset, else when the file was written.
-            let taken = stamp
+            let taken = source
+                .stamp()
                 .and_then(|s| s.instant())
                 .or_else(|| std::fs::metadata(&job.src).and_then(|m| m.modified()).ok())
                 .unwrap_or_else(SystemTime::now);
@@ -725,10 +770,10 @@ mod tests {
                 media: OutputMedia::Screen,
                 amount: OutputAmount::High,
             },
-            ..small
+            ..small.clone()
         };
-        let (pw, ph, plain) = bake_sized::<u8>(&img, &Adjustments::default(), &[], 0, small);
-        let (sw, sh, sharpened) = bake_sized::<u8>(&img, &Adjustments::default(), &[], 0, sharp);
+        let (pw, ph, plain) = bake_sized::<u8>(&img, &Adjustments::default(), &[], 0, &small);
+        let (sw, sh, sharpened) = bake_sized::<u8>(&img, &Adjustments::default(), &[], 0, &sharp);
         assert_eq!((pw, ph), (32, 16));
         assert_eq!((sw, sh), (32, 16));
         let mut after_resize = plain.clone();
@@ -773,8 +818,15 @@ mod tests {
                 format,
                 ..Output::FULL
             };
-            let bytes = render(&img, &Adjustments::default(), &[], 1, output, None)
-                .unwrap_or_else(|e| panic!("{format:?}: {e}"));
+            let bytes = render(
+                &img,
+                &Adjustments::default(),
+                &[],
+                1,
+                &output,
+                &SourceMeta::default(),
+            )
+            .unwrap_or_else(|e| panic!("{format:?}: {e}"));
             let magic_ok = match format {
                 ExportFormat::Jpeg => bytes.starts_with(&[0xFF, 0xD8]),
                 ExportFormat::Png => bytes.starts_with(b"\x89PNG"),
@@ -802,8 +854,8 @@ mod tests {
             exposure: 0.37,
             ..Adjustments::default()
         };
-        let (w, h, deep) = bake_sized::<u16>(&img, &adj, &[], 0, Output::FULL);
-        let (_, _, shallow) = bake_sized::<u8>(&img, &adj, &[], 0, Output::FULL);
+        let (w, h, deep) = bake_sized::<u16>(&img, &adj, &[], 0, &Output::FULL);
+        let (_, _, shallow) = bake_sized::<u8>(&img, &adj, &[], 0, &Output::FULL);
         assert_eq!((w, h), (256, 4));
         let between = deep.iter().filter(|&&v| v % 257 != 0).count();
         assert!(
@@ -843,11 +895,11 @@ mod tests {
                 &Adjustments::default(),
                 &[],
                 0,
-                Output {
+                &Output {
                     jpeg_limit_kb: kb,
                     ..Output::FULL
                 },
-                None,
+                &SourceMeta::default(),
             )
         };
         let free = at(None).unwrap();
@@ -863,6 +915,170 @@ mod tests {
             "not needlessly small"
         );
         assert!(at(Some(1)).is_err(), "noise does not fit in 1 KB");
+    }
+
+    /// Every format this build writes carries the metadata its policy
+    /// keeps, read back by a reader that is not ours: GPS only under All,
+    /// the copyright line under all but None, and nothing under None.
+    #[test]
+    fn every_format_carries_what_the_metadata_policy_keeps() {
+        use exif::{Field, In, Tag, Value};
+        let f = |tag, value| Field {
+            tag,
+            ifd_num: In::PRIMARY,
+            value,
+        };
+        let ascii = |s: &str| Value::Ascii(vec![s.as_bytes().to_vec()]);
+        let camera = [
+            f(Tag::Make, ascii("TestCam")),
+            f(Tag::DateTimeOriginal, ascii("2024:06:01 18:04:05")),
+            f(Tag::GPSLatitudeRef, ascii("N")),
+            f(Tag::Copyright, ascii("Source")),
+        ];
+        let blob = metadata::block(&camera).unwrap().unwrap();
+        let source =
+            || SourceMeta::from_parts(exif::Reader::new().read_raw(blob.clone()).ok(), None);
+        let img = gradient(40, 30);
+        for format in ExportFormat::available() {
+            for policy in MetadataPolicy::ALL {
+                let output = Output {
+                    format,
+                    metadata: policy,
+                    copyright: "© 2026 Ada".into(),
+                    ..Output::FULL
+                };
+                let bytes = render(&img, &Adjustments::default(), &[], 0, &output, &source())
+                    .unwrap_or_else(|e| panic!("{format:?} {policy:?}: {e}"));
+                let read =
+                    exif::Reader::new().read_from_container(&mut std::io::Cursor::new(&bytes));
+                // The exif crate reads no AVIF; macOS's ImageIO checks those.
+                if format == ExportFormat::Avif {
+                    assert!(
+                        bytes.windows(4).any(|w| w == b"Exif") == (policy != MetadataPolicy::None)
+                    );
+                    continue;
+                }
+                let has = |tag| {
+                    read.as_ref()
+                        .is_ok_and(|e| e.get_field(tag, In::PRIMARY).is_some())
+                };
+                let what = format!("{format:?} {policy:?}");
+                assert_eq!(
+                    has(Tag::GPSLatitudeRef),
+                    policy == MetadataPolicy::All,
+                    "{what}"
+                );
+                assert_eq!(
+                    has(Tag::Make),
+                    matches!(policy, MetadataPolicy::All | MetadataPolicy::AllButLocation),
+                    "{what}"
+                );
+                assert_eq!(
+                    has(Tag::Copyright),
+                    policy != MetadataPolicy::None,
+                    "{what}"
+                );
+                assert_eq!(
+                    has(Tag::DateTimeOriginal),
+                    policy != MetadataPolicy::None,
+                    "{what}: every policy but None keeps the capture date"
+                );
+                if let Ok(e) = &read {
+                    if let Some(c) = e.get_field(Tag::Copyright, In::PRIMARY) {
+                        let text = match &c.value {
+                            Value::Ascii(v) => v.first().cloned().unwrap_or_default(),
+                            _ => Vec::new(),
+                        };
+                        assert_eq!(text, "© 2026 Ada".as_bytes(), "{what}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A 16-bit TIFF export waits, before it decodes anything, while
+    /// another holds the gate.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn sixteen_bit_tiffs_export_one_at_a_time() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let dir = scratch_dir("tiff-gate");
+        let src = dir.join("src.jpg");
+        image_encode::encode_jpeg(
+            &src,
+            16,
+            8,
+            &[128u8; 16 * 8 * 4],
+            image_encode::JpegQuality::Export,
+        )
+        .unwrap();
+        let job = ExportJob {
+            src,
+            dest: ExportDest::Folder(dir.join("out.tif")),
+            adj: Default::default(),
+            touchups: Vec::new(),
+            rot: 0,
+            output: Output {
+                format: ExportFormat::Tiff16,
+                ..Output::FULL
+            },
+        };
+        let held = TIFF16_GATE.lock().unwrap();
+        let (done_tx, done_rx) = channel();
+        let worker = std::thread::spawn(move || {
+            done_tx.send(do_export(&job).is_ok()).unwrap();
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a second TIFF waits for the first"
+        );
+        drop(held);
+        assert_eq!(done_rx.recv_timeout(Duration::from_secs(10)), Ok(true));
+        worker.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A source whose EXIF would overflow a JPEG's 64 KB segment still
+    /// exports with its date and the copyright line.
+    #[test]
+    fn an_oversized_exif_block_keeps_the_date_and_copyright_in_a_jpeg() {
+        use exif::{Field, In, Tag, Value};
+        let f = |tag, value| Field {
+            tag,
+            ifd_num: In::PRIMARY,
+            value,
+        };
+        let camera = [
+            f(Tag::Make, Value::Ascii(vec![b"TestCam".to_vec()])),
+            f(
+                Tag::DateTimeOriginal,
+                Value::Ascii(vec![b"2024:06:01 18:04:05".to_vec()]),
+            ),
+            f(Tag::UserComment, Value::Undefined(vec![b'x'; 70_000], 0)),
+        ];
+        let blob = metadata::block(&camera).unwrap().unwrap();
+        let source = SourceMeta::from_parts(exif::Reader::new().read_raw(blob).ok(), None);
+        let output = Output {
+            metadata: MetadataPolicy::All,
+            copyright: "Ada".into(),
+            ..Output::FULL
+        };
+        let jpeg = render(
+            &gradient(8, 8),
+            &Adjustments::default(),
+            &[],
+            0,
+            &output,
+            &source,
+        )
+        .unwrap();
+        let back = exif::Reader::new()
+            .read_from_container(&mut std::io::Cursor::new(&jpeg))
+            .unwrap();
+        assert!(back.get_field(Tag::DateTimeOriginal, In::PRIMARY).is_some());
+        assert!(back.get_field(Tag::Copyright, In::PRIMARY).is_some());
+        assert!(back.get_field(Tag::UserComment, In::PRIMARY).is_none());
     }
 
     #[test]

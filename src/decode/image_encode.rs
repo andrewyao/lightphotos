@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Encode RGBA8 pixels to JPEG. macOS uses ImageIO through a CoreGraphics
-//! bitmap context. Other targets use the pure-Rust `mozjpeg-rs` encoder.
-//! Export and the on-disk thumbnail cache both write through here, each at
-//! its own [`JpegQuality`].
+//! Encode baked pixels. JPEG serves export and the on-disk thumbnail cache,
+//! each at its own [`JpegQuality`]; macOS writes it and PNG through ImageIO,
+//! other targets through `mozjpeg-rs` and the `image` crate. Exports also
+//! write 16-bit TIFF through `kamadak-exif`'s TIFF writer, lossless WebP
+//! through `image-webp` and AVIF through `ravif`, each with an EXIF block.
 
 use std::path::Path;
 
@@ -191,6 +192,16 @@ impl Pixels<'_> {
         Ok(())
     }
 
+    /// RGBA at 8 bits per channel; a 16-bit sample keeps its high byte.
+    #[cfg(target_os = "macos")]
+    fn rgbx8(self, width: u32, height: u32) -> Vec<u8> {
+        let n = width as usize * height as usize * 4;
+        match self {
+            Pixels::Rgba8(p) => p.iter().take(n).copied().collect(),
+            Pixels::Rgba16(p) => p.iter().take(n).map(|c| (c >> 8) as u8).collect(),
+        }
+    }
+
     /// RGB without the alpha byte, 8 bits per channel; a 16-bit sample keeps
     /// its high byte.
     fn rgb8(self, width: u32, height: u32) -> Vec<u8> {
@@ -228,17 +239,11 @@ pub enum Encoding {
     Avif,
 }
 
-/// Whether this build, on this machine, can write `enc`. macOS asks ImageIO,
-/// which writes AVIF only on recent systems.
+/// Whether this build, on this machine, can write `enc`. macOS asks
+/// ImageIO, which writes AVIF only on recent systems.
 pub fn can_encode(enc: Encoding) -> bool {
     match enc {
-        Encoding::Jpeg(_) | Encoding::Png | Encoding::Webp => true,
-        #[cfg(not(target_arch = "wasm32"))]
-        Encoding::Tiff => true,
-        // A 16-bit bake and its TIFF copies, per export in flight, can run
-        // the tab's one 4 GB heap out on a 24 MP RAW.
-        #[cfg(target_arch = "wasm32")]
-        Encoding::Tiff => false,
+        Encoding::Jpeg(_) | Encoding::Png | Encoding::Tiff | Encoding::Webp => true,
         #[cfg(target_os = "macos")]
         Encoding::Avif => {
             static AVIF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -246,7 +251,7 @@ pub fn can_encode(enc: Encoding) -> bool {
         }
         #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
         Encoding::Avif => true,
-        // rav1e in a browser tab runs one 24 MP frame for minutes.
+        // rav1e on a browser's threads takes minutes per frame.
         #[cfg(target_arch = "wasm32")]
         Encoding::Avif => false,
     }
@@ -262,11 +267,19 @@ fn imageio_writes(uti: &str) -> bool {
     (0..types.len()).any(|i| types.get(i).is_some_and(|t| t.to_string() == uti))
 }
 
-/// Encode `pixels` as `enc`. JPEG, PNG and WebP keep 8 bits per channel;
-/// TIFF keeps 16 when given them.
+/// sRGB IEC 61966-2.1 as a 456-byte ICC v2 profile (CC0, from
+/// saucecontrol/Compact-ICC-Profiles), for formats whose readers assume
+/// nothing without one: TIFF and WebP.
+const SRGB_ICC: &[u8] = include_bytes!("../../assets/icc/sRGB-v2-micro.icc");
+
+/// Encode `pixels` as `enc` with no metadata. JPEG, PNG and WebP keep 8
+/// bits per channel; TIFF keeps 16 when given them.
 pub fn encode(enc: Encoding, width: u32, height: u32, pixels: Pixels) -> Result<Vec<u8>, String> {
-    Prepared::new(width, height, pixels)?.encode(enc)
+    Prepared::new(width, height, pixels)?.encode(enc, None)
 }
+
+/// The largest EXIF block a JPEG's APP1 segment holds, after its `Exif\0\0`.
+pub const MAX_JPEG_EXIF: usize = 65535 - 2 - 6;
 
 /// Pixels checked and ready to encode, more than once if need be: a JPEG
 /// held to a size limit is encoded at several qualities, and on macOS the
@@ -291,73 +304,107 @@ impl<'a> Prepared<'a> {
         })
     }
 
-    pub fn encode(&self, enc: Encoding) -> Result<Vec<u8>, String> {
+    /// Encode as `enc`, carrying `exif` (a TIFF-structured EXIF block, see
+    /// `export::metadata::block`) where the format keeps one. Any EXIF the
+    /// encoder wrote itself is replaced, or dropped when `exif` is `None`.
+    pub fn encode(&self, enc: Encoding, exif: Option<&[u8]>) -> Result<Vec<u8>, String> {
         if !can_encode(enc) {
             return Err(format!("this build cannot write {enc:?}"));
         }
         let (width, height, pixels) = (self.width, self.height, self.pixels);
         match enc {
-            Encoding::Webp => encode_webp(width, height, &pixels.rgb8(width, height)),
-            #[cfg(target_os = "macos")]
-            Encoding::Jpeg(q) => self.encode_imageio("public.jpeg", q),
-            #[cfg(target_os = "macos")]
-            Encoding::Png => self.encode_imageio("public.png", None),
-            #[cfg(target_os = "macos")]
-            Encoding::Tiff => self.encode_imageio("public.tiff", None),
-            #[cfg(target_os = "macos")]
-            Encoding::Avif => self.encode_imageio("public.avif", None),
-            #[cfg(not(target_os = "macos"))]
             Encoding::Jpeg(q) => {
-                let rgba = match pixels {
-                    Pixels::Rgba8(p) => std::borrow::Cow::Borrowed(p),
-                    Pixels::Rgba16(p) => {
-                        std::borrow::Cow::Owned(p.iter().map(|c| (c >> 8) as u8).collect())
-                    }
-                };
-                mozjpeg_rs::Encoder::new(mozjpeg_rs::Preset::default())
-                    .quality(q.unwrap_or(EXPORT_QUALITY))
-                    .encode_rgba(&rgba, width, height)
-                    .map_err(|e| e.to_string())
+                let jpeg = self.jpeg(q)?;
+                let exif = exif.filter(|e| e.len() <= MAX_JPEG_EXIF);
+                let app1 = exif.map_or_else(Vec::new, |e| {
+                    let mut app1 = vec![0xFF, 0xE1];
+                    app1.extend_from_slice(&((2 + 6 + e.len()) as u16).to_be_bytes());
+                    app1.extend_from_slice(b"Exif\0\0");
+                    app1.extend_from_slice(e);
+                    app1
+                });
+                Ok(splice_app1(&jpeg, &app1))
             }
-            #[cfg(not(target_os = "macos"))]
-            Encoding::Png => encode_with_image(
-                image::ImageFormat::Png,
-                image::DynamicImage::ImageRgb8(rgb8_image(width, height, pixels)?),
-            ),
-            #[cfg(not(target_os = "macos"))]
-            Encoding::Tiff => {
-                let img = match pixels {
-                    Pixels::Rgba16(p) => {
-                        let n = width as usize * height as usize;
-                        let rgb: Vec<u16> = p
-                            .as_chunks::<4>()
-                            .0
-                            .iter()
-                            .take(n)
-                            .flat_map(|&[r, g, b, _]| [r, g, b])
-                            .collect();
-                        image::DynamicImage::ImageRgb16(
-                            image::ImageBuffer::from_raw(width, height, rgb)
-                                .ok_or("pixel buffer does not fit the image")?,
-                        )
-                    }
-                    Pixels::Rgba8(_) => {
-                        image::DynamicImage::ImageRgb8(rgb8_image(width, height, pixels)?)
-                    }
-                };
-                encode_with_image(image::ImageFormat::Tiff, img)
+            Encoding::Png => Ok(with_png_exif(&self.png()?, exif)),
+            Encoding::Webp => {
+                let mut out = Vec::new();
+                let mut encoder = image_webp::WebPEncoder::new(&mut out);
+                encoder.set_icc_profile(SRGB_ICC.to_vec());
+                if let Some(e) = exif {
+                    encoder.set_exif_metadata(e.to_vec());
+                }
+                encoder
+                    .encode(
+                        &pixels.rgb8(width, height),
+                        width,
+                        height,
+                        image_webp::ColorType::Rgb8,
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(out)
             }
+            Encoding::Tiff => encode_tiff(width, height, pixels, exif),
+            #[cfg(target_os = "macos")]
+            Encoding::Avif => self.encode_imageio("public.avif", None, exif),
             #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-            Encoding::Avif => encode_avif(width, height, &pixels.rgb8(width, height)),
+            Encoding::Avif => encode_avif(width, height, &pixels.rgb8(width, height), exif),
             #[cfg(target_arch = "wasm32")]
-            Encoding::Avif => Err("this build cannot write AVIF".into()),
+            Encoding::Avif => Err(format!("this build cannot write {enc:?}")),
         }
     }
 
-    /// Encode through ImageIO into memory. `quality` is 1 to 100, for a
-    /// lossy format; `None` keeps ImageIO's default.
     #[cfg(target_os = "macos")]
-    fn encode_imageio(&self, uti: &str, quality: Option<u8>) -> Result<Vec<u8>, String> {
+    fn jpeg(&self, quality: Option<u8>) -> Result<Vec<u8>, String> {
+        self.encode_imageio("public.jpeg", quality, None)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn png(&self) -> Result<Vec<u8>, String> {
+        self.encode_imageio("public.png", None, None)
+    }
+
+    /// Borrows 8-bit pixels as they are, so a size-limited export's
+    /// quality tries copy nothing.
+    #[cfg(not(target_os = "macos"))]
+    fn jpeg(&self, quality: Option<u8>) -> Result<Vec<u8>, String> {
+        let rgba = match self.pixels {
+            Pixels::Rgba8(p) => std::borrow::Cow::Borrowed(p),
+            Pixels::Rgba16(p) => {
+                std::borrow::Cow::Owned(p.iter().map(|c| (c >> 8) as u8).collect())
+            }
+        };
+        mozjpeg_rs::Encoder::new(mozjpeg_rs::Preset::default())
+            .quality(quality.unwrap_or(EXPORT_QUALITY))
+            .encode_rgba(&rgba, self.width, self.height)
+            .map_err(|e| e.to_string())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn png(&self) -> Result<Vec<u8>, String> {
+        let img = image::RgbImage::from_raw(
+            self.width,
+            self.height,
+            self.pixels.rgb8(self.width, self.height),
+        )
+        .ok_or("pixel buffer does not fit the image")?;
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        Ok(out.into_inner())
+    }
+
+    /// Encode through ImageIO into memory. `quality` is 1 to 100, for a
+    /// lossy format; `None` keeps ImageIO's default. `exif` goes in as the
+    /// properties ImageIO reads from it, for a format with no EXIF segment
+    /// of its own to splice.
+    #[cfg(target_os = "macos")]
+    fn encode_imageio(
+        &self,
+        uti: &str,
+        quality: Option<u8>,
+        exif: Option<&[u8]>,
+    ) -> Result<Vec<u8>, String> {
         let image = match self.image.get() {
             Some(image) => image,
             None => {
@@ -370,9 +417,13 @@ impl<'a> Prepared<'a> {
         let dest =
             unsafe { CGImageDestination::with_data(&data, &CFString::from_str(uti), 1, None) }
                 .ok_or_else(|| format!("ImageIO cannot write {uti}"))?;
-        let properties = quality
-            .map(|q| lossy_quality_properties(f64::from(q.clamp(1, 100)) / 100.0))
-            .transpose()?;
+        let properties = match (quality, exif) {
+            (Some(q), _) => Some(lossy_quality_properties(
+                f64::from(q.clamp(1, 100)) / 100.0,
+            )?),
+            (None, Some(e)) => Some(exif_properties(e)?),
+            (None, None) => None,
+        };
         // SAFETY: dest/image are valid; properties, if any, map a documented
         // destination key to a CFNumber.
         unsafe { CGImageDestination::add_image(&dest, image, properties.as_deref()) };
@@ -383,28 +434,40 @@ impl<'a> Prepared<'a> {
         Ok(data.to_vec())
     }
 
-    /// The pixels as an opaque sRGB `CGImage`. 16-bit samples go in
-    /// little-endian, which is every Mac's own order.
+    /// The pixels as an opaque 8-bit sRGB `CGImage`.
     #[cfg(target_os = "macos")]
     fn cg_image(&self) -> Result<CFRetained<objc2_core_graphics::CGImage>, String> {
-        let (mut buffer, bits): (Vec<u8>, usize) = match self.pixels {
-            Pixels::Rgba8(p) => (p.to_vec(), 8),
-            Pixels::Rgba16(p) => (bytemuck::cast_slice::<u16, u8>(p).to_vec(), 16),
-        };
-        let bytes_per_row = self.width as usize * 4 * bits / 8;
-        // SAFETY: buffer holds width*height RGBX samples of `bits` each,
-        // checked by `Pixels::check`, and outlives `ctx`.
+        let mut buffer = self.pixels.rgbx8(self.width, self.height);
+        // SAFETY: buffer holds width*height RGBX bytes, checked by
+        // `Pixels::check`, and outlives `ctx`.
         let ctx = unsafe {
             coregraphics::srgb_opaque_context(
                 buffer.as_mut_ptr() as *mut c_void,
                 self.width,
                 self.height,
-                bytes_per_row,
-                bits,
+                self.width as usize * 4,
             )?
         };
         coregraphics::bitmap_context_image(&ctx)
     }
+}
+
+/// What ImageIO reads from `exif`: the dictionaries of a one-pixel JPEG that
+/// carries it, handed to a destination as the image's properties.
+#[cfg(target_os = "macos")]
+fn exif_properties(exif: &[u8]) -> Result<CFRetained<CFDictionary>, String> {
+    if exif.len() > MAX_JPEG_EXIF {
+        return Err("EXIF block too large".into());
+    }
+    let carrier = Prepared::new(1, 1, Pixels::Rgba8(&[0, 0, 0, 255]))?
+        .encode(Encoding::Jpeg(None), Some(exif))?;
+    let data = objc2_core_foundation::CFData::from_bytes(&carrier);
+    // SAFETY: data is a valid CFData and no options are passed.
+    let source = unsafe { objc2_image_io::CGImageSource::with_data(&data, None) }
+        .ok_or("ImageIO could not read the EXIF block")?;
+    // SAFETY: index 0 exists in a one-image JPEG and no options are passed.
+    unsafe { source.properties_at_index(0, None) }
+        .ok_or_else(|| "ImageIO found no properties".into())
 }
 
 /// The quality of an export JPEG with no size limit. macOS passes none and
@@ -412,42 +475,99 @@ impl<'a> Prepared<'a> {
 #[cfg(not(target_os = "macos"))]
 const EXPORT_QUALITY: u8 = 90;
 
-fn encode_webp(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    image_webp::WebPEncoder::new(&mut out)
-        .encode(rgb, width, height, image_webp::ColorType::Rgb8)
-        .map_err(|e| e.to_string())?;
-    Ok(out)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn rgb8_image(width: u32, height: u32, pixels: Pixels) -> Result<image::RgbImage, String> {
-    image::RgbImage::from_raw(width, height, pixels.rgb8(width, height))
-        .ok_or_else(|| "pixel buffer does not fit the image".into())
-}
-
-#[cfg(not(target_os = "macos"))]
-fn encode_with_image(
-    format: image::ImageFormat,
-    img: image::DynamicImage,
+/// A TIFF of `pixels`, RGB at 8 or 16 bits per channel, little-endian,
+/// uncompressed, with `exif`'s fields in its own directories.
+fn encode_tiff(
+    width: u32,
+    height: u32,
+    pixels: Pixels,
+    exif: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
+    use exif::{Field, In, Tag, Value};
+    let n = width as usize * height as usize;
+    let (samples, bits): (Vec<u8>, u16) = match pixels {
+        Pixels::Rgba8(_) => (pixels.rgb8(width, height), 8),
+        Pixels::Rgba16(p) => (
+            p.as_chunks::<4>()
+                .0
+                .iter()
+                .take(n)
+                .flat_map(|&[r, g, b, _]| [r, g, b])
+                .flat_map(u16::to_le_bytes)
+                .collect(),
+            16,
+        ),
+    };
+    let row_bytes = width as usize * 3 * usize::from(bits / 8);
+    // About 1 MB per strip, as most writers do.
+    let rows = (1 << 20) / row_bytes.max(1);
+    let rows = rows.clamp(1, height as usize);
+    let strips: Vec<&[u8]> = samples.chunks(rows * row_bytes).collect();
+
+    let source: Vec<Field> = match exif {
+        Some(block) => exif::Reader::new()
+            .read_raw(block.to_vec())
+            .map_err(|e| format!("EXIF: {e}"))?
+            .fields()
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
+    let field = |tag, value| Field {
+        tag,
+        ifd_num: In::PRIMARY,
+        value,
+    };
+    let own = [
+        field(Tag::ImageWidth, Value::Long(vec![width])),
+        field(Tag::ImageLength, Value::Long(vec![height])),
+        field(Tag::BitsPerSample, Value::Short(vec![bits; 3])),
+        field(Tag::Compression, Value::Short(vec![1])),
+        field(Tag::PhotometricInterpretation, Value::Short(vec![2])),
+        field(Tag::SamplesPerPixel, Value::Short(vec![3])),
+        field(Tag::RowsPerStrip, Value::Long(vec![rows as u32])),
+        field(Tag::PlanarConfiguration, Value::Short(vec![1])),
+        // InterColorProfile, which `exif` has no name for.
+        field(
+            Tag(exif::Context::Tiff, 0x8773),
+            Value::Undefined(SRGB_ICC.to_vec(), 0),
+        ),
+    ];
+    let mut writer = exif::experimental::Writer::new();
+    for f in own.iter().chain(
+        source
+            .iter()
+            .filter(|f| !own.iter().any(|o| o.tag == f.tag)),
+    ) {
+        writer.push_field(f);
+    }
+    writer.set_strips(&strips, In::PRIMARY);
     let mut out = std::io::Cursor::new(Vec::new());
-    img.write_to(&mut out, format).map_err(|e| e.to_string())?;
+    writer
+        .write(&mut out, true)
+        .map_err(|e| format!("TIFF: {e}"))?;
     Ok(out.into_inner())
 }
 
 /// AVIF through rav1e at quality 80 and speed 6, the middle of its range.
 #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-fn encode_avif(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
+fn encode_avif(
+    width: u32,
+    height: u32,
+    rgb: &[u8],
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
     let px: Vec<ravif::RGB8> = rgb
         .as_chunks::<3>()
         .0
         .iter()
         .map(|&[r, g, b]| ravif::RGB8 { r, g, b })
         .collect();
-    ravif::Encoder::new()
-        .with_quality(80.0)
-        .with_speed(6)
+    let mut encoder = ravif::Encoder::new().with_quality(80.0).with_speed(6);
+    if let Some(e) = exif {
+        encoder = encoder.with_exif(e);
+    }
+    encoder
         .encode_rgb(ravif::Img::new(
             px.as_slice(),
             width as usize,
@@ -457,81 +577,67 @@ fn encode_avif(width: u32, height: u32, rgb: &[u8]) -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// `jpeg` with its EXIF block replaced by one this app writes: sRGB, the pixel
-/// size, and the capture date when `taken` has one. The pixels are already
-/// upright, so there is no orientation tag, and nothing else from the source
-/// carries over. Without the date an export would lose it, and Immich would
-/// file an upload under the day it was exported.
-pub fn with_exif(
-    jpeg: &[u8],
-    width: u32,
-    height: u32,
-    taken: Option<&crate::decode::image_decode::CaptureStamp>,
-) -> Vec<u8> {
-    const ASCII: u16 = 2;
-    const SHORT: u16 = 3;
-    const LONG: u16 = 4;
-    const UNDEFINED: u16 = 7;
-    let ascii = |s: &str| {
-        let mut v = s.as_bytes().to_vec();
-        v.push(0);
-        v
-    };
-    // Sorted by tag, as TIFF requires. The offset tags are EXIF 2.31.
-    let mut exif_ifd: Vec<(u16, u16, Vec<u8>)> = vec![(0x9000, UNDEFINED, b"0231".to_vec())];
-    if let Some(stamp) = taken {
-        exif_ifd.push((0x9003, ASCII, ascii(&stamp.local)));
-        if let Some(offset) = &stamp.offset {
-            exif_ifd.push((0x9011, ASCII, ascii(offset)));
-        }
+/// `png` with its eXIf chunks replaced by one holding `exif`, placed after
+/// IHDR, or dropped when `exif` is `None`, and an `sRGB` chunk after IHDR
+/// when the encoder named no colour space. Returns `png` unchanged if its
+/// chunks don't parse.
+fn with_png_exif(png: &[u8], exif: Option<&[u8]>) -> Vec<u8> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    if !png.starts_with(SIGNATURE) {
+        return png.to_vec();
     }
-    exif_ifd.push((0xA001, SHORT, 1u16.to_be_bytes().to_vec()));
-    exif_ifd.push((0xA002, LONG, width.to_be_bytes().to_vec()));
-    exif_ifd.push((0xA003, LONG, height.to_be_bytes().to_vec()));
-
-    // Big-endian TIFF: header, IFD0 holding only the pointer to the EXIF IFD,
-    // then the EXIF IFD and the values too long to sit in an entry.
-    const EXIF_IFD_AT: u32 = 8 + 2 + 12 + 4;
-    let mut tiff = b"MM\0\x2a\0\0\0\x08\0\x01".to_vec();
-    tiff.extend_from_slice(&0x8769u16.to_be_bytes());
-    tiff.extend_from_slice(&LONG.to_be_bytes());
-    tiff.extend_from_slice(&1u32.to_be_bytes());
-    tiff.extend_from_slice(&EXIF_IFD_AT.to_be_bytes());
-    tiff.extend_from_slice(&0u32.to_be_bytes());
-
-    let mut data_at = EXIF_IFD_AT + 2 + 12 * exif_ifd.len() as u32 + 4;
-    let mut data = Vec::new();
-    tiff.extend_from_slice(&(exif_ifd.len() as u16).to_be_bytes());
-    for (tag, kind, value) in &exif_ifd {
-        let unit = match *kind {
-            SHORT => 2,
-            LONG => 4,
-            _ => 1,
+    let tagged = [b"sRGB", b"iCCP"]
+        .iter()
+        .any(|kind| png.windows(4).any(|w| w == *kind));
+    let mut out = SIGNATURE.to_vec();
+    let mut i = SIGNATURE.len();
+    while let Some(head) = png.get(i..i + 8) {
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        let Some(chunk) = len
+            .checked_add(12)
+            .and_then(|total| png.get(i..i.checked_add(total)?))
+        else {
+            return png.to_vec();
         };
-        tiff.extend_from_slice(&tag.to_be_bytes());
-        tiff.extend_from_slice(&kind.to_be_bytes());
-        tiff.extend_from_slice(&((value.len() / unit) as u32).to_be_bytes());
-        if value.len() <= 4 {
-            let mut inline = value.clone();
-            inline.resize(4, 0);
-            tiff.extend_from_slice(&inline);
-        } else {
-            tiff.extend_from_slice(&data_at.to_be_bytes());
-            data.extend_from_slice(value);
-            if value.len() % 2 == 1 {
-                data.push(0);
+        let kind = &head[4..8];
+        if kind != b"eXIf" {
+            out.extend_from_slice(chunk);
+        }
+        if kind == b"IHDR" {
+            let mut chunk = |kind: &[u8; 4], body: &[u8]| {
+                let Ok(n) = u32::try_from(body.len()) else {
+                    return;
+                };
+                out.extend_from_slice(&n.to_be_bytes());
+                let start = out.len();
+                out.extend_from_slice(kind);
+                out.extend_from_slice(body);
+                let crc = crc32(&out[start..]);
+                out.extend_from_slice(&crc.to_be_bytes());
+            };
+            if !tagged {
+                // Rendering intent 0, perceptual.
+                chunk(b"sRGB", &[0]);
             }
-            data_at = EXIF_IFD_AT + 2 + 12 * exif_ifd.len() as u32 + 4 + data.len() as u32;
+            if let Some(e) = exif {
+                chunk(b"eXIf", e);
+            }
+        }
+        i += chunk.len();
+    }
+    out
+}
+
+/// CRC-32 as PNG chunks use it (ISO 3309, reflected, poly 0xEDB88320).
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xEDB8_8320 & (crc & 1).wrapping_neg());
         }
     }
-    tiff.extend_from_slice(&0u32.to_be_bytes());
-    tiff.extend_from_slice(&data);
-
-    let mut app1 = vec![0xFF, 0xE1];
-    app1.extend_from_slice(&((2 + 6 + tiff.len()) as u16).to_be_bytes());
-    app1.extend_from_slice(b"Exif\0\0");
-    app1.extend_from_slice(&tiff);
-    splice_app1(jpeg, &app1)
+    !crc
 }
 
 /// Put `app1` after SOI (and after a JFIF APP0, which by convention comes
@@ -704,6 +810,19 @@ mod tests {
         jpeg.windows(6).filter(|w| w == b"Exif\0\0").count()
     }
 
+    /// A `w` x `h` grey JPEG whose EXIF holds `stamp`, as an export of a
+    /// photo taken then would.
+    pub(crate) fn dated_jpeg(w: u32, h: u32, stamp: Option<image_decode::CaptureStamp>) -> Vec<u8> {
+        use crate::export::metadata::{block, fields, MetadataPolicy, SourceMeta};
+        let source = SourceMeta::from_parts(None, stamp);
+        let exif = block(&fields(&source, MetadataPolicy::All, "", w, h)).unwrap();
+        let rgba = vec![90u8; (w * h * 4) as usize];
+        Prepared::new(w, h, Pixels::Rgba8(&rgba))
+            .unwrap()
+            .encode(Encoding::Jpeg(None), exif.as_deref())
+            .unwrap()
+    }
+
     /// Read back through the app's own EXIF reader, which is ImageIO on macOS
     /// and kamadak-exif elsewhere, not through code in this file.
     #[cfg(not(target_arch = "wasm32"))]
@@ -713,14 +832,11 @@ mod tests {
             "lightphotos-with-exif-test-{}.jpg",
             std::process::id()
         ));
-        encode_jpeg(&path, 12, 8, &[90u8; 12 * 8 * 4], JpegQuality::Export).unwrap();
-        let plain = std::fs::read(&path).unwrap();
-
         for stamp in [
             image_decode::CaptureStamp::new("2024:06:01 18:04:05", Some("-07:00")).unwrap(),
             image_decode::CaptureStamp::new("2023:12:31 23:59:59", None).unwrap(),
         ] {
-            let tagged = with_exif(&plain, 12, 8, Some(&stamp));
+            let tagged = dated_jpeg(12, 8, Some(stamp.clone()));
             assert_eq!(
                 exif_blocks(&tagged),
                 1,
@@ -732,32 +848,49 @@ mod tests {
             assert_eq!((img.width, img.height), (12, 8));
         }
 
-        std::fs::write(&path, with_exif(&plain, 12, 8, None)).unwrap();
+        let rgba = [90u8; 12 * 8 * 4];
+        let bare = Prepared::new(12, 8, Pixels::Rgba8(&rgba))
+            .unwrap()
+            .encode(Encoding::Jpeg(None), None)
+            .unwrap();
+        assert_eq!(exif_blocks(&bare), 0, "no metadata means no EXIF at all");
+        std::fs::write(&path, bare).unwrap();
         assert_eq!(image_decode::capture_stamp(&path), None);
         std::fs::remove_file(&path).ok();
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn exif_goes_after_jfif_and_bytes_that_are_not_a_jpeg_pass_through() {
         let jfif = [0xFF, 0xE0, 0x00, 0x07, b'J', b'F', b'I', b'F', 0x00];
         let mut jpeg = vec![0xFF, 0xD8];
         jpeg.extend_from_slice(&jfif);
         jpeg.extend_from_slice(&[0xFF, 0xDB, 0x00, 0x02, 0xFF, 0xD9]);
-        let out = with_exif(&jpeg, 1, 1, None);
+        let app1 = [0xFF, 0xE1, 0x00, 0x08, b'E', b'x', b'i', b'f', 0, 0];
+        let out = splice_app1(&jpeg, &app1);
         assert_eq!(&out[2..11], &jfif, "JFIF stays first");
         assert_eq!(&out[11..13], &[0xFF, 0xE1], "EXIF follows it");
         assert!(out.ends_with(&[0xFF, 0xDB, 0x00, 0x02, 0xFF, 0xD9]));
 
-        assert_eq!(with_exif(b"not a jpeg", 1, 1, None), b"not a jpeg");
+        assert_eq!(splice_app1(b"not a jpeg", &app1), b"not a jpeg");
     }
 
     #[test]
     fn an_app_segment_too_short_to_hold_its_length_passes_through() {
         for len in [0u8, 1] {
             let jpeg = [0xFF, 0xD8, 0xFF, 0xE1, 0x00, len, 0xFF, 0xD9];
-            assert_eq!(with_exif(&jpeg, 1, 1, None), jpeg);
+            assert_eq!(splice_app1(&jpeg, &[]), jpeg);
         }
+    }
+
+    /// PNG chunks that run past the end, or a file that is not a PNG, pass
+    /// through untouched rather than panic.
+    #[test]
+    fn a_malformed_png_passes_through_the_exif_splice() {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xF0, b'I', b'H', b'D', b'R', 1, 2]);
+        assert_eq!(with_png_exif(&png, Some(b"II*\0")), png);
+        assert_eq!(with_png_exif(b"nope", Some(b"II*\0")), b"nope");
+        assert_eq!(crc32(b"IEND"), 0xAE42_6082, "PNG's own IEND CRC");
     }
 
     /// The browser's export path: its worker holds only the source bytes, so
@@ -766,8 +899,8 @@ mod tests {
     #[test]
     fn a_baked_export_carries_the_capture_date_of_its_source_bytes() {
         let stamp = image_decode::CaptureStamp::new("2024:06:01 18:04:05", Some("+09:00")).unwrap();
+        let tagged = dated_jpeg(16, 8, Some(stamp.clone()));
         let plain = encode_jpeg_to_vec(16, 8, &[120u8; 16 * 8 * 4], JpegQuality::Export).unwrap();
-        let tagged = with_exif(&plain, 16, 8, Some(&stamp));
         let bake = |src: Vec<u8>| {
             crate::export::bake_export_from_shared_vec(
                 std::sync::Arc::new(src),

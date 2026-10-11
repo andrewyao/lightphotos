@@ -492,7 +492,7 @@ impl App {
             for (seq, (src, is_raw, adj, touchups, rot)) in jobs.into_iter().enumerate() {
                 // Each export in flight holds its source's bytes and a
                 // full-resolution decode in the one shared heap.
-                while pool.in_flight() >= pool.capacity(&decoder) {
+                while pool.in_flight() >= pool.capacity(&decoder, output.format) {
                     Self::wait_for_export_capacity().await;
                 }
                 let stem = naming.stem(&src, seq + 1, total);
@@ -512,7 +512,7 @@ impl App {
                             adj,
                             touchups,
                             rot,
-                            output,
+                            output: output.clone(),
                         },
                     ),
                     Err(e) => pool.fail(src, output_folder.clone(), dest_dir.clone(), filename, e),
@@ -554,7 +554,7 @@ impl App {
             rot: self.rotations.get(&src).copied().unwrap_or(0),
             src,
             dest,
-            output,
+            output: output.clone(),
         };
 
         let total = paths.len();
@@ -903,12 +903,19 @@ mod status_tests {
         let a = dir.join("a.jpg");
         let stamp =
             crate::decode::image_decode::CaptureStamp::new("2024:06:01 18:00:00", Some("-07:00"));
-        let tagged = crate::decode::image_encode::with_exif(
-            &std::fs::read(&a).unwrap(),
-            300,
-            200,
-            stamp.as_ref(),
-        );
+        let tagged = {
+            use crate::decode::image_encode::{Encoding, Pixels, Prepared};
+            use crate::export::metadata::{block, fields, MetadataPolicy, SourceMeta};
+            let source = SourceMeta::from_parts(None, stamp);
+            let exif = block(&fields(&source, MetadataPolicy::All, "", 300, 200)).unwrap();
+            let rgba = crate::decode::image_decode::decode(&a, u32::MAX)
+                .unwrap()
+                .rgba;
+            Prepared::new(300, 200, Pixels::Rgba8(&rgba))
+                .unwrap()
+                .encode(Encoding::Jpeg(None), exif.as_deref())
+                .unwrap()
+        };
         std::fs::write(&a, tagged).unwrap();
 
         let mut app = App::new(None);
@@ -1336,7 +1343,7 @@ mod form_tests {
 
         app.exports.settings.album = AlbumChoice::New(String::new());
         // Tall enough that the footer is on screen under the File section.
-        let painted = crate::app::test_support::settled_at(&mut app, egui::vec2(1200.0, 1100.0));
+        let painted = crate::app::test_support::settled_at(&mut app, egui::vec2(1200.0, 1400.0));
         assert!(painted.has(t().album_name), "{:?}", painted.texts());
         assert_eq!(app.export_blocker(), Some(t().album_name_needed));
         assert!(
