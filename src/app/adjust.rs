@@ -408,10 +408,14 @@ impl App {
 
     /// A slider drag changes the edit every frame. Writing the sidecar each
     /// time blocks the UI thread on disk I/O, so wait for the mouse release.
-    /// The release also ends the drag's undo step.
+    /// The release also ends the drag's undo step, unless an Auto Tone or
+    /// Remove Chromatic Aberration batch is still landing results: one batch
+    /// is one step.
     pub(super) fn save_edit_unless_dragging(&mut self) {
         if !self.egui_ctx.input(|i| i.pointer.any_down()) {
             self.save_edit();
+            self.history
+                .hold(self.autotone.is_running() || self.remove_ca_pending());
             self.history.seal();
         }
     }
@@ -419,6 +423,10 @@ impl App {
     /// Puts back the edits from before the last undo step. Returns how many
     /// photos it changed. A photo that has left the folder is skipped.
     pub(super) fn undo_edit(&mut self) -> usize {
+        // Undo takes back a running batch's step, so the batch must not land
+        // more results after it.
+        self.cancel_auto_tone();
+        self.cancel_remove_ca();
         let Some(step) = self.history.pop() else {
             return 0;
         };

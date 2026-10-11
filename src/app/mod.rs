@@ -1040,6 +1040,7 @@ impl App {
     /// they write to is replaced or closed.
     fn finish_folder_jobs(&mut self) {
         self.cancel_auto_tone();
+        self.cancel_remove_ca();
         self.cancel_scoring();
         self.cancel_delete();
         self.save_edit();

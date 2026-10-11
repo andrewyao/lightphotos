@@ -1,6 +1,8 @@
 //! Develop undo. Each step holds the edit every photo had before the step's
-//! first change to it, and its touch-ups when the step cleared them. One command is one step, and so is one slider drag:
-//! a step stays open until the pointer is up at the end of a frame.
+//! first change to it, and its touch-ups when the step cleared them. One
+//! command is one step, and so is one slider drag or one Auto Tone or Remove
+//! Chromatic Aberration batch: a step stays open until the pointer is up at
+//! the end of a frame and no batch is running.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +17,9 @@ pub(crate) struct EditHistory {
     open: Option<EditStep>,
     /// Nested `begin`s still running. A step cannot close while any are.
     depth: u32,
+    /// A background batch (Auto Tone, Remove Chromatic Aberration) is still
+    /// writing results, so its frames join one step.
+    held: bool,
 }
 
 #[derive(Default)]
@@ -22,7 +27,6 @@ pub(crate) struct EditStep {
     pub(crate) before: Vec<Before>,
 }
 
-#[derive(Debug, PartialEq)]
 pub(crate) struct Before {
     pub(crate) path: PathBuf,
     pub(crate) adj: Adjustments,
@@ -71,9 +75,14 @@ impl EditHistory {
         &mut step.before[i]
     }
 
-    /// Closes the open step, unless a `begin` holds it.
+    /// Holds the open step open while `batch_running`, across frames.
+    pub(super) fn hold(&mut self, batch_running: bool) {
+        self.held = batch_running;
+    }
+
+    /// Closes the open step, unless a `begin` or a batch holds it.
     pub(super) fn seal(&mut self) {
-        if self.depth == 0 {
+        if self.depth == 0 && !self.held {
             self.close();
         }
     }
@@ -148,6 +157,20 @@ mod tests {
         h.seal();
         assert_eq!(h.pop().unwrap().before[0].adj, exposure(0.4));
         assert_eq!(h.pop().unwrap().before[0].adj, exposure(0.0), "one step");
+        assert!(h.pop().is_none());
+    }
+
+    #[test]
+    fn a_held_step_spans_seals_until_released() {
+        let mut h = EditHistory::default();
+        h.hold(true);
+        h.note(Path::new("/a.jpg"), exposure(0.0));
+        h.seal();
+        h.note(Path::new("/b.jpg"), exposure(0.0));
+        h.seal();
+        h.hold(false);
+        h.seal();
+        assert_eq!(h.pop().unwrap().before.len(), 2, "one step");
         assert!(h.pop().is_none());
     }
 

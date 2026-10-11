@@ -118,6 +118,13 @@ impl App {
         self.start_next_measure();
     }
 
+    /// Drops the waiting and running measurements. A result still on its
+    /// way is dropped when it lands.
+    pub(super) fn cancel_remove_ca(&mut self) {
+        self.optics.queue.clear();
+        self.optics.pending = None;
+    }
+
     /// Start measuring the next queued photo unless one is under way. A photo
     /// that cannot start is reported and skipped.
     fn start_next_measure(&mut self) {
@@ -265,6 +272,60 @@ mod tests {
         app.apply_look_to(&Adjustments::default(), optics, &paths);
         assert!(!app.remove_ca_pending());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_remove_ca_run_undoes_in_one_step() {
+        let (mut app, dir, paths) = crate::app::test_support::folder_app("ca-undo", 2);
+        app.selected = (0..2).collect();
+        app.sel = Some(0);
+        for path in &paths {
+            crate::decode::image_encode::encode_jpeg(
+                path,
+                64,
+                48,
+                &vec![128u8; 64 * 48 * 4],
+                crate::decode::image_encode::JpegQuality::Export,
+            )
+            .unwrap();
+        }
+        app.set_remove_ca(true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while app.remove_ca_pending() {
+            assert!(std::time::Instant::now() < deadline, "measuring timed out");
+            app.poll_remove_ca();
+            app.save_edit_unless_dragging();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        app.save_edit_unless_dragging();
+        assert!(paths
+            .iter()
+            .all(|p| app.catalog.adjustments(p).chromatic_aberration.is_some()));
+
+        assert_eq!(app.undo_edit(), 2, "both photos in one step");
+        assert!(paths
+            .iter()
+            .all(|p| app.catalog.adjustments(p).is_identity()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_folder_stops_measuring_the_last_one() {
+        let (mut app, dir, _) = crate::app::test_support::folder_app("ca-folder", 2);
+        app.selected = (0..2).collect();
+        app.sel = Some(0);
+        app.set_remove_ca(true);
+        assert!(app.remove_ca_pending());
+        let other = crate::app::test_support::temp_folder("ca-folder-next");
+        app.run(crate::command::Command::OpenFolder(
+            crate::command::OpenFolderParams {
+                path: other.clone(),
+            },
+        ))
+        .unwrap();
+        assert!(!app.remove_ca_pending());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
     }
 
     #[test]

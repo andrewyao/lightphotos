@@ -578,6 +578,87 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn land_thumb(app: &mut App, path: &Path) {
+        app.loader.as_mut().unwrap().insert_thumb_external(
+            path.to_path_buf(),
+            THUMB_PX,
+            std::sync::Arc::new(DecodedImage::new_tracked(DecodedImageFields {
+                width: 8,
+                height: 8,
+                rgba: [32, 32, 32, 255].repeat(64),
+                pixel_format: crate::decode::image_decode::PixelFormat::Srgb8,
+            })),
+        );
+    }
+
+    fn batch_with_loader(tag: &str) -> (App, PathBuf, PathBuf, PathBuf) {
+        let (mut app, dir, a, b) = grid_with_two_photos(tag);
+        app.loader = Some(crate::jobs::loader::Loader::new(
+            16384,
+            crate::jobs::cache_limits::CacheLimits::PLATFORM,
+        ));
+        app.auto_tone_batch(vec![a.clone(), b.clone()], DeferredAutoToneMode::Replace);
+        (app, dir, a, b)
+    }
+
+    /// The batch lands one photo a frame here, and every frame end seals.
+    #[test]
+    fn a_batch_over_several_frames_undoes_in_one_step() {
+        let (mut app, dir, a, b) = batch_with_loader("autotone-undo");
+        for path in [&a, &b] {
+            land_thumb(&mut app, path);
+            app.poll_auto_tone();
+            app.save_edit_unless_dragging();
+        }
+        assert!(!app.autotone.is_running());
+        assert!(app.edits.contains_key(&a) && app.edits.contains_key(&b));
+
+        assert_eq!(app.undo_edit(), 2, "one step for the batch");
+        assert!(app.edits.is_empty());
+        assert_eq!(app.undo_edit(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_mid_batch_stops_it_and_takes_back_what_it_toned() {
+        let (mut app, dir, a, b) = batch_with_loader("autotone-undo-mid");
+        land_thumb(&mut app, &a);
+        app.poll_auto_tone();
+        app.save_edit_unless_dragging();
+        assert!(app.edits.contains_key(&a) && app.autotone.is_running());
+
+        assert_eq!(app.undo_edit(), 1);
+        assert!(!app.autotone.is_running());
+        land_thumb(&mut app, &b);
+        app.poll_auto_tone();
+        assert!(app.edits.is_empty(), "the stopped batch tones nothing more");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancelled_batch_ends_its_step() {
+        let (mut app, dir, a, b) = batch_with_loader("autotone-undo-cancel");
+        land_thumb(&mut app, &a);
+        app.poll_auto_tone();
+        app.save_edit_unless_dragging();
+        app.cancel_auto_tone();
+        app.save_edit_unless_dragging();
+        app.put_edit(
+            &b,
+            Adjustments {
+                exposure: 1.0,
+                ..Default::default()
+            },
+        );
+        app.save_edit_unless_dragging();
+
+        assert_eq!(app.undo_edit(), 1, "the hand edit is its own step");
+        assert!(app.edits.contains_key(&a) && !app.edits.contains_key(&b));
+        assert_eq!(app.undo_edit(), 1, "then the batch's");
+        assert!(app.edits.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A batch used to request every photo's thumbnail at once, which made the
     /// cache hold the whole selection. The window is what keeps a 20k-photo
     /// selection from asking for 20k decoded thumbnails.
