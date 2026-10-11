@@ -13,7 +13,11 @@ impl App {
     /// Runs `cmd` if [`check`](Self::check) allows it.
     pub(crate) fn run(&mut self, cmd: Command) -> Result<Outcome, CommandError> {
         self.check(&cmd)?;
+        // Every develop write of one command is one undo step.
+        self.history.begin();
         let out = self.apply_command(cmd);
+        self.history.end();
+        self.save_edit_unless_dragging();
         self.request_redraw();
         out
     }
@@ -290,7 +294,7 @@ impl App {
                     pending,
                 })
             }
-            Command::Undo => done(0),
+            Command::Undo => done(self.undo_edit()),
         }
     }
 
@@ -746,6 +750,73 @@ mod tests {
         run(&mut app, r#"{"id":"view.mode","params":{"mode":"loupe"}}"#).unwrap();
         assert_eq!(app.mode, ViewMode::Loupe);
         assert_eq!(app.selected_path(), Some(paths[2].clone()));
+    }
+
+    #[test]
+    fn one_develop_set_of_several_controls_undoes_in_one_step() {
+        let (mut app, _, paths) = folder_app("cmd-undo", 2);
+        app.select_all();
+        let set = r#"{"id":"develop.set","params":{"controls":{"exposure":0.5,"contrast":20}}}"#;
+        run(&mut app, set).unwrap();
+        run(
+            &mut app,
+            r#"{"id":"develop.set","params":{"controls":{"clarity":30},"photos":["1.jpg"]}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            run(&mut app, r#"{"id":"edit.undo"}"#).map(|o| o.photos),
+            Ok(1)
+        );
+        let adj = app.catalog.adjustments(&paths[1]);
+        assert_eq!((adj.exposure, adj.contrast, adj.clarity), (0.5, 20.0, 0.0));
+
+        assert_eq!(
+            run(&mut app, r#"{"id":"edit.undo"}"#).map(|o| o.photos),
+            Ok(2)
+        );
+        for path in &paths {
+            assert!(
+                app.catalog.adjustments(path).is_identity(),
+                "{}",
+                path.display()
+            );
+            assert!(!app.edits.contains_key(path));
+        }
+        assert_eq!(
+            run(&mut app, r#"{"id":"edit.undo"}"#).map(|o| o.photos),
+            Ok(0),
+            "nothing left to undo"
+        );
+    }
+
+    #[test]
+    fn undo_puts_back_a_crop_and_skips_ratings() {
+        let (mut app, _, paths) = folder_app("cmd-undo-crop", 1);
+        app.select_single(0);
+        run(&mut app, r#"{"id":"crop.set","params":{"straighten":3}}"#).unwrap();
+        run(&mut app, r#"{"id":"photo.rate","params":{"stars":5}}"#).unwrap();
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        assert_eq!(app.catalog.adjustments(&paths[0]).straighten, 0.0);
+        assert_eq!(
+            app.rating_of(&paths[0]),
+            5,
+            "undo covers develop edits only"
+        );
+    }
+
+    #[test]
+    fn a_new_folder_forgets_the_undo_steps() {
+        let (mut app, dir, paths) = folder_app("cmd-undo-folder", 1);
+        app.select_single(0);
+        run(
+            &mut app,
+            r#"{"id":"develop.set","params":{"controls":{"exposure":1}}}"#,
+        )
+        .unwrap();
+        crate::app::test_support::load_folder(&mut app, &dir);
+        assert!(!app.history.can_undo());
+        assert_eq!(app.catalog.adjustments(&paths[0]).exposure, 1.0);
     }
 
     #[test]

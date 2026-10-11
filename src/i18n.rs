@@ -1157,6 +1157,7 @@ pub static EN: Strings = Strings {
         HelpSection {
             title: "Edit",
             rows: &[
+                ("Cmd+Z", "Undo the last develop change"),
                 ("Cmd+[ / Cmd+]", "Rotate image -90 / +90 degrees"),
                 ("R", "Crop"),
                 ("Y", "Before / after compare (in editor)"),
@@ -1946,6 +1947,7 @@ pub static ZH: Strings = Strings {
         HelpSection {
             title: "编辑",
             rows: &[
+                ("Cmd+Z", "撤销上一次调整"),
                 ("Cmd+[ / Cmd+]", "向左 / 向右旋转 90 度"),
                 ("R", "裁剪"),
                 ("Y", "调整前 / 调整后对比（编辑器中）"),

@@ -470,6 +470,8 @@ pub(crate) struct App {
     ratings: HashMap<PathBuf, u8>,
     /// Per-image develop edits. Holds only non-identity edits.
     edits: HashMap<PathBuf, Adjustments>,
+    /// Undo for `edits`. `put_edit` records into it.
+    history: history::EditHistory,
     touchups: HashMap<PathBuf, Vec<TouchUp>>,
     /// Loupe click tool. Crop mode (`cropping()`) turns it off.
     tool: LoupeTool,
@@ -709,6 +711,7 @@ mod group_compare;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use export::ImmichLink;
 mod histogram;
+mod history;
 mod keys;
 mod loupe;
 #[cfg(target_os = "macos")]
@@ -775,6 +778,7 @@ impl App {
             catalog_load: catalog::CatalogLoad::new(),
             ratings: HashMap::new(),
             edits: HashMap::new(),
+            history: history::EditHistory::default(),
             touchups: HashMap::new(),
             tool: LoupeTool::None,
             // Clamped up to TOUCHUP_MIN_PIXELS once an image is loaded.
@@ -1060,6 +1064,7 @@ impl App {
         #[cfg(target_arch = "wasm32")]
         crate::web::analytics::folder_opened(playlist.entries().len());
         self.teardown_loupe_state();
+        self.history.clear();
         self.burst_scan = None;
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);

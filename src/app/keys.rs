@@ -329,6 +329,7 @@ impl App {
                 self.request_redraw();
             }
 
+            KeyCode::KeyZ if cmd && !alt => self.run_ui(Command::Undo),
             KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => {
                 self.run_ui(select(SelectWord::All))
             }

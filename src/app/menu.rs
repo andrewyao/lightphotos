@@ -22,7 +22,11 @@ impl App {
         match cmd {
             Cut | Copy | Paste | BiggerText | SmallerText => true,
             SelectAll => typing || (free && self.mode == ViewMode::Grid),
-            Undo => typing || (self.tool == LoupeTool::TouchUp && self.can_undo_touchup()),
+            Undo => {
+                typing
+                    || (self.tool == LoupeTool::TouchUp && self.can_undo_touchup())
+                    || (free && self.history.can_undo())
+            }
             Settings => matches!(blocker, None | Some(Blocker::Settings)),
             OpenFolder | Export | Crop | KeyboardShortcuts => free,
             CompareStack => {

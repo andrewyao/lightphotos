@@ -318,8 +318,10 @@ impl App {
     /// removed from the edits map rather than stored.
     pub(super) fn apply_adjustments(&mut self, adj: Adjustments) {
         let before = self.current_adjustments();
+        self.history.begin();
         self.apply_adjustments_kind(adj, "adjustment");
         self.sync_to_selection(before, adj);
+        self.history.end();
     }
 
     /// Lightroom's Auto Sync: with several photos selected, a slider's new
@@ -389,6 +391,14 @@ impl App {
     /// The one writer of a photo's develop edit in `edits`. An identity edit
     /// is removed rather than stored, matching how the catalog stores edits.
     pub(super) fn put_edit(&mut self, path: &Path, adj: Adjustments) {
+        let before = self.edits.get(path).copied().unwrap_or_default();
+        if before != adj {
+            self.history.note(path, before);
+        }
+        self.store_edit(path, adj);
+    }
+
+    fn store_edit(&mut self, path: &Path, adj: Adjustments) {
         if adj.is_identity() {
             self.edits.remove(path);
         } else {
@@ -398,10 +408,43 @@ impl App {
 
     /// A slider drag changes the edit every frame. Writing the sidecar each
     /// time blocks the UI thread on disk I/O, so wait for the mouse release.
+    /// The release also ends the drag's undo step.
     pub(super) fn save_edit_unless_dragging(&mut self) {
         if !self.egui_ctx.input(|i| i.pointer.any_down()) {
             self.save_edit();
+            self.history.seal();
         }
+    }
+
+    /// Puts back the edits from before the last undo step. Returns how many
+    /// photos it changed. A photo that has left the folder is skipped.
+    pub(super) fn undo_edit(&mut self) -> usize {
+        let Some(step) = self.history.pop() else {
+            return 0;
+        };
+        let shown = self.shown.path().map(Path::to_path_buf);
+        let mut n = 0;
+        for (path, adj) in step.before {
+            let in_folder = self
+                .playlist
+                .as_ref()
+                .is_some_and(|pl| pl.entries().contains(&path));
+            if !in_folder {
+                continue;
+            }
+            self.store_edit(&path, adj);
+            self.catalog.set_adjustments(&path, &adj);
+            n += 1;
+            if shown.as_ref() == Some(&path) {
+                self.push_adjustments();
+                self.hist.invalidate();
+                if self.fitted {
+                    self.fit_to_window();
+                }
+            }
+        }
+        self.request_redraw();
+        n
     }
 
     pub(crate) fn save_edit(&mut self) {
@@ -684,6 +727,59 @@ mod tests {
         }
         assert_eq!(app.current_adjustments(), adj);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_slider_drag_undoes_in_one_step_and_the_next_drag_in_another() {
+        let (mut app, dir, photo) = one_photo("drag-undo");
+        app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
+        app.mode = ViewMode::Loupe;
+        let drag = |app: &mut App, field: fn(&mut Adjustments) -> &mut f32| {
+            press(app, true);
+            for step in 1..=5 {
+                let mut adj = app.current_adjustments();
+                *field(&mut adj) = step as f32 * 0.1;
+                app.apply_adjustments(adj);
+                app.save_edit_unless_dragging();
+            }
+            press(app, false);
+            app.save_edit_unless_dragging();
+        };
+        drag(&mut app, |a| &mut a.exposure);
+        drag(&mut app, |a| &mut a.contrast);
+        assert_eq!(
+            (
+                app.current_adjustments().exposure,
+                app.current_adjustments().contrast
+            ),
+            (0.5, 0.5)
+        );
+
+        app.modifiers = winit::keyboard::ModifiersState::SUPER;
+        app.handle_key(KeyCode::KeyZ);
+        let adj = app.current_adjustments();
+        assert_eq!(
+            (adj.exposure, adj.contrast),
+            (0.5, 0.0),
+            "Cmd+Z undid the last drag"
+        );
+        app.handle_key(KeyCode::KeyZ);
+        assert!(
+            app.current_adjustments().is_identity(),
+            "then the first, whole"
+        );
+        assert_eq!(
+            app.pushed_adj,
+            Some(Adjustments::default()),
+            "the Loupe shows it"
+        );
+        app.catalog
+            .flush_blocking(std::time::Duration::from_secs(10));
+        assert!(
+            app.catalog.adjustments(&photo).is_identity(),
+            "and the sidecar has it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

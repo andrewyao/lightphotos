@@ -28,13 +28,15 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 | `Cmd`+`Shift`+`G` | Ungroup the selected stacks; their photos come back selected |
 | `Shift`+`Delete` | Delete Group: for the selected stacks, either Remove Group (keep every photo as a single) or move every member to the Trash |
 
-## Rate and label
+## Rate, flag and label
 
 | Key | Action |
 | --- | --- |
 | `0` `1` `2` `3` `4` `5` | Set star rating 0-5 |
-| `Shift`+`1`-`5` | Set color label (red / yellow / green / blue / purple) |
-| `Shift`+`0` | Clear color label |
+| `Shift`+`0`-`5` | Set the rating and go to the next photo |
+| `P` / `X` / `U` | Pick / reject / unflag |
+| `` ` `` | Pick, or unflag a picked photo |
+| `6` `7` `8` `9` | Red, yellow, green or blue label; press again to clear |
 
 ## Zoom and pan (in the editor)
 
@@ -56,7 +58,8 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 
 | Key | Action |
 | --- | --- |
-| `[` / `]` | Rotate image −90° / +90° |
+| `Cmd`+`Z` | Undo the last develop change: a slider drag, a reset, a crop, a preset, Auto Tone or a pasted look. Ratings, flags, labels and rotation are not undone |
+| `Cmd`+`[` / `Cmd`+`]` | Rotate image −90° / +90° |
 | `R` | Crop |
 | `C` | Compare: 2 to 6 selected photos, grouped or not, or else the photos in the selected stack, with a shared zoom square |
 | `Y` | Before / after compare |

@@ -427,7 +427,7 @@ pub const SLIDERS: [Slider; 71] = [
     ),
 ];
 
-/// A slider's stable name, the id the command layer and sidecar-free callers
+/// A slider's stable name, the id the command layer and headless callers
 /// use: lower snake parts joined by `.`, such as `exposure`,
 /// `mix.blue.saturation` or `grade.shadows.hue`.
 impl std::fmt::Display for SliderId {
