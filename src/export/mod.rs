@@ -933,7 +933,7 @@ mod tests {
             held.len() * 4 > limit as usize * 1024,
             "not needlessly small"
         );
-        assert!(at(Some(1)).is_err(), "noise does not fit in 1 KB");
+        assert!(at(Some(0)).is_err(), "no JPEG fits in 0 KB");
     }
 
     /// Every format this build writes carries the date, the camera and the
