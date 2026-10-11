@@ -36,7 +36,7 @@ pub enum UserEvent {
     /// A `--control` request, answered on the sender.
     #[cfg(not(target_arch = "wasm32"))]
     Control(
-        crate::shell::control::Op,
+        crate::shell::control::Request,
         std::sync::mpsc::Sender<crate::shell::control::Answer>,
     ),
 }

@@ -6,7 +6,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use super::{App, State};
-use crate::shell::control::{Answer, ChannelError, Op, Payload};
+use crate::shell::control::{Answer, ChannelError, Op, Payload, Request};
 
 /// Requests the frame loop answers later.
 #[derive(Default)]
@@ -28,7 +28,13 @@ fn json(value: impl serde::Serialize) -> Answer {
 }
 
 impl App {
-    pub(crate) fn answer_control(&mut self, op: Op, reply: Sender<Answer>) {
+    /// Dropping `reply` unanswered tells the connection nothing ran.
+    pub(crate) fn answer_control(&mut self, request: Request, reply: Sender<Answer>) {
+        let Request { op, expires } = request;
+        let now = Instant::now();
+        if now >= expires {
+            return;
+        }
         // A result shows in the window even with no input to wake it.
         self.request_redraw();
         let answer = match op {
@@ -37,7 +43,10 @@ impl App {
             Op::State => json(State::of(self)),
             Op::Screenshot => return self.control.shots.push(reply),
             Op::Wait(timeout) => {
-                return self.control.waits.push((reply, Instant::now() + timeout));
+                return self
+                    .control
+                    .waits
+                    .push((reply, (now + timeout).min(expires)));
             }
         };
         let _ = reply.send(answer);
@@ -106,6 +115,11 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    fn live(op: Op) -> Request {
+        let expires = Instant::now() + Duration::from_secs(60);
+        Request { op, expires }
+    }
+
     fn json_of(answer: Answer) -> Result<serde_json::Value, String> {
         match answer {
             Ok(Payload::Json(v)) => Ok(v),
@@ -118,15 +132,15 @@ mod tests {
     fn state_and_run_answer_at_once_and_a_wait_answers_from_the_loop() {
         let mut app = App::new(None);
         let (tx, rx) = mpsc::channel();
-        app.answer_control(Op::State, tx.clone());
+        app.answer_control(live(Op::State), tx.clone());
         assert_eq!(json_of(rx.try_recv().unwrap()).unwrap()["mode"], "grid");
 
         let rate = crate::command::Command::parse(r#"{"id":"photo.rate","params":{"stars":3}}"#);
-        app.answer_control(Op::Run(Box::new(rate.unwrap())), tx.clone());
+        app.answer_control(live(Op::Run(Box::new(rate.unwrap()))), tx.clone());
         let refused = json_of(rx.try_recv().unwrap()).unwrap_err();
         assert!(refused.contains("no_photos"), "{refused}");
 
-        app.answer_control(Op::Wait(Duration::from_secs(5)), tx);
+        app.answer_control(live(Op::Wait(Duration::from_secs(5))), tx);
         assert!(rx.try_recv().is_err(), "a wait is held for the loop");
         assert_eq!(app.poll_control(), None);
         assert_eq!(json_of(rx.try_recv().unwrap()).unwrap()["mode"], "grid");
@@ -136,12 +150,38 @@ mod tests {
     fn a_screenshot_without_a_window_is_an_error() {
         let mut app = App::new(None);
         let (tx, rx) = mpsc::channel();
-        app.answer_control(Op::Screenshot, tx);
+        app.answer_control(live(Op::Screenshot), tx);
         assert!(rx.try_recv().is_err());
         app.poll_control();
         assert!(json_of(rx.try_recv().unwrap())
             .unwrap_err()
             .contains("not ready"));
+    }
+
+    #[test]
+    fn a_request_whose_connection_gave_up_is_dropped_unrun() {
+        let (mut app, _, _) = crate::app::test_support::folder_app("control-expired", 1);
+        app.select_single(0);
+        let loupe =
+            crate::command::Command::parse(r#"{"id":"view.mode","params":{"mode":"loupe"}}"#);
+        let expired = |op| Request {
+            op,
+            expires: Instant::now(),
+        };
+        for op in [
+            Op::Run(Box::new(loupe.unwrap())),
+            Op::Screenshot,
+            Op::Wait(Duration::from_secs(5)),
+        ] {
+            let (tx, rx) = mpsc::channel();
+            app.answer_control(expired(op), tx);
+            app.poll_control();
+            assert!(
+                matches!(rx.try_recv(), Err(mpsc::TryRecvError::Disconnected)),
+                "no answer, and the reply channel is closed"
+            );
+        }
+        assert_eq!(app.mode, crate::app::ViewMode::Grid, "the run never ran");
     }
 
     #[test]

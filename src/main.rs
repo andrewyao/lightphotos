@@ -176,7 +176,7 @@ impl ApplicationHandler<UserEvent> for App {
             #[cfg(target_os = "macos")]
             UserEvent::Menu(cmd) => self.run_menu_command(cmd),
             #[cfg(not(target_arch = "wasm32"))]
-            UserEvent::Control(op, reply) => self.answer_control(op, reply),
+            UserEvent::Control(request, reply) => self.answer_control(request, reply),
         }
     }
 

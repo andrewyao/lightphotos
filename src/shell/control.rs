@@ -26,7 +26,7 @@ use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -55,6 +55,15 @@ pub(crate) enum Op {
     Screenshot,
     /// Answer once the app settles, or with `timeout` after this long.
     Wait(Duration),
+}
+
+/// An `Op` on its way to the main thread.
+#[derive(Debug, Clone)]
+pub(crate) struct Request {
+    pub(crate) op: Op,
+    /// When the connection stops waiting. The app drops a request it reaches
+    /// after this unrun, so a client's retry never runs a command twice.
+    pub(crate) expires: Instant,
 }
 
 /// The main thread's answer to one `Op`.
@@ -163,8 +172,8 @@ pub(crate) fn split_args(
 /// the port and token to stderr.
 pub(crate) fn start(port: u16, proxy: EventLoopProxy<UserEvent>) -> Result<(), String> {
     let token = token_from_env()?;
-    let port = listen(port, token.clone(), move |op, reply| {
-        proxy.send_event(UserEvent::Control(op, reply)).is_ok()
+    let port = listen(port, token.clone(), move |request, reply| {
+        proxy.send_event(UserEvent::Control(request, reply)).is_ok()
     })?;
     eprintln!("[control] listening on 127.0.0.1:{port} token {token}");
     Ok(())
@@ -204,7 +213,7 @@ fn same_token(given: &[u8], token: &[u8]) -> bool {
 /// returns false once the app is gone.
 fn listen<A>(port: u16, token: String, app: A) -> Result<u16, String>
 where
-    A: Fn(Op, Sender<Answer>) -> bool + Clone + Send + 'static,
+    A: Fn(Request, Sender<Answer>) -> bool + Clone + Send + 'static,
 {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
         .map_err(|e| format!("can't listen on 127.0.0.1:{port}: {e}"))?;
@@ -228,7 +237,7 @@ where
 
 fn accept<A>(mut stream: TcpStream, token: &Arc<str>, open: &Arc<AtomicUsize>, app: A)
 where
-    A: Fn(Op, Sender<Answer>) -> bool + Send + 'static,
+    A: Fn(Request, Sender<Answer>) -> bool + Send + 'static,
 {
     let Some(slot) = Slot::take(open) else {
         let refused = ChannelError::TooManyConnections {
@@ -274,7 +283,7 @@ fn serve(
     mut reader: impl BufRead,
     mut writer: impl Write,
     token: &str,
-    app: &impl Fn(Op, Sender<Answer>) -> bool,
+    app: &impl Fn(Request, Sender<Answer>) -> bool,
 ) {
     loop {
         let line = match read_line(&mut reader) {
@@ -358,16 +367,17 @@ fn parse_request(line: &[u8], token: &str) -> Result<Op, Failure> {
 }
 
 /// Hands `op` to the main thread and waits for its answer.
-fn ask(app: &impl Fn(Op, Sender<Answer>) -> bool, op: Op) -> Answer {
+fn ask(app: &impl Fn(Request, Sender<Answer>) -> bool, op: Op) -> Answer {
     let patience = match &op {
         Op::Wait(timeout) => *timeout + REPLY_TIMEOUT,
         _ => REPLY_TIMEOUT,
     };
+    let expires = Instant::now() + patience;
     let (reply, answer) = mpsc::channel();
-    if !app(op, reply) {
+    if !app(Request { op, expires }, reply) {
         return Err(ChannelError::AppClosed.into());
     }
-    match answer.recv_timeout(patience) {
+    match answer.recv_timeout(expires.saturating_duration_since(Instant::now())) {
         Ok(answer) => answer,
         Err(RecvTimeoutError::Timeout) => Err(ChannelError::Timeout.into()),
         Err(RecvTimeoutError::Disconnected) => Err(ChannelError::AppClosed.into()),
@@ -559,9 +569,9 @@ mod tests {
     }
 
     /// Stands in for the main thread: answers each op on a thread of its own.
-    fn fake_app(op: Op, reply: Sender<Answer>) -> bool {
+    fn fake_app(request: Request, reply: Sender<Answer>) -> bool {
         std::thread::spawn(move || {
-            let answer = match op {
+            let answer = match request.op {
                 Op::State => Ok(Payload::Json(json!({ "mode": "grid" }))),
                 Op::Screenshot => Ok(Payload::Frame(RgbFrame {
                     width: 2,
@@ -632,7 +642,7 @@ mod tests {
     #[test]
     fn a_closed_app_is_an_error_not_a_hang() {
         let mut out = Vec::new();
-        let gone = |_: Op, _: Sender<Answer>| false;
+        let gone = |_: Request, _: Sender<Answer>| false;
         serve(
             Cursor::new(request("state").into_bytes()),
             &mut out,
