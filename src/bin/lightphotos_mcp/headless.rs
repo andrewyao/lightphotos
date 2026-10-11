@@ -175,8 +175,9 @@ impl Folder {
     }
 
     /// The photo `name` means: a file name in the folder, or an absolute
-    /// path whose folder is this one. Anything else is refused, so a tool
-    /// call cannot read or write outside the folder.
+    /// path whose folder is this one. Anything else is refused, and so is a
+    /// symlink to a file outside the folder, so a tool call cannot read or
+    /// write outside the folder.
     fn photo(&self, name: &Path) -> Result<PathBuf, String> {
         let refuse = || {
             format!(
@@ -199,7 +200,10 @@ impl Folder {
             }
         };
         let path = self.root.join(file);
-        if path.is_file() && image_decode::is_image_extension(&path) {
+        let inside = path
+            .canonicalize()
+            .is_ok_and(|real| real.starts_with(&self.root));
+        if inside && path.is_file() && image_decode::is_image_extension(&path) {
             Ok(path)
         } else {
             Err(refuse())
@@ -267,5 +271,36 @@ fn explain(e: CommandError) -> String {
             format!("no command `{id}`. Call list_commands to see every id.")
         }
         e => e.to_string(),
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_symlink_to_a_photo_outside_the_folder_is_refused() {
+        let base = std::env::temp_dir().join(format!("lp-mcp-symlink-{}", std::process::id()));
+        let (inside, outside) = (base.join("folder"), base.join("elsewhere"));
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.jpg"), b"not yours").unwrap();
+        std::fs::write(inside.join("own.jpg"), b"yours").unwrap();
+        std::os::unix::fs::symlink(outside.join("secret.jpg"), inside.join("link.jpg")).unwrap();
+        std::os::unix::fs::symlink(inside.join("own.jpg"), inside.join("alias.jpg")).unwrap();
+        let folder = Folder::open(&inside).unwrap();
+
+        let leak = folder.photo(Path::new("link.jpg"));
+        let absolute = folder.photo(&folder.root().join("link.jpg"));
+        let alias = folder.photo(Path::new("alias.jpg"));
+        std::fs::remove_dir_all(&base).unwrap();
+
+        assert!(leak.is_err(), "followed a symlink out: {leak:?}");
+        assert!(absolute.is_err(), "followed a symlink out: {absolute:?}");
+        assert!(
+            alias.is_ok(),
+            "a symlink inside the folder is fine: {alias:?}"
+        );
     }
 }
