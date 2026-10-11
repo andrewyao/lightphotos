@@ -21,7 +21,7 @@
 //! for the answer on a channel. The app holds `wait` and `screenshot` until
 //! its frame loop can answer them (`app/control.rs`).
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
@@ -43,6 +43,9 @@ const MIN_TOKEN_LEN: usize = 16;
 const TOKEN_ENV: &str = "LIGHTPHOTOS_CONTROL_TOKEN";
 /// How long a connection waits for the main thread to answer.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a connection may go without sending a line before it closes,
+/// so idle clients can't hold every slot.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const DEFAULT_WAIT: Duration = Duration::from_secs(10);
 const MAX_WAIT: Duration = Duration::from_secs(60);
 
@@ -62,7 +65,8 @@ pub(crate) enum Op {
 pub(crate) struct Request {
     pub(crate) op: Op,
     /// When the connection stops waiting. The app drops a request it reaches
-    /// after this unrun, so a client's retry never runs a command twice.
+    /// later without running it, so a request the client gave up on can't
+    /// run behind its retry.
     pub(crate) expires: Instant,
 }
 
@@ -110,6 +114,7 @@ pub(crate) enum ChannelError {
     UnknownOp { op: String },
     TooLong { limit: usize },
     TooManyConnections { limit: usize },
+    IdleTimeout,
     Timeout,
     AppClosed,
     Failed { reason: String },
@@ -138,6 +143,9 @@ impl std::fmt::Display for ChannelError {
             ChannelError::TooManyConnections { limit } => write!(
                 f,
                 "{limit} connections are open already; close one and retry"
+            ),
+            ChannelError::IdleTimeout => f.write_str(
+                "no request for a while; closing the connection, open a new one to go on",
             ),
             ChannelError::Timeout => f.write_str("timed out: the app is still busy"),
             ChannelError::AppClosed => f.write_str("the app is closing"),
@@ -172,7 +180,7 @@ pub(crate) fn split_args(
 /// the port and token to stderr.
 pub(crate) fn start(port: u16, proxy: EventLoopProxy<UserEvent>) -> Result<(), String> {
     let token = token_from_env()?;
-    let port = listen(port, token.clone(), move |request, reply| {
+    let port = listen(port, token.clone(), IDLE_TIMEOUT, move |request, reply| {
         proxy.send_event(UserEvent::Control(request, reply)).is_ok()
     })?;
     eprintln!("[control] listening on 127.0.0.1:{port} token {token}");
@@ -209,9 +217,10 @@ fn same_token(given: &[u8], token: &[u8]) -> bool {
 }
 
 /// Binds 127.0.0.1:`port` and serves each connection on a thread of its
-/// own. Returns the bound port. `app` hands a request to the main thread and
-/// returns false once the app is gone.
-fn listen<A>(port: u16, token: String, app: A) -> Result<u16, String>
+/// own, closing one that sends nothing for `idle`. Returns the bound port.
+/// `app` hands a request to the main thread and returns false once the app
+/// is gone.
+fn listen<A>(port: u16, token: String, idle: Duration, app: A) -> Result<u16, String>
 where
     A: Fn(Request, Sender<Answer>) -> bool + Clone + Send + 'static,
 {
@@ -225,7 +234,7 @@ where
         .spawn(move || {
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => accept(stream, &token, &open, app.clone()),
+                    Ok(stream) => accept(stream, &token, &open, idle, app.clone()),
                     // Out of file descriptors, say. Don't spin on it.
                     Err(_) => std::thread::sleep(Duration::from_millis(50)),
                 }
@@ -235,8 +244,13 @@ where
     Ok(port)
 }
 
-fn accept<A>(mut stream: TcpStream, token: &Arc<str>, open: &Arc<AtomicUsize>, app: A)
-where
+fn accept<A>(
+    mut stream: TcpStream,
+    token: &Arc<str>,
+    open: &Arc<AtomicUsize>,
+    idle: Duration,
+    app: A,
+) where
     A: Fn(Request, Sender<Answer>) -> bool + Send + 'static,
 {
     let Some(slot) = Slot::take(open) else {
@@ -247,6 +261,9 @@ where
         return;
     };
     let _ = stream.set_nodelay(true);
+    if stream.set_read_timeout(Some(idle)).is_err() {
+        return;
+    }
     let Ok(reader) = stream.try_clone().map(BufReader::new) else {
         return;
     };
@@ -277,8 +294,9 @@ impl Drop for Slot {
     }
 }
 
-/// Answers one connection's requests until it closes or sends a line over
-/// `MAX_LINE`. A bad line gets an error reply and the next line is read.
+/// Answers one connection's requests until it closes, goes idle past the
+/// read timeout, or sends a line over `MAX_LINE`. A bad line gets an error
+/// reply and the next line is read.
 fn serve(
     mut reader: impl BufRead,
     mut writer: impl Write,
@@ -291,6 +309,10 @@ fn serve(
             Ok(Line::TooLong) => {
                 let too_long = ChannelError::TooLong { limit: MAX_LINE };
                 let _ = write_reply(&mut writer, Err(too_long.into()));
+                return;
+            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                let _ = write_reply(&mut writer, Err(ChannelError::IdleTimeout.into()));
                 return;
             }
             Ok(Line::End) | Err(_) => return,
@@ -653,9 +675,51 @@ mod tests {
         assert_eq!(reply["error"]["error"], "app_closed");
     }
 
+    /// A slot frees just after its socket closes, so retry for a while.
+    fn assert_a_slot_frees(port: u16) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            // A refused connection may close before the request is written.
+            let mut again = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+            let _ = again.write_all(format!("{}\n", request("state")).as_bytes());
+            let mut reply = String::new();
+            let _ = BufReader::new(again).read_line(&mut reply);
+            if reply.contains(r#""ok":true"#) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "slots never freed: {reply}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn idle_connections_get_one_error_line_and_free_their_slots() {
+        let idle = Duration::from_millis(100);
+        let port = listen(0, TOKEN.into(), idle, fake_app).unwrap();
+        let connect = || TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        let held: Vec<TcpStream> = (0..MAX_CONNECTIONS).map(|_| connect()).collect();
+        for mut stream in held {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut said = String::new();
+            stream.read_to_string(&mut said).unwrap();
+            let lines: Vec<Value> = said
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
+            assert_eq!(lines.len(), 1, "{said}");
+            assert_eq!(lines[0]["error"]["error"], "idle_timeout");
+        }
+        assert_a_slot_frees(port);
+    }
+
     #[test]
     fn over_loopback_a_screenshot_decodes_and_extra_connections_are_refused() {
-        let port = listen(0, TOKEN.into(), fake_app).unwrap();
+        let port = listen(0, TOKEN.into(), IDLE_TIMEOUT, fake_app).unwrap();
         let connect = || TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
         let ask_line = |stream: &mut TcpStream, line: &str| -> Value {
             stream.write_all(format!("{line}\n").as_bytes()).unwrap();
@@ -691,21 +755,6 @@ mod tests {
 
         drop(open);
         drop(first);
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            // A refused connection may close before the request is written.
-            let mut again = connect();
-            let _ = again.write_all(format!("{}\n", request("state")).as_bytes());
-            let mut reply = String::new();
-            let _ = BufReader::new(again).read_line(&mut reply);
-            if reply.contains(r#""ok":true"#) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "slots never freed: {reply}"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        assert_a_slot_frees(port);
     }
 }
