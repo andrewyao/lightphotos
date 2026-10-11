@@ -43,6 +43,11 @@ impl Faces {
     /// A result the signal cache saved. One computed this session wins.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn seed(&mut self, path: PathBuf, quality: FaceQuality) {
+        // Cached before faces had a frame, so Compare would have none to
+        // start on: analyze it again.
+        if quality.faces > 0 && quality.frame.is_none() {
+            return;
+        }
         self.quality.entry(path).or_insert(quality);
     }
 
@@ -127,6 +132,28 @@ impl App {
         }
     }
 
+    /// The square around `path`'s faces: `Some(None)` when it has none or
+    /// can't be analyzed, `None` while the analysis runs. Queues it when it
+    /// was never asked for, such as a photo in no group.
+    pub(super) fn face_frame(
+        &mut self,
+        path: &Path,
+    ) -> Option<Option<crate::scoring::facequality::FaceFrame>> {
+        if let Some(q) = self.faces.quality.get(path) {
+            return Some(q.frame);
+        }
+        let Some(pool) = &self.faces.pool else {
+            return Some(None);
+        };
+        if self.faces.failed.contains(path) {
+            return Some(None);
+        }
+        if self.faces.pending.insert(path.to_path_buf()) {
+            pool.submit(path.to_path_buf());
+        }
+        None
+    }
+
     /// The face analysis for a path. `None` while pending, after a failure, or
     /// when never requested.
     pub(super) fn face_quality_of(
@@ -171,6 +198,7 @@ mod tests {
             crate::scoring::facequality::FaceQuality {
                 faces: 0,
                 min_eye_openness: None,
+                frame: None,
             },
         );
         let mut got = app.face_candidates();
@@ -185,6 +213,30 @@ mod tests {
             ]
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cached_analysis_with_faces_but_no_frame_runs_again() {
+        use crate::scoring::facequality::{FaceFrame, FaceQuality};
+        let mut faces = super::Faces::new();
+        let old = FaceQuality {
+            faces: 2,
+            min_eye_openness: None,
+            frame: None,
+        };
+        faces.seed("old.jpg".into(), old);
+        assert!(faces.quality.is_empty(), "no frame for Compare to start on");
+        let none = FaceQuality { faces: 0, ..old };
+        faces.seed("empty.jpg".into(), none);
+        let framed = FaceQuality {
+            frame: Some(FaceFrame {
+                center: (0.5, 0.5),
+                side: 0.2,
+            }),
+            ..old
+        };
+        faces.seed("new.jpg".into(), framed);
+        assert_eq!(faces.quality.len(), 2);
     }
 
     #[test]

@@ -131,6 +131,74 @@ pub struct FaceQuality {
     /// The least-open eye in the frame, so one blinker marks a group shot.
     /// `None` when no eye landmarks were found.
     pub min_eye_openness: Option<f32>,
+    /// A square around the face nearest the top-left corner, for Compare's
+    /// zoom square to start on:
+    /// its center in display-oriented uv and its side as a fraction of the
+    /// photo's short side. `None` with no faces, and for an analysis cached
+    /// before this was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<FaceFrame>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FaceFrame {
+    pub center: (f32, f32),
+    pub side: f32,
+}
+
+/// Room around the face, so the square shows it whole.
+const FRAME_MARGIN: f32 = 1.3;
+
+/// The square around one face in `faces`, the one whose center is nearest
+/// the upright photo's top-left corner, found on a stored `w`×`h` image
+/// whose EXIF orientation is `orientation`. Vision reports boxes on the
+/// stored pixels with the origin bottom-left; the square is in the upright
+/// photo's uv, origin top-left.
+pub fn face_frame(faces: &[RawFace], (w, h): (u32, u32), orientation: u8) -> Option<FaceFrame> {
+    let (dw, dh) = if (5..=8).contains(&orientation) {
+        (h, w)
+    } else {
+        (w, h)
+    };
+    let short = dw.min(dh) as f32;
+    if short <= 0.0 {
+        return None;
+    }
+    let upright = |f: &RawFace| {
+        let (x, y, bw, bh) = f.bounding_box;
+        // Stored uv, origin top-left.
+        let (u0, v0, u1, v1) = (x, 1.0 - y - bh, x + bw, 1.0 - y);
+        let [a, b] = [(u0, v0), (u1, v1)].map(|(u, v)| upright_uv(u, v, orientation));
+        (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
+    };
+    // In pixels, so a wide photo's x counts as much as its y.
+    let distance = |(x0, y0, x1, y1): (f32, f32, f32, f32)| {
+        ((x0 + x1) / 2.0 * dw as f32).hypot((y0 + y1) / 2.0 * dh as f32)
+    };
+    let (x0, y0, x1, y1) = faces
+        .iter()
+        .map(upright)
+        .filter(|b| distance(*b).is_finite())
+        .min_by(|a, b| distance(*a).total_cmp(&distance(*b)))?;
+    let extent = ((x1 - x0) * dw as f32).max((y1 - y0) * dh as f32);
+    let side = (extent * FRAME_MARGIN / short).clamp(0.02, 1.0);
+    let center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    (side.is_finite() && center.0.is_finite() && center.1.is_finite())
+        .then_some(FaceFrame { center, side })
+}
+
+/// A point in stored uv moved to where EXIF `orientation` shows it.
+fn upright_uv(u: f32, v: f32, orientation: u8) -> (f32, f32) {
+    match orientation {
+        2 => (1.0 - u, v),
+        3 => (1.0 - u, 1.0 - v),
+        4 => (u, 1.0 - v),
+        5 => (v, u),
+        6 => (1.0 - v, u),
+        7 => (1.0 - v, 1.0 - u),
+        8 => (v, 1.0 - u),
+        _ => (u, v),
+    }
 }
 
 impl FaceQuality {
@@ -204,6 +272,7 @@ pub fn face_quality(faces: &[RawFace], aspect_wh: f32) -> FaceQuality {
     FaceQuality {
         faces: faces.len() as u32,
         min_eye_openness,
+        frame: None,
     }
 }
 
@@ -212,10 +281,19 @@ pub fn face_quality(faces: &[RawFace], aspect_wh: f32) -> FaceQuality {
 #[hotpath::measure]
 pub fn analyze(path: &Path) -> Result<FaceQuality, String> {
     let faces = detect_faces(path)?;
-    let aspect_wh = crate::decode::image_decode::pixel_size(path)
-        .map(|(w, h)| w as f32 / h as f32)
-        .unwrap_or(1.0);
-    Ok(face_quality(&faces, aspect_wh))
+    let size = crate::decode::image_decode::pixel_size(path);
+    let aspect_wh = size.map(|(w, h)| w as f32 / h as f32).unwrap_or(1.0);
+    let frame = size.and_then(|size| {
+        face_frame(
+            &faces,
+            size,
+            crate::decode::image_decode::orientation_of(path),
+        )
+    });
+    Ok(FaceQuality {
+        frame,
+        ..face_quality(&faces, aspect_wh)
+    })
 }
 
 pub struct FaceOutcome {
@@ -323,6 +401,61 @@ mod tests {
         })
     }
 
+    fn face_at(x: f32, y: f32, w: f32, h: f32) -> RawFace {
+        RawFace {
+            bounding_box: (x, y, w, h),
+            confidence: 1.0,
+            left_eye: Vec::new(),
+            right_eye: Vec::new(),
+        }
+    }
+
+    fn close(a: (f32, f32), b: (f32, f32)) -> bool {
+        (a.0 - b.0).abs() < 1e-4 && (a.1 - b.1).abs() < 1e-4
+    }
+
+    #[test]
+    fn the_face_frame_flips_visions_bottom_left_origin() {
+        // A face in the stored image's bottom-left corner, on a 4000x2000.
+        let f =
+            face_frame(&[face_at(0.0, 0.0, 0.1, 0.2)], (4000, 2000), 1).expect("one face frames");
+        assert!(close(f.center, (0.05, 0.9)), "{f:?}");
+        // 0.2 of 2000 tall beats 0.1 of 4000 wide: 400 px, with margin, of a
+        // 2000 px short side.
+        assert!((f.side - 0.2 * FRAME_MARGIN).abs() < 1e-4, "{f:?}");
+    }
+
+    #[test]
+    fn the_face_frame_follows_the_exif_rotation() {
+        let face = [face_at(0.0, 0.0, 0.1, 0.2)];
+        // Orientation 6 turns the stored bottom-left to the top-left.
+        let f = face_frame(&face, (4000, 2000), 6).expect("frames");
+        assert!(close(f.center, (0.1, 0.05)), "{f:?}");
+        // Orientation 8 turns it to the bottom-right.
+        let f = face_frame(&face, (4000, 2000), 8).expect("frames");
+        assert!(close(f.center, (0.9, 0.95)), "{f:?}");
+    }
+
+    #[test]
+    fn the_face_frame_holds_only_the_face_nearest_the_top_left() {
+        // Vision's origin is bottom-left, so the first face sits low on the
+        // photo and the larger second one high on its left.
+        let faces = [face_at(0.1, 0.1, 0.1, 0.1), face_at(0.3, 0.6, 0.2, 0.2)];
+        let f = face_frame(&faces, (1000, 1000), 1).expect("frames");
+        assert!(close(f.center, (0.4, 0.3)), "{f:?}");
+        assert!((f.side - 0.2 * FRAME_MARGIN).abs() < 1e-4, "{f:?}");
+        // Turned by orientation 6, the low-left face lands at the top-left.
+        let f = face_frame(&faces, (1000, 1000), 6).expect("frames");
+        assert!(close(f.center, (0.15, 0.15)), "{f:?}");
+    }
+
+    #[test]
+    fn the_face_frame_is_none_without_a_face_or_an_image() {
+        let faces = [face_at(0.1, 0.4, 0.1, 0.1)];
+        assert_eq!(face_frame(&[], (1000, 1000), 1), None);
+        assert_eq!(face_frame(&faces, (0, 0), 1), None, "an empty image");
+    }
+
     #[test]
     fn a_pool_that_started_no_workers_is_never_handed_to_a_caller() {
         assert!(
@@ -340,6 +473,7 @@ mod tests {
             Ok(FaceQuality {
                 faces: 0,
                 min_eye_openness: None,
+                frame: None,
             })
         }
         let pool = FacePool::with_workers(1, panics_on_boom).expect("one worker should start");

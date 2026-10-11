@@ -1102,6 +1102,7 @@ impl App {
         // Upload thumbnails before egui references them.
         self.sync_thumb_textures();
         self.sync_compare_tiles();
+        self.frame_compare_on_faces();
 
         if self.hist.is_dirty() && self.develop_open {
             self.recompute_histogram();

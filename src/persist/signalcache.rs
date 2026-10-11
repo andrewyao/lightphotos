@@ -467,6 +467,7 @@ mod tests {
         Signal::Faces(FaceQuality {
             faces: n,
             min_eye_openness: None,
+            frame: None,
         })
     }
 
@@ -493,6 +494,7 @@ mod tests {
                 Signal::Faces(FaceQuality {
                     faces: 2,
                     min_eye_openness: Some(0.31),
+                    frame: None,
                 }),
             );
             cache.flush_blocking(Duration::from_secs(5));

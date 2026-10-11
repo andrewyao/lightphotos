@@ -266,6 +266,9 @@ pub(super) fn drop_full_crops(tiles: &mut CompareTiles, r: &mut Renderer) {
 }
 
 pub(crate) struct GroupCompare {
+    /// The photo whose faces the zoom square was last framed on, so it is
+    /// framed once and then left where the person moves it.
+    framed: Option<PathBuf>,
     /// One mipped texture per group member, keyed on the members and
     /// the preview size, so a resize or another group re-uploads the set.
     tiles: Option<CompareTiles>,
@@ -319,6 +322,7 @@ impl GroupCompare {
             picks: GroupPicks::default(),
             flag_filter: FlagFilter::NotRejected,
             adhoc: None,
+            framed: None,
         }
     }
 }
@@ -449,6 +453,34 @@ impl App {
                 tiles.bytes as f64 / 1e6
             );
         }
+    }
+
+    /// Center the zoom square on the face nearest the top-left of the pane's
+    /// first photo, the representative, and size it to hold that face, once
+    /// per photo. A
+    /// photo with no faces leaves the square where it was.
+    pub(super) fn frame_compare_on_faces(&mut self) {
+        if self.mode != ViewMode::Loupe || self.group_compare.view != GroupView::Compare {
+            return;
+        }
+        let Some(first) = self
+            .compare_rep()
+            .or_else(|| self.group_compare.tiles.as_ref()?.order.first().cloned())
+        else {
+            return;
+        };
+        if self.group_compare.framed.as_ref() == Some(&first) {
+            return;
+        }
+        let Some(frame) = self.face_frame(&first) else {
+            return;
+        };
+        if let Some(f) = frame {
+            self.group_compare.center = egui::pos2(f.center.0, f.center.1);
+            self.group_compare.side = f.side;
+            self.request_redraw();
+        }
+        self.group_compare.framed = Some(first);
     }
 
     /// When a Full re-crop is waiting on the zoom square to settle, the

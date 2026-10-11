@@ -1087,6 +1087,10 @@ mod tests {
         let blink = FaceQuality {
             faces: 1,
             min_eye_openness: Some(0.1),
+            frame: Some(crate::scoring::facequality::FaceFrame {
+                center: (0.5, 0.4),
+                side: 0.3,
+            }),
         };
         {
             let mut cache = SignalCache::load(&dir);
@@ -1103,6 +1107,7 @@ mod tests {
         let two_faces = FaceQuality {
             faces: 2,
             min_eye_openness: None,
+            frame: None,
         };
         app.signals.record(&b, Signal::Faces(two_faces));
 
