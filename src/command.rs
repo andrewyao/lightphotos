@@ -317,13 +317,58 @@ pub fn reset(adj: Adjustments) -> Adjustments {
     }
 }
 
-/// Runs `cmd` on one photo's sidecar record, with the result the app gives
-/// that photo, for a caller with no running app. The caller resolves
-/// `photos` to records and saves each. `size` gives the photo's pixel size,
-/// asked for only by a crop on a straightened photo. A command that
-/// [`Command::about`] does not mark headless is refused with
-/// [`CommandError::NeedsApp`], and a refused command leaves `rec` as it was.
-pub fn apply_to_record(
+/// Runs `cmd` on the sidecar records of the photos it names, with the
+/// result the app gives them, for a caller with no running app. The caller
+/// resolves `photos` to records and saves each. A toggle is decided once
+/// across all of them, as the app decides it: toggle pick picks every photo
+/// unless every photo is picked already. `size_of(i)` gives photo `i`'s
+/// pixel size, asked for only by a crop on a straightened photo. A command
+/// that [`Command::about`] does not mark headless is refused with
+/// [`CommandError::NeedsApp`]. A refused command, on any photo, leaves every
+/// record as it was.
+pub fn apply_to_records(
+    cmd: &Command,
+    records: &mut [ImageRecord],
+    mut size_of: impl FnMut(usize) -> Result<(f32, f32), CommandError>,
+) -> Result<(), CommandError> {
+    if records.is_empty() {
+        return Err(CommandError::NoPhotos);
+    }
+    let cmd = settle_toggles(cmd, records);
+    let mut edited = records.to_vec();
+    for (i, rec) in edited.iter_mut().enumerate() {
+        apply_to_record(&cmd, rec, || size_of(i))?;
+    }
+    records.clone_from_slice(&edited);
+    Ok(())
+}
+
+/// `cmd` with each toggle turned into the value the whole set takes.
+fn settle_toggles(cmd: &Command, records: &[ImageRecord]) -> Command {
+    use crate::sidecar::Flag;
+    let mut cmd = cmd.clone();
+    match &mut cmd {
+        Command::Flag(p) if p.flag == FlagChange::TogglePick => {
+            let all = records.iter().all(|r| r.flag == Some(Flag::Pick));
+            p.flag = if all {
+                FlagChange::None
+            } else {
+                FlagChange::Pick
+            };
+        }
+        Command::Label(p) if p.on.is_none() => {
+            p.on = Some(!records.iter().all(|r| r.label == Some(p.label)));
+        }
+        Command::Monochrome(p) if p.on.is_none() => {
+            p.on = Some(!records.iter().all(|r| r.adjustments.is_monochrome()));
+        }
+        _ => {}
+    }
+    cmd
+}
+
+/// [`apply_to_records`] on one record, with any toggle already settled.
+fn apply_to_record(
     cmd: &Command,
     rec: &mut ImageRecord,
     size: impl FnOnce() -> Result<(f32, f32), CommandError>,
@@ -1199,17 +1244,19 @@ mod tests {
     }
 
     fn on_record(rec: &mut ImageRecord, json: serde_json::Value) -> Result<(), CommandError> {
-        let size = || Ok((4000.0, 3000.0));
-        apply_to_record(&Command::from_json(&json)?, rec, size)
+        let size = |_| Ok((4000.0, 3000.0));
+        apply_to_records(&Command::from_json(&json)?, std::slice::from_mut(rec), size)
     }
 
     /// The listing's `headless` flag is the promise a headless caller reads,
-    /// so it must name exactly the commands `apply_to_record` runs.
+    /// so it must name exactly the commands `apply_to_records` runs.
     #[test]
-    fn apply_to_record_runs_exactly_the_commands_listed_as_headless() {
+    fn apply_to_records_runs_exactly_the_commands_listed_as_headless() {
         for cmd in Command::examples() {
             let mut rec = ImageRecord::default();
-            let ran = apply_to_record(&cmd, &mut rec, || Ok((4000.0, 3000.0)));
+            let ran = apply_to_records(&cmd, std::slice::from_mut(&mut rec), |_| {
+                Ok((4000.0, 3000.0))
+            });
             assert_eq!(
                 ran != Err(CommandError::NeedsApp),
                 cmd.about().1,
@@ -1287,16 +1334,36 @@ mod tests {
             matches!(err, Err(CommandError::OutOfRange { .. })),
             "{err:?}"
         );
-        let sizeless = apply_to_record(
+        let sizeless = apply_to_records(
             &Command::from_json(&json!({"id": "crop.set", "params": {"straighten": 3}})).unwrap(),
-            &mut rec,
-            || Ok((0.0, 0.0)),
+            std::slice::from_mut(&mut rec),
+            |_| Ok((0.0, 0.0)),
         );
         assert!(
             matches!(sizeless, Err(CommandError::Failed { .. })),
             "{sizeless:?}"
         );
         assert_eq!(rec, before);
+    }
+
+    #[test]
+    fn a_command_refused_on_one_record_changes_none() {
+        let mut recs = vec![ImageRecord::default(); 2];
+        let straighten =
+            Command::from_json(&json!({"id": "crop.set", "params": {"straighten": 3}})).unwrap();
+        let err = apply_to_records(&straighten, &mut recs, |i| {
+            if i == 0 {
+                Ok((4000.0, 3000.0))
+            } else {
+                Ok((0.0, 0.0))
+            }
+        });
+        assert!(matches!(err, Err(CommandError::Failed { .. })), "{err:?}");
+        assert_eq!(recs, vec![ImageRecord::default(); 2]);
+        assert_eq!(
+            apply_to_records(&straighten, &mut [], |_| Ok((1.0, 1.0))),
+            Err(CommandError::NoPhotos)
+        );
     }
 
     #[test]

@@ -486,7 +486,10 @@ mod tests {
             "controls":{"exposure":{"by":0.3},"contrast":"default","highlights":-20}}}"#;
         let cmd = Command::parse(json).unwrap();
         let mut headless = start.clone();
-        command::apply_to_record(&cmd, &mut headless, || Ok((4000.0, 3000.0))).unwrap();
+        command::apply_to_records(&cmd, std::slice::from_mut(&mut headless), |_| {
+            Ok((4000.0, 3000.0))
+        })
+        .unwrap();
         assert_eq!(app.run(cmd).map(|o| o.photos), Ok(1));
         app.catalog
             .flush_blocking(std::time::Duration::from_secs(10));
@@ -504,6 +507,60 @@ mod tests {
                 ..headless
             }
         );
+    }
+
+    /// A toggle on several photos is one decision for the set, in the app
+    /// and headless alike: a mixed set turns on, a uniform one turns off.
+    #[test]
+    fn toggles_on_a_mixed_set_match_the_app() {
+        use crate::sidecar::{self, ColorLabel, Flag, ImageRecord};
+        let mut mono = ImageRecord::default();
+        mono.edit(1_700_000_000, |r| r.adjustments.saturation = -100.0);
+        let mixed = [
+            ImageRecord {
+                flag: Some(Flag::Pick),
+                label: Some(ColorLabel::Red),
+                ..mono
+            },
+            ImageRecord::default(),
+        ];
+        type Field = fn(&ImageRecord) -> String;
+        let cases: [(&str, Field); 3] = [
+            (
+                r#"{"id":"photo.flag","params":{"flag":"toggle_pick","photos":["0.jpg","1.jpg"]}}"#,
+                |r| format!("{:?}", r.flag),
+            ),
+            (
+                r#"{"id":"photo.label","params":{"label":"red","photos":["0.jpg","1.jpg"]}}"#,
+                |r| format!("{:?}", r.label),
+            ),
+            (
+                r#"{"id":"develop.monochrome","params":{"photos":["0.jpg","1.jpg"]}}"#,
+                |r| r.adjustments.is_monochrome().to_string(),
+            ),
+        ];
+        for (json, field) in cases {
+            let (mut app, dir, paths) = folder_app("cmd-toggle-parity", 2);
+            for (path, rec) in paths.iter().zip(&mixed) {
+                sidecar::write_record(path, rec).unwrap();
+            }
+            crate::app::test_support::load_folder(&mut app, &dir);
+
+            let cmd = Command::parse(json).unwrap();
+            let mut headless = mixed.clone();
+            command::apply_to_records(&cmd, &mut headless, |_| Ok((4000.0, 3000.0))).unwrap();
+            assert_eq!(app.run(cmd).map(|o| o.photos), Ok(2), "{json}");
+            app.catalog
+                .flush_blocking(std::time::Duration::from_secs(10));
+
+            let saved: Vec<String> = paths
+                .iter()
+                .map(|p| field(&sidecar::read_record(p).unwrap()))
+                .collect();
+            let settled: Vec<String> = headless.iter().map(field).collect();
+            assert_eq!(saved, settled, "{json}");
+            assert_eq!(saved[0], saved[1], "one value for the set: {json}");
+        }
     }
 
     #[test]
