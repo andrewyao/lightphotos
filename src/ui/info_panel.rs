@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The right panel's Info page: the focused photo's size and format on one
-//! line, then its file, camera, exposure, date, and location details.
+//! The right panel's Info page: the focused photo's file size and format on
+//! one line, then its file, camera, exposure, date, and location details.
 
 use std::path::Path;
 
@@ -33,6 +33,10 @@ fn info_groups(path: &Path, meta: Option<&ImageMetadata>) -> Vec<InfoGroup> {
             t.info_file,
             vec![
                 (t.info_name, name),
+                (
+                    t.info_dimensions,
+                    m(|m| m.source_size.map(|(w, h)| format_dimensions(w, h))),
+                ),
                 (t.info_modified, m(|m| m.modified.map(date_text))),
             ],
         ),
@@ -99,17 +103,13 @@ fn info_groups(path: &Path, meta: Option<&ImageMetadata>) -> Vec<InfoGroup> {
         .collect()
 }
 
-/// Dimensions, file size and format, the ones the photo has, on one line.
-/// `None` until the background read lands.
+/// File size and format, the ones the photo has, on one line. `None` until
+/// the background read lands.
 fn summary_line(meta: &ImageMetadata) -> Option<String> {
-    let parts: Vec<String> = [
-        meta.source_size.map(|(w, h)| format_dimensions(w, h)),
-        meta.file_size.map(format_file_size),
-        meta.format.clone(),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let parts: Vec<String> = [meta.file_size.map(format_file_size), meta.format.clone()]
+        .into_iter()
+        .flatten()
+        .collect();
     (!parts.is_empty()).then(|| parts.join(" \u{b7} "))
 }
 
@@ -212,15 +212,38 @@ mod tests {
     fn size_and_format_share_one_line() {
         assert_eq!(summary_line(&ImageMetadata::default()), None);
         let meta = ImageMetadata {
-            source_size: Some((6000, 4000)),
+            file_size: Some(2048),
             format: Some("JPEG".into()),
             ..Default::default()
         };
-        let line = summary_line(&meta).unwrap();
         assert_eq!(
-            line,
-            format!("{} \u{b7} JPEG", format_dimensions(6000, 4000)),
+            summary_line(&meta).unwrap(),
+            format!("{} \u{b7} JPEG", format_file_size(2048))
+        );
+        let meta = ImageMetadata {
+            format: Some("JPEG".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            summary_line(&meta).unwrap(),
+            "JPEG",
             "a missing file size leaves no gap"
+        );
+    }
+
+    #[test]
+    fn the_dimensions_have_their_own_row_under_file() {
+        let meta = ImageMetadata {
+            source_size: Some((6000, 4000)),
+            ..Default::default()
+        };
+        let groups = info_groups(Path::new("/p/IMG_1.JPG"), Some(&meta));
+        assert_eq!(
+            groups[0].rows,
+            [
+                (t().info_name, "IMG_1.JPG".to_string()),
+                (t().info_dimensions, format_dimensions(6000, 4000)),
+            ]
         );
     }
 
