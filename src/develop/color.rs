@@ -6,6 +6,10 @@
 //! weights over the bands fall off as a raised cosine between neighbouring
 //! band centres, so no seam shows between two bands.
 //!
+//! A monochrome photo swaps the mixer for the B&W mix ([`GrayMix`]): the
+//! same band weights brighten or darken each colour before Saturation -100
+//! turns the photo gray, so a band sets how light its colours come out.
+//!
 //! [`ColorOps`] turns the sliders into the numbers the per-pixel math needs.
 //! The CPU bake reads it and [`super::GpuAdjust`] carries it whole to
 //! `colorMix` in loupe_common.wgsl, so the two never derive them twice.
@@ -112,6 +116,49 @@ impl ColorMixer {
     }
 }
 
+/// The B&W mix: how light each band's colours turn out in a monochrome
+/// photo, -100..100.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct GrayMix {
+    #[serde(skip_serializing_if = "is_zero")]
+    pub red: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub orange: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub yellow: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub green: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub aqua: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub blue: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub purple: f32,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub magenta: f32,
+}
+
+impl GrayMix {
+    pub fn is_neutral(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The bands in [`Band::ALL`] order.
+    pub fn bands(&self) -> [f32; 8] {
+        [
+            self.red,
+            self.orange,
+            self.yellow,
+            self.green,
+            self.aqua,
+            self.blue,
+            self.purple,
+            self.magenta,
+        ]
+    }
+}
+
 /// OkLCh hue, in radians, of each band's centre: the pure sRGB colour at
 /// HSV hue 0, 30, 60, 120, 180, 225, 270 and 315 degrees, linearized with
 /// the 2.2 gamma the pipeline works in. They rise once around the circle.
@@ -123,20 +170,23 @@ pub const BAND_HUES: [f32; 8] = [
 const HUE_MAX: f32 = 0.5;
 /// OkLab lightness change at ±100 on a fully coloured pixel of lightness 1.
 const LUM_MAX: f32 = 0.18;
+/// OkLab lightness change of a fully coloured pixel at B&W mix ±100.
+const GRAY_MAX: f32 = 0.25;
 /// OkLCh chroma at and above which a pixel takes a band's full hue and
 /// luminance shift. Duller pixels take less, so grays, whose hue means
 /// nothing, stay put.
 const CHROMA_FULL: f32 = 0.12;
 
 /// The derived numbers for one render, laid out as the tail of the shader's
-/// `Adjust` uniform after the effects. Must match its `mix_*` fields. Every
-/// array is 8 floats, two `vec4`s on the GPU, so the layout needs no padding
-/// between them.
+/// `Adjust` uniform after the effects. Must match its `color_on`, `band_hue`,
+/// `mix_*` and `gray` fields. Every array is 8 floats, two `vec4`s on the
+/// GPU, so the layout needs no padding between them. The mixer and the B&W
+/// mix never both act, so the arrays of the one that is off are 0.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ColorOps {
-    /// 1 when the mixer changes something, 0 to skip it.
-    pub mix_on: f32,
+    /// 1 when the mixer or the B&W mix changes something, 0 to skip both.
+    pub on: f32,
     pub _pad: [f32; 3],
     /// [`BAND_HUES`].
     pub band_hue: [f32; 8],
@@ -146,32 +196,46 @@ pub struct ColorOps {
     pub mix_sat: [f32; 8],
     /// OkLab lightness change per band at full chroma and lightness 1.
     pub mix_lum: [f32; 8],
+    /// OkLab lightness change per band at full chroma, from the B&W mix.
+    pub gray: [f32; 8],
 }
 
 impl ColorOps {
     /// Each slider is clamped first, since a sidecar can hold anything. A
-    /// monochrome photo skips the mixer, as Lightroom swaps it for the B&W
-    /// mix.
-    pub fn new(mixer: &ColorMixer, monochrome: bool) -> Self {
-        if mixer.is_neutral() || monochrome {
+    /// monochrome photo takes the B&W mix and skips the mixer, as Lightroom
+    /// swaps the one panel for the other; a colour photo the reverse.
+    pub fn new(mixer: &ColorMixer, gray: &GrayMix, monochrome: bool) -> Self {
+        let unit = |v: f32| v.clamp(-100.0, 100.0) / 100.0;
+        let on = Self {
+            on: 1.0,
+            band_hue: BAND_HUES,
+            ..Self::default()
+        };
+        if monochrome {
+            if gray.is_neutral() {
+                return Self::default();
+            }
+            return Self {
+                gray: gray.bands().map(|v| unit(v) * GRAY_MAX),
+                ..on
+            };
+        }
+        if mixer.is_neutral() {
             return Self::default();
         }
         let bands = mixer.bands();
-        let unit = |v: f32| v.clamp(-100.0, 100.0) / 100.0;
         Self {
-            mix_on: 1.0,
-            _pad: [0.0; 3],
-            band_hue: BAND_HUES,
             mix_hue: bands.map(|b| unit(b.hue) * HUE_MAX),
             mix_sat: bands.map(|b| unit(b.saturation)),
             mix_lum: bands.map(|b| unit(b.luminance) * LUM_MAX),
+            ..on
         }
     }
 
-    /// The Color Mixer on one gamma-space pixel. Must match `colorMix` in
-    /// loupe_common.wgsl.
+    /// The Color Mixer, or the B&W mix, on one gamma-space pixel. Must
+    /// match `colorMix` in loupe_common.wgsl.
     pub fn apply(&self, rgb: [f32; 3]) -> [f32; 3] {
-        if self.mix_on == 0.0 {
+        if self.on == 0.0 {
             return rgb;
         }
         let [l, a, b] = oklab(rgb.map(|x| x.max(0.0).powf(2.2)));
@@ -188,7 +252,7 @@ impl ColorOps {
         let cw = (c / CHROMA_FULL).min(1.0);
         let h2 = h + blend(&self.mix_hue) * cw;
         let c2 = c * (1.0 + blend(&self.mix_sat)).max(0.0);
-        let l2 = l + blend(&self.mix_lum) * cw * l.max(0.05).sqrt();
+        let l2 = l + (blend(&self.mix_lum) * l.max(0.05).sqrt() + blend(&self.gray)) * cw;
         let lin = oklab_to_linear([l2, c2 * h2.cos(), c2 * h2.sin()]);
         lin.map(|x| x.max(0.0).powf(1.0 / 2.2))
     }
@@ -330,6 +394,7 @@ mod tests {
                     ..Default::default()
                 },
             ),
+            &GrayMix::default(),
             false,
         );
         let blue = [0.15, 0.3, 0.9];
@@ -357,6 +422,7 @@ mod tests {
                     luminance: 100.0,
                 },
             ),
+            &GrayMix::default(),
             false,
         );
         let linear = |rgb: [f32; 3]| ops.apply(rgb).map(|x| x.powf(2.2));
@@ -381,11 +447,12 @@ mod tests {
         // A red with room to turn inside sRGB, so no channel clips.
         let red = [0.7, 0.3, 0.28];
         let before = lch(red)[2];
-        let after = lch(ColorOps::new(&m, false).apply(red))[2];
+        let after = lch(ColorOps::new(&m, &GrayMix::default(), false).apply(red))[2];
         assert!(after - before > 0.3, "{before} -> {after}");
-        assert_eq!(ColorOps::new(&m, true), ColorOps::default());
+        let none = GrayMix::default();
+        assert_eq!(ColorOps::new(&m, &none, true), ColorOps::default());
         assert_eq!(
-            ColorOps::new(&ColorMixer::default(), false),
+            ColorOps::new(&ColorMixer::default(), &none, false),
             ColorOps::default()
         );
     }
@@ -400,7 +467,7 @@ mod tests {
                 luminance: 500.0,
             },
         );
-        let ops = ColorOps::new(&m, false);
+        let ops = ColorOps::new(&m, &GrayMix::default(), false);
         assert_eq!(ops.mix_hue[4], HUE_MAX);
         assert_eq!(ops.mix_sat[4], -1.0);
         assert_eq!(ops.mix_lum[4], LUM_MAX);

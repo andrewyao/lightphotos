@@ -12,7 +12,7 @@ A real page switch, such as Develop's Sliders, Crop and Masks, is a column of pa
 
 The Develop Sliders page follows the selection (`App::develop_scope`). With nothing selected it says so in the histogram's place and every control is off, at its default. With one photo it shows that photo. With several it names no one photo: each slider is a row of step buttons (`«  ‹  0  ›  »`, five steps, one step, reset, one step, five steps of the slider's keyboard step; the reset button shows the slider's default, 50 for Vignette Midpoint) that move every selected photo from its own value, the curve is off, and Remove Chromatic Aberration shows a grey tick when only some photos have it. Ticking it measures the photos that lack it one at a time.
 
-The Color Mixer shows one of Hue, Saturation and Luminance at a time, picked with a `form::segmented` row under its header, and hides for a monochrome photo. `develop::Slider::shown` decides which rows draw, and the keyboard cursor walks only those.
+The Color Mixer shows one of Hue, Saturation and Luminance at a time, picked with a `form::segmented` row under its header, and gives way to the B&W Mix on a monochrome photo, as in Lightroom. `develop::Slider::shown` decides which rows draw, and the keyboard cursor walks only those.
 
 Copy Adjustment opens Copy Settings (`modals::copy_settings_modal`), a checkbox per section of `develop::copy::CopySection` with Check All and Check None. Paste and preset apply both go through `develop::copy::merge`; a preset carries `CopySections::LOOK`, everything but Optics and Crop.
 

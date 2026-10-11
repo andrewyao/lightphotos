@@ -57,9 +57,10 @@ struct Adjust {
     grain_amount: f32,
     grain_rough: f32,
     grain_scale: vec2<f32>,
-    // The Color Mixer, derived on the CPU by `develop::ColorOps`. Each
-    // array is 8 floats, one per band. See `colorMix`.
-    mix_on: f32,
+    // The Color Mixer and the B&W mix, derived on the CPU by
+    // `develop::ColorOps`. Each array is 8 floats, one per band. See
+    // `colorMix`.
+    color_on: f32,
     _cpad0: f32,
     _cpad1: f32,
     _cpad2: f32,
@@ -67,6 +68,7 @@ struct Adjust {
     mix_hue: array<vec4<f32>, 2>,
     mix_sat: array<vec4<f32>, 2>,
     mix_lum: array<vec4<f32>, 2>,
+    gray: array<vec4<f32>, 2>,
 };
 
 struct TouchUp {
@@ -451,11 +453,15 @@ fn mixLum(i: u32) -> f32 {
     return adj.mix_lum[i / 4u][i % 4u];
 }
 
-// The Color Mixer on gamma-space `rgb`, in OkLCh: each pixel takes a
-// raised-cosine blend of the two bands its hue sits between. Must match
-// `ColorOps::apply` in develop/color.rs.
+fn grayMix(i: u32) -> f32 {
+    return adj.gray[i / 4u][i % 4u];
+}
+
+// The Color Mixer, or the B&W mix, on gamma-space `rgb`, in OkLCh: each
+// pixel takes a raised-cosine blend of the two bands its hue sits between.
+// Must match `ColorOps::apply` in develop/color.rs.
 fn colorMix(rgb: vec3<f32>) -> vec3<f32> {
-    if (adj.mix_on == 0.0) {
+    if (adj.color_on == 0.0) {
         return rgb;
     }
     let lab = oklab(pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(2.2)));
@@ -482,7 +488,9 @@ fn colorMix(rgb: vec3<f32>) -> vec3<f32> {
     let cw = min(c / 0.12, 1.0);
     let h2 = h + (mixHue(i) + (mixHue(j) - mixHue(i)) * s) * cw;
     let c2 = c * max(1.0 + (mixSat(i) + (mixSat(j) - mixSat(i)) * s), 0.0);
-    let l2 = lab.x + (mixLum(i) + (mixLum(j) - mixLum(i)) * s) * cw * sqrt(max(lab.x, 0.05));
+    let lum = (mixLum(i) + (mixLum(j) - mixLum(i)) * s) * sqrt(max(lab.x, 0.05));
+    let gray = grayMix(i) + (grayMix(j) - grayMix(i)) * s;
+    let l2 = lab.x + (lum + gray) * cw;
     let lin = oklabToLinear(vec3<f32>(l2, c2 * cos(h2), c2 * sin(h2)));
     return pow(max(lin, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
 }

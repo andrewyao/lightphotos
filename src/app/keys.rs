@@ -1314,21 +1314,25 @@ mod tests {
             saturation: -100.0,
             ..Default::default()
         });
-        let mixer_before = app.current_adjustments().mixer;
+        let before = app.current_adjustments();
         app.develop_adjust(1);
         assert_eq!(
-            app.current_adjustments().mixer,
-            mixer_before,
-            "a nudge never lands on a hidden row"
+            app.current_adjustments(),
+            before,
+            "the first nudge on a hidden row only moves the cursor"
         );
-        assert_eq!(app.develop_focus, at(SliderId::SharpenAmount));
+        assert_eq!(app.develop_focus, at(SliderId::Gray(Band::Red)));
+        app.develop_adjust(1);
+        assert_eq!(app.current_adjustments().gray_mix.red, 1.0);
         app.develop_focus = at(SliderId::Saturation);
         app.develop_move(1);
         assert_eq!(
             app.develop_focus,
-            at(SliderId::SharpenAmount),
-            "a monochrome photo hides the mixer"
+            at(SliderId::Gray(Band::Red)),
+            "a monochrome photo swaps the mixer for the B&W mix"
         );
+        app.develop_move(8);
+        assert_eq!(app.develop_focus, at(SliderId::SharpenAmount));
     }
 
     #[test]

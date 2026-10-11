@@ -10,7 +10,7 @@ use crate::develop::curve::Curve;
 use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
     Adjustments, BandShift, BaseProbe, CaScale, ColorMixer, Crop, GpuAdjust, GpuTouchUp, Grain,
-    Sharpening, Straighten, TouchUp, Vignette, SLIDERS,
+    GrayMix, Section, Sharpening, Straighten, TouchUp, Vignette, SLIDERS,
 };
 
 const W: u32 = 96;
@@ -163,6 +163,10 @@ fn cases() -> Vec<Case> {
     for s in &SLIDERS {
         for end in [*s.range.start(), *s.range.end()] {
             let mut adj = Adjustments::default();
+            // The B&W mix acts only on a monochrome photo.
+            if s.section == Section::GrayMix {
+                adj.saturation = -100.0;
+            }
             *(s.field)(&mut adj) = end;
             out.push(case(format!("{:?}={end}", s.id).to_lowercase(), adj));
         }
@@ -377,6 +381,32 @@ fn cases() -> Vec<Case> {
             ..Default::default()
         },
     ));
+    let gray_mix = GrayMix {
+        red: 80.0,
+        orange: -40.0,
+        yellow: 100.0,
+        green: -100.0,
+        aqua: 30.0,
+        blue: -70.0,
+        purple: 60.0,
+        magenta: -20.0,
+    };
+    out.push(case(
+        "gray_all".into(),
+        Adjustments {
+            gray_mix,
+            saturation: -100.0,
+            ..Default::default()
+        },
+    ));
+    out.push(case(
+        "gray+color".into(),
+        Adjustments {
+            gray_mix,
+            mixer,
+            ..Default::default()
+        },
+    ));
     out.push(case(
         "mixer+ca".into(),
         Adjustments {
@@ -422,6 +452,17 @@ fn cases() -> Vec<Case> {
         name: "everything_color".into(),
         adj: Adjustments {
             mixer,
+            chromatic_aberration: None,
+            ..everything
+        },
+        touchups: vec![touchup],
+    });
+    out.push(Case {
+        name: "everything_mono".into(),
+        adj: Adjustments {
+            mixer,
+            gray_mix,
+            saturation: -100.0,
             chromatic_aberration: None,
             ..everything
         },

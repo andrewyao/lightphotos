@@ -454,6 +454,7 @@ pub struct Strings {
     pub curve_green: &'static str,
     pub curve_blue: &'static str,
     pub color_mixer: &'static str,
+    pub gray_mix: &'static str,
     pub mix_hue: &'static str,
     pub mix_luminance: &'static str,
     /// The Color Mixer's bands, in `develop::Band::ALL` order.
@@ -714,6 +715,7 @@ impl Strings {
             Section::Grain => self.grain,
             Section::Curve => self.curve,
             Section::ColorMixer => self.color_mixer,
+            Section::GrayMix => self.gray_mix,
         }
     }
 
@@ -771,7 +773,7 @@ impl Strings {
             SliderId::VignetteFeather => self.feather,
             SliderId::GrainSize => self.grain_size,
             SliderId::GrainRoughness => self.roughness,
-            SliderId::Mix(_, band) => self.band(band),
+            SliderId::Mix(_, band) | SliderId::Gray(band) => self.band(band),
         }
     }
 }
@@ -1265,6 +1267,7 @@ pub static EN: Strings = Strings {
     curve_green: "Green",
     curve_blue: "Blue",
     color_mixer: "Color Mixer",
+    gray_mix: "B&W Mix",
     mix_hue: "Hue",
     mix_luminance: "Luminance",
     bands: [
@@ -2008,6 +2011,7 @@ pub static ZH: Strings = Strings {
     curve_green: "绿色",
     curve_blue: "蓝色",
     color_mixer: "混色器",
+    gray_mix: "黑白混合",
     mix_hue: "色相",
     mix_luminance: "明亮度",
     bands: [

@@ -149,7 +149,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = curved.g;
     b = curved.b;
 
-    // 4.3. The Color Mixer, in OkLCh.
+    // 4.3. The Color Mixer, or the B&W mix, in OkLCh.
     let mixed = colorMix(vec3<f32>(r, g, b));
     r = mixed.r;
     g = mixed.g;

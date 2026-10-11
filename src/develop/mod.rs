@@ -18,7 +18,7 @@ pub mod sharpen;
 use serde::{Deserialize, Serialize};
 
 pub use base::{BaseLayer, BaseProbe, BaseTexel, Grid};
-pub use color::{Band, BandShift, ColorMixer, ColorOps, MixAxis};
+pub use color::{Band, BandShift, ColorMixer, ColorOps, GrayMix, MixAxis};
 pub use effects::{Effects, Grain, Vignette};
 pub use sharpen::{Sharpen, Sharpening};
 
@@ -62,6 +62,11 @@ const fn mix(axis: MixAxis, band: Band, field: fn(&mut Adjustments) -> &mut f32)
     tone(Section::ColorMixer, SliderId::Mix(axis, band), field)
 }
 
+/// One B&W mix slider: how light `band` turns out, -100..100.
+const fn gray(band: Band, field: fn(&mut Adjustments) -> &mut f32) -> Slider {
+    tone(Section::GrayMix, SliderId::Gray(band), field)
+}
+
 /// A 0..100 slider that rests at `default`.
 const fn percent(
     section: Section,
@@ -77,8 +82,8 @@ const fn percent(
 }
 
 /// What the Sliders page shows of the sliders that share rows: the Color
-/// Mixer's chosen axis, and whether the photos are monochrome, which hides
-/// the mixer as Lightroom does.
+/// Mixer's chosen axis, and whether the photos are monochrome, which swaps
+/// the mixer for the B&W mix as Lightroom does.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct SliderView {
     pub mixer_axis: MixAxis,
@@ -91,6 +96,7 @@ impl Slider {
     pub fn shown(&self, view: SliderView) -> bool {
         match self.id {
             SliderId::Mix(axis, _) => !view.monochrome && axis == view.mixer_axis,
+            SliderId::Gray(_) => view.monochrome,
             _ => true,
         }
     }
@@ -105,6 +111,9 @@ pub enum Section {
     Curve,
     /// Hue, saturation and luminance per hue band. See [`ColorMixer`].
     ColorMixer,
+    /// The B&W mix, in the mixer's place on a monochrome photo. See
+    /// [`GrayMix`].
+    GrayMix,
     Detail,
     /// Checkboxes, not sliders. See [`CaScale`].
     Optics,
@@ -130,6 +139,7 @@ pub enum SliderId {
     Vibrance,
     Saturation,
     Mix(MixAxis, Band),
+    Gray(Band),
     SharpenAmount,
     SharpenRadius,
     SharpenDetail,
@@ -144,7 +154,7 @@ pub enum SliderId {
     GrainRoughness,
 }
 
-pub const SLIDERS: [Slider; 49] = [
+pub const SLIDERS: [Slider; 57] = [
     tone(Section::WhiteBalance, SliderId::Temp, |a| &mut a.temp),
     tone(Section::WhiteBalance, SliderId::Tint, |a| &mut a.tint),
     Slider {
@@ -224,6 +234,14 @@ pub const SLIDERS: [Slider; 49] = [
     mix(MixAxis::Luminance, Band::Magenta, |a| {
         &mut a.mixer.magenta.luminance
     }),
+    gray(Band::Red, |a| &mut a.gray_mix.red),
+    gray(Band::Orange, |a| &mut a.gray_mix.orange),
+    gray(Band::Yellow, |a| &mut a.gray_mix.yellow),
+    gray(Band::Green, |a| &mut a.gray_mix.green),
+    gray(Band::Aqua, |a| &mut a.gray_mix.aqua),
+    gray(Band::Blue, |a| &mut a.gray_mix.blue),
+    gray(Band::Purple, |a| &mut a.gray_mix.purple),
+    gray(Band::Magenta, |a| &mut a.gray_mix.magenta),
     Slider {
         range: sharpen::AMOUNT_RANGE,
         ..percent(
@@ -377,6 +395,9 @@ pub struct Adjustments {
     pub saturation: f32,
     #[serde(default, skip_serializing_if = "ColorMixer::is_neutral")]
     pub mixer: ColorMixer,
+    /// Acts only while the photo is monochrome.
+    #[serde(default, skip_serializing_if = "GrayMix::is_neutral")]
+    pub gray_mix: GrayMix,
     #[serde(default, skip_serializing_if = "Sharpening::is_default")]
     pub sharpening: Sharpening,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -623,6 +644,13 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
             }
         }
     }
+    // And the B&W mix only on one.
+    if !adj.gray_mix.is_neutral() && adj.is_monochrome() {
+        h.write(&[11]);
+        for x in adj.gray_mix.bands() {
+            h.write(&((x * 1000.0).round() as i32).to_le_bytes());
+        }
+    }
     if adj.sharpening.amount != 0.0 {
         h.write(&[9]);
         let s = adj.sharpening;
@@ -829,7 +857,7 @@ impl From<&Adjustments> for GpuAdjust {
             texture: a.texture.clamp(-100.0, 100.0),
             clarity: a.clarity.clamp(-100.0, 100.0),
             dehaze: a.dehaze.clamp(-100.0, 100.0),
-            color: ColorOps::new(&a.mixer, a.is_monochrome()),
+            color: ColorOps::new(&a.mixer, &a.gray_mix, a.is_monochrome()),
             ..Self::default()
         }
     }
@@ -941,7 +969,7 @@ impl<'a> Develop<'a> {
         Develop {
             adj,
             curve,
-            color: ColorOps::new(&adj.mixer, adj.is_monochrome()),
+            color: ColorOps::new(&adj.mixer, &adj.gray_mix, adj.is_monochrome()),
             frame: None,
         }
     }
@@ -1808,6 +1836,45 @@ mod tests {
         assert_ne!(hue, edit_signature(&a, 0));
         a.mixer = ColorMixer::default();
         assert_eq!(plain, edit_signature(&a, 0));
+    }
+
+    /// Catches a B&W mix that acts on a colour photo, changes the plain
+    /// B&W look at 0, or lightens the wrong band.
+    #[test]
+    fn the_gray_mix_sets_how_light_each_band_turns_out_in_black_and_white() {
+        let red = [0.6, 0.06, 0.04];
+        let blue = [0.04, 0.08, 0.6];
+        let mono = Adjustments {
+            saturation: -100.0,
+            ..Default::default()
+        };
+        let lit = Adjustments {
+            gray_mix: GrayMix {
+                red: 100.0,
+                ..Default::default()
+            },
+            ..mono
+        };
+        let plain = apply_linear(&mono, red);
+        let mixed = apply_linear(&lit, red);
+        assert!(mixed[0] > plain[0] + 0.05, "{plain:?} -> {mixed:?}");
+        assert!((mixed[0] - mixed[2]).abs() < 1e-5, "still gray: {mixed:?}");
+        let b = apply_linear(&lit, blue);
+        let b0 = apply_linear(&mono, blue);
+        assert!((b[0] - b0[0]).abs() < 1e-3, "blue moved: {b0:?} -> {b:?}");
+        let colour = Adjustments {
+            saturation: 0.0,
+            ..lit
+        };
+        assert_eq!(
+            apply_linear(&colour, red),
+            apply_linear(&Adjustments::default(), red)
+        );
+        assert_eq!(
+            ColorOps::new(&ColorMixer::default(), &GrayMix::default(), true),
+            ColorOps::default(),
+            "a plain B&W photo skips the colour step"
+        );
     }
 
     #[test]

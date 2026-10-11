@@ -7,8 +7,8 @@
 // every other RAW path bakes into u8 sRGB at decode time.
 //
 // Order: denoise -> touch-ups -> local edits -> WB -> exposure -> sRGB
-// gamma + boost -> tone -> curve -> color mixer -> vibrance/saturation ->
-// vignette and grain -> clamp.
+// gamma + boost -> tone -> curve -> color mixer or B&W mix ->
+// vibrance/saturation -> vignette and grain -> clamp.
 //
 // Two differences from `shader.wgsl`:
 // 1. The working gamma is the real sRGB curve plus the display boost, not
@@ -127,7 +127,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = curved.g;
     b = curved.b;
 
-    // 4.3. The Color Mixer, in OkLCh.
+    // 4.3. The Color Mixer, or the B&W mix, in OkLCh.
     let mixed = colorMix(vec3<f32>(r, g, b));
     r = mixed.r;
     g = mixed.g;

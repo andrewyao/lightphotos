@@ -13,7 +13,7 @@ pub enum CopySection {
     Tone,
     Presence,
     Curve,
-    /// The Color Mixer.
+    /// The Color Mixer and the B&W mix.
     Color,
     Detail,
     /// Vignette and Grain.
@@ -45,7 +45,7 @@ impl CopySection {
             Section::Tone => CopySection::Tone,
             Section::Presence => CopySection::Presence,
             Section::Curve => CopySection::Curve,
-            Section::ColorMixer => CopySection::Color,
+            Section::ColorMixer | Section::GrayMix => CopySection::Color,
             Section::Detail => CopySection::Detail,
             Section::Optics => CopySection::Optics,
             Section::Vignette | Section::Grain => CopySection::Effects,
@@ -110,20 +110,20 @@ impl CopySections {
         }
     }
 
-    /// The stored preference: every section's key, comma-separated, with
-    /// `-` before the ones not chosen, so a section added later can tell
-    /// "not chosen" from "not known when this was saved".
+    /// The stored preference: a format mark, then every section's key,
+    /// comma-separated, with `-` before the ones not chosen, so a section
+    /// added later can tell "not chosen" from "not known when this was
+    /// saved".
     pub fn to_pref(self) -> String {
-        CopySection::ALL
-            .into_iter()
-            .map(|c| {
+        std::iter::once(PREF_FORMAT.to_string())
+            .chain(CopySection::ALL.into_iter().map(|c| {
                 let key = c.key();
                 if self.has(c) {
                     key.to_string()
                 } else {
                     format!("-{key}")
                 }
-            })
+            }))
             .collect::<Vec<_>>()
             .join(",")
     }
@@ -131,8 +131,9 @@ impl CopySections {
     /// Reads [`CopySections::to_pref`]. An unknown key is skipped, so a
     /// newer app's choice still loads. A section the text doesn't name takes
     /// its [`CopySections::LOOK`] default, so one added since the choice was
-    /// saved still copies. The first format listed only the chosen keys and
-    /// predates `color`, so there an unnamed key is off, except `color`.
+    /// saved still copies. The first format, with no mark, listed only the
+    /// chosen keys and predates `color`, so there an unnamed key is off,
+    /// except `color`. Text naming no section at all is [`Self::NONE`].
     pub fn from_pref(text: &str) -> CopySections {
         let items: Vec<&str> = text.split(',').map(str::trim).collect();
         let named = |c: CopySection| {
@@ -141,7 +142,10 @@ impl CopySections {
                 .find(|item| item.strip_prefix('-').unwrap_or(item) == c.key())
                 .map(|item| !item.starts_with('-'))
         };
-        let first_format = !items.iter().any(|item| item.starts_with('-'));
+        if CopySection::ALL.into_iter().all(|c| named(c).is_none()) {
+            return Self::NONE;
+        }
+        let first_format = !items.contains(&PREF_FORMAT);
         CopySection::ALL.into_iter().fold(Self::NONE, |s, c| {
             let on = match named(c) {
                 Some(on) => on,
@@ -152,6 +156,9 @@ impl CopySections {
         })
     }
 }
+
+/// The mark that opens a [`CopySections::to_pref`] text.
+const PREF_FORMAT: &str = "v2";
 
 /// `target` with the `sections` of `source` laid over it. Optics carries
 /// only whether the correction is on: a photo that has its own scales keeps
@@ -302,10 +309,24 @@ mod tests {
             assert_eq!(CopySections::from_pref(&sections.to_pref()), sections);
         }
         assert_eq!(
-            CopySections::from_pref("tone,-crop,hdr"),
+            CopySections::from_pref("v2,tone,-crop,hdr"),
             CopySections::LOOK.with(CopySection::Crop, false),
             "unnamed sections take the look's default"
         );
+        assert_eq!(
+            CopySections::from_pref(
+                "v2,white_balance,tone,presence,curve,color,detail,effects,optics,crop"
+            ),
+            CopySections::all(),
+            "a choice of everything keeps a later section's default"
+        );
+        for junk in ["", "hdr,,x", "v2"] {
+            assert_eq!(
+                CopySections::from_pref(junk),
+                CopySections::NONE,
+                "{junk:?}"
+            );
+        }
     }
 
     /// Catches a choice saved before the Color Mixer existed dropping it

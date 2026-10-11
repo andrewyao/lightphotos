@@ -86,6 +86,7 @@ fn keys(id: SliderId) -> &'static [&'static str] {
             };
             std::slice::from_ref(&table[band as usize])
         }
+        SliderId::Gray(band) => std::slice::from_ref(&GRAY_KEYS[band as usize]),
     }
 }
 
@@ -109,6 +110,16 @@ const SATURATION_KEYS: [&str; 8] = [
     "SaturationAdjustmentBlue",
     "SaturationAdjustmentPurple",
     "SaturationAdjustmentMagenta",
+];
+const GRAY_KEYS: [&str; 8] = [
+    "GrayMixerRed",
+    "GrayMixerOrange",
+    "GrayMixerYellow",
+    "GrayMixerGreen",
+    "GrayMixerAqua",
+    "GrayMixerBlue",
+    "GrayMixerPurple",
+    "GrayMixerMagenta",
 ];
 const LUMINANCE_KEYS: [&str; 8] = [
     "LuminanceAdjustmentRed",
@@ -434,6 +445,7 @@ mod tests {
             vibrance: 20.0,
             saturation: -5.0,
             mixer: Default::default(),
+            gray_mix: Default::default(),
             denoise: 30.0,
             sharpening: Default::default(),
             crop: None,
@@ -494,6 +506,28 @@ mod tests {
             },
             Default::default(),
             "no other band moved"
+        );
+    }
+
+    /// Catches a B&W mix key read into the wrong band.
+    #[test]
+    fn gray_mixer_keys_fill_the_bw_mix() {
+        let got = parse(&packet(
+            "crs:ConvertToGrayscale=\"True\" crs:GrayMixerRed=\"+25\" \
+             crs:GrayMixerBlue=\"-40\" crs:GrayMixerMagenta=\"7\"",
+            "",
+        ))
+        .unwrap();
+        assert!(got.dropped.is_empty(), "{:?}", got.dropped);
+        assert!(got.adj.is_monochrome());
+        assert_eq!(
+            got.adj.gray_mix,
+            crate::develop::GrayMix {
+                red: 25.0,
+                blue: -40.0,
+                magenta: 7.0,
+                ..Default::default()
+            }
         );
     }
 

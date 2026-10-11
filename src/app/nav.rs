@@ -1070,8 +1070,9 @@ impl App {
     pub(super) fn develop_move(&mut self, delta: isize) {
         // The cursor walks the sliders, so show them.
         self.set_develop_tab(DevelopTab::Sliders);
+        let view = self.slider_view();
         for _ in 0..delta.unsigned_abs() {
-            match self.next_shown_slider(delta < 0) {
+            match self.next_shown_slider(view, delta < 0) {
                 Some(next) => self.develop_focus = next,
                 None => break,
             }
@@ -1081,8 +1082,7 @@ impl App {
 
     /// The nearest shown slider after the cursor, or before it when
     /// `back`.
-    fn next_shown_slider(&self, back: bool) -> Option<usize> {
-        let view = self.slider_view();
+    fn next_shown_slider(&self, view: develop::SliderView, back: bool) -> Option<usize> {
         let shown = |i: &usize| develop::SLIDERS.get(*i).is_some_and(|s| s.shown(view));
         let i = self.develop_focus;
         if back {
@@ -1094,18 +1094,25 @@ impl App {
 
     /// Move a cursor left on a row that has since hidden, such as the mixer
     /// after B&W turns on, to the next row that shows, or the one before.
-    fn home_develop_focus(&mut self) {
+    /// Returns whether it moved.
+    fn home_develop_focus(&mut self) -> bool {
         let view = self.slider_view();
         if develop::SLIDERS
             .get(self.develop_focus)
-            .is_some_and(|s| !s.shown(view))
+            .is_none_or(|s| s.shown(view))
         {
-            if let Some(i) = self
-                .next_shown_slider(false)
-                .or_else(|| self.next_shown_slider(true))
-            {
+            return false;
+        }
+        match self
+            .next_shown_slider(view, false)
+            .or_else(|| self.next_shown_slider(view, true))
+        {
+            Some(i) => {
                 self.develop_focus = i;
+                self.request_redraw();
+                true
             }
+            None => false,
         }
     }
 
@@ -1154,9 +1161,14 @@ impl App {
     }
 
     /// Nudge the focused Develop slider one step in direction `dir` (-1 or +1).
+    /// A cursor on a hidden row first moves to one that shows, and that
+    /// keypress changes nothing, so a nudge never lands on a slider the
+    /// person didn't see focused.
     pub(super) fn develop_adjust(&mut self, dir: isize) {
         self.set_develop_tab(DevelopTab::Sliders);
-        self.home_develop_focus();
+        if self.home_develop_focus() {
+            return;
+        }
         if self.develop_scope() == DevelopScope::Many {
             let step = if dir < 0 {
                 SliderStep::Down
@@ -1530,7 +1542,7 @@ pub(in crate::app) mod tests {
     fn keyboard_nudges_follow_the_develop_panel_order() {
         let mut app = App::new(None);
         app.shown = Shown::Preview(PathBuf::from("/nonexistent/a.jpg"), 1024, 1024);
-        let order: [fn(&Adjustments) -> f32; 49] = [
+        let order: [fn(&Adjustments) -> f32; 57] = [
             |a| a.temp,
             |a| a.tint,
             |a| a.exposure,
@@ -1568,6 +1580,14 @@ pub(in crate::app) mod tests {
             |a| a.mixer.blue.luminance,
             |a| a.mixer.purple.luminance,
             |a| a.mixer.magenta.luminance,
+            |a| a.gray_mix.red,
+            |a| a.gray_mix.orange,
+            |a| a.gray_mix.yellow,
+            |a| a.gray_mix.green,
+            |a| a.gray_mix.aqua,
+            |a| a.gray_mix.blue,
+            |a| a.gray_mix.purple,
+            |a| a.gray_mix.magenta,
             |a| a.sharpening.amount,
             |a| a.sharpening.radius,
             |a| a.sharpening.detail,
@@ -1582,9 +1602,18 @@ pub(in crate::app) mod tests {
             |a| a.grain.roughness,
         ];
         for (i, read) in order.iter().enumerate() {
-            // The mixer shows one axis at a time; show this row's.
-            if let develop::SliderId::Mix(axis, _) = develop::SLIDERS[i].id {
-                app.set_mixer_axis(axis);
+            // The mixer shows one axis at a time; show this row's. The B&W
+            // mix needs a selected monochrome photo, which this app has
+            // none of, so its rows check the table directly.
+            match develop::SLIDERS[i].id {
+                develop::SliderId::Mix(axis, _) => app.set_mixer_axis(axis),
+                develop::SliderId::Gray(_) => {
+                    let mut adj = Adjustments::default();
+                    *(develop::SLIDERS[i].field)(&mut adj) = 1.0;
+                    assert_eq!(read(&adj), 1.0, "slider {i}");
+                    continue;
+                }
+                _ => {}
             }
             app.develop_focus = i;
             let before = read(&app.current_adjustments());
