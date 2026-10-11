@@ -6,6 +6,7 @@ use crate::app::ImmichLink;
 use crate::develop::sharpen::{OutputAmount, OutputMedia, OutputSharpening};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::export::immich::Album;
+use crate::export::metadata::MetadataPolicy;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::export::AlbumChoice;
 use crate::export::{
@@ -181,6 +182,53 @@ fn file_rows(
     }
 }
 
+/// What the files say about themselves: how much of each photo's metadata
+/// they keep, and a copyright line set once for every export.
+fn metadata_rows(
+    ui: &mut egui::Ui,
+    form: &Form,
+    settings: &ExportSettings,
+    next: &mut Option<ExportSettings>,
+) {
+    let t = t();
+    let label = |p: MetadataPolicy| match p {
+        MetadataPolicy::All => t.export_metadata_all,
+        MetadataPolicy::AllButLocation => t.export_metadata_no_location,
+        MetadataPolicy::CopyrightOnly => t.export_metadata_copyright_only,
+        MetadataPolicy::None => t.export_metadata_none,
+    };
+    form.row(ui, t.export_metadata_include, |ui| {
+        egui::ComboBox::from_id_salt("export_metadata")
+            .selected_text(label(settings.metadata))
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for policy in MetadataPolicy::ALL {
+                    let on = settings.metadata == policy;
+                    if ui.selectable_label(on, label(policy)).clicked() && !on {
+                        *next = Some(ExportSettings {
+                            metadata: policy,
+                            ..settings.clone()
+                        });
+                    }
+                }
+            });
+    });
+    if settings.metadata == MetadataPolicy::None {
+        return;
+    }
+    form.row(ui, t.export_copyright, |ui| {
+        let mut text = settings.copyright.clone();
+        let field = ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY));
+        if field.changed() {
+            *next = Some(ExportSettings {
+                copyright: text,
+                ..settings.clone()
+            });
+        }
+        form::hint(ui, t.export_copyright_hint);
+    });
+}
+
 /// The export page under its heading: where to, how big, and the footer.
 fn draw_export_form(
     ui: &mut egui::Ui,
@@ -255,6 +303,9 @@ fn draw_export_form(
                     });
             });
             sharpen_rows(ui, &form, settings, next);
+        });
+        form.section(ui, t.export_metadata, |ui| {
+            metadata_rows(ui, &form, settings, next)
         });
     }
 
