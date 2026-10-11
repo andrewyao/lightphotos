@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::develop::{Adjustments, Crop, SliderId, SLIDERS, STRAIGHTEN_RANGE};
+use crate::develop::{Adjustments, Crop, SliderId, Straighten, SLIDERS, STRAIGHTEN_RANGE};
 use crate::export::ExportSettings;
 use crate::sidecar::{ColorLabel, MAX_RATING};
 
@@ -332,7 +332,7 @@ pub struct MonochromeParams {
 #[serde(deny_unknown_fields)]
 pub struct CropParams {
     /// 0..1 of the straightened photo, origin top-left. The full frame
-    /// clears the crop.
+    /// clears the crop, which on a turned photo is the largest crop that fits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<Crop>,
     /// Degrees, within `STRAIGHTEN_RANGE`.
@@ -375,8 +375,15 @@ impl CropParams {
     }
 
     /// `adj` with the crop and straighten set. Call
-    /// [`validate`](Self::validate) first.
-    pub fn apply(&self, mut adj: Adjustments) -> Adjustments {
+    /// [`validate`](Self::validate) first. A turned photo always keeps a box
+    /// the turn fills, as the crop tool does: a cleared crop becomes the
+    /// largest that fits, and a crop past the turned photo's edge is refused.
+    /// `size` gives the photo's pixel size, asked for only when it is turned.
+    pub fn apply(
+        &self,
+        mut adj: Adjustments,
+        size: impl FnOnce() -> Result<(f32, f32), CommandError>,
+    ) -> Result<Adjustments, CommandError> {
         if let Some(c) = self.crop {
             let full = c.left == 0.0 && c.top == 0.0 && c.right == 1.0 && c.bottom == 1.0;
             adj.crop = (!full).then_some(c);
@@ -384,7 +391,33 @@ impl CropParams {
         if let Some(deg) = self.straighten {
             adj.straighten = deg;
         }
-        adj
+        if adj.straighten == 0.0 {
+            return Ok(adj);
+        }
+        let (w, h) = size()?;
+        let turn = Straighten::new(adj.straighten, w, h);
+        let Some(r) = adj.crop else {
+            adj.crop = Some(turn.largest_crop(w / h));
+            return Ok(adj);
+        };
+        if turn.covers(r) {
+            return Ok(adj);
+        }
+        let ratio = (r.right - r.left) * w / ((r.bottom - r.top) * h);
+        let fit = turn.largest_crop(if ratio.is_finite() && ratio > 0.0 {
+            ratio
+        } else {
+            w / h
+        });
+        Err(CommandError::bad_params(
+            "crop.set",
+            format!(
+                "a {}° straighten leaves the crop's corners past the photo's edge; \
+                 the largest crop of its shape that fits is left {:.4}, top {:.4}, \
+                 right {:.4}, bottom {:.4}",
+                adj.straighten, fit.left, fit.top, fit.right, fit.bottom
+            ),
+        ))
     }
 }
 
@@ -977,9 +1010,16 @@ mod tests {
         assert!(crop(0.9, 0.1, 0.1, 0.9).validate().is_err());
         assert!(crop(-0.1, 0.0, 1.0, 1.0).validate().is_err());
         assert!(crop(0.0, 0.0, f32::NAN, 1.0).validate().is_err());
+        let unturned = || -> Result<(f32, f32), CommandError> { panic!("no size needed") };
         let full = crop(0.0, 0.0, 1.0, 1.0);
-        let cropped = crop(0.1, 0.1, 0.9, 0.9).apply(Adjustments::default());
-        assert_eq!(full.apply(cropped).crop, None, "the full frame clears it");
+        let cropped = crop(0.1, 0.1, 0.9, 0.9)
+            .apply(Adjustments::default(), unturned)
+            .unwrap();
+        assert_eq!(
+            full.apply(cropped, unturned).unwrap().crop,
+            None,
+            "the full frame clears it"
+        );
         let tilt = CropParams {
             crop: None,
             straighten: Some(60.0),
@@ -989,6 +1029,73 @@ mod tests {
             tilt.validate(),
             Err(CommandError::OutOfRange { .. })
         ));
+    }
+
+    #[test]
+    fn a_turned_crop_set_keeps_a_box_the_turn_fills() {
+        let size = || Ok((4000.0, 3000.0));
+        let turn = Straighten::new(5.0, 4000.0, 3000.0);
+        let tilt = |crop| CropParams {
+            crop,
+            straighten: Some(5.0),
+            photos: Photos::Selected,
+        };
+
+        let adj = tilt(None).apply(Adjustments::default(), size).unwrap();
+        assert_eq!(adj.crop, Some(turn.largest_crop(4000.0 / 3000.0)));
+        let full = Crop {
+            left: 0.0,
+            top: 0.0,
+            right: 1.0,
+            bottom: 1.0,
+        };
+        let adj = tilt(Some(full))
+            .apply(Adjustments::default(), size)
+            .unwrap();
+        assert_eq!(
+            adj.crop,
+            Some(turn.largest_crop(4000.0 / 3000.0)),
+            "the full frame clears to the largest fitting crop"
+        );
+
+        let inner = Crop {
+            left: 0.2,
+            top: 0.2,
+            right: 0.8,
+            bottom: 0.8,
+        };
+        let adj = tilt(Some(inner))
+            .apply(Adjustments::default(), size)
+            .unwrap();
+        assert_eq!(adj.crop, Some(inner));
+
+        let wide = Crop {
+            left: 0.01,
+            top: 0.01,
+            right: 0.99,
+            bottom: 0.99,
+        };
+        let Err(CommandError::BadParams { reason, .. }) =
+            tilt(Some(wide)).apply(Adjustments::default(), size)
+        else {
+            panic!("a crop past the turned edge is refused");
+        };
+        assert!(reason.contains("5° straighten"), "{reason}");
+        assert!(reason.contains("largest crop"), "{reason}");
+
+        let kept = Adjustments {
+            crop: Some(wide),
+            ..Default::default()
+        };
+        let turn_only = CropParams {
+            crop: None,
+            straighten: Some(5.0),
+            photos: Photos::Selected,
+        };
+        assert!(
+            turn_only.apply(kept, size).is_err(),
+            "a kept crop must fit the new turn too"
+        );
     }
 
     #[test]

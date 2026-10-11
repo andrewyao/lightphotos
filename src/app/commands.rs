@@ -230,7 +230,18 @@ impl App {
             }
             Command::Crop(p) => {
                 let paths = self.resolve(&p.photos)?;
-                let n = self.edit_each(&paths, |adj| p.apply(adj));
+                // Every photo's edit is checked before any is written.
+                let edits = paths
+                    .iter()
+                    .map(|path| {
+                        let adj = self.edits.get(path).copied().unwrap_or_default();
+                        p.apply(adj, || self.photo_size(path))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for (path, adj) in paths.iter().zip(edits) {
+                    self.edit_each(std::slice::from_ref(path), |_| adj);
+                }
+                let n = paths.len();
                 if self.fitted
                     && self
                         .shown
@@ -296,6 +307,26 @@ impl App {
             }
             Command::Undo => done(self.undo_edit()),
         }
+    }
+
+    /// `path`'s size in display pixels, which a straightened crop needs.
+    /// Read from the file when the app has not loaded it yet.
+    fn photo_size(&self, path: &Path) -> Result<(f32, f32), CommandError> {
+        let from_meta = |m: &image_decode::ImageMetadata| m.source_size;
+        let size = match self.exif_cache.get(path).and_then(from_meta) {
+            Some((w, h)) => Some((w as f32, h as f32)),
+            None if self.shown.path() == Some(path) => Some(self.image_size()),
+            None => {
+                from_meta(&image_decode::read_metadata(path)).map(|(w, h)| (w as f32, h as f32))
+            }
+        };
+        size.filter(|&(w, h)| w > 0.0 && h > 0.0)
+            .ok_or_else(|| CommandError::Failed {
+                reason: format!(
+                    "cannot read the size of {}, which a straightened crop needs",
+                    path.display()
+                ),
+            })
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -412,10 +443,58 @@ mod tests {
     use super::*;
     use crate::app::test_support::folder_app;
     use crate::command::{CropParams, DevelopParams, FlagParams, LabelParams, RateParams, Stars};
-    use crate::develop::{Crop, SliderId};
+    use crate::develop::{Crop, SliderId, Straighten};
 
     fn run(app: &mut App, json: &str) -> Result<Outcome, CommandError> {
         app.run(Command::parse(json)?)
+    }
+
+    /// The test photos are empty files, so give them a size to straighten.
+    fn sized(app: &mut App, paths: &[PathBuf], size: (u32, u32)) {
+        for path in paths {
+            let meta = image_decode::ImageMetadata {
+                source_size: Some(size),
+                ..Default::default()
+            };
+            app.exif_cache.insert(path.clone(), meta);
+        }
+    }
+
+    #[test]
+    fn a_crop_set_that_fails_one_photo_writes_none() {
+        let (mut app, _, paths) = folder_app("cmd-crop-atomic", 2);
+        sized(&mut app, &paths[..1], (4000, 3000));
+        app.select_all();
+        let err = run(&mut app, r#"{"id":"crop.set","params":{"straighten":4}}"#).unwrap_err();
+        assert!(
+            matches!(&err, CommandError::Failed { reason } if reason.contains("1.jpg")),
+            "{err}"
+        );
+        for path in &paths {
+            assert!(
+                app.catalog.adjustments(path).is_identity(),
+                "{}",
+                path.display()
+            );
+        }
+
+        sized(&mut app, &paths, (3000, 4000));
+        let err = run(
+            &mut app,
+            r#"{"id":"crop.set","params":{"straighten":4,"crop":{"left":0,"top":0,"right":1,"bottom":0.98}}}"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, CommandError::BadParams { reason, .. } if reason.contains("4° straighten")),
+            "{err}"
+        );
+        for path in &paths {
+            assert!(
+                app.catalog.adjustments(path).is_identity(),
+                "{}",
+                path.display()
+            );
+        }
     }
 
     fn named(paths: &[PathBuf]) -> Photos {
@@ -567,6 +646,7 @@ mod tests {
     #[test]
     fn crop_set_crops_and_straightens_and_the_full_frame_clears_it() {
         let (mut app, _, paths) = folder_app("cmd-crop", 1);
+        sized(&mut app, &paths, (4000, 3000));
         app.select_single(0);
         let crop = Crop {
             left: 0.1,
@@ -589,7 +669,14 @@ mod tests {
         )
         .unwrap();
         let adj = app.catalog.adjustments(&paths[0]);
-        assert_eq!((adj.crop, adj.straighten), (None, 2.0), "straighten stays");
+        assert_eq!(
+            (adj.crop, adj.straighten),
+            (
+                Some(Straighten::new(2.0, 4000.0, 3000.0).largest_crop(4000.0 / 3000.0)),
+                2.0
+            ),
+            "straighten stays, so the cleared crop is the largest that fits it"
+        );
         assert!(matches!(
             run(&mut app, r#"{"id":"crop.set","params":{"straighten":90}}"#),
             Err(CommandError::OutOfRange { .. })
@@ -793,11 +880,17 @@ mod tests {
     #[test]
     fn undo_puts_back_a_crop_and_skips_ratings() {
         let (mut app, _, paths) = folder_app("cmd-undo-crop", 1);
+        sized(&mut app, &paths, (4000, 3000));
         app.select_single(0);
         run(&mut app, r#"{"id":"crop.set","params":{"straighten":3}}"#).unwrap();
+        assert!(
+            app.catalog.adjustments(&paths[0]).crop.is_some(),
+            "a turned photo keeps a box"
+        );
         run(&mut app, r#"{"id":"photo.rate","params":{"stars":5}}"#).unwrap();
         run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
-        assert_eq!(app.catalog.adjustments(&paths[0]).straighten, 0.0);
+        let adj = app.catalog.adjustments(&paths[0]);
+        assert_eq!((adj.crop, adj.straighten), (None, 0.0));
         assert_eq!(
             app.rating_of(&paths[0]),
             5,
