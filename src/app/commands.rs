@@ -100,9 +100,10 @@ impl App {
     }
 
     /// The photos `photos` names. `Selected` is what the keyboard acts on.
-    /// A name is an absolute path or a file name in the open folder.
+    /// A name is an absolute path or a file name in the open folder. A photo
+    /// named twice is acted on once, as headless mode does.
     pub(crate) fn resolve(&self, photos: &Photos) -> Result<Vec<PathBuf>, CommandError> {
-        let paths = match photos {
+        let paths: Vec<PathBuf> = match photos {
             Photos::Selected => {
                 let paths = self.action_paths();
                 if paths.is_empty() {
@@ -111,10 +112,17 @@ impl App {
                     paths
                 }
             }
-            Photos::Named(names) => names
-                .iter()
-                .map(|name| self.resolve_one(name))
-                .collect::<Result<_, _>>()?,
+            Photos::Named(names) => {
+                let mut seen = std::collections::HashSet::new();
+                let mut paths = Vec::new();
+                for name in names {
+                    let path = self.resolve_one(name)?;
+                    if seen.insert(path.clone()) {
+                        paths.push(path);
+                    }
+                }
+                paths
+            }
         };
         if paths.is_empty() {
             return Err(CommandError::NoPhotos);
@@ -576,6 +584,31 @@ mod tests {
         let cw = r#"{"id":"photo.rotate","params":{"clockwise":true,"photos":["0.jpg"]}}"#;
         assert_eq!(run(&mut app, cw).map(|o| o.photos), Ok(1));
         assert_eq!(app.catalog.rotation(&paths[0]), 0, "3 and a quarter turn");
+    }
+
+    /// Headless dedupes the photos a command names; the app must too, or
+    /// the same command turns a photo twice in one and once in the other.
+    #[test]
+    fn a_photo_named_twice_is_acted_on_once() {
+        let (mut app, dir, paths) = folder_app("cmd-rotate-twice", 2);
+        crate::app::test_support::load_folder(&mut app, &dir);
+        let both = format!("{:?}", paths[1].display().to_string());
+        let cw = format!(
+            r#"{{"id":"photo.rotate","params":{{"clockwise":true,
+                "photos":["1.jpg","0.jpg","1.jpg",{both}]}}}}"#
+        );
+        assert_eq!(run(&mut app, &cw).map(|o| o.photos), Ok(2));
+        assert_eq!(app.catalog.rotation(&paths[0]), 1);
+        assert_eq!(
+            app.catalog.rotation(&paths[1]),
+            1,
+            "a quarter turn, not three"
+        );
+        let named = Photos::Named(vec!["1.jpg".into(), "0.jpg".into(), "1.jpg".into()]);
+        assert_eq!(
+            app.resolve(&named),
+            Ok(vec![paths[1].clone(), paths[0].clone()])
+        );
     }
 
     #[test]
