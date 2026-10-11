@@ -11,6 +11,7 @@ use crate::export::metadata::MAX_COPYRIGHT_CHARS;
 use crate::export::AlbumChoice;
 use crate::export::{
     ExportFormat, ExportSettings, ExportSize, ExportTarget, FolderChoice, NameTemplate,
+    MAX_STEM_BYTES,
 };
 
 /// The right-hand export form. It takes the Develop panel's place while open,
@@ -27,6 +28,7 @@ pub(super) fn draw_export_panel(
     let t = t();
     let settings = app.export_settings();
     let mut next: Option<ExportSettings> = None;
+    let mut draft: Option<ExportSettings> = None;
 
     // In the Loupe, Export takes Develop's place and width beside the rail.
     let panel = if in_loupe {
@@ -49,11 +51,43 @@ pub(super) fn draw_export_panel(
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 form::page_heading(ui, &(t.export_title)(app.action_count()), |_| {});
-                form::page(ui, |ui| draw_export_form(ui, app, settings, &mut next, out));
+                form::page(ui, |ui| {
+                    draw_export_form(ui, app, settings, &mut next, &mut draft, out)
+                });
             });
     });
+    if let Some(typed) = draft {
+        out.actions.push(UiAction::EditExportSettings(typed));
+    }
     if let Some(changed) = next {
         out.actions.push(UiAction::SetExportSettings(changed));
+    }
+}
+
+/// A text field over one export setting. Each keystroke goes to `draft`,
+/// kept in memory; leaving the field, or Enter, saves through `next`, so
+/// typing a name does not write the settings file once per letter.
+fn setting_text(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &str,
+    char_limit: usize,
+    with: impl Fn(String) -> ExportSettings,
+    next: &mut Option<ExportSettings>,
+    draft: &mut Option<ExportSettings>,
+) {
+    let mut text = value.to_string();
+    let field = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id_salt(id)
+            .char_limit(char_limit)
+            .desired_width(f32::INFINITY),
+    );
+    if field.changed() {
+        *draft = Some(with(text.clone()));
+    }
+    if field.lost_focus() {
+        *next = Some(with(text));
     }
 }
 
@@ -154,6 +188,7 @@ fn file_rows(
     app: &App,
     settings: &ExportSettings,
     next: &mut Option<ExportSettings>,
+    draft: &mut Option<ExportSettings>,
 ) {
     let t = t();
     let format_label = |f: ExportFormat| match f {
@@ -164,18 +199,19 @@ fn file_rows(
         ExportFormat::Avif => "AVIF",
     };
     form.row(ui, t.export_naming, |ui| {
-        let mut text = settings.naming.0.clone();
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut text)
-                .id_salt("export_naming")
-                .desired_width(f32::INFINITY),
+        let with = |text| ExportSettings {
+            naming: NameTemplate(text),
+            ..settings.clone()
+        };
+        setting_text(
+            ui,
+            "export_naming",
+            &settings.naming.0,
+            MAX_STEM_BYTES,
+            with,
+            next,
+            draft,
         );
-        if field.changed() {
-            *next = Some(ExportSettings {
-                naming: NameTemplate(text),
-                ..settings.clone()
-            });
-        }
         form::hint(ui, t.export_naming_hint);
         if let Some(example) = app.export_example_name() {
             form::hint(ui, &(t.export_naming_example)(&example));
@@ -229,6 +265,7 @@ fn metadata_rows(
     form: &Form,
     settings: &ExportSettings,
     next: &mut Option<ExportSettings>,
+    draft: &mut Option<ExportSettings>,
 ) {
     let t = t();
     form.row(ui, t.export_metadata_include, |ui| {
@@ -244,19 +281,20 @@ fn metadata_rows(
         form::hint(ui, t.export_keep_hint);
     });
     form.row(ui, t.export_copyright, |ui| {
-        let mut text = settings.copyright.clone();
-        let field = ui.add(
-            egui::TextEdit::singleline(&mut text)
-                .id_salt("export_copyright")
-                .char_limit(MAX_COPYRIGHT_CHARS)
-                .desired_width(f32::INFINITY),
+        let with = |copyright| ExportSettings {
+            copyright,
+            ..settings.clone()
+        };
+        let value = &settings.copyright;
+        setting_text(
+            ui,
+            "export_copyright",
+            value,
+            MAX_COPYRIGHT_CHARS,
+            with,
+            next,
+            draft,
         );
-        if field.changed() {
-            *next = Some(ExportSettings {
-                copyright: text,
-                ..settings.clone()
-            });
-        }
         form::hint(ui, t.export_copyright_hint);
     });
 }
@@ -268,6 +306,7 @@ fn draw_export_form(
     app: &App,
     settings: &ExportSettings,
     next: &mut Option<ExportSettings>,
+    draft: &mut Option<ExportSettings>,
     out: &mut FrameOutput,
 ) {
     let t = t();
@@ -306,7 +345,7 @@ fn draw_export_form(
 
     if !immich_unavailable(settings) {
         form.section(ui, t.export_file, |ui| {
-            file_rows(ui, &form, app, settings, next)
+            file_rows(ui, &form, app, settings, next, draft)
         });
         form.section(ui, t.export_output, |ui| {
             form.row(ui, t.export_size, |ui| {
@@ -334,7 +373,7 @@ fn draw_export_form(
             sharpen_rows(ui, &form, settings, next);
         });
         form.section(ui, t.export_metadata, |ui| {
-            metadata_rows(ui, &form, settings, next)
+            metadata_rows(ui, &form, settings, next, draft)
         });
     }
 }

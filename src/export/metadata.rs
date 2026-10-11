@@ -19,8 +19,7 @@ pub struct Keep {
     /// The GPS block.
     #[serde(default)]
     pub location: bool,
-    /// [`IDENTIFYING_TAGS`]: serial numbers, the owner, the artist, and
-    /// the free-text caption and comment, which can say anything.
+    /// [`IDENTIFYING_TAGS`]: serial numbers and the people named.
     #[serde(default)]
     pub identity: bool,
 }
@@ -33,12 +32,13 @@ impl Keep {
     };
 }
 
-/// Tags that name a person or one physical camera or lens, or hold free
-/// text that might.
+/// Tags that name a person or one physical camera or lens. The last two
+/// are EXIF 3.0's Photographer and ImageEditor, which the `exif` crate has
+/// no names for.
 pub const IDENTIFYING_TAGS: [Tag; 7] = [
     Tag::Artist,
-    Tag::ImageDescription,
-    Tag::UserComment,
+    Tag(Context::Exif, 0xA437),
+    Tag(Context::Exif, 0xA438),
     Tag::CameraOwnerName,
     Tag::BodySerialNumber,
     Tag::LensSerialNumber,
@@ -121,31 +121,59 @@ fn has_date(exif: &exif::Exif) -> bool {
     exif.get_field(Tag::DateTimeOriginal, In::PRIMARY).is_some()
 }
 
-/// The source's TIFF-context tags an export keeps: who and what made the
-/// photo. The rest describe the source's own pixel layout.
-const KEPT_TIFF_TAGS: [Tag; 10] = [
-    Tag::ImageDescription,
+/// The source's tags every export keeps: what took the photo, when, and
+/// how it was exposed. Anything else, such as a caption, a comment, a maker
+/// note or a tag describing the source's own pixels, stays behind.
+const ALWAYS_TAGS: [Tag; 49] = [
     Tag::Make,
     Tag::Model,
     Tag::Software,
     Tag::DateTime,
-    Tag::Artist,
     Tag::Copyright,
     Tag::XResolution,
     Tag::YResolution,
     Tag::ResolutionUnit,
-];
-
-/// EXIF-context tags that describe the source's own pixels, which the
-/// export has cropped, turned, resized and turned into RGB.
-const DROPPED_EXIF_TAGS: [Tag; 6] = [
-    // Its offsets point into the source file, so it cannot move.
-    Tag::MakerNote,
-    Tag::SubjectArea,
-    Tag::SubjectLocation,
-    Tag::ComponentsConfiguration,
-    Tag::CompressedBitsPerPixel,
-    Tag::SubjectDistanceRange,
+    Tag::DateTimeOriginal,
+    Tag::DateTimeDigitized,
+    Tag::OffsetTime,
+    Tag::OffsetTimeOriginal,
+    Tag::OffsetTimeDigitized,
+    Tag::SubSecTime,
+    Tag::SubSecTimeOriginal,
+    Tag::SubSecTimeDigitized,
+    Tag::ExposureTime,
+    Tag::FNumber,
+    Tag::ExposureProgram,
+    Tag::PhotographicSensitivity,
+    Tag::SensitivityType,
+    Tag::RecommendedExposureIndex,
+    Tag::ISOSpeed,
+    Tag::ExposureIndex,
+    Tag::ShutterSpeedValue,
+    Tag::ApertureValue,
+    Tag::BrightnessValue,
+    Tag::ExposureBiasValue,
+    Tag::MaxApertureValue,
+    Tag::SubjectDistance,
+    Tag::MeteringMode,
+    Tag::LightSource,
+    Tag::Flash,
+    Tag::FocalLength,
+    Tag::FocalLengthIn35mmFilm,
+    Tag::ExposureMode,
+    Tag::WhiteBalance,
+    Tag::DigitalZoomRatio,
+    Tag::SceneCaptureType,
+    Tag::GainControl,
+    Tag::Contrast,
+    Tag::Saturation,
+    Tag::Sharpness,
+    Tag::SensingMethod,
+    Tag::SceneType,
+    Tag::CustomRendered,
+    Tag::LensSpecification,
+    Tag::LensMake,
+    Tag::LensModel,
 ];
 
 /// The EXIF fields an export of `src` at `width` x `height` carries.
@@ -171,25 +199,10 @@ pub fn fields(
         .filter(|f| f.ifd_num == In::PRIMARY)
         .filter(|f| !matches!(f.value, Value::Unknown(..)))
         .filter(|f| !(own_copyright.is_some() && f.tag == Tag::Copyright))
-        // Rewritten below for the export's own pixels.
         .filter(|f| {
-            !matches!(
-                f.tag,
-                Tag::ExifVersion | Tag::ColorSpace | Tag::PixelXDimension | Tag::PixelYDimension
-            )
-        })
-        .filter(|f| keep.identity || !IDENTIFYING_TAGS.contains(&f.tag))
-        // A tag the `exif` crate has no name for, such as EXIF 3.0's
-        // Photographer, could name anyone.
-        .filter(|f| f.tag.description().is_some())
-        .filter(|f| match f.tag.context() {
-            Context::Tiff => KEPT_TIFF_TAGS.contains(&f.tag),
-            Context::Exif => !DROPPED_EXIF_TAGS.contains(&f.tag),
-            Context::Gps => keep.location,
-            // Its index can name Adobe RGB, which the export is not.
-            Context::Interop => false,
-            // A context a later `exif` adds; nothing here knows it is safe.
-            _ => false,
+            ALWAYS_TAGS.contains(&f.tag)
+                || (keep.identity && IDENTIFYING_TAGS.contains(&f.tag))
+                || (keep.location && f.tag.context() == Context::Gps)
         })
         .cloned()
         .filter_map(|mut f| {
@@ -226,23 +239,21 @@ fn technical(width: u32, height: u32) -> [Field; 4] {
     ]
 }
 
-/// The fields a file must not lose even when the rest will not fit, as in
-/// a JPEG's 64 KB EXIF segment: the copyright, the capture date, and
-/// [`technical`]'s.
+/// The fields a file keeps when the rest will not fit, as in a JPEG's
+/// 64 KB EXIF segment: everything but location and identifying data, all
+/// of which [`ALWAYS_TAGS`] and [`technical`] keep small.
 pub fn essential(fields: &[Field]) -> Vec<Field> {
     fields
         .iter()
         .filter(|f| {
-            matches!(
-                f.tag,
-                Tag::Copyright
-                    | Tag::DateTimeOriginal
-                    | Tag::OffsetTimeOriginal
-                    | Tag::ExifVersion
-                    | Tag::ColorSpace
-                    | Tag::PixelXDimension
-                    | Tag::PixelYDimension
-            )
+            ALWAYS_TAGS.contains(&f.tag)
+                || matches!(
+                    f.tag,
+                    Tag::ExifVersion
+                        | Tag::ColorSpace
+                        | Tag::PixelXDimension
+                        | Tag::PixelYDimension
+                )
         })
         .cloned()
         .collect()
@@ -297,6 +308,33 @@ fn capture_date(src: &SourceMeta) -> Vec<Field> {
         .collect()
 }
 
+/// An XMP packet holding the copyright in `fields` as `dc:rights`, or
+/// `None` without one. EXIF's Copyright is an ASCII tag; readers that
+/// decode it as Latin-1, as Windows does, garble a "©" or a Chinese name,
+/// while every XMP reader takes UTF-8.
+pub fn xmp(fields: &[Field]) -> Option<Vec<u8>> {
+    let rights = fields
+        .iter()
+        .find(|f| f.tag == Tag::Copyright)
+        .and_then(|f| copyright_text(&f.value))?;
+    let escaped = rights
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;");
+    Some(
+        format!(
+            "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\
+             <x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+             <rdf:Description rdf:about=\"\" xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\
+             <dc:rights><rdf:Alt><rdf:li xml:lang=\"x-default\">{escaped}</rdf:li></rdf:Alt></dc:rights>\
+             </rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end=\"r\"?>"
+        )
+        .into_bytes(),
+    )
+}
+
 /// `fields` as a little-endian TIFF-structured EXIF block, the body of a
 /// JPEG's APP1 after `Exif\0\0`, a PNG's eXIf chunk or a WebP's EXIF chunk.
 /// `None` for no fields.
@@ -340,6 +378,11 @@ mod tests {
             f(Tag::ImageDescription, ascii("Home, kids' room")),
             // EXIF 3.0's Photographer, which the exif crate cannot name.
             f(Tag(Context::Exif, 0xA437), ascii("Ada")),
+            f(
+                Tag::UserComment,
+                Value::Undefined(b"ASCII\0\0\0at home".to_vec(), 0),
+            ),
+            f(Tag(Context::Exif, 0xBEEF), ascii("unknown")),
         ];
         let blob = block(&fields).unwrap().unwrap();
         SourceMeta::from_parts(Some(exif::Reader::new().read_raw(blob).unwrap()), None)
@@ -376,11 +419,11 @@ mod tests {
         assert!(!tags(&plain).contains(&Tag::Artist));
         assert!(
             !tags(&plain).contains(&Tag::ImageDescription),
-            "captions are opt-in"
+            "captions never go"
         );
         assert!(
             !tags(&plain).contains(&Tag(Context::Exif, 0xA437)),
-            "unnamed tags never go"
+            "Photographer is identifying"
         );
         assert!(
             !tags(&plain).contains(&Tag::MakerNote),
@@ -428,8 +471,14 @@ mod tests {
         );
         assert!(tags(&known).contains(&Tag::BodySerialNumber));
         assert!(tags(&known).contains(&Tag::Artist));
-        assert!(tags(&known).contains(&Tag::ImageDescription));
-        assert!(!tags(&known).contains(&Tag(Context::Exif, 0xA437)));
+        assert!(
+            tags(&known).contains(&Tag(Context::Exif, 0xA437)),
+            "EXIF 3.0 Photographer"
+        );
+        assert!(
+            !tags(&known).contains(&Tag::ImageDescription),
+            "captions never go"
+        );
         assert!(!known.iter().any(|f| f.tag.context() == Context::Gps));
         assert_eq!(block(&[]).unwrap(), None);
     }

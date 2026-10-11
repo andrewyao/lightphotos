@@ -275,8 +275,27 @@ const SRGB_ICC: &[u8] = include_bytes!("../../assets/icc/sRGB-v2-micro.icc");
 /// Encode `pixels` as `enc` with no metadata. JPEG, PNG and WebP keep 8
 /// bits per channel; TIFF keeps 16 when given them.
 pub fn encode(enc: Encoding, width: u32, height: u32, pixels: Pixels) -> Result<Vec<u8>, String> {
-    Prepared::new(width, height, pixels)?.encode(enc, None)
+    Prepared::new(width, height, pixels)?.encode(enc, Embedded::NONE)
 }
+
+/// Metadata to put in an encoded file, each part already serialized: a
+/// TIFF-structured EXIF block (`export::metadata::block`) and an XMP packet
+/// (`export::metadata::xmp`).
+#[derive(Clone, Copy, Default)]
+pub struct Embedded<'a> {
+    pub exif: Option<&'a [u8]>,
+    pub xmp: Option<&'a [u8]>,
+}
+
+impl Embedded<'_> {
+    pub const NONE: Embedded<'static> = Embedded {
+        exif: None,
+        xmp: None,
+    };
+}
+
+const EXIF_HEAD: &[u8] = b"Exif\0\0";
+const XMP_HEAD: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 
 /// The largest EXIF block a JPEG's APP1 segment holds, after its `Exif\0\0`.
 pub const MAX_JPEG_EXIF: usize = 65535 - 2 - 6;
@@ -304,10 +323,11 @@ impl<'a> Prepared<'a> {
         })
     }
 
-    /// Encode as `enc`, carrying `exif` (a TIFF-structured EXIF block, see
-    /// `export::metadata::block`) where the format keeps one. Any EXIF the
-    /// encoder wrote itself is replaced, or dropped when `exif` is `None`.
-    pub fn encode(&self, enc: Encoding, exif: Option<&[u8]>) -> Result<Vec<u8>, String> {
+    /// Encode as `enc`, carrying `meta` where the format keeps it. Any EXIF
+    /// or XMP the encoder wrote itself is replaced, or dropped when `meta`
+    /// has none.
+    pub fn encode(&self, enc: Encoding, meta: Embedded) -> Result<Vec<u8>, String> {
+        let Embedded { exif, xmp } = meta;
         if !can_encode(enc) {
             return Err(format!("this build cannot write {enc:?}"));
         }
@@ -315,23 +335,28 @@ impl<'a> Prepared<'a> {
         match enc {
             Encoding::Jpeg(q) => {
                 let jpeg = self.jpeg(q)?;
-                let exif = exif.filter(|e| e.len() <= MAX_JPEG_EXIF);
-                let app1 = exif.map_or_else(Vec::new, |e| {
+                let segment = |head: &[u8], body: &[u8]| {
+                    let len = u16::try_from(2 + head.len() + body.len()).ok()?;
                     let mut app1 = vec![0xFF, 0xE1];
-                    app1.extend_from_slice(&((2 + 6 + e.len()) as u16).to_be_bytes());
-                    app1.extend_from_slice(b"Exif\0\0");
-                    app1.extend_from_slice(e);
-                    app1
-                });
+                    app1.extend_from_slice(&len.to_be_bytes());
+                    app1.extend_from_slice(head);
+                    app1.extend_from_slice(body);
+                    Some(app1)
+                };
+                let mut app1 = exif.and_then(|e| segment(EXIF_HEAD, e)).unwrap_or_default();
+                app1.extend(xmp.and_then(|x| segment(XMP_HEAD, x)).unwrap_or_default());
                 Ok(splice_app1(&jpeg, &app1))
             }
-            Encoding::Png => Ok(with_png_exif(&self.png()?, exif)),
+            Encoding::Png => Ok(with_png_meta(&self.png()?, exif, xmp)),
             Encoding::Webp => {
                 let mut out = Vec::new();
                 let mut encoder = image_webp::WebPEncoder::new(&mut out);
                 encoder.set_icc_profile(SRGB_ICC.to_vec());
                 if let Some(e) = exif {
                     encoder.set_exif_metadata(e.to_vec());
+                }
+                if let Some(x) = xmp {
+                    encoder.set_xmp_metadata(x.to_vec());
                 }
                 encoder
                     .encode(
@@ -343,9 +368,9 @@ impl<'a> Prepared<'a> {
                     .map_err(|e| e.to_string())?;
                 Ok(out)
             }
-            Encoding::Tiff => encode_tiff(width, height, pixels, exif),
+            Encoding::Tiff => encode_tiff(width, height, pixels, exif, xmp),
             #[cfg(target_os = "macos")]
-            Encoding::Avif => self.encode_imageio("public.avif", None, exif),
+            Encoding::Avif => self.encode_imageio("public.avif", None, meta),
             #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
             Encoding::Avif => encode_avif(width, height, &pixels.rgb8(width, height), exif),
             #[cfg(target_arch = "wasm32")]
@@ -355,12 +380,12 @@ impl<'a> Prepared<'a> {
 
     #[cfg(target_os = "macos")]
     fn jpeg(&self, quality: Option<u8>) -> Result<Vec<u8>, String> {
-        self.encode_imageio("public.jpeg", quality, None)
+        self.encode_imageio("public.jpeg", quality, Embedded::NONE)
     }
 
     #[cfg(target_os = "macos")]
     fn png(&self) -> Result<Vec<u8>, String> {
-        self.encode_imageio("public.png", None, None)
+        self.encode_imageio("public.png", None, Embedded::NONE)
     }
 
     /// Borrows 8-bit pixels as they are, so a size-limited export's
@@ -403,7 +428,7 @@ impl<'a> Prepared<'a> {
         &self,
         uti: &str,
         quality: Option<u8>,
-        exif: Option<&[u8]>,
+        meta: Embedded,
     ) -> Result<Vec<u8>, String> {
         let image = match self.image.get() {
             Some(image) => image,
@@ -417,12 +442,12 @@ impl<'a> Prepared<'a> {
         let dest =
             unsafe { CGImageDestination::with_data(&data, &CFString::from_str(uti), 1, None) }
                 .ok_or_else(|| format!("ImageIO cannot write {uti}"))?;
-        let properties = match (quality, exif) {
-            (Some(q), _) => Some(lossy_quality_properties(
+        let properties = match quality {
+            Some(q) => Some(lossy_quality_properties(
                 f64::from(q.clamp(1, 100)) / 100.0,
             )?),
-            (None, Some(e)) => Some(exif_properties(e)?),
-            (None, None) => None,
+            None if meta.exif.is_some() || meta.xmp.is_some() => Some(meta_properties(meta)?),
+            None => None,
         };
         // SAFETY: dest/image are valid; properties, if any, map a documented
         // destination key to a CFNumber.
@@ -452,15 +477,15 @@ impl<'a> Prepared<'a> {
     }
 }
 
-/// What ImageIO reads from `exif`: the dictionaries of a one-pixel JPEG that
+/// What ImageIO reads from `meta`: the dictionaries of a one-pixel JPEG that
 /// carries it, handed to a destination as the image's properties.
 #[cfg(target_os = "macos")]
-fn exif_properties(exif: &[u8]) -> Result<CFRetained<CFDictionary>, String> {
-    if exif.len() > MAX_JPEG_EXIF {
+fn meta_properties(meta: Embedded) -> Result<CFRetained<CFDictionary>, String> {
+    if meta.exif.is_some_and(|e| e.len() > MAX_JPEG_EXIF) {
         return Err("EXIF block too large".into());
     }
-    let carrier = Prepared::new(1, 1, Pixels::Rgba8(&[0, 0, 0, 255]))?
-        .encode(Encoding::Jpeg(None), Some(exif))?;
+    let carrier =
+        Prepared::new(1, 1, Pixels::Rgba8(&[0, 0, 0, 255]))?.encode(Encoding::Jpeg(None), meta)?;
     let data = objc2_core_foundation::CFData::from_bytes(&carrier);
     // SAFETY: data is a valid CFData and no options are passed.
     let source = unsafe { objc2_image_io::CGImageSource::with_data(&data, None) }
@@ -476,12 +501,14 @@ fn exif_properties(exif: &[u8]) -> Result<CFRetained<CFDictionary>, String> {
 const EXPORT_QUALITY: u8 = 90;
 
 /// A TIFF of `pixels`, RGB at 8 or 16 bits per channel, little-endian,
-/// uncompressed, with `exif`'s fields in its own directories.
+/// uncompressed, with `exif`'s fields in its own directories and `xmp` as
+/// its XMLPacket.
 fn encode_tiff(
     width: u32,
     height: u32,
     pixels: Pixels,
     exif: Option<&[u8]>,
+    xmp: Option<&[u8]>,
 ) -> Result<Vec<u8>, String> {
     use exif::{Field, In, Tag, Value};
     let n = width as usize * height as usize;
@@ -533,8 +560,10 @@ fn encode_tiff(
             Value::Undefined(SRGB_ICC.to_vec(), 0),
         ),
     ];
+    // XMLPacket, which `exif` has no name for either.
+    let packet = xmp.map(|x| field(Tag(exif::Context::Tiff, 0x02BC), Value::Byte(x.to_vec())));
     let mut writer = exif::experimental::Writer::new();
-    for f in own.iter().chain(
+    for f in own.iter().chain(&packet).chain(
         source
             .iter()
             .filter(|f| !own.iter().any(|o| o.tag == f.tag)),
@@ -577,11 +606,11 @@ fn encode_avif(
         .map_err(|e| e.to_string())
 }
 
-/// `png` with its eXIf chunks replaced by one holding `exif`, placed after
-/// IHDR, or dropped when `exif` is `None`, and an `sRGB` chunk after IHDR
+/// `png` with its eXIf chunks and XMP iTXt replaced by `exif` and `xmp`,
+/// placed after IHDR, or dropped when `None`, and an `sRGB` chunk after IHDR
 /// when the encoder named no colour space. Returns `png` unchanged if its
 /// chunks don't parse.
-fn with_png_exif(png: &[u8], exif: Option<&[u8]>) -> Vec<u8> {
+fn with_png_meta(png: &[u8], exif: Option<&[u8]>, xmp: Option<&[u8]>) -> Vec<u8> {
     const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
     if !png.starts_with(SIGNATURE) {
         return png.to_vec();
@@ -600,7 +629,9 @@ fn with_png_exif(png: &[u8], exif: Option<&[u8]>) -> Vec<u8> {
             return png.to_vec();
         };
         let kind = &head[4..8];
-        if kind != b"eXIf" {
+        let xmp_text =
+            kind == b"iTXt" && chunk.get(8..).is_some_and(|b| b.starts_with(PNG_XMP_KEY));
+        if kind != b"eXIf" && !xmp_text {
             out.extend_from_slice(chunk);
         }
         if kind == b"IHDR" {
@@ -622,11 +653,21 @@ fn with_png_exif(png: &[u8], exif: Option<&[u8]>) -> Vec<u8> {
             if let Some(e) = exif {
                 chunk(b"eXIf", e);
             }
+            if let Some(x) = xmp {
+                // Keyword, then no compression, no language, no translation.
+                let mut text = PNG_XMP_KEY.to_vec();
+                text.extend_from_slice(&[0, 0, 0, 0]);
+                text.extend_from_slice(x);
+                chunk(b"iTXt", &text);
+            }
         }
         i += chunk.len();
     }
     out
 }
+
+/// The iTXt keyword XMP goes under, with its terminating NUL.
+const PNG_XMP_KEY: &[u8] = b"XML:com.adobe.xmp\0";
 
 /// CRC-32 as PNG chunks use it (ISO 3309, reflected, poly 0xEDB88320).
 fn crc32(bytes: &[u8]) -> u32 {
@@ -641,7 +682,7 @@ fn crc32(bytes: &[u8]) -> u32 {
 }
 
 /// Put `app1` after SOI (and after a JFIF APP0, which by convention comes
-/// first), dropping any EXIF APP1 already there. Returns `jpeg` unchanged if
+/// first), dropping any EXIF or XMP APP1 already there. Returns `jpeg` unchanged if
 /// its header doesn't parse.
 fn splice_app1(jpeg: &[u8], app1: &[u8]) -> Vec<u8> {
     if !jpeg.starts_with(&[0xFF, 0xD8]) {
@@ -660,7 +701,8 @@ fn splice_app1(jpeg: &[u8], app1: &[u8]) -> Vec<u8> {
             return jpeg.to_vec();
         };
         let is_jfif = jpeg[i + 1] == 0xE0 && payload.starts_with(b"JFIF\0");
-        let is_exif = jpeg[i + 1] == 0xE1 && payload.starts_with(b"Exif\0\0");
+        let is_exif = jpeg[i + 1] == 0xE1
+            && (payload.starts_with(EXIF_HEAD) || payload.starts_with(XMP_HEAD));
         if !is_jfif && !placed {
             head.extend_from_slice(app1);
             placed = true;
@@ -819,7 +861,13 @@ mod tests {
         let rgba = vec![90u8; (w * h * 4) as usize];
         Prepared::new(w, h, Pixels::Rgba8(&rgba))
             .unwrap()
-            .encode(Encoding::Jpeg(None), exif.as_deref())
+            .encode(
+                Encoding::Jpeg(None),
+                Embedded {
+                    exif: exif.as_deref(),
+                    xmp: None,
+                },
+            )
             .unwrap()
     }
 
@@ -851,7 +899,7 @@ mod tests {
         let rgba = [90u8; 12 * 8 * 4];
         let bare = Prepared::new(12, 8, Pixels::Rgba8(&rgba))
             .unwrap()
-            .encode(Encoding::Jpeg(None), None)
+            .encode(Encoding::Jpeg(None), Embedded::NONE)
             .unwrap();
         assert_eq!(exif_blocks(&bare), 0, "no metadata means no EXIF at all");
         std::fs::write(&path, bare).unwrap();
@@ -888,8 +936,8 @@ mod tests {
     fn a_malformed_png_passes_through_the_exif_splice() {
         let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
         png.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xF0, b'I', b'H', b'D', b'R', 1, 2]);
-        assert_eq!(with_png_exif(&png, Some(b"II*\0")), png);
-        assert_eq!(with_png_exif(b"nope", Some(b"II*\0")), b"nope");
+        assert_eq!(with_png_meta(&png, Some(b"II*\0"), None), png);
+        assert_eq!(with_png_meta(b"nope", Some(b"II*\0"), None), b"nope");
         assert_eq!(crc32(b"IEND"), 0xAE42_6082, "PNG's own IEND CRC");
     }
 

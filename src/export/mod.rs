@@ -19,7 +19,7 @@ use std::sync::{Mutex, PoisonError};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
 
-use crate::decode::image_encode::{Encoding, Pixels};
+use crate::decode::image_encode::{Embedded, Encoding, Pixels};
 use crate::decode::{image_decode, image_encode};
 use crate::develop::sharpen::OutputSharpening;
 use crate::develop::{Adjustments, TouchUp};
@@ -377,34 +377,52 @@ fn render(
     output: &Output,
     source: &SourceMeta,
 ) -> Result<Vec<u8>, String> {
-    let exif = |w, h| {
+    // The EXIF block and the XMP packet for a `w` x `h` export.
+    let meta = |w, h| -> Result<FileMeta, String> {
         let fields = metadata::fields(source, output.keep, &output.copyright, w, h);
+        let xmp = metadata::xmp(&fields);
         let block = metadata::block(&fields)?;
         // A JPEG's EXIF segment, and the carrier macOS reads AVIF's from,
         // hold 64 KB; past that the date and copyright still go in.
         let capped = matches!(output.format, ExportFormat::Jpeg | ExportFormat::Avif);
-        match block {
+        let block = match block {
             Some(b) if capped && b.len() > image_encode::MAX_JPEG_EXIF => {
-                metadata::block(&metadata::essential(&fields))
+                metadata::block(&metadata::essential(&fields))?
             }
-            block => Ok(block),
-        }
+            block => block,
+        };
+        Ok(FileMeta { exif: block, xmp })
     };
     if output.format == ExportFormat::Tiff16 {
         let (w, h, rgba) = bake_sized::<u16>(img, adj, touchups, rot, output);
         let prepared = image_encode::Prepared::new(w, h, Pixels::Rgba16(&rgba))?;
-        return prepared.encode(Encoding::Tiff, exif(w, h)?.as_deref());
+        return prepared.encode(Encoding::Tiff, meta(w, h)?.embedded());
     }
     let (w, h, rgba) = bake_sized::<u8>(img, adj, touchups, rot, output);
     let prepared = image_encode::Prepared::new(w, h, Pixels::Rgba8(&rgba))?;
-    let exif = exif(w, h)?;
+    let meta = meta(w, h)?;
     if output.format != ExportFormat::Jpeg {
-        return prepared.encode(output.format.encoding(None), exif.as_deref());
+        return prepared.encode(output.format.encoding(None), meta.embedded());
     }
-    let jpeg = |quality| prepared.encode(Encoding::Jpeg(quality), exif.as_deref());
+    let jpeg = |quality| prepared.encode(Encoding::Jpeg(quality), meta.embedded());
     match output.jpeg_limit_kb {
         None => jpeg(None),
         Some(kb) => within_limit(kb, jpeg),
+    }
+}
+
+/// An export's EXIF block and XMP packet, serialized.
+struct FileMeta {
+    exif: Option<Vec<u8>>,
+    xmp: Option<Vec<u8>>,
+}
+
+impl FileMeta {
+    fn embedded(&self) -> Embedded<'_> {
+        Embedded {
+            exif: self.exif.as_deref(),
+            xmp: self.xmp.as_deref(),
+        }
     }
 }
 
@@ -947,7 +965,7 @@ mod tests {
                 let output = Output {
                     format,
                     keep: Keep { location, identity },
-                    copyright: "© 2026 Ada".into(),
+                    copyright: "© 2026 张三 Ünïcode".into(),
                     ..Output::FULL
                 };
                 let what = format!("{format:?} location {location} identity {identity}");
@@ -973,8 +991,13 @@ mod tests {
                     });
                 assert_eq!(
                     copyright.as_deref(),
-                    Some("© 2026 Ada".as_bytes()),
+                    Some("© 2026 张三 Ünïcode".as_bytes()),
                     "{what}"
+                );
+                let rights = "<dc:rights><rdf:Alt><rdf:li xml:lang=\"x-default\">© 2026 张三 Ünïcode</rdf:li>";
+                assert!(
+                    bytes.windows(rights.len()).any(|w| w == rights.as_bytes()),
+                    "{what}: the XMP packet carries the copyright as UTF-8"
                 );
             }
         }

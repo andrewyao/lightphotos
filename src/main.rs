@@ -356,6 +356,7 @@ impl ApplicationHandler<UserEvent> for App {
             shell::window_rect::save(window);
         }
         self.save_edit();
+        self.save_export_edits();
         // AppKit delivers this from `applicationWillTerminate:` and then calls
         // `exit()` itself, so `main`'s return is never reached on Cmd+Q and
         // this is the last chance to get queued sidecars onto the disk. The

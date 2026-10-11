@@ -90,6 +90,8 @@ pub enum UiAction {
     /// Open the export form, or close it if it is showing.
     ToggleExportForm,
     SetExportSettings(crate::export::ExportSettings),
+    /// A keystroke in an export text field: kept, saved when it loses focus.
+    EditExportSettings(crate::export::ExportSettings),
     /// Export the selection with the form's settings.
     RunExport,
     #[cfg(not(target_arch = "wasm32"))]

@@ -1317,6 +1317,7 @@ impl App {
                 }
                 ui::UiAction::ToggleExportForm => self.toggle_export_form(),
                 ui::UiAction::SetExportSettings(settings) => self.set_export_settings(settings),
+                ui::UiAction::EditExportSettings(settings) => self.edit_export_settings(settings),
                 ui::UiAction::RunExport => self.run_export_form(),
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::ChooseExportFolder => self.choose_export_folder(),

@@ -97,6 +97,9 @@ pub(crate) struct Exports {
     settings: ExportSettings,
     /// The export form is showing in the right-hand panel.
     form_open: bool,
+    /// `settings` holds typing that has not been saved yet: a text field
+    /// saves when it loses focus, not on every keystroke.
+    unsaved: bool,
     /// The Immich server export uploads to, and the form's sign-in fields.
     #[cfg(not(target_arch = "wasm32"))]
     immich: ImmichLink,
@@ -130,6 +133,7 @@ impl Exports {
             #[cfg(not(test))]
             settings: load_export_settings(),
             form_open: false,
+            unsaved: false,
             #[cfg(not(target_arch = "wasm32"))]
             immich: ImmichLink::Disconnected {
                 #[cfg(test)]
@@ -184,6 +188,7 @@ impl App {
     /// Open the export form, or close it if it is showing. Opening it is what
     /// the toolbar's Export button and `X` do; Export in the form runs it.
     pub(super) fn toggle_export_form(&mut self) {
+        self.save_export_edits();
         self.exports.form_open = !self.exports.form_open;
         if self.exports.form_open {
             self.info_open = false;
@@ -196,6 +201,7 @@ impl App {
     }
 
     pub(super) fn close_export_form(&mut self) {
+        self.save_export_edits();
         self.exports.form_open = false;
         self.request_redraw();
     }
@@ -203,6 +209,7 @@ impl App {
     pub(super) fn set_export_settings(&mut self, settings: ExportSettings) {
         save_export_settings(&settings);
         self.exports.settings = settings;
+        self.exports.unsaved = false;
         #[cfg(not(target_arch = "wasm32"))]
         self.resume_immich();
         self.request_redraw();
@@ -261,7 +268,24 @@ impl App {
 
     /// Export in the form: export the selection with the form's settings. The
     /// form closes once the batch is running, and the toast takes over.
+    /// Take a keystroke in one of the form's text fields: in memory now,
+    /// saved when the field loses focus ([`App::set_export_settings`]) or
+    /// the form closes, runs or the app quits.
+    pub(super) fn edit_export_settings(&mut self, settings: ExportSettings) {
+        self.exports.settings = settings;
+        self.exports.unsaved = true;
+        self.request_redraw();
+    }
+
+    /// Save text typed into the form that its field has not saved yet.
+    pub(crate) fn save_export_edits(&mut self) {
+        if std::mem::take(&mut self.exports.unsaved) {
+            save_export_settings(&self.exports.settings);
+        }
+    }
+
     pub(super) fn run_export_form(&mut self) {
+        self.save_export_edits();
         if let Some(why) = self.export_blocker() {
             self.set_status(StatusKind::Error, why.into());
             self.request_redraw();
@@ -904,7 +928,7 @@ mod status_tests {
         let stamp =
             crate::decode::image_decode::CaptureStamp::new("2024:06:01 18:00:00", Some("-07:00"));
         let tagged = {
-            use crate::decode::image_encode::{Encoding, Pixels, Prepared};
+            use crate::decode::image_encode::{Embedded, Encoding, Pixels, Prepared};
             use crate::export::metadata::{block, fields, Keep, SourceMeta};
             let source = SourceMeta::from_parts(None, stamp);
             let exif = block(&fields(&source, Keep::default(), "", 300, 200)).unwrap();
@@ -913,7 +937,13 @@ mod status_tests {
                 .rgba;
             Prepared::new(300, 200, Pixels::Rgba8(&rgba))
                 .unwrap()
-                .encode(Encoding::Jpeg(None), exif.as_deref())
+                .encode(
+                    Encoding::Jpeg(None),
+                    Embedded {
+                        exif: exif.as_deref(),
+                        xmp: None,
+                    },
+                )
                 .unwrap()
         };
         std::fs::write(&a, tagged).unwrap();
@@ -1256,6 +1286,47 @@ mod form_tests {
         };
         assert!(picked.keep.location && !picked.keep.identity);
         assert_eq!(picked.copyright, app.exports.settings.copyright);
+    }
+
+    /// A keystroke in the copyright field changes the setting in memory and
+    /// saves nothing; leaving the field saves it.
+    #[test]
+    fn typing_a_copyright_saves_only_when_the_field_is_left() {
+        use crate::app::test_support::{click, frame};
+        use crate::i18n::t;
+        use crate::ui::UiAction;
+
+        let (mut app, _) = folder_app(2);
+        app.exports.form_open = true;
+        let size = egui::vec2(1200.0, 1400.0);
+        let painted = crate::app::test_support::settled_at(&mut app, size);
+        let label = painted.pos_of(t().export_copyright);
+        let (_, _) = click(&mut app, label + egui::vec2(40.0, 24.0));
+        let (actions, _) = frame(&mut app, vec![egui::Event::Text("©".into())]);
+        let [UiAction::EditExportSettings(typed)] = &actions[..] else {
+            panic!("{actions:?}");
+        };
+        assert_eq!(typed.copyright, "©");
+        app.apply_ui_actions(actions);
+        assert!(app.exports.unsaved, "kept, not yet saved");
+        let (actions, _) = frame(
+            &mut app,
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, UiAction::SetExportSettings(s) if s.copyright == "©")),
+            "{actions:?}"
+        );
+        app.apply_ui_actions(actions);
+        assert!(!app.exports.unsaved);
     }
 
     /// Typing a server URL and an API key into the Immich rows enables
