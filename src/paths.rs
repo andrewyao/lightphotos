@@ -64,6 +64,25 @@ pub fn export_target(stem: &str, ext: &str, dest_dir: &Path, taken: &HashSet<Pat
     }
 }
 
+/// [`write_atomic`], creating `file`'s directory first.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_atomic_in_dir(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = file
+        .parent()
+        .ok_or_else(|| std::io::Error::other("path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    write_atomic(file, bytes)
+}
+
+/// Remove `file`. A file that is already gone counts as removed.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn remove_if_present(file: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 /// Write `bytes` to `dest` through a sibling temp file and a rename, so a crash
 /// never leaves a partial file. The temp file is opened with `create_new`,
 /// which refuses any existing name, a symlink included. A folder someone else

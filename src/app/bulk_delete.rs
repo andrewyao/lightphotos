@@ -1091,9 +1091,7 @@ mod tests {
         assert!(paths.iter().all(|p| !p.exists()));
         assert!(app.catalog.groups().unwrap().is_empty());
         app.catalog.flush_blocking(Duration::from_secs(10));
-        let groups_dir = dir
-            .join(crate::persist::catalog::SIDECAR_DIR)
-            .join("groups");
+        let groups_dir = dir.join(crate::sidecar::SIDECAR_DIR).join("groups");
         let left = std::fs::read_dir(&groups_dir).map_or(0, |d| d.count());
         assert_eq!(left, 0, "the group's sidecar is deleted");
         let _ = std::fs::remove_dir_all(&dir);

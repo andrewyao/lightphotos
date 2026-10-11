@@ -15,7 +15,8 @@ use web_sys::{
 };
 
 use crate::persist::catalog::group_file::{self, GROUPS_DIR};
-use crate::persist::catalog::{ImageRecord, SidecarLoad, SIDECAR_DIR, SIDECAR_EXT};
+use crate::persist::catalog::SidecarLoad;
+use crate::sidecar::{SIDECAR_DIR, SIDECAR_EXT};
 
 /// The `.lightphotos` directory under `root`, created if `create` is set.
 /// Returns `Ok(None)` when it is missing and `create` is false.
@@ -119,18 +120,22 @@ pub(crate) async fn load_sidecars(root: &FileSystemDirectoryHandle) -> SidecarLo
             continue;
         };
         let parsed = match crate::web::web_fs::stat(&file_handle).await {
+            // Checked before reading, so an oversized file is never loaded.
+            Ok(file) if file.size() > crate::sidecar::MAX_SIDECAR_BYTES as f64 => {
+                Err(format!("{} bytes, too large for a sidecar", file.size()))
+            }
             Ok(file) => crate::web::web_fs::file_bytes(&file)
                 .await
                 .and_then(|bytes| {
-                    serde_json::from_slice::<ImageRecord>(&bytes).map_err(|e| e.to_string())
-                })
-                .map(|rec| (rec, file)),
+                    // Milliseconds; `as` saturates, so a bad value can't wrap.
+                    crate::sidecar::parse_record(&bytes, || {
+                        Some((file.last_modified() / 1000.0) as u64)
+                    })
+                }),
             Err(e) => Err(e),
         };
         match parsed {
-            Ok((mut rec, file)) => {
-                // Milliseconds; `as` saturates, so a bad value can't wrap.
-                rec.settle_edited(|| Some((file.last_modified() / 1000.0) as u64));
+            Ok(rec) => {
                 if !rec.is_empty() {
                     load.images.insert(stem, rec);
                 }

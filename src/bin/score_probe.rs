@@ -27,8 +27,9 @@
 //! the image itself at the same size instead; RAW renders may differ a little.
 
 use lightphotos::decode::image_decode;
-use lightphotos::develop::{self, image_ops};
+use lightphotos::develop::image_ops;
 use lightphotos::scoring::{judge, quality};
+use lightphotos::sidecar::{self, ImageRecord};
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -71,7 +72,7 @@ fn main() -> ExitCode {
     );
     let mut rows = Vec::new();
     for path in &photos {
-        let sidecar = Sidecar::read(path);
+        let sidecar = sidecar::read_record(path).unwrap_or_default();
         match measure(path, &sidecar) {
             Ok(row) => {
                 print_row(path, sidecar.rating, &row);
@@ -131,7 +132,7 @@ struct Row {
     penalties: Vec<quality::Deduction>,
 }
 
-fn measure(path: &Path, sidecar: &Sidecar) -> Result<Row, String> {
+fn measure(path: &Path, sidecar: &ImageRecord) -> Result<Row, String> {
     let img = image_decode::decode(path, quality::ANALYSIS_PX)?;
     let (w, h, rgba) = image_ops::bake_edited(
         &img,
@@ -194,34 +195,6 @@ fn list_photos(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
         .collect();
     photos.sort();
     Ok(photos)
-}
-
-/// The fields of the app's sidecar (`catalog::ImageRecord`) the probe needs.
-/// Read loosely: the probe must not pull in the catalog module.
-#[derive(serde::Deserialize, Default)]
-struct Sidecar {
-    #[serde(default)]
-    rating: Option<u8>,
-    #[serde(default)]
-    adjustments: develop::Adjustments,
-    #[serde(default)]
-    touchups: Vec<develop::TouchUp>,
-    #[serde(default)]
-    rotation: u8,
-}
-
-impl Sidecar {
-    fn read(photo: &Path) -> Sidecar {
-        let (Some(dir), Some(file)) = (photo.parent(), photo.file_name()) else {
-            return Sidecar::default();
-        };
-        let mut name = file.to_os_string();
-        name.push(".xmp");
-        std::fs::read(dir.join(".lightphotos").join(name))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
-    }
 }
 
 /// Spearman's rho: Pearson's correlation of the ranks, ties averaged. `None`

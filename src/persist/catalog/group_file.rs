@@ -22,7 +22,7 @@ struct GroupFile {
 }
 
 pub(super) fn path(dir: &Path, id: &GroupId) -> PathBuf {
-    dir.join(super::SIDECAR_DIR)
+    dir.join(crate::sidecar::SIDECAR_DIR)
         .join(GROUPS_DIR)
         .join(format!("{id}.{EXT}"))
 }
@@ -64,7 +64,8 @@ pub(super) fn to_bytes(group: &Group) -> Result<Vec<u8>, String> {
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) fn load(dir: &Path, skipped: &mut usize) -> Vec<(GroupId, SavedGroup)> {
     let mut files = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir.join(super::SIDECAR_DIR).join(GROUPS_DIR)) else {
+    let Ok(entries) = std::fs::read_dir(dir.join(crate::sidecar::SIDECAR_DIR).join(GROUPS_DIR))
+    else {
         return files;
     };
     for entry in entries.filter_map(|e| e.ok()) {

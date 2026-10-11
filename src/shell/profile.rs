@@ -825,7 +825,7 @@ fn wait_for_thumbs(loader: &mut Loader, photos: &[PathBuf]) {
 /// visit. Reports whether there was one.
 fn drop_signal_cache(dir: &Path) -> bool {
     let file = dir
-        .join(crate::persist::catalog::SIDECAR_DIR)
+        .join(crate::sidecar::SIDECAR_DIR)
         .join(crate::persist::signalcache::CACHE_FILE);
     std::fs::remove_file(file).is_ok()
 }
@@ -834,7 +834,7 @@ fn drop_signal_cache(dir: &Path) -> bool {
 /// user's ratings and edits and share the folder, so the suffix match has to
 /// be exact.
 fn drop_thumb_cache(dir: &Path) -> usize {
-    let cache = dir.join(crate::persist::catalog::SIDECAR_DIR);
+    let cache = dir.join(crate::sidecar::SIDECAR_DIR);
     let Ok(entries) = std::fs::read_dir(&cache) else {
         return 0;
     };

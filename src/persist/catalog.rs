@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Per-photo sidecars that persist ratings and develop edits. Each photo's
-//! record lives in `<photo dir>/.lightphotos/<photo filename>.xmp`, so edits
-//! travel with the folder and originals are never touched. The body is our
-//! own JSON, not Adobe XMP; the extension is cosmetic. `.lightphotos/` is
-//! created on the first write, so browsing a folder never changes it.
+//! The open folder's sidecars, cached. The record format, its path and its
+//! single-file read and write live in [`crate::sidecar`].
 //!
 //! [`Catalog`] caches one directory at a time. Reads and writes derive the
 //! sidecar path from the photo's own path.
@@ -13,150 +10,17 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use crate::develop::{Adjustments, TouchUp};
 use crate::persist::groups::{GroupId, GroupWrite, Groups, SavedGroup};
 use crate::scoring::quality::QualityScore;
-use crate::sidecar::{ColorLabel, Flag, MAX_RATING};
+use crate::sidecar::{ColorLabel, Flag, ImageRecord, StoredScore, MAX_RATING};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::sidecar::{SIDECAR_DIR, SIDECAR_EXT};
 
 pub(crate) mod group_file;
 mod writeback;
 pub(crate) use writeback::LoadMark;
 use writeback::{WriteOp, Writeback};
-
-/// Hidden subfolder holding a directory's sidecars and thumbnail cache.
-pub(crate) const SIDECAR_DIR: &str = ".lightphotos";
-/// Sidecar file extension. Cosmetic; see the module docs.
-pub(crate) const SIDECAR_EXT: &str = "xmp";
-
-/// Persisted state for one photo. Default fields are skipped on write, so a
-/// rated but unedited photo's sidecar stays small.
-#[derive(Serialize, Deserialize, Default, Clone)]
-pub struct ImageRecord {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rating: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flag: Option<Flag>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<ColorLabel>,
-    #[serde(default, skip_serializing_if = "Adjustments::is_identity")]
-    pub adjustments: Adjustments,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "at_most_max_touchups"
-    )]
-    pub touchups: Vec<TouchUp>,
-    /// Manual rotation in 90° clockwise steps, `0..=3`.
-    #[serde(default, skip_serializing_if = "is_zero_rot")]
-    pub rotation: u8,
-    /// Kept here rather than in `signals.json` because it is measured on the
-    /// edited photo, so it travels with the edits it describes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub score: Option<StoredScore>,
-    /// Unix seconds when the edits last changed, for the Grid's Edit Time
-    /// sort. `None` while the photo has no edits.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edited: Option<u64>,
-}
-
-/// A quality score and the edits it was measured on.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct StoredScore {
-    #[serde(flatten)]
-    pub score: QualityScore,
-    /// [`ImageRecord::edit_signature`] when scored. A different signature
-    /// now means the photo was edited since, and the score is stale.
-    pub edits: u64,
-}
-
-/// A sidecar comes from whoever supplied the folder, and past
-/// [`crate::develop::MAX_TOUCHUPS`] the renderer's buffer overflows, so extra
-/// spots are dropped on load.
-fn at_most_max_touchups<'de, D>(deserializer: D) -> Result<Vec<TouchUp>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let mut touchups = Vec::<TouchUp>::deserialize(deserializer)?;
-    touchups.truncate(crate::develop::MAX_TOUCHUPS);
-    Ok(touchups)
-}
-
-fn is_zero_rot(v: &u8) -> bool {
-    *v == 0
-}
-
-impl ImageRecord {
-    /// True when there is nothing to persist. An empty record's sidecar is
-    /// deleted instead of written.
-    ///
-    /// This restates what the `skip_serializing_if` attributes already say,
-    /// because it runs on every rating keystroke and serializing there would
-    /// cost a `Map` allocation per photo. The debug assertion keeps the two
-    /// honest: a field added to the struct but not to this conjunction fails
-    /// the moment any test sets it.
-    pub(crate) fn is_empty(&self) -> bool {
-        let empty = self.rating.is_none()
-            && self.flag.is_none()
-            && self.label.is_none()
-            && !self.has_edits()
-            && self.score.is_none()
-            && self.edited.is_none();
-        debug_assert_eq!(
-            empty,
-            self.serializes_to_nothing(),
-            "ImageRecord::is_empty disagrees with what the sidecar would hold; \
-             a field was added to the struct but not to is_empty"
-        );
-        empty
-    }
-
-    /// A hash of the edits that change how the photo renders.
-    pub(crate) fn edit_signature(&self) -> u64 {
-        crate::develop::edit_signature_with_touchups(
-            &self.adjustments,
-            &self.touchups,
-            self.rotation,
-        )
-    }
-
-    fn has_edits(&self) -> bool {
-        !self.adjustments.is_identity() || !self.touchups.is_empty() || self.rotation != 0
-    }
-
-    /// Run `edit`, then stamp `edited` with `now` if it changed how the
-    /// photo renders, or clear it if no edit is left.
-    fn edit(&mut self, now: u64, edit: impl FnOnce(&mut ImageRecord)) {
-        let before = self.edit_signature();
-        edit(self);
-        if !self.has_edits() {
-            self.edited = None;
-        } else if self.edit_signature() != before {
-            self.edited = Some(now);
-        }
-    }
-
-    /// Bring a record read from disk in line with its edits: no edits, no
-    /// edit time. A sidecar written before edit times were kept takes
-    /// `saved_at`, when the file was last written.
-    pub(crate) fn settle_edited(&mut self, saved_at: impl FnOnce() -> Option<u64>) {
-        if !self.has_edits() {
-            self.edited = None;
-        } else if self.edited.is_none() {
-            self.edited = saved_at();
-        }
-    }
-
-    /// Whether this record's sidecar would be `{}`, read off the serde
-    /// attributes rather than a second hand-written list.
-    fn serializes_to_nothing(&self) -> bool {
-        matches!(
-            serde_json::to_value(self),
-            Ok(serde_json::Value::Object(fields)) if fields.is_empty()
-        )
-    }
-}
 
 /// Records for the active directory, backed by its sidecar files. `images`
 /// is a read cache keyed by filename, so it answers only for photos in the
@@ -507,9 +371,7 @@ impl Catalog {
     }
 
     fn update_edits(&mut self, path: &Path, edit: impl FnOnce(&mut ImageRecord)) {
-        let now = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let now = crate::sidecar::unix_now();
         self.update(path, |rec| rec.edit(now, edit));
     }
 
@@ -650,24 +512,14 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
         let Some(stem) = path.file_stem() else {
             continue;
         };
-        match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<ImageRecord>(&bytes) {
-                Ok(mut rec) => {
-                    rec.settle_edited(|| {
-                        let saved = entry.metadata().ok()?.modified().ok()?;
-                        Some(saved.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs())
-                    });
-                    if !rec.is_empty() {
-                        images.insert(stem.to_os_string(), rec);
-                    }
+        match crate::sidecar::read_sidecar_file(&path) {
+            Ok(rec) => {
+                if !rec.is_empty() {
+                    images.insert(stem.to_os_string(), rec);
                 }
-                Err(e) => {
-                    eprintln!("[catalog] unreadable sidecar {}: {e}", path.display());
-                    skipped += 1;
-                }
-            },
+            }
             Err(e) => {
-                eprintln!("[catalog] could not read {}: {e}", path.display());
+                eprintln!("[catalog] unreadable sidecar {}: {e}", path.display());
                 skipped += 1;
             }
         }
@@ -1048,57 +900,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// The defect this guards is a new `ImageRecord` field that `is_empty`
-    /// forgets, which makes a cleared photo keep writing a sidecar instead of
-    /// deleting it. Every field is set through the serialized form, so the
-    /// check is the serde attributes rather than a second hand-written list.
-    #[test]
-    fn every_persisted_field_on_its_own_makes_a_record_non_empty() {
-        let populated = ImageRecord {
-            rating: Some(3),
-            label: Some(ColorLabel::Red),
-            adjustments: Adjustments {
-                exposure: 0.5,
-                ..Default::default()
-            },
-            touchups: vec![TouchUp {
-                center: [0.4, 0.5],
-                radius: 0.02,
-                source: [0.6, 0.5],
-                feather: 0.5,
-                delta: [0.01, -0.02, 0.0],
-                opacity: 1.0,
-            }],
-            rotation: 1,
-            score: Some(StoredScore {
-                score: sample_score(),
-                edits: 7,
-            }),
-            ..Default::default()
-        };
-
-        let serde_json::Value::Object(fields) = serde_json::to_value(&populated).unwrap() else {
-            panic!("a record serializes to an object");
-        };
-        assert_eq!(
-            fields.len(),
-            6,
-            "set every field of ImageRecord here, got {fields:?}"
-        );
-
-        for name in fields.keys() {
-            let mut only = serde_json::Map::new();
-            only.insert(name.clone(), fields[name].clone());
-            let rec: ImageRecord = serde_json::from_value(serde_json::Value::Object(only)).unwrap();
-            assert!(
-                !rec.is_empty(),
-                "a record holding only {name} must still be written"
-            );
-        }
-
-        assert!(ImageRecord::default().is_empty());
-    }
-
     fn sample_score() -> QualityScore {
         QualityScore {
             value: 73,
@@ -1224,17 +1025,6 @@ mod tests {
 
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();
-    }
-
-    #[test]
-    fn a_sidecar_loads_at_most_max_touchups() {
-        let spot =
-            r#"{"center":[0.5,0.5],"radius":0.1,"source":[0.2,0.2],"feather":0.5,"delta":[0,0,0]}"#;
-        let spots = vec![spot; crate::develop::MAX_TOUCHUPS + 36].join(",");
-        let rec: ImageRecord =
-            serde_json::from_str(&format!(r#"{{"rating":2,"touchups":[{spots}]}}"#)).unwrap();
-        assert_eq!(rec.touchups.len(), crate::develop::MAX_TOUCHUPS);
-        assert_eq!(rec.rating, Some(2));
     }
 
     #[test]
@@ -1564,6 +1354,74 @@ mod tests {
         std::fs::remove_dir_all(&elsewhere).unwrap();
     }
 
+    fn fully_populated() -> ImageRecord {
+        let mut rec = ImageRecord {
+            rating: Some(3),
+            flag: Some(Flag::Reject),
+            label: Some(ColorLabel::Green),
+            score: Some(StoredScore {
+                score: sample_score(),
+                edits: 9,
+            }),
+            ..ImageRecord::default()
+        };
+        rec.edit(1_700_000_000, |r| {
+            r.adjustments.exposure = -0.7;
+            r.rotation = 2;
+            r.touchups = vec![TouchUp {
+                center: [0.4, 0.5],
+                radius: 0.02,
+                source: [0.6, 0.5],
+                feather: 0.5,
+                delta: [0.01, -0.02, 0.0],
+                opacity: 1.0,
+            }];
+        });
+        rec
+    }
+
+    #[test]
+    fn a_record_the_lib_writes_is_what_the_catalog_loads() {
+        let dir = temp_folder("catalog-test");
+        let p = dir.join("photo.jpg");
+        let rec = fully_populated();
+        crate::sidecar::write_record(&p, &rec).unwrap();
+
+        let cat = Catalog::with_dir(dir.clone());
+        assert_eq!(cat.record(&p), Some(&rec));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_record_the_catalog_writes_is_what_the_lib_reads() {
+        let dir = temp_folder("catalog-test");
+        let p = dir.join("photo.jpg");
+        let rec = fully_populated();
+        let mut cat = Catalog::with_dir(dir.clone());
+        cat.set(&p, 3);
+        cat.set_flag(&p, rec.flag);
+        cat.set_label(&p, rec.label);
+        cat.set_adjustments(&p, &rec.adjustments);
+        cat.set_touchups(&p, &rec.touchups);
+        cat.set_rotation(&p, rec.rotation);
+        cat.set_score(&p, sample_score(), 9);
+        flush(&mut cat);
+
+        let read = crate::sidecar::read_record(&p).unwrap();
+        assert_eq!(Some(&read), cat.record(&p));
+        assert_eq!(
+            ImageRecord {
+                edited: rec.edited,
+                ..read
+            },
+            rec,
+            "every field but the edit time matches the lib's own record"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn load_sidecars_reads_a_directory_without_mutating_a_catalog() {
         let dir = temp_folder("catalog-test");
@@ -1581,40 +1439,6 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn an_edit_stamps_its_time_and_undoing_every_edit_clears_it() {
-        let mut rec = ImageRecord {
-            rating: Some(3),
-            ..ImageRecord::default()
-        };
-        rec.edit(100, |r| r.adjustments.exposure = 0.5);
-        assert_eq!(rec.edited, Some(100));
-        rec.edit(200, |r| r.adjustments.exposure = 0.5);
-        assert_eq!(
-            rec.edited,
-            Some(100),
-            "an edit that changes nothing keeps the time"
-        );
-        rec.edit(300, |r| r.rotation = 1);
-        assert_eq!(rec.edited, Some(300));
-        rec.edit(400, |r| {
-            r.adjustments = Adjustments::default();
-            r.rotation = 0;
-        });
-        assert_eq!(rec.edited, None);
-        rec.rating = None;
-        assert!(rec.is_empty(), "an undone edit leaves no sidecar behind");
-    }
-
-    #[test]
-    fn the_edit_time_does_not_count_as_an_edit() {
-        let mut rec = ImageRecord::default();
-        rec.adjustments.exposure = 0.5;
-        let signature = rec.edit_signature();
-        rec.edited = Some(1);
-        assert_eq!(rec.edit_signature(), signature);
     }
 
     #[test]

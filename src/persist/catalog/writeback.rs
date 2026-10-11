@@ -13,8 +13,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
-use super::ImageRecord;
 use crate::persist::groups::{Group, GroupId, GroupWrite, Groups};
+use crate::sidecar::ImageRecord;
 
 /// One queued sidecar mutation.
 ///
@@ -191,7 +191,7 @@ impl Writeback {
         groups: &mut Groups,
     ) {
         let groups_dir = dir
-            .join(super::SIDECAR_DIR)
+            .join(crate::sidecar::SIDECAR_DIR)
             .join(super::group_file::GROUPS_DIR);
         let mut group_writes = Vec::new();
         for (path, authored) in &self.authored {
@@ -362,57 +362,14 @@ impl Drop for Writeback {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn perform(path: &Path, op: &WriteOp) -> Result<(), String> {
+    use crate::paths::{remove_if_present, write_atomic_in_dir};
     match op {
-        WriteOp::Put(rec) => {
-            let sidecar =
-                sidecar_path(path).ok_or_else(|| "cannot determine sidecar path".to_string())?;
-            write_sidecar_file(&sidecar, rec)
-        }
-        WriteOp::Delete => match sidecar_path(path) {
-            Some(sidecar) => remove_if_present(&sidecar),
-            None => Ok(()),
-        },
-        WriteOp::PutGroup(group) => write_atomic_in_dir(path, &super::group_file::to_bytes(group)?),
-        WriteOp::DeleteGroup => remove_if_present(path),
+        WriteOp::Put(rec) => crate::sidecar::write_record(path, rec),
+        WriteOp::Delete => crate::sidecar::delete_record(path),
+        WriteOp::PutGroup(group) => write_atomic_in_dir(path, &super::group_file::to_bytes(group)?)
+            .map_err(|e| e.to_string()),
+        WriteOp::DeleteGroup => remove_if_present(path).map_err(|e| e.to_string()),
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn remove_if_present(file: &Path) -> Result<(), String> {
-    match std::fs::remove_file(file) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-/// `<dir>/.lightphotos/<filename>.xmp`, or `None` for a path like `/` or `..`.
-/// Built from `OsString` so non-UTF-8 names stay exact.
-#[cfg(not(target_arch = "wasm32"))]
-fn sidecar_path(path: &Path) -> Option<PathBuf> {
-    let dir = path.parent()?;
-    let name = path.file_name()?;
-    let mut sidecar_name = name.to_os_string();
-    sidecar_name.push(".");
-    sidecar_name.push(super::SIDECAR_EXT);
-    Some(dir.join(super::SIDECAR_DIR).join(sidecar_name))
-}
-
-/// Write `rec` as JSON to `sidecar`, atomically.
-#[cfg(not(target_arch = "wasm32"))]
-fn write_sidecar_file(sidecar: &Path, rec: &ImageRecord) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(rec).map_err(|e| e.to_string())?;
-    write_atomic_in_dir(sidecar, &bytes)
-}
-
-/// Write `bytes` to `file` atomically, creating its directory first.
-#[cfg(not(target_arch = "wasm32"))]
-fn write_atomic_in_dir(file: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = file
-        .parent()
-        .ok_or_else(|| "sidecar path has no parent".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    crate::paths::write_atomic(file, bytes).map_err(|e| e.to_string())
 }
 
 #[cfg(target_arch = "wasm32")]
