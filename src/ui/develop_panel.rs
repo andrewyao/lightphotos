@@ -431,6 +431,7 @@ fn draw_sliders_body(
     out: &mut FrameOutput,
 ) {
     let t = t();
+    let view = app.slider_view();
     if crate::app::SHOW_PRESETS {
         draw_presets(ui, app, out);
     }
@@ -454,7 +455,7 @@ fn draw_sliders_body(
         }
         // Lightroom's B&W treatment, as the full desaturation that preset
         // import maps `ConvertToGrayscale` to.
-        let mono = app.selection_is_monochrome();
+        let mono = view.monochrome;
         if ui
             .add(egui::Button::new(t.black_and_white).selected(mono))
             .on_hover_text(crate::i18n::keys(t.black_and_white_tip))
@@ -470,13 +471,16 @@ fn draw_sliders_body(
     let one = scope == DevelopScope::One;
     let mut section = None;
     for (idx, s) in crate::develop::SLIDERS.iter().enumerate() {
+        if !s.shown(view) {
+            continue;
+        }
         if section != Some(s.section) {
             if section.is_some() {
                 form::divider(ui);
             }
-            // Lightroom puts the curve between Presence and Detail. Several
-            // photos have no one curve to bend, so it is off for them.
-            if s.section == crate::develop::Section::Detail {
+            // Lightroom puts the curve right after Presence. Several photos
+            // have no one curve to bend, so it is off for them.
+            if section == Some(crate::develop::Section::Presence) {
                 changed |= ui
                     .add_enabled_ui(one, |ui| draw_curve_section(ui, app, one, &mut adj.curve))
                     .inner;
@@ -499,6 +503,13 @@ fn draw_sliders_body(
                 }
                 _ => {}
             });
+            if s.section == crate::develop::Section::ColorMixer {
+                let choices = crate::develop::MixAxis::ALL.map(|a| (a, t.mix_axis(a), None));
+                let picked = form::segmented(ui, &choices, view.mixer_axis);
+                if let Some(axis) = picked.filter(|&a| a != view.mixer_axis) {
+                    out.actions.push(UiAction::SetMixerAxis(axis));
+                }
+            }
         }
         let focused = focus_idx == Some(idx);
         let interacted = if scope == DevelopScope::Many {

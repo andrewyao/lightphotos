@@ -453,6 +453,11 @@ pub struct Strings {
     pub curve_red: &'static str,
     pub curve_green: &'static str,
     pub curve_blue: &'static str,
+    pub color_mixer: &'static str,
+    pub mix_hue: &'static str,
+    pub mix_luminance: &'static str,
+    /// The Color Mixer's bands, in `develop::Band::ALL` order.
+    pub bands: [&'static str; 8],
     pub remove_ca: &'static str,
     pub remove_ca_tip: &'static str,
     pub no_photo_selected: &'static str,
@@ -708,6 +713,7 @@ impl Strings {
             Section::Vignette => self.vignette,
             Section::Grain => self.grain,
             Section::Curve => self.curve,
+            Section::ColorMixer => self.color_mixer,
         }
     }
 
@@ -718,10 +724,24 @@ impl Strings {
             C::Tone => self.tone,
             C::Presence => self.presence,
             C::Curve => self.curve,
+            C::Color => self.color_mixer,
             C::Detail => self.detail,
             C::Effects => self.effects,
             C::Optics => self.optics,
             C::Crop => self.crop_section,
+        }
+    }
+
+    pub fn band(&self, band: crate::develop::Band) -> &'static str {
+        self.bands[band as usize]
+    }
+
+    pub fn mix_axis(&self, axis: crate::develop::MixAxis) -> &'static str {
+        use crate::develop::MixAxis;
+        match axis {
+            MixAxis::Hue => self.mix_hue,
+            MixAxis::Saturation => self.saturation,
+            MixAxis::Luminance => self.mix_luminance,
         }
     }
 
@@ -751,6 +771,7 @@ impl Strings {
             SliderId::VignetteFeather => self.feather,
             SliderId::GrainSize => self.grain_size,
             SliderId::GrainRoughness => self.roughness,
+            SliderId::Mix(_, band) => self.band(band),
         }
     }
 }
@@ -1243,6 +1264,12 @@ pub static EN: Strings = Strings {
     curve_red: "Red",
     curve_green: "Green",
     curve_blue: "Blue",
+    color_mixer: "Color Mixer",
+    mix_hue: "Hue",
+    mix_luminance: "Luminance",
+    bands: [
+        "Red", "Orange", "Yellow", "Green", "Aqua", "Blue", "Purple", "Magenta",
+    ],
     remove_ca: "Remove Chromatic Aberration",
     remove_ca_tip: "Measures the red and blue fringes at high-contrast edges and lines them up with green",
     no_photo_selected: "No photo selected",
@@ -1980,6 +2007,12 @@ pub static ZH: Strings = Strings {
     curve_red: "红色",
     curve_green: "绿色",
     curve_blue: "蓝色",
+    color_mixer: "混色器",
+    mix_hue: "色相",
+    mix_luminance: "明亮度",
+    bands: [
+        "红色", "橙色", "黄色", "绿色", "浅绿色", "蓝色", "紫色", "洋红",
+    ],
     remove_ca: "删除色差",
     remove_ca_tip: "测量高对比度边缘的红色和蓝色色边，并与绿色对齐",
     no_photo_selected: "未选择照片",

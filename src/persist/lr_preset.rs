@@ -10,7 +10,7 @@
 //! XML crate, least of all one that has to build for wasm32.
 
 use crate::develop::curve::{Channel, Curve};
-use crate::develop::{Adjustments, SliderId, SLIDERS};
+use crate::develop::{Adjustments, MixAxis, SliderId, SLIDERS};
 
 /// What a preset file yielded.
 pub struct Imported {
@@ -78,8 +78,48 @@ fn keys(id: SliderId) -> &'static [&'static str] {
         SliderId::GrainAmount => &["GrainAmount"],
         SliderId::GrainSize => &["GrainSize"],
         SliderId::GrainRoughness => &["GrainFrequency"],
+        SliderId::Mix(axis, band) => {
+            let table = match axis {
+                MixAxis::Hue => &HUE_KEYS,
+                MixAxis::Saturation => &SATURATION_KEYS,
+                MixAxis::Luminance => &LUMINANCE_KEYS,
+            };
+            std::slice::from_ref(&table[band as usize])
+        }
     }
 }
+
+/// The Color Mixer keys, one per band in [`crate::develop::Band::ALL`] order.
+const HUE_KEYS: [&str; 8] = [
+    "HueAdjustmentRed",
+    "HueAdjustmentOrange",
+    "HueAdjustmentYellow",
+    "HueAdjustmentGreen",
+    "HueAdjustmentAqua",
+    "HueAdjustmentBlue",
+    "HueAdjustmentPurple",
+    "HueAdjustmentMagenta",
+];
+const SATURATION_KEYS: [&str; 8] = [
+    "SaturationAdjustmentRed",
+    "SaturationAdjustmentOrange",
+    "SaturationAdjustmentYellow",
+    "SaturationAdjustmentGreen",
+    "SaturationAdjustmentAqua",
+    "SaturationAdjustmentBlue",
+    "SaturationAdjustmentPurple",
+    "SaturationAdjustmentMagenta",
+];
+const LUMINANCE_KEYS: [&str; 8] = [
+    "LuminanceAdjustmentRed",
+    "LuminanceAdjustmentOrange",
+    "LuminanceAdjustmentYellow",
+    "LuminanceAdjustmentGreen",
+    "LuminanceAdjustmentAqua",
+    "LuminanceAdjustmentBlue",
+    "LuminanceAdjustmentPurple",
+    "LuminanceAdjustmentMagenta",
+];
 
 /// Fields with no counterpart here, under the label the note names. The
 /// labels are Adobe's identifiers because no `i18n` string wraps them.
@@ -97,48 +137,6 @@ const UNSUPPORTED: &[(&str, &[&str], Untouched)] = &[
         Untouched::Default(25.0),
     ),
     ("CropAngle", &["CropAngle"], Untouched::Zero),
-    (
-        "HueAdjustment*",
-        &[
-            "HueAdjustmentRed",
-            "HueAdjustmentOrange",
-            "HueAdjustmentYellow",
-            "HueAdjustmentGreen",
-            "HueAdjustmentAqua",
-            "HueAdjustmentBlue",
-            "HueAdjustmentPurple",
-            "HueAdjustmentMagenta",
-        ],
-        Untouched::Zero,
-    ),
-    (
-        "SaturationAdjustment*",
-        &[
-            "SaturationAdjustmentRed",
-            "SaturationAdjustmentOrange",
-            "SaturationAdjustmentYellow",
-            "SaturationAdjustmentGreen",
-            "SaturationAdjustmentAqua",
-            "SaturationAdjustmentBlue",
-            "SaturationAdjustmentPurple",
-            "SaturationAdjustmentMagenta",
-        ],
-        Untouched::Zero,
-    ),
-    (
-        "LuminanceAdjustment*",
-        &[
-            "LuminanceAdjustmentRed",
-            "LuminanceAdjustmentOrange",
-            "LuminanceAdjustmentYellow",
-            "LuminanceAdjustmentGreen",
-            "LuminanceAdjustmentAqua",
-            "LuminanceAdjustmentBlue",
-            "LuminanceAdjustmentPurple",
-            "LuminanceAdjustmentMagenta",
-        ],
-        Untouched::Zero,
-    ),
 ];
 
 /// Parse a Lightroom `.xmp` develop preset. `Err` for a file that is not one.
@@ -435,6 +433,7 @@ mod tests {
             blacks: -8.0,
             vibrance: 20.0,
             saturation: -5.0,
+            mixer: Default::default(),
             denoise: 30.0,
             sharpening: Default::default(),
             crop: None,
@@ -467,6 +466,35 @@ mod tests {
         };
         assert_eq!(at("40"), crate::develop::Sharpening::default());
         assert_eq!(at("60").amount, 60.0);
+    }
+
+    /// Catches a Color Mixer key read into the wrong band or axis, or still
+    /// reported as dropped.
+    #[test]
+    fn color_mixer_keys_fill_their_band_and_axis() {
+        let got = parse(&packet(
+            "crs:HueAdjustmentRed=\"+10\" crs:SaturationAdjustmentAqua=\"-20\" \
+             crs:LuminanceAdjustmentMagenta=\"+30\" crs:SaturationAdjustmentBlue=\"-250\"",
+            "",
+        ))
+        .unwrap();
+        assert!(got.dropped.is_empty(), "{:?}", got.dropped);
+        let m = got.adj.mixer;
+        assert_eq!(m.red.hue, 10.0);
+        assert_eq!(m.aqua.saturation, -20.0);
+        assert_eq!(m.magenta.luminance, 30.0);
+        assert_eq!(m.blue.saturation, -100.0, "out of range clamps");
+        assert_eq!(
+            crate::develop::ColorMixer {
+                red: Default::default(),
+                aqua: Default::default(),
+                magenta: Default::default(),
+                blue: Default::default(),
+                ..m
+            },
+            Default::default(),
+            "no other band moved"
+        );
     }
 
     /// Catches Texture, Clarity or Dehaze still reported as dropped.
@@ -647,19 +675,18 @@ mod tests {
     #[test]
     fn a_zero_unsupported_field_is_not_reported_while_a_nonzero_one_is() {
         let zero = parse(&packet(
-            "crs:Temperature=\"0\" crs:Tint=\"+0\" crs:HueAdjustmentRed=\"0\" \
-             crs:CropAngle=\"0\"",
+            "crs:Temperature=\"0\" crs:Tint=\"+0\" crs:CropAngle=\"0\"",
             "",
         ))
         .unwrap();
         assert!(zero.dropped.is_empty(), "{:?}", zero.dropped);
 
         let set = parse(&packet(
-            "crs:CropAngle=\"+15\" crs:HueAdjustmentBlue=\"0\" crs:HueAdjustmentAqua=\"-3\"",
+            "crs:CropAngle=\"+15\" crs:Temperature=\"0\" crs:Tint=\"-3\"",
             "",
         ))
         .unwrap();
-        assert_eq!(set.dropped, ["CropAngle", "HueAdjustment*"]);
+        assert_eq!(set.dropped, ["Tint", "CropAngle"]);
     }
 
     /// Catches a parser that turns a stray file into an empty preset.

@@ -57,6 +57,16 @@ struct Adjust {
     grain_amount: f32,
     grain_rough: f32,
     grain_scale: vec2<f32>,
+    // The Color Mixer, derived on the CPU by `develop::ColorOps`. Each
+    // array is 8 floats, one per band. See `colorMix`.
+    mix_on: f32,
+    _cpad0: f32,
+    _cpad1: f32,
+    _cpad2: f32,
+    band_hue: array<vec4<f32>, 2>,
+    mix_hue: array<vec4<f32>, 2>,
+    mix_sat: array<vec4<f32>, 2>,
+    mix_lum: array<vec4<f32>, 2>,
 };
 
 struct TouchUp {
@@ -384,6 +394,97 @@ fn toneCurve(c: vec3<f32>) -> vec3<f32> {
         mix(curve_lut[i.g].g, curve_lut[i.g + 1u].g, t.g),
         mix(curve_lut[i.b].b, curve_lut[i.b + 1u].b, t.b),
     );
+}
+
+// A cube root through `pow` on the magnitude. Must match `color::cbrt`.
+fn cbrtSigned(v: f32) -> f32 {
+    return sign(v) * pow(abs(v), 1.0 / 3.0);
+}
+
+// Linear sRGB to OkLab. Must match `color::oklab` in develop/color.rs.
+fn oklab(c: vec3<f32>) -> vec3<f32> {
+    let l = cbrtSigned(0.41222147 * c.r + 0.53633255 * c.g + 0.051445995 * c.b);
+    let m = cbrtSigned(0.2119035 * c.r + 0.6806995 * c.g + 0.10739696 * c.b);
+    let s = cbrtSigned(0.08830246 * c.r + 0.28171885 * c.g + 0.6299787 * c.b);
+    return vec3<f32>(
+        0.21045426 * l + 0.7936178 * m - 0.004072047 * s,
+        1.9779985 * l - 2.4285922 * m + 0.4505937 * s,
+        0.025904037 * l + 0.78277177 * m - 0.80867577 * s,
+    );
+}
+
+// OkLab to linear sRGB. Must match `color::oklab_to_linear`.
+fn oklabToLinear(lab: vec3<f32>) -> vec3<f32> {
+    let l0 = lab.x + 0.39633778 * lab.y + 0.21580376 * lab.z;
+    let m0 = lab.x - 0.105561346 * lab.y - 0.06385417 * lab.z;
+    let s0 = lab.x - 0.08948418 * lab.y - 1.2914855 * lab.z;
+    let l = l0 * l0 * l0;
+    let m = m0 * m0 * m0;
+    let s = s0 * s0 * s0;
+    return vec3<f32>(
+        4.0767417 * l - 3.3077116 * m + 0.23096994 * s,
+        -1.268438 * l + 2.6097574 * m - 0.34131938 * s,
+        -0.0041960863 * l - 0.7034186 * m + 1.7076147 * s,
+    );
+}
+
+// `x` into 0..TAU. Must match `color::wrap_tau`.
+fn wrapTau(x: f32) -> f32 {
+    let tau = 6.2831855;
+    return x - tau * floor(x / tau);
+}
+
+// Band `i` of one of the Color Mixer's per-band arrays.
+fn bandHue(i: u32) -> f32 {
+    return adj.band_hue[i / 4u][i % 4u];
+}
+
+fn mixHue(i: u32) -> f32 {
+    return adj.mix_hue[i / 4u][i % 4u];
+}
+
+fn mixSat(i: u32) -> f32 {
+    return adj.mix_sat[i / 4u][i % 4u];
+}
+
+fn mixLum(i: u32) -> f32 {
+    return adj.mix_lum[i / 4u][i % 4u];
+}
+
+// The Color Mixer on gamma-space `rgb`, in OkLCh: each pixel takes a
+// raised-cosine blend of the two bands its hue sits between. Must match
+// `ColorOps::apply` in develop/color.rs.
+fn colorMix(rgb: vec3<f32>) -> vec3<f32> {
+    if (adj.mix_on == 0.0) {
+        return rgb;
+    }
+    let lab = oklab(pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(2.2)));
+    let c = sqrt(lab.y * lab.y + lab.z * lab.z);
+    // atan2(0, 0) is undefined on some backends. Must match the CPU's
+    // early return.
+    if (c < 1e-6) {
+        return rgb;
+    }
+    let h = atan2(lab.z, lab.y);
+    var i = 0u;
+    var s = 0.0;
+    for (var k = 0u; k < 8u; k = k + 1u) {
+        let a = bandHue(k);
+        let span = wrapTau(bandHue((k + 1u) % 8u) - a);
+        let d = wrapTau(h - a);
+        if (d < span) {
+            i = k;
+            s = 0.5 - 0.5 * cos(3.1415927 * (d / span));
+            break;
+        }
+    }
+    let j = (i + 1u) % 8u;
+    let cw = min(c / 0.12, 1.0);
+    let h2 = h + (mixHue(i) + (mixHue(j) - mixHue(i)) * s) * cw;
+    let c2 = c * max(1.0 + (mixSat(i) + (mixSat(j) - mixSat(i)) * s), 0.0);
+    let l2 = lab.x + (mixLum(i) + (mixLum(j) - mixLum(i)) * s) * cw * sqrt(max(lab.x, 0.05));
+    let lin = oklabToLinear(vec3<f32>(l2, c2 * cos(h2), c2 * sin(h2)));
+    return pow(max(lin, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
 }
 
 // 0 inside the vignette, 1 past its falloff, at canvas `uv`. Must match

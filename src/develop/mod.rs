@@ -7,6 +7,7 @@
 
 pub mod base;
 pub mod chroma;
+pub mod color;
 pub mod copy;
 pub mod curve;
 pub mod effects;
@@ -17,6 +18,7 @@ pub mod sharpen;
 use serde::{Deserialize, Serialize};
 
 pub use base::{BaseLayer, BaseProbe, BaseTexel, Grid};
+pub use color::{Band, BandShift, ColorMixer, ColorOps, MixAxis};
 pub use effects::{Effects, Grain, Vignette};
 pub use sharpen::{Sharpen, Sharpening};
 
@@ -55,6 +57,11 @@ const fn tone(section: Section, id: SliderId, field: fn(&mut Adjustments) -> &mu
     }
 }
 
+/// One Color Mixer slider: `axis` of `band`, -100..100.
+const fn mix(axis: MixAxis, band: Band, field: fn(&mut Adjustments) -> &mut f32) -> Slider {
+    tone(Section::ColorMixer, SliderId::Mix(axis, band), field)
+}
+
 /// A 0..100 slider that rests at `default`.
 const fn percent(
     section: Section,
@@ -69,6 +76,26 @@ const fn percent(
     }
 }
 
+/// What the Sliders page shows of the sliders that share rows: the Color
+/// Mixer's chosen axis, and whether the photos are monochrome, which hides
+/// the mixer as Lightroom does.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct SliderView {
+    pub mixer_axis: MixAxis,
+    pub monochrome: bool,
+}
+
+impl Slider {
+    /// Whether the panel draws this slider under `view`. The keyboard
+    /// cursor walks only these.
+    pub fn shown(&self, view: SliderView) -> bool {
+        match self.id {
+            SliderId::Mix(axis, _) => !view.monochrome && axis == view.mixer_axis,
+            _ => true,
+        }
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Section {
     WhiteBalance,
@@ -76,6 +103,8 @@ pub enum Section {
     Presence,
     /// The point curve, not sliders. See [`ToneCurve`].
     Curve,
+    /// Hue, saturation and luminance per hue band. See [`ColorMixer`].
+    ColorMixer,
     Detail,
     /// Checkboxes, not sliders. See [`CaScale`].
     Optics,
@@ -100,6 +129,7 @@ pub enum SliderId {
     Dehaze,
     Vibrance,
     Saturation,
+    Mix(MixAxis, Band),
     SharpenAmount,
     SharpenRadius,
     SharpenDetail,
@@ -114,7 +144,7 @@ pub enum SliderId {
     GrainRoughness,
 }
 
-pub const SLIDERS: [Slider; 25] = [
+pub const SLIDERS: [Slider; 49] = [
     tone(Section::WhiteBalance, SliderId::Temp, |a| &mut a.temp),
     tone(Section::WhiteBalance, SliderId::Tint, |a| &mut a.tint),
     Slider {
@@ -137,6 +167,62 @@ pub const SLIDERS: [Slider; 25] = [
     tone(Section::Presence, SliderId::Vibrance, |a| &mut a.vibrance),
     tone(Section::Presence, SliderId::Saturation, |a| {
         &mut a.saturation
+    }),
+    mix(MixAxis::Hue, Band::Red, |a| &mut a.mixer.red.hue),
+    mix(MixAxis::Hue, Band::Orange, |a| &mut a.mixer.orange.hue),
+    mix(MixAxis::Hue, Band::Yellow, |a| &mut a.mixer.yellow.hue),
+    mix(MixAxis::Hue, Band::Green, |a| &mut a.mixer.green.hue),
+    mix(MixAxis::Hue, Band::Aqua, |a| &mut a.mixer.aqua.hue),
+    mix(MixAxis::Hue, Band::Blue, |a| &mut a.mixer.blue.hue),
+    mix(MixAxis::Hue, Band::Purple, |a| &mut a.mixer.purple.hue),
+    mix(MixAxis::Hue, Band::Magenta, |a| &mut a.mixer.magenta.hue),
+    mix(MixAxis::Saturation, Band::Red, |a| {
+        &mut a.mixer.red.saturation
+    }),
+    mix(MixAxis::Saturation, Band::Orange, |a| {
+        &mut a.mixer.orange.saturation
+    }),
+    mix(MixAxis::Saturation, Band::Yellow, |a| {
+        &mut a.mixer.yellow.saturation
+    }),
+    mix(MixAxis::Saturation, Band::Green, |a| {
+        &mut a.mixer.green.saturation
+    }),
+    mix(MixAxis::Saturation, Band::Aqua, |a| {
+        &mut a.mixer.aqua.saturation
+    }),
+    mix(MixAxis::Saturation, Band::Blue, |a| {
+        &mut a.mixer.blue.saturation
+    }),
+    mix(MixAxis::Saturation, Band::Purple, |a| {
+        &mut a.mixer.purple.saturation
+    }),
+    mix(MixAxis::Saturation, Band::Magenta, |a| {
+        &mut a.mixer.magenta.saturation
+    }),
+    mix(MixAxis::Luminance, Band::Red, |a| {
+        &mut a.mixer.red.luminance
+    }),
+    mix(MixAxis::Luminance, Band::Orange, |a| {
+        &mut a.mixer.orange.luminance
+    }),
+    mix(MixAxis::Luminance, Band::Yellow, |a| {
+        &mut a.mixer.yellow.luminance
+    }),
+    mix(MixAxis::Luminance, Band::Green, |a| {
+        &mut a.mixer.green.luminance
+    }),
+    mix(MixAxis::Luminance, Band::Aqua, |a| {
+        &mut a.mixer.aqua.luminance
+    }),
+    mix(MixAxis::Luminance, Band::Blue, |a| {
+        &mut a.mixer.blue.luminance
+    }),
+    mix(MixAxis::Luminance, Band::Purple, |a| {
+        &mut a.mixer.purple.luminance
+    }),
+    mix(MixAxis::Luminance, Band::Magenta, |a| {
+        &mut a.mixer.magenta.luminance
     }),
     Slider {
         range: sharpen::AMOUNT_RANGE,
@@ -289,6 +375,8 @@ pub struct Adjustments {
     /// -100 is grayscale.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub saturation: f32,
+    #[serde(default, skip_serializing_if = "ColorMixer::is_neutral")]
+    pub mixer: ColorMixer,
     #[serde(default, skip_serializing_if = "Sharpening::is_default")]
     pub sharpening: Sharpening,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -526,6 +614,15 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
             h.write(&((v * 1000.0).round() as i32).to_le_bytes());
         }
     }
+    // A monochrome photo skips the mixer, so its values can't change a render.
+    if !adj.mixer.is_neutral() && !adj.is_monochrome() {
+        h.write(&[10]);
+        for b in adj.mixer.bands() {
+            for x in [b.hue, b.saturation, b.luminance] {
+                h.write(&((x * 1000.0).round() as i32).to_le_bytes());
+            }
+        }
+    }
     if adj.sharpening.amount != 0.0 {
         h.write(&[9]);
         let s = adj.sharpening;
@@ -642,6 +739,7 @@ pub struct GpuAdjust {
     pub sharpen: Sharpen,
     /// Set by [`GpuAdjust::for_image`], which knows the image size.
     pub effects: Effects,
+    pub color: ColorOps,
 }
 
 impl Default for GpuAdjust {
@@ -677,6 +775,7 @@ impl Default for GpuAdjust {
             fine_on: 0.0,
             sharpen: Sharpen::default(),
             effects: Effects::default(),
+            color: ColorOps::default(),
         }
     }
 }
@@ -730,6 +829,7 @@ impl From<&Adjustments> for GpuAdjust {
             texture: a.texture.clamp(-100.0, 100.0),
             clarity: a.clarity.clamp(-100.0, 100.0),
             dehaze: a.dehaze.clamp(-100.0, 100.0),
+            color: ColorOps::new(&a.mixer, a.is_monochrome()),
             ..Self::default()
         }
     }
@@ -824,6 +924,7 @@ pub fn apply_raw_display(adj: &Adjustments, rgb: [f32; 3]) -> [f32; 3] {
 pub struct Develop<'a> {
     adj: &'a Adjustments,
     curve: Option<Box<curve::Lut>>,
+    color: ColorOps,
     frame: Option<Frame>,
 }
 
@@ -840,6 +941,7 @@ impl<'a> Develop<'a> {
         Develop {
             adj,
             curve,
+            color: ColorOps::new(&adj.mixer, adj.is_monochrome()),
             frame: None,
         }
     }
@@ -858,33 +960,33 @@ impl<'a> Develop<'a> {
     }
 
     pub fn linear(&self, rgb: [f32; 3]) -> [f32; 3] {
-        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, None, false)
+        apply_linear_impl(self, rgb, None, false)
     }
 
     pub fn raw_display(&self, rgb: [f32; 3]) -> [f32; 3] {
-        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, None, true)
+        apply_linear_impl(self, rgb, None, true)
     }
 
     /// [`Develop::linear`] for the pixel at canvas UV `(u, v)`.
     pub fn linear_at(&self, rgb: [f32; 3], u: f32, v: f32) -> [f32; 3] {
         let at = self.frame.as_ref().map(|f| (f, u, v));
-        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, at, false)
+        apply_linear_impl(self, rgb, at, false)
     }
 
     /// [`Develop::raw_display`] for the pixel at canvas UV `(u, v)`.
     pub fn raw_display_at(&self, rgb: [f32; 3], u: f32, v: f32) -> [f32; 3] {
         let at = self.frame.as_ref().map(|f| (f, u, v));
-        apply_linear_impl(self.adj, self.curve.as_deref(), rgb, at, true)
+        apply_linear_impl(self, rgb, at, true)
     }
 }
 
 fn apply_linear_impl(
-    adj: &Adjustments,
-    curve: Option<&curve::Lut>,
+    dev: &Develop,
     rgb: [f32; 3],
     at: Option<(&Frame, f32, f32)>,
     raw_display: bool,
 ) -> [f32; 3] {
+    let adj = dev.adj;
     let [mut r, mut g, mut b] = rgb;
 
     // White balance as small per-channel gains, at most ±0.3.
@@ -950,11 +1052,13 @@ fn apply_linear_impl(
     gg = tone(gg);
     bg = tone(bg);
 
-    if let Some(lut) = curve {
+    if let Some(lut) = dev.curve.as_deref() {
         rg = curve::apply(lut, 0, rg);
         gg = curve::apply(lut, 1, gg);
         bg = curve::apply(lut, 2, bg);
     }
+
+    [rg, gg, bg] = dev.color.apply([rg, gg, bg]);
 
     // Vibrance and saturation scale chroma around Rec.601 luma. Vibrance is
     // weaker on pixels that are already saturated.
@@ -1688,6 +1792,22 @@ mod tests {
         assert_ne!(edit_signature(&a, 0), edit_signature(&v, 0));
         assert_ne!(edit_signature(&a, 0), edit_signature(&s, 0));
         assert_ne!(edit_signature(&v, 0), edit_signature(&s, 0));
+    }
+
+    #[test]
+    fn edit_signature_hashes_the_color_mixer_once_it_moves() {
+        let mut a = Adjustments::default();
+        let plain = edit_signature(&a, 0);
+        a.mixer.green.hue = 20.0;
+        let hue = edit_signature(&a, 0);
+        a.mixer.green = BandShift {
+            luminance: 20.0,
+            ..Default::default()
+        };
+        assert_ne!(plain, hue);
+        assert_ne!(hue, edit_signature(&a, 0));
+        a.mixer = ColorMixer::default();
+        assert_eq!(plain, edit_signature(&a, 0));
     }
 
     #[test]

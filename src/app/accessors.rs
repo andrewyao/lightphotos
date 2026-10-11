@@ -119,6 +119,14 @@ impl App {
         self.develop_focus
     }
 
+    /// What the Sliders page shows of the sliders that share rows.
+    pub(crate) fn slider_view(&self) -> crate::develop::SliderView {
+        crate::develop::SliderView {
+            mixer_axis: self.mixer_axis,
+            monochrome: self.selection_is_monochrome(),
+        }
+    }
+
     pub(crate) fn develop_tab(&self) -> DevelopTab {
         self.develop_tab
     }

@@ -1283,6 +1283,54 @@ mod tests {
         assert_ne!(app.pan, (0.0, 0.0), "Shift+wheel pans once Touch Up is off");
     }
 
+    /// Catches a cursor that lands on a Color Mixer row the panel hides.
+    #[test]
+    fn the_slider_cursor_walks_only_the_rows_that_show() {
+        use crate::develop::{Band, MixAxis, SliderId, SLIDERS};
+        let at = |id: SliderId| SLIDERS.iter().position(|s| s.id == id).unwrap();
+        let (mut app, _) = editor_app();
+        app.develop_focus = at(SliderId::Saturation);
+        app.develop_move(1);
+        assert_eq!(
+            app.develop_focus,
+            at(SliderId::Mix(MixAxis::Hue, Band::Red))
+        );
+        app.develop_move(8);
+        assert_eq!(app.develop_focus, at(SliderId::SharpenAmount));
+        app.develop_move(-1);
+        assert_eq!(
+            app.develop_focus,
+            at(SliderId::Mix(MixAxis::Hue, Band::Magenta))
+        );
+
+        app.set_mixer_axis(MixAxis::Luminance);
+        assert_eq!(
+            app.develop_focus,
+            at(SliderId::Mix(MixAxis::Luminance, Band::Magenta)),
+            "the cursor keeps its band on the new axis"
+        );
+
+        app.apply_adjustments(Adjustments {
+            saturation: -100.0,
+            ..Default::default()
+        });
+        let mixer_before = app.current_adjustments().mixer;
+        app.develop_adjust(1);
+        assert_eq!(
+            app.current_adjustments().mixer,
+            mixer_before,
+            "a nudge never lands on a hidden row"
+        );
+        assert_eq!(app.develop_focus, at(SliderId::SharpenAmount));
+        app.develop_focus = at(SliderId::Saturation);
+        app.develop_move(1);
+        assert_eq!(
+            app.develop_focus,
+            at(SliderId::SharpenAmount),
+            "a monochrome photo hides the mixer"
+        );
+    }
+
     #[test]
     fn keyboard_slider_steps_bring_the_sliders_tab_forward() {
         let (mut app, _) = editor_app();

@@ -149,6 +149,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = curved.g;
     b = curved.b;
 
+    // 4.3. The Color Mixer, in OkLCh.
+    let mixed = colorMix(vec3<f32>(r, g, b));
+    r = mixed.r;
+    g = mixed.g;
+    b = mixed.b;
+
     // 4.5. Vibrance and saturation scale chroma around luma, in gamma space.
     // Must match `apply_linear` in develop/mod.rs.
     let luma = 0.299 * r + 0.587 * g + 0.114 * b;

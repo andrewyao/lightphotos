@@ -9,8 +9,8 @@ use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat}
 use crate::develop::curve::Curve;
 use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
-    Adjustments, BaseProbe, CaScale, Crop, GpuAdjust, GpuTouchUp, Grain, Sharpening, Straighten,
-    TouchUp, Vignette, SLIDERS,
+    Adjustments, BandShift, BaseProbe, CaScale, ColorMixer, Crop, GpuAdjust, GpuTouchUp, Grain,
+    Sharpening, Straighten, TouchUp, Vignette, SLIDERS,
 };
 
 const W: u32 = 96;
@@ -69,6 +69,21 @@ fn ramp(x: u32, y: u32) -> [f32; 3] {
     ]
 }
 
+/// A pure colour at HSV hue `deg`, saturation `s` and value `v`.
+fn hsv(deg: f32, s: f32, v: f32) -> [f32; 3] {
+    let hp = deg / 60.0;
+    let x = 1.0 - (hp % 2.0 - 1.0).abs();
+    let [r, g, b] = match hp as u32 {
+        0 => [1.0, x, 0.0],
+        1 => [x, 1.0, 0.0],
+        2 => [0.0, 1.0, x],
+        3 => [0.0, x, 1.0],
+        4 => [x, 0.0, 1.0],
+        _ => [1.0, 0.0, x],
+    };
+    [r, g, b].map(|c| v * (1.0 - s + s * c))
+}
+
 fn fixtures() -> Vec<Fixture> {
     let mut seed: u32 = 1;
     let mut noise = Vec::with_capacity((W * H * 3) as usize);
@@ -95,6 +110,16 @@ fn fixtures() -> Vec<Fixture> {
                 } else {
                     [25, 60, 230]
                 }
+            }),
+        },
+        // Every hue across, dull to vivid down, for the Color Mixer's bands
+        // and the seams between them.
+        Fixture {
+            name: "hues",
+            img: photo(|x, y| {
+                let deg = 360.0 * x as f32 / W as f32;
+                let s = 0.15 + 0.85 * y as f32 / (H - 1) as f32;
+                hsv(deg, s, 0.85).map(|c| (c * 255.0).round() as u8)
             }),
         },
         Fixture {
@@ -315,6 +340,51 @@ fn cases() -> Vec<Case> {
             ..Default::default()
         },
     ));
+    let shift = |hue, saturation, luminance| BandShift {
+        hue,
+        saturation,
+        luminance,
+    };
+    let mixer = ColorMixer {
+        red: shift(40.0, 30.0, -20.0),
+        orange: shift(-30.0, -50.0, 40.0),
+        yellow: shift(100.0, 0.0, 0.0),
+        green: shift(-80.0, 80.0, -60.0),
+        aqua: shift(0.0, -100.0, 100.0),
+        blue: shift(60.0, 100.0, -100.0),
+        purple: shift(-100.0, -30.0, 20.0),
+        magenta: shift(20.0, 60.0, 60.0),
+    };
+    out.push(case(
+        "mixer_all".into(),
+        Adjustments {
+            mixer,
+            ..Default::default()
+        },
+    ));
+    let mut mixer_curve = Adjustments {
+        mixer,
+        contrast: 40.0,
+        ..Default::default()
+    };
+    mixer_curve.curve.rgb = Curve::STRONG_CONTRAST;
+    out.push(case("mixer+curve".into(), mixer_curve));
+    out.push(case(
+        "mixer+monochrome".into(),
+        Adjustments {
+            mixer,
+            saturation: -100.0,
+            ..Default::default()
+        },
+    ));
+    out.push(case(
+        "mixer+ca".into(),
+        Adjustments {
+            mixer,
+            chromatic_aberration: ca,
+            ..Default::default()
+        },
+    ));
     let mut everything = Adjustments {
         temp: 30.0,
         tint: -20.0,
@@ -346,6 +416,17 @@ fn cases() -> Vec<Case> {
         adj: everything,
         touchups: vec![touchup],
     });
+    // The colour tools on top of everything else, but without CA, which
+    // `mixer+ca` covers with its own bound.
+    out.push(Case {
+        name: "everything_color".into(),
+        adj: Adjustments {
+            mixer,
+            chromatic_aberration: None,
+            ..everything
+        },
+        touchups: vec![touchup],
+    });
     out
 }
 
@@ -356,11 +437,16 @@ fn cases() -> Vec<Case> {
 /// view multiplies the pixel's own error by 8, so a turned photo, whose
 /// every read falls between texels, shows it on the noise chart (13 on 16
 /// pixels). The layer itself holds at 2 there: `straighten/mid`, `/wide`
-/// and `/dark` hold.
-fn tolerance(case: &str) -> u8 {
-    match case {
-        "ca" | "ca/detail" => 3,
-        "straighten/detail" => 13,
+/// and `/dark` hold. The hue chart has a channel at 0 over a third of its
+/// width, where the dark view's gamma step is steepest, so the same CA
+/// weights show as 4 on 30 of its pixels, and the Color Mixer, which can
+/// double a band's chroma, takes `ca`'s two edge pixels to 4 (both
+/// measured 2026-10-10).
+fn tolerance(fixture: &str, case: &str) -> u8 {
+    match (fixture, case) {
+        (_, "ca" | "ca/detail") => 3,
+        ("hues", "ca/dark") | (_, "mixer+ca") => 4,
+        (_, "straighten/detail") => 13,
         _ => 2,
     }
 }
@@ -454,7 +540,7 @@ fn report(mut diffs: Vec<Diff>) {
     }
     let failing: Vec<String> = diffs
         .iter()
-        .filter(|d| d.max > tolerance(&d.case))
+        .filter(|d| d.max > tolerance(d.fixture, &d.case))
         .map(|d| format!("{} {} max {}", d.fixture, d.case, d.max))
         .collect();
     assert!(failing.is_empty(), "over tolerance: {failing:#?}");

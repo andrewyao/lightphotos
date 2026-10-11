@@ -13,6 +13,8 @@ pub enum CopySection {
     Tone,
     Presence,
     Curve,
+    /// The Color Mixer.
+    Color,
     Detail,
     /// Vignette and Grain.
     Effects,
@@ -24,11 +26,12 @@ pub enum CopySection {
 }
 
 impl CopySection {
-    pub const ALL: [CopySection; 8] = [
+    pub const ALL: [CopySection; 9] = [
         CopySection::WhiteBalance,
         CopySection::Tone,
         CopySection::Presence,
         CopySection::Curve,
+        CopySection::Color,
         CopySection::Detail,
         CopySection::Effects,
         CopySection::Optics,
@@ -42,6 +45,7 @@ impl CopySection {
             Section::Tone => CopySection::Tone,
             Section::Presence => CopySection::Presence,
             Section::Curve => CopySection::Curve,
+            Section::ColorMixer => CopySection::Color,
             Section::Detail => CopySection::Detail,
             Section::Optics => CopySection::Optics,
             Section::Vignette | Section::Grain => CopySection::Effects,
@@ -59,6 +63,7 @@ impl CopySection {
             CopySection::Tone => "tone",
             CopySection::Presence => "presence",
             CopySection::Curve => "curve",
+            CopySection::Color => "color",
             CopySection::Detail => "detail",
             CopySection::Effects => "effects",
             CopySection::Optics => "optics",
@@ -82,6 +87,7 @@ impl CopySections {
             | CopySection::Tone.bit()
             | CopySection::Presence.bit()
             | CopySection::Curve.bit()
+            | CopySection::Color.bit()
             | CopySection::Detail.bit()
             | CopySection::Effects.bit(),
     );
@@ -104,23 +110,46 @@ impl CopySections {
         }
     }
 
-    /// The stored preference: the chosen sections' keys, comma-separated.
+    /// The stored preference: every section's key, comma-separated, with
+    /// `-` before the ones not chosen, so a section added later can tell
+    /// "not chosen" from "not known when this was saved".
     pub fn to_pref(self) -> String {
         CopySection::ALL
             .into_iter()
-            .filter(|&c| self.has(c))
-            .map(CopySection::key)
+            .map(|c| {
+                let key = c.key();
+                if self.has(c) {
+                    key.to_string()
+                } else {
+                    format!("-{key}")
+                }
+            })
             .collect::<Vec<_>>()
             .join(",")
     }
 
     /// Reads [`CopySections::to_pref`]. An unknown key is skipped, so a
-    /// newer app's choice still loads.
+    /// newer app's choice still loads. A section the text doesn't name takes
+    /// its [`CopySections::LOOK`] default, so one added since the choice was
+    /// saved still copies. The first format listed only the chosen keys and
+    /// predates `color`, so there an unnamed key is off, except `color`.
     pub fn from_pref(text: &str) -> CopySections {
-        text.split(',')
-            .map(str::trim)
-            .filter_map(|key| CopySection::ALL.into_iter().find(|c| c.key() == key))
-            .fold(Self::NONE, |s, c| s.with(c, true))
+        let items: Vec<&str> = text.split(',').map(str::trim).collect();
+        let named = |c: CopySection| {
+            items
+                .iter()
+                .find(|item| item.strip_prefix('-').unwrap_or(item) == c.key())
+                .map(|item| !item.starts_with('-'))
+        };
+        let first_format = !items.iter().any(|item| item.starts_with('-'));
+        CopySection::ALL.into_iter().fold(Self::NONE, |s, c| {
+            let on = match named(c) {
+                Some(on) => on,
+                None if first_format && c != CopySection::Color => false,
+                None => Self::LOOK.has(c),
+            };
+            s.with(c, on)
+        })
     }
 }
 
@@ -158,6 +187,13 @@ mod tests {
             temp: 20.0,
             exposure: 1.0,
             clarity: 30.0,
+            mixer: crate::develop::ColorMixer {
+                blue: crate::develop::BandShift {
+                    saturation: -40.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             denoise: 40.0,
             vignette: Vignette {
                 amount: -30.0,
@@ -219,6 +255,9 @@ mod tests {
         assert_eq!((presence.clarity, presence.saturation), (30.0, 0.0));
         assert_eq!(only(CopySection::Detail).denoise, 40.0);
         assert_eq!(only(CopySection::Curve).curve, source().curve);
+        let color = only(CopySection::Color);
+        assert_eq!((color.mixer, color.clarity), (source().mixer, 0.0));
+        assert!(presence.mixer.is_neutral());
         let effects = only(CopySection::Effects);
         assert_eq!(
             (effects.vignette, effects.grain),
@@ -263,10 +302,22 @@ mod tests {
             assert_eq!(CopySections::from_pref(&sections.to_pref()), sections);
         }
         assert_eq!(
+            CopySections::from_pref("tone,-crop,hdr"),
+            CopySections::LOOK.with(CopySection::Crop, false),
+            "unnamed sections take the look's default"
+        );
+    }
+
+    /// Catches a choice saved before the Color Mixer existed dropping it
+    /// from every copy.
+    #[test]
+    fn a_first_format_choice_keeps_its_sections_and_gains_color() {
+        assert_eq!(
             CopySections::from_pref("tone, crop,hdr"),
             CopySections::NONE
                 .with(CopySection::Tone, true)
                 .with(CopySection::Crop, true)
+                .with(CopySection::Color, true)
         );
     }
 }

@@ -1070,8 +1070,59 @@ impl App {
     pub(super) fn develop_move(&mut self, delta: isize) {
         // The cursor walks the sliders, so show them.
         self.set_develop_tab(DevelopTab::Sliders);
-        let max = develop::SLIDERS.len() as isize - 1;
-        self.develop_focus = (self.develop_focus as isize + delta).clamp(0, max) as usize;
+        for _ in 0..delta.unsigned_abs() {
+            match self.next_shown_slider(delta < 0) {
+                Some(next) => self.develop_focus = next,
+                None => break,
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// The nearest shown slider after the cursor, or before it when
+    /// `back`.
+    fn next_shown_slider(&self, back: bool) -> Option<usize> {
+        let view = self.slider_view();
+        let shown = |i: &usize| develop::SLIDERS.get(*i).is_some_and(|s| s.shown(view));
+        let i = self.develop_focus;
+        if back {
+            (0..i).rev().find(shown)
+        } else {
+            (i + 1..develop::SLIDERS.len()).find(shown)
+        }
+    }
+
+    /// Move a cursor left on a row that has since hidden, such as the mixer
+    /// after B&W turns on, to the next row that shows, or the one before.
+    fn home_develop_focus(&mut self) {
+        let view = self.slider_view();
+        if develop::SLIDERS
+            .get(self.develop_focus)
+            .is_some_and(|s| !s.shown(view))
+        {
+            if let Some(i) = self
+                .next_shown_slider(false)
+                .or_else(|| self.next_shown_slider(true))
+            {
+                self.develop_focus = i;
+            }
+        }
+    }
+
+    /// Show the Color Mixer's `axis`. A cursor on one of its sliders moves
+    /// to the same band on the new axis, so it stays on a row that shows.
+    pub(super) fn set_mixer_axis(&mut self, axis: develop::MixAxis) {
+        self.mixer_axis = axis;
+        if let Some(develop::SliderId::Mix(_, band)) =
+            develop::SLIDERS.get(self.develop_focus).map(|s| s.id)
+        {
+            if let Some(i) = develop::SLIDERS
+                .iter()
+                .position(|s| s.id == develop::SliderId::Mix(axis, band))
+            {
+                self.develop_focus = i;
+            }
+        }
         self.request_redraw();
     }
 
@@ -1105,6 +1156,7 @@ impl App {
     /// Nudge the focused Develop slider one step in direction `dir` (-1 or +1).
     pub(super) fn develop_adjust(&mut self, dir: isize) {
         self.set_develop_tab(DevelopTab::Sliders);
+        self.home_develop_focus();
         if self.develop_scope() == DevelopScope::Many {
             let step = if dir < 0 {
                 SliderStep::Down
@@ -1478,7 +1530,7 @@ pub(in crate::app) mod tests {
     fn keyboard_nudges_follow_the_develop_panel_order() {
         let mut app = App::new(None);
         app.shown = Shown::Preview(PathBuf::from("/nonexistent/a.jpg"), 1024, 1024);
-        let order: [fn(&Adjustments) -> f32; 25] = [
+        let order: [fn(&Adjustments) -> f32; 49] = [
             |a| a.temp,
             |a| a.tint,
             |a| a.exposure,
@@ -1492,6 +1544,30 @@ pub(in crate::app) mod tests {
             |a| a.dehaze,
             |a| a.vibrance,
             |a| a.saturation,
+            |a| a.mixer.red.hue,
+            |a| a.mixer.orange.hue,
+            |a| a.mixer.yellow.hue,
+            |a| a.mixer.green.hue,
+            |a| a.mixer.aqua.hue,
+            |a| a.mixer.blue.hue,
+            |a| a.mixer.purple.hue,
+            |a| a.mixer.magenta.hue,
+            |a| a.mixer.red.saturation,
+            |a| a.mixer.orange.saturation,
+            |a| a.mixer.yellow.saturation,
+            |a| a.mixer.green.saturation,
+            |a| a.mixer.aqua.saturation,
+            |a| a.mixer.blue.saturation,
+            |a| a.mixer.purple.saturation,
+            |a| a.mixer.magenta.saturation,
+            |a| a.mixer.red.luminance,
+            |a| a.mixer.orange.luminance,
+            |a| a.mixer.yellow.luminance,
+            |a| a.mixer.green.luminance,
+            |a| a.mixer.aqua.luminance,
+            |a| a.mixer.blue.luminance,
+            |a| a.mixer.purple.luminance,
+            |a| a.mixer.magenta.luminance,
             |a| a.sharpening.amount,
             |a| a.sharpening.radius,
             |a| a.sharpening.detail,
@@ -1506,6 +1582,10 @@ pub(in crate::app) mod tests {
             |a| a.grain.roughness,
         ];
         for (i, read) in order.iter().enumerate() {
+            // The mixer shows one axis at a time; show this row's.
+            if let develop::SliderId::Mix(axis, _) = develop::SLIDERS[i].id {
+                app.set_mixer_axis(axis);
+            }
             app.develop_focus = i;
             let before = read(&app.current_adjustments());
             app.develop_adjust(1);

@@ -672,6 +672,8 @@ pub(crate) struct App {
     focus_level: FocusLevel,
     /// Keyboard-focused Develop slider, an index into `develop::SLIDERS`.
     develop_focus: usize,
+    /// Which of hue, saturation and luminance the Color Mixer shows.
+    mixer_axis: crate::develop::MixAxis,
     toolbar_focus: usize,
 
     pub(crate) cursor: (f64, f64),
@@ -864,6 +866,7 @@ impl App {
             main_focus: Region::Folders,
             focus_level: FocusLevel::Selected,
             develop_focus: 0,
+            mixer_axis: crate::develop::MixAxis::Hue,
             toolbar_focus: 0,
             cursor: (0.0, 0.0),
             modifiers: ModifiersState::empty(),
@@ -1368,6 +1371,7 @@ impl App {
                     self.toolbar_focus = idx;
                     self.request_redraw();
                 }
+                ui::UiAction::SetMixerAxis(axis) => self.set_mixer_axis(axis),
                 ui::UiAction::FocusDevelop(idx) => {
                     self.set_focus(Region::Develop, FocusLevel::Entered);
                     self.develop_focus = idx;

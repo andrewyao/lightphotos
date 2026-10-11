@@ -203,6 +203,8 @@ pub enum UiAction {
     FocusToolbar(usize),
     /// Focus the Develop panel with the keyboard cursor on this slider index.
     FocusDevelop(usize),
+    /// Show the Color Mixer's hue, saturation or luminance sliders.
+    SetMixerAxis(crate::develop::MixAxis),
     SetLanguage(Lang),
     SetTheme(theme::Theme),
     SetAutoToneCentering(crate::autotone::Centering),
