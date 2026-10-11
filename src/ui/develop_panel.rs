@@ -504,11 +504,16 @@ fn draw_sliders_body(
                 _ => {}
             });
             if s.section == crate::develop::Section::ColorMixer {
-                let choices = crate::develop::MixAxis::ALL.map(|a| (a, t.mix_axis(a), None));
+                let choices = crate::develop::ColorAxis::ALL.map(|a| (a, t.color_axis(a), None));
                 let picked = form::segmented(ui, &choices, view.mixer_axis);
                 if let Some(axis) = picked.filter(|&a| a != view.mixer_axis) {
                     out.actions.push(UiAction::SetMixerAxis(axis));
                 }
+            }
+            // Several photos have no one wheel position to drag.
+            if s.section == crate::develop::Section::ColorGrading {
+                changed |=
+                    super::grade_wheel::grade_wheels(ui, &mut adj.grade, view.grade_zone, one, out);
             }
         }
         let focused = focus_idx == Some(idx);

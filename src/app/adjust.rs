@@ -280,9 +280,7 @@ impl App {
         self.edit_each(&paths, |mut adj| {
             let field = (slider.field)(&mut adj);
             *field = match step.steps() {
-                Some(n) => {
-                    (*field + n * slider.step).clamp(*slider.range.start(), *slider.range.end())
-                }
+                Some(n) => slider.stepped(*field, n),
                 None => slider.default,
             };
             adj

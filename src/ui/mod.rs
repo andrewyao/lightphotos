@@ -204,7 +204,9 @@ pub enum UiAction {
     /// Focus the Develop panel with the keyboard cursor on this slider index.
     FocusDevelop(usize),
     /// Show the Color Mixer's hue, saturation or luminance sliders.
-    SetMixerAxis(crate::develop::MixAxis),
+    SetMixerAxis(crate::develop::ColorAxis),
+    /// Show the sliders of this Color Grading wheel.
+    SetGradeZone(crate::develop::Zone),
     SetLanguage(Lang),
     SetTheme(theme::Theme),
     SetAutoToneCentering(crate::autotone::Centering),
@@ -248,6 +250,7 @@ mod develop_panel;
 mod export_panel;
 pub mod font_size;
 mod form;
+mod grade_wheel;
 mod grid;
 mod home;
 mod info_panel;

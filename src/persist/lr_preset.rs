@@ -10,7 +10,7 @@
 //! XML crate, least of all one that has to build for wasm32.
 
 use crate::develop::curve::{Channel, Curve};
-use crate::develop::{Adjustments, MixAxis, SliderId, SLIDERS};
+use crate::develop::{Adjustments, ColorAxis, SliderId, SLIDERS};
 
 /// What a preset file yielded.
 pub struct Imported {
@@ -80,13 +80,18 @@ fn keys(id: SliderId) -> &'static [&'static str] {
         SliderId::GrainRoughness => &["GrainFrequency"],
         SliderId::Mix(axis, band) => {
             let table = match axis {
-                MixAxis::Hue => &HUE_KEYS,
-                MixAxis::Saturation => &SATURATION_KEYS,
-                MixAxis::Luminance => &LUMINANCE_KEYS,
+                ColorAxis::Hue => &HUE_KEYS,
+                ColorAxis::Saturation => &SATURATION_KEYS,
+                ColorAxis::Luminance => &LUMINANCE_KEYS,
             };
             std::slice::from_ref(&table[band as usize])
         }
         SliderId::Gray(band) => std::slice::from_ref(&GRAY_KEYS[band as usize]),
+        SliderId::Grade(zone, axis) => {
+            std::slice::from_ref(&GRADE_KEYS[zone as usize][axis as usize])
+        }
+        SliderId::GradeBlending => &["ColorGradeBlending"],
+        SliderId::GradeBalance => &["SplitToningBalance"],
     }
 }
 
@@ -110,6 +115,31 @@ const SATURATION_KEYS: [&str; 8] = [
     "SaturationAdjustmentBlue",
     "SaturationAdjustmentPurple",
     "SaturationAdjustmentMagenta",
+];
+/// The Color Grading keys per wheel in [`crate::develop::Zone::ALL`] order,
+/// as hue, saturation, luminance. Camera Raw keeps the shadow and highlight
+/// hue and saturation under their Split Toning names.
+const GRADE_KEYS: [[&str; 3]; 4] = [
+    [
+        "SplitToningShadowHue",
+        "SplitToningShadowSaturation",
+        "ColorGradeShadowLum",
+    ],
+    [
+        "ColorGradeMidtoneHue",
+        "ColorGradeMidtoneSat",
+        "ColorGradeMidtoneLum",
+    ],
+    [
+        "SplitToningHighlightHue",
+        "SplitToningHighlightSaturation",
+        "ColorGradeHighlightLum",
+    ],
+    [
+        "ColorGradeGlobalHue",
+        "ColorGradeGlobalSat",
+        "ColorGradeGlobalLum",
+    ],
 ];
 const GRAY_KEYS: [&str; 8] = [
     "GrayMixerRed",
@@ -182,6 +212,18 @@ pub fn parse(xmp: &str) -> Result<Imported, String> {
         })
     {
         adj.sharpening = Default::default();
+    }
+
+    // A split-toning preset from before Color Grading has no Blending.
+    // Camera Raw reads it as Blending 100, which tints across the whole
+    // range as split toning did.
+    let split_toning = GRADE_KEYS
+        .iter()
+        .flat_map(|w| w.iter())
+        .chain(&["SplitToningBalance"])
+        .any(|k| k.starts_with("SplitToning") && !matches!(number(body, k), Field::Absent));
+    if split_toning && matches!(number(body, "ColorGradeBlending"), Field::Absent) {
+        adj.grade.blending = 100.0;
     }
 
     // Our closest monochrome. Lightroom's B&W mode ignores its own
@@ -446,6 +488,7 @@ mod tests {
             saturation: -5.0,
             mixer: Default::default(),
             gray_mix: Default::default(),
+            grade: Default::default(),
             denoise: 30.0,
             sharpening: Default::default(),
             crop: None,
@@ -507,6 +550,60 @@ mod tests {
             Default::default(),
             "no other band moved"
         );
+    }
+
+    /// Catches a Color Grading key read into the wrong wheel or slider,
+    /// including the shadow and highlight tints Camera Raw keeps under
+    /// their Split Toning names.
+    #[test]
+    fn color_grade_and_split_toning_keys_fill_the_wheels() {
+        let got = parse(&packet(
+            "crs:SplitToningShadowHue=\"220\" crs:SplitToningShadowSaturation=\"25\" \
+             crs:SplitToningHighlightHue=\"45\" crs:SplitToningHighlightSaturation=\"30\" \
+             crs:SplitToningBalance=\"-20\" crs:ColorGradeMidtoneHue=\"100\" \
+             crs:ColorGradeMidtoneSat=\"10\" crs:ColorGradeShadowLum=\"-5\" \
+             crs:ColorGradeHighlightLum=\"8\" crs:ColorGradeMidtoneLum=\"3\" \
+             crs:ColorGradeGlobalHue=\"300\" crs:ColorGradeGlobalSat=\"12\" \
+             crs:ColorGradeGlobalLum=\"-4\" crs:ColorGradeBlending=\"70\"",
+            "",
+        ))
+        .unwrap();
+        assert!(got.dropped.is_empty(), "{:?}", got.dropped);
+        let w = |hue, saturation, luminance| crate::develop::Wheel {
+            hue,
+            saturation,
+            luminance,
+        };
+        assert_eq!(
+            got.adj.grade,
+            crate::develop::ColorGrade {
+                shadows: w(220.0, 25.0, -5.0),
+                midtones: w(100.0, 10.0, 3.0),
+                highlights: w(45.0, 30.0, 8.0),
+                global: w(300.0, 12.0, -4.0),
+                blending: 70.0,
+                balance: -20.0,
+            }
+        );
+    }
+
+    /// Catches an old split-toning preset losing its full-range tint.
+    #[test]
+    fn a_split_toning_preset_without_blending_blends_fully() {
+        let old = parse(&packet(
+            "crs:SplitToningShadowHue=\"220\" crs:SplitToningShadowSaturation=\"25\"",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(old.adj.grade.blending, 100.0);
+        let new = parse(&packet(
+            "crs:SplitToningShadowHue=\"220\" crs:ColorGradeBlending=\"40\"",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(new.adj.grade.blending, 40.0);
+        let none = parse(&packet("crs:Exposure2012=\"+1\"", "")).unwrap();
+        assert_eq!(none.adj.grade.blending, 50.0);
     }
 
     /// Catches a B&W mix key read into the wrong band.

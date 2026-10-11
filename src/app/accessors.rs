@@ -124,6 +124,7 @@ impl App {
         crate::develop::SliderView {
             mixer_axis: self.mixer_axis,
             monochrome: self.selection_is_monochrome(),
+            grade_zone: self.grade_zone,
         }
     }
 

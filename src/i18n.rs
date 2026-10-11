@@ -455,6 +455,12 @@ pub struct Strings {
     pub curve_blue: &'static str,
     pub color_mixer: &'static str,
     pub gray_mix: &'static str,
+    pub copy_color: &'static str,
+    pub color_grading: &'static str,
+    pub midtones: &'static str,
+    pub global: &'static str,
+    pub blending: &'static str,
+    pub balance: &'static str,
     pub mix_hue: &'static str,
     pub mix_luminance: &'static str,
     /// The Color Mixer's bands, in `develop::Band::ALL` order.
@@ -716,6 +722,7 @@ impl Strings {
             Section::Curve => self.curve,
             Section::ColorMixer => self.color_mixer,
             Section::GrayMix => self.gray_mix,
+            Section::ColorGrading => self.color_grading,
         }
     }
 
@@ -726,7 +733,8 @@ impl Strings {
             C::Tone => self.tone,
             C::Presence => self.presence,
             C::Curve => self.curve,
-            C::Color => self.color_mixer,
+            C::Color => self.copy_color,
+            C::ColorGrading => self.color_grading,
             C::Detail => self.detail,
             C::Effects => self.effects,
             C::Optics => self.optics,
@@ -738,12 +746,22 @@ impl Strings {
         self.bands[band as usize]
     }
 
-    pub fn mix_axis(&self, axis: crate::develop::MixAxis) -> &'static str {
-        use crate::develop::MixAxis;
+    pub fn color_axis(&self, axis: crate::develop::ColorAxis) -> &'static str {
+        use crate::develop::ColorAxis;
         match axis {
-            MixAxis::Hue => self.mix_hue,
-            MixAxis::Saturation => self.saturation,
-            MixAxis::Luminance => self.mix_luminance,
+            ColorAxis::Hue => self.mix_hue,
+            ColorAxis::Saturation => self.saturation,
+            ColorAxis::Luminance => self.mix_luminance,
+        }
+    }
+
+    pub fn zone(&self, zone: crate::develop::Zone) -> &'static str {
+        use crate::develop::Zone;
+        match zone {
+            Zone::Shadows => self.shadows,
+            Zone::Midtones => self.midtones,
+            Zone::Highlights => self.highlights,
+            Zone::Global => self.global,
         }
     }
 
@@ -774,6 +792,9 @@ impl Strings {
             SliderId::GrainSize => self.grain_size,
             SliderId::GrainRoughness => self.roughness,
             SliderId::Mix(_, band) | SliderId::Gray(band) => self.band(band),
+            SliderId::Grade(_, axis) => self.color_axis(axis),
+            SliderId::GradeBlending => self.blending,
+            SliderId::GradeBalance => self.balance,
         }
     }
 }
@@ -1268,6 +1289,12 @@ pub static EN: Strings = Strings {
     curve_blue: "Blue",
     color_mixer: "Color Mixer",
     gray_mix: "B&W Mix",
+    copy_color: "Color Mixer and B&W Mix",
+    color_grading: "Color Grading",
+    midtones: "Midtones",
+    global: "Global",
+    blending: "Blending",
+    balance: "Balance",
     mix_hue: "Hue",
     mix_luminance: "Luminance",
     bands: [
@@ -2012,6 +2039,12 @@ pub static ZH: Strings = Strings {
     curve_blue: "蓝色",
     color_mixer: "混色器",
     gray_mix: "黑白混合",
+    copy_color: "混色器和黑白混合",
+    color_grading: "颜色分级",
+    midtones: "中间调",
+    global: "全局",
+    blending: "混合",
+    balance: "平衡",
     mix_hue: "色相",
     mix_luminance: "明亮度",
     bands: [

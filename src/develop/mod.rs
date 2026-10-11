@@ -11,6 +11,7 @@ pub mod color;
 pub mod copy;
 pub mod curve;
 pub mod effects;
+pub mod grade;
 pub mod image_ops;
 pub mod local;
 pub mod sharpen;
@@ -18,8 +19,9 @@ pub mod sharpen;
 use serde::{Deserialize, Serialize};
 
 pub use base::{BaseLayer, BaseProbe, BaseTexel, Grid};
-pub use color::{Band, BandShift, ColorMixer, ColorOps, GrayMix, MixAxis};
+pub use color::{Band, BandShift, ColorAxis, ColorMixer, ColorOps, GrayMix};
 pub use effects::{Effects, Grain, Vignette};
+pub use grade::{ColorGrade, GradeOps, Wheel, Zone};
 pub use sharpen::{Sharpen, Sharpening};
 
 use curve::ToneCurve;
@@ -28,6 +30,8 @@ use curve::ToneCurve;
 pub const TONE_RANGE: std::ops::RangeInclusive<f32> = -100.0..=100.0;
 /// Exposure range in stops.
 pub const EXPOSURE_RANGE: std::ops::RangeInclusive<f32> = -5.0..=5.0;
+/// Range of a Color Grading wheel's hue, in degrees.
+pub const HUE_RANGE: std::ops::RangeInclusive<f32> = 0.0..=360.0;
 /// Range of Denoise and the 0..100 Vignette and Grain sliders.
 pub const PERCENT_RANGE: std::ops::RangeInclusive<f32> = 0.0..=100.0;
 
@@ -58,13 +62,19 @@ const fn tone(section: Section, id: SliderId, field: fn(&mut Adjustments) -> &mu
 }
 
 /// One Color Mixer slider: `axis` of `band`, -100..100.
-const fn mix(axis: MixAxis, band: Band, field: fn(&mut Adjustments) -> &mut f32) -> Slider {
+const fn mix(axis: ColorAxis, band: Band, field: fn(&mut Adjustments) -> &mut f32) -> Slider {
     tone(Section::ColorMixer, SliderId::Mix(axis, band), field)
 }
 
 /// One B&W mix slider: how light `band` turns out, -100..100.
 const fn gray(band: Band, field: fn(&mut Adjustments) -> &mut f32) -> Slider {
     tone(Section::GrayMix, SliderId::Gray(band), field)
+}
+
+/// One Color Grading slider: `axis` of the `zone` wheel. Hue and
+/// Saturation take their own ranges.
+const fn grade(zone: Zone, axis: ColorAxis, field: fn(&mut Adjustments) -> &mut f32) -> Slider {
+    tone(Section::ColorGrading, SliderId::Grade(zone, axis), field)
 }
 
 /// A 0..100 slider that rests at `default`.
@@ -86,17 +96,30 @@ const fn percent(
 /// the mixer for the B&W mix as Lightroom does.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct SliderView {
-    pub mixer_axis: MixAxis,
+    pub mixer_axis: ColorAxis,
     pub monochrome: bool,
+    /// The Color Grading wheel whose sliders show.
+    pub grade_zone: Zone,
 }
 
 impl Slider {
+    /// `value` moved `steps` keyboard steps: around the circle for a
+    /// grading hue, which is an angle, else clamped to the range.
+    pub fn stepped(&self, value: f32, steps: f32) -> f32 {
+        let v = value + steps * self.step;
+        if let SliderId::Grade(_, ColorAxis::Hue) = self.id {
+            return v.rem_euclid(360.0);
+        }
+        v.clamp(*self.range.start(), *self.range.end())
+    }
+
     /// Whether the panel draws this slider under `view`. The keyboard
     /// cursor walks only these.
     pub fn shown(&self, view: SliderView) -> bool {
         match self.id {
             SliderId::Mix(axis, _) => !view.monochrome && axis == view.mixer_axis,
             SliderId::Gray(_) => view.monochrome,
+            SliderId::Grade(zone, _) => zone == view.grade_zone,
             _ => true,
         }
     }
@@ -114,6 +137,9 @@ pub enum Section {
     /// The B&W mix, in the mixer's place on a monochrome photo. See
     /// [`GrayMix`].
     GrayMix,
+    /// Wheels for the shadows, midtones, highlights and whole photo. See
+    /// [`ColorGrade`].
+    ColorGrading,
     Detail,
     /// Checkboxes, not sliders. See [`CaScale`].
     Optics,
@@ -138,8 +164,11 @@ pub enum SliderId {
     Dehaze,
     Vibrance,
     Saturation,
-    Mix(MixAxis, Band),
+    Mix(ColorAxis, Band),
     Gray(Band),
+    Grade(Zone, ColorAxis),
+    GradeBlending,
+    GradeBalance,
     SharpenAmount,
     SharpenRadius,
     SharpenDetail,
@@ -154,7 +183,7 @@ pub enum SliderId {
     GrainRoughness,
 }
 
-pub const SLIDERS: [Slider; 57] = [
+pub const SLIDERS: [Slider; 71] = [
     tone(Section::WhiteBalance, SliderId::Temp, |a| &mut a.temp),
     tone(Section::WhiteBalance, SliderId::Tint, |a| &mut a.tint),
     Slider {
@@ -178,60 +207,60 @@ pub const SLIDERS: [Slider; 57] = [
     tone(Section::Presence, SliderId::Saturation, |a| {
         &mut a.saturation
     }),
-    mix(MixAxis::Hue, Band::Red, |a| &mut a.mixer.red.hue),
-    mix(MixAxis::Hue, Band::Orange, |a| &mut a.mixer.orange.hue),
-    mix(MixAxis::Hue, Band::Yellow, |a| &mut a.mixer.yellow.hue),
-    mix(MixAxis::Hue, Band::Green, |a| &mut a.mixer.green.hue),
-    mix(MixAxis::Hue, Band::Aqua, |a| &mut a.mixer.aqua.hue),
-    mix(MixAxis::Hue, Band::Blue, |a| &mut a.mixer.blue.hue),
-    mix(MixAxis::Hue, Band::Purple, |a| &mut a.mixer.purple.hue),
-    mix(MixAxis::Hue, Band::Magenta, |a| &mut a.mixer.magenta.hue),
-    mix(MixAxis::Saturation, Band::Red, |a| {
+    mix(ColorAxis::Hue, Band::Red, |a| &mut a.mixer.red.hue),
+    mix(ColorAxis::Hue, Band::Orange, |a| &mut a.mixer.orange.hue),
+    mix(ColorAxis::Hue, Band::Yellow, |a| &mut a.mixer.yellow.hue),
+    mix(ColorAxis::Hue, Band::Green, |a| &mut a.mixer.green.hue),
+    mix(ColorAxis::Hue, Band::Aqua, |a| &mut a.mixer.aqua.hue),
+    mix(ColorAxis::Hue, Band::Blue, |a| &mut a.mixer.blue.hue),
+    mix(ColorAxis::Hue, Band::Purple, |a| &mut a.mixer.purple.hue),
+    mix(ColorAxis::Hue, Band::Magenta, |a| &mut a.mixer.magenta.hue),
+    mix(ColorAxis::Saturation, Band::Red, |a| {
         &mut a.mixer.red.saturation
     }),
-    mix(MixAxis::Saturation, Band::Orange, |a| {
+    mix(ColorAxis::Saturation, Band::Orange, |a| {
         &mut a.mixer.orange.saturation
     }),
-    mix(MixAxis::Saturation, Band::Yellow, |a| {
+    mix(ColorAxis::Saturation, Band::Yellow, |a| {
         &mut a.mixer.yellow.saturation
     }),
-    mix(MixAxis::Saturation, Band::Green, |a| {
+    mix(ColorAxis::Saturation, Band::Green, |a| {
         &mut a.mixer.green.saturation
     }),
-    mix(MixAxis::Saturation, Band::Aqua, |a| {
+    mix(ColorAxis::Saturation, Band::Aqua, |a| {
         &mut a.mixer.aqua.saturation
     }),
-    mix(MixAxis::Saturation, Band::Blue, |a| {
+    mix(ColorAxis::Saturation, Band::Blue, |a| {
         &mut a.mixer.blue.saturation
     }),
-    mix(MixAxis::Saturation, Band::Purple, |a| {
+    mix(ColorAxis::Saturation, Band::Purple, |a| {
         &mut a.mixer.purple.saturation
     }),
-    mix(MixAxis::Saturation, Band::Magenta, |a| {
+    mix(ColorAxis::Saturation, Band::Magenta, |a| {
         &mut a.mixer.magenta.saturation
     }),
-    mix(MixAxis::Luminance, Band::Red, |a| {
+    mix(ColorAxis::Luminance, Band::Red, |a| {
         &mut a.mixer.red.luminance
     }),
-    mix(MixAxis::Luminance, Band::Orange, |a| {
+    mix(ColorAxis::Luminance, Band::Orange, |a| {
         &mut a.mixer.orange.luminance
     }),
-    mix(MixAxis::Luminance, Band::Yellow, |a| {
+    mix(ColorAxis::Luminance, Band::Yellow, |a| {
         &mut a.mixer.yellow.luminance
     }),
-    mix(MixAxis::Luminance, Band::Green, |a| {
+    mix(ColorAxis::Luminance, Band::Green, |a| {
         &mut a.mixer.green.luminance
     }),
-    mix(MixAxis::Luminance, Band::Aqua, |a| {
+    mix(ColorAxis::Luminance, Band::Aqua, |a| {
         &mut a.mixer.aqua.luminance
     }),
-    mix(MixAxis::Luminance, Band::Blue, |a| {
+    mix(ColorAxis::Luminance, Band::Blue, |a| {
         &mut a.mixer.blue.luminance
     }),
-    mix(MixAxis::Luminance, Band::Purple, |a| {
+    mix(ColorAxis::Luminance, Band::Purple, |a| {
         &mut a.mixer.purple.luminance
     }),
-    mix(MixAxis::Luminance, Band::Magenta, |a| {
+    mix(ColorAxis::Luminance, Band::Magenta, |a| {
         &mut a.mixer.magenta.luminance
     }),
     gray(Band::Red, |a| &mut a.gray_mix.red),
@@ -242,6 +271,71 @@ pub const SLIDERS: [Slider; 57] = [
     gray(Band::Blue, |a| &mut a.gray_mix.blue),
     gray(Band::Purple, |a| &mut a.gray_mix.purple),
     gray(Band::Magenta, |a| &mut a.gray_mix.magenta),
+    Slider {
+        range: HUE_RANGE,
+        ..grade(Zone::Shadows, ColorAxis::Hue, |a| &mut a.grade.shadows.hue)
+    },
+    Slider {
+        range: PERCENT_RANGE,
+        ..grade(Zone::Shadows, ColorAxis::Saturation, |a| {
+            &mut a.grade.shadows.saturation
+        })
+    },
+    grade(Zone::Shadows, ColorAxis::Luminance, |a| {
+        &mut a.grade.shadows.luminance
+    }),
+    Slider {
+        range: HUE_RANGE,
+        ..grade(Zone::Midtones, ColorAxis::Hue, |a| {
+            &mut a.grade.midtones.hue
+        })
+    },
+    Slider {
+        range: PERCENT_RANGE,
+        ..grade(Zone::Midtones, ColorAxis::Saturation, |a| {
+            &mut a.grade.midtones.saturation
+        })
+    },
+    grade(Zone::Midtones, ColorAxis::Luminance, |a| {
+        &mut a.grade.midtones.luminance
+    }),
+    Slider {
+        range: HUE_RANGE,
+        ..grade(Zone::Highlights, ColorAxis::Hue, |a| {
+            &mut a.grade.highlights.hue
+        })
+    },
+    Slider {
+        range: PERCENT_RANGE,
+        ..grade(Zone::Highlights, ColorAxis::Saturation, |a| {
+            &mut a.grade.highlights.saturation
+        })
+    },
+    grade(Zone::Highlights, ColorAxis::Luminance, |a| {
+        &mut a.grade.highlights.luminance
+    }),
+    Slider {
+        range: HUE_RANGE,
+        ..grade(Zone::Global, ColorAxis::Hue, |a| &mut a.grade.global.hue)
+    },
+    Slider {
+        range: PERCENT_RANGE,
+        ..grade(Zone::Global, ColorAxis::Saturation, |a| {
+            &mut a.grade.global.saturation
+        })
+    },
+    grade(Zone::Global, ColorAxis::Luminance, |a| {
+        &mut a.grade.global.luminance
+    }),
+    percent(
+        Section::ColorGrading,
+        SliderId::GradeBlending,
+        |a| &mut a.grade.blending,
+        50.0,
+    ),
+    tone(Section::ColorGrading, SliderId::GradeBalance, |a| {
+        &mut a.grade.balance
+    }),
     Slider {
         range: sharpen::AMOUNT_RANGE,
         ..percent(
@@ -398,6 +492,8 @@ pub struct Adjustments {
     /// Acts only while the photo is monochrome.
     #[serde(default, skip_serializing_if = "GrayMix::is_neutral")]
     pub gray_mix: GrayMix,
+    #[serde(default, skip_serializing_if = "ColorGrade::is_default")]
+    pub grade: ColorGrade,
     #[serde(default, skip_serializing_if = "Sharpening::is_default")]
     pub sharpening: Sharpening,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -651,6 +747,18 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
             h.write(&((x * 1000.0).round() as i32).to_le_bytes());
         }
     }
+    // The derived numbers, so a hue at saturation 0 or an out-of-range
+    // value that clamps to the same render doesn't re-bake.
+    let grade = GradeOps::new(&adj.grade);
+    if grade.on != 0.0 {
+        h.write(&[12]);
+        for x in [grade.mid, grade.width]
+            .into_iter()
+            .chain(grade.wheels.into_iter().flatten())
+        {
+            h.write(&((x * 1e5).round() as i32).to_le_bytes());
+        }
+    }
     if adj.sharpening.amount != 0.0 {
         h.write(&[9]);
         let s = adj.sharpening;
@@ -768,6 +876,7 @@ pub struct GpuAdjust {
     /// Set by [`GpuAdjust::for_image`], which knows the image size.
     pub effects: Effects,
     pub color: ColorOps,
+    pub grade: GradeOps,
 }
 
 impl Default for GpuAdjust {
@@ -804,6 +913,7 @@ impl Default for GpuAdjust {
             sharpen: Sharpen::default(),
             effects: Effects::default(),
             color: ColorOps::default(),
+            grade: GradeOps::default(),
         }
     }
 }
@@ -858,6 +968,7 @@ impl From<&Adjustments> for GpuAdjust {
             clarity: a.clarity.clamp(-100.0, 100.0),
             dehaze: a.dehaze.clamp(-100.0, 100.0),
             color: ColorOps::new(&a.mixer, &a.gray_mix, a.is_monochrome()),
+            grade: GradeOps::new(&a.grade),
             ..Self::default()
         }
     }
@@ -953,6 +1064,7 @@ pub struct Develop<'a> {
     adj: &'a Adjustments,
     curve: Option<Box<curve::Lut>>,
     color: ColorOps,
+    grade: GradeOps,
     frame: Option<Frame>,
 }
 
@@ -970,6 +1082,7 @@ impl<'a> Develop<'a> {
             adj,
             curve,
             color: ColorOps::new(&adj.mixer, &adj.gray_mix, adj.is_monochrome()),
+            grade: GradeOps::new(&adj.grade),
             frame: None,
         }
     }
@@ -1104,6 +1217,8 @@ fn apply_linear_impl(
     rg = luma + (rg - luma) * total;
     gg = luma + (gg - luma) * total;
     bg = luma + (bg - luma) * total;
+
+    [rg, gg, bg] = dev.grade.apply([rg, gg, bg]);
 
     if let Some((frame, u, v)) = at {
         [rg, gg, bg] = frame.effects.apply([rg, gg, bg], u, v, frame.texel);
@@ -1875,6 +1990,40 @@ mod tests {
             ColorOps::default(),
             "a plain B&W photo skips the colour step"
         );
+    }
+
+    /// Catches a grading hue that sticks at 360 instead of going round.
+    #[test]
+    fn a_grading_hue_steps_round_the_circle_and_other_sliders_clamp() {
+        let at = |id: SliderId| SLIDERS.iter().find(|s| s.id == id).unwrap();
+        let hue = at(SliderId::Grade(Zone::Midtones, ColorAxis::Hue));
+        assert_eq!(hue.stepped(358.0, 3.0), 1.0);
+        assert_eq!(hue.stepped(2.0, -5.0), 357.0);
+        let sat = at(SliderId::Grade(Zone::Midtones, ColorAxis::Saturation));
+        assert_eq!(sat.stepped(99.0, 5.0), 100.0);
+        assert_eq!(at(SliderId::Temp).stepped(-99.0, -5.0), -100.0);
+    }
+
+    #[test]
+    fn edit_signature_hashes_color_grading_once_it_tints() {
+        let mut a = Adjustments::default();
+        let plain = edit_signature(&a, 0);
+        a.grade.balance = 50.0;
+        a.grade.midtones.hue = 90.0;
+        assert_eq!(plain, edit_signature(&a, 0), "nothing tints yet");
+        a.grade.global.luminance = 10.0;
+        let lit = edit_signature(&a, 0);
+        a.grade.midtones.hue = 200.0;
+        assert_eq!(
+            lit,
+            edit_signature(&a, 0),
+            "a hue at saturation 0 renders the same"
+        );
+        a.grade.midtones.saturation = 30.0;
+        let tinted = edit_signature(&a, 0);
+        a.grade.balance = -50.0;
+        assert_ne!(plain, tinted);
+        assert_ne!(tinted, edit_signature(&a, 0));
     }
 
     #[test]

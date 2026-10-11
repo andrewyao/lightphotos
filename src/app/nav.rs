@@ -1118,19 +1118,32 @@ impl App {
 
     /// Show the Color Mixer's `axis`. A cursor on one of its sliders moves
     /// to the same band on the new axis, so it stays on a row that shows.
-    pub(super) fn set_mixer_axis(&mut self, axis: develop::MixAxis) {
+    pub(super) fn set_mixer_axis(&mut self, axis: develop::ColorAxis) {
         self.mixer_axis = axis;
-        if let Some(develop::SliderId::Mix(_, band)) =
-            develop::SLIDERS.get(self.develop_focus).map(|s| s.id)
-        {
-            if let Some(i) = develop::SLIDERS
-                .iter()
-                .position(|s| s.id == develop::SliderId::Mix(axis, band))
-            {
-                self.develop_focus = i;
-            }
+        if let Some(develop::SliderId::Mix(_, band)) = self.focused_slider() {
+            self.focus_slider(develop::SliderId::Mix(axis, band));
         }
         self.request_redraw();
+    }
+
+    /// Show the sliders of Color Grading's `zone` wheel. A cursor on one of
+    /// them moves to the same slider of the new wheel.
+    pub(super) fn set_grade_zone(&mut self, zone: develop::Zone) {
+        self.grade_zone = zone;
+        if let Some(develop::SliderId::Grade(_, axis)) = self.focused_slider() {
+            self.focus_slider(develop::SliderId::Grade(zone, axis));
+        }
+        self.request_redraw();
+    }
+
+    fn focused_slider(&self) -> Option<develop::SliderId> {
+        develop::SLIDERS.get(self.develop_focus).map(|s| s.id)
+    }
+
+    fn focus_slider(&mut self, id: develop::SliderId) {
+        if let Some(i) = develop::SLIDERS.iter().position(|s| s.id == id) {
+            self.develop_focus = i;
+        }
     }
 
     /// How many controls the F6 cursor walks in the Grid toolbar,
@@ -1183,8 +1196,7 @@ impl App {
         };
         let mut adj = self.current_adjustments();
         let field = (slider.field)(&mut adj);
-        *field =
-            (*field + dir as f32 * slider.step).clamp(*slider.range.start(), *slider.range.end());
+        *field = slider.stepped(*field, dir as f32);
         self.apply_adjustments(adj);
     }
 }
@@ -1542,7 +1554,7 @@ pub(in crate::app) mod tests {
     fn keyboard_nudges_follow_the_develop_panel_order() {
         let mut app = App::new(None);
         app.shown = Shown::Preview(PathBuf::from("/nonexistent/a.jpg"), 1024, 1024);
-        let order: [fn(&Adjustments) -> f32; 57] = [
+        let order: [fn(&Adjustments) -> f32; 71] = [
             |a| a.temp,
             |a| a.tint,
             |a| a.exposure,
@@ -1588,6 +1600,20 @@ pub(in crate::app) mod tests {
             |a| a.gray_mix.blue,
             |a| a.gray_mix.purple,
             |a| a.gray_mix.magenta,
+            |a| a.grade.shadows.hue,
+            |a| a.grade.shadows.saturation,
+            |a| a.grade.shadows.luminance,
+            |a| a.grade.midtones.hue,
+            |a| a.grade.midtones.saturation,
+            |a| a.grade.midtones.luminance,
+            |a| a.grade.highlights.hue,
+            |a| a.grade.highlights.saturation,
+            |a| a.grade.highlights.luminance,
+            |a| a.grade.global.hue,
+            |a| a.grade.global.saturation,
+            |a| a.grade.global.luminance,
+            |a| a.grade.blending,
+            |a| a.grade.balance,
             |a| a.sharpening.amount,
             |a| a.sharpening.radius,
             |a| a.sharpening.detail,
@@ -1607,6 +1633,7 @@ pub(in crate::app) mod tests {
             // none of, so its rows check the table directly.
             match develop::SLIDERS[i].id {
                 develop::SliderId::Mix(axis, _) => app.set_mixer_axis(axis),
+                develop::SliderId::Grade(zone, _) => app.set_grade_zone(zone),
                 develop::SliderId::Gray(_) => {
                     let mut adj = Adjustments::default();
                     *(develop::SLIDERS[i].field)(&mut adj) = 1.0;

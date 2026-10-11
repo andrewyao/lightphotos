@@ -8,7 +8,7 @@
 //
 // Order: denoise -> touch-ups -> local edits -> WB -> exposure -> sRGB
 // gamma + boost -> tone -> curve -> color mixer or B&W mix ->
-// vibrance/saturation -> vignette and grain -> clamp.
+// vibrance/saturation -> color grading -> vignette and grain -> clamp.
 //
 // Two differences from `shader.wgsl`:
 // 1. The working gamma is the real sRGB curve plus the display boost, not
@@ -148,6 +148,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     r = luma + (r - luma) * total;
     g = luma + (g - luma) * total;
     b = luma + (b - luma) * total;
+
+    // 4.6. Color Grading, in OkLab, so it tints a B&W photo too.
+    let graded = colorGrade(vec3<f32>(r, g, b));
+    r = graded.r;
+    g = graded.g;
+    b = graded.b;
 
     // 4.75. Post-crop Vignette and Grain, by canvas position.
     let fx = effects(vec3<f32>(r, g, b), in.uv, footprintOf(ddx, ddy));

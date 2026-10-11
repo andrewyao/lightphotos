@@ -15,6 +15,7 @@ pub enum CopySection {
     Curve,
     /// The Color Mixer and the B&W mix.
     Color,
+    ColorGrading,
     Detail,
     /// Vignette and Grain.
     Effects,
@@ -26,12 +27,13 @@ pub enum CopySection {
 }
 
 impl CopySection {
-    pub const ALL: [CopySection; 9] = [
+    pub const ALL: [CopySection; 10] = [
         CopySection::WhiteBalance,
         CopySection::Tone,
         CopySection::Presence,
         CopySection::Curve,
         CopySection::Color,
+        CopySection::ColorGrading,
         CopySection::Detail,
         CopySection::Effects,
         CopySection::Optics,
@@ -46,6 +48,7 @@ impl CopySection {
             Section::Presence => CopySection::Presence,
             Section::Curve => CopySection::Curve,
             Section::ColorMixer | Section::GrayMix => CopySection::Color,
+            Section::ColorGrading => CopySection::ColorGrading,
             Section::Detail => CopySection::Detail,
             Section::Optics => CopySection::Optics,
             Section::Vignette | Section::Grain => CopySection::Effects,
@@ -64,6 +67,7 @@ impl CopySection {
             CopySection::Presence => "presence",
             CopySection::Curve => "curve",
             CopySection::Color => "color",
+            CopySection::ColorGrading => "color_grading",
             CopySection::Detail => "detail",
             CopySection::Effects => "effects",
             CopySection::Optics => "optics",
@@ -88,6 +92,7 @@ impl CopySections {
             | CopySection::Presence.bit()
             | CopySection::Curve.bit()
             | CopySection::Color.bit()
+            | CopySection::ColorGrading.bit()
             | CopySection::Detail.bit()
             | CopySection::Effects.bit(),
     );
@@ -132,8 +137,9 @@ impl CopySections {
     /// newer app's choice still loads. A section the text doesn't name takes
     /// its [`CopySections::LOOK`] default, so one added since the choice was
     /// saved still copies. The first format, with no mark, listed only the
-    /// chosen keys and predates `color`, so there an unnamed key is off,
-    /// except `color`. Text naming no section at all is [`Self::NONE`].
+    /// chosen keys and predates the colour sections, so there an unnamed key
+    /// is off, except those. Text naming no section at all is
+    /// [`Self::NONE`].
     pub fn from_pref(text: &str) -> CopySections {
         let items: Vec<&str> = text.split(',').map(str::trim).collect();
         let named = |c: CopySection| {
@@ -149,7 +155,11 @@ impl CopySections {
         CopySection::ALL.into_iter().fold(Self::NONE, |s, c| {
             let on = match named(c) {
                 Some(on) => on,
-                None if first_format && c != CopySection::Color => false,
+                None if first_format
+                    && !matches!(c, CopySection::Color | CopySection::ColorGrading) =>
+                {
+                    false
+                }
                 None => Self::LOOK.has(c),
             };
             s.with(c, on)
@@ -199,6 +209,10 @@ mod tests {
                     saturation: -40.0,
                     ..Default::default()
                 },
+                ..Default::default()
+            },
+            grade: crate::develop::ColorGrade {
+                balance: 30.0,
                 ..Default::default()
             },
             denoise: 40.0,
@@ -265,6 +279,11 @@ mod tests {
         let color = only(CopySection::Color);
         assert_eq!((color.mixer, color.clarity), (source().mixer, 0.0));
         assert!(presence.mixer.is_neutral());
+        let grading = only(CopySection::ColorGrading);
+        assert_eq!(
+            (grading.grade, grading.mixer),
+            (source().grade, target().mixer)
+        );
         let effects = only(CopySection::Effects);
         assert_eq!(
             (effects.vignette, effects.grain),
@@ -339,6 +358,7 @@ mod tests {
                 .with(CopySection::Tone, true)
                 .with(CopySection::Crop, true)
                 .with(CopySection::Color, true)
+                .with(CopySection::ColorGrading, true)
         );
     }
 }

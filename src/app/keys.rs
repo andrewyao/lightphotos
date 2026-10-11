@@ -1286,27 +1286,43 @@ mod tests {
     /// Catches a cursor that lands on a Color Mixer row the panel hides.
     #[test]
     fn the_slider_cursor_walks_only_the_rows_that_show() {
-        use crate::develop::{Band, MixAxis, SliderId, SLIDERS};
+        use crate::develop::{Band, ColorAxis, SliderId, Zone, SLIDERS};
         let at = |id: SliderId| SLIDERS.iter().position(|s| s.id == id).unwrap();
         let (mut app, _) = editor_app();
         app.develop_focus = at(SliderId::Saturation);
         app.develop_move(1);
         assert_eq!(
             app.develop_focus,
-            at(SliderId::Mix(MixAxis::Hue, Band::Red))
+            at(SliderId::Mix(ColorAxis::Hue, Band::Red))
         );
         app.develop_move(8);
-        assert_eq!(app.develop_focus, at(SliderId::SharpenAmount));
-        app.develop_move(-1);
         assert_eq!(
             app.develop_focus,
-            at(SliderId::Mix(MixAxis::Hue, Band::Magenta))
+            at(SliderId::Grade(Zone::Shadows, ColorAxis::Hue))
+        );
+        app.develop_move(5);
+        assert_eq!(app.develop_focus, at(SliderId::SharpenAmount));
+        app.develop_move(-3);
+        assert_eq!(
+            app.develop_focus,
+            at(SliderId::Grade(Zone::Shadows, ColorAxis::Luminance))
+        );
+        app.set_grade_zone(Zone::Global);
+        assert_eq!(
+            app.develop_focus,
+            at(SliderId::Grade(Zone::Global, ColorAxis::Luminance)),
+            "the cursor keeps its slider on the new wheel"
+        );
+        app.develop_move(-3);
+        assert_eq!(
+            app.develop_focus,
+            at(SliderId::Mix(ColorAxis::Hue, Band::Magenta))
         );
 
-        app.set_mixer_axis(MixAxis::Luminance);
+        app.set_mixer_axis(ColorAxis::Luminance);
         assert_eq!(
             app.develop_focus,
-            at(SliderId::Mix(MixAxis::Luminance, Band::Magenta)),
+            at(SliderId::Mix(ColorAxis::Luminance, Band::Magenta)),
             "the cursor keeps its band on the new axis"
         );
 
@@ -1332,7 +1348,10 @@ mod tests {
             "a monochrome photo swaps the mixer for the B&W mix"
         );
         app.develop_move(8);
-        assert_eq!(app.develop_focus, at(SliderId::SharpenAmount));
+        assert_eq!(
+            app.develop_focus,
+            at(SliderId::Grade(Zone::Global, ColorAxis::Hue))
+        );
     }
 
     #[test]

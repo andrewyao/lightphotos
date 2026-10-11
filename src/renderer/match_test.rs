@@ -6,11 +6,13 @@
 
 use super::Renderer;
 use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
+use crate::develop::color::hue_rgb;
 use crate::develop::curve::Curve;
 use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
-    Adjustments, BandShift, BaseProbe, CaScale, ColorMixer, Crop, GpuAdjust, GpuTouchUp, Grain,
-    GrayMix, Section, Sharpening, Straighten, TouchUp, Vignette, SLIDERS,
+    Adjustments, BandShift, BaseProbe, CaScale, ColorAxis, ColorGrade, ColorMixer, Crop, GpuAdjust,
+    GpuTouchUp, Grain, GrayMix, Section, Sharpening, SliderId, Straighten, TouchUp, Vignette,
+    Wheel, SLIDERS,
 };
 
 const W: u32 = 96;
@@ -69,21 +71,6 @@ fn ramp(x: u32, y: u32) -> [f32; 3] {
     ]
 }
 
-/// A pure colour at HSV hue `deg`, saturation `s` and value `v`.
-fn hsv(deg: f32, s: f32, v: f32) -> [f32; 3] {
-    let hp = deg / 60.0;
-    let x = 1.0 - (hp % 2.0 - 1.0).abs();
-    let [r, g, b] = match hp as u32 {
-        0 => [1.0, x, 0.0],
-        1 => [x, 1.0, 0.0],
-        2 => [0.0, 1.0, x],
-        3 => [0.0, x, 1.0],
-        4 => [x, 0.0, 1.0],
-        _ => [1.0, 0.0, x],
-    };
-    [r, g, b].map(|c| v * (1.0 - s + s * c))
-}
-
 fn fixtures() -> Vec<Fixture> {
     let mut seed: u32 = 1;
     let mut noise = Vec::with_capacity((W * H * 3) as usize);
@@ -119,7 +106,7 @@ fn fixtures() -> Vec<Fixture> {
             img: photo(|x, y| {
                 let deg = 360.0 * x as f32 / W as f32;
                 let s = 0.15 + 0.85 * y as f32 / (H - 1) as f32;
-                hsv(deg, s, 0.85).map(|c| (c * 255.0).round() as u8)
+                hue_rgb(deg).map(|c| (0.85 * (1.0 - s + s * c) * 255.0).round() as u8)
             }),
         },
         Fixture {
@@ -159,6 +146,16 @@ fn cases() -> Vec<Case> {
         blue: -0.003,
     });
 
+    let wheel = |hue, saturation, luminance| Wheel {
+        hue,
+        saturation,
+        luminance,
+    };
+    let split = ColorGrade {
+        shadows: wheel(220.0, 60.0, 0.0),
+        highlights: wheel(40.0, 60.0, 0.0),
+        ..Default::default()
+    };
     let mut out = vec![case("identity".into(), Adjustments::default())];
     for s in &SLIDERS {
         for end in [*s.range.start(), *s.range.end()] {
@@ -166,6 +163,17 @@ fn cases() -> Vec<Case> {
             // The B&W mix acts only on a monochrome photo.
             if s.section == Section::GrayMix {
                 adj.saturation = -100.0;
+            }
+            // A wheel's hue tints only with saturation, and Blending and
+            // Balance only move tints that are there.
+            match s.id {
+                SliderId::Grade(zone, ColorAxis::Hue) => {
+                    let mut g = ColorGrade::default();
+                    *g.wheel_mut(zone) = wheel(0.0, 60.0, 0.0);
+                    adj.grade = g;
+                }
+                SliderId::GradeBlending | SliderId::GradeBalance => adj.grade = split,
+                _ => {}
             }
             *(s.field)(&mut adj) = end;
             out.push(case(format!("{:?}={end}", s.id).to_lowercase(), adj));
@@ -407,6 +415,29 @@ fn cases() -> Vec<Case> {
             ..Default::default()
         },
     ));
+    let grade = ColorGrade {
+        shadows: wheel(210.0, 70.0, -30.0),
+        midtones: wheel(120.0, 40.0, 20.0),
+        highlights: wheel(45.0, 80.0, 40.0),
+        global: wheel(300.0, 30.0, -10.0),
+        blending: 80.0,
+        balance: -40.0,
+    };
+    out.push(case(
+        "grade_all".into(),
+        Adjustments {
+            grade,
+            ..Default::default()
+        },
+    ));
+    out.push(case(
+        "grade+mono".into(),
+        Adjustments {
+            grade: split,
+            saturation: -100.0,
+            ..Default::default()
+        },
+    ));
     out.push(case(
         "mixer+ca".into(),
         Adjustments {
@@ -452,6 +483,7 @@ fn cases() -> Vec<Case> {
         name: "everything_color".into(),
         adj: Adjustments {
             mixer,
+            grade,
             chromatic_aberration: None,
             ..everything
         },
@@ -461,6 +493,7 @@ fn cases() -> Vec<Case> {
         name: "everything_mono".into(),
         adj: Adjustments {
             mixer,
+            grade,
             gray_mix,
             saturation: -100.0,
             chromatic_aberration: None,

@@ -69,6 +69,14 @@ struct Adjust {
     mix_sat: array<vec4<f32>, 2>,
     mix_lum: array<vec4<f32>, 2>,
     gray: array<vec4<f32>, 2>,
+    // Color Grading, derived on the CPU by `develop::GradeOps`. Each wheel
+    // is (a, b, lightness, pad), in shadows, midtones, highlights, global
+    // order. See `colorGrade`.
+    grade_on: f32,
+    grade_mid: f32,
+    grade_width: f32,
+    _gpad: f32,
+    grade_wheels: array<vec4<f32>, 4>,
 };
 
 struct TouchUp {
@@ -493,6 +501,34 @@ fn colorMix(rgb: vec3<f32>) -> vec3<f32> {
     let l2 = lab.x + (lum + gray) * cw;
     let lin = oklabToLinear(vec3<f32>(l2, c2 * cos(h2), c2 * sin(h2)));
     return pow(max(lin, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+}
+
+// Must match `grade::smooth` in develop/grade.rs.
+fn smoothRamp(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// Color Grading on gamma-space `rgb`, in OkLab: each wheel adds its tint
+// and lightness, weighted by the pixel's lightness for the three ranges and
+// in full for the global wheel. Must match `GradeOps::apply` in
+// develop/grade.rs.
+fn colorGrade(rgb: vec3<f32>) -> vec3<f32> {
+    if (adj.grade_on == 0.0) {
+        return rgb;
+    }
+    var lab = oklab(pow(max(rgb, vec3<f32>(0.0)), vec3<f32>(2.2)));
+    let m = adj.grade_mid;
+    let w = adj.grade_width;
+    let ws = 1.0 - smoothRamp(m - w, m + w * 0.25, lab.x);
+    let wh = smoothRamp(m - w * 0.25, m + w, lab.x);
+    let wm = max(1.0 - ws - wh, 0.0);
+    let weights = vec4<f32>(ws, wm, wh, 1.0);
+    for (var k = 0u; k < 4u; k = k + 1u) {
+        let wheel = adj.grade_wheels[k];
+        lab = vec3<f32>(lab.x + wheel.z * weights[k], lab.y + wheel.x * weights[k], lab.z + wheel.y * weights[k]);
+    }
+    return pow(max(oklabToLinear(lab), vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
 }
 
 // 0 inside the vignette, 1 past its falloff, at canvas `uv`. Must match

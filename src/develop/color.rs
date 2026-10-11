@@ -44,16 +44,17 @@ impl Band {
     ];
 }
 
-/// Which of a band's three values a Color Mixer slider moves.
+/// Which of hue, saturation and luminance a Color Mixer or Color Grading
+/// slider moves.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum MixAxis {
+pub enum ColorAxis {
     Hue,
     Saturation,
     Luminance,
 }
 
-impl MixAxis {
-    pub const ALL: [MixAxis; 3] = [MixAxis::Hue, MixAxis::Saturation, MixAxis::Luminance];
+impl ColorAxis {
+    pub const ALL: [ColorAxis; 3] = [ColorAxis::Hue, ColorAxis::Saturation, ColorAxis::Luminance];
 }
 
 /// One band's three sliders, each -100..100.
@@ -276,6 +277,22 @@ impl ColorOps {
     }
 }
 
+/// The fully saturated, full-value colour at HSV hue `deg`, as 0..1
+/// channels. Band centres, grading wheels and their painted discs all start
+/// from it.
+pub fn hue_rgb(deg: f32) -> [f32; 3] {
+    let hp = deg.clamp(0.0, 360.0).rem_euclid(360.0) / 60.0;
+    let x = 1.0 - (hp % 2.0 - 1.0).abs();
+    match hp as u32 {
+        0 => [1.0, x, 0.0],
+        1 => [x, 1.0, 0.0],
+        2 => [0.0, 1.0, x],
+        3 => [0.0, x, 1.0],
+        4 => [x, 0.0, 1.0],
+        _ => [1.0, 0.0, x],
+    }
+}
+
 /// `x` into 0..TAU. Written out rather than `rem_euclid` so it rounds as
 /// the shader's `wrapTau` does.
 fn wrap_tau(x: f32) -> f32 {
@@ -285,7 +302,7 @@ fn wrap_tau(x: f32) -> f32 {
 
 /// Linear sRGB to OkLab (Björn Ottosson, 2020). Must match `oklab` in
 /// loupe_common.wgsl.
-fn oklab(rgb: [f32; 3]) -> [f32; 3] {
+pub(super) fn oklab(rgb: [f32; 3]) -> [f32; 3] {
     let [r, g, b] = rgb;
     let l = 0.412_221_47 * r + 0.536_332_55 * g + 0.051_445_995 * b;
     let m = 0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b;
@@ -299,7 +316,7 @@ fn oklab(rgb: [f32; 3]) -> [f32; 3] {
 }
 
 /// OkLab to linear sRGB. Must match `oklabToLinear` in loupe_common.wgsl.
-fn oklab_to_linear(lab: [f32; 3]) -> [f32; 3] {
+pub(super) fn oklab_to_linear(lab: [f32; 3]) -> [f32; 3] {
     let [l, a, b] = lab;
     let l_ = l + 0.396_337_78 * a + 0.215_803_76 * b;
     let m_ = l - 0.105_561_346 * a - 0.063_854_17 * b;
@@ -320,19 +337,6 @@ fn cbrt(v: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn hsv(deg: f32) -> [f32; 3] {
-        let hp = deg / 60.0;
-        let x = 1.0 - (hp % 2.0 - 1.0).abs();
-        match hp as u32 {
-            0 => [1.0, x, 0.0],
-            1 => [x, 1.0, 0.0],
-            2 => [0.0, 1.0, x],
-            3 => [0.0, x, 1.0],
-            4 => [x, 0.0, 1.0],
-            _ => [1.0, 0.0, x],
-        }
-    }
 
     fn lch(rgb: [f32; 3]) -> [f32; 3] {
         let [l, a, b] = oklab(rgb.map(|x| x.max(0.0).powf(2.2)));
@@ -361,7 +365,7 @@ mod tests {
             .into_iter()
             .zip(BAND_HUES)
         {
-            let got = lch(hsv(deg))[2];
+            let got = lch(hue_rgb(deg))[2];
             assert!((got - want).abs() < 1e-4, "{deg}: {got} vs {want}");
         }
         let total: f32 = (0..8)
@@ -426,9 +430,9 @@ mod tests {
             false,
         );
         let linear = |rgb: [f32; 3]| ops.apply(rgb).map(|x| x.powf(2.2));
-        let mut prev = linear(hsv(0.0).map(|x| 0.2 + 0.6 * x));
+        let mut prev = linear(hue_rgb(0.0).map(|x| 0.2 + 0.6 * x));
         for k in 1..=3600 {
-            let out = linear(hsv(k as f32 / 10.0 % 360.0).map(|x| 0.2 + 0.6 * x));
+            let out = linear(hue_rgb(k as f32 / 10.0 % 360.0).map(|x| 0.2 + 0.6 * x));
             let jump = (0..3).map(|i| (out[i] - prev[i]).abs()).fold(0.0, f32::max);
             assert!(jump < 0.02, "seam at {} degrees: {jump}", k as f32 / 10.0);
             prev = out;
