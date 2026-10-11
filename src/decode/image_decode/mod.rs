@@ -36,12 +36,26 @@ use objc2_image_io::{
 #[cfg(target_os = "macos")]
 use crate::decode::coregraphics;
 
-/// True for camera RAW extensions, which the `image` crate cannot decode.
-/// Mirrors the RAW subset of `navigation.rs`'s `IMAGE_EXTS`.
+/// Camera RAW extensions, which the `image` crate cannot decode.
+const RAW_EXTS: &[&str] = &[
+    "cr2", "cr3", "nef", "arw", "dng", "raf", "rw2", "orf", "pef", "srw",
+];
+
+/// Extensions we treat as images. Keep in sync with the UTIs in Info.plist.
+const IMAGE_EXTS: &[&str] = &[
+    "jpg", "jpeg", "png", "gif", "tiff", "tif", "bmp", "heic", "heif",
+];
+
+/// True for a file a folder listing shows as a photo, RAW or not.
+pub fn is_image_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| IMAGE_EXTS.contains(&e.as_str()) || RAW_EXTS.contains(&e.as_str()))
+}
+
+/// True for camera RAW extensions.
 pub fn is_raw_extension(path: &Path) -> bool {
-    const RAW_EXTS: &[&str] = &[
-        "cr2", "cr3", "nef", "arw", "dng", "raf", "rw2", "orf", "pef", "srw",
-    ];
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| RAW_EXTS.contains(&e.to_ascii_lowercase().as_str()))

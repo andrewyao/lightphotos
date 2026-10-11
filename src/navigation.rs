@@ -3,6 +3,7 @@
 //! Folder listing, rating filters, burst grouping by time, and grid/tree
 //! arrow-key movement.
 
+use crate::decode::image_decode::is_image_extension;
 use crate::sidecar::Flag;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -10,20 +11,6 @@ use std::ffi::OsStr;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-
-/// Extensions we treat as images. Keep in sync with the UTIs in Info.plist.
-const IMAGE_EXTS: &[&str] = &[
-    "jpg", "jpeg", "png", "gif", "tiff", "tif", "bmp", "heic", "heif",
-    // common camera RAW
-    "cr2", "cr3", "nef", "arw", "dng", "raf", "rw2", "orf", "pef", "srw",
-];
-
-pub fn is_image(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
-        .unwrap_or(false)
-}
 
 /// Star-rating filter comparator. The app's filter is `Option<(Cmp, u8)>`, and
 /// `None` shows everything. "Unrated" is `(Eq, 0)`.
@@ -245,7 +232,7 @@ fn cmp_name_key(name: Option<&OsStr>, key: Option<&str>) -> std::cmp::Ordering {
 fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = read_dir_paths(dir)
         .into_iter()
-        .filter(|p| p.is_file() && is_image(p))
+        .filter(|p| p.is_file() && is_image_extension(p))
         .collect();
     sort_by_name(&mut entries);
     entries

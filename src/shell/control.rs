@@ -421,7 +421,7 @@ fn reply_json(answer: Answer) -> Value {
             Ok(png) => json!({
                 "ok": true,
                 "result": {
-                    "png_base64": base64(&png),
+                    "png_base64": lightphotos::base64::encode(&png),
                     "width": frame.width,
                     "height": frame.height,
                 },
@@ -437,24 +437,6 @@ fn reply_json(answer: Answer) -> Value {
     }
 }
 
-/// Standard base64 with `=` padding.
-fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let byte = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
-        let group = (byte(0) << 16) | (byte(1) << 8) | byte(2);
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(char::from(ALPHABET[(group >> (18 - 6 * i)) as usize & 63]));
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,22 +450,6 @@ mod tests {
 
     fn error_tag(failure: &Failure) -> &str {
         failure.error["error"].as_str().unwrap()
-    }
-
-    #[test]
-    fn base64_matches_the_rfc_4648_vectors() {
-        for (plain, encoded) in [
-            ("", ""),
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foob", "Zm9vYg=="),
-            ("fooba", "Zm9vYmE="),
-            ("foobar", "Zm9vYmFy"),
-        ] {
-            assert_eq!(base64(plain.as_bytes()), encoded, "{plain:?}");
-        }
-        assert_eq!(base64(&[0xfb, 0xff, 0xbf]), "+/+/");
     }
 
     #[test]

@@ -1,0 +1,271 @@
+//! Headless mode: commands edit the photos' sidecars, and `render` decodes,
+//! develops and encodes through the lib's export path. No app runs.
+
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
+
+use serde_json::{json, Map, Value};
+
+use lightphotos::command::{self, Command, CommandError, Photos};
+use lightphotos::decode::image_decode;
+use lightphotos::export::{self, Output};
+use lightphotos::sidecar::{self, ImageRecord};
+
+use crate::tools::{command_request, image, text, Tool, ToolResult};
+
+pub const MIN_RENDER: u32 = 16;
+pub const MAX_RENDER: u32 = 4096;
+pub const DEFAULT_RENDER: u32 = 1024;
+/// `get_state` lists at most this many photos.
+const MAX_LISTED: usize = 2000;
+
+pub struct Folder {
+    /// Canonical, so a path an agent names can be compared with it.
+    root: PathBuf,
+}
+
+impl Folder {
+    pub fn open(dir: &Path) -> Result<Folder, String> {
+        let root = dir
+            .canonicalize()
+            .map_err(|e| format!("cannot open the folder {}: {e}", dir.display()))?;
+        if !root.is_dir() {
+            return Err(format!("{} is not a folder", dir.display()));
+        }
+        Ok(Folder { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn call(&self, tool: Tool, args: &Map<String, Value>) -> ToolResult {
+        let photo_arg = || args.get("photo").and_then(Value::as_str);
+        match tool {
+            Tool::ListCommands => {
+                let current = match photo_arg() {
+                    Some(name) => Some(self.record(&self.photo(Path::new(name))?)?.adjustments),
+                    None => None,
+                };
+                let listing = serde_json::to_string(&command::listing(current.as_ref()))
+                    .map_err(|e| e.to_string())?;
+                Ok(vec![text(listing)])
+            }
+            Tool::RunCommand => self.run(args),
+            Tool::GetState => Ok(vec![text(self.state()?.to_string())]),
+            Tool::Screenshot => Err("screenshot needs the running app. Headless, call render \
+                                     to see a photo with its edits."
+                .into()),
+            Tool::Render => {
+                let name = photo_arg().ok_or("pass `photo`, a file name from get_state")?;
+                let max = match args.get("max_size") {
+                    None | Some(Value::Null) => DEFAULT_RENDER,
+                    Some(v) => v
+                        .as_u64()
+                        .map(|n| {
+                            u32::try_from(n)
+                                .unwrap_or(MAX_RENDER)
+                                .clamp(MIN_RENDER, MAX_RENDER)
+                        })
+                        .ok_or("`max_size` must be a whole number of pixels")?,
+                };
+                self.render(Path::new(name), max)
+            }
+        }
+    }
+
+    /// Runs one headless command on the photos it names. Every photo's
+    /// sidecar is read and edited before any is written.
+    fn run(&self, args: &Map<String, Value>) -> ToolResult {
+        let cmd = Command::from_json(&command_request(args)?).map_err(explain)?;
+        if !cmd.about().1 {
+            return Err(explain(CommandError::NeedsApp));
+        }
+        let names = match cmd.photos() {
+            Some(Photos::Named(names)) if !names.is_empty() => names,
+            _ => {
+                return Err(format!(
+                    "pass params.photos, a list of file names in {}, such as [\"IMG_0042.JPG\"]; \
+                     headless there is no selection",
+                    self.root.display()
+                ))
+            }
+        };
+        let mut seen = HashSet::new();
+        let mut paths = Vec::new();
+        for name in names {
+            let path = self.photo(name)?;
+            if seen.insert(path.clone()) {
+                paths.push(path);
+            }
+        }
+        let mut records = paths
+            .iter()
+            .map(|p| self.record(p))
+            .collect::<Result<Vec<_>, _>>()?;
+        command::apply_to_records(&cmd, &mut records, |i| {
+            paths
+                .get(i)
+                .map_or(Err(CommandError::NoPhotos), |p| display_size(p))
+        })
+        .map_err(explain)?;
+        for (n, (path, rec)) in paths.iter().zip(&records).enumerate() {
+            sidecar::write_record(path, rec).map_err(|e| {
+                format!(
+                    "saved {n} of {} photos, then could not save {}: {e}",
+                    paths.len(),
+                    file_name(path)
+                )
+            })?;
+        }
+        let photos: Vec<Value> = paths
+            .iter()
+            .zip(&records)
+            .map(|(p, r)| entry(p, r))
+            .collect();
+        Ok(vec![text(json!({ "photos": photos }).to_string())])
+    }
+
+    fn state(&self) -> Result<Value, String> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&self.root)
+            .map_err(|e| format!("cannot list {}: {e}", self.root.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_file() && image_decode::is_image_extension(p))
+            .collect();
+        paths.sort();
+        let total = paths.len();
+        let photos: Vec<Value> = paths
+            .iter()
+            .take(MAX_LISTED)
+            .map(|p| match sidecar::read_record(p) {
+                Ok(rec) => entry(p, &rec),
+                Err(e) => json!({ "name": file_name(p), "sidecar_error": e }),
+            })
+            .collect();
+        Ok(json!({
+            "folder": self.root,
+            "photos": photos,
+            "total": total,
+            "truncated": total > MAX_LISTED,
+        }))
+    }
+
+    fn render(&self, name: &Path, max: u32) -> ToolResult {
+        let path = self.photo(name)?;
+        let rec = self.record(&path)?;
+        let output = Output {
+            max_px: max,
+            ..Output::FULL
+        };
+        let jpeg = export::export_file(
+            &path,
+            &rec.adjustments,
+            &rec.touchups,
+            rec.rotation,
+            &output,
+        )
+        .map_err(|e| format!("cannot render {}: {e}", file_name(&path)))?;
+        Ok(vec![
+            image(lightphotos::base64::encode(&jpeg), "image/jpeg"),
+            text(format!(
+                "{} with its saved edits, at most {max} px on the long edge.",
+                file_name(&path)
+            )),
+        ])
+    }
+
+    /// The photo `name` means: a file name in the folder, or an absolute
+    /// path whose folder is this one. Anything else is refused, so a tool
+    /// call cannot read or write outside the folder.
+    fn photo(&self, name: &Path) -> Result<PathBuf, String> {
+        let refuse = || {
+            format!(
+                "no photo `{}` in {}. Name a photo by its file name, as get_state lists it",
+                name.display(),
+                self.root.display()
+            )
+        };
+        let file = if name.is_absolute() {
+            let parent = name.parent().and_then(|p| p.canonicalize().ok());
+            if parent.as_deref() != Some(self.root.as_path()) {
+                return Err(refuse());
+            }
+            name.file_name().ok_or_else(refuse)?
+        } else {
+            let mut parts = name.components();
+            match (parts.next(), parts.next()) {
+                (Some(Component::Normal(file)), None) => file,
+                _ => return Err(refuse()),
+            }
+        };
+        let path = self.root.join(file);
+        if path.is_file() && image_decode::is_image_extension(&path) {
+            Ok(path)
+        } else {
+            Err(refuse())
+        }
+    }
+
+    fn record(&self, path: &Path) -> Result<ImageRecord, String> {
+        sidecar::read_record(path).map_err(|e| {
+            format!(
+                "cannot read the saved edits of {}: {e}; nothing was changed",
+                file_name(path)
+            )
+        })
+    }
+}
+
+/// What `get_state` and `run_command` report for one photo.
+fn entry(path: &Path, rec: &ImageRecord) -> Value {
+    json!({
+        "name": file_name(path),
+        "rating": rec.rating,
+        "flag": rec.flag,
+        "label": rec.label,
+        "edited": rec.edited.is_some(),
+    })
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The photo's size as shown, which a straightened crop needs.
+fn display_size(path: &Path) -> Result<(f32, f32), CommandError> {
+    image_decode::read_metadata(path)
+        .source_size
+        .filter(|&(w, h)| w > 0 && h > 0)
+        .map(|(w, h)| (w as f32, h as f32))
+        .ok_or_else(|| CommandError::Failed {
+            reason: format!(
+                "cannot read the size of {}, which a straightened crop needs",
+                file_name(path)
+            ),
+        })
+}
+
+/// A command error as a tool error that says what to do next.
+fn explain(e: CommandError) -> String {
+    match e {
+        CommandError::NeedsApp => {
+            let headless: Vec<&str> = Command::examples()
+                .iter()
+                .filter(|c| c.about().1)
+                .map(Command::id)
+                .collect();
+            format!(
+                "this command needs the running app. Headless, these run: {}. For the rest, \
+                 start the app with `lightphotos --control <port> <folder>` and run \
+                 lightphotos-mcp with --attach <port>.",
+                headless.join(", ")
+            )
+        }
+        CommandError::UnknownCommand { id } => {
+            format!("no command `{id}`. Call list_commands to see every id.")
+        }
+        e => e.to_string(),
+    }
+}

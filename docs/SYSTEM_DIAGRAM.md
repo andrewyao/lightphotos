@@ -17,7 +17,8 @@ does not use egui, winit or wgpu. Each folder under `src/` is one module, in one
 | `jobs/` | app | Background work |
 | `persist/` | app | Persistence |
 | `decode/`, `develop/`, `export/`, `scoring/` | lib | Lib |
-| `bin/`, `decode/rawler/probe/` | probes | not shown |
+| `bin/lightphotos_mcp/` | MCP server | Platform shell |
+| other `bin/`, `decode/rawler/probe/` | probes | not shown |
 
 `navigation.rs`, `autotone.rs` and `i18n.rs` are in the app root. `hash.rs`, `paths.rs`
 and `worker_pool.rs` are in the lib root. In the diagram, a path starts at `src/`.
@@ -38,6 +39,7 @@ flowchart LR
         menu["shell/menu.rs<br/>native menu bar"]
         drive["shell/drive.rs<br/>--drive headless scripts"]
         control["shell/control.rs<br/>--control loopback JSON"]
+        mcp["bin/lightphotos_mcp/<br/>MCP server on stdio"]
         profile["shell/profile.rs<br/>--profile (hotpath)"]
         webshell["web/*<br/>web_fs, web_canvas, analytics"]
     end
@@ -102,6 +104,9 @@ flowchart LR
     main -- "window_event / key_input" --> app
     drive -- "synthetic events" --> app
     control -- "UserEvent::Control" --> main
+    mcp -- "--attach: one request per connection" --> control
+    mcp -- "--folder: render" --> export
+    mcp -- "--folder: run_command" --> sidecars
     profile -- "headless phases" --> loader
     webshell --> app
     webshell --> fsa
@@ -159,6 +164,10 @@ flowchart LR
 
 `shell/control.rs` runs only with `--control <port>`, and not in the browser.
 Its threads read the requests. The main thread runs them (`app/control.rs`).
+
+`bin/lightphotos_mcp/` is a separate binary. It links only the lib. With `--attach`, it
+sends each tool call to `shell/control.rs`. With `--folder`, no app runs: it writes the
+sidecars and renders through `export/`.
 
 `scoring/facequality.rs`, `scoring/segmentation.rs` and the aesthetics part of
 `scoring/judge.rs` build on all platforms. On Linux, Windows and the browser, they return

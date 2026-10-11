@@ -11,6 +11,8 @@
 pub mod immich;
 pub mod metadata;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
 use std::path::PathBuf;
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
@@ -592,9 +594,7 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
     // full-size image either.
     let _one_at_a_time = (job.output.format == ExportFormat::Tiff16)
         .then(|| TIFF16_GATE.lock().unwrap_or_else(PoisonError::into_inner));
-    let img = decode_job(job)?;
-    let source = SourceMeta::read_path(&job.src);
-    let file = render(&img, &job.adj, &job.touchups, job.rot, &job.output, &source)?;
+    let file = export_file(&job.src, &job.adj, &job.touchups, job.rot, &job.output)?;
     match &job.dest {
         ExportDest::Folder(dest) => {
             crate::paths::write_atomic(dest, &file).map_err(|e| format!("write: {e}"))?;
@@ -609,7 +609,7 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
             // camera's clock. This is the fallback it uses when that is
             // missing, so it has to be a real instant: the capture time when
             // the camera recorded its offset, else when the file was written.
-            let taken = source
+            let taken = SourceMeta::read_path(&job.src)
                 .stamp()
                 .and_then(|s| s.instant())
                 .or_else(|| std::fs::metadata(&job.src).and_then(|m| m.modified()).ok())
@@ -630,19 +630,40 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
     }
 }
 
+/// Decode `src` at full resolution, bake in its edits, and encode it as
+/// `output` says: the bytes an export of `src` writes.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn export_file(
+    src: &Path,
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    rot: u8,
+    output: &Output,
+) -> Result<Vec<u8>, String> {
+    let img = decode_full(src)?;
+    render(
+        &img,
+        adj,
+        touchups,
+        rot,
+        output,
+        &SourceMeta::read_path(src),
+    )
+}
+
 #[cfg(target_os = "macos")]
-fn decode_job(job: &ExportJob) -> Result<image_decode::DecodedImage, String> {
-    image_decode::decode(&job.src, u32::MAX)
+fn decode_full(src: &Path) -> Result<image_decode::DecodedImage, String> {
+    image_decode::decode(src, u32::MAX)
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-fn decode_job(job: &ExportJob) -> Result<image_decode::DecodedImage, String> {
-    if image_decode::is_raw_extension(&job.src) {
+fn decode_full(src: &Path) -> Result<image_decode::DecodedImage, String> {
+    if image_decode::is_raw_extension(src) {
         // rawler's path-based decoder memory-maps the file, which avoids
         // reading the whole RAW into a Vec first.
-        crate::decode::rawler::decode_raw_nonmac(&job.src, u32::MAX)
+        crate::decode::rawler::decode_raw_nonmac(src, u32::MAX)
     } else {
-        let bytes = std::fs::read(&job.src).map_err(|e| e.to_string())?;
+        let bytes = std::fs::read(src).map_err(|e| e.to_string())?;
         image_decode::decode_nonraw_from_bytes(&bytes, u32::MAX)
     }
 }

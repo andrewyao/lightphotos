@@ -16,7 +16,8 @@ use web_sys::{
     FileSystemPermissionMode,
 };
 
-use crate::navigation::{is_image, is_listable_subdir};
+use crate::decode::image_decode::is_image_extension;
+use crate::navigation::is_listable_subdir;
 
 /// A folder picked via `showDirectoryPicker`, listed one level deep.
 /// `dir` is the handle's name used as a label, not a real path. All paths
@@ -269,7 +270,7 @@ pub struct DirListing {
     pub subdirs: Vec<(PathBuf, FileSystemDirectoryHandle)>,
 }
 
-/// List `handle` with the same filters as the native listing (`is_image`,
+/// List `handle` with the same filters as the native listing (`is_image_extension`,
 /// `is_listable_subdir`). Both lists are sorted case-insensitively by name,
 /// matching the native order.
 pub async fn list_dir(
@@ -300,7 +301,7 @@ pub async fn list_dir(
         let name = child.name();
         let path = base.join(&name);
         match child.kind() {
-            FileSystemHandleKind::File if is_image(&path) => {
+            FileSystemHandleKind::File if is_image_extension(&path) => {
                 images.push((path, child.unchecked_into()));
             }
             FileSystemHandleKind::Directory if is_listable_subdir(&name) => {

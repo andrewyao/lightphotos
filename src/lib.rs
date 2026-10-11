@@ -15,6 +15,7 @@
 //! app in `main.rs` and the probes in `src/bin/` share it, so none of these
 //! modules depends on egui, winit or wgpu.
 
+pub mod base64;
 pub mod command;
 pub mod decode;
 pub mod develop;

@@ -27,6 +27,12 @@ path = "src/bin/seg_probe.rs"
 name = "score_probe"
 path = "src/bin/score_probe.rs"
 
+# MCP server over stdio: drives a running app through `--control`, or edits
+# and renders a folder headless through the lib. Desktop only.
+[[bin]]
+name = "lightphotos-mcp"
+path = "src/bin/lightphotos_mcp/main.rs"
+
 [[bin]]
 name = "decode_probe"
 path = "src/decode/rawler/probe/main.rs"

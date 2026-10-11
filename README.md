@@ -110,6 +110,23 @@ Set `LIGHTPHOTOS_CONTROL_TOKEN` (16 characters or more) to choose the token. Sen
 
 A reply is `{"ok": true, "result": …}` or `{"ok": false, "error": {"error": "<code>", …}, "message": "…"}`. The codes are the command errors and `bad_json`, `bad_token`, `unknown_op`, `too_long`, `too_many_connections`, `idle_timeout`, `timeout`, `app_closed` and `failed`. A bad line gets an error and the connection stays open. A line over 1 MiB closes the connection. A connection that sends nothing for 60 s gets an `idle_timeout` error and closes. The app accepts 4 connections at a time. When the app closes a connection, open a new one to send more requests.
 
+### Agent control (MCP)
+
+`lightphotos-mcp` is an MCP server on stdio, so an agent such as Claude Code can cull, edit and look at photos. Build it with `cargo build --release --bin lightphotos-mcp`. Its tools are `list_commands`, `run_command`, `get_state`, and `screenshot` or `render`. Call `list_commands` first: it gives every command id with an example of its params.
+
+Headless, it works on one folder with no app open. Commands marked `headless` (rate, flag, label, rotate, develop, crop) write the photos' sidecars, and `render` returns a photo with its saved edits as a JPEG:
+
+```sh
+claude mcp add lightphotos -- /path/to/lightphotos-mcp --folder ~/Pictures/shoot
+```
+
+Attached, it drives a running app through the control channel, and `screenshot` returns the window. Start the app and the server with the same token:
+
+```sh
+LIGHTPHOTOS_CONTROL_TOKEN=<32 hex characters> ./target/release/lightphotos --control 7777 ~/Pictures/shoot
+claude mcp add lightphotos -e LIGHTPHOTOS_CONTROL_TOKEN=<the same token> -- /path/to/lightphotos-mcp --attach 7777
+```
+
 ## Releasing and packaging
 
 ```sh
