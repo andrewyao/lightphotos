@@ -692,6 +692,7 @@ mod autotone;
 mod bulk_delete;
 mod bursts;
 mod catalog;
+mod commands;
 mod crop;
 pub(crate) use accessors::FlagCoverage;
 pub(crate) use catalog::flag_name;
@@ -718,7 +719,11 @@ mod presets;
 mod score;
 mod session;
 mod sort;
+#[cfg(not(target_arch = "wasm32"))]
+mod state;
 pub(crate) use sort::{GridSort, SortOrder};
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use state::State;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod thumbs;

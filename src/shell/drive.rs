@@ -24,6 +24,9 @@
 //! idle                     wait until decodes, sidecar writes, batches and animations settle
 //! shot grid                write <out dir>/grid.png
 //! state                    print one JSON line of the app's state
+//! run {"id":"photo.rate","params":{"stars":4}}
+//!                          run a command; print {"id", "ok": outcome} or {"id", "error", "message"}
+//! commands                 print every command id with an example, and every develop control
 //! quit
 //! ```
 //!
@@ -49,7 +52,8 @@ use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::{Window, WindowId};
 
-use crate::app::{App, Region, ViewMode};
+use crate::app::{App, State, ViewMode};
+use crate::command::Command;
 use crate::renderer::{Renderer, RgbFrame};
 use crate::shell::macos_delegate::UserEvent;
 
@@ -159,6 +163,8 @@ pub(crate) enum Step {
     Idle,
     Shot(String),
     State,
+    Run(Box<Command>),
+    Commands,
     Quit,
 }
 
@@ -380,11 +386,16 @@ fn parse_step(line: &str) -> Result<Step, String> {
             Step::Shot(slug.to_string())
         }
         "state" => Step::State,
+        "run" => {
+            let json = line.trim_start().strip_prefix("run").unwrap_or_default();
+            Step::Run(Box::new(Command::parse(json).map_err(|e| e.to_string())?))
+        }
+        "commands" => Step::Commands,
         "quit" => Step::Quit,
         _ => return Err(format!("unknown step `{cmd}`")),
     };
     let arity_ok = match step {
-        Step::Idle | Step::State | Step::Quit => args.is_empty(),
+        Step::Idle | Step::State | Step::Commands | Step::Quit => args.is_empty(),
         _ => true,
     };
     if !arity_ok {
@@ -396,7 +407,12 @@ fn parse_step(line: &str) -> Result<Step, String> {
 fn parse_script(text: &str) -> Result<Vec<Step>, ParseError> {
     let mut steps = Vec::new();
     for (i, raw) in text.lines().enumerate() {
-        let line = raw.split('#').next().unwrap_or_default().trim();
+        // A `run` line is JSON, where `#` is text, not a comment.
+        let line = if raw.trim_start().starts_with("run ") {
+            raw.trim()
+        } else {
+            raw.split('#').next().unwrap_or_default().trim()
+        };
         if line.is_empty() {
             continue;
         }
@@ -571,6 +587,23 @@ impl Driver {
                 Step::Idle => self.idle()?,
                 Step::Shot(slug) => self.shot(slug)?,
                 Step::State => println!("{}", self.state_json()?),
+                Step::Run(cmd) => {
+                    let id = cmd.id();
+                    let reply = match self.app.run((**cmd).clone()) {
+                        Ok(outcome) => serde_json::json!({ "id": id, "ok": outcome }),
+                        Err(e) => {
+                            serde_json::json!({ "id": id, "error": e, "message": e.to_string() })
+                        }
+                    };
+                    println!("{reply}");
+                }
+                Step::Commands => {
+                    let listing = self.app.listing();
+                    println!(
+                        "{}",
+                        serde_json::to_string(&listing).map_err(|e| e.to_string())?
+                    );
+                }
                 Step::Quit => return Ok(()),
             }
             self.frame();
@@ -811,69 +844,6 @@ fn write_png(path: &Path, frame: &RgbFrame) -> Result<(), String> {
     writer.finish().map_err(|e| err(&e))
 }
 
-#[derive(serde::Serialize)]
-struct State {
-    mode: ViewMode,
-    /// Photos the filters leave in the Grid.
-    visible: usize,
-    /// Cell positions `[start, end)` the Grid drew last frame.
-    grid_range: (usize, usize),
-    /// Each cell in `grid_range` that carries a stack badge, as its
-    /// position, its stack's size, and whether the stack is expanded.
-    stacks: Vec<(usize, usize, bool)>,
-    /// The primary photo's position among the visible ones.
-    sel: Option<usize>,
-    /// The multi-selection's positions.
-    selected: Vec<usize>,
-    /// File name of the photo single-photo actions apply to.
-    photo: Option<String>,
-    /// The keyboard-focused region.
-    focus: Region,
-    /// Loupe zoom relative to fit-to-window; absent in the Grid.
-    zoom: Option<f32>,
-    /// The status toast, while it shows.
-    status: Option<String>,
-    /// Visible thumbnails whose decode failed for good.
-    failed_thumbs: usize,
-    /// The Folders tree's roots.
-    folder_roots: Vec<std::path::PathBuf>,
-    /// The folder the Grid shows.
-    folder: Option<std::path::PathBuf>,
-}
-
-impl State {
-    fn of(app: &App) -> State {
-        let mode = app.mode();
-        State {
-            mode,
-            visible: app.visible_len(),
-            grid_range: app.grid_range(),
-            stacks: {
-                let (start, end) = app.grid_range();
-                (start..end)
-                    .filter_map(|p| {
-                        app.stack_badge_at(p)
-                            .map(|(_, n, expanded)| (p, n, expanded))
-                    })
-                    .collect()
-            },
-            folder_roots: app.folder_roots().to_vec(),
-            folder: app.folder_sel(),
-            sel: app.sel(),
-            selected: app.selected_positions(),
-            photo: app
-                .selected_path()
-                .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
-            focus: app.focus(),
-            zoom: (mode == ViewMode::Loupe).then(|| app.zoom_rel()),
-            status: app.status().map(|(_, text)| text.to_string()),
-            failed_thumbs: (0..app.visible_len())
-                .filter(|&pos| app.thumb_failed_at(pos))
-                .count(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,8 +854,7 @@ mod tests {
 
     #[test]
     fn every_step_form_parses() {
-        let script = "\
-# a comment line
+        let script = r##"# a comment line
 size 1200 800
 key cmd+shift+u
 type Holiday snaps  # trailing comment
@@ -901,8 +870,11 @@ drag 100 100 300 200
 idle
 shot grid-1
 state
+run {"id":"photo.rate","params":{"stars":4}}
+run {"id":"preset.apply","params":{"name":"#1"}}
+commands
 quit
-";
+"##;
         let shift = ModifiersState::SHIFT;
         assert_eq!(
             parse_script(script).unwrap(),
@@ -957,6 +929,14 @@ quit
                 Step::Idle,
                 Step::Shot("grid-1".into()),
                 Step::State,
+                Step::Run(Box::new(
+                    Command::parse(r#"{"id":"photo.rate","params":{"stars":4}}"#).unwrap()
+                )),
+                Step::Run(Box::new(Command::Preset(crate::command::PresetParams {
+                    name: "#1".into(),
+                    photos: crate::command::Photos::Selected,
+                }))),
+                Step::Commands,
                 Step::Quit,
             ]
         );
@@ -980,6 +960,14 @@ quit
             ("move 5 inf", 1),
             ("scroll 0 1e39", 1),
             ("drag 0 0 -inf 1", 1),
+            ("run", 1),
+            ("run {", 1),
+            (
+                "idle\nrun {\"id\":\"photo.rate\",\"params\":{\"stars\":9}}",
+                2,
+            ),
+            ("run {\"id\":\"no.such\"}", 1),
+            ("commands all", 1),
         ] {
             let err = parse_script(script).unwrap_err();
             assert_eq!(err.line, line, "{script:?}: {}", err.message);
@@ -1059,15 +1047,5 @@ quit
         let err = args(&["--drive", &s, &d]).unwrap_err();
         assert!(err.ends_with("line 2: unknown step `bogus`"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn state_of_a_fresh_app_is_the_empty_grid() {
-        let app = App::new(None);
-        let json = serde_json::to_string(&State::of(&app)).unwrap();
-        assert_eq!(
-            json,
-            r#"{"mode":"grid","visible":0,"grid_range":[0,0],"stacks":[],"sel":null,"selected":[],"photo":null,"focus":"folders","zoom":null,"status":null,"failed_thumbs":0,"folder_roots":[],"folder":null}"#
-        );
     }
 }

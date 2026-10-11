@@ -284,6 +284,29 @@ impl App {
         }
     }
 
+    /// Exports `paths` now, with `settings` in place of the form's for this
+    /// one batch. Returns whether the batch is under way, or why it could
+    /// not start.
+    pub(super) fn export_with(
+        &mut self,
+        paths: Vec<PathBuf>,
+        settings: Option<ExportSettings>,
+    ) -> Result<bool, &'static str> {
+        let saved = settings.map(|given| std::mem::replace(&mut self.exports.settings, given));
+        let nothing_selected = crate::i18n::t().export_nothing_selected;
+        let blocked = self.export_blocker().filter(|&why| why != nothing_selected);
+        if blocked.is_none() {
+            self.start_export(paths);
+        }
+        if let Some(saved) = saved {
+            self.exports.settings = saved;
+        }
+        match blocked {
+            Some(why) => Err(why),
+            None => Ok(self.exports.progress.is_some()),
+        }
+    }
+
     pub(super) fn run_export_form(&mut self) {
         self.save_export_edits();
         if let Some(why) = self.export_blocker() {
@@ -565,7 +588,7 @@ impl App {
     /// Returns at once; `on_export_outcomes` reports progress. The caller has
     /// checked `export_blocker`.
     #[cfg(not(target_arch = "wasm32"))]
-    fn start_export(&mut self, paths: Vec<PathBuf>) {
+    pub(super) fn start_export(&mut self, paths: Vec<PathBuf>) {
         let Some(exporter) = self.exports.exporter.as_ref() else {
             return;
         };

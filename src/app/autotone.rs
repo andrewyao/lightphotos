@@ -148,7 +148,7 @@ impl AutoTone {
 }
 
 #[derive(Clone, Copy)]
-enum DeferredAutoToneMode {
+pub(super) enum DeferredAutoToneMode {
     Replace,
     Append,
 }
@@ -216,7 +216,7 @@ impl App {
 
     /// Start a batch over `paths`, or defer it while the catalog loads. When
     /// deferred, `Append` adds to the waiting list and `Replace` swaps it out.
-    fn auto_tone_batch(&mut self, paths: Vec<PathBuf>, mode: DeferredAutoToneMode) {
+    pub(super) fn auto_tone_batch(&mut self, paths: Vec<PathBuf>, mode: DeferredAutoToneMode) {
         if paths.is_empty() {
             return;
         }

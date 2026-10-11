@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The macOS menu bar. Most commands stand for a key chord that
+//! The macOS menu bar. An item that stands for a `Command` runs it through
+//! `App::run`, as its key does. Most other items stand for a key chord that
 //! `App::handle_key` already binds, and choosing one replays that chord, so
-//! the menu acts under the same modal rules as the keyboard. A few commands
+//! the menu acts under the same modal rules as the keyboard. A few items
 //! have no key, and `App::run_menu_command` runs those directly.
 //!
 //! AppKit offers a key event to the menu before the window. An enabled item
@@ -114,6 +115,69 @@ impl MenuCommand {
             SmallerText => (alt, KeyCode::Minus),
             KeyboardShortcuts => (ModifiersState::SHIFT, KeyCode::Slash),
             AutoToneSelection | ScorePhotos | GroupBursts => return None,
+        })
+    }
+
+    /// The command this item runs, or `None` for chrome: text size, the
+    /// help, Settings, the text-editing items, and the actions that stay
+    /// keyboard-only (grouping, compare, copy and paste settings, trash).
+    pub fn command(self) -> Option<crate::command::Command> {
+        use crate::command::{
+            Command as Cmd, FlagChange as F, FlagParams, LabelParams, MonochromeParams, Photos,
+            PhotosParams, RateParams, RotateParams, SelectParams, SelectWord, Selection, Stars,
+            View, ViewParams, Zoom, ZoomParams,
+        };
+        use MenuCommand::*;
+        let flag = |flag| {
+            Cmd::Flag(FlagParams {
+                flag,
+                photos: Photos::Selected,
+            })
+        };
+        let rotate = |clockwise| {
+            Cmd::Rotate(RotateParams {
+                clockwise,
+                photos: Photos::Selected,
+            })
+        };
+        let view = |mode| Cmd::View(ViewParams { mode });
+        let zoom = |zoom| Cmd::Zoom(ZoomParams { zoom });
+        Some(match self {
+            Rate(stars) => Cmd::Rate(RateParams {
+                stars: Stars::try_from(stars).ok()?,
+                advance: false,
+                photos: Photos::Selected,
+            }),
+            Pick => flag(F::Pick),
+            Unflag => flag(F::None),
+            Reject => flag(F::Reject),
+            Label(label) => Cmd::Label(LabelParams {
+                label,
+                on: None,
+                photos: Photos::Selected,
+            }),
+            AutoTone => Cmd::AutoTone(PhotosParams::default()),
+            BlackAndWhite => Cmd::Monochrome(MonochromeParams {
+                on: None,
+                photos: Photos::Selected,
+            }),
+            RotateLeft => rotate(false),
+            RotateRight => rotate(true),
+            DeselectAll => Cmd::Select(SelectParams {
+                photos: Selection::Word(SelectWord::None),
+            }),
+            Grid => view(View::Grid),
+            Loupe => view(View::Loupe),
+            Develop => view(View::Develop),
+            ToggleZoom => zoom(Zoom::Cycle),
+            ZoomIn => zoom(Zoom::In),
+            ZoomOut => zoom(Zoom::Out),
+            Settings | OpenFolder | Export | Undo | Cut | Copy | Paste | SelectAll
+            | CopySettings | PasteSettings | AutoToneSelection | ScorePhotos | MoveToTrash
+            | GroupSelected | GroupBursts | Ungroup | DeleteGroup | Crop | CompareStack
+            | InfoPanel | BeforeAfter | BiggerText | SmallerText | KeyboardShortcuts => {
+                return None;
+            }
         })
     }
 

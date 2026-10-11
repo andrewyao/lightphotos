@@ -359,7 +359,7 @@ impl App {
         self.after_flag_change();
     }
 
-    fn after_flag_change(&mut self) {
+    pub(super) fn after_flag_change(&mut self) {
         if self.flag_filter != FlagFilter::All {
             self.refilter_after_catalog_change();
             self.resync_loupe_selection();
@@ -502,16 +502,7 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        let all = paths.iter().all(|p| self.catalog.label(p) == Some(label));
-        let label = (!all).then_some(label);
-        for path in &paths {
-            self.catalog.set_label(path, label);
-        }
-        if !self.label_filter.is_empty() {
-            self.refilter_after_catalog_change();
-            self.resync_loupe_selection();
-        }
-        self.request_redraw();
+        self.set_label_of(&paths, label, None);
     }
 
     /// A digit key's rating. With `advance` (Shift held) it then moves on to

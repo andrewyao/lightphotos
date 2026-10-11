@@ -1,36 +1,30 @@
-//! The App side of the macOS menu bar: whether each command's key would act
-//! right now, and running a command by replaying that key, or directly for
-//! the few commands with no key.
+//! The App side of the macOS menu bar: whether each item would act right
+//! now, and running it as a `Command`, by replaying its key, or directly for
+//! the few items with no key.
 
 use super::*;
 
+use crate::command::Blocker;
 use crate::shell::menu::MenuCommand;
 
 impl App {
-    /// Whether `cmd`'s key would act right now. Mirrors the early returns in
-    /// `handle_key`.
+    /// Whether `cmd` would act right now. An item that runs a command asks
+    /// `App::check`; the rest ask `input_blocker`, which holds the keyboard
+    /// rules `handle_key` follows.
     pub(crate) fn menu_enabled(&self, cmd: MenuCommand) -> bool {
         use MenuCommand::*;
+        let runs = || cmd.command().is_some_and(|c| self.check(&c).is_ok());
         let typing = self.egui_ctx.text_edit_focused();
-        // Crop, the WB picker, Touch Up, the preset-name prompt, a confirm
-        // dialog and Copy Settings each hold the keyboard. Settings holds it
-        // too, except for Cmd+,.
-        let tool_free = self.tool == LoupeTool::None
-            && self.preset_name_edit.is_none()
-            && !self.confirm_open()
-            && self.copy_dialog.is_none();
-        let free = tool_free && !self.cropping() && !self.show_settings;
+        let blocker = self.input_blocker();
+        let free = blocker.is_none();
         let loupe = self.mode == ViewMode::Loupe;
         let selected = self.selection_count();
         match cmd {
             Cut | Copy | Paste | BiggerText | SmallerText => true,
             SelectAll => typing || (free && self.mode == ViewMode::Grid),
             Undo => typing || (self.tool == LoupeTool::TouchUp && self.can_undo_touchup()),
-            Settings => tool_free && !self.cropping(),
-            Export => free,
-            OpenFolder | AutoTone | Rate(_) | Grid | Develop | Crop | KeyboardShortcuts => free,
-            Pick | Unflag | Reject | Label(_) => free && self.selected_path().is_some(),
-            DeselectAll => free && selected > 0,
+            Settings => matches!(blocker, None | Some(Blocker::Settings)),
+            OpenFolder | Export | Crop | KeyboardShortcuts => free,
             CompareStack => {
                 let on_stack = if loupe {
                     self.has_compare_set()
@@ -40,7 +34,7 @@ impl App {
                 let few = (2..=super::group_compare::COMPARE_SELECTION_MAX).contains(&selected);
                 free && (few || on_stack)
             }
-            AutoToneSelection | BlackAndWhite => free && selected > 0,
+            AutoToneSelection => free && selected > 0,
             ScorePhotos => free && selected > 0 && self.scoring_available(),
             MoveToTrash => free && selected > 0 && self.delete_available(),
             GroupSelected => free && self.group_available(),
@@ -49,23 +43,29 @@ impl App {
             DeleteGroup => free && self.selection_has_group() && self.delete_available(),
             CopySettings => free && selected == 1,
             PasteSettings => free && selected > 0 && self.has_copied_settings(),
-            Loupe => free && self.mode == ViewMode::Grid,
             InfoPanel => free && matches!(self.mode, ViewMode::Grid | ViewMode::Loupe),
-            // Cmd+[ and Cmd+] still rotate while cropping.
-            RotateLeft | RotateRight => tool_free && !self.show_settings && loupe,
-            BeforeAfter | ToggleZoom | ZoomIn | ZoomOut => free && loupe,
+            BeforeAfter => free && loupe,
+            Loupe => runs() && self.mode == ViewMode::Grid,
+            DeselectAll => runs() && selected > 0,
+            Rate(_) | Pick | Unflag | Reject | Label(_) | AutoTone | BlackAndWhite | RotateLeft
+            | RotateRight | Grid | Develop | ToggleZoom | ZoomIn | ZoomOut => runs(),
         }
     }
 
     /// Runs `cmd` as the keyboard would: the edit commands go to egui, as
-    /// egui_winit turns their keys into events, and the rest go to
-    /// `handle_key` with the command's modifiers held. A command with no key
-    /// runs its action here.
+    /// egui_winit turns their keys into events, an item that stands for a
+    /// `Command` runs it, and the rest go to `handle_key` with the item's
+    /// modifiers held. An item with no key runs its action here.
     pub(crate) fn run_menu_command(&mut self, cmd: MenuCommand) {
         if let Some(event) = self.text_edit_event(cmd) {
             if let Some(state) = self.egui_state.as_mut() {
                 state.egui_input_mut().events.push(event);
             }
+            self.request_redraw();
+            return;
+        }
+        if let Some(command) = cmd.command() {
+            self.run_ui(command);
             self.request_redraw();
             return;
         }

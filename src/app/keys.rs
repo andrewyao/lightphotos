@@ -2,7 +2,11 @@ use super::*;
 
 use winit::keyboard::KeyCode;
 
-use crate::sidecar::Flag;
+use crate::command::{
+    Command, FlagChange, FlagParams, LabelParams, MonochromeParams, Photos, PhotosParams,
+    RateParams, RotateParams, SelectParams, SelectWord, Selection, Stars, View, ViewParams, Zoom,
+    ZoomParams,
+};
 use crate::ui;
 
 impl App {
@@ -99,8 +103,8 @@ impl App {
                 KeyCode::KeyR if !cmd && !alt => self.commit_crop(),
                 KeyCode::Enter | KeyCode::NumpadEnter => self.commit_crop(),
                 KeyCode::Escape => self.cancel_crop(),
-                KeyCode::BracketLeft if cmd && !alt => self.rotate(false),
-                KeyCode::BracketRight if cmd && !alt => self.rotate(true),
+                KeyCode::BracketLeft if cmd && !alt => self.run_ui(rotate(false)),
+                KeyCode::BracketRight if cmd && !alt => self.run_ui(rotate(true)),
                 _ => {}
             }
             return;
@@ -196,12 +200,20 @@ impl App {
         // labels.
         if !cmd && !alt {
             if let Some(n) = digit_of(code) {
-                if n <= crate::sidecar::MAX_RATING {
-                    self.rate_key(n, shift);
+                if let Ok(stars) = Stars::try_from(n) {
+                    self.run_ui(Command::Rate(RateParams {
+                        stars,
+                        advance: shift,
+                        photos: Photos::Selected,
+                    }));
                     return;
                 }
                 if let Some(label) = crate::sidecar::ColorLabel::from_digit(n).filter(|_| !shift) {
-                    self.toggle_label(label);
+                    self.run_ui(Command::Label(LabelParams {
+                        label,
+                        on: None,
+                        photos: Photos::Selected,
+                    }));
                     return;
                 }
             }
@@ -210,13 +222,15 @@ impl App {
         let loupe = self.mode == ViewMode::Loupe;
         match code {
             // Shift is allowed so `+` works on a US layout.
-            KeyCode::Equal | KeyCode::NumpadAdd if cmd && loupe => self.zoom_by(1.2),
-            KeyCode::Minus | KeyCode::NumpadSubtract if cmd && loupe => self.zoom_by(1.0 / 1.2),
-            KeyCode::BracketLeft if cmd && !alt && loupe => self.rotate(false),
-            KeyCode::BracketRight if cmd && !alt && loupe => self.rotate(true),
+            KeyCode::Equal | KeyCode::NumpadAdd if cmd && loupe => self.run_ui(zoom(Zoom::In)),
+            KeyCode::Minus | KeyCode::NumpadSubtract if cmd && loupe => {
+                self.run_ui(zoom(Zoom::Out))
+            }
+            KeyCode::BracketLeft if cmd && !alt && loupe => self.run_ui(rotate(false)),
+            KeyCode::BracketRight if cmd && !alt && loupe => self.run_ui(rotate(true)),
             // `main.rs` sends Space only on a tap, not while it's held to pan.
-            KeyCode::Space if loupe => self.cycle_zoom(),
-            KeyCode::KeyZ if loupe && !cmd && !alt => self.cycle_zoom(),
+            KeyCode::Space if loupe => self.run_ui(zoom(Zoom::Cycle)),
+            KeyCode::KeyZ if loupe && !cmd && !alt => self.run_ui(zoom(Zoom::Cycle)),
             KeyCode::Space if self.focus == Region::Grid => self.nav_enter(),
 
             // F6 cycles between the main region and the Toolbar and Filmstrip.
@@ -258,21 +272,28 @@ impl App {
 
             KeyCode::KeyG if cmd && shift && !alt => self.ungroup_selected(),
             KeyCode::KeyG if cmd && !alt => self.group_selected(),
-            KeyCode::KeyG if !cmd && !alt => self.enter_grid(),
+            KeyCode::KeyG if !cmd && !alt => self.run_ui(view(View::Grid)),
             KeyCode::KeyI if !cmd && !alt => self.click_rail(RailItem::Info),
             KeyCode::KeyE if cmd && shift && !alt => self.toggle_export_form(),
-            KeyCode::KeyE if !cmd && !alt && self.mode == ViewMode::Grid => self.enter_loupe(),
-            KeyCode::KeyD if cmd && !alt => self.deselect_all(),
-            KeyCode::KeyD if !alt => self.open_develop(),
+            KeyCode::KeyE if !cmd && !alt && self.mode == ViewMode::Grid => {
+                self.run_ui(view(View::Loupe))
+            }
+            KeyCode::KeyD if cmd && !alt => self.run_ui(select(SelectWord::None)),
+            KeyCode::KeyD if !alt => self.run_ui(view(View::Develop)),
             KeyCode::KeyR if !cmd && !alt => self.enter_crop(),
             KeyCode::KeyC if !cmd && !alt => self.compare_stack(),
-            KeyCode::KeyP if !cmd && !alt => self.set_flag(Some(Flag::Pick)),
-            KeyCode::KeyX if !cmd && !alt => self.set_flag(Some(Flag::Reject)),
-            KeyCode::KeyU if !cmd && !alt => self.set_flag(None),
-            KeyCode::Backquote if !cmd && !alt => self.toggle_pick(),
+            KeyCode::KeyP if !cmd && !alt => self.run_ui(flag(FlagChange::Pick)),
+            KeyCode::KeyX if !cmd && !alt => self.run_ui(flag(FlagChange::Reject)),
+            KeyCode::KeyU if !cmd && !alt => self.run_ui(flag(FlagChange::None)),
+            KeyCode::Backquote if !cmd && !alt => self.run_ui(flag(FlagChange::TogglePick)),
             KeyCode::Enter | KeyCode::NumpadEnter => self.nav_enter(),
-            KeyCode::KeyU if cmd && !shift && !alt => self.auto_tone_selected(),
-            KeyCode::KeyV if !cmd && !alt => self.toggle_black_and_white(),
+            KeyCode::KeyU if cmd && !shift && !alt => {
+                self.run_ui(Command::AutoTone(PhotosParams::default()))
+            }
+            KeyCode::KeyV if !cmd && !alt => self.run_ui(Command::Monochrome(MonochromeParams {
+                on: None,
+                photos: Photos::Selected,
+            })),
             KeyCode::KeyV if cmd && shift && !alt && self.has_copied_settings() => {
                 self.request_bulk(ui::BulkKind::ApplySettings)
             }
@@ -308,7 +329,9 @@ impl App {
                 self.request_redraw();
             }
 
-            KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => self.select_all(),
+            KeyCode::KeyA if cmd && self.mode == ViewMode::Grid => {
+                self.run_ui(select(SelectWord::All))
+            }
             KeyCode::KeyC if cmd && shift => self.copy_settings(),
             KeyCode::KeyN if cmd && shift && crate::app::SHOW_PRESETS => self.prompt_save_preset(),
             KeyCode::Delete if shift && self.selection_has_group() => self.request_delete_group(),
@@ -332,11 +355,40 @@ impl App {
     }
 }
 
+fn rotate(clockwise: bool) -> Command {
+    Command::Rotate(RotateParams {
+        clockwise,
+        photos: Photos::Selected,
+    })
+}
+
+fn zoom(zoom: Zoom) -> Command {
+    Command::Zoom(ZoomParams { zoom })
+}
+
+fn view(mode: View) -> Command {
+    Command::View(ViewParams { mode })
+}
+
+fn select(word: SelectWord) -> Command {
+    Command::Select(SelectParams {
+        photos: Selection::Word(word),
+    })
+}
+
+fn flag(flag: FlagChange) -> Command {
+    Command::Flag(FlagParams {
+        flag,
+        photos: Photos::Selected,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::nav::tests::group_photos;
     use crate::navigation::Playlist;
+    use crate::sidecar::Flag;
     use std::collections::BTreeSet;
     use winit::keyboard::ModifiersState;
 
