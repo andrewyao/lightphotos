@@ -280,12 +280,24 @@ impl App {
             .any(|p| loader.get_thumb(p, px).is_none() && !loader.thumb_failed(p, px))
     }
 
+    pub(crate) fn on_sort_meta(
+        &mut self,
+        metas: Vec<(PathBuf, crate::decode::image_decode::SortMeta)>,
+    ) {
+        let mut times = Vec::with_capacity(metas.len());
+        for (path, meta) in metas {
+            times.push((path.clone(), meta.capture));
+            self.sort_meta.insert(path, meta);
+        }
+        self.on_capture_times(times);
+    }
+
     pub(crate) fn on_capture_times(&mut self, times: Vec<(PathBuf, Option<SystemTime>)>) {
         for (path, t) in times {
             self.signals.record(&path, Signal::Capture(t));
             self.capture_times.insert(path, t);
         }
-        if self.grid_sort == GridSort::Time {
+        if self.grid_sort.reads_files() {
             self.recompute_visible();
         }
         self.poll_bursts();

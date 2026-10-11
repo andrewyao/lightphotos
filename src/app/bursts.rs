@@ -25,14 +25,23 @@ impl App {
 
     /// Asks the loader for every listed photo's capture time not yet known,
     /// for the Time sort. Each landing re-sorts the Grid.
-    pub(super) fn request_capture_times(&mut self) {
+    /// Reads what the Grid's sort orders by for every photo that lacks it.
+    pub(super) fn request_sort_meta(&mut self) {
         let (Some(pl), Some(loader)) = (self.playlist.as_ref(), self.loader.as_mut()) else {
             return;
         };
+        // The signal cache seeds capture times without the rest.
+        let time = self.grid_sort == GridSort::Time;
         for path in pl.entries() {
-            if !self.capture_times.contains_key(path) && !loader.request_meta(path.clone()) {
-                // No worker will read it, so it sorts with the untimed.
-                self.capture_times.insert(path.clone(), None);
+            let known = if time {
+                self.capture_times.contains_key(path)
+            } else {
+                self.sort_meta.contains_key(path)
+            };
+            if !known && !loader.request_meta(path.clone()) {
+                // No worker will read it, so it sorts with the unknown.
+                self.capture_times.entry(path.clone()).or_insert(None);
+                self.sort_meta.insert(path.clone(), Default::default());
             }
         }
     }

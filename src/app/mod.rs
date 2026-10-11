@@ -165,8 +165,27 @@ pub enum GridSort {
     Name,
     /// Oldest capture time first, photos without one last in name order.
     Time,
+    /// Most recently modified file first.
+    Modified,
+    /// Largest file first.
+    Size,
+    /// Fastest shutter speed first.
+    Shutter,
     /// Highest quality score first, unscored photos last in name order.
     Quality,
+}
+
+impl GridSort {
+    /// Whether this order needs the file's [`SortMeta`] read, so the Grid
+    /// waits on the metadata jobs.
+    ///
+    /// [`SortMeta`]: crate::decode::image_decode::SortMeta
+    pub(crate) fn reads_files(self) -> bool {
+        matches!(
+            self,
+            Self::Time | Self::Modified | Self::Size | Self::Shutter
+        )
+    }
 }
 
 /// Chrome regions F6 steps through before wrapping back to the main region.
@@ -568,6 +587,8 @@ pub(crate) struct App {
     /// Capture time per path, from EXIF or mtime. `Some(None)` means the read
     /// found no time, so it isn't requested again.
     capture_times: HashMap<PathBuf, Option<SystemTime>>,
+    /// What the Modified, Size and Shutter sorts read, per path, once read.
+    sort_meta: HashMap<PathBuf, crate::decode::image_decode::SortMeta>,
     /// Group Bursts' photos while their capture times are read.
     burst_scan: Option<Vec<PathBuf>>,
 
@@ -811,6 +832,7 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             signal_load_rx: None,
             capture_times: HashMap::new(),
+            sort_meta: HashMap::new(),
             burst_scan: None,
             // A test must never read the developer's own settings.
             #[cfg(test)]

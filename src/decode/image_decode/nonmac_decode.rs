@@ -71,28 +71,40 @@ pub fn decode_nonraw_from_bytes(bytes: &[u8], max_dim: u32) -> Result<DecodedIma
     }))
 }
 
-/// Capture time for `path`: EXIF `DateTimeOriginal` with its sub-seconds,
-/// else the file mtime, the same fallback the mac version uses. A RAW goes
-/// straight to the mtime.
+/// What the Grid's sorts and burst grouping read from `path`. The capture
+/// time is EXIF `DateTimeOriginal` with its sub-seconds, else the file mtime,
+/// the same fallback the mac version uses. A RAW goes straight to the mtime
+/// and has no shutter speed.
 #[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
-pub fn capture_time(path: &Path) -> Option<std::time::SystemTime> {
+pub fn sort_meta(path: &Path) -> crate::decode::image_decode::SortMeta {
+    let stat = std::fs::metadata(path).ok();
+    let modified = stat.as_ref().and_then(|m| m.modified().ok());
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(t) = exif_capture_time(path) {
-        return Some(t);
+    let (capture, shutter) = exif_sort_fields(path);
+    #[cfg(target_arch = "wasm32")]
+    let (capture, shutter) = (None, None);
+    crate::decode::image_decode::SortMeta {
+        capture: capture.or(modified),
+        modified,
+        size: stat.map(|m| m.len()),
+        shutter,
     }
-    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
+/// EXIF capture time and exposure time in seconds.
 #[cfg(all(not(target_os = "macos"), not(target_arch = "wasm32")))]
-fn exif_capture_time(path: &Path) -> Option<std::time::SystemTime> {
+fn exif_sort_fields(path: &Path) -> (Option<std::time::SystemTime>, Option<f64>) {
     if is_raw_extension(path) {
-        return None;
+        return (None, None);
     }
-    let file = std::fs::File::open(path).ok()?;
-    let exif = exif::Reader::new()
-        .read_from_container(&mut std::io::BufReader::new(file))
-        .ok()?;
+    let Some(exif) = std::fs::File::open(path).ok().and_then(|file| {
+        exif::Reader::new()
+            .read_from_container(&mut std::io::BufReader::new(file))
+            .ok()
+    }) else {
+        return (None, None);
+    };
     let ascii = |tag| {
         let field = exif.get_field(tag, exif::In::PRIMARY)?;
         match &field.value {
@@ -100,11 +112,22 @@ fn exif_capture_time(path: &Path) -> Option<std::time::SystemTime> {
             _ => None,
         }
     };
-    let t = crate::decode::image_decode::parse_exif_datetime(&ascii(exif::Tag::DateTimeOriginal)?)?;
-    Some(crate::decode::image_decode::with_subsec(
-        t,
-        ascii(exif::Tag::SubSecTimeOriginal).as_deref(),
-    ))
+    let capture = ascii(exif::Tag::DateTimeOriginal)
+        .and_then(|s| crate::decode::image_decode::parse_exif_datetime(&s))
+        .map(|t| {
+            crate::decode::image_decode::with_subsec(
+                t,
+                ascii(exif::Tag::SubSecTimeOriginal).as_deref(),
+            )
+        });
+    let shutter = exif
+        .get_field(exif::Tag::ExposureTime, exif::In::PRIMARY)
+        .and_then(|f| match &f.value {
+            exif::Value::Rational(r) => r.first().map(|r| r.to_f64()),
+            _ => None,
+        })
+        .filter(|t| t.is_finite() && *t > 0.0);
+    (capture, shutter)
 }
 
 /// EXIF `DateTimeOriginal` with `OffsetTimeOriginal`, else `DateTime` with

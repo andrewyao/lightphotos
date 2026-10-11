@@ -300,6 +300,9 @@ impl ToolbarControl {
                 let name = |sort| match sort {
                     GridSort::Name => t.sort_name,
                     GridSort::Time => t.sort_time,
+                    GridSort::Modified => t.sort_modified,
+                    GridSort::Size => t.sort_size,
+                    GridSort::Shutter => t.sort_shutter,
                     GridSort::Quality => t.sort_quality,
                 };
                 egui::ComboBox::from_id_salt("grid_sort")
@@ -308,10 +311,16 @@ impl ToolbarControl {
                     .show_ui(ui, |ui| {
                         for sort in sort_choices(app) {
                             let mut item = ui.selectable_label(current == sort, name(sort));
-                            match sort {
-                                GridSort::Time => item = item.on_hover_text(t.sort_time_tip),
-                                GridSort::Quality => item = item.on_hover_text(t.sort_quality_tip),
-                                GridSort::Name => {}
+                            let tip = match sort {
+                                GridSort::Name => None,
+                                GridSort::Time => Some(t.sort_time_tip),
+                                GridSort::Modified => Some(t.sort_modified_tip),
+                                GridSort::Size => Some(t.sort_size_tip),
+                                GridSort::Shutter => Some(t.sort_shutter_tip),
+                                GridSort::Quality => Some(t.sort_quality_tip),
+                            };
+                            if let Some(tip) = tip {
+                                item = item.on_hover_text(tip);
                             }
                             if item.clicked() && current != sort {
                                 out.actions.push(UiAction::SetSort(sort));
@@ -325,12 +334,17 @@ impl ToolbarControl {
 }
 
 /// The Grid's sorts on offer. Quality waits out a scoring run, since each
-/// new score would reorder the Grid, and the browser can't read capture
-/// times.
+/// new score would reorder the Grid, and the browser can't read a file's
+/// metadata by path.
 fn sort_choices(app: &App) -> Vec<GridSort> {
     let mut sorts = vec![GridSort::Name];
     if !cfg!(target_arch = "wasm32") {
-        sorts.push(GridSort::Time);
+        sorts.extend([
+            GridSort::Time,
+            GridSort::Modified,
+            GridSort::Size,
+            GridSort::Shutter,
+        ]);
     }
     if app.quality_sort_available() {
         sorts.push(GridSort::Quality);

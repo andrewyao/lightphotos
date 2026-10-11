@@ -404,6 +404,7 @@ impl App {
         self.autotone.forget(path);
         self.rotations.remove(path);
         self.capture_times.remove(path);
+        self.sort_meta.remove(path);
         self.signals.forget(path);
 
         #[cfg(target_arch = "wasm32")]

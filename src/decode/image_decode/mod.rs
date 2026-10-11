@@ -156,6 +156,18 @@ pub struct ImageMetadata {
     pub source_size: Option<(u32, u32)>,
 }
 
+/// What the Grid's sorts read from a photo's file and metadata. Each is
+/// `None` when unreadable, and such photos sort last.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SortMeta {
+    pub capture: Option<SystemTime>,
+    pub modified: Option<SystemTime>,
+    /// Bytes on disk.
+    pub size: Option<u64>,
+    /// Exposure time in seconds.
+    pub shutter: Option<f64>,
+}
+
 /// A wall-clock time for display. For a capture date this is the camera's
 /// clock as recorded, since EXIF has no time zone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -489,14 +501,33 @@ fn offset_seconds(s: &str) -> Option<i64> {
     (h <= 14 && m < 60 && rest.len() == 5).then(|| sign * (h * 3600 + m * 60))
 }
 
-/// Capture time from EXIF or TIFF, else the file's mtime so grouping always
-/// has something to sort by. `None` only when the mtime is unreadable too.
+/// What the Grid's sorts and burst grouping read from `path`. The capture
+/// time comes from EXIF or TIFF, else the file's mtime so grouping always
+/// has something to sort by.
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
-pub fn capture_time(path: &Path) -> Option<SystemTime> {
-    let source = open_image_source(path).ok()?;
-    read_capture_time(&source)
-        .or_else(|| std::fs::metadata(path).ok().and_then(|m| m.modified().ok()))
+pub fn sort_meta(path: &Path) -> SortMeta {
+    let stat = std::fs::metadata(path).ok();
+    let modified = stat.as_ref().and_then(|m| m.modified().ok());
+    let (capture, shutter) = open_image_source(path)
+        .ok()
+        .map(|source| (read_capture_time(&source), read_exposure_time(&source)))
+        .unwrap_or_default();
+    SortMeta {
+        capture: capture.or(modified),
+        modified,
+        size: stat.map(|m| m.len()),
+        shutter,
+    }
+}
+
+/// EXIF `ExposureTime` in seconds.
+#[cfg(target_os = "macos")]
+fn read_exposure_time(source: &CGImageSource) -> Option<f64> {
+    // SAFETY: index 0 exists and no options are passed.
+    let props = unsafe { source.properties_at_index(0, None) }?;
+    let exif = dict_dictionary(&props, key!(kCGImagePropertyExifDictionary))?;
+    dict_f64(exif, key!(kCGImagePropertyExifExposureTime)).filter(|t| t.is_finite() && *t > 0.0)
 }
 
 /// EXIF `DateTimeOriginal`, else TIFF `DateTime`.

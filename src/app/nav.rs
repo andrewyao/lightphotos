@@ -95,8 +95,8 @@ impl App {
         let anchor_pl = self.anchor.and_then(|p| self.visible.get(p).copied());
         let sel_pl = self.selected_index();
 
-        if self.grid_sort == GridSort::Time {
-            self.request_capture_times();
+        if self.grid_sort.reads_files() {
+            self.request_sort_meta();
         }
         let Some(pl) = &self.playlist else {
             self.visible.clear();
@@ -151,13 +151,30 @@ impl App {
                     .retain(|&i| entries.get(i).is_none_or(|p| !gone.contains(p)));
             }
         }
-        if self.grid_sort == GridSort::Time {
-            let times = &self.capture_times;
-            // Stable, so equal times and the untimed tail keep name order.
-            self.visible.sort_by_key(|&i| {
-                let t = entries.get(i).and_then(|p| times.get(p).copied().flatten());
+        // Each sort is stable, so ties and the unknown tail keep name order.
+        let meta = |i: usize| entries.get(i).and_then(|p| self.sort_meta.get(p));
+        match self.grid_sort {
+            GridSort::Name | GridSort::Quality => {}
+            GridSort::Time => {
+                let times = &self.capture_times;
+                self.visible.sort_by_key(|&i| {
+                    let t = entries.get(i).and_then(|p| times.get(p).copied().flatten());
+                    (t.is_none(), t)
+                });
+            }
+            GridSort::Modified => self.visible.sort_by_key(|&i| {
+                let t = meta(i).and_then(|m| m.modified);
+                (t.is_none(), t.map(std::cmp::Reverse))
+            }),
+            GridSort::Size => self.visible.sort_by_key(|&i| {
+                let s = meta(i).and_then(|m| m.size);
+                (s.is_none(), s.map(std::cmp::Reverse))
+            }),
+            // A positive finite f64's bits order as the number does.
+            GridSort::Shutter => self.visible.sort_by_key(|&i| {
+                let t = meta(i).and_then(|m| m.shutter).map(f64::to_bits);
                 (t.is_none(), t)
-            });
+            }),
         }
         if self.grid_sort == GridSort::Quality {
             let catalog = &self.catalog;

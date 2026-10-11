@@ -318,6 +318,53 @@ mod tests {
     }
 
     #[test]
+    fn the_file_sorts_order_by_their_field_and_put_the_unknown_last() {
+        use crate::decode::image_decode::SortMeta;
+        let (mut app, dir, paths) = folder_app(4);
+        let at = |s| Some(std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(s));
+        let metas = [
+            (None, None, None),
+            (at(100), Some(3_000), Some(1.0 / 60.0)),
+            (at(300), Some(1_000), Some(1.0 / 1000.0)),
+            (at(200), Some(2_000), Some(2.0)),
+        ];
+        app.on_sort_meta(
+            paths
+                .iter()
+                .zip(metas)
+                .map(|(p, (modified, size, shutter))| {
+                    let meta = SortMeta {
+                        capture: None,
+                        modified,
+                        size,
+                        shutter,
+                    };
+                    (p.clone(), meta)
+                })
+                .collect(),
+        );
+        app.set_sort(GridSort::Modified);
+        assert_eq!(
+            visible_names(&app),
+            ["p02.jpg", "p03.jpg", "p01.jpg", "p00.jpg"],
+            "newest first"
+        );
+        app.set_sort(GridSort::Size);
+        assert_eq!(
+            visible_names(&app),
+            ["p01.jpg", "p03.jpg", "p02.jpg", "p00.jpg"],
+            "largest first"
+        );
+        app.set_sort(GridSort::Shutter);
+        assert_eq!(
+            visible_names(&app),
+            ["p02.jpg", "p01.jpg", "p03.jpg", "p00.jpg"],
+            "fastest first"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn scoring_a_group_scores_every_photo_in_it() {
         let (mut app, dir, paths) = folder_app(5);
         crate::app::nav::tests::group_photos(&mut app, &[0, 1, 2], 0);

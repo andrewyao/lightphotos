@@ -472,7 +472,7 @@ impl App {
                 || !exifs.is_empty()
                 || loader.has_baked();
             if !metas.is_empty() {
-                self.on_capture_times(metas);
+                self.on_sort_meta(metas);
             }
             if !exifs.is_empty() {
                 self.on_exif_info(exifs);

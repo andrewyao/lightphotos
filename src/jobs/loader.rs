@@ -18,7 +18,6 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Condvar, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread;
-use std::time::SystemTime;
 
 use crate::decode::image_decode::{self, DecodedImage, ImageMetadata};
 use crate::develop::{Adjustments, TouchUp};
@@ -152,7 +151,7 @@ enum JobResult {
     Full(PathBuf, Result<DecodedImage, String>),
     Thumb(PathBuf, u32, Result<Arc<DecodedImage>, String>),
     Exif(PathBuf, ImageMetadata),
-    Meta(PathBuf, Option<SystemTime>),
+    Meta(PathBuf, image_decode::SortMeta),
     /// `None` when the bake panicked.
     Baked(PathBuf, u32, u64, Option<BakedThumb>),
     #[cfg(target_arch = "wasm32")]
@@ -586,9 +585,9 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
         }
         Job::Meta(path) => {
             let t = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                image_decode::capture_time(&path)
+                image_decode::sort_meta(&path)
             }))
-            .unwrap_or(None);
+            .unwrap_or_default();
             JobResult::Meta(path, t)
         }
         Job::Bake(job) => {
@@ -827,8 +826,8 @@ pub struct Arrivals {
     pub full: Vec<PathBuf>,
     /// Thumbnails that landed, keyed by their longest side in pixels.
     pub thumbs: Vec<(PathBuf, u32)>,
-    /// Capture times read from file metadata.
-    pub metas: Vec<(PathBuf, Option<SystemTime>)>,
+    /// What the Grid's sorts read from each file.
+    pub metas: Vec<(PathBuf, image_decode::SortMeta)>,
     /// EXIF read for `App::on_exif_info`.
     pub exifs: Vec<(PathBuf, ImageMetadata)>,
 }
@@ -1199,7 +1198,7 @@ impl Loader {
         shared.ready.notify_all();
     }
 
-    /// Requests `path`'s capture time. The result arrives in the third list
+    /// Requests `path`'s [`SortMeta`](image_decode::SortMeta). The result arrives in the third list
     /// returned by [`poll_all`](Self::poll_all). False when no result will.
     pub fn request_meta(&mut self, path: PathBuf) -> bool {
         if self.meta_inflight.contains(&path) {
