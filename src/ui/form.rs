@@ -187,6 +187,45 @@ pub(super) fn section_header(ui: &mut egui::Ui, title: &str, trailing: impl FnOn
     ui.add_space(font_size::px(ui.style(), HEADER_GAP));
 }
 
+/// A section's header that folds the section: a chevron and the title,
+/// either of which toggles it, with `trailing` at the right end of its row.
+/// Returns whether the chevron or title was clicked.
+pub(super) fn collapsing_header(
+    ui: &mut egui::Ui,
+    title: &str,
+    open: bool,
+    trailing: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let size = font_size::px(ui.style(), HEADER);
+    let clicked = ui
+        .horizontal(|ui| {
+            let (chevron_rect, chevron) =
+                ui.allocate_exact_size(egui::vec2(0.6 * size, size), egui::Sense::click());
+            let title = ui.add(
+                egui::Label::new(egui::RichText::new(title).size(size).strong())
+                    .sense(egui::Sense::click()),
+            );
+            let toggle = chevron.union(title);
+            egui::collapsing_header::paint_default_icon(
+                ui,
+                if open { 1.0 } else { 0.0 },
+                &toggle.clone().with_new_rect(egui::Rect::from_center_size(
+                    chevron_rect.center(),
+                    egui::Vec2::splat(0.5 * size),
+                )),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+            toggle
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .clicked()
+        })
+        .inner;
+    if open {
+        ui.add_space(font_size::px(ui.style(), HEADER_GAP));
+    }
+    clicked
+}
+
 /// A side panel page's heading over a rule, inset like the page under it,
 /// with `trailing` at the right end of its row.
 pub(super) fn page_heading(ui: &mut egui::Ui, title: &str, trailing: impl FnOnce(&mut egui::Ui)) {

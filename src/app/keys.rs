@@ -1283,6 +1283,29 @@ mod tests {
         assert_ne!(app.pan, (0.0, 0.0), "Shift+wheel pans once Touch Up is off");
     }
 
+    #[test]
+    fn a_folded_section_drops_out_of_the_slider_cursors_walk() {
+        use crate::develop::{Section, SliderId, SLIDERS};
+        let at = |id: SliderId| SLIDERS.iter().position(|s| s.id == id).unwrap();
+        let (mut app, _) = editor_app();
+        app.develop_focus = at(SliderId::Contrast);
+        app.toggle_section(Section::Tone);
+        assert_eq!(
+            app.develop_focus,
+            at(SliderId::Texture),
+            "a cursor in the folded section moves to the next row that shows"
+        );
+        app.develop_move(-1);
+        assert_eq!(app.develop_focus, at(SliderId::Tint), "Tone is skipped");
+        app.toggle_section(Section::Tone);
+        app.develop_move(1);
+        assert_eq!(
+            app.develop_focus,
+            at(SliderId::Exposure),
+            "Tone shows again"
+        );
+    }
+
     /// Catches a cursor that lands on a Color Mixer row the panel hides.
     #[test]
     fn the_slider_cursor_walks_only_the_rows_that_show() {

@@ -469,9 +469,16 @@ fn draw_sliders_body(
     ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
 
     let one = scope == DevelopScope::One;
+    // Headers go by what an open section would show, so a folded one keeps
+    // its header.
+    let unfolded = crate::develop::SliderView {
+        collapsed: crate::develop::Sections::NONE,
+        ..view
+    };
+    let open = |section| !view.collapsed.contains(section);
     let mut section = None;
     for (idx, s) in crate::develop::SLIDERS.iter().enumerate() {
-        if !s.shown(view) {
+        if !s.shown(unfolded) {
             continue;
         }
         if section != Some(s.section) {
@@ -482,7 +489,9 @@ fn draw_sliders_body(
             // have no one curve to bend, so it is off for them.
             if section == Some(crate::develop::Section::Presence) {
                 changed |= ui
-                    .add_enabled_ui(one, |ui| draw_curve_section(ui, app, one, &mut adj.curve))
+                    .add_enabled_ui(one, |ui| {
+                        draw_curve_section(ui, app, one, &mut adj.curve, out)
+                    })
                     .inner;
                 form::divider(ui);
             }
@@ -492,17 +501,27 @@ fn draw_sliders_body(
                 form::divider(ui);
             }
             section = Some(s.section);
-            form::section_header(ui, t.section(s.section), |ui| match s.section {
-                // The picker samples the Loupe's photo.
-                crate::develop::Section::WhiteBalance if one && app.mode() == ViewMode::Loupe => {
-                    let picker = eyedropper_button(ui, app.wb_picker_active())
-                        .on_hover_text(t.pick_gray_tip);
-                    if picker.clicked() {
-                        out.actions.push(UiAction::ToggleWbPicker);
+            let toggle = form::collapsing_header(ui, t.section(s.section), open(s.section), |ui| {
+                match s.section {
+                    // The picker samples the Loupe's photo.
+                    crate::develop::Section::WhiteBalance
+                        if one && app.mode() == ViewMode::Loupe =>
+                    {
+                        let picker = eyedropper_button(ui, app.wb_picker_active())
+                            .on_hover_text(t.pick_gray_tip);
+                        if picker.clicked() {
+                            out.actions.push(UiAction::ToggleWbPicker);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             });
+            if toggle {
+                out.actions.push(UiAction::ToggleSection(s.section));
+            }
+            if !open(s.section) {
+                continue;
+            }
             if s.section == crate::develop::Section::ColorMixer {
                 let choices = crate::develop::ColorAxis::ALL.map(|a| (a, t.color_axis(a), None));
                 let picked = form::segmented(ui, &choices, view.mixer_axis);
@@ -515,6 +534,9 @@ fn draw_sliders_body(
                 changed |=
                     super::grade_wheel::grade_wheels(ui, &mut adj.grade, view.grade_zone, one, out);
             }
+        }
+        if !open(s.section) {
+            continue;
         }
         let focused = focus_idx == Some(idx);
         let interacted = if scope == DevelopScope::Many {
@@ -555,7 +577,14 @@ fn draw_sliders_body(
 /// Remove Chromatic Aberration, ticked for all, some or none of the photos.
 fn draw_optics(ui: &mut egui::Ui, app: &App, scope: DevelopScope, out: &mut FrameOutput) {
     let t = t();
-    form::section_header(ui, t.section(crate::develop::Section::Optics), |_| {});
+    let optics = crate::develop::Section::Optics;
+    let open = !app.slider_view().collapsed.contains(optics);
+    if form::collapsing_header(ui, t.section(optics), open, |_| {}) {
+        out.actions.push(UiAction::ToggleSection(optics));
+    }
+    if !open {
+        return;
+    }
     let state = if scope == DevelopScope::None {
         CaState::Off
     } else {
@@ -1062,9 +1091,22 @@ const CURVE_CHANNEL: f32 = 24.0;
 /// and Reset row, all for the channel picked. Edits `curve` in place and
 /// returns whether it changed. The picked channel is session state, kept in
 /// egui's memory.
-fn draw_curve_section(ui: &mut egui::Ui, app: &App, one: bool, curve: &mut ToneCurve) -> bool {
+fn draw_curve_section(
+    ui: &mut egui::Ui,
+    app: &App,
+    one: bool,
+    curve: &mut ToneCurve,
+    out: &mut FrameOutput,
+) -> bool {
     let t = t();
-    form::section_header(ui, t.section(crate::develop::Section::Curve), |_| {});
+    let section = crate::develop::Section::Curve;
+    let open = !app.slider_view().collapsed.contains(section);
+    if form::collapsing_header(ui, t.section(section), open, |_| {}) {
+        out.actions.push(UiAction::ToggleSection(section));
+    }
+    if !open {
+        return false;
+    }
     let id = egui::Id::new("curve_channel");
     let mut ch: Channel = ui.data(|d| d.get_temp(id)).unwrap_or_default();
     if let Some(picked) = curve_channels(ui, ch, curve) {

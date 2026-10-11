@@ -100,6 +100,25 @@ pub struct SliderView {
     pub monochrome: bool,
     /// The Color Grading wheel whose sliders show.
     pub grade_zone: Zone,
+    /// Sections folded shut on the Sliders page.
+    pub collapsed: Sections,
+}
+
+/// A set of [`Section`]s.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, Default)]
+pub struct Sections(u16);
+
+impl Sections {
+    pub const NONE: Self = Self(0);
+
+    pub fn contains(self, section: Section) -> bool {
+        self.0 & (1 << section as u16) != 0
+    }
+
+    /// `self` with `section` in it if it was out, or out if it was in.
+    pub fn toggled(self, section: Section) -> Self {
+        Self(self.0 ^ (1 << section as u16))
+    }
 }
 
 impl Slider {
@@ -116,6 +135,9 @@ impl Slider {
     /// Whether the panel draws this slider under `view`. The keyboard
     /// cursor walks only these.
     pub fn shown(&self, view: SliderView) -> bool {
+        if view.collapsed.contains(self.section) {
+            return false;
+        }
         match self.id {
             SliderId::Mix(axis, _) => !view.monochrome && axis == view.mixer_axis,
             SliderId::Gray(_) => view.monochrome,

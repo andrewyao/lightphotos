@@ -1133,6 +1133,14 @@ impl App {
         }
     }
 
+    /// Fold `section` shut, or open it again. A cursor in a section that
+    /// folds shut moves to the next row that shows.
+    pub(super) fn toggle_section(&mut self, section: develop::Section) {
+        self.collapsed_sections = self.collapsed_sections.toggled(section);
+        self.home_develop_focus();
+        self.request_redraw();
+    }
+
     /// Show the Color Mixer's `axis`. A cursor on one of its sliders moves
     /// to the same band on the new axis, so it stays on a row that shows.
     pub(super) fn set_mixer_axis(&mut self, axis: develop::ColorAxis) {

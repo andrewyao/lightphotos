@@ -695,6 +695,8 @@ pub(crate) struct App {
     develop_focus: usize,
     /// Which of hue, saturation and luminance the Color Mixer shows.
     mixer_axis: crate::develop::ColorAxis,
+    /// The Sliders page's folded sections, for this session.
+    collapsed_sections: crate::develop::Sections,
     /// The Color Grading wheel whose sliders show.
     grade_zone: crate::develop::Zone,
     toolbar_focus: usize,
@@ -891,6 +893,7 @@ impl App {
             focus_level: FocusLevel::Selected,
             develop_focus: 0,
             mixer_axis: crate::develop::ColorAxis::Hue,
+            collapsed_sections: crate::develop::Sections::NONE,
             grade_zone: crate::develop::Zone::Shadows,
             toolbar_focus: 0,
             cursor: (0.0, 0.0),
@@ -1398,6 +1401,7 @@ impl App {
                     self.request_redraw();
                 }
                 ui::UiAction::SetMixerAxis(axis) => self.set_mixer_axis(axis),
+                ui::UiAction::ToggleSection(section) => self.toggle_section(section),
                 ui::UiAction::SetGradeZone(zone) => self.set_grade_zone(zone),
                 ui::UiAction::FocusDevelop(idx) => {
                     self.set_focus(Region::Develop, FocusLevel::Entered);

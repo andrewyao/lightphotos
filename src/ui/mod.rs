@@ -207,6 +207,8 @@ pub enum UiAction {
     FocusDevelop(usize),
     /// Show the Color Mixer's hue, saturation or luminance sliders.
     SetMixerAxis(crate::develop::ColorAxis),
+    /// Fold a Sliders page section shut, or open it again.
+    ToggleSection(crate::develop::Section),
     /// Show the sliders of this Color Grading wheel.
     SetGradeZone(crate::develop::Zone),
     SetLanguage(Lang),
