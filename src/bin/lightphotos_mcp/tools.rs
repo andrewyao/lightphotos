@@ -12,7 +12,7 @@ pub enum Mode {
 
 impl Mode {
     pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Mode, String> {
-        let (mut folder, mut port, mut token) = (None, None, None);
+        let (mut folder, mut port) = (None, None);
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or(format!("{arg} takes a value"));
@@ -25,7 +25,12 @@ impl Mode {
                             .map_err(|_| format!("--attach takes a port, not `{v}`"))?,
                     );
                 }
-                "--token" => token = Some(value()?),
+                "--token" => {
+                    return Err(format!(
+                        "pass the token in {}, not as a flag, which ps shows to every user",
+                        attached::TOKEN_ENV
+                    ))
+                }
                 _ => return Err(format!("unknown argument `{arg}`")),
             }
         }
@@ -36,16 +41,11 @@ impl Mode {
                 Ok(Mode::Headless(folder))
             }
             (None, Some(port)) => {
-                let token = token.or_else(|| {
-                    std::env::var(attached::TOKEN_ENV)
-                        .ok()
-                        .filter(|t| !t.is_empty())
-                });
+                let token = std::env::var(attached::TOKEN_ENV)
+                    .ok()
+                    .filter(|t| !t.is_empty());
                 if token.is_none() {
-                    eprintln!(
-                        "[lightphotos-mcp] no token: set {} or pass --token",
-                        attached::TOKEN_ENV
-                    );
+                    eprintln!("[lightphotos-mcp] no token: set {}", attached::TOKEN_ENV);
                 }
                 eprintln!("[lightphotos-mcp] attached to 127.0.0.1:{port}");
                 Ok(Mode::Attached(attached::App::new(port, token)))
@@ -213,5 +213,21 @@ impl Mode {
             Mode::Attached(app) => app.call(tool, args),
             Mode::Headless(folder) => folder.call(tool, args),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_token_is_not_taken_as_a_flag() {
+        let args = ["--attach", "7777", "--token", "0123456789abcdef"].map(String::from);
+        let err = Mode::from_args(args).err();
+        assert!(
+            err.as_deref()
+                .is_some_and(|e| e.contains(attached::TOKEN_ENV)),
+            "{err:?}"
+        );
     }
 }

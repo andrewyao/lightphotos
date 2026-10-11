@@ -19,7 +19,8 @@
 //! lightphotos-mcp --attach 7777               # drives `lightphotos --control 7777`
 //! ```
 //!
-//! Attached, the token comes from `LIGHTPHOTOS_CONTROL_TOKEN` or `--token`.
+//! Attached, the token comes from `LIGHTPHOTOS_CONTROL_TOKEN`, never a flag,
+//! which `ps` would show.
 //! The tools are a small fixed set; `list_commands` describes every command
 //! `run_command` takes. stdout carries the protocol only, so every log line
 //! goes to stderr. Desktop only.
@@ -43,7 +44,7 @@ fn main() -> std::process::ExitCode {
         Err(e) => {
             eprintln!("lightphotos-mcp: {e}");
             eprintln!("usage: lightphotos-mcp --folder <dir>");
-            eprintln!("       lightphotos-mcp --attach <port> [--token <token>]");
+            eprintln!("       LIGHTPHOTOS_CONTROL_TOKEN=<token> lightphotos-mcp --attach <port>");
             return std::process::ExitCode::from(2);
         }
     };

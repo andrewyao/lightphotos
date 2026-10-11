@@ -120,7 +120,7 @@ Headless, it works on one folder with no app open. Commands marked `headless` (r
 claude mcp add lightphotos -- /path/to/lightphotos-mcp --folder ~/Pictures/shoot
 ```
 
-Attached, it drives a running app through the control channel, and `screenshot` returns the window. Start the app and the server with the same token:
+Attached, it drives a running app through the control channel, and `screenshot` returns the window. Start the app and the server with the same token. The token goes in `LIGHTPHOTOS_CONTROL_TOKEN`, not on the command line, where `ps` shows it to every user:
 
 ```sh
 LIGHTPHOTOS_CONTROL_TOKEN=<32 hex characters> ./target/release/lightphotos --control 7777 ~/Pictures/shoot

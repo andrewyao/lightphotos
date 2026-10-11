@@ -105,7 +105,7 @@ impl App {
         };
         let token = self.token.as_deref().ok_or_else(|| {
             fail(format!(
-                "no control token. Set {TOKEN_ENV} for lightphotos-mcp (or pass --token) to \
+                "no control token. Set {TOKEN_ENV} for lightphotos-mcp to \
                  the token the app printed at startup, or start the app with the same \
                  {TOKEN_ENV}."
             ))
