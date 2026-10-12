@@ -627,10 +627,12 @@ impl App {
             .into_iter()
             .map(|(p, _, _)| p)
             .collect();
-        // Auto Tone needs thumbnails for its photos even off screen, and
+        // Auto Tone needs thumbnails for its window even off screen, and
         // `loader.rs`'s queue has no workers on wasm32. They go after the
-        // visible grid so the grid reads first.
-        keys.extend(self.autotone.pending().cloned());
+        // visible grid so the grid reads first. Only the window: the cache
+        // holds the grid plus the window, so asking for the whole batch
+        // fetches photos it evicts before Auto Tone reads them.
+        keys.extend(self.autotone.window().cloned());
         self.prepare_web_thumb_cache();
         let Some(decoder) = self.loader.as_ref().map(|l| l.web_decoder()) else {
             return false;

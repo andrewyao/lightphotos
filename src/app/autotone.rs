@@ -104,9 +104,11 @@ impl AutoTone {
         self.window.len()
     }
 
+    /// The photos whose thumbnails the batch wants now. The rest of the
+    /// batch waits in the queue until the window has room.
     #[cfg(target_arch = "wasm32")]
-    pub(super) fn pending(&self) -> impl Iterator<Item = &PathBuf> {
-        self.pending.iter()
+    pub(super) fn window(&self) -> impl Iterator<Item = &PathBuf> {
+        self.window.iter()
     }
 
     /// The batch that waited for the catalog, once it has loaded.
