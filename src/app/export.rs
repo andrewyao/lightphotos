@@ -181,6 +181,16 @@ impl App {
         self.exports.progress.is_some()
     }
 
+    /// Whether a batch or the album add that ends it is still running. The
+    /// form is disabled meanwhile.
+    pub(crate) fn export_busy(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        let adding_to_album = self.exports.album_add.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let adding_to_album = false;
+        self.exports.progress.is_some() || adding_to_album
+    }
+
     pub(crate) fn export_settings(&self) -> &ExportSettings {
         &self.exports.settings
     }
@@ -233,13 +243,9 @@ impl App {
         }
         // One batch at a time. A second batch would pick the same file names
         // before the first batch's files exist on disk, and overwrite them.
-        if self.exports.progress.is_some() {
-            return Some(t.export_in_progress);
-        }
         // The album add that ends an Immich batch counts as part of it: a
         // batch started meanwhile would create a second new album.
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.exports.album_add.is_some() {
+        if self.export_busy() {
             return Some(t.export_in_progress);
         }
         // The edit maps read below fill in only after the background catalog
@@ -266,8 +272,6 @@ impl App {
         None
     }
 
-    /// Export in the form: export the selection with the form's settings. The
-    /// form closes once the batch is running, and the toast takes over.
     /// Take a keystroke in one of the form's text fields: in memory now,
     /// saved when the field loses focus ([`App::set_export_settings`]) or
     /// the form closes, runs or the app quits.
@@ -307,7 +311,12 @@ impl App {
         }
     }
 
+    /// Export in the form: export the selection with the form's settings. The
+    /// form stays up, disabled while the batch runs, and stays up after.
     pub(super) fn run_export_form(&mut self) {
+        if self.export_busy() {
+            return;
+        }
         self.save_export_edits();
         if let Some(why) = self.export_blocker() {
             self.set_status(StatusKind::Error, why.into());
@@ -315,9 +324,6 @@ impl App {
             return;
         }
         self.start_export(self.action_paths());
-        if self.exports.progress.is_some() {
-            self.close_export_form();
-        }
     }
 
     /// Where a folder export would land, for the form to show.
@@ -854,12 +860,7 @@ impl App {
     /// True while a long operation owns the status line. One predicate rather
     /// than a condition that grows an `||` per feature.
     pub(crate) fn batch_running(&self) -> bool {
-        #[cfg(not(target_arch = "wasm32"))]
-        let adding_to_album = self.exports.album_add.is_some();
-        #[cfg(target_arch = "wasm32")]
-        let adding_to_album = false;
-        self.exports.progress.is_some()
-            || adding_to_album
+        self.export_busy()
             || self.bulk_delete.is_some()
             || self.autotone.is_running()
             || self.score_progress().is_some()
@@ -999,8 +1000,8 @@ mod status_tests {
             app.toggle_export_form();
             app.run_export_form();
             assert!(
-                !app.export_form_open(),
-                "the form closes once the batch runs"
+                app.export_form_open(),
+                "the form stays up while the batch runs"
             );
             let deadline = Instant::now() + std::time::Duration::from_secs(120);
             while app.exports.progress.is_some() {
@@ -1022,6 +1023,38 @@ mod status_tests {
             "the same bytes again converge on the existing assets"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Export in the form keeps the form up, disabled while the batch runs,
+    /// and still up once it ends.
+    #[test]
+    fn the_form_stays_up_through_its_batch() {
+        let (mut app, dir, _) = crate::app::test_support::folder_app("export-wait", 1);
+        app.selected.insert(0);
+        let out = temp_folder("export-wait-out");
+        app.exports.exporter = Some(crate::export::Exporter::new());
+        app.exports.settings.target = ExportTarget::Folder(FolderChoice::Custom(out.clone()));
+        app.toggle_export_form();
+
+        app.run_export_form();
+        assert!(app.export_busy(), "the batch is running");
+        assert!(app.export_form_open(), "the form stays up while it runs");
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        while app.export_busy() {
+            assert!(Instant::now() < deadline, "the batch finished in time");
+            let outcomes = app.poll_exporter();
+            if !outcomes.is_empty() {
+                app.on_export_outcomes(outcomes);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            app.export_form_open(),
+            "the form stays up when the batch ends"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     #[test]

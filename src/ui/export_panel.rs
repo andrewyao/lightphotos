@@ -47,12 +47,15 @@ pub(super) fn draw_export_panel(
             .show_inside(ui, |ui| {
                 form::page_footer(ui, |ui| export_footer(ui, app, settings, out))
             });
+        // Disabled while a batch runs, so its settings can't change under it.
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                form::page_heading(ui, &(t.export_title)(app.action_count()), |_| {});
-                form::page(ui, |ui| {
-                    draw_export_form(ui, app, settings, &mut next, &mut draft, out)
+                ui.add_enabled_ui(!app.export_busy(), |ui| {
+                    form::page_heading(ui, &(t.export_title)(app.action_count()), |_| {});
+                    form::page(ui, |ui| {
+                        draw_export_form(ui, app, settings, &mut next, &mut draft, out)
+                    });
                 });
             });
     });
@@ -102,7 +105,10 @@ fn export_footer(ui: &mut egui::Ui, app: &App, settings: &ExportSettings, out: &
     let t = t();
     let blocker = app.export_blocker();
     let buttons = [
-        Button::new(t.cancel, Role::Cancel),
+        Button {
+            enabled: !app.export_busy(),
+            ..Button::new(t.cancel, Role::Cancel)
+        },
         Button {
             enabled: blocker.is_none(),
             ..Button::new(t.export_run, Role::Primary)
