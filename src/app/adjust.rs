@@ -66,11 +66,9 @@ impl App {
         self.develop_page_shown().map(RailItem::Develop)
     }
 
-    /// The lit icon turns its page off; any other icon shows its page in
+    /// The lit icon hides the panel; any other icon shows its page in
     /// place of the lit one. Leaving a Develop page ends its tool the way
     /// switching pages does: a crop is kept and the brush is put down.
-    /// Info, Compare and Export stand in for Develop without closing it, so
-    /// turning one off brings back the page Develop had.
     pub(super) fn click_rail(&mut self, item: RailItem) {
         if self.mode == ViewMode::Grid && !item.in_grid() {
             return;
@@ -78,6 +76,11 @@ impl App {
         let lit = self.rail_lit() == Some(item);
         if item != RailItem::Info {
             self.info_open = false;
+        }
+        // Info, Compare and Export stand in for Develop, so hiding one
+        // hides Develop too rather than bring back its page.
+        if lit {
+            self.develop_open = false;
         }
         match item {
             RailItem::Info if lit => {
@@ -108,11 +111,12 @@ impl App {
             }
             RailItem::Develop(_) if lit => {
                 self.put_down_develop_tools();
-                self.develop_open = false;
-                self.normalize_focus();
                 self.request_redraw();
             }
             RailItem::Develop(tab) => self.show_develop_page(tab),
+        }
+        if lit {
+            self.normalize_focus();
         }
     }
 
@@ -1260,11 +1264,7 @@ mod tests {
 
             press(&mut app, RailItem::Export);
             assert!(!app.export_form_open(), "Export's own icon closes it");
-            assert_eq!(
-                app.rail_lit(),
-                Some(RailItem::Develop(DevelopTab::Masks)),
-                "closing Export brings back the page Develop had"
-            );
+            assert_eq!(app.rail_lit(), None, "closing Export hides the panel");
 
             press(&mut app, RailItem::Export);
             press(&mut app, RailItem::Develop(DevelopTab::Sliders));
@@ -1302,6 +1302,17 @@ mod tests {
 
             press(&mut app, DevelopTab::Crop);
             assert_eq!(app.develop_page_shown(), Some(DevelopTab::Crop));
+        }
+
+        #[test]
+        fn the_lit_info_icon_hides_the_panel() {
+            let mut app = loupe("rail-info");
+            app.click_rail(RailItem::Info);
+            assert_eq!(app.rail_lit(), Some(RailItem::Info));
+            app.click_rail(RailItem::Info);
+            assert_eq!(app.rail_lit(), None, "Info's own icon hides the panel");
+            app.click_rail(RailItem::Info);
+            assert_eq!(app.rail_lit(), Some(RailItem::Info));
         }
 
         #[test]

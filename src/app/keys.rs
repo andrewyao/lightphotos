@@ -1217,11 +1217,7 @@ mod tests {
         assert_eq!(app.rail_lit(), Some(RailItem::Info));
         assert_eq!(app.develop_page_shown(), None, "Info takes Develop's place");
         press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
-        assert_eq!(
-            app.develop_page_shown(),
-            Some(DevelopTab::Sliders),
-            "and closing it brings Develop back"
-        );
+        assert_eq!(app.rail_lit(), None, "and closing it hides the panel");
 
         press(&mut app, ModifiersState::empty(), KeyCode::KeyI);
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyE);

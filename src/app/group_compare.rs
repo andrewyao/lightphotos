@@ -1126,7 +1126,7 @@ mod tests {
             GroupView::Edit,
             "its own icon turns it off"
         );
-        assert_eq!(app.develop_page_shown(), Some(DevelopTab::Masks));
+        assert_eq!(app.rail_lit(), None, "and hides the panel");
 
         act(&mut app, group());
         act(&mut app, page(DevelopTab::Sliders));
