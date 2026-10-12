@@ -38,7 +38,7 @@ impl App {
             } else {
                 self.sort_meta.contains_key(path)
             };
-            if !known && !loader.request_meta(path.clone()) {
+            if !known && !loader.request_meta(path) {
                 // No worker will read it, so it sorts with the unknown.
                 self.capture_times.entry(path.clone()).or_insert(None);
                 self.sort_meta.insert(path.clone(), Default::default());
@@ -55,10 +55,7 @@ impl App {
             if self.capture_times.contains_key(path) {
                 continue;
             }
-            let queued = self
-                .loader
-                .as_mut()
-                .is_some_and(|l| l.request_meta(path.clone()));
+            let queued = self.loader.as_mut().is_some_and(|l| l.request_meta(path));
             if queued {
                 waiting.push(path.clone());
             } else {

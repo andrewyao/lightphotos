@@ -11,6 +11,10 @@ use crate::develop::{self};
 use crate::jobs::thumbnail::{Origin, THUMB_PX};
 use crate::persist::signalcache::Signal;
 
+/// How often the Grid sorts again while capture times or sort metadata are
+/// still arriving.
+const META_SORT_EVERY: std::time::Duration = std::time::Duration::from_millis(250);
+
 impl App {
     pub(crate) fn request_redraw(&self) {
         if let Some(w) = &self.window {
@@ -297,8 +301,19 @@ impl App {
             self.signals.record(&path, Signal::Capture(t));
             self.capture_times.insert(path, t);
         }
+        // Reads land in small batches. Sorting the whole folder for each one
+        // reshuffles the Grid a hundred times on a cold folder, so sort at
+        // most every `META_SORT_EVERY`, and once more when the last lands.
         if self.sort_order.key.reads_files() {
-            self.recompute_visible();
+            let now = Instant::now();
+            let due = self
+                .last_meta_sort
+                .is_none_or(|at| now.duration_since(at) >= META_SORT_EVERY);
+            let last = !self.loader.as_ref().is_some_and(|l| l.meta_pending());
+            if due || last {
+                self.last_meta_sort = Some(now);
+                self.recompute_visible();
+            }
         }
         self.poll_bursts();
     }

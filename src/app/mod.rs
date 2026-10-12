@@ -564,6 +564,9 @@ pub(crate) struct App {
     capture_times: HashMap<PathBuf, Option<SystemTime>>,
     /// What the Modified, Size and Shutter sorts read, per path, once read.
     sort_meta: HashMap<PathBuf, crate::decode::image_decode::SortMeta>,
+    /// When the Grid last sorted for arriving capture times or sort metadata.
+    /// See `on_capture_times`.
+    last_meta_sort: Option<Instant>,
     /// Group Bursts' photos while their capture times are read.
     burst_scan: Option<Vec<PathBuf>>,
 
@@ -829,6 +832,7 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             signal_load_rx: None,
             capture_times: HashMap::new(),
+            last_meta_sort: None,
             sort_meta: HashMap::new(),
             burst_scan: None,
             // A test must never read the developer's own settings.

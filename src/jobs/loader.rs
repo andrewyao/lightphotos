@@ -1202,15 +1202,20 @@ impl Loader {
 
     /// Requests `path`'s [`SortMeta`](image_decode::SortMeta). The result arrives in the third list
     /// returned by [`poll_all`](Self::poll_all). False when no result will.
-    pub fn request_meta(&mut self, path: PathBuf) -> bool {
-        if self.meta_inflight.contains(&path) {
+    pub fn request_meta(&mut self, path: &Path) -> bool {
+        if self.meta_inflight.contains(path) {
             return true;
         }
-        if self.enqueue(Job::Meta(path.clone())) == Enqueued::Yes {
-            self.meta_inflight.insert(path);
+        if self.enqueue(Job::Meta(path.to_path_buf())) == Enqueued::Yes {
+            self.meta_inflight.insert(path.to_path_buf());
             return true;
         }
         false
+    }
+
+    /// Whether any `request_meta` read has not landed yet.
+    pub fn meta_pending(&self) -> bool {
+        !self.meta_inflight.is_empty()
     }
 
     /// Requests `path`'s camera, lens, and exposure metadata. The result arrives
@@ -2298,7 +2303,7 @@ mod tests {
         loader.prefetch_preview(path("a"), 2560);
         loader.request_full(path("a"));
         loader.request_exif(path("a"));
-        loader.request_meta(path("a"));
+        loader.request_meta(&path("a"));
         loader.request_thumb(path("a"), 192);
         loader.set_viewport_thumbs(&paths(&["a"]), 192);
         assert!(!loader.has_pending_image());
