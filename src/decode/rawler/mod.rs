@@ -21,11 +21,11 @@ use crate::develop::apply_raw_preview_boost;
 
 /// rawler allocates its raw buffer at whatever size the file claims. 0.7.2
 /// panicked past 50,000 samples on a side or 500 million in all; 0.8.0 drops
-/// that check and tries the allocation. Either is fatal to a wasm32 decode
-/// thread and strands everything the thread held, so a file past that limit
-/// is refused here first. rawler counts a row in samples, padded to whole
-/// tiles, so a 3-channel DNG wider than 16,666 px (a Lightroom panorama) is
-/// past it.
+/// that check and tries the allocation, which wraps or aborts on wasm32 and
+/// strands everything the decode thread held. rawler counts in samples,
+/// padded to whole tiles, so the cap here is 500 million of them (1 GB of
+/// u16), checked before rawler runs. A long side alone is fine: a 40,000 px
+/// panorama decodes.
 pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<(), String> {
     use rawler::decoders::WellKnownIFD;
     use rawler::tags::TiffCommonTag;
@@ -46,12 +46,7 @@ pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<
     let cpp = tag(TiffCommonTag::SamplesPerPixel).unwrap_or(1).max(1);
     let row = padded_to_tiles(width, tag(TiffCommonTag::TileWidth)).saturating_mul(cpp);
     let rows = padded_to_tiles(height, tag(TiffCommonTag::TileLength));
-    if width == 0
-        || height == 0
-        || row > 50_000
-        || rows > 50_000
-        || row.saturating_mul(rows) > 500_000_000
-    {
+    if width == 0 || height == 0 || row.saturating_mul(rows) > 500_000_000 {
         return Err(format!(
             "{width}x{height} with {cpp} samples per pixel is too large to decode"
         ));

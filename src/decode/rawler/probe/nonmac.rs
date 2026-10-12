@@ -892,49 +892,45 @@ mod tests {
         report.expect("rawler's decoded pixels diverged from the analytic gradient ground truth");
     }
 
-    /// rawler counts a row in samples, so 16,667 RGB pixels (50,001 samples)
-    /// is one past its limit. On wasm32 its panic kills the decode thread, so
-    /// the preview decode has to refuse that file with an error first.
+    /// 0.7.2 panicked past 50,000 samples on a side, so a 3-channel DNG wider
+    /// than 16,666 px was refused. 0.8.0 decodes it, so it must reach rawler.
     #[test]
-    fn a_dng_one_sample_past_rawlers_limit_is_refused_before_rawler_panics() {
-        let read_fixture = |width: u32| {
-            let path = std::env::temp_dir().join(format!(
-                "lightphotos_linear_dng_limit_{width}_{}.dng",
-                std::process::id()
-            ));
-            write_linear_dng(&path, width, 4).expect("write_linear_dng failed");
-            let bytes = std::fs::read(&path).expect("read fixture");
-            let _ = std::fs::remove_file(&path);
-            bytes
-        };
-        let past = read_fixture(16_667);
-        let within = read_fixture(16_666);
+    fn a_dng_past_rawlers_old_side_limit_decodes() {
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_linear_dng_wide_{}.dng",
+            std::process::id()
+        ));
+        write_linear_dng(&path, 40_000, 4).expect("write_linear_dng failed");
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let _ = std::fs::remove_file(&path);
 
-        // rawler catches its own panic on native and reports it as an error.
-        // wasm32 aborts before that catch can run.
-        let rawler_panics = |bytes: &[u8]| {
-            let source = rawler::rawsource::RawSource::new_from_slice(bytes);
-            let params = rawler::decoders::RawDecodeParams::default();
-            match std::panic::catch_unwind(|| rawler::decode(&source, &params)) {
-                Err(_) => true,
-                Ok(r) => r.is_err_and(|e| e.to_string().contains("Caught a panic")),
-            }
-        };
-        assert!(
-            rawler_panics(&past),
-            "rawler no longer panics at 50,001 samples"
-        );
-        assert!(!rawler_panics(&within), "rawler panics below its limit");
-
-        match raw_preview::decode_raw_fast_from_bytes(&past, u32::MAX) {
-            Ok(_) => panic!("a file past rawler's limit decoded"),
-            Err(e) => assert!(
-                e.contains("too large"),
-                "refused by a panic, not the check: {e}"
-            ),
+        if let Err(e) = raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX) {
+            panic!("a 40,000 px wide DNG was refused: {e}");
         }
-        if let Err(e) = raw_preview::decode_raw_fast_from_bytes(&within, u32::MAX) {
-            panic!("a file within rawler's limit was refused: {e}");
+    }
+
+    /// A small file whose header claims more than 500 million samples is
+    /// refused before rawler allocates that much.
+    #[test]
+    fn a_dng_claiming_too_many_samples_is_refused_before_rawler_allocates() {
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_linear_dng_huge_{}.dng",
+            std::process::id()
+        ));
+        write_linear_dng(&path, 4, 4).expect("write_linear_dng failed");
+        let mut bytes = std::fs::read(&path).expect("read fixture");
+        let _ = std::fs::remove_file(&path);
+        // ImageWidth and ImageLength are the IFD's 2nd and 3rd entries, LONG
+        // values inline at IFD offset 8 + 2 + 12 * n + 8.
+        let claim = |bytes: &mut Vec<u8>, at: usize, v: u32| {
+            bytes[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        claim(&mut bytes, 30, 20_000);
+        claim(&mut bytes, 42, 10_000);
+
+        match raw_preview::decode_raw_fast_from_bytes(&bytes, u32::MAX) {
+            Ok(_) => panic!("a 600 million sample claim decoded"),
+            Err(e) => assert!(e.contains("too large"), "not refused by the check: {e}"),
         }
     }
 
