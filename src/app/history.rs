@@ -4,6 +4,7 @@
 //! Chromatic Aberration batch: a step stays open until the pointer is up at
 //! the end of a frame and no batch is running.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::develop::{Adjustments, TouchUp};
@@ -25,6 +26,9 @@ pub(crate) struct EditHistory {
 #[derive(Default)]
 pub(crate) struct EditStep {
     pub(crate) before: Vec<Before>,
+    /// Each path's index in `before`, so a step over thousands of photos
+    /// finds a photo's entry without a scan.
+    index: HashMap<PathBuf, usize>,
 }
 
 pub(crate) struct Before {
@@ -61,15 +65,17 @@ impl EditHistory {
 
     fn entry(&mut self, path: &Path, adj: Adjustments) -> &mut Before {
         let step = self.open.get_or_insert_with(EditStep::default);
-        let i = match step.before.iter().position(|b| b.path == path) {
-            Some(i) => i,
+        let i = match step.index.get(path) {
+            Some(&i) => i,
             None => {
+                let i = step.before.len();
                 step.before.push(Before {
                     path: path.to_path_buf(),
                     adj,
                     touchups: None,
                 });
-                step.before.len() - 1
+                step.index.insert(path.to_path_buf(), i);
+                i
             }
         };
         &mut step.before[i]
