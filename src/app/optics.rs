@@ -5,7 +5,7 @@
 //! scales as an edit.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 
 use super::{App, CaState, StatusKind};
@@ -43,8 +43,8 @@ impl Optics {
         }
     }
 
-    fn waiting(&self, path: &PathBuf) -> bool {
-        self.pending.as_ref() == Some(path) || self.queue.contains(path)
+    fn waiting(&self, path: &Path) -> bool {
+        self.pending.as_deref() == Some(path) || self.queue.iter().any(|q| q == path)
     }
 }
 
@@ -52,20 +52,20 @@ impl App {
     /// The Remove Chromatic Aberration checkbox over the photos the panel
     /// acts on: on once measured, and while waiting to be measured.
     pub(crate) fn remove_ca_state(&self) -> CaState {
-        let paths = self.action_paths();
-        let on = paths
-            .iter()
-            .filter(|p| {
+        let (mut total, mut on) = (0, 0);
+        for p in self.action_path_refs() {
+            total += 1;
+            on += usize::from(
                 self.optics.waiting(p)
                     || self
                         .edits
-                        .get(*p)
-                        .is_some_and(|a| a.chromatic_aberration.is_some())
-            })
-            .count();
+                        .get(p)
+                        .is_some_and(|a| a.chromatic_aberration.is_some()),
+            );
+        }
         match on {
             0 => CaState::Off,
-            n if n == paths.len() => CaState::On,
+            n if n == total => CaState::On,
             _ => CaState::Mixed,
         }
     }

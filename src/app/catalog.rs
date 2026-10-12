@@ -800,11 +800,11 @@ impl App {
     /// Whether every photo the toolbar acts on is black and white, which is
     /// when the B&W button shows as on.
     pub(crate) fn selection_is_monochrome(&self) -> bool {
-        let paths = self.action_paths();
-        !paths.is_empty()
-            && paths
-                .iter()
-                .all(|p| self.edits.get(p).is_some_and(Adjustments::is_monochrome))
+        let mut any = false;
+        self.action_path_refs().all(|p| {
+            any = true;
+            self.edits.get(p).is_some_and(Adjustments::is_monochrome)
+        }) && any
     }
 
     /// Replaces each path's adjustments with `edit` of them, and returns how

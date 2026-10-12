@@ -167,8 +167,7 @@ impl App {
         if !self.scoring_available() {
             return None;
         }
-        self.selected_paths()
-            .iter()
+        self.selected_path_refs()
             .filter_map(|p| self.catalog.score(p))
             .map(|(s, stale)| (s.score.value, stale))
             .fold(None, |span, (v, stale)| match span {

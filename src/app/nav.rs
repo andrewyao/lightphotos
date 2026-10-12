@@ -339,6 +339,14 @@ impl App {
         }
     }
 
+    /// `action_paths` without building the list, for readers that run every
+    /// frame.
+    pub(crate) fn action_path_refs(&self) -> impl Iterator<Item = &Path> {
+        let picks = self.group_picks();
+        let selection = picks.is_empty().then(|| self.selected_path_refs());
+        picks.into_iter().chain(selection.into_iter().flatten())
+    }
+
     /// How many photos `action_paths` names, without building the list.
     pub(crate) fn action_count(&self) -> usize {
         match self.group_picks().len() {
@@ -350,17 +358,36 @@ impl App {
     /// Paths bulk actions apply to, in `visible` order. Falls back to `sel`,
     /// then in the Loupe to the photo on screen, like `selected_path`.
     pub(crate) fn selected_paths(&self) -> Vec<PathBuf> {
-        if self.mode == ViewMode::Loupe && self.selected.is_empty() && self.sel.is_none() {
-            return self.want.clone().into_iter().collect();
-        }
-        let Some(pl) = self.playlist.as_ref() else {
-            return Vec::new();
+        self.selected_path_refs().map(Path::to_path_buf).collect()
+    }
+
+    /// `selected_paths` without building the list, for readers that run
+    /// every frame.
+    pub(crate) fn selected_path_refs(&self) -> impl Iterator<Item = &Path> {
+        let want_only =
+            self.mode == ViewMode::Loupe && self.selected.is_empty() && self.sel.is_none();
+        let want = if want_only {
+            self.want.as_deref()
+        } else {
+            None
         };
-        self.selected_cells()
-            .iter()
-            .filter_map(|&p| self.visible.get(p).copied())
-            .filter_map(|i| pl.entry(i).map(|p| p.to_path_buf()))
-            .collect()
+        let pl = if want_only {
+            None
+        } else {
+            self.playlist.as_ref()
+        };
+        let sel = if self.selected.is_empty() {
+            self.sel
+        } else {
+            None
+        };
+        let cells = self.selected.iter().copied().chain(sel);
+        let listed = pl.map(move |pl| {
+            cells
+                .filter_map(|p| self.visible.get(p).copied())
+                .filter_map(move |i| pl.entry(i))
+        });
+        want.into_iter().chain(listed.into_iter().flatten())
     }
 
     /// The selection with each grouped cell expanded to every member still in

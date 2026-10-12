@@ -334,11 +334,14 @@ impl App {
     /// How much of the selection is in flag state `flag` (`None` being
     /// Unflagged): all of it, some, or none. Nothing selected counts as none.
     pub(crate) fn selection_flag_coverage(&self, flag: Option<Flag>) -> FlagCoverage {
-        let paths = self.selected_paths();
-        let n = paths.iter().filter(|p| self.flag_of(p) == flag).count();
+        let (mut total, mut n) = (0, 0);
+        for p in self.selected_path_refs() {
+            total += 1;
+            n += usize::from(self.flag_of(p) == flag);
+        }
         match n {
             0 => FlagCoverage::None,
-            n if n == paths.len() => FlagCoverage::All,
+            n if n == total => FlagCoverage::All,
             _ => FlagCoverage::Some,
         }
     }
@@ -357,10 +360,7 @@ impl App {
     /// The lowest and highest rating across the selection, `(0, 0)` when
     /// nothing is selected.
     pub(crate) fn selection_rating_span(&self) -> (u8, u8) {
-        let ratings = self
-            .selected_paths()
-            .into_iter()
-            .map(|p| self.rating_of(&p));
+        let ratings = self.selected_path_refs().map(|p| self.rating_of(p));
         ratings
             .fold(None, |span, r| match span {
                 None => Some((r, r)),
