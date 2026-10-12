@@ -60,8 +60,19 @@ impl App {
             Command::Crop(p) => p.validate()?,
             _ => {}
         }
-        if let Some(photos) = cmd.photos() {
-            self.resolve(photos)?;
+        match cmd.photos() {
+            // The menu bar checks every item on each event-loop turn, so this
+            // counts the selection rather than building its path list.
+            // `apply_command` resolves the paths when the command runs.
+            Some(Photos::Selected) => {
+                if self.action_count() == 0 && self.selected_path().is_none() {
+                    return Err(CommandError::NoPhotos);
+                }
+            }
+            Some(photos) => {
+                self.resolve(photos)?;
+            }
+            None => {}
         }
         Ok(())
     }
