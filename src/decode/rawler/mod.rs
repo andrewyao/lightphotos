@@ -64,7 +64,7 @@ fn padded_to_tiles(n: usize, tile: Option<usize>) -> usize {
     }
 }
 
-/// rawler 0.7.2's `apply_scaling` panics on a Linear DNG whose black level
+/// rawler's `apply_scaling` panics on a Linear DNG whose black level
 /// count differs from its white level count. The Samsung Galaxy S23 Ultra
 /// writes a 2x2 `BlackLevelRepeatDim` (12 levels for 3 channels) against 3
 /// white levels. This averages the repeat down to one black level per channel

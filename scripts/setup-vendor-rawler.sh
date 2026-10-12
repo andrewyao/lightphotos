@@ -53,6 +53,14 @@ if [ "${1:-}" = "--check" ]; then
   exit
 fi
 
+# A version bump leaves the old tree behind; nothing points at it any more.
+for old in "$HERE"/vendor/rawler-*; do
+  [ -d "$old" ] && [ "$old" != "$DEST" ] || continue
+  echo "Removing stale $(basename "$old")..."
+  chmod -R u+w "$old" 2>/dev/null || true
+  rm -rf "$old"
+done
+
 if [ -d "$DEST" ]; then
   if [ "$FORCE" -eq 1 ]; then
     echo "Removing existing $DEST (--force)..."

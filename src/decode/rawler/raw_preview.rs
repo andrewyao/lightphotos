@@ -126,7 +126,7 @@ fn decode_raw_preview(
 
     // wasm32 builds with `panic=abort`, so `catch_unwind` only helps on native.
     // Every layout rawler would panic on must be rejected before the call.
-    // `apply_scaling()` hits `todo!()` for `BlackIsZero` (rawler 0.7.2).
+    // rawler's `apply_scaling()` hits `todo!()` for `BlackIsZero`.
     if !matches!(
         raw.photometric,
         RawPhotometricInterpretation::Cfa(_) | RawPhotometricInterpretation::LinearRaw
@@ -268,7 +268,7 @@ fn describe_photometric(photometric: &rawler::rawimage::RawPhotometricInterpreta
     }
 }
 
-/// rawler 0.7.2 always sets `RawImage.orientation` to `Normal`, so read the
+/// rawler always sets `RawImage.orientation` to `Normal`, so read the
 /// EXIF orientation from `raw_metadata()` instead.
 fn real_orientation(
     source: &rawler::rawsource::RawSource,
