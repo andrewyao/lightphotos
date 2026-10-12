@@ -348,12 +348,19 @@ impl Playlist {
         let dir = current.parent().unwrap_or_else(|| Path::new("."));
         let mut entries = sorted_images_in(dir);
 
-        // Compare normalized paths so `current` matches its entry even when
-        // spelled differently (relative, symlinked).
-        let target = crate::paths::normalize(current);
-        let index = entries
-            .iter()
-            .position(|p| crate::paths::normalize(p) == target)
+        // Every entry is `dir` joined with a name, so the entry with
+        // `current`'s name is `current`. Only when no name matches (another
+        // case on a case-insensitive disk) compare normalized paths, which
+        // costs a `realpath` per entry.
+        let index = current
+            .file_name()
+            .and_then(|name| entries.iter().position(|p| p.file_name() == Some(name)))
+            .or_else(|| {
+                let target = crate::paths::normalize(current);
+                entries
+                    .iter()
+                    .position(|p| crate::paths::normalize(p) == target)
+            })
             .unwrap_or(0);
 
         if entries.is_empty() {
