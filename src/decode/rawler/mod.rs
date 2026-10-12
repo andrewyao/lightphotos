@@ -19,12 +19,13 @@ use crate::decode::image_decode::{
 };
 use crate::develop::apply_raw_preview_boost;
 
-/// rawler 0.7.2 panics instead of returning an error when the raw buffer it
-/// is about to allocate is over 50,000 samples on a side or 500 million in
-/// all. A panic is fatal to a wasm32 decode thread and strands everything the
-/// thread held, so a file past the limit is refused here first. rawler counts
-/// a row in samples, padded to whole tiles, so a 3-channel DNG wider than
-/// 16,666 px (a Lightroom panorama) is past it.
+/// rawler allocates its raw buffer at whatever size the file claims. 0.7.2
+/// panicked past 50,000 samples on a side or 500 million in all; 0.8.0 drops
+/// that check and tries the allocation. Either is fatal to a wasm32 decode
+/// thread and strands everything the thread held, so a file past that limit
+/// is refused here first. rawler counts a row in samples, padded to whole
+/// tiles, so a 3-channel DNG wider than 16,666 px (a Lightroom panorama) is
+/// past it.
 pub fn check_rawler_size_limit(source: &rawler::rawsource::RawSource) -> Result<(), String> {
     use rawler::decoders::WellKnownIFD;
     use rawler::tags::TiffCommonTag;
@@ -106,6 +107,76 @@ pub fn normalize_linear_levels(raw: &mut rawler::RawImage) -> Result<(), String>
     Ok(())
 }
 
+/// `RawExposureBias` at DR100, the headroom every Fujifilm RAF carries. The
+/// RAW look curve already covers it, as it covers other makers' headroom.
+const FUJI_DR100_BIAS_EV: f32 = 0.72;
+
+/// The linear gain that undoes a Fujifilm DR200/DR400 setting, which
+/// underexposes the raw by 1 or 2 stops for highlight room. Apple's RAW
+/// engine applies about the same gain. `None` when the file is not a RAF,
+/// was shot at DR100, or has no readable bias.
+///
+/// rawler skips the RAF header's `RawExposureBias` tag (0x9650), so this reads
+/// it directly: offset 92 holds a big-endian pointer to a tag directory, a
+/// `u32` count, then `u16` tag, `u16` length and data per entry. The bias is
+/// two big-endian `i16`s, numerator and denominator, in EV.
+pub fn fuji_dynamic_range_gain(file: &[u8]) -> Option<f32> {
+    const MAX_ENTRIES: u32 = 256;
+    const MAX_EXTRA_EV: f32 = 3.0;
+    let be_u16 = |at: usize| {
+        Some(u16::from_be_bytes(
+            file.get(at..at.checked_add(2)?)?.try_into().ok()?,
+        ))
+    };
+    let be_u32 = |at: usize| {
+        Some(u32::from_be_bytes(
+            file.get(at..at.checked_add(4)?)?.try_into().ok()?,
+        ))
+    };
+
+    if file.get(..16)? != b"FUJIFILMCCD-RAW " {
+        return None;
+    }
+    let dir = usize::try_from(be_u32(92)?).ok()?;
+    let count = be_u32(dir)?;
+    if count > MAX_ENTRIES {
+        return None;
+    }
+    let mut at = dir.checked_add(4)?;
+    for _ in 0..count {
+        let tag = be_u16(at)?;
+        let len = usize::from(be_u16(at.checked_add(2)?)?);
+        let data = at.checked_add(4)?;
+        if tag == 0x9650 && len >= 4 {
+            let num = f32::from(be_u16(data)? as i16);
+            let den = f32::from(be_u16(data.checked_add(2)?)? as i16);
+            if den <= 0.0 {
+                return None;
+            }
+            let extra_ev = (-num / den - FUJI_DR100_BIAS_EV).clamp(0.0, MAX_EXTRA_EV);
+            return (extra_ev > 0.05).then(|| extra_ev.exp2());
+        }
+        at = data.checked_add(len)?;
+    }
+    None
+}
+
+/// Folds [`fuji_dynamic_range_gain`] into `raw.wb_coeffs`. Both RAW develop
+/// paths multiply by them in linear light, before the color matrix and the
+/// highlight clip, so the gain reaches every pixel exactly once.
+pub fn apply_fuji_dynamic_range_gain(raw: &mut rawler::RawImage, file: &[u8]) {
+    let Some(gain) = fuji_dynamic_range_gain(file) else {
+        return;
+    };
+    let wb = &mut raw.wb_coeffs;
+    if wb[..3].iter().all(|c| c.is_finite()) {
+        wb[..3].iter_mut().for_each(|c| *c *= gain);
+    } else {
+        // Both paths read non-finite coefficients as neutral.
+        *wb = [gain, gain, gain, wb[3]];
+    }
+}
+
 /// Decodes a RAW/DNG file to rawler's undeveloped `RawImage`: sensor samples
 /// with no white balance, color matrix, or gamma. Still mosaiced (cpp=1) for
 /// Bayer/X-Trans files, already RGB (cpp=3/4) for Linear DNG.
@@ -148,24 +219,9 @@ pub const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 #[allow(dead_code)]
 #[hotpath::measure]
 pub fn decode_raw_nonmac(path: &Path, max_dim: u32) -> Result<DecodedImage, String> {
-    let raw = decode_raw_via_rawler(path)?;
-    // Memory-map instead of `std::fs::read` + `new_from_slice`, which would
-    // hold two full heap copies of the file just to read the orientation.
-    let orientation = rawler::rawsource::RawSource::new(path)
-        .ok()
-        .and_then(|source| {
-            let params = rawler::decoders::RawDecodeParams::default();
-            rawler::get_decoder(&source)
-                .ok()
-                .and_then(|decoder| decoder.raw_metadata(&source, &params).ok())
-                .and_then(|meta| meta.exif.orientation)
-                .map(|orientation| {
-                    exif_code_from_rawler_orientation(rawler::Orientation::from_u16(orientation))
-                })
-        })
-        .unwrap_or_else(|| exif_code_from_rawler_orientation(raw.orientation));
-
-    develop_raw_image_to_srgb8(&raw, orientation, max_dim)
+    // Memory-mapped, so the file is never copied onto the heap.
+    let source = rawler::rawsource::RawSource::new(path).map_err(|e| e.to_string())?;
+    decode_raw_nonmac_from_source(source, max_dim)
 }
 
 /// [`decode_raw_nonmac`] for an in-memory file. Export uses it, and a browser
@@ -199,6 +255,7 @@ fn decode_raw_nonmac_from_source(
     let params = rawler::decoders::RawDecodeParams::default();
     let mut raw = rawler::decode(&source, &params).map_err(|e| e.to_string())?;
     normalize_linear_levels(&mut raw)?;
+    apply_fuji_dynamic_range_gain(&mut raw, source.buf());
     let orientation = rawler::get_decoder(&source)
         .ok()
         .and_then(|decoder| decoder.raw_metadata(&source, &params).ok())
@@ -211,6 +268,101 @@ fn decode_raw_nonmac_from_source(
     develop_raw_image_to_srgb8(&raw, orientation, max_dim)
 }
 
+/// `RawDevelop`'s default steps without the last, `SRgb`. rawler runs its
+/// steps on its own one-thread pool in the browser, and that gamma step's
+/// `powf` per channel was most of a 24 MP develop. [`display_rgba8`] does it
+/// in parallel instead.
+const LINEAR_DEVELOP_STEPS: [rawler::imgop::develop::ProcessingStep; 7] = {
+    use rawler::imgop::develop::ProcessingStep::*;
+    [
+        Rescale,
+        Demosaic,
+        FujiRotate,
+        CropActiveArea,
+        WhiteBalance,
+        Calibrate,
+        CropDefault,
+    ]
+};
+
+/// One linear channel as rawler's `SRgb` step, `to_dynamic_image` and
+/// `into_rgba8` together made it: gamma, scaled to 16 bits, then to 8.
+fn rawler_srgb8(v: f32) -> u8 {
+    let u = (rawler::imgop::srgb::srgb_apply_gamma(v) * f32::from(u16::MAX)) as u16;
+    let one = image::ImageBuffer::from_pixel(1, 1, image::Rgb([u, u, u]));
+    image::DynamicImage::ImageRgb16(one).into_rgba8().into_raw()[0]
+}
+
+/// [`rawler_srgb8`] by a search of 255 steps instead of a `powf`. Its
+/// output only rises with its input, so each step is the smallest input
+/// reaching that output, found by bisection over the float's bits. Bit for
+/// bit the same for every input, NaN and the infinities included.
+fn linear_to_rawler_srgb8(v: f32) -> u8 {
+    static STEPS: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
+    let steps = STEPS.get_or_init(|| {
+        std::array::from_fn(|i| {
+            let k = i as u8 + 1;
+            // rawler_srgb8(2.0) is 255, so every step lies below it.
+            let (mut lo, mut hi) = (0u32, 2.0f32.to_bits());
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                if rawler_srgb8(f32::from_bits(mid)) >= k {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            f32::from_bits(lo)
+        })
+    });
+    steps.partition_point(|&step| step <= v) as u8
+}
+
+/// A linear `RawDevelop` result as display sRGB8 RGBA: what rawler's `SRgb`
+/// step and `to_dynamic_image().into_rgba8()` made of it, then the display
+/// boost, a band of rows per thread. `None` for a buffer short of its size,
+/// which `to_dynamic_image` also refuses.
+fn display_rgba8(developed: &rawler::imgop::develop::Intermediate) -> Option<image::RgbaImage> {
+    use rawler::imgop::develop::Intermediate;
+    let boost: [u8; 256] =
+        std::array::from_fn(|i| (apply_raw_preview_boost(i as f32 / 255.0) * 255.0).round() as u8);
+    let shown = |v: f32| boost[linear_to_rawler_srgb8(v) as usize];
+    let (w, h, len) = match developed {
+        Intermediate::Monochrome(p) => (p.width, p.height, p.data.len()),
+        Intermediate::ThreeColor(p) => (p.width, p.height, p.data.len()),
+        Intermediate::FourColor(p) => (p.width, p.height, p.data.len()),
+    };
+    if w.checked_mul(h)? != len {
+        return None;
+    }
+    let mut rgba = vec![0u8; len.checked_mul(4)?];
+    let fill = |rgba: &mut [u8], px: &(dyn Fn(usize) -> Option<[u8; 4]> + Sync)| {
+        crate::develop::parallel::for_each_row(rgba, w * 4, |y, row| {
+            for (x, out) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                if let Some(p) = px(y * w + x) {
+                    *out = p;
+                }
+            }
+        });
+    };
+    match developed {
+        Intermediate::Monochrome(p) => fill(&mut rgba, &|i| {
+            let v = shown(*p.data.get(i)?);
+            Some([v, v, v, 255])
+        }),
+        Intermediate::ThreeColor(p) => fill(&mut rgba, &|i| {
+            let [r, g, b] = *p.data.get(i)?;
+            Some([shown(r), shown(g), shown(b), 255])
+        }),
+        // The fourth channel becomes alpha, as `to_dynamic_image` made it.
+        Intermediate::FourColor(p) => fill(&mut rgba, &|i| {
+            let [r, g, b, a] = *p.data.get(i)?;
+            Some([shown(r), shown(g), shown(b), linear_to_rawler_srgb8(a)])
+        }),
+    }
+    image::RgbaImage::from_raw(u32::try_from(w).ok()?, u32::try_from(h).ok()?, rgba)
+}
+
 /// Develops a decoded RAW to premultiplied sRGB8: `RawDevelop`, display
 /// boost, auto-denoise, `max_dim` downscale, then EXIF orientation.
 #[hotpath::measure]
@@ -221,23 +373,10 @@ fn develop_raw_image_to_srgb8(
 ) -> Result<DecodedImage, String> {
     let side = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     check_decode_size(side(raw.width), side(raw.height))?;
-    let developed = rawler::imgop::develop::RawDevelop::default()
+    let developed = rawler::imgop::develop::RawDevelop::new_with(&LINEAR_DEVELOP_STEPS)
         .develop_intermediate(raw)
         .map_err(|e| e.to_string())?;
-    let dynamic = developed
-        .to_dynamic_image()
-        .ok_or("rawler produced an empty developed image")?;
-    let mut img = dynamic.into_rgba8();
-
-    // `RawDevelop` already gamma-encoded these bytes, so the boost applies
-    // directly through a u8 lookup table.
-    let boost_lut: [u8; 256] =
-        std::array::from_fn(|i| (apply_raw_preview_boost(i as f32 / 255.0) * 255.0).round() as u8);
-    for px in img.pixels_mut() {
-        px[0] = boost_lut[px[0] as usize];
-        px[1] = boost_lut[px[1] as usize];
-        px[2] = boost_lut[px[2] as usize];
-    }
+    let mut img = display_rgba8(&developed).ok_or("rawler produced an empty developed image")?;
 
     let (src_w, src_h) = (img.width(), img.height());
     if src_w == 0 || src_h == 0 {
@@ -245,32 +384,37 @@ fn develop_raw_image_to_srgb8(
     }
     let (w, h) = fit_within(src_w, src_h, max_dim);
 
-    // Shrink before denoising, so the two f32 buffers below are preview-sized
-    // rather than sensor-sized (about 570 MB less on a 24 MP file).
+    // Shrink before denoising, so the f32 buffer below is preview-sized
+    // rather than sensor-sized (about 290 MB less on a 24 MP file).
     if (w, h) != (src_w, src_h) {
         img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3);
     }
 
     // `RawDevelop` has no mid-pipeline hook, so denoise runs on the finished
-    // sRGB8 image, decoded to the linear light `denoise_linear_rgb_buffer`
-    // expects and encoded back.
+    // sRGB8 image, decoded to the linear light the denoise expects and
+    // encoded back in place, a band of rows per thread.
     let (dw, dh) = (img.width() as usize, img.height() as usize);
+    let lut = crate::develop::image_ops::srgb8_to_linear_lut();
     let linear: Vec<[f32; 3]> = img
         .pixels()
-        .map(|p| [p[0], p[1], p[2]].map(|c| crate::develop::srgb_decode(c as f32 / 255.0)))
+        .map(|p| [p[0], p[1], p[2]].map(|c| lut[c as usize]))
         .collect();
-    let denoised =
-        crate::develop::denoise_linear_rgb_buffer(AUTO_RAW_DENOISE_STRENGTH, dw, dh, &linear);
-    let encode = |v: f32| {
-        (crate::develop::srgb_encode(v) * 255.0)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
-    for (px, lin) in img.pixels_mut().zip(denoised) {
-        px[0] = encode(lin[0]);
-        px[1] = encode(lin[1]);
-        px[2] = encode(lin[2]);
-    }
+    let encode = crate::develop::image_ops::linear_to_srgb8;
+    crate::develop::parallel::for_each_row(&mut img, dw * 4, |y, row| {
+        for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let lin = crate::develop::denoise_linear_rgb_pixel(
+                AUTO_RAW_DENOISE_STRENGTH,
+                dw,
+                dh,
+                &linear,
+                x,
+                y,
+            );
+            px[0] = encode(lin[0]);
+            px[1] = encode(lin[1]);
+            px[2] = encode(lin[2]);
+        }
+    });
 
     Ok(apply_exif_orientation(
         DecodedImage::new_tracked(DecodedImageFields {
@@ -417,12 +561,129 @@ pub fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<Decoded
 
 #[cfg(test)]
 mod tests {
-    use super::padded_to_tiles;
+    use super::{
+        apply_raw_preview_boost, display_rgba8, fuji_dynamic_range_gain, linear_to_rawler_srgb8,
+        padded_to_tiles, rawler_srgb8,
+    };
+    use rawler::imgop::develop::Intermediate;
+    use rawler::pixarray::{Color2D, PixF32};
+
+    #[test]
+    fn the_srgb8_search_matches_rawlers_curve_for_every_input() {
+        let specials = [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+            0.0,
+            1.0,
+            1e30,
+        ];
+        let sweep = (0..=u32::MAX).step_by(65_537).map(f32::from_bits);
+        for v in specials.into_iter().chain(sweep) {
+            assert_eq!(linear_to_rawler_srgb8(v), rawler_srgb8(v), "{v:e}");
+        }
+    }
+
+    /// The parallel pass gives the bytes rawler's own `SRgb` step and
+    /// `to_dynamic_image().into_rgba8()` gave before it, boost and all.
+    #[test]
+    fn display_rgba8_matches_rawlers_srgb_step_and_conversion() {
+        let (w, h) = (37, 41);
+        let values: Vec<f32> = (0..w * h * 3)
+            .map(|i| (i as f32 * 0.618_034).fract() * 1.2 - 0.1)
+            .collect();
+        let rgb: Vec<[f32; 3]> = values.as_chunks::<3>().0.to_vec();
+        let mut gamma = Color2D::new_with(rgb.clone(), w, h);
+        gamma.for_each(rawler::imgop::srgb::srgb_apply_gamma_n);
+        let mut gray = PixF32::new_with(values[..w * h].to_vec(), w, h);
+        gray.for_each(rawler::imgop::srgb::srgb_apply_gamma);
+
+        let boost = |c: u8| (apply_raw_preview_boost(f32::from(c) / 255.0) * 255.0).round() as u8;
+        for (linear, encoded) in [
+            (
+                Intermediate::ThreeColor(Color2D::new_with(rgb, w, h)),
+                Intermediate::ThreeColor(gamma),
+            ),
+            (
+                Intermediate::Monochrome(PixF32::new_with(values[..w * h].to_vec(), w, h)),
+                Intermediate::Monochrome(gray),
+            ),
+        ] {
+            let mut old = encoded.to_dynamic_image().unwrap().into_rgba8();
+            for px in old.pixels_mut() {
+                for c in 0..3 {
+                    px[c] = boost(px[c]);
+                }
+            }
+            assert_eq!(display_rgba8(&linear).unwrap(), old);
+        }
+    }
+
+    #[test]
+    fn display_rgba8_refuses_a_buffer_short_of_its_size() {
+        let short = Intermediate::ThreeColor(Color2D {
+            width: 4,
+            height: 4,
+            data: vec![[0.5; 3]; 15],
+        });
+        assert!(display_rgba8(&short).is_none());
+    }
 
     #[test]
     fn tile_padding_of_a_huge_tag_saturates_instead_of_wrapping() {
         assert_eq!(padded_to_tiles(100, Some(64)), 128);
         assert_eq!(padded_to_tiles(100, Some(0)), 100);
         assert_eq!(padded_to_tiles(usize::MAX, Some(2)), usize::MAX);
+    }
+
+    /// A RAF header whose tag directory sits at 100 and holds a 0x0100 entry
+    /// ahead of `RawExposureBias` = `num`/`den` EV.
+    fn raf_with_bias(num: i16, den: i16) -> Vec<u8> {
+        let mut f = b"FUJIFILMCCD-RAW ".to_vec();
+        f.resize(92, 0);
+        f.extend_from_slice(&100u32.to_be_bytes());
+        f.resize(100, 0);
+        f.extend_from_slice(&2u32.to_be_bytes());
+        f.extend_from_slice(&[0x01, 0x00, 0x00, 0x04, 1, 2, 3, 4]);
+        f.extend_from_slice(&[0x96, 0x50, 0x00, 0x04]);
+        f.extend_from_slice(&num.to_be_bytes());
+        f.extend_from_slice(&den.to_be_bytes());
+        f
+    }
+
+    #[test]
+    fn dr400_gains_two_stops_and_dr100_none() {
+        let dr400 = fuji_dynamic_range_gain(&raf_with_bias(-272, 100)).unwrap();
+        assert!((dr400 - 4.0).abs() < 1e-4, "{dr400}");
+        let dr200 = fuji_dynamic_range_gain(&raf_with_bias(-172, 100)).unwrap();
+        assert!((dr200 - 2.0).abs() < 1e-4, "{dr200}");
+        assert_eq!(fuji_dynamic_range_gain(&raf_with_bias(-72, 100)), None);
+    }
+
+    #[test]
+    fn a_malformed_raf_header_gives_no_gain_instead_of_panicking() {
+        let full = raf_with_bias(-272, 100);
+        for end in 0..full.len() {
+            assert_eq!(
+                fuji_dynamic_range_gain(&full[..end]),
+                None,
+                "truncated at {end}"
+            );
+        }
+        assert_eq!(fuji_dynamic_range_gain(&raf_with_bias(-272, 0)), None);
+        assert_eq!(fuji_dynamic_range_gain(&raf_with_bias(-272, -100)), None);
+        let huge = fuji_dynamic_range_gain(&raf_with_bias(i16::MIN, 1)).unwrap();
+        assert!((huge - 8.0).abs() < 1e-4, "capped at 3 stops: {huge}");
+
+        let mut far = full.clone();
+        far[92..96].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(fuji_dynamic_range_gain(&far), None);
+        let mut many = full.clone();
+        many[100..104].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(fuji_dynamic_range_gain(&many), None);
+        let mut not_raf = full;
+        not_raf[0] = b'X';
+        assert_eq!(fuji_dynamic_range_gain(&not_raf), None);
     }
 }

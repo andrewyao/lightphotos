@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Background export. Each export decodes at full resolution, bakes in the
-//! edits, and encodes the chosen format, which takes hundreds of
-//! milliseconds. A
-//! worker pool does that off the UI thread, and the frame loop drains results
-//! with `poll`. Each `ExportJob` carries everything its worker needs, so
-//! workers never touch `App`.
+//! Background export. Each export decodes as large as its size and crop
+//! need, bakes in the edits, and encodes the chosen format, which takes
+//! hundreds of milliseconds. A worker pool does that off the UI thread, and
+//! the frame loop drains results with `poll`. Each `ExportJob` carries
+//! everything its worker needs, so workers never touch `App`.
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod immich;
@@ -21,7 +20,7 @@ use std::sync::{Mutex, PoisonError};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::SystemTime;
 
-use crate::decode::image_encode::{Embedded, Encoding, Pixels};
+use crate::decode::image_encode::{Embedded, Encoding, JpegOptions, JpegPreset, Pixels};
 use crate::decode::{image_decode, image_encode};
 use crate::develop::sharpen::OutputSharpening;
 use crate::develop::{Adjustments, TouchUp};
@@ -48,6 +47,8 @@ pub struct ExportSettings {
     #[serde(default)]
     pub jpeg_limit_kb: Option<u32>,
     #[serde(default)]
+    pub jpeg_preset: JpegPreset,
+    #[serde(default)]
     pub naming: NameTemplate,
     /// Location and identifying camera data, both off unless chosen.
     #[serde(default)]
@@ -65,6 +66,7 @@ impl ExportSettings {
             sharpen: self.sharpen,
             format: self.format.or_jpeg(),
             jpeg_limit_kb: self.jpeg_limit_kb,
+            jpeg_preset: self.jpeg_preset,
             keep: self.keep,
             copyright: self.copyright.clone(),
         }
@@ -80,6 +82,7 @@ pub struct Output {
     pub sharpen: OutputSharpening,
     pub format: ExportFormat,
     pub jpeg_limit_kb: Option<u32>,
+    pub jpeg_preset: JpegPreset,
     pub keep: Keep,
     pub copyright: String,
 }
@@ -94,6 +97,7 @@ impl Output {
         },
         format: ExportFormat::Jpeg,
         jpeg_limit_kb: None,
+        jpeg_preset: JpegPreset::Progressive,
         keep: Keep::NONE,
         copyright: String::new(),
     };
@@ -127,7 +131,7 @@ impl ExportFormat {
     }
 
     pub fn can_encode(self) -> bool {
-        image_encode::can_encode(self.encoding(None))
+        image_encode::can_encode(self.encoding(JpegOptions::default()))
     }
 
     /// `self`, or JPEG when this build cannot write it, such as settings
@@ -161,9 +165,9 @@ impl ExportFormat {
         }
     }
 
-    fn encoding(self, jpeg_quality: Option<u8>) -> Encoding {
+    fn encoding(self, jpeg: JpegOptions) -> Encoding {
         match self {
-            ExportFormat::Jpeg => Encoding::Jpeg(jpeg_quality),
+            ExportFormat::Jpeg => Encoding::Jpeg(jpeg),
             ExportFormat::Png => Encoding::Png,
             ExportFormat::Tiff16 => Encoding::Tiff,
             ExportFormat::Webp => Encoding::Webp,
@@ -305,8 +309,8 @@ impl ExportSize {
     }
 }
 
-/// Decode `src_bytes` at full resolution, bake in the edits, and encode
-/// the export. Used by non-mac native export for non-RAW files.
+/// Decode `src_bytes` as large as `output` needs, bake in the edits, and
+/// encode the export. Used by non-mac native export for non-RAW files.
 #[cfg(not(target_os = "macos"))]
 #[allow(dead_code)]
 #[hotpath::measure]
@@ -318,10 +322,11 @@ pub fn bake_export(
     rot: u8,
     output: Output,
 ) -> Result<Vec<u8>, String> {
+    let decode_px = decode_px(output.max_px, adj.crop);
     let img = if is_raw {
-        crate::decode::rawler::decode_raw_nonmac_from_bytes(src_bytes, u32::MAX)?
+        crate::decode::rawler::decode_raw_nonmac_from_bytes(src_bytes, decode_px)?
     } else {
-        image_decode::decode_nonraw_from_bytes(src_bytes, u32::MAX)?
+        image_decode::decode_nonraw_from_bytes(src_bytes, decode_px)?
     };
     render(
         &img,
@@ -347,10 +352,11 @@ pub fn bake_export_from_shared_vec(
     rot: u8,
     output: Output,
 ) -> Result<Vec<u8>, String> {
+    let decode_px = decode_px(output.max_px, adj.crop);
     let img = if is_raw {
-        crate::decode::rawler::decode_raw_nonmac_from_shared_vec(src_bytes.clone(), u32::MAX)?
+        crate::decode::rawler::decode_raw_nonmac_from_shared_vec(src_bytes.clone(), decode_px)?
     } else {
-        image_decode::decode_nonraw_from_bytes(src_bytes.as_slice(), u32::MAX)?
+        image_decode::decode_nonraw_from_bytes(src_bytes.as_slice(), decode_px)?
     };
     render(
         &img,
@@ -404,9 +410,18 @@ fn render(
     let prepared = image_encode::Prepared::new(w, h, Pixels::Rgba8(&rgba))?;
     let meta = meta(w, h)?;
     if output.format != ExportFormat::Jpeg {
-        return prepared.encode(output.format.encoding(None), meta.embedded());
+        return prepared.encode(
+            output.format.encoding(JpegOptions::default()),
+            meta.embedded(),
+        );
     }
-    let jpeg = |quality| prepared.encode(Encoding::Jpeg(quality), meta.embedded());
+    let preset = output.jpeg_preset;
+    let jpeg = |quality| {
+        prepared.encode(
+            Encoding::Jpeg(JpegOptions { quality, preset }),
+            meta.embedded(),
+        )
+    };
     match output.jpeg_limit_kb {
         None => jpeg(None),
         Some(kb) => within_limit(kb, jpeg),
@@ -585,8 +600,8 @@ impl Default for Exporter {
     }
 }
 
-/// Decode `job.src` at full resolution, bake in its edits and size, and
-/// deliver the encoded file to `job.dest`.
+/// Decode `job.src`, bake in its edits and size, and deliver the encoded
+/// file to `job.dest`.
 #[cfg(not(target_arch = "wasm32"))]
 #[hotpath::measure]
 fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
@@ -630,8 +645,10 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
     }
 }
 
-/// Decode `src` at full resolution, bake in its edits, and encode it as
-/// `output` says: the bytes an export of `src` writes.
+/// Decode `src` only as large as `output.max_px` needs, bake in its edits,
+/// and encode it as `output` says: the bytes an export of `src` writes. The
+/// shrink happens before the bake, so time and memory follow
+/// `output.max_px`, not the source.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn export_file(
     src: &Path,
@@ -640,34 +657,7 @@ pub fn export_file(
     rot: u8,
     output: &Output,
 ) -> Result<Vec<u8>, String> {
-    decode_and_render(src, u32::MAX, adj, touchups, rot, output)
-}
-
-/// [`export_file`] decoded only as large as `output.max_px` needs, for a
-/// look at the edited photo rather than a file to keep. The shrink happens
-/// before the bake, so memory follows `output.max_px`, not the source.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn preview_file(
-    src: &Path,
-    adj: &Adjustments,
-    touchups: &[TouchUp],
-    rot: u8,
-    output: &Output,
-) -> Result<Vec<u8>, String> {
-    let decode_px = preview_decode_px(output.max_px, adj.crop);
-    decode_and_render(src, decode_px, adj, touchups, rot, output)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn decode_and_render(
-    src: &Path,
-    decode_px: u32,
-    adj: &Adjustments,
-    touchups: &[TouchUp],
-    rot: u8,
-    output: &Output,
-) -> Result<Vec<u8>, String> {
-    let img = image_decode::decode(src, decode_px)?;
+    let img = image_decode::decode(src, decode_px(output.max_px, adj.crop))?;
     render(
         &img,
         adj,
@@ -684,8 +674,7 @@ fn decode_and_render(
 /// is `f` keeps at least `f` of the decode's long edge. Straighten turns the
 /// canvas without scaling it and quarter turns only swap sides, so neither
 /// changes the size needed. A crop from a hostile sidecar decodes in full.
-#[cfg(not(target_arch = "wasm32"))]
-fn preview_decode_px(max_px: u32, crop: Option<crate::develop::Crop>) -> u32 {
+fn decode_px(max_px: u32, crop: Option<crate::develop::Crop>) -> u32 {
     let (w, h) = crop.map_or((1.0, 1.0), |c| (c.right - c.left, c.bottom - c.top));
     if !(w > 0.0 && h > 0.0) {
         return u32::MAX;
@@ -809,9 +798,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_preview_decodes_only_what_the_crop_needs() {
+    fn an_export_decodes_only_what_the_crop_needs() {
         use crate::develop::Crop;
         let crop = |left, top, right, bottom| {
             Some(Crop {
@@ -821,26 +809,26 @@ mod tests {
                 bottom,
             })
         };
-        assert_eq!(preview_decode_px(256, None), 258);
-        assert_eq!(preview_decode_px(256, crop(0.0, 0.0, 0.5, 1.0)), 514);
-        assert_eq!(preview_decode_px(256, crop(0.0, 0.25, 0.75, 0.5)), 1026);
+        assert_eq!(decode_px(256, None), 258);
+        assert_eq!(decode_px(256, crop(0.0, 0.0, 0.5, 1.0)), 514);
+        assert_eq!(decode_px(256, crop(0.0, 0.25, 0.75, 0.5)), 1026);
         for hostile in [
             crop(0.5, 0.0, 0.5, 1.0),
             crop(0.9, 0.0, 0.1, 1.0),
             crop(f32::NAN, 0.0, 1.0, 1.0),
             crop(0.0, 0.0, 1e-30, 1.0),
         ] {
-            assert_eq!(preview_decode_px(256, hostile), u32::MAX, "{hostile:?}");
+            assert_eq!(decode_px(256, hostile), u32::MAX, "{hostile:?}");
         }
-        assert_eq!(preview_decode_px(256, crop(-1.0, -1.0, 2.0, 2.0)), 258);
+        assert_eq!(decode_px(256, crop(-1.0, -1.0, 2.0, 2.0)), 258);
     }
 
-    /// A preview of a big photo shrinks before the bake, yet a tight crop
+    /// An export of a big photo shrinks before the bake, yet a tight crop
     /// still fills `max_px`.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn a_preview_of_a_cropped_photo_still_fills_max_px() {
-        let dir = scratch_dir("preview");
+    fn an_export_of_a_cropped_photo_still_fills_max_px() {
+        let dir = scratch_dir("cropped");
         let src = dir.join("src.jpg");
         let (w, h) = (3000u32, 2000u32);
         image_encode::encode_jpeg(
@@ -865,13 +853,9 @@ mod tests {
             max_px: 200,
             ..Output::FULL
         };
-        assert_eq!(
-            preview_decode_px(200, adj.crop),
-            1602,
-            "about half the source"
-        );
+        assert_eq!(decode_px(200, adj.crop), 1602, "about half the source");
 
-        let jpeg = preview_file(&src, &adj, &[], 1, &output).unwrap();
+        let jpeg = export_file(&src, &adj, &[], 1, &output).unwrap();
         std::fs::write(dir.join("out.jpg"), &jpeg).unwrap();
         let out = image_decode::decode(&dir.join("out.jpg"), u32::MAX).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -882,6 +866,40 @@ mod tests {
             out.width,
             out.height
         );
+    }
+
+    /// Settings saved before the preset existed keep the encoder they had,
+    /// and off macOS the preset picks the JPEG's kind: SOF0 is baseline,
+    /// SOF2 progressive.
+    #[test]
+    fn the_jpeg_preset_defaults_to_progressive_and_picks_the_file_kind() {
+        let old: ExportSettings =
+            serde_json::from_str(r#"{"target":{"Folder":"ExportsSubfolder"},"size":"Full"}"#)
+                .unwrap();
+        assert_eq!(old.jpeg_preset, JpegPreset::Progressive);
+
+        #[cfg(not(target_os = "macos"))]
+        for (preset, sof) in [
+            (JpegPreset::Fastest, 0xC0),
+            (JpegPreset::Baseline, 0xC0),
+            (JpegPreset::Progressive, 0xC2),
+        ] {
+            let output = Output {
+                jpeg_preset: preset,
+                ..Output::FULL
+            };
+            let jpeg = render(
+                &gradient(64, 48),
+                &Adjustments::default(),
+                &[],
+                0,
+                &output,
+                &SourceMeta::read_bytes(&[]),
+            )
+            .unwrap();
+            let has = |marker| jpeg.windows(2).any(|w| w == [0xFF, marker]);
+            assert!(has(sof), "{preset:?} writes SOF{:X}", sof - 0xC0);
+        }
     }
 
     /// Output sharpening runs on the resized bake, and a settings file

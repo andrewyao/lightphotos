@@ -14,6 +14,7 @@ pub mod effects;
 pub mod grade;
 pub mod image_ops;
 pub mod local;
+pub mod parallel;
 pub mod sharpen;
 
 use serde::{Deserialize, Serialize};

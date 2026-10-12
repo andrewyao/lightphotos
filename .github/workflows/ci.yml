@@ -8,7 +8,7 @@ name: ci
 # pull request that caused it.
 #
 # Every job runs ./scripts/setup-vendor-rawler.sh before its first cargo
-# command. `[patch.crates-io]` redirects `rawler` to vendor/rawler-0.7.2, which
+# command. `[patch.crates-io]` redirects `rawler` to vendor/rawler-0.8.0, which
 # is gitignored, so without that step even `cargo metadata` fails.
 
 on:

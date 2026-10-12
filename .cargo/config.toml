@@ -1,0 +1,6 @@
+# x86-64-v2 (SSE4.2, POPCNT; every x86 CPU since 2009, and what Windows 11
+# requires) instead of the SSE2 baseline, so the pixel loops vectorize wider.
+# aarch64 always has NEON. The browser build sets RUSTFLAGS, which replaces
+# this table, so its SIMD flag lives in scripts/web-env.sh.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=x86-64-v2"]

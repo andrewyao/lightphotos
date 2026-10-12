@@ -62,8 +62,8 @@ under CC0 1.0 Universal (public domain dedication).
 
 --------------------------------------------------------------------------------
 
-rawler 0.7.2 (LGPL-2.1, full text above). LightPhotos ships a modified copy.
-scripts/setup-vendor-rawler.sh fetches rawler 0.7.2 from crates.io and applies
+rawler 0.8.0 (LGPL-2.1, full text above). LightPhotos ships a modified copy.
+scripts/setup-vendor-rawler.sh fetches rawler 0.8.0 from crates.io and applies
 these patches from the patches/ directory:
 
 EOF

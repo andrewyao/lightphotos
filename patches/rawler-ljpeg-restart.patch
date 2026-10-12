@@ -1,17 +1,16 @@
-# The diff applied to vendor/rawler-0.7.2/ after rawler-web-time.patch.
+# The diff applied to vendor/rawler-0.8.0/ after rawler-web-time.patch.
 # Adds restart interval (DRI/RSTn) support to the plain lossless JPEG
 # decoder. Samsung Galaxy phones write Linear DNGs whose LJPEG strip has a
 # restart marker every 16 rows; without this every row after the first band
 # decodes to garbage. Regenerate the full vendored copy via
 # ./scripts/setup-vendor-rawler.sh.
-diff -ru rawler-upstream/src/decompressors/ljpeg/decompressors.rs rawler-0.7.2/src/decompressors/ljpeg/decompressors.rs
---- a/rawler-upstream/src/decompressors/ljpeg/decompressors.rs	2026-10-03 21:57:31
-+++ b/rawler-0.7.2/src/decompressors/ljpeg/decompressors.rs	2026-10-03 21:57:33
-@@ -8,7 +8,10 @@
+diff -ru rawler-upstream/src/decompressors/ljpeg/decompressors.rs rawler-0.8.0/src/decompressors/ljpeg/decompressors.rs
+--- a/rawler-upstream/src/decompressors/ljpeg/decompressors.rs	2026-10-11 13:21:40
++++ b/rawler-0.8.0/src/decompressors/ljpeg/decompressors.rs	2026-10-11 13:21:40
+@@ -8,6 +8,10 @@
  /// `stripwidth` is the count of pixels of a single output strip (may
  /// be larger than width if each row has padding bytes).
  /// `width` is the output image width in pixels.
--#[allow(clippy::let_and_return)]
 +///
 +/// A stream with a restart interval (DRI) is decoded one restart band at a
 +/// time: each band's entropy data ends at an RSTn marker, and prediction
@@ -19,7 +18,7 @@ diff -ru rawler-upstream/src/decompressors/ljpeg/decompressors.rs rawler-0.7.2/s
  pub fn decode_ljpeg(ljpeg: &LjpegDecompressor, out: &mut [u16], x: usize, stripwidth: usize, width: usize, height: usize) -> Result<(), String> {
    let ncomp: usize = ljpeg.components();
    if ljpeg.sof.width * ncomp < width || ljpeg.sof.height < height {
-@@ -18,58 +21,107 @@
+@@ -17,58 +21,107 @@
      ));
    }
  
@@ -142,10 +141,10 @@ diff -ru rawler-upstream/src/decompressors/ljpeg/decompressors.rs rawler-0.7.2/s
                let a = out[row * stripwidth + (col - ncomp) + c] as i32;
                let b = out[(row - 1) * stripwidth + col + c] as i32;
                (a + b) >> 1 // Adobe DNG SDK uses int32 and shifts, so we will do, too.
-diff -ru rawler-upstream/src/decompressors/ljpeg/mod.rs rawler-0.7.2/src/decompressors/ljpeg/mod.rs
---- a/rawler-upstream/src/decompressors/ljpeg/mod.rs	2026-10-03 21:57:31
-+++ b/rawler-0.7.2/src/decompressors/ljpeg/mod.rs	2026-10-03 21:57:33
-@@ -16,6 +16,7 @@
+diff -ru rawler-upstream/src/decompressors/ljpeg/mod.rs rawler-0.8.0/src/decompressors/ljpeg/mod.rs
+--- a/rawler-upstream/src/decompressors/ljpeg/mod.rs	2026-10-11 13:21:40
++++ b/rawler-0.8.0/src/decompressors/ljpeg/mod.rs	2026-10-11 13:21:40
+@@ -57,6 +57,7 @@
    EOI = 0xd9,  // end of image
    SOS = 0xda,  // start of scan
    DQT = 0xdb,  // quantization tables
@@ -153,7 +152,7 @@ diff -ru rawler-upstream/src/decompressors/ljpeg/mod.rs rawler-0.7.2/src/decompr
    Fill = 0xff,
  }
  
-@@ -129,6 +130,8 @@
+@@ -170,6 +171,8 @@
    predictor: usize,
    point_transform: usize,
    dhts: Vec<HuffTable>,
@@ -162,7 +161,7 @@ diff -ru rawler-upstream/src/decompressors/ljpeg/mod.rs rawler-0.7.2/src/decompr
  }
  
  impl<'a> LjpegDecompressor<'a> {
-@@ -146,6 +149,7 @@
+@@ -187,6 +190,7 @@
      let mut dht_init = [false; 4];
      let mut dht_bits = [[0_u32; 17]; 4];
      let mut dht_huffval = [[0_u32; 256]; 4];
@@ -170,7 +169,7 @@ diff -ru rawler-upstream/src/decompressors/ljpeg/mod.rs rawler-0.7.2/src/decompr
      let pred;
      let pt;
      loop {
-@@ -168,6 +172,9 @@
+@@ -209,6 +213,9 @@
        } else if marker == m(Marker::EOI) {
          // Should never be reached as we stop at SOS
          return Err("ljpeg: reached EOI before SOS".to_string());
@@ -180,7 +179,7 @@ diff -ru rawler-upstream/src/decompressors/ljpeg/mod.rs rawler-0.7.2/src/decompr
        } else if marker == m(Marker::DQT) {
          return Err("ljpeg: not a valid raw file, found DQT".to_string());
        }
-@@ -205,6 +212,7 @@
+@@ -246,6 +253,7 @@
        predictor: pred,
        point_transform: pt,
        dhts,

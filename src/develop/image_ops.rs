@@ -32,7 +32,7 @@ fn encode_srgb8_curve(v: f32) -> u8 {
 
 /// [`srgb_decode`] for every 8-bit `c`: the same floats, computed once. A
 /// 512px edited thumbnail makes half a million of these.
-fn srgb8_to_linear_lut() -> &'static [f32; 256] {
+pub(crate) fn srgb8_to_linear_lut() -> &'static [f32; 256] {
     static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
     LUT.get_or_init(|| std::array::from_fn(|c| srgb_decode(c as f32 / 255.0)))
 }
@@ -65,7 +65,7 @@ pub(crate) fn linear_to_srgb8(v: f32) -> u8 {
 /// One sRGB-encoded channel of a baked image: 8 bits for JPEG, the Loupe
 /// and thumbnails, 16 for a TIFF export, which keeps the edit math's
 /// in-between levels instead of rounding them to 256.
-pub trait Sample: Copy + Default {
+pub trait Sample: Copy + Default + Send + Sync {
     /// The value of full white.
     const MAX: f32;
     /// Linear light to this sample, rounded.
@@ -227,6 +227,7 @@ pub fn bake_edited(
 /// [`bake_edited`] at any sample depth. At 16 bits the decode is still
 /// 8-bit sRGB, but every edit runs in floats, so the extra bits hold the
 /// levels a curve or exposure push lands between two 8-bit steps.
+#[hotpath::measure]
 pub fn bake_edited_as<S: Sample>(
     img: &DecodedImage,
     adj: &Adjustments,
@@ -286,8 +287,9 @@ fn bake_samples<S: Sample>(
         .flatten();
     let mut cropped = vec![S::default(); (cw * ch * 4) as usize];
     let opaque = S::encode(1.0);
-    for y in 0..ch {
-        for x in 0..cw {
+    develop::parallel::for_each_row(&mut cropped, (cw * 4) as usize, |y, out_row| {
+        let y = y as u32;
+        for (x, out_px) in (0..cw).zip(out_row.as_chunks_mut::<4>().0) {
             let (px, py) = (x0 + x, y0 + y);
             let canvas = ((px as f32 + 0.5) / w as f32, (py as f32 + 0.5) / h as f32);
             let (u, v) = turn.map_or(canvas, |t| t.to_source(canvas.0, canvas.1));
@@ -328,13 +330,12 @@ fn bake_samples<S: Sample>(
                 )
             };
             let out = dev.linear_at(pre, canvas.0, canvas.1);
-            let di = ((y * cw + x) * 4) as usize;
-            cropped[di] = S::encode(out[0]);
-            cropped[di + 1] = S::encode(out[1]);
-            cropped[di + 2] = S::encode(out[2]);
-            cropped[di + 3] = opaque;
+            out_px[0] = S::encode(out[0]);
+            out_px[1] = S::encode(out[1]);
+            out_px[2] = S::encode(out[2]);
+            out_px[3] = opaque;
         }
-    }
+    });
 
     rotate_rgba(&cropped, cw, ch, rot)
 }

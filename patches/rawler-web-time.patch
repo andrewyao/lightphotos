@@ -1,11 +1,11 @@
-# The diff applied to vendor/rawler-0.7.2/ (plain rawler from crates.io —
+# The diff applied to vendor/rawler-0.8.0/ (plain rawler from crates.io —
 # no third-party fork). Swaps std::time::Instant for web_time::Instant at
-# the 4 call sites that otherwise panic unconditionally on bare
+# the 6 call sites that otherwise panic unconditionally on bare
 # wasm32/64-unknown-unknown, which has no clock source. Regenerate the full
 # vendored copy via ./scripts/setup-vendor-rawler.sh.
---- a/rawler-upstream/Cargo.toml	2006-07-23 18:21:28
-+++ b/rawler-0.7.2/Cargo.toml	2026-08-22 08:01:56
-@@ -151,6 +151,13 @@
+--- a/rawler-upstream/Cargo.toml	2026-10-11 13:21:33
++++ b/rawler-0.8.0/Cargo.toml	2026-10-11 13:21:37
+@@ -174,6 +174,13 @@
  version = "0.8.26"
  features = ["derive"]
  
@@ -19,8 +19,8 @@
  [dev-dependencies.anyhow]
  version = "1.0"
  
---- a/rawler-upstream/src/decompressors/crx/decoder.rs	2006-07-23 18:21:28
-+++ b/rawler-0.7.2/src/decompressors/crx/decoder.rs	2026-08-22 08:01:44
+--- a/rawler-upstream/src/decompressors/crx/decoder.rs	2026-10-11 13:21:35
++++ b/rawler-0.8.0/src/decompressors/crx/decoder.rs	2026-10-11 13:21:37
 @@ -14,7 +14,9 @@
  use itertools::izip;
  use log::debug;
@@ -32,8 +32,8 @@
  
  /// Maximum value for K during Adaptive Golomb-Rice for K prediction
  pub(super) const PREDICT_K_MAX: u32 = 15;
---- a/rawler-upstream/src/dng/writer.rs	2006-07-23 18:21:28
-+++ b/rawler-0.7.2/src/dng/writer.rs	2026-08-22 08:01:49
+--- a/rawler-upstream/src/dng/writer.rs	2026-10-11 13:21:35
++++ b/rawler-0.8.0/src/dng/writer.rs	2026-10-11 13:21:37
 @@ -2,8 +2,9 @@
    borrow::Cow,
    io::{self, Seek, Write},
@@ -45,8 +45,8 @@
  
  use image::{DynamicImage, codecs::jpeg::JpegEncoder, imageops::FilterType};
  use log::debug;
---- a/rawler-upstream/src/imgop/sensor/bayer/ppg.rs	2006-07-23 18:21:28
-+++ b/rawler-0.7.2/src/imgop/sensor/bayer/ppg.rs	2026-08-22 08:01:41
+--- a/rawler-upstream/src/imgop/sensor/bayer/ppg.rs	2026-10-11 13:21:35
++++ b/rawler-0.8.0/src/imgop/sensor/bayer/ppg.rs	2026-10-11 13:21:37
 @@ -3,7 +3,12 @@
  
  use multiversion::multiversion;
@@ -61,3 +61,27 @@
  
  use crate::{
    cfa::{CFA, CFA_COLOR_B, CFA_COLOR_G, CFA_COLOR_R, PlaneColor},
+--- a/rawler-upstream/src/imgop/sensor/xtrans/bilinear.rs	2026-10-11 13:21:35
++++ b/rawler-0.8.0/src/imgop/sensor/xtrans/bilinear.rs	2026-10-11 13:21:37
+@@ -3,7 +3,8 @@
+ 
+ use multiversion::multiversion;
+ use rayon::prelude::*;
+-use std::time::Instant;
++// See imgop/sensor/bayer/ppg.rs for why web_time::Instant, not std's.
++use web_time::Instant;
+ 
+ use crate::{
+   cfa::{CFA, PlaneColor},
+--- a/rawler-upstream/src/imgop/sensor/xtrans/markesteijn.rs	2026-10-11 13:21:35
++++ b/rawler-0.8.0/src/imgop/sensor/xtrans/markesteijn.rs	2026-10-11 13:21:37
+@@ -9,7 +9,8 @@
+ 
+ use multiversion::multiversion;
+ use rayon::prelude::*;
+-use std::time::Instant;
++// See imgop/sensor/bayer/ppg.rs for why web_time::Instant, not std's.
++use web_time::Instant;
+ 
+ use crate::{
+   CFA,

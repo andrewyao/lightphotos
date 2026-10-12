@@ -570,6 +570,18 @@ pub struct Strings {
     pub export_limit: &'static str,
     pub export_limit_none: &'static str,
     pub export_limit_kb: fn(u32) -> String,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub export_jpeg_preset: &'static str,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub export_jpeg_fastest: &'static str,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub export_jpeg_baseline: &'static str,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub export_jpeg_progressive: &'static str,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub export_jpeg_smallest: &'static str,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    pub export_jpeg_preset_hint: &'static str,
     pub export_naming: &'static str,
     pub export_naming_hint: &'static str,
     pub export_naming_example: fn(&str) -> String,
@@ -1469,6 +1481,12 @@ pub static EN: Strings = Strings {
             format!("Up to {kb} KB")
         }
     },
+    export_jpeg_preset: "Encoding",
+    export_jpeg_fastest: "Fastest",
+    export_jpeg_baseline: "Baseline",
+    export_jpeg_progressive: "Progressive",
+    export_jpeg_smallest: "Smallest",
+    export_jpeg_preset_hint: "Fastest encodes several times faster. The others make files 10-20% smaller.",
     export_naming: "File name",
     export_naming_hint: "{name} is the photo's name and {seq} its number in this export.",
     export_naming_example: |name| format!("For example: {name}"),
@@ -2236,6 +2254,12 @@ pub static ZH: Strings = Strings {
             format!("最大 {kb} KB")
         }
     },
+    export_jpeg_preset: "编码",
+    export_jpeg_fastest: "最快",
+    export_jpeg_baseline: "基线",
+    export_jpeg_progressive: "渐进式",
+    export_jpeg_smallest: "最小",
+    export_jpeg_preset_hint: "“最快”的编码速度快数倍。其他选项的文件小 10-20%。",
     export_naming: "文件名",
     export_naming_hint: "{name} 是照片的名称，{seq} 是它在这次导出中的序号。",
     export_naming_example: |name| format!("例如：{name}"),

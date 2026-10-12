@@ -1,0 +1,31 @@
+# The diff applied to vendor/rawler-0.8.0/ after rawler-ljpeg-restart.patch.
+# SensorType::from_cfa calls unimplemented!() for a CFA that is neither 2x2
+# nor 6x6, and every decoder calls it while building the RawImage, so a DNG
+# with an unusual CFARepeatPatternDim panics inside rawler::decode, which
+# kills a wasm32 decode worker. Fall back to Bayer, which is how rawler 0.7.2
+# treated such a pattern. Regenerate the full vendored copy via
+# ./scripts/setup-vendor-rawler.sh.
+diff -ru rawler-upstream/src/imgop/sensor/mod.rs rawler-0.8.0/src/imgop/sensor/mod.rs
+--- a/rawler-upstream/src/imgop/sensor/mod.rs	2026-10-11 14:04:52
++++ b/rawler-0.8.0/src/imgop/sensor/mod.rs	2026-10-11 14:04:54
+@@ -32,16 +32,16 @@
+   /// - 2x2 with at least 3 unique colors → [`SensorType::Bayer`]
+   /// - 6x6 → [`SensorType::Xtrans`]
+   ///
+-  /// # Panics
+-  /// Panics (via `unimplemented!()`) for CFA patterns that do not match
+-  /// either a Bayer or X-Trans layout.
++  /// - anything else → [`SensorType::Bayer`], so the develop dispatch treats it
++  ///   as rawler 0.7.2 did instead of panicking inside `decode` on a DNG with an
++  ///   unusual `CFARepeatPatternDim` (patched locally).
+   pub fn from_cfa(cfa: &CFA) -> Self {
+     if cfa.width == 2 && cfa.height == 2 && cfa.unique_colors() >= 3 {
+       Self::Bayer
+     } else if cfa.width == 6 && cfa.height == 6 {
+       Self::Xtrans
+     } else {
+-      unimplemented!()
++      Self::Bayer
+     }
+   }
+ }

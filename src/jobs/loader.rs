@@ -839,6 +839,8 @@ impl Loader {
         #[cfg(not(target_arch = "wasm32"))]
         let cores = thread::available_parallelism().map(|n| n.get());
         let cores = cores.unwrap_or(4);
+        #[cfg(target_arch = "wasm32")]
+        crate::develop::parallel::warm();
         let workers = cores
             .saturating_sub(2)
             .clamp(1, limits.decode_threads.max(1));

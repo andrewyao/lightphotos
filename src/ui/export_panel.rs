@@ -255,7 +255,44 @@ fn file_rows(
                     }
                 });
         });
+        // ImageIO, which writes macOS's JPEGs, has no presets.
+        #[cfg(not(target_os = "macos"))]
+        jpeg_preset_row(ui, form, settings, next);
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn jpeg_preset_row(
+    ui: &mut egui::Ui,
+    form: &Form,
+    settings: &ExportSettings,
+    next: &mut Option<ExportSettings>,
+) {
+    use crate::decode::image_encode::JpegPreset;
+    let t = t();
+    let preset_label = |p: JpegPreset| match p {
+        JpegPreset::Fastest => t.export_jpeg_fastest,
+        JpegPreset::Baseline => t.export_jpeg_baseline,
+        JpegPreset::Progressive => t.export_jpeg_progressive,
+        JpegPreset::Smallest => t.export_jpeg_smallest,
+    };
+    form.row(ui, t.export_jpeg_preset, |ui| {
+        egui::ComboBox::from_id_salt("export_jpeg_preset")
+            .selected_text(preset_label(settings.jpeg_preset))
+            .width(ui.available_width())
+            .show_ui(ui, |ui| {
+                for preset in JpegPreset::ALL {
+                    let on = settings.jpeg_preset == preset;
+                    if ui.selectable_label(on, preset_label(preset)).clicked() && !on {
+                        *next = Some(ExportSettings {
+                            jpeg_preset: preset,
+                            ..settings.clone()
+                        });
+                    }
+                }
+            });
+        form::hint(ui, t.export_jpeg_preset_hint);
+    });
 }
 
 /// What the files say about themselves: the two sensitive parts of each

@@ -138,6 +138,7 @@ fn decode_raw_preview(
     }
 
     super::normalize_linear_levels(&mut raw)?;
+    super::apply_fuji_dynamic_range_gain(&mut raw, source.buf());
     // A file smaller than its sensor (a lossy RAW) asked for too little.
     // Asking again for the whole amount, rather than the difference while
     // holding the first grant, keeps two decodes from each waiting on the
@@ -606,7 +607,8 @@ fn map_xtrans_coord(coord: usize, tile_step: usize) -> usize {
 }
 
 /// Demosaics a CFA mosaic with rawler's `Demosaic` impls: `Superpixel3Channel`
-/// for `Fast`, `PPGDemosaic` for `Quality`. Returns `None` for layouts that
+/// for `Fast`, `PPGDemosaic` for `Quality`, `XTransBilinearDemosaic` for
+/// X-Trans in either mode. Returns `None` for layouts that
 /// would panic (see `is_supported_bayer_layout`).
 #[hotpath::measure]
 pub fn demosaic_cfa(
@@ -614,9 +616,9 @@ pub fn demosaic_cfa(
     mode: DemosaicMode,
     max_px: u32,
 ) -> Option<(u32, u32, Vec<u8>)> {
-    use rawler::imgop::sensor::bayer::{
-        ppg::PPGDemosaic, superpixel::Superpixel3Channel, Demosaic,
-    };
+    use rawler::imgop::sensor::bayer::{ppg::PPGDemosaic, superpixel::Superpixel3Channel};
+    use rawler::imgop::sensor::xtrans::bilinear::XTransBilinearDemosaic;
+    use rawler::imgop::sensor::Demosaic;
     use rawler::pixarray::Pix2D;
     use rawler::rawimage::RawPhotometricInterpretation;
     use rawler::RawImageData;
@@ -691,10 +693,9 @@ pub fn demosaic_cfa(
 
     let half_res = mode == DemosaicMode::Fast || half_res_is_enough(area, max_px);
     let demosaiced = if is_xtrans {
-        // rawler 0.7.2 has no X-Trans demosaic. `PPGDemosaic` does not panic
-        // on it because it reads colors via `cfa.color_at()`, but it assumes
-        // Bayer neighborhoods, so the result is soft.
-        PPGDemosaic::new().demosaic(&pixels, &cfa, &colors, area)
+        // Not `PPGDemosaic`: it assumes Bayer neighborhoods and turns an
+        // X-Trans mosaic green.
+        XTransBilinearDemosaic::new().demosaic(&pixels, &cfa, &colors, area)
     } else {
         if half_res {
             Superpixel3Channel::new().demosaic(&pixels, &cfa, &colors, area)

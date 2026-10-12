@@ -178,8 +178,8 @@ impl WebExifJob {
     }
 }
 
-/// One export: the source's bytes and its edits, baked into a JPEG at full
-/// resolution and then shaped by `output`. `id` finds the destination folder,
+/// One export: the source's bytes and its edits, decoded as large as
+/// `output` needs, baked, and shaped by `output`. `id` finds the destination folder,
 /// which is a JS object and stays on the main thread.
 pub struct WebExportJob {
     pub id: u64,

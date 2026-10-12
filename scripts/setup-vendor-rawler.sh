@@ -1,21 +1,24 @@
 #!/bin/sh
-# Materializes vendor/rawler-0.7.2/ — the patched RAW-decode crate that
+# Materializes vendor/rawler-0.8.0/ — the patched RAW-decode crate that
 # [patch.crates-io] in the root Cargo.toml redirects every use of `rawler`
 # to. vendor/ is NOT committed (see .gitignore), so this must be run once
 # per fresh clone, before any cargo/trunk command. Safe to re-run: an
 # already-set-up tree is left alone and the script exits 0.
 #
-# What it does: fetches plain rawler 0.7.2 from crates.io (no third-party
+# What it does: fetches plain rawler 0.8.0 from crates.io (no third-party
 # fork) and applies patches/rawler-web-time.patch, which swaps
-# std::time::Instant for web_time::Instant at the 4 call sites
-# (imgop/sensor/bayer/ppg.rs, decompressors/crx/decoder.rs, dng/writer.rs)
+# std::time::Instant for web_time::Instant at the 6 call sites
+# (imgop/sensor/bayer/ppg.rs, imgop/sensor/xtrans/{bilinear,markesteijn}.rs,
+# decompressors/crx/decoder.rs, dng/writer.rs)
 # that otherwise panic unconditionally on bare wasm32-unknown-unknown,
 # which has no clock source. Hit for real the first time
 # DemosaicMode::Quality (PPGDemosaic) ran inside an actual wasm32 Web
 # Worker: "panicked at .../unsupported.rs: time not implemented on this
 # platform". See Cargo.toml's own comment on the [patch.crates-io] entry.
 # Then it applies patches/rawler-ljpeg-restart.patch, which teaches the
-# lossless JPEG decoder restart markers (Samsung Galaxy Linear DNGs).
+# lossless JPEG decoder restart markers (Samsung Galaxy Linear DNGs), and
+# patches/rawler-sensor-type-fallback.patch, which stops a DNG with an
+# unusual CFA size from panicking inside rawler::decode.
 #
 # Needed for ANY cargo invocation that touches this crate, wasm32 or not —
 # [patch.crates-io] redirects every use of `rawler` here, globally (Cargo
@@ -33,13 +36,13 @@
 # so trees set up before it are regenerated on the next run.
 set -eu
 
-CRATE_VERSION="0.7.2"
+CRATE_VERSION="0.8.0"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$HERE/vendor/rawler-$CRATE_VERSION"
 # Written only after the patch applies cleanly; its presence is what marks
 # the tree as fully set up (a half-materialized dir has no sentinel).
 SENTINEL="$DEST/.lightphotos-patched"
-PATCHES="rawler-web-time.patch rawler-ljpeg-restart.patch"
+PATCHES="rawler-web-time.patch rawler-ljpeg-restart.patch rawler-sensor-type-fallback.patch"
 STAMP="rawler $CRATE_VERSION + $PATCHES"
 
 FORCE=0
@@ -85,7 +88,7 @@ chmod -R u+w "$DEST"
 for p in $PATCHES; do
   echo "Applying $p..."
   # -d vendor: the patch's paths are "a/rawler-upstream/..." and
-  # "b/rawler-0.7.2/...", -p1 strips the first component, so the remainder
+  # "b/rawler-0.8.0/...", -p1 strips the first component, so the remainder
   # needs to resolve relative to vendor/, not to this script's own directory.
   patch -p1 -d "$HERE/vendor" < "$HERE/patches/$p"
 done

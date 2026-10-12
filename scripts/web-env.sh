@@ -24,9 +24,10 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR_WEB:-$(cd "$(dirname "${BASH_SOURCE[
 # through to cargo. The link arguments give wasm-bindgen a shared, imported
 # memory with thread-local storage. `__heap_base` is exported by hand because
 # current lld stopped exporting it, and wasm-bindgen's thread transform fails
-# without it.
+# without it. `simd128` lets mozjpeg's color conversion and the compiler's
+# vectorized loops use WASM SIMD; every browser with WebGPU has it.
 export RUSTFLAGS="--cfg=web_sys_unstable_apis \
-  -C target-feature=+atomics,+bulk-memory,+mutable-globals \
+  -C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 \
   -C link-arg=--shared-memory \
   -C link-arg=--max-memory=4294967296 \
   -C link-arg=--import-memory \

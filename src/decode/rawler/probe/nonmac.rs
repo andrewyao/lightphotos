@@ -66,12 +66,15 @@ fn run() -> Result<(), String> {
         let t0 = std::time::Instant::now();
         match decode_via_rawler(&path) {
             Ok(img) => println!(
-                "{}: {}x{} cpp={} bps={} in {:?}",
+                "{}: {}x{} cpp={} bps={} fuji_dr_gain={:?} in {:?}",
                 path.display(),
                 img.width,
                 img.height,
                 img.cpp,
                 img.bps,
+                std::fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| lp_rawler::fuji_dynamic_range_gain(&bytes)),
                 t0.elapsed()
             ),
             Err(e) => println!("{}: FAILED: {e}", path.display()),
@@ -223,7 +226,8 @@ fn decode_via_rawler(path: &Path) -> Result<rawler::RawImage, String> {
 }
 
 /// Runs `RawDevelop::default().develop_intermediate` and `to_dynamic_image`,
-/// the calls `decode_raw_nonmac` makes, on the fixture. Develop changes the
+/// the rawler calls at the core of `decode_raw_nonmac`, on the fixture.
+/// The fixture is a DNG, so the Fujifilm DR gain never applies. Develop changes the
 /// pixel values, so this checks only for success, matching dimensions, and a
 /// non-uniform result.
 fn develop_smoke_check(path: &Path, width: u32, height: u32) -> Result<(), String> {

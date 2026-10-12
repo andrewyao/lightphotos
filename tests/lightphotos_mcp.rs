@@ -83,7 +83,13 @@ fn temp_dir(tag: &str) -> PathBuf {
 /// A 300x200 mid-gray JPEG.
 fn write_jpeg(path: &Path) {
     let rgba: Vec<u8> = [110, 110, 110, 255].repeat(300 * 200);
-    let jpeg = image_encode::encode(Encoding::Jpeg(None), 300, 200, Pixels::Rgba8(&rgba)).unwrap();
+    let jpeg = image_encode::encode(
+        Encoding::Jpeg(Default::default()),
+        300,
+        200,
+        Pixels::Rgba8(&rgba),
+    )
+    .unwrap();
     std::fs::write(path, jpeg).unwrap();
 }
 

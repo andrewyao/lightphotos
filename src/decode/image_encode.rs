@@ -225,12 +225,55 @@ impl Pixels<'_> {
     }
 }
 
+/// How hard mozjpeg works on an export JPEG, fastest first. macOS writes
+/// JPEG through ImageIO, which offers no such choice and ignores it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum JpegPreset {
+    /// Baseline, no trellis or optimized Huffman tables: 4-10x faster than
+    /// the others, files 10-20% larger.
+    Fastest,
+    /// Baseline with trellis quantization and optimized Huffman tables.
+    Baseline,
+    /// `Baseline`'s optimizations in a progressive file.
+    #[default]
+    Progressive,
+    /// `Progressive` plus a search over scan layouts: about twice its time
+    /// for about 1% smaller files.
+    Smallest,
+}
+
+impl JpegPreset {
+    pub const ALL: [JpegPreset; 4] = [
+        JpegPreset::Fastest,
+        JpegPreset::Baseline,
+        JpegPreset::Progressive,
+        JpegPreset::Smallest,
+    ];
+
+    #[cfg(not(target_os = "macos"))]
+    fn mozjpeg(self) -> mozjpeg_rs::Preset {
+        match self {
+            JpegPreset::Fastest => mozjpeg_rs::Preset::BaselineFastest,
+            JpegPreset::Baseline => mozjpeg_rs::Preset::BaselineBalanced,
+            JpegPreset::Progressive => mozjpeg_rs::Preset::ProgressiveBalanced,
+            JpegPreset::Smallest => mozjpeg_rs::Preset::ProgressiveSmallest,
+        }
+    }
+}
+
+/// An export JPEG's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct JpegOptions {
+    /// Quality 1 to 100, or `None` for the export default.
+    pub quality: Option<u8>,
+    pub preset: JpegPreset,
+}
+
 /// A file format to encode an export as. Which ones a build can write is
 /// [`can_encode`]'s answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
-    /// Quality 1 to 100, or `None` for the export default.
-    Jpeg(Option<u8>),
+    Jpeg(JpegOptions),
     Png,
     /// 16 bits per channel when given [`Pixels::Rgba16`].
     Tiff,
@@ -326,6 +369,7 @@ impl<'a> Prepared<'a> {
     /// Encode as `enc`, carrying `meta` where the format keeps it. Any EXIF
     /// or XMP the encoder wrote itself is replaced, or dropped when `meta`
     /// has none.
+    #[hotpath::measure]
     pub fn encode(&self, enc: Encoding, meta: Embedded) -> Result<Vec<u8>, String> {
         let Embedded { exif, xmp } = meta;
         if !can_encode(enc) {
@@ -333,8 +377,8 @@ impl<'a> Prepared<'a> {
         }
         let (width, height, pixels) = (self.width, self.height, self.pixels);
         match enc {
-            Encoding::Jpeg(q) => {
-                let jpeg = self.jpeg(q)?;
+            Encoding::Jpeg(options) => {
+                let jpeg = self.jpeg(options)?;
                 let segment = |head: &[u8], body: &[u8]| {
                     let len = u16::try_from(2 + head.len() + body.len()).ok()?;
                     let mut app1 = vec![0xFF, 0xE1];
@@ -379,8 +423,8 @@ impl<'a> Prepared<'a> {
     }
 
     #[cfg(target_os = "macos")]
-    fn jpeg(&self, quality: Option<u8>) -> Result<Vec<u8>, String> {
-        self.encode_imageio("public.jpeg", quality, Embedded::NONE)
+    fn jpeg(&self, options: JpegOptions) -> Result<Vec<u8>, String> {
+        self.encode_imageio("public.jpeg", options.quality, Embedded::NONE)
     }
 
     #[cfg(target_os = "macos")]
@@ -391,15 +435,15 @@ impl<'a> Prepared<'a> {
     /// Borrows 8-bit pixels as they are, so a size-limited export's
     /// quality tries copy nothing.
     #[cfg(not(target_os = "macos"))]
-    fn jpeg(&self, quality: Option<u8>) -> Result<Vec<u8>, String> {
+    fn jpeg(&self, options: JpegOptions) -> Result<Vec<u8>, String> {
         let rgba = match self.pixels {
             Pixels::Rgba8(p) => std::borrow::Cow::Borrowed(p),
             Pixels::Rgba16(p) => {
                 std::borrow::Cow::Owned(p.iter().map(|c| (c >> 8) as u8).collect())
             }
         };
-        mozjpeg_rs::Encoder::new(mozjpeg_rs::Preset::default())
-            .quality(quality.unwrap_or(EXPORT_QUALITY))
+        mozjpeg_rs::Encoder::new(options.preset.mozjpeg())
+            .quality(options.quality.unwrap_or(EXPORT_QUALITY))
             .encode_rgba(&rgba, self.width, self.height)
             .map_err(|e| e.to_string())
     }
@@ -484,8 +528,8 @@ fn meta_properties(meta: Embedded) -> Result<CFRetained<CFDictionary>, String> {
     if meta.exif.is_some_and(|e| e.len() > MAX_JPEG_EXIF) {
         return Err("EXIF block too large".into());
     }
-    let carrier =
-        Prepared::new(1, 1, Pixels::Rgba8(&[0, 0, 0, 255]))?.encode(Encoding::Jpeg(None), meta)?;
+    let carrier = Prepared::new(1, 1, Pixels::Rgba8(&[0, 0, 0, 255]))?
+        .encode(Encoding::Jpeg(JpegOptions::default()), meta)?;
     let data = objc2_core_foundation::CFData::from_bytes(&carrier);
     // SAFETY: data is a valid CFData and no options are passed.
     let source = unsafe { objc2_image_io::CGImageSource::with_data(&data, None) }
@@ -862,7 +906,7 @@ mod tests {
         Prepared::new(w, h, Pixels::Rgba8(&rgba))
             .unwrap()
             .encode(
-                Encoding::Jpeg(None),
+                Encoding::Jpeg(JpegOptions::default()),
                 Embedded {
                     exif: exif.as_deref(),
                     xmp: None,
@@ -899,7 +943,7 @@ mod tests {
         let rgba = [90u8; 12 * 8 * 4];
         let bare = Prepared::new(12, 8, Pixels::Rgba8(&rgba))
             .unwrap()
-            .encode(Encoding::Jpeg(None), Embedded::NONE)
+            .encode(Encoding::Jpeg(JpegOptions::default()), Embedded::NONE)
             .unwrap();
         assert_eq!(exif_blocks(&bare), 0, "no metadata means no EXIF at all");
         std::fs::write(&path, bare).unwrap();

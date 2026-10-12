@@ -961,7 +961,7 @@ mod status_tests {
             Prepared::new(300, 200, Pixels::Rgba8(&rgba))
                 .unwrap()
                 .encode(
-                    Encoding::Jpeg(None),
+                    Encoding::Jpeg(Default::default()),
                     Embedded {
                         exif: exif.as_deref(),
                         xmp: None,
