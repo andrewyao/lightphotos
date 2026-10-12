@@ -1472,30 +1472,11 @@ fn denoise_sample_with_strength(strength: f32, sample: impl Fn(i32, i32) -> [f32
     [sum[0] / wsum, sum[1] / wsum, sum[2] / wsum]
 }
 
-/// Denoise a whole packed linear-light buffer, clamping at its edges. The
-/// `rawler` RAW decoders (browser, Linux, Windows) call this after demosaic
-/// because rawler doesn't denoise; ImageIO on macOS does its own. Returns a
-/// copy of `buf` when `strength <= 0.0` or the size is bad.
-#[cfg(not(target_os = "macos"))]
-#[hotpath::measure]
-pub(crate) fn denoise_linear_rgb_buffer(
-    strength: f32,
-    width: usize,
-    height: usize,
-    buf: &[[f32; 3]],
-) -> Vec<[f32; 3]> {
-    if strength <= 0.0 || width == 0 || height == 0 || buf.len() < width * height {
-        return buf.to_vec();
-    }
-    (0..height)
-        .flat_map(|y| {
-            (0..width).map(move |x| denoise_linear_rgb_pixel(strength, width, height, buf, x, y))
-        })
-        .collect()
-}
-
-/// One pixel of [`denoise_linear_rgb_buffer`], for callers that consume
-/// pixels as they go and cannot afford a second full-size buffer.
+/// Denoise one pixel of a packed linear-light buffer, clamping at its edges.
+/// The `rawler` RAW decoders (browser, Linux, Windows) call this after
+/// demosaic because rawler doesn't denoise; ImageIO on macOS does its own.
+/// Callers consume pixels as they go, a band of rows per thread, so there is
+/// no second full-size buffer.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn denoise_linear_rgb_pixel(
     strength: f32,
@@ -1972,6 +1953,21 @@ mod tests {
             denoise_sample(&adj, sample),
             denoise_sample_with_strength(60.0, sample)
         );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn denoise_linear_rgb_buffer(
+        strength: f32,
+        width: usize,
+        height: usize,
+        buf: &[[f32; 3]],
+    ) -> Vec<[f32; 3]> {
+        (0..height)
+            .flat_map(|y| {
+                (0..width)
+                    .map(move |x| denoise_linear_rgb_pixel(strength, width, height, buf, x, y))
+            })
+            .collect()
     }
 
     #[test]

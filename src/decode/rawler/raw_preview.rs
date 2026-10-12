@@ -913,30 +913,31 @@ fn decimate_linear_rgb(
     }
 
     // Auto-denoise, `Quality` only. White balance is already folded in here,
-    // unlike `demosaic_cfa`; both still denoise before the color matrix.
-    if mode == DemosaicMode::Quality {
-        linear = crate::develop::denoise_linear_rgb_buffer(
-            super::AUTO_RAW_DENOISE_STRENGTH,
-            out_w,
-            out_h,
-            &linear,
-        );
-    }
-
+    // unlike `demosaic_cfa`; both still denoise before the color matrix. Each
+    // pixel denoises as it renders, a band of rows per thread, so a
+    // near-full-size Loupe decode needs no second linear buffer.
     let mut rgba = vec![0u8; out_w * out_h * bpp];
-    for (i, &rgb) in linear.iter().enumerate() {
-        let idx = i * bpp;
-        match mode {
-            DemosaicMode::Fast => {
-                let px = render_rgb_sample(rgb, &cam2rgb);
-                rgba[idx..idx + 4].copy_from_slice(&px);
-            }
-            DemosaicMode::Quality => {
-                let px = render_rgb_sample_linear_bytes(rgb, &cam2rgb);
-                rgba[idx..idx + 8].copy_from_slice(&px);
+    crate::develop::parallel::for_each_row(&mut rgba, out_w * bpp, |y, row| {
+        for (x, px) in row.chunks_exact_mut(bpp).enumerate() {
+            match mode {
+                DemosaicMode::Fast => {
+                    let rgb = linear[y * out_w + x];
+                    px.copy_from_slice(&render_rgb_sample(rgb, &cam2rgb));
+                }
+                DemosaicMode::Quality => {
+                    let rgb = crate::develop::denoise_linear_rgb_pixel(
+                        super::AUTO_RAW_DENOISE_STRENGTH,
+                        out_w,
+                        out_h,
+                        &linear,
+                        x,
+                        y,
+                    );
+                    px.copy_from_slice(&render_rgb_sample_linear_bytes(rgb, &cam2rgb));
+                }
             }
         }
-    }
+    });
 
     Some((out_w as u32, out_h as u32, rgba))
 }
