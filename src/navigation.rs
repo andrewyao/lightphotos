@@ -203,10 +203,38 @@ fn group_by_time(times: &[Option<SystemTime>], gap: Duration) -> Vec<u32> {
 
 /// Empty when `dir` can't be read. Skips entries that fail to read.
 #[hotpath::measure]
-fn read_dir_paths(dir: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(dir)
-        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-        .unwrap_or_default()
+/// `dir`'s entries whose name passes `keep_name` and whose kind is `kind`.
+/// The kind comes from the directory listing, so a folder of 10k photos
+/// costs no `stat` per entry. Only a symlink, or a listing without the
+/// kind, is stat'ed, so a link counts as what it leads to.
+fn read_dir_paths(dir: &Path, kind: EntryKind, keep_name: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    rd.filter_map(Result::ok)
+        .map(|e| (e.path(), e.file_type()))
+        .filter(|(p, _)| keep_name(p))
+        .filter(|(p, ft)| match ft {
+            Ok(ft) if !ft.is_symlink() => match kind {
+                EntryKind::File => ft.is_file(),
+                EntryKind::Dir => ft.is_dir(),
+            },
+            _ => match kind {
+                EntryKind::File => p.is_file(),
+                EntryKind::Dir => p.is_dir(),
+            },
+        })
+        .map(|(p, _)| p)
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+enum EntryKind {
+    File,
+    // Only `list_subdirs` asks for folders, and the browser lists its
+    // folders through `web_fs.rs`.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Dir,
 }
 
 /// Sort case-insensitively by file name. `web_fs.rs` uses this too, so the
@@ -230,10 +258,7 @@ fn cmp_name_key(name: Option<&OsStr>, key: Option<&str>) -> std::cmp::Ordering {
 
 #[hotpath::measure]
 fn sorted_images_in(dir: &Path) -> Vec<PathBuf> {
-    let mut entries: Vec<PathBuf> = read_dir_paths(dir)
-        .into_iter()
-        .filter(|p| p.is_file() && is_image_extension(p))
-        .collect();
+    let mut entries = read_dir_paths(dir, EntryKind::File, is_image_extension);
     sort_by_name(&mut entries);
     entries
 }
@@ -257,15 +282,11 @@ pub fn is_listable_subdir(name: &str) -> bool {
 #[cfg(not(target_arch = "wasm32"))]
 #[hotpath::measure]
 pub fn list_subdirs(dir: &Path) -> Vec<PathBuf> {
-    let mut entries: Vec<PathBuf> = read_dir_paths(dir)
-        .into_iter()
-        .filter(|p| p.is_dir())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|s| s.to_str())
-                .is_some_and(is_listable_subdir)
-        })
-        .collect();
+    let mut entries = read_dir_paths(dir, EntryKind::Dir, |p| {
+        p.file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(is_listable_subdir)
+    });
     sort_by_name(&mut entries);
     entries
 }
