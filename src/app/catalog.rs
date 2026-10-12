@@ -372,13 +372,26 @@ impl App {
     }
 
     pub(super) fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) -> bool {
+        if !self.store_group_writes(writes) {
+            return false;
+        }
+        self.after_group_writes();
+        true
+    }
+
+    /// Re-lays out the grid after group writes. A caller applying many with
+    /// [`store_group_writes`](Self::store_group_writes) calls this once.
+    pub(super) fn after_group_writes(&mut self) {
+        self.recompute_visible();
+        self.resync_loupe_selection();
+        self.request_redraw();
+    }
+
+    /// [`apply_group_writes`](Self::apply_group_writes) without the grid
+    /// re-layout.
+    pub(super) fn store_group_writes(&mut self, writes: Vec<GroupWrite>) -> bool {
         match self.catalog.apply_group_writes(writes) {
-            Ok(()) => {
-                self.recompute_visible();
-                self.resync_loupe_selection();
-                self.request_redraw();
-                true
-            }
+            Ok(()) => true,
             Err(e) => {
                 eprintln!("[lightphotos] group change refused: {e}");
                 let t = crate::i18n::t();

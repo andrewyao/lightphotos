@@ -139,21 +139,31 @@ impl App {
         let t = crate::i18n::t();
         let mut grouped = 0;
         let mut photos = 0;
+        let mut failed = false;
+        // One grid re-layout after the loop, not one per burst.
         for burst in bursts {
             let Some(groups) = self.catalog.groups() else {
                 self.set_status(StatusKind::Error, t.group_refused_loading.to_string());
                 self.request_redraw();
-                return;
+                failed = true;
+                break;
             };
             let Some(group) = burst_group(&burst) else {
                 continue;
             };
             let writes = groups.create(group, web_time::SystemTime::now());
-            if !self.apply_group_writes(writes) {
-                return;
+            if !self.store_group_writes(writes) {
+                failed = true;
+                break;
             }
             grouped += 1;
             photos += burst.len();
+        }
+        if grouped > 0 {
+            self.after_group_writes();
+        }
+        if failed {
+            return;
         }
         let msg = if grouped == 0 {
             t.bursts_none.to_string()
