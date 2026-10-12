@@ -435,16 +435,21 @@ impl App {
             return 0;
         };
         let shown = self.shown.path().map(Path::to_path_buf);
+        // A set, not a scan of the folder per photo: a step can hold every
+        // photo in a large folder.
+        let in_folder: std::collections::HashSet<&Path> = self
+            .playlist
+            .as_ref()
+            .map(|pl| pl.entries().iter().map(PathBuf::as_path).collect())
+            .unwrap_or_default();
+        let befores: Vec<_> = step
+            .before
+            .into_iter()
+            .filter(|b| in_folder.contains(b.path.as_path()))
+            .collect();
         let mut n = 0;
-        for before in step.before {
+        for before in befores {
             let path = before.path;
-            let in_folder = self
-                .playlist
-                .as_ref()
-                .is_some_and(|pl| pl.entries().contains(&path));
-            if !in_folder {
-                continue;
-            }
             self.store_edit(&path, before.adj);
             self.catalog.set_adjustments(&path, &before.adj);
             if let Some(touchups) = before.touchups {
