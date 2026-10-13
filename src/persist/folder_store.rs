@@ -535,8 +535,8 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
 
 fn skipped_message(skipped: usize) -> String {
     format!(
-        "{skipped} catalog entr{} could not be read and {} skipped.",
-        if skipped == 1 { "y" } else { "ies" },
+        "{skipped} sidecar file{} could not be read and {} skipped.",
+        if skipped == 1 { "" } else { "s" },
         if skipped == 1 { "was" } else { "were" },
     )
 }

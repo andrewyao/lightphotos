@@ -245,7 +245,7 @@ impl App {
             }
             self.set_status(
                 StatusKind::Error,
-                crate::i18n::t().auto_tone_waits_for_catalog.into(),
+                crate::i18n::t().auto_tone_waits_for_edits.into(),
             );
             self.request_redraw();
             return;

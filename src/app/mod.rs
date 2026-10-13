@@ -1182,7 +1182,7 @@ impl App {
         if let Some(cause) = self.folder_store.take_error() {
             self.set_status(
                 StatusKind::Error,
-                (crate::i18n::t().catalog_save_failed)(&cause),
+                (crate::i18n::t().edits_save_failed)(&cause),
             );
         }
         if let Some(message) = self.presets.take_error() {
