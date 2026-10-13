@@ -24,6 +24,7 @@ pub(crate) mod native;
 mod web;
 
 /// The directory extension that marks a catalog.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const EXT: &str = "lightphotos";
 /// The name of the one catalog every install starts with.
 pub(crate) const DEFAULT_NAME: &str = "default";
@@ -32,8 +33,10 @@ const VERSION: u32 = 1;
 /// A `catalog.json` past this is refused rather than parsed: a thousand
 /// folder paths fit in a tenth of it.
 pub(crate) const MAX_RECORD_BYTES: usize = 1 << 20;
-/// A shard past this is refused. A directory of 50 000 marked photos
-/// serializes to a few megabytes.
+/// A shard past this is refused on read. A directory of 50 000 marked
+/// photos serializes to a few megabytes. Only tests read shards until the
+/// cross-folder reader exists.
+#[cfg(test)]
 pub(crate) const MAX_SHARD_BYTES: usize = 16 << 20;
 /// Folders a catalog may list.
 pub(crate) const MAX_FOLDERS: usize = 1000;
@@ -82,16 +85,8 @@ impl CatalogRef {
             .is_some_and(|stem| !stem.is_empty())
     }
 
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn named(name: &str) -> Result<CatalogRef, CatalogError> {
-        if name.trim().is_empty() || name.contains('\0') {
-            return Err(CatalogError::BadName(name.to_string()));
-        }
-        Ok(CatalogRef {
-            name: name.to_string(),
-        })
-    }
-
+    // The web reads the name once the Folders heading shows it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -130,6 +125,8 @@ impl PhotoMarks {
 /// One directory's marked photos by file name. Holds no empty entries.
 pub(crate) type DirMarks = BTreeMap<String, PhotoMarks>;
 
+/// Why a catalog on disk could not be opened or made.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 pub(crate) enum CatalogError {
     /// Not `<stem>.lightphotos`, or an empty name.
@@ -144,9 +141,9 @@ pub(crate) enum CatalogError {
     /// A `catalog.json` that will not parse. Never overwritten.
     Parse(PathBuf, String),
     TooBig(PathBuf, usize),
-    TooManyFolders(usize),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Display for CatalogError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -159,14 +156,16 @@ impl std::fmt::Display for CatalogError {
             CatalogError::TooBig(p, max) => {
                 write!(f, "{} is over the {max}-byte limit", p.display())
             }
-            CatalogError::TooManyFolders(max) => {
-                write!(f, "a catalog lists at most {max} folders")
-            }
         }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl std::error::Error for CatalogError {}
+
+fn too_many_folders(max: usize) -> String {
+    format!("a catalog lists at most {max} folders")
+}
 
 /// The stored `catalog.json`.
 #[derive(Serialize, Deserialize)]
@@ -224,6 +223,8 @@ pub(crate) fn add_root(roots: &mut Vec<PathBuf>, dir: &Path) -> bool {
 
 /// One open catalog: its roots and the marks copy's write queue.
 pub(crate) struct Catalog {
+    // Read on the web once the Folders heading shows the name.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     at: CatalogRef,
     folders: Record,
     /// Signature of the shard last queued per photo directory, so a
@@ -237,18 +238,14 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
-    /// A catalog that is never written anywhere.
+    /// A catalog that is never written anywhere: a test's, or the one the
+    /// app runs on when the default cannot be made.
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn in_memory(name: &str) -> Catalog {
-        #[cfg(not(target_arch = "wasm32"))]
-        let at = CatalogRef {
+        Catalog::empty(CatalogRef {
             path: PathBuf::from(format!("{name}.{EXT}")),
             name: name.to_string(),
-        };
-        #[cfg(target_arch = "wasm32")]
-        let at = CatalogRef {
-            name: name.to_string(),
-        };
-        Catalog::empty(at)
+        })
     }
 
     /// No folders, no writer, record loaded.
@@ -263,10 +260,13 @@ impl Catalog {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn at(&self) -> &CatalogRef {
         &self.at
     }
 
+    // The web reads the name once the Folders heading shows it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn name(&self) -> &str {
         self.at.name()
     }
@@ -286,7 +286,7 @@ impl Catalog {
     pub(crate) fn add_folder(&mut self, dir: &Path) -> bool {
         let roots = self.folders.folders_mut();
         if roots.len() >= MAX_FOLDERS && !roots.iter().any(|r| dir.starts_with(r)) {
-            self.last_error = Some(CatalogError::TooManyFolders(MAX_FOLDERS).to_string());
+            self.last_error = Some(too_many_folders(MAX_FOLDERS));
             return false;
         }
         let changed = add_root(roots, dir);
@@ -378,7 +378,7 @@ fn shard_name(dir: &Path) -> String {
 }
 
 /// Parse a shard's bytes, refusing one over the cap or not for `dir`.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[cfg(test)]
 fn parse_shard(bytes: &[u8], dir: &Path) -> Result<DirMarks, String> {
     if bytes.len() > MAX_SHARD_BYTES {
         return Err(format!("{} bytes is over the shard limit", bytes.len()));
@@ -402,7 +402,7 @@ fn parse_record(bytes: &[u8]) -> Result<Vec<PathBuf>, String> {
     }
     let record: RecordFile = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if record.folders.len() > MAX_FOLDERS {
-        return Err(CatalogError::TooManyFolders(MAX_FOLDERS).to_string());
+        return Err(too_many_folders(MAX_FOLDERS));
     }
     let mut folders = Vec::new();
     for dir in &record.folders {

@@ -865,6 +865,7 @@ impl App {
             || self.autotone.is_running()
             || self.score_progress().is_some()
             || self.folder_store.backlog() > 0
+            || self.catalog.backlog() > 0
     }
 
     /// Restart a showing toast's 3-second clock while a batch runs, so a slow

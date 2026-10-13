@@ -368,6 +368,13 @@ impl ApplicationHandler<UserEvent> for App {
         #[cfg(not(target_arch = "wasm32"))]
         self.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
+        // The catalog's copy of the marks follows the records just flushed.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.sync_marks();
+            self.catalog
+                .flush_blocking(std::time::Duration::from_secs(10));
+        }
         // Same last chance for the folder's derived signals. Losing them costs
         // only a recompute, so the bound is shorter than the folder store's.
         #[cfg(not(target_arch = "wasm32"))]
@@ -449,6 +456,8 @@ impl App {
         // Outside the loader block below, because a queued sidecar write has
         // no loader to wait on and can outlive the folder it came from.
         self.folder_store.pump();
+        self.sync_marks();
+        self.catalog.pump();
         self.keep_status_alive();
         self.signals.flush_if_due();
         self.poll_delete();
@@ -574,6 +583,7 @@ impl App {
             Some(16)
         } else if self.export_running()
             || self.folder_store.backlog() > 0
+            || self.catalog.backlog() > 0
             || immich_connecting
             || vision_pending
             || scoring

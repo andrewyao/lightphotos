@@ -660,6 +660,8 @@ pub struct Strings {
     pub catalog_fallback: fn(&str) -> String,
     /// A catalog the user chose could not open. Takes why.
     pub catalog_open_failed: fn(&str) -> String,
+    /// A catalog file could not be written. Takes why.
+    pub catalog_save_failed: fn(&str) -> String,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub preview_failed: fn(&str) -> String,
     /// The group tiles' page, as first, last and group size.
@@ -1570,6 +1572,7 @@ pub static EN: Strings = Strings {
     open_folder_failed: |e| format!("Couldn't open folder: {e}"),
     catalog_fallback: |e| format!("Couldn't open the last catalog, so the default one is open: {e}"),
     catalog_open_failed: |e| format!("Couldn't open catalog: {e}"),
+    catalog_save_failed: |e| format!("Couldn't save the catalog: {e}"),
     preview_failed: |path| format!("Unable to load Loupe preview for {path}"),
     group_page: |first, last, n| format!("{first}–{last} of {n}"),
     tile_load: "Load Photos:",
@@ -2345,6 +2348,7 @@ pub static ZH: Strings = Strings {
     open_folder_failed: |e| format!("无法打开文件夹：{e}"),
     catalog_fallback: |e| format!("无法打开上次的目录，已打开默认目录：{e}"),
     catalog_open_failed: |e| format!("无法打开目录：{e}"),
+    catalog_save_failed: |e| format!("无法保存目录：{e}"),
     preview_failed: |path| format!("无法加载 {path} 的预览"),
     group_page: |first, last, n| format!("{first}–{last} / {n} 张"),
     tile_load: "加载照片：",

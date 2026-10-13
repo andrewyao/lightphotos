@@ -39,6 +39,8 @@ pub(crate) struct State {
     status: Option<String>,
     /// Visible thumbnails whose decode failed for good.
     failed_thumbs: usize,
+    /// The open catalog's name.
+    catalog: String,
     /// The Folders tree's roots.
     folder_roots: Vec<std::path::PathBuf>,
     /// The folder the Grid shows.
@@ -62,6 +64,7 @@ impl State {
                     })
                     .collect()
             },
+            catalog: app.catalog.name().to_string(),
             folder_roots: app.folder_roots().to_vec(),
             folder: app.folder_sel(),
             sel: app.sel(),
@@ -92,7 +95,7 @@ mod tests {
         let json = serde_json::to_string(&State::of(&app)).unwrap();
         assert_eq!(
             json,
-            r#"{"mode":"grid","visible":0,"grid_range":[0,0],"stacks":[],"sel":null,"selected":[],"photo":null,"rating":null,"flag":null,"label":null,"focus":"folders","zoom":null,"status":null,"failed_thumbs":0,"folder_roots":[],"folder":null}"#
+            r#"{"mode":"grid","visible":0,"grid_range":[0,0],"stacks":[],"sel":null,"selected":[],"photo":null,"rating":null,"flag":null,"label":null,"focus":"folders","zoom":null,"status":null,"failed_thumbs":0,"catalog":"default","folder_roots":[],"folder":null}"#
         );
     }
 }

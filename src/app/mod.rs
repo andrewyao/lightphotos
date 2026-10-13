@@ -656,8 +656,11 @@ pub(crate) struct App {
     /// The open catalog: the tops of the folder tree, sorted, every folder
     /// the user has added and an opened file's parent, plus the marks copy.
     /// Remembered across launches natively; on the web, in memory, holding
-    /// the picked folders.
-    catalog: crate::persist::catalog::Catalog,
+    /// the picked folders. `pub(crate)` because the frame loop drives its
+    /// write queue directly.
+    pub(crate) catalog: crate::persist::catalog::Catalog,
+    /// The folder store's `marks_revision` the catalog's copy last took.
+    marks_synced: u64,
     /// Roots that weren't a folder when last checked, such as an unplugged
     /// drive's. They stay listed so the user can remove them.
     missing_roots: HashSet<PathBuf>,
@@ -893,6 +896,7 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             control: control::Pending::default(),
             catalog: launch.catalog,
+            marks_synced: 0,
             missing_roots,
             folder_sel: None,
             expanded: HashSet::new(),
@@ -1205,6 +1209,12 @@ impl App {
         }
         if let Some(message) = self.presets.take_error() {
             self.set_status(StatusKind::Error, message);
+        }
+        if let Some(cause) = self.catalog.take_error() {
+            self.set_status(
+                StatusKind::Error,
+                (crate::i18n::t().catalog_save_failed)(&cause),
+            );
         }
 
         let pixels_per_point = self.egui_ctx.pixels_per_point();

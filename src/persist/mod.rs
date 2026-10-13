@@ -2,9 +2,6 @@
 //! What outlives the session: the per-folder store and its sidecar writes,
 //! photo groups, cached signals, preferences, presets, and the Immich key.
 
-// The marks projection lands in the next commit; until then its half of
-// the store has no caller.
-#[allow(dead_code)]
 pub(crate) mod catalog;
 pub(crate) mod folder_store;
 pub(crate) mod groups;

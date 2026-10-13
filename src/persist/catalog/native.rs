@@ -12,7 +12,9 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::{Catalog, CatalogError, CatalogRef, DirMarks, Record};
+#[cfg(test)]
+use super::DirMarks;
+use super::{Catalog, CatalogError, CatalogRef, Record};
 use crate::paths::{remove_if_present, write_atomic_in_dir};
 
 const RECORD_FILE: &str = "catalog.json";
@@ -126,7 +128,9 @@ impl Catalog {
 
     /// The shard for `dir` as stored, or `None` when there is none, it will
     /// not parse, or it is for another directory. The next projection
-    /// replaces a bad one.
+    /// replaces a bad one. Only tests read shards until the cross-folder
+    /// reader exists.
+    #[cfg(test)]
     pub(crate) fn load_shard(&self, dir: &Path) -> Option<DirMarks> {
         let file = self.shard_path(dir);
         let bytes = read_capped(&file, super::MAX_SHARD_BYTES).ok()??;

@@ -11,6 +11,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use crate::develop::{Adjustments, TouchUp};
+use crate::persist::catalog::{DirMarks, PhotoMarks};
 use crate::persist::groups::{GroupId, GroupWrite, Groups, SavedGroup};
 use crate::scoring::quality::QualityScore;
 use crate::sidecar::{ColorLabel, Flag, ImageRecord, StoredScore, MAX_RATING};
@@ -41,6 +42,8 @@ pub struct FolderStore {
     last_error: Option<String>,
     /// See [`FolderStore::sort_revision`].
     sort_revision: u64,
+    /// See [`FolderStore::marks_revision`].
+    marks_revision: u64,
     /// Sidecar mutations on their way to disk. Every write goes through here,
     /// so no caller blocks a frame on the filesystem.
     writeback: Writeback,
@@ -61,6 +64,7 @@ impl FolderStore {
             dir: None,
             last_error: None,
             sort_revision: 0,
+            marks_revision: 0,
             writeback: Writeback::new(),
             #[cfg(target_arch = "wasm32")]
             wasm_dir_handle: None,
@@ -176,6 +180,7 @@ impl FolderStore {
         }
         if self.dir.as_deref() == Some(dir) {
             self.sort_revision += 1;
+            self.marks_revision += 1;
             for (name, rec) in loaded.images {
                 if !self.dirty.contains(&name) {
                     self.images.insert(name, rec);
@@ -236,6 +241,36 @@ impl FolderStore {
     /// Grid's order, so the Grid knows when to sort again.
     pub(crate) fn sort_revision(&self) -> u64 {
         self.sort_revision
+    }
+
+    /// Counts changes to any photo's rating, flag or label, and each load
+    /// of the active directory, so the catalog knows when its copy of the
+    /// marks is behind. Edits to adjustments don't move it: a slider drag
+    /// updates every frame.
+    pub(crate) fn marks_revision(&self) -> u64 {
+        self.marks_revision
+    }
+
+    /// The active directory and its marked photos, as the catalog's copy
+    /// should read. `None` until the directory's load has landed, so a mark
+    /// made while loading never projects a partial directory.
+    pub(crate) fn dir_marks(&self) -> Option<(&Path, DirMarks)> {
+        let dir = self.dir.as_deref()?;
+        self.groups.as_ref()?;
+        let marks = self
+            .images
+            .iter()
+            .filter_map(|(name, rec)| {
+                let marks = PhotoMarks::of(rec);
+                if marks.is_empty() {
+                    return None;
+                }
+                // A name that isn't UTF-8 can't be a JSON key that names
+                // the file again, and the copy is disposable.
+                Some((name.to_str()?.to_string(), marks))
+            })
+            .collect();
+        Some((dir, marks))
     }
 
     /// The cache key for `path`: its filename, when `path` is in the active
@@ -345,6 +380,7 @@ impl FolderStore {
             if let Some(name) = self.cache_key(path) {
                 self.images.remove(name);
                 self.dirty.insert(name.to_os_string());
+                self.marks_revision += 1;
             }
             self.enqueue(path, WriteOp::Delete);
         }
@@ -389,9 +425,13 @@ impl FolderStore {
         self.dirty.insert(name.clone());
         let mut rec = self.images.remove(&name).unwrap_or_default();
         let sorted_by = (rec.rating, rec.edited);
+        let marked = PhotoMarks::of(&rec);
         mutate(&mut rec);
         if (rec.rating, rec.edited) != sorted_by {
             self.sort_revision += 1;
+        }
+        if PhotoMarks::of(&rec) != marked {
+            self.marks_revision += 1;
         }
         if rec.is_empty() {
             self.enqueue(path, WriteOp::Delete);
@@ -447,6 +487,7 @@ impl FolderStore {
         if let Some(name) = self.cache_key(path) {
             self.images.remove(name);
             self.dirty.insert(name.to_os_string());
+            self.marks_revision += 1;
         }
         self.delete_sidecar_with_handle(path, dir_handle);
     }
