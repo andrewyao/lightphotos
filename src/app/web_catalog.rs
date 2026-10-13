@@ -39,6 +39,9 @@ pub(super) struct State {
     restore_waiting: bool,
     /// New Catalog's name prompt, while it is open.
     name_edit: Option<String>,
+    /// Roots removed while the record was out. Whether their kept handles
+    /// go is decided against the landed record.
+    forget_after_load: Vec<PathBuf>,
 }
 
 impl State {
@@ -51,6 +54,7 @@ impl State {
             known: None,
             restore_waiting: false,
             name_edit: None,
+            forget_after_load: Vec::new(),
         }
     }
 }
@@ -110,11 +114,17 @@ impl App {
             ),
         }
         let seed = if load.seed { kept.as_slice() } else { &[] };
-        if let Err(e) = self.catalog.land_record(load.record, seed) {
-            self.set_status(
+        let removed = std::mem::take(&mut self.web.catalogs.forget_after_load);
+        match self.catalog.land_record(load.record, seed) {
+            Ok(()) => {
+                for root in removed {
+                    self.forget_kept_handle(&root);
+                }
+            }
+            Err(e) => self.set_status(
                 StatusKind::Error,
                 (crate::i18n::t().catalog_open_failed)(&e),
-            );
+            ),
         }
         self.note_known_catalog();
         // A root picked while the record was out has handles before its
@@ -130,6 +140,22 @@ impl App {
             self.restore_last_session();
         }
         self.request_redraw();
+    }
+
+    /// Stop keeping `root`'s handle unless a catalog still lists it. While
+    /// the record is out it may list `root`, so the check waits for it.
+    pub(super) fn forget_kept_handle(&mut self, root: &Path) {
+        if self.catalog.loading() {
+            self.web.catalogs.forget_after_load.push(root.to_path_buf());
+            return;
+        }
+        if self.catalog.folders().iter().any(|f| f == root) {
+            return;
+        }
+        wasm_bindgen_futures::spawn_local(idb::forget_folder_if_unlisted(
+            self.catalog.name().to_string(),
+            root.to_path_buf(),
+        ));
     }
 
     /// Hold the session restore until the record lands. True when it waits.
@@ -162,6 +188,7 @@ impl App {
         self.close_folder();
         self.supersede_web_pending_nav();
         self.catalog = catalog;
+        self.web.catalogs.forget_after_load.clear();
         self.expanded.clear();
         self.subdirs.clear();
         self.missing_roots.clear();

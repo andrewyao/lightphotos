@@ -122,7 +122,7 @@ impl Catalog {
     fn on_disk(at: CatalogRef) -> Catalog {
         let mut catalog = Catalog::empty(at);
         catalog.writer = Some(Writer::new());
-        catalog.folders = Record::Pending(Vec::new());
+        catalog.folders = Record::pending();
         catalog
     }
 

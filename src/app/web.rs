@@ -492,14 +492,11 @@ impl App {
     }
 
     /// Drop every handle, listing and cache index under `root`, and stop
-    /// keeping it for later visits unless another catalog lists it. Its
-    /// files stay.
+    /// keeping it for later visits unless a catalog lists it. Its files
+    /// stay.
     pub(super) fn forget_web_root(&mut self, root: &Path) {
         self.drop_web_root_handles(root);
-        wasm_bindgen_futures::spawn_local(crate::web::web_catalog_idb::forget_folder_if_unlisted(
-            self.catalog.name().to_string(),
-            root.to_path_buf(),
-        ));
+        self.forget_kept_handle(root);
     }
 
     fn drop_web_root_handles(&mut self, root: &Path) {

@@ -228,7 +228,12 @@ struct Shard {
 /// `Loaded` record is ever written.
 #[derive(Debug, PartialEq, Eq)]
 enum Record {
-    Pending(Vec<PathBuf>),
+    /// The folders added while the record is out, which are all the tree
+    /// shows, and the folders removed meanwhile, which the record may list.
+    Pending {
+        added: Vec<PathBuf>,
+        removed: Vec<PathBuf>,
+    },
     Loaded(Vec<PathBuf>),
     /// The stored record could not be read or will not parse. The folders
     /// live in memory for this visit and the record stays as it is.
@@ -236,16 +241,40 @@ enum Record {
 }
 
 impl Record {
+    fn pending() -> Record {
+        Record::Pending {
+            added: Vec::new(),
+            removed: Vec::new(),
+        }
+    }
+
     fn folders(&self) -> &[PathBuf] {
         match self {
-            Record::Pending(f) | Record::Loaded(f) | Record::Unreadable(f) => f,
+            Record::Pending { added: f, .. } | Record::Loaded(f) | Record::Unreadable(f) => f,
         }
     }
 
     fn folders_mut(&mut self) -> &mut Vec<PathBuf> {
         match self {
-            Record::Pending(f) | Record::Loaded(f) | Record::Unreadable(f) => f,
+            Record::Pending { added: f, .. } | Record::Loaded(f) | Record::Unreadable(f) => f,
         }
+    }
+
+    /// `base`, the stored record or a first record's seed, with the changes
+    /// made while pending: `(base ∪ added) − removed`, tidied like the tree.
+    fn merged_onto(&self, base: &[PathBuf]) -> Vec<PathBuf> {
+        let (added, removed) = match self {
+            Record::Pending { added, removed } => (added.as_slice(), removed.as_slice()),
+            Record::Loaded(_) | Record::Unreadable(_) => (&[][..], &[][..]),
+        };
+        let mut folders = Vec::new();
+        for dir in base.iter().chain(added) {
+            if folders.len() < MAX_FOLDERS {
+                add_root(&mut folders, dir);
+            }
+        }
+        folders.retain(|f| !removed.contains(f));
+        folders
     }
 }
 
@@ -326,31 +355,38 @@ impl Catalog {
             return false;
         }
         let changed = add_root(roots, dir);
+        if let Record::Pending { removed, .. } = &mut self.folders {
+            removed.retain(|r| r != dir);
+        }
         if changed {
             self.save_record();
         }
         changed
     }
 
-    /// Drop `dir` from the roots. Returns whether it was listed.
+    /// Drop `dir` from the roots. Returns whether it was listed. While the
+    /// record is out the removal is remembered, so a record that lists
+    /// `dir` does not bring it back.
     pub(crate) fn remove_folder(&mut self, dir: &Path) -> bool {
         let roots = self.folders.folders_mut();
         let before = roots.len();
         roots.retain(|r| r != dir);
         let changed = roots.len() != before;
+        if let Record::Pending { removed, .. } = &mut self.folders {
+            if changed && !removed.iter().any(|r| r == dir) {
+                removed.push(dir.to_path_buf());
+            }
+        }
         if changed {
             self.save_record();
         }
         changed
     }
 
-    /// The stored record arrived. Roots added while it was pending merge in
-    /// on top of it.
+    /// The stored record arrived. The changes made while it was pending
+    /// apply on top of it.
     fn load_record(&mut self, stored: Vec<PathBuf>) {
-        let mut folders = Vec::new();
-        for dir in stored.iter().chain(self.folders.folders()) {
-            add_root(&mut folders, dir);
-        }
+        let folders = self.folders.merged_onto(&stored);
         let merged = folders != stored;
         self.folders = Record::Loaded(folders);
         if merged {
@@ -361,12 +397,12 @@ impl Catalog {
     /// Whether the stored record has yet to arrive.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub(crate) fn loading(&self) -> bool {
-        matches!(self.folders, Record::Pending(_))
+        matches!(self.folders, Record::Pending { .. })
     }
 
     /// The browser's stored record arrived: its JSON, `None` when there is
     /// none yet, or why it could not be read. A missing record is made from
-    /// `seed` and the folders added while it was pending. One that cannot be
+    /// `seed` and the changes made while it was pending. One that cannot be
     /// read or parsed is an error, and the catalog never writes over it.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub(crate) fn land_record(
@@ -378,13 +414,7 @@ impl Catalog {
         match parsed {
             Ok(Some(folders)) => self.load_record(folders),
             Ok(None) => {
-                let mut folders = Vec::new();
-                for dir in seed.iter().chain(self.folders.folders()) {
-                    if folders.len() < MAX_FOLDERS {
-                        add_root(&mut folders, dir);
-                    }
-                }
-                self.folders = Record::Loaded(folders);
+                self.folders = Record::Loaded(self.folders.merged_onto(seed));
                 self.save_record();
             }
             Err(e) => {
@@ -526,13 +556,53 @@ mod tests {
     #[test]
     fn a_pending_record_merges_into_the_loaded_one() {
         let mut cat = Catalog::in_memory("x");
-        cat.folders = Record::Pending(paths(&["/added/while/pending"]));
+        cat.folders = Record::Pending {
+            added: paths(&["/added/while/pending"]),
+            removed: Vec::new(),
+        };
         cat.load_record(paths(&["/stored"]));
         assert_eq!(
             cat.folders(),
             paths(&["/added/while/pending", "/stored"]).as_slice()
         );
         assert!(matches!(cat.folders, Record::Loaded(_)));
+    }
+
+    /// A folder removed while the record was out stays removed when the
+    /// record lists it, and the merged list is written back over it.
+    #[test]
+    fn a_folder_removed_while_pending_stays_removed() {
+        let dir = crate::app::test_support::temp_folder("pending-remove");
+        let at = CatalogRef::in_dir(&dir, "c").unwrap();
+        let mut cat =
+            Catalog::create_at(at.clone(), paths(&["/stored", "/gone", "/back"])).unwrap();
+        cat.folders = Record::pending();
+        for added in ["/picked", "/gone", "/back", "/dropped"] {
+            assert!(cat.add_folder(Path::new(added)));
+        }
+        for removed in ["/gone", "/back", "/dropped"] {
+            assert!(cat.remove_folder(Path::new(removed)));
+        }
+        assert!(cat.add_folder(Path::new("/back")), "re-added after removal");
+        cat.load_record(paths(&["/back", "/gone", "/stored"]));
+        let want = paths(&["/back", "/picked", "/stored"]);
+        assert_eq!(cat.folders(), want.as_slice());
+        cat.flush_blocking(std::time::Duration::from_secs(10));
+        drop(cat);
+        assert_eq!(Catalog::open(at).unwrap().folders(), want.as_slice());
+
+        let mut first = Catalog::in_memory("y");
+        first.folders = Record::pending();
+        first.add_folder(Path::new("/kept"));
+        first.remove_folder(Path::new("/kept"));
+        first
+            .land_record(Ok(None), &paths(&["/kept", "/other"]))
+            .unwrap();
+        assert_eq!(
+            first.folders(),
+            paths(&["/other"]).as_slice(),
+            "the seed loses it too"
+        );
     }
 
     #[test]
@@ -554,7 +624,10 @@ mod tests {
         let dir = crate::app::test_support::temp_folder("land-missing");
         let at = CatalogRef::in_dir(&dir, "c").unwrap();
         let mut cat = Catalog::create_at(at.clone(), Vec::new()).unwrap();
-        cat.folders = Record::Pending(paths(&["/picked"]));
+        cat.folders = Record::Pending {
+            added: paths(&["/picked"]),
+            removed: Vec::new(),
+        };
         assert!(cat.loading());
         cat.land_record(Ok(None), &paths(&["/kept/b", "/kept/a"]))
             .unwrap();
@@ -583,7 +656,10 @@ mod tests {
             Ok(Some(b"null".to_vec())),
             Err("IndexedDB is unavailable".to_string()),
         ] {
-            cat.folders = Record::Pending(paths(&["/picked"]));
+            cat.folders = Record::Pending {
+                added: paths(&["/picked"]),
+                removed: Vec::new(),
+            };
             let why = cat.land_record(stored, &paths(&["/seed"])).unwrap_err();
             assert!(why.starts_with("c: "), "{why}");
             assert!(!cat.loading(), "the restore must not wait forever");

@@ -88,7 +88,7 @@ impl Catalog {
     /// The catalog `at`, its record still to come.
     pub(crate) fn pending(at: CatalogRef) -> Catalog {
         let mut catalog = Catalog::empty(at);
-        catalog.folders = Record::Pending(Vec::new());
+        catalog.folders = Record::pending();
         catalog
     }
 
