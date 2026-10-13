@@ -2,6 +2,10 @@
 //! What outlives the session: the per-folder store and its sidecar writes,
 //! photo groups, cached signals, preferences, presets, and the Immich key.
 
+// Wired into the app by the next commit, which owns the Folders roots
+// through it.
+#[allow(dead_code)]
+pub(crate) mod catalog;
 pub(crate) mod folder_store;
 pub(crate) mod groups;
 // The importer is native-only, so the browser build compiles the parser with
