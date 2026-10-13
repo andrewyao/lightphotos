@@ -10,7 +10,7 @@
 use std::sync::mpsc::{Receiver, Sender};
 
 use super::*;
-use crate::persist::catalog::{Catalog, CatalogRef};
+use crate::persist::catalog::{web_fallback, Catalog, CatalogRef};
 use crate::web::{web_catalog_idb as idb, web_fs};
 
 /// What opening a catalog read, all at once so its roots and missing roots
@@ -22,9 +22,11 @@ pub(super) struct CatalogLoad {
     kept: Result<Vec<PathBuf>, String>,
     /// Every stored catalog's name.
     names: Result<Vec<String>, String>,
-    /// Make a missing record from `kept`: the first visit since catalogs,
-    /// whose folders were the kept ones.
-    seed: bool,
+    /// The catalog a switch left, to go back to if this one won't load.
+    /// `None` for a launch, which falls back to the default instead, and
+    /// whose missing record is made from `kept`: the first visit since
+    /// catalogs, whose folders were the kept ones.
+    came_from: Option<CatalogRef>,
 }
 
 pub(super) struct State {
@@ -61,8 +63,9 @@ impl State {
 
 impl App {
     /// Read the open catalog's record, the kept folders and the catalog
-    /// list. `seed` makes a missing record from the kept folders.
-    pub(crate) fn start_catalog_load(&mut self, seed: bool) {
+    /// list. `came_from` is the catalog to go back to if it won't load;
+    /// `None` at launch.
+    pub(crate) fn start_catalog_load(&mut self, came_from: Option<CatalogRef>) {
         let state = &mut self.web.catalogs;
         state.generation = state.generation.wrapping_add(1);
         let generation = state.generation;
@@ -77,7 +80,7 @@ impl App {
                 record,
                 kept,
                 names,
-                seed,
+                came_from,
             });
         });
     }
@@ -113,7 +116,8 @@ impl App {
                 &format!("[catalog] could not list the catalogs: {e}").into(),
             ),
         }
-        let seed = if load.seed { kept.as_slice() } else { &[] };
+        let launch = load.came_from.is_none();
+        let seed = if launch { kept.as_slice() } else { &[] };
         let removed = std::mem::take(&mut self.web.catalogs.forget_after_load);
         match self.catalog.land_record(load.record, seed) {
             Ok(()) => {
@@ -121,10 +125,28 @@ impl App {
                     self.forget_kept_handle(&root);
                 }
             }
-            Err(e) => self.set_status(
-                StatusKind::Error,
-                (crate::i18n::t().catalog_open_failed)(&e),
-            ),
+            Err(e) => {
+                let t = crate::i18n::t();
+                let toast = if launch {
+                    t.catalog_fallback
+                } else {
+                    t.catalog_open_failed
+                };
+                self.set_status(StatusKind::Error, toast(&e));
+                let came_from = load.came_from.as_ref().map(CatalogRef::name);
+                let back = web_fallback(self.catalog.name(), came_from)
+                    .and_then(|name| CatalogRef::named(name).ok());
+                if let Some(back) = back {
+                    // A launch leaves the pref naming the last catalog, as
+                    // natively, so it opens again once it can. A switch
+                    // never happened, so the pref goes back too.
+                    if !launch {
+                        self.remember_web_catalog(back.name());
+                    }
+                    self.enter_web_catalog(Catalog::pending(back), None);
+                    return;
+                }
+            }
         }
         self.note_known_catalog();
         // A root picked while the record was out has handles before its
@@ -181,9 +203,17 @@ impl App {
         self.web.catalogs.known.as_deref().unwrap_or(&[])
     }
 
+    /// Leave the open catalog for `catalog`, and save it as the one to
+    /// reopen. If it won't load, the one left opens again.
+    fn switch_web_catalog(&mut self, catalog: Catalog) {
+        let left = self.catalog.at().clone();
+        self.remember_web_catalog(catalog.name());
+        self.enter_web_catalog(catalog, Some(left));
+    }
+
     /// Leave the folder showing and make `catalog` the open one. Its roots
     /// and the session restore follow once its record lands.
-    fn switch_web_catalog(&mut self, catalog: Catalog) {
+    fn enter_web_catalog(&mut self, catalog: Catalog, came_from: Option<CatalogRef>) {
         self.sync_marks();
         self.close_folder();
         self.supersede_web_pending_nav();
@@ -193,18 +223,19 @@ impl App {
         self.subdirs.clear();
         self.missing_roots.clear();
         self.note_known_catalog();
-        if let Err(e) =
-            crate::persist::prefs::save(super::catalog::CATALOG_PREF, self.catalog.name())
-        {
+        if self.catalog.loading() {
+            self.start_catalog_load(came_from);
+        }
+        self.restore_last_session();
+        self.request_redraw();
+    }
+
+    fn remember_web_catalog(&self, name: &str) {
+        if let Err(e) = crate::persist::prefs::save(super::catalog::CATALOG_PREF, name) {
             web_sys::console::warn_1(
                 &format!("[catalog] could not save the catalog pref: {e}").into(),
             );
         }
-        if self.catalog.loading() {
-            self.start_catalog_load(false);
-        }
-        self.restore_last_session();
-        self.request_redraw();
     }
 
     /// Switch to the catalog `at` from the Folders heading.

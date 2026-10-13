@@ -86,7 +86,7 @@ fn finish_window_setup(
     web::analytics::started();
     // The browser's catalog record is async; the restore below waits on it.
     #[cfg(target_arch = "wasm32")]
-    app.start_catalog_load(true);
+    app.start_catalog_load(None);
 
     if let Some(path) = app.pending_initial.take() {
         jobs::loader::mark("opening initial path");

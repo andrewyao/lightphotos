@@ -44,6 +44,15 @@ pub(crate) const MAX_FOLDERS: usize = 1000;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) const MAX_NAME_CHARS: usize = 100;
 
+/// The catalog the browser opens when catalog `failed` won't load: the one
+/// a switch came from, or at launch (`came_from` is `None`) the default, as
+/// natively. `None` keeps `failed` open, its folders in memory only.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn web_fallback<'a>(failed: &str, came_from: Option<&'a str>) -> Option<&'a str> {
+    let to = came_from.unwrap_or(DEFAULT_NAME);
+    (to != failed).then_some(to)
+}
+
 /// `name` as a browser catalog's name: trimmed, non-empty, at most
 /// [`MAX_NAME_CHARS`], with no `/` (which reads as a path) and no NUL (which
 /// separates the catalog from the directory in a marks key).
@@ -603,6 +612,26 @@ mod tests {
             paths(&["/other"]).as_slice(),
             "the seed loses it too"
         );
+    }
+
+    #[test]
+    fn a_browser_catalog_that_wont_load_falls_back_like_native() {
+        assert_eq!(
+            web_fallback("trip", None),
+            Some(DEFAULT_NAME),
+            "a launch opens the default"
+        );
+        assert_eq!(
+            web_fallback(DEFAULT_NAME, None),
+            None,
+            "a broken default stays open, in memory"
+        );
+        assert_eq!(
+            web_fallback("broken", Some("trip")),
+            Some("trip"),
+            "a switch goes back where it came from"
+        );
+        assert_eq!(web_fallback("trip", Some("trip")), None);
     }
 
     #[test]
