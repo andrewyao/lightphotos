@@ -327,6 +327,68 @@ when no worker thread starts, which is what happens on wasm32, and `App` then
 holds no pool to submit to. `ScorePool::new` returns `None` off macOS, so
 scoring does not run there.
 
+## Catalogs
+
+A catalog is a named set of top-level photo folders: the roots of the
+Folders panel. A person can keep several, such as one for family photos and
+one for client work, and switch between them. The app opens the last
+catalog used, or one called `default`.
+
+**What a catalog holds:**
+- The list of folders.
+- A copy of each rated, flagged or color-labelled photo's marks, grouped by
+  the directory the photo is in.
+
+**What it does not hold:** develop edits, presets, thumbnails, Vision
+signals, or anything else about a photo. Those stay in the photo's folder.
+
+**The folder is the truth.** Every edit and mark is written to the photo's
+own sidecar under `<photo dir>/.lightphotos/`, as before catalogs. The marks
+in a catalog are a projection of those sidecars, so they can be deleted and
+rebuilt at any time. Once per frame, `App::sync_marks` checks whether the
+open folder's marks changed (`FolderStore::marks_revision`). If they did, it
+replaces that directory's whole shard with the folder's current marks. A
+directory with no marks has no shard. Writing the shard again with the same
+marks changes nothing, and visiting a folder rewrites a stale shard. Nothing
+reads the shards yet. They are there for a later reader that works across
+folders.
+
+**Where it is stored:**
+- Native: a directory `<name>.lightphotos`, by default in
+  `~/Pictures/LightPhotos/`. It holds `catalog.json`
+  (`{"v":1,"folders":[...]}`) and `marks/<fnv1a of the dir>.json`
+  (`{"v":1,"dir":...,"photos":{...}}`), one shard per photo directory. A
+  shard names its directory inside, so a hash collision or a stale shard is
+  caught and replaced. A writer thread keeps only the newest bytes per
+  file, and exit waits for it.
+- Browser: IndexedDB `lightphotos-catalogs`. The `catalogs` store maps a
+  catalog's name to its `{v, folders}`. The `marks` store maps
+  `<name>\0<dir>` to a shard. The folders are listed by the names under
+  which `web_fs.rs` keeps their directory handles in `lightphotos-folders`.
+  A listed folder whose handle is gone shows as missing. A page has no exit
+  hook, so each write starts at once and waits only behind a write already
+  out for the same key. Removing a folder forgets its kept handle only when
+  no other catalog lists it.
+
+**The record's states.** `persist::catalog::Record` is one of three states:
+- `Pending`: the stored list has not arrived. Native reads it at open, so
+  this lasts no time there. The browser reads it asynchronously, and the
+  session restore waits for it. Folders added or removed meanwhile are
+  remembered, and the landed list is (stored ∪ added) − removed.
+- `Loaded`: the list is known, and every change is written.
+- `Unreadable`: the stored list could not be read or will not parse. The
+  folders live in memory, and the stored list is never written over. A
+  launch whose last catalog will not open falls back to `default` with a
+  toast and leaves the `catalog` pref alone, so that catalog reopens once it
+  can. A failed switch goes back to the catalog it left.
+
+**Seeding from older builds.** Before catalogs, the session pref held the
+folder list. On the first launch with catalogs, that list creates the
+native default catalog. The session keeps saving the list until a default
+catalog on disk holds it, so a launch that cannot create the default loses
+nothing. The browser seeds its first `default` record from the folders it
+already keeps handles for.
+
 ## File index
 
 | File | Pipeline stage | Platform |
@@ -351,8 +413,11 @@ scoring does not run there.
 | `web/web_fs.rs` | File System Access folder picking/listing/byte reads | wasm32 |
 | `web/web_folder_store_fs.rs` | File System Access counterpart of the native sidecar I/O in `sidecar.rs` and `persist/folder_store.rs` | wasm32 |
 | `app/loupe.rs` | View-state math (zoom/pan/fit) and the decision to fetch full resolution | all |
-| `app/folders.rs` | The Folders tree's roots: add, remove, reveal them. The list is the open catalog's (`persist/catalog`, native: `<name>.lightphotos/catalog.json`; web: in memory, over one IndexedDB handle per root in `web_fs.rs`, allowed again on a click). The Grid shows one folder at a time | all |
-| `app/catalog.rs` | Which catalog opens at launch (the last one, else `default.lightphotos`, seeded once from an older build's folder list), switching catalogs, and the `catalog` pref | all |
+| `app/folders.rs` | The Folders tree's roots: add, remove, reveal them. The list is the open catalog's (`persist/catalog`, native: `<name>.lightphotos/catalog.json`; web: IndexedDB, over one kept handle per root in `web_fs.rs`, allowed again on a click). The Grid shows one folder at a time | all |
+| `app/catalog.rs` | Which catalog opens at launch (the last one, else `default.lightphotos`, seeded once from an older build's folder list), switching catalogs, the `catalog` pref, and the per-frame marks projection | all; switching is native only |
+| `app/web_catalog.rs` | The browser's catalogs: loading the record, missing roots, New Catalog's name prompt, switching and falling back | wasm32 |
+| `persist/catalog/` | `Catalog`: the roots, the `Record` states, and the marks shards. `native.rs` writes the `.lightphotos` directory; `web.rs` queues IndexedDB writes | all |
+| `web/web_catalog_idb.rs` | IndexedDB `lightphotos-catalogs` reads and writes, and the kept-handle forget check | wasm32 |
 | `app/thumbs.rs` | `try_show`'s tier-selection logic, thumbnail texture sync, capture-time and face signal hooks | all |
 | `scoring/vision.rs` | `perform` runs Vision requests over a file (Vision decodes it) or an in-memory image, and blocks | macOS (the module itself is `cfg(target_os = "macos")`) |
 | `scoring/facequality.rs` | Face landmarks from Vision, then eye-openness geometry for blink detection; owns `FacePool` | macOS; the non-mac arm returns `Err` |
