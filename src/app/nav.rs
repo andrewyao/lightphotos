@@ -934,7 +934,8 @@ impl App {
     pub(super) fn visible_tree(&self) -> Vec<PathBuf> {
         let is_expanded = |p: &Path| self.expanded.contains(p);
         let children = |p: &Path| self.subdirs.get(p).cloned().unwrap_or_default();
-        self.folder_roots
+        self.catalog
+            .folders()
             .iter()
             .flat_map(|root| flatten_visible_tree(root, &is_expanded, &children))
             .collect()
@@ -1014,7 +1015,7 @@ impl App {
         if self.expanded.contains(&cur) {
             self.expanded.remove(&cur);
             self.request_redraw();
-        } else if !self.folder_roots.contains(&cur) {
+        } else if !self.catalog.folders().contains(&cur) {
             if let Some(parent) = cur.parent() {
                 self.nav_to_folder(parent.to_path_buf());
             }
@@ -1034,7 +1035,7 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         {
             // A root on an unplugged drive stays listed but can't open.
-            if self.folder_roots.contains(&path) {
+            if self.catalog.folders().contains(&path) {
                 if !path.is_dir() {
                     self.missing_roots.insert(path);
                     self.request_redraw();

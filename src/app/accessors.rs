@@ -139,7 +139,7 @@ impl App {
 
     /// The tops of the folder tree, in the order the tree shows them.
     pub(crate) fn folder_roots(&self) -> &[PathBuf] {
-        &self.folder_roots
+        self.catalog.folders()
     }
 
     /// Whether `root` wasn't a folder when last checked.

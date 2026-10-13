@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::sidecar::{ColorLabel, Flag, ImageRecord};
 
 #[cfg(not(target_arch = "wasm32"))]
-mod native;
+pub(crate) mod native;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

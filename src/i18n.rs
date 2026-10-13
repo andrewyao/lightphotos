@@ -655,6 +655,11 @@ pub struct Strings {
     pub wb_pick_brighter: &'static str,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub open_folder_failed: fn(&str) -> String,
+    /// The last catalog could not open at launch, so the default one did.
+    /// Takes why.
+    pub catalog_fallback: fn(&str) -> String,
+    /// A catalog the user chose could not open. Takes why.
+    pub catalog_open_failed: fn(&str) -> String,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub preview_failed: fn(&str) -> String,
     /// The group tiles' page, as first, last and group size.
@@ -1563,6 +1568,8 @@ pub static EN: Strings = Strings {
     wb_no_image: "No image loaded to pick from",
     wb_pick_brighter: "Pick a brighter, less saturated pixel for white balance",
     open_folder_failed: |e| format!("Couldn't open folder: {e}"),
+    catalog_fallback: |e| format!("Couldn't open the last catalog, so the default one is open: {e}"),
+    catalog_open_failed: |e| format!("Couldn't open catalog: {e}"),
     preview_failed: |path| format!("Unable to load Loupe preview for {path}"),
     group_page: |first, last, n| format!("{first}–{last} of {n}"),
     tile_load: "Load Photos:",
@@ -2336,6 +2343,8 @@ pub static ZH: Strings = Strings {
     wb_no_image: "没有已加载的图像可供取样",
     wb_pick_brighter: "请选择更亮、饱和度更低的像素来设置白平衡",
     open_folder_failed: |e| format!("无法打开文件夹：{e}"),
+    catalog_fallback: |e| format!("无法打开上次的目录，已打开默认目录：{e}"),
+    catalog_open_failed: |e| format!("无法打开目录：{e}"),
     preview_failed: |path| format!("无法加载 {path} 的预览"),
     group_page: |first, last, n| format!("{first}–{last} / {n} 张"),
     tile_load: "加载照片：",

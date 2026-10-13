@@ -351,7 +351,8 @@ scoring does not run there.
 | `web/web_fs.rs` | File System Access folder picking/listing/byte reads | wasm32 |
 | `web/web_folder_store_fs.rs` | File System Access counterpart of the native sidecar I/O in `sidecar.rs` and `persist/folder_store.rs` | wasm32 |
 | `app/loupe.rs` | View-state math (zoom/pan/fit) and the decision to fetch full resolution | all |
-| `app/folders.rs` | The Folders tree's roots: add, remove, remember them (native: the session's `folders`; web: one IndexedDB handle per root in `web_fs.rs`, allowed again on a click). The Grid shows one folder at a time | all |
+| `app/folders.rs` | The Folders tree's roots: add, remove, reveal them. The list is the open catalog's (`persist/catalog`, native: `<name>.lightphotos/catalog.json`; web: in memory, over one IndexedDB handle per root in `web_fs.rs`, allowed again on a click). The Grid shows one folder at a time | all |
+| `app/catalog.rs` | Which catalog opens at launch (the last one, else `default.lightphotos`, seeded once from an older build's folder list), switching catalogs, and the `catalog` pref | all |
 | `app/thumbs.rs` | `try_show`'s tier-selection logic, thumbnail texture sync, capture-time and face signal hooks | all |
 | `scoring/vision.rs` | `perform` runs Vision requests over a file (Vision decodes it) or an in-memory image, and blocks | macOS (the module itself is `cfg(target_os = "macos")`) |
 | `scoring/facequality.rs` | Face landmarks from Vision, then eye-openness geometry for blink detection; owns `FacePool` | macOS; the non-mac arm returns `Err` |

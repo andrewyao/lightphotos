@@ -31,7 +31,9 @@
 //! ```
 //!
 //! With no photo or folder after the flags, the run starts on the home page.
-//! Settings start empty, so that is a first launch.
+//! Settings start empty, so that is a first launch. Catalogs go under
+//! `--catalog-dir <dir>`, or under the run's scratch settings directory,
+//! never `~/Pictures`.
 //!
 //! Keys cannot take the `WindowEvent::KeyboardInput` road: winit's `KeyEvent`
 //! has a private field, so nothing outside winit can build one. The driver
@@ -74,6 +76,9 @@ pub(crate) struct Args {
     /// The photo or folder to open. Without one the run starts on the home
     /// page, as a launch with no path does.
     target: Option<PathBuf>,
+    /// Where the run keeps its catalogs, in place of `~/Pictures/LightPhotos`.
+    /// Without one they go under the run's scratch settings directory.
+    catalog_dir: Option<PathBuf>,
 }
 
 impl Args {
@@ -89,6 +94,7 @@ impl Args {
         let mut script = None;
         let mut out_dir = None;
         let mut target = None;
+        let mut catalog_dir = None;
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -97,6 +103,9 @@ impl Args {
                 }
                 "--drive-out" => {
                     out_dir = Some(args.next().ok_or("--drive-out needs a directory")?);
+                }
+                "--catalog-dir" => {
+                    catalog_dir = Some(args.next().ok_or("--catalog-dir needs a directory")?);
                 }
                 _ if target.is_none() => target = Some(arg),
                 _ => return Err(format!("unexpected argument: {arg}")),
@@ -117,6 +126,7 @@ impl Args {
             steps,
             out_dir,
             target,
+            catalog_dir: catalog_dir.map(PathBuf::from),
         }))
     }
 }
@@ -440,6 +450,11 @@ impl std::fmt::Display for ParseError {
 pub(crate) fn run(args: Args) -> i32 {
     let config_dir = std::env::temp_dir().join(format!("lightphotos-drive-{}", std::process::id()));
     crate::persist::prefs::override_config_dir(config_dir.clone());
+    crate::persist::catalog::native::override_default_dir(
+        args.catalog_dir
+            .clone()
+            .unwrap_or_else(|| config_dir.join("catalogs")),
+    );
     crate::shell::dialog::cancel_all_pickers();
     crate::i18n::init();
 
@@ -1019,6 +1034,12 @@ quit
         assert_eq!(parsed.target, Some(dir.clone()));
         let parsed = args(&[&d, "--drive", &s]).unwrap().unwrap();
         assert_eq!(parsed.out_dir, PathBuf::from("."));
+        assert_eq!(parsed.catalog_dir, None);
+        let parsed = args(&["--drive", &s, "--catalog-dir", &d])
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.catalog_dir, Some(dir.clone()));
+        assert!(args(&["--drive", &s, "--catalog-dir"]).is_err());
 
         assert!(args(&["--drive"]).is_err());
         let parsed = args(&["--drive", &s]).unwrap().unwrap();

@@ -1,5 +1,6 @@
 //! Where the user left off, saved as it changes and restored at the next
-//! launch.
+//! launch. The Folders list itself is the catalog's; the session only
+//! says which of its folders was showing.
 
 use std::path::{Path, PathBuf};
 
@@ -17,27 +18,26 @@ pub(crate) enum SessionView {
     Loupe,
 }
 
-/// The folders the user added, and where they were: the folder showing, the
-/// selected photo, and whether it is open in the Loupe. Natively every path
-/// is full; on the web each starts with its folder's kept name.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "StoredSession")]
+/// Where the user was: the folder showing, the selected photo, and whether
+/// it is open in the Loupe. Natively every path is full; on the web each
+/// starts with its folder's kept name.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct Session {
-    /// The Folders panel's list.
-    pub(crate) folders: Vec<PathBuf>,
-    /// The folder showing, inside one of `folders`.
+    /// The folder showing, inside one of the catalog's folders.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dir: Option<PathBuf>,
     pub(crate) photo: Option<PathBuf>,
     pub(crate) view: SessionView,
 }
 
-/// A session as saved by this build or by one before `folders`, which kept
-/// one folder in `root` and its subfolder showing in `dir`, `None` for
-/// `root` itself.
+/// A session as saved by this build, by the build before catalogs, which
+/// kept the Folders list in `folders`, or by one before that, which kept
+/// one folder in `root` and its subfolder showing in `dir`.
 #[derive(Deserialize)]
 struct StoredSession {
+    #[serde(default)]
     folders: Option<Vec<PathBuf>>,
+    #[serde(default)]
     root: Option<PathBuf>,
     #[serde(default)]
     dir: Option<PathBuf>,
@@ -47,40 +47,40 @@ struct StoredSession {
     view: SessionView,
 }
 
-impl TryFrom<StoredSession> for Session {
-    type Error = &'static str;
-
-    /// `folders` when it is there; otherwise the old `root` becomes the
-    /// list. A session with neither has nothing to reopen.
-    fn try_from(stored: StoredSession) -> Result<Self, Self::Error> {
-        let (folders, dir) = match (stored.folders, stored.root) {
-            (Some(folders), _) => (folders, stored.dir),
+impl StoredSession {
+    /// The session, and the Folders list an older build saved with it, which
+    /// seeds the default catalog once.
+    fn split(self) -> (Session, Vec<PathBuf>) {
+        let (legacy, dir) = match (self.folders, self.root) {
+            (Some(folders), _) => (folders, self.dir),
             (None, Some(root)) => {
-                let dir = stored.dir.unwrap_or_else(|| root.clone());
+                let dir = self.dir.unwrap_or_else(|| root.clone());
                 (vec![root], Some(dir))
             }
-            (None, None) => return Err("a session needs folders or root"),
+            (None, None) => (Vec::new(), self.dir),
         };
-        Ok(Session {
-            folders,
+        let session = Session {
             dir,
-            photo: stored.photo,
-            view: stored.view,
-        })
+            photo: self.photo,
+            view: self.view,
+        };
+        (session, legacy)
     }
 }
 
 impl Session {
-    /// The saved session, if one parses. A session saved in an older shape
-    /// is saved again in this one, which drops its `root`.
+    /// The saved session, if one parses, with the Folders list an older
+    /// build kept in it. A session saved in an older shape is saved again in
+    /// this one, which drops that list.
     #[cfg_attr(test, allow(dead_code))]
-    pub(crate) fn load() -> Option<Session> {
+    pub(crate) fn load() -> Option<(Session, Vec<PathBuf>)> {
         let json = crate::persist::prefs::load(SESSION_PREF)?;
-        let session: Session = serde_json::from_str(&json).ok()?;
+        let stored: StoredSession = serde_json::from_str(&json).ok()?;
+        let (session, legacy) = stored.split();
         if serde_json::to_string(&session).ok().as_deref() != Some(json.as_str()) {
             session.save();
         }
-        Some(session)
+        Some((session, legacy))
     }
 
     fn save(&self) {
@@ -96,55 +96,55 @@ impl Session {
         }
     }
 
-    /// The folder to reopen, as (its root, the folder itself), if there is
-    /// one.
-    pub(crate) fn place(&self) -> Option<(&Path, &Path)> {
+    /// The folder to reopen, as (its root among `roots`, the folder itself),
+    /// if there is one.
+    pub(crate) fn place<'a>(&'a self, roots: &'a [PathBuf]) -> Option<(&'a Path, &'a Path)> {
         let dir = self.dir.as_deref()?;
-        let root = self.folders.iter().find(|f| dir.starts_with(f))?;
+        let root = roots.iter().find(|f| dir.starts_with(f))?;
         Some((root, dir))
     }
 
-    /// The session to reopen at launch: this one when its folder is listed
-    /// and `exists`, else the first listed folder that `exists`, at its top
-    /// in the Grid.
-    fn to_restore(&self, exists: impl Fn(&Path) -> bool) -> Option<Session> {
-        if self.place().is_some_and(|(root, _)| exists(root)) {
-            return Some(self.clone());
-        }
-        let root = self.folders.iter().find(|f| exists(f))?;
-        Some(Session {
-            folders: self.folders.clone(),
-            dir: Some(root.clone()),
-            photo: None,
-            view: SessionView::Grid,
-        })
-    }
-
     /// The root, then each folder below it down to the one showing.
-    pub(crate) fn folder_chain(&self) -> Vec<PathBuf> {
-        self.place()
+    pub(crate) fn folder_chain(&self, roots: &[PathBuf]) -> Vec<PathBuf> {
+        self.place(roots)
             .map(|(root, dir)| super::folders::folder_chain(root, dir))
             .unwrap_or_default()
     }
+}
+
+/// The session to reopen: `session` when its folder is among `roots` and
+/// `exists`, else the first of `roots` that `exists`, at its top in the
+/// Grid. `None` leaves the landing page.
+fn to_restore(
+    session: Option<&Session>,
+    roots: &[PathBuf],
+    exists: impl Fn(&Path) -> bool,
+) -> Option<Session> {
+    if let Some(session) = session {
+        if session.place(roots).is_some_and(|(root, _)| exists(root)) {
+            return Some(session.clone());
+        }
+    }
+    let root = roots.iter().find(|f| exists(f))?;
+    Some(Session {
+        dir: Some(root.clone()),
+        photo: None,
+        view: SessionView::Grid,
+    })
 }
 
 impl App {
     /// The session as it stands. The landing page keeps the last place, and
     /// has no session before any folder was opened.
     fn current_session(&self) -> Option<Session> {
-        let folders = self.folder_roots.clone();
         let Some(dir) = self.playlist.as_ref().map(|pl| pl.dir().to_path_buf()) else {
-            return self
-                .session
-                .clone()
-                .map(|session| Session { folders, ..session });
+            return self.session.clone();
         };
         let view = match self.mode {
             ViewMode::Loupe => SessionView::Loupe,
             ViewMode::Grid => SessionView::Grid,
         };
         Some(Session {
-            folders,
             dir: Some(dir),
             photo: self.selected_path(),
             view,
@@ -170,16 +170,17 @@ impl App {
         }
     }
 
-    /// At launch, open the last session where it left off, or the first
-    /// listed folder when that place is gone. With no folders left, the
-    /// landing page stays.
+    /// At launch, and after a catalog switch, open the last session where it
+    /// left off, or the catalog's first listed folder when that place is
+    /// gone. With no folder to open, the landing page stays.
     pub(crate) fn restore_last_session(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         let exists = Path::is_dir;
         // The browser lists a kept folder only once it allows it again.
         #[cfg(target_arch = "wasm32")]
         let exists = |_: &Path| true;
-        let Some(session) = self.session.as_ref().and_then(|s| s.to_restore(exists)) else {
+        let Some(session) = to_restore(self.session.as_ref(), self.catalog.folders(), exists)
+        else {
             return;
         };
         #[cfg(not(target_arch = "wasm32"))]
@@ -193,11 +194,12 @@ impl App {
     /// leaves the grid with nothing selected.
     #[cfg(not(target_arch = "wasm32"))]
     fn restore_session(&mut self, session: &Session) {
-        let Some((root, _)) = session.place() else {
+        let Some((root, _)) = session.place(self.catalog.folders()) else {
             return;
         };
-        self.open(root.to_path_buf());
-        let chain = session.folder_chain();
+        let root = root.to_path_buf();
+        self.open(root);
+        let chain = session.folder_chain(self.catalog.folders());
         if let Some(dir) = chain.last().filter(|d| chain.len() > 1 && d.is_dir()) {
             for folder in &chain {
                 self.ensure_subdirs(folder);
@@ -249,7 +251,6 @@ mod tests {
 
     fn session(root: &Path, photo: Option<&str>, view: SessionView) -> Session {
         Session {
-            folders: vec![root.to_path_buf()],
             dir: Some(photo.map_or(root.to_path_buf(), |p| {
                 root.join(p).parent().unwrap().to_path_buf()
             })),
@@ -258,11 +259,13 @@ mod tests {
         }
     }
 
-    /// `first` and `second` in the order the Folders list keeps them.
-    fn both(first: &Path, second: &Path) -> Vec<PathBuf> {
-        let mut roots = vec![first.to_path_buf(), second.to_path_buf()];
-        roots.sort_by_cached_key(|r| r.to_string_lossy().to_lowercase());
-        roots
+    /// An App whose catalog lists `roots`, as the last launch left it.
+    fn app_listing(roots: &[&Path]) -> App {
+        let mut app = App::new(None);
+        for root in roots {
+            app.catalog.add_folder(root);
+        }
+        app
     }
 
     #[test]
@@ -314,7 +317,7 @@ mod tests {
     fn launching_restores_the_subfolder_photo_and_loupe() {
         let root = tree("restore-sub");
         let saved = session(&root, Some("sub/d.jpg"), SessionView::Loupe);
-        let mut app = App::new(None);
+        let mut app = app_listing(&[&root]);
         app.session = Some(saved.clone());
         app.restore_last_session();
 
@@ -331,7 +334,7 @@ mod tests {
         let mut saved = session(&root, Some("sub/d.jpg"), SessionView::Loupe);
         saved.dir = Some(root.join("gone"));
         saved.photo = Some(root.join("gone/d.jpg"));
-        let mut app = App::new(None);
+        let mut app = app_listing(&[&root]);
         app.restore_session(&saved);
         assert_eq!(
             app.current_session(),
@@ -339,50 +342,55 @@ mod tests {
         );
     }
 
-    fn parse(json: &str) -> Option<Session> {
-        serde_json::from_str(json).ok()
+    fn parse(json: &str) -> Option<(Session, Vec<PathBuf>)> {
+        serde_json::from_str::<StoredSession>(json)
+            .ok()
+            .map(StoredSession::split)
     }
 
     #[test]
     fn a_session_saved_before_subfolders_were_remembered_still_loads() {
-        let old = parse(r#"{"root":"/photos","photo":"/photos/a.jpg","view":"Loupe"}"#).unwrap();
-        assert_eq!(old.folders, vec![PathBuf::from("/photos")]);
-        assert_eq!(old.folder_chain(), vec![PathBuf::from("/photos")]);
+        let (old, legacy) =
+            parse(r#"{"root":"/photos","photo":"/photos/a.jpg","view":"Loupe"}"#).unwrap();
+        assert_eq!(legacy, vec![PathBuf::from("/photos")]);
+        assert_eq!(old.folder_chain(&legacy), vec![PathBuf::from("/photos")]);
     }
 
-    /// The migration: an old session's `root` becomes `folders`, and the
-    /// saved form never has `root` again.
+    /// The migration: an old session's `root` or `folders` become the
+    /// catalog seed, and the saved form has neither.
     #[test]
-    fn an_old_sessions_root_becomes_its_folders() {
+    fn an_old_sessions_folders_leave_it_as_the_catalog_seed() {
         let old =
             r#"{"root":"/photos","dir":"/photos/sub","photo":"/photos/sub/a.jpg","view":"Loupe"}"#;
-        let s = parse(old).unwrap();
-        assert_eq!(s.folders, vec![PathBuf::from("/photos")]);
+        let (s, legacy) = parse(old).unwrap();
+        assert_eq!(legacy, vec![PathBuf::from("/photos")]);
         assert_eq!(
-            s.place(),
+            s.place(&legacy),
             Some((Path::new("/photos"), Path::new("/photos/sub")))
         );
         let saved = serde_json::to_string(&s).unwrap();
         assert!(!saved.contains("\"root\""), "{saved}");
-        assert_eq!(parse(&saved), Some(s));
+        assert!(!saved.contains("\"folders\""), "{saved}");
+        assert_eq!(parse(&saved), Some((s, Vec::new())));
+
+        let (s, legacy) =
+            parse(r#"{"folders":["/a","/b"],"root":"/old","dir":"/a","photo":null,"view":"Grid"}"#)
+                .unwrap();
+        assert_eq!(legacy, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(s.dir, Some(PathBuf::from("/a")));
     }
 
     #[test]
-    fn folders_win_over_a_leftover_root() {
-        let s = parse(r#"{"folders":["/a"],"root":"/old","dir":"/a","photo":null,"view":"Grid"}"#)
-            .unwrap();
-        assert_eq!(s.folders, vec![PathBuf::from("/a")]);
-        assert!(!serde_json::to_string(&s).unwrap().contains("/old"));
+    fn a_session_with_no_folder_restores_nothing() {
+        let (s, legacy) = parse(r#"{"photo":null,"view":"Grid"}"#).unwrap();
+        assert_eq!(legacy, Vec::<PathBuf>::new());
+        assert_eq!(s.dir, None);
+        assert_eq!(parse("{"), None);
+        assert_eq!(parse(r#"{"dir":7}"#), None);
     }
 
-    #[test]
-    fn a_session_with_neither_folders_nor_root_is_none() {
-        assert_eq!(parse(r#"{"photo":null,"view":"Grid"}"#), None);
-        assert!(parse(r#"{"folders":[],"photo":null,"view":"Grid"}"#).is_some());
-    }
-
-    /// Removing the last folder leaves an empty list, so the next launch
-    /// stays on the landing page.
+    /// Removing the last folder leaves the catalog empty, so a restore stays
+    /// on the landing page.
     #[test]
     fn an_empty_folders_list_restores_nothing() {
         let root = tree("emptied");
@@ -390,24 +398,16 @@ mod tests {
         app.open(root.clone());
         app.save_session_if_changed();
         app.remove_root(&root);
-        app.save_session_if_changed();
-        let saved = app.session.clone();
-        assert_eq!(saved.as_ref().map(|s| s.folders.len()), Some(0));
-
-        let mut app = App::new(None);
-        app.session = saved;
+        assert!(app.folder_roots().is_empty());
         app.restore_last_session();
         assert!(app.playlist.is_none());
     }
 
     #[test]
     fn a_missing_folder_leaves_the_landing_page() {
-        let mut app = App::new(None);
-        app.session = Some(session(
-            Path::new("/lightphotos-no-such-folder"),
-            None,
-            SessionView::Grid,
-        ));
+        let gone = Path::new("/lightphotos-no-such-folder");
+        let mut app = app_listing(&[gone]);
+        app.session = Some(session(gone, None, SessionView::Grid));
         app.restore_last_session();
         assert!(app.playlist.is_none());
         assert!(!app.folder_pick_pending());
@@ -427,12 +427,9 @@ mod tests {
         app.remove_root(&open);
         app.save_session_if_changed();
         let saved = app.session.clone();
-        assert_eq!(
-            saved.as_ref().map(|s| s.folders.clone()),
-            Some(vec![other.clone()])
-        );
+        assert_eq!(app.folder_roots(), std::slice::from_ref(&other));
 
-        let mut app = App::new(None);
+        let mut app = app_listing(&[&other]);
         app.session = saved;
         app.restore_last_session();
         assert_eq!(app.folder_sel.as_deref(), Some(other.as_path()));
@@ -445,27 +442,35 @@ mod tests {
     fn a_missing_folder_falls_back_to_another_listed_one() {
         let other = tree("fallback");
         let gone = PathBuf::from("/lightphotos-no-such-folder");
-        let mut saved = session(&gone, None, SessionView::Loupe);
-        saved.folders = both(&gone, &other);
-        let mut app = App::new(None);
-        app.session = Some(saved);
+        let mut app = app_listing(&[&gone, &other]);
+        app.session = Some(session(&gone, None, SessionView::Loupe));
         app.restore_last_session();
         assert_eq!(app.folder_sel.as_deref(), Some(other.as_path()));
         assert_eq!(app.mode, ViewMode::Grid);
     }
 
+    /// With no session at all, a catalog's first folder that exists opens.
+    #[test]
+    fn without_a_session_the_first_listed_folder_opens() {
+        let (gone, here) = (PathBuf::from("/lightphotos-no-such-folder"), tree("first"));
+        let mut app = app_listing(&[&gone, &here]);
+        app.restore_last_session();
+        assert_eq!(app.folder_sel.as_deref(), Some(here.as_path()));
+    }
+
     #[test]
     fn the_folder_chain_runs_from_the_root_down_to_the_subfolder() {
         let s = Session {
-            folders: vec![PathBuf::from("/photos")],
             dir: Some(PathBuf::from("/photos/2024/june")),
             photo: None,
             view: SessionView::Grid,
         };
+        let roots = vec![PathBuf::from("/photos")];
         assert_eq!(
-            s.folder_chain(),
+            s.folder_chain(&roots),
             ["/photos", "/photos/2024", "/photos/2024/june"].map(PathBuf::from)
         );
+        assert!(s.folder_chain(&[PathBuf::from("/elsewhere")]).is_empty());
     }
 
     #[test]
@@ -482,7 +487,10 @@ mod tests {
         app.open(first.clone());
         app.save_session_if_changed();
         assert_eq!(
-            app.session.as_ref().and_then(Session::place).map(|p| p.0),
+            app.session
+                .as_ref()
+                .and_then(|s| s.place(app.folder_roots()))
+                .map(|p| p.0),
             Some(first.as_path())
         );
 
@@ -490,10 +498,7 @@ mod tests {
         app.save_session_if_changed();
         assert_eq!(
             app.session.as_ref(),
-            Some(&Session {
-                folders: both(&first, &second),
-                ..session(&second, None, SessionView::Grid)
-            })
+            Some(&session(&second, None, SessionView::Grid))
         );
     }
 
@@ -505,13 +510,10 @@ mod tests {
         app.open(second.clone());
         app.open_folder(second.join("sub"));
         app.select_single(0);
-        let want = Session {
-            folders: both(&first, &second),
-            ..session(&second, Some("sub/c.jpg"), SessionView::Grid)
-        };
+        let want = session(&second, Some("sub/c.jpg"), SessionView::Grid);
         assert_eq!(app.current_session().as_ref(), Some(&want));
         assert_eq!(
-            want.place(),
+            want.place(app.folder_roots()),
             Some((second.as_path(), second.join("sub").as_path()))
         );
     }
@@ -520,7 +522,7 @@ mod tests {
     fn launching_restores_the_folder_photo_and_loupe() {
         let root = tree("restore");
         let saved = session(&root, Some("b.jpg"), SessionView::Loupe);
-        let mut app = App::new(None);
+        let mut app = app_listing(&[&root]);
         app.session = Some(saved.clone());
         app.restore_last_session();
 
@@ -544,7 +546,7 @@ mod tests {
     fn a_grid_session_restores_the_selection_without_opening_the_loupe() {
         let root = tree("grid");
         let saved = session(&root, Some("b.jpg"), SessionView::Grid);
-        let mut app = App::new(None);
+        let mut app = app_listing(&[&root]);
         app.restore_session(&saved);
         assert_eq!(app.mode, ViewMode::Grid);
         assert_eq!(app.current_session(), Some(saved));
@@ -553,7 +555,7 @@ mod tests {
     #[test]
     fn a_missing_photo_reopens_the_folder_with_nothing_selected() {
         let root = tree("photo-gone");
-        let mut app = App::new(None);
+        let mut app = app_listing(&[&root]);
         app.restore_session(&session(&root, Some("gone.jpg"), SessionView::Loupe));
         assert_eq!(
             app.current_session(),

@@ -653,10 +653,11 @@ pub(crate) struct App {
     #[cfg(not(target_arch = "wasm32"))]
     control: control::Pending,
 
-    /// Tops of the folder tree, sorted: every folder the user has added, and
-    /// an opened file's parent. Remembered across launches natively; on the
-    /// web, just the picked folder.
-    folder_roots: Vec<PathBuf>,
+    /// The open catalog: the tops of the folder tree, sorted, every folder
+    /// the user has added and an opened file's parent, plus the marks copy.
+    /// Remembered across launches natively; on the web, in memory, holding
+    /// the picked folders.
+    catalog: crate::persist::catalog::Catalog,
     /// Roots that weren't a folder when last checked, such as an unplugged
     /// drive's. They stay listed so the user can remove them.
     missing_roots: HashSet<PathBuf>,
@@ -699,6 +700,7 @@ mod adjust;
 mod autotone;
 mod bulk_delete;
 mod bursts;
+mod catalog;
 mod commands;
 #[cfg(not(target_arch = "wasm32"))]
 mod control;
@@ -757,13 +759,19 @@ impl App {
         let (selection_tx, selection_rx) = std::sync::mpsc::channel();
         #[cfg(target_arch = "wasm32")]
         let (renderer_init_tx, renderer_init_rx) = std::sync::mpsc::channel();
-        // A test must never read the developer's own session.
+        // A test must never read the developer's own session or catalog.
         #[cfg(test)]
-        let session = None;
+        let (session, launch) = (None, catalog::Launch::in_memory());
         #[cfg(not(test))]
-        let session = session::Session::load();
-        let (folder_roots, missing_roots) = folders::remembered(session.as_ref());
-        Self {
+        let (session, launch) = {
+            let (session, legacy) = match session::Session::load() {
+                Some((session, legacy)) => (Some(session), legacy),
+                None => (None, Vec::new()),
+            };
+            (session, catalog::Launch::at_startup(&legacy))
+        };
+        let missing_roots = folders::missing_among(launch.catalog.folders());
+        let mut app = Self {
             window: None,
             renderer: None,
             #[cfg(test)]
@@ -884,7 +892,7 @@ impl App {
             repaint_at: None,
             #[cfg(not(target_arch = "wasm32"))]
             control: control::Pending::default(),
-            folder_roots,
+            catalog: launch.catalog,
             missing_roots,
             folder_sel: None,
             expanded: HashSet::new(),
@@ -905,12 +913,22 @@ impl App {
             last_drag: (0.0, 0.0),
             egui_ctx,
             egui_state: None,
+        };
+        if let Some(why) = launch.fallback {
+            app.set_status(StatusKind::Error, (crate::i18n::t().catalog_fallback)(&why));
         }
+        app
     }
 
-    /// Open a directory in the Grid with nothing selected, or a file in the
-    /// Loupe with its folder as the playlist.
+    /// Open a directory in the Grid with nothing selected, a file in the
+    /// Loupe with its folder as the playlist, or a `*.lightphotos` catalog
+    /// in place of the one open.
     pub(crate) fn open(&mut self, path: PathBuf) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(at) = crate::persist::catalog::CatalogRef::parse(&path) {
+            self.open_catalog(at);
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let is_dir = match std::fs::metadata(&path) {
             Ok(m) => m.is_dir(),
@@ -919,7 +937,7 @@ impl App {
             // the tree; anything else gets the error.
             Err(e) => {
                 eprintln!("[lightphotos] open {}: {e}", path.display());
-                if self.folder_roots.contains(&path) {
+                if self.catalog.folders().contains(&path) {
                     self.missing_roots.insert(path);
                 } else {
                     self.set_status(

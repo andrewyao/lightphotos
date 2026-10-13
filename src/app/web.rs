@@ -467,7 +467,7 @@ impl App {
             return;
         }
         let Some(name) = session
-            .place()
+            .place(self.catalog.folders())
             .map(|(root, _)| root.to_string_lossy().into_owned())
         else {
             return;
@@ -531,7 +531,7 @@ impl App {
         match names {
             Ok(names) => {
                 for name in &names {
-                    super::folders::add_root(&mut self.folder_roots, name);
+                    self.catalog.add_folder(name);
                 }
                 self.request_redraw();
             }
@@ -592,7 +592,7 @@ impl App {
                     let playlist = Playlist::from_entries(root.clone(), picked.entries);
                     self.load_playlist(playlist, root.clone());
                     // Show the root in the tree only once the playlist is loaded.
-                    super::folders::add_root(&mut self.folder_roots, &root);
+                    self.catalog.add_folder(&root);
                     self.expanded.insert(root.clone());
                     self.mode = ViewMode::Grid;
                     self.web.session_restore = restore;
@@ -1492,7 +1492,7 @@ impl App {
         {
             return;
         }
-        if self.folder_roots.contains(&dir) && !self.web_root_allowed(&dir) {
+        if self.catalog.folders().contains(&dir) && !self.web_root_allowed(&dir) {
             // A kept root from an earlier visit. The grant lists it and
             // loads it into the grid. It goes first: the supersede clears
             // the probe marker the grant reads.
@@ -1608,7 +1608,7 @@ impl App {
         let Some(session) = self.web.session_restore.clone() else {
             return;
         };
-        let chain = session.folder_chain();
+        let chain = session.folder_chain(self.catalog.folders());
         if let Some(unlisted) = chain.iter().find(|d| !self.subdirs.contains_key(*d)) {
             self.request_dir_listing(&unlisted.clone());
             return;

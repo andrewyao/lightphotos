@@ -270,6 +270,11 @@ pub fn is_listable_subdir(name: &str) -> bool {
     if name.starts_with('.') {
         return false;
     }
+    // A catalog saved inside a photo folder is not a folder of photos.
+    #[cfg(not(target_arch = "wasm32"))]
+    if crate::persist::catalog::CatalogRef::is_catalog_name(name) {
+        return false;
+    }
     let ext = std::path::Path::new(name)
         .extension()
         .and_then(|e| e.to_str())
@@ -858,6 +863,8 @@ mod tests {
         assert!(is_listable_subdir("My Photos"));
         assert!(!is_listable_subdir(".git"));
         assert!(!is_listable_subdir(".lightphotos"));
+        assert!(!is_listable_subdir("default.lightphotos"));
+        assert!(!is_listable_subdir("Trip 2024.lightphotos"));
         assert!(!is_listable_subdir("Photos.app"));
         assert!(!is_listable_subdir("Library.photoslibrary"));
         assert!(!is_listable_subdir("Thing.APP"));

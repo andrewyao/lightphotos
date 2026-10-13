@@ -1,39 +1,21 @@
-//! The folders the user has added: the tops of the folder tree, remembered
-//! across launches so the landing page can list them. Natively the list is
-//! the session's `folders`; on the web it is the folders `web_fs` keeps in
-//! IndexedDB, each of which the browser must allow again on a later visit.
+//! The folders the user has added: the tops of the folder tree. The list is
+//! the open catalog's, remembered across launches so the landing page can
+//! list them. On the web the catalog is in memory and the list is the
+//! folders `web_fs` keeps in IndexedDB, each of which the browser must
+//! allow again on a later visit.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::*;
 
-/// The saved session's folders, tidied by `add_root`, and those of them
-/// that aren't a folder right now. Empty on the web, whose kept folders
-/// `poll_saved_folders` adds once they load.
-pub(super) fn remembered(session: Option<&session::Session>) -> (Vec<PathBuf>, HashSet<PathBuf>) {
+/// Those of `roots` that aren't a folder right now. Empty on the web, whose
+/// kept folders `poll_saved_folders` adds once they load.
+pub(super) fn missing_among(roots: &[PathBuf]) -> HashSet<PathBuf> {
     if cfg!(target_arch = "wasm32") {
-        return (Vec::new(), HashSet::new());
+        return HashSet::new();
     }
-    let mut roots = Vec::new();
-    for root in session.map_or(&[][..], |s| s.folders.as_slice()) {
-        add_root(&mut roots, root);
-    }
-    let missing = roots.iter().filter(|r| !r.is_dir()).cloned().collect();
-    (roots, missing)
-}
-
-/// Add `dir` to `roots`, which stays sorted with no root inside another.
-/// A folder already in the tree changes nothing; a folder holding roots
-/// takes their place. Returns whether `roots` changed.
-pub(super) fn add_root(roots: &mut Vec<PathBuf>, dir: &Path) -> bool {
-    if roots.iter().any(|r| dir.starts_with(r)) {
-        return false;
-    }
-    roots.retain(|r| !r.starts_with(dir));
-    roots.push(dir.to_path_buf());
-    roots.sort_by_cached_key(|r| r.to_string_lossy().to_lowercase());
-    true
+    roots.iter().filter(|r| !r.is_dir()).cloned().collect()
 }
 
 /// `root`, then each folder below it down to `dir`. Just `root` when `dir`
@@ -53,10 +35,10 @@ pub(super) fn folder_chain(root: &Path, dir: &Path) -> Vec<PathBuf> {
 
 impl App {
     /// Add `dir` to the tree's roots, unless a root already holds it. The
-    /// session saves the list.
+    /// catalog saves the list.
     pub(super) fn add_root(&mut self, dir: &Path) {
         self.missing_roots.remove(dir);
-        if add_root(&mut self.folder_roots, dir) {
+        if self.catalog.add_folder(dir) {
             self.missing_roots.retain(|r| !r.starts_with(dir));
         }
     }
@@ -65,7 +47,8 @@ impl App {
     /// on the way, so `dir` shows as a row.
     pub(super) fn reveal_folder(&mut self, dir: &Path) {
         let Some(root) = self
-            .folder_roots
+            .catalog
+            .folders()
             .iter()
             .find(|r| dir.starts_with(r))
             .cloned()
@@ -82,9 +65,7 @@ impl App {
     /// When the grid shows a folder in it, show the next root that is there,
     /// or the landing page when none is.
     pub(super) fn remove_root(&mut self, root: &Path) {
-        let before = self.folder_roots.len();
-        self.folder_roots.retain(|r| r != root);
-        if self.folder_roots.len() == before {
+        if !self.catalog.remove_folder(root) {
             return;
         }
         #[cfg(target_arch = "wasm32")]
@@ -99,14 +80,17 @@ impl App {
         if showing {
             // The roots passed over weren't there; a drive unplugged since
             // launch isn't in `missing_roots` yet.
-            let next = self.folder_roots.iter().position(|r| self.root_ready(r));
+            let roots = self.catalog.folders();
+            let next = roots.iter().position(|r| self.root_ready(r));
             #[cfg(not(target_arch = "wasm32"))]
             self.missing_roots.extend(
-                self.folder_roots[..next.unwrap_or(self.folder_roots.len())]
+                roots
+                    .get(..next.unwrap_or(roots.len()))
+                    .unwrap_or(&[])
                     .iter()
                     .cloned(),
             );
-            match next.and_then(|i| self.folder_roots.get(i).cloned()) {
+            match next.and_then(|i| self.catalog.folders().get(i).cloned()) {
                 Some(next) => self.open(next),
                 None => self.close_folder(),
             }
@@ -128,7 +112,7 @@ impl App {
     }
 
     /// Back to the landing page with no folder showing.
-    fn close_folder(&mut self) {
+    pub(super) fn close_folder(&mut self) {
         self.teardown_loupe_state();
         self.finish_folder_jobs();
         self.burst_scan = None;
@@ -149,10 +133,6 @@ mod tests {
     use super::*;
     use crate::app::test_support::temp_folder;
 
-    fn paths(ps: &[&str]) -> Vec<PathBuf> {
-        ps.iter().map(PathBuf::from).collect()
-    }
-
     /// A folder holding `a.jpg` and a `sub` folder holding `b.jpg`.
     fn photos(tag: &str) -> PathBuf {
         let dir = temp_folder(tag);
@@ -163,40 +143,14 @@ mod tests {
     }
 
     #[test]
-    fn added_roots_stay_sorted_without_duplicates() {
-        let mut roots = Vec::new();
-        assert!(add_root(&mut roots, Path::new("/photos/zoo")));
-        assert!(add_root(&mut roots, Path::new("/photos/Beach")));
-        assert!(!add_root(&mut roots, Path::new("/photos/zoo")));
-        assert_eq!(roots, paths(&["/photos/Beach", "/photos/zoo"]));
-    }
-
-    #[test]
-    fn a_folder_inside_a_root_is_not_a_new_root() {
-        let mut roots = paths(&["/photos"]);
-        assert!(!add_root(&mut roots, Path::new("/photos/2024/june")));
-        assert_eq!(roots, paths(&["/photos"]));
-    }
-
-    #[test]
-    fn a_folder_holding_roots_takes_their_place() {
-        let mut roots = paths(&["/photos/a", "/photos/b", "/other"]);
-        assert!(add_root(&mut roots, Path::new("/photos")));
-        assert_eq!(roots, paths(&["/other", "/photos"]));
-    }
-
-    #[test]
-    fn the_saved_folders_are_tidied_and_missing_ones_marked() {
-        let saved = session::Session {
-            folders: paths(&["/lp-gone/b", "/lp-gone/a", "/lp-gone/a/x"]),
-            dir: None,
-            photo: None,
-            view: session::SessionView::Grid,
-        };
-        let (roots, missing) = remembered(Some(&saved));
-        assert_eq!(roots, paths(&["/lp-gone/a", "/lp-gone/b"]));
-        assert_eq!(missing, roots.iter().cloned().collect());
-        assert_eq!(remembered(None), (Vec::new(), HashSet::new()));
+    fn the_catalogs_folders_that_are_not_there_are_marked_missing() {
+        let here = temp_folder("roots-here");
+        let roots = vec![PathBuf::from("/lp-gone/a"), here.clone()];
+        assert_eq!(
+            missing_among(&roots),
+            HashSet::from([PathBuf::from("/lp-gone/a")])
+        );
+        assert!(missing_among(&[]).is_empty());
     }
 
     #[test]
@@ -304,7 +258,7 @@ mod tests {
         let gone = temp_folder("roots-gone");
         std::fs::remove_dir_all(&gone).unwrap();
         let mut app = App::new(None);
-        app.folder_roots = vec![gone.clone()];
+        app.catalog.add_folder(&gone);
         app.missing_roots.insert(gone.clone());
         app.open_folder(gone.clone());
         assert!(!app.has_playlist());
@@ -316,7 +270,7 @@ mod tests {
     fn a_root_that_comes_back_opens() {
         let back = photos("roots-back");
         let mut app = App::new(None);
-        app.folder_roots = vec![back.clone()];
+        app.catalog.add_folder(&back);
         app.missing_roots.insert(back.clone());
         app.open_folder(back.clone());
         assert!(app.has_playlist());
@@ -329,7 +283,8 @@ mod tests {
     fn the_title_names_the_folder_showing_not_the_first_root() {
         let (a, b) = (photos("title-a"), photos("title-b"));
         let mut app = App::new(None);
-        app.folder_roots = vec![a, b.clone()];
+        app.catalog.add_folder(&a);
+        app.catalog.add_folder(&b);
         assert_eq!(app.window_title(), "LightPhotos");
         app.open(b.clone());
         let name = b.file_name().unwrap().to_string_lossy();
@@ -366,7 +321,8 @@ mod tests {
 
         let (a, b) = (photos("roots-home-a"), photos("roots-home-b"));
         let mut app = App::new(None);
-        app.folder_roots = vec![a.clone(), b.clone()];
+        app.catalog.add_folder(&a);
+        app.catalog.add_folder(&b);
         let painted = settled(&mut app);
         let name = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
         assert!(painted.texts().contains(&name(&a).as_str()));
