@@ -77,7 +77,7 @@ pub(super) fn load(dir: &Path, skipped: &mut usize) -> Vec<(GroupId, SavedGroup)
         }
         let Some(id) = path.file_name().and_then(|n| n.to_str()).and_then(id_of) else {
             eprintln!(
-                "[catalog] unreadable group {}: not a group id",
+                "[folder store] unreadable group {}: not a group id",
                 path.display()
             );
             *skipped += 1;
@@ -89,7 +89,7 @@ pub(super) fn load(dir: &Path, skipped: &mut usize) -> Vec<(GroupId, SavedGroup)
         match parsed {
             Ok(saved) => files.push((id, saved)),
             Err(e) => {
-                eprintln!("[catalog] unreadable group {}: {e}", path.display());
+                eprintln!("[folder store] unreadable group {}: {e}", path.display());
                 *skipped += 1;
             }
         }

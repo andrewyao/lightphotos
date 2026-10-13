@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The edit model. [`Adjustments`] is what the catalog stores, [`GpuAdjust`]
+//! The edit model. [`Adjustments`] is what the folder store stores, [`GpuAdjust`]
 //! is its uniform-buffer copy, and [`apply_linear`] is the CPU tone pipeline
 //! used for export, edited thumbnails, and the histogram. The Loupe runs the
 //! same math in `shader.wgsl`; the two must stay in sync.
@@ -779,7 +779,7 @@ impl Straighten {
 }
 
 impl Adjustments {
-    /// True for no edit. The catalog skips storing these.
+    /// True for no edit. The folder store skips storing these.
     pub fn is_identity(&self) -> bool {
         *self == Self::default()
     }

@@ -5,7 +5,7 @@
 //! A sidecar write is a `create_dir_all`, a serialize, a temp file and a
 //! rename: around 80-120 µs on APFS. Rating a selection of 20 000 photos does
 //! that 20 000 times, so doing it inline froze the window for seconds. Every
-//! [`Catalog`](super::Catalog) mutation now hands the work to this queue and
+//! [`FolderStore`](super::FolderStore) mutation now hands the work to this queue and
 //! returns.
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use crate::sidecar::ImageRecord;
 /// One queued sidecar mutation.
 ///
 /// The payload is a whole-record snapshot rather than a delta, because a
-/// `Catalog` mutation is already a read-modify-write of the entire
+/// `FolderStore` mutation is already a read-modify-write of the entire
 /// [`ImageRecord`] or [`Group`]. A later entry for a path therefore supersedes
 /// every earlier one, which is what lets [`Writeback::overlay`] answer a read
 /// with a single value and lets wasm admit one task per path without losing a
@@ -42,8 +42,8 @@ pub(super) enum WriteOp {
 /// a write we have already issued. The mark names the point below which every
 /// write had reached the disk when the load was requested, so anything we
 /// wrote at or after it is a record the load may have missed.
-/// [`Catalog::switch_dir`](super::Catalog::switch_dir) issues one and
-/// [`Catalog::apply_loaded`](super::Catalog::apply_loaded) hands it back.
+/// [`FolderStore::switch_dir`](super::FolderStore::switch_dir) issues one and
+/// [`FolderStore::apply_loaded`](super::FolderStore::apply_loaded) hands it back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LoadMark(u64);
 
@@ -66,7 +66,7 @@ type Done = (PathBuf, u64, Option<String>);
 #[cfg(target_arch = "wasm32")]
 const WEB_WRITE_WINDOW: usize = 32;
 
-/// Sidecar writes and deletes that have left [`Catalog`](super::Catalog), plus
+/// Sidecar writes and deletes that have left [`FolderStore`](super::FolderStore), plus
 /// enough history to tell a background load's snapshot from a newer write of
 /// our own.
 ///
@@ -74,7 +74,7 @@ const WEB_WRITE_WINDOW: usize = 32;
 ///
 /// - An entry carries the photo's own path, not just its file name, so a
 ///   folder switch cannot misroute a queued write into a same-named photo in
-///   the new folder. `Catalog` keys its cache by file name; this queue does
+///   the new folder. `FolderStore` keys its cache by file name; this queue does
 ///   not.
 /// - Operations on one path complete in submission order. Native gets that
 ///   from a single FIFO worker, wasm from admitting at most one task per path.
@@ -167,9 +167,9 @@ impl Writeback {
     /// the load carrying `mark` may have read before one of our own writes
     /// reached the disk.
     ///
-    /// `Catalog::switch_dir` clears the cache, so a folder round-trip during a
+    /// `FolderStore::switch_dir` clears the cache, so a folder round-trip during a
     /// flush leaves nothing else to correct the load with. Without this the
-    /// pre-edit record goes back into the cache and `reconcile_catalog_mirrors`
+    /// pre-edit record goes back into the cache and `reconcile_folder_store_mirrors`
     /// drops the user's change from the grid. A record we wrote before the load
     /// was requested is left alone, so an edit made outside the app still wins
     /// on a revisit.
@@ -293,7 +293,7 @@ impl Writeback {
             let (tx, rx) = channel::<(PathBuf, u64, WriteOp)>();
             let done_tx = self.done_tx.clone();
             let spawned = std::thread::Builder::new()
-                .name("catalog-write".into())
+                .name("folder-store-write".into())
                 .spawn(move || {
                     while let Ok((path, seq, op)) = rx.recv() {
                         let err = perform(&path, &op).err();
@@ -306,7 +306,7 @@ impl Writeback {
                     self.tx = Some(tx);
                 }
                 Err(e) => {
-                    eprintln!("[catalog] could not start the sidecar writer: {e}");
+                    eprintln!("[folder store] could not start the sidecar writer: {e}");
                     return None;
                 }
             }
@@ -348,7 +348,7 @@ impl Writeback {
 impl Drop for Writeback {
     fn drop(&mut self) {
         // Closing the channel makes the worker finish what is queued and then
-        // exit, so dropping a `Catalog` never loses an edit. The join is
+        // exit, so dropping a `FolderStore` never loses an edit. The join is
         // deliberately unbounded, unlike the one on quit: an edit is worth more
         // than a prompt shutdown. The cost is that on an unresponsive volume
         // this hangs with the window already gone and nothing on screen to say
@@ -375,7 +375,7 @@ fn perform(path: &Path, op: &WriteOp) -> Result<(), String> {
 #[cfg(target_arch = "wasm32")]
 impl Writeback {
     /// Queue `op` against the folder handle it must land in. Capturing the
-    /// handle here, rather than reading the catalog's current one at write
+    /// handle here, rather than reading the folder store's current one at write
     /// time, is what lets a write outlive a folder switch.
     pub(super) fn enqueue(
         &mut self,
@@ -438,7 +438,7 @@ impl Writeback {
             self.in_flight.insert(path.clone());
             let done_tx = self.done_tx.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                use crate::web::web_catalog_fs as fs;
+                use crate::web::web_folder_store_fs as fs;
                 let result = match (is_group, body) {
                     (false, Some(bytes)) => fs::write_sidecar(&dir_handle, &name, &bytes).await,
                     (false, None) => fs::delete_sidecar(&dir_handle, &name).await,

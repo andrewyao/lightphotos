@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! The `App`: all viewer state, plus the logic that ties together the GPU
-//! renderer, the background loader, the catalog, the egui chrome, and the
+//! renderer, the background loader, the folder store, the egui chrome, and the
 //! keyboard bindings. `main.rs` runs the winit event loop and calls into the
 //! `pub(crate)` methods and fields here.
 
@@ -21,7 +21,7 @@ use crate::develop::{Adjustments, Crop, TouchUp};
 use crate::export::Exporter;
 use crate::jobs::loader::Loader;
 use crate::navigation::{Cmp, FlagFilter, Playlist};
-use crate::persist::catalog::Catalog;
+use crate::persist::folder_store::FolderStore;
 use crate::renderer::{EguiPaint, Renderer};
 use crate::ui;
 
@@ -402,11 +402,11 @@ pub(crate) struct ThumbTexture {
 
 /// A finished background sidecar load: its directory, the navigation token it
 /// was requested under, its place in the sidecar write order, and the records.
-pub(crate) type CatalogLoadResult = (
+pub(crate) type FolderStoreLoadResult = (
     PathBuf,
     u64,
-    crate::persist::catalog::LoadMark,
-    crate::persist::catalog::SidecarLoad,
+    crate::persist::folder_store::LoadMark,
+    crate::persist::folder_store::SidecarLoad,
 );
 
 /// A folder's signal cache as loaded off the UI thread, with what it knows
@@ -464,9 +464,9 @@ pub(crate) struct App {
 
     pub(crate) mode: ViewMode,
     /// `pub(crate)` because the frame loop drives its write queue directly.
-    pub(crate) catalog: Catalog,
+    pub(crate) folder_store: FolderStore,
     /// The background sidecar scan in flight.
-    catalog_load: catalog::CatalogLoad,
+    folder_store_load: folder_store::FolderStoreLoad,
     ratings: HashMap<PathBuf, u8>,
     /// Per-image develop edits. Holds only non-identity edits.
     edits: HashMap<PathBuf, Adjustments>,
@@ -511,7 +511,7 @@ pub(crate) struct App {
     sort_order: SortOrder,
     /// Whether `visible` is in playlist order, so it can be binary-searched.
     visible_in_order: bool,
-    /// [`Catalog::sort_revision`] when the Grid was last ordered.
+    /// [`FolderStore::sort_revision`] when the Grid was last ordered.
     sorted_revision: u64,
     /// Indices into `playlist.entries()` that pass the current filter.
     visible: Vec<usize>,
@@ -579,7 +579,7 @@ pub(crate) struct App {
     /// Highlight the background instead of the subject.
     selection_invert: bool,
     /// Subject mask for the photo in the Loupe, tagged with its path so a stale
-    /// result can be dropped. Never saved to the catalog. Only the photo on
+    /// result can be dropped. Never saved to the folder store. Only the photo on
     /// screen gets one, since segmentation is too heavy to run per folder.
     current_selection: Option<(PathBuf, crate::scoring::segmentation::Mask)>,
     selection_pending: Option<PathBuf>,
@@ -621,7 +621,7 @@ pub(crate) struct App {
     pending_confirm: Option<PendingConfirm>,
 
     /// What Copy Settings last copied.
-    copied_settings: Option<catalog::CopiedSettings>,
+    copied_settings: Option<folder_store::CopiedSettings>,
     /// The open Copy Settings dialog: the photo and the sections ticked.
     copy_dialog: Option<(PathBuf, crate::develop::copy::CopySections)>,
     /// The sections Copy Settings opens with: the preference, read once.
@@ -699,14 +699,14 @@ mod adjust;
 mod autotone;
 mod bulk_delete;
 mod bursts;
-mod catalog;
 mod commands;
 #[cfg(not(target_arch = "wasm32"))]
 mod control;
 mod crop;
+mod folder_store;
 pub(crate) use accessors::FlagCoverage;
-pub(crate) use catalog::flag_name;
 pub(crate) use crop::{CropAspect, CropOrientation, CropOverlay};
+pub(crate) use folder_store::flag_name;
 pub(crate) use group_compare::{
     compare_claims_pane, compare_zoom_uv, GroupView, PickHow, TileFidelity, COMPARE_PAGE,
     COMPARE_SELECTION_MAX,
@@ -749,7 +749,7 @@ pub(crate) use thumbs::{grid_working_range, load_order, strip_working_range};
 
 impl App {
     pub(crate) fn new(initial: Option<PathBuf>) -> Self {
-        let catalog = Catalog::new();
+        let folder_store = FolderStore::new();
         let egui_ctx = egui::Context::default();
         fonts::configure(&egui_ctx, None);
         crate::ui::font_size::init(&egui_ctx);
@@ -782,8 +782,8 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             web: web::Web::new(),
             mode: ViewMode::Grid,
-            catalog,
-            catalog_load: catalog::CatalogLoad::new(),
+            folder_store,
+            folder_store_load: folder_store::FolderStoreLoad::new(),
             ratings: HashMap::new(),
             edits: HashMap::new(),
             history: history::EditHistory::default(),
@@ -1036,7 +1036,7 @@ impl App {
     }
 
     /// Start loading `playlist`'s saved ratings, edits, and rotations in the
-    /// background. `poll_catalog_load` copies them in when they land, so first
+    /// background. `poll_folder_store_load` copies them in when they land, so first
     /// paint never waits on the sidecars.
     fn seed_mirrors(&mut self, playlist: &Playlist) {
         self.finish_folder_jobs();
@@ -1044,10 +1044,10 @@ impl App {
             self.expanded_stacks.clear();
         }
         self.adopt_signal_cache(playlist);
-        self.request_catalog_load(playlist.dir());
+        self.request_folder_store_load(playlist.dir());
     }
 
-    /// Finish the jobs that write to the folder showing, before the catalog
+    /// Finish the jobs that write to the folder showing, before the folder store
     /// they write to is replaced or closed.
     fn finish_folder_jobs(&mut self) {
         self.cancel_auto_tone();
@@ -1178,8 +1178,8 @@ impl App {
         self.apply_ui_actions(out.actions);
         self.save_edit_unless_dragging();
 
-        // Show catalog write failures, or the user loses the change silently.
-        if let Some(cause) = self.catalog.take_error() {
+        // Show folder store write failures, or the user loses the change silently.
+        if let Some(cause) = self.folder_store.take_error() {
             self.set_status(
                 StatusKind::Error,
                 (crate::i18n::t().catalog_save_failed)(&cause),
@@ -1505,8 +1505,9 @@ impl App {
                     }
                     self.put_edit(&path, Adjustments::default());
                     self.touchups.remove(&path);
-                    self.catalog.set_adjustments(&path, &Adjustments::default());
-                    self.catalog.set_touchups(&path, &[]);
+                    self.folder_store
+                        .set_adjustments(&path, &Adjustments::default());
+                    self.folder_store.set_touchups(&path, &[]);
                     self.touchup_selected = None;
                     self.push_adjustments();
                     self.hist.invalidate();

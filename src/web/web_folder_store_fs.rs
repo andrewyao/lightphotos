@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! wasm32-only: sidecar I/O through File System Access directory handles.
-//! The browser counterpart of the `std::fs` sidecar code in `catalog.rs`,
+//! The browser counterpart of the `std::fs` sidecar code in `folder_store.rs`,
 //! which still owns the sidecar format.
 
 use std::collections::HashMap;
@@ -14,8 +14,8 @@ use web_sys::{
     FileSystemGetFileOptions, FileSystemHandleKind, FileSystemWritableFileStream,
 };
 
-use crate::persist::catalog::group_file::{self, GROUPS_DIR};
-use crate::persist::catalog::SidecarLoad;
+use crate::persist::folder_store::group_file::{self, GROUPS_DIR};
+use crate::persist::folder_store::SidecarLoad;
 use crate::sidecar::{SIDECAR_DIR, SIDECAR_EXT};
 
 /// The `.lightphotos` directory under `root`, created if `create` is set.

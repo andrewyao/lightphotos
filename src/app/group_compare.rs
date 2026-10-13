@@ -562,7 +562,7 @@ impl App {
     /// when one was chosen.
     fn shown_group(&self) -> Option<(&[std::ffi::OsString], Option<&std::ffi::OsString>)> {
         let shown = self.selected_path()?;
-        let groups = self.catalog.groups()?;
+        let groups = self.folder_store.groups()?;
         let g = groups.get(groups.group_of(shown.file_name()?)?)?;
         Some((g.members(), g.rep()))
     }
@@ -657,7 +657,9 @@ impl App {
     /// `paths` in the pane's order: highest score first, unscored last, and
     /// ties in the order given.
     pub(super) fn by_score(&self, mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
-        paths.sort_by_key(|p| std::cmp::Reverse(self.catalog.score(p).map(|(s, _)| s.score.value)));
+        paths.sort_by_key(|p| {
+            std::cmp::Reverse(self.folder_store.score(p).map(|(s, _)| s.score.value))
+        });
         paths
     }
 
@@ -727,7 +729,9 @@ impl App {
         &self,
         path: &Path,
     ) -> Option<(&crate::scoring::quality::QualityScore, bool)> {
-        self.catalog.score(path).map(|(s, stale)| (&s.score, stale))
+        self.folder_store
+            .score(path)
+            .map(|(s, stale)| (&s.score, stale))
     }
 
     /// Rate a member of the shown group from its tile, the representative
@@ -1024,7 +1028,7 @@ mod tests {
         assert_eq!(app.flag_of(&paths[1]), None, "not one of the compared");
         app.set_member_as_rep(paths[4].clone());
         assert!(app
-            .catalog
+            .folder_store
             .groups()
             .is_none_or(|g| g.group_of(paths[4].file_name().unwrap()).is_none()));
 
@@ -1624,7 +1628,7 @@ mod tests {
             base: None,
             deductions: Vec::new(),
         };
-        app.catalog.set_score(path, score, 0);
+        app.folder_store.set_score(path, score, 0);
     }
 
     #[test]
@@ -1658,7 +1662,7 @@ mod tests {
         act(&mut app, UiAction::SelectToggle(2));
         app.group_selected();
         let rep = |app: &App| {
-            let groups = app.catalog.groups().unwrap();
+            let groups = app.folder_store.groups().unwrap();
             let g = groups.get(groups.group_of(paths[1].file_name().unwrap()).unwrap());
             g.unwrap().rep().cloned()
         };

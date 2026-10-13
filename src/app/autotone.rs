@@ -111,7 +111,7 @@ impl AutoTone {
         self.window.iter()
     }
 
-    /// The batch that waited for the catalog, once it has loaded.
+    /// The batch that waited for the folder store, once it has loaded.
     pub(super) fn take_deferred(&mut self) -> Option<Vec<PathBuf>> {
         self.deferred.take()
     }
@@ -122,7 +122,7 @@ impl AutoTone {
         self.base.remove(path);
     }
 
-    /// Drops trashed photos from a batch waiting for the catalog, and the
+    /// Drops trashed photos from a batch waiting for the folder store, and the
     /// batch with them if none are left.
     pub(super) fn drop_deferred(&mut self, gone: &HashSet<PathBuf>) {
         if let Some(deferred) = self.deferred.as_mut() {
@@ -157,12 +157,12 @@ pub(super) enum DeferredAutoToneMode {
 
 impl App {
     /// Auto Tone the photo on screen from its histogram sample. Applies this
-    /// frame, or is deferred until the catalog finishes loading.
+    /// frame, or is deferred until the folder store finishes loading.
     pub(super) fn auto_tone_shown(&mut self) {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return;
         };
-        if self.catalog_loading() {
+        if self.folder_store_loading() {
             self.auto_tone_batch(vec![path], DeferredAutoToneMode::Append);
             return;
         }
@@ -194,7 +194,7 @@ impl App {
         let Some(path) = self.selected_path() else {
             return;
         };
-        if self.catalog_loading() {
+        if self.folder_store_loading() {
             self.auto_tone_batch(vec![path], DeferredAutoToneMode::Append);
             return;
         }
@@ -216,13 +216,13 @@ impl App {
         self.auto_tone_batch(self.all_member_paths(), DeferredAutoToneMode::Replace);
     }
 
-    /// Start a batch over `paths`, or defer it while the catalog loads. When
+    /// Start a batch over `paths`, or defer it while the folder store loads. When
     /// deferred, `Append` adds to the waiting list and `Replace` swaps it out.
     pub(super) fn auto_tone_batch(&mut self, paths: Vec<PathBuf>, mode: DeferredAutoToneMode) {
         if paths.is_empty() {
             return;
         }
-        if self.catalog_loading() {
+        if self.folder_store_loading() {
             match mode {
                 DeferredAutoToneMode::Replace => {
                     let mut seen = std::collections::HashSet::with_capacity(paths.len());
@@ -390,7 +390,7 @@ impl App {
     }
 
     /// Drop a batch's waiting photos. Call on every folder change: `tone_one`
-    /// writes to the active catalog, which keys records by filename only, so a
+    /// writes to the active folder store, which keys records by filename only, so a
     /// late photo from the old folder would corrupt a same-named record.
     pub(super) fn cancel_auto_tone(&mut self) {
         if self.autotone.pending.is_empty() && self.autotone.deferred.is_none() {
@@ -422,7 +422,7 @@ impl App {
         let base = self.edits.get(path).copied().unwrap_or_default();
         let merged = autotone::merge(&base, auto);
         self.put_edit(path, merged);
-        self.catalog.set_adjustments(path, &merged);
+        self.folder_store.set_adjustments(path, &merged);
         #[cfg(target_arch = "wasm32")]
         if merged != base {
             crate::web::analytics::property("develop_edit_applied", "edit_kind", "auto_tone");
@@ -473,7 +473,7 @@ mod tests {
     fn grid_with_two_photos(tag: &str) -> (App, PathBuf, PathBuf, PathBuf) {
         let (dir, paths) = folder_of(tag, &["a.jpg".into(), "b.jpg".into()]);
         let mut app = App::new(None);
-        // Auto Tone waits for the async catalog load, so let it finish first.
+        // Auto Tone waits for the async folder store load, so let it finish first.
         load_folder(&mut app, &dir);
         app.mode = ViewMode::Grid;
         (app, dir, paths[0].clone(), paths[1].clone())
@@ -844,7 +844,7 @@ mod tests {
     }
 
     /// A thumbnail from folder A arriving after a switch to folder B must not
-    /// be toned against B's catalog. See `cancel_auto_tone`.
+    /// be toned against B's folder store. See `cancel_auto_tone`.
     #[test]
     fn switching_folders_cancels_a_pending_auto_tone_batch() {
         let dir = temp_folder("autotone-switch");
@@ -866,18 +866,18 @@ mod tests {
         app.poll_auto_tone();
         assert!(
             !app.edits.contains_key(&stale),
-            "a late arrival from folder A must not be toned against folder B's catalog"
+            "a late arrival from folder A must not be toned against folder B's folder store"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn shown_photo_auto_tone_waits_for_catalog_load() {
-        let (mut app, dir, a, _b) = grid_with_two_photos("autotone-catalog-race");
+    fn shown_photo_auto_tone_waits_for_folder_store_load() {
+        let (mut app, dir, a, _b) = grid_with_two_photos("autotone-folder-store-race");
         app.shown = Shown::Preview(a.clone(), 1024, 1024);
         app.hist.set_sample(vec![[0.02f32; 3]; 64]);
-        app.pretend_catalog_loading(&dir);
+        app.pretend_folder_store_loading(&dir);
 
         app.auto_tone_shown();
 
@@ -888,8 +888,8 @@ mod tests {
     }
 
     #[test]
-    fn cmd_u_in_the_grid_waits_for_catalog_load() {
-        let (mut app, dir, a, b) = grid_with_two_photos("autotone-grid-catalog-race");
+    fn cmd_u_in_the_grid_waits_for_folder_store_load() {
+        let (mut app, dir, a, b) = grid_with_two_photos("autotone-grid-folder-store-race");
         app.shown = Shown::Preview(a, 1024, 1024);
         app.hist.set_sample(vec![[0.02f32; 3]; 64]);
         app.sel = app
@@ -897,7 +897,7 @@ mod tests {
             .iter()
             .position(|&i| app.playlist.as_ref().and_then(|pl| pl.entry(i)) == Some(b.as_path()));
         assert!(app.sel.is_some());
-        app.pretend_catalog_loading(&dir);
+        app.pretend_folder_store_loading(&dir);
 
         app.auto_tone_selected();
 
@@ -907,9 +907,9 @@ mod tests {
     }
 
     #[test]
-    fn successive_cmd_u_requests_during_catalog_load_are_preserved_once() {
-        let (mut app, dir, a, b) = grid_with_two_photos("autotone-successive-catalog-race");
-        app.pretend_catalog_loading(&dir);
+    fn successive_cmd_u_requests_during_folder_store_load_are_preserved_once() {
+        let (mut app, dir, a, b) = grid_with_two_photos("autotone-successive-folder-store-race");
+        app.pretend_folder_store_loading(&dir);
 
         for path in [&a, &b, &a] {
             app.sel = app.visible.iter().position(|&i| {
@@ -929,9 +929,9 @@ mod tests {
 
     #[test]
     fn selection_request_replaces_deferred_single_photo_requests() {
-        let (mut app, dir, a, b) = grid_with_two_photos("autotone-selection-catalog-race");
+        let (mut app, dir, a, b) = grid_with_two_photos("autotone-selection-folder-store-race");
         let c = dir.join("c.jpg");
-        app.pretend_catalog_loading(&dir);
+        app.pretend_folder_store_loading(&dir);
 
         app.auto_tone_batch(vec![a.clone()], DeferredAutoToneMode::Append);
         app.auto_tone_batch(
@@ -945,14 +945,14 @@ mod tests {
     }
 
     #[test]
-    fn cmd_u_with_empty_histogram_waits_for_catalog_load() {
-        let (mut app, dir, a, _b) = grid_with_two_photos("autotone-empty-hist-catalog-race");
+    fn cmd_u_with_empty_histogram_waits_for_folder_store_load() {
+        let (mut app, dir, a, _b) = grid_with_two_photos("autotone-empty-hist-folder-store-race");
         app.mode = ViewMode::Loupe;
         app.shown = Shown::Preview(a.clone(), 1024, 1024);
         app.sel = None;
         app.want = Some(a.clone());
         app.hist.set_sample(Vec::new());
-        app.pretend_catalog_loading(&dir);
+        app.pretend_folder_store_loading(&dir);
 
         app.auto_tone_selected();
 
@@ -1000,7 +1000,7 @@ mod tests {
             None,
             "a photo that left the batch must not be toned"
         );
-        assert!(app.catalog.adjustments(&a).is_identity());
+        assert!(app.folder_store.adjustments(&a).is_identity());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -349,7 +349,7 @@ scoring does not run there.
 | `web/web_exports.rs` | Main-thread side of a batch export: each JPEG's destination folder handle, by job id | wasm32 |
 | `web/web_canvas.rs` | Attaches winit's canvas into the DOM at the right backing-store resolution | wasm32 |
 | `web/web_fs.rs` | File System Access folder picking/listing/byte reads | wasm32 |
-| `web/web_catalog_fs.rs` | File System Access counterpart of the native sidecar I/O in `sidecar.rs` and `persist/catalog.rs` | wasm32 |
+| `web/web_folder_store_fs.rs` | File System Access counterpart of the native sidecar I/O in `sidecar.rs` and `persist/folder_store.rs` | wasm32 |
 | `app/loupe.rs` | View-state math (zoom/pan/fit) and the decision to fetch full resolution | all |
 | `app/folders.rs` | The Folders tree's roots: add, remove, remember them (native: the session's `folders`; web: one IndexedDB handle per root in `web_fs.rs`, allowed again on a click). The Grid shows one folder at a time | all |
 | `app/thumbs.rs` | `try_show`'s tier-selection logic, thumbnail texture sync, capture-time and face signal hooks | all |

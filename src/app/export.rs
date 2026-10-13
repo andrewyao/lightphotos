@@ -248,9 +248,9 @@ impl App {
         if self.export_busy() {
             return Some(t.export_in_progress);
         }
-        // The edit maps read below fill in only after the background catalog
+        // The edit maps read below fill in only after the background folder store
         // load finishes. Exporting earlier would silently drop edits.
-        if self.catalog_loading() {
+        if self.folder_store_loading() {
             return Some(t.export_catalog_loading);
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -864,7 +864,7 @@ impl App {
             || self.bulk_delete.is_some()
             || self.autotone.is_running()
             || self.score_progress().is_some()
-            || self.catalog.backlog() > 0
+            || self.folder_store.backlog() > 0
     }
 
     /// Restart a showing toast's 3-second clock while a batch runs, so a slow
@@ -1075,12 +1075,12 @@ mod status_tests {
     fn a_status_survives_while_sidecars_are_still_being_written() {
         let dir = temp_folder("status-test");
         let mut app = App::new(None);
-        app.catalog.open_dir(&dir);
+        app.folder_store.open_dir(&dir);
         app.set_status(StatusKind::Success, "Rated 20000 photos".to_string());
         for i in 0..64 {
-            app.catalog.set(&dir.join(format!("p{i}.jpg")), 3);
+            app.folder_store.set(&dir.join(format!("p{i}.jpg")), 3);
         }
-        assert!(app.catalog.backlog() > 0);
+        assert!(app.folder_store.backlog() > 0);
         for _ in 0..3 {
             age_status(&mut app, 2);
             app.keep_status_alive();
@@ -1091,9 +1091,9 @@ mod status_tests {
             "the toast must outlive its expiry while writes are still draining"
         );
 
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
-        assert_eq!(app.catalog.backlog(), 0);
+        assert_eq!(app.folder_store.backlog(), 0);
         age_status(&mut app, 4);
         app.keep_status_alive();
         assert_eq!(
@@ -1110,13 +1110,13 @@ mod status_tests {
     fn a_later_write_does_not_revive_an_expired_status() {
         let dir = temp_folder("status-test");
         let mut app = app_with_a_stale_status();
-        app.catalog.open_dir(&dir);
-        app.catalog.set(&dir.join("p.jpg"), 3);
-        assert!(app.catalog.backlog() > 0);
+        app.folder_store.open_dir(&dir);
+        app.folder_store.set(&dir.join("p.jpg"), 3);
+        assert!(app.folder_store.backlog() > 0);
         app.keep_status_alive();
         assert_eq!(app.status_text(), None);
 
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         std::fs::remove_dir_all(&dir).unwrap();
     }

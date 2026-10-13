@@ -516,7 +516,7 @@ mod tests {
             exposure: 0.5,
             ..Default::default()
         };
-        app.copied_settings = Some(crate::app::catalog::CopiedSettings {
+        app.copied_settings = Some(crate::app::folder_store::CopiedSettings {
             path: paths[0].clone(),
             adj: look,
             sections: crate::develop::copy::CopySections::LOOK,
@@ -528,7 +528,7 @@ mod tests {
         assert!(
             paths
                 .iter()
-                .all(|p| app.catalog.adjustments(p).exposure == 0.5),
+                .all(|p| app.folder_store.adjustments(p).exposure == 0.5),
             "every photo got the look"
         );
         assert_eq!(
@@ -1030,9 +1030,9 @@ mod tests {
         )
         .unwrap();
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyZ);
-        assert_eq!(app.catalog.adjustments(&paths[0]).exposure, 1.0);
+        assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 1.0);
         press(&mut app, CMD, KeyCode::KeyZ);
-        assert_eq!(app.catalog.adjustments(&paths[0]).exposure, 0.0);
+        assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 0.0);
     }
 
     #[test]
@@ -1074,7 +1074,7 @@ mod tests {
         press(&mut app, CMD, KeyCode::KeyA);
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyV);
         press(&mut app, ModifiersState::empty(), KeyCode::Enter);
-        let pasted = app.catalog.adjustments(&paths[1]);
+        let pasted = app.folder_store.adjustments(&paths[1]);
         assert_eq!((pasted.exposure, pasted.temp), (1.0, 0.0));
     }
 
@@ -1447,7 +1447,7 @@ mod tests {
     }
 
     fn group_shapes(app: &App) -> Vec<(Vec<String>, Option<String>)> {
-        let groups = app.catalog.groups().expect("groups loaded");
+        let groups = app.folder_store.groups().expect("groups loaded");
         groups
             .iter()
             .map(|(_, g)| {
@@ -1554,8 +1554,8 @@ mod tests {
             Some(crate::i18n::t().group_refused_loading)
         );
         assert_eq!(app.visible, vec![0, 1, 2]);
-        crate::app::test_support::wait_for_catalog(&mut app);
-        app.catalog
+        crate::app::test_support::wait_for_folder_store(&mut app);
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         assert!(group_shapes(&app).is_empty());
         assert!(!dir.join(".lightphotos").join("groups").exists());

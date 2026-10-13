@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! What outlives the session: the per-folder catalog and its sidecar writes,
+//! What outlives the session: the per-folder store and its sidecar writes,
 //! photo groups, cached signals, preferences, presets, and the Immich key.
 
-pub(crate) mod catalog;
+pub(crate) mod folder_store;
 pub(crate) mod groups;
 // The importer is native-only, so the browser build compiles the parser with
 // no caller until a wasm file picker exists.

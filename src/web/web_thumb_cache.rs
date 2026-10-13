@@ -16,7 +16,7 @@ use web_sys::{
     FileSystemWritableFileStream,
 };
 
-use crate::web::web_catalog_fs::{is_not_found, js_error_string, sidecar_dir};
+use crate::web::web_folder_store_fs::{is_not_found, js_error_string, sidecar_dir};
 
 /// Shared by all writes to one directory while that folder is open. One
 /// task at a time (`running`) builds the index and deletes old versions.

@@ -25,7 +25,7 @@ pub fn move_to_trash(path: &Path) -> Result<(), String> {
 }
 
 // No wasm version: the File System Access API has no trash, so the browser
-// build deletes permanently from `app/catalog.rs` using a directory handle.
+// build deletes permanently from `app/folder_store.rs` using a directory handle.
 
 #[cfg(test)]
 mod tests {

@@ -210,7 +210,7 @@ pub(in crate::app) mod tests {
     use super::*;
     use crate::app::test_support::*;
     use crate::develop::Crop;
-    use crate::persist::catalog::Catalog;
+    use crate::persist::folder_store::FolderStore;
 
     const CROP: Crop = Crop {
         left: 0.1,
@@ -237,12 +237,12 @@ pub(in crate::app) mod tests {
         crs:Exposure2012=\"-0.2\" crs:ConvertToGrayscale=\"True\"/>\
         </rdf:RDF></x:xmpmeta>";
 
-    /// Sidecar writes are queued behind `Catalog`'s write-back worker, so a
+    /// Sidecar writes are queued behind `FolderStore`'s write-back worker, so a
     /// test that reads the disk waits here first. A timeout rather than an
     /// unbounded wait, so a stuck writer fails the assertion instead of
     /// hanging the suite.
     fn flush(app: &mut App) {
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
     }
 
@@ -295,7 +295,7 @@ pub(in crate::app) mod tests {
         assert_eq!(app.edits.get(&paths[0]), Some(&tone(0.5, 10.0)));
         flush(&mut app);
         assert_eq!(
-            Catalog::with_dir(dir.clone()).adjustments(&paths[0]),
+            FolderStore::with_dir(dir.clone()).adjustments(&paths[0]),
             tone(0.5, 10.0),
             "the sidecar on disk carries the new values"
         );
@@ -315,9 +315,9 @@ pub(in crate::app) mod tests {
             ..Adjustments::default()
         };
         app.edits.insert(paths[1].clone(), cropped);
-        app.catalog.set_adjustments(&paths[1], &cropped);
+        app.folder_store.set_adjustments(&paths[1], &cropped);
         app.selected = (0..3).collect();
-        app.copied_settings = Some(crate::app::catalog::CopiedSettings {
+        app.copied_settings = Some(crate::app::folder_store::CopiedSettings {
             path: paths[0].clone(),
             adj: tone(0.25, 5.0),
             sections: CopySections::LOOK,
@@ -326,12 +326,12 @@ pub(in crate::app) mod tests {
         app.apply_settings_to_selection();
 
         flush(&mut app);
-        let catalog = Catalog::with_dir(dir.clone());
+        let folder_store = FolderStore::with_dir(dir.clone());
         for path in &paths {
             let edit = app.edits.get(path).copied().unwrap();
             assert_eq!(edit.exposure, 0.25, "{} got the look", path.display());
             assert_eq!(edit.contrast, 5.0);
-            assert_eq!(catalog.adjustments(path).exposure, 0.25);
+            assert_eq!(folder_store.adjustments(path).exposure, 0.25);
         }
         assert_eq!(
             app.edits.get(&paths[1]).unwrap().crop,
@@ -339,7 +339,7 @@ pub(in crate::app) mod tests {
             "the cropped photo keeps its own crop"
         );
         assert_eq!(app.edits.get(&paths[0]).unwrap().crop, None);
-        assert_eq!(catalog.adjustments(&paths[1]).crop, Some(CROP));
+        assert_eq!(folder_store.adjustments(&paths[1]).crop, Some(CROP));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -361,7 +361,7 @@ pub(in crate::app) mod tests {
         );
         flush(&mut app);
         assert!(
-            Catalog::with_dir(dir.clone())
+            FolderStore::with_dir(dir.clone())
                 .adjustments(&paths[0])
                 .is_identity(),
             "and the sidecar no longer holds the old edit"
@@ -466,10 +466,10 @@ pub(in crate::app) mod tests {
         app.run_bulk(crate::ui::BulkKind::ApplyPreset(id));
 
         flush(&mut app);
-        let catalog = Catalog::with_dir(dir.clone());
+        let folder_store = FolderStore::with_dir(dir.clone());
         for path in &paths {
             assert_eq!(app.edits.get(path).unwrap().exposure, 0.4);
-            assert_eq!(catalog.adjustments(path).exposure, 0.4);
+            assert_eq!(folder_store.adjustments(path).exposure, 0.4);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

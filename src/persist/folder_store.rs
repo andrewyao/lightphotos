@@ -3,7 +3,7 @@
 //! The open folder's sidecars, cached. The record format, its path and its
 //! single-file read and write live in [`crate::sidecar`].
 //!
-//! [`Catalog`] caches one directory at a time. Reads and writes derive the
+//! [`FolderStore`] caches one directory at a time. Reads and writes derive the
 //! sidecar path from the photo's own path.
 
 use std::collections::{HashMap, HashSet};
@@ -24,22 +24,22 @@ use writeback::{WriteOp, Writeback};
 
 /// Records for the active directory, backed by its sidecar files. `images`
 /// is a read cache keyed by filename, so it answers only for photos in the
-/// active directory. See [`Catalog::cache_key`].
-pub struct Catalog {
+/// active directory. See [`FolderStore::cache_key`].
+pub struct FolderStore {
     images: HashMap<OsString, ImageRecord>,
     /// `None` until a load lands for `dir`, so an unloaded folder never
     /// passes for one without groups.
     groups: Option<Groups>,
-    /// Filenames written or removed since [`Catalog::switch_dir`]. A
+    /// Filenames written or removed since [`FolderStore::switch_dir`]. A
     /// background load must not overwrite these. It covers removals, which
     /// look the same as "not loaded yet" in `images`.
     dirty: HashSet<OsString>,
     /// The active directory. `None` before the first folder opens.
     dir: Option<PathBuf>,
-    /// The latest persist failure, drained by [`Catalog::take_error`] into a
+    /// The latest persist failure, drained by [`FolderStore::take_error`] into a
     /// toast.
     last_error: Option<String>,
-    /// See [`Catalog::sort_revision`].
+    /// See [`FolderStore::sort_revision`].
     sort_revision: u64,
     /// Sidecar mutations on their way to disk. Every write goes through here,
     /// so no caller blocks a frame on the filesystem.
@@ -51,10 +51,10 @@ pub struct Catalog {
     wasm_dir_handle: Option<web_sys::FileSystemDirectoryHandle>,
 }
 
-impl Catalog {
-    /// An empty catalog with no active directory.
-    pub fn new() -> Catalog {
-        Catalog {
+impl FolderStore {
+    /// An empty folder store with no active directory.
+    pub fn new() -> FolderStore {
+        FolderStore {
             images: HashMap::new(),
             groups: None,
             dirty: HashSet::new(),
@@ -103,15 +103,15 @@ impl Catalog {
     /// `new()` plus `open_dir(&dir)`.
     #[cfg(test)]
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn with_dir(dir: PathBuf) -> Catalog {
-        let mut cat = Catalog::new();
+    pub fn with_dir(dir: PathBuf) -> FolderStore {
+        let mut cat = FolderStore::new();
         cat.open_dir(&dir);
         cat
     }
 
     /// Make `dir` active and reload its sidecars from disk, blocking. The app
-    /// instead calls [`Catalog::switch_dir`], runs `load_sidecars` on a
-    /// background thread, then calls [`Catalog::apply_loaded`]. Native only,
+    /// instead calls [`FolderStore::switch_dir`], runs `load_sidecars` on a
+    /// background thread, then calls [`FolderStore::apply_loaded`]. Native only,
     /// because File System Access has no synchronous reads.
     #[cfg(test)]
     #[cfg(not(target_arch = "wasm32"))]
@@ -126,8 +126,8 @@ impl Catalog {
     /// sees the previous directory's records.
     ///
     /// Every load starts here, so this is also where a load takes its place in
-    /// the write order. The returned mark must reach [`Catalog::apply_loaded`],
-    /// or [`Catalog::abandon_load`] if the load never runs.
+    /// the write order. The returned mark must reach [`FolderStore::apply_loaded`],
+    /// or [`FolderStore::abandon_load`] if the load never runs.
     #[must_use]
     pub(crate) fn switch_dir(&mut self, dir: &Path) -> LoadMark {
         self.dir = Some(dir.to_path_buf());
@@ -228,11 +228,11 @@ impl Catalog {
 
     /// Log a persist failure and keep it for the UI to show.
     pub(crate) fn note_persist_error(&mut self, e: impl std::fmt::Display) {
-        eprintln!("[catalog] Failed to save catalog entry: {e}");
+        eprintln!("[folder store] Failed to save folder store entry: {e}");
         self.last_error = Some(e.to_string());
     }
 
-    /// Counts changes to the stars and edit times, the catalog's inputs to the
+    /// Counts changes to the stars and edit times, the folder store's inputs to the
     /// Grid's order, so the Grid knows when to sort again.
     pub(crate) fn sort_revision(&self) -> u64 {
         self.sort_revision
@@ -351,7 +351,7 @@ impl Catalog {
         self.forget_group_members(paths);
     }
 
-    /// The group half of [`Catalog::forget_photos`]. wasm forgets each
+    /// The group half of [`FolderStore::forget_photos`]. wasm forgets each
     /// photo's record through a captured handle instead, so it calls only
     /// this. A photo outside the open folder is skipped, since its folder's
     /// groups are not in memory; that folder's next load repairs them.
@@ -436,7 +436,7 @@ impl Catalog {
             .enqueue(path, WriteOp::Delete, dir_handle.clone());
     }
 
-    /// [`Catalog::remove`] through a captured directory handle, for a photo
+    /// [`FolderStore::remove`] through a captured directory handle, for a photo
     /// deletion that finishes after the user navigated to another folder.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn remove_with_handle(
@@ -452,9 +452,9 @@ impl Catalog {
     }
 }
 
-impl Default for Catalog {
-    fn default() -> Catalog {
-        Catalog::new()
+impl Default for FolderStore {
+    fn default() -> FolderStore {
+        FolderStore::new()
     }
 }
 
@@ -481,7 +481,7 @@ pub(crate) struct SidecarLoad {
 }
 
 /// Read every sidecar in `dir/.lightphotos/` and its `groups/`. Needs no
-/// `Catalog`, so it can run on a background thread. A missing folder gives
+/// `FolderStore`, so it can run on a background thread. A missing folder gives
 /// an empty result.
 #[cfg(not(target_arch = "wasm32"))]
 #[hotpath::measure]
@@ -519,7 +519,7 @@ pub(crate) fn load_sidecars(dir: &Path) -> SidecarLoad {
                 }
             }
             Err(e) => {
-                eprintln!("[catalog] unreadable sidecar {}: {e}", path.display());
+                eprintln!("[folder store] unreadable sidecar {}: {e}", path.display());
                 skipped += 1;
             }
         }
@@ -550,7 +550,7 @@ mod tests {
     /// Sidecar writes are queued, so a test that reads the disk waits here
     /// first. A timeout rather than an unbounded wait, so a stuck writer
     /// fails the assertion instead of hanging the suite.
-    fn flush(cat: &mut Catalog) {
+    fn flush(cat: &mut FolderStore) {
         cat.flush_blocking(std::time::Duration::from_secs(10));
     }
 
@@ -560,16 +560,16 @@ mod tests {
 
     #[test]
     fn round_trip_persists_across_reload() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg"); // nonexistent — exercises the fallback.
 
         {
-            let mut cat = Catalog::with_dir(dir.clone());
+            let mut cat = FolderStore::with_dir(dir.clone());
             cat.set(&p, 3);
             assert_eq!(cat.get(&p), Some(3));
         }
 
-        let reloaded = Catalog::with_dir(dir.clone());
+        let reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.get(&p), Some(3));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -577,18 +577,18 @@ mod tests {
 
     #[test]
     fn zero_removes_entry_and_persists_removal() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
         {
-            let mut cat = Catalog::with_dir(dir.clone());
+            let mut cat = FolderStore::with_dir(dir.clone());
             cat.set(&p, 4);
             assert_eq!(cat.get(&p), Some(4));
             cat.set(&p, 0);
             assert_eq!(cat.get(&p), None);
         }
 
-        let reloaded = Catalog::with_dir(dir.clone());
+        let reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.get(&p), None);
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -596,15 +596,15 @@ mod tests {
 
     #[test]
     fn rating_is_clamped_to_five() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         cat.set(&p, 9);
         assert_eq!(cat.get(&p), Some(5));
 
         flush(&mut cat);
-        let reloaded = Catalog::with_dir(dir.clone());
+        let reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.get(&p), Some(5));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -612,10 +612,10 @@ mod tests {
 
     #[test]
     fn a_flag_persists_and_clearing_it_deletes_an_otherwise_empty_sidecar() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         cat.set_flag(&p, Some(Flag::Reject));
         flush(&mut cat);
         let sidecar = std::fs::read_to_string(sidecar_for(&dir, "photo.jpg")).unwrap();
@@ -623,7 +623,7 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&sidecar).unwrap(),
             serde_json::json!({"flag": "reject"})
         );
-        let mut reloaded = Catalog::with_dir(dir.clone());
+        let mut reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.flag(&p), Some(Flag::Reject));
 
         reloaded.set_flag(&p, None);
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn adjustments_persist_across_reload() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
         let adj = Adjustments {
@@ -648,12 +648,12 @@ mod tests {
         };
 
         {
-            let mut cat = Catalog::with_dir(dir.clone());
+            let mut cat = FolderStore::with_dir(dir.clone());
             cat.set_adjustments(&p, &adj);
             assert_eq!(cat.adjustments(&p), adj);
         }
 
-        let reloaded = Catalog::with_dir(dir.clone());
+        let reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.adjustments(&p), adj);
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn denoise_persists_across_reload() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
         let adj = Adjustments {
@@ -670,12 +670,12 @@ mod tests {
         };
 
         {
-            let mut cat = Catalog::with_dir(dir.clone());
+            let mut cat = FolderStore::with_dir(dir.clone());
             cat.set_adjustments(&p, &adj);
             assert_eq!(cat.adjustments(&p), adj);
         }
 
-        let reloaded = Catalog::with_dir(dir.clone());
+        let reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.adjustments(&p), adj);
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -683,11 +683,11 @@ mod tests {
 
     #[test]
     fn rotation_persists_across_reload() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
         {
-            let mut cat = Catalog::with_dir(dir.clone());
+            let mut cat = FolderStore::with_dir(dir.clone());
             cat.set_rotation(&p, 3);
             assert_eq!(cat.rotation(&p), 3);
             // Wraps mod 4.
@@ -695,7 +695,7 @@ mod tests {
             assert_eq!(cat.rotation(&p), 1);
         }
 
-        let reloaded = Catalog::with_dir(dir.clone());
+        let reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.rotation(&p), 1);
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -703,7 +703,7 @@ mod tests {
 
     #[test]
     fn touchups_persist_across_reload_and_can_be_removed() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
         let t = TouchUp {
             center: [0.4, 0.5],
@@ -714,21 +714,21 @@ mod tests {
             opacity: 1.0,
         };
         {
-            let mut cat = Catalog::with_dir(dir.clone());
+            let mut cat = FolderStore::with_dir(dir.clone());
             cat.set_touchups(&p, &[t]);
             assert_eq!(cat.touchups(&p), vec![t]);
         }
-        let mut reloaded = Catalog::with_dir(dir.clone());
+        let mut reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.touchups(&p), vec![t]);
         reloaded.set_touchups(&p, &[]);
         flush(&mut reloaded);
-        assert!(Catalog::with_dir(dir.clone()).touchups(&p).is_empty());
+        assert!(FolderStore::with_dir(dir.clone()).touchups(&p).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn rating_and_adjustments_coexist() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
         let adj = Adjustments {
@@ -738,14 +738,14 @@ mod tests {
         };
 
         {
-            let mut cat = Catalog::with_dir(dir.clone());
+            let mut cat = FolderStore::with_dir(dir.clone());
             cat.set(&p, 5);
             cat.set_adjustments(&p, &adj);
             assert_eq!(cat.get(&p), Some(5));
             assert_eq!(cat.adjustments(&p), adj);
         }
 
-        let reloaded = Catalog::with_dir(dir.clone());
+        let reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.get(&p), Some(5));
         assert_eq!(reloaded.adjustments(&p), adj);
 
@@ -754,12 +754,12 @@ mod tests {
 
     #[test]
     fn identity_adjustments_omitted_from_sidecar_json() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
         // A rated image with identity edits: sidecar has no "adjustments" key.
         {
-            let mut cat = Catalog::with_dir(dir.clone());
+            let mut cat = FolderStore::with_dir(dir.clone());
             cat.set(&p, 2);
         }
         let bytes = std::fs::read(sidecar_for(&dir, "photo.jpg")).unwrap();
@@ -771,7 +771,7 @@ mod tests {
 
         // A non-identity edit stores an "adjustments" object.
         {
-            let mut cat = Catalog::with_dir(dir.clone());
+            let mut cat = FolderStore::with_dir(dir.clone());
             let adj = Adjustments {
                 shadows: 40.0,
                 ..Default::default()
@@ -792,10 +792,10 @@ mod tests {
     fn failed_persist_is_reported_once_via_take_error() {
         // A file named .lightphotos makes create_dir_all, and so every
         // write, fail.
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         std::fs::write(dir.join(SIDECAR_DIR), b"not a dir").unwrap();
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         assert!(cat.take_error().is_none(), "no error before any write");
 
         cat.set(&dir.join("photo.jpg"), 3);
@@ -817,11 +817,11 @@ mod tests {
 
     #[test]
     fn unreadable_sidecar_is_reported_not_silently_dropped() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         std::fs::create_dir_all(dir.join(SIDECAR_DIR)).unwrap();
         std::fs::write(sidecar_for(&dir, "bad.jpg"), b"{not valid json").unwrap();
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         assert_eq!(
             cat.get(&dir.join("bad.jpg")),
             None,
@@ -837,11 +837,11 @@ mod tests {
 
     #[test]
     fn corrupt_sidecar_does_not_block_other_photos_in_same_directory() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         std::fs::create_dir_all(dir.join(SIDECAR_DIR)).unwrap();
         std::fs::write(sidecar_for(&dir, "bad.jpg"), b"{not valid json").unwrap();
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         let _ = cat.take_error();
         cat.set(&dir.join("good.jpg"), 4);
         flush(&mut cat);
@@ -862,11 +862,11 @@ mod tests {
 
     #[test]
     fn same_stem_raw_and_jpeg_get_independent_sidecars() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let raw = dir.join("PHOTO1.ARW");
         let jpg = dir.join("PHOTO1.JPG");
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         cat.set(&raw, 5);
         cat.set(&jpg, 2);
         flush(&mut cat);
@@ -875,7 +875,7 @@ mod tests {
         assert!(sidecar_for(&dir, "PHOTO1.ARW").exists());
         assert!(sidecar_for(&dir, "PHOTO1.JPG").exists());
 
-        let reloaded = Catalog::with_dir(dir.clone());
+        let reloaded = FolderStore::with_dir(dir.clone());
         assert_eq!(reloaded.get(&raw), Some(5));
         assert_eq!(reloaded.get(&jpg), Some(2));
 
@@ -884,8 +884,8 @@ mod tests {
 
     #[test]
     fn lightphotos_dir_created_lazily_only_on_first_write() {
-        let dir = temp_folder("catalog-test");
-        let mut cat = Catalog::with_dir(dir.clone());
+        let dir = temp_folder("folder-store-test");
+        let mut cat = FolderStore::with_dir(dir.clone());
         assert!(
             !dir.join(SIDECAR_DIR).exists(),
             "opening/reading a directory must not create .lightphotos"
@@ -914,15 +914,15 @@ mod tests {
 
     #[test]
     fn a_score_alone_keeps_the_sidecar_and_round_trips() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         let edits = ImageRecord::default().edit_signature();
         cat.set_score(&p, sample_score(), edits);
         flush(&mut cat);
         assert!(sidecar_for(&dir, "photo.jpg").exists());
 
-        let reloaded = Catalog::with_dir(dir.clone());
+        let reloaded = FolderStore::with_dir(dir.clone());
         let (stored, stale) = reloaded.score(&p).expect("the score survives a reload");
         assert_eq!(stored.score, sample_score());
         assert!(!stale, "nothing was edited since");
@@ -932,9 +932,9 @@ mod tests {
 
     #[test]
     fn an_edit_after_scoring_marks_the_score_stale_and_undoing_it_clears_that() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         cat.set_score(&p, sample_score(), ImageRecord::default().edit_signature());
         cat.set(&p, 4);
         assert_eq!(
@@ -961,9 +961,9 @@ mod tests {
 
     #[test]
     fn empty_record_deletes_the_sidecar_file() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         cat.set(&p, 3);
         flush(&mut cat);
         assert!(sidecar_for(&dir, "photo.jpg").exists());
@@ -979,9 +979,9 @@ mod tests {
 
     #[test]
     fn forgetting_a_photo_deletes_its_sidecar_file() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         cat.set(&p, 4);
         flush(&mut cat);
         assert!(sidecar_for(&dir, "photo.jpg").exists());
@@ -997,12 +997,12 @@ mod tests {
 
     #[test]
     fn open_dir_switches_active_directory_without_cross_directory_leakage() {
-        let a = temp_folder("catalog-test");
-        let b = temp_folder("catalog-test");
+        let a = temp_folder("folder-store-test");
+        let b = temp_folder("folder-store-test");
         let pa = a.join("photo.jpg");
         let pb = b.join("photo.jpg"); // same filename, different directory
 
-        let mut cat = Catalog::with_dir(a.clone());
+        let mut cat = FolderStore::with_dir(a.clone());
         cat.set(&pa, 5);
 
         flush(&mut cat);
@@ -1029,12 +1029,12 @@ mod tests {
 
     #[test]
     fn a_photo_outside_the_active_directory_never_sees_its_records() {
-        let a = temp_folder("catalog-test");
-        let b = temp_folder("catalog-test");
+        let a = temp_folder("folder-store-test");
+        let b = temp_folder("folder-store-test");
         let pa = a.join("IMG_0001.JPG");
         let pb = b.join("IMG_0001.JPG");
 
-        let mut cat = Catalog::with_dir(a.clone());
+        let mut cat = FolderStore::with_dir(a.clone());
         cat.set(&pa, 4);
         cat.set_rotation(&pa, 1);
         cat.set_touchups(
@@ -1071,7 +1071,7 @@ mod tests {
 
         flush(&mut cat);
         assert!(!sidecar_for(&b, "IMG_0001.JPG").exists());
-        assert_eq!(Catalog::with_dir(a.clone()).get(&pa), Some(4));
+        assert_eq!(FolderStore::with_dir(a.clone()).get(&pa), Some(4));
 
         std::fs::remove_dir_all(&a).unwrap();
         std::fs::remove_dir_all(&b).unwrap();
@@ -1079,11 +1079,11 @@ mod tests {
 
     #[test]
     fn apply_loaded_is_discarded_for_a_directory_no_longer_active() {
-        let a = temp_folder("catalog-test");
-        let b = temp_folder("catalog-test");
+        let a = temp_folder("folder-store-test");
+        let b = temp_folder("folder-store-test");
         let pa = a.join("photo.jpg");
 
-        let mut cat = Catalog::with_dir(a.clone());
+        let mut cat = FolderStore::with_dir(a.clone());
         cat.set(&pa, 5);
         // A background load for `a` was started, but before it lands the
         // active directory switches to `b`.
@@ -1106,16 +1106,16 @@ mod tests {
 
     #[test]
     fn apply_loaded_does_not_clobber_a_local_write_made_after_switch() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let written = dir.join("written.jpg");
         let other = dir.join("other.jpg");
 
         // `other.jpg` already has a rating on disk from a previous session.
-        let mut seed = Catalog::with_dir(dir.clone());
+        let mut seed = FolderStore::with_dir(dir.clone());
         seed.set(&other, 3);
         drop(seed);
 
-        let mut cat = Catalog::new();
+        let mut cat = FolderStore::new();
         let mark = cat.switch_dir(&dir);
         // A write lands after switch_dir but before the background load,
         // whose snapshot predates the write, returns.
@@ -1140,13 +1140,13 @@ mod tests {
 
     #[test]
     fn apply_loaded_does_not_resurrect_a_locally_removed_record() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
         // A rating exists on disk from a previous session.
-        Catalog::with_dir(dir.clone()).set(&p, 4);
+        FolderStore::with_dir(dir.clone()).set(&p, 4);
 
-        let mut cat = Catalog::new();
+        let mut cat = FolderStore::new();
         let mark = cat.switch_dir(&dir);
         let loaded = load_sidecars(&dir); // snapshot still carries the rating
         cat.forget_photos(std::slice::from_ref(&p));
@@ -1165,12 +1165,12 @@ mod tests {
 
     #[test]
     fn apply_loaded_still_surfaces_skipped_count_for_a_stale_directory() {
-        let a = temp_folder("catalog-test");
-        let b = temp_folder("catalog-test");
+        let a = temp_folder("folder-store-test");
+        let b = temp_folder("folder-store-test");
         std::fs::create_dir_all(a.join(SIDECAR_DIR)).unwrap();
         std::fs::write(sidecar_for(&a, "bad.jpg"), b"{not valid json").unwrap();
 
-        let mut cat = Catalog::new();
+        let mut cat = FolderStore::new();
         let mark = cat.switch_dir(&a);
         let loaded = load_sidecars(&a); // has skipped == 1
         let _ = cat.switch_dir(&b); // the user already left `a` before the load lands
@@ -1190,12 +1190,12 @@ mod tests {
     /// filesystem once per photo and froze the window for seconds.
     #[test]
     fn rating_a_whole_folder_does_not_block_on_the_filesystem() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let paths: Vec<PathBuf> = (0..20_000)
             .map(|i| dir.join(format!("photo{i:05}.jpg")))
             .collect();
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         let started = std::time::Instant::now();
         for p in &paths {
             cat.set(p, 3);
@@ -1217,7 +1217,7 @@ mod tests {
         flush(&mut cat);
         assert_eq!(cat.backlog(), 0);
         assert_eq!(
-            Catalog::with_dir(dir.clone()).get(&paths[19_999]),
+            FolderStore::with_dir(dir.clone()).get(&paths[19_999]),
             Some(3),
             "every queued write must still reach the disk"
         );
@@ -1227,14 +1227,14 @@ mod tests {
 
     #[test]
     fn a_folder_round_trip_during_a_flush_does_not_revert_the_edit() {
-        let dir = temp_folder("catalog-test");
-        let elsewhere = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
+        let elsewhere = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
         // A previous session left this photo at three stars.
-        Catalog::with_dir(dir.clone()).set(&p, 3);
+        FolderStore::with_dir(dir.clone()).set(&p, 3);
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         // The snapshot a background load would carry: taken before the edit.
         let stale = load_sidecars(&dir);
         cat.set(&p, 5);
@@ -1253,7 +1253,7 @@ mod tests {
 
         flush(&mut cat);
         assert_eq!(
-            Catalog::with_dir(dir.clone()).get(&p),
+            FolderStore::with_dir(dir.clone()).get(&p),
             Some(5),
             "the queued write must still land in its own folder after the round trip"
         );
@@ -1273,13 +1273,13 @@ mod tests {
     /// sidecars is still running.
     #[test]
     fn a_completed_write_is_not_reverted_by_a_load_that_predates_it() {
-        let dir = temp_folder("catalog-test");
-        let elsewhere = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
+        let elsewhere = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
-        Catalog::with_dir(dir.clone()).set(&p, 3);
+        FolderStore::with_dir(dir.clone()).set(&p, 3);
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         let stale = load_sidecars(&dir);
         cat.set(&p, 5);
         let _ = cat.switch_dir(&elsewhere);
@@ -1302,13 +1302,13 @@ mod tests {
     /// history before the overlay could use it.
     #[test]
     fn a_completed_write_survives_the_last_outstanding_load() {
-        let dir = temp_folder("catalog-test");
-        let elsewhere = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
+        let elsewhere = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
-        Catalog::with_dir(dir.clone()).set(&p, 3);
+        FolderStore::with_dir(dir.clone()).set(&p, 3);
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         let stale = load_sidecars(&dir);
         cat.set(&p, 5);
         let _ = cat.switch_dir(&elsewhere);
@@ -1328,16 +1328,16 @@ mod tests {
     /// `reloading_a_folder_drops_values_its_sidecars_no_longer_have` relies on.
     #[test]
     fn a_load_requested_after_a_write_landed_still_wins() {
-        let dir = temp_folder("catalog-test");
-        let elsewhere = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
+        let elsewhere = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         cat.set(&p, 5);
         flush(&mut cat);
 
         // Another tool rewrites the sidecar while the user is elsewhere.
-        Catalog::with_dir(dir.clone()).set(&p, 1);
+        FolderStore::with_dir(dir.clone()).set(&p, 1);
 
         let _ = cat.switch_dir(&elsewhere);
         let mark = cat.switch_dir(&dir);
@@ -1381,24 +1381,24 @@ mod tests {
     }
 
     #[test]
-    fn a_record_the_lib_writes_is_what_the_catalog_loads() {
-        let dir = temp_folder("catalog-test");
+    fn a_record_the_lib_writes_is_what_the_folder_store_loads() {
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
         let rec = fully_populated();
         crate::sidecar::write_record(&p, &rec).unwrap();
 
-        let cat = Catalog::with_dir(dir.clone());
+        let cat = FolderStore::with_dir(dir.clone());
         assert_eq!(cat.record(&p), Some(&rec));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn a_record_the_catalog_writes_is_what_the_lib_reads() {
-        let dir = temp_folder("catalog-test");
+    fn a_record_the_folder_store_writes_is_what_the_lib_reads() {
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
         let rec = fully_populated();
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         cat.set(&p, 3);
         cat.set_flag(&p, rec.flag);
         cat.set_label(&p, rec.label);
@@ -1423,10 +1423,10 @@ mod tests {
     }
 
     #[test]
-    fn load_sidecars_reads_a_directory_without_mutating_a_catalog() {
-        let dir = temp_folder("catalog-test");
+    fn load_sidecars_reads_a_directory_without_mutating_a_folder_store() {
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
-        Catalog::with_dir(dir.clone()).set(&p, 4);
+        FolderStore::with_dir(dir.clone()).set(&p, 4);
 
         let loaded = load_sidecars(&dir);
         assert_eq!(loaded.skipped, 0);
@@ -1443,9 +1443,9 @@ mod tests {
 
     #[test]
     fn ratings_flags_and_labels_leave_the_edit_time_alone() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let p = dir.join("photo.jpg");
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         cat.set(&p, 2);
         cat.set_flag(&p, Some(Flag::Pick));
         cat.set_label(&p, Some(ColorLabel::Red));
@@ -1461,7 +1461,7 @@ mod tests {
 
     #[test]
     fn an_edited_sidecar_without_an_edit_time_takes_the_file_time() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let side = dir.join(SIDECAR_DIR);
         std::fs::create_dir_all(&side).unwrap();
         std::fs::write(side.join("old.jpg.xmp"), r#"{"rotation":1}"#).unwrap();
@@ -1515,7 +1515,7 @@ mod tests {
         path
     }
 
-    fn only_group(cat: &Catalog) -> (GroupId, Group) {
+    fn only_group(cat: &FolderStore) -> (GroupId, Group) {
         let all: Vec<_> = cat.groups().unwrap().iter().collect();
         assert_eq!(all.len(), 1, "expected one group, got {all:?}");
         (all[0].0.clone(), all[0].1.clone())
@@ -1523,11 +1523,11 @@ mod tests {
 
     #[test]
     fn a_group_round_trips_through_writeback_and_reload() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let members = photos(&dir, &["IMG_0001.JPG", "IMG_0002.JPG", "IMG_0003.JPG"]);
         let group = Group::new(members, Some("IMG_0002.JPG".into())).unwrap();
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         let writes = cat
             .groups()
             .unwrap()
@@ -1549,7 +1549,7 @@ mod tests {
             })
         );
         assert_eq!(
-            only_group(&Catalog::with_dir(dir.clone())),
+            only_group(&FolderStore::with_dir(dir.clone())),
             (id.clone(), group)
         );
 
@@ -1557,18 +1557,21 @@ mod tests {
         cat.apply_group_writes(writes).unwrap();
         flush(&mut cat);
         assert!(!file.exists(), "dissolving deletes the sidecar");
-        assert!(Catalog::with_dir(dir.clone()).groups().unwrap().is_empty());
+        assert!(FolderStore::with_dir(dir.clone())
+            .groups()
+            .unwrap()
+            .is_empty());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_group_with_no_representative_writes_none_and_reloads_without_one() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let members = photos(&dir, &["a.jpg", "b.jpg"]);
         let group = Group::new(members, None).unwrap();
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         let writes = cat
             .groups()
             .unwrap()
@@ -1583,24 +1586,24 @@ mod tests {
             body,
             serde_json::json!({"v": 1, "members": ["a.jpg", "b.jpg"]})
         );
-        assert_eq!(only_group(&Catalog::with_dir(dir.clone())), (id, group));
+        assert_eq!(only_group(&FolderStore::with_dir(dir.clone())), (id, group));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_load_without_groups_creates_no_directory() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         photos(&dir, &["a.jpg", "b.jpg"]);
-        let cat = Catalog::with_dir(dir.clone());
+        let cat = FolderStore::with_dir(dir.clone());
         assert!(cat.groups().unwrap().is_empty());
         assert!(
             !dir.join(SIDECAR_DIR).exists(),
             "loading a pristine folder must not create .lightphotos"
         );
 
-        Catalog::with_dir(dir.clone()).set(&dir.join("a.jpg"), 3);
-        let cat = Catalog::with_dir(dir.clone());
+        FolderStore::with_dir(dir.clone()).set(&dir.join("a.jpg"), 3);
+        let cat = FolderStore::with_dir(dir.clone());
         assert!(cat.groups().unwrap().is_empty());
         assert!(
             !groups_dir(&dir).exists(),
@@ -1612,7 +1615,7 @@ mod tests {
 
     #[test]
     fn loading_repairs_groups_in_memory_and_leaves_their_files_alone() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
         let missing =
             r#"{"v":1,"members":["gone.jpg","a.jpg","b.jpg"],"representative":"gone.jpg"}"#;
@@ -1620,7 +1623,7 @@ mod tests {
         let rival = r#"{"v":1,"members":["b.jpg","c.jpg"],"representative":"b.jpg"}"#;
         let rival_file = write_group_file(&dir, "g-1", rival);
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         assert_eq!(cat.take_error(), None);
         let (id, group) = only_group(&cat);
         assert_eq!(id.to_string(), "g-2");
@@ -1635,7 +1638,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_group_is_counted_and_the_rest_still_load() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         photos(&dir, &["a.jpg", "b.jpg", "c.jpg", "d.jpg", "notes.txt"]);
         write_group_file(&dir, "g-bad", "{not json");
         write_group_file(
@@ -1670,7 +1673,7 @@ mod tests {
             "bad JSON, an unknown version, and a name that is not a group id"
         );
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         assert!(cat.take_error().is_some());
         let (id, _) = only_group(&cat);
         assert_eq!(
@@ -1696,7 +1699,7 @@ mod tests {
 
     #[test]
     fn ungrouping_the_winner_does_not_bring_the_loser_back() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
         write_group_file(
             &dir,
@@ -1709,14 +1712,17 @@ mod tests {
             r#"{"v":1,"members":["b.jpg","c.jpg"],"representative":"b.jpg"}"#,
         );
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         let (winner, _) = only_group(&cat);
         assert_eq!(winner.to_string(), "g-000000000002-000000");
         let writes = cat.groups().unwrap().dissolve(&winner);
         cat.apply_group_writes(writes).unwrap();
         flush(&mut cat);
 
-        assert!(Catalog::with_dir(dir.clone()).groups().unwrap().is_empty());
+        assert!(FolderStore::with_dir(dir.clone())
+            .groups()
+            .unwrap()
+            .is_empty());
         assert_eq!(group_ids_on_disk(&dir), Vec::<String>::new());
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1724,7 +1730,7 @@ mod tests {
 
     #[test]
     fn a_group_dropped_for_a_missing_photo_stays_dropped_when_it_returns() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         photos(&dir, &["a.jpg", "c.jpg", "d.jpg"]);
         let dropped = write_group_file(
             &dir,
@@ -1732,7 +1738,7 @@ mod tests {
             r#"{"v":1,"members":["a.jpg","b.jpg"],"representative":"a.jpg"}"#,
         );
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         assert!(cat.groups().unwrap().is_empty());
         flush(&mut cat);
         assert!(dropped.exists(), "loading never writes");
@@ -1750,7 +1756,7 @@ mod tests {
         );
 
         photos(&dir, &["b.jpg"]);
-        let cat = Catalog::with_dir(dir.clone());
+        let cat = FolderStore::with_dir(dir.clone());
         assert_eq!(
             only_group(&cat).1.members(),
             ["c.jpg", "d.jpg"],
@@ -1762,11 +1768,11 @@ mod tests {
 
     #[test]
     fn a_load_that_predates_a_group_write_keeps_the_group() {
-        let dir = temp_folder("catalog-test");
-        let elsewhere = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
+        let elsewhere = temp_folder("folder-store-test");
         let members = photos(&dir, &["a.jpg", "b.jpg"]);
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         let stale = load_sidecars(&dir);
         let group = Group::new(members, Some("b.jpg".into())).unwrap();
         let writes = cat
@@ -1788,12 +1794,12 @@ mod tests {
 
     #[test]
     fn a_group_write_during_a_pending_load_is_refused_and_changes_nothing() {
-        let dir = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
         let members = photos(&dir, &["a.jpg", "b.jpg"]);
         let group = Group::new(members, Some("a.jpg".into())).unwrap();
         let writes = Groups::default().create(group, std::time::SystemTime::now());
 
-        let mut cat = Catalog::new();
+        let mut cat = FolderStore::new();
         let mark = cat.switch_dir(&dir);
         assert_eq!(
             cat.apply_group_writes(writes.clone()),
@@ -1821,8 +1827,8 @@ mod tests {
 
     #[test]
     fn a_stale_load_replays_group_writes_in_the_order_they_were_issued() {
-        let dir = temp_folder("catalog-test");
-        let elsewhere = temp_folder("catalog-test");
+        let dir = temp_folder("folder-store-test");
+        let elsewhere = temp_folder("folder-store-test");
         photos(&dir, &["a.jpg", "b.jpg", "c.jpg"]);
         let (first, second) = (
             GroupId::from_stem("g-1".as_ref()).unwrap(),
@@ -1830,7 +1836,7 @@ mod tests {
         );
         let second_group = Group::new(names(&["b.jpg", "c.jpg"]), Some("c.jpg".into())).unwrap();
 
-        let mut cat = Catalog::with_dir(dir.clone());
+        let mut cat = FolderStore::with_dir(dir.clone());
         let stale = load_sidecars(&dir);
         cat.enqueue(
             &group_file::path(&dir, &second),

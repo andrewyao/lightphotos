@@ -8,7 +8,7 @@
 //! second by what it indexes.
 //!
 //! A photo's removal divides in two. The path-keyed half (ratings, edits,
-//! rotations, the catalog record, the signal caches) is O(1) per photo and
+//! rotations, the folder store record, the signal caches) is O(1) per photo and
 //! runs as each result lands. The half that shifts playlist indices
 //! (`playlist.remove_matching`, the selection) runs exactly once, at the end.
 //! In between, trashed photos sit in `gone` and [`App::recompute_visible`]
@@ -173,7 +173,7 @@ impl BulkDelete {
             let tx = self.done_tx.clone();
             self.in_flight.insert(path.clone());
             wasm_bindgen_futures::spawn_local(async move {
-                let result = crate::web::web_catalog_fs::remove_file(&handle, &name).await;
+                let result = crate::web::web_folder_store_fs::remove_file(&handle, &name).await;
                 let _ = tx.send((path, result));
             });
         }
@@ -303,14 +303,14 @@ impl App {
         }
         #[cfg(not(target_arch = "wasm32"))]
         if !forget.is_empty() {
-            self.catalog.forget_photos(&forget);
+            self.folder_store.forget_photos(&forget);
         }
         // `forget_photo` already dropped each record through the origin
         // folder's handle, so only the groups are left. They are in memory
-        // only while that folder is still open, which the catalog checks.
+        // only while that folder is still open, which the folder store checks.
         #[cfg(target_arch = "wasm32")]
         if !forget.is_empty() {
-            self.catalog.forget_group_members(&forget);
+            self.folder_store.forget_group_members(&forget);
         }
 
         let Some(d) = self.bulk_delete.as_mut() else {
@@ -365,7 +365,7 @@ impl App {
     }
 
     fn whole_groups(&self, paths: &[PathBuf]) -> HeldGroups {
-        let Some(groups) = self.catalog.groups() else {
+        let Some(groups) = self.folder_store.groups() else {
             return Default::default();
         };
         let mut queued: HashMap<&GroupId, Vec<&std::ffi::OsStr>> = HashMap::new();
@@ -409,10 +409,11 @@ impl App {
 
         #[cfg(target_arch = "wasm32")]
         {
-            if self.catalog.is_active_dir(origin_dir) {
-                self.catalog.remove_with_handle(path, origin_handle);
+            if self.folder_store.is_active_dir(origin_dir) {
+                self.folder_store.remove_with_handle(path, origin_handle);
             } else {
-                self.catalog.delete_sidecar_with_handle(path, origin_handle);
+                self.folder_store
+                    .delete_sidecar_with_handle(path, origin_handle);
             }
             self.web.forget_handles(path);
         }
@@ -504,7 +505,7 @@ fn spawn_trash_worker(
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
-    use crate::app::test_support::{temp_folder, wait_for_catalog_within};
+    use crate::app::test_support::{temp_folder, wait_for_folder_store_within};
     use crate::navigation::Playlist;
     use std::time::{Duration, Instant};
 
@@ -678,7 +679,7 @@ mod tests {
     }
 
     /// A deferred Auto Tone batch names photos by path and outlives the
-    /// catalog load. Deleting some of them must drop those names without
+    /// folder store load. Deleting some of them must drop those names without
     /// abandoning the rest of the batch.
     #[test]
     fn a_delete_drops_its_photos_from_a_deferred_auto_tone_batch() {
@@ -728,8 +729,8 @@ mod tests {
     }
 
     /// A folder change mid-delete is the hazard `cancel_auto_tone` exists for,
-    /// reached by a second route. `Catalog` keys its cache by file name, so a
-    /// late `catalog.remove` for the old folder's `a.jpg` would drop the new
+    /// reached by a second route. `FolderStore` keys its cache by file name, so a
+    /// late `folder_store.remove` for the old folder's `a.jpg` would drop the new
     /// folder's `a.jpg` record and mark it dirty, and the load that was meant
     /// to restore it would then skip it.
     #[test]
@@ -741,7 +742,7 @@ mod tests {
         let new_dir = temp_folder("bulk-delete-test");
         let survivor = new_dir.join(&doomed[0]);
         std::fs::write(&survivor, b"").unwrap();
-        crate::persist::catalog::Catalog::with_dir(new_dir.clone()).set(&survivor, 4);
+        crate::persist::folder_store::FolderStore::with_dir(new_dir.clone()).set(&survivor, 4);
 
         app.selected = (0..old_paths.len()).collect();
         app.delete_selection();
@@ -755,22 +756,22 @@ mod tests {
             app.bulk_delete.is_none(),
             "a folder change must abandon the batch before the new folder loads"
         );
-        wait_for_catalog_within(&mut app, Duration::from_secs(20));
+        wait_for_folder_store_within(&mut app, Duration::from_secs(20));
         // What the frame loop would do next. A batch that survived the change
         // would speak for the old folder here.
         drain(&mut app);
 
         assert!(survivor.exists(), "the new folder's photo is untouched");
         assert_eq!(
-            app.catalog.get(&survivor),
+            app.folder_store.get(&survivor),
             Some(4),
             "the new folder's same-named photo must keep its rating"
         );
         assert_eq!(app.ratings.get(&survivor), Some(&4));
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         assert_eq!(
-            crate::persist::catalog::Catalog::with_dir(new_dir.clone()).get(&survivor),
+            crate::persist::folder_store::FolderStore::with_dir(new_dir.clone()).get(&survivor),
             Some(4),
             "and must keep it on disk"
         );
@@ -883,7 +884,7 @@ mod tests {
 
     fn grouped_app(names: &[&str]) -> (App, PathBuf, Vec<PathBuf>) {
         let (mut app, dir, paths) = app_with_photos(names);
-        app.catalog.open_dir(&dir);
+        app.folder_store.open_dir(&dir);
         app.recompute_visible();
         (app, dir, paths)
     }
@@ -927,7 +928,7 @@ mod tests {
     /// Each group's members and the photo its collapsed stack shows.
     fn group_names(app: &App) -> Vec<(Vec<String>, String)> {
         let s = |n: &std::ffi::OsString| n.to_string_lossy().into_owned();
-        app.catalog
+        app.folder_store
             .groups()
             .unwrap()
             .iter()
@@ -971,8 +972,8 @@ mod tests {
             vec![paths[0].clone(), paths[2].clone(), paths[4].clone()]
         );
 
-        app.catalog.flush_blocking(Duration::from_secs(10));
-        let reloaded = crate::persist::catalog::Catalog::with_dir(dir.clone());
+        app.folder_store.flush_blocking(Duration::from_secs(10));
+        let reloaded = crate::persist::folder_store::FolderStore::with_dir(dir.clone());
         let on_disk: Vec<_> = reloaded
             .groups()
             .unwrap()
@@ -1002,7 +1003,10 @@ mod tests {
             app.poll_delete();
         }
         assert_eq!(app.visible.len(), 1);
-        assert!(app.catalog.groups().unwrap().is_empty(), "p01 is alone");
+        assert!(
+            app.folder_store.groups().unwrap().is_empty(),
+            "p01 is alone"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1040,7 +1044,7 @@ mod tests {
         let exists: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
         assert_eq!(exists, [true, false, false, false, false, true]);
         assert_eq!(visible_names(&app), ["a.jpg", "f.jpg"]);
-        assert!(app.catalog.groups().unwrap().is_empty());
+        assert!(app.folder_store.groups().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1068,7 +1072,7 @@ mod tests {
         let (mut app, dir, paths) = grouped_app(&refs);
         let members: Vec<usize> = (0..40).collect();
         group_photos(&mut app, &members, 0);
-        app.catalog.flush_blocking(Duration::from_secs(10));
+        app.folder_store.flush_blocking(Duration::from_secs(10));
         app.select_single(0);
         app.request_bulk(crate::ui::BulkKind::Delete);
         app.confirm_pending();
@@ -1076,7 +1080,7 @@ mod tests {
         while app.bulk_delete.is_some() {
             assert!(Instant::now() < deadline, "the delete batch never finished");
             let sizes: Vec<usize> = app
-                .catalog
+                .folder_store
                 .groups()
                 .unwrap()
                 .iter()
@@ -1089,8 +1093,8 @@ mod tests {
             app.poll_delete();
         }
         assert!(paths.iter().all(|p| !p.exists()));
-        assert!(app.catalog.groups().unwrap().is_empty());
-        app.catalog.flush_blocking(Duration::from_secs(10));
+        assert!(app.folder_store.groups().unwrap().is_empty());
+        app.folder_store.flush_blocking(Duration::from_secs(10));
         let groups_dir = dir.join(crate::sidecar::SIDECAR_DIR).join("groups");
         let left = std::fs::read_dir(&groups_dir).map_or(0, |d| d.count());
         assert_eq!(left, 0, "the group's sidecar is deleted");
@@ -1108,7 +1112,7 @@ mod tests {
         while app.bulk_delete.is_some() {
             assert!(Instant::now() < deadline, "the delete batch never finished");
             let sizes: Vec<usize> = app
-                .catalog
+                .folder_store
                 .groups()
                 .unwrap()
                 .iter()
@@ -1122,7 +1126,7 @@ mod tests {
         }
         let exists: Vec<bool> = paths.iter().map(|p| p.exists()).collect();
         assert_eq!(exists, [true, false, false, false]);
-        assert!(app.catalog.groups().unwrap().is_empty());
+        assert!(app.folder_store.groups().unwrap().is_empty());
         let (kind, msg, _) = app.status.clone().expect("a delete reports");
         assert_eq!(
             (kind, msg),
@@ -1166,7 +1170,7 @@ mod tests {
         assert!(!app.confirm_open());
         assert!(app.bulk_delete.is_none());
         assert!(paths.iter().all(|p| p.exists()));
-        assert!(app.catalog.groups().unwrap().is_empty());
+        assert!(app.folder_store.groups().unwrap().is_empty());
         assert_eq!(visible_names(&app).len(), 8);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1184,7 +1188,7 @@ mod tests {
             "the single h was selected too, and stays"
         );
         assert_eq!(visible_names(&app), ["a.jpg", "h.jpg"]);
-        assert!(app.catalog.groups().unwrap().is_empty());
+        assert!(app.folder_store.groups().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1287,7 +1291,7 @@ mod tests {
         assert!(!app.confirm_open());
         assert!(app.bulk_delete.is_none());
         assert!(paths.iter().all(|p| p.exists()));
-        assert!(app.catalog.groups().unwrap().is_empty());
+        assert!(app.folder_store.groups().unwrap().is_empty());
         assert_eq!(visible_names(&app).len(), 8, "every member is a single");
         let _ = std::fs::remove_dir_all(&dir);
 
@@ -1299,7 +1303,7 @@ mod tests {
             exists,
             [true, false, false, false, false, false, false, true]
         );
-        assert!(app.catalog.groups().unwrap().is_empty());
+        assert!(app.folder_store.groups().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1307,7 +1311,7 @@ mod tests {
     fn delete_while_the_folder_loads_is_refused_and_trashes_nothing() {
         let (mut app, dir, paths) = app_with_photos(&["a.jpg", "b.jpg"]);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        assert!(app.catalog_loading());
+        assert!(app.folder_store_loading());
         app.select_single(0);
         app.request_bulk(crate::ui::BulkKind::Delete);
         assert!(app.pending_confirm.is_none(), "no confirm is offered");

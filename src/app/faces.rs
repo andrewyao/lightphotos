@@ -85,7 +85,7 @@ impl App {
     }
 
     fn face_candidates(&self) -> Vec<PathBuf> {
-        let (Some(pl), Some(groups)) = (self.playlist.as_ref(), self.catalog.groups()) else {
+        let (Some(pl), Some(groups)) = (self.playlist.as_ref(), self.folder_store.groups()) else {
             return Vec::new();
         };
         groups

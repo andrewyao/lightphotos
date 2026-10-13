@@ -366,10 +366,10 @@ impl ApplicationHandler<UserEvent> for App {
         // queued writes drain in about 2.5 s on APFS, and the usual backlog
         // is one record.
         #[cfg(not(target_arch = "wasm32"))]
-        self.catalog
+        self.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         // Same last chance for the folder's derived signals. Losing them costs
-        // only a recompute, so the bound is shorter than the catalog's.
+        // only a recompute, so the bound is shorter than the folder store's.
         #[cfg(not(target_arch = "wasm32"))]
         self.signals
             .flush_blocking(std::time::Duration::from_secs(2));
@@ -448,7 +448,7 @@ impl App {
     pub(crate) fn pump(&mut self) -> Option<std::time::Duration> {
         // Outside the loader block below, because a queued sidecar write has
         // no loader to wait on and can outlive the folder it came from.
-        self.catalog.pump();
+        self.folder_store.pump();
         self.keep_status_alive();
         self.signals.flush_if_due();
         self.poll_delete();
@@ -491,10 +491,10 @@ impl App {
                 self.request_redraw();
             }
         }
-        let catalog_load_pending = self.poll_catalog_load();
-        self.resort_after_catalog_change();
+        let folder_store_load_pending = self.poll_folder_store_load();
+        self.resort_after_folder_store_change();
         #[cfg(not(target_arch = "wasm32"))]
-        let catalog_load_pending = self.poll_signal_load() || catalog_load_pending;
+        let folder_store_load_pending = self.poll_signal_load() || folder_store_load_pending;
 
         let outcomes = self.poll_exporter();
         #[cfg(not(target_arch = "wasm32"))]
@@ -511,7 +511,7 @@ impl App {
             .is_some_and(|l| l.has_pending_image() || l.has_pending_exif())
             || self.selection_pending()
             || self.remove_ca_pending()
-            || catalog_load_pending
+            || folder_store_load_pending
             || self.compare_wake_at().is_some();
         if self
             .compare_wake_at()
@@ -573,7 +573,7 @@ impl App {
         let poll_ms = if image_pending || thumbs_pending || self.bulk_delete_running() {
             Some(16)
         } else if self.export_running()
-            || self.catalog.backlog() > 0
+            || self.folder_store.backlog() > 0
             || immich_connecting
             || vision_pending
             || scoring

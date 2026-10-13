@@ -76,7 +76,7 @@ impl App {
     pub(crate) fn group_bursts_available(&self) -> bool {
         !cfg!(target_arch = "wasm32")
             && self.mode == ViewMode::Grid
-            && !self.catalog_loading()
+            && !self.folder_store_loading()
             && !self.visible.is_empty()
     }
 
@@ -139,7 +139,7 @@ impl App {
         let mut failed = false;
         // One grid re-layout after the loop, not one per burst.
         for burst in bursts {
-            let Some(groups) = self.catalog.groups() else {
+            let Some(groups) = self.folder_store.groups() else {
                 self.set_status(StatusKind::Error, t.group_refused_loading.to_string());
                 self.request_redraw();
                 failed = true;
@@ -195,7 +195,7 @@ mod tests {
 
     /// Each group in the folder as its members' indices into `paths`.
     fn groups_of(app: &App, paths: &[PathBuf]) -> Vec<Vec<usize>> {
-        let groups = app.catalog.groups().unwrap();
+        let groups = app.folder_store.groups().unwrap();
         let mut out: Vec<Vec<usize>> = groups
             .iter()
             .map(|(_, g)| {

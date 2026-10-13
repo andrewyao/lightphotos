@@ -143,7 +143,7 @@ macro_rules! key {
 
 /// File facts, camera, lens, exposure, capture date, and location for
 /// display. Every platform's reader fills this one struct. Read from the file
-/// each time and never stored in the catalog. Missing fields are `None`.
+/// each time and never stored in the folder store. Missing fields are `None`.
 #[derive(Default)]
 pub struct ImageMetadata {
     pub file_size: Option<u64>,

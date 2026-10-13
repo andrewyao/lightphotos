@@ -38,31 +38,31 @@ pub(crate) fn folder_app(tag: &str, photos: usize) -> (App, PathBuf, Vec<PathBuf
     let names: Vec<String> = (0..photos).map(|i| format!("{i}.jpg")).collect();
     let (dir, paths) = folder_of(tag, &names);
     let mut app = App::new(None);
-    app.catalog.open_dir(&dir);
+    app.folder_store.open_dir(&dir);
     app.playlist = Some(Playlist::from_dir(&dir));
     app.mode = ViewMode::Grid;
     app.recompute_visible();
     (app, dir, paths)
 }
 
-/// Waits for the catalog load `App::load_playlist` started, failing after
+/// Waits for the folder store load `App::load_playlist` started, failing after
 /// `limit` rather than hanging the suite.
-pub(crate) fn wait_for_catalog_within(app: &mut App, limit: Duration) {
+pub(crate) fn wait_for_folder_store_within(app: &mut App, limit: Duration) {
     let deadline = Instant::now() + limit;
-    while app.poll_catalog_load() {
-        assert!(Instant::now() < deadline, "catalog load timed out");
+    while app.poll_folder_store_load() {
+        assert!(Instant::now() < deadline, "folder store load timed out");
         std::thread::sleep(Duration::from_millis(1));
     }
 }
 
-pub(crate) fn wait_for_catalog(app: &mut App) {
-    wait_for_catalog_within(app, Duration::from_secs(10));
+pub(crate) fn wait_for_folder_store(app: &mut App) {
+    wait_for_folder_store_within(app, Duration::from_secs(10));
 }
 
-/// `App::load_playlist` on `dir`, then `wait_for_catalog`.
+/// `App::load_playlist` on `dir`, then `wait_for_folder_store`.
 pub(crate) fn load_folder(app: &mut App, dir: &Path) {
     app.load_playlist(Playlist::from_dir(dir), dir.to_path_buf());
-    wait_for_catalog(app);
+    wait_for_folder_store(app);
 }
 
 /// One real frame of the whole UI. Returns the actions it pushed and every

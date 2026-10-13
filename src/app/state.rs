@@ -71,7 +71,7 @@ impl State {
                 .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())),
             rating: path.as_ref().map(|p| app.rating_of(p)),
             flag: path.as_ref().and_then(|p| app.flag_of(p)),
-            label: path.as_ref().and_then(|p| app.catalog.label(p)),
+            label: path.as_ref().and_then(|p| app.folder_store.label(p)),
             focus: app.focus(),
             zoom: (mode == ViewMode::Loupe).then(|| app.zoom_rel()),
             status: app.status().map(|(_, text)| text.to_string()),

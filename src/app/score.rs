@@ -35,7 +35,7 @@ impl App {
             return;
         }
         // The worker reads the edits from the mirrors, and staleness is judged
-        // against the catalog, so the two must agree before it starts.
+        // against the folder store, so the two must agree before it starts.
         self.save_edit();
         // Each new score would reorder the Grid under the pointer.
         if self.sort_order.key == GridSort::Quality {
@@ -66,7 +66,7 @@ impl App {
                 continue;
             }
             if let Ok(score) = o.result {
-                self.catalog.set_score(&o.path, score, o.edits);
+                self.folder_store.set_score(&o.path, score, o.edits);
             }
         }
         if let Some(job) = self.score_job.as_mut() {
@@ -147,7 +147,9 @@ impl App {
         }
         let pl = self.playlist.as_ref()?;
         let path = pl.entry(*self.visible.get(pos)?)?;
-        self.catalog.score(path).map(|(s, stale)| (&s.score, stale))
+        self.folder_store
+            .score(path)
+            .map(|(s, stale)| (&s.score, stale))
     }
 
     /// The shown photo's stored score and whether it went stale.
@@ -156,7 +158,7 @@ impl App {
             return None;
         }
         let path = self.selected_path()?;
-        self.catalog
+        self.folder_store
             .score(&path)
             .map(|(s, stale)| (s.score.clone(), stale))
     }
@@ -168,7 +170,7 @@ impl App {
             return None;
         }
         self.selected_path_refs()
-            .filter_map(|p| self.catalog.score(p))
+            .filter_map(|p| self.folder_store.score(p))
             .map(|(s, stale)| (s.score.value, stale))
             .fold(None, |span, (v, stale)| match span {
                 None => Some((v, v, stale)),
@@ -195,7 +197,7 @@ mod tests {
         let (dir, paths) = crate::app::test_support::folder_of("score-test", &names);
         let mut app = App::new(None);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        app.catalog.open_dir(&dir);
+        app.folder_store.open_dir(&dir);
         (app, dir, paths)
     }
 
@@ -234,7 +236,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         for p in &paths {
-            let (stored, stale) = app.catalog.score(p).expect("every photo is scored");
+            let (stored, stale) = app.folder_store.score(p).expect("every photo is scored");
             assert_eq!((stored.score.value, stale), (61, false));
         }
         assert_eq!(app.status_text(), Some("Scored 12 photo(s)"));
@@ -250,7 +252,7 @@ mod tests {
         app.score_all();
         assert_eq!(app.score_progress(), Some((0, 5)));
         run_until_idle(&mut app);
-        assert!(paths.iter().all(|p| app.catalog.score(p).is_some()));
+        assert!(paths.iter().all(|p| app.folder_store.score(p).is_some()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -361,9 +363,11 @@ mod tests {
         assert_eq!(app.score_progress(), Some((0, 3)));
         run_until_idle(&mut app);
         for p in &paths[..3] {
-            assert!(app.catalog.score(p).is_some(), "{p:?} is scored");
+            assert!(app.folder_store.score(p).is_some(), "{p:?} is scored");
         }
-        assert!(paths[3..].iter().all(|p| app.catalog.score(p).is_none()));
+        assert!(paths[3..]
+            .iter()
+            .all(|p| app.folder_store.score(p).is_none()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -378,7 +382,7 @@ mod tests {
         assert_eq!(app.score_progress(), None);
         run_until_idle(&mut app);
         assert!(
-            paths.iter().all(|p| app.catalog.score(p).is_none()),
+            paths.iter().all(|p| app.folder_store.score(p).is_none()),
             "the two photos already on workers are dropped too"
         );
         assert_eq!(app.status_text(), Some("Scoring stopped at 0/8"));
@@ -427,7 +431,7 @@ mod tests {
     fn without_a_scoring_pool_no_score_or_quality_sort_shows() {
         let (mut app, _dir, paths) = folder_app(2);
         let unedited = crate::sidecar::ImageRecord::default().edit_signature();
-        app.catalog.set_score(&paths[0], scored(80), unedited);
+        app.folder_store.set_score(&paths[0], scored(80), unedited);
         app.select_single(0);
         assert!(app.score_pool.is_none());
 
@@ -444,9 +448,9 @@ mod tests {
         let (mut app, dir, paths) = folder_app(4);
         app.score_pool = ScorePool::with_runner(2, slow_fixed);
         let unedited = crate::sidecar::ImageRecord::default().edit_signature();
-        app.catalog.set_score(&paths[1], scored(30), unedited);
-        app.catalog.set_score(&paths[2], scored(80), unedited);
-        app.catalog.set_score(&paths[3], scored(30), unedited);
+        app.folder_store.set_score(&paths[1], scored(30), unedited);
+        app.folder_store.set_score(&paths[2], scored(80), unedited);
+        app.folder_store.set_score(&paths[3], scored(30), unedited);
         app.select_single(2);
         assert_eq!(app.selected_path().as_ref(), Some(&paths[2]));
 
@@ -483,9 +487,9 @@ mod tests {
             exposure: 0.5,
             ..Adjustments::default()
         };
-        app.catalog.set_adjustments(&paths[0], &adj);
+        app.folder_store.set_adjustments(&paths[0], &adj);
         assert_eq!(
-            app.catalog.score(&paths[0]).map(|(_, stale)| stale),
+            app.folder_store.score(&paths[0]).map(|(_, stale)| stale),
             Some(true)
         );
         let _ = std::fs::remove_dir_all(&dir);

@@ -3,7 +3,7 @@
 //! Reduced-size decodes and the on-disk thumbnail cache. macOS asks ImageIO
 //! for a thumbnail. Other targets try the file's embedded preview, then fall
 //! back to a full decode and resize. The cache stores one JPEG per photo in
-//! `<dir>/.lightphotos/`, beside the catalog sidecars. The wasm32 build reads
+//! `<dir>/.lightphotos/`, beside the folder store sidecars. The wasm32 build reads
 //! and writes the same files through `web/web_thumb_cache.rs`.
 
 #![allow(dead_code)]
@@ -294,7 +294,7 @@ pub(crate) fn preview_is_large_enough(width: u32, height: u32, max_px: u32) -> b
     width > 0 && height > 0 && width.max(height) >= max_px.div_ceil(2)
 }
 
-/// Suffix of every cache entry name. Not `.xmp`, so the catalog's sidecar
+/// Suffix of every cache entry name. Not `.xmp`, so the folder store's sidecar
 /// scans skip these files.
 const CACHE_SUFFIX: &str = ".thumb.jpg";
 

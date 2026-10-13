@@ -28,12 +28,12 @@ pub struct PickedFolder {
     pub handles: HashMap<PathBuf, FileSystemFileHandle>,
     /// Directory handles by relative path: the root, its immediate
     /// subdirectories, and any deeper folder the user browses into.
-    /// `web_catalog_fs.rs` needs these to write `.lightphotos` sidecars.
+    /// `web_folder_store_fs.rs` needs these to write `.lightphotos` sidecars.
     pub dir_handles: HashMap<PathBuf, FileSystemDirectoryHandle>,
 }
 
 /// Show the folder picker, keep the chosen folder for later visits, and
-/// list its images and subdirectories. Requests `readwrite` so catalog
+/// list its images and subdirectories. Requests `readwrite` so folder store
 /// sidecars can be saved. A cancelled picker and a listing failure both
 /// return `Err`.
 pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {

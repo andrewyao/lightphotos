@@ -298,14 +298,16 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         app.save_edit_unless_dragging();
-        assert!(paths
-            .iter()
-            .all(|p| app.catalog.adjustments(p).chromatic_aberration.is_some()));
+        assert!(paths.iter().all(|p| app
+            .folder_store
+            .adjustments(p)
+            .chromatic_aberration
+            .is_some()));
 
         assert_eq!(app.undo_edit(), 2, "both photos in one step");
         assert!(paths
             .iter()
-            .all(|p| app.catalog.adjustments(p).is_identity()));
+            .all(|p| app.folder_store.adjustments(p).is_identity()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

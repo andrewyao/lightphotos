@@ -77,8 +77,8 @@ flowchart LR
     end
 
     subgraph persist["Persistence (persist/)"]
-        catalog["persist/catalog.rs<br/>ratings, flags, labels, edits"]
-        writeback["persist/catalog/writeback.rs<br/>off-frame write queue"]
+        folder_store["persist/folder_store.rs<br/>ratings, flags, labels, edits"]
+        writeback["persist/folder_store/writeback.rs<br/>off-frame write queue"]
         groups["persist/groups.rs<br/>photo groups / bursts"]
         signal["persist/signalcache.rs<br/>capture time, face quality"]
         prefs["persist/prefs.rs · presets.rs"]
@@ -146,9 +146,9 @@ flowchart LR
     develop --> imgops
     app --> develop
 
-    app -- "set / set_adjustments<br/>apply_group_writes" --> catalog
-    catalog --> writeback --> sidecars
-    catalog --- groups
+    app -- "set / set_adjustments<br/>apply_group_writes" --> folder_store
+    folder_store --> writeback --> sidecars
+    folder_store --- groups
     app --> signal --> sidecars
     app --> prefs
     decode -. "reads" .-> folder
@@ -202,7 +202,7 @@ sequenceDiagram
     participant W as Decode worker
     participant D as image_decode
     participant R as renderer/
-    participant C as Catalog
+    participant C as FolderStore
     participant Q as writeback queue
 
     U->>M: double-click grid cell

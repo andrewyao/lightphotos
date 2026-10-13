@@ -15,7 +15,7 @@
 //! It exists because a report is only worth acting on if the next person can
 //! reproduce it. Driving the window by hand gives a different scroll depth and
 //! a different cache state every run, so the numbers cannot be compared
-//! before and after a change. This runs the same `navigation`, `catalog`,
+//! before and after a change. This runs the same `navigation`, `folder_store`,
 //! `Loader`, `thumbnail` and `export` code the window drives, minus egui and
 //! the GPU, over a folder named on the command line, and then returns so the
 //! hotpath guard drops and prints its report.
@@ -375,7 +375,7 @@ impl Run {
     }
 
     fn view_rebuild(&self, photos: &[PathBuf]) {
-        let loaded = crate::persist::catalog::load_sidecars(&self.dir);
+        let loaded = crate::persist::folder_store::load_sidecars(&self.dir);
         let names: HashSet<&std::ffi::OsStr> =
             photos.iter().filter_map(|p| p.file_name()).collect();
         let groups =
@@ -583,7 +583,7 @@ impl Run {
     fn folder_load(&self) -> Playlist {
         let playlist = Playlist::from_dir(&self.dir);
         crate::navigation::list_subdirs(&self.dir);
-        crate::persist::catalog::load_sidecars(&self.dir);
+        crate::persist::folder_store::load_sidecars(&self.dir);
         crate::persist::signalcache::SignalCache::load(&self.dir);
         crate::jobs::thumbnail::sweep_orphans(&self.dir);
         playlist

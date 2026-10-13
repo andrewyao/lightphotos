@@ -4,7 +4,7 @@
 //! saved once and applied to any photo afterwards.
 //!
 //! Presets are global to the app, not per folder, so they live in
-//! [`crate::persist::prefs`] rather than in a catalog sidecar. `Catalog` is scoped to
+//! [`crate::persist::prefs`] rather than in a folder store sidecar. `FolderStore` is scoped to
 //! one active directory and keys its records by filename.
 
 use serde::{Deserialize, Serialize};
@@ -207,7 +207,7 @@ impl PresetStore {
     }
 
     /// The latest failure, drained into a toast once per frame alongside the
-    /// catalog's.
+    /// folder store's.
     pub fn take_error(&mut self) -> Option<String> {
         self.last_error.take()
     }

@@ -393,7 +393,7 @@ impl App {
     }
 
     /// The one writer of a photo's develop edit in `edits`. An identity edit
-    /// is removed rather than stored, matching how the catalog stores edits.
+    /// is removed rather than stored, matching how the folder store stores edits.
     pub(super) fn put_edit(&mut self, path: &Path, adj: Adjustments) {
         let before = self.edits.get(path).copied().unwrap_or_default();
         if before != adj {
@@ -451,9 +451,9 @@ impl App {
         for before in befores {
             let path = before.path;
             self.store_edit(&path, before.adj);
-            self.catalog.set_adjustments(&path, &before.adj);
+            self.folder_store.set_adjustments(&path, &before.adj);
             if let Some(touchups) = before.touchups {
-                self.catalog.set_touchups(&path, &touchups);
+                self.folder_store.set_touchups(&path, &touchups);
                 if touchups.is_empty() {
                     self.touchups.remove(&path);
                 } else {
@@ -476,11 +476,11 @@ impl App {
     pub(crate) fn save_edit(&mut self) {
         for path in std::mem::take(&mut self.unsaved_synced) {
             let adj = self.edits.get(&path).copied().unwrap_or_default();
-            self.catalog.set_adjustments(&path, &adj);
+            self.folder_store.set_adjustments(&path, &adj);
         }
         if let Some(path) = self.unsaved_edit.take() {
             let adj = self.edits.get(&path).copied().unwrap_or_default();
-            self.catalog.set_adjustments(&path, &adj);
+            self.folder_store.set_adjustments(&path, &adj);
             #[cfg(target_arch = "wasm32")]
             crate::web::analytics::property(
                 "develop_edit_applied",
@@ -532,7 +532,7 @@ impl App {
         } else {
             self.touchups.insert(path.clone(), touchups.clone());
         }
-        self.catalog.set_touchups(&path, &touchups);
+        self.folder_store.set_touchups(&path, &touchups);
         #[cfg(target_arch = "wasm32")]
         if changed {
             crate::web::analytics::property("develop_edit_applied", "edit_kind", "touch_up");
@@ -724,13 +724,13 @@ mod tests {
         let photo = dir.join("a.jpg");
         std::fs::write(&photo, []).unwrap();
         let mut app = App::new(None);
-        app.catalog.open_dir(&dir);
+        app.folder_store.open_dir(&dir);
         app.shown = Shown::Preview(photo.clone(), 1024, 1024);
         (app, dir, photo)
     }
 
     #[test]
-    fn showing_fractional_catalog_edits_does_not_emit_an_edit_action() {
+    fn showing_fractional_folder_store_edits_does_not_emit_an_edit_action() {
         let (mut app, dir, photo) = one_photo("display-only");
         app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
         app.mode = ViewMode::Loupe;
@@ -799,10 +799,10 @@ mod tests {
             Some(Adjustments::default()),
             "the Loupe shows it"
         );
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         assert!(
-            app.catalog.adjustments(&photo).is_identity(),
+            app.folder_store.adjustments(&photo).is_identity(),
             "and the sidecar has it"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -826,10 +826,10 @@ mod tests {
 
         press(&app, false);
         app.save_edit_unless_dragging();
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         assert!(sidecar.exists(), "the release writes the edit");
-        assert_eq!(app.catalog.adjustments(&photo).exposure, 0.5);
+        assert_eq!(app.folder_store.adjustments(&photo).exposure, 0.5);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -840,7 +840,7 @@ mod tests {
             contrast: 10.0,
             ..Default::default()
         });
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         assert!(dir.join(".lightphotos").join("a.jpg.xmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
@@ -876,10 +876,10 @@ mod tests {
         }
         assert_eq!(app.edits[&paths[1]].exposure, 1.0, "its own exposure stays");
         assert!(app.edits[&paths[1]].is_monochrome());
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
-        let catalog = crate::persist::catalog::Catalog::with_dir(dir.clone());
-        assert_eq!(catalog.adjustments(&paths[2]).contrast, 30.0);
+        let folder_store = crate::persist::folder_store::FolderStore::with_dir(dir.clone());
+        assert_eq!(folder_store.adjustments(&paths[2]).contrast, 30.0);
 
         app.selected = BTreeSet::from([0]);
         app.apply_adjustments(Adjustments {
@@ -917,17 +917,17 @@ mod tests {
             contrast: 30.0,
             ..Default::default()
         });
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         let on_disk = || {
-            crate::persist::catalog::Catalog::with_dir(dir.clone())
+            crate::persist::folder_store::FolderStore::with_dir(dir.clone())
                 .adjustments(&paths[2])
                 .contrast
         };
         assert_eq!(on_disk(), 0.0, "nothing is written while the mouse is held");
         press(&app, false);
         app.save_edit_unless_dragging();
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         assert_eq!(on_disk(), 30.0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -1045,7 +1045,7 @@ mod tests {
             -100.0,
             "Reset leaves other sliders"
         );
-        let saved = app.catalog.adjustments(&paths[2]);
+        let saved = app.folder_store.adjustments(&paths[2]);
         assert_eq!(saved.saturation, -1.0, "steps are saved");
         let _ = std::fs::remove_dir_all(&dir);
     }

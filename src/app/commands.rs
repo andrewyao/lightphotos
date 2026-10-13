@@ -221,7 +221,7 @@ impl App {
                     Photos::Selected => self.set_flag(flag),
                     Photos::Named(_) => {
                         for path in &paths {
-                            self.catalog.set_flag(path, flag);
+                            self.folder_store.set_flag(path, flag);
                         }
                         self.after_flag_change();
                     }
@@ -295,7 +295,7 @@ impl App {
                 }
                 Ok(Outcome {
                     photos: paths.len(),
-                    pending: self.autotone.is_running() || self.catalog_loading(),
+                    pending: self.autotone.is_running() || self.folder_store_loading(),
                 })
             }
             Command::Preset(p) => {
@@ -428,16 +428,20 @@ impl App {
     /// Sets `label` on each path, or clears it where it is set. `on: None`
     /// toggles: on, or off when every path has it already.
     pub(super) fn set_label_of(&mut self, paths: &[PathBuf], label: ColorLabel, on: Option<bool>) {
-        let on = on.unwrap_or_else(|| !paths.iter().all(|p| self.catalog.label(p) == Some(label)));
+        let on = on.unwrap_or_else(|| {
+            !paths
+                .iter()
+                .all(|p| self.folder_store.label(p) == Some(label))
+        });
         for path in paths {
             if on {
-                self.catalog.set_label(path, Some(label));
-            } else if self.catalog.label(path) == Some(label) {
-                self.catalog.set_label(path, None);
+                self.folder_store.set_label(path, Some(label));
+            } else if self.folder_store.label(path) == Some(label) {
+                self.folder_store.set_label(path, None);
             }
         }
         if !self.label_filter.is_empty() {
-            self.refilter_after_catalog_change();
+            self.refilter_after_folder_store_change();
             self.resync_loupe_selection();
         }
         self.request_redraw();
@@ -455,7 +459,7 @@ impl App {
         } else {
             self.rotations.insert(path.to_path_buf(), step);
         }
-        self.catalog.set_rotation(path, step);
+        self.folder_store.set_rotation(path, step);
     }
 }
 
@@ -510,7 +514,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(app.run(cmd).map(|o| o.photos), Ok(1));
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
 
         let saved = sidecar::read_record(&paths[0]).unwrap();
@@ -569,7 +573,7 @@ mod tests {
             let mut headless = mixed.clone();
             command::apply_to_records(&cmd, &mut headless, |_| Ok((4000.0, 3000.0))).unwrap();
             assert_eq!(app.run(cmd).map(|o| o.photos), Ok(2), "{json}");
-            app.catalog
+            app.folder_store
                 .flush_blocking(std::time::Duration::from_secs(10));
 
             let saved: Vec<String> = paths
@@ -594,7 +598,11 @@ mod tests {
 
         let cw = r#"{"id":"photo.rotate","params":{"clockwise":true,"photos":["0.jpg"]}}"#;
         assert_eq!(run(&mut app, cw).map(|o| o.photos), Ok(1));
-        assert_eq!(app.catalog.rotation(&paths[0]), 0, "3 and a quarter turn");
+        assert_eq!(
+            app.folder_store.rotation(&paths[0]),
+            0,
+            "3 and a quarter turn"
+        );
     }
 
     /// Headless dedupes the photos a command names; the app must too, or
@@ -609,9 +617,9 @@ mod tests {
                 "photos":["1.jpg","0.jpg","1.jpg",{both}]}}}}"#
         );
         assert_eq!(run(&mut app, &cw).map(|o| o.photos), Ok(2));
-        assert_eq!(app.catalog.rotation(&paths[0]), 1);
+        assert_eq!(app.folder_store.rotation(&paths[0]), 1);
         assert_eq!(
-            app.catalog.rotation(&paths[1]),
+            app.folder_store.rotation(&paths[1]),
             1,
             "a quarter turn, not three"
         );
@@ -634,7 +642,7 @@ mod tests {
         );
         for path in &paths {
             assert!(
-                app.catalog.adjustments(path).is_identity(),
+                app.folder_store.adjustments(path).is_identity(),
                 "{}",
                 path.display()
             );
@@ -652,7 +660,7 @@ mod tests {
         );
         for path in &paths {
             assert!(
-                app.catalog.adjustments(path).is_identity(),
+                app.folder_store.adjustments(path).is_identity(),
                 "{}",
                 path.display()
             );
@@ -728,17 +736,17 @@ mod tests {
         app.run(label(None)).unwrap();
         assert!(paths
             .iter()
-            .all(|p| app.catalog.label(p) == Some(ColorLabel::Green)));
+            .all(|p| app.folder_store.label(p) == Some(ColorLabel::Green)));
         app.run(label(Some(true))).unwrap();
         assert!(
             paths
                 .iter()
-                .all(|p| app.catalog.label(p) == Some(ColorLabel::Green)),
+                .all(|p| app.folder_store.label(p) == Some(ColorLabel::Green)),
             "on: true keeps it on"
         );
         app.run(label(None)).unwrap();
         assert!(
-            paths.iter().all(|p| app.catalog.label(p).is_none()),
+            paths.iter().all(|p| app.folder_store.label(p).is_none()),
             "toggled off"
         );
         assert_eq!(
@@ -768,7 +776,7 @@ mod tests {
         );
         assert_eq!(out.map(|o| o.photos), Ok(2));
         for path in &paths[..2] {
-            let adj = app.catalog.adjustments(path);
+            let adj = app.folder_store.adjustments(path);
             assert_eq!(
                 (adj.exposure, adj.contrast),
                 (0.5, 20.0),
@@ -776,7 +784,7 @@ mod tests {
                 path.display()
             );
         }
-        assert!(app.catalog.adjustments(&paths[2]).is_identity());
+        assert!(app.folder_store.adjustments(&paths[2]).is_identity());
     }
 
     #[test]
@@ -802,7 +810,7 @@ mod tests {
             !app.edits.contains_key(&paths[0]),
             "contrast was not written either"
         );
-        assert!(app.catalog.adjustments(&paths[0]).is_identity());
+        assert!(app.folder_store.adjustments(&paths[0]).is_identity());
     }
 
     #[test]
@@ -822,7 +830,7 @@ mod tests {
             photos: Photos::Selected,
         }))
         .unwrap();
-        let adj = app.catalog.adjustments(&paths[0]);
+        let adj = app.folder_store.adjustments(&paths[0]);
         assert_eq!((adj.crop, adj.straighten), (Some(crop), 2.0));
 
         run(
@@ -830,7 +838,7 @@ mod tests {
             r#"{"id":"crop.set","params":{"crop":{"left":0,"top":0,"right":1,"bottom":1}}}"#,
         )
         .unwrap();
-        let adj = app.catalog.adjustments(&paths[0]);
+        let adj = app.folder_store.adjustments(&paths[0]);
         assert_eq!(
             (adj.crop, adj.straighten),
             (
@@ -950,7 +958,7 @@ mod tests {
                 let before = (
                     app.rating_of(&paths[0]),
                     app.flag_of(&paths[0]),
-                    app.catalog.label(&paths[0]),
+                    app.folder_store.label(&paths[0]),
                     app.edits.len(),
                     app.mode,
                 );
@@ -959,7 +967,7 @@ mod tests {
                 let after = (
                     app.rating_of(&paths[0]),
                     app.flag_of(&paths[0]),
-                    app.catalog.label(&paths[0]),
+                    app.folder_store.label(&paths[0]),
                     app.edits.len(),
                     app.mode,
                 );
@@ -1017,7 +1025,7 @@ mod tests {
             run(&mut app, r#"{"id":"edit.undo"}"#).map(|o| o.photos),
             Ok(1)
         );
-        let adj = app.catalog.adjustments(&paths[1]);
+        let adj = app.folder_store.adjustments(&paths[1]);
         assert_eq!((adj.exposure, adj.contrast, adj.clarity), (0.5, 20.0, 0.0));
 
         assert_eq!(
@@ -1026,7 +1034,7 @@ mod tests {
         );
         for path in &paths {
             assert!(
-                app.catalog.adjustments(path).is_identity(),
+                app.folder_store.adjustments(path).is_identity(),
                 "{}",
                 path.display()
             );
@@ -1057,7 +1065,7 @@ mod tests {
             run(&mut app, r#"{"id":"edit.undo"}"#).map(|o| o.photos),
             Ok(1)
         );
-        assert_eq!(app.catalog.adjustments(&paths[0]).exposure, 1.0);
+        assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 1.0);
         assert_eq!(app.edits.get(&paths[0]).map(|a| a.exposure), Some(1.0));
     }
 
@@ -1083,19 +1091,19 @@ mod tests {
 
         app.apply_ui_actions(vec![ui::UiAction::ResetAllEdits]);
         app.save_edit_unless_dragging();
-        assert!(app.catalog.touchups(&paths[0]).is_empty());
+        assert!(app.folder_store.touchups(&paths[0]).is_empty());
 
         assert_eq!(
             run(&mut app, r#"{"id":"edit.undo"}"#).map(|o| o.photos),
             Ok(1)
         );
-        assert_eq!(app.catalog.adjustments(&paths[0]).exposure, 1.0);
-        assert_eq!(app.catalog.touchups(&paths[0]), vec![spot]);
+        assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 1.0);
+        assert_eq!(app.folder_store.touchups(&paths[0]), vec![spot]);
         assert_eq!(app.current_touchups(), &[spot]);
 
         run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
         assert_eq!(
-            app.catalog.touchups(&paths[0]),
+            app.folder_store.touchups(&paths[0]),
             vec![spot],
             "undoing the exposure leaves the spots"
         );
@@ -1108,12 +1116,12 @@ mod tests {
         app.select_single(0);
         run(&mut app, r#"{"id":"crop.set","params":{"straighten":3}}"#).unwrap();
         assert!(
-            app.catalog.adjustments(&paths[0]).crop.is_some(),
+            app.folder_store.adjustments(&paths[0]).crop.is_some(),
             "a turned photo keeps a box"
         );
         run(&mut app, r#"{"id":"photo.rate","params":{"stars":5}}"#).unwrap();
         run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
-        let adj = app.catalog.adjustments(&paths[0]);
+        let adj = app.folder_store.adjustments(&paths[0]);
         assert_eq!((adj.crop, adj.straighten), (None, 0.0));
         assert_eq!(
             app.rating_of(&paths[0]),
@@ -1133,7 +1141,7 @@ mod tests {
         .unwrap();
         crate::app::test_support::load_folder(&mut app, &dir);
         assert!(!app.history.can_undo());
-        assert_eq!(app.catalog.adjustments(&paths[0]).exposure, 1.0);
+        assert_eq!(app.folder_store.adjustments(&paths[0]).exposure, 1.0);
     }
 
     #[test]
@@ -1153,7 +1161,7 @@ mod tests {
         )
         .unwrap();
         run(&mut app, r#"{"id":"develop.reset"}"#).unwrap();
-        let adj = app.catalog.adjustments(&paths[0]);
+        let adj = app.folder_store.adjustments(&paths[0]);
         assert_eq!(adj.exposure, 0.0);
         assert!(adj.crop.is_some());
     }

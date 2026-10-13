@@ -696,7 +696,7 @@ fn develop_slider(
     let speed = (range.end() - range.start()) / 300.0;
     let readout = egui::DragValue::new(&mut typed)
         .range(range.clone())
-        // Preserve fractional Auto Tone/catalog values on display. Clamping
+        // Preserve fractional Auto Tone/folder store values on display. Clamping
         // would round them on first draw, producing an edit without any user
         // interaction.
         .clamp_existing_to_range(false)

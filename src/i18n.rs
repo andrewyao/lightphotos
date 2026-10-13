@@ -2565,7 +2565,7 @@ mod tests {
             "app/accessors.rs",
             "app/adjust.rs",
             "app/autotone.rs",
-            "app/catalog.rs",
+            "app/folder_store.rs",
             "app/crop.rs",
             "app/export.rs",
             "app/histogram.rs",

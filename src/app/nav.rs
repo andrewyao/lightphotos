@@ -60,7 +60,7 @@ impl<'a> Placer<'a> {
         if let Some(p) = self.cell(idx) {
             return Place::Cell(p);
         }
-        let (Some(pl), Some(groups)) = (self.app.playlist.as_ref(), self.app.catalog.groups())
+        let (Some(pl), Some(groups)) = (self.app.playlist.as_ref(), self.app.folder_store.groups())
         else {
             return Place::Gone;
         };
@@ -102,8 +102,8 @@ impl App {
     /// Under a Rating or Edit Time sort the Loupe keeps its order, so the
     /// photo under the cursor doesn't jump; the Grid sorts again when it
     /// shows.
-    pub(super) fn refilter_after_catalog_change(&mut self) {
-        let keep = self.mode == ViewMode::Loupe && self.sort_order.key.reads_catalog();
+    pub(super) fn refilter_after_folder_store_change(&mut self) {
+        let keep = self.mode == ViewMode::Loupe && self.sort_order.key.reads_folder_store();
         self.recompute_cells(if keep { Reorder::Keep } else { Reorder::Sort });
     }
 
@@ -131,7 +131,7 @@ impl App {
         };
         let ratings = &self.ratings;
         let entries = pl.entries();
-        let groups = self.catalog.groups();
+        let groups = self.folder_store.groups();
         let slot = |i: usize| {
             entries
                 .get(i)
@@ -141,8 +141,8 @@ impl App {
                     groups.slot(name, |id| self.expanded_stacks.contains(id))
                 })
         };
-        let (catalog, filter, flag_filter, labels) = (
-            &self.catalog,
+        let (folder_store, filter, flag_filter, labels) = (
+            &self.folder_store,
             self.filter,
             self.flag_filter,
             &self.label_filter,
@@ -152,8 +152,9 @@ impl App {
             entries.get(i).is_some_and(|p| {
                 filter.is_none_or(|(cmp, value)| {
                     cmp.matches(ratings.get(p).copied().unwrap_or(0), value)
-                }) && flag_filter.matches(catalog.flag(p))
-                    && (labels.is_empty() || catalog.label(p).is_some_and(|l| labels.contains(&l)))
+                }) && flag_filter.matches(folder_store.flag(p))
+                    && (labels.is_empty()
+                        || folder_store.label(p).is_some_and(|l| labels.contains(&l)))
                     && (!eyes || self.eyes_closed(p))
             })
         };
@@ -250,7 +251,7 @@ impl App {
             (Reorder::Sort, GridSort::Quality) => navigation::sort_cells(
                 cells,
                 head,
-                |i| catalog.score(path(i)?).map(|(s, _)| s.score.value),
+                |i| folder_store.score(path(i)?).map(|(s, _)| s.score.value),
                 descending,
             ),
             (Reorder::Sort, GridSort::Rating) => navigation::sort_cells(
@@ -260,13 +261,13 @@ impl App {
                 descending,
             ),
             (Reorder::Sort, GridSort::Edited) => {
-                navigation::sort_cells(cells, head, |i| catalog.edited(path(i)?), descending)
+                navigation::sort_cells(cells, head, |i| folder_store.edited(path(i)?), descending)
             }
         }
         self.visible_in_order = in_name_order || visible.is_sorted();
         self.visible = visible;
         if reorder == Reorder::Sort {
-            self.sorted_revision = self.catalog.sort_revision();
+            self.sorted_revision = self.folder_store.sort_revision();
         }
         let clamped = match self.visible.len() {
             0 => None,
@@ -1336,7 +1337,7 @@ impl App {
 #[cfg(test)]
 pub(in crate::app) mod tests {
     use super::*;
-    use crate::app::test_support::{folder_app, wait_for_catalog};
+    use crate::app::test_support::{folder_app, wait_for_folder_store};
     use crate::navigation::Cmp;
     use crate::persist::groups::Group;
 
@@ -1352,16 +1353,19 @@ pub(in crate::app) mod tests {
     pub(in crate::app) fn group_photos(app: &mut App, members: &[usize], rep: usize) {
         let names = members.iter().map(|&i| name(app, i)).collect();
         let group = Group::new(names, Some(name(app, rep))).unwrap();
-        let groups = app.catalog.groups().expect("the folder's groups loaded");
+        let groups = app
+            .folder_store
+            .groups()
+            .expect("the folder's groups loaded");
         let writes = groups.create(group, std::time::SystemTime::now());
-        app.catalog.apply_group_writes(writes).unwrap();
+        app.folder_store.apply_group_writes(writes).unwrap();
         app.recompute_visible();
     }
 
     fn folder_with_saved_group(tag: &str, n: usize, members: &[usize], rep: usize) -> PathBuf {
         let (mut app, dir, _) = folder_app(tag, n);
         group_photos(&mut app, members, rep);
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         dir
     }
@@ -1412,7 +1416,7 @@ pub(in crate::app) mod tests {
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
         assert_eq!(cells(&app), vec![0, 1, 2, 3, 4, 5], "no groups yet");
         app.select_single(4);
-        wait_for_catalog(&mut app);
+        wait_for_folder_store(&mut app);
         assert_eq!(cells(&app), vec![0, 1, 4, 5]);
         assert_eq!(app.sel, Some(2), "the cursor stays on photo 4");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1424,7 +1428,7 @@ pub(in crate::app) mod tests {
         let opened = dir.join("2.jpg");
         let mut app = App::new(None);
         app.open(opened.clone());
-        wait_for_catalog(&mut app);
+        wait_for_folder_store(&mut app);
         assert_eq!(cells(&app), vec![0, 1, 4]);
         assert_eq!(app.mode, ViewMode::Loupe);
         assert_eq!(app.sel, None);
@@ -1607,7 +1611,7 @@ pub(in crate::app) mod tests {
         app.set_rating(1);
         assert_eq!(cells(&app), vec![0, 2, 3]);
         assert_eq!(app.selected_path().as_ref(), Some(&paths[2]));
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         let _ = std::fs::remove_dir_all(&dir);
     }

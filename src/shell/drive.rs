@@ -507,7 +507,7 @@ struct Driver {
 
 impl ApplicationHandler<UserEvent> for Driver {
     /// The whole script runs here. `ActiveEventLoop` exists only inside a
-    /// callback, and the loader, catalog queue and export pool are polled,
+    /// callback, and the loader, folder store queue and export pool are polled,
     /// not event-driven, so nothing needs the loop to turn.
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.app.window.is_some() {

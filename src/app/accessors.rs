@@ -41,7 +41,7 @@ impl App {
     fn stack_at(&self, pos: usize) -> Option<(&GroupId, &Group, bool)> {
         let idx = *self.visible.get(pos)?;
         let name = self.playlist.as_ref()?.entry(idx)?.file_name()?;
-        let groups = self.catalog.groups()?;
+        let groups = self.folder_store.groups()?;
         let id = groups.group_of(name)?;
         let group = groups.get(id)?;
         Some((id, group, group.cover() == name))
@@ -320,7 +320,7 @@ impl App {
         self.visible
             .get(pos)
             .and_then(|&i| self.playlist.as_ref().and_then(|pl| pl.entry(i)))
-            .and_then(|p| self.catalog.label(p))
+            .and_then(|p| self.folder_store.label(p))
     }
 
     /// Flag of the visible cell at `pos`. `None` when unflagged or out of range.
@@ -347,7 +347,8 @@ impl App {
     }
 
     pub(crate) fn selected_label(&self) -> Option<crate::sidecar::ColorLabel> {
-        self.selected_path().and_then(|p| self.catalog.label(&p))
+        self.selected_path()
+            .and_then(|p| self.folder_store.label(&p))
     }
 
     #[cfg(test)]

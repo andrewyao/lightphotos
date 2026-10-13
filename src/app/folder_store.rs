@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::develop::copy::{self, CopySection, CopySections};
 use crate::develop::Adjustments;
 use crate::navigation::{Cmp, FlagFilter};
-use crate::persist::catalog::GroupWriteRefused;
+use crate::persist::folder_store::GroupWriteRefused;
 use crate::persist::groups::{Group, GroupWrite};
 use crate::sidecar::Flag;
 use crate::ui;
@@ -21,19 +21,19 @@ pub(super) struct CopiedSettings {
     pub(super) sections: CopySections,
 }
 
-pub(super) struct CatalogLoad {
+pub(super) struct FolderStoreLoad {
     /// Directory and token of the background sidecar scan in flight, if any.
     /// Cleared only when the result with the matching token lands. A token is
     /// needed because fast A to B to A navigation runs two loads for A, and the
     /// first one landing must not clear the second.
     pending: Option<(PathBuf, u64)>,
-    /// One per `request_catalog_load` call.
+    /// One per `request_folder_store_load` call.
     token: u64,
-    tx: Sender<CatalogLoadResult>,
-    rx: Receiver<CatalogLoadResult>,
+    tx: Sender<FolderStoreLoadResult>,
+    rx: Receiver<FolderStoreLoadResult>,
 }
 
-impl CatalogLoad {
+impl FolderStoreLoad {
     pub(super) fn new() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
         Self {
@@ -47,14 +47,14 @@ impl CatalogLoad {
 
 impl App {
     /// Whether the folder's sidecars are still loading.
-    pub(super) fn catalog_loading(&self) -> bool {
-        self.catalog_load.pending.is_some()
+    pub(super) fn folder_store_loading(&self) -> bool {
+        self.folder_store_load.pending.is_some()
     }
 
     /// Makes the App act as if `dir`'s sidecars were still loading.
     #[cfg(test)]
-    pub(super) fn pretend_catalog_loading(&mut self, dir: &Path) {
-        self.catalog_load.pending = Some((dir.to_path_buf(), 1));
+    pub(super) fn pretend_folder_store_loading(&mut self, dir: &Path) {
+        self.folder_store_load.pending = Some((dir.to_path_buf(), 1));
     }
 
     /// Swaps in `playlist`'s folder's derived-signal cache and copies what it
@@ -160,39 +160,39 @@ impl App {
         false
     }
 
-    /// Points the catalog at `dir` and reads its sidecars in the background.
+    /// Points the folder store at `dir` and reads its sidecars in the background.
     /// `switch_dir` clears the cache first, so the old folder's ratings never
-    /// show for the new one. `poll_catalog_load` folds in the result.
-    pub(super) fn request_catalog_load(&mut self, dir: &Path) {
-        let mark = self.catalog.switch_dir(dir);
-        self.catalog_load.token += 1;
-        let token = self.catalog_load.token;
+    /// show for the new one. `poll_folder_store_load` folds in the result.
+    pub(super) fn request_folder_store_load(&mut self, dir: &Path) {
+        let mark = self.folder_store.switch_dir(dir);
+        self.folder_store_load.token += 1;
+        let token = self.folder_store_load.token;
         let dir = dir.to_path_buf();
-        let tx = self.catalog_load.tx.clone();
+        let tx = self.folder_store_load.tx.clone();
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             let for_thread = dir.clone();
             let spawned = std::thread::Builder::new()
-                .name("catalog-load".into())
+                .name("folder-store-load".into())
                 .spawn(move || {
-                    let loaded = crate::persist::catalog::load_sidecars(&for_thread);
+                    let loaded = crate::persist::folder_store::load_sidecars(&for_thread);
                     let _ = tx.send((for_thread.clone(), token, mark, loaded));
-                    // Sweep after sending, because the UI waits on the catalog
+                    // Sweep after sending, because the UI waits on the folder store
                     // and nothing waits on the sweep.
                     crate::jobs::thumbnail::sweep_orphans(&for_thread);
                 });
             match spawned {
-                Ok(_) => self.catalog_load.pending = Some((dir, token)),
+                Ok(_) => self.folder_store_load.pending = Some((dir, token)),
                 Err(e) => {
-                    // The catalog stays empty, so tell the user. Keep the load
+                    // The folder store stays empty, so tell the user. Keep the load
                     // marked pending on purpose: export refuses to run while a
                     // load is pending, which stops it exporting without the
                     // user's edits. Switching folders again retries.
-                    self.catalog
+                    self.folder_store
                         .note_persist_error(format!("could not load {}: {e}", dir.display()));
-                    self.catalog.abandon_load();
-                    self.catalog_load.pending = Some((dir, token));
+                    self.folder_store.abandon_load();
+                    self.folder_store_load.pending = Some((dir, token));
                 }
             }
         }
@@ -220,39 +220,39 @@ impl App {
                     .collect();
                 let reads = self.web.read_inflight();
                 wasm_bindgen_futures::spawn_local(async move {
-                    let loaded = crate::web::web_catalog_fs::load_sidecars(&handle).await;
+                    let loaded = crate::web::web_folder_store_fs::load_sidecars(&handle).await;
                     let _ = tx.send((for_task, token, mark, loaded));
                     crate::web::web_thumb_cache::sweep_orphans(&handle, &live, reads).await;
                 });
-                self.catalog_load.pending = Some((dir, token));
+                self.folder_store_load.pending = Some((dir, token));
             }
             None => {
-                self.catalog.abandon_load();
-                self.catalog_load.pending = None;
+                self.folder_store.abandon_load();
+                self.folder_store_load.pending = None;
             }
         }
     }
 
-    /// Applies finished catalog loads and refreshes the ratings and edits
+    /// Applies finished folder store loads and refreshes the ratings and edits
     /// mirrors for the open folder. Returns true while a load is still pending.
-    pub(crate) fn poll_catalog_load(&mut self) -> bool {
-        while let Ok((dir, token, mark, loaded)) = self.catalog_load.rx.try_recv() {
+    pub(crate) fn poll_folder_store_load(&mut self) -> bool {
+        while let Ok((dir, token, mark, loaded)) = self.folder_store_load.rx.try_recv() {
             let photos = match &self.playlist {
                 Some(p) if p.dir() == dir.as_path() => p.entries(),
                 _ => &[],
             };
-            self.catalog.apply_loaded(&dir, mark, loaded, photos);
+            self.folder_store.apply_loaded(&dir, mark, loaded, photos);
             // Match the token too: after A, B, A navigation two loads for A can
             // be in flight, and only the latest clears pending.
-            if self.catalog_load.pending.as_ref() == Some(&(dir.clone(), token)) {
-                self.catalog_load.pending = None;
+            if self.folder_store_load.pending.as_ref() == Some(&(dir.clone(), token)) {
+                self.folder_store_load.pending = None;
             }
-            // Take and restore the playlist, because `reconcile_catalog_mirrors`
+            // Take and restore the playlist, because `reconcile_folder_store_mirrors`
             // needs `&mut self` while reading it.
             if let Some(playlist) = self.playlist.take() {
                 let here = playlist.dir() == dir.as_path();
                 if here {
-                    self.reconcile_catalog_mirrors(&playlist);
+                    self.reconcile_folder_store_mirrors(&playlist);
                 }
                 self.playlist = Some(playlist);
                 if here {
@@ -262,38 +262,38 @@ impl App {
                 }
             }
         }
-        if self.catalog_load.pending.is_none() {
+        if self.folder_store_load.pending.is_none() {
             if let Some(paths) = self.autotone.take_deferred() {
                 self.enqueue_auto_tone(paths);
             }
         }
-        self.catalog_load.pending.is_some()
+        self.folder_store_load.pending.is_some()
     }
 
     /// Makes the app's ratings, edits, touchups, and rotations for `playlist`
-    /// match the loaded catalog, removing values its sidecars no longer have.
-    fn reconcile_catalog_mirrors(&mut self, playlist: &Playlist) {
+    /// match the loaded folder store, removing values its sidecars no longer have.
+    fn reconcile_folder_store_mirrors(&mut self, playlist: &Playlist) {
         // A drag in progress lives only in `edits`; write it before the
-        // catalog overwrites it.
+        // folder store overwrites it.
         self.save_edit();
         for p in playlist.entries() {
-            match self.catalog.get(p) {
+            match self.folder_store.get(p) {
                 Some(stars) => self.ratings.insert(p.clone(), stars),
                 None => self.ratings.remove(p),
             };
-            let adj = self.catalog.adjustments(p);
+            let adj = self.folder_store.adjustments(p);
             if adj.is_identity() {
                 self.edits.remove(p);
             } else {
                 self.edits.insert(p.clone(), adj);
             }
-            let touchups = self.catalog.touchups(p);
+            let touchups = self.folder_store.touchups(p);
             if touchups.is_empty() {
                 self.touchups.remove(p);
             } else {
                 self.touchups.insert(p.clone(), touchups);
             }
-            match self.catalog.rotation(p) {
+            match self.folder_store.rotation(p) {
                 0 => self.rotations.remove(p),
                 rot => self.rotations.insert(p.clone(), rot),
             };
@@ -334,9 +334,9 @@ impl App {
         } else {
             self.ratings.insert(path.clone(), stars);
         }
-        self.catalog.set(&path, stars);
+        self.folder_store.set(&path, stars);
         if self.filter.is_some() {
-            self.refilter_after_catalog_change();
+            self.refilter_after_folder_store_change();
             self.resync_loupe_selection();
         }
         self.request_redraw();
@@ -355,20 +355,20 @@ impl App {
 
     /// Flags `path`, as `set_flag` does the selected photo.
     pub(super) fn set_flag_of(&mut self, path: PathBuf, flag: Option<Flag>) {
-        self.catalog.set_flag(&path, flag);
+        self.folder_store.set_flag(&path, flag);
         self.after_flag_change();
     }
 
     pub(super) fn after_flag_change(&mut self) {
         if self.flag_filter != FlagFilter::All {
-            self.refilter_after_catalog_change();
+            self.refilter_after_folder_store_change();
             self.resync_loupe_selection();
         }
         self.request_redraw();
     }
 
     pub(super) fn flag_of(&self, path: &Path) -> Option<Flag> {
-        self.catalog.flag(path)
+        self.folder_store.flag(path)
     }
 
     pub(super) fn apply_group_writes(&mut self, writes: Vec<GroupWrite>) -> bool {
@@ -390,7 +390,7 @@ impl App {
     /// [`apply_group_writes`](Self::apply_group_writes) without the grid
     /// re-layout.
     pub(super) fn store_group_writes(&mut self, writes: Vec<GroupWrite>) -> bool {
-        match self.catalog.apply_group_writes(writes) {
+        match self.folder_store.apply_group_writes(writes) {
             Ok(()) => true,
             Err(e) => {
                 eprintln!("[lightphotos] group change refused: {e}");
@@ -414,7 +414,7 @@ impl App {
         let Some(name) = path.file_name() else {
             return;
         };
-        let Some(groups) = self.catalog.groups() else {
+        let Some(groups) = self.folder_store.groups() else {
             return;
         };
         let Some(id) = groups.group_of(name) else {
@@ -449,7 +449,7 @@ impl App {
         }
         let cells = self.selected_cells();
         let t = crate::i18n::t();
-        let Some(groups) = self.catalog.groups() else {
+        let Some(groups) = self.folder_store.groups() else {
             self.set_status(StatusKind::Error, t.group_refused_loading.to_string());
             self.request_redraw();
             return;
@@ -475,7 +475,7 @@ impl App {
             .and_then(|p| self.group_at(p))
             .map(|(_, g)| g.cover().to_os_string());
         let targets = self.selected_groups();
-        let Some(groups) = self.catalog.groups() else {
+        let Some(groups) = self.folder_store.groups() else {
             return;
         };
         let writes: Vec<GroupWrite> = targets
@@ -612,7 +612,7 @@ impl App {
     }
 
     pub(crate) fn delete_available(&self) -> bool {
-        !self.bulk_delete_running() && self.catalog_load.pending.is_none()
+        !self.bulk_delete_running() && self.folder_store_load.pending.is_none()
     }
 
     fn bulk_available(&self) -> bool {
@@ -842,7 +842,7 @@ impl App {
                 changed |= merged != existing;
             }
             self.put_edit(path, merged);
-            self.catalog.set_adjustments(path, &merged);
+            self.folder_store.set_adjustments(path, &merged);
         }
         #[cfg(target_arch = "wasm32")]
         if changed {
@@ -883,10 +883,10 @@ impl App {
             } else {
                 self.ratings.insert(path.clone(), stars);
             }
-            self.catalog.set(path, stars);
+            self.folder_store.set(path, stars);
         }
         if self.filter.is_some() {
-            self.refilter_after_catalog_change();
+            self.refilter_after_folder_store_change();
             self.resync_loupe_selection();
         }
         let n = paths.len();
@@ -908,7 +908,7 @@ impl App {
             return;
         }
         for path in &paths {
-            self.catalog.set_flag(path, flag);
+            self.folder_store.set_flag(path, flag);
         }
         self.after_flag_change();
         let n = paths.len();
@@ -1016,9 +1016,9 @@ mod tests {
         );
         assert_eq!(app.sel, Some(2), "the cursor follows the group's cell");
         assert_eq!(app.want.as_ref(), Some(&paths[3]), "the Loupe shows it");
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
-        let reloaded = crate::persist::catalog::Catalog::with_dir(dir.clone());
+        let reloaded = crate::persist::folder_store::FolderStore::with_dir(dir.clone());
         let reps: Vec<_> = reloaded
             .groups()
             .unwrap()
@@ -1033,7 +1033,7 @@ mod tests {
     /// sidecar that no longer has them, e.g. after another tool cleared it.
     #[test]
     fn reloading_a_folder_drops_values_its_sidecars_no_longer_have() {
-        let dir = temp_folder("app-catalog-test");
+        let dir = temp_folder("app-folder-store-test");
         let photo = dir.join("a.jpg");
         std::fs::write(&photo, b"").unwrap();
 
@@ -1078,8 +1078,8 @@ mod tests {
         use crate::persist::signalcache::{Signal, SignalCache};
         use crate::scoring::facequality::FaceQuality;
 
-        let dir = temp_folder("app-catalog-test");
-        let other = temp_folder("app-catalog-test");
+        let dir = temp_folder("app-folder-store-test");
+        let other = temp_folder("app-folder-store-test");
         let a = dir.join("a.jpg");
         let b = dir.join("b.jpg");
         std::fs::write(&a, b"a").unwrap();
@@ -1136,7 +1136,7 @@ mod tests {
     /// the photo on screen (`want`).
     #[test]
     fn rating_a_loupe_photo_applies_even_when_sel_has_gone_stale() {
-        let dir = temp_folder("app-catalog-test");
+        let dir = temp_folder("app-folder-store-test");
         let photo = dir.join("a.jpg");
         std::fs::write(&photo, b"").unwrap();
 
@@ -1155,7 +1155,7 @@ mod tests {
              `sel` has gone stale (None) while in Loupe"
         );
 
-        app.catalog
+        app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1215,8 +1215,8 @@ mod tests {
     #[test]
     fn the_grid_keeps_rejects_in_view_by_default_and_the_flag_filter_narrows_the_star_filter() {
         let (mut app, dir, paths) = crate::app::test_support::folder_app("flag-filter", 4);
-        app.catalog.set_flag(&paths[0], Some(Flag::Pick));
-        app.catalog.set_flag(&paths[1], Some(Flag::Pick));
+        app.folder_store.set_flag(&paths[0], Some(Flag::Pick));
+        app.folder_store.set_flag(&paths[1], Some(Flag::Pick));
         app.set_rating_of(paths[1].clone(), 3);
 
         app.select_single(2);
@@ -1245,9 +1245,11 @@ mod tests {
     fn the_label_filter_shows_photos_with_any_lit_label() {
         use crate::sidecar::ColorLabel;
         let (mut app, dir, paths) = crate::app::test_support::folder_app("label-filter", 4);
-        app.catalog.set_label(&paths[0], Some(ColorLabel::Red));
-        app.catalog.set_label(&paths[1], Some(ColorLabel::Purple));
-        app.catalog.set_label(&paths[2], Some(ColorLabel::Blue));
+        app.folder_store.set_label(&paths[0], Some(ColorLabel::Red));
+        app.folder_store
+            .set_label(&paths[1], Some(ColorLabel::Purple));
+        app.folder_store
+            .set_label(&paths[2], Some(ColorLabel::Blue));
 
         let shown = |app: &mut App, f: Vec<ColorLabel>| {
             app.apply_ui_actions(vec![ui::UiAction::SetLabelFilter(f)]);

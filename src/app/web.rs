@@ -114,7 +114,7 @@ pub(crate) struct Web {
     file_handles: HashMap<PathBuf, web_sys::FileSystemFileHandle>,
     /// Directory handles for every folder browsed so far, keyed by relative
     /// path with the root's kept name first. A kept root has none until the
-    /// user allows it again on this visit. The catalog's sidecar handle
+    /// user allows it again on this visit. The folder store's sidecar handle
     /// switches to the current folder's entry on each navigation.
     dir_handles: HashMap<PathBuf, web_sys::FileSystemDirectoryHandle>,
     /// Per-folder thumbnail cache index, shared by that folder's async writes.
@@ -585,10 +585,10 @@ impl App {
                     crate::navigation::sort_by_name(&mut first_level);
                     self.subdirs.insert(root.clone(), first_level);
 
-                    // Must precede `load_playlist`, whose catalog load reads
+                    // Must precede `load_playlist`, whose folder store load reads
                     // sidecars through this handle.
                     let root_handle = self.web.dir_handles.get(&root).cloned();
-                    self.catalog.set_wasm_dir_handle(root_handle);
+                    self.folder_store.set_wasm_dir_handle(root_handle);
                     let playlist = Playlist::from_entries(root.clone(), picked.entries);
                     self.load_playlist(playlist, root.clone());
                     // Show the root in the tree only once the playlist is loaded.
@@ -1705,7 +1705,7 @@ impl App {
         // Must precede `load_playlist`. Set even when `None`, so sidecar
         // writes never go to the previous folder.
         let dir_handle = self.web.dir_handles.get(&dir).cloned();
-        self.catalog.set_wasm_dir_handle(dir_handle);
+        self.folder_store.set_wasm_dir_handle(dir_handle);
         let mut entries: Vec<PathBuf> = self
             .web
             .file_handles

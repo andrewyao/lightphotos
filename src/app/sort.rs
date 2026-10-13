@@ -47,9 +47,9 @@ impl GridSort {
         )
     }
 
-    /// Whether this order reads the stars or edit times the catalog holds,
+    /// Whether this order reads the stars or edit times the folder store holds,
     /// so a change to them reorders the Grid.
-    pub(crate) fn reads_catalog(self) -> bool {
+    pub(crate) fn reads_folder_store(self) -> bool {
         matches!(self, Self::Rating | Self::Edited)
     }
 
@@ -186,10 +186,10 @@ impl App {
     /// Reorders the Grid after its stars or edit times changed. The Loupe
     /// keeps its order until the Grid shows again, so a photo rated there
     /// does not jump away from the cursor.
-    pub(crate) fn resort_after_catalog_change(&mut self) {
+    pub(crate) fn resort_after_folder_store_change(&mut self) {
         if self.mode == ViewMode::Grid
-            && self.sort_order.key.reads_catalog()
-            && self.sorted_revision != self.catalog.sort_revision()
+            && self.sort_order.key.reads_folder_store()
+            && self.sorted_revision != self.folder_store.sort_revision()
         {
             self.recompute_visible();
             self.request_redraw();
@@ -210,7 +210,7 @@ mod tests {
         let (dir, paths) = crate::app::test_support::folder_of("sort-test", &names);
         let mut app = App::new(None);
         app.load_playlist(Playlist::from_dir(&dir), dir.clone());
-        app.catalog.open_dir(&dir);
+        app.folder_store.open_dir(&dir);
         app.recompute_visible();
         (app, dir, paths)
     }
@@ -231,7 +231,7 @@ mod tests {
             exposure,
             ..Adjustments::default()
         };
-        app.catalog.set_adjustments(path, &adj);
+        app.folder_store.set_adjustments(path, &adj);
     }
 
     #[test]
@@ -260,8 +260,8 @@ mod tests {
         let (mut app, dir, paths) = folder_app(4);
         edit(&mut app, &paths[1], 0.5);
         edit(&mut app, &paths[3], 0.5);
-        app.catalog.set_edited(&paths[1], 100);
-        app.catalog.set_edited(&paths[3], 300);
+        app.folder_store.set_edited(&paths[1], 100);
+        app.folder_store.set_edited(&paths[3], 300);
         app.set_sort(GridSort::Edited);
         assert_eq!(
             visible_names(&app),
@@ -302,7 +302,7 @@ mod tests {
     fn an_expanded_stack_sorts_by_its_cover_and_stays_together() {
         let (mut app, dir, paths) = folder_app(5);
         crate::app::nav::tests::group_photos(&mut app, &[0, 2, 4], 2);
-        let Some(id) = app.catalog.groups().and_then(|g| {
+        let Some(id) = app.folder_store.groups().and_then(|g| {
             let name = paths[2].file_name()?;
             g.group_of(name).cloned()
         }) else {
@@ -332,15 +332,15 @@ mod tests {
         let (mut app, dir, paths) = folder_app(3);
         app.set_sort(GridSort::Rating);
         app.set_rating_of(paths[2].clone(), 3);
-        app.resort_after_catalog_change();
+        app.resort_after_folder_store_change();
         assert_eq!(visible_names(&app), ["p02.jpg", "p00.jpg", "p01.jpg"]);
 
         app.mode = ViewMode::Loupe;
         app.set_rating_of(paths[1].clone(), 4);
-        app.resort_after_catalog_change();
+        app.resort_after_folder_store_change();
         assert_eq!(visible_names(&app), ["p02.jpg", "p00.jpg", "p01.jpg"]);
         app.mode = ViewMode::Grid;
-        app.resort_after_catalog_change();
+        app.resort_after_folder_store_change();
         assert_eq!(visible_names(&app), ["p01.jpg", "p02.jpg", "p00.jpg"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -367,7 +367,7 @@ mod tests {
         );
 
         app.mode = ViewMode::Grid;
-        app.resort_after_catalog_change();
+        app.resort_after_folder_store_change();
         assert_eq!(visible_names(&app), ["p01.jpg", "p00.jpg", "p02.jpg"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -376,7 +376,7 @@ mod tests {
     fn a_stack_whose_cover_is_filtered_out_sorts_by_its_first_member_left() {
         let (mut app, dir, paths) = folder_app(4);
         crate::app::nav::tests::group_photos(&mut app, &[0, 2], 0);
-        let Some(id) = app.catalog.groups().and_then(|g| {
+        let Some(id) = app.folder_store.groups().and_then(|g| {
             let name = paths[0].file_name()?;
             g.group_of(name).cloned()
         }) else {

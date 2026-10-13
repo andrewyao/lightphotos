@@ -181,7 +181,7 @@ impl App {
         } else {
             self.rotations.insert(path.clone(), step);
         }
-        self.catalog.set_rotation(&path, step);
+        self.folder_store.set_rotation(&path, step);
         #[cfg(target_arch = "wasm32")]
         crate::web::analytics::property("develop_edit_applied", "edit_kind", "adjustment");
         self.flip_crop_orientation();

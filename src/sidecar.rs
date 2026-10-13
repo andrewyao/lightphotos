@@ -7,7 +7,7 @@
 //! created on the first write, so browsing a folder never changes it.
 //!
 //! This module owns the record, its path and its single-file read and write.
-//! The app's catalog caches a folder of them and queues the writes.
+//! The app's folder store caches a folder of them and queues the writes.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};

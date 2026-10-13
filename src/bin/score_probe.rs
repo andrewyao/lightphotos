@@ -23,7 +23,7 @@
 //! ```
 //!
 //! The app decodes through ImageIO's thumbnail path, which can use a RAW's
-//! embedded preview. That module drags in the catalog, so the probe decodes
+//! embedded preview. That module drags in the folder store, so the probe decodes
 //! the image itself at the same size instead; RAW renders may differ a little.
 
 use lightphotos::decode::image_decode;

@@ -115,7 +115,7 @@ impl EditHistory {
         !self.done.is_empty() || self.open.is_some()
     }
 
-    /// The photos leave the catalog's cache when the folder changes, so
+    /// The photos leave the folder store's cache when the folder changes, so
     /// their steps go with them.
     pub(super) fn clear(&mut self) {
         self.done.clear();

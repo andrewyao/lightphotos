@@ -14,7 +14,7 @@ pub(crate) mod drive;
 pub(crate) mod macos_delegate;
 #[cfg(target_os = "macos")]
 pub(crate) mod menu;
-// Profiling drives the real `navigation`, `catalog`, `Loader` and `export`
+// Profiling drives the real `navigation`, `folder_store`, `Loader` and `export`
 // code, none of which the browser build has, and the driver runs from the
 // native `main`. Gating the module the same way keeps `--features hotpath`
 // building for wasm32 instead of failing on APIs that target cannot have.

@@ -400,7 +400,7 @@ impl Playlist {
         self.index
     }
 
-    /// The folder these images live in. The catalog sidecar sits here.
+    /// The folder these images live in. The folder store sidecar sits here.
     pub fn dir(&self) -> &Path {
         &self.dir
     }
