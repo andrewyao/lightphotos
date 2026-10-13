@@ -26,6 +26,8 @@ use crate::sidecar::ColorLabel;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuCommand {
     Settings,
+    NewCatalog,
+    OpenCatalog,
     OpenFolder,
     Export,
     Undo,
@@ -114,7 +116,9 @@ impl MenuCommand {
             BiggerText => (alt, KeyCode::Equal),
             SmallerText => (alt, KeyCode::Minus),
             KeyboardShortcuts => (ModifiersState::SHIFT, KeyCode::Slash),
-            AutoToneSelection | ScorePhotos | GroupBursts => return None,
+            AutoToneSelection | ScorePhotos | GroupBursts | NewCatalog | OpenCatalog => {
+                return None
+            }
         })
     }
 
@@ -172,10 +176,11 @@ impl MenuCommand {
             ToggleZoom => zoom(Zoom::Cycle),
             ZoomIn => zoom(Zoom::In),
             ZoomOut => zoom(Zoom::Out),
-            Settings | OpenFolder | Export | Undo | Cut | Copy | Paste | SelectAll
-            | CopySettings | PasteSettings | AutoToneSelection | ScorePhotos | MoveToTrash
-            | GroupSelected | GroupBursts | Ungroup | DeleteGroup | Crop | CompareStack
-            | InfoPanel | BeforeAfter | BiggerText | SmallerText | KeyboardShortcuts => {
+            Settings | NewCatalog | OpenCatalog | OpenFolder | Export | Undo | Cut | Copy
+            | Paste | SelectAll | CopySettings | PasteSettings | AutoToneSelection
+            | ScorePhotos | MoveToTrash | GroupSelected | GroupBursts | Ungroup | DeleteGroup
+            | Crop | CompareStack | InfoPanel | BeforeAfter | BiggerText | SmallerText
+            | KeyboardShortcuts => {
                 return None;
             }
         })
@@ -297,6 +302,9 @@ const MENUS: &[(Label, Role, &[Row])] = &[
         |m| m.file,
         Role::Plain,
         &[
+            Command(C::NewCatalog, |m| m.new_catalog),
+            Command(C::OpenCatalog, |m| m.open_catalog),
+            Separator,
             Command(C::OpenFolder, |m| m.open_folder),
             Command(C::Export, |m| m.export),
         ],

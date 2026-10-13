@@ -22,11 +22,58 @@ pub(super) fn draw_left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutpu
     tour::anchor(ui.ctx(), tour::TourStep::Folders, panel.response.rect);
 }
 
-/// The Folders panel's body: Open Folder before there is any folder, then
-/// the folder tree with Add Folder under its last row, where an added
-/// folder shows.
+/// The Folders heading's text: the catalog's name with a dropdown mark.
+pub(crate) fn catalog_heading_label(name: &str) -> String {
+    format!("{name} \u{25BE}")
+}
+
+/// The catalog's name over the tree. Natively a dropdown that makes or
+/// opens a catalog or switches to a recent one; the browser has one.
+fn catalog_heading(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    let t = crate::i18n::t();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        ui.menu_button(catalog_heading_label(app.catalog_name()), |ui| {
+            if ui.button(t.new_catalog).clicked() {
+                out.actions.push(UiAction::NewCatalog);
+                ui.close();
+            }
+            if ui.button(t.open_catalog).clicked() {
+                out.actions.push(UiAction::OpenCatalog);
+                ui.close();
+            }
+            let recent = app.recent_catalogs();
+            if !recent.is_empty() {
+                ui.separator();
+            }
+            for at in recent {
+                let open = app.is_open_catalog(at);
+                if ui.selectable_label(open, at.name()).clicked() {
+                    if !open {
+                        out.actions.push(UiAction::SwitchCatalog(at.clone()));
+                    }
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text(t.catalog_tip);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = out;
+        ui.label(catalog_heading_label(app.catalog_name()))
+            .on_hover_text(t.catalog_tip);
+    }
+    ui.add_space(font_size::px(ui.style(), form::ROW_GAP));
+}
+
+/// The Folders panel's body: the catalog heading, then Open Folder before
+/// there is any folder, or the folder tree with Add Folder under its last
+/// row, where an added folder shows.
 pub(super) fn folder_list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
+    catalog_heading(ui, app, out);
     let pending = app.folder_pick_pending();
     let pick = |ui: &mut egui::Ui, out: &mut FrameOutput, label, role, tip| {
         let b = form::Button {

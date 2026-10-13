@@ -1,17 +1,24 @@
-//! The App's catalog: which one opens at launch, switching to another, and
-//! the pref that remembers the last one. The catalog itself, its roots and
-//! its marks copy, is [`crate::persist::catalog`].
+//! The App's catalog: which one opens at launch, making, opening and
+//! switching to another, and the prefs that remember the last one and the
+//! recent ones. The catalog itself, its roots and its marks copy, is
+//! [`crate::persist::catalog`].
 
 use std::path::PathBuf;
 
 use super::*;
 use crate::persist::catalog::Catalog;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::persist::catalog::{CatalogRef, DEFAULT_NAME};
+use crate::persist::catalog::{native::default_dir, CatalogRef, DEFAULT_NAME, EXT};
 
 /// `prefs` key holding the last opened catalog's path.
 #[cfg(not(target_arch = "wasm32"))]
 const CATALOG_PREF: &str = "catalog";
+/// `prefs` key holding the recent catalogs' paths, newest first.
+#[cfg(not(target_arch = "wasm32"))]
+const RECENT_PREF: &str = "catalogs-recent";
+/// How many the recent list keeps.
+#[cfg(not(target_arch = "wasm32"))]
+const RECENT_MAX: usize = 10;
 
 /// What launch opened, and why it is not the catalog asked for, if so.
 pub(super) struct Launch {
@@ -19,6 +26,9 @@ pub(super) struct Launch {
     /// The last catalog could not open, so `catalog` is the default. The
     /// pref keeps naming the last one, so it reopens once it is back.
     pub(super) fallback: Option<String>,
+    /// Catalogs opened before, newest first.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) recent: Vec<CatalogRef>,
 }
 
 impl Launch {
@@ -28,6 +38,7 @@ impl Launch {
         Launch {
             catalog: Catalog::in_memory(DEFAULT_NAME),
             fallback: None,
+            recent: Vec::new(),
         }
     }
 
@@ -37,8 +48,15 @@ impl Launch {
     #[cfg(all(not(test), not(target_arch = "wasm32")))]
     pub(super) fn at_startup(legacy: &[PathBuf]) -> Launch {
         let last = crate::persist::prefs::load(CATALOG_PREF).map(PathBuf::from);
-        let default_dir = crate::persist::catalog::native::default_dir();
-        launch(last.as_deref(), default_dir.as_deref(), legacy)
+        let mut launch = launch(last.as_deref(), default_dir().as_deref(), legacy);
+        launch.recent = crate::persist::prefs::load(RECENT_PREF)
+            .and_then(|json| serde_json::from_str::<Vec<PathBuf>>(&json).ok())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|p| CatalogRef::parse(p).ok())
+            .take(RECENT_MAX)
+            .collect();
+        launch
     }
 
     /// The browser's one in-memory catalog, until its store exists.
@@ -49,6 +67,14 @@ impl Launch {
             fallback: None,
         }
     }
+}
+
+/// Put `at` at the head of `recent`, once, keeping [`RECENT_MAX`].
+#[cfg(not(target_arch = "wasm32"))]
+fn note_recent(recent: &mut Vec<CatalogRef>, at: &CatalogRef) {
+    recent.retain(|r| r != at);
+    recent.insert(0, at.clone());
+    recent.truncate(RECENT_MAX);
 }
 
 /// `Launch::at_startup` with its inputs injected. `last` is the pref, which
@@ -63,6 +89,7 @@ fn launch(last: Option<&Path>, default_dir: Option<&Path>, legacy: &[PathBuf]) -
                 return Launch {
                     catalog,
                     fallback: None,
+                    recent: Vec::new(),
                 }
             }
             Err(e) => fallback = Some(e.to_string()),
@@ -73,7 +100,11 @@ fn launch(last: Option<&Path>, default_dir: Option<&Path>, legacy: &[PathBuf]) -
         .and_then(|dir| CatalogRef::in_dir(dir, DEFAULT_NAME).map_err(|e| e.to_string()))
         .and_then(|at| Catalog::open_or_create(at, legacy.to_vec()).map_err(|e| e.to_string()));
     match default {
-        Ok(catalog) => Launch { catalog, fallback },
+        Ok(catalog) => Launch {
+            catalog,
+            fallback,
+            recent: Vec::new(),
+        },
         // Nothing can be saved, but the user keeps the folders they had.
         Err(e) => {
             let mut catalog = Catalog::in_memory(DEFAULT_NAME);
@@ -83,9 +114,34 @@ fn launch(last: Option<&Path>, default_dir: Option<&Path>, legacy: &[PathBuf]) -
             Launch {
                 catalog,
                 fallback: Some(fallback.map_or(e.clone(), |first| format!("{first}; {e}"))),
+                recent: Vec::new(),
             }
         }
     }
+}
+
+/// `path` as a catalog location. A bare name means that catalog in the
+/// app's catalog folder; a path without the extension gets it.
+#[cfg(not(target_arch = "wasm32"))]
+fn catalog_ref_for(path: &Path) -> Result<CatalogRef, String> {
+    let bare = path.components().count() == 1 && !path.has_root();
+    let path = if bare {
+        default_dir()
+            .ok_or_else(|| "no home directory for the catalog folder".to_string())?
+            .join(path)
+    } else {
+        path.to_path_buf()
+    };
+    let has_ext = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(&format!(".{EXT}")));
+    if has_ext {
+        return CatalogRef::parse(&path).map_err(|e| e.to_string());
+    }
+    let mut with_ext = path.into_os_string();
+    with_ext.push(format!(".{EXT}"));
+    CatalogRef::parse(Path::new(&with_ext)).map_err(|e| e.to_string())
 }
 
 impl App {
@@ -107,8 +163,6 @@ impl App {
     }
 }
 
-// The browser has one catalog until its store lands, so nothing there
-// switches yet.
 #[cfg(not(target_arch = "wasm32"))]
 impl App {
     /// Leave the folder showing, make `catalog` the one open, and reopen
@@ -127,29 +181,131 @@ impl App {
         self.request_redraw();
     }
 
-    /// Open the catalog at `at` and switch to it.
+    /// Open the catalog at `at` and switch to it, or say why not.
     pub(super) fn open_catalog(&mut self, at: CatalogRef) {
-        match Catalog::open(at) {
-            Ok(catalog) => self.switch_catalog(catalog),
-            Err(e) => {
-                self.set_status(
-                    StatusKind::Error,
-                    (crate::i18n::t().catalog_open_failed)(&e.to_string()),
-                );
-                self.request_redraw();
-            }
+        if let Err(e) = self.open_catalog_ref(at) {
+            self.set_status(
+                StatusKind::Error,
+                (crate::i18n::t().catalog_open_failed)(&e),
+            );
+            self.request_redraw();
         }
     }
 
-    /// Save the open catalog as the one to reopen next launch.
+    fn open_catalog_ref(&mut self, at: CatalogRef) -> Result<(), String> {
+        let catalog = Catalog::open(at).map_err(|e| e.to_string())?;
+        self.switch_catalog(catalog);
+        Ok(())
+    }
+
+    /// `catalog.new`: make an empty catalog at `path` and switch to it.
+    pub(super) fn create_catalog_at(&mut self, path: &Path) -> Result<(), String> {
+        let at = catalog_ref_for(path)?;
+        let catalog = Catalog::create_at(at, Vec::new()).map_err(|e| e.to_string())?;
+        self.switch_catalog(catalog);
+        Ok(())
+    }
+
+    /// `catalog.open`: switch to the catalog at `path`.
+    pub(super) fn open_catalog_at(&mut self, path: &Path) -> Result<(), String> {
+        self.open_catalog_ref(catalog_ref_for(path)?)
+    }
+
+    /// `catalog.switch`: switch to a catalog opened before, by name, or to
+    /// the default one.
+    pub(super) fn switch_catalog_named(&mut self, name: &str) -> Result<(), String> {
+        if name == self.catalog.name() {
+            return Ok(());
+        }
+        let known = self
+            .recent_catalogs
+            .iter()
+            .find(|at| at.name() == name)
+            .cloned();
+        let default = || {
+            (name == DEFAULT_NAME)
+                .then(|| CatalogRef::in_dir(&default_dir()?, DEFAULT_NAME).ok())
+                .flatten()
+        };
+        let at = known.or_else(default).ok_or_else(|| {
+            format!("no catalog named {name} has been opened; give its path to catalog.open")
+        })?;
+        self.open_catalog_ref(at)
+    }
+
+    /// New Catalog…: a save dialog in the catalog folder, then a switch.
+    pub(super) fn new_catalog_dialog(&mut self) {
+        let Some(path) = crate::shell::dialog::save_catalog(default_dir()) else {
+            return;
+        };
+        if let Err(e) = self.create_catalog_at(&path) {
+            self.set_status(
+                StatusKind::Error,
+                (crate::i18n::t().catalog_create_failed)(&e),
+            );
+            self.request_redraw();
+        }
+    }
+
+    /// Open Catalog…: the folder picker, then a switch.
+    pub(super) fn open_catalog_dialog(&mut self) {
+        let Some(path) = crate::shell::dialog::pick_catalog() else {
+            return;
+        };
+        if let Err(e) = self.open_catalog_at(&path) {
+            self.set_status(
+                StatusKind::Error,
+                (crate::i18n::t().catalog_open_failed)(&e),
+            );
+            self.request_redraw();
+        }
+    }
+
+    /// List the open catalog among the recent ones, in memory.
+    pub(super) fn note_open_catalog(&mut self) {
+        let at = self.catalog.at().clone();
+        note_recent(&mut self.recent_catalogs, &at);
+    }
+
+    /// Save the open catalog as the one to reopen next launch, and the
+    /// recent list with it at the head.
     fn remember_catalog(&mut self) {
+        self.note_open_catalog();
         // A test must never write the developer's own settings.
         if cfg!(test) {
             return;
         }
         let path = self.catalog.at().path().to_string_lossy();
-        if let Err(e) = crate::persist::prefs::save(CATALOG_PREF, &path) {
-            eprintln!("[catalog] could not save the catalog pref: {e}");
+        let recent: Vec<&Path> = self.recent_catalogs.iter().map(CatalogRef::path).collect();
+        let saved = crate::persist::prefs::save(CATALOG_PREF, &path).and_then(|()| {
+            let json = serde_json::to_string(&recent).map_err(|e| e.to_string())?;
+            crate::persist::prefs::save(RECENT_PREF, &json)
+        });
+        if let Err(e) = saved {
+            eprintln!("[catalog] could not save the catalog prefs: {e}");
+        }
+    }
+}
+
+/// The browser has one catalog until its store lands.
+#[cfg(target_arch = "wasm32")]
+impl App {
+    pub(super) fn create_catalog_at(&mut self, _path: &Path) -> Result<(), String> {
+        Err("the browser keeps one catalog".into())
+    }
+
+    pub(super) fn open_catalog_at(&mut self, _path: &Path) -> Result<(), String> {
+        Err("the browser keeps one catalog".into())
+    }
+
+    pub(super) fn switch_catalog_named(&mut self, name: &str) -> Result<(), String> {
+        if name == self.catalog.name() {
+            Ok(())
+        } else {
+            Err(format!(
+                "the browser keeps one catalog, {}",
+                self.catalog.name()
+            ))
         }
     }
 }
@@ -275,6 +431,124 @@ mod tests {
             !app.folder_roots().contains(&at.path().to_path_buf()),
             "a catalog is never a photo root"
         );
+    }
+
+    #[test]
+    fn a_bare_name_means_a_catalog_in_the_catalog_folder_and_the_extension_is_added() {
+        assert_eq!(
+            catalog_ref_for(Path::new("/p/trip")).unwrap().path(),
+            Path::new("/p/trip.lightphotos")
+        );
+        assert_eq!(
+            catalog_ref_for(Path::new("/p/Trip 2024.lightphotos"))
+                .unwrap()
+                .name(),
+            "Trip 2024"
+        );
+        assert!(catalog_ref_for(Path::new("/p/.lightphotos")).is_err());
+        if let Some(dir) = default_dir() {
+            assert_eq!(
+                catalog_ref_for(Path::new("trip")).unwrap().path(),
+                dir.join("trip.lightphotos")
+            );
+        }
+    }
+
+    #[test]
+    fn the_catalog_commands_make_open_and_switch_catalogs() {
+        use crate::command::Command;
+        let dir = temp_folder("catalog-commands");
+        let photos = dir.join("photos");
+        std::fs::create_dir_all(&photos).unwrap();
+        std::fs::write(photos.join("x.jpg"), b"").unwrap();
+        let mut app = App::new(None);
+        app.open(photos.clone());
+        let run = |app: &mut App, json: &str| app.run(Command::parse(json).unwrap());
+
+        let trip = dir.join("trip");
+        let new = format!(
+            r#"{{"id":"catalog.new","params":{{"path":{}}}}}"#,
+            serde_json::to_string(&trip).unwrap()
+        );
+        run(&mut app, &new).unwrap();
+        assert_eq!(app.catalog.name(), "trip");
+        assert!(dir.join("trip.lightphotos/catalog.json").exists());
+        assert!(app.folder_roots().is_empty(), "a new catalog is empty");
+        assert!(app.playlist.is_none());
+        assert!(
+            run(&mut app, &new).is_err(),
+            "a catalog that exists is not made twice"
+        );
+
+        let other = CatalogRef::in_dir(&dir, "other").unwrap();
+        drop(Catalog::create_at(other.clone(), vec![photos.clone()]).unwrap());
+        let open = format!(
+            r#"{{"id":"catalog.open","params":{{"path":{}}}}}"#,
+            serde_json::to_string(other.path()).unwrap()
+        );
+        run(&mut app, &open).unwrap();
+        assert_eq!(app.catalog.name(), "other");
+        assert_eq!(app.folder_sel.as_deref(), Some(photos.as_path()));
+        assert_eq!(
+            app.recent_catalogs()
+                .iter()
+                .map(CatalogRef::name)
+                .collect::<Vec<_>>(),
+            ["other", "trip", "default"],
+            "newest first, with the catalog launch opened listed too"
+        );
+
+        run(
+            &mut app,
+            r#"{"id":"catalog.switch","params":{"name":"trip"}}"#,
+        )
+        .unwrap();
+        assert_eq!(app.catalog.name(), "trip");
+        assert!(run(
+            &mut app,
+            r#"{"id":"catalog.switch","params":{"name":"nope"}}"#
+        )
+        .is_err());
+        assert!(run(
+            &mut app,
+            r#"{"id":"catalog.open","params":{"path":"/no/such/x.lightphotos"}}"#
+        )
+        .is_err());
+        assert_eq!(
+            app.catalog.name(),
+            "trip",
+            "a failed open leaves the catalog alone"
+        );
+    }
+
+    #[test]
+    fn the_recent_list_is_newest_first_without_repeats_and_capped() {
+        let mut recent = Vec::new();
+        for i in 0..(RECENT_MAX + 3) {
+            let at = CatalogRef::parse(Path::new(&format!("/c/{i}.lightphotos"))).unwrap();
+            note_recent(&mut recent, &at);
+        }
+        let again = CatalogRef::parse(Path::new("/c/5.lightphotos")).unwrap();
+        note_recent(&mut recent, &again);
+        assert_eq!(recent.len(), RECENT_MAX);
+        assert_eq!(recent[0], again);
+        assert_eq!(recent.iter().filter(|r| **r == again).count(), 1);
+        assert_eq!(recent[1].name(), format!("{}", RECENT_MAX + 2));
+    }
+
+    /// The Folders panel heading names the catalog and drops down to make
+    /// a new one, through the whole UI.
+    #[test]
+    fn the_folders_heading_names_the_catalog_and_offers_a_new_one() {
+        use crate::app::test_support::{click, settled};
+        use crate::ui::UiAction;
+        let mut app = App::new(None);
+        let painted = settled(&mut app);
+        let heading = painted.pos_of(&crate::ui::catalog_heading_label(DEFAULT_NAME));
+        let (_, painted) = click(&mut app, heading);
+        let new = painted.pos_of(crate::i18n::t().new_catalog);
+        let (actions, _) = click(&mut app, new);
+        assert_eq!(actions, vec![UiAction::NewCatalog]);
     }
 
     #[test]

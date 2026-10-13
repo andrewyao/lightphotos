@@ -85,8 +85,6 @@ impl CatalogRef {
             .is_some_and(|stem| !stem.is_empty())
     }
 
-    // The web reads the name once the Folders heading shows it.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -223,8 +221,6 @@ pub(crate) fn add_root(roots: &mut Vec<PathBuf>, dir: &Path) -> bool {
 
 /// One open catalog: its roots and the marks copy's write queue.
 pub(crate) struct Catalog {
-    // Read on the web once the Folders heading shows the name.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     at: CatalogRef,
     folders: Record,
     /// Signature of the shard last queued per photo directory, so a
@@ -265,8 +261,6 @@ impl Catalog {
         &self.at
     }
 
-    // The web reads the name once the Folders heading shows it.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn name(&self) -> &str {
         self.at.name()
     }

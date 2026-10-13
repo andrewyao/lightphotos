@@ -661,6 +661,9 @@ pub(crate) struct App {
     pub(crate) catalog: crate::persist::catalog::Catalog,
     /// The folder store's `marks_revision` the catalog's copy last took.
     marks_synced: u64,
+    /// Catalogs opened before, newest first, for the Folders heading.
+    #[cfg(not(target_arch = "wasm32"))]
+    recent_catalogs: Vec<crate::persist::catalog::CatalogRef>,
     /// Roots that weren't a folder when last checked, such as an unplugged
     /// drive's. They stay listed so the user can remove them.
     missing_roots: HashSet<PathBuf>,
@@ -897,6 +900,8 @@ impl App {
             control: control::Pending::default(),
             catalog: launch.catalog,
             marks_synced: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            recent_catalogs: launch.recent,
             missing_roots,
             folder_sel: None,
             expanded: HashSet::new(),
@@ -921,6 +926,8 @@ impl App {
         if let Some(why) = launch.fallback {
             app.set_status(StatusKind::Error, (crate::i18n::t().catalog_fallback)(&why));
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        app.note_open_catalog();
         app
     }
 
@@ -1368,6 +1375,12 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::ImportLrPresets => self.import_lr_presets(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::NewCatalog => self.new_catalog_dialog(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::OpenCatalog => self.open_catalog_dialog(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::SwitchCatalog(at) => self.open_catalog(at),
                 ui::UiAction::ToggleHelp => {
                     self.show_help = !self.show_help;
                     self.request_redraw();

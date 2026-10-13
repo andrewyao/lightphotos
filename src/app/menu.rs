@@ -28,7 +28,7 @@ impl App {
                     || (free && self.history.can_undo())
             }
             Settings => matches!(blocker, None | Some(Blocker::Settings)),
-            OpenFolder | Export | Crop | KeyboardShortcuts => free,
+            NewCatalog | OpenCatalog | OpenFolder | Export | Crop | KeyboardShortcuts => free,
             CompareStack => {
                 let on_stack = if loupe {
                     self.has_compare_set()
@@ -84,6 +84,8 @@ impl App {
                 MenuCommand::AutoToneSelection => self.request_bulk(ui::BulkKind::AutoTone),
                 MenuCommand::ScorePhotos => self.score_selection(),
                 MenuCommand::GroupBursts => self.group_bursts(),
+                MenuCommand::NewCatalog => self.new_catalog_dialog(),
+                MenuCommand::OpenCatalog => self.open_catalog_dialog(),
                 _ => {}
             },
         }

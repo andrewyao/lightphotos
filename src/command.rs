@@ -22,6 +22,12 @@ use crate::sidecar::{ColorLabel, ImageRecord, MAX_RATING};
 pub enum Command {
     #[serde(rename = "folder.open")]
     OpenFolder(OpenFolderParams),
+    #[serde(rename = "catalog.new")]
+    NewCatalog(CatalogPathParams),
+    #[serde(rename = "catalog.open")]
+    OpenCatalog(CatalogPathParams),
+    #[serde(rename = "catalog.switch")]
+    SwitchCatalog(CatalogNameParams),
     #[serde(rename = "view.mode")]
     View(ViewParams),
     #[serde(rename = "view.zoom")]
@@ -84,6 +90,21 @@ pub struct PhotosParams {
 #[serde(deny_unknown_fields)]
 pub struct OpenFolderParams {
     pub path: PathBuf,
+}
+
+/// A catalog by path: a `<name>.lightphotos` folder, or a bare name, which
+/// means that catalog in the app's catalog folder.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogPathParams {
+    pub path: PathBuf,
+}
+
+/// A catalog by name: one opened before, or `default`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogNameParams {
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -413,6 +434,9 @@ fn apply_to_record(
             develop(rec, p.apply(adj, size)?);
         }
         Command::OpenFolder(_)
+        | Command::NewCatalog(_)
+        | Command::OpenCatalog(_)
+        | Command::SwitchCatalog(_)
         | Command::View(_)
         | Command::Zoom(_)
         | Command::Select(_)
@@ -699,6 +723,9 @@ impl Command {
         use Command::*;
         match self {
             OpenFolder(_) => "folder.open",
+            NewCatalog(_) => "catalog.new",
+            OpenCatalog(_) => "catalog.open",
+            SwitchCatalog(_) => "catalog.switch",
             View(_) => "view.mode",
             Zoom(_) => "view.zoom",
             Select(_) => "select",
@@ -732,7 +759,8 @@ impl Command {
             Crop(p) => Some(&p.photos),
             Preset(p) => Some(&p.photos),
             Export(p) => Some(&p.photos),
-            OpenFolder(_) | View(_) | Zoom(_) | Select(_) | Navigate(_) | Undo => None,
+            OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
+            | Zoom(_) | Select(_) | Navigate(_) | Undo => None,
         }
     }
 
@@ -742,6 +770,19 @@ impl Command {
         use Command::*;
         match self {
             OpenFolder(_) => ("Open a folder in the Grid.", false),
+            NewCatalog(_) => (
+                "Make an empty catalog at `path` and open it. A bare name goes in the \
+                 app's catalog folder.",
+                false,
+            ),
+            OpenCatalog(_) => (
+                "Open the catalog at `path`, a <name>.lightphotos folder.",
+                false,
+            ),
+            SwitchCatalog(_) => (
+                "Open a catalog by name: one opened before, or `default`.",
+                false,
+            ),
             View(_) => (
                 "Show the Grid, the Loupe, or the Loupe with Develop open.",
                 false,
@@ -784,6 +825,15 @@ impl Command {
         vec![
             Command::OpenFolder(OpenFolderParams {
                 path: PathBuf::from("/Users/me/Pictures/Trip"),
+            }),
+            Command::NewCatalog(CatalogPathParams {
+                path: PathBuf::from("/Users/me/Pictures/LightPhotos/Trip.lightphotos"),
+            }),
+            Command::OpenCatalog(CatalogPathParams {
+                path: PathBuf::from("/Users/me/Pictures/LightPhotos/Trip.lightphotos"),
+            }),
+            Command::SwitchCatalog(CatalogNameParams {
+                name: "default".into(),
             }),
             Command::View(ViewParams { mode: View::Loupe }),
             Command::Zoom(ZoomParams { zoom: Zoom::Fit }),

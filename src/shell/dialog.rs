@@ -31,6 +31,38 @@ pub fn pick_folder() -> Option<PathBuf> {
         .pick_folder()
 }
 
+/// The save dialog for a new catalog, in `dir` (made if missing) with
+/// `Untitled.lightphotos` filled in. `None` when the user cancelled.
+/// Blocks until the dialog closes, so call it only on the main thread.
+pub fn save_catalog(dir: Option<PathBuf>) -> Option<PathBuf> {
+    if headless("catalog save") {
+        return None;
+    }
+    let t = crate::i18n::t();
+    let ext = crate::persist::catalog::EXT;
+    let mut dialog = rfd::FileDialog::new()
+        .set_title(t.catalog_save_title)
+        .set_file_name(format!("{}.{ext}", t.catalog_untitled))
+        .add_filter(t.catalog_filter_name, &[ext]);
+    if let Some(dir) = dir {
+        let _ = std::fs::create_dir_all(&dir);
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file()
+}
+
+/// The folder picker, asking for a `.lightphotos` folder. `None` when the
+/// user cancelled. Blocks until the dialog closes, so call it only on the
+/// main thread.
+pub fn pick_catalog() -> Option<PathBuf> {
+    if headless("catalog") {
+        return None;
+    }
+    rfd::FileDialog::new()
+        .set_title(crate::i18n::t().catalog_picker_title)
+        .pick_folder()
+}
+
 /// Show the OS file picker for Lightroom presets. Empty when the user
 /// cancelled. Blocks until the dialog closes, so call it only on the main
 /// thread.

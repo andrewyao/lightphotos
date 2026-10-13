@@ -142,6 +142,22 @@ impl App {
         self.catalog.folders()
     }
 
+    /// The open catalog's name, for the Folders panel heading.
+    pub(crate) fn catalog_name(&self) -> &str {
+        self.catalog.name()
+    }
+
+    /// Catalogs opened before, newest first.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn recent_catalogs(&self) -> &[crate::persist::catalog::CatalogRef] {
+        &self.recent_catalogs
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn is_open_catalog(&self, at: &crate::persist::catalog::CatalogRef) -> bool {
+        self.catalog.at() == at
+    }
+
     /// Whether `root` wasn't a folder when last checked.
     pub(crate) fn is_missing_root(&self, root: &Path) -> bool {
         self.missing_roots.contains(root)

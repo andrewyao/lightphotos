@@ -171,6 +171,21 @@ impl App {
                 self.open_folder_at(p.path)?;
                 done(0)
             }
+            Command::NewCatalog(p) => {
+                self.create_catalog_at(&p.path)
+                    .map_err(|reason| CommandError::Failed { reason })?;
+                done(0)
+            }
+            Command::OpenCatalog(p) => {
+                self.open_catalog_at(&p.path)
+                    .map_err(|reason| CommandError::Failed { reason })?;
+                done(0)
+            }
+            Command::SwitchCatalog(p) => {
+                self.switch_catalog_named(&p.name)
+                    .map_err(|reason| CommandError::Failed { reason })?;
+                done(0)
+            }
             Command::View(p) => {
                 match p.mode {
                     View::Grid => self.enter_grid(),

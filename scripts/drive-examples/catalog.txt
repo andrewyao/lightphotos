@@ -1,0 +1,23 @@
+# The catalog's copy of the marks, and switching catalogs. Run on a
+# make-fixture.sh folder with --catalog-dir <scratch>, then read
+# <scratch>/default.lightphotos/catalog.json and marks/*.json: the shard
+# holds IMG_0002.jpg at 3 stars with a red label and nothing for IMG_0001.jpg,
+# whose rating was cleared. Each `state` line names the catalog open.
+size 1200 800
+idle
+click-cell 0
+key 4
+click-cell 1
+key 3
+run {"id":"photo.label","params":{"label":"red","on":true,"photos":["IMG_0002.jpg"]}}
+click-cell 0
+key 0
+idle
+state
+run {"id":"catalog.new","params":{"path":"trip"}}
+idle
+state
+run {"id":"catalog.switch","params":{"name":"default"}}
+idle
+state
+quit

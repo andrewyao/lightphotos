@@ -86,6 +86,15 @@ pub enum UiAction {
     /// multi-file picker wired up yet.
     #[cfg(not(target_arch = "wasm32"))]
     ImportLrPresets,
+    /// New Catalog…: the save dialog, then a switch to the new catalog.
+    #[cfg(not(target_arch = "wasm32"))]
+    NewCatalog,
+    /// Open Catalog…: the folder picker, then a switch.
+    #[cfg(not(target_arch = "wasm32"))]
+    OpenCatalog,
+    /// Switch to this catalog from the Folders heading's recent list.
+    #[cfg(not(target_arch = "wasm32"))]
+    SwitchCatalog(crate::persist::catalog::CatalogRef),
     ToggleHelp,
     /// Open the export form, or close it if it is showing.
     ToggleExportForm,
@@ -274,6 +283,8 @@ pub(crate) use develop_panel::rail_button_rect;
 use develop_panel::{draw_develop_panel, draw_develop_rail};
 use export_panel::draw_export_panel;
 pub(crate) use form::Role;
+#[cfg(test)]
+pub(crate) use grid::catalog_heading_label;
 use grid::{draw_grid, draw_left_panel};
 use info_panel::draw_info_panel;
 use loupe::draw_loupe;
