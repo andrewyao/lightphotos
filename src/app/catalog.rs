@@ -7,12 +7,14 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::persist::catalog::Catalog;
+#[cfg(target_arch = "wasm32")]
+use crate::persist::catalog::CatalogRef;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::persist::catalog::{native::default_dir, CatalogRef, DEFAULT_NAME, EXT};
 
-/// `prefs` key holding the last opened catalog's path.
-#[cfg(not(target_arch = "wasm32"))]
-const CATALOG_PREF: &str = "catalog";
+/// `prefs` key holding the last opened catalog's path, or on the web its
+/// name.
+pub(super) const CATALOG_PREF: &str = "catalog";
 /// `prefs` key holding the recent catalogs' paths, newest first.
 #[cfg(not(target_arch = "wasm32"))]
 const RECENT_PREF: &str = "catalogs-recent";
@@ -65,14 +67,21 @@ impl Launch {
         launch
     }
 
-    /// The browser's one in-memory catalog, until its store exists. Its
-    /// roots come from the kept handles, never from the session, so the
-    /// session's list is dead weight there.
+    /// The browser's last catalog, or the default one, its record still to
+    /// come from IndexedDB. `App::poll_catalog_load` lands it. Its first
+    /// record is seeded from the kept handles, never from the session, so
+    /// the session's list is dead weight there.
     #[cfg(all(not(test), target_arch = "wasm32"))]
     pub(super) fn at_startup(_legacy: &[PathBuf]) -> Launch {
+        let last = crate::persist::prefs::load(CATALOG_PREF).map(|name| CatalogRef::named(&name));
+        let (at, fallback) = match last {
+            Some(Ok(at)) => (at, None),
+            Some(Err(e)) => (CatalogRef::default_web(), Some(e)),
+            None => (CatalogRef::default_web(), None),
+        };
         Launch {
-            catalog: Catalog::open_default(),
-            fallback: None,
+            catalog: Catalog::pending(at),
+            fallback,
             legacy_held: true,
         }
     }
@@ -307,29 +316,6 @@ impl App {
         });
         if let Err(e) = saved {
             eprintln!("[catalog] could not save the catalog prefs: {e}");
-        }
-    }
-}
-
-/// The browser has one catalog until its store lands.
-#[cfg(target_arch = "wasm32")]
-impl App {
-    pub(super) fn create_catalog_at(&mut self, _path: &Path) -> Result<(), String> {
-        Err("the browser keeps one catalog".into())
-    }
-
-    pub(super) fn open_catalog_at(&mut self, _path: &Path) -> Result<(), String> {
-        Err("the browser keeps one catalog".into())
-    }
-
-    pub(super) fn switch_catalog_named(&mut self, name: &str) -> Result<(), String> {
-        if name == self.catalog.name() {
-            Ok(())
-        } else {
-            Err(format!(
-                "the browser keeps one catalog, {}",
-                self.catalog.name()
-            ))
         }
     }
 }

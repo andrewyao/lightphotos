@@ -8,8 +8,8 @@
 //!
 //! Natively a catalog is a directory `<name>.lightphotos` holding
 //! `catalog.json` and one `marks/<fnv1a>.json` shard per photo directory.
-//! The browser build keeps one in-memory catalog until its IndexedDB store
-//! lands; `web.rs` is the seam it fills.
+//! The browser keeps each catalog in IndexedDB: a record per catalog and a
+//! shard per photo directory, written by `web.rs`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -40,6 +40,29 @@ pub(crate) const MAX_RECORD_BYTES: usize = 1 << 20;
 pub(crate) const MAX_SHARD_BYTES: usize = 16 << 20;
 /// Folders a catalog may list.
 pub(crate) const MAX_FOLDERS: usize = 1000;
+/// The longest browser catalog name, in characters.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) const MAX_NAME_CHARS: usize = 100;
+
+/// `name` as a browser catalog's name: trimmed, non-empty, at most
+/// [`MAX_NAME_CHARS`], with no `/` (which reads as a path) and no NUL (which
+/// separates the catalog from the directory in a marks key).
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn web_catalog_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a catalog needs a name".into());
+    }
+    if name.chars().count() > MAX_NAME_CHARS {
+        return Err(format!(
+            "a catalog name has at most {MAX_NAME_CHARS} characters"
+        ));
+    }
+    if name.contains(['/', '\0']) {
+        return Err(format!("{name:?} has a / or a NUL in it"));
+    }
+    Ok(name.to_string())
+}
 
 /// A validated catalog location. Natively a directory path whose last
 /// component is `<non-empty stem>.lightphotos`; on the web a non-empty
@@ -66,6 +89,22 @@ impl CatalogRef {
             path: path.to_path_buf(),
             name: stem.to_string(),
         })
+    }
+
+    /// A browser catalog's location: its name, by [`web_catalog_name`].
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn named(name: &str) -> Result<CatalogRef, String> {
+        Ok(CatalogRef {
+            name: web_catalog_name(name)?,
+        })
+    }
+
+    /// The browser's default catalog.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn default_web() -> CatalogRef {
+        CatalogRef {
+            name: DEFAULT_NAME.to_string(),
+        }
     }
 
     /// The catalog `name` would be inside `dir`.
@@ -185,23 +224,27 @@ struct Shard {
 
 /// The folder list, and whether the stored record has arrived. Native reads
 /// it at open; the browser gets it from an async store. Until it lands root
-/// changes stay in memory and merge into the record, never over it.
+/// changes stay in memory and merge into the record, never over it. Only a
+/// `Loaded` record is ever written.
 #[derive(Debug, PartialEq, Eq)]
 enum Record {
     Pending(Vec<PathBuf>),
     Loaded(Vec<PathBuf>),
+    /// The stored record could not be read or will not parse. The folders
+    /// live in memory for this visit and the record stays as it is.
+    Unreadable(Vec<PathBuf>),
 }
 
 impl Record {
     fn folders(&self) -> &[PathBuf] {
         match self {
-            Record::Pending(f) | Record::Loaded(f) => f,
+            Record::Pending(f) | Record::Loaded(f) | Record::Unreadable(f) => f,
         }
     }
 
     fn folders_mut(&mut self) -> &mut Vec<PathBuf> {
         match self {
-            Record::Pending(f) | Record::Loaded(f) => f,
+            Record::Pending(f) | Record::Loaded(f) | Record::Unreadable(f) => f,
         }
     }
 }
@@ -226,8 +269,8 @@ pub(crate) struct Catalog {
     /// Signature of the shard last queued per photo directory, so a
     /// projection that changed nothing writes nothing.
     written: HashMap<PathBuf, u64>,
-    /// `None` for a catalog that is never written: a test's, or the web's
-    /// until its store exists.
+    /// `None` for a catalog that is never written, a test's. The browser's
+    /// writes go through `web.rs`'s page-wide queue.
     #[cfg(not(target_arch = "wasm32"))]
     writer: Option<native::Writer>,
     last_error: Option<String>,
@@ -256,7 +299,6 @@ impl Catalog {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn at(&self) -> &CatalogRef {
         &self.at
     }
@@ -316,6 +358,44 @@ impl Catalog {
         }
     }
 
+    /// Whether the stored record has yet to arrive.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn loading(&self) -> bool {
+        matches!(self.folders, Record::Pending(_))
+    }
+
+    /// The browser's stored record arrived: its JSON, `None` when there is
+    /// none yet, or why it could not be read. A missing record is made from
+    /// `seed` and the folders added while it was pending. One that cannot be
+    /// read or parsed is an error, and the catalog never writes over it.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn land_record(
+        &mut self,
+        stored: Result<Option<Vec<u8>>, String>,
+        seed: &[PathBuf],
+    ) -> Result<(), String> {
+        let parsed = stored.and_then(|bytes| bytes.map(|b| parse_record(&b)).transpose());
+        match parsed {
+            Ok(Some(folders)) => self.load_record(folders),
+            Ok(None) => {
+                let mut folders = Vec::new();
+                for dir in seed.iter().chain(self.folders.folders()) {
+                    if folders.len() < MAX_FOLDERS {
+                        add_root(&mut folders, dir);
+                    }
+                }
+                self.folders = Record::Loaded(folders);
+                self.save_record();
+            }
+            Err(e) => {
+                let folders = std::mem::take(self.folders.folders_mut());
+                self.folders = Record::Unreadable(folders);
+                return Err(format!("{}: {e}", self.name()));
+            }
+        }
+        Ok(())
+    }
+
     /// The latest persist failure, each returned once.
     pub(crate) fn take_error(&mut self) -> Option<String> {
         self.last_error.take()
@@ -362,9 +442,9 @@ fn signature(bytes: &[u8]) -> u64 {
     h.finish().max(1)
 }
 
-/// `marks/<fnv1a of the path>.json`, the shard file name for `dir`.
-// The web stub keeps no shards yet, so only native reads these.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+/// `marks/<fnv1a of the path>.json`, the shard file name for `dir`. The
+/// browser keys its shards by the path itself.
+#[cfg(not(target_arch = "wasm32"))]
 fn shard_name(dir: &Path) -> String {
     let mut h = crate::hash::Fnv1a::new();
     h.write(dir.to_string_lossy().as_bytes());
@@ -389,7 +469,6 @@ fn parse_shard(bytes: &[u8], dir: &Path) -> Result<DirMarks, String> {
 }
 
 /// Parse `catalog.json`'s bytes.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn parse_record(bytes: &[u8]) -> Result<Vec<PathBuf>, String> {
     if bytes.len() > MAX_RECORD_BYTES {
         return Err(format!("{} bytes is over the catalog limit", bytes.len()));
@@ -405,7 +484,6 @@ fn parse_record(bytes: &[u8]) -> Result<Vec<PathBuf>, String> {
     Ok(folders)
 }
 
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn record_bytes(folders: &[PathBuf]) -> Result<Vec<u8>, String> {
     serde_json::to_vec(&RecordFile {
         v: VERSION,
@@ -455,6 +533,66 @@ mod tests {
             paths(&["/added/while/pending", "/stored"]).as_slice()
         );
         assert!(matches!(cat.folders, Record::Loaded(_)));
+    }
+
+    #[test]
+    fn a_web_catalog_name_is_trimmed_and_refuses_paths_nul_and_length() {
+        assert_eq!(web_catalog_name("  Trip 2024 ").unwrap(), "Trip 2024");
+        assert_eq!(web_catalog_name("旅行").unwrap(), "旅行");
+        for bad in ["", "   ", "a/b", "/", "a\0b"] {
+            assert!(web_catalog_name(bad).is_err(), "{bad:?}");
+        }
+        let longest = "é".repeat(MAX_NAME_CHARS);
+        assert_eq!(web_catalog_name(&longest).unwrap(), longest);
+        assert!(web_catalog_name(&format!("{longest}x")).is_err());
+    }
+
+    /// The browser's first visit: no record yet, so the kept folders and
+    /// any picked while it loaded become the record, and it is written.
+    #[test]
+    fn a_missing_record_is_made_from_the_seed_and_the_pending_roots() {
+        let dir = crate::app::test_support::temp_folder("land-missing");
+        let at = CatalogRef::in_dir(&dir, "c").unwrap();
+        let mut cat = Catalog::create_at(at.clone(), Vec::new()).unwrap();
+        cat.folders = Record::Pending(paths(&["/picked"]));
+        assert!(cat.loading());
+        cat.land_record(Ok(None), &paths(&["/kept/b", "/kept/a"]))
+            .unwrap();
+        assert!(!cat.loading());
+        assert_eq!(cat.folders(), paths(&["/kept/a", "/kept/b", "/picked"]));
+        cat.flush_blocking(std::time::Duration::from_secs(10));
+        drop(cat);
+        assert_eq!(
+            Catalog::open(at).unwrap().folders(),
+            paths(&["/kept/a", "/kept/b", "/picked"])
+        );
+    }
+
+    /// A stored record that won't parse, or couldn't be read, keeps its
+    /// roots in memory and is never written over, however they change.
+    #[test]
+    fn an_unreadable_record_is_an_error_and_never_overwritten() {
+        let dir = crate::app::test_support::temp_folder("land-bad");
+        let at = CatalogRef::in_dir(&dir, "c").unwrap();
+        let mut cat = Catalog::create_at(at.clone(), paths(&["/on/disk"])).unwrap();
+        cat.flush_blocking(std::time::Duration::from_secs(10));
+        let file = at.path().join("catalog.json");
+        let before = std::fs::read(&file).unwrap();
+        for stored in [
+            Ok(Some(b"{\"v\":1,\"folders\":".to_vec())),
+            Ok(Some(b"null".to_vec())),
+            Err("IndexedDB is unavailable".to_string()),
+        ] {
+            cat.folders = Record::Pending(paths(&["/picked"]));
+            let why = cat.land_record(stored, &paths(&["/seed"])).unwrap_err();
+            assert!(why.starts_with("c: "), "{why}");
+            assert!(!cat.loading(), "the restore must not wait forever");
+            assert_eq!(cat.folders(), paths(&["/picked"]), "the seed is unused");
+            assert!(cat.add_folder(Path::new("/added")));
+            assert!(cat.remove_folder(Path::new("/picked")));
+            cat.flush_blocking(std::time::Duration::from_secs(10));
+            assert_eq!(std::fs::read(&file).unwrap(), before);
+        }
     }
 
     #[test]

@@ -105,10 +105,9 @@ pub(crate) struct Web {
     full_cjk_requested: Arc<std::sync::atomic::AtomicBool>,
     folder_tx: Sender<(u64, Result<crate::web::web_fs::PickedFolder, String>)>,
     folder_rx: Receiver<(u64, Result<crate::web::web_fs::PickedFolder, String>)>,
-    /// The names of the folders kept from earlier visits, read once at
-    /// startup so the Folders list shows them before any is allowed. `None`
-    /// once they have landed.
-    saved_folders_rx: Option<Receiver<Result<Vec<PathBuf>, String>>>,
+    /// The browser's catalogs: the open one's load, the list, New Catalog's
+    /// prompt.
+    pub(super) catalogs: super::web_catalog::State,
     /// File handles for the listed folders' images, keyed like the playlist
     /// entries. A picked folder has no OS path, so every read goes through these.
     file_handles: HashMap<PathBuf, web_sys::FileSystemFileHandle>,
@@ -202,12 +201,8 @@ impl Web {
         let (dirlist_tx, dirlist_rx) = std::sync::mpsc::channel();
         let (export_tx, export_rx) = std::sync::mpsc::channel();
         let (paste_tx, paste_rx) = std::sync::mpsc::channel();
-        let (saved_tx, saved_rx) = std::sync::mpsc::channel();
-        wasm_bindgen_futures::spawn_local(async move {
-            let _ = saved_tx.send(web_fs::saved_folder_names().await);
-        });
         Self {
-            saved_folders_rx: Some(saved_rx),
+            catalogs: super::web_catalog::State::new(),
             session_restore: None,
             folder_pending: false,
             folder_generation: 0,
@@ -277,11 +272,6 @@ impl Web {
 
     pub(super) fn folder_pending(&self) -> bool {
         self.folder_pending
-    }
-
-    /// True until the kept folders' names have landed in the Folders list.
-    pub(super) fn saved_folders_pending(&self) -> bool {
-        self.saved_folders_rx.is_some()
     }
 
     /// Text pasted since the last frame.
@@ -502,11 +492,14 @@ impl App {
     }
 
     /// Drop every handle, listing and cache index under `root`, and stop
-    /// keeping it for later visits. Its files stay.
+    /// keeping it for later visits unless another catalog lists it. Its
+    /// files stay.
     pub(super) fn forget_web_root(&mut self, root: &Path) {
         self.drop_web_root_handles(root);
-        let name = root.to_string_lossy().into_owned();
-        wasm_bindgen_futures::spawn_local(web_fs::forget_folder(name));
+        wasm_bindgen_futures::spawn_local(crate::web::web_catalog_idb::forget_folder_if_unlisted(
+            self.catalog.name().to_string(),
+            root.to_path_buf(),
+        ));
     }
 
     fn drop_web_root_handles(&mut self, root: &Path) {
@@ -516,37 +509,11 @@ impl App {
         self.subdirs.retain(|p, _| !p.starts_with(root));
     }
 
-    /// Adds the folders kept from earlier visits to the Folders list once
-    /// their names land. Returns true until they have.
-    fn poll_saved_folders(&mut self) -> bool {
-        let Some(rx) = &self.web.saved_folders_rx else {
-            return false;
-        };
-        let names = match rx.try_recv() {
-            Ok(names) => names,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(Vec::new()),
-        };
-        self.web.saved_folders_rx = None;
-        match names {
-            Ok(names) => {
-                for name in &names {
-                    self.catalog.add_folder(name);
-                }
-                self.request_redraw();
-            }
-            Err(e) => web_sys::console::warn_1(
-                &format!("[web] could not read the kept folders: {e}").into(),
-            ),
-        }
-        false
-    }
-
     /// Loads a finished pick through `load_playlist`, like native
-    /// `load_folder`. Returns true while a pick is still open or the kept
-    /// folders' names are still loading.
+    /// `load_folder`. Returns true while a pick is still open or the
+    /// catalog's record is still loading.
     pub(crate) fn poll_folder_pick(&mut self) -> bool {
-        let saved_pending = self.poll_saved_folders();
+        let catalog_pending = self.poll_catalog_load();
         while let Ok((generation, result)) = self.web.folder_rx.try_recv() {
             // A request the user made since superseded this one.
             if generation != self.web.folder_generation {
@@ -614,7 +581,7 @@ impl App {
             }
             self.request_redraw();
         }
-        self.web.folder_pending || saved_pending
+        self.web.folder_pending || catalog_pending
     }
 
     /// The wasm32 version of `request_working_thumbs`. Reads each missing

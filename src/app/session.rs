@@ -161,13 +161,6 @@ impl App {
     /// Save the session when it has changed since the last save. Cheap enough
     /// to run once per event-loop turn.
     pub(crate) fn save_session_if_changed(&mut self) {
-        // The web's Folders list fills once the kept names land. A save
-        // before then would record no folders, and the startup restore
-        // would then find no folder to reopen.
-        #[cfg(target_arch = "wasm32")]
-        if self.web.saved_folders_pending() {
-            return;
-        }
         let Some(now) = self.current_session() else {
             return;
         };
@@ -183,9 +176,15 @@ impl App {
     pub(crate) fn restore_last_session(&mut self) {
         #[cfg(not(target_arch = "wasm32"))]
         let exists = Path::is_dir;
-        // The browser lists a kept folder only once it allows it again.
+        // The browser's roots arrive with the catalog's record. A root it
+        // keeps a handle for lists once it allows it again; one it doesn't
+        // is missing.
         #[cfg(target_arch = "wasm32")]
-        let exists = |_: &Path| true;
+        if self.restore_waits_for_catalog() {
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        let exists = |root: &Path| !self.missing_roots.contains(root);
         let Some(session) = to_restore(self.session.as_ref(), self.catalog.folders(), exists)
         else {
             return;

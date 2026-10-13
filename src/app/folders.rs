@@ -1,8 +1,8 @@
 //! The folders the user has added: the tops of the folder tree. The list is
 //! the open catalog's, remembered across launches so the landing page can
-//! list them. On the web the catalog is in memory and the list is the
-//! folders `web_fs` keeps in IndexedDB, each of which the browser must
-//! allow again on a later visit.
+//! list them. On the web the catalog lists folders by the names `web_fs`
+//! keeps their handles under, each of which the browser must allow again on
+//! a later visit.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 
 /// Those of `roots` that aren't a folder right now. Empty on the web, whose
-/// kept folders `poll_saved_folders` adds once they load.
+/// missing roots land with the catalog's record in `poll_catalog_load`.
 pub(super) fn missing_among(roots: &[PathBuf]) -> HashSet<PathBuf> {
     if cfg!(target_arch = "wasm32") {
         return HashSet::new();

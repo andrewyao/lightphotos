@@ -190,6 +190,58 @@ pub(super) fn preset_name_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput)
     }
 }
 
+/// Names a new browser catalog, in the preset prompt's shape. Native New
+/// Catalog… is a save dialog instead.
+#[cfg(target_arch = "wasm32")]
+pub(super) fn catalog_name_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
+    let Some(name) = app.catalog_name_edit() else {
+        return;
+    };
+    let t = t();
+    let mut text = name.to_string();
+    let resp = form::dialog(ui.ctx(), "catalog_name", form::DIALOG_WIDTH, |ui| {
+        form::title(ui, t.catalog_save_title);
+        let form = Form::new(ui, &[t.catalog_name_label]);
+        let mut field = None;
+        form.section(ui, "", |ui| {
+            form.row(ui, t.catalog_name_label, |ui| {
+                field = Some(
+                    ui.add(
+                        egui::TextEdit::singleline(&mut text)
+                            .hint_text(t.catalog_name_hint)
+                            .char_limit(crate::persist::catalog::MAX_NAME_CHARS)
+                            .desired_width(f32::INFINITY),
+                    ),
+                );
+            });
+        });
+        let mut entered = false;
+        if let Some(field) = field {
+            if field.changed() {
+                out.actions.push(UiAction::SetCatalogNameText(text.clone()));
+            }
+            // As in `preset_name_modal`: read Enter before asking for focus.
+            entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if !entered && !field.has_focus() {
+                field.request_focus();
+            }
+        }
+        let buttons = [
+            Button::new(t.cancel, Role::Cancel),
+            Button::new(t.create, Role::Primary),
+        ];
+        match form::footer(ui, &buttons) {
+            Some(Role::Cancel) => out.actions.push(UiAction::CancelCatalogName),
+            Some(_) => out.actions.push(UiAction::CommitCatalogName),
+            None if entered => out.actions.push(UiAction::CommitCatalogName),
+            None => {}
+        }
+    });
+    if resp.should_close() {
+        out.actions.push(UiAction::CancelCatalogName);
+    }
+}
+
 /// The keyboard-shortcut list, toggled by `?`.
 pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     if !app.show_help() {

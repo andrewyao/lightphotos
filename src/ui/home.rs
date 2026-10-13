@@ -18,6 +18,8 @@ pub(super) fn draw_home(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     status_toast(ui, app);
     help_modal(ui, app, out);
     settings_modal(ui, app, out);
+    #[cfg(target_arch = "wasm32")]
+    modals::catalog_name_modal(ui, app, out);
 }
 
 /// The left panel's width, the Grid's minimum for its folder tree.

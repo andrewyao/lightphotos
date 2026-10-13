@@ -84,6 +84,9 @@ fn finish_window_setup(
     app.egui_state = Some(egui_state);
     #[cfg(target_arch = "wasm32")]
     web::analytics::started();
+    // The browser's catalog record is async; the restore below waits on it.
+    #[cfg(target_arch = "wasm32")]
+    app.start_catalog_load(true);
 
     if let Some(path) = app.pending_initial.take() {
         jobs::loader::mark("opening initial path");

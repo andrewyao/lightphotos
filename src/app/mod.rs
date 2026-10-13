@@ -655,9 +655,9 @@ pub(crate) struct App {
 
     /// The open catalog: the tops of the folder tree, sorted, every folder
     /// the user has added and an opened file's parent, plus the marks copy.
-    /// Remembered across launches natively; on the web, in memory, holding
-    /// the picked folders. `pub(crate)` because the frame loop drives its
-    /// write queue directly.
+    /// Remembered across launches, natively on disk and on the web in
+    /// IndexedDB. `pub(crate)` because the frame loop drives its write queue
+    /// directly.
     pub(crate) catalog: crate::persist::catalog::Catalog,
     /// The folder store's `marks_revision` the catalog's copy last took.
     marks_synced: u64,
@@ -755,6 +755,8 @@ mod thumbs;
 mod tour;
 #[cfg(target_arch = "wasm32")]
 mod web;
+#[cfg(target_arch = "wasm32")]
+mod web_catalog;
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::browser_is_mac;
 
@@ -1394,12 +1396,16 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::ImportLrPresets => self.import_lr_presets(),
-                #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::NewCatalog => self.new_catalog_dialog(),
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::OpenCatalog => self.open_catalog_dialog(),
-                #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::SwitchCatalog(at) => self.open_catalog(at),
+                #[cfg(target_arch = "wasm32")]
+                ui::UiAction::SetCatalogNameText(text) => self.set_catalog_name_text(text),
+                #[cfg(target_arch = "wasm32")]
+                ui::UiAction::CommitCatalogName => self.commit_catalog_name(),
+                #[cfg(target_arch = "wasm32")]
+                ui::UiAction::CancelCatalogName => self.cancel_catalog_name(),
                 ui::UiAction::ToggleHelp => {
                     self.show_help = !self.show_help;
                     self.request_redraw();

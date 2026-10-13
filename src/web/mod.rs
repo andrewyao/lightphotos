@@ -7,6 +7,8 @@ pub(crate) mod analytics;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod web_canvas;
 #[cfg(target_arch = "wasm32")]
+pub(crate) mod web_catalog_idb;
+#[cfg(target_arch = "wasm32")]
 pub(crate) mod web_decode;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod web_export_fs;

@@ -39,24 +39,26 @@ pub struct PickedFolder {
 pub async fn pick_and_list_folder() -> Result<PickedFolder, String> {
     let window = web_sys::window().ok_or("no window")?;
     // tools/web-bench hands over an OPFS folder here, since an automated
-    // browser cannot drive the native picker.
-    if let Ok(root) = js_sys::Reflect::get(&window, &"__lpTestRoot".into()) {
-        if !root.is_undefined() {
-            let handle: FileSystemDirectoryHandle = root.unchecked_into();
-            let name = handle.name();
-            return list_root(handle, name).await;
+    // browser cannot drive the native picker. It is kept like a picked one,
+    // so a reload finds it.
+    let test_root = js_sys::Reflect::get(&window, &"__lpTestRoot".into())
+        .ok()
+        .filter(|root| !root.is_undefined());
+    let handle: FileSystemDirectoryHandle = match test_root {
+        Some(root) => root.unchecked_into(),
+        None => {
+            let opts = DirectoryPickerOptions::new();
+            opts.set_mode(FileSystemPermissionMode::Readwrite);
+            JsFuture::from(
+                window
+                    .show_directory_picker_with_options(&opts)
+                    .map_err(|e| js_error_string(&e))?,
+            )
+            .await
+            .map_err(|e| js_error_string(&e))?
+            .unchecked_into()
         }
-    }
-    let opts = DirectoryPickerOptions::new();
-    opts.set_mode(FileSystemPermissionMode::Readwrite);
-    let handle: FileSystemDirectoryHandle = JsFuture::from(
-        window
-            .show_directory_picker_with_options(&opts)
-            .map_err(|e| js_error_string(&e))?,
-    )
-    .await
-    .map_err(|e| js_error_string(&e))?
-    .unchecked_into();
+    };
     // The Folders list needs this handle after a reload. Losing it costs
     // only that, so it doesn't fail the pick. The keep runs in IndexedDB
     // while the listing runs: the promise starts as soon as it is made, and
@@ -103,15 +105,6 @@ pub async fn saved_folder_names() -> Result<Vec<PathBuf>, String> {
         .filter_map(|n| n.as_string())
         .map(PathBuf::from)
         .collect())
-}
-
-/// Stop keeping a folder. Its files stay as they are.
-pub async fn forget_folder(name: String) {
-    if let Err(e) = JsFuture::from(forget_folder_js(&name)).await {
-        web_sys::console::warn_1(
-            &format!("[web] could not forget the folder: {}", js_error_string(&e)).into(),
-        );
-    }
 }
 
 /// List `handle` as the root called `name`, which is unique among the
@@ -247,9 +240,6 @@ export async function grantedFolder(name, ask) {
   }
   return handle;
 }
-export async function forgetFolder(name) {
-  await run("readwrite", (s) => { s.delete(PREFIX + name); });
-}
 "#)]
 extern "C" {
     #[wasm_bindgen(js_name = keepFolder)]
@@ -258,8 +248,6 @@ extern "C" {
     fn granted_folder(name: &str, ask: bool) -> js_sys::Promise;
     #[wasm_bindgen(js_name = savedFolderNames)]
     fn saved_folder_names_js() -> js_sys::Promise;
-    #[wasm_bindgen(js_name = forgetFolder)]
-    fn forget_folder_js(name: &str) -> js_sys::Promise;
 }
 
 /// The image files and immediate subdirectories of one directory handle.
@@ -364,7 +352,7 @@ pub async fn file_bytes(file: &web_sys::File) -> Result<Vec<u8>, String> {
 
 /// The `message` of a thrown JS value (usually a `DOMException` such as
 /// `AbortError` on picker cancel), or its debug form.
-fn js_error_string(e: &JsValue) -> String {
+pub(crate) fn js_error_string(e: &JsValue) -> String {
     js_sys::Reflect::get(e, &"message".into())
         .ok()
         .and_then(|v| v.as_string())

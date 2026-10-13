@@ -153,7 +153,12 @@ impl App {
         &self.recent_catalogs
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Every catalog in this browser, by name.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn recent_catalogs(&self) -> &[crate::persist::catalog::CatalogRef] {
+        self.known_catalogs()
+    }
+
     pub(crate) fn is_open_catalog(&self, at: &crate::persist::catalog::CatalogRef) -> bool {
         self.catalog.at() == at
     }
@@ -215,6 +220,15 @@ impl App {
             && !self.confirm_open()
             && !self.cropping()
             && !self.show_settings
+            && !self.catalog_prompt_open()
+    }
+
+    /// Whether the browser's New Catalog name prompt is up.
+    pub(crate) fn catalog_prompt_open(&self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        return self.catalog_name_edit().is_some();
+        #[cfg(not(target_arch = "wasm32"))]
+        false
     }
 
     pub(crate) fn autotone_centering(&self) -> crate::autotone::Centering {

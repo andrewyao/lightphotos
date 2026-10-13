@@ -157,6 +157,15 @@ impl App {
             }
             return;
         }
+        #[cfg(target_arch = "wasm32")]
+        if self.catalog_prompt_open() {
+            match code {
+                KeyCode::Escape => self.cancel_catalog_name(),
+                KeyCode::Enter | KeyCode::NumpadEnter => self.commit_catalog_name(),
+                _ => {}
+            }
+            return;
+        }
 
         // While the export form is open, Enter runs it and Escape closes it.
         // Other keys still act, so the selection can change under the form.

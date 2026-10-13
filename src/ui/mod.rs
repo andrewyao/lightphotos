@@ -86,15 +86,21 @@ pub enum UiAction {
     /// multi-file picker wired up yet.
     #[cfg(not(target_arch = "wasm32"))]
     ImportLrPresets,
-    /// New Catalog…: the save dialog, then a switch to the new catalog.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// New Catalog…: the save dialog, or on the web the name prompt, then a
+    /// switch to the new catalog.
     NewCatalog,
     /// Open Catalog…: the folder picker, then a switch.
     #[cfg(not(target_arch = "wasm32"))]
     OpenCatalog,
-    /// Switch to this catalog from the Folders heading's recent list.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Switch to this catalog from the Folders heading's list.
     SwitchCatalog(crate::persist::catalog::CatalogRef),
+    /// A keystroke in New Catalog's name prompt, and its two ways out.
+    #[cfg(target_arch = "wasm32")]
+    SetCatalogNameText(String),
+    #[cfg(target_arch = "wasm32")]
+    CommitCatalogName,
+    #[cfg(target_arch = "wasm32")]
+    CancelCatalogName,
     ToggleHelp,
     /// Open the export form, or close it if it is showing.
     ToggleExportForm,
@@ -347,6 +353,8 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     delete_group_modal(ui, app, &mut out);
     delete_preset_modal(ui, app, &mut out);
     preset_name_modal(ui, app, &mut out);
+    #[cfg(target_arch = "wasm32")]
+    modals::catalog_name_modal(ui, app, &mut out);
     help_modal(ui, app, &mut out);
     settings_modal(ui, app, &mut out);
     copy_settings_modal(ui, app, &mut out);

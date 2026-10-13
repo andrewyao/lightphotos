@@ -201,7 +201,12 @@ pub struct Strings {
     pub remove_folder: &'static str,
     /// Hover text on a Folders root that isn't there, such as on an
     /// unplugged drive. Takes the folder's path.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub folder_missing: fn(&str) -> String,
+    /// The same on the web, for a root whose access this browser no longer
+    /// keeps. Takes the folder's name.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub folder_not_kept: fn(&str) -> String,
     /// The home page's empty actions bar.
     pub select_photos_hint: &'static str,
 
@@ -675,6 +680,14 @@ pub struct Strings {
     pub catalog_untitled: &'static str,
     pub catalog_filter_name: &'static str,
     pub catalog_picker_title: &'static str,
+    /// The browser's New Catalog prompt: its field's label and hint, and
+    /// the button that makes the catalog.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub catalog_name_label: &'static str,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub catalog_name_hint: &'static str,
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub create: &'static str,
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     pub preview_failed: fn(&str) -> String,
     /// The group tiles' page, as first, last and group size.
@@ -938,6 +951,7 @@ pub static EN: Strings = Strings {
     add_folder_tip: "Add a folder of photos (Cmd+O)",
     remove_folder: "Remove Folder from LightPhotos",
     folder_missing: |folder| format!("{folder} can't be found. Reconnect its drive, or right-click to remove it."),
+    folder_not_kept: |folder| format!("This browser no longer has access to {folder}. Add it again, or right-click to remove it."),
     select_photos_hint: "Select photos to rate, stack and export them here.",
     tour: "Tour",
     tour_tip: "A quick tour of where everything is",
@@ -1596,6 +1610,9 @@ pub static EN: Strings = Strings {
     catalog_untitled: "Untitled",
     catalog_filter_name: "LightPhotos catalog",
     catalog_picker_title: "Choose a catalog (a .lightphotos folder)",
+    catalog_name_label: "Name",
+    catalog_name_hint: "Catalog name",
+    create: "Create",
     preview_failed: |path| format!("Unable to load Loupe preview for {path}"),
     group_page: |first, last, n| format!("{first}–{last} of {n}"),
     tile_load: "Load Photos:",
@@ -1754,6 +1771,7 @@ pub static ZH: Strings = Strings {
     add_folder_tip: "添加照片文件夹 (Cmd+O)",
     remove_folder: "从 LightPhotos 中移除文件夹",
     folder_missing: |folder| format!("找不到 {folder}。请重新连接，或右键点按将其移除。"),
+    folder_not_kept: |folder| format!("此浏览器已不能打开 {folder}。请重新添加，或右键点按将其移除。"),
     select_photos_hint: "选择照片后，可以在这里评分、堆叠和导出。",
     tour: "导览",
     tour_tip: "快速了解各项功能的位置",
@@ -2382,6 +2400,9 @@ pub static ZH: Strings = Strings {
     catalog_untitled: "未命名",
     catalog_filter_name: "LightPhotos 目录",
     catalog_picker_title: "选择目录（.lightphotos 文件夹）",
+    catalog_name_label: "名称",
+    catalog_name_hint: "目录名称",
+    create: "创建",
     preview_failed: |path| format!("无法加载 {path} 的预览"),
     group_page: |first, last, n| format!("{first}–{last} / {n} 张"),
     tile_load: "加载照片：",

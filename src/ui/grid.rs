@@ -27,44 +27,37 @@ pub(crate) fn catalog_heading_label(name: &str) -> String {
     format!("{name} \u{25BE}")
 }
 
-/// The catalog's name over the tree. Natively a dropdown that makes or
-/// opens a catalog or switches to a recent one; the browser has one.
+/// The catalog's name over the tree, as a dropdown that makes a catalog,
+/// natively opens one, and switches to a recent one, or on the web to any
+/// catalog in this browser.
 fn catalog_heading(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = crate::i18n::t();
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        ui.menu_button(catalog_heading_label(app.catalog_name()), |ui| {
-            if ui.button(t.new_catalog).clicked() {
-                out.actions.push(UiAction::NewCatalog);
-                ui.close();
-            }
-            if ui.button(t.open_catalog).clicked() {
-                out.actions.push(UiAction::OpenCatalog);
-                ui.close();
-            }
-            let recent = app.recent_catalogs();
-            if !recent.is_empty() {
-                ui.separator();
-            }
-            for at in recent {
-                let open = app.is_open_catalog(at);
-                if ui.selectable_label(open, at.name()).clicked() {
-                    if !open {
-                        out.actions.push(UiAction::SwitchCatalog(at.clone()));
-                    }
-                    ui.close();
+    ui.menu_button(catalog_heading_label(app.catalog_name()), |ui| {
+        if ui.button(t.new_catalog).clicked() {
+            out.actions.push(UiAction::NewCatalog);
+            ui.close();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui.button(t.open_catalog).clicked() {
+            out.actions.push(UiAction::OpenCatalog);
+            ui.close();
+        }
+        let recent = app.recent_catalogs();
+        if !recent.is_empty() {
+            ui.separator();
+        }
+        for at in recent {
+            let open = app.is_open_catalog(at);
+            if ui.selectable_label(open, at.name()).clicked() {
+                if !open {
+                    out.actions.push(UiAction::SwitchCatalog(at.clone()));
                 }
+                ui.close();
             }
-        })
-        .response
-        .on_hover_text(t.catalog_tip);
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = out;
-        ui.label(catalog_heading_label(app.catalog_name()))
-            .on_hover_text(t.catalog_tip);
-    }
+        }
+    })
+    .response
+    .on_hover_text(t.catalog_tip);
     ui.add_space(font_size::px(ui.style(), form::ROW_GAP));
 }
 
@@ -282,6 +275,15 @@ fn disclosure_triangle(ui: &mut egui::Ui, expanded: bool) -> egui::Response {
     response
 }
 
+/// Why a missing root greys out: natively an unplugged drive, on the web
+/// a folder this browser no longer keeps access to.
+fn missing_tip(folder: &str) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    return (crate::i18n::t().folder_missing)(folder);
+    #[cfg(target_arch = "wasm32")]
+    return (crate::i18n::t().folder_not_kept)(folder);
+}
+
 /// One folder row. Recurses into expanded folders. A root's row also has a
 /// right-click menu to remove it, and a root that isn't there right now is
 /// greyed out and doesn't open.
@@ -300,9 +302,7 @@ fn folder_node(ui: &mut egui::Ui, app: &App, path: &Path, depth: usize, out: &mu
                     false,
                     egui::RichText::new(name).weak(),
                 ))
-                .on_hover_text((crate::i18n::t().folder_missing)(
-                    &path.display().to_string(),
-                ));
+                .on_hover_text(missing_tip(&path.display().to_string()));
             if label.clicked() {
                 // Checks again, in case the drive is back.
                 out.actions.push(UiAction::OpenFolder(path.to_path_buf()));

@@ -1071,6 +1071,11 @@ impl App {
         }
         #[cfg(target_arch = "wasm32")]
         {
+            // A catalog root this browser keeps no handle for can't open;
+            // only picking it again can.
+            if self.missing_roots.contains(&path) {
+                return;
+            }
             self.supersede_web_pending_nav();
             if !self.subdirs.contains_key(&path) {
                 self.defer_web_nav(crate::app::WebPendingNav::Open(path.clone()));
