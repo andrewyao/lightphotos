@@ -299,6 +299,7 @@ use toolbar::{grid_toolbar, selection_bar};
 pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     let mut out = FrameOutput::default();
     app.clear_cell_rects();
+    app.show_launch_notice();
 
     // Drawn first and on every screen, so the Open button never moves.
     app_header(ui, &mut out);

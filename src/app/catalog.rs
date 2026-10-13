@@ -29,6 +29,11 @@ pub(super) struct Launch {
     /// Catalogs opened before, newest first.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) recent: Vec<CatalogRef>,
+    /// The Folders list an older build kept in the session is now held by
+    /// a default catalog on disk, so the session may drop it. Until then
+    /// every session save keeps it, so a launch that cannot make the
+    /// default loses nothing.
+    pub(super) legacy_held: bool,
 }
 
 impl Launch {
@@ -39,6 +44,7 @@ impl Launch {
             catalog: Catalog::in_memory(DEFAULT_NAME),
             fallback: None,
             recent: Vec::new(),
+            legacy_held: true,
         }
     }
 
@@ -59,19 +65,22 @@ impl Launch {
         launch
     }
 
-    /// The browser's one in-memory catalog, until its store exists.
+    /// The browser's one in-memory catalog, until its store exists. Its
+    /// roots come from the kept handles, never from the session, so the
+    /// session's list is dead weight there.
     #[cfg(all(not(test), target_arch = "wasm32"))]
     pub(super) fn at_startup(_legacy: &[PathBuf]) -> Launch {
         Launch {
             catalog: Catalog::open_default(),
             fallback: None,
+            legacy_held: true,
         }
     }
 }
 
 /// Put `at` at the head of `recent`, once, keeping [`RECENT_MAX`].
 #[cfg(not(target_arch = "wasm32"))]
-fn note_recent(recent: &mut Vec<CatalogRef>, at: &CatalogRef) {
+pub(super) fn note_recent(recent: &mut Vec<CatalogRef>, at: &CatalogRef) {
     recent.retain(|r| r != at);
     recent.insert(0, at.clone());
     recent.truncate(RECENT_MAX);
@@ -82,30 +91,40 @@ fn note_recent(recent: &mut Vec<CatalogRef>, at: &CatalogRef) {
 /// the next launch.
 #[cfg(not(target_arch = "wasm32"))]
 fn launch(last: Option<&Path>, default_dir: Option<&Path>, legacy: &[PathBuf]) -> Launch {
+    let default_at = default_dir
+        .ok_or_else(|| "no home directory for the default catalog".to_string())
+        .and_then(|dir| CatalogRef::in_dir(dir, DEFAULT_NAME).map_err(|e| e.to_string()));
     let mut fallback = None;
     if let Some(last) = last {
         match CatalogRef::parse(last).and_then(Catalog::open) {
             Ok(catalog) => {
+                // The default was seeded by the launch that made it; only
+                // its absence means the list still has nowhere else to live.
+                let legacy_held = legacy.is_empty()
+                    || default_at
+                        .as_ref()
+                        .is_ok_and(|at| Catalog::open(at.clone()).is_ok());
                 return Launch {
                     catalog,
                     fallback: None,
                     recent: Vec::new(),
-                }
+                    legacy_held,
+                };
             }
             Err(e) => fallback = Some(e.to_string()),
         }
     }
-    let default = default_dir
-        .ok_or_else(|| "no home directory for the default catalog".to_string())
-        .and_then(|dir| CatalogRef::in_dir(dir, DEFAULT_NAME).map_err(|e| e.to_string()))
+    let default = default_at
         .and_then(|at| Catalog::open_or_create(at, legacy.to_vec()).map_err(|e| e.to_string()));
     match default {
         Ok(catalog) => Launch {
             catalog,
             fallback,
             recent: Vec::new(),
+            legacy_held: true,
         },
-        // Nothing can be saved, but the user keeps the folders they had.
+        // Nothing can be saved, but the user keeps the folders they had,
+        // and the session keeps its list for a launch that can.
         Err(e) => {
             let mut catalog = Catalog::in_memory(DEFAULT_NAME);
             for dir in legacy {
@@ -115,6 +134,7 @@ fn launch(last: Option<&Path>, default_dir: Option<&Path>, legacy: &[PathBuf]) -
                 catalog,
                 fallback: Some(fallback.map_or(e.clone(), |first| format!("{first}; {e}"))),
                 recent: Vec::new(),
+                legacy_held: false,
             }
         }
     }
@@ -145,6 +165,15 @@ fn catalog_ref_for(path: &Path) -> Result<CatalogRef, String> {
 }
 
 impl App {
+    /// Turn launch's notice into a toast. Called as a frame is painted, so
+    /// the toast's clock starts when someone can see it, not during a slow
+    /// startup.
+    pub(crate) fn show_launch_notice(&mut self) {
+        if let Some(why) = self.launch_notice.take() {
+            self.set_status(StatusKind::Error, (crate::i18n::t().catalog_fallback)(&why));
+        }
+    }
+
     /// Bring the catalog's copy of the open folder's marks up to date with
     /// the folder store. Once per frame, and before the folder store or
     /// the catalog is replaced. Idempotent: an unchanged revision, or a
@@ -261,16 +290,11 @@ impl App {
         }
     }
 
-    /// List the open catalog among the recent ones, in memory.
-    pub(super) fn note_open_catalog(&mut self) {
-        let at = self.catalog.at().clone();
-        note_recent(&mut self.recent_catalogs, &at);
-    }
-
     /// Save the open catalog as the one to reopen next launch, and the
     /// recent list with it at the head.
     fn remember_catalog(&mut self) {
-        self.note_open_catalog();
+        let at = self.catalog.at().clone();
+        note_recent(&mut self.recent_catalogs, &at);
         // A test must never write the developer's own settings.
         if cfg!(test) {
             return;
@@ -378,6 +402,57 @@ mod tests {
         let launched = launch(None, None, &[PathBuf::from("/kept")]);
         assert!(launched.fallback.is_some());
         assert_eq!(launched.catalog.folders(), &[PathBuf::from("/kept")]);
+    }
+
+    /// The older build's Folders list lives in the session until a launch
+    /// has put it in a default catalog on disk: a launch with no home, or
+    /// an unwritable catalog folder, leaves it for the next one.
+    #[test]
+    fn the_legacy_folders_stay_until_a_default_catalog_on_disk_holds_them() {
+        let legacy = vec![PathBuf::from("/kept/b"), PathBuf::from("/kept/a")];
+        assert!(!launch(None, None, &legacy).legacy_held, "no home");
+
+        let dir = temp_folder("catalog-unwritable");
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"a file where the catalog folder should be").unwrap();
+        let launched = launch(None, Some(&blocker), &legacy);
+        assert!(launched.fallback.is_some());
+        assert!(!launched.legacy_held, "unwritable catalog folder");
+        assert_eq!(
+            launched.catalog.folders(),
+            &legacy[1..=1]
+                .iter()
+                .chain(&legacy[..1])
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+
+        let launched = launch(None, Some(&dir), &legacy);
+        assert!(launched.legacy_held, "the default now holds the list");
+        assert_eq!(
+            Catalog::open(CatalogRef::in_dir(&dir, DEFAULT_NAME).unwrap())
+                .unwrap()
+                .folders(),
+            &[PathBuf::from("/kept/a"), PathBuf::from("/kept/b")]
+        );
+
+        let trip = CatalogRef::in_dir(&dir, "trip").unwrap();
+        drop(Catalog::create_at(trip.clone(), Vec::new()).unwrap());
+        assert!(
+            launch(Some(trip.path()), Some(&dir), &legacy).legacy_held,
+            "another catalog opened, and the default on disk already holds the list"
+        );
+        let elsewhere = temp_folder("catalog-no-default");
+        let trip2 = CatalogRef::in_dir(&elsewhere, "trip").unwrap();
+        drop(Catalog::create_at(trip2.clone(), Vec::new()).unwrap());
+        assert!(
+            !launch(Some(trip2.path()), Some(&elsewhere), &legacy).legacy_held,
+            "another catalog opened, but no default exists to hold the list"
+        );
+        assert!(
+            launch(Some(trip2.path()), Some(&elsewhere), &[]).legacy_held,
+            "nothing to hold"
+        );
     }
 
     #[test]
@@ -534,6 +609,21 @@ mod tests {
         assert_eq!(recent[0], again);
         assert_eq!(recent.iter().filter(|r| **r == again).count(), 1);
         assert_eq!(recent[1].name(), format!("{}", RECENT_MAX + 2));
+    }
+
+    /// A slow first frame must not eat the toast: its clock starts when it
+    /// is painted, not when launch found the problem.
+    #[test]
+    fn the_fallback_toast_starts_on_the_first_painted_frame() {
+        use crate::app::test_support::settled;
+        let mut app = App::new(None);
+        app.launch_notice = Some("gone.lightphotos is not there".into());
+        assert_eq!(app.status_text(), None, "nothing to see before a frame");
+        let painted = settled(&mut app);
+        let toast = app.status_text().expect("the toast shows once painted");
+        assert!(toast.contains("gone.lightphotos"), "{toast}");
+        assert!(painted.any_containing("gone.lightphotos"));
+        assert_eq!(app.launch_notice, None, "shown once");
     }
 
     /// The Folders panel heading names the catalog and drops down to make

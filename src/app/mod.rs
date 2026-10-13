@@ -664,6 +664,12 @@ pub(crate) struct App {
     /// Catalogs opened before, newest first, for the Folders heading.
     #[cfg(not(target_arch = "wasm32"))]
     recent_catalogs: Vec<crate::persist::catalog::CatalogRef>,
+    /// The Folders list an older build kept in the session, saved with it
+    /// until a default catalog on disk holds it. Empty once one does.
+    legacy_folders: Vec<PathBuf>,
+    /// Why launch did not open the catalog asked for. Shown as a toast on
+    /// the first frame, so its clock starts when someone can see it.
+    launch_notice: Option<String>,
     /// Roots that weren't a folder when last checked, such as an unplugged
     /// drive's. They stay listed so the user can remove them.
     missing_roots: HashSet<PathBuf>,
@@ -767,17 +773,34 @@ impl App {
         let (renderer_init_tx, renderer_init_rx) = std::sync::mpsc::channel();
         // A test must never read the developer's own session or catalog.
         #[cfg(test)]
-        let (session, launch) = (None, catalog::Launch::in_memory());
+        let (session, launch) = (None::<session::Session>, catalog::Launch::in_memory());
         #[cfg(not(test))]
         let (session, launch) = {
-            let (session, legacy) = match session::Session::load() {
-                Some((session, legacy)) => (Some(session), legacy),
-                None => (None, Vec::new()),
-            };
-            (session, catalog::Launch::at_startup(&legacy))
+            let session = session::Session::load();
+            let legacy = session
+                .as_ref()
+                .map_or(&[][..], |s| s.legacy_folders.as_slice());
+            let launch = catalog::Launch::at_startup(legacy);
+            (session, launch)
+        };
+        let legacy_folders = if launch.legacy_held {
+            Vec::new()
+        } else {
+            session
+                .as_ref()
+                .map(|s| s.legacy_folders.clone())
+                .unwrap_or_default()
         };
         let missing_roots = folders::missing_among(launch.catalog.folders());
-        let mut app = Self {
+        // The catalog launch opened is a recent one too, so the Folders
+        // heading can switch back to it.
+        #[cfg(not(target_arch = "wasm32"))]
+        let recent_catalogs = {
+            let mut recent = launch.recent;
+            catalog::note_recent(&mut recent, launch.catalog.at());
+            recent
+        };
+        Self {
             window: None,
             renderer: None,
             #[cfg(test)]
@@ -901,7 +924,9 @@ impl App {
             catalog: launch.catalog,
             marks_synced: 0,
             #[cfg(not(target_arch = "wasm32"))]
-            recent_catalogs: launch.recent,
+            recent_catalogs,
+            legacy_folders,
+            launch_notice: launch.fallback,
             missing_roots,
             folder_sel: None,
             expanded: HashSet::new(),
@@ -922,13 +947,7 @@ impl App {
             last_drag: (0.0, 0.0),
             egui_ctx,
             egui_state: None,
-        };
-        if let Some(why) = launch.fallback {
-            app.set_status(StatusKind::Error, (crate::i18n::t().catalog_fallback)(&why));
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        app.note_open_catalog();
-        app
     }
 
     /// Open a directory in the Grid with nothing selected, a file in the

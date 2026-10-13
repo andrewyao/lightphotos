@@ -23,6 +23,11 @@ pub(crate) enum SessionView {
 /// starts with its folder's kept name.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct Session {
+    /// The Folders list a build before catalogs kept here. Saved again, as
+    /// `folders`, until a launch has seeded a default catalog on disk with
+    /// it; `App::new` empties it then, and every save after drops it.
+    #[serde(rename = "folders", skip_serializing_if = "Vec::is_empty")]
+    pub(crate) legacy_folders: Vec<PathBuf>,
     /// The folder showing, inside one of the catalog's folders.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dir: Option<PathBuf>,
@@ -48,10 +53,10 @@ struct StoredSession {
 }
 
 impl StoredSession {
-    /// The session, and the Folders list an older build saved with it, which
-    /// seeds the default catalog once.
-    fn split(self) -> (Session, Vec<PathBuf>) {
-        let (legacy, dir) = match (self.folders, self.root) {
+    /// The session, with the Folders list an older build saved with it,
+    /// which seeds the default catalog.
+    fn into_session(self) -> Session {
+        let (legacy_folders, dir) = match (self.folders, self.root) {
             (Some(folders), _) => (folders, self.dir),
             (None, Some(root)) => {
                 let dir = self.dir.unwrap_or_else(|| root.clone());
@@ -59,28 +64,23 @@ impl StoredSession {
             }
             (None, None) => (Vec::new(), self.dir),
         };
-        let session = Session {
+        Session {
+            legacy_folders,
             dir,
             photo: self.photo,
             view: self.view,
-        };
-        (session, legacy)
+        }
     }
 }
 
 impl Session {
-    /// The saved session, if one parses, with the Folders list an older
-    /// build kept in it. A session saved in an older shape is saved again in
-    /// this one, which drops that list.
+    /// The saved session, if one parses. Nothing is written here: the
+    /// first `save_session_if_changed` saves it in this build's shape.
     #[cfg_attr(test, allow(dead_code))]
-    pub(crate) fn load() -> Option<(Session, Vec<PathBuf>)> {
+    pub(crate) fn load() -> Option<Session> {
         let json = crate::persist::prefs::load(SESSION_PREF)?;
         let stored: StoredSession = serde_json::from_str(&json).ok()?;
-        let (session, legacy) = stored.split();
-        if serde_json::to_string(&session).ok().as_deref() != Some(json.as_str()) {
-            session.save();
-        }
-        Some((session, legacy))
+        Some(stored.into_session())
     }
 
     fn save(&self) {
@@ -127,6 +127,7 @@ fn to_restore(
     }
     let root = roots.iter().find(|f| exists(f))?;
     Some(Session {
+        legacy_folders: Vec::new(),
         dir: Some(root.clone()),
         photo: None,
         view: SessionView::Grid,
@@ -135,16 +136,22 @@ fn to_restore(
 
 impl App {
     /// The session as it stands. The landing page keeps the last place, and
-    /// has no session before any folder was opened.
+    /// has no session before any folder was opened. The legacy Folders
+    /// list rides along until the default catalog holds it.
     fn current_session(&self) -> Option<Session> {
+        let legacy_folders = self.legacy_folders.clone();
         let Some(dir) = self.playlist.as_ref().map(|pl| pl.dir().to_path_buf()) else {
-            return self.session.clone();
+            return self.session.clone().map(|session| Session {
+                legacy_folders,
+                ..session
+            });
         };
         let view = match self.mode {
             ViewMode::Loupe => SessionView::Loupe,
             ViewMode::Grid => SessionView::Grid,
         };
         Some(Session {
+            legacy_folders,
             dir: Some(dir),
             photo: self.selected_path(),
             view,
@@ -251,6 +258,7 @@ mod tests {
 
     fn session(root: &Path, photo: Option<&str>, view: SessionView) -> Session {
         Session {
+            legacy_folders: Vec::new(),
             dir: Some(photo.map_or(root.to_path_buf(), |p| {
                 root.join(p).parent().unwrap().to_path_buf()
             })),
@@ -342,48 +350,86 @@ mod tests {
         );
     }
 
-    fn parse(json: &str) -> Option<(Session, Vec<PathBuf>)> {
+    fn parse(json: &str) -> Option<Session> {
         serde_json::from_str::<StoredSession>(json)
             .ok()
-            .map(StoredSession::split)
+            .map(StoredSession::into_session)
     }
 
     #[test]
     fn a_session_saved_before_subfolders_were_remembered_still_loads() {
-        let (old, legacy) =
-            parse(r#"{"root":"/photos","photo":"/photos/a.jpg","view":"Loupe"}"#).unwrap();
-        assert_eq!(legacy, vec![PathBuf::from("/photos")]);
-        assert_eq!(old.folder_chain(&legacy), vec![PathBuf::from("/photos")]);
+        let old = parse(r#"{"root":"/photos","photo":"/photos/a.jpg","view":"Loupe"}"#).unwrap();
+        assert_eq!(old.legacy_folders, vec![PathBuf::from("/photos")]);
+        assert_eq!(
+            old.folder_chain(&old.legacy_folders),
+            vec![PathBuf::from("/photos")]
+        );
     }
 
     /// The migration: an old session's `root` or `folders` become the
-    /// catalog seed, and the saved form has neither.
+    /// catalog seed, saved again as `folders` until a catalog holds them.
     #[test]
-    fn an_old_sessions_folders_leave_it_as_the_catalog_seed() {
+    fn an_old_sessions_folders_ride_along_as_the_catalog_seed() {
         let old =
             r#"{"root":"/photos","dir":"/photos/sub","photo":"/photos/sub/a.jpg","view":"Loupe"}"#;
-        let (s, legacy) = parse(old).unwrap();
-        assert_eq!(legacy, vec![PathBuf::from("/photos")]);
+        let s = parse(old).unwrap();
+        assert_eq!(s.legacy_folders, vec![PathBuf::from("/photos")]);
         assert_eq!(
-            s.place(&legacy),
+            s.place(&s.legacy_folders),
             Some((Path::new("/photos"), Path::new("/photos/sub")))
         );
         let saved = serde_json::to_string(&s).unwrap();
         assert!(!saved.contains("\"root\""), "{saved}");
-        assert!(!saved.contains("\"folders\""), "{saved}");
-        assert_eq!(parse(&saved), Some((s, Vec::new())));
+        assert!(saved.contains(r#""folders":["/photos"]"#), "{saved}");
+        assert_eq!(parse(&saved), Some(s.clone()));
 
-        let (s, legacy) =
+        let held = Session {
+            legacy_folders: Vec::new(),
+            ..s
+        };
+        let saved = serde_json::to_string(&held).unwrap();
+        assert!(!saved.contains("\"folders\""), "{saved}");
+        assert_eq!(parse(&saved), Some(held));
+
+        let s =
             parse(r#"{"folders":["/a","/b"],"root":"/old","dir":"/a","photo":null,"view":"Grid"}"#)
                 .unwrap();
-        assert_eq!(legacy, vec![PathBuf::from("/a"), PathBuf::from("/b")]);
+        assert_eq!(
+            s.legacy_folders,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
         assert_eq!(s.dir, Some(PathBuf::from("/a")));
+    }
+
+    /// A launch that cannot make the default catalog leaves the list in
+    /// the app, and every save it makes keeps it for the launch that can.
+    #[test]
+    fn a_session_saved_before_the_default_catalog_exists_keeps_its_folders() {
+        let root = tree("keep-legacy");
+        let mut app = App::new(None);
+        app.legacy_folders = vec![PathBuf::from("/kept")];
+        app.save_session_if_changed();
+        assert_eq!(app.session, None, "nothing to save on the landing page");
+
+        app.open(root.clone());
+        app.select_single(0);
+        app.save_session_if_changed();
+        let saved = serde_json::to_string(app.session.as_ref().unwrap()).unwrap();
+        assert!(saved.contains(r#""folders":["/kept"]"#), "{saved}");
+        let back = parse(&saved).unwrap();
+        assert_eq!(back.legacy_folders, vec![PathBuf::from("/kept")]);
+        assert_eq!(back.dir.as_deref(), Some(root.as_path()));
+
+        app.legacy_folders.clear();
+        app.save_session_if_changed();
+        let saved = serde_json::to_string(app.session.as_ref().unwrap()).unwrap();
+        assert!(!saved.contains("\"folders\""), "held now: {saved}");
     }
 
     #[test]
     fn a_session_with_no_folder_restores_nothing() {
-        let (s, legacy) = parse(r#"{"photo":null,"view":"Grid"}"#).unwrap();
-        assert_eq!(legacy, Vec::<PathBuf>::new());
+        let s = parse(r#"{"photo":null,"view":"Grid"}"#).unwrap();
+        assert_eq!(s.legacy_folders, Vec::<PathBuf>::new());
         assert_eq!(s.dir, None);
         assert_eq!(parse("{"), None);
         assert_eq!(parse(r#"{"dir":7}"#), None);
@@ -461,6 +507,7 @@ mod tests {
     #[test]
     fn the_folder_chain_runs_from_the_root_down_to_the_subfolder() {
         let s = Session {
+            legacy_folders: Vec::new(),
             dir: Some(PathBuf::from("/photos/2024/june")),
             photo: None,
             view: SessionView::Grid,
