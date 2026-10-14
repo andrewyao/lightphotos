@@ -3,7 +3,8 @@
 //! folder opens and the tour can point at each region: the left panel lists
 //! the folders added before with Add Folder over them, or Open Folder, the
 //! toolbars and rail are switched off, and the content area is a field of
-//! empty tiles under the prompt and the Open Folder button.
+//! empty tiles, under the prompt and the Open Folder button while the
+//! catalog has no folders.
 
 use super::*;
 
@@ -94,9 +95,10 @@ const CARD_WIDTH: f32 = 820.0;
 const CARD_PAD: egui::Vec2 = egui::vec2(72.0, 64.0);
 const TILE_GAP: f32 = 8.0;
 
-/// Rows of empty tiles where the thumbnails will go, the whole layout
-/// dimmed, and a card over it holding the prompt, the buttons, on the web a
-/// note on the browser's file permission, and a Take the Tour link.
+/// Rows of empty tiles where the thumbnails will go. While the catalog has
+/// no folders, the whole layout dimmed and a card over it holding the
+/// prompt, the buttons, on the web a note on the browser's file permission,
+/// and a Take the Tour link.
 fn content(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let pal = theme::colors(ui.ctx());
     let tile_fill = pal.panel.lerp_to_gamma(pal.value, 0.05);
@@ -117,22 +119,22 @@ fn content(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             }
         }
 
+        // A catalog with folders lists them on the left; picking one is the
+        // way in, so the card has nothing to add.
+        if !app.folder_roots().is_empty() {
+            return;
+        }
+
         // One dim layer over every placeholder region below the header, so
         // the layout reads as a preview behind the card. It paints on the
-        // panels' own layer after them and before the card's widgets. It
-        // leaves out the Folders panel when that lists folders to open.
+        // panels' own layer after them and before the card's widgets.
         let screen = ui.ctx().content_rect();
         let top =
             tour::anchored(ui.ctx(), tour::TourStep::Header).map_or(screen.min.y, |h| h.max.y);
-        let left = if app.folder_roots().is_empty() {
-            screen.min.x
-        } else {
-            tour::anchored(ui.ctx(), tour::TourStep::Folders).map_or(screen.min.x, |f| f.max.x)
-        };
         ui.ctx()
             .layer_painter(egui::LayerId::background())
             .rect_filled(
-                egui::Rect::from_min_max(egui::pos2(left, top), screen.max),
+                egui::Rect::from_min_max(egui::pos2(screen.min.x, top), screen.max),
                 0.0,
                 egui::Color32::from_black_alpha(OVERLAY_ALPHA),
             );

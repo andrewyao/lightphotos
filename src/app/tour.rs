@@ -118,6 +118,19 @@ mod tests {
         assert_eq!(actions, vec![UiAction::StartTour]);
     }
 
+    /// The home page's card asks for a folder only while the catalog has
+    /// none; once it lists some, picking one there is the way in.
+    #[test]
+    fn the_home_page_card_shows_only_while_the_catalog_has_no_folders() {
+        let mut app = App::new(None);
+        assert!(settled(&mut app).has(t().landing_prompt));
+        app.catalog.add_folder(std::path::Path::new("/photos"));
+        let painted = settled(&mut app);
+        assert!(!app.has_playlist());
+        assert!(!painted.has(t().landing_prompt), "{:?}", painted.texts());
+        assert!(!painted.has(t().take_tour), "{:?}", painted.texts());
+    }
+
     /// The tour holds the keyboard: arrows move it, Esc ends it, and a
     /// shortcut such as Cmd+, waits.
     #[test]

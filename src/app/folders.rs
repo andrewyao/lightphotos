@@ -332,15 +332,9 @@ mod tests {
             painted.texts().contains(&crate::i18n::t().add_folder),
             "Add Folder adds another folder"
         );
-        let open_folder = crate::i18n::t().open_folder;
-        assert_eq!(
-            painted
-                .texts()
-                .iter()
-                .filter(|t| **t == open_folder)
-                .count(),
-            1,
-            "with folders listed, only the home card has Open Folder"
+        assert!(
+            !painted.has(crate::i18n::t().open_folder),
+            "with folders listed, no home card asks for one"
         );
         let (actions, _) = click(&mut app, painted.pos_of(&name(&b)));
         assert_eq!(actions, vec![crate::ui::UiAction::OpenFolder(b.clone())]);
