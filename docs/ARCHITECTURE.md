@@ -273,10 +273,13 @@ them out.
 - `renderer/match_test.rs` holds the two paths to the same tolerance as the
   rest of the develop pipeline.
 
-**Where masks are guarded:** a sidecar's mask that isn't one, or holds a
-number that isn't finite, is dropped (`sidecar::valid_masks`). The rest are
-clamped (`Mask::sanitized`) and capped at `MAX_MASKS`, the GPU buffer's size.
-`mask.add` and `mask.set` run the same check.
+**Where masks are guarded:** `ImageRecord::masks` is a `sidecar::MaskList`.
+A sidecar's mask of a known kind that isn't one, or holds a number that isn't
+finite, is dropped. The rest are clamped (`Mask::sanitized`) and capped at
+`MAX_MASKS`, the GPU buffer's size. A mask whose `kind` this build doesn't
+know is a later build's: the list keeps its JSON verbatim and writes it back
+where it stood, so a folder shared across versions loses nothing. `mask.add`
+and `mask.set` run the same check.
 
 **Editing:** `app/masks.rs` is the one writer of a photo's masks. Every change
 goes through the main `EditHistory`, so `Cmd`+`Z` undoes a whole handle drag
