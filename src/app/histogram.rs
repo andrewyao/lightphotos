@@ -120,6 +120,7 @@ impl App {
             return;
         }
         let adj = self.current_adjustments();
+        let masks = self.current_masks().to_vec();
         // Count only cells inside the crop, matching what the loupe and export show.
         let crop = adj
             .crop
@@ -141,6 +142,8 @@ impl App {
         let base = layers.base.as_ref().filter(|_| adj.needs_base());
         let fine = layers.fine.as_ref().filter(|_| adj.texture != 0.0);
         let dev = develop::Develop::framed(&adj, dw as u32, dh as u32);
+        let global = develop::LocalAmounts::of(&adj);
+        let aspect = dw as f32 / dh as f32;
         let mut bins = [[0f32; 256]; 3];
         for cy in 0..dh {
             for cx in 0..dw {
@@ -175,9 +178,15 @@ impl App {
                     base.map(|b| b.at_uv(su, sv)),
                     fine.map(|f| f.at_uv(su, sv).mid),
                 );
-                let out = match self.hist.pixel_format {
-                    image_decode::PixelFormat::Srgb8 => dev.linear_at(px, u, v),
-                    image_decode::PixelFormat::LinearF16 => dev.raw_display_at(px, u, v),
+                let tone = (!masks.is_empty())
+                    .then(|| develop::mask::local_tone(global, &masks, [su, sv], aspect));
+                let out = match (self.hist.pixel_format, &tone) {
+                    (image_decode::PixelFormat::Srgb8, None) => dev.linear_at(px, u, v),
+                    (image_decode::PixelFormat::Srgb8, Some(t)) => dev.linear_at_local(px, u, v, t),
+                    (image_decode::PixelFormat::LinearF16, None) => dev.raw_display_at(px, u, v),
+                    (image_decode::PixelFormat::LinearF16, Some(t)) => {
+                        dev.raw_display_at_local(px, u, v, t)
+                    }
                 };
                 for ch in 0..3 {
                     // `apply_raw_display` already returns display space. The

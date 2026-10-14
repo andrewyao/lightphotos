@@ -1318,6 +1318,19 @@ impl<'a> Develop<'a> {
         let at = self.frame.as_ref().map(|f| (f, u, v));
         apply_linear_impl(self, rgb, at, true, None)
     }
+
+    /// [`Develop::raw_display_at`] with `local` in place of the photo's own
+    /// values for the sliders a mask moves.
+    pub fn raw_display_at_local(
+        &self,
+        rgb: [f32; 3],
+        u: f32,
+        v: f32,
+        local: &LocalAmounts,
+    ) -> [f32; 3] {
+        let at = self.frame.as_ref().map(|f| (f, u, v));
+        apply_linear_impl(self, rgb, at, true, Some(local))
+    }
 }
 
 fn apply_linear_impl(
