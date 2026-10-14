@@ -501,17 +501,22 @@ impl App {
             is_raw: bool,
             adj: crate::develop::Adjustments,
             touchups: Vec<crate::develop::TouchUp>,
-            masks: crate::develop::MaskSet,
+            /// `None` while a detected mask's coverage isn't in memory: that
+            /// photo's export fails by name rather than dropping the mask.
+            masks: Option<crate::develop::MaskSet>,
             rot: u8,
         }
+        let sets: Vec<Option<crate::develop::MaskSet>> =
+            paths.iter().map(|src| self.mask_set_for(src)).collect();
         let jobs: Vec<Job> = paths
             .iter()
-            .map(|src| Job {
+            .zip(sets)
+            .map(|(src, masks)| Job {
                 src: src.clone(),
                 is_raw: crate::decode::image_decode::is_raw_extension(src),
                 adj: self.edits.get(src).copied().unwrap_or_default(),
                 touchups: self.touchups.get(src).cloned().unwrap_or_default(),
-                masks: self.mask_set_for(src),
+                masks,
                 rot: self.rotations.get(src).copied().unwrap_or(0),
             })
             .collect();
@@ -570,6 +575,16 @@ impl App {
                 let filename =
                     crate::paths::export_name(&stem, output.format.extension(), &existing, &taken);
                 taken.insert(filename.clone());
+                let Some(masks) = masks else {
+                    pool.fail(
+                        src,
+                        output_folder.clone(),
+                        dest_dir.clone(),
+                        filename,
+                        crate::i18n::t().export_masks_detecting.to_string(),
+                    );
+                    continue;
+                };
                 match fs.read_source_array_buffer(&src).await {
                     Ok(bytes) => pool.submit(
                         &decoder,
@@ -623,7 +638,12 @@ impl App {
         let job = |src: PathBuf, dest: ExportDest| ExportJob {
             adj: self.edits.get(&src).copied().unwrap_or_default(),
             touchups: self.touchups.get(&src).cloned().unwrap_or_default(),
-            masks: self.mask_input(&src),
+            // The worker reads the coverage itself; the blocker held the
+            // export until every detection was recorded.
+            masks: crate::develop::MaskInput::OnDisk {
+                masks: self.masks.get(&src).cloned().unwrap_or_default(),
+                detections: self.detections.get(&src).copied().unwrap_or_default(),
+            },
             rot: self.rotations.get(&src).copied().unwrap_or(0),
             src,
             dest,

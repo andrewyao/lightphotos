@@ -84,7 +84,14 @@ impl App {
                     &detections,
                     rot,
                 );
-                let masks = self.mask_input(&path);
+                // A photo whose detected mask is still detecting scores
+                // later, with the mask, rather than now without it.
+                let Some(masks) = self.mask_input(&path) else {
+                    if let Some(job) = self.score_job.as_mut() {
+                        job.defer(&path);
+                    }
+                    continue;
+                };
                 if let Some(pool) = self.score_pool.as_mut() {
                     pool.submit(ScoreRequest {
                         path,

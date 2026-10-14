@@ -383,13 +383,9 @@ impl App {
                         renderer.free_thumb(old.id);
                     }
                 }
-            } else {
-                let masks = super::masks::mask_input_of(
-                    &self.masks,
-                    &self.detections,
-                    &self.coverage,
-                    path,
-                );
+            } else if let Some(masks) =
+                super::masks::mask_input_of(&self.masks, &self.detections, &mut self.coverage, path)
+            {
                 loader.request_bake(path, *px, *sig, img, adj, touchups, masks, rot);
             }
         }

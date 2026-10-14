@@ -23,12 +23,31 @@ impl App {
             .unwrap_or(&[])
     }
 
-    /// `path`'s masks with whatever coverage is in memory, for a bake that
-    /// can't read the folder itself.
+    /// `path`'s masks with their coverage from memory, for a bake that
+    /// can't read the folder itself. `None` while a target's work is still
+    /// out, so no bake runs without a mask its signature claims.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn mask_set_for(&self, path: &Path) -> MaskSet {
-        let masks = self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]);
-        MaskSet::new(masks, |t| self.coverage.ready(path, t))
+    pub(crate) fn mask_set_for(&mut self, path: &Path) -> Option<MaskSet> {
+        let masks = self.masks.get(path).cloned().unwrap_or_default();
+        let recorded = self.detections.get(path).copied().unwrap_or_default();
+        if self.coverage.readiness(path, &masks, &recorded, true) == coverage::Readiness::Pending {
+            return None;
+        }
+        Some(MaskSet::new(&masks, |t| self.coverage.ready(path, t)))
+    }
+
+    /// Starts the work the selection's detected masks still need, so a
+    /// photo that is never shown still detects and, in the browser, loads.
+    /// Each frame; cheap, since only photos with masks are looked at.
+    fn kick_selection_coverage(&mut self) {
+        for path in self.action_paths() {
+            let Some(masks) = self.masks.get(&path).cloned() else {
+                continue;
+            };
+            let recorded = self.detections.get(&path).copied().unwrap_or_default();
+            self.coverage
+                .readiness(&path, &masks, &recorded, cfg!(target_arch = "wasm32"));
+        }
     }
 
     /// The shown photo's masks with their coverage, for the Loupe and the
@@ -203,6 +222,7 @@ impl App {
     /// the mask, but the detection still records, so Redo brings the mask
     /// back with no second detection.
     pub(crate) fn poll_coverage(&mut self) {
+        self.kick_selection_coverage();
         #[cfg(target_arch = "wasm32")]
         {
             self.start_web_loads();
@@ -237,37 +257,41 @@ impl App {
         self.request_redraw();
     }
 
-    /// What a background bake of `path` carries.
-    pub(crate) fn mask_input(&self, path: &Path) -> MaskInput {
-        mask_input_of(&self.masks, &self.detections, &self.coverage, path)
+    /// What a background bake of `path` carries, or `None` while its
+    /// detected masks' work is still out.
+    pub(crate) fn mask_input(&mut self, path: &Path) -> Option<MaskInput> {
+        mask_input_of(&self.masks, &self.detections, &mut self.coverage, path)
     }
 }
 
-/// What a background bake of `path` carries, from the app's mirrors. Native
-/// workers read the coverage beside the photo themselves; the browser's
-/// can't reach the folder, so they take what the store has in memory. A
-/// free function, so a caller holding the loader can still build one.
+/// What a background bake of `path` carries, from the app's mirrors, or
+/// `None` while a detected mask's work is still out: the bake defers and
+/// asks again next frame, so it never runs without a mask its signature
+/// claims. Native workers read the coverage beside the photo themselves;
+/// the browser's can't reach the folder, so they take what the store has in
+/// memory. A free function, so a caller holding the loader can still build
+/// one.
 pub(crate) fn mask_input_of(
     masks: &HashMap<PathBuf, Vec<Mask>>,
     detections: &HashMap<PathBuf, crate::develop::Detections>,
-    coverage: &coverage::CoverageStore,
+    coverage: &mut coverage::CoverageStore,
     path: &Path,
-) -> MaskInput {
+) -> Option<MaskInput> {
+    let masks = masks.get(path).cloned().unwrap_or_default();
+    let detections = detections.get(path).copied().unwrap_or_default();
+    let in_memory = cfg!(target_arch = "wasm32");
+    if coverage.readiness(path, &masks, &detections, in_memory) == coverage::Readiness::Pending {
+        return None;
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let _ = coverage;
-        MaskInput::OnDisk {
-            masks: masks.get(path).cloned().unwrap_or_default(),
-            detections: detections.get(path).copied().unwrap_or_default(),
-        }
+        Some(MaskInput::OnDisk { masks, detections })
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = detections;
-        MaskInput::Ready(MaskSet::new(
-            masks.get(path).map(Vec::as_slice).unwrap_or(&[]),
-            |t| coverage.ready(path, t),
-        ))
+        Some(MaskInput::Ready(MaskSet::new(&masks, |t| {
+            coverage.ready(path, t)
+        })))
     }
 }
 

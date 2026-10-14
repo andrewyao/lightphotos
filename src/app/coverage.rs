@@ -118,6 +118,9 @@ pub(crate) struct CoverageStore {
     ),
     /// Jobs submitted and not yet drained, so the frame loop keeps polling.
     in_flight: usize,
+    /// Which targets this build can detect: `detect::available`, or a
+    /// test's stand-in.
+    available: fn(DetectTarget) -> bool,
 }
 
 /// Work the app finished for the store, on the web.
@@ -153,6 +156,7 @@ impl CoverageStore {
                 wanted_detects: Vec::new(),
                 web_landings: std::sync::mpsc::channel(),
                 in_flight: 0,
+                available: detect::available,
             }
         }
     }
@@ -187,6 +191,16 @@ impl CoverageStore {
 
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn with_detector(detector: Detector) -> Self {
+        Self::with_detector_and_availability(detector, detect::available)
+    }
+
+    /// [`with_detector`](Self::with_detector) with `available` in place of
+    /// `detect::available`, so a test can make a target unsupported.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_detector_and_availability(
+        detector: Detector,
+        available: fn(DetectTarget) -> bool,
+    ) -> Self {
         let detect = WorkerPool::spawn(
             "detect",
             1,
@@ -208,6 +222,7 @@ impl CoverageStore {
             detect,
             load,
             in_flight: 0,
+            available,
         }
     }
 
@@ -255,12 +270,9 @@ impl CoverageStore {
         masks: &[Mask],
         detections: &Detections,
     ) {
-        for target in DetectTarget::ALL {
+        for target in used_targets(masks) {
             let key = (photo.to_path_buf(), target);
-            if masks.iter().any(|m| m.target() == Some(target))
-                && detections.get(target).is_none()
-                && !self.slots.contains_key(&key)
-            {
+            if detections.get(target).is_none() && !self.slots.contains_key(&key) {
                 self.start_detect(key);
             }
         }
@@ -289,17 +301,94 @@ impl CoverageStore {
             Some(Slot::Ready(c)) => c.is_nothing().then_some(MaskStatus::NothingFound),
             Some(Slot::Failed(f)) => Some(MaskStatus::Failed(f.clone())),
             Some(Slot::Detecting | Slot::Loading(_)) => Some(MaskStatus::Detecting),
-            None if recorded.is_none() && !detect::available(target) => {
+            None if recorded.is_none() && !(self.available)(target) => {
                 Some(MaskStatus::Failed(Failure::Unsupported))
             }
             None => Some(MaskStatus::Detecting),
         }
     }
 
-    /// How many of `paths` have a detected mask whose target is not yet
-    /// recorded and not settled as failed: the export blocker. A recorded
-    /// target counts as done even while it loads, since a worker reads the
-    /// file itself.
+    /// What `target` of `photo` needs before a bake can use it. `in_memory`
+    /// is the browser's rule: a recorded coverage must be loaded, since no
+    /// worker there can read the file; native workers read it themselves.
+    fn need(
+        &self,
+        photo: &Path,
+        target: DetectTarget,
+        recorded: Option<RasterId>,
+        in_memory: bool,
+    ) -> Need {
+        let slot = self.slots.get(&(photo.to_path_buf(), target));
+        match (slot, recorded) {
+            (Some(Slot::Failed(_)), _) => Need::Ready,
+            (Some(Slot::Ready(c)), Some(id)) if c.id() == id => Need::Ready,
+            (Some(Slot::Ready(_)), None) => Need::Ready,
+            (_, Some(id)) if !in_memory => {
+                let _ = id;
+                Need::Ready
+            }
+            (Some(Slot::Loading(l)), Some(id)) if *l == id => Need::Pending,
+            (_, Some(id)) => Need::Load(id),
+            (Some(Slot::Detecting | Slot::Loading(_)), None) => Need::Pending,
+            (None, None) => Need::Detect,
+        }
+    }
+
+    /// Whether every target `masks` use is ready for a bake of `photo`,
+    /// starting whatever is missing: loads where the bake needs the pixels
+    /// in memory, detections where nothing is recorded. A target this build
+    /// can't detect settles as failed and counts as ready, since it renders
+    /// as nothing under a signature that says so. Every bake, score and
+    /// export asks here, so a photo never shown still gets its work done.
+    pub(crate) fn readiness(
+        &mut self,
+        photo: &Path,
+        masks: &[Mask],
+        detections: &Detections,
+        in_memory: bool,
+    ) -> Readiness {
+        let mut out = Readiness::Ready;
+        for target in used_targets(masks) {
+            match self.need(photo, target, detections.get(target), in_memory) {
+                Need::Ready => {}
+                Need::Pending => out = Readiness::Pending,
+                Need::Load(id) => {
+                    self.start_load((photo.to_path_buf(), target), id);
+                    out = Readiness::Pending;
+                }
+                Need::Detect => {
+                    if matches!(
+                        self.start_detect((photo.to_path_buf(), target)),
+                        Lookup::Pending
+                    ) {
+                        out = Readiness::Pending;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// [`readiness`](Self::readiness) without starting anything, for a
+    /// query from the UI. Work it reports pending is started by the frame
+    /// loop's [`readiness`] over the selection, so pending never stands.
+    pub(crate) fn is_ready(
+        &self,
+        photo: &Path,
+        masks: &[Mask],
+        detections: &Detections,
+        in_memory: bool,
+    ) -> bool {
+        used_targets(masks).all(
+            |t| match self.need(photo, t, detections.get(t), in_memory) {
+                Need::Ready => true,
+                Need::Detect => !(self.available)(t),
+                Need::Pending | Need::Load(_) => false,
+            },
+        )
+    }
+
+    /// How many of `paths` a bake can't yet serve: the export blocker.
     pub(crate) fn pending_among(
         &self,
         paths: &[PathBuf],
@@ -309,14 +398,9 @@ impl CoverageStore {
         paths
             .iter()
             .filter(|p| {
-                let Some(masks) = masks.get(*p) else {
-                    return false;
-                };
-                let recorded = detections.get(*p).copied().unwrap_or_default();
-                DetectTarget::ALL.iter().any(|&t| {
-                    masks.iter().any(|m| m.target() == Some(t))
-                        && recorded.get(t).is_none()
-                        && !matches!(self.slots.get(&(p.to_path_buf(), t)), Some(Slot::Failed(_)))
+                masks.get(*p).is_some_and(|masks| {
+                    let recorded = detections.get(*p).copied().unwrap_or_default();
+                    !self.is_ready(p, masks, &recorded, cfg!(target_arch = "wasm32"))
                 })
             })
             .count()
@@ -416,7 +500,7 @@ impl CoverageStore {
                             // writing over the bad file.
                             crate::develop::coverage::remove(&key.0, job.id);
                         }
-                        if detect::available(key.1) {
+                        if (self.available)(key.1) {
                             self.slots.remove(&key);
                             self.start_detect(key.clone());
                         } else {
@@ -469,7 +553,7 @@ impl CoverageStore {
     }
 
     fn start_detect(&mut self, key: (PathBuf, DetectTarget)) -> Lookup {
-        if !detect::available(key.1) {
+        if !(self.available)(key.1) {
             self.slots.insert(key, Slot::Failed(Failure::Unsupported));
             return Lookup::Failed;
         }
@@ -551,6 +635,28 @@ impl CoverageStore {
         self.ready_order.retain(|k| k != key);
         self.ready_order.push_back(key.clone());
     }
+}
+
+/// What one target needs before a bake can use it. See [`CoverageStore::need`].
+enum Need {
+    Ready,
+    Pending,
+    Load(RasterId),
+    Detect,
+}
+
+/// Whether a photo's detected masks are ready for a bake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    Ready,
+    Pending,
+}
+
+/// The targets `masks` read, each once.
+fn used_targets(masks: &[Mask]) -> impl Iterator<Item = DetectTarget> + '_ {
+    DetectTarget::ALL
+        .into_iter()
+        .filter(move |&t| masks.iter().any(|m| m.target() == Some(t)))
 }
 
 /// The panel's mark on a detected mask.
@@ -687,6 +793,82 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The defect: a bake that needs the pixels in memory (the browser's)
+    /// got a set without the recorded coverage, since only the shown photo
+    /// ever asked for a load. Readiness must start the load and say so.
+    #[test]
+    fn readiness_loads_a_recorded_coverage_for_a_photo_never_shown() {
+        let (dir, p) = photo("never-shown");
+        let c = Coverage::fit(2, 1, &[255, 0]).unwrap();
+        crate::develop::coverage::write(&p, &c).unwrap();
+        let mut d = Detections::default();
+        d.set(DetectTarget::Sky, Some(c.id()));
+        let masks = [Mask::detected(DetectTarget::Sky)];
+        let mut store = CoverageStore::with_detector(half_left);
+        assert!(!store.is_ready(&p, &masks, &d, true));
+        assert!(
+            store.is_ready(&p, &masks, &d, false),
+            "a native worker reads the file itself"
+        );
+        assert_eq!(store.readiness(&p, &masks, &d, true), Readiness::Pending);
+        assert!(store.busy(), "a load is queued");
+        assert_eq!(
+            store.status(&p, DetectTarget::Sky, Some(c.id())),
+            Some(MaskStatus::Detecting)
+        );
+        drain_until(&mut store, |s| !s.busy());
+        assert_eq!(store.readiness(&p, &masks, &d, true), Readiness::Ready);
+        assert!(store.is_ready(&p, &masks, &d, true));
+        assert_eq!(store.ready(&p, DetectTarget::Sky).unwrap().id(), c.id());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The defect: after a folder reopened, a detected mask with no record
+    /// and no slot blocked Export forever, since nothing started its
+    /// detection. Readiness starts it, and a target this build can't detect
+    /// settles rather than blocks.
+    #[test]
+    fn readiness_starts_a_detection_nothing_else_asked_for_and_settles_the_unsupported() {
+        fn sky_only(t: DetectTarget) -> bool {
+            t == DetectTarget::Sky
+        }
+        let (dir, p) = photo("reopened");
+        let masks = [
+            Mask::detected(DetectTarget::Sky),
+            Mask::detected(DetectTarget::Subject),
+        ];
+        let none = Detections::default();
+        let mut store = CoverageStore::with_detector_and_availability(half_left, sky_only);
+        let mut all = HashMap::new();
+        all.insert(p.clone(), masks.to_vec());
+        let paths = vec![p.clone()];
+        let unrecorded = HashMap::new();
+        assert_eq!(
+            store.pending_among(&paths, &all, &unrecorded),
+            1,
+            "the sky mask has work to do"
+        );
+        assert_eq!(
+            store.readiness(&p, &masks, &none, false),
+            Readiness::Pending
+        );
+        assert!(store.busy(), "the sky detection started");
+        assert_eq!(
+            store.status(&p, DetectTarget::Subject, None),
+            Some(MaskStatus::Failed(Failure::Unsupported)),
+            "the subject settled without a worker"
+        );
+        drain_until(&mut store, |s| !s.busy());
+        assert_eq!(store.readiness(&p, &masks, &none, false), Readiness::Ready);
+        assert_eq!(
+            store.pending_among(&paths, &all, &unrecorded),
+            0,
+            "landed sky, unsupported subject: nothing left to wait for"
+        );
+        assert_eq!(runs_on(&p), 1, "the unsupported target never ran");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Export waits for a detection that is queued or in flight, not for
     /// one that landed and is recorded, and not for one that failed.
     #[test]
@@ -714,8 +896,8 @@ mod tests {
         drain_until(&mut store, |s| !s.busy());
         assert_eq!(
             store.pending_among(&paths, &masks, &unrecorded),
-            1,
-            "landed but not yet recorded"
+            0,
+            "landed: in memory, and recorded in the same frame"
         );
         let mut d = Detections::default();
         for t in DetectTarget::ALL {

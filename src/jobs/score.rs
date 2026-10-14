@@ -216,6 +216,14 @@ impl ScoreJob {
         out
     }
 
+    /// Put a taken photo back at the head of the queue, for one whose
+    /// inputs aren't ready to submit yet.
+    pub fn defer(&mut self, path: &Path) {
+        if self.in_flight.remove(path) {
+            self.pending.push_front(path.to_path_buf());
+        }
+    }
+
     /// Record a photo's outcome. `false` when it is not this job's, such as
     /// a late result from a job that was cancelled.
     pub fn finish(&mut self, path: &Path, ok: bool) -> bool {
