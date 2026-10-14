@@ -2,6 +2,7 @@
 //! Photo scores: the technical quality score, the judge's penalty curves, face
 //! and blink quality, subject masks, and the Apple Vision requests behind them.
 
+pub mod detect;
 pub mod facequality;
 pub mod judge;
 pub mod quality;

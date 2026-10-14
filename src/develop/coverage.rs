@@ -239,6 +239,12 @@ impl Coverage {
         self.alpha.iter().all(|&a| a == 0)
     }
 
+    /// The plane resampled to `width x height`, for a detector that reads
+    /// another target's coverage at its own preview size.
+    pub fn resampled(&self, width: u32, height: u32) -> Vec<u8> {
+        super::image_ops::resample_bilinear_u8(&self.alpha, self.width, self.height, width, height)
+    }
+
     /// Coverage at source `uv`, 0..1: bilinear between the four texels around
     /// `uv * size - 0.5`, clamped at the edge, through the arithmetic
     /// `fieldAt` already matches. Must match `coverageAt` in
