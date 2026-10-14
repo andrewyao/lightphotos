@@ -508,11 +508,11 @@ impl App {
             .iter()
             .map(GpuTouchUp::from)
             .collect();
-        let gpu_masks = self.current_mask_set().gpu_masks();
+        let masks = self.current_mask_set();
         if let Some(r) = &mut self.renderer {
             r.set_adjustments(gpu, &adj.curve);
             r.set_touchups(&gpu_touchups);
-            r.set_masks(&gpu_masks);
+            r.set_masks(&masks);
         }
         self.request_redraw();
     }
