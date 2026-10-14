@@ -701,6 +701,33 @@ mod tests {
         );
     }
 
+    /// The defect: a `detections` value of the wrong shape failed the whole
+    /// record, and the photo lost its rating and edits.
+    #[test]
+    fn a_hostile_detections_value_costs_only_the_detection_not_the_record() {
+        for (body, subject) in [
+            (r#"{"rating":4,"detections":{"subject":42}}"#, None),
+            (
+                r#"{"rating":4,"detections":{"subject":null,"sky":[1]}}"#,
+                None,
+            ),
+            (r#"{"rating":4,"detections":"x"}"#, None),
+            (r#"{"rating":4,"detections":[]}"#, None),
+            (r#"{"rating":4,"detections":null}"#, None),
+            (r#"{"rating":4,"detections":7}"#, None),
+            (
+                r#"{"rating":4,"detections":{"subject":"0123456789abcdef","sky":{"id":1},"extra":true}}"#,
+                "0123456789abcdef".parse().ok(),
+            ),
+        ] {
+            let rec =
+                parse_record(body.as_bytes(), || None).unwrap_or_else(|e| panic!("{body}: {e}"));
+            assert_eq!(rec.rating, Some(4), "{body}");
+            assert_eq!(rec.detections.subject, subject, "{body}");
+            assert_eq!(rec.detections.sky, None, "{body}");
+        }
+    }
+
     #[test]
     fn detections_round_trip_through_the_sidecar_and_a_bad_id_loads_as_none() {
         let body = br#"{"masks":[{"shape":{"kind":"detected","target":"subject"}}],

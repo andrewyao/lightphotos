@@ -102,24 +102,33 @@ impl<'de> Deserialize<'de> for RasterId {
 /// mask finds the photo's own detection, and undo never rewrites it. A value
 /// that isn't 16 hex digits loads as `None` (re-detected), never failing the
 /// record.
-#[derive(Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq, Debug)]
+#[derive(Serialize, Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Detections {
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "lenient_id"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<RasterId>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "lenient_id"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub sky: Option<RasterId>,
 }
 
-fn lenient_id<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<RasterId>, D::Error> {
-    Ok(Option::<String>::deserialize(deserializer)?.and_then(|s| s.parse().ok()))
+/// Whatever JSON the sidecar holds under `detections`, read for the valid
+/// ids in it: a number, a string, a list or `null` in place of the object,
+/// or in place of an id, costs that id and nothing else. A sidecar comes
+/// from whoever supplied the folder, and a bad detection must never cost
+/// the photo its rating.
+impl<'de> Deserialize<'de> for Detections {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Detections, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let id = |key: &str| {
+            value
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|s| s.parse().ok())
+        };
+        Ok(Detections {
+            subject: id("subject"),
+            sky: id("sky"),
+        })
+    }
 }
 
 impl Detections {
