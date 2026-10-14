@@ -120,7 +120,7 @@ impl App {
             return;
         }
         let adj = self.current_adjustments();
-        let masks = self.current_masks().to_vec();
+        let masks = self.current_mask_set();
         // Count only cells inside the crop, matching what the loupe and export show.
         let crop = adj
             .crop
@@ -178,8 +178,7 @@ impl App {
                     base.map(|b| b.at_uv(su, sv)),
                     fine.map(|f| f.at_uv(su, sv).mid),
                 );
-                let tone = (!masks.is_empty())
-                    .then(|| develop::mask::local_tone(global, &masks, [su, sv], aspect));
+                let tone = (!masks.is_empty()).then(|| masks.local_tone(global, [su, sv], aspect));
                 let out = match (self.hist.pixel_format, &tone) {
                     (image_decode::PixelFormat::Srgb8, None) => dev.linear_at(px, u, v),
                     (image_decode::PixelFormat::Srgb8, Some(t)) => dev.linear_at_local(px, u, v, t),

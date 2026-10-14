@@ -134,11 +134,12 @@ struct Row {
 
 fn measure(path: &Path, sidecar: &ImageRecord) -> Result<Row, String> {
     let img = image_decode::decode(path, quality::ANALYSIS_PX)?;
+    let masks = sidecar.mask_set(path)?;
     let (w, h, rgba) = image_ops::bake_edited(
         &img,
         &sidecar.adjustments,
         &sidecar.touchups,
-        &sidecar.masks,
+        &masks,
         sidecar.rotation,
     );
     let t = quality::technical(&rgba, w, h);

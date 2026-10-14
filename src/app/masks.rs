@@ -4,7 +4,7 @@
 
 use super::*;
 
-use crate::develop::{Mask, MAX_MASKS};
+use crate::develop::{Mask, MaskInput, MaskSet, MAX_MASKS};
 
 /// The shape the armed mask tool draws.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -22,6 +22,55 @@ impl App {
             .unwrap_or(&[])
     }
 
+    /// `path`'s masks with whatever coverage is in memory, for a bake that
+    /// can't read the folder itself.
+    pub(crate) fn mask_set_for(&self, path: &Path) -> MaskSet {
+        let masks = self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]);
+        MaskSet::new(masks, |_| None)
+    }
+
+    /// The shown photo's masks with their coverage, for the Loupe and the
+    /// histogram.
+    pub(crate) fn current_mask_set(&self) -> MaskSet {
+        match self.shown.path() {
+            Some(p) => self.mask_set_for(p),
+            None => MaskSet::default(),
+        }
+    }
+
+    /// What a background bake of `path` carries.
+    pub(crate) fn mask_input(&self, path: &Path) -> MaskInput {
+        mask_input_of(&self.masks, &self.detections, path)
+    }
+}
+
+/// What a background bake of `path` carries, from the app's mirrors. Native
+/// workers read the coverage beside the photo themselves; the browser's
+/// can't reach the folder, so they take what is in memory. A free function,
+/// so a caller holding the loader can still build one.
+pub(crate) fn mask_input_of(
+    masks: &HashMap<PathBuf, Vec<Mask>>,
+    detections: &HashMap<PathBuf, crate::develop::Detections>,
+    path: &Path,
+) -> MaskInput {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        MaskInput::OnDisk {
+            masks: masks.get(path).cloned().unwrap_or_default(),
+            detections: detections.get(path).copied().unwrap_or_default(),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = detections;
+        MaskInput::Ready(MaskSet::new(
+            masks.get(path).map(Vec::as_slice).unwrap_or(&[]),
+            |_| None,
+        ))
+    }
+}
+
+impl App {
     /// The selected mask's index, while it still names one.
     pub(crate) fn selected_mask(&self) -> Option<usize> {
         self.mask_selected

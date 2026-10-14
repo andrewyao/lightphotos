@@ -480,6 +480,9 @@ pub(crate) struct App {
     touchups: HashMap<PathBuf, Vec<TouchUp>>,
     /// Per-image local adjustment masks. Holds only non-empty lists.
     masks: HashMap<PathBuf, Vec<Mask>>,
+    /// Which coverage answers each photo's detected-mask targets, as the
+    /// sidecars record it. Holds only photos with a detection.
+    detections: HashMap<PathBuf, crate::develop::Detections>,
     /// Loupe click tool. Crop mode (`cropping()`) turns it off.
     tool: LoupeTool,
     touchup_radius: f32,
@@ -842,6 +845,7 @@ impl App {
             history: history::EditHistory::default(),
             touchups: HashMap::new(),
             masks: HashMap::new(),
+            detections: HashMap::new(),
             tool: LoupeTool::None,
             // Clamped up to TOUCHUP_MIN_PIXELS once an image is loaded.
             touchup_radius: 0.001,

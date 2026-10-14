@@ -19,6 +19,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use super::mask::DetectTarget;
 use crate::hash::Fnv1a;
 
 /// The longest side a stored coverage may have. A detector's output is
@@ -29,6 +30,13 @@ pub const MAX_COVERAGE_SIDE: u32 = 2048;
 /// gray PNG at the largest side is 4 MiB uncompressed, so this holds one
 /// that compresses badly and refuses anything that isn't a coverage.
 pub const MAX_COVERAGE_FILE_BYTES: u64 = 8 << 20;
+/// The most bytes the Loupe's packed coverage buffer can hold: one coverage
+/// per target at the largest side, since a photo has one detection per
+/// target and every mask of that target shares it. 8 MiB, so every byte
+/// offset is exact as an f32 (below 2^24) and the buffer is well inside
+/// WebGPU's 128 MiB storage binding default.
+pub const MAX_COVERAGE_BYTES: usize =
+    DetectTarget::ALL.len() * (MAX_COVERAGE_SIDE as usize) * (MAX_COVERAGE_SIDE as usize);
 /// The subdirectory of `.lightphotos/` that holds coverage files. Its own
 /// directory, so neither the thumbnail cache's name parser nor the sidecar
 /// scan ever sees one.
@@ -86,6 +94,56 @@ impl<'de> Deserialize<'de> for RasterId {
         let s = String::deserialize(deserializer)?;
         s.parse()
             .map_err(|()| serde::de::Error::custom("a raster id is 16 hex digits"))
+    }
+}
+
+/// The detections a photo has, one per target: a per-photo fact like its
+/// score, not an edit. Masks reference it by target, so a pasted or undone
+/// mask finds the photo's own detection, and undo never rewrites it. A value
+/// that isn't 16 hex digits loads as `None` (re-detected), never failing the
+/// record.
+#[derive(Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Detections {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_id"
+    )]
+    pub subject: Option<RasterId>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_id"
+    )]
+    pub sky: Option<RasterId>,
+}
+
+fn lenient_id<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<RasterId>, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.and_then(|s| s.parse().ok()))
+}
+
+impl Detections {
+    pub fn get(&self, target: DetectTarget) -> Option<RasterId> {
+        match target {
+            DetectTarget::Subject => self.subject,
+            DetectTarget::Sky => self.sky,
+        }
+    }
+
+    pub fn set(&mut self, target: DetectTarget, id: Option<RasterId>) {
+        match target {
+            DetectTarget::Subject => self.subject = id,
+            DetectTarget::Sky => self.sky = id,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Detections::default()
+    }
+
+    /// Whether any target records `id`, for the orphan sweep.
+    pub fn names(&self, id: RasterId) -> bool {
+        DetectTarget::ALL.iter().any(|&t| self.get(t) == Some(id))
     }
 }
 
@@ -399,6 +457,28 @@ mod tests {
         assert_eq!(serde_json::from_str::<RasterId>(&json).unwrap(), a.id());
         assert!("zz".parse::<RasterId>().is_err());
         assert!(serde_json::from_str::<RasterId>("\"0123456789abcdef0\"").is_err());
+    }
+
+    #[test]
+    fn detections_load_a_bad_id_as_none_and_write_only_what_is_set() {
+        let d: Detections =
+            serde_json::from_str(r#"{"subject":"0123456789abcdef","sky":"nope"}"#).unwrap();
+        assert_eq!(d.subject, Some(RasterId(0x0123_4567_89ab_cdef)));
+        assert_eq!(d.sky, None);
+        assert_eq!(
+            serde_json::to_string(&d).unwrap(),
+            r#"{"subject":"0123456789abcdef"}"#
+        );
+        assert!(d.names(RasterId(0x0123_4567_89ab_cdef)));
+        assert!(!d.names(RasterId(1)));
+        assert!(!d.is_empty() && Detections::default().is_empty());
+        let mut e = d;
+        e.set(DetectTarget::Subject, None);
+        assert!(e.is_empty());
+        assert_eq!(MAX_COVERAGE_BYTES, 8 << 20);
+        const {
+            assert!(MAX_COVERAGE_BYTES <= 1 << 24, "offsets must be exact f32s");
+        }
     }
 
     #[test]

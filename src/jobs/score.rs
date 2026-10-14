@@ -13,7 +13,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use crate::develop::{Adjustments, Mask, TouchUp};
+use crate::develop::{Adjustments, MaskInput, TouchUp};
 use crate::scoring::quality::QualityScore;
 use crate::worker_pool::WorkerPool;
 
@@ -23,7 +23,7 @@ pub struct ScoreRequest {
     pub path: PathBuf,
     pub adj: Adjustments,
     pub touchups: Vec<TouchUp>,
-    pub masks: Vec<Mask>,
+    pub masks: MaskInput,
     pub rot: u8,
     /// The edit signature of `adj`, `touchups` and `rot`, stored with the
     /// score so a later edit marks it stale.
@@ -48,8 +48,13 @@ pub fn score_photo(req: &ScoreRequest) -> Result<QualityScore, String> {
         sharpening: Default::default(),
         ..req.adj
     };
+    let masks = req
+        .masks
+        .clone()
+        .resolve(&req.path)
+        .map_err(|e| e.to_string())?;
     let (w, h, rgba) =
-        crate::develop::image_ops::bake_edited(&img, &adj, &req.touchups, &req.masks, req.rot);
+        crate::develop::image_ops::bake_edited(&img, &adj, &req.touchups, &masks, req.rot);
     if w == 0 || h == 0 {
         return Err("the edited preview is empty".into());
     }
@@ -315,7 +320,7 @@ mod tests {
             path: PathBuf::from(name),
             adj: Adjustments::default(),
             touchups: Vec::new(),
-            masks: Vec::new(),
+            masks: MaskInput::none(),
             rot: 0,
             edits: 9,
         }

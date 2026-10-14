@@ -157,11 +157,14 @@ impl Folder {
             max_px: max,
             ..Output::FULL
         };
+        let masks = rec
+            .mask_set(&path)
+            .map_err(|e| format!("cannot render {e}"))?;
         let jpeg = export::export_file(
             &path,
             &rec.adjustments,
             &rec.touchups,
-            &rec.masks,
+            &masks,
             rec.rotation,
             &output,
         )

@@ -83,11 +83,16 @@ impl Space<'_> {
     }
 }
 
-/// Where a mask's pin sits: a radial's center, a linear's midpoint.
-fn pin_of(m: &Mask) -> [f32; 2] {
+/// Where a mask's pin sits: a radial's center, a linear's midpoint. A
+/// detected mask has no geometry, so no pin: the panel is where it is
+/// picked.
+fn pin_of(m: &Mask) -> Option<[f32; 2]> {
     match m.shape {
-        MaskShape::Linear { start, end } => [(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0],
-        MaskShape::Radial { center, .. } => center,
+        MaskShape::Linear { start, end } => {
+            Some([(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0])
+        }
+        MaskShape::Radial { center, .. } => Some(center),
+        MaskShape::Detected { .. } => None,
     }
 }
 
@@ -114,7 +119,9 @@ pub(super) fn loupe_mask_overlay(
     let accent = theme::colors(&ctx).cursor;
 
     for (i, m) in masks.iter().enumerate() {
-        let at = space.screen(pin_of(m));
+        let Some(at) = pin_of(m).map(|p| space.screen(p)) else {
+            continue;
+        };
         if selected == Some(i) {
             draw_selected(&painter, &space, m, accent);
             continue;
@@ -307,7 +314,7 @@ fn dragged(
                 feather,
             }
         }
-        (MaskShape::Linear { .. }, _) => return None,
+        (MaskShape::Linear { .. } | MaskShape::Detected { .. }, _) => return None,
     };
     Mask { shape, ..from }.sanitized()
 }
@@ -318,8 +325,12 @@ fn handles(space: &Space, m: &Mask) -> Vec<(Handle, egui::Pos2)> {
         MaskShape::Linear { start, end } => vec![
             (Handle::Start, space.screen(start)),
             (Handle::End, space.screen(end)),
-            (Handle::Move, space.screen(pin_of(m))),
+            (
+                Handle::Move,
+                space.screen([(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0]),
+            ),
         ],
+        MaskShape::Detected { .. } => Vec::new(),
         MaskShape::Radial {
             center,
             radii,
@@ -422,8 +433,10 @@ fn draw_selected(painter: &egui::Painter, space: &Space, m: &Mask, accent: egui:
             }
             pin(painter, a, egui::Color32::WHITE);
             pin(painter, b, egui::Color32::WHITE);
-            pin(painter, space.screen(pin_of(m)), accent);
+            pin(painter, a + along / 2.0, accent);
         }
+        // Its coverage shows through the Loupe's tint overlay instead.
+        MaskShape::Detected { .. } => {}
         MaskShape::Radial {
             center,
             radii,

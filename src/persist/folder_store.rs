@@ -345,6 +345,10 @@ impl FolderStore {
         self.update_edits(path, |rec| rec.masks.set(masks));
     }
 
+    pub fn detections(&self, path: &Path) -> crate::develop::Detections {
+        self.record(path).map(|r| r.detections).unwrap_or_default()
+    }
+
     pub fn rotation(&self, path: &Path) -> u8 {
         self.record(path).map(|r| r.rotation).unwrap_or(0)
     }

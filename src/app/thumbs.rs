@@ -234,6 +234,7 @@ impl App {
             &adj,
             self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]),
             self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]),
+            &self.detections.get(path).copied().unwrap_or_default(),
             rot,
         )
     }
@@ -383,6 +384,7 @@ impl App {
                     }
                 }
             } else {
+                let masks = super::masks::mask_input_of(&self.masks, &self.detections, path);
                 loader.request_bake(path, *px, *sig, img, adj, touchups, masks, rot);
             }
         }

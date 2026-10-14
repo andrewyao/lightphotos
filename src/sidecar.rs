@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
-use crate::develop::{Adjustments, Mask, MaskShape, TouchUp, MAX_MASKS};
+use crate::develop::{Adjustments, Detections, Mask, MaskShape, TouchUp, MAX_MASKS};
 use crate::scoring::quality::QualityScore;
 
 /// Hidden subfolder holding a directory's sidecars and thumbnail cache.
@@ -82,6 +82,12 @@ pub struct ImageRecord {
     pub touchups: Vec<TouchUp>,
     #[serde(default, skip_serializing_if = "MaskList::is_empty")]
     pub masks: MaskList,
+    /// Which coverage file answers each detected-mask target. Beside
+    /// `masks`, not inside them, so a pasted or undone mask finds the photo's
+    /// own detection by target. A fact about the photo, not an edit: it is
+    /// written outside the undo history.
+    #[serde(default, skip_serializing_if = "Detections::is_empty")]
+    pub detections: Detections,
     /// Manual rotation in 90° clockwise steps, `0..=3`.
     #[serde(
         default,
@@ -271,6 +277,7 @@ impl ImageRecord {
             && self.label.is_none()
             && !self.has_edits()
             && self.masks.is_empty()
+            && self.detections.is_empty()
             && self.score.is_none()
             && self.edited.is_none();
         debug_assert_eq!(
@@ -288,8 +295,25 @@ impl ImageRecord {
             &self.adjustments,
             &self.touchups,
             &self.masks,
+            &self.detections,
             self.rotation,
         )
+    }
+
+    /// The masks with their coverage read from beside `photo`, for a bake.
+    /// A recorded coverage that is missing or corrupt is an error, never a
+    /// silently unmasked render.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn mask_set(&self, photo: &Path) -> Result<crate::develop::MaskSet, String> {
+        crate::develop::MaskSet::read(photo, &self.masks, &self.detections).map_err(|e| {
+            format!(
+                "{}: {e}",
+                photo.file_name().map_or_else(
+                    || photo.display().to_string(),
+                    |n| n.to_string_lossy().into_owned()
+                )
+            )
+        })
     }
 
     /// Whether an edit this build renders is set. A foreign mask is kept
@@ -491,6 +515,10 @@ mod tests {
                 opacity: 1.0,
             }],
             masks: vec![Mask::linear([0.5, 0.0], [0.5, 1.0])].into(),
+            detections: Detections {
+                subject: "0123456789abcdef".parse().ok(),
+                sky: None,
+            },
             rotation: 1,
             score: Some(StoredScore {
                 score: sample_score(),
@@ -504,7 +532,7 @@ mod tests {
         };
         assert_eq!(
             fields.len(),
-            7,
+            8,
             "set every field of ImageRecord here, got {fields:?}"
         );
 
@@ -617,11 +645,88 @@ mod tests {
         assert!(rec.masks.is_empty());
         assert_eq!(
             rec.edit_signature(),
-            crate::develop::edit_signature_with_touchups(&rec.adjustments, &[], &[], 0)
+            crate::develop::edit_signature_with_touchups(
+                &rec.adjustments,
+                &[],
+                &[],
+                &Detections::default(),
+                0
+            )
         );
         let mut masked = rec.clone();
         masked.masks.set(vec![Mask::radial([0.5, 0.5], [0.1, 0.1])]);
         assert_ne!(rec.edit_signature(), masked.edit_signature());
+    }
+
+    /// A detection changes the render only through a mask that reads it:
+    /// recording one for an unused target must not re-bake every thumbnail,
+    /// and a gradient-only photo must sign as it did before detections.
+    #[test]
+    fn a_detection_signs_only_through_the_masks_that_read_it() {
+        use crate::develop::DetectTarget;
+        let gradient = parse_record(
+            br#"{"masks":[{"shape":{"kind":"radial","center":[0.5,0.5],"radii":[0.1,0.1]}}]}"#,
+            || None,
+        )
+        .unwrap();
+        let id = "5be1c0a39d2f7e14".parse().ok();
+        let mut with_sky = gradient.clone();
+        with_sky.detections.set(DetectTarget::Sky, id);
+        assert_eq!(gradient.edit_signature(), with_sky.edit_signature());
+        assert_eq!(
+            gradient.edit_signature(),
+            crate::develop::edit_signature_with_touchups(
+                &gradient.adjustments,
+                &[],
+                &gradient.masks,
+                &Detections::default(),
+                0
+            )
+        );
+
+        let mut sky_mask = gradient.clone();
+        sky_mask
+            .masks
+            .set(vec![Mask::detected(DetectTarget::Sky), gradient.masks[0]]);
+        let pending = sky_mask.edit_signature();
+        assert_ne!(pending, gradient.edit_signature());
+        sky_mask.detections.set(DetectTarget::Sky, id);
+        let landed = sky_mask.edit_signature();
+        assert_ne!(landed, pending, "landing a detection re-bakes");
+        sky_mask.detections.set(DetectTarget::Subject, id);
+        assert_eq!(
+            landed,
+            sky_mask.edit_signature(),
+            "an unused target doesn't"
+        );
+    }
+
+    #[test]
+    fn detections_round_trip_through_the_sidecar_and_a_bad_id_loads_as_none() {
+        let body = br#"{"masks":[{"shape":{"kind":"detected","target":"subject"}}],
+            "detections":{"subject":"0123456789abcdef","sky":"not-an-id"}}"#;
+        let rec = parse_record(body, || None).unwrap();
+        assert_eq!(rec.masks.len(), 1);
+        assert_eq!(rec.detections.subject, "0123456789abcdef".parse().ok());
+        assert_eq!(rec.detections.sky, None);
+        assert!(!rec.is_empty());
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(
+            json.contains(r#""detections":{"subject":"0123456789abcdef"}"#),
+            "{json}"
+        );
+        assert_eq!(parse_record(json.as_bytes(), || None).unwrap(), rec);
+
+        let only = ImageRecord {
+            detections: rec.detections,
+            ..ImageRecord::default()
+        };
+        assert!(!only.is_empty(), "a detection alone still persists");
+        assert_eq!(
+            only.edit_signature(),
+            ImageRecord::default().edit_signature(),
+            "but is not an edit"
+        );
     }
 
     #[test]

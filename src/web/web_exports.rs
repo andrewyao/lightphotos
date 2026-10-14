@@ -53,7 +53,7 @@ pub struct Export {
     pub is_raw: bool,
     pub adj: Adjustments,
     pub touchups: Vec<TouchUp>,
-    pub masks: Vec<crate::develop::Mask>,
+    pub masks: crate::develop::MaskSet,
     pub rot: u8,
     pub output: crate::export::Output,
 }

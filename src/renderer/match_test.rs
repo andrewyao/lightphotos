@@ -11,7 +11,7 @@ use crate::develop::curve::Curve;
 use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
     Adjustments, BandShift, BaseProbe, CaScale, ColorAxis, ColorGrade, ColorMixer, Crop, GpuAdjust,
-    GpuMask, GpuTouchUp, Grain, GrayMix, Mask, MaskShape, Section, Sharpening, SliderId,
+    GpuTouchUp, Grain, GrayMix, Mask, MaskSet, MaskShape, Section, Sharpening, SliderId,
     Straighten, TouchUp, Vignette, Wheel, SLIDERS,
 };
 
@@ -608,20 +608,14 @@ fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case, probe: BaseProbe) -
     );
     let gpu_touchups: Vec<GpuTouchUp> = case.touchups.iter().map(GpuTouchUp::from).collect();
     r.set_touchups(&gpu_touchups);
-    let gpu_masks: Vec<GpuMask> = case.masks.iter().map(GpuMask::from).collect();
-    r.set_masks(&gpu_masks);
+    let masks = MaskSet::new(&case.masks, |_| None);
+    r.set_masks(&masks.gpu_masks());
     assert!(r.render(None, None, None), "{}: render failed", case.name);
     let gpu = r.read_offscreen_blocking().expect("offscreen readback");
     assert_eq!((gpu.width, gpu.height), (w, h));
 
-    let (cw, ch, cpu) = bake_edited_probe(
-        &fixture.img,
-        &case.adj,
-        &case.touchups,
-        &case.masks,
-        0,
-        probe,
-    );
+    let (cw, ch, cpu) =
+        bake_edited_probe(&fixture.img, &case.adj, &case.touchups, &masks, 0, probe);
     let crop = case.adj.crop.unwrap_or(Crop {
         left: 0.0,
         top: 0.0,

@@ -492,7 +492,7 @@ impl App {
             is_raw: bool,
             adj: crate::develop::Adjustments,
             touchups: Vec<crate::develop::TouchUp>,
-            masks: Vec<crate::develop::Mask>,
+            masks: crate::develop::MaskSet,
             rot: u8,
         }
         let jobs: Vec<Job> = paths
@@ -502,7 +502,7 @@ impl App {
                 is_raw: crate::decode::image_decode::is_raw_extension(src),
                 adj: self.edits.get(src).copied().unwrap_or_default(),
                 touchups: self.touchups.get(src).cloned().unwrap_or_default(),
-                masks: self.masks.get(src).cloned().unwrap_or_default(),
+                masks: self.mask_set_for(src),
                 rot: self.rotations.get(src).copied().unwrap_or(0),
             })
             .collect();
@@ -614,7 +614,7 @@ impl App {
         let job = |src: PathBuf, dest: ExportDest| ExportJob {
             adj: self.edits.get(&src).copied().unwrap_or_default(),
             touchups: self.touchups.get(&src).cloned().unwrap_or_default(),
-            masks: self.masks.get(&src).cloned().unwrap_or_default(),
+            masks: self.mask_input(&src),
             rot: self.rotations.get(&src).copied().unwrap_or(0),
             src,
             dest,

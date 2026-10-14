@@ -301,6 +301,12 @@ impl App {
             } else {
                 self.masks.insert(p.clone(), masks);
             }
+            let detections = self.folder_store.detections(p);
+            if detections.is_empty() {
+                self.detections.remove(p);
+            } else {
+                self.detections.insert(p.clone(), detections);
+            }
             match self.folder_store.rotation(p) {
                 0 => self.rotations.remove(p),
                 rot => self.rotations.insert(p.clone(), rot),
