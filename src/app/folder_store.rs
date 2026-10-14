@@ -179,10 +179,19 @@ impl App {
                 .name("folder-store-load".into())
                 .spawn(move || {
                     let loaded = crate::persist::folder_store::load_sidecars(&for_thread);
+                    let named: HashMap<std::ffi::OsString, crate::develop::Detections> = loaded
+                        .images
+                        .iter()
+                        .filter(|(_, r)| !r.detections.is_empty())
+                        .map(|(name, r)| (name.clone(), r.detections))
+                        .collect();
                     let _ = tx.send((for_thread.clone(), token, mark, loaded));
                     // Sweep after sending, because the UI waits on the folder store
-                    // and nothing waits on the sweep.
+                    // and nothing waits on the sweeps.
                     crate::jobs::thumbnail::sweep_orphans(&for_thread);
+                    crate::develop::coverage::sweep_orphans(&for_thread, |photo, id| {
+                        named.get(photo).is_some_and(|d| d.names(id))
+                    });
                 });
             match spawned {
                 Ok(_) => self.folder_store_load.pending = Some((dir, token)),

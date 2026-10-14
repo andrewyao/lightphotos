@@ -7,7 +7,6 @@
 
 use std::cell::OnceCell;
 use std::fmt;
-#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};

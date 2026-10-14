@@ -999,7 +999,7 @@ mod tests {
                 false,
                 &Default::default(),
                 &[],
-                &[],
+                &crate::develop::MaskSet::default(),
                 0,
                 crate::export::Output {
                     max_px: 8,

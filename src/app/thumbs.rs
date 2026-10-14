@@ -384,7 +384,12 @@ impl App {
                     }
                 }
             } else {
-                let masks = super::masks::mask_input_of(&self.masks, &self.detections, path);
+                let masks = super::masks::mask_input_of(
+                    &self.masks,
+                    &self.detections,
+                    &self.coverage,
+                    path,
+                );
                 loader.request_bake(path, *px, *sig, img, adj, touchups, masks, rot);
             }
         }

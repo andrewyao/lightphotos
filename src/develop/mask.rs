@@ -13,7 +13,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::coverage::{Coverage, CoverageError, Detections, RasterId};
+#[cfg(not(target_arch = "wasm32"))]
+use super::coverage::Detections;
+use super::coverage::{Coverage, CoverageError, RasterId};
 use super::{Adjustments, SliderId, EXPOSURE_RANGE, TONE_RANGE};
 
 /// The most masks one photo can hold: the GPU buffer's size.
@@ -535,6 +537,8 @@ impl MaskInput {
 
     /// The masks with their coverage, read from beside `photo` if needed.
     pub fn resolve(self, photo: &std::path::Path) -> Result<MaskSet, CoverageError> {
+        // Only the native variant reads beside the photo.
+        let _ = photo;
         match self {
             MaskInput::Ready(set) => Ok(set),
             #[cfg(not(target_arch = "wasm32"))]

@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::develop::{Coverage, CoverageError, DetectTarget, Detections, Mask, RasterId};
-use crate::scoring::detect::{self, DetectError};
+use crate::scoring::detect;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::scoring::detect::DetectError;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::worker_pool::WorkerPool;
 
@@ -67,12 +69,15 @@ pub(crate) enum Record {
     Set(Option<RasterId>),
 }
 
+// Only a detection lands with a notice, and the browser has no detector.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) enum Notice {
     NothingFound,
     Failed(String),
 }
 
 /// A detector the store runs: `detect::run`, or a test's stand-in.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) type Detector = fn(&Path, DetectTarget) -> Result<Coverage, DetectError>;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -100,9 +105,28 @@ pub(crate) struct CoverageStore {
     detect: WorkerPool<DetectJob, Coverage>,
     #[cfg(not(target_arch = "wasm32"))]
     load: WorkerPool<LoadJob, Result<Coverage, CoverageError>>,
+    /// Loads the app must run for the store: File System Access is
+    /// main-thread only, so the app reads each file as a task and sends
+    /// the result back through `web_landings`.
+    #[cfg(target_arch = "wasm32")]
+    wanted_loads: Vec<(PathBuf, DetectTarget, RasterId)>,
+    #[cfg(target_arch = "wasm32")]
+    web_landings: (
+        std::sync::mpsc::Sender<WebLanding>,
+        std::sync::mpsc::Receiver<WebLanding>,
+    ),
     /// Jobs submitted and not yet drained, so the frame loop keeps polling.
     in_flight: usize,
 }
+
+/// A coverage file the app read for the store, on the web.
+#[cfg(target_arch = "wasm32")]
+pub(crate) type WebLanding = (
+    PathBuf,
+    DetectTarget,
+    RasterId,
+    Result<Coverage, CoverageError>,
+);
 
 impl CoverageStore {
     pub(crate) fn new() -> Self {
@@ -116,9 +140,23 @@ impl CoverageStore {
                 slots: HashMap::new(),
                 ready_order: VecDeque::new(),
                 ready_bytes: 0,
+                wanted_loads: Vec::new(),
+                web_landings: std::sync::mpsc::channel(),
                 in_flight: 0,
             }
         }
+    }
+
+    /// The files the app must read for the store, each once.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn take_wanted_loads(&mut self) -> Vec<(PathBuf, DetectTarget, RasterId)> {
+        std::mem::take(&mut self.wanted_loads)
+    }
+
+    /// Where the app sends what it read.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn web_landing_sender(&self) -> std::sync::mpsc::Sender<WebLanding> {
+        self.web_landings.0.clone()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -278,6 +316,34 @@ impl CoverageStore {
     /// where a detector exists, else settled as `Failed(Missing)`.
     pub(crate) fn drain(&mut self) -> Vec<Landed> {
         let mut out = Vec::new();
+        #[cfg(target_arch = "wasm32")]
+        {
+            while let Ok((photo, target, id, result)) = self.web_landings.1.try_recv() {
+                self.in_flight = self.in_flight.saturating_sub(1);
+                let key = (photo, target);
+                if !matches!(self.slots.get(&key), Some(Slot::Loading(l)) if *l == id) {
+                    continue;
+                }
+                let record = match result {
+                    Ok(coverage) => {
+                        self.set_ready(&key, Arc::new(coverage));
+                        Record::Keep
+                    }
+                    // The browser has no detector to fall back on.
+                    Err(_) => {
+                        self.slots
+                            .insert(key.clone(), Slot::Failed(Failure::Missing));
+                        Record::Set(None)
+                    }
+                };
+                out.push(Landed {
+                    photo: key.0,
+                    target: key.1,
+                    record,
+                    notice: None,
+                });
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
         {
             for (job, result) in self.detect.poll() {
@@ -351,16 +417,17 @@ impl CoverageStore {
             return Lookup::Failed;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let submitted = self.detect.submit(DetectJob {
-                photo: key.0.clone(),
-                target: key.1,
-            });
-            if submitted {
-                self.in_flight += 1;
-                self.slots.insert(key, Slot::Detecting);
-                return Lookup::Pending;
-            }
+        let submitted = self.detect.submit(DetectJob {
+            photo: key.0.clone(),
+            target: key.1,
+        });
+        // No detector is available in the browser, so this is never reached.
+        #[cfg(target_arch = "wasm32")]
+        let submitted = false;
+        if submitted {
+            self.in_flight += 1;
+            self.slots.insert(key, Slot::Detecting);
+            return Lookup::Pending;
         }
         let why = Failure::Detect("the detect worker is gone".into());
         self.slots.insert(key, Slot::Failed(why));
@@ -369,20 +436,22 @@ impl CoverageStore {
 
     fn start_load(&mut self, key: (PathBuf, DetectTarget), id: RasterId) -> Lookup {
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            let submitted = self.load.submit(LoadJob {
-                photo: key.0.clone(),
-                target: key.1,
-                id,
-            });
-            if submitted {
-                self.in_flight += 1;
-                self.forget_ready(&key);
-                self.slots.insert(key, Slot::Loading(id));
-                return Lookup::Pending;
-            }
+        let submitted = self.load.submit(LoadJob {
+            photo: key.0.clone(),
+            target: key.1,
+            id,
+        });
+        #[cfg(target_arch = "wasm32")]
+        let submitted = {
+            self.wanted_loads.push((key.0.clone(), key.1, id));
+            true
+        };
+        if submitted {
+            self.in_flight += 1;
+            self.forget_ready(&key);
+            self.slots.insert(key, Slot::Loading(id));
+            return Lookup::Pending;
         }
-        let _ = id;
         self.slots.insert(key, Slot::Failed(Failure::Missing));
         Lookup::Failed
     }

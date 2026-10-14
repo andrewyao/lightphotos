@@ -79,6 +79,32 @@ impl App {
         self.hist.invalidate();
     }
 
+    /// Reads, as tasks, the coverage files the store asked for. File System
+    /// Access is main-thread only, so no worker can do it; each result goes
+    /// back through the store's channel and lands in `drain`.
+    #[cfg(target_arch = "wasm32")]
+    fn start_web_loads(&mut self) {
+        use crate::develop::{Coverage, CoverageError};
+        for (photo, target, id) in self.coverage.take_wanted_loads() {
+            let tx = self.coverage.web_landing_sender();
+            let handle = photo.parent().and_then(|dir| self.web.dir_handle(dir));
+            let name = photo.file_name().map(|n| n.to_os_string());
+            let (Some(handle), Some(name)) = (handle, name) else {
+                let _ = tx.send((photo, target, id, Err(CoverageError::Missing)));
+                continue;
+            };
+            wasm_bindgen_futures::spawn_local(async move {
+                let read = crate::web::web_folder_store_fs::read_coverage(&handle, &name, id).await;
+                let result = match read {
+                    Ok(Some(bytes)) => Coverage::decode(&bytes, id),
+                    Ok(None) => Err(CoverageError::Missing),
+                    Err(e) => Err(CoverageError::Io(e)),
+                };
+                let _ = tx.send((photo, target, id, result));
+            });
+        }
+    }
+
     /// Writes what `target` resolves to for `path`: the sidecar and the
     /// mirror, outside the undo history. A detection is a fact about the
     /// photo, not an edit the user made.
@@ -96,6 +122,8 @@ impl App {
     /// the mask, but the detection still records, so Redo brings the mask
     /// back with no second detection.
     pub(crate) fn poll_coverage(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        self.start_web_loads();
         let landed = self.coverage.drain();
         self.sync_mask_overlay();
         if landed.is_empty() {
@@ -127,21 +155,23 @@ impl App {
 
     /// What a background bake of `path` carries.
     pub(crate) fn mask_input(&self, path: &Path) -> MaskInput {
-        mask_input_of(&self.masks, &self.detections, path)
+        mask_input_of(&self.masks, &self.detections, &self.coverage, path)
     }
 }
 
 /// What a background bake of `path` carries, from the app's mirrors. Native
 /// workers read the coverage beside the photo themselves; the browser's
-/// can't reach the folder, so they take what is in memory. A free function,
-/// so a caller holding the loader can still build one.
+/// can't reach the folder, so they take what the store has in memory. A
+/// free function, so a caller holding the loader can still build one.
 pub(crate) fn mask_input_of(
     masks: &HashMap<PathBuf, Vec<Mask>>,
     detections: &HashMap<PathBuf, crate::develop::Detections>,
+    coverage: &coverage::CoverageStore,
     path: &Path,
 ) -> MaskInput {
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let _ = coverage;
         MaskInput::OnDisk {
             masks: masks.get(path).cloned().unwrap_or_default(),
             detections: detections.get(path).copied().unwrap_or_default(),
@@ -152,7 +182,7 @@ pub(crate) fn mask_input_of(
         let _ = detections;
         MaskInput::Ready(MaskSet::new(
             masks.get(path).map(Vec::as_slice).unwrap_or(&[]),
-            |_| None,
+            |t| coverage.ready(path, t),
         ))
     }
 }

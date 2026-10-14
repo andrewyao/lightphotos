@@ -23,7 +23,7 @@ use std::time::SystemTime;
 use crate::decode::image_encode::{Embedded, Encoding, JpegOptions, JpegPreset, Pixels};
 use crate::decode::{image_decode, image_encode};
 use crate::develop::sharpen::OutputSharpening;
-use crate::develop::{Adjustments, MaskInput, MaskSet, TouchUp};
+use crate::develop::{Adjustments, MaskSet, TouchUp};
 use metadata::{Keep, SourceMeta};
 
 /// Subfolder of the current folder that exports go to, on every platform.
@@ -518,7 +518,7 @@ pub struct ExportJob {
     pub dest: ExportDest,
     pub adj: Adjustments,
     pub touchups: Vec<TouchUp>,
-    pub masks: MaskInput,
+    pub masks: crate::develop::MaskInput,
     pub rot: u8,
     pub output: Output,
 }
@@ -731,7 +731,7 @@ mod tests {
             dest: ExportDest::Folder(PathBuf::from("out.jpg")),
             adj: Default::default(),
             touchups: Vec::new(),
-            masks: MaskInput::none(),
+            masks: crate::develop::MaskInput::none(),
             rot: 0,
             output: Output::FULL,
         };
@@ -803,7 +803,7 @@ mod tests {
             dest: ExportDest::Folder(dest.clone()),
             adj,
             touchups: Vec::new(),
-            masks: MaskInput::none(),
+            masks: crate::develop::MaskInput::none(),
             rot: 1,
             output: Output {
                 max_px: 50,
@@ -1218,7 +1218,7 @@ mod tests {
             dest: ExportDest::Folder(dir.join("out.tif")),
             adj: Default::default(),
             touchups: Vec::new(),
-            masks: MaskInput::none(),
+            masks: crate::develop::MaskInput::none(),
             rot: 0,
             output: Output {
                 format: ExportFormat::Tiff16,
