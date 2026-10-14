@@ -20,7 +20,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
 use crate::decode::image_decode::{self, DecodedImage, ImageMetadata};
-use crate::develop::{Adjustments, TouchUp};
+use crate::develop::{Adjustments, Mask, TouchUp};
 use crate::jobs::cache_limits::CacheLimits;
 use crate::jobs::thumbnail::{Origin, ThumbCache};
 
@@ -105,13 +105,19 @@ struct BakeJob {
     img: Arc<DecodedImage>,
     adj: Adjustments,
     touchups: Vec<TouchUp>,
+    masks: Vec<Mask>,
     rot: u8,
 }
 
 impl BakeJob {
     fn run(self) -> BakedThumb {
-        let (width, height, rgba) =
-            crate::develop::image_ops::bake_edited(&self.img, &self.adj, &self.touchups, self.rot);
+        let (width, height, rgba) = crate::develop::image_ops::bake_edited(
+            &self.img,
+            &self.adj,
+            &self.touchups,
+            &self.masks,
+            self.rot,
+        );
         BakedThumb {
             path: self.path,
             px: self.px,
@@ -1388,6 +1394,7 @@ impl Loader {
         img: Arc<DecodedImage>,
         adj: Adjustments,
         touchups: &[TouchUp],
+        masks: &[Mask],
         rot: u8,
     ) {
         let key = (path.to_path_buf(), px);
@@ -1403,6 +1410,7 @@ impl Loader {
             img,
             adj,
             touchups: touchups.to_vec(),
+            masks: masks.to_vec(),
             rot,
         };
         if self.workers == 0 {
@@ -1806,6 +1814,7 @@ mod tests {
             img: image(2, 2),
             adj: Adjustments::default(),
             touchups: Vec::new(),
+            masks: Vec::new(),
             rot: 0,
         }))
     }
@@ -1874,9 +1883,9 @@ mod tests {
     fn a_newer_edit_replaces_the_queued_bake_for_that_thumbnail() {
         let mut loader = Loader::queue_only_for_test();
         let a = path("a");
-        loader.request_bake(&a, 512, 1, image(2, 2), Adjustments::default(), &[], 1);
-        loader.request_bake(&a, 512, 2, image(2, 2), Adjustments::default(), &[], 1);
-        loader.request_bake(&a, 512, 2, image(2, 2), Adjustments::default(), &[], 1);
+        loader.request_bake(&a, 512, 1, image(2, 2), Adjustments::default(), &[], &[], 1);
+        loader.request_bake(&a, 512, 2, image(2, 2), Adjustments::default(), &[], &[], 1);
+        loader.request_bake(&a, 512, 2, image(2, 2), Adjustments::default(), &[], &[], 1);
         assert_eq!(queued_bakes(&loader), [(a, 2)]);
     }
 
@@ -1884,12 +1893,39 @@ mod tests {
     fn a_cell_that_scrolled_away_loses_its_queued_bake() {
         let mut loader = Loader::queue_only_for_test();
         let (gone, kept) = (path("gone"), path("kept"));
-        loader.request_bake(&gone, 512, 1, image(2, 2), Adjustments::default(), &[], 1);
-        loader.request_bake(&kept, 512, 1, image(2, 2), Adjustments::default(), &[], 1);
+        loader.request_bake(
+            &gone,
+            512,
+            1,
+            image(2, 2),
+            Adjustments::default(),
+            &[],
+            &[],
+            1,
+        );
+        loader.request_bake(
+            &kept,
+            512,
+            1,
+            image(2, 2),
+            Adjustments::default(),
+            &[],
+            &[],
+            1,
+        );
         loader.retain_bakes(|(p, _)| p == &kept);
         assert_eq!(queued_bakes(&loader), [(kept, 1)]);
         // Its marker went with it, so scrolling back queues it again.
-        loader.request_bake(&gone, 512, 1, image(2, 2), Adjustments::default(), &[], 1);
+        loader.request_bake(
+            &gone,
+            512,
+            1,
+            image(2, 2),
+            Adjustments::default(),
+            &[],
+            &[],
+            1,
+        );
         assert_eq!(queued_bakes(&loader).len(), 2);
     }
 
@@ -1903,6 +1939,7 @@ mod tests {
             image(4, 2),
             Adjustments::default(),
             &[],
+            &[],
             1,
         );
         let baked = loader.take_baked();
@@ -1915,7 +1952,7 @@ mod tests {
     fn a_bake_that_yields_nothing_is_not_queued_again_until_the_edit_changes() {
         let mut loader = Loader::queue_only_for_test();
         let a = path("a");
-        loader.request_bake(&a, 512, 1, image(0, 0), Adjustments::default(), &[], 1);
+        loader.request_bake(&a, 512, 1, image(0, 0), Adjustments::default(), &[], &[], 1);
         let job = loader
             .shared
             .queue
@@ -1931,9 +1968,9 @@ mod tests {
         assert!(loader.take_baked().is_empty());
         assert!(!loader.bakes_pending());
 
-        loader.request_bake(&a, 512, 1, image(0, 0), Adjustments::default(), &[], 1);
+        loader.request_bake(&a, 512, 1, image(0, 0), Adjustments::default(), &[], &[], 1);
         assert!(queued_bakes(&loader).is_empty());
-        loader.request_bake(&a, 512, 2, image(0, 0), Adjustments::default(), &[], 1);
+        loader.request_bake(&a, 512, 2, image(0, 0), Adjustments::default(), &[], &[], 1);
         assert_eq!(queued_bakes(&loader), [(a, 2)]);
     }
 

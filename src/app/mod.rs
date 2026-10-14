@@ -17,7 +17,7 @@ use winit::keyboard::{KeyCode, ModifiersState};
 use winit::window::Window;
 
 use crate::decode::image_decode;
-use crate::develop::{Adjustments, Crop, TouchUp};
+use crate::develop::{Adjustments, Crop, Mask, TouchUp};
 use crate::export::Exporter;
 use crate::jobs::loader::Loader;
 use crate::navigation::{Cmp, FlagFilter, Playlist};
@@ -473,6 +473,8 @@ pub(crate) struct App {
     /// Undo for `edits`. `put_edit` records into it.
     history: history::EditHistory,
     touchups: HashMap<PathBuf, Vec<TouchUp>>,
+    /// Per-image local adjustment masks. Holds only non-empty lists.
+    masks: HashMap<PathBuf, Vec<Mask>>,
     /// Loupe click tool. Crop mode (`cropping()`) turns it off.
     tool: LoupeTool,
     touchup_radius: f32,
@@ -827,6 +829,7 @@ impl App {
             edits: HashMap::new(),
             history: history::EditHistory::default(),
             touchups: HashMap::new(),
+            masks: HashMap::new(),
             tool: LoupeTool::None,
             // Clamped up to TOUCHUP_MIN_PIXELS once an image is loaded.
             touchup_radius: 0.001,

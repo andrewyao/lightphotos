@@ -138,6 +138,7 @@ fn measure(path: &Path, sidecar: &ImageRecord) -> Result<Row, String> {
         &img,
         &sidecar.adjustments,
         &sidecar.touchups,
+        &sidecar.masks,
         sidecar.rotation,
     );
     let t = quality::technical(&rgba, w, h);

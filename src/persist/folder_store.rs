@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use crate::develop::{Adjustments, TouchUp};
+use crate::develop::{Adjustments, Mask, TouchUp};
 use crate::persist::catalog::{DirMarks, PhotoMarks};
 use crate::persist::groups::{GroupId, GroupWrite, Groups, SavedGroup};
 use crate::scoring::quality::QualityScore;
@@ -332,6 +332,12 @@ impl FolderStore {
     pub fn set_touchups(&mut self, path: &Path, touchups: &[TouchUp]) {
         let touchups = touchups.to_vec();
         self.update_edits(path, |rec| rec.touchups = touchups);
+    }
+
+    pub fn masks(&self, path: &Path) -> Vec<Mask> {
+        self.record(path)
+            .map(|r| r.masks.clone())
+            .unwrap_or_default()
     }
 
     pub fn rotation(&self, path: &Path) -> u8 {

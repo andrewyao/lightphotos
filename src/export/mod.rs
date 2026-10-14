@@ -23,7 +23,7 @@ use std::time::SystemTime;
 use crate::decode::image_encode::{Embedded, Encoding, JpegOptions, JpegPreset, Pixels};
 use crate::decode::{image_decode, image_encode};
 use crate::develop::sharpen::OutputSharpening;
-use crate::develop::{Adjustments, TouchUp};
+use crate::develop::{Adjustments, Mask, TouchUp};
 use metadata::{Keep, SourceMeta};
 
 /// Subfolder of the current folder that exports go to, on every platform.
@@ -319,6 +319,7 @@ pub fn bake_export(
     is_raw: bool,
     adj: &Adjustments,
     touchups: &[TouchUp],
+    masks: &[Mask],
     rot: u8,
     output: Output,
 ) -> Result<Vec<u8>, String> {
@@ -332,6 +333,7 @@ pub fn bake_export(
         &img,
         adj,
         touchups,
+        masks,
         rot,
         &output,
         &SourceMeta::read_bytes(src_bytes),
@@ -349,6 +351,7 @@ pub fn bake_export_from_shared_vec(
     is_raw: bool,
     adj: &Adjustments,
     touchups: &[TouchUp],
+    masks: &[Mask],
     rot: u8,
     output: Output,
 ) -> Result<Vec<u8>, String> {
@@ -362,6 +365,7 @@ pub fn bake_export_from_shared_vec(
         &img,
         adj,
         touchups,
+        masks,
         rot,
         &output,
         &SourceMeta::read_bytes(&src_bytes),
@@ -381,6 +385,7 @@ fn render(
     img: &image_decode::DecodedImage,
     adj: &Adjustments,
     touchups: &[TouchUp],
+    masks: &[Mask],
     rot: u8,
     output: &Output,
     source: &SourceMeta,
@@ -402,11 +407,11 @@ fn render(
         Ok(FileMeta { exif: block, xmp })
     };
     if output.format == ExportFormat::Tiff16 {
-        let (w, h, rgba) = bake_sized::<u16>(img, adj, touchups, rot, output);
+        let (w, h, rgba) = bake_sized::<u16>(img, adj, touchups, masks, rot, output);
         let prepared = image_encode::Prepared::new(w, h, Pixels::Rgba16(&rgba))?;
         return prepared.encode(Encoding::Tiff, meta(w, h)?.embedded());
     }
-    let (w, h, rgba) = bake_sized::<u8>(img, adj, touchups, rot, output);
+    let (w, h, rgba) = bake_sized::<u8>(img, adj, touchups, masks, rot, output);
     let prepared = image_encode::Prepared::new(w, h, Pixels::Rgba8(&rgba))?;
     let meta = meta(w, h)?;
     if output.format != ExportFormat::Jpeg {
@@ -480,10 +485,12 @@ fn bake_sized<S: crate::develop::image_ops::Sample>(
     img: &image_decode::DecodedImage,
     adj: &Adjustments,
     touchups: &[TouchUp],
+    masks: &[Mask],
     rot: u8,
     output: &Output,
 ) -> (u32, u32, Vec<S>) {
-    let (w, h, rgba) = crate::develop::image_ops::bake_edited_as::<S>(img, adj, touchups, rot);
+    let (w, h, rgba) =
+        crate::develop::image_ops::bake_edited_as::<S>(img, adj, touchups, masks, rot);
     let (w, h, mut rgba) = crate::develop::image_ops::fit_long_edge(w, h, rgba, output.max_px);
     output.sharpen.apply(w, h, &mut rgba);
     (w, h, rgba)
@@ -511,6 +518,7 @@ pub struct ExportJob {
     pub dest: ExportDest,
     pub adj: Adjustments,
     pub touchups: Vec<TouchUp>,
+    pub masks: Vec<Mask>,
     pub rot: u8,
     pub output: Output,
 }
@@ -609,7 +617,14 @@ fn do_export(job: &ExportJob) -> Result<ExportLanding, String> {
     // full-size image either.
     let _one_at_a_time = (job.output.format == ExportFormat::Tiff16)
         .then(|| TIFF16_GATE.lock().unwrap_or_else(PoisonError::into_inner));
-    let file = export_file(&job.src, &job.adj, &job.touchups, job.rot, &job.output)?;
+    let file = export_file(
+        &job.src,
+        &job.adj,
+        &job.touchups,
+        &job.masks,
+        job.rot,
+        &job.output,
+    )?;
     match &job.dest {
         ExportDest::Folder(dest) => {
             crate::paths::write_atomic(dest, &file).map_err(|e| format!("write: {e}"))?;
@@ -654,6 +669,7 @@ pub fn export_file(
     src: &Path,
     adj: &Adjustments,
     touchups: &[TouchUp],
+    masks: &[Mask],
     rot: u8,
     output: &Output,
 ) -> Result<Vec<u8>, String> {
@@ -662,6 +678,7 @@ pub fn export_file(
         &img,
         adj,
         touchups,
+        masks,
         rot,
         output,
         &SourceMeta::read_path(src),
@@ -709,6 +726,7 @@ mod tests {
             dest: ExportDest::Folder(PathBuf::from("out.jpg")),
             adj: Default::default(),
             touchups: Vec::new(),
+            masks: Vec::new(),
             rot: 0,
             output: Output::FULL,
         };
@@ -780,6 +798,7 @@ mod tests {
             dest: ExportDest::Folder(dest.clone()),
             adj,
             touchups: Vec::new(),
+            masks: Vec::new(),
             rot: 1,
             output: Output {
                 max_px: 50,
@@ -855,7 +874,7 @@ mod tests {
         };
         assert_eq!(decode_px(200, adj.crop), 1602, "about half the source");
 
-        let jpeg = export_file(&src, &adj, &[], 1, &output).unwrap();
+        let jpeg = export_file(&src, &adj, &[], &[], 1, &output).unwrap();
         std::fs::write(dir.join("out.jpg"), &jpeg).unwrap();
         let out = image_decode::decode(&dir.join("out.jpg"), u32::MAX).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -891,6 +910,7 @@ mod tests {
             let jpeg = render(
                 &gradient(64, 48),
                 &Adjustments::default(),
+                &[],
                 &[],
                 0,
                 &output,
@@ -933,8 +953,9 @@ mod tests {
             },
             ..small.clone()
         };
-        let (pw, ph, plain) = bake_sized::<u8>(&img, &Adjustments::default(), &[], 0, &small);
-        let (sw, sh, sharpened) = bake_sized::<u8>(&img, &Adjustments::default(), &[], 0, &sharp);
+        let (pw, ph, plain) = bake_sized::<u8>(&img, &Adjustments::default(), &[], &[], 0, &small);
+        let (sw, sh, sharpened) =
+            bake_sized::<u8>(&img, &Adjustments::default(), &[], &[], 0, &sharp);
         assert_eq!((pw, ph), (32, 16));
         assert_eq!((sw, sh), (32, 16));
         let mut after_resize = plain.clone();
@@ -983,6 +1004,7 @@ mod tests {
                 &img,
                 &Adjustments::default(),
                 &[],
+                &[],
                 1,
                 &output,
                 &SourceMeta::default(),
@@ -1015,8 +1037,8 @@ mod tests {
             exposure: 0.37,
             ..Adjustments::default()
         };
-        let (w, h, deep) = bake_sized::<u16>(&img, &adj, &[], 0, &Output::FULL);
-        let (_, _, shallow) = bake_sized::<u8>(&img, &adj, &[], 0, &Output::FULL);
+        let (w, h, deep) = bake_sized::<u16>(&img, &adj, &[], &[], 0, &Output::FULL);
+        let (_, _, shallow) = bake_sized::<u8>(&img, &adj, &[], &[], 0, &Output::FULL);
         assert_eq!((w, h), (256, 4));
         let between = deep.iter().filter(|&&v| v % 257 != 0).count();
         assert!(
@@ -1054,6 +1076,7 @@ mod tests {
             render(
                 &img,
                 &Adjustments::default(),
+                &[],
                 &[],
                 0,
                 &Output {
@@ -1111,8 +1134,16 @@ mod tests {
                     ..Output::FULL
                 };
                 let what = format!("{format:?} location {location} identity {identity}");
-                let bytes = render(&img, &Adjustments::default(), &[], 0, &output, &source())
-                    .unwrap_or_else(|e| panic!("{what}: {e}"));
+                let bytes = render(
+                    &img,
+                    &Adjustments::default(),
+                    &[],
+                    &[],
+                    0,
+                    &output,
+                    &source(),
+                )
+                .unwrap_or_else(|e| panic!("{what}: {e}"));
                 // The exif crate reads no AVIF; macOS's ImageIO checks those.
                 if format == ExportFormat::Avif {
                     assert!(bytes.windows(4).any(|w| w == b"Exif"), "{what}");
@@ -1167,6 +1198,7 @@ mod tests {
             dest: ExportDest::Folder(dir.join("out.tif")),
             adj: Default::default(),
             touchups: Vec::new(),
+            masks: Vec::new(),
             rot: 0,
             output: Output {
                 format: ExportFormat::Tiff16,
@@ -1219,6 +1251,7 @@ mod tests {
         let jpeg = render(
             &gradient(8, 8),
             &Adjustments::default(),
+            &[],
             &[],
             0,
             &output,

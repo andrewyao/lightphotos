@@ -1281,23 +1281,30 @@ impl<'a> Develop<'a> {
     }
 
     pub fn linear(&self, rgb: [f32; 3]) -> [f32; 3] {
-        apply_linear_impl(self, rgb, None, false)
+        apply_linear_impl(self, rgb, None, false, None)
     }
 
     pub fn raw_display(&self, rgb: [f32; 3]) -> [f32; 3] {
-        apply_linear_impl(self, rgb, None, true)
+        apply_linear_impl(self, rgb, None, true, None)
     }
 
     /// [`Develop::linear`] for the pixel at canvas UV `(u, v)`.
     pub fn linear_at(&self, rgb: [f32; 3], u: f32, v: f32) -> [f32; 3] {
         let at = self.frame.as_ref().map(|f| (f, u, v));
-        apply_linear_impl(self, rgb, at, false)
+        apply_linear_impl(self, rgb, at, false, None)
+    }
+
+    /// [`Develop::linear_at`] with `local` in place of the photo's own
+    /// values for the sliders a mask moves; see [`mask::local_tone`].
+    pub fn linear_at_local(&self, rgb: [f32; 3], u: f32, v: f32, local: &LocalAmounts) -> [f32; 3] {
+        let at = self.frame.as_ref().map(|f| (f, u, v));
+        apply_linear_impl(self, rgb, at, false, Some(local))
     }
 
     /// [`Develop::raw_display`] for the pixel at canvas UV `(u, v)`.
     pub fn raw_display_at(&self, rgb: [f32; 3], u: f32, v: f32) -> [f32; 3] {
         let at = self.frame.as_ref().map(|f| (f, u, v));
-        apply_linear_impl(self, rgb, at, true)
+        apply_linear_impl(self, rgb, at, true, None)
     }
 }
 
@@ -1306,13 +1313,16 @@ fn apply_linear_impl(
     rgb: [f32; 3],
     at: Option<(&Frame, f32, f32)>,
     raw_display: bool,
+    local: Option<&LocalAmounts>,
 ) -> [f32; 3] {
     let adj = dev.adj;
+    // The nine sliders a mask can move, here or for the whole photo.
+    let l = local.copied().unwrap_or_else(|| LocalAmounts::of(adj));
     let [mut r, mut g, mut b] = rgb;
 
     // White balance as small per-channel gains, at most ±0.3.
-    let t = adj.temp / 100.0;
-    let ti = adj.tint / 100.0;
+    let t = l.temp / 100.0;
+    let ti = l.tint / 100.0;
     let r_gain = 1.0 + t * 0.3;
     let b_gain = 1.0 - t * 0.3;
     let g_gain = 1.0 - ti * 0.15;
@@ -1320,7 +1330,7 @@ fn apply_linear_impl(
     g *= g_gain;
     b *= b_gain;
 
-    let exposed = exposure_curve([r, g, b], adj.exposure);
+    let exposed = exposure_curve([r, g, b], l.exposure);
     r = exposed[0];
     g = exposed[1];
     b = exposed[2];
@@ -1341,27 +1351,27 @@ fn apply_linear_impl(
     let tone = |v: f32| -> f32 {
         let mut x = v;
 
-        let blacks = adj.blacks / 100.0 * 0.2;
-        let whites = adj.whites / 100.0 * 0.2;
+        let blacks = l.blacks / 100.0 * 0.2;
+        let whites = l.whites / 100.0 * 0.2;
         // Map input `-blacks` to 0 and `1 - whites` to 1. Positive Whites
         // brightens the top end, as in Lightroom.
         x = (x + blacks) / ((1.0 - whites) + blacks);
 
         // S-curve around 0.5.
-        let c = adj.contrast / 100.0 * 0.5;
+        let c = l.contrast / 100.0 * 0.5;
         if c != 0.0 {
             let d = x - 0.5;
             x = 0.5 + d + c * d * (1.0 - 4.0 * d * d);
         }
 
         // Shadows and Highlights are weighted toward black and white respectively.
-        let s = adj.shadows / 100.0 * 0.3;
+        let s = l.shadows / 100.0 * 0.3;
         if s != 0.0 {
             let mask = (1.0 - x.clamp(0.0, 1.0)).powf(2.0);
             x += s * mask;
         }
 
-        let h = adj.highlights / 100.0 * 0.3;
+        let h = l.highlights / 100.0 * 0.3;
         if h != 0.0 {
             let mask = x.clamp(0.0, 1.0).powf(2.0);
             x += h * mask;
@@ -1384,7 +1394,7 @@ fn apply_linear_impl(
     // Vibrance and saturation scale chroma around Rec.601 luma. Vibrance is
     // weaker on pixels that are already saturated.
     let luma = 0.299 * rg + 0.587 * gg + 0.114 * bg;
-    let sat_total = 1.0 + adj.saturation / 100.0;
+    let sat_total = 1.0 + l.saturation / 100.0;
     let cmax = rg.max(gg).max(bg);
     let cmin = rg.min(gg).min(bg);
     let cur_sat = if cmax > 0.0 {

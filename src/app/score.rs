@@ -74,13 +74,16 @@ impl App {
             for path in job.take(free) {
                 let adj = self.edits.get(&path).copied().unwrap_or_default();
                 let touchups = self.touchups.get(&path).cloned().unwrap_or_default();
+                let masks = self.masks.get(&path).cloned().unwrap_or_default();
                 let rot = self.rotations.get(&path).copied().unwrap_or(0);
-                let edits = crate::develop::edit_signature_with_touchups(&adj, &touchups, &[], rot);
+                let edits =
+                    crate::develop::edit_signature_with_touchups(&adj, &touchups, &masks, rot);
                 if let Some(pool) = self.score_pool.as_mut() {
                     pool.submit(ScoreRequest {
                         path,
                         adj,
                         touchups,
+                        masks,
                         rot,
                         edits,
                     });

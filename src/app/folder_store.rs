@@ -293,6 +293,12 @@ impl App {
             } else {
                 self.touchups.insert(p.clone(), touchups);
             }
+            let masks = self.folder_store.masks(p);
+            if masks.is_empty() {
+                self.masks.remove(p);
+            } else {
+                self.masks.insert(p.clone(), masks);
+            }
             match self.folder_store.rotation(p) {
                 0 => self.rotations.remove(p),
                 rot => self.rotations.insert(p.clone(), rot),

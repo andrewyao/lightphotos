@@ -161,6 +161,7 @@ impl Folder {
             &path,
             &rec.adjustments,
             &rec.touchups,
+            &rec.masks,
             rec.rotation,
             &output,
         )

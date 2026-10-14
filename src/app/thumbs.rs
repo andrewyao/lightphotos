@@ -233,7 +233,7 @@ impl App {
         develop::edit_signature_with_touchups(
             &adj,
             self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]),
-            &[],
+            self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]),
             rot,
         )
     }
@@ -368,8 +368,9 @@ impl App {
             };
             let adj = self.edits.get(path).copied().unwrap_or_default();
             let touchups = self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]);
+            let masks = self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]);
             let rot = self.rotations.get(path).copied().unwrap_or(0);
-            if adj.is_identity() && touchups.is_empty() && rot % 4 == 0 {
+            if adj.is_identity() && touchups.is_empty() && masks.is_empty() && rot % 4 == 0 {
                 if let Some(id) = renderer.upload_thumb(img.width, img.height, &img.rgba) {
                     let tex = ThumbTexture {
                         id,
@@ -382,7 +383,7 @@ impl App {
                     }
                 }
             } else {
-                loader.request_bake(path, *px, *sig, img, adj, touchups, rot);
+                loader.request_bake(path, *px, *sig, img, adj, touchups, masks, rot);
             }
         }
 

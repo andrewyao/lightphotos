@@ -492,6 +492,7 @@ impl App {
             bool,
             crate::develop::Adjustments,
             Vec<crate::develop::TouchUp>,
+            Vec<crate::develop::Mask>,
             u8,
         )> = paths
             .iter()
@@ -501,6 +502,7 @@ impl App {
                     crate::decode::image_decode::is_raw_extension(src),
                     self.edits.get(src).copied().unwrap_or_default(),
                     self.touchups.get(src).cloned().unwrap_or_default(),
+                    self.masks.get(src).cloned().unwrap_or_default(),
                     self.rotations.get(src).copied().unwrap_or(0),
                 )
             })
@@ -542,7 +544,7 @@ impl App {
                 }
             };
             let mut taken: HashSet<String> = HashSet::new();
-            for (seq, (src, is_raw, adj, touchups, rot)) in jobs.into_iter().enumerate() {
+            for (seq, (src, is_raw, adj, touchups, masks, rot)) in jobs.into_iter().enumerate() {
                 // Each export in flight holds its source's bytes and a
                 // full-resolution decode in the one shared heap.
                 while pool.in_flight() >= pool.capacity(&decoder, output.format) {
@@ -564,6 +566,7 @@ impl App {
                             is_raw,
                             adj,
                             touchups,
+                            masks,
                             rot,
                             output: output.clone(),
                         },
@@ -604,6 +607,7 @@ impl App {
         let job = |src: PathBuf, dest: ExportDest| ExportJob {
             adj: self.edits.get(&src).copied().unwrap_or_default(),
             touchups: self.touchups.get(&src).cloned().unwrap_or_default(),
+            masks: self.masks.get(&src).cloned().unwrap_or_default(),
             rot: self.rotations.get(&src).copied().unwrap_or(0),
             src,
             dest,

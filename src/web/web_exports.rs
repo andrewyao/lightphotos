@@ -53,6 +53,7 @@ pub struct Export {
     pub is_raw: bool,
     pub adj: Adjustments,
     pub touchups: Vec<TouchUp>,
+    pub masks: Vec<crate::develop::Mask>,
     pub rot: u8,
     pub output: crate::export::Output,
 }
@@ -90,6 +91,7 @@ impl WebExports {
             is_raw: export.is_raw,
             adj: export.adj,
             touchups: export.touchups,
+            masks: export.masks,
             rot: export.rot,
             output: export.output,
         });

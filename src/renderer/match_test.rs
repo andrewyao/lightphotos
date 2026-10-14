@@ -543,7 +543,7 @@ fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case, probe: BaseProbe) -
     let gpu = r.read_offscreen_blocking().expect("offscreen readback");
     assert_eq!((gpu.width, gpu.height), (w, h));
 
-    let (cw, ch, cpu) = bake_edited_probe(&fixture.img, &case.adj, &case.touchups, 0, probe);
+    let (cw, ch, cpu) = bake_edited_probe(&fixture.img, &case.adj, &case.touchups, &[], 0, probe);
     let crop = case.adj.crop.unwrap_or(Crop {
         left: 0.0,
         top: 0.0,
