@@ -1705,12 +1705,14 @@ impl Renderer {
         }));
     }
 
-    /// Flip the overlay between tinting the subject and tinting the background.
-    pub fn set_selection_inverted(&mut self, inverted: bool) {
+    /// How the overlay tints: `tint` is linear RGB, and `inverted` tints
+    /// the background instead of the mask.
+    pub fn set_selection_style(&mut self, inverted: bool, tint: [f32; 3]) {
         self.queue.write_buffer(
             &self.overlay_buf,
             0,
             bytemuck::bytes_of(&OverlayParams {
+                tint: [tint[0], tint[1], tint[2], 1.0],
                 invert: if inverted { 1.0 } else { 0.0 },
                 ..OverlayParams::default()
             }),

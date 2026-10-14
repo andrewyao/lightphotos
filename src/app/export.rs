@@ -253,6 +253,15 @@ impl App {
         if self.folder_store_loading() {
             return Some(t.export_edits_loading);
         }
+        // A detected mask whose detection hasn't landed would export as
+        // nothing. One that failed exports as nothing too, but on purpose.
+        if self
+            .coverage
+            .pending_among(&self.action_paths(), &self.masks, &self.detections)
+            > 0
+        {
+            return Some(t.export_masks_detecting);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if self.exports.settings.target == ExportTarget::Immich
             && !matches!(self.exports.immich, ImmichLink::Connected { .. })

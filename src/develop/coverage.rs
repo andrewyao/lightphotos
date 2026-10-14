@@ -393,6 +393,15 @@ pub fn write(photo: &Path, coverage: &Coverage) -> Result<(), CoverageError> {
         .map_err(|e| CoverageError::Io(format!("{}: {e}", path.display())))
 }
 
+/// Removes the file for `id`, when a read found it corrupt: content-addressed
+/// writes skip an existing name, so a re-detect could not replace it.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn remove(photo: &Path, id: RasterId) {
+    if let Ok(path) = file_path(photo, id) {
+        let _ = crate::paths::remove_if_present(&path);
+    }
+}
+
 /// Removes coverage files in `dir`'s folder that `named` doesn't claim, and
 /// stale write temporaries, each older than an hour, so a detection that has
 /// written its file but not yet its sidecar keeps it. `named(photo, id)`

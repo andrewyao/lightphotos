@@ -349,6 +349,17 @@ impl FolderStore {
         self.record(path).map(|r| r.detections).unwrap_or_default()
     }
 
+    /// Records which coverage answers `target` for `path`. Through
+    /// `update_edits`, since a mask reading it now renders differently.
+    pub fn set_detection(
+        &mut self,
+        path: &Path,
+        target: crate::develop::DetectTarget,
+        id: Option<crate::develop::RasterId>,
+    ) {
+        self.update_edits(path, |rec| rec.detections.set(target, id));
+    }
+
     pub fn rotation(&self, path: &Path) -> u8 {
         self.record(path).map(|r| r.rotation).unwrap_or(0)
     }

@@ -227,7 +227,7 @@ impl App {
 
     /// Hash of `path`'s edits, rotation, and touch-ups. Part of the thumbnail
     /// texture key, so an edit re-bakes the thumbnail.
-    fn edit_sig_for(&self, path: &Path) -> u64 {
+    pub(super) fn edit_sig_for(&self, path: &Path) -> u64 {
         let adj = self.edits.get(path).copied().unwrap_or_default();
         let rot = self.rotations.get(path).copied().unwrap_or(0);
         develop::edit_signature_with_touchups(

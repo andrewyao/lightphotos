@@ -4,7 +4,8 @@
 
 use super::*;
 
-use crate::develop::{Mask, MaskInput, MaskSet, MAX_MASKS};
+use super::coverage;
+use crate::develop::{DetectTarget, Mask, MaskInput, MaskSet, RasterId, MAX_MASKS};
 
 /// The shape the armed mask tool draws.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -24,18 +25,104 @@ impl App {
 
     /// `path`'s masks with whatever coverage is in memory, for a bake that
     /// can't read the folder itself.
+    #[cfg(target_arch = "wasm32")]
     pub(crate) fn mask_set_for(&self, path: &Path) -> MaskSet {
         let masks = self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]);
-        MaskSet::new(masks, |_| None)
+        MaskSet::new(masks, |t| self.coverage.ready(path, t))
     }
 
     /// The shown photo's masks with their coverage, for the Loupe and the
-    /// histogram.
-    pub(crate) fn current_mask_set(&self) -> MaskSet {
-        match self.shown.path() {
-            Some(p) => self.mask_set_for(p),
-            None => MaskSet::default(),
+    /// histogram. Asks the store, so a missing coverage starts loading or
+    /// detecting; a pending target renders as nothing until it lands.
+    pub(crate) fn current_mask_set(&mut self) -> MaskSet {
+        let Some(path) = self.shown.path().map(Path::to_path_buf) else {
+            return MaskSet::default();
+        };
+        let masks = self.masks.get(&path).cloned().unwrap_or_default();
+        let recorded = self.detections.get(&path).copied().unwrap_or_default();
+        MaskSet::new(&masks, |t| {
+            match self.coverage.ask(&path, t, recorded.get(t)) {
+                coverage::Lookup::Ready(c) => Some(c),
+                coverage::Lookup::Pending | coverage::Lookup::Failed => None,
+            }
+        })
+    }
+
+    /// The panel's mark on mask `i` of the shown photo: `None` for a
+    /// parametric mask, or a detected one whose coverage is in hand.
+    pub(crate) fn mask_status(&self, i: usize) -> Option<coverage::MaskStatus> {
+        let path = self.shown.path()?;
+        let target = self.current_masks().get(i)?.target()?;
+        let recorded = self.detections.get(path).and_then(|d| d.get(target));
+        self.coverage.status(path, target, recorded)
+    }
+
+    /// The mask row's Retry: clears the failure so the next frame asks
+    /// again. A recorded file that went missing is forgotten too, so a
+    /// detector that exists runs afresh.
+    pub(super) fn retry_detection(&mut self, i: usize) {
+        let Some(path) = self.shown.path().map(Path::to_path_buf) else {
+            return;
+        };
+        let Some(target) = self.current_masks().get(i).and_then(Mask::target) else {
+            return;
+        };
+        if matches!(
+            self.mask_status(i),
+            Some(coverage::MaskStatus::NothingFound)
+                | Some(coverage::MaskStatus::Failed(coverage::Failure::Missing))
+        ) {
+            self.record_detection(&path, target, None);
         }
+        self.coverage.retry(&path, target);
+        self.push_adjustments();
+        self.hist.invalidate();
+    }
+
+    /// Writes what `target` resolves to for `path`: the sidecar and the
+    /// mirror, outside the undo history. A detection is a fact about the
+    /// photo, not an edit the user made.
+    fn record_detection(&mut self, path: &Path, target: DetectTarget, id: Option<RasterId>) {
+        self.folder_store.set_detection(path, target, id);
+        let entry = self.detections.entry(path.to_path_buf()).or_default();
+        entry.set(target, id);
+        if entry.is_empty() {
+            self.detections.remove(path);
+        }
+    }
+
+    /// Each frame: finished detections and loads. A landing records its id
+    /// and redraws the photo if it is shown; undo before it lands removes
+    /// the mask, but the detection still records, so Redo brings the mask
+    /// back with no second detection.
+    pub(crate) fn poll_coverage(&mut self) {
+        let landed = self.coverage.drain();
+        self.sync_mask_overlay();
+        if landed.is_empty() {
+            return;
+        }
+        let t = crate::i18n::t();
+        for l in landed {
+            if let coverage::Record::Set(id) = l.record {
+                self.record_detection(&l.photo, l.target, id);
+            }
+            if self.shown.path() == Some(l.photo.as_path()) {
+                self.push_adjustments();
+                self.hist.invalidate();
+            }
+            match l.notice {
+                Some(coverage::Notice::NothingFound) => self.set_status(
+                    StatusKind::Info,
+                    (t.detect_nothing_found)(t.target(l.target)),
+                ),
+                Some(coverage::Notice::Failed(why)) => self.set_status(
+                    StatusKind::Error,
+                    (t.detect_failed)(t.target(l.target), &why),
+                ),
+                None => {}
+            }
+        }
+        self.request_redraw();
     }
 
     /// What a background bake of `path` carries.
@@ -185,6 +272,10 @@ impl App {
     /// redraws the photo if it is the shown one. No undo record.
     pub(super) fn store_masks(&mut self, path: &Path, masks: Vec<Mask>) {
         self.folder_store.set_masks(path, &masks);
+        // Add, paste, a command, undo and redo all converge here: a detected
+        // mask on a photo without that detection gets one queued.
+        let recorded = self.detections.get(path).copied().unwrap_or_default();
+        self.coverage.ensure_detected(path, &masks, &recorded);
         if masks.is_empty() {
             self.masks.remove(path);
         } else {
@@ -243,6 +334,171 @@ mod tests {
         app.folder_store
             .flush_blocking(std::time::Duration::from_secs(10));
         assert!(app.folder_store.masks(&photo).is_empty(), "and the sidecar");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Polls the app until `done`, as frames would, failing after ten seconds.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_until(app: &mut App, mut done: impl FnMut(&App) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !done(app) {
+            assert!(std::time::Instant::now() < deadline, "detection stalled");
+            app.poll_coverage();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// The defect: a landing that went through the undo history would make
+    /// Cmd+Z after a detection undo the detection instead of the add, and a
+    /// re-added mask would detect its subject a second time.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_detection_lands_outside_undo_and_a_re_added_mask_reuses_it() {
+        use super::super::coverage::{test_support, CoverageStore, MaskStatus};
+        use crate::develop::DetectTarget;
+        let (mut app, dir, photo) = one_photo("mask-detect");
+        app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
+        app.mode = ViewMode::Loupe;
+        app.coverage = CoverageStore::with_detector(test_support::half_left);
+        let runs = test_support::runs_on(&photo);
+
+        assert_eq!(app.add_mask(Mask::detected(DetectTarget::Subject)), Some(0));
+        app.save_edit_unless_dragging();
+        assert_eq!(app.mask_status(0), Some(MaskStatus::Detecting));
+        assert!(
+            app.current_mask_set().coverage(0).is_none(),
+            "renders as nothing while pending"
+        );
+        let before = app.edit_sig_for(&photo);
+
+        poll_until(&mut app, |a| a.mask_status(0).is_none());
+        assert_eq!(test_support::runs_on(&photo), runs + 1);
+        let id = app.detections[&photo]
+            .subject
+            .expect("recorded in the mirror");
+        assert_eq!(
+            app.folder_store.detections(&photo).subject,
+            Some(id),
+            "and the sidecar"
+        );
+        assert_ne!(app.edit_sig_for(&photo), before, "the landing re-bakes");
+        assert!(
+            app.current_mask_set().coverage(0).is_some(),
+            "and the Loupe gets the coverage"
+        );
+
+        app.modifiers = winit::keyboard::ModifiersState::SUPER;
+        app.handle_key(KeyCode::KeyZ);
+        assert!(app.current_masks().is_empty(), "one step undid the add");
+        assert_eq!(
+            app.detections[&photo].subject,
+            Some(id),
+            "the detection stays"
+        );
+        app.handle_key(KeyCode::KeyZ);
+        assert!(
+            app.current_masks().is_empty(),
+            "there was nothing else to undo"
+        );
+
+        app.add_mask(Mask::detected(DetectTarget::Subject));
+        app.save_edit_unless_dragging();
+        assert_eq!(app.mask_status(0), None, "ready at once");
+        assert!(app.coverage.drain().is_empty());
+        assert_eq!(
+            test_support::runs_on(&photo),
+            runs + 1,
+            "no second detection"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_failed_detection_shows_retry_and_retry_runs_it_again() {
+        use super::super::coverage::{test_support, CoverageStore, Failure, MaskStatus};
+        use crate::develop::DetectTarget;
+        let (mut app, dir, photo) = one_photo("mask-retry");
+        app.coverage = CoverageStore::with_detector(test_support::always_fails);
+        let runs = test_support::runs_on(&photo);
+        app.add_mask(Mask::detected(DetectTarget::Subject));
+        poll_until(&mut app, |a| {
+            a.mask_status(0) != Some(MaskStatus::Detecting)
+        });
+        assert_eq!(
+            app.mask_status(0),
+            Some(MaskStatus::Failed(Failure::Detect("no model today".into())))
+        );
+        assert!(!app.detections.contains_key(&photo), "nothing recorded");
+        for _ in 0..3 {
+            app.push_adjustments();
+            app.poll_coverage();
+        }
+        assert_eq!(
+            test_support::runs_on(&photo),
+            runs + 1,
+            "a failure doesn't loop"
+        );
+        app.retry_detection(0);
+        assert_eq!(app.mask_status(0), Some(MaskStatus::Detecting));
+        poll_until(&mut app, |a| {
+            a.mask_status(0) != Some(MaskStatus::Detecting)
+        });
+        assert_eq!(test_support::runs_on(&photo), runs + 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The Masks page offers Subject and Sky beside the gradients, names
+    /// each mask by its kind, and marks one whose detection failed with a
+    /// Retry.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_masks_page_offers_subject_and_sky_and_names_masks_by_kind() {
+        use super::super::coverage::{test_support, CoverageStore};
+        use crate::develop::DetectTarget;
+        use crate::ui::UiAction;
+        let (mut app, dir, _photo) = one_photo("mask-page");
+        app.playlist = Some(crate::navigation::Playlist::from_dir(&dir));
+        app.mode = ViewMode::Loupe;
+        app.develop_open = true;
+        app.set_develop_tab(DevelopTab::Masks);
+        app.coverage = CoverageStore::with_detector(test_support::always_fails);
+        let t = crate::i18n::t();
+
+        let painted = settled(&mut app);
+        let subject = format!("+ {}", t.subject_mask);
+        assert!(painted.has(&subject), "{:?}", painted.texts());
+        assert!(painted.has(&format!("+ {}", t.sky_mask)));
+        let (actions, _) = click(&mut app, painted.pos_of(&subject));
+        let added = actions
+            .iter()
+            .any(|a| matches!(a, UiAction::AddDetectedMask(DetectTarget::Subject)));
+        assert_eq!(
+            added,
+            cfg!(target_os = "macos"),
+            "enabled only where a detector exists: {actions:?}"
+        );
+
+        app.add_mask(Mask::radial([0.5, 0.5], [0.1, 0.1]));
+        app.add_mask(Mask::detected(DetectTarget::Subject));
+        poll_until(&mut app, |a| !a.coverage.busy());
+        app.poll_coverage();
+        let painted = settled(&mut app);
+        assert!(
+            painted.has(&format!("{} 1", t.radial_gradient)),
+            "{:?}",
+            painted.texts()
+        );
+        let failed = format!("{} 2 !", t.subject_mask);
+        assert!(painted.has(&failed), "{:?}", painted.texts());
+        assert!(
+            painted.has(t.mask_retry),
+            "the picked failed mask offers Retry"
+        );
+        let (actions, _) = click(&mut app, painted.pos_of(t.mask_retry));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, UiAction::RetryDetection(1))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

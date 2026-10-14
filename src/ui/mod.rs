@@ -204,6 +204,10 @@ pub enum UiAction {
     DisarmMaskTool,
     /// A drawn mask: added to the shown photo and selected.
     AddMask(crate::develop::Mask),
+    /// A Subject or Sky mask: added, selected, and its detection queued.
+    AddDetectedMask(crate::develop::DetectTarget),
+    /// Runs mask `.0`'s detection again after a failure or an empty result.
+    RetryDetection(usize),
     /// Mask `.0` of the shown photo becomes `.1`.
     SetMask(usize, crate::develop::Mask),
     SelectMask(Option<usize>),

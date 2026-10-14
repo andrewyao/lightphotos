@@ -1,0 +1,23 @@
+# Run on a folder holding a portrait: opens the Masks page, adds a Subject
+# mask, waits for Vision to land its coverage, darkens the subject by two
+# stops, and shoots. `state` prints masks[0].shape.kind == "detected"; the
+# sidecar beside the photo records detections.subject and
+# .lightphotos/masks/ holds the coverage PNG.
+size 1200 800
+idle
+dblclick-cell 0
+idle
+key k
+idle
+shot ai-masks-before
+run {"id":"mask.add","params":{"shape":{"kind":"detected","target":"subject"}}}
+idle
+state
+run {"id":"mask.set","params":{"index":0,"amounts":{"exposure":-2}}}
+idle
+state
+shot ai-masks-subject-darkened
+# The picked mask tints red over the photo while the Masks page is open.
+click 1000 600
+idle
+shot ai-masks-picked

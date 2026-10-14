@@ -250,8 +250,9 @@ flowchart TD
 `Adjustments` is `Copy` and applies to the whole photo. The two kinds of
 local edit live beside it in the sidecar, as their own lists:
 `ImageRecord::touchups` (spot heals) and `ImageRecord::masks` (Linear and
-Radial gradient masks, `develop/mask.rs`). Both are in source UV: 0..1 of the
-photo before straighten and crop, so neither tool moves them.
+Radial gradient masks and Detected masks, `develop/mask.rs`). All are in
+source UV: 0..1 of the photo before straighten and crop, so neither tool
+moves them.
 
 A mask is a shape, an Invert flag and nine sliders (`LocalAmounts`): Temp,
 Tint, Exposure, Contrast, Highlights, Shadows, Whites, Blacks and Saturation.
@@ -259,19 +260,46 @@ These are plain per-pixel terms of the tone pipeline. Texture, Clarity,
 Dehaze, sharpening and noise reduction read blurred layers, so masks leave
 them out.
 
+**Detected masks.** A detected mask names what it selects
+(`MaskShape::Detected { target }`, Subject or Sky) and nothing else, so
+`Mask` stays `Copy`, paste is verbatim, and undo never touches a bitmap. The
+photo owns the detection: `ImageRecord::detections` records which coverage
+answers each target, and every mask of that target shares it. A coverage
+(`develop/coverage.rs`) is one byte per texel in source UV, at most 2048 px
+on its long side, content-addressed by a `RasterId` (FNV-1a of size and
+bytes) that names its file, `.lightphotos/masks/<photo>.<id>.png`, enters
+the edit signature, and is checked on every read. Files are write-once;
+`coverage::sweep_orphans` removes unnamed ones older than an hour after a
+folder loads. "Nothing found" is a 1x1 zero coverage, remembered like any
+other answer. Detection (`scoring/detect.rs`) reads the source file, which
+edits never change; `app/coverage.rs` is the per-(photo, target) state
+machine (detecting, loading, ready, failed) that every writer of masks asks
+through `ensure_detected`, with one detect worker and one load worker. A
+landing records its id outside the undo history. A failed slot is never
+retried on its own; the row's Retry clears it.
+
 **How a mask renders:**
 - `mask::mask_weight` gives each mask's 0..1 weight at a pixel's source UV.
-  Lengths are fractions of the shorter side, so a circle stays round.
-- `mask::local_tone` adds every mask's weighted sliders to the photo's own
-  and holds each sum to its slider's range. The tone pipeline
-  (`Develop::linear_at_local`) reads those nine values in place of the
-  photo's.
+  Lengths are fractions of the shorter side, so a circle stays round. A
+  detected mask reads its coverage bilinearly (`Coverage::at_uv`), and
+  covers nothing until its detection lands.
+- `MaskSet` pairs each mask with the coverage its target resolved to and is
+  what every renderer reads. `MaskSet::local_tone` adds every mask's
+  weighted sliders to the photo's own and holds each sum to its slider's
+  range. The tone pipeline (`Develop::linear_at_local`) reads those nine
+  values in place of the photo's. Jobs carry a `MaskInput`: native workers
+  read the coverage beside the photo themselves (`OnDisk`); the browser's
+  take it resolved (`Ready`). A recorded coverage that is missing or corrupt
+  fails the bake rather than caching an unmasked render.
 - The CPU bake (`image_ops::bake_samples`) and the histogram do this per
   pixel. The Loupe does it in `localTone` (`loupe_common.wgsl`), with the
-  masks in a storage buffer at group 3 binding 4. The uniform's `mask_count`
-  says how many apply, so compare's "before" half shows none.
+  masks in a storage buffer at group 3 binding 4 and every distinct coverage
+  packed four bytes a word in another at binding 5, read by `coverageAt`
+  with `fieldAt`'s bilinear. The uniform's `mask_count` says how many apply,
+  so compare's "before" half shows none. The renderer re-uploads the
+  coverage only when `MaskSet::coverage_key` changes.
 - `renderer/match_test.rs` holds the two paths to the same tolerance as the
-  rest of the develop pipeline.
+  rest of the develop pipeline, raster cases included.
 
 **Where masks are guarded:** `ImageRecord::masks` is a `sidecar::MaskList`.
 A sidecar's mask of a known kind that isn't one, or holds a number that isn't
@@ -309,18 +337,22 @@ sources:
 flowchart TD
     frame["Every frame\nrequest_face_quality (app/thumbs.rs)\nno candidates until photos can be grouped"]
     sel["User opens Show Selection in the Loupe\nrequest_selection_mask (app/loupe.rs)"]
+    det["User adds a Subject mask, or pastes one\nCoverageStore::ensure_detected (app/coverage.rs)"]
     score["User asks to score photos\nscore_selected / score_all (app/score.rs)"]
     frame --> fpool["FacePool: 1-2 workers"]
     sel --> sthread["segmentation: one thread per request"]
+    det --> dpool["detect worker: one thread\nscoring/detect.rs, in an autoreleasepool"]
     score --> spool["ScorePool: 2-4 workers\npreview decode, edits baked in"]
     fpool --> vfile["vision::perform(Source::File)\nVision decodes the file itself"]
     sthread --> vfile
+    dpool --> vfile
     spool --> vimg["scoring/judge.rs\nvision::perform(Source::Image)"]
     vfile --> fl["VNDetectFaceLandmarksRequest\nscoring/facequality.rs"]
     vfile --> sg["VNGeneratePersonSegmentationRequest, then\nVNGenerateForegroundInstanceMaskRequest\nscoring/segmentation.rs"]
     vimg --> jq["VNDetectFaceLandmarksRequest +\nVNCalculateImageAestheticsScoresRequest (macOS 15+)"]
     fl --> blink["eye-openness geometry -> EyeState\nfeeds the eyes-closed filter and burst::combined_score"]
     sg --> mask["Mask -> the Loupe's selection overlay"]
+    sg --> cov["Coverage -> .lightphotos/masks/, a Subject mask's shape"]
     jq --> qs["QualityScore: technical score\nwith face and aesthetics penalties"]
 ```
 
@@ -329,7 +361,10 @@ flowchart TD
   and the scoring on top of them is plain geometry, testable with fabricated
   points.
 - Person segmentation, with the general foreground request as a fallback,
-  produces the "Show Selection" mask.
+  produces the "Show Selection" mask and a Subject mask's coverage. Sky
+  masks have no Vision request: Apple ships no sky segmentation, so the
+  sky detector is the app's own (`scoring::sky`, behind the seam in
+  `scoring/detect.rs`).
 - The aesthetics score feeds the quality score. Without it, as on macOS 14
   and earlier or when Vision fails, the score has no aesthetics part.
 - Three requests postdate the app's own floor. `Info.plist` declares
@@ -347,7 +382,11 @@ flowchart TD
 - The quality score is the exception. `ImageRecord.score` holds it in the
   photo's sidecar, keyed to the edits it was measured on, so a later edit
   marks it stale.
-- The selection mask is not persisted.
+- The selection mask is not persisted. A Subject mask's coverage is, as a
+  content-addressed PNG under `.lightphotos/masks/` named by
+  `ImageRecord::detections`, because Vision's output varies by OS version
+  and an edit's look must not drift, and because Linux and the browser
+  render it without Vision.
 
 **What it costs:**
 - A `Source::File` call is a second full-resolution decode of a file the app
