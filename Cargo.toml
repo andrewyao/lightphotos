@@ -57,7 +57,6 @@ egui-wgpu = "0.34"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 # Detected masks' coverage files (`develop/coverage.rs`), on every target.
-# wasm32 already had it through `image`.
 png = "0.18"
 
 # Bare wasm32/64-unknown-unknown has no OS clock source — std::time::Instant

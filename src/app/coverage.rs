@@ -99,9 +99,9 @@ pub(crate) struct CoverageStore {
     /// Ready entries in last-use order, oldest first.
     ready_order: VecDeque<(PathBuf, DetectTarget)>,
     ready_bytes: usize,
-    /// One detect worker: Vision and a model both saturate the GPU or the
-    /// Neural Engine, so two at once is slower. One load worker apart from
-    /// it, so a 5 ms load never waits behind a 3 s detection.
+    /// One detect worker: Vision saturates the GPU or the Neural Engine,
+    /// so two at once is slower. One load worker apart from it, so a 5 ms
+    /// load never waits behind a 3 s detection.
     #[cfg(not(target_arch = "wasm32"))]
     detect: WorkerPool<DetectJob, Coverage>,
     #[cfg(not(target_arch = "wasm32"))]

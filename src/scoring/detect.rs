@@ -19,11 +19,10 @@ pub const PREVIEW_SIDE: u32 = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetectError {
-    /// This build has no detector for the target: Subject off macOS, Sky
-    /// until its algorithm lands. The panel greys the button on
-    /// [`available`].
+    /// This build has no detector for the target: Subject off macOS. The
+    /// panel greys the button on [`available`].
     Unsupported,
-    /// Vision, the model or the decode failed. Not persisted; Retry re-runs.
+    /// Vision or the decode failed. Not persisted; Retry re-runs.
     Failed(String),
 }
 

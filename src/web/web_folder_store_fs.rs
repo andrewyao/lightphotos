@@ -271,8 +271,7 @@ pub(crate) async fn delete_group(
     }
 }
 
-/// `.lightphotos/masks` under `root`, or `None` when it is missing. Nothing
-/// creates it in the browser: detection runs on a Mac.
+/// `.lightphotos/masks` under `root`, or `None` when it is missing.
 async fn masks_dir(
     root: &FileSystemDirectoryHandle,
 ) -> Result<Option<FileSystemDirectoryHandle>, String> {
