@@ -623,14 +623,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Export waits for a detection that is queued or in flight, not for
+    /// one that landed and is recorded, and not for one that failed.
     #[test]
-    fn an_unsupported_target_fails_without_a_worker_and_a_pending_one_blocks_export() {
-        let (dir, p) = photo("sky");
-        let mut store = CoverageStore::with_detector(half_left);
-        assert!(matches!(
-            store.ask(&p, DetectTarget::Sky, None),
-            Lookup::Failed
-        ));
+    fn a_pending_detection_blocks_export_and_a_recorded_or_failed_one_does_not() {
+        let (dir, p) = photo("pending");
         let mut masks = HashMap::new();
         masks.insert(
             p.clone(),
@@ -639,31 +636,39 @@ mod tests {
                 Mask::detected(DetectTarget::Subject),
             ],
         );
-        let detections = HashMap::new();
+        let unrecorded = HashMap::new();
         let paths = vec![p.clone()];
+
+        let mut store = CoverageStore::with_detector(half_left);
         assert_eq!(
-            store.pending_among(&paths, &masks, &detections),
+            store.pending_among(&paths, &masks, &unrecorded),
             1,
-            "subject not asked yet"
+            "not asked yet"
         );
         store.ensure_detected(&p, &masks[&p], &Detections::default());
+        assert_eq!(store.pending_among(&paths, &masks, &unrecorded), 1);
         drain_until(&mut store, |s| !s.busy());
         assert_eq!(
-            store.pending_among(&paths, &masks, &detections),
+            store.pending_among(&paths, &masks, &unrecorded),
             1,
             "landed but not yet recorded"
         );
-        let mut recorded = HashMap::new();
         let mut d = Detections::default();
-        d.set(
-            DetectTarget::Subject,
-            store.ready(&p, DetectTarget::Subject).map(|c| c.id()),
-        );
+        for t in DetectTarget::ALL {
+            d.set(t, store.ready(&p, t).map(|c| c.id()));
+        }
+        assert!(d.subject.is_some() && d.sky.is_some());
+        let mut recorded = HashMap::new();
         recorded.insert(p.clone(), d);
+        assert_eq!(store.pending_among(&paths, &masks, &recorded), 0);
+
+        let mut failing = CoverageStore::with_detector(always_fails);
+        failing.ensure_detected(&p, &masks[&p], &Detections::default());
+        drain_until(&mut failing, |s| !s.busy());
         assert_eq!(
-            store.pending_among(&paths, &masks, &recorded),
+            failing.pending_among(&paths, &masks, &unrecorded),
             0,
-            "sky failed, subject recorded"
+            "a failed target exports as nothing, on purpose"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

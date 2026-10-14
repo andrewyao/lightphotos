@@ -10,8 +10,12 @@ use std::fmt;
 use std::path::Path;
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
-use crate::develop::coverage::MAX_COVERAGE_SIDE;
 use crate::develop::{Coverage, DetectTarget};
+
+/// The longest side of [`DetectInput::preview`]. The sky heuristic's budget
+/// is about 30 ms at 1024; its guided filter only gets slower on more
+/// pixels, with no gain in the mask.
+pub const PREVIEW_SIDE: u32 = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetectError {
@@ -103,6 +107,9 @@ pub enum PhotoSource<'a> {
     /// The file's bytes, for a build that can't open paths.
     #[cfg(not(target_os = "macos"))]
     Bytes { bytes: &'a [u8], is_raw: bool },
+    /// Pixels already decoded, upright, at any size: the browser's shown
+    /// photo, or a test's synthetic frame.
+    Pixels(Rgba8),
 }
 
 /// What a detector may read. Each accessor computes once and caches, so a
@@ -125,6 +132,10 @@ impl<'a> DetectInput<'a> {
         Self::from(PhotoSource::Bytes { bytes, is_raw })
     }
 
+    pub fn pixels(frame: Rgba8) -> Self {
+        Self::from(PhotoSource::Pixels(frame))
+    }
+
     fn from(source: PhotoSource<'a>) -> Self {
         DetectInput {
             source,
@@ -136,17 +147,22 @@ impl<'a> DetectInput<'a> {
     /// For platform APIs that decode the file themselves, such as Vision.
     /// `None` when the photo came as bytes.
     pub fn path(&self) -> Option<&Path> {
-        match self.source {
+        match &self.source {
             #[cfg(not(target_arch = "wasm32"))]
             PhotoSource::File(p) => Some(p),
             #[cfg(not(target_os = "macos"))]
             PhotoSource::Bytes { .. } => None,
+            PhotoSource::Pixels(_) => None,
         }
     }
 
     /// The photo upright in source UV, longest side at most
-    /// [`MAX_COVERAGE_SIDE`], through the platform's normal decode.
+    /// [`PREVIEW_SIDE`], through the platform's normal decode. Pixels given
+    /// ready are returned as they are.
     pub fn preview(&self) -> Result<&Rgba8, DetectError> {
+        if let PhotoSource::Pixels(frame) = &self.source {
+            return Ok(frame);
+        }
         self.preview
             .get_or_init(|| self.decode_preview())
             .as_ref()
@@ -154,17 +170,18 @@ impl<'a> DetectInput<'a> {
     }
 
     fn decode_preview(&self) -> Result<Rgba8, DetectError> {
-        let img = match self.source {
+        let img = match &self.source {
             #[cfg(not(target_arch = "wasm32"))]
-            PhotoSource::File(p) => crate::decode::image_decode::decode(p, MAX_COVERAGE_SIDE),
+            PhotoSource::File(p) => crate::decode::image_decode::decode(p, PREVIEW_SIDE),
             #[cfg(not(target_os = "macos"))]
             PhotoSource::Bytes { bytes, is_raw } => {
-                if is_raw {
-                    crate::decode::rawler::decode_raw_nonmac_from_bytes(bytes, MAX_COVERAGE_SIDE)
+                if *is_raw {
+                    crate::decode::rawler::decode_raw_nonmac_from_bytes(bytes, PREVIEW_SIDE)
                 } else {
-                    crate::decode::image_decode::decode_nonraw_from_bytes(bytes, MAX_COVERAGE_SIDE)
+                    crate::decode::image_decode::decode_nonraw_from_bytes(bytes, PREVIEW_SIDE)
                 }
             }
+            PhotoSource::Pixels(_) => return Err(DetectError::Failed("no decode needed".into())),
         }
         .map_err(DetectError::Failed)?;
         Ok(Rgba8::from(img))
@@ -207,31 +224,22 @@ impl<'a> DetectInput<'a> {
 
 mod sky_detect {
     //! The seam for the sky detector. Its algorithm is `scoring::sky`, a pure
-    //! function over the preview, built separately; wiring it in changes
-    //! nothing outside this module. Photos keep the coverage they stored;
-    //! Retry adopts the new algorithm.
+    //! function over the preview; changing it changes nothing outside this
+    //! module. Photos keep the coverage they stored; Retry adopts the new
+    //! algorithm.
 
     use super::{Coverage, DetectError, DetectInput};
 
-    pub const AVAILABLE: bool = false;
+    pub const AVAILABLE: bool = true;
 
+    /// The heuristic over the preview, with the subject cut out where this
+    /// build can find one (people's blue shirts are not sky).
     pub fn detect(input: &DetectInput) -> Result<Coverage, DetectError> {
-        // Wired in when scoring::sky lands:
-        //
-        // let p = input.preview()?;
-        // let subject = input
-        //     .subject()
-        //     .ok()
-        //     .map(|c| c.resampled(p.width, p.height));
-        // let alpha = crate::scoring::sky::sky_coverage(
-        //     &p.pixels,
-        //     p.width,
-        //     p.height,
-        //     subject.as_deref(),
-        // );
-        // Coverage::fit(p.width, p.height, &alpha).map_err(|e| DetectError::Failed(e.to_string()))
-        let _ = input;
-        Err(DetectError::Unsupported)
+        let p = input.preview()?;
+        let subject = input.subject().ok().map(|c| c.resampled(p.width, p.height));
+        let alpha =
+            crate::scoring::sky::sky_coverage(&p.pixels, p.width, p.height, subject.as_deref());
+        Coverage::fit(p.width, p.height, &alpha).map_err(|e| DetectError::Failed(e.to_string()))
     }
 }
 
@@ -240,9 +248,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sky_is_unsupported_until_its_algorithm_lands() {
-        assert!(!available(DetectTarget::Sky));
+    fn availability_follows_the_build() {
+        assert_eq!(available(DetectTarget::Sky), !cfg!(target_arch = "wasm32"));
         assert_eq!(available(DetectTarget::Subject), cfg!(target_os = "macos"));
+    }
+
+    /// A blue sky over brown ground, through the seam: the sky is covered,
+    /// the ground is not, with no file and no platform decode involved.
+    #[test]
+    fn sky_covers_the_blue_half_of_a_synthetic_frame_and_not_the_ground() {
+        let (w, h) = (96u32, 64u32);
+        let mut pixels = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                // A faint gradient, since a real sky is never perfectly
+                // flat; the ground is textured.
+                let px = if y < h / 2 {
+                    [120 + (y % 7) as u8, 170 + (x % 5) as u8, 235, 255]
+                } else {
+                    let n = ((x * 7 + y * 13) % 40) as u8;
+                    [90 + n, 70 + n / 2, 40, 255]
+                };
+                pixels.extend(px);
+            }
+        }
+        let input = DetectInput::pixels(Rgba8 {
+            width: w,
+            height: h,
+            pixels,
+        });
+        let coverage = detect(&input, DetectTarget::Sky).unwrap();
+        assert_eq!((coverage.width(), coverage.height()), (w, h));
+        assert!(!coverage.is_nothing());
+        let at = |x: u32, y: u32| coverage.alpha()[(y * w + x) as usize];
+        assert!(at(w / 2, 4) > 200, "sky: {}", at(w / 2, 4));
+        assert!(at(w / 2, h - 5) < 50, "ground: {}", at(w / 2, h - 5));
+        assert_eq!(input.path(), None);
     }
 }
 
@@ -271,10 +312,10 @@ mod file_tests {
             );
         }
         assert!(!dir.join(".lightphotos").exists());
-        assert_eq!(
+        assert!(matches!(
             run(&photo, DetectTarget::Sky),
-            Err(DetectError::Unsupported)
-        );
+            Err(DetectError::Failed(_))
+        ));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

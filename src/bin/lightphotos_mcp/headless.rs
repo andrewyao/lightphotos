@@ -379,9 +379,16 @@ mod tests {
             cfg!(target_os = "macos"),
             "the file exists before the sidecar"
         );
-        assert!(rec.detections.sky.is_none());
-        assert!(notes.iter().any(|n| n.contains("sky")), "{notes:?}");
-        assert_eq!(notes.len(), if cfg!(target_os = "macos") { 1 } else { 2 });
+        assert!(
+            rec.detections.sky.is_some(),
+            "sky runs on every native build"
+        );
+        if cfg!(target_os = "macos") {
+            assert!(notes.is_empty(), "{notes:?}");
+        } else {
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(notes[0].contains("subject"), "{notes:?}");
+        }
     }
 
     #[test]
