@@ -559,8 +559,6 @@ fn rotate_rgba<S: Sample>(src: &[S], w: u32, h: u32, steps: u8) -> (u32, u32, Ve
 /// `dw x dh`. Bilinear keeps the mask's soft edges. The `+ 0.5 ... - 0.5`
 /// maps pixel centers, so the result doesn't shift half a pixel toward the
 /// origin. Edges clamp.
-// Only `seg_probe` uses this. The Loupe stretches masks on the GPU.
-#[allow(dead_code)]
 #[hotpath::measure]
 pub(crate) fn resample_bilinear_u8(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < (sw * sh) as usize {

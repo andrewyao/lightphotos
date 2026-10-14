@@ -9,6 +9,7 @@ pub mod base;
 pub mod chroma;
 pub mod color;
 pub mod copy;
+pub mod coverage;
 pub mod curve;
 pub mod effects;
 pub mod grade;
@@ -22,6 +23,7 @@ use serde::{Deserialize, Serialize};
 
 pub use base::{BaseLayer, BaseProbe, BaseTexel, Grid};
 pub use color::{Band, BandShift, ColorAxis, ColorMixer, ColorOps, GrayMix};
+pub use coverage::{Coverage, CoverageError, RasterId};
 pub use effects::{Effects, Grain, Vignette};
 pub use grade::{ColorGrade, GradeOps, Wheel, Zone};
 pub use mask::{GpuMask, LocalAmounts, Mask, MaskShape, MAX_MASKS};
