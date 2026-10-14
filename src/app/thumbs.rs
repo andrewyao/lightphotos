@@ -233,6 +233,7 @@ impl App {
         develop::edit_signature_with_touchups(
             &adj,
             self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]),
+            &[],
             rot,
         )
     }

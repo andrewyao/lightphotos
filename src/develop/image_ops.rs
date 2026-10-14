@@ -933,7 +933,7 @@ mod tests {
             "an opaque spot writes no opacity"
         );
         let adj = Adjustments::default();
-        let sig = |t: TouchUp| crate::develop::edit_signature_with_touchups(&adj, &[t], 0);
+        let sig = |t: TouchUp| crate::develop::edit_signature_with_touchups(&adj, &[t], &[], 0);
         assert_ne!(sig(t), sig(TouchUp { opacity: 0.5, ..t }));
     }
 

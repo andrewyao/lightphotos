@@ -14,6 +14,7 @@ pub mod effects;
 pub mod grade;
 pub mod image_ops;
 pub mod local;
+pub mod mask;
 pub mod parallel;
 pub mod sharpen;
 
@@ -23,6 +24,7 @@ pub use base::{BaseLayer, BaseProbe, BaseTexel, Grid};
 pub use color::{Band, BandShift, ColorAxis, ColorMixer, ColorOps, GrayMix};
 pub use effects::{Effects, Grain, Vignette};
 pub use grade::{ColorGrade, GradeOps, Wheel, Zone};
+pub use mask::{GpuMask, LocalAmounts, Mask, MaskShape, MAX_MASKS};
 pub use sharpen::{Sharpen, Sharpening};
 
 use curve::ToneCurve;
@@ -812,7 +814,12 @@ impl Adjustments {
 /// A hash of everything that changes how an image renders, used in the
 /// thumbnail cache key. Floats are rounded so tiny jitter doesn't re-bake, and
 /// every unedited photo gets the same value.
-pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot: u8) -> u64 {
+pub fn edit_signature_with_touchups(
+    adj: &Adjustments,
+    touchups: &[TouchUp],
+    masks: &[Mask],
+    rot: u8,
+) -> u64 {
     use crate::hash::Fnv1a;
 
     let mut h = Fnv1a::new();
@@ -942,6 +949,17 @@ pub fn edit_signature_with_touchups(adj: &Adjustments, touchups: &[TouchUp], rot
         let g = adj.grain;
         for x in [g.amount, g.size, g.roughness] {
             h.write(&((x * 1000.0).round() as i32).to_le_bytes());
+        }
+    }
+
+    // Only a photo with masks writes, so older hashes hold.
+    if !masks.is_empty() {
+        h.write(&[13]);
+        for m in masks {
+            let g = GpuMask::from(m);
+            for x in [g.geom, g.params, g.a0, g.a1, g.a2].into_iter().flatten() {
+                h.write(&((x * 100_000.0).round() as i32).to_le_bytes());
+            }
         }
     }
 
@@ -1537,7 +1555,7 @@ mod tests {
     }
 
     fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
-        edit_signature_with_touchups(adj, &[], rot)
+        edit_signature_with_touchups(adj, &[], &[], rot)
     }
 
     /// 0 and 1 stay fixed, so the boost never clips or crushes, and mid-gray

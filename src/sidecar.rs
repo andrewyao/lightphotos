@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::develop::{Adjustments, TouchUp};
+use crate::develop::{Adjustments, Mask, TouchUp};
 use crate::scoring::quality::QualityScore;
 
 /// Hidden subfolder holding a directory's sidecars and thumbnail cache.
@@ -79,6 +79,12 @@ pub struct ImageRecord {
         deserialize_with = "at_most_max_touchups"
     )]
     pub touchups: Vec<TouchUp>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "valid_masks"
+    )]
+    pub masks: Vec<Mask>,
     /// Manual rotation in 90° clockwise steps, `0..=3`.
     #[serde(
         default,
@@ -116,6 +122,30 @@ where
     let mut touchups = Vec::<TouchUp>::deserialize(deserializer)?;
     touchups.truncate(crate::develop::MAX_TOUCHUPS);
     Ok(touchups)
+}
+
+/// A sidecar's masks come from whoever supplied the folder. One that isn't a
+/// mask, or holds a number that isn't one, is dropped rather than failing the
+/// whole record and its rating; the rest are clamped into range, and past
+/// [`crate::develop::MAX_MASKS`] the renderer's buffer overflows.
+fn valid_masks<'de, D>(deserializer: D) -> Result<Vec<Mask>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Entry {
+        Mask(Mask),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(Vec::<Entry>::deserialize(deserializer)?
+        .into_iter()
+        .filter_map(|e| match e {
+            Entry::Mask(m) => m.sanitized(),
+            Entry::Other(_) => None,
+        })
+        .take(crate::develop::MAX_MASKS)
+        .collect())
 }
 
 /// A sidecar's rotation is whatever u8 its writer put there; only `0..=3`
@@ -161,12 +191,16 @@ impl ImageRecord {
         crate::develop::edit_signature_with_touchups(
             &self.adjustments,
             &self.touchups,
+            &self.masks,
             self.rotation,
         )
     }
 
     fn has_edits(&self) -> bool {
-        !self.adjustments.is_identity() || !self.touchups.is_empty() || self.rotation != 0
+        !self.adjustments.is_identity()
+            || !self.touchups.is_empty()
+            || !self.masks.is_empty()
+            || self.rotation != 0
     }
 
     /// Run `edit`, then stamp `edited` with `now` if it changed how the
@@ -358,6 +392,7 @@ mod tests {
                 delta: [0.01, -0.02, 0.0],
                 opacity: 1.0,
             }],
+            masks: vec![Mask::linear([0.5, 0.0], [0.5, 1.0])],
             rotation: 1,
             score: Some(StoredScore {
                 score: sample_score(),
@@ -371,7 +406,7 @@ mod tests {
         };
         assert_eq!(
             fields.len(),
-            6,
+            7,
             "set every field of ImageRecord here, got {fields:?}"
         );
 
@@ -397,6 +432,52 @@ mod tests {
             serde_json::from_str(&format!(r#"{{"rating":2,"touchups":[{spots}]}}"#)).unwrap();
         assert_eq!(rec.touchups.len(), crate::develop::MAX_TOUCHUPS);
         assert_eq!(rec.rating, Some(2));
+    }
+
+    #[test]
+    fn a_sidecar_keeps_its_good_masks_and_drops_or_clamps_the_rest() {
+        let good =
+            r#"{"shape":{"kind":"linear","start":[0.5,0],"end":[0.5,1]},"amounts":{"exposure":1}}"#;
+        let body = format!(
+            r#"{{"rating":2,"masks":[
+                {good},
+                {{"shape":{{"kind":"lasso","points":[]}}}},
+                {{"shape":{{"kind":"radial","center":[0.5,0.5],"radii":[-1,0.2]}},"amounts":{{"temp":900}}}},
+                {{"shape":{{"kind":"linear","start":[1e39,0],"end":[0.5,1]}}}},
+                "not a mask",
+                {{"shape":{{"kind":"radial","center":[0.5],"radii":[0.1,0.1]}}}}
+            ]}}"#
+        );
+        let rec = parse_record(body.as_bytes(), || None).unwrap();
+        assert_eq!(rec.rating, Some(2), "a bad mask doesn't cost the rating");
+        assert_eq!(rec.masks.len(), 2, "{:?}", rec.masks);
+        assert_eq!(rec.masks[0].amounts.exposure, 1.0);
+        let crate::develop::MaskShape::Radial { radii, .. } = rec.masks[1].shape else {
+            panic!("the radial mask survives clamped: {:?}", rec.masks[1]);
+        };
+        assert_eq!(radii, [1e-4, 0.2]);
+        assert_eq!(rec.masks[1].amounts.temp, 100.0);
+    }
+
+    #[test]
+    fn a_sidecar_loads_at_most_max_masks() {
+        let mask = r#"{"shape":{"kind":"radial","center":[0.5,0.5],"radii":[0.1,0.1]}}"#;
+        let masks = vec![mask; 10_000].join(",");
+        let rec = parse_record(format!(r#"{{"masks":[{masks}]}}"#).as_bytes(), || None).unwrap();
+        assert_eq!(rec.masks.len(), crate::develop::MAX_MASKS);
+    }
+
+    #[test]
+    fn a_sidecar_from_before_masks_loads_and_signs_the_same() {
+        let rec = parse_record(br#"{"adjustments":{"exposure":0.5}}"#, || None).unwrap();
+        assert!(rec.masks.is_empty());
+        assert_eq!(
+            rec.edit_signature(),
+            crate::develop::edit_signature_with_touchups(&rec.adjustments, &[], &[], 0)
+        );
+        let mut masked = rec.clone();
+        masked.masks.push(Mask::radial([0.5, 0.5], [0.1, 0.1]));
+        assert_ne!(rec.edit_signature(), masked.edit_signature());
     }
 
     #[test]
