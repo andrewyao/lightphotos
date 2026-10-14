@@ -41,9 +41,7 @@ impl fmt::Display for DetectError {
 pub const fn available(target: DetectTarget) -> bool {
     match target {
         DetectTarget::Subject => cfg!(target_os = "macos"),
-        // The browser has no worker that can reach the folder, so a sky
-        // detector there needs its own path once one exists.
-        DetectTarget::Sky => sky_detect::AVAILABLE && !cfg!(target_arch = "wasm32"),
+        DetectTarget::Sky => sky_detect::AVAILABLE,
     }
 }
 
@@ -95,6 +93,24 @@ impl From<DecodedImage> for Rgba8 {
         Rgba8 {
             width: img.width,
             height: img.height,
+            pixels,
+        }
+    }
+}
+
+impl Rgba8 {
+    /// `img` as sRGB8, fit within `max_side` on its long side. For a frame
+    /// already in a cache that must stay as it is.
+    pub fn fit_from(img: &DecodedImage, max_side: u32) -> Rgba8 {
+        let pixels = match img.pixel_format {
+            PixelFormat::Srgb8 => img.rgba.clone(),
+            PixelFormat::LinearF16 => crate::develop::image_ops::linear_f16_to_srgb8(img),
+        };
+        let (width, height, pixels) =
+            crate::develop::image_ops::fit_long_edge(img.width, img.height, pixels, max_side);
+        Rgba8 {
+            width,
+            height,
             pixels,
         }
     }
@@ -249,7 +265,7 @@ mod tests {
 
     #[test]
     fn availability_follows_the_build() {
-        assert_eq!(available(DetectTarget::Sky), !cfg!(target_arch = "wasm32"));
+        assert!(available(DetectTarget::Sky));
         assert_eq!(available(DetectTarget::Subject), cfg!(target_os = "macos"));
     }
 

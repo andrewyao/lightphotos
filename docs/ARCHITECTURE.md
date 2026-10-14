@@ -276,7 +276,11 @@ edits never change; `app/coverage.rs` is the per-(photo, target) state
 machine (detecting, loading, ready, failed) that every writer of masks asks
 through `ensure_detected`, with one detect worker and one load worker. A
 landing records its id outside the undo history. A failed slot is never
-retried on its own; the row's Retry clears it.
+retried on its own; the row's Retry clears it. In the browser, where no
+worker can reach the folder, a Sky detection runs on the main thread from
+the shown photo's decoded frame at 512 px and writes its file through File
+System Access; a pending one waits until its photo is shown. Subject needs
+Vision, so the browser only reads Subject coverage a Mac made.
 
 **How a mask renders:**
 - `mask::mask_weight` gives each mask's 0..1 weight at a pixel's source UV.

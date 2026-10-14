@@ -90,7 +90,12 @@ impl App {
             let handle = photo.parent().and_then(|dir| self.web.dir_handle(dir));
             let name = photo.file_name().map(|n| n.to_os_string());
             let (Some(handle), Some(name)) = (handle, name) else {
-                let _ = tx.send((photo, target, id, Err(CoverageError::Missing)));
+                let _ = tx.send(coverage::WebLanding::Loaded {
+                    photo,
+                    target,
+                    id,
+                    result: Err(CoverageError::Missing),
+                });
                 continue;
             };
             wasm_bindgen_futures::spawn_local(async move {
@@ -100,7 +105,83 @@ impl App {
                     Ok(None) => Err(CoverageError::Missing),
                     Err(e) => Err(CoverageError::Io(e)),
                 };
-                let _ = tx.send((photo, target, id, result));
+                let _ = tx.send(coverage::WebLanding::Loaded {
+                    photo,
+                    target,
+                    id,
+                    result,
+                });
+            });
+        }
+    }
+
+    /// Runs the detections the store wants for the shown photo, on the
+    /// frame the Loupe already decoded (full, preview or thumbnail tier,
+    /// whichever is in the cache), fit to 512 px so the heuristic takes a
+    /// few milliseconds on the main thread. The coverage file is written
+    /// through File System Access before the landing is sent, so the
+    /// sidecar can only ever name a file that exists. A pending mask on a
+    /// photo that isn't shown waits until it is.
+    #[cfg(target_arch = "wasm32")]
+    fn start_web_detects(&mut self) {
+        use crate::scoring::detect::{self, DetectInput, Rgba8};
+        const DETECT_SIDE: u32 = 512;
+        let Some(shown) = self.shown.path().map(Path::to_path_buf) else {
+            return;
+        };
+        let preview_px = self.preview_px();
+        let Some(img) = self.loader.as_ref().and_then(|l| {
+            l.get_full(&shown)
+                .or_else(|| l.get_preview(&shown, preview_px))
+                .or_else(|| l.get_thumb(&shown, crate::jobs::thumbnail::THUMB_PX))
+        }) else {
+            return;
+        };
+        let jobs = self.coverage.take_wanted_detects(|p| p == shown.as_path());
+        if jobs.is_empty() {
+            return;
+        }
+        let input = DetectInput::pixels(Rgba8::fit_from(&img, DETECT_SIDE));
+        let tx = self.coverage.web_landing_sender();
+        let handle = shown.parent().and_then(|dir| self.web.dir_handle(dir));
+        let name = shown.file_name().map(|n| n.to_os_string());
+        for (photo, target) in jobs {
+            let detected = detect::detect(&input, target)
+                .map_err(|e| e.to_string())
+                .and_then(|c| {
+                    let bytes = c.encode().map_err(|e| e.to_string())?;
+                    Ok((c, bytes))
+                });
+            let fail = |why: String| coverage::WebLanding::Detected {
+                photo: photo.clone(),
+                target,
+                result: Err(why),
+            };
+            let (coverage, bytes) = match detected {
+                Ok(ok) => ok,
+                Err(e) => {
+                    let _ = tx.send(fail(e));
+                    continue;
+                }
+            };
+            let (Some(handle), Some(name)) = (handle.clone(), name.clone()) else {
+                let _ = tx.send(fail("the folder is no longer open".into()));
+                continue;
+            };
+            let tx = tx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                let written = crate::web::web_folder_store_fs::write_coverage(
+                    &handle,
+                    &name,
+                    coverage.id(),
+                    &bytes,
+                )
+                .await;
+                let _ = tx.send(coverage::WebLanding::Detected {
+                    photo,
+                    target,
+                    result: written.map(|()| coverage),
+                });
             });
         }
     }
@@ -123,7 +204,10 @@ impl App {
     /// back with no second detection.
     pub(crate) fn poll_coverage(&mut self) {
         #[cfg(target_arch = "wasm32")]
-        self.start_web_loads();
+        {
+            self.start_web_loads();
+            self.start_web_detects();
+        }
         let landed = self.coverage.drain();
         self.sync_mask_overlay();
         if landed.is_empty() {

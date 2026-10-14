@@ -69,8 +69,6 @@ pub(crate) enum Record {
     Set(Option<RasterId>),
 }
 
-// Only a detection lands with a notice, and the browser has no detector.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) enum Notice {
     NothingFound,
     Failed(String),
@@ -105,11 +103,14 @@ pub(crate) struct CoverageStore {
     detect: WorkerPool<DetectJob, Coverage>,
     #[cfg(not(target_arch = "wasm32"))]
     load: WorkerPool<LoadJob, Result<Coverage, CoverageError>>,
-    /// Loads the app must run for the store: File System Access is
-    /// main-thread only, so the app reads each file as a task and sends
-    /// the result back through `web_landings`.
+    /// Work the app must run for the store: File System Access is
+    /// main-thread only, so the app reads each file as a task, and a
+    /// detection runs on the shown photo's decoded pixels when it is shown.
+    /// Results come back through `web_landings`.
     #[cfg(target_arch = "wasm32")]
     wanted_loads: Vec<(PathBuf, DetectTarget, RasterId)>,
+    #[cfg(target_arch = "wasm32")]
+    wanted_detects: Vec<(PathBuf, DetectTarget)>,
     #[cfg(target_arch = "wasm32")]
     web_landings: (
         std::sync::mpsc::Sender<WebLanding>,
@@ -119,14 +120,22 @@ pub(crate) struct CoverageStore {
     in_flight: usize,
 }
 
-/// A coverage file the app read for the store, on the web.
+/// Work the app finished for the store, on the web.
 #[cfg(target_arch = "wasm32")]
-pub(crate) type WebLanding = (
-    PathBuf,
-    DetectTarget,
-    RasterId,
-    Result<Coverage, CoverageError>,
-);
+pub(crate) enum WebLanding {
+    Loaded {
+        photo: PathBuf,
+        target: DetectTarget,
+        id: RasterId,
+        result: Result<Coverage, CoverageError>,
+    },
+    /// The coverage file is written before this is sent, like native.
+    Detected {
+        photo: PathBuf,
+        target: DetectTarget,
+        result: Result<Coverage, String>,
+    },
+}
 
 impl CoverageStore {
     pub(crate) fn new() -> Self {
@@ -141,6 +150,7 @@ impl CoverageStore {
                 ready_order: VecDeque::new(),
                 ready_bytes: 0,
                 wanted_loads: Vec::new(),
+                wanted_detects: Vec::new(),
                 web_landings: std::sync::mpsc::channel(),
                 in_flight: 0,
             }
@@ -151,6 +161,22 @@ impl CoverageStore {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn take_wanted_loads(&mut self) -> Vec<(PathBuf, DetectTarget, RasterId)> {
         std::mem::take(&mut self.wanted_loads)
+    }
+
+    /// The detections the app can run now: those whose photo `can_run`
+    /// accepts (the shown one, with its pixels decoded). The rest wait,
+    /// still `Detecting`, until their photo is shown.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn take_wanted_detects(
+        &mut self,
+        can_run: impl Fn(&Path) -> bool,
+    ) -> Vec<(PathBuf, DetectTarget)> {
+        let (now, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.wanted_detects)
+            .into_iter()
+            .partition(|(photo, _)| can_run(photo));
+        self.wanted_detects = later;
+        self.in_flight += now.len();
+        now
     }
 
     /// Where the app sends what it read.
@@ -318,59 +344,59 @@ impl CoverageStore {
         let mut out = Vec::new();
         #[cfg(target_arch = "wasm32")]
         {
-            while let Ok((photo, target, id, result)) = self.web_landings.1.try_recv() {
+            while let Ok(landing) = self.web_landings.1.try_recv() {
                 self.in_flight = self.in_flight.saturating_sub(1);
-                let key = (photo, target);
-                if !matches!(self.slots.get(&key), Some(Slot::Loading(l)) if *l == id) {
-                    continue;
+                match landing {
+                    WebLanding::Loaded {
+                        photo,
+                        target,
+                        id,
+                        result,
+                    } => {
+                        let key = (photo, target);
+                        if !matches!(self.slots.get(&key), Some(Slot::Loading(l)) if *l == id) {
+                            continue;
+                        }
+                        let record = match result {
+                            Ok(coverage) => {
+                                self.set_ready(&key, Arc::new(coverage));
+                                Record::Keep
+                            }
+                            // A Subject file can't be re-detected here, and a
+                            // Sky one is re-detected only when its photo is
+                            // shown, so both settle rather than wait.
+                            Err(_) => {
+                                self.slots
+                                    .insert(key.clone(), Slot::Failed(Failure::Missing));
+                                Record::Set(None)
+                            }
+                        };
+                        out.push(Landed {
+                            photo: key.0,
+                            target: key.1,
+                            record,
+                            notice: None,
+                        });
+                    }
+                    WebLanding::Detected {
+                        photo,
+                        target,
+                        result,
+                    } => {
+                        if let Some(landed) = self.land_detected((photo, target), result) {
+                            out.push(landed);
+                        }
+                    }
                 }
-                let record = match result {
-                    Ok(coverage) => {
-                        self.set_ready(&key, Arc::new(coverage));
-                        Record::Keep
-                    }
-                    // The browser has no detector to fall back on.
-                    Err(_) => {
-                        self.slots
-                            .insert(key.clone(), Slot::Failed(Failure::Missing));
-                        Record::Set(None)
-                    }
-                };
-                out.push(Landed {
-                    photo: key.0,
-                    target: key.1,
-                    record,
-                    notice: None,
-                });
             }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             for (job, result) in self.detect.poll() {
                 self.in_flight = self.in_flight.saturating_sub(1);
-                let key = (job.photo, job.target);
-                if !matches!(self.slots.get(&key), Some(Slot::Detecting)) {
-                    continue;
+                if let Some(landed) = self.land_detected((job.photo, job.target), result) {
+                    out.push(landed);
                 }
-                let (record, notice) = match result {
-                    Ok(coverage) => {
-                        let notice = coverage.is_nothing().then_some(Notice::NothingFound);
-                        let id = coverage.id();
-                        self.set_ready(&key, Arc::new(coverage));
-                        (Record::Set(Some(id)), notice)
-                    }
-                    Err(why) => {
-                        self.slots
-                            .insert(key.clone(), Slot::Failed(Failure::Detect(why.clone())));
-                        (Record::Keep, Some(Notice::Failed(why)))
-                    }
-                };
-                out.push(Landed {
-                    photo: key.0,
-                    target: key.1,
-                    record,
-                    notice,
-                });
             }
             for (job, result) in self.load.poll() {
                 self.in_flight = self.in_flight.saturating_sub(1);
@@ -411,6 +437,37 @@ impl CoverageStore {
         out
     }
 
+    /// A finished detection for `key`, unless its slot was cleared meanwhile
+    /// (a folder switch): "nothing found" is remembered like any answer.
+    fn land_detected(
+        &mut self,
+        key: (PathBuf, DetectTarget),
+        result: Result<Coverage, String>,
+    ) -> Option<Landed> {
+        if !matches!(self.slots.get(&key), Some(Slot::Detecting)) {
+            return None;
+        }
+        let (record, notice) = match result {
+            Ok(coverage) => {
+                let notice = coverage.is_nothing().then_some(Notice::NothingFound);
+                let id = coverage.id();
+                self.set_ready(&key, Arc::new(coverage));
+                (Record::Set(Some(id)), notice)
+            }
+            Err(why) => {
+                self.slots
+                    .insert(key.clone(), Slot::Failed(Failure::Detect(why.clone())));
+                (Record::Keep, Some(Notice::Failed(why)))
+            }
+        };
+        Some(Landed {
+            photo: key.0,
+            target: key.1,
+            record,
+            notice,
+        })
+    }
+
     fn start_detect(&mut self, key: (PathBuf, DetectTarget)) -> Lookup {
         if !detect::available(key.1) {
             self.slots.insert(key, Slot::Failed(Failure::Unsupported));
@@ -421,11 +478,18 @@ impl CoverageStore {
             photo: key.0.clone(),
             target: key.1,
         });
-        // No detector is available in the browser, so this is never reached.
+        // The app runs it on the shown photo's pixels; until then it waits
+        // here without counting as in flight.
         #[cfg(target_arch = "wasm32")]
-        let submitted = false;
+        let submitted = {
+            self.wanted_detects.push(key.clone());
+            true
+        };
         if submitted {
-            self.in_flight += 1;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.in_flight += 1;
+            }
             self.slots.insert(key, Slot::Detecting);
             return Lookup::Pending;
         }

@@ -310,6 +310,29 @@ pub(crate) async fn read_coverage(
     crate::web::web_fs::file_bytes(&file).await.map(Some)
 }
 
+/// Write `bytes` to `root/.lightphotos/masks/<photo>.<id>.png`, creating
+/// the directories if needed. Content-addressed, so a file already there
+/// holds the same bytes and is left alone.
+pub(crate) async fn write_coverage(
+    root: &FileSystemDirectoryHandle,
+    photo: &OsStr,
+    id: crate::develop::RasterId,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let dir = sidecar_dir(root, true)
+        .await?
+        .ok_or_else(|| "could not create .lightphotos".to_string())?;
+    let dir = subdir(&dir, crate::develop::coverage::COVERAGE_DIR, true)
+        .await?
+        .ok_or_else(|| "could not create .lightphotos/masks".to_string())?;
+    let name = crate::develop::coverage::file_name(photo, id);
+    let name = name.to_string_lossy();
+    if JsFuture::from(dir.get_file_handle(&name)).await.is_ok() {
+        return Ok(());
+    }
+    write_file(&dir, &name, bytes).await
+}
+
 /// Permanently delete `dir/<filename>`. File System Access has no trash,
 /// so this replaces `trash::move_to_trash` on web. A file that is already
 /// gone is not an error.
