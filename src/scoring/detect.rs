@@ -99,18 +99,64 @@ impl From<DecodedImage> for Rgba8 {
 }
 
 impl Rgba8 {
-    /// `img` as sRGB8, fit within `max_side` on its long side. For a frame
-    /// already in a cache that must stay as it is.
+    /// `img` as sRGB8, fit within `max_side` on its long side, for a frame
+    /// in a cache that must stay as it is. A frame already within the
+    /// limit is copied as it is; a larger one is point-sampled at the
+    /// target pixels' centres, converting only the pixels sampled, so the
+    /// cost is the output's size, not the source's. The main thread pays
+    /// it in the browser.
     pub fn fit_from(img: &DecodedImage, max_side: u32) -> Rgba8 {
-        let pixels = match img.pixel_format {
-            PixelFormat::Srgb8 => img.rgba.clone(),
-            PixelFormat::LinearF16 => crate::develop::image_ops::linear_f16_to_srgb8(img),
+        let (w, h) = (img.width, img.height);
+        let bpp = match img.pixel_format {
+            PixelFormat::Srgb8 => 4,
+            PixelFormat::LinearF16 => 8,
         };
-        let (width, height, pixels) =
-            crate::develop::image_ops::fit_long_edge(img.width, img.height, pixels, max_side);
+        if w == 0 || h == 0 || img.rgba.len() < w as usize * h as usize * bpp {
+            return Rgba8 {
+                width: 0,
+                height: 0,
+                pixels: Vec::new(),
+            };
+        }
+        if w.max(h) <= max_side || max_side == 0 {
+            let pixels = match img.pixel_format {
+                PixelFormat::Srgb8 => img.rgba.clone(),
+                PixelFormat::LinearF16 => crate::develop::image_ops::linear_f16_to_srgb8(img),
+            };
+            return Rgba8 {
+                width: w,
+                height: h,
+                pixels,
+            };
+        }
+        let scale = w.max(h) as f64 / max_side as f64;
+        let nw = ((w as f64 / scale).round() as u32).clamp(1, w);
+        let nh = ((h as f64 / scale).round() as u32).clamp(1, h);
+        let mut pixels = Vec::with_capacity(nw as usize * nh as usize * 4);
+        for y in 0..nh {
+            let sy = (((y as f64 + 0.5) * scale) as u32).min(h - 1) as usize;
+            for x in 0..nw {
+                let sx = (((x as f64 + 0.5) * scale) as u32).min(w - 1) as usize;
+                let i = (sy * w as usize + sx) * bpp;
+                match img.pixel_format {
+                    PixelFormat::Srgb8 => {
+                        pixels.extend_from_slice(img.rgba.get(i..i + 4).unwrap_or(&[0; 4]));
+                    }
+                    PixelFormat::LinearF16 => {
+                        let px = img
+                            .rgba
+                            .get(i..i + 8)
+                            .and_then(|s| <&[u8; 8]>::try_from(s).ok())
+                            .copied()
+                            .unwrap_or([0; 8]);
+                        pixels.extend(crate::develop::image_ops::linear_f16_px_to_srgb8(&px));
+                    }
+                }
+            }
+        }
         Rgba8 {
-            width,
-            height,
+            width: nw,
+            height: nh,
             pixels,
         }
     }
@@ -267,6 +313,77 @@ mod tests {
     fn availability_follows_the_build() {
         assert!(available(DetectTarget::Sky));
         assert_eq!(available(DetectTarget::Subject), cfg!(target_os = "macos"));
+    }
+
+    fn frame(
+        w: u32,
+        h: u32,
+        format: PixelFormat,
+        px: impl Fn(u32, u32) -> Vec<u8>,
+    ) -> DecodedImage {
+        let mut rgba = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                rgba.extend(px(x, y));
+            }
+        }
+        DecodedImage::new_tracked(crate::decode::image_decode::DecodedImageFields {
+            width: w,
+            height: h,
+            rgba,
+            pixel_format: format,
+        })
+    }
+
+    /// A frame within the limit comes back byte for byte; a larger one is
+    /// sampled at the target pixels' centres, in either format, converting
+    /// a LinearF16 pixel exactly as the whole-frame conversion does.
+    #[test]
+    fn fit_from_keeps_a_small_frame_and_centre_samples_a_large_one() {
+        let small = frame(6, 4, PixelFormat::Srgb8, |x, y| {
+            vec![x as u8, y as u8, 7, 255]
+        });
+        let out = Rgba8::fit_from(&small, 8);
+        assert_eq!((out.width, out.height), (6, 4));
+        assert_eq!(out.pixels, small.rgba, "unchanged");
+
+        let big = frame(8, 4, PixelFormat::Srgb8, |x, y| {
+            vec![x as u8, y as u8, 9, 255]
+        });
+        let out = Rgba8::fit_from(&big, 4);
+        assert_eq!((out.width, out.height), (4, 2));
+        for y in 0..2u32 {
+            for x in 0..4u32 {
+                let i = ((y * 4 + x) * 4) as usize;
+                assert_eq!(
+                    &out.pixels[i..i + 4],
+                    &[(2 * x + 1) as u8, (2 * y + 1) as u8, 9, 255],
+                    "({x}, {y}) samples the centre of its source cell"
+                );
+            }
+        }
+
+        let f16 = |v: f32| half::f16::from_f32(v).to_le_bytes();
+        let deep = frame(8, 4, PixelFormat::LinearF16, |x, y| {
+            [
+                f16(x as f32 / 8.0),
+                f16(y as f32 / 4.0),
+                f16(0.25),
+                f16(1.0),
+            ]
+            .concat()
+        });
+        let out = Rgba8::fit_from(&deep, 4);
+        let whole = crate::develop::image_ops::linear_f16_to_srgb8(&deep);
+        assert_eq!((out.width, out.height), (4, 2));
+        for y in 0..2u32 {
+            for x in 0..4u32 {
+                let i = ((y * 4 + x) * 4) as usize;
+                let j = (((2 * y + 1) * 8 + 2 * x + 1) * 4) as usize;
+                assert_eq!(&out.pixels[i..i + 4], &whole[j..j + 4], "({x}, {y})");
+            }
+        }
+        assert_eq!(out.pixels.len(), 4 * 2 * 4);
     }
 
     /// A blue sky over brown ground, through the seam: the sky is covered,

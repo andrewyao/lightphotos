@@ -366,6 +366,18 @@ fn pre_at(src: &Source, touchups: &[TouchUp], x: u32, y: u32) -> [f32; 3] {
     apply_touchups(src, touchups, u, v, px)
 }
 
+/// One `LinearF16` pixel as opaque sRGB8, as `raw_shader.wgsl` would
+/// display it with no edits.
+pub fn linear_f16_px_to_srgb8(px: &[u8; 8]) -> [u8; 4] {
+    let f = |b: &[u8]| half::f16::from_le_bytes([b[0], b[1]]).to_f32();
+    let d = develop::apply_raw_display(
+        &Adjustments::default(),
+        [f(&px[0..]), f(&px[2..]), f(&px[4..])],
+    );
+    let [r, g, b] = d.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+    [r, g, b, 255]
+}
+
 /// A `LinearF16` image as opaque sRGB8 RGBA, with no edits, as
 /// `raw_shader.wgsl` would display it. Empty for a short buffer.
 pub fn linear_f16_to_srgb8(img: &DecodedImage) -> Vec<u8> {
@@ -373,13 +385,9 @@ pub fn linear_f16_to_srgb8(img: &DecodedImage) -> Vec<u8> {
     if img.rgba.len() < n * 8 {
         return Vec::new();
     }
-    let adj = Adjustments::default();
-    let f = |b: &[u8]| half::f16::from_le_bytes([b[0], b[1]]).to_f32();
     let mut out = Vec::with_capacity(n * 4);
     for px in img.rgba.as_chunks::<8>().0.iter().take(n) {
-        let d = develop::apply_raw_display(&adj, [f(&px[0..]), f(&px[2..]), f(&px[4..])]);
-        out.extend(d.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
-        out.push(255);
+        out.extend(linear_f16_px_to_srgb8(px));
     }
     out
 }
