@@ -7,5 +7,6 @@ pub mod facequality;
 pub mod judge;
 pub mod quality;
 pub mod segmentation;
+pub mod sky;
 #[cfg(target_os = "macos")]
 pub mod vision;
