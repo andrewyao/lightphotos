@@ -145,6 +145,8 @@ pub(super) fn draw_loupe(ui: &mut egui::Ui, app: &mut App, out: &mut FrameOutput
         loupe_crop_overlay(ui, app, central, out);
     } else if app.touchup_active() {
         loupe_touchup_overlay(ui, app, central, out);
+    } else if app.masks_shown() {
+        super::mask_overlay::loupe_mask_overlay(ui, app, central, out);
     } else if app.wb_picker_active() {
         loupe_wb_picker_overlay(ui, app, central, out);
     } else if app.compare() {

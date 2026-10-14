@@ -145,6 +145,30 @@ impl App {
             return;
         }
 
+        // Esc puts the mask tool down, then lets go of the selected mask, and
+        // Delete removes that mask rather than the photo.
+        let mask_selected = self.selected_mask().filter(|_| self.masks_shown());
+        if self.mask_tool().is_some() || mask_selected.is_some() {
+            match code {
+                KeyCode::Escape => {
+                    if self.mask_tool().is_some() {
+                        self.tool = LoupeTool::None;
+                    } else {
+                        self.mask_selected = None;
+                    }
+                    self.request_redraw();
+                    return;
+                }
+                KeyCode::Delete | KeyCode::Backspace if !cmd => {
+                    if let Some(i) = mask_selected {
+                        self.delete_mask(i);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // While the name prompt is open, only Escape and Enter act. egui
         // swallows keys while the field holds focus, so this is the fallback
         // for a prompt that lost focus, where `x` would export and a digit
@@ -278,6 +302,12 @@ impl App {
                 self.set_develop_tab(DevelopTab::Masks);
                 self.toggle_touchup();
             }
+            // Lightroom's keys: M draws a Linear Gradient, Shift+M a Radial.
+            KeyCode::KeyM if !cmd && !alt => self.toggle_mask_tool(if shift {
+                super::masks::MaskKind::Radial
+            } else {
+                super::masks::MaskKind::Linear
+            }),
 
             KeyCode::KeyG if cmd && shift && !alt => self.ungroup_selected(),
             KeyCode::KeyG if cmd && !alt => self.group_selected(),
@@ -526,6 +556,7 @@ mod tests {
             ..Default::default()
         };
         app.copied_settings = Some(crate::app::folder_store::CopiedSettings {
+            masks: Vec::new(),
             path: paths[0].clone(),
             adj: look,
             sections: crate::develop::copy::CopySections::LOOK,
@@ -1085,6 +1116,59 @@ mod tests {
         press(&mut app, ModifiersState::empty(), KeyCode::Enter);
         let pasted = app.folder_store.adjustments(&paths[1]);
         assert_eq!((pasted.exposure, pasted.temp), (1.0, 0.0));
+    }
+
+    /// Masks paste only when their section is ticked, which it isn't by
+    /// default.
+    #[test]
+    fn paste_carries_masks_only_when_ticked() {
+        use crate::develop::copy::{CopySection, CopySections};
+        let (mut app, paths) = folder_app(2);
+        let mask = crate::develop::Mask::radial([0.4, 0.5], [0.2, 0.2]);
+        app.masks.insert(paths[0].clone(), vec![mask]);
+        for (sections, want) in [
+            (CopySections::LOOK, vec![]),
+            (
+                CopySections::LOOK.with(CopySection::Masks, true),
+                vec![mask],
+            ),
+        ] {
+            app.sel = Some(0);
+            app.selected.clear();
+            press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyC);
+            app.set_copy_sections(sections);
+            press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+            press(&mut app, CMD, KeyCode::KeyA);
+            press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyV);
+            press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+            assert_eq!(app.folder_store.masks(&paths[1]), want, "{sections:?}");
+        }
+    }
+
+    /// M and Shift+M arm Lightroom's Linear and Radial gradients, Esc puts
+    /// the tool down, and Delete with a mask picked removes the mask, not
+    /// the photo.
+    #[test]
+    fn mask_keys_arm_the_tools_and_delete_removes_the_mask() {
+        use crate::app::MaskKind;
+        let (mut app, paths) = folder_app(2);
+        app.sel = Some(0);
+        press(&mut app, ModifiersState::empty(), KeyCode::KeyM);
+        assert_eq!(app.mask_tool(), Some(MaskKind::Linear));
+        assert_eq!(app.mode, ViewMode::Loupe);
+        assert_eq!(app.develop_tab(), DevelopTab::Masks);
+        press(&mut app, ModifiersState::SHIFT, KeyCode::KeyM);
+        assert_eq!(app.mask_tool(), Some(MaskKind::Radial));
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        assert_eq!(app.mask_tool(), None);
+
+        app.shown = Shown::Preview(paths[0].clone(), 1024, 1024);
+        app.add_mask(crate::develop::Mask::radial([0.5, 0.5], [0.1, 0.1]));
+        assert_eq!(app.selected_mask(), Some(0));
+        press(&mut app, ModifiersState::empty(), KeyCode::Delete);
+        assert!(app.current_masks().is_empty());
+        assert!(!app.confirm_open(), "the photo stays");
+        assert!(paths[0].exists());
     }
 
     #[test]

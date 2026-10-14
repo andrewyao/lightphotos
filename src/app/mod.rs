@@ -385,6 +385,8 @@ pub(crate) enum LoupeTool {
     WbPicker,
     /// Clicks add spot-heal touch-ups.
     TouchUp,
+    /// A drag draws a new mask of this shape.
+    Mask(masks::MaskKind),
 }
 
 /// A grid thumbnail on the GPU. The size travels with the id because the
@@ -426,6 +428,9 @@ pub(crate) struct App {
     /// this is the only way to assert what the loupe would actually show.
     #[cfg(test)]
     pub(crate) pushed_adj: Option<Adjustments>,
+    /// How many masks the last push handed the GPU.
+    #[cfg(test)]
+    pub(crate) pushed_masks: usize,
     pub(crate) loader: Option<Loader>,
     /// `None` until the window is created, and on targets that cannot spawn
     /// threads.
@@ -481,6 +486,9 @@ pub(crate) struct App {
     touchup_feather: f32,
     touchup_opacity: f32,
     touchup_selected: Option<usize>,
+    /// The mask the Masks page and the Loupe overlay edit. See
+    /// `App::selected_mask`.
+    mask_selected: Option<usize>,
     /// O hides the spot circles in Touch Up to judge the fix unobstructed.
     touchup_spots_hidden: bool,
     /// Per-image spot lists as they were before each Touch Up add or delete,
@@ -738,6 +746,7 @@ mod histogram;
 mod history;
 mod keys;
 mod loupe;
+mod masks;
 #[cfg(target_os = "macos")]
 mod menu;
 mod nav;
@@ -748,8 +757,9 @@ mod session;
 mod sort;
 #[cfg(not(target_arch = "wasm32"))]
 mod state;
-pub(crate) use sort::{GridSort, SortOrder};
 #[cfg(not(target_arch = "wasm32"))]
+pub(crate) use masks::MaskKind;
+pub(crate) use sort::{GridSort, SortOrder};
 pub(crate) use state::State;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -809,6 +819,8 @@ impl App {
             renderer: None,
             #[cfg(test)]
             pushed_adj: None,
+            #[cfg(test)]
+            pushed_masks: 0,
             loader: None,
             score_pool: None,
             score_job: None,
@@ -836,6 +848,7 @@ impl App {
             touchup_feather: TOUCHUP_FEATHER,
             touchup_opacity: 1.0,
             touchup_selected: None,
+            mask_selected: None,
             touchup_spots_hidden: false,
             touchup_undo: HashMap::new(),
             develop_open: false,
@@ -1069,6 +1082,7 @@ impl App {
         self.abandon_crop_draft();
         self.tool = LoupeTool::None;
         self.touchup_selected = None;
+        self.mask_selected = None;
     }
 
     /// List `dir`'s subfolders into `subdirs` if not cached. Async on wasm32.
@@ -1545,6 +1559,19 @@ impl App {
                     self.request_redraw();
                 }
                 ui::UiAction::DeleteTouchUp => self.delete_selected_touchup(),
+                ui::UiAction::ToggleMaskTool(kind) => self.toggle_mask_tool(kind),
+                ui::UiAction::DisarmMaskTool => {
+                    if self.mask_tool().is_some() {
+                        self.tool = LoupeTool::None;
+                    }
+                    self.request_redraw();
+                }
+                ui::UiAction::AddMask(m) => {
+                    self.add_mask(m);
+                }
+                ui::UiAction::SetMask(i, m) => self.set_mask(i, m),
+                ui::UiAction::SelectMask(i) => self.select_mask(i),
+                ui::UiAction::DeleteMask(i) => self.delete_mask(i),
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(*adj),
                 ui::UiAction::SetCopySections(s) => self.set_copy_sections(s),
                 ui::UiAction::CommitCopySettings => self.commit_copy_settings(),
@@ -1561,6 +1588,7 @@ impl App {
                     #[cfg(target_arch = "wasm32")]
                     if !self.current_adjustments().is_identity()
                         || !self.current_touchups().is_empty()
+                        || !self.current_masks().is_empty()
                     {
                         crate::web::analytics::property(
                             "develop_edit_applied",
@@ -1572,6 +1600,8 @@ impl App {
                         let adj = self.edits.get(&path).copied().unwrap_or_default();
                         self.history.note_touchups(&path, adj, spots);
                     }
+                    self.put_masks(&path, Vec::new());
+                    self.mask_selected = None;
                     self.put_edit(&path, Adjustments::default());
                     self.touchups.remove(&path);
                     self.folder_store

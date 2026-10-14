@@ -6,7 +6,7 @@ use crate::app::{
     RailItem, Region, SliderStep, StraightenTool,
 };
 use crate::develop::curve::{Channel, Curve, ToneCurve};
-use crate::develop::Adjustments;
+use crate::develop::{Adjustments, Mask};
 
 /// The right-hand Develop panel, with sliders in Lightroom's order. Pushes one
 /// `SetAdjustments` only on frames where a slider changed. Double-clicking a
@@ -812,14 +812,17 @@ fn toggle_switch(ui: &mut egui::Ui, on: bool) -> egui::Response {
     response
 }
 
-/// Touch Up: the tool toggle, brush size and feather, and the list of spots.
-/// The brush only matters while the tool is armed.
+/// Masks, then Touch Up. Masks: a button per shape that arms its draw tool,
+/// the photo's masks to pick from, and the picked one's sliders. Touch Up:
+/// the tool toggle, brush size and feather, and the list of spots. The brush
+/// only matters while the tool is armed.
 fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     form::page_heading(ui, t.tab_masks, |_| {});
     form::page(ui, |ui| {
         let active = app.touchup_active();
-        let form = Form::new(ui, &[t.touch_up, t.spots]).spacious();
+        let form = Form::new(ui, &[t.masks, t.touch_up, t.spots]).spacious();
+        draw_mask_section(ui, app, &form, out);
         form.section(ui, "", |ui| {
             form.row(ui, t.touch_up, |ui| {
                 if toggle_switch(ui, active).clicked() {
@@ -896,6 +899,95 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                     });
                 });
             });
+        }
+    });
+}
+
+/// The Masks section of [`draw_masks_tab`].
+fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameOutput) {
+    use crate::app::MaskKind;
+    use crate::develop::MaskShape;
+    let t = t();
+    let masks = app.current_masks();
+    let selected = app.selected_mask();
+    form.section(ui, "", |ui| {
+        form.row(ui, t.masks, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for (kind, label, tip) in [
+                    (MaskKind::Linear, t.linear_gradient, t.linear_gradient_tip),
+                    (MaskKind::Radial, t.radial_gradient, t.radial_gradient_tip),
+                ] {
+                    let armed = app.mask_tool() == Some(kind);
+                    let add = ui.add_enabled(
+                        masks.len() < crate::develop::MAX_MASKS,
+                        egui::Button::selectable(armed, format!("+ {label}")),
+                    );
+                    if add.on_hover_text(tip).clicked() {
+                        out.actions.push(UiAction::ToggleMaskTool(kind));
+                    }
+                }
+            });
+            if app.mask_tool().is_some() {
+                form::hint(ui, t.mask_draw_hint);
+            }
+        });
+        if masks.is_empty() {
+            return;
+        }
+        form.row(ui, "", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                for i in 0..masks.len() {
+                    let label = format!("{}", i + 1);
+                    if ui.selectable_label(selected == Some(i), label).clicked() {
+                        let pick = (selected != Some(i)).then_some(i);
+                        out.actions.push(UiAction::SelectMask(pick));
+                    }
+                }
+            });
+        });
+        let Some((i, mask)) = selected.and_then(|i| masks.get(i).map(|m| (i, *m))) else {
+            return;
+        };
+        form.row(ui, "", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let mut invert = mask.invert;
+                if ui.checkbox(&mut invert, t.mask_invert).changed() {
+                    out.actions
+                        .push(UiAction::SetMask(i, Mask { invert, ..mask }));
+                }
+                let delete = egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger);
+                if ui.button(delete).clicked() {
+                    out.actions.push(UiAction::DeleteMask(i));
+                }
+            });
+        });
+    });
+    let Some((i, mask)) = selected.and_then(|i| masks.get(i).map(|m| (i, *m))) else {
+        return;
+    };
+    ui.add_space(font_size::px(ui.style(), form::SLIDER_GAP));
+    ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.y = font_size::px(ui.style(), form::SLIDER_GAP);
+        let mut next = mask;
+        for s in &crate::develop::mask::LOCAL_SLIDERS {
+            let field = (s.field)(&mut next.amounts);
+            develop_slider(
+                ui,
+                t.slider(s.id),
+                field,
+                s.range.clone(),
+                0.0,
+                s.decimals,
+                false,
+            );
+        }
+        if let MaskShape::Radial { feather, .. } = &mut next.shape {
+            let mut percent = *feather * 100.0;
+            develop_slider(ui, t.feather, &mut percent, 0.0..=100.0, 50.0, 0, false);
+            *feather = (percent / 100.0).clamp(0.0, 1.0);
+        }
+        if next != mask {
+            out.actions.push(UiAction::SetMask(i, next));
         }
     });
 }

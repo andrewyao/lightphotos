@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::develop::curve::Channel;
 use crate::develop::image_ops;
-use crate::develop::{self, Adjustments, GpuAdjust, GpuMask, GpuTouchUp, Mask, TouchUp};
+use crate::develop::{self, Adjustments, GpuAdjust, GpuMask, GpuTouchUp, TouchUp};
 
 impl App {
     /// Develop adjustments of the image currently shown (identity if unset).
@@ -19,14 +19,6 @@ impl App {
         self.shown
             .path()
             .and_then(|p| self.touchups.get(p))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-
-    pub(crate) fn current_masks(&self) -> &[Mask] {
-        self.shown
-            .path()
-            .and_then(|p| self.masks.get(p))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
@@ -468,6 +460,9 @@ impl App {
                     self.touchups.insert(path.clone(), touchups);
                 }
             }
+            if let Some(masks) = before.masks {
+                self.store_masks(&path, masks);
+            }
             n += 1;
             if shown.as_ref() == Some(&path) {
                 self.push_adjustments();
@@ -504,6 +499,7 @@ impl App {
         #[cfg(test)]
         {
             self.pushed_adj = Some(self.current_adjustments());
+            self.pushed_masks = self.current_masks().len();
         }
         let adj = self.current_adjustments();
         let gpu = self.gpu_adjust(&adj);
@@ -715,35 +711,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn press(app: &App, down: bool) {
-        let pos = egui::pos2(1.0, 1.0);
-        let input = egui::RawInput {
-            events: vec![
-                egui::Event::PointerMoved(pos),
-                egui::Event::PointerButton {
-                    pos,
-                    button: egui::PointerButton::Primary,
-                    pressed: down,
-                    modifiers: Default::default(),
-                },
-            ],
-            ..Default::default()
-        };
-        let _ = app.egui_ctx.run_ui(input, |_| {});
-    }
-
-    fn one_photo(tag: &str) -> (App, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("lp-adjust-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let photo = dir.join("a.jpg");
-        std::fs::write(&photo, []).unwrap();
-        let mut app = App::new(None);
-        app.folder_store.open_dir(&dir);
-        app.shown = Shown::Preview(photo.clone(), 1024, 1024);
-        (app, dir, photo)
-    }
+    use crate::app::test_support::{one_photo, press};
 
     #[test]
     fn showing_fractional_folder_store_edits_does_not_emit_an_edit_action() {
@@ -1203,7 +1171,7 @@ mod tests {
             app.set_develop_tab(DevelopTab::Masks);
             let painted = settled(&mut app);
             assert!(
-                painted.pos_of(t.touch_up).y < rail_icon(&app, DevelopTab::Masks).y,
+                painted.pos_of(t.masks).y < rail_icon(&app, DevelopTab::Masks).y,
                 "Masks starts at the panel's top, with no histogram over it"
             );
             let size_px = format!("{:.0} px", app.touchup_radius_px());

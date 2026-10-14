@@ -18,6 +18,8 @@ pub(super) struct CopiedSettings {
     pub(super) path: PathBuf,
     /// The photo's whole edit; Paste takes `sections` of it.
     pub(super) adj: Adjustments,
+    /// The photo's masks, which Paste lays down when `sections` has them.
+    pub(super) masks: Vec<crate::develop::Mask>,
     pub(super) sections: CopySections,
 }
 
@@ -760,10 +762,12 @@ impl App {
             }
         }
         let adj = self.edits.get(&path).copied().unwrap_or_default();
+        let masks = self.masks.get(&path).cloned().unwrap_or_default();
         let name = file_label(&path);
         self.copied_settings = Some(CopiedSettings {
             path,
             adj,
+            masks,
             sections,
         });
         self.set_status(
@@ -778,7 +782,13 @@ impl App {
         let Some(copied) = self.copied_settings.clone() else {
             return;
         };
-        let n = self.apply_look_to(&copied.adj, copied.sections, &self.action_paths());
+        let paths = self.action_paths();
+        let n = self.apply_look_to(&copied.adj, copied.sections, &paths);
+        if copied.sections.has(CopySection::Masks) {
+            for path in &paths {
+                self.put_masks(path, copied.masks.clone());
+            }
+        }
         if n == 0 {
             return;
         }

@@ -198,6 +198,16 @@ pub enum UiAction {
     TouchUpClick(f32, f32),
     SelectTouchUp(usize),
     DeleteTouchUp,
+    /// Arms the mask tool for a shape, or puts it down if it is armed.
+    ToggleMaskTool(crate::app::MaskKind),
+    /// Puts the mask tool down, as a finished draw does.
+    DisarmMaskTool,
+    /// A drawn mask: added to the shown photo and selected.
+    AddMask(crate::develop::Mask),
+    /// Mask `.0` of the shown photo becomes `.1`.
+    SetMask(usize, crate::develop::Mask),
+    SelectMask(Option<usize>),
+    DeleteMask(usize),
     SetAdjustments(Box<Adjustments>),
     /// The sections ticked in the open Copy Settings.
     SetCopySections(crate::develop::copy::CopySections),
@@ -275,6 +285,7 @@ mod grid;
 mod home;
 mod info_panel;
 mod loupe;
+mod mask_overlay;
 mod modals;
 mod photo_menu;
 mod tabs;

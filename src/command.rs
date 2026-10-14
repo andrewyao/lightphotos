@@ -13,7 +13,10 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::develop::{Adjustments, Crop, SliderId, Straighten, SLIDERS, STRAIGHTEN_RANGE};
+use crate::develop::{
+    Adjustments, Crop, LocalAmounts, Mask, MaskShape, SliderId, Straighten, MAX_MASKS, SLIDERS,
+    STRAIGHTEN_RANGE,
+};
 use crate::export::ExportSettings;
 use crate::sidecar::{ColorLabel, ImageRecord, MAX_RATING};
 
@@ -54,6 +57,12 @@ pub enum Command {
     Monochrome(MonochromeParams),
     #[serde(rename = "crop.set")]
     Crop(CropParams),
+    #[serde(rename = "mask.add")]
+    AddMask(MaskAddParams),
+    #[serde(rename = "mask.set")]
+    SetMask(MaskSetParams),
+    #[serde(rename = "mask.clear")]
+    ClearMasks(MaskClearParams),
     #[serde(rename = "preset.apply")]
     Preset(PresetParams),
     #[serde(rename = "export")]
@@ -433,6 +442,12 @@ fn apply_to_record(
             p.validate()?;
             develop(rec, p.apply(adj, size)?);
         }
+        Command::AddMask(_) | Command::SetMask(_) | Command::ClearMasks(_) => {
+            if let Some(masks) = cmd.edit_masks(&rec.masks) {
+                let masks = masks?;
+                rec.edit(now, |r| r.masks = masks);
+            }
+        }
         Command::OpenFolder(_)
         | Command::NewCatalog(_)
         | Command::OpenCatalog(_)
@@ -555,6 +570,119 @@ impl CropParams {
                 adj.straighten, fit.left, fit.top, fit.right, fit.bottom
             ),
         ))
+    }
+}
+
+/// A new mask, added after a photo's others. `shape` is in 0..1 of the
+/// unturned, uncropped photo; see [`MaskShape`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MaskAddParams {
+    pub shape: MaskShape,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub invert: bool,
+    #[serde(default, skip_serializing_if = "LocalAmounts::is_zero")]
+    pub amounts: LocalAmounts,
+    #[serde(default, skip_serializing_if = "Photos::is_selected")]
+    pub photos: Photos,
+}
+
+/// Changes mask `index` (0 is the first). Each field given replaces the
+/// mask's own; `amounts` replaces all of them, so a slider it leaves out
+/// goes to 0.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MaskSetParams {
+    pub index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<MaskShape>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invert: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amounts: Option<LocalAmounts>,
+    #[serde(default, skip_serializing_if = "Photos::is_selected")]
+    pub photos: Photos,
+}
+
+/// Removes mask `index`, or every mask when `index` is absent.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct MaskClearParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Photos::is_selected")]
+    pub photos: Photos,
+}
+
+/// A mask from a caller, held to range, or why it can't be one.
+fn valid_mask(id: &str, mask: Mask) -> Result<Mask, CommandError> {
+    mask.sanitized()
+        .ok_or_else(|| CommandError::bad_params(id, "every mask number must be finite".to_string()))
+}
+
+impl MaskAddParams {
+    fn apply(&self, masks: &[Mask]) -> Result<Vec<Mask>, CommandError> {
+        if masks.len() >= MAX_MASKS {
+            return Err(CommandError::bad_params(
+                "mask.add",
+                format!("a photo holds at most {MAX_MASKS} masks"),
+            ));
+        }
+        let mask = Mask {
+            shape: self.shape,
+            invert: self.invert,
+            amounts: self.amounts,
+        };
+        let mut out = masks.to_vec();
+        out.push(valid_mask("mask.add", mask)?);
+        Ok(out)
+    }
+}
+
+impl MaskSetParams {
+    fn apply(&self, masks: &[Mask]) -> Result<Vec<Mask>, CommandError> {
+        let mut out = masks.to_vec();
+        let slot = out
+            .get_mut(self.index)
+            .ok_or_else(|| no_mask("mask.set", self.index, masks.len()))?;
+        let mask = Mask {
+            shape: self.shape.unwrap_or(slot.shape),
+            invert: self.invert.unwrap_or(slot.invert),
+            amounts: self.amounts.unwrap_or(slot.amounts),
+        };
+        *slot = valid_mask("mask.set", mask)?;
+        Ok(out)
+    }
+}
+
+impl MaskClearParams {
+    fn apply(&self, masks: &[Mask]) -> Result<Vec<Mask>, CommandError> {
+        let Some(i) = self.index else {
+            return Ok(Vec::new());
+        };
+        if i >= masks.len() {
+            return Err(no_mask("mask.clear", i, masks.len()));
+        }
+        let mut out = masks.to_vec();
+        out.remove(i);
+        Ok(out)
+    }
+}
+
+fn no_mask(id: &str, index: usize, len: usize) -> CommandError {
+    CommandError::bad_params(id, format!("no mask {index}; the photo has {len} mask(s)"))
+}
+
+impl Command {
+    /// `masks` as a mask command leaves them, or `None` for any other
+    /// command. A caller works out every photo's result before writing any.
+    pub fn edit_masks(&self, masks: &[Mask]) -> Option<Result<Vec<Mask>, CommandError>> {
+        match self {
+            Command::AddMask(p) => Some(p.apply(masks)),
+            Command::SetMask(p) => Some(p.apply(masks)),
+            Command::ClearMasks(p) => Some(p.apply(masks)),
+            _ => None,
+        }
     }
 }
 
@@ -739,6 +867,9 @@ impl Command {
             AutoTone(_) => "develop.auto",
             Monochrome(_) => "develop.monochrome",
             Crop(_) => "crop.set",
+            AddMask(_) => "mask.add",
+            SetMask(_) => "mask.set",
+            ClearMasks(_) => "mask.clear",
             Preset(_) => "preset.apply",
             Export(_) => "export",
             Undo => "edit.undo",
@@ -757,6 +888,9 @@ impl Command {
             Reset(p) | AutoTone(p) => Some(&p.photos),
             Monochrome(p) => Some(&p.photos),
             Crop(p) => Some(&p.photos),
+            AddMask(p) => Some(&p.photos),
+            SetMask(p) => Some(&p.photos),
+            ClearMasks(p) => Some(&p.photos),
             Preset(p) => Some(&p.photos),
             Export(p) => Some(&p.photos),
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
@@ -803,6 +937,13 @@ impl Command {
             AutoTone(_) => ("Auto Tone the photos.", false),
             Monochrome(_) => ("Turn black and white on or off, or toggle it.", true),
             Crop(_) => ("Set the crop rectangle and the straighten angle.", true),
+            AddMask(_) => (
+                "Add a linear or radial gradient mask with its own tone and color \
+                 sliders. Points are 0..1 of the uncropped photo.",
+                true,
+            ),
+            SetMask(_) => ("Change one mask's shape, invert or sliders.", true),
+            ClearMasks(_) => ("Remove one mask, or every mask.", true),
             Preset(_) => ("Apply a saved preset by name.", false),
             Export(_) => (
                 "Export with the form's settings, or with `settings` for this run.",
@@ -879,6 +1020,28 @@ impl Command {
                 straighten: Some(1.5),
                 photos: Photos::Selected,
             }),
+            Command::AddMask(MaskAddParams {
+                shape: MaskShape::Radial {
+                    center: [0.5, 0.4],
+                    radii: [0.3, 0.2],
+                    angle: 0.0,
+                    feather: 0.5,
+                },
+                invert: false,
+                amounts: LocalAmounts {
+                    exposure: 0.5,
+                    ..LocalAmounts::default()
+                },
+                photos: Photos::Selected,
+            }),
+            Command::SetMask(MaskSetParams {
+                index: 0,
+                shape: None,
+                invert: Some(true),
+                amounts: None,
+                photos: Photos::Selected,
+            }),
+            Command::ClearMasks(MaskClearParams::default()),
             Command::Preset(PresetParams {
                 name: "Golden".into(),
                 photos: Photos::Selected,
@@ -1296,6 +1459,60 @@ mod tests {
     fn on_record(rec: &mut ImageRecord, json: serde_json::Value) -> Result<(), CommandError> {
         let size = |_| Ok((4000.0, 3000.0));
         apply_to_records(&Command::from_json(&json)?, std::slice::from_mut(rec), size)
+    }
+
+    #[test]
+    fn mask_commands_add_change_and_clear_a_records_masks() {
+        let mut rec = ImageRecord::default();
+        let add = json!({"id": "mask.add", "params": {
+            "shape": {"kind": "linear", "start": [0.5, 0.0], "end": [0.5, 0.6]},
+            "amounts": {"temp": -40}
+        }});
+        on_record(&mut rec, add.clone()).unwrap();
+        on_record(&mut rec, add).unwrap();
+        assert_eq!(rec.masks.len(), 2);
+        assert_eq!(rec.masks[0].amounts.temp, -40.0);
+        assert!(rec.edited.is_some(), "a mask is an edit");
+
+        on_record(
+            &mut rec,
+            json!({"id": "mask.set", "params": {"index": 1, "invert": true}}),
+        )
+        .unwrap();
+        assert!(rec.masks[1].invert && !rec.masks[0].invert);
+        assert_eq!(rec.masks[1].amounts.temp, -40.0, "unnamed fields stay");
+
+        let before = rec.clone();
+        for bad in [
+            json!({"id": "mask.set", "params": {"index": 5, "invert": true}}),
+            json!({"id": "mask.clear", "params": {"index": 2}}),
+            json!({"id": "mask.add", "params": {"shape": {"kind": "spiral"}}}),
+        ] {
+            assert!(on_record(&mut rec, bad.clone()).is_err(), "{bad}");
+            assert_eq!(rec, before, "a refused {bad} changes nothing");
+        }
+
+        on_record(
+            &mut rec,
+            json!({"id": "mask.clear", "params": {"index": 0}}),
+        )
+        .unwrap();
+        assert_eq!(rec.masks.len(), 1);
+        on_record(&mut rec, json!({"id": "mask.clear", "params": {}})).unwrap();
+        assert!(rec.masks.is_empty());
+    }
+
+    #[test]
+    fn mask_add_refuses_past_max_masks() {
+        let mut rec = ImageRecord::default();
+        let add = json!({"id": "mask.add", "params": {
+            "shape": {"kind": "radial", "center": [0.5, 0.5], "radii": [0.1, 0.1]}
+        }});
+        for _ in 0..MAX_MASKS {
+            on_record(&mut rec, add.clone()).unwrap();
+        }
+        assert!(on_record(&mut rec, add).is_err());
+        assert_eq!(rec.masks.len(), MAX_MASKS);
     }
 
     /// The listing's `headless` flag is the promise a headless caller reads,

@@ -31,6 +31,11 @@ pub(crate) struct State {
     rating: Option<u8>,
     flag: Option<crate::sidecar::Flag>,
     label: Option<crate::sidecar::ColorLabel>,
+    /// That photo's masks, and the one the Masks page edits.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    masks: Vec<crate::develop::Mask>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selected_mask: Option<usize>,
     /// The keyboard-focused region.
     focus: Region,
     /// Loupe zoom relative to fit-to-window; absent in the Grid.
@@ -75,6 +80,11 @@ impl State {
             rating: path.as_ref().map(|p| app.rating_of(p)),
             flag: path.as_ref().and_then(|p| app.flag_of(p)),
             label: path.as_ref().and_then(|p| app.folder_store.label(p)),
+            masks: path
+                .as_ref()
+                .and_then(|p| app.masks.get(p).cloned())
+                .unwrap_or_default(),
+            selected_mask: app.selected_mask(),
             focus: app.focus(),
             zoom: (mode == ViewMode::Loupe).then(|| app.zoom_rel()),
             status: app.status().map(|(_, text)| text.to_string()),

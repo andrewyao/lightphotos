@@ -1,5 +1,6 @@
 //! Develop undo. Each step holds the edit every photo had before the step's
-//! first change to it, and its touch-ups when the step cleared them. One
+//! first change to it, its touch-ups when the step cleared them, and its
+//! masks when the step changed them. One
 //! command is one step, and so is one slider drag or one Auto Tone or Remove
 //! Chromatic Aberration batch: a step stays open until the pointer is up at
 //! the end of a frame and no batch is running.
@@ -7,7 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::develop::{Adjustments, TouchUp};
+use crate::develop::{Adjustments, Mask, TouchUp};
 
 /// Steps older than this are dropped.
 const MAX_STEPS: usize = 100;
@@ -36,6 +37,8 @@ pub(crate) struct Before {
     pub(crate) adj: Adjustments,
     /// `None` when the step left the touch-ups alone.
     pub(crate) touchups: Option<Vec<TouchUp>>,
+    /// `None` when the step left the masks alone.
+    pub(crate) masks: Option<Vec<Mask>>,
 }
 
 impl EditHistory {
@@ -63,6 +66,14 @@ impl EditHistory {
             .get_or_insert_with(|| touchups.to_vec());
     }
 
+    /// As [`note`](Self::note), and records `masks` as `path`'s masks
+    /// ahead of a change to them, unless the open step already holds some.
+    pub(super) fn note_masks(&mut self, path: &Path, adj: Adjustments, masks: &[Mask]) {
+        self.entry(path, adj)
+            .masks
+            .get_or_insert_with(|| masks.to_vec());
+    }
+
     fn entry(&mut self, path: &Path, adj: Adjustments) -> &mut Before {
         let step = self.open.get_or_insert_with(EditStep::default);
         let i = match step.index.get(path) {
@@ -73,6 +84,7 @@ impl EditHistory {
                     path: path.to_path_buf(),
                     adj,
                     touchups: None,
+                    masks: None,
                 });
                 step.index.insert(path.to_path_buf(), i);
                 i

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::{App, ViewMode};
+use super::{App, Shown, ViewMode};
 use crate::navigation::Playlist;
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -209,4 +209,37 @@ pub(crate) fn click(app: &mut App, pos: egui::Pos2) -> (Vec<crate::ui::UiAction>
     let _ = frame(app, vec![egui::Event::PointerMoved(pos), button(true)]);
     let (actions, _) = frame(app, vec![button(false)]);
     (actions, settled(app))
+}
+
+/// Presses or releases the primary button, so the app sees a drag in progress
+/// or over.
+pub(crate) fn press(app: &App, down: bool) {
+    let pos = egui::pos2(1.0, 1.0);
+    let input = egui::RawInput {
+        events: vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: down,
+                modifiers: Default::default(),
+            },
+        ],
+        ..Default::default()
+    };
+    let _ = app.egui_ctx.run_ui(input, |_| {});
+}
+
+/// An App showing `a.jpg`, an empty file in a new folder whose folder store
+/// is open. Returns the app, the folder and the photo.
+pub(crate) fn one_photo(tag: &str) -> (App, PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("lp-adjust-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let photo = dir.join("a.jpg");
+    std::fs::write(&photo, []).unwrap();
+    let mut app = App::new(None);
+    app.folder_store.open_dir(&dir);
+    app.shown = Shown::Preview(photo.clone(), 1024, 1024);
+    (app, dir, photo)
 }

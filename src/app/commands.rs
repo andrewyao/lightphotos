@@ -291,6 +291,28 @@ impl App {
                 }
                 done(n)
             }
+            Command::AddMask(_) | Command::SetMask(_) | Command::ClearMasks(_) => {
+                let photos = cmd.photos().cloned().unwrap_or_default();
+                let paths = self.resolve(&photos)?;
+                let edits = paths
+                    .iter()
+                    .map(|path| {
+                        let masks = self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]);
+                        cmd.edit_masks(masks).unwrap_or_else(|| Ok(masks.to_vec()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for (path, masks) in paths.iter().zip(edits) {
+                    self.put_masks(path, masks);
+                }
+                let shown = self
+                    .shown
+                    .path()
+                    .is_some_and(|s| paths.iter().any(|p| p == s));
+                if shown && matches!(cmd, Command::AddMask(_)) {
+                    self.mask_selected = self.current_masks().len().checked_sub(1);
+                }
+                done(paths.len())
+            }
             Command::Monochrome(p) => {
                 let paths = self.resolve(&p.photos)?;
                 let on = p.on.unwrap_or_else(|| {

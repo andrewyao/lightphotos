@@ -340,6 +340,11 @@ impl FolderStore {
             .unwrap_or_default()
     }
 
+    pub fn set_masks(&mut self, path: &Path, masks: &[Mask]) {
+        let masks = masks.to_vec();
+        self.update_edits(path, |rec| rec.masks = masks);
+    }
+
     pub fn rotation(&self, path: &Path) -> u8 {
         self.record(path).map(|r| r.rotation).unwrap_or(0)
     }
@@ -770,6 +775,25 @@ mod tests {
         reloaded.set_touchups(&p, &[]);
         flush(&mut reloaded);
         assert!(FolderStore::with_dir(dir.clone()).touchups(&p).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn masks_persist_across_reload_and_can_be_removed() {
+        let dir = temp_folder("folder-store-masks");
+        let p = dir.join("photo.jpg");
+        let mut m = Mask::radial([0.3, 0.6], [0.2, 0.1]);
+        m.amounts.exposure = 1.0;
+        {
+            let mut cat = FolderStore::with_dir(dir.clone());
+            cat.set_masks(&p, &[m]);
+            assert_eq!(cat.masks(&p), vec![m]);
+        }
+        let mut reloaded = FolderStore::with_dir(dir.clone());
+        assert_eq!(reloaded.masks(&p), vec![m]);
+        reloaded.set_masks(&p, &[]);
+        flush(&mut reloaded);
+        assert!(FolderStore::with_dir(dir.clone()).masks(&p).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

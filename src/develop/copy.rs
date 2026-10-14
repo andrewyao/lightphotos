@@ -24,10 +24,14 @@ pub enum CopySection {
     Optics,
     /// The crop and the straighten angle.
     Crop,
+    /// The local adjustment masks, which live beside the edit, so
+    /// [`merge`] leaves them to the caller. Off unless chosen: they are
+    /// drawn for one photo's framing.
+    Masks,
 }
 
 impl CopySection {
-    pub const ALL: [CopySection; 10] = [
+    pub const ALL: [CopySection; 11] = [
         CopySection::WhiteBalance,
         CopySection::Tone,
         CopySection::Presence,
@@ -38,6 +42,7 @@ impl CopySection {
         CopySection::Effects,
         CopySection::Optics,
         CopySection::Crop,
+        CopySection::Masks,
     ];
 
     /// The section a Develop slider belongs to.
@@ -72,6 +77,7 @@ impl CopySection {
             CopySection::Effects => "effects",
             CopySection::Optics => "optics",
             CopySection::Crop => "crop",
+            CopySection::Masks => "masks",
         }
     }
 }
@@ -336,7 +342,7 @@ mod tests {
             CopySections::from_pref(
                 "v2,white_balance,tone,presence,curve,color,detail,effects,optics,crop"
             ),
-            CopySections::all(),
+            CopySections::all().with(CopySection::Masks, false),
             "a choice of everything keeps a later section's default"
         );
         for junk in ["", "hdr,,x", "v2"] {

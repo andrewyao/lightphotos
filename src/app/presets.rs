@@ -318,6 +318,7 @@ pub(in crate::app) mod tests {
         app.folder_store.set_adjustments(&paths[1], &cropped);
         app.selected = (0..3).collect();
         app.copied_settings = Some(crate::app::folder_store::CopiedSettings {
+            masks: Vec::new(),
             path: paths[0].clone(),
             adj: tone(0.25, 5.0),
             sections: CopySections::LOOK,
