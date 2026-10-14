@@ -139,7 +139,7 @@ pub(super) fn loupe_mask_overlay(
             };
             let resp = resp.on_hover_cursor(cursor);
             if resp.drag_started() {
-                if let Some(p) = resp.interact_pointer_pos() {
+                if let Some(p) = press_origin(&ctx, &resp) {
                     let drag = Drag::Edit {
                         index: i,
                         handle,
@@ -199,7 +199,7 @@ fn draw_tool(
                 ctx.set_cursor_icon(egui::CursorIcon::Crosshair);
             }
             if resp.drag_started() {
-                if let Some(p) = resp.interact_pointer_pos() {
+                if let Some(p) = press_origin(ctx, &resp) {
                     let drag = Drag::Draw {
                         kind,
                         origin: space.uv(p),
@@ -340,6 +340,14 @@ fn handles(space: &Space, m: &Mask) -> Vec<(Handle, egui::Pos2)> {
             ]
         }
     }
+}
+
+/// Where the press that began a drag landed. egui reports a drag only once
+/// the pointer has moved past its threshold, by when the pointer is
+/// elsewhere, so a draw would start short of where the person pressed.
+fn press_origin(ctx: &egui::Context, resp: &egui::Response) -> Option<egui::Pos2> {
+    ctx.input(|i| i.pointer.press_origin())
+        .or_else(|| resp.interact_pointer_pos())
 }
 
 /// A handle's own area, or `None` when it sits off the image.

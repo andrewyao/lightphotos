@@ -1298,8 +1298,16 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encode source png");
 
-        let jpeg = bake_export(&png, false, &Adjustments::default(), &[], 0, Output::FULL)
-            .expect("bake_export should succeed");
+        let jpeg = bake_export(
+            &png,
+            false,
+            &Adjustments::default(),
+            &[],
+            &[],
+            0,
+            Output::FULL,
+        )
+        .expect("bake_export should succeed");
 
         let out = image::load_from_memory(&jpeg)
             .expect("decode baked jpeg")
@@ -1325,8 +1333,16 @@ mod tests {
             .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("encode source png");
 
-        let jpeg = bake_export(&png, false, &Adjustments::default(), &[], 1, Output::FULL)
-            .expect("bake_export should succeed");
+        let jpeg = bake_export(
+            &png,
+            false,
+            &Adjustments::default(),
+            &[],
+            &[],
+            1,
+            Output::FULL,
+        )
+        .expect("bake_export should succeed");
         let out = image::load_from_memory(&jpeg).expect("decode").into_rgba8();
         assert_eq!(out.dimensions(), (h, w), "90 deg rotation swaps dimensions");
     }

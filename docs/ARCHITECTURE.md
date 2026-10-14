@@ -245,6 +245,46 @@ flowchart TD
 
 ---
 
+## Local edits: touch-ups and masks
+
+`Adjustments` is `Copy` and applies to the whole photo. The two kinds of
+local edit live beside it in the sidecar, as their own lists:
+`ImageRecord::touchups` (spot heals) and `ImageRecord::masks` (Linear and
+Radial gradient masks, `develop/mask.rs`). Both are in source UV: 0..1 of the
+photo before straighten and crop, so neither tool moves them.
+
+A mask is a shape, an Invert flag and nine sliders (`LocalAmounts`): Temp,
+Tint, Exposure, Contrast, Highlights, Shadows, Whites, Blacks and Saturation.
+These are plain per-pixel terms of the tone pipeline. Texture, Clarity,
+Dehaze, sharpening and noise reduction read blurred layers, so masks leave
+them out.
+
+**How a mask renders:**
+- `mask::mask_weight` gives each mask's 0..1 weight at a pixel's source UV.
+  Lengths are fractions of the shorter side, so a circle stays round.
+- `mask::local_tone` adds every mask's weighted sliders to the photo's own
+  and holds each sum to its slider's range. The tone pipeline
+  (`Develop::linear_at_local`) reads those nine values in place of the
+  photo's.
+- The CPU bake (`image_ops::bake_samples`) and the histogram do this per
+  pixel. The Loupe does it in `localTone` (`loupe_common.wgsl`), with the
+  masks in a storage buffer at group 3 binding 4. The uniform's `mask_count`
+  says how many apply, so compare's "before" half shows none.
+- `renderer/match_test.rs` holds the two paths to the same tolerance as the
+  rest of the develop pipeline.
+
+**Where masks are guarded:** a sidecar's mask that isn't one, or holds a
+number that isn't finite, is dropped (`sidecar::valid_masks`). The rest are
+clamped (`Mask::sanitized`) and capped at `MAX_MASKS`, the GPU buffer's size.
+`mask.add` and `mask.set` run the same check.
+
+**Editing:** `app/masks.rs` is the one writer of a photo's masks. Every change
+goes through the main `EditHistory`, so `Cmd`+`Z` undoes a whole handle drag
+as one step. The Loupe overlay (`ui/mask_overlay.rs`) gives each handle its
+own small egui area, so a press anywhere else still pans the photo.
+
+---
+
 ## Vision signals (macOS only)
 
 Machine learning enters the app in exactly one place, Apple's Vision

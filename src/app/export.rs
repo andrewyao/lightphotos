@@ -487,24 +487,23 @@ impl App {
         let Some(decoder) = self.loader.as_ref().map(|l| l.web_decoder()) else {
             return;
         };
-        let jobs: Vec<(
-            PathBuf,
-            bool,
-            crate::develop::Adjustments,
-            Vec<crate::develop::TouchUp>,
-            Vec<crate::develop::Mask>,
-            u8,
-        )> = paths
+        struct Job {
+            src: PathBuf,
+            is_raw: bool,
+            adj: crate::develop::Adjustments,
+            touchups: Vec<crate::develop::TouchUp>,
+            masks: Vec<crate::develop::Mask>,
+            rot: u8,
+        }
+        let jobs: Vec<Job> = paths
             .iter()
-            .map(|src| {
-                (
-                    src.clone(),
-                    crate::decode::image_decode::is_raw_extension(src),
-                    self.edits.get(src).copied().unwrap_or_default(),
-                    self.touchups.get(src).cloned().unwrap_or_default(),
-                    self.masks.get(src).cloned().unwrap_or_default(),
-                    self.rotations.get(src).copied().unwrap_or(0),
-                )
+            .map(|src| Job {
+                src: src.clone(),
+                is_raw: crate::decode::image_decode::is_raw_extension(src),
+                adj: self.edits.get(src).copied().unwrap_or_default(),
+                touchups: self.touchups.get(src).cloned().unwrap_or_default(),
+                masks: self.masks.get(src).cloned().unwrap_or_default(),
+                rot: self.rotations.get(src).copied().unwrap_or(0),
             })
             .collect();
 
@@ -531,7 +530,7 @@ impl App {
             let existing = match fs.existing_export_names().await {
                 Ok(existing) => existing,
                 Err(e) => {
-                    for (src, ..) in jobs {
+                    for Job { src, .. } in jobs {
                         pool.fail(
                             src,
                             output_folder.clone(),
@@ -544,7 +543,15 @@ impl App {
                 }
             };
             let mut taken: HashSet<String> = HashSet::new();
-            for (seq, (src, is_raw, adj, touchups, masks, rot)) in jobs.into_iter().enumerate() {
+            for (seq, job) in jobs.into_iter().enumerate() {
+                let Job {
+                    src,
+                    is_raw,
+                    adj,
+                    touchups,
+                    masks,
+                    rot,
+                } = job;
                 // Each export in flight holds its source's bytes and a
                 // full-resolution decode in the one shared heap.
                 while pool.in_flight() >= pool.capacity(&decoder, output.format) {

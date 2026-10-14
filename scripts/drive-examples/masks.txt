@@ -1,0 +1,26 @@
+# Run on one photo: masks-before is unedited, masks-after has a radial
+# mask brightening the left middle and a linear one cooling the top.
+size 1200 800
+idle
+shot masks-before
+run {"id":"mask.add","params":{"shape":{"kind":"radial","center":[0.3,0.5],"radii":[0.25,0.2],"feather":0.5},"amounts":{"exposure":1}}}
+run {"id":"mask.add","params":{"shape":{"kind":"linear","start":[0.5,0.0],"end":[0.5,0.4]},"amounts":{"temp":-40}}}
+idle
+state
+shot masks-after
+# Drawing by hand: M arms a Linear Gradient, Shift+M a Radial.
+key m
+drag 700 150 700 350
+idle
+state
+shot masks-drawn-linear
+key shift+m
+drag 500 400 620 470
+idle
+state
+shot masks-drawn-radial
+# Dragging the picked radial's right axis handle widens it.
+drag 670 400 760 400
+idle
+state
+shot masks-dragged-handle

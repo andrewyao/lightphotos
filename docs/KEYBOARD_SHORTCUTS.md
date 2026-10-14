@@ -63,6 +63,8 @@ the primary modifier on macOS. On Linux, Windows and the browser it is `Ctrl`.
 | `R` | Crop |
 | `C` | Compare: 2 to 6 selected photos, grouped or not, or else the photos in the selected stack, with a shared zoom square |
 | `Y` | Before / after compare |
+| `M` | Linear Gradient mask: drag on the photo from where the effect is full to where it ends. `M` again puts the tool down |
+| `Shift`+`M` | Radial Gradient mask: drag out from its center. A click without a drag adds a default-sized one |
 | `Cmd`+`U` | Auto Tone this photo |
 | `Cmd`+`Shift`+`U` | Auto Tone the selection (after a confirm) |
 | `Cmd`+`Shift`+`C` | Copy develop settings: choose the sections to carry, then `Enter` copies and `Esc` cancels. The choice is remembered |
@@ -92,3 +94,13 @@ edit.
 | `Cmd`+`Z` | Delete the selected touch-up, or the last one if none is selected |
 
 While cropping, drag the edges to resize and hold `Shift` to keep the ratio.
+
+On the Masks page, a mask tool or a picked mask takes these keys. The others
+work as usual.
+
+| Key | Action |
+| --- | --- |
+| `Esc` | Put the mask tool down, or let go of the picked mask |
+| `Delete` / `Backspace` | Delete the picked mask, not the photo |
+| `Shift`+scroll | Over a radial mask's center, change its feather |
+| `Cmd`+`Z` | Undo the last mask change; a whole handle drag is one step |

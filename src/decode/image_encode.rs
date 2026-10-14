@@ -999,6 +999,7 @@ mod tests {
                 false,
                 &Default::default(),
                 &[],
+                &[],
                 0,
                 crate::export::Output {
                     max_px: 8,

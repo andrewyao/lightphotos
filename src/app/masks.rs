@@ -37,12 +37,13 @@ impl App {
     }
 
     /// Whether the Loupe shows the mask overlay: the Masks page is open and
-    /// Touch Up isn't using the photo.
+    /// Touch Up and compare aren't using the photo.
     pub(crate) fn masks_shown(&self) -> bool {
         self.mode == ViewMode::Loupe
             && self.develop_open
             && self.develop_tab == DevelopTab::Masks
             && !self.touchup_active()
+            && !self.compare
     }
 
     /// Arms the tool for `kind`, or puts it down when it is already armed.

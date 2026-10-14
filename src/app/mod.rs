@@ -757,9 +757,9 @@ mod session;
 mod sort;
 #[cfg(not(target_arch = "wasm32"))]
 mod state;
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use masks::MaskKind;
 pub(crate) use sort::{GridSort, SortOrder};
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use state::State;
 #[cfg(test)]
 pub(crate) mod test_support;
