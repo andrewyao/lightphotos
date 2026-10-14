@@ -30,10 +30,10 @@ impl App {
         let Some(path) = self.shown.path().map(Path::to_path_buf) else {
             return MaskSet::default();
         };
-        let masks = self.masks.get(&path).cloned().unwrap_or_default();
-        let recorded = self.detections.get(&path).cloned().unwrap_or_default();
-        MaskSet::new(&masks, |t| {
-            match self.coverage.ask(&path, t, recorded.get(t)) {
+        let masks = self.masks.get(&path).map_or(&[][..], Vec::as_slice);
+        let recorded = self.detections.get(&path);
+        MaskSet::new(masks, |t| {
+            match self.coverage.ask(&path, t, recorded.and_then(|d| d.get(t))) {
                 coverage::Lookup::Ready(c) => Some(c),
                 coverage::Lookup::Pending | coverage::Lookup::Failed => None,
             }
@@ -431,8 +431,13 @@ impl App {
         self.folder_store.set_masks(path, &masks);
         // Add, paste, a command, undo and redo all converge here: a detected
         // mask on a photo without that detection gets one queued.
-        let recorded = self.detections.get(path).cloned().unwrap_or_default();
-        self.coverage.ensure_detected(path, &masks, &recorded);
+        self.coverage.ensure_detected(
+            path,
+            &masks,
+            self.detections
+                .get(path)
+                .unwrap_or(&crate::develop::Detections::default()),
+        );
         if masks.is_empty() {
             self.masks.remove(path);
         } else {

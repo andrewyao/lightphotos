@@ -75,12 +75,9 @@ fn real_main() -> ExitCode {
 
     let mut failures = 0;
     if let (Some(out), Some(path)) = (&coverage_out, paths.first()) {
-        match write_coverage(path, out) {
-            Ok(()) => {}
-            Err(e) => {
-                failures += 1;
-                println!("  ERROR: {e}");
-            }
+        if let Err(e) = write_coverage(path, out) {
+            failures += 1;
+            println!("  ERROR: {e}");
         }
     }
     for path in &paths {

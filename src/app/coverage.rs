@@ -404,8 +404,11 @@ impl CoverageStore {
     ) {
         for p in paths {
             if let Some(masks) = masks.get(p) {
-                let recorded = detections.get(p).cloned().unwrap_or_default();
-                self.ensure_detected(p, masks, &recorded);
+                self.ensure_detected(
+                    p,
+                    masks,
+                    detections.get(p).unwrap_or(&Detections::default()),
+                );
             }
         }
     }
@@ -422,8 +425,11 @@ impl CoverageStore {
             .iter()
             .filter(|p| {
                 masks.get(*p).is_some_and(|masks| {
-                    let recorded = detections.get(*p).cloned().unwrap_or_default();
-                    !self.is_ready(p, masks, &recorded)
+                    !self.is_ready(
+                        p,
+                        masks,
+                        detections.get(*p).unwrap_or(&Detections::default()),
+                    )
                 })
             })
             .count()
@@ -525,29 +531,28 @@ impl CoverageStore {
                         self.set_ready(&key, Arc::new(coverage));
                         Record::Keep
                     }
+                    // A read that failed this session (permission, a device
+                    // gone) keeps the id for Retry. Only a file that is gone
+                    // or bad is forgotten.
+                    Err(CoverageError::Io(why)) => {
+                        self.slots
+                            .insert(key.clone(), Slot::Failed(Failure::Read(why)));
+                        Record::Keep
+                    }
                     Err(e) => {
-                        // A read that failed this session (permission, a
-                        // device gone) keeps the id for Retry. Only a file
-                        // that is gone or bad is forgotten.
-                        if let CoverageError::Io(why) = e {
-                            self.slots
-                                .insert(key.clone(), Slot::Failed(Failure::Read(why)));
-                            Record::Keep
-                        } else {
-                            if matches!(e, CoverageError::Corrupt(_)) {
-                                // Content-addressed, so a re-detect would
-                                // skip writing over the bad file.
-                                crate::develop::coverage::remove(&key.0, job.id);
-                            }
-                            if (self.available)(key.1) {
-                                self.slots.remove(&key);
-                                self.start_detect(key.clone());
-                            } else {
-                                self.slots
-                                    .insert(key.clone(), Slot::Failed(Failure::Missing));
-                            }
-                            Record::Set(None)
+                        if matches!(e, CoverageError::Corrupt(_)) {
+                            // Content-addressed, so a re-detect would skip
+                            // writing over the bad file.
+                            crate::develop::coverage::remove(&key.0, job.id);
                         }
+                        if (self.available)(key.1) {
+                            self.slots.remove(&key);
+                            self.start_detect(key.clone());
+                        } else {
+                            self.slots
+                                .insert(key.clone(), Slot::Failed(Failure::Missing));
+                        }
+                        Record::Set(None)
                     }
                 };
                 out.push(Landed {
