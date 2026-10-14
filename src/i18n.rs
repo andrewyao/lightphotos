@@ -194,7 +194,7 @@ pub struct Strings {
     pub landing_allow_note: &'static str,
     pub opening: &'static str,
     pub picker_title: &'static str,
-    /// The Folders panel's button under the list, once it lists a folder.
+    /// The Folders panel's button over the list, once it lists a folder.
     pub add_folder: &'static str,
     pub add_folder_tip: &'static str,
     /// A Folders root's right-click item. The folder's files stay.
@@ -969,7 +969,7 @@ pub static EN: Strings = Strings {
     tour_steps: [
         (
             "Folders",
-            "Open Folder adds a folder of photos here, and Add Folder under the list adds another. Each one is listed with its subfolders. Click one to show its photos; right-click a folder to remove it from the list.",
+            "Open Folder adds a folder of photos here, and Add Folder above the list adds another. Each one is listed with its subfolders. Click one to show its photos; right-click a folder to remove it from the list.",
         ),
         (
             "Filter toolbar",

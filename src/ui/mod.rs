@@ -289,8 +289,6 @@ pub(crate) use develop_panel::rail_button_rect;
 use develop_panel::{draw_develop_panel, draw_develop_rail};
 use export_panel::draw_export_panel;
 pub(crate) use form::Role;
-#[cfg(test)]
-pub(crate) use grid::catalog_heading_label;
 use grid::{draw_grid, draw_left_panel};
 use info_panel::draw_info_panel;
 use loupe::draw_loupe;
@@ -308,7 +306,7 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     app.show_launch_notice();
 
     // Drawn first and on every screen, so the Open button never moves.
-    app_header(ui, &mut out);
+    app_header(ui, app, &mut out);
 
     // Everything below assumes a folder is open.
     if !app.has_playlist() {
@@ -362,12 +360,12 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     out
 }
 
-/// The "LightPhotos" wordmark at the left; help, Tour and Settings at the
-/// right, on every screen. The wordmark copies the lightphotos.app site's
+/// The "LightPhotos" wordmark and the catalog picker at the left; help, Tour
+/// and Settings at the right, on every screen. The wordmark copies the lightphotos.app site's
 /// `.lp-wordmark` style: "Light" in the default text color, "Photos" in
 /// italic brand blue. The web canvas fills the viewport, so the site's HTML
 /// header can't wrap it; native draws the same header.
-fn app_header(ui: &mut egui::Ui, out: &mut FrameOutput) {
+fn app_header(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let panel = egui::Panel::top("lp_app_header")
         .frame(egui::Frame::side_top_panel(ui.style()).fill(theme::colors(ui.ctx()).header))
         .show_inside(ui, |ui| {
@@ -399,6 +397,8 @@ fn app_header(ui: &mut egui::Ui, out: &mut FrameOutput) {
                     },
                 );
                 ui.label(job);
+                ui.add_space(font_size::px(ui.style(), 8.0));
+                catalog_picker(ui, app, out);
 
                 // Not in the F6 focus cycle; `?` and `Cmd+,` are their keyboard
                 // routes. Open Folder lives in the Folders panel.
@@ -422,6 +422,43 @@ fn app_header(ui: &mut egui::Ui, out: &mut FrameOutput) {
             ui.add_space(font_size::px(ui.style(), 4.0));
         });
     tour::anchor(ui.ctx(), tour::TourStep::Header, panel.response.rect);
+}
+
+/// The catalog picker's text: the catalog's name with a dropdown mark.
+pub(crate) fn catalog_picker_label(name: &str) -> String {
+    format!("{name} \u{25BE}")
+}
+
+/// The catalog's name after the wordmark, as a dropdown that makes a
+/// catalog, natively opens one, and switches to a recent one, or on the web
+/// to any catalog in this browser.
+fn catalog_picker(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+    ui.menu_button(catalog_picker_label(app.catalog_name()), |ui| {
+        if ui.button(t().new_catalog).clicked() {
+            out.actions.push(UiAction::NewCatalog);
+            ui.close();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if ui.button(t().open_catalog).clicked() {
+            out.actions.push(UiAction::OpenCatalog);
+            ui.close();
+        }
+        let recent = app.recent_catalogs();
+        if !recent.is_empty() {
+            ui.separator();
+        }
+        for at in recent {
+            let open = app.is_open_catalog(at);
+            if ui.selectable_label(open, at.name()).clicked() {
+                if !open {
+                    out.actions.push(UiAction::SwitchCatalog(at.clone()));
+                }
+                ui.close();
+            }
+        }
+    })
+    .response
+    .on_hover_text(t().catalog_tip);
 }
 
 /// The shown folder's name above the Grid or Loupe. In the Loupe it adds a

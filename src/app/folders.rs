@@ -291,7 +291,7 @@ mod tests {
         assert_eq!(app.window_title(), format!("LightPhotos - {name}"));
     }
 
-    /// A real click on Add Folder under the Grid's folder list.
+    /// A real click on Add Folder over the Grid's folder list.
     #[test]
     fn add_folder_opens_the_picker() {
         use crate::app::test_support::{click, settled};
@@ -306,9 +306,11 @@ mod tests {
             "the Grid's header no longer has Open Folder"
         );
         let add = painted.pos_of(crate::i18n::t().add_folder);
+        let row = painted.pos_of(&name);
+        assert!(add.y < row.y, "Add Folder sits over the folder list");
         assert!(
-            add.y > painted.pos_of(&name).y,
-            "Add Folder sits under the folder it would add after"
+            add.x < row.x,
+            "Add Folder sits flush left, not centred over the list"
         );
         let (actions, _) = click(&mut app, add);
         assert_eq!(actions, vec![crate::ui::UiAction::PickFolder]);

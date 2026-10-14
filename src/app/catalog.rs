@@ -612,16 +612,16 @@ mod tests {
         assert_eq!(app.launch_notice, None, "shown once");
     }
 
-    /// The Folders panel heading names the catalog and drops down to make
+    /// The header's catalog picker names the catalog and drops down to make
     /// a new one, through the whole UI.
     #[test]
-    fn the_folders_heading_names_the_catalog_and_offers_a_new_one() {
+    fn the_catalog_picker_names_the_catalog_and_offers_a_new_one() {
         use crate::app::test_support::{click, settled};
         use crate::ui::UiAction;
         let mut app = App::new(None);
         let painted = settled(&mut app);
-        let heading = painted.pos_of(&crate::ui::catalog_heading_label(DEFAULT_NAME));
-        let (_, painted) = click(&mut app, heading);
+        let picker = painted.pos_of(&crate::ui::catalog_picker_label(DEFAULT_NAME));
+        let (_, painted) = click(&mut app, picker);
         let new = painted.pos_of(crate::i18n::t().new_catalog);
         let (actions, _) = click(&mut app, new);
         assert_eq!(actions, vec![UiAction::NewCatalog]);

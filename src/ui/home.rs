@@ -1,7 +1,7 @@
 //! The home page, shown when no folder is open. It draws the Grid's own
 //! layout with nothing in it, so the window looks the way it will once a
 //! folder opens and the tour can point at each region: the left panel lists
-//! the folders added before with Add Folder under them, or Open Folder, the
+//! the folders added before with Add Folder over them, or Open Folder, the
 //! toolbars and rail are switched off, and the content area is a field of
 //! empty tiles under the prompt and the Open Folder button.
 
@@ -27,7 +27,7 @@ const PANEL_WIDTH: f32 = 220.0;
 const PANEL_MARGIN: f32 = 12.0;
 
 /// The folders added before, each a row that opens it, as the Grid's tree
-/// lists them, with Add Folder under them; Open Folder before there are any.
+/// lists them, with Add Folder over them; Open Folder before there are any.
 fn left_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let width = font_size::px(ui.style(), PANEL_WIDTH);
     let panel = egui::Panel::left("folders")
