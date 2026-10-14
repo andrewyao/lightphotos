@@ -13,7 +13,7 @@ use winit::window::Window;
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::curve::ToneCurve;
-use crate::develop::{BaseProbe, GpuAdjust, GpuCurve, GpuTouchUp, Grid};
+use crate::develop::{BaseProbe, GpuAdjust, GpuCurve, GpuMask, GpuTouchUp, Grid};
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
@@ -191,6 +191,8 @@ pub struct Renderer {
     curve_buf_b: wgpu::Buffer,
     adj_bind_b: wgpu::BindGroup,
     touch_buf: wgpu::Buffer,
+    /// The masks, beside the touch-ups in group 3. See `set_masks`.
+    mask_buf: wgpu::Buffer,
     touch_bind: wgpu::BindGroup,
 
     /// Draws the subject-selection tint over the image. It is a separate
@@ -511,8 +513,9 @@ impl Renderer {
 
         let touch_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("touch_bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
+            // Masks at 4, clear of the overlay's 1 to 3 in the same group.
+            entries: &[0, 4].map(|binding| wgpu::BindGroupLayoutEntry {
+                binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -520,7 +523,7 @@ impl Renderer {
                     min_binding_size: None,
                 },
                 count: None,
-            }],
+            }),
         });
 
         // Overlay bindings start at 1 so they never overlap the touch-up
@@ -844,13 +847,25 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let mask_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("masks"),
+            size: (crate::develop::MAX_MASKS * std::mem::size_of::<GpuMask>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let touch_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("touch_bg"),
             layout: &touch_bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: touch_buf.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: touch_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: mask_buf.as_entire_binding(),
+                },
+            ],
         });
 
         let overlay_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -882,6 +897,7 @@ impl Renderer {
             curve_buf_b,
             adj_bind_b,
             touch_buf,
+            mask_buf,
             touch_bind,
             overlay_pipeline,
             overlay_bind_layout,
@@ -1667,6 +1683,16 @@ impl Renderer {
         }
         self.touchups = touchups.to_vec();
         self.base_wanted.touch_gen += 1;
+    }
+
+    /// Uploads the masks. They change no layer, so nothing rebuilds; the
+    /// uniform's `mask_count` says how many the shader reads.
+    pub fn set_masks(&mut self, masks: &[GpuMask]) {
+        let masks = masks.get(..crate::develop::MAX_MASKS).unwrap_or(masks);
+        if !masks.is_empty() {
+            self.queue
+                .write_buffer(&self.mask_buf, 0, bytemuck::cast_slice(masks));
+        }
     }
 
     /// Render the image pass, then the egui pass, in one submission.

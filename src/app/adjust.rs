@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::develop::curve::Channel;
 use crate::develop::image_ops;
-use crate::develop::{self, Adjustments, GpuAdjust, GpuTouchUp, TouchUp};
+use crate::develop::{self, Adjustments, GpuAdjust, GpuMask, GpuTouchUp, Mask, TouchUp};
 
 impl App {
     /// Develop adjustments of the image currently shown (identity if unset).
@@ -19,6 +19,14 @@ impl App {
         self.shown
             .path()
             .and_then(|p| self.touchups.get(p))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub(crate) fn current_masks(&self) -> &[Mask] {
+        self.shown
+            .path()
+            .and_then(|p| self.masks.get(p))
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
@@ -504,9 +512,11 @@ impl App {
             .iter()
             .map(GpuTouchUp::from)
             .collect();
+        let gpu_masks: Vec<GpuMask> = self.current_masks().iter().map(GpuMask::from).collect();
         if let Some(r) = &mut self.renderer {
             r.set_adjustments(gpu, &adj.curve);
             r.set_touchups(&gpu_touchups);
+            r.set_masks(&gpu_masks);
         }
         self.request_redraw();
     }
@@ -514,7 +524,13 @@ impl App {
     /// Convert `adj` to the GPU uniform for the shown image.
     pub(super) fn gpu_adjust(&self, adj: &Adjustments) -> GpuAdjust {
         let (w, h) = self.image_size();
-        GpuAdjust::for_image(adj, w, h, self.current_touchups().len())
+        GpuAdjust::for_image(
+            adj,
+            w,
+            h,
+            self.current_touchups().len(),
+            self.current_masks().len(),
+        )
     }
 
     pub(super) fn apply_touchups(&mut self, touchups: Vec<TouchUp>) {

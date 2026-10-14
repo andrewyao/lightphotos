@@ -77,6 +77,11 @@ struct Adjust {
     grade_width: f32,
     _gpad: f32,
     grade_wheels: array<vec4<f32>, 4>,
+    // How many entries of `masks` apply; 0 for none. See `localTone`.
+    mask_count: f32,
+    _mpad0: f32,
+    _mpad1: f32,
+    _mpad2: f32,
 };
 
 struct TouchUp {
@@ -85,6 +90,33 @@ struct TouchUp {
     opacity: f32,
     _pad: f32,
     delta: vec4<f32>,
+};
+
+// Must match `GpuMask` in develop/mask.rs.
+struct Mask {
+    // Linear: start, end. Radial: center, radii.
+    geom: vec4<f32>,
+    // Kind (0 linear, 1 radial), invert, angle, feather.
+    params: vec4<f32>,
+    // Exposure, contrast, highlights, shadows.
+    a0: vec4<f32>,
+    // Whites, blacks, temp, tint.
+    a1: vec4<f32>,
+    // Saturation, then padding.
+    a2: vec4<f32>,
+};
+
+// The sliders a mask can move, at one pixel.
+struct LocalTone {
+    exposure: f32,
+    contrast: f32,
+    highlights: f32,
+    shadows: f32,
+    whites: f32,
+    blacks: f32,
+    temp: f32,
+    tint: f32,
+    saturation: f32,
 };
 
 @group(0) @binding(0) var tex: texture_2d<f32>;
@@ -99,6 +131,8 @@ struct TouchUp {
 // i / 255. Written from `GpuCurve` in develop/mod.rs.
 @group(2) @binding(1) var<uniform> curve_lut: array<vec4<f32>, 256>;
 @group(3) @binding(0) var<storage, read> touchups: array<TouchUp>;
+// Binding 4, past the overlay's 1 to 3 in shader.wgsl, which share group 3.
+@group(3) @binding(4) var<storage, read> masks: array<Mask>;
 
 // A straightened-canvas UV to the source texture's UV: the canvas offset from
 // the center, turned in pixel space. The crop is in canvas UV; sampling,
@@ -355,33 +389,105 @@ fn exposureCurve(rgb: vec3<f32>, stops: f32) -> vec3<f32> {
     return vec3<f32>(newLuma) + (rgb - vec3<f32>(luma)) * chroma;
 }
 
-// Gamma-space tone ops, per channel. Must match the `tone` closure in
-// `apply_linear` in develop/mod.rs.
-fn tone(v: f32) -> f32 {
+// 1 inside `1 - feather` of the radius, 0 at and past it, smoothstep
+// between. Must match `falloff` in develop/mask.rs.
+fn maskFalloff(d: f32, feather: f32) -> f32 {
+    if (d >= 1.0) {
+        return 0.0;
+    }
+    if (d <= 1.0 - feather) {
+        return 1.0;
+    }
+    let t = (1.0 - d) / feather;
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// How much of mask `m` applies at source `uv`. Lengths are in units of the
+// shorter side. Must match `mask_weight` in develop/mask.rs.
+fn maskWeight(m: Mask, uv: vec2<f32>) -> f32 {
+    let aspect = adj.texel_h / adj.texel_w;
+    var scale = vec2<f32>(1.0, 1.0 / aspect);
+    if (aspect >= 1.0) {
+        scale = vec2<f32>(aspect, 1.0);
+    }
+    var w = 0.0;
+    if (m.params.x == 0.0) {
+        let dir = (m.geom.zw - m.geom.xy) * scale;
+        let len2 = dot(dir, dir);
+        // A gradient with no length covers nothing, inverted or not.
+        if (len2 < 1e-12) {
+            return 0.0;
+        }
+        let t = clamp(dot((uv - m.geom.xy) * scale, dir) / len2, 0.0, 1.0);
+        w = 1.0 - t * t * (3.0 - 2.0 * t);
+    } else {
+        let q = (uv - m.geom.xy) * scale;
+        let s = sin(m.params.z);
+        let c = cos(m.params.z);
+        let x = (c * q.x + s * q.y) / m.geom.z;
+        let y = (c * q.y - s * q.x) / m.geom.w;
+        w = maskFalloff(length(vec2<f32>(x, y)), m.params.w);
+    }
+    if (m.params.y != 0.0) {
+        return 1.0 - w;
+    }
+    return w;
+}
+
+// The global sliders plus every mask's weighted amounts at source `uv`, each
+// held to its range. Must match `mask::local_tone` and `LocalAmounts::of` in
+// develop.
+fn localTone(uv: vec2<f32>) -> LocalTone {
+    var l = LocalTone(adj.exposure, adj.contrast, adj.highlights, adj.shadows,
+        adj.whites, adj.blacks, adj.temp, adj.tint, adj.saturation);
+    let n = u32(adj.mask_count);
+    if (n == 0u) {
+        return l;
+    }
+    var a0 = vec4<f32>(l.exposure, l.contrast, l.highlights, l.shadows);
+    var a1 = vec4<f32>(l.whites, l.blacks, l.temp, l.tint);
+    var sat = l.saturation;
+    for (var i = 0u; i < n; i = i + 1u) {
+        let m = masks[i];
+        let w = maskWeight(m, uv);
+        if (w > 0.0) {
+            a0 = a0 + m.a0 * w;
+            a1 = a1 + m.a1 * w;
+            sat = sat + m.a2.x * w;
+        }
+    }
+    a0 = clamp(a0, vec4<f32>(-5.0, -100.0, -100.0, -100.0), vec4<f32>(5.0, 100.0, 100.0, 100.0));
+    a1 = clamp(a1, vec4<f32>(-100.0), vec4<f32>(100.0));
+    return LocalTone(a0.x, a0.y, a0.z, a0.w, a1.x, a1.y, a1.z, a1.w, clamp(sat, -100.0, 100.0));
+}
+
+// Gamma-space tone ops, per channel, with `l`'s sliders. Must match the
+// `tone` closure in `apply_linear` in develop/mod.rs.
+fn tone(v: f32, l: LocalTone) -> f32 {
     var x = v;
 
     // Blacks and whites move the endpoints by up to 0.2.
-    let blacks = adj.blacks / 100.0 * 0.2;
-    let whites = adj.whites / 100.0 * 0.2;
+    let blacks = l.blacks / 100.0 * 0.2;
+    let whites = l.whites / 100.0 * 0.2;
     // Positive whites brighten and clip the top end, as in Lightroom.
     x = (x + blacks) / ((1.0 - whites) + blacks);
 
     // Contrast: an S-curve around mid-gray, strength up to 0.5.
-    let c = adj.contrast / 100.0 * 0.5;
+    let c = l.contrast / 100.0 * 0.5;
     if (c != 0.0) {
         let d = x - 0.5;
         x = 0.5 + d + c * d * (1.0 - 4.0 * d * d);
     }
 
     // Shadows: masked to act near black.
-    let s = adj.shadows / 100.0 * 0.3;
+    let s = l.shadows / 100.0 * 0.3;
     if (s != 0.0) {
         let mask = pow(1.0 - clamp(x, 0.0, 1.0), 2.0);
         x = x + s * mask;
     }
 
     // Highlights: masked to act near white.
-    let h = adj.highlights / 100.0 * 0.3;
+    let h = l.highlights / 100.0 * 0.3;
     if (h != 0.0) {
         let mask = pow(clamp(x, 0.0, 1.0), 2.0);
         x = x + h * mask;

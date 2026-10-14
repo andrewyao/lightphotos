@@ -97,15 +97,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     g = pre.g;
     b = pre.b;
 
+    // The sliders here, with every mask's share added.
+    let l = localTone(uv);
+
     // 1. White balance: temp/tint (−100..100) → gentle per-channel gains.
-    let t = adj.temp / 100.0;
-    let ti = adj.tint / 100.0;
+    let t = l.temp / 100.0;
+    let ti = l.tint / 100.0;
     r = r * (1.0 + t * 0.3);
     g = g * (1.0 - ti * 0.15);
     b = b * (1.0 - t * 0.3);
 
     // 2. Exposure.
-    let exposed = exposureCurve(vec3<f32>(r, g, b), adj.exposure);
+    let exposed = exposureCurve(vec3<f32>(r, g, b), l.exposure);
     r = exposed.r;
     g = exposed.g;
     b = exposed.b;
@@ -117,9 +120,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     b = apply_raw_preview_boost(srgb.b);
 
     // 4. Perceptual tone ops, in the working (boosted) space.
-    r = tone(r);
-    g = tone(g);
-    b = tone(b);
+    r = tone(r, l);
+    g = tone(g, l);
+    b = tone(b, l);
 
     // 4.25. The point curve, still in gamma space.
     let curved = toneCurve(vec3<f32>(r, g, b));
@@ -136,7 +139,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // 4.5. Vibrance/saturation: scale chroma around luma in gamma space.
     // Must match develop `apply_linear` and shader.wgsl.
     let luma = 0.299 * r + 0.587 * g + 0.114 * b;
-    let satTotal = 1.0 + adj.saturation / 100.0;
+    let satTotal = 1.0 + l.saturation / 100.0;
     let cmax = max(r, max(g, b));
     let cmin = min(r, min(g, b));
     var curSat = 0.0;

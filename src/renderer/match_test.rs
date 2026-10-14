@@ -11,8 +11,8 @@ use crate::develop::curve::Curve;
 use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
     Adjustments, BandShift, BaseProbe, CaScale, ColorAxis, ColorGrade, ColorMixer, Crop, GpuAdjust,
-    GpuTouchUp, Grain, GrayMix, Section, Sharpening, SliderId, Straighten, TouchUp, Vignette,
-    Wheel, SLIDERS,
+    GpuMask, GpuTouchUp, Grain, GrayMix, Mask, MaskShape, Section, Sharpening, SliderId,
+    Straighten, TouchUp, Vignette, Wheel, SLIDERS,
 };
 
 const W: u32 = 96;
@@ -23,6 +23,7 @@ struct Case {
     name: String,
     adj: Adjustments,
     touchups: Vec<TouchUp>,
+    masks: Vec<Mask>,
 }
 
 /// A synthetic photo and what it stresses.
@@ -125,6 +126,7 @@ fn cases() -> Vec<Case> {
         name,
         adj,
         touchups: Vec::new(),
+        masks: Vec::new(),
     };
     let touchup = TouchUp {
         center: [0.5, 0.5],
@@ -211,6 +213,7 @@ fn cases() -> Vec<Case> {
         name: "touchup".into(),
         adj: Adjustments::default(),
         touchups: vec![touchup],
+        masks: Vec::new(),
     });
     out.push(Case {
         name: "touchup_opaque".into(),
@@ -220,6 +223,60 @@ fn cases() -> Vec<Case> {
             delta: [0.0; 3],
             ..touchup
         }],
+        masks: Vec::new(),
+    });
+    let mut sky = Mask::linear([0.5, 0.1], [0.4, 0.7]);
+    sky.amounts = crate::develop::LocalAmounts {
+        exposure: 1.2,
+        temp: -40.0,
+        highlights: -60.0,
+        saturation: 30.0,
+        ..Default::default()
+    };
+    let mut spot = Mask {
+        shape: MaskShape::Radial {
+            center: [0.55, 0.45],
+            radii: [0.35, 0.2],
+            angle: 0.6,
+            feather: 0.7,
+        },
+        invert: true,
+        amounts: crate::develop::LocalAmounts {
+            exposure: -0.8,
+            contrast: 40.0,
+            shadows: 50.0,
+            whites: -30.0,
+            blacks: 20.0,
+            tint: 25.0,
+            ..Default::default()
+        },
+    };
+    out.push(Case {
+        name: "mask_linear".into(),
+        adj: Adjustments::default(),
+        touchups: Vec::new(),
+        masks: vec![sky],
+    });
+    out.push(Case {
+        name: "mask_radial_inverted".into(),
+        adj: Adjustments {
+            exposure: 0.4,
+            saturation: -20.0,
+            ..Default::default()
+        },
+        touchups: Vec::new(),
+        masks: vec![spot],
+    });
+    spot.invert = false;
+    out.push(Case {
+        name: "masks+crop+straighten".into(),
+        adj: Adjustments {
+            straighten: 7.0,
+            crop: straighten_crop,
+            ..Default::default()
+        },
+        touchups: vec![touchup],
+        masks: vec![sky, spot],
     });
     out.push(case(
         "denoise+straighten".into(),
@@ -288,11 +345,13 @@ fn cases() -> Vec<Case> {
         name: "texture+touchup".into(),
         adj: presence(100.0, 0.0, 0.0),
         touchups: vec![touchup],
+        masks: Vec::new(),
     });
     out.push(Case {
         name: "clarity+touchup".into(),
         adj: presence(0.0, 100.0, 0.0),
         touchups: vec![touchup],
+        masks: Vec::new(),
     });
     out.push(case(
         "presence+straighten".into(),
@@ -342,6 +401,7 @@ fn cases() -> Vec<Case> {
             ..Default::default()
         },
         touchups: vec![touchup],
+        masks: Vec::new(),
     });
     out.push(case(
         "sharpen+straighten".into(),
@@ -476,6 +536,7 @@ fn cases() -> Vec<Case> {
         name: "everything".into(),
         adj: everything,
         touchups: vec![touchup],
+        masks: Vec::new(),
     });
     // The colour tools on top of everything else, but without CA, which
     // `mixer+ca` covers with its own bound.
@@ -488,6 +549,7 @@ fn cases() -> Vec<Case> {
             ..everything
         },
         touchups: vec![touchup],
+        masks: Vec::new(),
     });
     out.push(Case {
         name: "everything_mono".into(),
@@ -500,6 +562,7 @@ fn cases() -> Vec<Case> {
             ..everything
         },
         touchups: vec![touchup],
+        masks: Vec::new(),
     });
     out
 }
@@ -533,17 +596,32 @@ fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case, probe: BaseProbe) -
     r.set_adjustments(
         GpuAdjust {
             base_probe: probe.gpu(),
-            ..GpuAdjust::for_image(&case.adj, w as f32, h as f32, case.touchups.len())
+            ..GpuAdjust::for_image(
+                &case.adj,
+                w as f32,
+                h as f32,
+                case.touchups.len(),
+                case.masks.len(),
+            )
         },
         &case.adj.curve,
     );
     let gpu_touchups: Vec<GpuTouchUp> = case.touchups.iter().map(GpuTouchUp::from).collect();
     r.set_touchups(&gpu_touchups);
+    let gpu_masks: Vec<GpuMask> = case.masks.iter().map(GpuMask::from).collect();
+    r.set_masks(&gpu_masks);
     assert!(r.render(None, None, None), "{}: render failed", case.name);
     let gpu = r.read_offscreen_blocking().expect("offscreen readback");
     assert_eq!((gpu.width, gpu.height), (w, h));
 
-    let (cw, ch, cpu) = bake_edited_probe(&fixture.img, &case.adj, &case.touchups, &[], 0, probe);
+    let (cw, ch, cpu) = bake_edited_probe(
+        &fixture.img,
+        &case.adj,
+        &case.touchups,
+        &case.masks,
+        0,
+        probe,
+    );
     let crop = case.adj.crop.unwrap_or(Crop {
         left: 0.0,
         top: 0.0,
@@ -693,6 +771,7 @@ fn loupe_grain_matches_cpu_bake_at_full_strength() {
             ..Default::default()
         },
         touchups: Vec::new(),
+        masks: Vec::new(),
     };
     let cases = [
         grain(100.0, 100.0, 0.0),
@@ -745,6 +824,7 @@ fn loupe_presence_matches_cpu_bake_on_a_large_frame() {
             ..Default::default()
         },
         touchups: Vec::new(),
+        masks: Vec::new(),
     };
     let cases = [
         presence("texture=100", 100.0, 0.0, 0.0),
@@ -807,6 +887,7 @@ fn loupe_sharpening_matches_cpu_bake_at_full_size() {
             ..Default::default()
         },
         touchups: Vec::new(),
+        masks: Vec::new(),
     };
     let spot = Case {
         touchups: vec![TouchUp {
@@ -856,7 +937,7 @@ fn only_the_spots_and_the_ca_scales_rebuild_the_base_layer() {
     let push = |r: &mut Renderer, adj: &Adjustments, spots: &[GpuTouchUp]| {
         let gpu = GpuAdjust {
             base_on: 1.0,
-            ..GpuAdjust::for_image(adj, W as f32, H as f32, spots.len())
+            ..GpuAdjust::for_image(adj, W as f32, H as f32, spots.len(), 0)
         };
         r.set_adjustments(gpu, &adj.curve);
         r.set_touchups(spots);
@@ -906,7 +987,7 @@ fn each_layer_builds_only_for_its_reader() {
     r.set_image(&fixtures[0].img);
     let mut push = |adj: Adjustments| {
         r.set_adjustments(
-            GpuAdjust::for_image(&adj, W as f32, H as f32, 0),
+            GpuAdjust::for_image(&adj, W as f32, H as f32, 0, 0),
             &adj.curve,
         );
         r.set_touchups(&[]);
@@ -973,7 +1054,7 @@ fn frame_time_with_and_without_a_base_rebuild() {
             let gpu = GpuAdjust {
                 base_on: 1.0,
                 fine_on: 1.0,
-                ..GpuAdjust::for_image(&adj, w as f32, h as f32, 0)
+                ..GpuAdjust::for_image(&adj, w as f32, h as f32, 0, 0)
             };
             r.set_adjustments(gpu, &adj.curve);
             r.set_touchups(&[]);
@@ -990,7 +1071,7 @@ fn frame_time_with_and_without_a_base_rebuild() {
         GpuAdjust {
             base_on: 1.0,
             fine_on: 1.0,
-            ..GpuAdjust::for_image(&Adjustments::default(), w as f32, h as f32, 0)
+            ..GpuAdjust::for_image(&Adjustments::default(), w as f32, h as f32, 0, 0)
         },
         &Adjustments::default().curve,
     );
