@@ -23,33 +23,6 @@ impl App {
             .unwrap_or(&[])
     }
 
-    /// `path`'s masks with their coverage from memory, for a bake that
-    /// can't read the folder itself. `None` while a target's work is still
-    /// out, so no bake runs without a mask its signature claims.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn mask_set_for(&mut self, path: &Path) -> Option<MaskSet> {
-        let masks = self.masks.get(path).cloned().unwrap_or_default();
-        let recorded = self.detections.get(path).cloned().unwrap_or_default();
-        if self.coverage.readiness(path, &masks, &recorded, true) == coverage::Readiness::Pending {
-            return None;
-        }
-        Some(MaskSet::new(&masks, |t| self.coverage.ready(path, t)))
-    }
-
-    /// Starts the work the selection's detected masks still need, so a
-    /// photo that is never shown still detects and, in the browser, loads.
-    /// Each frame; cheap, since only photos with masks are looked at.
-    fn kick_selection_coverage(&mut self) {
-        for path in self.action_paths() {
-            let Some(masks) = self.masks.get(&path).cloned() else {
-                continue;
-            };
-            let recorded = self.detections.get(&path).cloned().unwrap_or_default();
-            self.coverage
-                .readiness(&path, &masks, &recorded, cfg!(target_arch = "wasm32"));
-        }
-    }
-
     /// The shown photo's masks with their coverage, for the Loupe and the
     /// histogram. Asks the store, so a missing coverage starts loading or
     /// detecting; a pending target renders as nothing until it lands.
@@ -103,7 +76,7 @@ impl App {
     /// back through the store's channel and lands in `drain`.
     #[cfg(target_arch = "wasm32")]
     fn start_web_loads(&mut self) {
-        use crate::develop::{Coverage, CoverageError};
+        use crate::develop::CoverageError;
         for (photo, target, id) in self.coverage.take_wanted_loads() {
             let tx = self.coverage.web_landing_sender();
             let handle = photo.parent().and_then(|dir| self.web.dir_handle(dir));
@@ -118,12 +91,7 @@ impl App {
                 continue;
             };
             wasm_bindgen_futures::spawn_local(async move {
-                let read = crate::web::web_folder_store_fs::read_coverage(&handle, &name, id).await;
-                let result = match read {
-                    Ok(Some(bytes)) => Coverage::decode(&bytes, id),
-                    Ok(None) => Err(CoverageError::Missing),
-                    Err(e) => Err(CoverageError::Io(e)),
-                };
+                let result = read_coverage(&handle, &name, id).await;
                 let _ = tx.send(coverage::WebLanding::Loaded {
                     photo,
                     target,
@@ -222,7 +190,9 @@ impl App {
     /// the mask, but the detection still records, so Redo brings the mask
     /// back with no second detection.
     pub(crate) fn poll_coverage(&mut self) {
-        self.kick_selection_coverage();
+        let selection = self.action_paths();
+        self.coverage
+            .kick(&selection, &self.masks, &self.detections);
         #[cfg(target_arch = "wasm32")]
         {
             self.start_web_loads();
@@ -279,8 +249,7 @@ pub(crate) fn mask_input_of(
 ) -> Option<MaskInput> {
     let masks = masks.get(path).cloned().unwrap_or_default();
     let detections = detections.get(path).cloned().unwrap_or_default();
-    let in_memory = cfg!(target_arch = "wasm32");
-    if coverage.readiness(path, &masks, &detections, in_memory) == coverage::Readiness::Pending {
+    if coverage.readiness(path, &masks, &detections) == coverage::Readiness::Pending {
         return None;
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -293,6 +262,56 @@ pub(crate) fn mask_input_of(
             coverage.ready(path, t)
         })))
     }
+}
+
+/// Reads and decodes one recorded coverage file through File System Access.
+#[cfg(target_arch = "wasm32")]
+async fn read_coverage(
+    handle: &web_sys::FileSystemDirectoryHandle,
+    photo: &std::ffi::OsStr,
+    id: RasterId,
+) -> Result<crate::develop::Coverage, crate::develop::CoverageError> {
+    use crate::develop::{Coverage, CoverageError};
+    match crate::web::web_folder_store_fs::read_coverage(handle, photo, id).await {
+        Ok(Some(bytes)) => Coverage::decode(&bytes, id),
+        Ok(None) => Err(CoverageError::Missing),
+        Err(e) => Err(CoverageError::Io(e)),
+    }
+}
+
+/// `masks` with the coverage each recorded target names, read from the
+/// folder `handle` points at, for a web export about to run. It reads
+/// rather than asks the store, so a batch holds only the photos in flight.
+/// A target with nothing recorded (failed or unsupported) renders as
+/// nothing, as it does everywhere.
+#[cfg(target_arch = "wasm32")]
+pub(crate) async fn read_mask_set(
+    handle: Option<&web_sys::FileSystemDirectoryHandle>,
+    photo: &Path,
+    masks: &[Mask],
+    recorded: &crate::develop::Detections,
+) -> Result<MaskSet, String> {
+    let mut read = Vec::new();
+    for t in DetectTarget::ALL {
+        let Some(id) = recorded.get(t) else {
+            continue;
+        };
+        if !masks.iter().any(|m| m.target() == Some(t)) {
+            continue;
+        }
+        let (Some(handle), Some(name)) = (handle, photo.file_name()) else {
+            return Err("the folder is no longer open".into());
+        };
+        let coverage = read_coverage(handle, name, id)
+            .await
+            .map_err(|e| e.to_string())?;
+        read.push((t, Arc::new(coverage)));
+    }
+    Ok(MaskSet::new(masks, |t| {
+        read.iter()
+            .find(|(r, _)| *r == t)
+            .map(|(_, c)| Arc::clone(c))
+    }))
 }
 
 impl App {

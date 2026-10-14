@@ -501,22 +501,23 @@ impl App {
             is_raw: bool,
             adj: crate::develop::Adjustments,
             touchups: Vec<crate::develop::TouchUp>,
-            /// `None` while a detected mask's coverage isn't in memory: that
-            /// photo's export fails by name rather than dropping the mask.
-            masks: Option<crate::develop::MaskSet>,
+            masks: Vec<crate::develop::Mask>,
+            detections: crate::develop::Detections,
+            /// The photo's folder, where its coverage files are read as the
+            /// job is dispatched.
+            dir: Option<web_sys::FileSystemDirectoryHandle>,
             rot: u8,
         }
-        let sets: Vec<Option<crate::develop::MaskSet>> =
-            paths.iter().map(|src| self.mask_set_for(src)).collect();
         let jobs: Vec<Job> = paths
             .iter()
-            .zip(sets)
-            .map(|(src, masks)| Job {
+            .map(|src| Job {
                 src: src.clone(),
                 is_raw: crate::decode::image_decode::is_raw_extension(src),
                 adj: self.edits.get(src).copied().unwrap_or_default(),
                 touchups: self.touchups.get(src).cloned().unwrap_or_default(),
-                masks,
+                masks: self.masks.get(src).cloned().unwrap_or_default(),
+                detections: self.detections.get(src).cloned().unwrap_or_default(),
+                dir: src.parent().and_then(|d| self.web.dir_handle(d)),
                 rot: self.rotations.get(src).copied().unwrap_or(0),
             })
             .collect();
@@ -564,6 +565,8 @@ impl App {
                     adj,
                     touchups,
                     masks,
+                    detections,
+                    dir,
                     rot,
                 } = job;
                 // Each export in flight holds its source's bytes and a
@@ -575,15 +578,19 @@ impl App {
                 let filename =
                     crate::paths::export_name(&stem, output.format.extension(), &existing, &taken);
                 taken.insert(filename.clone());
-                let Some(masks) = masks else {
-                    pool.fail(
-                        src,
-                        output_folder.clone(),
-                        dest_dir.clone(),
-                        filename,
-                        crate::i18n::t().export_masks_detecting.to_string(),
-                    );
-                    continue;
+                let masks = match super::masks::read_mask_set(
+                    dir.as_ref(),
+                    &src,
+                    &masks,
+                    &detections,
+                )
+                .await
+                {
+                    Ok(masks) => masks,
+                    Err(e) => {
+                        pool.fail(src, output_folder.clone(), dest_dir.clone(), filename, e);
+                        continue;
+                    }
                 };
                 match fs.read_source_array_buffer(&src).await {
                     Ok(bytes) => pool.submit(

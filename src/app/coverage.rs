@@ -124,6 +124,12 @@ pub(crate) struct CoverageStore {
     /// Which targets this build can detect: `detect::available`, or a
     /// test's stand-in.
     available: fn(DetectTarget) -> bool,
+    /// `READY_BUDGET`, or a test's smaller one.
+    ready_budget: usize,
+    /// Whether a bake takes its coverage from memory rather than reading
+    /// the file itself: the browser's rule, since no worker there can reach
+    /// the folder. A test sets it to run the browser's path natively.
+    in_memory: bool,
 }
 
 /// Work the app finished for the store, on the web.
@@ -160,6 +166,8 @@ impl CoverageStore {
                 web_landings: std::sync::mpsc::channel(),
                 in_flight: 0,
                 available: detect::available,
+                ready_budget: READY_BUDGET,
+                in_memory: true,
             }
         }
     }
@@ -226,6 +234,8 @@ impl CoverageStore {
             load,
             in_flight: 0,
             available,
+            ready_budget: READY_BUDGET,
+            in_memory: false,
         }
     }
 
@@ -326,10 +336,7 @@ impl CoverageStore {
             (Some(Slot::Failed(_)), _) => Need::Ready,
             (Some(Slot::Ready(c)), Some(id)) if c.id() == id => Need::Ready,
             (Some(Slot::Ready(_)), None) => Need::Ready,
-            (_, Some(id)) if !in_memory => {
-                let _ = id;
-                Need::Ready
-            }
+            (_, Some(_)) if !in_memory => Need::Ready,
             (Some(Slot::Loading(l)), Some(id)) if *l == id => Need::Pending,
             (_, Some(id)) => Need::Load(id),
             (Some(Slot::Detecting | Slot::Loading(_)), None) => Need::Pending,
@@ -341,18 +348,17 @@ impl CoverageStore {
     /// starting whatever is missing: loads where the bake needs the pixels
     /// in memory, detections where nothing is recorded. A target this build
     /// can't detect settles as failed and counts as ready, since it renders
-    /// as nothing under a signature that says so. Every bake, score and
-    /// export asks here, so a photo never shown still gets its work done.
+    /// as nothing under a signature that says so. Only a bake about to run
+    /// asks here, so what it loads is bounded by the working set.
     pub(crate) fn readiness(
         &mut self,
         photo: &Path,
         masks: &[Mask],
         detections: &Detections,
-        in_memory: bool,
     ) -> Readiness {
         let mut out = Readiness::Ready;
         for target in used_targets(masks) {
-            match self.need(photo, target, detections.get(target), in_memory) {
+            match self.need(photo, target, detections.get(target), self.in_memory) {
                 Need::Ready => {}
                 Need::Pending => out = Readiness::Pending,
                 Need::Load(id) => {
@@ -372,26 +378,40 @@ impl CoverageStore {
         out
     }
 
-    /// [`readiness`](Self::readiness) without starting anything, for a
-    /// query from the UI. Work it reports pending is started by the frame
-    /// loop's [`readiness`] over the selection, so pending never stands.
-    pub(crate) fn is_ready(
-        &self,
-        photo: &Path,
-        masks: &[Mask],
-        detections: &Detections,
-        in_memory: bool,
-    ) -> bool {
-        used_targets(masks).all(
-            |t| match self.need(photo, t, detections.get(t), in_memory) {
-                Need::Ready => true,
-                Need::Detect => !(self.available)(t),
-                Need::Pending | Need::Load(_) => false,
-            },
-        )
+    /// Whether every target `masks` use has settled: detected and recorded,
+    /// failed, or unsupported. A recorded coverage counts on every platform,
+    /// since the bake loads it when it runs. Starts nothing; the frame
+    /// loop's [`kick`](Self::kick) over the selection starts what this
+    /// reports pending, so pending never stands.
+    fn is_ready(&self, photo: &Path, masks: &[Mask], detections: &Detections) -> bool {
+        used_targets(masks).all(|t| match self.need(photo, t, detections.get(t), false) {
+            Need::Ready => true,
+            Need::Detect => !(self.available)(t),
+            Need::Pending | Need::Load(_) => false,
+        })
     }
 
-    /// How many of `paths` a bake can't yet serve: the export blocker.
+    /// Starts the work nothing else will for `paths`' detected masks:
+    /// detections for a photo never shown, and an unsupported target
+    /// settled. Each frame, over the selection. Never loads, since the
+    /// selection can outgrow `ready_budget`; a bake loads what it needs
+    /// through [`readiness`](Self::readiness).
+    pub(crate) fn kick(
+        &mut self,
+        paths: &[PathBuf],
+        masks: &HashMap<PathBuf, Vec<Mask>>,
+        detections: &HashMap<PathBuf, Detections>,
+    ) {
+        for p in paths {
+            if let Some(masks) = masks.get(p) {
+                let recorded = detections.get(p).cloned().unwrap_or_default();
+                self.ensure_detected(p, masks, &recorded);
+            }
+        }
+    }
+
+    /// How many of `paths` still have detection work out: the export
+    /// blocker.
     pub(crate) fn pending_among(
         &self,
         paths: &[PathBuf],
@@ -403,7 +423,7 @@ impl CoverageStore {
             .filter(|p| {
                 masks.get(*p).is_some_and(|masks| {
                     let recorded = detections.get(*p).cloned().unwrap_or_default();
-                    !self.is_ready(p, masks, &recorded, cfg!(target_arch = "wasm32"))
+                    !self.is_ready(p, masks, &recorded)
                 })
             })
             .count()
@@ -629,7 +649,7 @@ impl CoverageStore {
         self.ready_bytes += coverage.alpha().len();
         self.slots.insert(key.clone(), Slot::Ready(coverage));
         self.ready_order.push_back(key.clone());
-        while self.ready_bytes > READY_BUDGET && self.ready_order.len() > 1 {
+        while self.ready_bytes > self.ready_budget && self.ready_order.len() > 1 {
             let Some(old) = self.ready_order.pop_front() else {
                 break;
             };
@@ -825,20 +845,19 @@ mod tests {
         d.set(DetectTarget::Sky, Some(c.id()));
         let masks = [Mask::detected(DetectTarget::Sky)];
         let mut store = CoverageStore::with_detector(half_left);
-        assert!(!store.is_ready(&p, &masks, &d, true));
+        store.in_memory = true;
         assert!(
-            store.is_ready(&p, &masks, &d, false),
-            "a native worker reads the file itself"
+            store.is_ready(&p, &masks, &d),
+            "export doesn't wait on a recorded coverage"
         );
-        assert_eq!(store.readiness(&p, &masks, &d, true), Readiness::Pending);
+        assert_eq!(store.readiness(&p, &masks, &d), Readiness::Pending);
         assert!(store.busy(), "a load is queued");
         assert_eq!(
             store.status(&p, DetectTarget::Sky, Some(c.id())),
             Some(MaskStatus::Detecting)
         );
         drain_until(&mut store, |s| !s.busy());
-        assert_eq!(store.readiness(&p, &masks, &d, true), Readiness::Ready);
-        assert!(store.is_ready(&p, &masks, &d, true));
+        assert_eq!(store.readiness(&p, &masks, &d), Readiness::Ready);
         assert_eq!(store.ready(&p, DetectTarget::Sky).unwrap().id(), c.id());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -868,10 +887,7 @@ mod tests {
             1,
             "the sky mask has work to do"
         );
-        assert_eq!(
-            store.readiness(&p, &masks, &none, false),
-            Readiness::Pending
-        );
+        assert_eq!(store.readiness(&p, &masks, &none), Readiness::Pending);
         assert!(store.busy(), "the sky detection started");
         assert_eq!(
             store.status(&p, DetectTarget::Subject, None),
@@ -879,7 +895,7 @@ mod tests {
             "the subject settled without a worker"
         );
         drain_until(&mut store, |s| !s.busy());
-        assert_eq!(store.readiness(&p, &masks, &none, false), Readiness::Ready);
+        assert_eq!(store.readiness(&p, &masks, &none), Readiness::Ready);
         assert_eq!(
             store.pending_among(&paths, &all, &unrecorded),
             0,
@@ -971,6 +987,60 @@ mod tests {
             failing.pending_among(&paths, &masks, &unrecorded),
             0,
             "a failed target exports as nothing, on purpose"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The defect: in the browser, every frame loaded each recorded
+    /// coverage in the selection, and the export blocker waited for all of
+    /// them in memory at once. Past the budget, each load evicted one the
+    /// next frame reloaded, so reads never stopped, the shown photo's
+    /// coverage was evicted, and Export never unblocked.
+    #[test]
+    fn a_selection_past_the_budget_loads_nothing_and_does_not_block_export() {
+        let dir = crate::app::test_support::temp_folder("coverage-selection");
+        let c = Coverage::fit(4, 4, &[255; 16]).unwrap();
+        let budget = 4 * c.alpha().len();
+        let mut paths = Vec::new();
+        let mut masks = HashMap::new();
+        let mut detections = HashMap::new();
+        for i in 0..3 * budget / c.alpha().len() {
+            let p = dir.join(format!("{i}.jpg"));
+            std::fs::write(&p, []).unwrap();
+            crate::develop::coverage::write(&p, &c).unwrap();
+            let mut d = Detections::default();
+            d.set(DetectTarget::Subject, Some(c.id()));
+            masks.insert(p.clone(), vec![Mask::detected(DetectTarget::Subject)]);
+            detections.insert(p.clone(), d);
+            paths.push(p);
+        }
+        let mut store = CoverageStore::with_detector(half_left);
+        store.ready_budget = budget;
+        store.in_memory = true;
+        let shown = dir.join("shown.jpg");
+        std::fs::write(&shown, []).unwrap();
+        crate::develop::coverage::write(&shown, &c).unwrap();
+        let t = DetectTarget::Subject;
+        assert!(matches!(
+            store.ask(&shown, t, Some(c.id())),
+            Lookup::Pending
+        ));
+        drain_until(&mut store, |s| !s.busy());
+
+        for round in 0..5 {
+            store.kick(&paths, &masks, &detections);
+            assert!(!store.busy(), "round {round}: no load started");
+            assert_eq!(
+                store.pending_among(&paths, &masks, &detections),
+                0,
+                "round {round}: recorded coverage doesn't block export"
+            );
+            store.drain();
+        }
+        assert!(paths.iter().all(|p| store.ready(p, t).is_none()));
+        assert!(
+            store.ready(&shown, t).is_some(),
+            "the shown photo's coverage was not evicted"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
