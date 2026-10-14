@@ -938,8 +938,10 @@ impl Command {
             Monochrome(_) => ("Turn black and white on or off, or toggle it.", true),
             Crop(_) => ("Set the crop rectangle and the straighten angle.", true),
             AddMask(_) => (
-                "Add a linear or radial gradient mask with its own tone and color \
-                 sliders. Points are 0..1 of the uncropped photo.",
+                "Add a mask with its own tone and color sliders: a linear or radial \
+                 gradient (points are 0..1 of the uncropped photo), or a detected one, \
+                 {\"kind\":\"detected\",\"target\":\"subject\"|\"sky\"}, whose shape is \
+                 found for each photo.",
                 true,
             ),
             SetMask(_) => ("Change one mask's shape, invert or sliders.", true),

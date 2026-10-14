@@ -788,9 +788,19 @@ impl App {
         let Some(copied) = self.copied_settings.clone() else {
             return;
         };
-        let paths = self.action_paths();
+        let mut paths = self.action_paths();
         let n = self.apply_look_to(&copied.adj, copied.sections, &paths);
         if copied.sections.has(CopySection::Masks) {
+            // A pasted detected mask reads each photo's own detection, which
+            // store_masks queues. The shown photo goes first, so its
+            // detection lands ahead of the batch's.
+            if let Some(i) = self
+                .shown
+                .path()
+                .and_then(|shown| paths.iter().position(|p| p == shown))
+            {
+                paths.swap(0, i);
+            }
             for path in &paths {
                 self.put_masks(path, copied.masks.clone());
             }

@@ -16,8 +16,12 @@ state
 run {"id":"mask.set","params":{"index":0,"amounts":{"exposure":-2}}}
 idle
 state
+# The new mask is picked, which tints it red over the photo. Clicking its
+# label puts it down so the shot shows the darkening alone, and again picks
+# it back up for the tinted shot.
+click 938 182
+idle
 shot ai-masks-subject-darkened
-# The picked mask tints red over the photo while the Masks page is open.
-click 1000 600
+click 938 182
 idle
 shot ai-masks-picked

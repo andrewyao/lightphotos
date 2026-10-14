@@ -502,6 +502,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Paste lays the same detected mask on every target photo, and each
+    /// photo detects its own subject: Lightroom's behaviour, with no paste
+    /// special case.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn pasting_a_detected_mask_onto_two_photos_detects_each_photo_once() {
+        use super::super::coverage::{test_support, CoverageStore};
+        use crate::develop::copy::{CopySection, CopySections};
+        use crate::develop::DetectTarget;
+        let (mut app, dir, paths) = folder_app("mask-paste", 3);
+        app.coverage = CoverageStore::with_detector(test_support::half_left);
+        app.copied_settings = Some(super::super::folder_store::CopiedSettings {
+            path: paths[0].clone(),
+            adj: Adjustments::default(),
+            masks: vec![Mask::detected(DetectTarget::Subject)],
+            sections: CopySections::NONE.with(CopySection::Masks, true),
+        });
+        app.sel = Some(1);
+        app.selected = [1, 2].into_iter().collect();
+        app.apply_settings_to_selection();
+        app.save_edit_unless_dragging();
+        assert!(app.coverage.busy());
+        poll_until(&mut app, |a| !a.coverage.busy());
+        app.poll_coverage();
+        for p in &paths[1..] {
+            assert_eq!(app.masks[p], vec![Mask::detected(DetectTarget::Subject)]);
+            assert_eq!(test_support::runs_on(p), 1, "{}", p.display());
+            assert!(app.detections[p].subject.is_some(), "{}", p.display());
+            assert!(app.folder_store.detections(p).subject.is_some());
+        }
+        assert_eq!(
+            test_support::runs_on(&paths[0]),
+            0,
+            "the source photo wasn't pasted onto"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `mask.add` takes a detected shape like any other, and the app queues
+    /// its detection as the button would.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_mask_add_command_accepts_a_detected_shape() {
+        use crate::command::Command;
+        use crate::develop::{DetectTarget, MaskShape};
+        let (mut app, dir, paths) = folder_app("mask-add-detected", 1);
+        let photo = paths[0].clone();
+        app.select_single(0);
+        app.shown = Shown::Preview(photo.clone(), 1024, 1024);
+        app.mode = ViewMode::Loupe;
+        let cmd = Command::parse(
+            r#"{"id":"mask.add","params":{"shape":{"kind":"detected","target":"sky"},"amounts":{"exposure":-1}}}"#,
+        )
+        .unwrap();
+        app.run(cmd).unwrap();
+        assert_eq!(
+            app.current_masks()[0].shape,
+            MaskShape::Detected {
+                target: DetectTarget::Sky
+            }
+        );
+        assert_eq!(app.selected_mask(), Some(0));
+        assert!(
+            app.mask_status(0).is_some(),
+            "a sky mask is pending or unsupported, never silently ready"
+        );
+        assert_eq!(app.folder_store.masks(&photo).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_photo_holds_at_most_max_masks() {
         let (mut app, dir, _) = one_photo("mask-limit");
