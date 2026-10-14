@@ -346,7 +346,9 @@ impl FolderStore {
     }
 
     pub fn detections(&self, path: &Path) -> crate::develop::Detections {
-        self.record(path).map(|r| r.detections).unwrap_or_default()
+        self.record(path)
+            .map(|r| r.detections.clone())
+            .unwrap_or_default()
     }
 
     /// Records which coverage answers `target` for `path`. Through

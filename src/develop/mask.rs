@@ -82,6 +82,10 @@ pub enum DetectTarget {
 
 impl DetectTarget {
     pub const ALL: [DetectTarget; 2] = [DetectTarget::Subject, DetectTarget::Sky];
+    /// The `target` names this build reads, in `ALL`'s order. A detected
+    /// mask with any other name is a later build's, which
+    /// `sidecar::MaskList` keeps verbatim.
+    pub const NAMES: [&str; 2] = ["subject", "sky"];
 
     /// Position in [`ALL`](Self::ALL), for per-target tables.
     pub fn index(self) -> usize {
@@ -819,6 +823,13 @@ mod tests {
         assert_eq!(feather, 1.0);
         assert!(invert);
         assert_eq!((amounts.exposure, amounts.saturation), (5.0, -100.0));
+    }
+
+    #[test]
+    fn every_target_serializes_with_a_name_this_build_lists() {
+        for (t, name) in DetectTarget::ALL.iter().zip(DetectTarget::NAMES) {
+            assert_eq!(serde_json::to_value(t).unwrap(), name);
+        }
     }
 
     #[test]

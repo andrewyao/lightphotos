@@ -183,7 +183,7 @@ impl App {
                         .images
                         .iter()
                         .filter(|(_, r)| !r.detections.is_empty())
-                        .map(|(name, r)| (name.clone(), r.detections))
+                        .map(|(name, r)| (name.clone(), r.detections.clone()))
                         .collect();
                     let _ = tx.send((for_thread.clone(), token, mark, loaded));
                     // Sweep after sending, because the UI waits on the folder store

@@ -402,7 +402,7 @@ impl CoverageStore {
             .iter()
             .filter(|p| {
                 masks.get(*p).is_some_and(|masks| {
-                    let recorded = detections.get(*p).copied().unwrap_or_default();
+                    let recorded = detections.get(*p).cloned().unwrap_or_default();
                     !self.is_ready(p, masks, &recorded, cfg!(target_arch = "wasm32"))
                 })
             })

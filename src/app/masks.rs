@@ -29,7 +29,7 @@ impl App {
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn mask_set_for(&mut self, path: &Path) -> Option<MaskSet> {
         let masks = self.masks.get(path).cloned().unwrap_or_default();
-        let recorded = self.detections.get(path).copied().unwrap_or_default();
+        let recorded = self.detections.get(path).cloned().unwrap_or_default();
         if self.coverage.readiness(path, &masks, &recorded, true) == coverage::Readiness::Pending {
             return None;
         }
@@ -44,7 +44,7 @@ impl App {
             let Some(masks) = self.masks.get(&path).cloned() else {
                 continue;
             };
-            let recorded = self.detections.get(&path).copied().unwrap_or_default();
+            let recorded = self.detections.get(&path).cloned().unwrap_or_default();
             self.coverage
                 .readiness(&path, &masks, &recorded, cfg!(target_arch = "wasm32"));
         }
@@ -58,7 +58,7 @@ impl App {
             return MaskSet::default();
         };
         let masks = self.masks.get(&path).cloned().unwrap_or_default();
-        let recorded = self.detections.get(&path).copied().unwrap_or_default();
+        let recorded = self.detections.get(&path).cloned().unwrap_or_default();
         MaskSet::new(&masks, |t| {
             match self.coverage.ask(&path, t, recorded.get(t)) {
                 coverage::Lookup::Ready(c) => Some(c),
@@ -278,7 +278,7 @@ pub(crate) fn mask_input_of(
     path: &Path,
 ) -> Option<MaskInput> {
     let masks = masks.get(path).cloned().unwrap_or_default();
-    let detections = detections.get(path).copied().unwrap_or_default();
+    let detections = detections.get(path).cloned().unwrap_or_default();
     let in_memory = cfg!(target_arch = "wasm32");
     if coverage.readiness(path, &masks, &detections, in_memory) == coverage::Readiness::Pending {
         return None;
@@ -412,7 +412,7 @@ impl App {
         self.folder_store.set_masks(path, &masks);
         // Add, paste, a command, undo and redo all converge here: a detected
         // mask on a photo without that detection gets one queued.
-        let recorded = self.detections.get(path).copied().unwrap_or_default();
+        let recorded = self.detections.get(path).cloned().unwrap_or_default();
         self.coverage.ensure_detected(path, &masks, &recorded);
         if masks.is_empty() {
             self.masks.remove(path);

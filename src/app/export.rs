@@ -642,7 +642,7 @@ impl App {
             // export until every detection was recorded.
             masks: crate::develop::MaskInput::OnDisk {
                 masks: self.masks.get(&src).cloned().unwrap_or_default(),
-                detections: self.detections.get(&src).copied().unwrap_or_default(),
+                detections: self.detections.get(&src).cloned().unwrap_or_default(),
             },
             rot: self.rotations.get(&src).copied().unwrap_or(0),
             src,

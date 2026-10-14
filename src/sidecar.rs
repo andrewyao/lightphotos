@@ -155,16 +155,27 @@ impl MaskList {
         self.known = known;
     }
 
-    /// A mask entry of a kind this build doesn't read, to keep as it came.
-    /// Anything else that failed to parse is garbage, and dropped.
+    /// A mask entry of a kind this build doesn't read, or a detected one
+    /// whose target it doesn't know, to keep as it came. Anything else that
+    /// failed to parse is garbage, and dropped.
     fn is_foreign(raw: &RawValue) -> bool {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.get()) else {
             return false;
         };
-        v.get("shape")
-            .and_then(|s| s.get("kind"))
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|kind| !MaskShape::KINDS.contains(&kind))
+        let Some(shape) = v.get("shape") else {
+            return false;
+        };
+        let Some(kind) = shape.get("kind").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        if !MaskShape::KINDS.contains(&kind) {
+            return true;
+        }
+        kind == "detected"
+            && shape
+                .get("target")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|target| !crate::develop::DetectTarget::NAMES.contains(&target))
     }
 }
 
@@ -515,9 +526,13 @@ mod tests {
                 opacity: 1.0,
             }],
             masks: vec![Mask::linear([0.5, 0.0], [0.5, 1.0])].into(),
-            detections: Detections {
-                subject: "0123456789abcdef".parse().ok(),
-                sky: None,
+            detections: {
+                let mut d = Detections::default();
+                d.set(
+                    crate::develop::DetectTarget::Subject,
+                    "0123456789abcdef".parse().ok(),
+                );
+                d
             },
             rotation: 1,
             score: Some(StoredScore {
@@ -593,6 +608,23 @@ mod tests {
             !json.contains("1e39"),
             "a bad known kind is dropped: {json}"
         );
+    }
+
+    /// The defect: a detected mask for a target a later build added was
+    /// dropped as garbage, since its kind is known, and the next write lost
+    /// it. One with a target that isn't even a name is still garbage.
+    #[test]
+    fn a_detected_mask_of_an_unknown_target_is_kept_as_foreign() {
+        let person = r#"{"shape":{"kind":"detected","target":"person"},"amounts":{"exposure":1}}"#;
+        let body = format!(
+            r#"{{"masks":[{person},{{"shape":{{"kind":"detected","target":5}}}},{{"shape":{{"kind":"detected","target":"sky"}}}}]}}"#
+        );
+        let rec = parse_record(body.as_bytes(), || None).unwrap();
+        assert_eq!(rec.masks.len(), 1, "only the sky mask is this build's");
+        let written = serde_json::to_string(&rec).unwrap();
+        assert!(written.contains(person), "{written}");
+        assert!(!written.contains(r#""target":5"#), "{written}");
+        assert_eq!(parse_record(written.as_bytes(), || None).unwrap(), rec);
     }
 
     /// The defect: a build that doesn't know a mask kind drops it on load and

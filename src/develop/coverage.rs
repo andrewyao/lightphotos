@@ -102,32 +102,56 @@ impl<'de> Deserialize<'de> for RasterId {
 /// mask finds the photo's own detection, and undo never rewrites it. A value
 /// that isn't 16 hex digits loads as `None` (re-detected), never failing the
 /// record.
-#[derive(Serialize, Clone, Copy, Default, PartialEq, Eq, Debug)]
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Detections {
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<RasterId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub sky: Option<RasterId>,
+    /// Targets a later build added, with their ids, kept through every
+    /// write of this one so its masks stay whole, and so the orphan sweep
+    /// keeps their files. Nothing here reads them.
+    extra: std::collections::BTreeMap<String, RasterId>,
+}
+
+impl Serialize for Detections {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let known = DetectTarget::ALL
+            .iter()
+            .zip(DetectTarget::NAMES)
+            .filter_map(|(&t, name)| self.get(t).map(|id| (name, id)));
+        let extra = self.extra.iter().map(|(name, &id)| (name.as_str(), id));
+        let mut map = serializer.serialize_map(None)?;
+        for (name, id) in known.chain(extra) {
+            map.serialize_entry(name, &id)?;
+        }
+        map.end()
+    }
 }
 
 /// Whatever JSON the sidecar holds under `detections`, read for the valid
 /// ids in it: a number, a string, a list or `null` in place of the object,
 /// or in place of an id, costs that id and nothing else. A sidecar comes
 /// from whoever supplied the folder, and a bad detection must never cost
-/// the photo its rating.
+/// the photo its rating. A key this build doesn't know keeps its id.
 impl<'de> Deserialize<'de> for Detections {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Detections, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let id = |key: &str| {
-            value
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .and_then(|s| s.parse().ok())
+        let mut out = Detections::default();
+        let Some(object) = value.as_object() else {
+            return Ok(out);
         };
-        Ok(Detections {
-            subject: id("subject"),
-            sky: id("sky"),
-        })
+        for (key, v) in object {
+            let Some(id) = v.as_str().and_then(|s| s.parse::<RasterId>().ok()) else {
+                continue;
+            };
+            match DetectTarget::NAMES.iter().position(|n| n == key) {
+                Some(i) => out.set(DetectTarget::ALL[i], Some(id)),
+                None => {
+                    out.extra.insert(key.clone(), id);
+                }
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -150,9 +174,11 @@ impl Detections {
         *self == Detections::default()
     }
 
-    /// Whether any target records `id`, for the orphan sweep.
+    /// Whether any target records `id`, a later build's included, for the
+    /// orphan sweep.
     pub fn names(&self, id: RasterId) -> bool {
         DetectTarget::ALL.iter().any(|&t| self.get(t) == Some(id))
+            || self.extra.values().any(|&e| e == id)
     }
 }
 
@@ -496,9 +522,34 @@ mod tests {
         assert!(d.names(RasterId(0x0123_4567_89ab_cdef)));
         assert!(!d.names(RasterId(1)));
         assert!(!d.is_empty() && Detections::default().is_empty());
-        let mut e = d;
+        let mut e = d.clone();
         e.set(DetectTarget::Subject, None);
         assert!(e.is_empty());
+
+        // A later build's target keeps its id through this build's write,
+        // and the sweep sees its file as named; a bad extra is dropped.
+        let later: Detections = serde_json::from_str(
+            r#"{"person":"fedcba9876543210","sky":"0123456789abcdef","water":"nope"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            later.get(DetectTarget::Sky),
+            Some(RasterId(0x0123_4567_89ab_cdef))
+        );
+        assert!(later.names(RasterId(0xfedc_ba98_7654_3210)));
+        assert!(!later.is_empty());
+        assert_eq!(
+            serde_json::to_string(&later).unwrap(),
+            r#"{"sky":"0123456789abcdef","person":"fedcba9876543210"}"#
+        );
+        let mut only_extra = later.clone();
+        only_extra.set(DetectTarget::Sky, None);
+        assert!(!only_extra.is_empty(), "still persists");
+        assert_eq!(
+            serde_json::from_str::<Detections>(&serde_json::to_string(&only_extra).unwrap())
+                .unwrap(),
+            only_extra
+        );
         assert_eq!(MAX_COVERAGE_BYTES, 8 << 20);
         const {
             assert!(MAX_COVERAGE_BYTES <= 1 << 24, "offsets must be exact f32s");
@@ -687,7 +738,8 @@ mod file_tests {
         let kept = Coverage::fit(1, 1, &[7]).unwrap();
         let orphan = Coverage::fit(1, 1, &[8]).unwrap();
         let fresh = Coverage::fit(1, 1, &[9]).unwrap();
-        for c in [&kept, &orphan, &fresh] {
+        let later = Coverage::fit(1, 1, &[10]).unwrap();
+        for c in [&kept, &orphan, &fresh, &later] {
             write(&photo, c).unwrap();
         }
         let masks = dir.join(".lightphotos").join("masks");
@@ -699,17 +751,30 @@ mod file_tests {
         for p in [
             file_path(&photo, kept.id()).unwrap(),
             file_path(&photo, orphan.id()).unwrap(),
+            file_path(&photo, later.id()).unwrap(),
             stale_tmp.clone(),
             foreign.clone(),
         ] {
             std::fs::File::open(&p).unwrap().set_modified(old).unwrap();
         }
 
-        sweep_orphans(&dir, |name, id| name == "a.jpg" && id == kept.id());
+        // Named the way the app names files: by any id the record holds,
+        // one of this build's targets or a later build's.
+        let record: Detections = serde_json::from_str(&format!(
+            r#"{{"subject":"{}","person":"{}"}}"#,
+            kept.id(),
+            later.id()
+        ))
+        .unwrap();
+        sweep_orphans(&dir, |name, id| name == "a.jpg" && record.names(id));
 
         assert!(
             file_path(&photo, kept.id()).unwrap().is_file(),
             "named: kept"
+        );
+        assert!(
+            file_path(&photo, later.id()).unwrap().is_file(),
+            "named by a later build's target: kept"
         );
         assert!(
             !file_path(&photo, orphan.id()).unwrap().exists(),

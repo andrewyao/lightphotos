@@ -75,7 +75,7 @@ impl App {
                 let adj = self.edits.get(&path).copied().unwrap_or_default();
                 let touchups = self.touchups.get(&path).cloned().unwrap_or_default();
                 let masks = self.masks.get(&path).cloned().unwrap_or_default();
-                let detections = self.detections.get(&path).copied().unwrap_or_default();
+                let detections = self.detections.get(&path).cloned().unwrap_or_default();
                 let rot = self.rotations.get(&path).copied().unwrap_or(0);
                 let edits = crate::develop::edit_signature_with_touchups(
                     &adj,

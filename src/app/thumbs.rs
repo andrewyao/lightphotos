@@ -234,7 +234,7 @@ impl App {
             &adj,
             self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]),
             self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]),
-            &self.detections.get(path).copied().unwrap_or_default(),
+            &self.detections.get(path).cloned().unwrap_or_default(),
             rot,
         )
     }
