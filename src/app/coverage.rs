@@ -42,6 +42,9 @@ pub(crate) enum Failure {
     Missing,
     /// The detector errored; its message for the tooltip.
     Detect(String),
+    /// The recorded file could not be read this session (permission, a
+    /// lost folder handle); the id stays recorded, and Retry reads again.
+    Read(String),
 }
 
 /// What a caller gets back.
@@ -446,10 +449,18 @@ impl CoverageStore {
                                 self.set_ready(&key, Arc::new(coverage));
                                 Record::Keep
                             }
-                            // A Subject file can't be re-detected here, and a
-                            // Sky one is re-detected only when its photo is
-                            // shown, so both settle rather than wait.
-                            Err(_) => {
+                            // A read that failed this session keeps the id
+                            // for Retry; a file that is gone or bad is
+                            // forgotten. A Subject file can't be re-detected
+                            // here, and a Sky one is re-detected only when
+                            // its photo is shown, so both settle rather
+                            // than wait.
+                            Err(CoverageError::Io(why)) => {
+                                self.slots
+                                    .insert(key.clone(), Slot::Failed(Failure::Read(why)));
+                                Record::Keep
+                            }
+                            Err(CoverageError::Missing | CoverageError::Corrupt(_)) => {
                                 self.slots
                                     .insert(key.clone(), Slot::Failed(Failure::Missing));
                                 Record::Set(None)
@@ -495,19 +506,28 @@ impl CoverageStore {
                         Record::Keep
                     }
                     Err(e) => {
-                        if matches!(e, CoverageError::Corrupt(_)) {
-                            // Content-addressed, so a re-detect would skip
-                            // writing over the bad file.
-                            crate::develop::coverage::remove(&key.0, job.id);
-                        }
-                        if (self.available)(key.1) {
-                            self.slots.remove(&key);
-                            self.start_detect(key.clone());
-                        } else {
+                        // A read that failed this session (permission, a
+                        // device gone) keeps the id for Retry. Only a file
+                        // that is gone or bad is forgotten.
+                        if let CoverageError::Io(why) = e {
                             self.slots
-                                .insert(key.clone(), Slot::Failed(Failure::Missing));
+                                .insert(key.clone(), Slot::Failed(Failure::Read(why)));
+                            Record::Keep
+                        } else {
+                            if matches!(e, CoverageError::Corrupt(_)) {
+                                // Content-addressed, so a re-detect would
+                                // skip writing over the bad file.
+                                crate::develop::coverage::remove(&key.0, job.id);
+                            }
+                            if (self.available)(key.1) {
+                                self.slots.remove(&key);
+                                self.start_detect(key.clone());
+                            } else {
+                                self.slots
+                                    .insert(key.clone(), Slot::Failed(Failure::Missing));
+                            }
+                            Record::Set(None)
                         }
-                        Record::Set(None)
                     }
                 };
                 out.push(Landed {
@@ -866,6 +886,42 @@ mod tests {
             "landed sky, unsupported subject: nothing left to wait for"
         );
         assert_eq!(runs_on(&p), 1, "the unsupported target never ran");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The defect: a read that failed for a reason that has nothing to do
+    /// with the file (here a directory in its place, as a permission would)
+    /// forgot the recorded id, and the next open re-detected or lost the
+    /// mask. Only a missing or corrupt file forgets it.
+    #[test]
+    fn an_io_failure_on_load_keeps_the_recorded_id_and_offers_retry() {
+        let (dir, p) = photo("io");
+        let c = Coverage::fit(1, 1, &[200]).unwrap();
+        let name = crate::develop::coverage::file_name(std::ffi::OsStr::new("a.jpg"), c.id());
+        std::fs::create_dir_all(dir.join(".lightphotos").join("masks").join(name)).unwrap();
+        let mut store = CoverageStore::with_detector(half_left);
+        let t = DetectTarget::Subject;
+        assert!(matches!(store.ask(&p, t, Some(c.id())), Lookup::Pending));
+        let landed = drain_until(&mut store, |s| !s.busy());
+        assert_eq!(landed.len(), 1);
+        assert!(matches!(landed[0].record, Record::Keep), "the id stays");
+        assert!(matches!(
+            store.status(&p, t, Some(c.id())),
+            Some(MaskStatus::Failed(Failure::Read(_)))
+        ));
+        assert!(matches!(store.ask(&p, t, Some(c.id())), Lookup::Failed));
+        assert_eq!(runs_on(&p), 0, "no re-detect over a readable-later file");
+
+        std::fs::remove_dir_all(dir.join(".lightphotos")).unwrap();
+        crate::develop::coverage::write(&p, &c).unwrap();
+        store.retry(&p, t);
+        assert!(matches!(store.ask(&p, t, Some(c.id())), Lookup::Pending));
+        drain_until(&mut store, |s| !s.busy());
+        assert_eq!(
+            store.ready(&p, t).unwrap().id(),
+            c.id(),
+            "Retry reads again"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

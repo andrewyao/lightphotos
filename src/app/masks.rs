@@ -113,7 +113,7 @@ impl App {
                     photo,
                     target,
                     id,
-                    result: Err(CoverageError::Missing),
+                    result: Err(CoverageError::Io("the folder is no longer open".into())),
                 });
                 continue;
             };

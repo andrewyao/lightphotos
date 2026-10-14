@@ -992,6 +992,9 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                         Some(MaskStatus::Failed(Failure::Detect(why))) => {
                             picked.on_hover_text((t.detect_failed)(kind, why))
                         }
+                        Some(MaskStatus::Failed(Failure::Read(why))) => {
+                            picked.on_hover_text((t.detect_read_failed)(kind, why))
+                        }
                         None => picked,
                     };
                     if picked.clicked() {
@@ -1014,7 +1017,9 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                 let retry = matches!(
                     app.mask_status(i),
                     Some(MaskStatus::NothingFound)
-                        | Some(MaskStatus::Failed(Failure::Missing | Failure::Detect(_)))
+                        | Some(MaskStatus::Failed(
+                            Failure::Missing | Failure::Detect(_) | Failure::Read(_)
+                        ))
                 );
                 if retry && ui.button(t.mask_retry).clicked() {
                     out.actions.push(UiAction::RetryDetection(i));
