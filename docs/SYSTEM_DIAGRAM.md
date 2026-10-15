@@ -42,6 +42,7 @@ flowchart LR
         mcp["bin/lightphotos_mcp/<br/>MCP server on stdio"]
         profile["shell/profile.rs<br/>--profile (hotpath)"]
         webshell["web/*<br/>web_fs, web_canvas, analytics"]
+        webmcp["web/web_mcp.rs<br/>WebMCP tools in the browser"]
     end
 
     subgraph appg["App coordinator (app/)"]
@@ -105,6 +106,7 @@ flowchart LR
     drive -- "synthetic events" --> app
     control -- "UserEvent::Control" --> main
     mcp -- "--attach: one request per connection" --> control
+    webmcp -- "UserEvent::Control" --> main
     mcp -- "--folder: render" --> export
     mcp -- "--folder: run_command" --> sidecars
     profile -- "headless phases" --> loader
@@ -159,11 +161,12 @@ flowchart LR
     classDef web stroke:#16a34a,stroke-width:2px,stroke-dasharray:5 3
     class delegate,menu,vision,spool,imageio,applevision,keychain mac
     class nonmac,rawlerdir,crates,rawlercrate nonmac
-    class webshell,fsa,rawrender web
+    class webshell,webmcp,fsa,rawrender web
 ```
 
 `shell/control/tcp.rs` runs only with `--control <port>`, and not in the browser.
-Its threads read the requests. The main thread runs them (`app/control.rs`).
+Its threads read the requests. The main thread runs them (`app/control.rs`). In the
+browser, `web/web_mcp.rs` registers WebMCP tools that send the same requests.
 
 `bin/lightphotos_mcp/` is a separate binary. It links only the lib. With `--attach`, it
 sends each tool call to `shell/control/tcp.rs`. With `--folder`, no app runs: it writes the

@@ -687,8 +687,7 @@ pub(crate) struct App {
     /// `about_to_wait` redraws once it passes, so an animation (a modal's
     /// fade, a collapsing header) finishes with no input to wake the loop.
     pub(crate) repaint_at: Option<Instant>,
-    /// `--control` requests waiting on the frame loop.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Control requests waiting on the frame loop.
     control: control::Pending,
 
     /// The open catalog: the tops of the folder tree, sorted, every folder
@@ -752,7 +751,6 @@ mod bulk_delete;
 mod bursts;
 mod catalog;
 mod commands;
-#[cfg(not(target_arch = "wasm32"))]
 mod control;
 mod coverage;
 mod crop;
@@ -784,13 +782,11 @@ mod presets;
 mod score;
 mod session;
 mod sort;
-#[cfg(not(target_arch = "wasm32"))]
 mod state;
 pub(crate) use coverage::{Failure, MaskStatus};
 pub(crate) use masks::MaskKind;
 pub(crate) use presets::FolderState;
 pub(crate) use sort::{GridSort, SortOrder};
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use state::State;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -975,7 +971,6 @@ impl App {
             status: None,
             occluded: false,
             repaint_at: None,
-            #[cfg(not(target_arch = "wasm32"))]
             control: control::Pending::default(),
             catalog: launch.catalog,
             marks_synced: 0,

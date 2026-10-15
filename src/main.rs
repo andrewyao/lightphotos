@@ -178,7 +178,6 @@ impl ApplicationHandler<UserEvent> for App {
             }
             #[cfg(target_os = "macos")]
             UserEvent::Menu(cmd) => self.run_menu_command(cmd),
-            #[cfg(not(target_arch = "wasm32"))]
             UserEvent::Control(request, reply) => self.answer_control(request, reply),
         }
     }
@@ -400,7 +399,6 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         let poll_delay = self.pump();
-        #[cfg(not(target_arch = "wasm32"))]
         let poll_delay = poll_delay.into_iter().chain(self.poll_control()).min();
         let now = web_time::Instant::now();
         if self.repaint_at.is_some_and(|at| at <= now) {
@@ -737,6 +735,7 @@ fn main() {
         }
     };
     event_loop.set_control_flow(ControlFlow::Wait);
+    web::web_mcp::register(event_loop.create_proxy());
 
     i18n::init();
     jobs::loader::mark("event loop built; constructing App");

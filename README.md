@@ -127,6 +127,8 @@ LIGHTPHOTOS_CONTROL_TOKEN=<32 hex characters> ./target/release/lightphotos --con
 claude mcp add lightphotos -e LIGHTPHOTOS_CONTROL_TOKEN=<the same token> -- /path/to/lightphotos-mcp --attach 7777
 ```
 
+In the browser, the app registers `list_commands`, `run_command` and `get_state` with WebMCP when the browser offers `document.modelContext` (or `navigator.modelContext`, as the `@mcp-b` polyfill does). An agent in the browser then drives the open app with the same requests as the control channel. There is no `screenshot` tool: the agent already sees the page. A browser without WebMCP logs one console line and the app runs as usual.
+
 ## Releasing and packaging
 
 ```sh

@@ -4,7 +4,6 @@
 //! `--control` loopback channel, and the `--drive` and `--profile` headless
 //! runners.
 
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod control;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod dialog;

@@ -25,7 +25,7 @@ use objc2_foundation::{NSArray, NSURL};
 use winit::event_loop::EventLoopProxy;
 
 /// Events delivered from the OS into the winit event loop.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum UserEvent {
     /// Finder (or CLI) asked us to open this image file.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -33,8 +33,8 @@ pub enum UserEvent {
     /// The user chose a command from the menu bar.
     #[cfg(target_os = "macos")]
     Menu(crate::shell::menu::MenuCommand),
-    /// A `--control` request, answered on the sender.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// A control request (`--control`, or WebMCP in the browser), answered on
+    /// its reply.
     Control(crate::shell::control::Request, crate::shell::control::Reply),
 }
 

@@ -1,8 +1,10 @@
-//! The app's side of `--control` (`shell::control`). Answers each request
-//! on the main thread. A `wait` or `screenshot` stays here until the frame
-//! loop can answer it, so neither blocks the thread.
+//! The app's side of the control channel (`shell::control`). Answers each
+//! request on the main thread. A `wait` or `screenshot` stays here until the
+//! frame loop can answer it, so neither blocks the thread.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 use super::{App, State};
 use crate::shell::control::{Answer, ChannelError, Op, Payload, Reply, Request};
@@ -10,6 +12,7 @@ use crate::shell::control::{Answer, ChannelError, Op, Payload, Reply, Request};
 /// Requests the frame loop answers later.
 #[derive(Default)]
 pub(crate) struct Pending {
+    #[cfg(not(target_arch = "wasm32"))]
     shots: Vec<Reply>,
     waits: Vec<(Reply, Instant)>,
 }
@@ -27,7 +30,7 @@ fn json(value: impl serde::Serialize) -> Answer {
 }
 
 impl App {
-    /// Dropping `reply` unanswered tells the connection nothing ran.
+    /// Dropping `reply` unanswered tells the transport nothing ran.
     pub(crate) fn answer_control(&mut self, request: Request, reply: Reply) {
         let Request { op, expires } = request;
         let now = Instant::now();
@@ -40,6 +43,7 @@ impl App {
             Op::Run(cmd) => self.run(*cmd).map_err(Into::into).and_then(json),
             Op::Commands => json(self.listing()),
             Op::State => json(State::of(self)),
+            #[cfg(not(target_arch = "wasm32"))]
             Op::Screenshot => return self.control.shots.push(reply),
             Op::Wait(timeout) => {
                 return self
@@ -54,6 +58,7 @@ impl App {
     /// Answers the held requests. `about_to_wait` calls it after `pump`;
     /// returns how soon to call again.
     pub(crate) fn poll_control(&mut self) -> Option<Duration> {
+        #[cfg(not(target_arch = "wasm32"))]
         for reply in std::mem::take(&mut self.control.shots) {
             let _ = reply.send(self.screenshot());
         }
@@ -89,6 +94,7 @@ impl App {
 
     /// Draws one frame into an offscreen target and reads it back, then
     /// presents to the window again.
+    #[cfg(not(target_arch = "wasm32"))]
     fn screenshot(&mut self) -> Answer {
         let Some(renderer) = self.renderer.as_mut() else {
             let reason = "no screenshot: the window is not ready yet".into();

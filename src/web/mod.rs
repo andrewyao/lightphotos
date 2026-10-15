@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //! The browser shell: the canvas, File System Access folders and exports,
-//! worker-side decode, the thumbnail cache, and page analytics.
+//! worker-side decode, the thumbnail cache, page analytics, and the WebMCP
+//! agent tools.
 
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) mod analytics;
@@ -18,5 +19,7 @@ pub(crate) mod web_exports;
 pub(crate) mod web_folder_store_fs;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod web_fs;
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) mod web_mcp;
 #[cfg(target_arch = "wasm32")]
 pub(crate) mod web_thumb_cache;

@@ -278,7 +278,6 @@ impl App {
         self.grid_range = (start, end);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn grid_range(&self) -> (usize, usize) {
         self.grid_range
     }
@@ -312,7 +311,6 @@ impl App {
             .map(|(_, r)| *r)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn selected_positions(&self) -> Vec<usize> {
         self.selected.iter().copied().collect()
     }
@@ -322,7 +320,6 @@ impl App {
         self.zoom() * 100.0
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn zoom_rel(&self) -> f32 {
         self.zoom_rel
     }

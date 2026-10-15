@@ -29,10 +29,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use winit::event_loop::EventLoopProxy;
 
-use super::{
-    Answer, ChannelError, Failure, Op, Payload, Reply, Request, DEFAULT_WAIT, MAX_WAIT,
-    REPLY_TIMEOUT,
-};
+use super::{Answer, ChannelError, Failure, Op, Payload, Reply, Request, DEFAULT_WAIT};
 use crate::command::Command;
 use crate::shell::macos_delegate::UserEvent;
 
@@ -44,6 +41,7 @@ const TOKEN_ENV: &str = "LIGHTPHOTOS_CONTROL_TOKEN";
 /// How long a connection may go without sending a line before it closes,
 /// so idle clients can't hold every slot.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_WAIT: Duration = Duration::from_secs(60);
 
 /// Splits `--control <port>` out of the arguments. Returns the port, if the
 /// flag is there, and the other arguments in order.
@@ -281,13 +279,10 @@ fn parse_request(line: &[u8], token: &str) -> Result<Op, Failure> {
 
 /// Hands `op` to the main thread and waits for its answer.
 fn ask(app: &impl Fn(Request, Reply) -> bool, op: Op) -> Answer {
-    let patience = match &op {
-        Op::Wait(timeout) => *timeout + REPLY_TIMEOUT,
-        _ => REPLY_TIMEOUT,
-    };
-    let expires = Instant::now() + patience;
+    let request = Request::new(op);
+    let expires = request.expires;
     let (reply, answer) = mpsc::channel();
-    if !app(Request { op, expires }, reply) {
+    if !app(request, reply) {
         return Err(ChannelError::AppClosed.into());
     }
     match answer.recv_timeout(expires.saturating_duration_since(Instant::now())) {
