@@ -1,0 +1,34 @@
+# The Presets button and a folder preset on three photos, then one undo.
+# Run from a directory holding `presets/`, a folder of Lightroom .xmp
+# presets with a `Creative` group of at least eight presets, on a
+# make-fixture.sh folder:
+#   lightphotos --drive presets.txt --drive-out out --catalog-dir cats photos
+# `applied` shows the popup open under the button at the far right of the
+# Adjustments heading, its groups, the Creative group open, and the first
+# three thumbnails changed; `undone` shows all three back as they were
+# after one Cmd+Z. cats/default.lightphotos/presets.json lists the folder.
+size 1200 800
+idle
+run {"id":"preset.add_folder","params":{"path":"presets"}}
+idle
+click-cell 0
+click-cell 1 shift
+click-cell 2 shift
+# The Sliders page, then the Presets button at the right of its heading.
+click 1176 60
+idle
+click 1121 64
+idle
+shot popup
+# The Creative group's header, then its eighth row.
+click 900 164
+idle
+click 928 332
+idle
+shot applied
+state
+key cmd+z
+idle
+state
+shot undone
+quit
