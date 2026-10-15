@@ -104,7 +104,9 @@ impl App {
         }
         self.preset_name_edit = None;
         match target {
-            None => self.save_preset_from_shown(&name),
+            None => {
+                self.save_preset_from_shown(&name);
+            }
             Some(id) => self.rename_preset(id, &name),
         }
     }
@@ -144,16 +146,16 @@ impl App {
 
     /// Saves the shown photo's tone settings under `name`, with no crop,
     /// rotation or touch-ups, so the look can be applied to any other photo.
-    fn save_preset_from_shown(&mut self, name: &str) {
+    /// Returns the stored name, or `None` when the library could not take it.
+    pub(super) fn save_preset_from_shown(&mut self, name: &str) -> Option<String> {
         let tone = self.current_adjustments().tone_only();
-        let Some(stored) = self.presets.add(name, tone, Vec::new()) else {
-            return;
-        };
+        let stored = self.presets.add(name, tone, Vec::new())?;
         self.set_status(
             StatusKind::Success,
             (crate::i18n::t().saved_preset)(&stored),
         );
         self.request_redraw();
+        Some(stored)
     }
 
     /// Applies a preset to every photo the keyboard acts on, with no

@@ -76,6 +76,8 @@ pub enum Command {
     PasteSettings(PhotosParams),
     #[serde(rename = "preset.apply")]
     Preset(PresetParams),
+    #[serde(rename = "preset.save")]
+    SavePreset(PresetSaveParams),
     #[serde(rename = "preset.add_folder")]
     AddPresetFolder(PresetFolderParams),
     #[serde(rename = "export")]
@@ -568,6 +570,7 @@ fn apply_to_record(
         | Command::CopySettings(_)
         | Command::PasteSettings(_)
         | Command::Preset(_)
+        | Command::SavePreset(_)
         | Command::AddPresetFolder(_)
         | Command::Export(_)
         | Command::Undo => return Err(CommandError::NeedsApp),
@@ -841,6 +844,24 @@ pub struct PresetParams {
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
+pub struct PresetSaveParams {
+    pub name: String,
+}
+
+impl PresetSaveParams {
+    pub fn validate(&self) -> Result<(), CommandError> {
+        if self.name.trim().is_empty() {
+            return Err(CommandError::bad_params(
+                "preset.save",
+                "name is blank; give the preset a name".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PresetFolderParams {
     pub path: PathBuf,
 }
@@ -1027,6 +1048,7 @@ impl Command {
             CopySettings(_) => "settings.copy",
             PasteSettings(_) => "settings.paste",
             Preset(_) => "preset.apply",
+            SavePreset(_) => "preset.save",
             AddPresetFolder(_) => "preset.add_folder",
             Export(_) => "export",
             Undo => "edit.undo",
@@ -1052,7 +1074,7 @@ impl Command {
             Export(p) => Some(&p.photos),
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
             | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
-            | AddPresetFolder(_) | Undo => None,
+            | SavePreset(_) | AddPresetFolder(_) | Undo => None,
         }
     }
 
@@ -1133,6 +1155,11 @@ impl Command {
             Preset(_) => (
                 "Apply a preset by name: a saved one, or one from a preset folder. Give \
                  `group` when several preset folders hold that name.",
+                false,
+            ),
+            SavePreset(_) => (
+                "Save the Loupe photo's develop settings, less its crop and straighten, as \
+                 a new preset named `name`, which no saved preset has.",
                 false,
             ),
             AddPresetFolder(_) => (
@@ -1257,6 +1284,9 @@ impl Command {
                 name: "Golden".into(),
                 group: None,
                 photos: Photos::Selected,
+            }),
+            Command::SavePreset(PresetSaveParams {
+                name: "Golden".into(),
             }),
             Command::AddPresetFolder(PresetFolderParams {
                 path: PathBuf::from("/Users/me/Presets"),
@@ -1513,6 +1543,22 @@ mod tests {
             Command::parse(r#"{"id":"settings.copy","params":{"items":["sparkle"]}}"#),
             Err(CommandError::BadParams { .. })
         ));
+    }
+
+    #[test]
+    fn preset_save_takes_a_name_and_refuses_a_blank_one() {
+        let save = |json: &str| match Command::parse(json) {
+            Ok(Command::SavePreset(p)) => p,
+            other => panic!("{other:?}"),
+        };
+        let p = save(r#"{"id":"preset.save","params":{"name":"Golden"}}"#);
+        assert_eq!((p.name.as_str(), p.validate()), ("Golden", Ok(())));
+        let blank = save(r#"{"id":"preset.save","params":{"name":"  "}}"#);
+        assert!(matches!(
+            blank.validate(),
+            Err(CommandError::BadParams { .. })
+        ));
+        assert!(Command::parse(r#"{"id":"preset.save"}"#).is_err());
     }
 
     #[test]

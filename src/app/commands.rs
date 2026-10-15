@@ -53,6 +53,10 @@ impl App {
                 return Err(CommandError::NeedsView { view: View::Grid });
             }
             Command::Filter(p) => p.validate()?,
+            Command::SavePreset(_) if !loupe => {
+                return Err(CommandError::NeedsView { view: View::Loupe });
+            }
+            Command::SavePreset(p) => p.validate()?,
             Command::Rotate(p) if p.photos.is_selected() && !loupe => {
                 return Err(CommandError::NeedsView { view: View::Loupe });
             }
@@ -407,6 +411,30 @@ impl App {
                     .ok_or_else(|| failed(format!("preset `{}` is gone", p.name)))?;
                 let n = self.apply_look_to(&look, crate::develop::copy::CopyItems::LOOK, &paths);
                 done(n)
+            }
+            Command::SavePreset(p) => {
+                if self.shown.path().is_none() {
+                    return Err(CommandError::NoPhotos);
+                }
+                // The prompt suffixes a taken name, but a caller that
+                // applies by name would then reach the older preset.
+                if self.presets.has_name(&p.name) {
+                    return Err(CommandError::Failed {
+                        reason: format!(
+                            "a preset named `{}` exists; pick another name",
+                            p.name.trim()
+                        ),
+                    });
+                }
+                if self.save_preset_from_shown(&p.name).is_none() {
+                    let reason = self
+                        .presets
+                        .take_error()
+                        .unwrap_or_else(|| "the preset library has no room left".into());
+                    self.set_status(StatusKind::Error, reason.clone());
+                    return Err(CommandError::Failed { reason });
+                }
+                done(1)
             }
             Command::AddPresetFolder(p) => {
                 self.add_preset_folder(&p.path)
@@ -1526,6 +1554,69 @@ mod tests {
         assert!(paths
             .iter()
             .all(|p| app.folder_store.adjustments(p) == Adjustments::default()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An app in the Loupe on photo 0, with an exposure of 0.8 on it.
+    fn loupe_on_an_edit(tag: &str) -> (App, PathBuf, Vec<PathBuf>) {
+        let (mut app, dir, paths) = folder_app(tag, 2);
+        app.select_single(0);
+        run(
+            &mut app,
+            r#"{"id":"develop.set","params":{"controls":{"exposure":0.8}}}"#,
+        )
+        .unwrap();
+        run(&mut app, r#"{"id":"view.mode","params":{"mode":"loupe"}}"#).unwrap();
+        app.shown = Shown::Preview(paths[0].clone(), 100, 100);
+        (app, dir, paths)
+    }
+
+    #[test]
+    fn preset_save_then_preset_apply_lays_the_look_on_another_photo() {
+        let (mut app, dir, paths) = loupe_on_an_edit("cmd-preset-save");
+        run(
+            &mut app,
+            r#"{"id":"preset.save","params":{"name":"  Bright  "}}"#,
+        )
+        .unwrap();
+        run(
+            &mut app,
+            r#"{"id":"preset.apply","params":{"name":"Bright","photos":["1.jpg"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(app.folder_store.adjustments(&paths[1]).exposure, 0.8);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preset_save_refuses_a_blank_or_taken_name_and_the_grid() {
+        let (mut app, dir, _) = loupe_on_an_edit("cmd-preset-save-bad");
+        assert!(matches!(
+            run(&mut app, r#"{"id":"preset.save","params":{"name":" \t "}}"#),
+            Err(CommandError::BadParams { .. })
+        ));
+        assert!(app.presets.presets().is_empty());
+        run(
+            &mut app,
+            r#"{"id":"preset.save","params":{"name":"Bright"}}"#,
+        )
+        .unwrap();
+        let Err(CommandError::Failed { reason }) = run(
+            &mut app,
+            r#"{"id":"preset.save","params":{"name":"bright"}}"#,
+        ) else {
+            panic!("a taken name saved");
+        };
+        assert!(reason.contains("exists"), "{reason}");
+        assert_eq!(app.presets.presets().len(), 1, "nothing suffixed");
+        run(&mut app, r#"{"id":"view.mode","params":{"mode":"grid"}}"#).unwrap();
+        assert_eq!(
+            run(
+                &mut app,
+                r#"{"id":"preset.save","params":{"name":"Other"}}"#
+            ),
+            Err(CommandError::NeedsView { view: View::Loupe })
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

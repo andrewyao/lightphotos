@@ -222,13 +222,7 @@ impl PresetStore {
         if name.is_empty() {
             return None;
         }
-        let free = |candidate: &str| {
-            let key = candidate.to_lowercase();
-            !self
-                .presets
-                .iter()
-                .any(|p| Some(p.id) != keep && p.name.to_lowercase() == key)
-        };
+        let free = |candidate: &str| !self.taken(candidate, keep);
         if free(name) {
             return Some(name.to_string());
         }
@@ -240,6 +234,19 @@ impl PresetStore {
             }
             n += 1;
         }
+    }
+
+    /// Whether a preset other than `keep` has `name`, ignoring case.
+    fn taken(&self, name: &str, keep: Option<u64>) -> bool {
+        let key = name.to_lowercase();
+        self.presets
+            .iter()
+            .any(|p| Some(p.id) != keep && p.name.to_lowercase() == key)
+    }
+
+    /// Whether [`PresetStore::add`] would have to suffix `name`.
+    pub fn has_name(&self, name: &str) -> bool {
+        self.taken(name.trim(), None)
     }
 
     fn writable(&mut self) -> bool {
