@@ -135,19 +135,13 @@ impl App {
                     continue;
                 }
             };
+            let notes = crate::persist::preset_folders::notes(&imported);
             let name = imported.name.unwrap_or_else(|| {
                 path.file_stem()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into()
             });
-            let mut notes = Vec::new();
-            if !imported.dropped.is_empty() {
-                notes.push((t.preset_import_note)(&imported.dropped.join(", ")));
-            }
-            if imported.monochrome {
-                notes.push(t.preset_monochrome_note.to_string());
-            }
             looks.push((name, imported.adj, notes));
         }
 

@@ -18,8 +18,6 @@ use crate::develop::{Adjustments, ColorAxis, SliderId, SLIDERS};
 pub struct Imported {
     pub name: Option<String>,
     /// `crs:Group`, the folder Lightroom files the preset under.
-    // Read by the preset-folder scan, which a later commit wires in.
-    #[allow(dead_code)]
     pub group: Option<String>,
     pub adj: Adjustments,
     /// `crs:` fields Lightroom set that have no field here.
