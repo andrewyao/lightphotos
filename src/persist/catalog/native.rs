@@ -288,14 +288,14 @@ impl Writer {
                     let bytes = q.latest.remove(&file).flatten();
                     q.in_flight += 1;
                     drop(q);
-                    let result = perform(&file, bytes.as_deref());
+                    // The error goes out before the write counts as done, so
+                    // a flush that wakes on the count always collects it.
+                    if let Err(e) = perform(&file, bytes.as_deref()) {
+                        let _ = done_tx.send(e);
+                    }
                     let mut q = lock.lock().unwrap_or_else(PoisonError::into_inner);
                     q.in_flight -= 1;
                     wake.notify_all();
-                    drop(q);
-                    if let Err(e) = result {
-                        let _ = done_tx.send(e);
-                    }
                 }
             });
         match spawned {
