@@ -57,6 +57,11 @@ impl App {
                 return Err(CommandError::NeedsView { view: View::Loupe });
             }
             Command::SavePreset(p) => p.validate()?,
+            Command::PasteSettings(_) if !self.has_copied_settings() => {
+                return Err(CommandError::Failed {
+                    reason: "nothing is copied; run settings.copy first".into(),
+                });
+            }
             Command::Rotate(p) if p.photos.is_selected() && !loupe => {
                 return Err(CommandError::NeedsView { view: View::Loupe });
             }
@@ -391,11 +396,6 @@ impl App {
             }
             Command::PasteSettings(p) => {
                 let paths = self.resolve(&p.photos)?;
-                if !self.has_copied_settings() {
-                    return Err(CommandError::Failed {
-                        reason: "nothing is copied; run settings.copy first".into(),
-                    });
-                }
                 let n = paths.len();
                 self.paste_settings_onto(paths);
                 done(n)
@@ -1536,6 +1536,13 @@ mod tests {
     #[test]
     fn settings_paste_with_nothing_copied_and_a_copy_of_two_photos_fail() {
         let (mut app, dir, paths) = folder_app("cmd-paste-bad", 2);
+        assert!(
+            matches!(
+                run(&mut app, r#"{"id":"settings.paste"}"#),
+                Err(CommandError::Failed { .. })
+            ),
+            "with nothing selected too, the missing copy is what to fix"
+        );
         app.select_all();
         let Err(CommandError::Failed { reason }) = run(&mut app, r#"{"id":"settings.paste"}"#)
         else {
