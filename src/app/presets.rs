@@ -37,6 +37,21 @@ impl FolderState {
 /// A finished scan of one folder.
 pub(crate) type FolderScan = (PathBuf, FolderState);
 
+/// A running scan's results, and the flag that stops it. Dropping the handle
+/// stops the scan, so a rescan or a catalog switch never leaves an old walk
+/// reading on.
+pub(crate) struct ScanHandle {
+    rx: Receiver<FolderScan>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for ScanHandle {
+    fn drop(&mut self) {
+        self.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// A folder preset's group and name, as `preset.apply` lists a clash.
 fn label(p: &FolderPreset) -> String {
     format!("{} / {}", p.group, p.name)
@@ -340,7 +355,7 @@ impl App {
         let picking = self.poll_preset_pick();
         #[cfg(not(target_arch = "wasm32"))]
         let picking = false;
-        let Some(rx) = &self.preset_scan else {
+        let Some(ScanHandle { rx, .. }) = &self.preset_scan else {
             return picking;
         };
         let mut landed = Vec::new();
@@ -441,47 +456,54 @@ impl App {
 }
 
 /// Scans `folders` in order on a thread of its own, sending each result as
-/// it lands. The thread stops early once the receiver is dropped.
+/// it lands. Dropping the handle stops the walk mid-folder.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_scan(folders: Vec<PathBuf>, _ask: bool) -> Result<Receiver<FolderScan>, String> {
+fn spawn_scan(folders: Vec<PathBuf>, _ask: bool) -> Result<ScanHandle, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
     let (tx, rx) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let stop = cancel.clone();
     std::thread::Builder::new()
         .name("preset-scan".into())
         .spawn(move || {
             for folder in folders {
                 use crate::persist::preset_folders::{scan, LIMITS};
-                let state = FolderState::from_scan(scan(&folder, &LIMITS));
-                if tx.send((folder, state)).is_err() {
+                let state = FolderState::from_scan(scan(&folder, &LIMITS, &stop));
+                if stop.load(Ordering::Relaxed) || tx.send((folder, state)).is_err() {
                     return;
                 }
             }
         })
         .map_err(|e| e.to_string())?;
-    Ok(rx)
+    Ok(ScanHandle { rx, cancel })
 }
 
 /// The browser's scan: each folder through its kept handle, one after
 /// another on the page's own task. A folder the browser withholds access to
 /// waits for a click to `ask`.
 #[cfg(target_arch = "wasm32")]
-fn spawn_scan(folders: Vec<PathBuf>, ask: bool) -> Result<Receiver<FolderScan>, String> {
+fn spawn_scan(folders: Vec<PathBuf>, ask: bool) -> Result<ScanHandle, String> {
     use crate::web::web_fs;
+    use std::sync::atomic::{AtomicBool, Ordering};
     let (tx, rx) = std::sync::mpsc::channel();
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let stop = cancel.clone();
     wasm_bindgen_futures::spawn_local(async move {
         for folder in folders {
             let state = match web_fs::reopen_preset_folder(&folder.to_string_lossy(), ask).await {
-                Ok(Some(handle)) => {
-                    FolderState::from_scan(Ok(web_fs::scan_preset_folder(&folder, handle).await))
-                }
+                Ok(Some(handle)) => FolderState::from_scan(Ok(web_fs::scan_preset_folder(
+                    &folder, handle, &stop,
+                )
+                .await)),
                 Ok(None) => FolderState::NeedsPermission,
                 Err(e) => FolderState::Unavailable(e),
             };
-            if tx.send((folder, state)).is_err() {
+            if stop.load(Ordering::Relaxed) || tx.send((folder, state)).is_err() {
                 return;
             }
         }
     });
-    Ok(rx)
+    Ok(ScanHandle { rx, cancel })
 }
 
 #[cfg(test)]
@@ -829,9 +851,17 @@ pub(in crate::app) mod tests {
         );
         app.catalog.add_preset_folder(&presets);
         let (stale_tx, stale_rx) = std::sync::mpsc::channel();
-        app.preset_scan = Some(stale_rx);
+        let stale_cancel = std::sync::Arc::default();
+        app.preset_scan = Some(ScanHandle {
+            rx: stale_rx,
+            cancel: std::sync::Arc::clone(&stale_cancel),
+        });
 
         app.rescan_preset_folders(false);
+        assert!(
+            stale_cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "the rescan stops the old walk"
+        );
         let stale = FolderState::Ready {
             presets: vec![FolderPreset {
                 path: presets.join("Old.xmp"),

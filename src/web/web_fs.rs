@@ -326,6 +326,7 @@ pub async fn reopen_preset_folder(
 pub async fn scan_preset_folder(
     root: &Path,
     handle: FileSystemDirectoryHandle,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> crate::persist::preset_folders::Scan {
     use crate::persist::preset_folders::{is_preset_file, read_preset, skips_dir, Scan, LIMITS};
     let mut out = Scan::default();
@@ -336,6 +337,9 @@ pub async fn scan_preset_folder(
             continue;
         };
         for (name, child) in children {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                break 'walk;
+            }
             let path = rel.join(&name);
             match child.kind() {
                 FileSystemHandleKind::Directory => {

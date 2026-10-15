@@ -665,7 +665,7 @@ pub(crate) struct App {
     preset_folders: Vec<(PathBuf, presets::FolderState)>,
     /// The latest scan's results. A rescan replaces it, so an older scan's
     /// results are dropped with its receiver.
-    preset_scan: Option<Receiver<presets::FolderScan>>,
+    preset_scan: Option<presets::ScanHandle>,
     /// The browser's Add preset folder… picker, while it is open: the kept
     /// name of the folder picked.
     #[cfg(target_arch = "wasm32")]

@@ -134,10 +134,16 @@ pub(crate) fn notes(imported: &Imported) -> Vec<String> {
 
 /// Walks `root` for presets. `Err` only when the root itself cannot be read;
 /// a bad file or subfolder below it is skipped, never an error. Symlink loops
-/// are cut by remembering each directory's canonical path.
+/// are cut by remembering each directory's canonical path. Setting `cancel`
+/// stops the walk where it is.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn scan(root: &Path, limits: &Limits) -> Result<Scan, String> {
+pub(crate) fn scan(
+    root: &Path,
+    limits: &Limits,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Scan, String> {
     use std::collections::{HashSet, VecDeque};
+    use std::sync::atomic::Ordering;
 
     std::fs::read_dir(root).map_err(|e| e.to_string())?;
     let mut out = Scan::default();
@@ -159,6 +165,9 @@ pub(crate) fn scan(root: &Path, limits: &Limits) -> Result<Scan, String> {
         let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
         entries.sort();
         for path in entries {
+            if cancel.load(Ordering::Relaxed) {
+                break 'walk;
+            }
             let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else {
                 continue;
             };
@@ -212,6 +221,7 @@ fn read_capped(path: &Path, max: u64) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::app::test_support::temp_folder;
+    use std::sync::atomic::AtomicBool;
 
     fn preset(name: Option<&str>, group: Option<&str>, exposure: &str) -> String {
         let name = name.map_or(String::new(), |n| {
@@ -261,7 +271,7 @@ mod tests {
             &preset(Some("Night"), Some("Moody Looks"), "-1"),
         );
 
-        let scan = scan(&root, &LIMITS).unwrap();
+        let scan = scan(&root, &LIMITS, &AtomicBool::new(false)).unwrap();
 
         assert_eq!(
             listed(&scan),
@@ -312,7 +322,7 @@ mod tests {
             &preset(Some("Inner"), None, "0"),
         );
 
-        let scan = scan(&root, &LIMITS).unwrap();
+        let scan = scan(&root, &LIMITS, &AtomicBool::new(false)).unwrap();
 
         assert_eq!(
             listed(&scan).iter().map(|(_, n)| *n).collect::<Vec<_>>(),
@@ -347,7 +357,7 @@ mod tests {
             &preset(Some("Nine"), Some("G"), "0"),
         );
 
-        let scan = scan(&root, &LIMITS).unwrap();
+        let scan = scan(&root, &LIMITS, &AtomicBool::new(false)).unwrap();
 
         assert_eq!(listed(&scan), [("G", "Eight")]);
         let _ = std::fs::remove_dir_all(&root);
@@ -361,7 +371,7 @@ mod tests {
         }
         let limits = Limits { files: 3, ..LIMITS };
 
-        let scan = scan(&root, &limits).unwrap();
+        let scan = scan(&root, &limits, &AtomicBool::new(false)).unwrap();
 
         assert_eq!(scan.presets.len() + scan.skipped, 3);
         let _ = std::fs::remove_dir_all(&root);
@@ -377,15 +387,29 @@ mod tests {
         std::os::unix::fs::symlink(&root, root.join("A/back")).unwrap();
         std::os::unix::fs::symlink(root.join("A"), root.join("again")).unwrap();
 
-        let scan = scan(&root, &LIMITS).unwrap();
+        let scan = scan(&root, &LIMITS, &AtomicBool::new(false)).unwrap();
 
         assert_eq!(listed(&scan), [("A", "Warm")]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Catches a superseded scan walking on to the end of a large folder.
+    #[test]
+    fn a_cancelled_walk_reads_nothing_more() {
+        let root = temp_folder("presets-cancel");
+        for i in 0..3 {
+            write(&root, &format!("{i}.xmp"), &preset(None, None, "0"));
+        }
+
+        let scan = scan(&root, &LIMITS, &AtomicBool::new(true)).unwrap();
+
+        assert_eq!(scan.presets.len() + scan.skipped, 0);
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_missing_root_is_an_error_not_an_empty_folder() {
         let root = temp_folder("presets-missing").join("gone");
-        assert!(scan(&root, &LIMITS).is_err());
+        assert!(scan(&root, &LIMITS, &AtomicBool::new(false)).is_err());
     }
 }
