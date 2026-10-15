@@ -78,6 +78,13 @@ async fn drive(key: Key, mut json: Option<String>) {
     }
 }
 
+/// The catalogs store's key for catalog `name`'s preset folders. A catalog
+/// name holds no NUL, so no catalog is ever called this, and builds that
+/// list the store's keys as catalogs pass over it.
+fn presets_key(name: &str) -> String {
+    format!("presets\0{name}")
+}
+
 /// The marks store's key for `dir` in catalog `name`. A catalog name holds
 /// no NUL, so the split is unambiguous.
 fn shard_key(name: &str, dir: &Path) -> String {
@@ -89,6 +96,7 @@ impl Catalog {
     pub(crate) fn pending(at: CatalogRef) -> Catalog {
         let mut catalog = Catalog::empty(at);
         catalog.folders = Record::pending();
+        catalog.preset_folders = Record::pending();
         catalog
     }
 
@@ -98,6 +106,16 @@ impl Catalog {
         };
         match super::record_bytes(folders).and_then(utf8) {
             Ok(json) => write((Store::Catalogs, self.name().to_string()), Some(json)),
+            Err(e) => self.note_error(e),
+        }
+    }
+
+    pub(super) fn save_presets(&mut self) {
+        let Record::Loaded(folders) = &self.preset_folders else {
+            return;
+        };
+        match super::record_bytes(folders).and_then(utf8) {
+            Ok(json) => write((Store::Catalogs, presets_key(self.name())), Some(json)),
             Err(e) => self.note_error(e),
         }
     }

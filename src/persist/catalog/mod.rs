@@ -7,9 +7,14 @@
 //! open folder's records, so it can be thrown away and rebuilt at any time.
 //!
 //! Natively a catalog is a directory `<name>.lightphotos` holding
-//! `catalog.json` and one `marks/<fnv1a>.json` shard per photo directory.
-//! The browser keeps each catalog in IndexedDB: a record per catalog and a
-//! shard per photo directory, written by `web.rs`.
+//! `catalog.json`, `presets.json` and one `marks/<fnv1a>.json` shard per
+//! photo directory. The browser keeps each catalog in IndexedDB: a record
+//! per catalog, a preset-folders record, and a shard per photo directory,
+//! written by `web.rs`.
+//!
+//! The preset folders have a record of their own, never a field in
+//! `catalog.json`: v0.1.26 and v0.1.27 rewrite that file as `{v, folders}`
+//! and would drop a field they don't know.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -269,6 +274,52 @@ impl Record {
         }
     }
 
+    /// Add `dir` by [`add_root`]'s rule. Returns whether the list changed;
+    /// past [`MAX_FOLDERS`] the add is refused.
+    fn add(&mut self, dir: &Path) -> Result<bool, String> {
+        let roots = self.folders_mut();
+        if roots.len() >= MAX_FOLDERS && !roots.iter().any(|r| dir.starts_with(r)) {
+            return Err(too_many_folders(MAX_FOLDERS));
+        }
+        let changed = add_root(roots, dir);
+        if let Record::Pending { removed, .. } = self {
+            removed.retain(|r| r != dir);
+        }
+        Ok(changed)
+    }
+
+    /// Drop `dir`. Returns whether it was listed. While the record is out
+    /// the removal is remembered, so a record that lists `dir` does not
+    /// bring it back.
+    fn remove(&mut self, dir: &Path) -> bool {
+        let roots = self.folders_mut();
+        let before = roots.len();
+        roots.retain(|r| r != dir);
+        let changed = roots.len() != before;
+        if let Record::Pending { removed, .. } = self {
+            if changed && !removed.iter().any(|r| r == dir) {
+                removed.push(dir.to_path_buf());
+            }
+        }
+        changed
+    }
+
+    /// The stored list arrived. The changes made while it was pending apply
+    /// on top of it. Returns whether that differs from what is stored.
+    fn load(&mut self, stored: &[PathBuf]) -> bool {
+        let folders = self.merged_onto(stored);
+        let merged = folders != stored;
+        *self = Record::Loaded(folders);
+        merged
+    }
+
+    /// The stored list could not be read. What is in memory stays for this
+    /// visit, and the store is never written over.
+    fn unreadable(&mut self) {
+        let folders = std::mem::take(self.folders_mut());
+        *self = Record::Unreadable(folders);
+    }
+
     /// `base`, the stored record or a first record's seed, with the changes
     /// made while pending: `(base ∪ added) − removed`, tidied like the tree.
     fn merged_onto(&self, base: &[PathBuf]) -> Vec<PathBuf> {
@@ -300,10 +351,12 @@ pub(crate) fn add_root(roots: &mut Vec<PathBuf>, dir: &Path) -> bool {
     true
 }
 
-/// One open catalog: its roots and the marks copy's write queue.
+/// One open catalog: its roots, its preset folders and the marks copy's
+/// write queue.
 pub(crate) struct Catalog {
     at: CatalogRef,
     folders: Record,
+    preset_folders: Record,
     /// Signature of the shard last queued per photo directory, so a
     /// projection that changed nothing writes nothing.
     written: HashMap<PathBuf, u64>,
@@ -330,6 +383,7 @@ impl Catalog {
         Catalog {
             at,
             folders: Record::Loaded(Vec::new()),
+            preset_folders: Record::Loaded(Vec::new()),
             written: HashMap::new(),
             #[cfg(not(target_arch = "wasm32"))]
             writer: None,
@@ -358,34 +412,19 @@ impl Catalog {
     /// Add `dir` as a root, by [`add_root`]'s rule. Returns whether the list
     /// changed. Past [`MAX_FOLDERS`] the add is refused and reported.
     pub(crate) fn add_folder(&mut self, dir: &Path) -> bool {
-        let roots = self.folders.folders_mut();
-        if roots.len() >= MAX_FOLDERS && !roots.iter().any(|r| dir.starts_with(r)) {
-            self.last_error = Some(too_many_folders(MAX_FOLDERS));
-            return false;
-        }
-        let changed = add_root(roots, dir);
-        if let Record::Pending { removed, .. } = &mut self.folders {
-            removed.retain(|r| r != dir);
-        }
+        let changed = self.folders.add(dir).unwrap_or_else(|e| {
+            self.last_error = Some(e);
+            false
+        });
         if changed {
             self.save_record();
         }
         changed
     }
 
-    /// Drop `dir` from the roots. Returns whether it was listed. While the
-    /// record is out the removal is remembered, so a record that lists
-    /// `dir` does not bring it back.
+    /// Drop `dir` from the roots. Returns whether it was listed.
     pub(crate) fn remove_folder(&mut self, dir: &Path) -> bool {
-        let roots = self.folders.folders_mut();
-        let before = roots.len();
-        roots.retain(|r| r != dir);
-        let changed = roots.len() != before;
-        if let Record::Pending { removed, .. } = &mut self.folders {
-            if changed && !removed.iter().any(|r| r == dir) {
-                removed.push(dir.to_path_buf());
-            }
-        }
+        let changed = self.folders.remove(dir);
         if changed {
             self.save_record();
         }
@@ -395,11 +434,67 @@ impl Catalog {
     /// The stored record arrived. The changes made while it was pending
     /// apply on top of it.
     fn load_record(&mut self, stored: Vec<PathBuf>) {
-        let folders = self.folders.merged_onto(&stored);
-        let merged = folders != stored;
-        self.folders = Record::Loaded(folders);
-        if merged {
+        if self.folders.load(&stored) {
             self.save_record();
+        }
+    }
+
+    /// The folders presets are read from, sorted, none inside another.
+    // The app calls this from the next commit.
+    #[allow(dead_code)]
+    pub(crate) fn preset_folders(&self) -> &[PathBuf] {
+        self.preset_folders.folders()
+    }
+
+    /// Add a preset folder, by [`add_root`]'s rule: a folder inside one
+    /// already listed is already scanned. Returns whether the list changed.
+    /// Writes only the preset-folders record.
+    // The app calls this from the next commit.
+    #[allow(dead_code)]
+    pub(crate) fn add_preset_folder(&mut self, dir: &Path) -> bool {
+        let changed = self.preset_folders.add(dir).unwrap_or_else(|e| {
+            self.last_error = Some(e);
+            false
+        });
+        if changed {
+            self.save_presets();
+        }
+        changed
+    }
+
+    /// Drop a preset folder. Returns whether it was listed.
+    // The app calls this from the next commit.
+    #[allow(dead_code)]
+    pub(crate) fn remove_preset_folder(&mut self, dir: &Path) -> bool {
+        let changed = self.preset_folders.remove(dir);
+        if changed {
+            self.save_presets();
+        }
+        changed
+    }
+
+    /// The stored preset-folders record arrived: its JSON, `None` when
+    /// there is none, or why it could not be read. A missing one is an empty
+    /// list. One that cannot be read or parsed is an error, and the catalog
+    /// never writes over it.
+    // The browser lands its record from the commit that loads it.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn land_presets(
+        &mut self,
+        stored: Result<Option<Vec<u8>>, String>,
+    ) -> Result<(), String> {
+        let parsed = stored.and_then(|bytes| bytes.map(|b| parse_record(&b)).transpose());
+        match parsed {
+            Ok(folders) => {
+                if self.preset_folders.load(&folders.unwrap_or_default()) {
+                    self.save_presets();
+                }
+                Ok(())
+            }
+            Err(e) => {
+                self.preset_folders.unreadable();
+                Err(format!("{}: {e}", self.name()))
+            }
         }
     }
 
@@ -427,8 +522,7 @@ impl Catalog {
                 self.save_record();
             }
             Err(e) => {
-                let folders = std::mem::take(self.folders.folders_mut());
-                self.folders = Record::Unreadable(folders);
+                self.folders.unreadable();
                 return Err(format!("{}: {e}", self.name()));
             }
         }

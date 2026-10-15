@@ -18,6 +18,7 @@ use super::{Catalog, CatalogError, CatalogRef, Record};
 use crate::paths::{remove_if_present, write_atomic_in_dir};
 
 const RECORD_FILE: &str = "catalog.json";
+const PRESETS_FILE: &str = "presets.json";
 const MARKS_DIR: &str = "marks";
 
 static DEFAULT_DIR_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
@@ -72,8 +73,13 @@ impl Catalog {
             Ok(None) => Vec::new(),
             Err(e) => return Err(e),
         };
+        let presets = path.join(PRESETS_FILE);
         let mut catalog = Catalog::on_disk(at);
         catalog.load_record(folders);
+        let stored = read_capped(&presets, super::MAX_RECORD_BYTES).map_err(|e| e.to_string());
+        if let Err(e) = catalog.land_presets(stored) {
+            catalog.note_error(format!("{}: {e}", presets.display()));
+        }
         Ok(catalog)
     }
 
@@ -104,6 +110,7 @@ impl Catalog {
             .map_err(|e| CatalogError::Io(path.to_path_buf(), e))?;
         let mut catalog = Catalog::on_disk(at);
         catalog.folders = Record::Loaded(tidy);
+        catalog.preset_folders = Record::Loaded(Vec::new());
         Ok(catalog)
     }
 
@@ -123,6 +130,7 @@ impl Catalog {
         let mut catalog = Catalog::empty(at);
         catalog.writer = Some(Writer::new());
         catalog.folders = Record::pending();
+        catalog.preset_folders = Record::pending();
         catalog
     }
 
@@ -156,6 +164,19 @@ impl Catalog {
         };
         match super::record_bytes(folders) {
             Ok(bytes) => writer.put(self.at.path().join(RECORD_FILE), Some(bytes)),
+            Err(e) => self.note_error(e),
+        }
+    }
+
+    pub(super) fn save_presets(&mut self) {
+        let Record::Loaded(folders) = &self.preset_folders else {
+            return;
+        };
+        let Some(writer) = &mut self.writer else {
+            return;
+        };
+        match super::record_bytes(folders) {
+            Ok(bytes) => writer.put(self.at.path().join(PRESETS_FILE), Some(bytes)),
             Err(e) => self.note_error(e),
         }
     }
@@ -511,6 +532,108 @@ mod tests {
         assert!(!cat.remove_folder(&dir.join("p")));
         cat.flush_blocking(Duration::from_secs(10));
         assert!(Catalog::open(at).unwrap().folders().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Catches the list landing in `catalog.json`, which v0.1.26 and
+    /// v0.1.27 rewrite without it, or not coming back on open.
+    #[test]
+    fn preset_folders_round_trip_through_their_own_file() {
+        let dir = scratch("presets-roundtrip");
+        let at = CatalogRef::in_dir(&dir, "c").unwrap();
+        let mut cat = Catalog::create_at(at.clone(), vec![dir.join("photos")]).unwrap();
+        cat.flush_blocking(Duration::from_secs(10));
+        let record = at.path().join(RECORD_FILE);
+        let before = std::fs::read(&record).unwrap();
+
+        assert!(cat.add_preset_folder(&dir.join("Presets/Film")));
+        assert!(cat.add_preset_folder(&dir.join("Presets/Travel")));
+        assert!(
+            !cat.add_preset_folder(&dir.join("Presets/Film/Kodak")),
+            "a folder inside one already listed is already scanned"
+        );
+        cat.flush_blocking(Duration::from_secs(10));
+
+        assert_eq!(
+            std::fs::read(&record).unwrap(),
+            before,
+            "catalog.json is not touched"
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(at.path().join(PRESETS_FILE)).unwrap()).unwrap();
+        assert_eq!(json["v"], 1);
+        let want = [dir.join("Presets/Film"), dir.join("Presets/Travel")];
+        let opened = Catalog::open(at.clone()).unwrap();
+        assert_eq!(opened.preset_folders(), want);
+        assert_eq!(opened.folders(), [dir.join("photos")]);
+        drop(opened);
+
+        assert!(cat.remove_preset_folder(&dir.join("Presets/Film")));
+        assert!(!cat.remove_preset_folder(&dir.join("Presets/Film")));
+        cat.add_folder(&dir.join("more photos"));
+        cat.flush_blocking(Duration::from_secs(10));
+        let opened = Catalog::open(at).unwrap();
+        assert_eq!(opened.preset_folders(), [dir.join("Presets/Travel")]);
+        assert_eq!(
+            opened.folders(),
+            [dir.join("more photos"), dir.join("photos")],
+            "a photo-folder change keeps the preset folders"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A catalog from before preset folders has no `presets.json`.
+    #[test]
+    fn a_catalog_with_no_presets_file_has_no_preset_folders() {
+        let dir = scratch("presets-missing");
+        let at = CatalogRef::in_dir(&dir, "old").unwrap();
+        std::fs::create_dir_all(at.path()).unwrap();
+        std::fs::write(at.path().join(RECORD_FILE), br#"{"v":1,"folders":["/p"]}"#).unwrap();
+
+        let mut cat = Catalog::open(at.clone()).unwrap();
+
+        assert!(cat.preset_folders().is_empty());
+        assert!(cat.take_error().is_none());
+        cat.add_folder(Path::new("/q"));
+        cat.flush_blocking(Duration::from_secs(10));
+        assert!(
+            !at.path().join(PRESETS_FILE).exists(),
+            "a photo-folder change writes no presets file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Catches a broken preset list failing the whole catalog, or being
+    /// replaced by the next add.
+    #[test]
+    fn an_unparseable_presets_file_is_reported_and_never_overwritten() {
+        let dir = scratch("presets-bad");
+        let at = CatalogRef::in_dir(&dir, "c").unwrap();
+        std::fs::create_dir_all(at.path()).unwrap();
+        std::fs::write(at.path().join(RECORD_FILE), br#"{"v":1,"folders":["/p"]}"#).unwrap();
+        let file = at.path().join(PRESETS_FILE);
+        for bad in [
+            &br#"{"v":1,"folders":["/a""#[..],
+            b"[]",
+            b"\xff\xfe",
+            br#"{"v":1,"folders":[7]}"#,
+        ] {
+            std::fs::write(&file, bad).unwrap();
+            let mut cat = Catalog::open(at.clone()).unwrap();
+            assert_eq!(
+                cat.folders(),
+                [PathBuf::from("/p")],
+                "the catalog still opens"
+            );
+            assert!(cat.take_error().is_some(), "{bad:?} is reported");
+            assert!(cat.preset_folders().is_empty());
+
+            assert!(cat.add_preset_folder(Path::new("/presets")));
+            assert_eq!(cat.preset_folders(), [PathBuf::from("/presets")]);
+            assert!(cat.remove_preset_folder(Path::new("/presets")));
+            cat.flush_blocking(Duration::from_secs(10));
+            assert_eq!(std::fs::read(&file).unwrap(), bad, "left for the user");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
