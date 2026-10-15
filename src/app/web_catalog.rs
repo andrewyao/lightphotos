@@ -225,6 +225,9 @@ impl App {
         self.close_folder();
         self.supersede_web_pending_nav();
         self.catalog = catalog;
+        // The new catalog's preset folders are still pending, so this
+        // empties the list and drops the old catalog's scan.
+        self.rescan_preset_folders(false);
         self.web.catalogs.forget_after_load.clear();
         self.expanded.clear();
         self.subdirs.clear();

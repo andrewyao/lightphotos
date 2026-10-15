@@ -753,6 +753,16 @@ pub(in crate::app) mod tests {
         app.switch_catalog(crate::persist::catalog::Catalog::in_memory("empty"));
         assert_eq!(app.folder_presets().count(), 0);
         assert!(app.preset_folders.is_empty());
+
+        app.open_catalog(crate::persist::catalog::CatalogRef::in_dir(&dir, "trip").unwrap());
+        assert!(app.preset_scan.is_some(), "the trip's scan is under way");
+        app.switch_catalog(crate::persist::catalog::Catalog::in_memory("empty"));
+        assert!(
+            app.preset_scan.is_none(),
+            "a switch drops the scan of the catalog it left"
+        );
+        wait_for_scans(&mut app);
+        assert_eq!(app.folder_presets().count(), 0, "so nothing of it lands");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&presets);
     }
