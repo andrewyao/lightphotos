@@ -449,17 +449,15 @@ impl Catalog {
     }
 
     /// Add a preset folder, by [`add_root`]'s rule: a folder inside one
-    /// already listed is already scanned. Returns whether the list changed.
-    /// Writes only the preset-folders record.
-    pub(crate) fn add_preset_folder(&mut self, dir: &Path) -> bool {
-        let changed = self.preset_folders.add(dir).unwrap_or_else(|e| {
-            self.last_error = Some(e);
-            false
-        });
+    /// already listed is already scanned. Returns whether the list changed;
+    /// past [`MAX_FOLDERS`] the add is refused with why. Writes only the
+    /// preset-folders record.
+    pub(crate) fn add_preset_folder(&mut self, dir: &Path) -> Result<bool, String> {
+        let changed = self.preset_folders.add(dir)?;
         if changed {
             self.save_presets();
         }
-        changed
+        Ok(changed)
     }
 
     /// Drop a preset folder. Returns whether it was listed.

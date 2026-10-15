@@ -536,10 +536,11 @@ mod tests {
         let record = at.path().join(RECORD_FILE);
         let before = std::fs::read(&record).unwrap();
 
-        assert!(cat.add_preset_folder(&dir.join("Presets/Film")));
-        assert!(cat.add_preset_folder(&dir.join("Presets/Travel")));
+        assert!(cat.add_preset_folder(&dir.join("Presets/Film")).unwrap());
+        assert!(cat.add_preset_folder(&dir.join("Presets/Travel")).unwrap());
         assert!(
-            !cat.add_preset_folder(&dir.join("Presets/Film/Kodak")),
+            !cat.add_preset_folder(&dir.join("Presets/Film/Kodak"))
+                .unwrap(),
             "a folder inside one already listed is already scanned"
         );
         cat.flush_blocking(Duration::from_secs(10));
@@ -638,7 +639,7 @@ mod tests {
             assert!(cat.take_error().is_none(), "as no failed save");
             assert!(cat.preset_folders().is_empty());
 
-            assert!(cat.add_preset_folder(Path::new("/presets")));
+            assert!(cat.add_preset_folder(Path::new("/presets")).unwrap());
             assert_eq!(cat.preset_folders(), [PathBuf::from("/presets")]);
             assert!(cat.remove_preset_folder(Path::new("/presets")));
             cat.flush_blocking(Duration::from_secs(10));

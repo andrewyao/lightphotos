@@ -242,7 +242,7 @@ impl App {
         if !dir.is_dir() {
             return Err(format!("{} is not a folder", dir.display()));
         }
-        if self.catalog.add_preset_folder(&dir) {
+        if self.catalog.add_preset_folder(&dir)? {
             self.rescan_preset_folders(false);
         }
         Ok(())
@@ -283,11 +283,14 @@ impl App {
         };
         self.preset_pick = None;
         match picked {
-            Ok(name) => {
-                if self.catalog.add_preset_folder(&name) {
-                    self.rescan_preset_folders(false);
-                }
-            }
+            Ok(name) => match self.catalog.add_preset_folder(&name) {
+                Ok(true) => self.rescan_preset_folders(false),
+                Ok(false) => {}
+                Err(e) => self.set_status(
+                    StatusKind::Error,
+                    (crate::i18n::t().preset_folder_add_failed)(&e),
+                ),
+            },
             Err(e) => web_sys::console::log_1(&format!("[presets] no folder picked: {e}").into()),
         }
         false
@@ -296,10 +299,15 @@ impl App {
     /// Add preset folder…: the folder picker, then the add.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn add_preset_folder_dialog(&mut self) {
-        let Some(dir) = crate::shell::dialog::pick_preset_folder() else {
-            return;
-        };
-        if let Err(e) = self.add_preset_folder(&dir) {
+        if let Some(dir) = crate::shell::dialog::pick_preset_folder() {
+            self.add_picked_preset_folder(&dir);
+        }
+    }
+
+    /// A folder the picker returned: added, or the reason it wasn't shown.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn add_picked_preset_folder(&mut self, dir: &Path) {
+        if let Err(e) = self.add_preset_folder(dir) {
             self.set_status(
                 StatusKind::Error,
                 (crate::i18n::t().preset_folder_add_failed)(&e),
@@ -766,7 +774,7 @@ pub(in crate::app) mod tests {
         );
         let at = crate::persist::catalog::CatalogRef::in_dir(&dir, "trip").unwrap();
         let mut trip = crate::persist::catalog::Catalog::create_at(at.clone(), Vec::new()).unwrap();
-        trip.add_preset_folder(&presets);
+        trip.add_preset_folder(&presets).unwrap();
         trip.flush_blocking(std::time::Duration::from_secs(10));
         drop(trip);
 
@@ -843,6 +851,39 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Catches a refused add reported as done, and its reason shown as a
+    /// failed catalog save.
+    #[test]
+    fn a_preset_folder_past_the_cap_is_refused_as_an_add() {
+        let (mut app, dir, _) = folder_app("preset-cap", 1);
+        for i in 0..crate::persist::catalog::MAX_FOLDERS {
+            app.catalog
+                .add_preset_folder(&PathBuf::from(format!("/p{i}")))
+                .unwrap();
+        }
+        let presets = preset_dir("preset-cap-presets", &[]);
+
+        let refused = app.run(Command::AddPresetFolder(
+            crate::command::PresetFolderParams {
+                path: presets.clone(),
+            },
+        ));
+
+        assert!(refused.is_err(), "the command fails: {refused:?}");
+        assert!(!app.catalog.preset_folders().contains(&presets));
+        assert_eq!(app.catalog.take_error(), None, "no catalog save failed");
+
+        app.add_picked_preset_folder(&presets);
+        let t = crate::i18n::t();
+        let status = app.status_text().unwrap_or_default();
+        assert!(
+            status.starts_with(&(t.preset_folder_add_failed)("")),
+            "the picker's add says it failed: {status}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&presets);
+    }
+
     /// A slow scan from before a rescan must not land over the newer one.
     /// The stale sender stands in for that scan's thread.
     #[test]
@@ -852,7 +893,7 @@ pub(in crate::app) mod tests {
             "preset-stale-presets",
             &[("New.xmp", lr_preset("New", "+1", "0"))],
         );
-        app.catalog.add_preset_folder(&presets);
+        app.catalog.add_preset_folder(&presets).unwrap();
         let (stale_tx, stale_rx) = std::sync::mpsc::channel();
         let stale_cancel = std::sync::Arc::default();
         app.preset_scan = Some(ScanHandle {
