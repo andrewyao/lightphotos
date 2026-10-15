@@ -89,7 +89,6 @@ pub enum UiAction {
     /// The Presets popup opened: read the preset folders again.
     RescanPresetFolders,
     /// Pick a folder of Lightroom presets to list in the popup.
-    #[cfg(not(target_arch = "wasm32"))]
     AddPresetFolder,
     /// Stop listing this preset folder's presets.
     RemovePresetFolder(std::path::PathBuf),

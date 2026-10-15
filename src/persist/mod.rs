@@ -10,8 +10,6 @@ pub(crate) mod groups;
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) mod lr_preset;
 pub(crate) mod prefs;
-// The browser's walker arrives in a later commit.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) mod preset_folders;
 pub(crate) mod presets;
 #[cfg(not(target_arch = "wasm32"))]

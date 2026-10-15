@@ -651,6 +651,10 @@ pub(crate) struct App {
     /// The latest scan's results. A rescan replaces it, so an older scan's
     /// results are dropped with its receiver.
     preset_scan: Option<Receiver<presets::FolderScan>>,
+    /// The browser's Add preset folder… picker, while it is open: the kept
+    /// name of the folder picked.
+    #[cfg(target_arch = "wasm32")]
+    preset_pick: Option<Receiver<Result<PathBuf, String>>>,
 
     show_help: bool,
     show_settings: bool,
@@ -947,6 +951,8 @@ impl App {
             preset_name_edit: None,
             preset_folders: Vec::new(),
             preset_scan: None,
+            #[cfg(target_arch = "wasm32")]
+            preset_pick: None,
             show_help: false,
             show_settings: false,
             tour: None,
@@ -983,7 +989,7 @@ impl App {
             egui_ctx,
             egui_state: None,
         };
-        app.rescan_preset_folders();
+        app.rescan_preset_folders(false);
         app
     }
 
@@ -1433,8 +1439,7 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::ImportLrPresets => self.import_lr_presets(),
-                ui::UiAction::RescanPresetFolders => self.rescan_preset_folders(),
-                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::RescanPresetFolders => self.rescan_preset_folders(true),
                 ui::UiAction::AddPresetFolder => self.add_preset_folder_dialog(),
                 ui::UiAction::RemovePresetFolder(dir) => self.remove_preset_folder(&dir),
                 ui::UiAction::NewCatalog => self.new_catalog_dialog(),

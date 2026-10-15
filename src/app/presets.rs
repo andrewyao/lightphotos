@@ -1,6 +1,6 @@
 use super::*;
 use crate::develop::copy::CopySections;
-use crate::persist::preset_folders::{FolderPreset, Scan};
+use crate::persist::preset_folders::FolderPreset;
 use crate::ui::PresetRef;
 
 /// One preset folder's scan.
@@ -13,12 +13,29 @@ pub(crate) enum FolderState {
         /// `.xmp` files that were not develop presets or would not read.
         skipped: usize,
     },
+    /// The browser holds the folder's handle but withholds read access
+    /// until a click asks for it.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    NeedsPermission,
     /// The folder could not be read, with why.
     Unavailable(String),
 }
 
+impl FolderState {
+    /// A scan's outcome as a folder's state.
+    fn from_scan(scan: Result<crate::persist::preset_folders::Scan, String>) -> FolderState {
+        match scan {
+            Ok(scan) => FolderState::Ready {
+                presets: scan.presets,
+                skipped: scan.skipped,
+            },
+            Err(e) => FolderState::Unavailable(e),
+        }
+    }
+}
+
 /// A finished scan of one folder.
-pub(crate) type FolderScan = (PathBuf, Result<Scan, String>);
+pub(crate) type FolderScan = (PathBuf, FolderState);
 
 /// A folder preset's group and name, as `preset.apply` lists a clash.
 fn label(p: &FolderPreset) -> String {
@@ -148,7 +165,9 @@ impl App {
             .iter()
             .flat_map(|(_, state)| match state {
                 FolderState::Ready { presets, .. } => presets.as_slice(),
-                FolderState::Scanning | FolderState::Unavailable(_) => &[],
+                FolderState::Scanning
+                | FolderState::NeedsPermission
+                | FolderState::Unavailable(_) => &[],
             })
     }
 
@@ -206,7 +225,7 @@ impl App {
             return Err(format!("{} is not a folder", dir.display()));
         }
         if self.catalog.add_preset_folder(&dir) {
-            self.rescan_preset_folders();
+            self.rescan_preset_folders(false);
         }
         Ok(())
     }
@@ -216,6 +235,44 @@ impl App {
     #[cfg(target_arch = "wasm32")]
     pub(super) fn add_preset_folder(&mut self, _dir: &Path) -> Result<(), String> {
         Err("the browser adds preset folders through Add preset folder…".into())
+    }
+
+    /// Add preset folder…: the browser's folder picker. The pick lands in
+    /// [`poll_preset_scans`](Self::poll_preset_scans).
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn add_preset_folder_dialog(&mut self) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.preset_pick = Some(rx);
+        wasm_bindgen_futures::spawn_local(async move {
+            let _ = tx.send(crate::web::web_fs::pick_preset_folder().await);
+        });
+    }
+
+    /// A finished browser pick: the folder joins the catalog, or a cancel
+    /// does nothing.
+    #[cfg(target_arch = "wasm32")]
+    fn poll_preset_pick(&mut self) -> bool {
+        let Some(rx) = &self.preset_pick else {
+            return false;
+        };
+        let picked = match rx.try_recv() {
+            Ok(picked) => picked,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.preset_pick = None;
+                return false;
+            }
+        };
+        self.preset_pick = None;
+        match picked {
+            Ok(name) => {
+                if self.catalog.add_preset_folder(&name) {
+                    self.rescan_preset_folders(false);
+                }
+            }
+            Err(e) => web_sys::console::log_1(&format!("[presets] no folder picked: {e}").into()),
+        }
+        false
     }
 
     /// Add preset folder…: the folder picker, then the add.
@@ -234,13 +291,22 @@ impl App {
 
     pub(super) fn remove_preset_folder(&mut self, dir: &Path) {
         if self.catalog.remove_preset_folder(dir) {
-            self.rescan_preset_folders();
+            #[cfg(target_arch = "wasm32")]
+            wasm_bindgen_futures::spawn_local(
+                crate::web::web_catalog_idb::forget_preset_folder_if_unlisted(
+                    self.catalog.name().to_string(),
+                    dir.to_path_buf(),
+                ),
+            );
+            self.rescan_preset_folders(false);
         }
     }
 
     /// Reads the catalog's preset folders again. Each keeps showing its last
-    /// result until the new one lands; a folder no longer listed goes.
-    pub(crate) fn rescan_preset_folders(&mut self) {
+    /// result until the new one lands; a folder no longer listed goes. `ask`
+    /// is for a click, which lets the browser ask for access to a folder it
+    /// withholds; natively it changes nothing.
+    pub(crate) fn rescan_preset_folders(&mut self, ask: bool) {
         let folders = self.catalog.preset_folders().to_vec();
         let mut old = std::mem::take(&mut self.preset_folders);
         self.preset_folders = folders
@@ -257,7 +323,7 @@ impl App {
         if folders.is_empty() {
             return;
         }
-        match spawn_scan(folders) {
+        match spawn_scan(folders, ask) {
             Ok(rx) => self.preset_scan = Some(rx),
             Err(e) => {
                 for (_, state) in &mut self.preset_folders {
@@ -270,8 +336,12 @@ impl App {
 
     /// Lands finished scans. True while the latest scan is still running.
     pub(crate) fn poll_preset_scans(&mut self) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        let picking = self.poll_preset_pick();
+        #[cfg(not(target_arch = "wasm32"))]
+        let picking = false;
         let Some(rx) = &self.preset_scan else {
-            return false;
+            return picking;
         };
         let mut landed = Vec::new();
         let running = loop {
@@ -285,18 +355,15 @@ impl App {
             self.preset_scan = None;
         }
         if landed.is_empty() {
-            return running;
+            return running || picking;
         }
-        for (folder, result) in landed {
+        for (folder, scanned) in landed {
             if let Some((_, state)) = self.preset_folders.iter_mut().find(|(f, _)| *f == folder) {
-                *state = match result {
-                    Ok(Scan { presets, skipped }) => FolderState::Ready { presets, skipped },
-                    Err(e) => FolderState::Unavailable(e),
-                };
+                *state = scanned;
             }
         }
         self.request_redraw();
-        running
+        running || picking
     }
 
     /// Opens the Lightroom preset picker and imports what the user chose.
@@ -376,15 +443,15 @@ impl App {
 /// Scans `folders` in order on a thread of its own, sending each result as
 /// it lands. The thread stops early once the receiver is dropped.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_scan(folders: Vec<PathBuf>) -> Result<Receiver<FolderScan>, String> {
+fn spawn_scan(folders: Vec<PathBuf>, _ask: bool) -> Result<Receiver<FolderScan>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("preset-scan".into())
         .spawn(move || {
             for folder in folders {
                 use crate::persist::preset_folders::{scan, LIMITS};
-                let scan = scan(&folder, &LIMITS);
-                if tx.send((folder, scan)).is_err() {
+                let state = FolderState::from_scan(scan(&folder, &LIMITS));
+                if tx.send((folder, state)).is_err() {
                     return;
                 }
             }
@@ -393,11 +460,28 @@ fn spawn_scan(folders: Vec<PathBuf>) -> Result<Receiver<FolderScan>, String> {
     Ok(rx)
 }
 
-/// The browser reads preset folders through kept handles, from a later
-/// commit.
+/// The browser's scan: each folder through its kept handle, one after
+/// another on the page's own task. A folder the browser withholds access to
+/// waits for a click to `ask`.
 #[cfg(target_arch = "wasm32")]
-fn spawn_scan(_folders: Vec<PathBuf>) -> Result<Receiver<FolderScan>, String> {
-    Err("preset folders are not read in the browser yet".into())
+fn spawn_scan(folders: Vec<PathBuf>, ask: bool) -> Result<Receiver<FolderScan>, String> {
+    use crate::web::web_fs;
+    let (tx, rx) = std::sync::mpsc::channel();
+    wasm_bindgen_futures::spawn_local(async move {
+        for folder in folders {
+            let state = match web_fs::reopen_preset_folder(&folder.to_string_lossy(), ask).await {
+                Ok(Some(handle)) => {
+                    FolderState::from_scan(Ok(web_fs::scan_preset_folder(&folder, handle).await))
+                }
+                Ok(None) => FolderState::NeedsPermission,
+                Err(e) => FolderState::Unavailable(e),
+            };
+            if tx.send((folder, state)).is_err() {
+                return;
+            }
+        }
+    });
+    Ok(rx)
 }
 
 #[cfg(test)]
@@ -686,8 +770,8 @@ pub(in crate::app) mod tests {
         let (stale_tx, stale_rx) = std::sync::mpsc::channel();
         app.preset_scan = Some(stale_rx);
 
-        app.rescan_preset_folders();
-        let stale = Scan {
+        app.rescan_preset_folders(false);
+        let stale = FolderState::Ready {
             presets: vec![FolderPreset {
                 path: presets.join("Old.xmp"),
                 group: "Old".into(),
@@ -697,7 +781,7 @@ pub(in crate::app) mod tests {
             }],
             skipped: 0,
         };
-        let _ = stale_tx.send((presets.clone(), Ok(stale)));
+        let _ = stale_tx.send((presets.clone(), stale));
         wait_for_scans(&mut app);
 
         let names: Vec<&str> = app.folder_presets().map(|p| p.name.as_str()).collect();

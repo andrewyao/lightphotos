@@ -2,7 +2,8 @@
 
 //! wasm32-only: the browser's catalogs in IndexedDB, the counterpart of the
 //! native `<name>.lightphotos` directories. DB `lightphotos-catalogs` holds
-//! two stores: `catalogs`, a catalog's name to `{v, folders}`, and `marks`,
+//! two stores: `catalogs`, a catalog's name to `{v, folders}` and
+//! `presets\0<name>` to its preset folders' `{v, folders}`, and `marks`,
 //! `<name>\0<dir>` to `{v, dir, photos}`. The values are the same JSON the
 //! native catalog writes, put as objects. Rust parses what it reads back, so
 //! a value edited by hand is an error there, not here.
@@ -30,9 +31,10 @@ impl Store {
     }
 }
 
-// `forgetFolderIfUnlisted` reaches into `web_fs`'s `lightphotos-folders`
-// database, so its name, store and `folder:` key prefix must match that
-// module's.
+// `forgetFolderIfUnlisted` and `forgetPresetFolderIfUnlisted` reach into
+// `web_fs`'s `lightphotos-folders` database, so its name, store and
+// `folder:` and `preset:` key prefixes must match that module's. A key with
+// a NUL is a preset-folders record, never a catalog.
 #[wasm_bindgen(inline_js = r#"
 const DB = "lightphotos-catalogs";
 const CATALOGS = "catalogs";
@@ -98,10 +100,27 @@ export async function forgetFolderIfUnlisted(name, folder) {
     Promise.all([request(s.getAllKeys()), request(s.getAll())]));
   const lists = (v) => Array.isArray(v?.folders) && v.folders.some((f) =>
     typeof f === "string" && (f === folder || f.startsWith(folder + "/")));
-  if (keys.some((k, i) => k !== name && lists(values[i]))) return false;
+  if (keys.some((k, i) => k !== name && !k.includes("\0") && lists(values[i]))) return false;
   const db = await open("lightphotos-folders", ["handles"]);
   try {
     await txn(db, "handles", "readwrite", (s) => request(s.delete("folder:" + folder)));
+  } finally {
+    db.close();
+  }
+  return true;
+}
+// The same for preset folder `folder`, against the other catalogs'
+// preset-folders records.
+export async function forgetPresetFolderIfUnlisted(name, folder) {
+  const [keys, values] = await run(CATALOGS, "readonly", (s) =>
+    Promise.all([request(s.getAllKeys()), request(s.getAll())]));
+  const mine = "presets\0" + name;
+  const lists = (v) => Array.isArray(v?.folders) && v.folders.includes(folder);
+  if (keys.some((k, i) => typeof k === "string" && k.startsWith("presets\0")
+      && k !== mine && lists(values[i]))) return false;
+  const db = await open("lightphotos-folders", ["handles"]);
+  try {
+    await txn(db, "handles", "readwrite", (s) => request(s.delete("preset:" + folder)));
   } finally {
     db.close();
   }
@@ -119,6 +138,8 @@ extern "C" {
     fn delete_value_js(store: &str, key: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = forgetFolderIfUnlisted)]
     fn forget_folder_if_unlisted_js(name: &str, folder: &str) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = forgetPresetFolderIfUnlisted)]
+    fn forget_preset_folder_if_unlisted_js(name: &str, folder: &str) -> js_sys::Promise;
 }
 
 async fn settle(promise: js_sys::Promise) -> Result<wasm_bindgen::JsValue, String> {
@@ -151,6 +172,17 @@ pub(crate) async fn put(store: Store, key: &str, json: &str) -> Result<(), Strin
 
 pub(crate) async fn delete(store: Store, key: &str) -> Result<(), String> {
     settle(delete_value_js(store.js(), key)).await.map(drop)
+}
+
+/// Stop keeping preset folder `folder`'s handle unless a catalog other than
+/// `name` lists it. Its files stay as they are.
+pub(crate) async fn forget_preset_folder_if_unlisted(name: String, folder: PathBuf) {
+    let folder = folder.to_string_lossy();
+    if let Err(e) = settle(forget_preset_folder_if_unlisted_js(&name, &folder)).await {
+        web_sys::console::warn_1(
+            &format!("[catalog] could not forget the preset folder {folder}: {e}").into(),
+        );
+    }
 }
 
 /// Stop keeping `folder`'s handle unless a catalog other than `name` lists

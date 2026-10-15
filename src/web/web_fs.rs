@@ -149,10 +149,13 @@ fn picked_folder(
 // A directory handle survives a reload only in IndexedDB, which stores it by
 // structured clone. `localStorage` holds only strings. Each kept folder is
 // stored under `folder:<name>`; before there were several, the one kept
-// folder sat under `root`, which the first read moves.
+// folder sat under `root`, which the first read moves. A preset folder is
+// kept under `preset:<name>`, apart from the photo folders, so forgetting a
+// photo folder never takes a preset folder's handle with it.
 #[wasm_bindgen(inline_js = r#"
 const STORE = "handles";
 const PREFIX = "folder:";
+const PRESET = "preset:";
 const LEGACY = "root";
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -240,6 +243,34 @@ export async function grantedFolder(name, ask) {
   }
   return handle;
 }
+// The kept name of preset folder `handle`, keeping it under a new unique
+// name if it isn't kept yet.
+export async function keepPresetFolder(handle) {
+  const [keys, handles] = await run("readonly", (s) =>
+    Promise.all([request(s.getAllKeys()), request(s.getAll())]));
+  const kept = [];
+  keys.forEach((key, i) => {
+    if (typeof key === "string" && key.startsWith(PRESET)) {
+      kept.push([key.slice(PRESET.length), handles[i]]);
+    }
+  });
+  for (const [name, other] of kept) {
+    if (await other.isSameEntry(handle)) return name;
+  }
+  const name = uniqueName(handle.name, kept.map(([n]) => n));
+  await run("readwrite", (s) => { s.put(handle, PRESET + name); });
+  return name;
+}
+// Kept preset folder `name` with read access, or null while the browser
+// withholds it. Asking needs a click's user activation.
+export async function grantedPresetFolder(name, ask) {
+  const handle = await run("readonly", (s) => request(s.get(PRESET + name)));
+  if (!handle) throw new Error("no saved preset folder");
+  const mode = { mode: "read" };
+  if ((await handle.queryPermission(mode)) === "granted") return handle;
+  if (ask && (await handle.requestPermission(mode)) === "granted") return handle;
+  return null;
+}
 "#)]
 extern "C" {
     #[wasm_bindgen(js_name = keepFolder)]
@@ -248,6 +279,123 @@ extern "C" {
     fn granted_folder(name: &str, ask: bool) -> js_sys::Promise;
     #[wasm_bindgen(js_name = savedFolderNames)]
     fn saved_folder_names_js() -> js_sys::Promise;
+    #[wasm_bindgen(js_name = keepPresetFolder)]
+    fn keep_preset_folder(handle: &FileSystemDirectoryHandle) -> js_sys::Promise;
+    #[wasm_bindgen(js_name = grantedPresetFolder)]
+    fn granted_preset_folder(name: &str, ask: bool) -> js_sys::Promise;
+}
+
+/// Show the folder picker for a folder of Lightroom presets and keep it for
+/// later visits. Returns its kept name, which the catalog lists in place of
+/// a path. Read access is all a scan needs.
+pub async fn pick_preset_folder() -> Result<PathBuf, String> {
+    let window = web_sys::window().ok_or("no window")?;
+    let opts = DirectoryPickerOptions::new();
+    opts.set_mode(FileSystemPermissionMode::Read);
+    let handle: FileSystemDirectoryHandle = JsFuture::from(
+        window
+            .show_directory_picker_with_options(&opts)
+            .map_err(|e| js_error_string(&e))?,
+    )
+    .await
+    .map_err(|e| js_error_string(&e))?
+    .unchecked_into();
+    let name = JsFuture::from(keep_preset_folder(&handle))
+        .await
+        .map_err(|e| js_error_string(&e))?;
+    Ok(PathBuf::from(
+        name.as_string().unwrap_or_else(|| handle.name()),
+    ))
+}
+
+/// Kept preset folder `name`, or `None` while the browser withholds read
+/// access. `ask` asks for it, which needs a click's user activation.
+pub async fn reopen_preset_folder(
+    name: &str,
+    ask: bool,
+) -> Result<Option<FileSystemDirectoryHandle>, String> {
+    let handle = JsFuture::from(granted_preset_folder(name, ask))
+        .await
+        .map_err(|e| js_error_string(&e))?;
+    Ok((!handle.is_null()).then(|| handle.unchecked_into()))
+}
+
+/// Walks preset folder `root` through `handle`, by the rules and limits the
+/// native walker uses. The browser has no symlinks, so the depth limit is
+/// the only bound a walk needs.
+pub async fn scan_preset_folder(
+    root: &Path,
+    handle: FileSystemDirectoryHandle,
+) -> crate::persist::preset_folders::Scan {
+    use crate::persist::preset_folders::{is_preset_file, read_preset, skips_dir, Scan, LIMITS};
+    let mut out = Scan::default();
+    let mut files = 0usize;
+    let mut queue = std::collections::VecDeque::from([(PathBuf::new(), handle, 0usize)]);
+    'walk: while let Some((rel, dir, depth)) = queue.pop_front() {
+        let Ok(children) = children(&dir).await else {
+            continue;
+        };
+        for (name, child) in children {
+            let path = rel.join(&name);
+            match child.kind() {
+                FileSystemHandleKind::Directory => {
+                    if depth < LIMITS.depth && !skips_dir(&name) {
+                        queue.push_back((path, child.unchecked_into(), depth.saturating_add(1)));
+                    }
+                }
+                FileSystemHandleKind::File if is_preset_file(&name) => {
+                    if files >= LIMITS.files {
+                        break 'walk;
+                    }
+                    files = files.saturating_add(1);
+                    let file = child.unchecked_into::<FileSystemFileHandle>();
+                    let preset = match stat(&file).await {
+                        Ok(f) if f.size() <= LIMITS.file_bytes as f64 => file_bytes(&f)
+                            .await
+                            .ok()
+                            .and_then(|bytes| read_preset(root, &path, &bytes)),
+                        _ => None,
+                    };
+                    match preset {
+                        Some(p) => out.presets.push(p),
+                        None => out.skipped = out.skipped.saturating_add(1),
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Every entry of `handle` by name, in name order.
+async fn children(
+    handle: &FileSystemDirectoryHandle,
+) -> Result<Vec<(String, web_sys::FileSystemHandle)>, String> {
+    let mut out = Vec::new();
+    let iter = handle.values();
+    loop {
+        let next: JsValue = JsFuture::from(iter.next().map_err(|e| js_error_string(&e))?)
+            .await
+            .map_err(|e| js_error_string(&e))?;
+        let done = js_sys::Reflect::get(&next, &"done".into())
+            .ok()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if done {
+            break;
+        }
+        let Ok(value) = js_sys::Reflect::get(&next, &"value".into()) else {
+            continue;
+        };
+        let Ok(child) = value.dyn_into::<web_sys::FileSystemHandle>() else {
+            continue;
+        };
+        out.push((child.name(), child));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
 
 /// The image files and immediate subdirectories of one directory handle.

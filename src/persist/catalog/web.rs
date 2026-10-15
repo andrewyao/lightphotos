@@ -81,7 +81,7 @@ async fn drive(key: Key, mut json: Option<String>) {
 /// The catalogs store's key for catalog `name`'s preset folders. A catalog
 /// name holds no NUL, so no catalog is ever called this, and builds that
 /// list the store's keys as catalogs pass over it.
-fn presets_key(name: &str) -> String {
+pub(crate) fn presets_key(name: &str) -> String {
     format!("presets\0{name}")
 }
 

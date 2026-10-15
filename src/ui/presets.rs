@@ -140,7 +140,7 @@ fn popup(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             }
 
-            folder_notes(ui, app);
+            folder_notes(ui, app, out);
             if shown == 0 {
                 let empty = app.presets().is_empty() && app.preset_folder_states().is_empty();
                 ui.weak(if empty {
@@ -202,7 +202,7 @@ fn library_menu(ui: &mut egui::Ui, id: u64, out: &mut FrameOutput) {
 
 /// A line for each folder with nothing to list yet: still reading, not
 /// readable, or holding no presets.
-fn folder_notes(ui: &mut egui::Ui, app: &App) {
+fn folder_notes(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     for (folder, state) in app.preset_folder_states() {
         let name = display_name(folder);
@@ -212,6 +212,11 @@ fn folder_notes(ui: &mut egui::Ui, app: &App) {
                     ui.add(egui::Spinner::new());
                     ui.weak((t.reading_presets)(&name));
                 });
+            }
+            FolderState::NeedsPermission => {
+                if ui.link((t.preset_folder_needs_permission)(&name)).clicked() {
+                    out.actions.push(UiAction::RescanPresetFolders);
+                }
             }
             FolderState::Unavailable(why) => {
                 ui.weak((t.preset_folder_unavailable)(&name))
@@ -246,7 +251,6 @@ fn footer(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         out.actions.push(UiAction::ImportLrPresets);
         ui.close();
     }
-    #[cfg(not(target_arch = "wasm32"))]
     if ui
         .button(t.add_preset_folder)
         .on_hover_text(t.add_preset_folder_tip)
@@ -274,7 +278,7 @@ fn footer(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         .iter()
         .map(|(_, state)| match state {
             FolderState::Ready { skipped, .. } => *skipped,
-            FolderState::Scanning | FolderState::Unavailable(_) => 0,
+            FolderState::Scanning | FolderState::NeedsPermission | FolderState::Unavailable(_) => 0,
         })
         .sum();
     if skipped > 0 {

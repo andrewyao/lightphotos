@@ -442,6 +442,8 @@ pub struct Strings {
     pub preset_folder_unavailable: fn(&str) -> String,
     /// (preset folder name)
     pub preset_folder_empty: fn(&str) -> String,
+    /// (preset folder name)
+    pub preset_folder_needs_permission: fn(&str) -> String,
     /// (number of .xmp files skipped)
     pub presets_skipped: fn(usize) -> String,
     pub presets_skipped_tip: &'static str,
@@ -1398,6 +1400,7 @@ pub static EN: Strings = Strings {
     reading_presets: |name| format!("Reading {name}…"),
     preset_folder_unavailable: |name| format!("Can't read {name}"),
     preset_folder_empty: |name| format!("No presets in {name}"),
+    preset_folder_needs_permission: |name| format!("Click to allow access to {name}"),
     presets_skipped: |n| format!("{n} file(s) skipped"),
     presets_skipped_tip: "Profiles, looks, and .xmp files that are not develop presets or would not read",
     preset_folder_add_failed: |e| format!("Could not add the preset folder: {e}"),
@@ -2243,6 +2246,7 @@ pub static ZH: Strings = Strings {
     reading_presets: |name| format!("正在读取 {name}…"),
     preset_folder_unavailable: |name| format!("无法读取 {name}"),
     preset_folder_empty: |name| format!("{name} 中没有预设"),
+    preset_folder_needs_permission: |name| format!("点击以允许访问 {name}"),
     presets_skipped: |n| format!("已跳过 {n} 个文件"),
     presets_skipped_tip: "配置文件、外观，以及不是修改预设或无法读取的 .xmp 文件",
     preset_folder_add_failed: |e| format!("无法添加预设文件夹：{e}"),

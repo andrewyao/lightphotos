@@ -26,7 +26,7 @@ use crate::sidecar::{ColorLabel, Flag, ImageRecord};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod native;
 #[cfg(target_arch = "wasm32")]
-mod web;
+pub(crate) mod web;
 
 /// The directory extension that marks a catalog.
 #[cfg(not(target_arch = "wasm32"))]
@@ -447,8 +447,6 @@ impl Catalog {
     /// Add a preset folder, by [`add_root`]'s rule: a folder inside one
     /// already listed is already scanned. Returns whether the list changed.
     /// Writes only the preset-folders record.
-    // The browser adds through its picker from a later commit.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn add_preset_folder(&mut self, dir: &Path) -> bool {
         let changed = self.preset_folders.add(dir).unwrap_or_else(|e| {
             self.last_error = Some(e);
@@ -473,8 +471,6 @@ impl Catalog {
     /// there is none, or why it could not be read. A missing one is an empty
     /// list. One that cannot be read or parsed is an error, and the catalog
     /// never writes over it.
-    // The browser lands its record from the commit that loads it.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn land_presets(
         &mut self,
         stored: Result<Option<Vec<u8>>, String>,

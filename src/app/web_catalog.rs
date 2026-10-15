@@ -18,6 +18,8 @@ use crate::web::{web_catalog_idb as idb, web_fs};
 pub(super) struct CatalogLoad {
     generation: u64,
     record: Result<Option<Vec<u8>>, String>,
+    /// The preset-folders record, kept apart from `record`.
+    presets: Result<Option<Vec<u8>>, String>,
     /// The kept folder handles' names.
     kept: Result<Vec<PathBuf>, String>,
     /// Every stored catalog's name.
@@ -73,11 +75,13 @@ impl App {
         let name = self.catalog.name().to_string();
         wasm_bindgen_futures::spawn_local(async move {
             let record = idb::get_record(&name).await;
+            let presets = idb::get_record(&crate::persist::catalog::web::presets_key(&name)).await;
             let kept = web_fs::saved_folder_names().await;
             let names = idb::catalog_names().await;
             let _ = tx.send(CatalogLoad {
                 generation,
                 record,
+                presets,
                 kept,
                 names,
                 came_from,
@@ -148,6 +152,12 @@ impl App {
                 }
             }
         }
+        if let Err(e) = self.catalog.land_presets(load.presets) {
+            web_sys::console::warn_1(
+                &format!("[catalog] could not read the preset folders: {e}").into(),
+            );
+        }
+        self.rescan_preset_folders(false);
         self.note_known_catalog();
         // A root picked while the record was out has handles before its
         // kept name reaches `kept`.
