@@ -197,13 +197,15 @@ impl App {
     }
 
     /// Adds a preset folder to the catalog and scans it. `Err` for a path
-    /// that is not a folder.
+    /// that is not a folder. The catalog keeps the absolute path, so a
+    /// relative one names the same folder on the next launch.
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn add_preset_folder(&mut self, dir: &Path) -> Result<(), String> {
+        let dir = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         if !dir.is_dir() {
             return Err(format!("{} is not a folder", dir.display()));
         }
-        if self.catalog.add_preset_folder(dir) {
+        if self.catalog.add_preset_folder(&dir) {
             self.rescan_preset_folders();
         }
         Ok(())
@@ -462,9 +464,10 @@ pub(in crate::app) mod tests {
         )
     }
 
-    /// A preset folder holding `files` of `(relative path, xmp)`.
+    /// A preset folder holding `files` of `(relative path, xmp)`, by the
+    /// absolute path the catalog keeps.
     fn preset_dir(tag: &str, files: &[(&str, String)]) -> PathBuf {
-        let dir = temp_folder(tag);
+        let dir = std::fs::canonicalize(temp_folder(tag)).unwrap();
         for (rel, xmp) in files {
             let path = dir.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -621,6 +624,26 @@ pub(in crate::app) mod tests {
         assert_eq!(app.catalog.preset_folders(), std::slice::from_ref(&presets));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&presets);
+    }
+
+    /// The catalog keeps the folder itself, so a path through a link, or a
+    /// relative one, still names it next launch, and the same folder by two
+    /// paths is listed once.
+    #[cfg(unix)]
+    #[test]
+    fn a_preset_folder_is_kept_by_its_real_path() {
+        let (mut app, dir, _) = folder_app("preset-real-path", 1);
+        let presets = preset_dir("preset-real-path-presets", &[]);
+        let link = temp_folder("preset-real-path-link").join("presets");
+        std::os::unix::fs::symlink(&presets, &link).unwrap();
+
+        app.add_preset_folder(&link).unwrap();
+        app.add_preset_folder(&presets).unwrap();
+
+        assert_eq!(app.catalog.preset_folders(), std::slice::from_ref(&presets));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&presets);
+        let _ = std::fs::remove_dir_all(link.parent().unwrap());
     }
 
     /// Catches a switch that keeps the last catalog's folder presets, or one
