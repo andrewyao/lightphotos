@@ -56,6 +56,12 @@ pub enum MaskShape {
     },
 }
 
+impl MaskShape {
+    /// The `kind` tags this build reads. A sidecar entry with any other tag
+    /// is a later build's mask, which `sidecar::MaskList` keeps verbatim.
+    pub const KINDS: &[&str] = &["linear", "radial"];
+}
+
 /// The sliders a mask carries, in the global sliders' units and ranges.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default)]
 #[serde(default)]
@@ -493,6 +499,21 @@ mod tests {
         assert_eq!(feather, 1.0);
         assert!(invert);
         assert_eq!((amounts.exposure, amounts.saturation), (5.0, -100.0));
+    }
+
+    #[test]
+    fn every_shape_serializes_with_a_kind_this_build_lists() {
+        for m in [
+            Mask::linear([0.0; 2], [1.0; 2]),
+            Mask::radial([0.5; 2], [0.1; 2]),
+        ] {
+            let v = serde_json::to_value(m.shape).unwrap();
+            let kind = v["kind"].as_str().unwrap();
+            assert!(
+                MaskShape::KINDS.contains(&kind),
+                "{kind} missing from KINDS"
+            );
+        }
     }
 
     #[test]

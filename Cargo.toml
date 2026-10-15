@@ -55,7 +55,7 @@ egui = "0.34"
 egui-wgpu = "0.34"
 
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 
 # Bare wasm32/64-unknown-unknown has no OS clock source — std::time::Instant
 # panics on ::now() there (same root cause found and fixed once already, in

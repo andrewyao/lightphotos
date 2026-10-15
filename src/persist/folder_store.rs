@@ -336,13 +336,13 @@ impl FolderStore {
 
     pub fn masks(&self, path: &Path) -> Vec<Mask> {
         self.record(path)
-            .map(|r| r.masks.clone())
+            .map(|r| r.masks.to_vec())
             .unwrap_or_default()
     }
 
     pub fn set_masks(&mut self, path: &Path, masks: &[Mask]) {
         let masks = masks.to_vec();
-        self.update_edits(path, |rec| rec.masks = masks);
+        self.update_edits(path, |rec| rec.masks.set(masks));
     }
 
     pub fn rotation(&self, path: &Path) -> u8 {

@@ -445,7 +445,7 @@ fn apply_to_record(
         Command::AddMask(_) | Command::SetMask(_) | Command::ClearMasks(_) => {
             if let Some(masks) = cmd.edit_masks(&rec.masks) {
                 let masks = masks?;
-                rec.edit(now, |r| r.masks = masks);
+                rec.edit(now, |r| r.masks.set(masks));
             }
         }
         Command::OpenFolder(_)

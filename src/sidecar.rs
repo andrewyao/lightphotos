@@ -13,8 +13,9 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
-use crate::develop::{Adjustments, Mask, TouchUp};
+use crate::develop::{Adjustments, Mask, MaskShape, TouchUp, MAX_MASKS};
 use crate::scoring::quality::QualityScore;
 
 /// Hidden subfolder holding a directory's sidecars and thumbnail cache.
@@ -79,12 +80,8 @@ pub struct ImageRecord {
         deserialize_with = "at_most_max_touchups"
     )]
     pub touchups: Vec<TouchUp>,
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        deserialize_with = "valid_masks"
-    )]
-    pub masks: Vec<Mask>,
+    #[serde(default, skip_serializing_if = "MaskList::is_empty")]
+    pub masks: MaskList,
     /// Manual rotation in 90° clockwise steps, `0..=3`.
     #[serde(
         default,
@@ -124,28 +121,126 @@ where
     Ok(touchups)
 }
 
-/// A sidecar's masks come from whoever supplied the folder. One that isn't a
-/// mask, or holds a number that isn't one, is dropped rather than failing the
-/// whole record and its rating; the rest are clamped into range, and past
-/// [`crate::develop::MAX_MASKS`] the renderer's buffer overflows.
-fn valid_masks<'de, D>(deserializer: D) -> Result<Vec<Mask>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Entry {
-        Mask(Mask),
-        Other(serde::de::IgnoredAny),
+/// A photo's masks as its sidecar holds them: the ones this build reads, and
+/// any whose `kind` it doesn't know, kept as the JSON they came as and
+/// written back where they stood. A folder shared with a later build keeps
+/// that build's masks through every write of this one. Foreign entries
+/// render nothing and the panel never lists them; `Deref` hands out only the
+/// known masks.
+///
+/// A sidecar's masks come from whoever supplied the folder. An entry of a
+/// known kind that isn't a mask, or holds a number that isn't one, is dropped
+/// rather than failing the whole record and its rating; the rest are clamped
+/// into range, and past [`MAX_MASKS`] the renderer's buffer overflows.
+#[derive(Clone, Debug, Default)]
+pub struct MaskList {
+    known: Vec<Mask>,
+    /// Each with its index in the list as read.
+    foreign: Vec<(usize, Box<RawValue>)>,
+}
+
+impl MaskList {
+    pub fn is_empty(&self) -> bool {
+        self.known.is_empty() && self.foreign.is_empty()
     }
-    Ok(Vec::<Entry>::deserialize(deserializer)?
-        .into_iter()
-        .filter_map(|e| match e {
-            Entry::Mask(m) => m.sanitized(),
-            Entry::Other(_) => None,
-        })
-        .take(crate::develop::MAX_MASKS)
-        .collect())
+
+    /// Replaces the masks this build reads; foreign entries stay.
+    pub fn set(&mut self, known: Vec<Mask>) {
+        self.known = known;
+    }
+
+    /// A mask entry of a kind this build doesn't read, to keep as it came.
+    /// Anything else that failed to parse is garbage, and dropped.
+    fn is_foreign(raw: &RawValue) -> bool {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(raw.get()) else {
+            return false;
+        };
+        v.get("shape")
+            .and_then(|s| s.get("kind"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| !MaskShape::KINDS.contains(&kind))
+    }
+}
+
+impl From<Vec<Mask>> for MaskList {
+    fn from(known: Vec<Mask>) -> Self {
+        MaskList {
+            known,
+            foreign: Vec::new(),
+        }
+    }
+}
+
+impl std::ops::Deref for MaskList {
+    type Target = [Mask];
+    fn deref(&self) -> &[Mask] {
+        &self.known
+    }
+}
+
+impl PartialEq for MaskList {
+    fn eq(&self, other: &Self) -> bool {
+        self.known == other.known
+            && self.foreign.len() == other.foreign.len()
+            && self
+                .foreign
+                .iter()
+                .zip(&other.foreign)
+                .all(|((i, a), (j, b))| i == j && a.get() == b.get())
+    }
+}
+
+impl Serialize for MaskList {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum Entry<'a> {
+            Mask(&'a Mask),
+            Foreign(&'a RawValue),
+        }
+        let mut out = Vec::with_capacity(self.known.len() + self.foreign.len());
+        let mut known = self.known.iter();
+        let mut foreign = self.foreign.iter().peekable();
+        loop {
+            match foreign.peek() {
+                Some((at, raw)) if *at == out.len() => {
+                    out.push(Entry::Foreign(raw));
+                    foreign.next();
+                }
+                _ => match known.next() {
+                    Some(m) => out.push(Entry::Mask(m)),
+                    None => break,
+                },
+            }
+        }
+        // A foreign entry past the end, after the masks before it were
+        // deleted, keeps its order after the rest.
+        out.extend(foreign.map(|(_, raw)| Entry::Foreign(raw)));
+        out.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MaskList {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut list = MaskList::default();
+        for (at, raw) in Vec::<Box<RawValue>>::deserialize(deserializer)?
+            .into_iter()
+            .enumerate()
+        {
+            match serde_json::from_str::<Mask>(raw.get()) {
+                Ok(m) => {
+                    if list.known.len() < MAX_MASKS {
+                        list.known.extend(m.sanitized());
+                    }
+                }
+                Err(_) if MaskList::is_foreign(&raw) && list.foreign.len() < MAX_MASKS => {
+                    list.foreign.push((at, raw));
+                }
+                Err(_) => {}
+            }
+        }
+        Ok(list)
+    }
 }
 
 /// A sidecar's rotation is whatever u8 its writer put there; only `0..=3`
@@ -175,6 +270,7 @@ impl ImageRecord {
             && self.flag.is_none()
             && self.label.is_none()
             && !self.has_edits()
+            && self.masks.is_empty()
             && self.score.is_none()
             && self.edited.is_none();
         debug_assert_eq!(
@@ -196,10 +292,12 @@ impl ImageRecord {
         )
     }
 
+    /// Whether an edit this build renders is set. A foreign mask is kept
+    /// but renders nothing, so it is not one; `is_empty` still counts it.
     fn has_edits(&self) -> bool {
         !self.adjustments.is_identity()
             || !self.touchups.is_empty()
-            || !self.masks.is_empty()
+            || !self.masks.known.is_empty()
             || self.rotation != 0
     }
 
@@ -392,7 +490,7 @@ mod tests {
                 delta: [0.01, -0.02, 0.0],
                 opacity: 1.0,
             }],
-            masks: vec![Mask::linear([0.5, 0.0], [0.5, 1.0])],
+            masks: vec![Mask::linear([0.5, 0.0], [0.5, 1.0])].into(),
             rotation: 1,
             score: Some(StoredScore {
                 score: sample_score(),
@@ -457,6 +555,52 @@ mod tests {
         };
         assert_eq!(radii, [1e-4, 0.2]);
         assert_eq!(rec.masks[1].amounts.temp, 100.0);
+        let json = serde_json::to_string(&rec).unwrap();
+        assert!(
+            json.contains(r#""kind":"lasso""#),
+            "kept as foreign: {json}"
+        );
+        assert!(!json.contains("not a mask"), "garbage is dropped: {json}");
+        assert!(
+            !json.contains("1e39"),
+            "a bad known kind is dropped: {json}"
+        );
+    }
+
+    /// The defect: a build that doesn't know a mask kind drops it on load and
+    /// the next write of that sidecar loses it for the build that does.
+    #[test]
+    fn a_mask_of_an_unknown_kind_survives_a_write_in_place_byte_for_byte() {
+        let foreign = r#"{"shape": {"kind":"lasso",  "points":[[0.1,0.2],[0.3,0.4]]}, "amounts": {"exposure": 0.5}, "future": true}"#;
+        let known = r#"{"shape":{"kind":"radial","center":[0.5,0.5],"radii":[0.1,0.1]}}"#;
+        let body = format!(r#"{{"masks":[{known},{foreign},{known}],"rating":1}}"#);
+        let mut rec = parse_record(body.as_bytes(), || None).unwrap();
+        assert_eq!(rec.masks.len(), 2);
+        assert!(!rec.masks.is_empty());
+
+        let written = serde_json::to_string(&rec).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&written).unwrap();
+        let entries = back["masks"].as_array().unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[1]["shape"]["kind"], "lasso", "in place: {written}");
+        assert!(written.contains(foreign), "verbatim: {written}");
+
+        let reread = parse_record(written.as_bytes(), || None).unwrap();
+        assert_eq!(reread, rec, "a second build round-trips it again");
+
+        rec.masks.set(Vec::new());
+        assert!(!rec.masks.is_empty(), "the foreign mask still persists");
+        rec.rating = None;
+        assert!(!rec.is_empty(), "so the sidecar is written, not deleted");
+        let written = serde_json::to_string(&rec).unwrap();
+        assert!(written.contains(foreign), "{written}");
+        let only_foreign = parse_record(written.as_bytes(), || None).unwrap();
+        assert_eq!(only_foreign.masks.len(), 0);
+        assert_eq!(
+            only_foreign.edit_signature(),
+            ImageRecord::default().edit_signature(),
+            "a foreign mask renders nothing, so it signs as nothing"
+        );
     }
 
     #[test]
@@ -476,7 +620,7 @@ mod tests {
             crate::develop::edit_signature_with_touchups(&rec.adjustments, &[], &[], 0)
         );
         let mut masked = rec.clone();
-        masked.masks.push(Mask::radial([0.5, 0.5], [0.1, 0.1]));
+        masked.masks.set(vec![Mask::radial([0.5, 0.5], [0.1, 0.1])]);
         assert_ne!(rec.edit_signature(), masked.edit_signature());
     }
 
