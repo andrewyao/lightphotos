@@ -6,7 +6,9 @@
 //!
 //! This is a scanner over a known key list, not an XML parser. Camera Raw
 //! writes every field either as an attribute or as a child element of one
-//! `rdf:Description`, and both spellings are read. A dozen keys do not earn an
+//! `rdf:Description`, and both spellings are read. A description nested in
+//! it, such as the profile in `crs:Look`, is not the preset's and is left
+//! out. A dozen keys do not earn an
 //! XML crate, least of all one that has to build for wasm32.
 
 use crate::develop::curve::{Channel, Curve};
@@ -183,6 +185,7 @@ const UNSUPPORTED: &[(&str, &[&str], Untouched)] = &[
 /// Parse a Lightroom `.xmp` develop preset. `Err` for a file that is not one.
 pub fn parse(xmp: &str) -> Result<Imported, String> {
     let body = description(xmp).ok_or("no rdf:Description")?;
+    let body = body.as_str();
     if !body.contains("crs:") {
         return Err("no crs: fields".into());
     }
@@ -253,28 +256,94 @@ pub fn parse(xmp: &str) -> Result<Imported, String> {
         }
     }
 
-    let name = raw_value(body, "Name")
-        .and_then(|alt| li_texts(alt).next())
-        .map(|li| decode(li).trim().to_string())
-        .filter(|n| !n.is_empty());
-
     Ok(Imported {
-        name,
+        name: label(body, "Name"),
         adj,
         dropped,
         monochrome,
     })
 }
 
-/// The first `rdf:Description` block. A second block is cut off so it cannot
-/// contribute values.
-fn description(xmp: &str) -> Option<&str> {
-    const TAG: &str = "<rdf:Description";
-    let body = &xmp[xmp.find(TAG)?..];
-    let end = body[TAG.len()..]
-        .find(TAG)
-        .map_or(body.len(), |i| i + TAG.len());
-    Some(&body[..end])
+/// A display string such as `crs:Name`: the first item of its `rdf:Alt`, or
+/// the plain attribute value. `None` when blank, so the caller's fallback
+/// applies.
+fn label(body: &str, key: &str) -> Option<String> {
+    let raw = raw_value(body, key)?;
+    let text = if raw.contains("<rdf:li") {
+        li_texts(raw).next()?
+    } else {
+        raw
+    };
+    let text = decode(text);
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// The first `rdf:Description` block's own text: its tag and what is inside
+/// it, less any description nested in it. A second block after it is cut
+/// off, so neither can contribute values.
+fn description(xmp: &str) -> Option<String> {
+    const NAME: &str = "rdf:Description";
+    let mut body = String::new();
+    let mut depth = 0usize;
+    // Where the outer block's text not yet copied into `body` starts, once
+    // it has started.
+    let mut kept_from = None;
+    let mut at = 0;
+    while let Some(i) = xmp[at..].find(NAME).map(|i| at + i) {
+        at = i + NAME.len();
+        let closing = xmp[..i].ends_with("</");
+        let opening = !closing && xmp[..i].ends_with('<');
+        let whole = xmp
+            .as_bytes()
+            .get(at)
+            .is_none_or(|&b| matches!(b, b'>' | b'/') || b.is_ascii_whitespace());
+        if !(opening || closing) || !whole {
+            continue;
+        }
+        let tag_start = if closing { i - 2 } else { i - 1 };
+        let tag_end = at + tag_len(&xmp[at..]);
+        at = tag_end;
+        if opening {
+            let self_closing = xmp[..tag_end].ends_with("/>");
+            match (depth, self_closing) {
+                (0, true) => return Some(xmp[tag_start..tag_end].to_string()),
+                (0, false) => {
+                    depth = 1;
+                    kept_from = Some(tag_start);
+                }
+                (1, _) => {
+                    body.push_str(&xmp[kept_from.unwrap_or(tag_start)..tag_start]);
+                    kept_from = Some(tag_end);
+                    if !self_closing {
+                        depth = 2;
+                    }
+                }
+                (_, true) => {}
+                (_, false) => depth = depth.saturating_add(1),
+            }
+        } else {
+            match depth {
+                0 => {}
+                1 => {
+                    body.push_str(&xmp[kept_from.unwrap_or(tag_start)..tag_start]);
+                    return Some(body);
+                }
+                2 => {
+                    depth = 1;
+                    kept_from = Some(tag_end);
+                }
+                _ => depth -= 1,
+            }
+        }
+    }
+    // Unclosed: what the outer block had, unless a nested one ran on to
+    // the end.
+    let from = kept_from?;
+    if depth <= 1 {
+        body.push_str(&xmp[from..]);
+    }
+    Some(body)
 }
 
 fn number(body: &str, key: &str) -> Field {
@@ -346,10 +415,30 @@ fn raw_value<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     attribute(body, key).or_else(|| element(body, key))
 }
 
-/// `crs:Key="value"`. Anchored on both sides. Without the trailing anchor
-/// `crs:Exposure2012` matches inside `crs:Exposure2012Reference`, and without
-/// the leading one a differently-prefixed attribute matches.
+/// The length of `text` up to and including the first `>` outside a quoted
+/// attribute value, which XML lets hold a bare `>`. All of it when there is
+/// none.
+fn tag_len(text: &str) -> usize {
+    let mut quote = None;
+    for (i, b) in text.bytes().enumerate() {
+        match (quote, b) {
+            (None, b'"' | b'\'') => quote = Some(b),
+            (Some(q), _) if b == q => quote = None,
+            (None, b'>') => return i + 1,
+            _ => {}
+        }
+    }
+    text.len()
+}
+
+/// `crs:Key="value"` on the description's own tag. A child element's
+/// attribute is not the preset's: Lightroom writes `<crs:Look crs:Name=""/>`
+/// into presets with a name of their own. Anchored on both sides. Without
+/// the trailing anchor `crs:Exposure2012` matches inside
+/// `crs:Exposure2012Reference`, and without the leading one a
+/// differently-prefixed attribute matches.
 fn attribute<'a>(body: &'a str, key: &str) -> Option<&'a str> {
+    let body = &body[..tag_len(body)];
     let needle = format!("crs:{key}");
     let bytes = body.as_bytes();
     body.match_indices(&needle).find_map(|(i, _)| {
@@ -829,6 +918,78 @@ mod tests {
             parse(&packet("xmp:Rating=\"3\"", "")).is_err(),
             "an XMP packet with no crs: fields is not a preset"
         );
+    }
+
+    /// Lightroom writes the profile a preset uses as a `crs:Look` holding a
+    /// description of its own, and current exports carry fields after it.
+    /// Catches the nested block cutting the preset short, and its own name
+    /// and fields standing in for the preset's.
+    #[test]
+    fn a_nested_look_neither_hides_later_fields_nor_lends_its_own() {
+        let got = parse(&packet(
+            "crs:PresetType=\"Normal\" crs:Name=\"Synthwave\" crs:Exposure2012=\"+0.25\"",
+            "<crs:Name><rdf:Alt><rdf:li xml:lang=\"x-default\">Synthwave</rdf:li></rdf:Alt></crs:Name>\
+             <crs:Look><rdf:Description crs:Name=\"Adobe Color\" crs:Amount=\"1.000000\" \
+             crs:Vibrance=\"+40\" crs:SupportsAmount=\"True\">\
+             <crs:Group><rdf:Alt><rdf:li xml:lang=\"x-default\">Profiles</rdf:li></rdf:Alt></crs:Group>\
+             </rdf:Description></crs:Look>\
+             <crs:ToneCurvePV2012><rdf:Seq><rdf:li>0, 20</rdf:li><rdf:li>128, 128</rdf:li>\
+             <rdf:li>255, 235</rdf:li></rdf:Seq></crs:ToneCurvePV2012>",
+        ))
+        .unwrap();
+        assert_eq!(got.name.as_deref(), Some("Synthwave"));
+        assert_eq!(got.adj.exposure, 0.25);
+        assert_eq!(
+            got.adj.vibrance, 0.0,
+            "the look's field is not the preset's"
+        );
+        assert_eq!(
+            got.adj.curve.rgb,
+            Curve::from(vec![[0, 20], [128, 128], [255, 235]]),
+            "the curve after the look still reads"
+        );
+
+        let adobe = parse(&packet(
+            "crs:PresetType=\"Normal\" crs:ConvertToGrayscale=\"True\"",
+            "<crs:Name><rdf:Alt><rdf:li xml:lang=\"x-default\">Auto-BW</rdf:li></rdf:Alt></crs:Name>\
+             <crs:Look\n    crs:Name=\"\"/>",
+        ))
+        .unwrap();
+        assert_eq!(
+            adobe.name.as_deref(),
+            Some("Auto-BW"),
+            "an empty look's crs:Name is not the preset's"
+        );
+    }
+
+    /// XML allows a bare `>` in an attribute value. Catches the tag being
+    /// cut there and the fields after it lost.
+    #[test]
+    fn a_bare_angle_bracket_in_a_value_does_not_end_the_tag() {
+        let got = parse(&packet(
+            "crs:Name=\"Warm > Cool\" crs:Exposure2012=\"+0.5\"",
+            "",
+        ))
+        .unwrap();
+        assert_eq!(got.name.as_deref(), Some("Warm > Cool"));
+        assert_eq!(got.adj.exposure, 0.5);
+    }
+
+    /// Truncated and misnested blocks read what they can without a panic.
+    #[test]
+    fn a_broken_nesting_reads_what_it_can() {
+        for xmp in [
+            "<rdf:Description crs:Exposure2012=\"+1\"",
+            "<rdf:Description crs:Exposure2012=\"+1\"><crs:Look><rdf:Description crs:Vibrance=\"9\">",
+            "<rdf:Description crs:Exposure2012=\"+1\"></rdf:Description></rdf:Description>",
+            "</rdf:Description><rdf:Description crs:Exposure2012=\"+1\"/>",
+            "<rdf:Descriptions><rdf:Description crs:Exposure2012=\"+1\">",
+            "<rdf:Description crs:Exposure2012=\"+1\"><rdf:Description/><rdf:Description",
+        ] {
+            let got = parse(xmp).unwrap_or_else(|e| panic!("{xmp}: {e}"));
+            assert_eq!(got.adj.exposure, 1.0, "{xmp}");
+            assert_eq!(got.adj.vibrance, 0.0, "{xmp}");
+        }
     }
 
     /// Catches a scanner that reads past the first description block.
