@@ -17,6 +17,10 @@ use crate::develop::{Adjustments, ColorAxis, SliderId, SLIDERS};
 /// What a preset file yielded.
 pub struct Imported {
     pub name: Option<String>,
+    /// `crs:Group`, the folder Lightroom files the preset under.
+    // Read by the preset-folder scan, which a later commit wires in.
+    #[allow(dead_code)]
+    pub group: Option<String>,
     pub adj: Adjustments,
     /// `crs:` fields Lightroom set that have no field here.
     pub dropped: Vec<&'static str>,
@@ -189,6 +193,11 @@ pub fn parse(xmp: &str) -> Result<Imported, String> {
     if !body.contains("crs:") {
         return Err("no crs: fields".into());
     }
+    // Looks share the format and the folders but carry no develop settings,
+    // so they would import as an empty edit.
+    if let Some(kind) = value(body, "PresetType").filter(|k| !k.eq_ignore_ascii_case("Normal")) {
+        return Err(format!("a {kind} preset, not a develop preset"));
+    }
 
     let mut adj = Adjustments::default();
     let mut dropped = Vec::new();
@@ -258,6 +267,7 @@ pub fn parse(xmp: &str) -> Result<Imported, String> {
 
     Ok(Imported {
         name: label(body, "Name"),
+        group: label(body, "Group"),
         adj,
         dropped,
         monochrome,
@@ -990,6 +1000,68 @@ mod tests {
             assert_eq!(got.adj.exposure, 1.0, "{xmp}");
             assert_eq!(got.adj.vibrance, 0.0, "{xmp}");
         }
+    }
+
+    /// The shape Lightroom Classic exports: the type as an attribute, then
+    /// `crs:Name` and `crs:Group` as `rdf:Alt` elements, and the profile as a
+    /// `crs:Look` whose own description has a group of its own.
+    fn exported(preset_type: &str, name: &str, group: &str) -> String {
+        packet(
+            &format!(
+                "crs:PresetType=\"{preset_type}\" crs:Cluster=\"\" \
+                 crs:UUID=\"10266C01A199423D80D8EF1D437CEA44\" crs:SupportsAmount=\"True\" \
+                 crs:ProcessVersion=\"15.4\" crs:Exposure2012=\"+0.40\" crs:HasSettings=\"True\""
+            ),
+            &format!(
+                "<crs:Name><rdf:Alt><rdf:li xml:lang=\"x-default\">{name}</rdf:li></rdf:Alt></crs:Name>\
+                 <crs:Group><rdf:Alt><rdf:li xml:lang=\"x-default\">{group}</rdf:li></rdf:Alt></crs:Group>\
+                 <crs:Look><rdf:Description crs:Name=\"Adobe Color\" crs:Amount=\"1.000000\">\
+                 <crs:Group><rdf:Alt><rdf:li xml:lang=\"x-default\">Profiles</rdf:li></rdf:Alt></crs:Group>\
+                 </rdf:Description></crs:Look>"
+            ),
+        )
+    }
+
+    /// Catches the profile's group, which comes later in the file, standing
+    /// in for the preset's, and an empty group passed on as a name.
+    #[test]
+    fn the_group_is_the_presets_own() {
+        let got = parse(&exported("Normal", "Warm Film", "Film Looks")).unwrap();
+        assert_eq!(got.name.as_deref(), Some("Warm Film"));
+        assert_eq!(got.group.as_deref(), Some("Film Looks"));
+        assert_eq!(got.adj.exposure, 0.4);
+
+        let empty = parse(&packet(
+            "crs:PresetType=\"Normal\" crs:Exposure2012=\"0\"",
+            "<crs:Group><rdf:Alt><rdf:li xml:lang=\"x-default\"/></rdf:Alt></crs:Group>\
+             <crs:Look crs:Name=\"\"/>",
+        ))
+        .unwrap();
+        assert_eq!(
+            empty.group, None,
+            "Adobe's empty group falls back to the caller"
+        );
+
+        let none = parse(&exported("Normal", "Warm Film", "Film").replace("<crs:Group><rdf:Alt><rdf:li xml:lang=\"x-default\">Film</rdf:li></rdf:Alt></crs:Group>", "")).unwrap();
+        assert_eq!(
+            none.group, None,
+            "the profile's Profiles group is not the preset's"
+        );
+    }
+
+    /// Looks are `.xmp` files in the same folders with no develop settings.
+    /// Catches one importing as an empty preset.
+    #[test]
+    fn only_a_normal_preset_type_is_a_develop_preset() {
+        assert!(parse(&exported("Normal", "Warm Film", "Mine")).is_ok());
+        assert!(
+            parse(&packet("crs:Exposure2012=\"0\"", "")).is_ok(),
+            "an older preset with no PresetType is a develop preset"
+        );
+        let err = parse(&exported("Look", "Vivid", "Looks"))
+            .err()
+            .expect("a Look is refused");
+        assert!(err.contains("Look"), "the reason names the type: {err}");
     }
 
     /// Catches a scanner that reads past the first description block.
