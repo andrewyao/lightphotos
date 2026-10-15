@@ -36,7 +36,7 @@ pub(crate) struct Limits {
     /// The scan stops after this many preset files.
     pub files: usize,
     /// A larger `.xmp` is skipped unread. Real presets are a few KB.
-    pub file_bytes: u64,
+    pub file_bytes: usize,
 }
 
 pub(crate) const LIMITS: Limits = Limits {
@@ -194,7 +194,10 @@ pub(crate) fn scan(
                 break 'walk;
             }
             files = files.saturating_add(1);
-            let preset = read_capped(&path, limits.file_bytes).and_then(|bytes| {
+            let bytes = crate::paths::read_capped(&path, limits.file_bytes)
+                .ok()
+                .flatten();
+            let preset = bytes.and_then(|bytes| {
                 let rel = path.strip_prefix(root).ok()?;
                 read_preset(root, rel, &bytes)
             });
@@ -206,19 +209,6 @@ pub(crate) fn scan(
     }
     out.sort();
     Ok(out)
-}
-
-/// The file's bytes, or `None` when it is unreadable or over `max`.
-#[cfg(not(target_arch = "wasm32"))]
-fn read_capped(path: &Path, max: u64) -> Option<Vec<u8>> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(max.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() as u64 <= max).then_some(bytes)
 }
 
 #[cfg(test)]
@@ -313,7 +303,7 @@ mod tests {
         let huge = format!(
             "{}{}",
             preset(Some("Huge"), None, "0"),
-            " ".repeat(LIMITS.file_bytes as usize)
+            " ".repeat(LIMITS.file_bytes)
         );
         write(&root, "huge.xmp", &huge);
         write(

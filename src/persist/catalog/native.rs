@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 #[cfg(test)]
 use super::DirMarks;
 use super::{Catalog, CatalogError, CatalogRef, Record};
-use crate::paths::{remove_if_present, write_atomic_in_dir};
+use crate::paths::{remove_if_present, write_atomic_in_dir, CappedReadError};
 
 const RECORD_FILE: &str = "catalog.json";
 const PRESETS_FILE: &str = "presets.json";
@@ -76,7 +76,9 @@ impl Catalog {
         let presets = path.join(PRESETS_FILE);
         let mut catalog = Catalog::on_disk(at);
         catalog.load_record(folders);
-        let stored = read_capped(&presets, super::MAX_RECORD_BYTES).map_err(|e| e.to_string());
+        // The error leaves the path out, as `land_presets` names the file.
+        let stored =
+            crate::paths::read_capped(&presets, super::MAX_RECORD_BYTES).map_err(|e| e.to_string());
         catalog.land_presets(&presets.display().to_string(), stored);
         Ok(catalog)
     }
@@ -214,20 +216,10 @@ impl Catalog {
 
 /// `file`'s bytes, `None` when it is not there, an error past `max`.
 fn read_capped(file: &Path, max: usize) -> Result<Option<Vec<u8>>, CatalogError> {
-    use std::io::Read;
-    let f = match std::fs::File::open(file) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(CatalogError::Io(file.to_path_buf(), e)),
-    };
-    let mut bytes = Vec::new();
-    f.take(max as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| CatalogError::Io(file.to_path_buf(), e))?;
-    if bytes.len() > max {
-        return Err(CatalogError::TooBig(file.to_path_buf(), max));
-    }
-    Ok(Some(bytes))
+    crate::paths::read_capped(file, max).map_err(|e| match e {
+        CappedReadError::Io(e) => CatalogError::Io(file.to_path_buf(), e),
+        CappedReadError::TooBig(max) => CatalogError::TooBig(file.to_path_buf(), max),
+    })
 }
 
 /// Newest bytes per file, in first-queued order. `None` deletes the file.
@@ -577,6 +569,21 @@ mod tests {
             [dir.join("more photos"), dir.join("photos")],
             "a photo-folder change keeps the preset folders"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Catches the file's path twice in the message, once from the read
+    /// and once from the record.
+    #[test]
+    fn a_presets_file_that_cannot_be_read_names_it_once() {
+        let dir = scratch("presets-unreadable");
+        let at = CatalogRef::in_dir(&dir, "c").unwrap();
+        std::fs::create_dir_all(at.path().join(PRESETS_FILE)).unwrap();
+
+        let mut cat = Catalog::open(at).unwrap();
+
+        let why = cat.take_presets_error().unwrap_or_default();
+        assert_eq!(why.matches(PRESETS_FILE).count(), 1, "{why}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

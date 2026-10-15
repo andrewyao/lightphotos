@@ -64,6 +64,46 @@ pub fn export_target(stem: &str, ext: &str, dest_dir: &Path, taken: &HashSet<Pat
     }
 }
 
+/// Why [`read_capped`] got no bytes. Neither names the file: the caller
+/// says which file it read.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub enum CappedReadError {
+    Io(std::io::Error),
+    /// The file is longer than this many bytes.
+    TooBig(usize),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for CappedReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CappedReadError::Io(e) => write!(f, "{e}"),
+            CappedReadError::TooBig(max) => write!(f, "over the {max}-byte limit"),
+        }
+    }
+}
+
+/// `file`'s bytes, `None` when it is not there. Reads at most `max + 1`
+/// bytes, so a huge file costs no more than the cap to refuse.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_capped(file: &Path, max: usize) -> Result<Option<Vec<u8>>, CappedReadError> {
+    use std::io::Read;
+    let f = match std::fs::File::open(file) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(CappedReadError::Io(e)),
+    };
+    let mut bytes = Vec::new();
+    f.take(u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(CappedReadError::Io)?;
+    if bytes.len() > max {
+        return Err(CappedReadError::TooBig(max));
+    }
+    Ok(Some(bytes))
+}
+
 /// [`write_atomic`], creating `file`'s directory first.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_atomic_in_dir(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
