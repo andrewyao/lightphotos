@@ -298,30 +298,50 @@ fn description(xmp: &str) -> Option<String> {
     // it has started.
     let mut kept_from = None;
     let mut at = 0;
-    while let Some(i) = xmp[at..].find(NAME).map(|i| at + i) {
-        at = i + NAME.len();
-        let closing = xmp[..i].ends_with("</");
-        let opening = !closing && xmp[..i].ends_with('<');
+    while let Some(i) = xmp.get(at..)?.find(NAME).map(|i| at.saturating_add(i)) {
+        at = i.saturating_add(NAME.len());
+        let before = xmp.get(..i)?;
+        let tag_start = if before.ends_with("</") {
+            i.checked_sub(2)
+        } else if before.ends_with('<') {
+            i.checked_sub(1)
+        } else {
+            None
+        };
+        let closing = before.ends_with("</");
         let whole = xmp
             .as_bytes()
             .get(at)
             .is_none_or(|&b| matches!(b, b'>' | b'/') || b.is_ascii_whitespace());
-        if !(opening || closing) || !whole {
+        let (Some(tag_start), true) = (tag_start, whole) else {
             continue;
-        }
-        let tag_start = if closing { i - 2 } else { i - 1 };
-        let tag_end = at + tag_len(&xmp[at..]);
+        };
+        let tag_end = at.saturating_add(tag_len(xmp.get(at..)?));
         at = tag_end;
-        if opening {
-            let self_closing = xmp[..tag_end].ends_with("/>");
+        let outer = |from: Option<usize>| xmp.get(from.unwrap_or(tag_start)..tag_start);
+        if closing {
+            match depth {
+                0 => {}
+                1 => {
+                    body.push_str(outer(kept_from)?);
+                    return Some(body);
+                }
+                2 => {
+                    depth = 1;
+                    kept_from = Some(tag_end);
+                }
+                _ => depth = depth.saturating_sub(1),
+            }
+        } else {
+            let self_closing = xmp.get(..tag_end)?.ends_with("/>");
             match (depth, self_closing) {
-                (0, true) => return Some(xmp[tag_start..tag_end].to_string()),
+                (0, true) => return xmp.get(tag_start..tag_end).map(str::to_string),
                 (0, false) => {
                     depth = 1;
                     kept_from = Some(tag_start);
                 }
                 (1, _) => {
-                    body.push_str(&xmp[kept_from.unwrap_or(tag_start)..tag_start]);
+                    body.push_str(outer(kept_from)?);
                     kept_from = Some(tag_end);
                     if !self_closing {
                         depth = 2;
@@ -330,26 +350,13 @@ fn description(xmp: &str) -> Option<String> {
                 (_, true) => {}
                 (_, false) => depth = depth.saturating_add(1),
             }
-        } else {
-            match depth {
-                0 => {}
-                1 => {
-                    body.push_str(&xmp[kept_from.unwrap_or(tag_start)..tag_start]);
-                    return Some(body);
-                }
-                2 => {
-                    depth = 1;
-                    kept_from = Some(tag_end);
-                }
-                _ => depth -= 1,
-            }
         }
     }
     // Unclosed: what the outer block had, unless a nested one ran on to
     // the end.
     let from = kept_from?;
     if depth <= 1 {
-        body.push_str(&xmp[from..]);
+        body.push_str(xmp.get(from..)?);
     }
     Some(body)
 }
@@ -401,13 +408,13 @@ fn curve(seq: &str) -> Option<Curve> {
 /// The raw text of each `<rdf:li>` in an `rdf:Seq` or `rdf:Alt`.
 fn li_texts(block: &str) -> impl Iterator<Item = &str> {
     block.match_indices("<rdf:li").filter_map(move |(i, _)| {
-        let rest = &block[i..];
+        let rest = block.get(i..)?;
         let open = rest.find('>')?;
-        if rest[..open].ends_with('/') {
+        if rest.get(..open)?.ends_with('/') {
             return Some("");
         }
-        let text = &rest[open + 1..];
-        Some(&text[..text.find("</rdf:li")?])
+        let text = rest.get(open.saturating_add(1)..)?;
+        text.get(..text.find("</rdf:li")?)
     })
 }
 
@@ -446,21 +453,25 @@ fn tag_len(text: &str) -> usize {
 /// `crs:Exposure2012Reference`, and without the leading one a
 /// differently-prefixed attribute matches.
 fn attribute<'a>(body: &'a str, key: &str) -> Option<&'a str> {
-    let body = &body[..tag_len(body)];
+    let body = body.get(..tag_len(body))?;
     let needle = format!("crs:{key}");
     let bytes = body.as_bytes();
     body.match_indices(&needle).find_map(|(i, _)| {
-        let led = i > 0 && (bytes[i - 1].is_ascii_whitespace() || bytes[i - 1] == b'<');
+        let led = bytes
+            .get(i.checked_sub(1)?)
+            .is_some_and(|&b| b.is_ascii_whitespace() || b == b'<');
         if !led {
             return None;
         }
-        let rest = body[i + needle.len()..].trim_start_matches(|c: char| c.is_ascii_whitespace());
+        let rest = body
+            .get(i.saturating_add(needle.len())..)?
+            .trim_start_matches(|c: char| c.is_ascii_whitespace());
         let rest = rest
             .strip_prefix('=')?
             .trim_start_matches(|c: char| c.is_ascii_whitespace());
         let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
-        let inner = &rest[1..];
-        Some(&inner[..inner.find(quote)?])
+        let inner = rest.get(1..)?;
+        inner.get(..inner.find(quote)?)
     })
 }
 
@@ -469,17 +480,17 @@ fn element<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     let open = format!("<crs:{key}");
     let close = format!("</crs:{key}");
     body.match_indices(&open).find_map(|(i, _)| {
-        let rest = &body[i + open.len()..];
+        let rest = body.get(i.saturating_add(open.len())..)?;
         let next = *rest.as_bytes().first()?;
         if !(next == b'>' || next == b'/' || next.is_ascii_whitespace()) {
             return None;
         }
         let tag_end = rest.find('>')?;
-        if rest[..tag_end].ends_with('/') {
+        if rest.get(..tag_end)?.ends_with('/') {
             return Some("");
         }
-        let inner = &rest[tag_end + 1..];
-        Some(&inner[..inner.find(&close)?])
+        let inner = rest.get(tag_end.saturating_add(1)..)?;
+        inner.get(..inner.find(&close)?)
     })
 }
 
@@ -495,17 +506,16 @@ fn decode(text: &str) -> String {
     ];
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
-    while let Some(i) = rest.find('&') {
-        out.push_str(&rest[..i]);
-        rest = &rest[i..];
-        match ENTITIES.iter().find(|(e, _)| rest.starts_with(e)) {
+    while let Some((head, tail)) = rest.split_once('&') {
+        out.push_str(head);
+        match ENTITIES.iter().find(|(e, _)| tail.starts_with(&e[1..])) {
             Some((e, c)) => {
                 out.push(*c);
-                rest = &rest[e.len()..];
+                rest = tail.get(e.len().saturating_sub(1)..).unwrap_or_default();
             }
             None => {
                 out.push('&');
-                rest = &rest[1..];
+                rest = tail;
             }
         }
     }
@@ -1060,6 +1070,56 @@ mod tests {
             .err()
             .expect("a Look is refused");
         assert!(err.contains("Look"), "the reason names the type: {err}");
+    }
+
+    /// Offsets come from the file, so a tag cut short anywhere, a `<` at
+    /// the very start, or closes with no opens must read as what they hold,
+    /// or as nothing, never a panic.
+    #[test]
+    fn truncated_tags_and_unbalanced_closes_never_panic() {
+        for xmp in [
+            "<",
+            "<r",
+            "</",
+            "<rdf:Description",
+            "x<rdf:Description",
+            "</rdf:Description>",
+            "</rdf:Description></rdf:Description>",
+            "<rdf:Description crs:Name=\"a",
+            "<rdf:Description crs:Exposure2012=",
+            "<rdf:Description crs:x=\"1\"><crs:Name><rdf:Alt><rdf:li",
+            "<rdf:Description crs:x=\"1\"><crs:Name><rdf:Alt><rdf:li xml:lang=\"x\">&am",
+            "<rdf:Description crs:x=\"1\"><crs:Exposure2012>&",
+            "<rdf:Description crs:x=\"1\"><rdf:Description",
+            "<rdf:Description crs:x=\"1\"></rdf:Description",
+        ] {
+            let _ = parse(xmp);
+        }
+
+        let got = parse(
+            "</rdf:Description></rdf:Description>\
+             <rdf:Description crs:Exposure2012=\"+1\"/>",
+        )
+        .unwrap();
+        assert_eq!(
+            got.adj.exposure, 1.0,
+            "stray closes before the block are passed over"
+        );
+
+        let got = parse("<rdf:Description crs:Exposure2012=\"+1\"><crs:Name>Tom &amp").unwrap();
+        assert_eq!(got.adj.exposure, 1.0);
+        assert_eq!(got.name, None, "an unclosed element has no value");
+
+        let got = parse(
+            "<rdf:Description crs:Exposure2012=\"+1\">\
+             <crs:Name><rdf:Alt><rdf:li>A &amp B &</rdf:li></rdf:Alt></crs:Name>",
+        )
+        .unwrap();
+        assert_eq!(
+            got.name.as_deref(),
+            Some("A &amp B &"),
+            "a bare & stays as it is"
+        );
     }
 
     /// Catches a scanner that reads past the first description block.
