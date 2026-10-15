@@ -45,7 +45,7 @@ fi
 echo "==> Checking the macOS signing secrets are set on GitHub"
 secrets="$(gh secret list --json name --jq '.[].name')"
 missing=()
-for name in MACOS_CERT_P12 MACOS_CERT_PASSWORD MACOS_SIGN_IDENTITY \
+for name in MACOS_CERT_P12 MACOS_CERT_PASSWORD \
   APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER; do
   grep -qx "$name" <<<"$secrets" || missing+=("$name")
 done

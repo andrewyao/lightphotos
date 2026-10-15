@@ -99,6 +99,16 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
           security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
           rm "$RUNNER_TEMP/cert.p12"
+          # Sign by the certificate's hash, read from the imported .p12, so no
+          # hand-typed name has to match it.
+          identity="$(security find-identity -v -p codesigning "$keychain" \
+            | awk '/"Developer ID Application: / {print $2; exit}')"
+          if [[ -z "$identity" ]]; then
+            echo "error: MACOS_CERT_P12 holds no Developer ID Application identity; it has:" >&2
+            security find-identity -v -p codesigning "$keychain" >&2
+            exit 1
+          fi
+          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
           printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary.p8"
 
       # macOS: make-dmg.sh builds the binary, assembles and signs the .app,
@@ -107,7 +117,6 @@ jobs:
       - name: Build and package (macOS)
         if: runner.os == 'macOS'
         env:
-          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
           APPLE_API_KEY_PATH: ${{ runner.temp }}/notary.p8
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}

@@ -9,8 +9,8 @@
 #   ./scripts/make-dmg.sh aarch64-apple-darwin lightphotos-macos-arm64.dmg
 #   ./scripts/make-dmg.sh x86_64-apple-darwin  lightphotos-macos-x64.dmg
 #
-# With MACOS_SIGN_IDENTITY set (e.g. "Developer ID Application: Name (TEAMID)",
-# from a keychain that holds it), the app and .dmg are Developer ID signed, then
+# With MACOS_SIGN_IDENTITY set (a "Developer ID Application: Name (TEAMID)"
+# name or its SHA-1 hash, from a keychain that holds it), the app and .dmg are Developer ID signed, then
 # the .dmg is notarized and stapled, so Gatekeeper opens a downloaded copy with
 # no prompt. Notarizing needs an App Store Connect API key: APPLE_API_KEY_PATH
 # (the .p8 file), APPLE_API_KEY_ID and APPLE_API_ISSUER. Without an identity the
