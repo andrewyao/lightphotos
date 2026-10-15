@@ -38,7 +38,7 @@ flowchart LR
         delegate["shell/macos_delegate.rs<br/>Finder open-document"]
         menu["shell/menu.rs<br/>native menu bar"]
         drive["shell/drive.rs<br/>--drive headless scripts"]
-        control["shell/control.rs<br/>--control loopback JSON"]
+        control["shell/control/tcp.rs<br/>--control loopback JSON"]
         mcp["bin/lightphotos_mcp/<br/>MCP server on stdio"]
         profile["shell/profile.rs<br/>--profile (hotpath)"]
         webshell["web/*<br/>web_fs, web_canvas, analytics"]
@@ -162,11 +162,11 @@ flowchart LR
     class webshell,fsa,rawrender web
 ```
 
-`shell/control.rs` runs only with `--control <port>`, and not in the browser.
+`shell/control/tcp.rs` runs only with `--control <port>`, and not in the browser.
 Its threads read the requests. The main thread runs them (`app/control.rs`).
 
 `bin/lightphotos_mcp/` is a separate binary. It links only the lib. With `--attach`, it
-sends each tool call to `shell/control.rs`. With `--folder`, no app runs: it writes the
+sends each tool call to `shell/control/tcp.rs`. With `--folder`, no app runs: it writes the
 sidecars and renders through `export/`.
 
 `scoring/facequality.rs`, `scoring/segmentation.rs` and the aesthetics part of

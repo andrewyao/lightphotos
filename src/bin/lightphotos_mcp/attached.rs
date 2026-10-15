@@ -1,5 +1,5 @@
 //! Attached mode: each tool call is one request on a fresh connection to
-//! the app's `--control` channel (`src/shell/control.rs`).
+//! the app's `--control` channel (`src/shell/control/tcp.rs`).
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};

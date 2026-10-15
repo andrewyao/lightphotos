@@ -2,17 +2,16 @@
 //! on the main thread. A `wait` or `screenshot` stays here until the frame
 //! loop can answer it, so neither blocks the thread.
 
-use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use super::{App, State};
-use crate::shell::control::{Answer, ChannelError, Op, Payload, Request};
+use crate::shell::control::{Answer, ChannelError, Op, Payload, Reply, Request};
 
 /// Requests the frame loop answers later.
 #[derive(Default)]
 pub(crate) struct Pending {
-    shots: Vec<Sender<Answer>>,
-    waits: Vec<(Sender<Answer>, Instant)>,
+    shots: Vec<Reply>,
+    waits: Vec<(Reply, Instant)>,
 }
 
 /// How often the loop looks again while a `wait` is pending.
@@ -29,7 +28,7 @@ fn json(value: impl serde::Serialize) -> Answer {
 
 impl App {
     /// Dropping `reply` unanswered tells the connection nothing ran.
-    pub(crate) fn answer_control(&mut self, request: Request, reply: Sender<Answer>) {
+    pub(crate) fn answer_control(&mut self, request: Request, reply: Reply) {
         let Request { op, expires } = request;
         let now = Instant::now();
         if now >= expires {

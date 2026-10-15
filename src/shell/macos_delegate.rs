@@ -35,10 +35,7 @@ pub enum UserEvent {
     Menu(crate::shell::menu::MenuCommand),
     /// A `--control` request, answered on the sender.
     #[cfg(not(target_arch = "wasm32"))]
-    Control(
-        crate::shell::control::Request,
-        std::sync::mpsc::Sender<crate::shell::control::Answer>,
-    ),
+    Control(crate::shell::control::Request, crate::shell::control::Reply),
 }
 
 /// Set once in `main`; read by the injected Objective-C method.

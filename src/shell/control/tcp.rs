@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! `--control <port>`: a loopback channel that lets another local process
-//! drive the running app. Off unless the flag is given, and bound to
-//! 127.0.0.1 only.
+//! `--control <port>`: the loopback TCP transport. Off unless the flag is
+//! given, and bound to 127.0.0.1 only.
 //!
 //! Each TCP connection carries one JSON request per line and gets one JSON
 //! reply per line:
@@ -18,22 +17,23 @@
 //!
 //! A connection thread parses and checks each line, then hands the request
 //! to the main thread through the event loop (`UserEvent::Control`) and waits
-//! for the answer on a channel. The app holds `wait` and `screenshot` until
-//! its frame loop can answer them (`app/control.rs`).
+//! for the answer on a channel.
 
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use serde_json::{json, Value};
 use winit::event_loop::EventLoopProxy;
 
-use crate::command::{Command, CommandError};
-use crate::renderer::RgbFrame;
+use super::{
+    Answer, ChannelError, Failure, Op, Payload, Reply, Request, DEFAULT_WAIT, MAX_WAIT,
+    REPLY_TIMEOUT,
+};
+use crate::command::Command;
 use crate::shell::macos_delegate::UserEvent;
 
 /// The longest request line. A longer one ends the connection.
@@ -41,118 +41,9 @@ const MAX_LINE: usize = 1 << 20;
 const MAX_CONNECTIONS: usize = 4;
 const MIN_TOKEN_LEN: usize = 16;
 const TOKEN_ENV: &str = "LIGHTPHOTOS_CONTROL_TOKEN";
-/// How long a connection waits for the main thread to answer.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a connection may go without sending a line before it closes,
 /// so idle clients can't hold every slot.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const DEFAULT_WAIT: Duration = Duration::from_secs(10);
-const MAX_WAIT: Duration = Duration::from_secs(60);
-
-/// A checked request for the main thread.
-#[derive(Debug, Clone)]
-pub(crate) enum Op {
-    Run(Box<Command>),
-    Commands,
-    State,
-    Screenshot,
-    /// Answer once the app settles, or with `timeout` after this long.
-    Wait(Duration),
-}
-
-/// An `Op` on its way to the main thread.
-#[derive(Debug, Clone)]
-pub(crate) struct Request {
-    pub(crate) op: Op,
-    /// When the connection stops waiting. The app drops a request it reaches
-    /// later without running it, so a request the client gave up on can't
-    /// run behind its retry.
-    pub(crate) expires: Instant,
-}
-
-/// The main thread's answer to one `Op`.
-pub(crate) type Answer = Result<Payload, Failure>;
-
-pub(crate) enum Payload {
-    Json(Value),
-    /// Encoded on the connection thread, so the main thread never waits on it.
-    Frame(RgbFrame),
-}
-
-/// An error reply. `error` is a [`CommandError`] or a [`ChannelError`], both
-/// tagged by their `error` field.
-#[derive(Debug)]
-pub(crate) struct Failure {
-    error: Value,
-    message: String,
-}
-
-impl From<CommandError> for Failure {
-    fn from(e: CommandError) -> Failure {
-        Failure {
-            error: serde_json::to_value(&e).unwrap_or_default(),
-            message: e.to_string(),
-        }
-    }
-}
-
-impl From<ChannelError> for Failure {
-    fn from(e: ChannelError) -> Failure {
-        Failure {
-            error: serde_json::to_value(&e).unwrap_or_default(),
-            message: e.to_string(),
-        }
-    }
-}
-
-/// What went wrong with a request before or after its command ran.
-#[derive(Serialize, Debug)]
-#[serde(tag = "error", rename_all = "snake_case")]
-pub(crate) enum ChannelError {
-    BadJson { reason: String },
-    BadToken,
-    UnknownOp { op: String },
-    TooLong { limit: usize },
-    TooManyConnections { limit: usize },
-    IdleTimeout,
-    Timeout,
-    AppClosed,
-    Failed { reason: String },
-}
-
-impl std::fmt::Display for ChannelError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ChannelError::BadJson { reason } => write!(
-                f,
-                "not a request: {reason}; send one JSON object per line with `token` and `op`"
-            ),
-            ChannelError::BadToken => {
-                f.write_str("wrong or missing `token`; use the one the app printed at startup")
-            }
-            ChannelError::UnknownOp { op } => write!(
-                f,
-                "no op `{op}`; use run, commands, state, screenshot or wait"
-            ),
-            ChannelError::TooLong { limit } => {
-                write!(
-                    f,
-                    "request longer than {limit} bytes; closing the connection"
-                )
-            }
-            ChannelError::TooManyConnections { limit } => write!(
-                f,
-                "{limit} connections are open already; close one and retry"
-            ),
-            ChannelError::IdleTimeout => f.write_str(
-                "no request for a while; closing the connection, open a new one to go on",
-            ),
-            ChannelError::Timeout => f.write_str("timed out: the app is still busy"),
-            ChannelError::AppClosed => f.write_str("the app is closing"),
-            ChannelError::Failed { reason } => f.write_str(reason),
-        }
-    }
-}
 
 /// Splits `--control <port>` out of the arguments. Returns the port, if the
 /// flag is there, and the other arguments in order.
@@ -222,7 +113,7 @@ fn same_token(given: &[u8], token: &[u8]) -> bool {
 /// is gone.
 fn listen<A>(port: u16, token: String, idle: Duration, app: A) -> Result<u16, String>
 where
-    A: Fn(Request, Sender<Answer>) -> bool + Clone + Send + 'static,
+    A: Fn(Request, Reply) -> bool + Clone + Send + 'static,
 {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))
         .map_err(|e| format!("can't listen on 127.0.0.1:{port}: {e}"))?;
@@ -251,7 +142,7 @@ fn accept<A>(
     idle: Duration,
     app: A,
 ) where
-    A: Fn(Request, Sender<Answer>) -> bool + Send + 'static,
+    A: Fn(Request, Reply) -> bool + Send + 'static,
 {
     let Some(slot) = Slot::take(open) else {
         let refused = ChannelError::TooManyConnections {
@@ -301,7 +192,7 @@ fn serve(
     mut reader: impl BufRead,
     mut writer: impl Write,
     token: &str,
-    app: &impl Fn(Request, Sender<Answer>) -> bool,
+    app: &impl Fn(Request, Reply) -> bool,
 ) {
     loop {
         let line = match read_line(&mut reader) {
@@ -389,7 +280,7 @@ fn parse_request(line: &[u8], token: &str) -> Result<Op, Failure> {
 }
 
 /// Hands `op` to the main thread and waits for its answer.
-fn ask(app: &impl Fn(Request, Sender<Answer>) -> bool, op: Op) -> Answer {
+fn ask(app: &impl Fn(Request, Reply) -> bool, op: Op) -> Answer {
     let patience = match &op {
         Op::Wait(timeout) => *timeout + REPLY_TIMEOUT,
         _ => REPLY_TIMEOUT,
@@ -440,6 +331,8 @@ fn reply_json(answer: Answer) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::CommandError;
+    use crate::renderer::RgbFrame;
     use std::io::Cursor;
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -557,7 +450,7 @@ mod tests {
     }
 
     /// Stands in for the main thread: answers each op on a thread of its own.
-    fn fake_app(request: Request, reply: Sender<Answer>) -> bool {
+    fn fake_app(request: Request, reply: Reply) -> bool {
         std::thread::spawn(move || {
             let answer = match request.op {
                 Op::State => Ok(Payload::Json(json!({ "mode": "grid" }))),
@@ -630,7 +523,7 @@ mod tests {
     #[test]
     fn a_closed_app_is_an_error_not_a_hang() {
         let mut out = Vec::new();
-        let gone = |_: Request, _: Sender<Answer>| false;
+        let gone = |_: Request, _: Reply| false;
         serve(
             Cursor::new(request("state").into_bytes()),
             &mut out,

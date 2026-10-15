@@ -661,7 +661,7 @@ fn main() {
 
     // The path argument is optional. Without one the app opens on the landing
     // page. A packaged .app may instead get its path from Finder later.
-    let (control_port, args) = match shell::control::split_args(std::env::args().skip(1)) {
+    let (control_port, args) = match shell::control::tcp::split_args(std::env::args().skip(1)) {
         Ok(split) => split,
         Err(e) => {
             eprintln!("[control] {e}");
@@ -699,7 +699,7 @@ fn main() {
 
     shell::macos_delegate::set_proxy(event_loop.create_proxy());
     if let Some(port) = control_port {
-        if let Err(e) = shell::control::start(port, event_loop.create_proxy()) {
+        if let Err(e) = shell::control::tcp::start(port, event_loop.create_proxy()) {
             eprintln!("[control] {e}");
             std::process::exit(2);
         }
