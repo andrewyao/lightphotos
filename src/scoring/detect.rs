@@ -26,6 +26,16 @@ pub enum DetectError {
     Failed(String),
 }
 
+impl DetectError {
+    /// Whether Vision failed because this machine can't run a model at all,
+    /// as on GitHub's macOS runners: VMs with no GPU or Neural Engine.
+    /// Tests that need a real detection skip on it.
+    pub fn is_no_model_here(&self) -> bool {
+        matches!(self, DetectError::Failed(e)
+            if e.contains("Could not create inference context") || e.contains("Unspecified error"))
+    }
+}
+
 impl fmt::Display for DetectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -467,13 +477,8 @@ mod file_tests {
             crate::decode::image_encode::JpegQuality::Export,
         )
         .unwrap();
-        // GitHub's macOS runners are VMs with no GPU or Neural Engine, where
-        // Vision can't run a model; facequality's tests skip the same way.
         let coverage = match run(&photo, DetectTarget::Subject) {
-            Err(DetectError::Failed(e))
-                if e.contains("Could not create inference context")
-                    || e.contains("Unspecified error") =>
-            {
+            Err(e) if e.is_no_model_here() => {
                 eprintln!("skipping: Vision cannot run a model here ({e})");
                 std::fs::remove_dir_all(&dir).unwrap();
                 return;

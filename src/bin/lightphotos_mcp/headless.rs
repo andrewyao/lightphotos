@@ -361,6 +361,13 @@ mod tests {
     #[test]
     fn detect_for_records_what_it_can_and_notes_the_rest() {
         let (dir, photo) = folder_with_photo("detect-for");
+        if let Err(e) = lightphotos::scoring::detect::run(&photo, DetectTarget::Subject) {
+            if e.is_no_model_here() {
+                eprintln!("skipping: Vision cannot run a model here ({e})");
+                std::fs::remove_dir_all(&dir).unwrap();
+                return;
+            }
+        }
         let mut rec = ImageRecord::default();
         rec.masks.set(vec![
             Mask::detected(DetectTarget::Subject),
