@@ -1004,7 +1004,7 @@ impl App {
             egui_ctx,
             egui_state: None,
         };
-        app.rescan_preset_folders(false);
+        app.rescan_preset_folders(presets::Access::Quiet);
         app
     }
 
@@ -1449,7 +1449,9 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::ImportLrPresets => self.import_lr_presets(),
-                ui::UiAction::RescanPresetFolders => self.rescan_preset_folders(true),
+                ui::UiAction::RescanPresetFolders => {
+                    self.rescan_preset_folders(presets::Access::Ask)
+                }
                 ui::UiAction::AddPresetFolder => self.add_preset_folder_dialog(),
                 ui::UiAction::RemovePresetFolder(dir) => self.remove_preset_folder(&dir),
                 ui::UiAction::NewCatalog => self.new_catalog_dialog(),

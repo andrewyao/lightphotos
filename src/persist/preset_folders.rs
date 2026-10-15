@@ -153,8 +153,6 @@ pub(crate) fn scan(
     let mut out = Scan::default();
     let mut seen = HashSet::new();
     let mut files = 0usize;
-    // Breadth first, in name order, so a folder reached two ways is grouped
-    // by its shallowest path every time.
     let mut queue = VecDeque::from([(root.to_path_buf(), 0usize)]);
     'walk: while let Some((dir, depth)) = queue.pop_front() {
         let Ok(canonical) = std::fs::canonicalize(&dir) else {

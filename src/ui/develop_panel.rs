@@ -160,7 +160,6 @@ pub(super) fn paint_rail_icon(
         );
     };
     match item {
-        // Two overlapping circles, as Lightroom draws its presets.
         RailItem::Presets => {
             painter.circle_stroke(p(-3.5, 0.0), 7.0 * u, stroke);
             painter.circle_stroke(p(3.5, 0.0), 7.0 * u, stroke);

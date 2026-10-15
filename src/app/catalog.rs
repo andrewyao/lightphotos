@@ -235,7 +235,7 @@ impl App {
         self.expanded.clear();
         self.subdirs.clear();
         self.missing_roots = super::folders::missing_among(self.catalog.folders());
-        self.rescan_preset_folders(false);
+        self.rescan_preset_folders(presets::Access::Quiet);
         self.remember_catalog();
         self.restore_last_session();
         self.request_redraw();

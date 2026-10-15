@@ -149,9 +149,7 @@ fn picked_folder(
 // A directory handle survives a reload only in IndexedDB, which stores it by
 // structured clone. `localStorage` holds only strings. Each kept folder is
 // stored under `folder:<name>`; before there were several, the one kept
-// folder sat under `root`, which the first read moves. A preset folder is
-// kept under `preset:<name>`, apart from the photo folders, so forgetting a
-// photo folder never takes a preset folder's handle with it.
+// folder sat under `root`, which the first read moves.
 #[wasm_bindgen(inline_js = r#"
 const STORE = "handles";
 const PREFIX = "folder:";
@@ -243,8 +241,6 @@ export async function grantedFolder(name, ask) {
   }
   return handle;
 }
-// The kept name of preset folder `handle`, keeping it under a new unique
-// name if it isn't kept yet.
 export async function keepPresetFolder(handle) {
   const [keys, handles] = await run("readonly", (s) =>
     Promise.all([request(s.getAllKeys()), request(s.getAll())]));
@@ -261,8 +257,6 @@ export async function keepPresetFolder(handle) {
   await run("readwrite", (s) => { s.put(handle, PRESET + name); });
   return name;
 }
-// Kept preset folder `name` with read access, or null while the browser
-// withholds it. Asking needs a click's user activation.
 export async function grantedPresetFolder(name, ask) {
   const handle = await run("readonly", (s) => request(s.get(PRESET + name)));
   if (!handle) throw new Error("no saved preset folder");

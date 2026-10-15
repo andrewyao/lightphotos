@@ -76,7 +76,6 @@ impl Catalog {
         let presets = path.join(PRESETS_FILE);
         let mut catalog = Catalog::on_disk(at);
         catalog.load_record(folders);
-        // The error leaves the path out, as `land_presets` names the file.
         let stored =
             crate::paths::read_capped(&presets, super::MAX_RECORD_BYTES).map_err(|e| e.to_string());
         catalog.land_presets(&presets.display().to_string(), stored);

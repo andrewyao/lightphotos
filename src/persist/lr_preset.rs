@@ -8,8 +8,8 @@
 //! writes every field either as an attribute or as a child element of one
 //! `rdf:Description`, and both spellings are read. A description nested in
 //! it, such as the profile in `crs:Look`, is not the preset's and is left
-//! out. A dozen keys do not earn an
-//! XML crate, least of all one that has to build for wasm32.
+//! out. A dozen keys do not earn an XML crate, least of all one that has to
+//! build for wasm32.
 
 use crate::develop::curve::{Channel, Curve};
 use crate::develop::{Adjustments, ColorAxis, SliderId, SLIDERS};
@@ -294,8 +294,6 @@ fn description(xmp: &str) -> Option<String> {
     const NAME: &str = "rdf:Description";
     let mut body = String::new();
     let mut depth = 0usize;
-    // Where the outer block's text not yet copied into `body` starts, once
-    // it has started.
     let mut kept_from = None;
     let mut at = 0;
     while let Some(i) = xmp.get(at..)?.find(NAME).map(|i| at.saturating_add(i)) {
@@ -352,8 +350,6 @@ fn description(xmp: &str) -> Option<String> {
             }
         }
     }
-    // Unclosed: what the outer block had, unless a nested one ran on to
-    // the end.
     let from = kept_from?;
     if depth <= 1 {
         body.push_str(xmp.get(from..)?);

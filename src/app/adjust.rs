@@ -92,9 +92,7 @@ impl App {
                 }
                 if item == RailItem::Presets {
                     self.side_page = SidePage::Presets;
-                    // A click, so the browser may ask again for a folder it
-                    // withholds.
-                    self.rescan_preset_folders(true);
+                    self.rescan_preset_folders(presets::Access::Ask);
                 } else {
                     self.side_page = SidePage::Info;
                 }

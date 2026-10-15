@@ -17,6 +17,7 @@ pub(crate) enum FolderState {
     },
     /// The browser holds the folder's handle but withholds read access
     /// until a click asks for it.
+    // Only the browser withholds access to a folder.
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     NeedsPermission,
     /// The folder could not be read, with why.
@@ -35,6 +36,14 @@ impl FolderState {
             Err(e) => FolderState::Unavailable(e),
         }
     }
+}
+
+/// Whether a scan may ask the browser again for a folder it withholds,
+/// which only a click lets it do. Natively every folder reads either way.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Access {
+    Ask,
+    Quiet,
 }
 
 /// A finished scan of one folder.
@@ -243,7 +252,7 @@ impl App {
             return Err(format!("{} is not a folder", dir.display()));
         }
         if self.catalog.add_preset_folder(&dir)? {
-            self.rescan_preset_folders(false);
+            self.rescan_preset_folders(Access::Quiet);
         }
         Ok(())
     }
@@ -284,7 +293,7 @@ impl App {
         self.preset_pick = None;
         match picked {
             Ok(name) => match self.catalog.add_preset_folder(&name) {
-                Ok(true) => self.rescan_preset_folders(false),
+                Ok(true) => self.rescan_preset_folders(Access::Quiet),
                 Ok(false) => {}
                 Err(e) => self.set_status(
                     StatusKind::Error,
@@ -324,15 +333,13 @@ impl App {
                     dir.to_path_buf(),
                 ),
             );
-            self.rescan_preset_folders(false);
+            self.rescan_preset_folders(Access::Quiet);
         }
     }
 
     /// Reads the catalog's preset folders again. Each keeps showing its last
-    /// result until the new one lands; a folder no longer listed goes. `ask`
-    /// is for a click, which lets the browser ask for access to a folder it
-    /// withholds; natively it changes nothing.
-    pub(crate) fn rescan_preset_folders(&mut self, ask: bool) {
+    /// result until the new one lands; a folder no longer listed goes.
+    pub(crate) fn rescan_preset_folders(&mut self, access: Access) {
         let folders = self.catalog.preset_folders().to_vec();
         let mut old = std::mem::take(&mut self.preset_folders);
         self.preset_folders = folders
@@ -349,7 +356,7 @@ impl App {
         if folders.is_empty() {
             return;
         }
-        match spawn_scan(folders, ask) {
+        match spawn_scan(folders, access) {
             Ok(rx) => self.preset_scan = Some(rx),
             Err(e) => {
                 for (_, state) in &mut self.preset_folders {
@@ -469,7 +476,7 @@ impl App {
 /// Scans `folders` in order on a thread of its own, sending each result as
 /// it lands. Dropping the handle stops the walk mid-folder.
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_scan(folders: Vec<PathBuf>, _ask: bool) -> Result<ScanHandle, String> {
+fn spawn_scan(folders: Vec<PathBuf>, _access: Access) -> Result<ScanHandle, String> {
     use std::sync::atomic::{AtomicBool, Ordering};
     let (tx, rx) = std::sync::mpsc::channel();
     let cancel = std::sync::Arc::new(AtomicBool::new(false));
@@ -491,9 +498,9 @@ fn spawn_scan(folders: Vec<PathBuf>, _ask: bool) -> Result<ScanHandle, String> {
 
 /// The browser's scan: each folder through its kept handle, one after
 /// another on the page's own task. A folder the browser withholds access to
-/// waits for a click to `ask`.
+/// waits for a click, `Access::Ask`.
 #[cfg(target_arch = "wasm32")]
-fn spawn_scan(folders: Vec<PathBuf>, ask: bool) -> Result<ScanHandle, String> {
+fn spawn_scan(folders: Vec<PathBuf>, access: Access) -> Result<ScanHandle, String> {
     use crate::web::web_fs;
     use std::sync::atomic::{AtomicBool, Ordering};
     let (tx, rx) = std::sync::mpsc::channel();
@@ -501,7 +508,12 @@ fn spawn_scan(folders: Vec<PathBuf>, ask: bool) -> Result<ScanHandle, String> {
     let stop = cancel.clone();
     wasm_bindgen_futures::spawn_local(async move {
         for folder in folders {
-            let state = match web_fs::reopen_preset_folder(&folder.to_string_lossy(), ask).await {
+            let state = match web_fs::reopen_preset_folder(
+                &folder.to_string_lossy(),
+                access == Access::Ask,
+            )
+            .await
+            {
                 Ok(Some(handle)) => FolderState::from_scan(Ok(web_fs::scan_preset_folder(
                     &folder, handle, &stop,
                 )
@@ -901,7 +913,7 @@ pub(in crate::app) mod tests {
             cancel: std::sync::Arc::clone(&stale_cancel),
         });
 
-        app.rescan_preset_folders(false);
+        app.rescan_preset_folders(Access::Quiet);
         assert!(
             stale_cancel.load(std::sync::atomic::Ordering::Relaxed),
             "the rescan stops the old walk"

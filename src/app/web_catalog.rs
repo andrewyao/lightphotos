@@ -154,7 +154,7 @@ impl App {
         }
         let source = self.catalog.name().to_string();
         self.catalog.land_presets(&source, load.presets);
-        self.rescan_preset_folders(false);
+        self.rescan_preset_folders(presets::Access::Quiet);
         self.note_known_catalog();
         // A root picked while the record was out has handles before its
         // kept name reaches `kept`.
@@ -225,9 +225,7 @@ impl App {
         self.close_folder();
         self.supersede_web_pending_nav();
         self.catalog = catalog;
-        // The new catalog's preset folders are still pending, so this
-        // empties the list and drops the old catalog's scan.
-        self.rescan_preset_folders(false);
+        self.rescan_preset_folders(presets::Access::Quiet);
         self.web.catalogs.forget_after_load.clear();
         self.expanded.clear();
         self.subdirs.clear();

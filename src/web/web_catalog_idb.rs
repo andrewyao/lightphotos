@@ -33,8 +33,7 @@ impl Store {
 
 // `forgetFolderIfUnlisted` and `forgetPresetFolderIfUnlisted` reach into
 // `web_fs`'s `lightphotos-folders` database, so its name, store and
-// `folder:` and `preset:` key prefixes must match that module's. A key with
-// a NUL is a preset-folders record, never a catalog.
+// `folder:` and `preset:` key prefixes must match that module's.
 #[wasm_bindgen(inline_js = r#"
 const DB = "lightphotos-catalogs";
 const CATALOGS = "catalogs";
@@ -109,8 +108,6 @@ export async function forgetFolderIfUnlisted(name, folder) {
   }
   return true;
 }
-// The same for preset folder `folder`, against the other catalogs'
-// preset-folders records.
 export async function forgetPresetFolderIfUnlisted(name, folder) {
   const [keys, values] = await run(CATALOGS, "readonly", (s) =>
     Promise.all([request(s.getAllKeys()), request(s.getAll())]));

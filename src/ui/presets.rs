@@ -38,7 +38,6 @@ fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     );
     ui.data_mut(|d| d.insert_temp(id, query.clone()));
     let query = query.trim().to_lowercase();
-    // Both sides lowercase: a folder preset's keys were made at scan time.
     let shows = |name_key: &str, group_key: &str| {
         query.is_empty() || name_key.contains(&query) || group_key.contains(&query)
     };
@@ -75,8 +74,6 @@ fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             }
 
-            // Folders that share a group list as one, so the scans' own
-            // order is merged here, by the keys they already carry.
             let mut groups: BTreeMap<&str, (&str, Vec<&FolderPreset>)> = BTreeMap::new();
             for preset in app.folder_presets() {
                 if shows(&preset.name_key, &preset.group_key) {
