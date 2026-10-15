@@ -297,6 +297,10 @@ uuid = { version = "1", features = ["js"] }
 # fall back to Bayer instead of `unimplemented!()`, so a DNG whose CFA is
 # neither 2x2 nor 6x6 can no longer panic inside `rawler::decode`.
 #
+# `patches/rawler-cr2-sraw-black.patch` gives a Canon sRAW/mRAW CR2 a black
+# level of 0. The camera already subtracted black, and taking off ColorData's
+# sensor black again cast those files green.
+#
 # `[patch.crates-io]` applies globally (Cargo has no way to scope a patch to
 # one target), so `vendor/rawler-0.8.0` must exist for every platform and
 # every Cargo entry point. It is NOT committed — `scripts/setup-vendor-rawler.sh`

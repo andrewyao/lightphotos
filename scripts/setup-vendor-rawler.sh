@@ -18,7 +18,9 @@
 # Then it applies patches/rawler-ljpeg-restart.patch, which teaches the
 # lossless JPEG decoder restart markers (Samsung Galaxy Linear DNGs), and
 # patches/rawler-sensor-type-fallback.patch, which stops a DNG with an
-# unusual CFA size from panicking inside rawler::decode.
+# unusual CFA size from panicking inside rawler::decode, and
+# patches/rawler-cr2-sraw-black.patch, which stops a Canon sRAW/mRAW CR2
+# from losing its black level twice and turning green.
 #
 # Needed for ANY cargo invocation that touches this crate, wasm32 or not —
 # [patch.crates-io] redirects every use of `rawler` here, globally (Cargo
@@ -42,7 +44,7 @@ DEST="$HERE/vendor/rawler-$CRATE_VERSION"
 # Written only after the patch applies cleanly; its presence is what marks
 # the tree as fully set up (a half-materialized dir has no sentinel).
 SENTINEL="$DEST/.lightphotos-patched"
-PATCHES="rawler-web-time.patch rawler-ljpeg-restart.patch rawler-sensor-type-fallback.patch"
+PATCHES="rawler-web-time.patch rawler-ljpeg-restart.patch rawler-sensor-type-fallback.patch rawler-cr2-sraw-black.patch"
 STAMP="rawler $CRATE_VERSION + $PATCHES"
 
 FORCE=0

@@ -48,7 +48,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vendor
-          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/*.patch') }}
 
       # Ahead of rust-cache, which runs `cargo metadata` of its own.
       - name: Vendor rawler
@@ -106,7 +106,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vendor
-          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/*.patch') }}
 
       - name: Vendor rawler
         run: ./scripts/setup-vendor-rawler.sh
@@ -139,7 +139,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vendor
-          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/*.patch') }}
 
       # The default shell here is pwsh, and this is a /bin/sh script. git-bash
       # ships on the runner and provides the sh, curl, tar and patch it needs.
@@ -169,7 +169,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vendor
-          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/*.patch') }}
 
       # `cargo fmt` reads `cargo metadata` to find the targets, so the patched
       # rawler path has to resolve here too even though nothing is compiled.
@@ -193,7 +193,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vendor
-          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/*.patch') }}
 
       # Pinned to the ABOUT_VERSION the script requires.
       - uses: taiki-e/install-action@v2
@@ -221,7 +221,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: vendor
-          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/rawler-web-time.patch') }}
+          key: vendor-rawler-${{ hashFiles('scripts/setup-vendor-rawler.sh', 'patches/*.patch') }}
 
       - name: Vendor rawler
         run: ./scripts/setup-vendor-rawler.sh

@@ -1,0 +1,27 @@
+# The diff applied to vendor/rawler-0.8.0/ after rawler-sensor-type-fallback.patch.
+# A Canon sRAW/mRAW CR2 is demosaiced and black-subtracted in camera, then
+# stored as YCbCr. rawler converts it back to RGB but still subtracts the
+# sensor black level from ColorData (about 2048), which crushes the shadows
+# and casts the image green. Use a black level of 0 for these 3-channel
+# CR2s. Regenerate the full vendored copy via ./scripts/setup-vendor-rawler.sh.
+--- a/rawler-upstream/src/decoders/cr2.rs
++++ b/rawler-0.8.0/src/decoders/cr2.rs
+@@ -575,11 +575,13 @@
+       if let Some(blacklevel) = colordata::parse_colordata(colordata)?.blacklevel {
+         match cpp {
+           1 => return Ok(Some(BlackLevel::new(&blacklevel, cam.cfa.width, cam.cfa.height, cpp))),
+-          3 => {
+-            let avg = blacklevel.into_iter().sum::<u16>() / 4;
+-            let levels: [u16; 3] = [avg, avg, avg];
+-            return Ok(Some(BlackLevel::new(&levels, 1, 1, cpp)));
+-          }
++          // sRAW/mRAW: the camera subtracts black before it converts to
++          // YCbCr, so the RGB from `convert_to_rgb` already starts at 0.
++          // ColorData still holds the sensor's black, about 2048 on a
++          // 5D Mark III; taking it off again crushes the shadows and, since
++          // red and blue sit lower than green before white balance, casts
++          // the whole image green (patched locally).
++          3 => return Ok(Some(BlackLevel::new(&[0u16; 3], 1, 1, cpp))),
+           _ => unreachable!(),
+         }
+       }
