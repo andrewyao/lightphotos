@@ -422,11 +422,33 @@ catalog used, or one called `default`.
 
 **What a catalog holds:**
 - The list of folders.
+- The list of preset folders: folders of Lightroom `.xmp` presets whose
+  presets the Presets popup lists, as Lightroom Classic can store presets
+  with a catalog.
 - A copy of each rated, flagged or color-labelled photo's marks, grouped by
   the directory the photo is in.
 
-**What it does not hold:** develop edits, presets, thumbnails, Vision
+**What it does not hold:** develop edits, the preset library (`presets.rs`
+keeps that per install), the preset files themselves, thumbnails, Vision
 signals, or anything else about a photo. Those stay in the photo's folder.
+
+**Preset folders.** The list is a record of its own, never a field in
+`catalog.json`: v0.1.26 and v0.1.27 rewrite that file as `{v, folders}`
+and would drop a field they don't know. It has the same shape and the same
+`Record` states as the folder list, and an unreadable one never stops the
+catalog opening. `persist/preset_folders.rs` holds the rules both
+platforms share: only `.xmp` counts, in any case; dot-folders and catalogs
+are passed over; a walk stops at 8 levels, 5000 files and 1 MiB a file; a
+preset is grouped by its own `crs:Group`, else the subfolder it sits in,
+else the folder's name; a file that is a Look or will not read adds to a
+skipped count. Natively a thread walks each folder with a set of canonical
+directories, which cuts symlink loops; the browser walks the kept handle
+on the page's task. `App` keeps a `FolderState` per folder (`Scanning`,
+`Ready`, `NeedsPermission` in the browser, `Unavailable`). A scan runs at
+launch, on a catalog switch, when a folder is added and when the popup
+opens, and each folder shows its last result until the new one lands. A
+rescan replaces the receiver, so an older scan's results are dropped with
+it.
 
 **The folder is the truth.** Every edit and mark is written to the photo's
 own sidecar under `<photo dir>/.lightphotos/`, as before catalogs. The marks
@@ -442,13 +464,18 @@ folders.
 **Where it is stored:**
 - Native: a directory `<name>.lightphotos`, by default in
   `~/Pictures/LightPhotos/`. It holds `catalog.json`
-  (`{"v":1,"folders":[...]}`) and `marks/<fnv1a of the dir>.json`
+  (`{"v":1,"folders":[...]}`), `presets.json` (the preset folders, the same
+  shape) and `marks/<fnv1a of the dir>.json`
   (`{"v":1,"dir":...,"photos":{...}}`), one shard per photo directory. A
   shard names its directory inside, so a hash collision or a stale shard is
   caught and replaced. A writer thread keeps only the newest bytes per
   file, and exit waits for it.
 - Browser: IndexedDB `lightphotos-catalogs`. The `catalogs` store maps a
-  catalog's name to its `{v, folders}`. The `marks` store maps
+  catalog's name to its `{v, folders}`, and `presets\0<name>` to its preset
+  folders; no catalog name holds a NUL, so that key is never taken for a
+  catalog. A preset folder is listed by the name its handle is kept under,
+  `preset:<name>` in `lightphotos-folders`, apart from the photo folders'
+  `folder:` handles. The `marks` store maps
   `<name>\0<dir>` to a shard. The folders are listed by the names under
   which `web_fs.rs` keeps their directory handles in `lightphotos-folders`.
   A listed folder whose handle is gone shows as missing. A page has no exit

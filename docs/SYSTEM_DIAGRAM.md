@@ -81,7 +81,7 @@ flowchart LR
         writeback["persist/folder_store/writeback.rs<br/>off-frame write queue"]
         groups["persist/groups.rs<br/>photo groups / bursts"]
         signal["persist/signalcache.rs<br/>capture time, face quality"]
-        prefs["persist/prefs.rs · presets.rs"]
+        prefs["persist/prefs.rs · presets.rs<br/>lr_preset.rs · preset_folders.rs"]
         secret["persist/secret.rs<br/>Immich API key"]
     end
 
