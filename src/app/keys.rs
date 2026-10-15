@@ -561,9 +561,10 @@ mod tests {
         };
         app.copied_settings = Some(crate::app::folder_store::CopiedSettings {
             masks: Vec::new(),
+            touchups: Vec::new(),
             path: paths[0].clone(),
             adj: look,
-            sections: crate::develop::copy::CopySections::LOOK,
+            items: crate::develop::copy::CopyItems::LOOK,
         });
         app.request_bulk(ui::BulkKind::ApplySettings);
         assert!(app.confirm_open(), "applying a look asks first");
@@ -1101,51 +1102,122 @@ mod tests {
         assert!(app.confirm_open(), "pasting onto the selection asks first");
     }
 
-    /// Paste carries only the sections ticked in Copy Settings.
+    /// Paste carries only the items ticked in Copy Settings, and Copy
+    /// Adjustment keeps leaving an unticked one out.
     #[test]
-    fn paste_carries_only_the_ticked_sections() {
-        use crate::develop::copy::{CopySection, CopySections};
+    fn an_unticked_item_stays_out_of_every_copy_until_ticked() {
+        use crate::develop::copy::{CopyItem, CopyItems};
         let (mut app, paths) = folder_app(2);
         let source = crate::develop::Adjustments {
             temp: 30.0,
+            tint: 12.0,
             exposure: 1.0,
             ..Default::default()
         };
         app.edits.insert(paths[0].clone(), source);
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyC);
-        app.set_copy_sections(CopySections::NONE.with(CopySection::Tone, true));
+        app.set_copy_items(CopyItems::LOOK.with(CopyItem::Tint, false));
         press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        app.copied_settings = None;
+        app.quick_copy_settings();
         press(&mut app, CMD, KeyCode::KeyA);
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyV);
         press(&mut app, ModifiersState::empty(), KeyCode::Enter);
         let pasted = app.folder_store.adjustments(&paths[1]);
-        assert_eq!((pasted.exposure, pasted.temp), (1.0, 0.0));
+        assert_eq!(
+            (pasted.exposure, pasted.temp, pasted.tint),
+            (1.0, 30.0, 0.0)
+        );
+        app.sel = Some(0);
+        app.selected.clear();
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyC);
+        assert_eq!(
+            app.copy_dialog(),
+            Some(CopyItems::LOOK.with(CopyItem::Tint, false))
+        );
     }
 
-    /// Masks paste only when their section is ticked, which it isn't by
-    /// default.
+    /// A ticked crop copies once, then Copy Settings opens with it off and
+    /// Copy Adjustment leaves it out.
+    #[test]
+    fn crop_is_chosen_afresh_for_each_copy() {
+        use crate::develop::copy::{CopyItem, CopyItems};
+        let (mut app, paths) = folder_app(2);
+        app.sel = Some(0);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyC);
+        let with_crop = CopyItems::LOOK.with(CopyItem::Crop, true);
+        app.set_copy_items(with_crop);
+        press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        assert_eq!(
+            app.copied_settings.as_ref().map(|c| c.items),
+            Some(with_crop)
+        );
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyC);
+        assert_eq!(app.copy_dialog(), Some(CopyItems::LOOK));
+        press(&mut app, ModifiersState::empty(), KeyCode::Escape);
+        app.quick_copy_settings();
+        assert_eq!(
+            app.copied_settings
+                .as_ref()
+                .map(|c| (c.path.clone(), c.items)),
+            Some((paths[0].clone(), CopyItems::LOOK))
+        );
+    }
+
+    /// Touch Up pastes the source's spots onto each photo, and one undo
+    /// takes them back off.
+    #[test]
+    fn pasted_touch_ups_land_on_each_photo_and_undo_together() {
+        use crate::develop::copy::{CopyItem, CopyItems};
+        let (mut app, paths) = folder_app(3);
+        let spot = crate::develop::TouchUp {
+            center: [0.3, 0.4],
+            radius: 0.05,
+            source: [0.5, 0.4],
+            feather: 0.5,
+            delta: [0.0; 3],
+            opacity: 1.0,
+        };
+        app.touchups.insert(paths[0].clone(), vec![spot]);
+        app.sel = Some(0);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyC);
+        app.set_copy_items(CopyItems::NONE.with(CopyItem::TouchUp, true));
+        press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        press(&mut app, CMD, KeyCode::KeyA);
+        press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyV);
+        press(&mut app, ModifiersState::empty(), KeyCode::Enter);
+        for path in &paths[1..] {
+            assert_eq!(app.touchups.get(path), Some(&vec![spot]));
+            assert_eq!(app.folder_store.touchups(path), vec![spot]);
+        }
+        app.save_edit_unless_dragging();
+        assert_eq!(app.undo_edit(), 2, "one step holds both photos");
+        for path in &paths[1..] {
+            assert_eq!(app.touchups.get(path), None);
+            assert!(app.folder_store.touchups(path).is_empty());
+        }
+    }
+
+    /// Masks paste only when ticked, which they aren't by default.
     #[test]
     fn paste_carries_masks_only_when_ticked() {
-        use crate::develop::copy::{CopySection, CopySections};
+        use crate::develop::copy::{CopyItem, CopyItems};
         let (mut app, paths) = folder_app(2);
         let mask = crate::develop::Mask::radial([0.4, 0.5], [0.2, 0.2]);
         app.masks.insert(paths[0].clone(), vec![mask]);
-        for (sections, want) in [
-            (CopySections::LOOK, vec![]),
-            (
-                CopySections::LOOK.with(CopySection::Masks, true),
-                vec![mask],
-            ),
+        for (items, want) in [
+            (CopyItems::LOOK, vec![]),
+            (CopyItems::LOOK.with(CopyItem::Masks, true), vec![mask]),
         ] {
             app.sel = Some(0);
             app.selected.clear();
             press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyC);
-            app.set_copy_sections(sections);
+            app.set_copy_items(items);
             press(&mut app, ModifiersState::empty(), KeyCode::Enter);
             press(&mut app, CMD, KeyCode::KeyA);
             press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyV);
             press(&mut app, ModifiersState::empty(), KeyCode::Enter);
-            assert_eq!(app.folder_store.masks(&paths[1]), want, "{sections:?}");
+            assert_eq!(app.folder_store.masks(&paths[1]), want, "{items:?}");
         }
     }
 

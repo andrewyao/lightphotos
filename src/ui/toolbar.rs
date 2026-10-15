@@ -10,6 +10,8 @@ use crate::sidecar::ColorLabel;
 const ITEM_GAP: f32 = 10.0;
 pub(super) const BUTTON_PAD: egui::Vec2 = egui::vec2(8.0, 3.0);
 const ROW_MARGIN: egui::Vec2 = egui::vec2(10.0, 6.0);
+/// The gear that opens Copy Settings. egui's default fonts carry it.
+const COG: &str = "\u{2699}";
 
 /// A panel for one of the grid's rows of controls, on top or at the
 /// bottom, laid out with the spacing above. The top row is the tour's filter
@@ -689,9 +691,9 @@ pub(super) fn strip_bar(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         });
 }
 
-/// Copy Adjustment and Apply Adjustment as one control split down the
-/// middle. Copy takes one photo's adjustment, so it waits for a single
-/// selection.
+/// Copy Adjustment, a cog that opens Copy Settings, and Apply Adjustment as
+/// one control in three segments. Copy takes one photo's adjustment, so it
+/// and the cog wait for a single selection.
 fn adjustment_pair(ui: &mut egui::Ui, app: &App, one: bool, out: &mut FrameOutput) {
     let t = t();
     ui.scope(|ui| {
@@ -701,7 +703,14 @@ fn adjustment_pair(ui: &mut egui::Ui, app: &App, one: bool, out: &mut FrameOutpu
         let right = egui::CornerRadius { nw: 0, sw: 0, ..r };
         if ui
             .add_enabled(one, egui::Button::new(t.copy_settings).corner_radius(left))
-            .on_hover_text(crate::i18n::keys(t.copy_settings_tip))
+            .on_hover_text(t.copy_settings_tip)
+            .clicked()
+        {
+            out.actions.push(UiAction::QuickCopySettings);
+        }
+        if ui
+            .add_enabled(one, egui::Button::new(COG).corner_radius(0))
+            .on_hover_text(crate::i18n::keys(t.copy_settings_choose_tip))
             .clicked()
         {
             out.actions.push(UiAction::CopySettings);
@@ -810,11 +819,20 @@ pub(super) fn pick_actions(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) 
         });
 }
 
+/// Copy Adjustment, then Copy Adjustment… to open Copy Settings, as
+/// entries of the Actions menu.
 fn copy_button(ui: &mut egui::Ui, out: &mut FrameOutput) {
     let t = t();
     if ui
         .button(t.copy_settings)
-        .on_hover_text(crate::i18n::keys(t.copy_settings_tip))
+        .on_hover_text(t.copy_settings_tip)
+        .clicked()
+    {
+        out.actions.push(UiAction::QuickCopySettings);
+    }
+    if ui
+        .button(t.menu.copy_settings)
+        .on_hover_text(crate::i18n::keys(t.copy_settings_choose_tip))
         .clicked()
     {
         out.actions.push(UiAction::CopySettings);

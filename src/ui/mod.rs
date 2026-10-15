@@ -68,7 +68,10 @@ pub enum UiAction {
     /// Shift-click: extend the range selection to this cell.
     SelectRange(usize),
     OpenLoupe(usize),
-    /// Copy the primary photo's develop settings to the in-app clipboard.
+    /// Copy the primary photo's remembered Copy Settings items to the
+    /// in-app clipboard, with no dialog.
+    QuickCopySettings,
+    /// Open Copy Settings for the primary photo.
     CopySettings,
     /// Open the name prompt for a new preset, seeded with a suggestion.
     SavePresetPrompt,
@@ -220,8 +223,8 @@ pub enum UiAction {
     SelectMask(Option<usize>),
     DeleteMask(usize),
     SetAdjustments(Box<Adjustments>),
-    /// The sections ticked in the open Copy Settings.
-    SetCopySections(crate::develop::copy::CopySections),
+    /// The items ticked in the open Copy Settings.
+    SetCopyItems(crate::develop::copy::CopyItems),
     CommitCopySettings,
     CancelCopySettings,
     /// Tick or clear Remove Chromatic Aberration for the loupe photo.

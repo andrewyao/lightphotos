@@ -1,14 +1,51 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! Which parts of an edit Copy and Paste carry, by Lightroom's sections.
-//! [`merge`] is the one place a copied edit or a preset lands on a photo,
-//! so the two can't disagree about what a section holds.
+//! Which parts of an edit Copy and Paste carry, by Lightroom's Copy Settings
+//! items. [`merge`] is the one place a copied edit or a preset lands on a
+//! photo, so the two can't disagree about what an item holds.
 
-use super::{Adjustments, Section, SLIDERS};
+use super::{Adjustments, SliderId, SLIDERS};
 
 /// One part of an edit that Copy can carry or leave.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum CopySection {
+pub enum CopyItem {
+    Temp,
+    Tint,
+    Exposure,
+    Contrast,
+    Highlights,
+    Shadows,
+    Whites,
+    Blacks,
+    Texture,
+    Clarity,
+    Dehaze,
+    Vibrance,
+    Saturation,
+    Curve,
+    ColorMixer,
+    GrayMix,
+    ColorGrading,
+    Sharpening,
+    NoiseReduction,
+    Vignette,
+    Grain,
+    /// Remove Chromatic Aberration. The scales are measured per photo, so
+    /// pasting it measures each photo that lacks it.
+    RemoveCa,
+    Crop,
+    Straighten,
+    /// The local adjustment masks, which live beside the edit, so
+    /// [`merge`] leaves them to the caller. Off unless chosen: they are
+    /// drawn for one photo's framing.
+    Masks,
+    /// The spot heals, which also live beside the edit.
+    TouchUp,
+}
+
+/// A heading in Copy Settings, over the items it holds.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum CopyGroup {
     WhiteBalance,
     Tone,
     Presence,
@@ -19,182 +56,340 @@ pub enum CopySection {
     Detail,
     /// Vignette and Grain.
     Effects,
-    /// Remove Chromatic Aberration. The scales are measured per photo, so
-    /// pasting it measures each photo that lacks it.
     Optics,
     /// The crop and the straighten angle.
     Crop,
-    /// The local adjustment masks, which live beside the edit, so
-    /// [`merge`] leaves them to the caller. Off unless chosen: they are
-    /// drawn for one photo's framing.
     Masks,
+    TouchUp,
 }
 
-impl CopySection {
-    pub const ALL: [CopySection; 11] = [
-        CopySection::WhiteBalance,
-        CopySection::Tone,
-        CopySection::Presence,
-        CopySection::Curve,
-        CopySection::Color,
-        CopySection::ColorGrading,
-        CopySection::Detail,
-        CopySection::Effects,
-        CopySection::Optics,
-        CopySection::Crop,
-        CopySection::Masks,
+/// Whether a group's items are all chosen, none, or some.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum GroupState {
+    On,
+    Off,
+    Mixed,
+}
+
+impl CopyGroup {
+    pub const ALL: [CopyGroup; 12] = [
+        CopyGroup::WhiteBalance,
+        CopyGroup::Tone,
+        CopyGroup::Presence,
+        CopyGroup::Curve,
+        CopyGroup::Color,
+        CopyGroup::ColorGrading,
+        CopyGroup::Detail,
+        CopyGroup::Effects,
+        CopyGroup::Optics,
+        CopyGroup::Crop,
+        CopyGroup::Masks,
+        CopyGroup::TouchUp,
     ];
 
-    /// The section a Develop slider belongs to.
-    fn of(section: Section) -> CopySection {
-        match section {
-            Section::WhiteBalance => CopySection::WhiteBalance,
-            Section::Tone => CopySection::Tone,
-            Section::Presence => CopySection::Presence,
-            Section::Curve => CopySection::Curve,
-            Section::ColorMixer | Section::GrayMix => CopySection::Color,
-            Section::ColorGrading => CopySection::ColorGrading,
-            Section::Detail => CopySection::Detail,
-            Section::Optics => CopySection::Optics,
-            Section::Vignette | Section::Grain => CopySection::Effects,
+    /// The group's items, in the order Copy Settings lists them.
+    pub fn items(self) -> &'static [CopyItem] {
+        use CopyItem as I;
+        match self {
+            CopyGroup::WhiteBalance => &[I::Temp, I::Tint],
+            CopyGroup::Tone => &[
+                I::Exposure,
+                I::Contrast,
+                I::Highlights,
+                I::Shadows,
+                I::Whites,
+                I::Blacks,
+            ],
+            CopyGroup::Presence => &[
+                I::Texture,
+                I::Clarity,
+                I::Dehaze,
+                I::Vibrance,
+                I::Saturation,
+            ],
+            CopyGroup::Curve => &[I::Curve],
+            CopyGroup::Color => &[I::ColorMixer, I::GrayMix],
+            CopyGroup::ColorGrading => &[I::ColorGrading],
+            CopyGroup::Detail => &[I::Sharpening, I::NoiseReduction],
+            CopyGroup::Effects => &[I::Vignette, I::Grain],
+            CopyGroup::Optics => &[I::RemoveCa],
+            CopyGroup::Crop => &[I::Crop, I::Straighten],
+            CopyGroup::Masks => &[I::Masks],
+            CopyGroup::TouchUp => &[I::TouchUp],
         }
     }
 
-    const fn bit(self) -> u16 {
-        1 << self as u16
+    /// The name the first two preference formats stored, when a group was
+    /// all Copy could choose. Never translated.
+    fn key(self) -> &'static str {
+        match self {
+            CopyGroup::WhiteBalance => "white_balance",
+            CopyGroup::Tone => "tone",
+            CopyGroup::Presence => "presence",
+            CopyGroup::Curve => "curve",
+            CopyGroup::Color => "color",
+            CopyGroup::ColorGrading => "color_grading",
+            CopyGroup::Detail => "detail",
+            CopyGroup::Effects => "effects",
+            CopyGroup::Optics => "optics",
+            CopyGroup::Crop => "crop",
+            CopyGroup::Masks => "masks",
+            CopyGroup::TouchUp => "touch_up",
+        }
+    }
+}
+
+impl CopyItem {
+    /// Every item, group by group.
+    pub fn all() -> impl Iterator<Item = CopyItem> {
+        CopyGroup::ALL
+            .into_iter()
+            .flat_map(|g| g.items().iter().copied())
+    }
+
+    /// The item a Develop slider belongs to.
+    fn of(id: SliderId) -> CopyItem {
+        use SliderId as S;
+        match id {
+            S::Temp => CopyItem::Temp,
+            S::Tint => CopyItem::Tint,
+            S::Exposure => CopyItem::Exposure,
+            S::Contrast => CopyItem::Contrast,
+            S::Highlights => CopyItem::Highlights,
+            S::Shadows => CopyItem::Shadows,
+            S::Whites => CopyItem::Whites,
+            S::Blacks => CopyItem::Blacks,
+            S::Texture => CopyItem::Texture,
+            S::Clarity => CopyItem::Clarity,
+            S::Dehaze => CopyItem::Dehaze,
+            S::Vibrance => CopyItem::Vibrance,
+            S::Saturation => CopyItem::Saturation,
+            S::Mix(..) => CopyItem::ColorMixer,
+            S::Gray(_) => CopyItem::GrayMix,
+            S::Grade(..) | S::GradeBlending | S::GradeBalance => CopyItem::ColorGrading,
+            S::SharpenAmount | S::SharpenRadius | S::SharpenDetail | S::SharpenMasking => {
+                CopyItem::Sharpening
+            }
+            S::Denoise => CopyItem::NoiseReduction,
+            S::VignetteAmount | S::VignetteMidpoint | S::VignetteRoundness | S::VignetteFeather => {
+                CopyItem::Vignette
+            }
+            S::GrainAmount | S::GrainSize | S::GrainRoughness => CopyItem::Grain,
+        }
+    }
+
+    const fn bit(self) -> u64 {
+        1 << self as u64
     }
 
     /// The name the preference stores. Never translated.
     fn key(self) -> &'static str {
         match self {
-            CopySection::WhiteBalance => "white_balance",
-            CopySection::Tone => "tone",
-            CopySection::Presence => "presence",
-            CopySection::Curve => "curve",
-            CopySection::Color => "color",
-            CopySection::ColorGrading => "color_grading",
-            CopySection::Detail => "detail",
-            CopySection::Effects => "effects",
-            CopySection::Optics => "optics",
-            CopySection::Crop => "crop",
-            CopySection::Masks => "masks",
+            CopyItem::Temp => "temp",
+            CopyItem::Tint => "tint",
+            CopyItem::Exposure => "exposure",
+            CopyItem::Contrast => "contrast",
+            CopyItem::Highlights => "highlights",
+            CopyItem::Shadows => "shadows",
+            CopyItem::Whites => "whites",
+            CopyItem::Blacks => "blacks",
+            CopyItem::Texture => "texture",
+            CopyItem::Clarity => "clarity",
+            CopyItem::Dehaze => "dehaze",
+            CopyItem::Vibrance => "vibrance",
+            CopyItem::Saturation => "saturation",
+            CopyItem::Curve => "curve",
+            CopyItem::ColorMixer => "color_mixer",
+            CopyItem::GrayMix => "gray_mix",
+            CopyItem::ColorGrading => "color_grading",
+            CopyItem::Sharpening => "sharpening",
+            CopyItem::NoiseReduction => "noise_reduction",
+            CopyItem::Vignette => "vignette",
+            CopyItem::Grain => "grain",
+            CopyItem::RemoveCa => "remove_ca",
+            CopyItem::Crop => "crop",
+            CopyItem::Straighten => "straighten",
+            CopyItem::Masks => "masks",
+            CopyItem::TouchUp => "touch_up",
         }
     }
 }
 
-/// A set of [`CopySection`]s.
+/// A set of [`CopyItem`]s.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub struct CopySections(u16);
+pub struct CopyItems(u64);
 
-impl CopySections {
-    pub const NONE: CopySections = CopySections(0);
+impl CopyItems {
+    pub const NONE: CopyItems = CopyItems(0);
 
-    /// A look: everything but the crop and the measured optics, which belong
-    /// to one photo's framing and lens. What a preset applies, and the copy
-    /// choice before the user makes one.
-    pub const LOOK: CopySections = CopySections(
-        CopySection::WhiteBalance.bit()
-            | CopySection::Tone.bit()
-            | CopySection::Presence.bit()
-            | CopySection::Curve.bit()
-            | CopySection::Color.bit()
-            | CopySection::ColorGrading.bit()
-            | CopySection::Detail.bit()
-            | CopySection::Effects.bit(),
+    /// A look: every slider, the curve and the colour work, but not the
+    /// measured optics, the framing or anything drawn on one photo. What a
+    /// preset applies, and the copy choice before the user makes one.
+    pub const LOOK: CopyItems = CopyItems(
+        CopyItem::Temp.bit()
+            | CopyItem::Tint.bit()
+            | CopyItem::Exposure.bit()
+            | CopyItem::Contrast.bit()
+            | CopyItem::Highlights.bit()
+            | CopyItem::Shadows.bit()
+            | CopyItem::Whites.bit()
+            | CopyItem::Blacks.bit()
+            | CopyItem::Texture.bit()
+            | CopyItem::Clarity.bit()
+            | CopyItem::Dehaze.bit()
+            | CopyItem::Vibrance.bit()
+            | CopyItem::Saturation.bit()
+            | CopyItem::Curve.bit()
+            | CopyItem::ColorMixer.bit()
+            | CopyItem::GrayMix.bit()
+            | CopyItem::ColorGrading.bit()
+            | CopyItem::Sharpening.bit()
+            | CopyItem::NoiseReduction.bit()
+            | CopyItem::Vignette.bit()
+            | CopyItem::Grain.bit(),
     );
 
-    pub fn all() -> CopySections {
-        CopySection::ALL
-            .into_iter()
-            .fold(Self::NONE, |s, c| s.with(c, true))
+    /// The items chosen afresh for each copy: never remembered, and off
+    /// whenever Copy Settings opens, so a crop or a heal laid on one photo's
+    /// framing never rides along unasked.
+    pub const PER_COPY: CopyItems =
+        CopyItems(CopyItem::Crop.bit() | CopyItem::Straighten.bit() | CopyItem::TouchUp.bit());
+
+    pub fn all() -> CopyItems {
+        CopyItem::all().fold(Self::NONE, |s, c| s.with(c, true))
     }
 
-    pub fn has(self, section: CopySection) -> bool {
-        self.0 & section.bit() != 0
+    pub fn has(self, item: CopyItem) -> bool {
+        self.0 & item.bit() != 0
     }
 
-    pub fn with(self, section: CopySection, on: bool) -> CopySections {
+    pub fn with(self, item: CopyItem, on: bool) -> CopyItems {
         if on {
-            CopySections(self.0 | section.bit())
+            CopyItems(self.0 | item.bit())
         } else {
-            CopySections(self.0 & !section.bit())
+            CopyItems(self.0 & !item.bit())
         }
     }
 
-    /// The stored preference: a format mark, then every section's key,
-    /// comma-separated, with `-` before the ones not chosen, so a section
+    /// Every item of `group` turned `on`.
+    pub fn with_group(self, group: CopyGroup, on: bool) -> CopyItems {
+        group.items().iter().fold(self, |s, &c| s.with(c, on))
+    }
+
+    pub fn group_state(self, group: CopyGroup) -> GroupState {
+        let items = group.items();
+        let on = items.iter().filter(|&&c| self.has(c)).count();
+        if on == 0 {
+            GroupState::Off
+        } else if on == items.len() {
+            GroupState::On
+        } else {
+            GroupState::Mixed
+        }
+    }
+
+    /// These items less the [`Self::PER_COPY`] ones.
+    pub fn without_per_copy(self) -> CopyItems {
+        CopyItems(self.0 & !Self::PER_COPY.0)
+    }
+
+    /// The stored preference: a format mark, then every remembered item's
+    /// key, comma-separated, with `-` before the ones not chosen, so an item
     /// added later can tell "not chosen" from "not known when this was
-    /// saved".
+    /// saved". [`Self::PER_COPY`] items are left out.
     pub fn to_pref(self) -> String {
         std::iter::once(PREF_FORMAT.to_string())
-            .chain(CopySection::ALL.into_iter().map(|c| {
-                let key = c.key();
-                if self.has(c) {
-                    key.to_string()
-                } else {
-                    format!("-{key}")
-                }
-            }))
+            .chain(
+                CopyItem::all()
+                    .filter(|&c| !Self::PER_COPY.has(c))
+                    .map(|c| {
+                        let key = c.key();
+                        if self.has(c) {
+                            key.to_string()
+                        } else {
+                            format!("-{key}")
+                        }
+                    }),
+            )
             .collect::<Vec<_>>()
             .join(",")
     }
 
-    /// Reads [`CopySections::to_pref`]. An unknown key is skipped, so a
-    /// newer app's choice still loads. A section the text doesn't name takes
-    /// its [`CopySections::LOOK`] default, so one added since the choice was
-    /// saved still copies. The first format, with no mark, listed only the
-    /// chosen keys and predates the colour sections, so there an unnamed key
-    /// is off, except those. Text naming no section at all is
-    /// [`Self::NONE`].
-    pub fn from_pref(text: &str) -> CopySections {
+    /// Reads [`CopyItems::to_pref`], or a choice saved when Copy chose
+    /// whole groups. An unknown key is skipped, so a newer app's choice still
+    /// loads. An item the text doesn't name takes its [`CopyItems::LOOK`]
+    /// default, so one added since the choice was saved still copies.
+    ///
+    /// The group formats name a group's key for all of its items. Of those,
+    /// the first, with no mark, listed only the chosen keys and predates the
+    /// colour groups, so there an unnamed group is off, except those. Text
+    /// naming nothing known is [`Self::NONE`]. [`Self::PER_COPY`] items
+    /// always read as off.
+    pub fn from_pref(text: &str) -> CopyItems {
         let items: Vec<&str> = text.split(',').map(str::trim).collect();
-        let named = |c: CopySection| {
+        let named = |key: &str| {
             items
                 .iter()
-                .find(|item| item.strip_prefix('-').unwrap_or(item) == c.key())
+                .find(|item| item.strip_prefix('-').unwrap_or(item) == key)
                 .map(|item| !item.starts_with('-'))
         };
-        if CopySection::ALL.into_iter().all(|c| named(c).is_none()) {
-            return Self::NONE;
-        }
-        let first_format = !items.contains(&PREF_FORMAT);
-        CopySection::ALL.into_iter().fold(Self::NONE, |s, c| {
-            let on = match named(c) {
-                Some(on) => on,
-                None if first_format
-                    && !matches!(c, CopySection::Color | CopySection::ColorGrading) =>
-                {
-                    false
-                }
-                None => Self::LOOK.has(c),
-            };
-            s.with(c, on)
-        })
+        let chosen = if items.contains(&PREF_FORMAT) {
+            if CopyItem::all().all(|c| named(c.key()).is_none()) {
+                return Self::NONE;
+            }
+            CopyItem::all().fold(Self::NONE, |s, c| {
+                s.with(c, named(c.key()).unwrap_or(Self::LOOK.has(c)))
+            })
+        } else {
+            if CopyGroup::ALL.into_iter().all(|g| named(g.key()).is_none()) {
+                return Self::NONE;
+            }
+            let first_format = !items.contains(&GROUP_FORMAT);
+            CopyGroup::ALL.into_iter().fold(Self::NONE, |s, g| {
+                let on = match named(g.key()) {
+                    Some(on) => on,
+                    None if first_format
+                        && !matches!(g, CopyGroup::Color | CopyGroup::ColorGrading) =>
+                    {
+                        false
+                    }
+                    None => Self::LOOK.group_state(g) == GroupState::On,
+                };
+                s.with_group(g, on)
+            })
+        };
+        chosen.without_per_copy()
     }
 }
 
-/// The mark that opens a [`CopySections::to_pref`] text.
-const PREF_FORMAT: &str = "v2";
+/// The mark that opens a [`CopyItems::to_pref`] text.
+const PREF_FORMAT: &str = "v3";
 
-/// `target` with the `sections` of `source` laid over it. Optics carries
-/// only whether the correction is on: a photo that has its own scales keeps
-/// them, and one that lacks them keeps `None` for the caller to measure.
-pub fn merge(target: Adjustments, source: &Adjustments, sections: CopySections) -> Adjustments {
+/// The mark of the second format, which stored groups.
+const GROUP_FORMAT: &str = "v2";
+
+/// `target` with the `items` of `source` laid over it. Remove Chromatic
+/// Aberration carries only whether the correction is on: a photo that has
+/// its own scales keeps them, and one that lacks them keeps `None` for the
+/// caller to measure.
+pub fn merge(target: Adjustments, source: &Adjustments, items: CopyItems) -> Adjustments {
     let mut out = target;
     let mut from = *source;
     for slider in &SLIDERS {
-        if sections.has(CopySection::of(slider.section)) {
+        if items.has(CopyItem::of(slider.id)) {
             *(slider.field)(&mut out) = *(slider.field)(&mut from);
         }
     }
-    if sections.has(CopySection::Curve) {
+    if items.has(CopyItem::Curve) {
         out.curve = source.curve;
     }
-    if sections.has(CopySection::Optics) && source.chromatic_aberration.is_none() {
+    if items.has(CopyItem::RemoveCa) && source.chromatic_aberration.is_none() {
         out.chromatic_aberration = None;
     }
-    if sections.has(CopySection::Crop) {
+    if items.has(CopyItem::Crop) {
         out.crop = source.crop;
+    }
+    if items.has(CopyItem::Straighten) {
         out.straighten = source.straighten;
     }
     out
@@ -208,6 +403,7 @@ mod tests {
     fn source() -> Adjustments {
         let mut a = Adjustments {
             temp: 20.0,
+            tint: 8.0,
             exposure: 1.0,
             clarity: 30.0,
             mixer: crate::develop::ColorMixer {
@@ -250,6 +446,7 @@ mod tests {
     fn target() -> Adjustments {
         Adjustments {
             temp: -5.0,
+            tint: -3.0,
             exposure: -0.5,
             saturation: 10.0,
             straighten: -1.0,
@@ -259,8 +456,8 @@ mod tests {
 
     #[test]
     fn nothing_chosen_changes_nothing_and_everything_copies_all_but_the_scales() {
-        assert_eq!(merge(target(), &source(), CopySections::NONE), target());
-        let all = merge(target(), &source(), CopySections::all());
+        assert_eq!(merge(target(), &source(), CopyItems::NONE), target());
+        let all = merge(target(), &source(), CopyItems::all());
         assert_eq!(
             all,
             Adjustments {
@@ -272,33 +469,64 @@ mod tests {
     }
 
     #[test]
-    fn each_section_carries_only_its_own_fields() {
-        let only = |c| merge(target(), &source(), CopySections::NONE.with(c, true));
-        let wb = only(CopySection::WhiteBalance);
-        assert_eq!((wb.temp, wb.exposure), (20.0, -0.5));
-        let tone = only(CopySection::Tone);
-        assert_eq!((tone.temp, tone.exposure), (-5.0, 1.0));
-        let presence = only(CopySection::Presence);
-        assert_eq!((presence.clarity, presence.saturation), (30.0, 0.0));
-        assert_eq!(only(CopySection::Detail).denoise, 40.0);
-        assert_eq!(only(CopySection::Curve).curve, source().curve);
-        let color = only(CopySection::Color);
-        assert_eq!((color.mixer, color.clarity), (source().mixer, 0.0));
-        assert!(presence.mixer.is_neutral());
-        let grading = only(CopySection::ColorGrading);
+    fn each_item_carries_only_its_own_fields() {
+        let only = |c| merge(target(), &source(), CopyItems::NONE.with(c, true));
+        let temp = only(CopyItem::Temp);
+        assert_eq!((temp.temp, temp.tint, temp.exposure), (20.0, -3.0, -0.5));
+        let tint = only(CopyItem::Tint);
+        assert_eq!((tint.temp, tint.tint), (-5.0, 8.0));
+        let exposure = only(CopyItem::Exposure);
+        assert_eq!((exposure.temp, exposure.exposure), (-5.0, 1.0));
+        let clarity = only(CopyItem::Clarity);
+        assert_eq!((clarity.clarity, clarity.saturation), (30.0, 10.0));
+        assert_eq!(only(CopyItem::Saturation).saturation, 0.0);
+        assert_eq!(only(CopyItem::NoiseReduction).denoise, 40.0);
+        assert_eq!(only(CopyItem::Sharpening).denoise, 0.0);
+        assert_eq!(only(CopyItem::Curve).curve, source().curve);
+        let mixer = only(CopyItem::ColorMixer);
+        assert_eq!((mixer.mixer, mixer.clarity), (source().mixer, 0.0));
+        assert!(clarity.mixer.is_neutral());
+        let grading = only(CopyItem::ColorGrading);
         assert_eq!(
             (grading.grade, grading.mixer),
             (source().grade, target().mixer)
         );
-        let effects = only(CopySection::Effects);
+        let vignette = only(CopyItem::Vignette);
         assert_eq!(
-            (effects.vignette, effects.grain),
-            (source().vignette, source().grain)
+            (vignette.vignette, vignette.grain),
+            (source().vignette, target().grain)
         );
-        assert_eq!(effects.temp, -5.0);
-        let crop = only(CopySection::Crop);
-        assert_eq!((crop.crop, crop.straighten), (source().crop, 3.0));
-        assert_eq!(crop.exposure, -0.5);
+        assert_eq!(only(CopyItem::Grain).grain, source().grain);
+        let crop = only(CopyItem::Crop);
+        assert_eq!((crop.crop, crop.straighten), (source().crop, -1.0));
+        let straighten = only(CopyItem::Straighten);
+        assert_eq!((straighten.crop, straighten.straighten), (None, 3.0));
+    }
+
+    #[test]
+    fn a_group_turns_all_its_items_and_reports_a_mix() {
+        let tone = CopyItems::NONE.with_group(CopyGroup::Tone, true);
+        assert_eq!(tone.group_state(CopyGroup::Tone), GroupState::On);
+        assert_eq!(tone.group_state(CopyGroup::Presence), GroupState::Off);
+        let mixed = CopyItems::LOOK.with(CopyItem::Tint, false);
+        assert_eq!(
+            mixed.group_state(CopyGroup::WhiteBalance),
+            GroupState::Mixed
+        );
+        assert_eq!(
+            mixed.with_group(CopyGroup::WhiteBalance, true),
+            CopyItems::LOOK
+        );
+    }
+
+    #[test]
+    fn every_item_sits_in_one_group() {
+        let mut seen = CopyItems::NONE;
+        for item in CopyItem::all() {
+            assert!(!seen.has(item), "{item:?} is listed twice");
+            seen = seen.with(item, true);
+        }
+        assert_eq!(seen, CopyItems::all());
     }
 
     #[test]
@@ -311,7 +539,7 @@ mod tests {
             chromatic_aberration: Some(own),
             ..target()
         };
-        let optics = CopySections::NONE.with(CopySection::Optics, true);
+        let optics = CopyItems::NONE.with(CopyItem::RemoveCa, true);
         assert_eq!(
             merge(measured, &source(), optics).chromatic_aberration,
             Some(own)
@@ -322,49 +550,68 @@ mod tests {
         };
         assert_eq!(merge(measured, &off, optics).chromatic_aberration, None);
         assert_eq!(
-            merge(measured, &off, CopySections::LOOK).chromatic_aberration,
+            merge(measured, &off, CopyItems::LOOK).chromatic_aberration,
             Some(own),
             "a look leaves the optics alone"
         );
     }
 
     #[test]
-    fn the_preference_round_trips_and_skips_unknown_keys() {
-        for sections in [CopySections::NONE, CopySections::LOOK, CopySections::all()] {
-            assert_eq!(CopySections::from_pref(&sections.to_pref()), sections);
+    fn the_preference_round_trips_and_forgets_the_per_copy_items() {
+        let no_tint = CopyItems::LOOK.with(CopyItem::Tint, false);
+        let with_masks = CopyItems::LOOK.with(CopyItem::Masks, true);
+        for items in [CopyItems::NONE, CopyItems::LOOK, no_tint, with_masks] {
+            assert_eq!(CopyItems::from_pref(&items.to_pref()), items);
         }
-        assert_eq!(
-            CopySections::from_pref("v2,tone,-crop,hdr"),
-            CopySections::LOOK.with(CopySection::Crop, false),
-            "unnamed sections take the look's default"
-        );
-        assert_eq!(
-            CopySections::from_pref(
-                "v2,white_balance,tone,presence,curve,color,detail,effects,optics,crop"
-            ),
-            CopySections::all().with(CopySection::Masks, false),
-            "a choice of everything keeps a later section's default"
-        );
-        for junk in ["", "hdr,,x", "v2"] {
-            assert_eq!(
-                CopySections::from_pref(junk),
-                CopySections::NONE,
-                "{junk:?}"
+        let pref = CopyItems::all().to_pref();
+        for per_copy in ["crop", "straighten", "touch_up"] {
+            assert!(
+                !pref
+                    .split(',')
+                    .any(|k| k.trim_start_matches('-') == per_copy),
+                "{per_copy} is saved in {pref:?}"
             );
         }
+        assert_eq!(
+            CopyItems::from_pref(&pref),
+            CopyItems::all().without_per_copy()
+        );
+        assert_eq!(
+            CopyItems::from_pref("v3,-tint,crop,hdr"),
+            CopyItems::LOOK.with(CopyItem::Tint, false),
+            "unnamed items take the look's default, and crop is never read"
+        );
+        for junk in ["", "hdr,,x", "v3", "v2"] {
+            assert_eq!(CopyItems::from_pref(junk), CopyItems::NONE, "{junk:?}");
+        }
+    }
+
+    /// Catches a choice saved when Copy chose whole groups losing them.
+    #[test]
+    fn a_group_choice_loads_as_its_items() {
+        assert_eq!(
+            CopyItems::from_pref("v2,-tone,crop,hdr"),
+            CopyItems::LOOK.with_group(CopyGroup::Tone, false),
+            "unnamed groups take the look's default, and crop is never read"
+        );
+        assert_eq!(
+            CopyItems::from_pref(
+                "v2,white_balance,tone,presence,curve,color,detail,effects,optics,crop"
+            ),
+            CopyItems::LOOK.with(CopyItem::RemoveCa, true),
+        );
     }
 
     /// Catches a choice saved before the Color Mixer existed dropping it
     /// from every copy.
     #[test]
-    fn a_first_format_choice_keeps_its_sections_and_gains_color() {
+    fn a_first_format_choice_keeps_its_groups_and_gains_color() {
         assert_eq!(
-            CopySections::from_pref("tone, crop,hdr"),
-            CopySections::NONE
-                .with(CopySection::Tone, true)
-                .with(CopySection::Crop, true)
-                .with(CopySection::Color, true)
-                .with(CopySection::ColorGrading, true)
+            CopyItems::from_pref("tone, crop,hdr"),
+            CopyItems::NONE
+                .with_group(CopyGroup::Tone, true)
+                .with_group(CopyGroup::Color, true)
+                .with_group(CopyGroup::ColorGrading, true)
         );
     }
 }

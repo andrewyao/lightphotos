@@ -1,5 +1,5 @@
 use super::*;
-use crate::develop::copy::CopySections;
+use crate::develop::copy::CopyItems;
 use crate::persist::preset_folders::FolderPreset;
 use crate::ui::PresetRef;
 
@@ -162,7 +162,7 @@ impl App {
         let Some((name, look)) = self.resolve_preset(preset) else {
             return;
         };
-        let n = self.apply_look_to(&look, CopySections::LOOK, &self.action_paths());
+        let n = self.apply_look_to(&look, CopyItems::LOOK, &self.action_paths());
         if n == 0 {
             return;
         }
@@ -1005,9 +1005,10 @@ pub(in crate::app) mod tests {
         app.selected = (0..3).collect();
         app.copied_settings = Some(crate::app::folder_store::CopiedSettings {
             masks: Vec::new(),
+            touchups: Vec::new(),
             path: paths[0].clone(),
             adj: tone(0.25, 5.0),
-            sections: CopySections::LOOK,
+            items: CopyItems::LOOK,
         });
 
         app.apply_settings_to_selection();

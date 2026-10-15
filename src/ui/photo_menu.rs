@@ -172,6 +172,12 @@ fn photo_menu(ui: &mut egui::Ui, app: &App, cell: Option<usize>, out: &mut Frame
     ui.separator();
 
     if ui
+        .add_enabled(n == 1, egui::Button::new(t.copy_settings))
+        .clicked()
+    {
+        out.actions.push(UiAction::QuickCopySettings);
+    }
+    if ui
         .add_enabled(n == 1, egui::Button::new(m.copy_settings))
         .clicked()
     {

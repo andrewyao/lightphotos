@@ -282,11 +282,12 @@ pub(super) fn help_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     }
 }
 
-/// Copy Settings: a checkbox per section, Check All and Check None, then
-/// Copy. Opened by Copy Adjustment and Cmd+Shift+C; Esc, Cancel or a
-/// backdrop click closes it without copying.
+/// Copy Settings: a checkbox per group over a checkbox per item, in two
+/// columns, Check All and Check None, then Copy. Opened by the cog beside
+/// Copy Adjustment and Cmd+Shift+C; Esc, Cancel or a backdrop click closes
+/// it without copying.
 pub(super) fn copy_settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
-    use crate::develop::copy::{CopySection, CopySections};
+    use crate::develop::copy::{CopyGroup, CopyItems};
     let Some(chosen) = app.copy_dialog() else {
         return;
     };
@@ -296,27 +297,31 @@ pub(super) fn copy_settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutpu
         ui.label(t.copy_settings_prompt);
         ui.add_space(font_size::px(ui.style(), form::SLIDER_GAP));
         let mut next = chosen;
-        for section in CopySection::ALL {
-            let mut on = chosen.has(section);
-            if ui.checkbox(&mut on, t.copy_section(section)).changed() {
-                next = next.with(section, on);
+        // The first four groups hold about half the rows.
+        let (left, right) = CopyGroup::ALL.split_at(4);
+        ui.columns(2, |columns| {
+            for (ui, groups) in columns.iter_mut().zip([left, right]) {
+                for &group in groups {
+                    copy_group_checkboxes(ui, group, chosen, &mut next);
+                }
             }
-        }
+        });
+        ui.add_space(font_size::px(ui.style(), form::SLIDER_GAP));
         ui.horizontal(|ui| {
             if form::button(ui, &Button::new(t.check_all, Role::Cancel)).clicked() {
-                next = CopySections::all();
+                next = CopyItems::all();
             }
             if form::button(ui, &Button::new(t.check_none, Role::Cancel)).clicked() {
-                next = CopySections::NONE;
+                next = CopyItems::NONE;
             }
         });
         if next != chosen {
-            out.actions.push(UiAction::SetCopySections(next));
+            out.actions.push(UiAction::SetCopyItems(next));
         }
         let buttons = [
             Button::new(t.cancel, Role::Cancel),
             Button {
-                enabled: chosen != CopySections::NONE,
+                enabled: chosen != CopyItems::NONE,
                 ..Button::new(t.copy_button, Role::Primary)
             },
         ];
@@ -329,6 +334,39 @@ pub(super) fn copy_settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutpu
     if resp.should_close() {
         out.actions.push(UiAction::CancelCopySettings);
     }
+}
+
+/// One Copy Settings group: its checkbox, which shows a dash while only some
+/// of its items are ticked, then its items indented beneath, unless it holds
+/// just one.
+fn copy_group_checkboxes(
+    ui: &mut egui::Ui,
+    group: crate::develop::copy::CopyGroup,
+    chosen: crate::develop::copy::CopyItems,
+    next: &mut crate::develop::copy::CopyItems,
+) {
+    use crate::develop::copy::GroupState;
+    let t = t();
+    let state = chosen.group_state(group);
+    let mut on = state == GroupState::On;
+    let header =
+        egui::Checkbox::new(&mut on, t.copy_group(group)).indeterminate(state == GroupState::Mixed);
+    if ui.add(header).changed() {
+        // A click on a mixed group ticks all of it, as Lightroom does.
+        *next = next.with_group(group, state != GroupState::On);
+    }
+    let items = group.items();
+    if items.len() < 2 {
+        return;
+    }
+    ui.indent(group, |ui| {
+        for &item in items {
+            let mut on = chosen.has(item);
+            if ui.checkbox(&mut on, t.copy_item(item)).changed() {
+                *next = next.with(item, on);
+            }
+        }
+    });
 }
 
 /// Theme as a segmented choice and language as a list of radios. Opened

@@ -651,10 +651,10 @@ pub(crate) struct App {
 
     /// What Copy Settings last copied.
     copied_settings: Option<folder_store::CopiedSettings>,
-    /// The open Copy Settings dialog: the photo and the sections ticked.
-    copy_dialog: Option<(PathBuf, crate::develop::copy::CopySections)>,
-    /// The sections Copy Settings opens with: the preference, read once.
-    copy_sections: Option<crate::develop::copy::CopySections>,
+    /// The open Copy Settings dialog: the photo and the items ticked.
+    copy_dialog: Option<(PathBuf, crate::develop::copy::CopyItems)>,
+    /// The items Copy Settings remembers: the preference, read once.
+    copy_items: Option<crate::develop::copy::CopyItems>,
 
     /// The named-look library, global to the app rather than per folder.
     presets: crate::persist::presets::PresetStore,
@@ -957,7 +957,7 @@ impl App {
             pending_confirm: None,
             copied_settings: None,
             copy_dialog: None,
-            copy_sections: None,
+            copy_items: None,
             // A test must never write the developer's own preset library.
             #[cfg(test)]
             presets: crate::persist::presets::PresetStore::in_memory(),
@@ -1436,6 +1436,7 @@ impl App {
                         self.show_sel();
                     }
                 }
+                ui::UiAction::QuickCopySettings => self.quick_copy_settings(),
                 ui::UiAction::CopySettings => self.copy_settings(),
                 ui::UiAction::SavePresetPrompt => self.prompt_save_preset(),
                 ui::UiAction::RenamePresetPrompt(id) => self.prompt_rename_preset(id),
@@ -1618,7 +1619,7 @@ impl App {
                 ui::UiAction::SelectMask(i) => self.select_mask(i),
                 ui::UiAction::DeleteMask(i) => self.delete_mask(i),
                 ui::UiAction::SetAdjustments(adj) => self.apply_adjustments(*adj),
-                ui::UiAction::SetCopySections(s) => self.set_copy_sections(s),
+                ui::UiAction::SetCopyItems(s) => self.set_copy_items(s),
                 ui::UiAction::CommitCopySettings => self.commit_copy_settings(),
                 ui::UiAction::CancelCopySettings => self.cancel_copy_settings(),
                 ui::UiAction::AutoTone => self.auto_tone_selected(),

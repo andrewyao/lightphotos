@@ -349,7 +349,9 @@ pub struct Strings {
     pub sort_descending_tip: &'static str,
     pub copy_settings: &'static str,
     pub copy_settings_tip: &'static str,
-    /// Copy Settings' line over its section checkboxes.
+    /// The cog beside Copy Adjustment, which opens Copy Settings.
+    pub copy_settings_choose_tip: &'static str,
+    /// Copy Settings' line over its checkboxes.
     pub copy_settings_prompt: &'static str,
     pub copy_button: &'static str,
     pub check_all: &'static str,
@@ -846,20 +848,53 @@ impl Strings {
         }
     }
 
-    pub fn copy_section(&self, section: crate::develop::copy::CopySection) -> &'static str {
-        use crate::develop::copy::CopySection as C;
-        match section {
-            C::WhiteBalance => self.white_balance,
-            C::Tone => self.tone,
-            C::Presence => self.presence,
-            C::Curve => self.curve,
-            C::Color => self.copy_color,
-            C::ColorGrading => self.color_grading,
-            C::Detail => self.detail,
-            C::Effects => self.effects,
-            C::Optics => self.optics,
-            C::Crop => self.crop_section,
-            C::Masks => self.masks,
+    pub fn copy_group(&self, group: crate::develop::copy::CopyGroup) -> &'static str {
+        use crate::develop::copy::CopyGroup as G;
+        match group {
+            G::WhiteBalance => self.white_balance,
+            G::Tone => self.tone,
+            G::Presence => self.presence,
+            G::Curve => self.curve,
+            G::Color => self.copy_color,
+            G::ColorGrading => self.color_grading,
+            G::Detail => self.detail,
+            G::Effects => self.effects,
+            G::Optics => self.optics,
+            G::Crop => self.crop_section,
+            G::Masks => self.masks,
+            G::TouchUp => self.touch_up,
+        }
+    }
+
+    pub fn copy_item(&self, item: crate::develop::copy::CopyItem) -> &'static str {
+        use crate::develop::copy::CopyItem as I;
+        match item {
+            I::Temp => self.slider(SliderId::Temp),
+            I::Tint => self.slider(SliderId::Tint),
+            I::Exposure => self.slider(SliderId::Exposure),
+            I::Contrast => self.slider(SliderId::Contrast),
+            I::Highlights => self.slider(SliderId::Highlights),
+            I::Shadows => self.slider(SliderId::Shadows),
+            I::Whites => self.slider(SliderId::Whites),
+            I::Blacks => self.slider(SliderId::Blacks),
+            I::Texture => self.slider(SliderId::Texture),
+            I::Clarity => self.slider(SliderId::Clarity),
+            I::Dehaze => self.slider(SliderId::Dehaze),
+            I::Vibrance => self.slider(SliderId::Vibrance),
+            I::Saturation => self.slider(SliderId::Saturation),
+            I::Curve => self.curve,
+            I::ColorMixer => self.color_mixer,
+            I::GrayMix => self.gray_mix,
+            I::ColorGrading => self.color_grading,
+            I::Sharpening => self.sharpening,
+            I::NoiseReduction => self.denoise,
+            I::Vignette => self.vignette,
+            I::Grain => self.grain,
+            I::RemoveCa => self.remove_ca,
+            I::Crop => self.crop_section,
+            I::Straighten => self.crop_straighten,
+            I::Masks => self.masks,
+            I::TouchUp => self.touch_up,
         }
     }
 
@@ -1147,8 +1182,9 @@ pub static EN: Strings = Strings {
     sort_ascending_tip: "Ascending. Click to reverse the order.",
     sort_descending_tip: "Descending. Click to reverse the order.",
     copy_settings: "Copy Adjustment",
-    copy_settings_tip: "Copy this photo's adjustment (Cmd+Shift+C)",
-    copy_settings_prompt: "Choose what Apply Adjustment carries to other photos.",
+    copy_settings_tip: "Copy this photo's adjustment, as chosen in Copy Settings",
+    copy_settings_choose_tip: "Choose what Copy Adjustment copies (Cmd+Shift+C)",
+    copy_settings_prompt: "Choose what Copy Adjustment carries to other photos. Crop, Straighten and Touch Up are chosen afresh for each copy.",
     copy_button: "Copy",
     check_all: "Check All",
     check_none: "Check None",
@@ -1448,7 +1484,7 @@ pub static EN: Strings = Strings {
     curve_blue: "Blue",
     color_mixer: "Color Mixer",
     gray_mix: "B&W Mix",
-    copy_color: "Color Mixer and B&W Mix",
+    copy_color: "Color",
     color_grading: "Color Grading",
     midtones: "Midtones",
     global: "Global",
@@ -1738,7 +1774,7 @@ pub static EN: Strings = Strings {
         paste: "Paste",
         select_all: "Select All",
         deselect_all: "Deselect All",
-        copy_settings: "Copy Adjustment",
+        copy_settings: "Copy Adjustment…",
         paste_settings: "Paste Adjustment",
         photo: "Photo",
         rate: "Rate",
@@ -2003,8 +2039,9 @@ pub static ZH: Strings = Strings {
     sort_ascending_tip: "升序。点按以反转顺序。",
     sort_descending_tip: "降序。点按以反转顺序。",
     copy_settings: "拷贝调整",
-    copy_settings_tip: "拷贝这张照片的调整 (Cmd+Shift+C)",
-    copy_settings_prompt: "选择应用调整时要带到其他照片的部分。",
+    copy_settings_tip: "按拷贝设置中的选择拷贝这张照片的调整",
+    copy_settings_choose_tip: "选择拷贝调整要拷贝的部分 (Cmd+Shift+C)",
+    copy_settings_prompt: "选择拷贝调整要带到其他照片的部分。裁剪、拉直和修补每次拷贝需重新选择。",
     copy_button: "拷贝",
     check_all: "全选",
     check_none: "全不选",
@@ -2295,7 +2332,7 @@ pub static ZH: Strings = Strings {
     curve_blue: "蓝色",
     color_mixer: "混色器",
     gray_mix: "黑白混合",
-    copy_color: "混色器和黑白混合",
+    copy_color: "颜色",
     color_grading: "颜色分级",
     midtones: "中间调",
     global: "全局",
@@ -2564,7 +2601,7 @@ pub static ZH: Strings = Strings {
         paste: "粘贴",
         select_all: "全选",
         deselect_all: "取消全选",
-        copy_settings: "拷贝调整",
+        copy_settings: "拷贝调整…",
         paste_settings: "粘贴调整",
         photo: "照片",
         rate: "评分",

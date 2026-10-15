@@ -1,7 +1,7 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
-use crate::develop::copy::{self, CopySection, CopySections};
+use crate::develop::copy::{self, CopyItem, CopyItems};
 use crate::develop::Adjustments;
 use crate::navigation::{Cmp, FlagFilter};
 use crate::persist::folder_store::GroupWriteRefused;
@@ -9,18 +9,21 @@ use crate::persist::groups::{Group, GroupWrite};
 use crate::sidecar::Flag;
 use crate::ui;
 
-/// The Copy Settings sections chosen last, as `CopySections::to_pref`.
-const COPY_SECTIONS_PREF: &str = "copy-sections";
+/// The Copy Settings items chosen last, as `CopyItems::to_pref`. The key
+/// predates items, and `from_pref` still reads the sections it once held.
+const COPY_ITEMS_PREF: &str = "copy-sections";
 
 /// What Copy put on the in-app clipboard.
 #[derive(Clone)]
 pub(super) struct CopiedSettings {
     pub(super) path: PathBuf,
-    /// The photo's whole edit; Paste takes `sections` of it.
+    /// The photo's whole edit; Paste takes `items` of it.
     pub(super) adj: Adjustments,
-    /// The photo's masks, which Paste lays down when `sections` has them.
+    /// The photo's masks, which Paste lays down when `items` has them.
     pub(super) masks: Vec<crate::develop::Mask>,
-    pub(super) sections: CopySections,
+    /// The photo's spot heals, which Paste lays down when `items` has them.
+    pub(super) touchups: Vec<crate::develop::TouchUp>,
+    pub(super) items: CopyItems,
 }
 
 pub(super) struct FolderStoreLoad {
@@ -722,29 +725,48 @@ impl App {
         }
     }
 
-    /// Opens Copy Settings for the selected photo, with the sections chosen
-    /// last time ticked. Does nothing unless exactly one photo is selected.
+    /// The items Copy remembers, read from the preference the first time.
+    /// Never holds a [`CopyItems::PER_COPY`] item.
+    fn remembered_copy_items(&mut self) -> CopyItems {
+        *self.copy_items.get_or_insert_with(|| {
+            let saved = (!cfg!(test))
+                .then(|| crate::persist::prefs::load(COPY_ITEMS_PREF))
+                .flatten();
+            saved
+                .map(|text| CopyItems::from_pref(&text))
+                .filter(|s| *s != CopyItems::NONE)
+                .unwrap_or(CopyItems::LOOK)
+        })
+    }
+
+    /// Opens Copy Settings for the selected photo, with the items chosen
+    /// last time ticked and the per-copy ones not. Does nothing unless
+    /// exactly one photo is selected.
     pub(super) fn copy_settings(&mut self) {
         let [path] = &self.action_paths()[..] else {
             return;
         };
-        let sections = *self.copy_sections.get_or_insert_with(|| {
-            let saved = (!cfg!(test))
-                .then(|| crate::persist::prefs::load(COPY_SECTIONS_PREF))
-                .flatten();
-            saved
-                .map(|text| CopySections::from_pref(&text))
-                .filter(|s| *s != CopySections::NONE)
-                .unwrap_or(CopySections::LOOK)
-        });
-        self.copy_dialog = Some((path.clone(), sections));
+        let path = path.clone();
+        let items = self.remembered_copy_items();
+        self.copy_dialog = Some((path, items));
         self.request_redraw();
     }
 
-    /// The sections ticked in the open Copy Settings.
-    pub(super) fn set_copy_sections(&mut self, sections: CopySections) {
+    /// Copy Adjustment: copies the selected photo's remembered items with no
+    /// dialog. Does nothing unless exactly one photo is selected.
+    pub(super) fn quick_copy_settings(&mut self) {
+        let [path] = &self.action_paths()[..] else {
+            return;
+        };
+        let path = path.clone();
+        let items = self.remembered_copy_items();
+        self.copy_from(path, items);
+    }
+
+    /// The items ticked in the open Copy Settings.
+    pub(super) fn set_copy_items(&mut self, items: CopyItems) {
         if let Some((_, chosen)) = &mut self.copy_dialog {
-            *chosen = sections;
+            *chosen = items;
             self.request_redraw();
         }
     }
@@ -754,31 +776,39 @@ impl App {
         self.request_redraw();
     }
 
-    /// Copies the open dialog's photo and sections to the in-app clipboard,
-    /// and remembers the sections for next time.
+    /// Copies the open dialog's photo and items to the in-app clipboard, and
+    /// remembers the items for next time, less the per-copy ones.
     pub(super) fn commit_copy_settings(&mut self) {
-        let Some((path, sections)) = self.copy_dialog.take() else {
+        let Some((path, items)) = self.copy_dialog.take() else {
             return;
         };
-        if sections == CopySections::NONE {
-            self.copy_dialog = Some((path, sections));
+        if items == CopyItems::NONE {
+            self.copy_dialog = Some((path, items));
             return;
         }
-        self.copy_sections = Some(sections);
+        let remembered = items.without_per_copy();
+        self.copy_items = Some(remembered);
         // A test must never write the developer's own settings.
         if !cfg!(test) {
-            if let Err(e) = crate::persist::prefs::save(COPY_SECTIONS_PREF, &sections.to_pref()) {
-                eprintln!("copy settings: could not remember the sections: {e}");
+            if let Err(e) = crate::persist::prefs::save(COPY_ITEMS_PREF, &remembered.to_pref()) {
+                eprintln!("copy settings: could not remember the items: {e}");
             }
         }
+        self.copy_from(path, items);
+    }
+
+    /// Puts `items` of `path`'s edit on the in-app clipboard.
+    fn copy_from(&mut self, path: PathBuf, items: CopyItems) {
         let adj = self.edits.get(&path).copied().unwrap_or_default();
         let masks = self.masks.get(&path).cloned().unwrap_or_default();
+        let touchups = self.touchups.get(&path).cloned().unwrap_or_default();
         let name = file_label(&path);
         self.copied_settings = Some(CopiedSettings {
             path,
             adj,
             masks,
-            sections,
+            touchups,
+            items,
         });
         self.set_status(
             StatusKind::Success,
@@ -787,14 +817,19 @@ impl App {
         self.request_redraw();
     }
 
-    /// Applies the copied sections to every selected photo.
+    /// Applies the copied items to every selected photo.
     pub(super) fn apply_settings_to_selection(&mut self) {
         let Some(copied) = self.copied_settings.clone() else {
             return;
         };
         let mut paths = self.action_paths();
-        let n = self.apply_look_to(&copied.adj, copied.sections, &paths);
-        if copied.sections.has(CopySection::Masks) {
+        let n = self.apply_look_to(&copied.adj, copied.items, &paths);
+        if copied.items.has(CopyItem::TouchUp) {
+            for path in &paths {
+                self.put_touchups(path, copied.touchups.clone());
+            }
+        }
+        if copied.items.has(CopyItem::Masks) {
             // A pasted detected mask reads each photo's own detection, which
             // store_masks queues. The shown photo goes first, so its
             // detection lands ahead of the batch's.
@@ -815,18 +850,18 @@ impl App {
         self.set_status(StatusKind::Success, (crate::i18n::t().applied_settings)(n));
     }
 
-    /// Lays `sections` of `look` over every path through [`copy::merge`],
+    /// Lays `items` of `look` over every path through [`copy::merge`],
     /// and returns how many were touched. Shared by Paste and by applying a
-    /// preset. Pasting Optics turns Remove Chromatic Aberration on or off as
-    /// the checkbox does, measuring each photo that lacks its own scales.
+    /// preset. Pasting Remove Chromatic Aberration turns the correction on or
+    /// off as the checkbox does, measuring each photo that lacks its own scales.
     pub(super) fn apply_look_to(
         &mut self,
         look: &Adjustments,
-        sections: CopySections,
+        items: CopyItems,
         paths: &[PathBuf],
     ) -> usize {
-        let n = self.edit_each(paths, |existing| copy::merge(existing, look, sections));
-        if sections.has(CopySection::Optics) {
+        let n = self.edit_each(paths, |existing| copy::merge(existing, look, items));
+        if items.has(CopyItem::RemoveCa) {
             self.set_ca_for(paths, look.chromatic_aberration.is_some());
         }
         n

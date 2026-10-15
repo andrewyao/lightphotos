@@ -344,7 +344,7 @@ impl App {
                 let (_, look) = self
                     .resolve_preset(&preset)
                     .ok_or_else(|| failed(format!("preset `{}` is gone", p.name)))?;
-                let n = self.apply_look_to(&look, crate::develop::copy::CopySections::LOOK, &paths);
+                let n = self.apply_look_to(&look, crate::develop::copy::CopyItems::LOOK, &paths);
                 done(n)
             }
             Command::AddPresetFolder(p) => {

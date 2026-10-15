@@ -264,11 +264,11 @@ mod tests {
     /// measurements, so none lands later and undoes the paste.
     #[test]
     fn pasting_optics_off_cancels_queued_measurements() {
-        use crate::develop::copy::{CopySection, CopySections};
+        use crate::develop::copy::{CopyItem, CopyItems};
         let (mut app, dir, paths) = crate::app::test_support::folder_app("ca-paste", 3);
         app.set_ca_for(&paths, true);
         assert!(app.remove_ca_pending());
-        let optics = CopySections::NONE.with(CopySection::Optics, true);
+        let optics = CopyItems::NONE.with(CopyItem::RemoveCa, true);
         app.apply_look_to(&Adjustments::default(), optics, &paths);
         assert!(!app.remove_ca_pending());
         let _ = std::fs::remove_dir_all(&dir);

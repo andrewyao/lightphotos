@@ -564,6 +564,33 @@ impl App {
         self.request_redraw();
     }
 
+    /// Replaces `path`'s spots with `touchups`, as Paste does, recording the
+    /// spots it replaces for Undo. More than the spot limit keeps the first
+    /// [`crate::develop::MAX_TOUCHUPS`], as a sidecar load does.
+    pub(super) fn put_touchups(&mut self, path: &Path, mut touchups: Vec<TouchUp>) {
+        touchups.truncate(crate::develop::MAX_TOUCHUPS);
+        let before = self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]);
+        if before == touchups.as_slice() {
+            return;
+        }
+        let adj = self.edits.get(path).copied().unwrap_or_default();
+        self.history.note_touchups(path, adj, before);
+        self.folder_store.set_touchups(path, &touchups);
+        if touchups.is_empty() {
+            self.touchups.remove(path);
+        } else {
+            self.touchups.insert(path.to_path_buf(), touchups);
+        }
+        #[cfg(target_arch = "wasm32")]
+        crate::web::analytics::property("develop_edit_applied", "edit_kind", "touch_up");
+        if self.shown.path() == Some(path) {
+            self.touchup_selected = None;
+            self.push_adjustments();
+            self.hist.invalidate();
+        }
+        self.request_redraw();
+    }
+
     fn choose_touchup(&self, u: f32, v: f32) -> Option<TouchUp> {
         let path = self.shown.path()?;
         // Samples by UV, so whichever loupe tier has landed will do.

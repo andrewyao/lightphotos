@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn pasting_a_detected_mask_onto_two_photos_detects_each_photo_once() {
         use super::super::coverage::{test_support, CoverageStore};
-        use crate::develop::copy::{CopySection, CopySections};
+        use crate::develop::copy::{CopyItem, CopyItems};
         use crate::develop::DetectTarget;
         let (mut app, dir, paths) = folder_app("mask-paste", 3);
         app.coverage = CoverageStore::with_detector(test_support::half_left);
@@ -679,7 +679,8 @@ mod tests {
             path: paths[0].clone(),
             adj: Adjustments::default(),
             masks: vec![Mask::detected(DetectTarget::Subject)],
-            sections: CopySections::NONE.with(CopySection::Masks, true),
+            touchups: Vec::new(),
+            items: CopyItems::NONE.with(CopyItem::Masks, true),
         });
         app.sel = Some(1);
         app.selected = [1, 2].into_iter().collect();
