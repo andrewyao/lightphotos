@@ -38,11 +38,11 @@ fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     );
     ui.data_mut(|d| d.insert_temp(id, query.clone()));
     let query = query.trim().to_lowercase();
-    let shows = |name: &str, group: &str| {
-        query.is_empty()
-            || name.to_lowercase().contains(&query)
-            || group.to_lowercase().contains(&query)
+    // Both sides lowercase: a folder preset's keys were made at scan time.
+    let shows = |name_key: &str, group_key: &str| {
+        query.is_empty() || name_key.contains(&query) || group_key.contains(&query)
     };
+    let library_key = t.my_presets.to_lowercase();
     let live = app.develop_scope() != DevelopScope::None;
     ui.separator();
 
@@ -53,7 +53,7 @@ fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
             let library: Vec<_> = app
                 .presets()
                 .iter()
-                .filter(|p| shows(&p.name, t.my_presets))
+                .filter(|p| query.is_empty() || shows(&p.name.to_lowercase(), &library_key))
                 .collect();
             if !library.is_empty() {
                 shown += library.len();
@@ -74,11 +74,13 @@ fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             }
 
-            let mut groups: BTreeMap<String, (&str, Vec<&FolderPreset>)> = BTreeMap::new();
+            // Folders that share a group list as one, so the scans' own
+            // order is merged here, by the keys they already carry.
+            let mut groups: BTreeMap<&str, (&str, Vec<&FolderPreset>)> = BTreeMap::new();
             for preset in app.folder_presets() {
-                if shows(&preset.name, &preset.group) {
+                if shows(&preset.name_key, &preset.group_key) {
                     groups
-                        .entry(preset.group.to_lowercase())
+                        .entry(preset.group_key.as_str())
                         .or_insert_with(|| (preset.group.as_str(), Vec::new()))
                         .1
                         .push(preset);

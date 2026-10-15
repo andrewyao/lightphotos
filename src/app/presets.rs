@@ -869,6 +869,8 @@ pub(in crate::app) mod tests {
                 name: "Old".into(),
                 adj: tone(-1.0, 0.0),
                 notes: Vec::new(),
+                group_key: "old".into(),
+                name_key: "old".into(),
             }],
             skipped: 0,
         };

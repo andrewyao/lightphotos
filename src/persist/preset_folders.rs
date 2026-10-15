@@ -22,6 +22,10 @@ pub(crate) struct FolderPreset {
     pub adj: Adjustments,
     /// What the preset sets that has no slider here, shown on hover.
     pub notes: Vec<String>,
+    /// `group` and `name` lowercased once at scan time, for sorting,
+    /// grouping and search, which run every frame the page is open.
+    pub group_key: String,
+    pub name_key: String,
 }
 
 /// Bounds on one folder's scan, so a folder pointed at the wrong place (a
@@ -52,12 +56,8 @@ pub(crate) struct Scan {
 
 impl Scan {
     pub(crate) fn sort(&mut self) {
-        self.presets.sort_by_cached_key(|p| {
-            (
-                p.group.to_lowercase(),
-                p.name.to_lowercase(),
-                p.path.clone(),
-            )
+        self.presets.sort_by(|a, b| {
+            (&a.group_key, &a.name_key, &a.path).cmp(&(&b.group_key, &b.name_key, &b.path))
         });
     }
 }
@@ -104,6 +104,8 @@ pub(crate) fn read_preset(root: &Path, rel: &Path, bytes: &[u8]) -> Option<Folde
     });
     Some(FolderPreset {
         path: root.join(rel),
+        group_key: group.to_lowercase(),
+        name_key: name.to_lowercase(),
         group,
         name,
         adj: imported.adj,
