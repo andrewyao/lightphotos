@@ -1350,6 +1350,35 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&presets);
     }
 
+    /// Catches a folder group named like the library sharing its header's
+    /// state, which opened it with the library.
+    #[test]
+    fn a_folder_group_named_my_presets_folds_on_its_own() {
+        let (mut app, dir, _, presets) = page_app("page-same-name");
+        let t = crate::i18n::t();
+        let group = format!(
+            "<crs:Group><rdf:Alt><rdf:li xml:lang=\"x-default\">{}</rdf:li></rdf:Alt></crs:Group>",
+            t.my_presets
+        );
+        let mine = lr_preset("Mine", "0", "0").replace("<crs:Name>", &format!("{group}<crs:Name>"));
+        std::fs::write(presets.join("Mine.xmp"), mine).unwrap();
+
+        let (_, page) = open_page(&mut app);
+
+        assert!(
+            page.has("Golden"),
+            "the library is open: {:?}",
+            page.texts()
+        );
+        assert!(
+            !page.has("Mine"),
+            "the folder group of the same name starts folded: {:?}",
+            page.texts()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&presets);
+    }
+
     /// Catches a removal that leaves the folder's presets listed.
     #[test]
     fn removing_a_preset_folder_drops_its_presets() {

@@ -57,7 +57,8 @@ fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 .collect();
             if !library.is_empty() {
                 shown += library.len();
-                group(ui, t.my_presets, true, !query.is_empty(), |ui| {
+                let id = egui::Id::new("preset_library");
+                group(ui, id, t.my_presets, true, !query.is_empty(), |ui| {
                     for preset in library {
                         ui.horizontal(|ui| {
                             let row = preset_row(ui, live, &preset.name, &preset.notes);
@@ -86,9 +87,10 @@ fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         .push(preset);
                 }
             }
-            for (name, presets) in groups.into_values() {
+            for (key, (name, presets)) in groups {
                 shown += presets.len();
-                group(ui, name, false, !query.is_empty(), |ui| {
+                let id = egui::Id::new(("preset_group", key));
+                group(ui, id, name, false, !query.is_empty(), |ui| {
                     for preset in presets {
                         if preset_row(ui, live, &preset.name, &preset.notes).clicked() {
                             out.actions.push(UiAction::ApplyPreset(PresetRef::Folder(
@@ -112,15 +114,18 @@ fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 }
 
 /// A collapsible group of rows. A search opens every group with a match.
+/// The library and the folder groups key their `id`s apart, so a folder
+/// group called My Presets keeps its own folded state.
 fn group(
     ui: &mut egui::Ui,
+    id: egui::Id,
     name: &str,
     default_open: bool,
     searching: bool,
     rows: impl FnOnce(&mut egui::Ui),
 ) {
     egui::CollapsingHeader::new(egui::RichText::new(name).strong())
-        .id_salt(("preset_group", name.to_lowercase()))
+        .id_salt(id)
         .default_open(default_open)
         .open(searching.then_some(true))
         .show(ui, rows);
