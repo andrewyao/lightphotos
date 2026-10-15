@@ -31,6 +31,12 @@ pub(crate) struct State {
     rating: Option<u8>,
     flag: Option<crate::sidecar::Flag>,
     label: Option<crate::sidecar::ColorLabel>,
+    /// That photo's stored quality score, where scoring runs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<Score>,
+    /// `[done, total]` while a scoring run is going.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scoring: Option<(usize, usize)>,
     /// That photo's masks, and the one the Masks page edits.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     masks: Vec<crate::develop::Mask>,
@@ -50,6 +56,13 @@ pub(crate) struct State {
     folder_roots: Vec<std::path::PathBuf>,
     /// The folder the Grid shows.
     folder: Option<std::path::PathBuf>,
+}
+
+#[derive(serde::Serialize)]
+struct Score {
+    value: u8,
+    /// Whether the photo was edited after it was scored.
+    stale: bool,
 }
 
 impl State {
@@ -80,6 +93,11 @@ impl State {
             rating: path.as_ref().map(|p| app.rating_of(p)),
             flag: path.as_ref().and_then(|p| app.flag_of(p)),
             label: path.as_ref().and_then(|p| app.folder_store.label(p)),
+            score: app.shown_score().map(|(s, stale)| Score {
+                value: s.value,
+                stale,
+            }),
+            scoring: app.score_progress(),
             masks: path
                 .as_ref()
                 .and_then(|p| app.masks.get(p).cloned())

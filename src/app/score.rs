@@ -27,7 +27,7 @@ impl App {
         self.score_paths(self.all_member_paths());
     }
 
-    fn score_paths(&mut self, paths: Vec<PathBuf>) {
+    pub(crate) fn score_paths(&mut self, paths: Vec<PathBuf>) {
         if self.score_pool.is_none() {
             return;
         }
@@ -198,6 +198,7 @@ impl App {
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
     use super::*;
+    use crate::command::{self, Command};
     use crate::jobs::score::ScorePool;
     use crate::scoring::quality::{Basis, QualityScore};
 
@@ -501,6 +502,67 @@ mod tests {
             app.folder_store.score(&paths[0]).map(|(_, stale)| stale),
             Some(true)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn run_json(app: &mut App, json: &str) -> Result<command::Outcome, command::CommandError> {
+        app.run(Command::parse(json)?)
+    }
+
+    fn state(app: &App) -> serde_json::Value {
+        serde_json::to_value(crate::app::state::State::of(app)).unwrap()
+    }
+
+    #[test]
+    fn photo_score_scores_the_named_photos_and_state_reports_progress_and_score() {
+        let (mut app, dir, paths) = folder_app(3);
+        app.score_pool = ScorePool::with_runner(2, slow_fixed);
+        let out = run_json(
+            &mut app,
+            r#"{"id":"photo.score","params":{"photos":["p00.jpg","p02.jpg"]}}"#,
+        )
+        .unwrap();
+        assert_eq!((out.photos, out.pending), (2, true));
+        assert_eq!(state(&app)["scoring"], serde_json::json!([0, 2]));
+        run_until_idle(&mut app);
+
+        let values: Vec<_> = paths
+            .iter()
+            .map(|p| app.folder_store.score(p).map(|(s, _)| s.score.value))
+            .collect();
+        assert_eq!(values, [Some(61), None, Some(61)]);
+        app.select_single(0);
+        let s = state(&app);
+        assert_eq!(s["score"], serde_json::json!({"value": 61, "stale": false}));
+        assert!(s.get("scoring").is_none(), "no run is going");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn photo_score_with_no_photos_named_scores_the_selection() {
+        let (mut app, dir, paths) = folder_app(4);
+        app.score_pool = ScorePool::with_runner(2, slow_fixed);
+        app.select_all();
+        let out = run_json(&mut app, r#"{"id":"photo.score"}"#).unwrap();
+        assert_eq!(out.photos, 4);
+        run_until_idle(&mut app);
+        assert!(paths.iter().all(|p| app.folder_store.score(p).is_some()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn photo_score_without_a_scoring_pool_fails_and_scores_nothing() {
+        let (mut app, dir, paths) = folder_app(2);
+        app.select_all();
+        let err = run_json(&mut app, r#"{"id":"photo.score"}"#).unwrap_err();
+        assert!(
+            matches!(err, command::CommandError::Failed { .. }),
+            "{err:?}"
+        );
+        assert_eq!(app.score_progress(), None);
+        assert!(paths.iter().all(|p| app.folder_store.score(p).is_none()));
+        let s = state(&app);
+        assert!(s.get("score").is_none() && s.get("scoring").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

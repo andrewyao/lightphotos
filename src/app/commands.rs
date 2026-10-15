@@ -335,6 +335,25 @@ impl App {
                     pending: self.autotone.is_running() || self.folder_store_loading(),
                 })
             }
+            Command::Score(p) => {
+                let paths = self.resolve(&p.photos)?;
+                if !self.scoring_available() {
+                    return Err(CommandError::Failed {
+                        reason: "scoring runs only in the macOS app, which has Apple's Vision \
+                                 framework"
+                            .into(),
+                    });
+                }
+                if p.photos.is_selected() {
+                    self.score_selection();
+                } else {
+                    self.score_paths(paths.clone());
+                }
+                Ok(Outcome {
+                    photos: paths.len(),
+                    pending: self.score_job.is_some(),
+                })
+            }
             Command::Preset(p) => {
                 let paths = self.resolve(&p.photos)?;
                 let failed = |reason| CommandError::Failed { reason };

@@ -47,6 +47,8 @@ pub enum Command {
     Label(LabelParams),
     #[serde(rename = "photo.rotate")]
     Rotate(RotateParams),
+    #[serde(rename = "photo.score")]
+    Score(PhotosParams),
     #[serde(rename = "develop.set")]
     Develop(DevelopParams),
     #[serde(rename = "develop.reset")]
@@ -459,6 +461,7 @@ fn apply_to_record(
         | Command::Select(_)
         | Command::Navigate(_)
         | Command::AutoTone(_)
+        | Command::Score(_)
         | Command::Preset(_)
         | Command::AddPresetFolder(_)
         | Command::Export(_)
@@ -875,6 +878,7 @@ impl Command {
             Flag(_) => "photo.flag",
             Label(_) => "photo.label",
             Rotate(_) => "photo.rotate",
+            Score(_) => "photo.score",
             Develop(_) => "develop.set",
             Reset(_) => "develop.reset",
             AutoTone(_) => "develop.auto",
@@ -899,7 +903,7 @@ impl Command {
             Label(p) => Some(&p.photos),
             Rotate(p) => Some(&p.photos),
             Develop(p) => Some(&p.photos),
-            Reset(p) | AutoTone(p) => Some(&p.photos),
+            Reset(p) | AutoTone(p) | Score(p) => Some(&p.photos),
             Monochrome(p) => Some(&p.photos),
             Crop(p) => Some(&p.photos),
             AddMask(p) => Some(&p.photos),
@@ -942,6 +946,10 @@ impl Command {
             Flag(_) => ("Pick, reject, unflag, or toggle pick.", true),
             Label(_) => ("Set, clear or toggle a color label.", true),
             Rotate(_) => ("Rotate 90 degrees.", true),
+            Score(_) => (
+                "Score each photo's quality, as Actions > Score photos does. macOS only.",
+                false,
+            ),
             Develop(_) => (
                 "Set develop controls. Put every control of one change in one call: \
                  it is one undo step.",
@@ -1024,6 +1032,7 @@ impl Command {
                 clockwise: true,
                 photos: Photos::Selected,
             }),
+            Command::Score(PhotosParams { photos: some() }),
             Command::Develop(DevelopParams {
                 controls,
                 photos: Photos::Selected,
@@ -1238,6 +1247,10 @@ mod tests {
             ControlValue::Default(DefaultWord::Default)
         );
         assert_eq!(Command::parse(r#"{"id":"edit.undo"}"#), Ok(Command::Undo));
+        assert_eq!(
+            Command::parse(r#"{"id":"photo.score"}"#),
+            Ok(Command::Score(PhotosParams::default()))
+        );
         assert_eq!(
             Command::parse(r#"{"id":"develop.reset"}"#),
             Ok(Command::Reset(PhotosParams::default())),
