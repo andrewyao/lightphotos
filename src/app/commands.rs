@@ -4,8 +4,8 @@
 use super::*;
 
 use crate::command::{
-    self, Blocker, Command, CommandError, FlagChange, Outcome, Photos, SelectWord, Selection, Step,
-    View, Zoom,
+    self, Blocker, Command, CommandError, FilterParams, FlagChange, FlagShown, Outcome, Photos,
+    SelectWord, Selection, SortKey, SortParams, StarCmp, Step, View, Zoom,
 };
 use crate::sidecar::{ColorLabel, Flag};
 
@@ -49,6 +49,10 @@ impl App {
             Command::Zoom(_) if !loupe => {
                 return Err(CommandError::NeedsView { view: View::Loupe });
             }
+            Command::Filter(_) | Command::Sort(_) if loupe => {
+                return Err(CommandError::NeedsView { view: View::Grid });
+            }
+            Command::Filter(p) => p.validate()?,
             Command::Rotate(p) if p.photos.is_selected() && !loupe => {
                 return Err(CommandError::NeedsView { view: View::Loupe });
             }
@@ -203,6 +207,14 @@ impl App {
                     Zoom::Cycle => self.cycle_zoom(),
                 }
                 done(0)
+            }
+            Command::Filter(p) => {
+                self.filter_grid(p);
+                done(self.visible_len())
+            }
+            Command::Sort(p) => {
+                self.sort_grid(p)?;
+                done(self.visible_len())
             }
             Command::Select(p) => self.select_photos(&p.photos),
             Command::Navigate(p) => {
@@ -458,6 +470,76 @@ impl App {
             photos: self.selection_count(),
             pending: false,
         })
+    }
+
+    /// Sets each filter `p` names. A star filter the toolbar shows as
+    /// "unrated" (= 0, <= 0) becomes its `= 0`, and `>= 0` shows every photo,
+    /// so the toolbar can always show the filter that is on.
+    fn filter_grid(&mut self, p: FilterParams) {
+        if let Some(rating) = p.rating {
+            let filter = rating.and_then(|r| {
+                let cmp = match r.cmp {
+                    StarCmp::AtLeast => Cmp::Gte,
+                    StarCmp::Exactly => Cmp::Eq,
+                    StarCmp::AtMost => Cmp::Lte,
+                };
+                match (cmp, r.stars.get()) {
+                    (Cmp::Gte, 0) => None,
+                    (_, 0) => Some((Cmp::Eq, 0)),
+                    (cmp, n) => {
+                        self.filter_cmp = cmp;
+                        Some((cmp, n))
+                    }
+                }
+            });
+            self.set_filter(filter);
+        }
+        if let Some(flag) = p.flag {
+            self.set_flag_filter(match flag {
+                FlagShown::All => FlagFilter::All,
+                FlagShown::Picked => FlagFilter::Picked,
+                FlagShown::Unflagged => FlagFilter::Unflagged,
+                FlagShown::Rejected => FlagFilter::Rejected,
+            });
+        }
+        if let Some(labels) = p.labels {
+            let mut shown = Vec::new();
+            for label in labels {
+                if !shown.contains(&label) {
+                    shown.push(label);
+                }
+            }
+            self.set_label_filter(shown);
+        }
+    }
+
+    /// Sorts the Grid by `p.by`, in its natural direction unless `p.reverse`.
+    fn sort_grid(&mut self, p: SortParams) -> Result<(), CommandError> {
+        let key = match p.by {
+            SortKey::Name => GridSort::Name,
+            SortKey::Time => GridSort::Time,
+            SortKey::Modified => GridSort::Modified,
+            SortKey::Size => GridSort::Size,
+            SortKey::Shutter => GridSort::Shutter,
+            SortKey::Quality => GridSort::Quality,
+            SortKey::Rating => GridSort::Rating,
+            SortKey::Edited => GridSort::Edited,
+        };
+        if key == GridSort::Quality && !self.quality_sort_available() {
+            let reason = if self.scoring_available() {
+                "a scoring run is going, and each new score would reorder the Grid; sort by \
+                 quality once get_state no longer shows `scoring`"
+            } else {
+                "sorting by quality needs scores, which only the macOS app makes"
+            };
+            return Err(CommandError::Failed {
+                reason: reason.into(),
+            });
+        }
+        let mut order = SortOrder::by(key);
+        order.descending ^= p.reverse;
+        self.apply_sort(order);
+        Ok(())
     }
 
     fn navigate(&mut self, to: Step) {
@@ -1216,5 +1298,119 @@ mod tests {
         let adj = app.folder_store.adjustments(&paths[0]);
         assert_eq!(adj.exposure, 0.0);
         assert!(adj.crop.is_some());
+    }
+
+    fn visible_names(app: &App) -> Vec<String> {
+        let Some(pl) = app.playlist.as_ref() else {
+            return Vec::new();
+        };
+        app.visible
+            .iter()
+            .filter_map(|&i| pl.entry(i)?.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn view_filter_sets_each_filter_it_names_and_leaves_the_rest() {
+        let (mut app, dir, paths) = folder_app("cmd-filter", 3);
+        app.set_rating_of(paths[0].clone(), 5);
+        app.set_rating_of(paths[1].clone(), 3);
+        app.folder_store.set_flag(&paths[1], Some(Flag::Pick));
+        app.folder_store.set_label(&paths[0], Some(ColorLabel::Red));
+        let filter = |app: &mut App, params: &str| {
+            let json = format!(r#"{{"id":"view.filter","params":{params}}}"#);
+            run(app, &json).unwrap().photos
+        };
+
+        assert_eq!(filter(&mut app, r#"{"rating":{"cmp":">=","stars":3}}"#), 2);
+        assert_eq!(visible_names(&app), ["0.jpg", "1.jpg"]);
+        assert_eq!(filter(&mut app, r#"{"flag":"picked"}"#), 1, "both apply");
+        assert_eq!(filter(&mut app, r#"{"rating":null}"#), 1, "flag stays");
+        assert_eq!(
+            filter(&mut app, r#"{"flag":"all","labels":["red","red"]}"#),
+            1
+        );
+        assert_eq!(visible_names(&app), ["0.jpg"]);
+        assert_eq!(filter(&mut app, r#"{"labels":[]}"#), 3);
+
+        assert_eq!(filter(&mut app, r#"{"rating":{"cmp":"<=","stars":0}}"#), 1);
+        assert_eq!(app.filter(), Some((Cmp::Eq, 0)), "as the toolbar's unrated");
+        assert_eq!(visible_names(&app), ["2.jpg"]);
+        filter(&mut app, r#"{"rating":{"cmp":"<=","stars":3}}"#);
+        assert_eq!(
+            app.filter_cmp(),
+            Cmp::Lte,
+            "the toolbar shows the comparator in use"
+        );
+        assert_eq!(visible_names(&app), ["1.jpg", "2.jpg"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_filter_refuses_bad_stars_an_empty_call_and_the_loupe() {
+        let (mut app, dir, _) = folder_app("cmd-filter-bad", 2);
+        for bad in [
+            r#"{"id":"view.filter","params":{"rating":{"stars":6}}}"#,
+            r#"{"id":"view.filter"}"#,
+        ] {
+            assert!(
+                matches!(run(&mut app, bad), Err(CommandError::BadParams { .. })),
+                "{bad}"
+            );
+        }
+        assert_eq!(app.filter(), None);
+        app.select_single(0);
+        run(&mut app, r#"{"id":"view.mode","params":{"mode":"loupe"}}"#).unwrap();
+        assert_eq!(
+            run(
+                &mut app,
+                r#"{"id":"view.filter","params":{"flag":"picked"}}"#
+            ),
+            Err(CommandError::NeedsView { view: View::Grid })
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_sort_sets_the_key_and_its_direction_rather_than_toggling() {
+        let (mut app, dir, paths) = folder_app("cmd-sort", 3);
+        app.set_rating_of(paths[0].clone(), 2);
+        app.set_rating_of(paths[1].clone(), 5);
+        let rating = r#"{"id":"view.sort","params":{"by":"rating"}}"#;
+        let reversed = r#"{"id":"view.sort","params":{"by":"rating","reverse":true}}"#;
+
+        assert_eq!(run(&mut app, rating).unwrap().photos, 3);
+        assert_eq!(visible_names(&app), ["1.jpg", "0.jpg", "2.jpg"]);
+        for _ in 0..2 {
+            run(&mut app, reversed).unwrap();
+            assert_eq!(visible_names(&app), ["2.jpg", "0.jpg", "1.jpg"]);
+        }
+        run(
+            &mut app,
+            r#"{"id":"view.sort","params":{"by":"name","reverse":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(visible_names(&app), ["2.jpg", "1.jpg", "0.jpg"]);
+        run(&mut app, r#"{"id":"view.sort","params":{"by":"name"}}"#).unwrap();
+        assert_eq!(visible_names(&app), ["0.jpg", "1.jpg", "2.jpg"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn view_sort_refuses_an_unknown_key_and_quality_without_scores() {
+        let (mut app, dir, _) = folder_app("cmd-sort-bad", 2);
+        assert!(matches!(
+            run(&mut app, r#"{"id":"view.sort","params":{"by":"colour"}}"#),
+            Err(CommandError::BadParams { .. })
+        ));
+        let Err(CommandError::Failed { reason }) =
+            run(&mut app, r#"{"id":"view.sort","params":{"by":"quality"}}"#)
+        else {
+            panic!("a quality sort with no scoring ran");
+        };
+        assert!(reason.contains("macOS"), "{reason}");
+        assert_eq!(app.sort_order(), crate::app::SortOrder::default());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

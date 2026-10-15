@@ -35,6 +35,10 @@ pub enum Command {
     View(ViewParams),
     #[serde(rename = "view.zoom")]
     Zoom(ZoomParams),
+    #[serde(rename = "view.filter")]
+    Filter(FilterParams),
+    #[serde(rename = "view.sort")]
+    Sort(SortParams),
     #[serde(rename = "select")]
     Select(SelectParams),
     #[serde(rename = "navigate")]
@@ -151,6 +155,98 @@ pub enum Zoom {
 #[serde(deny_unknown_fields)]
 pub struct ZoomParams {
     pub zoom: Zoom,
+}
+
+/// The Grid's filters. A filter left out stays as it is.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FilterParams {
+    /// `null` clears the star filter.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rating: Option<Option<RatingFilter>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag: Option<FlagShown>,
+    /// The labels shown; an empty list clears the label filter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Vec<ColorLabel>>,
+}
+
+impl FilterParams {
+    pub fn validate(&self) -> Result<(), CommandError> {
+        if self.rating.is_none() && self.flag.is_none() && self.labels.is_none() {
+            return Err(CommandError::bad_params(
+                "view.filter",
+                "give rating, flag, labels or a mix".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// A field that is present, even as `null`, as `Some`, so `null` can mean
+/// clear while a missing field means leave it.
+fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RatingFilter {
+    #[serde(default)]
+    pub cmp: StarCmp,
+    pub stars: Stars,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum StarCmp {
+    #[default]
+    #[serde(rename = ">=")]
+    AtLeast,
+    #[serde(rename = "=")]
+    Exactly,
+    #[serde(rename = "<=")]
+    AtMost,
+}
+
+/// Which photos the Grid's flag filter shows.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FlagShown {
+    All,
+    Picked,
+    Unflagged,
+    Rejected,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SortKey {
+    Name,
+    Time,
+    Modified,
+    Size,
+    Shutter,
+    Quality,
+    Rating,
+    Edited,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SortParams {
+    pub by: SortKey,
+    /// Run against the key's natural direction. Name, time and shutter run
+    /// A to Z, oldest and fastest first; the others run most first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reverse: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -458,6 +554,8 @@ fn apply_to_record(
         | Command::SwitchCatalog(_)
         | Command::View(_)
         | Command::Zoom(_)
+        | Command::Filter(_)
+        | Command::Sort(_)
         | Command::Select(_)
         | Command::Navigate(_)
         | Command::AutoTone(_)
@@ -872,6 +970,8 @@ impl Command {
             SwitchCatalog(_) => "catalog.switch",
             View(_) => "view.mode",
             Zoom(_) => "view.zoom",
+            Filter(_) => "view.filter",
+            Sort(_) => "view.sort",
             Select(_) => "select",
             Navigate(_) => "navigate",
             Rate(_) => "photo.rate",
@@ -912,7 +1012,8 @@ impl Command {
             Preset(p) => Some(&p.photos),
             Export(p) => Some(&p.photos),
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
-            | Zoom(_) | Select(_) | Navigate(_) | AddPresetFolder(_) | Undo => None,
+            | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | AddPresetFolder(_)
+            | Undo => None,
         }
     }
 
@@ -940,6 +1041,18 @@ impl Command {
                 false,
             ),
             Zoom(_) => ("Zoom the Loupe: fit, actual, in, out or cycle.", false),
+            Filter(_) => (
+                "Set the Grid's filters. `rating` is {\"cmp\": \">=\"|\"=\"|\"<=\", \"stars\": \
+                 0-5}, or null to clear; `flag` is all, picked, unflagged or rejected; \
+                 `labels` lists the labels shown, empty to clear. A filter left out stays.",
+                false,
+            ),
+            Sort(_) => (
+                "Sort the Grid by name, time, modified, size, shutter, quality, rating or \
+                 edited. Name, time and shutter run A to Z, oldest and fastest first, the \
+                 others most first; `reverse` runs it the other way.",
+                false,
+            ),
             Select(_) => ("Select all, none, or the named photos.", false),
             Navigate(_) => ("Move to the next, previous, first or last photo.", false),
             Rate(_) => ("Set the star rating, 0 to 5; 0 clears it.", true),
@@ -1010,6 +1123,18 @@ impl Command {
             }),
             Command::View(ViewParams { mode: View::Loupe }),
             Command::Zoom(ZoomParams { zoom: Zoom::Fit }),
+            Command::Filter(FilterParams {
+                rating: Some(Some(RatingFilter {
+                    cmp: StarCmp::AtLeast,
+                    stars: Stars(3),
+                })),
+                flag: Some(FlagShown::Picked),
+                labels: None,
+            }),
+            Command::Sort(SortParams {
+                by: SortKey::Rating,
+                reverse: false,
+            }),
             Command::Select(SelectParams {
                 photos: Selection::Word(SelectWord::All),
             }),
@@ -1263,6 +1388,77 @@ mod tests {
                 photos: Photos::Named(vec!["a.jpg".into()]),
             }))
         );
+    }
+
+    #[test]
+    fn view_filter_tells_a_null_rating_from_a_missing_one() {
+        let filter = |json: &str| match Command::parse(json) {
+            Ok(Command::Filter(p)) => p,
+            other => panic!("{other:?}"),
+        };
+        let p = filter(r#"{"id":"view.filter","params":{"rating":null}}"#);
+        assert_eq!(p.rating, Some(None), "null clears");
+        let p = filter(r#"{"id":"view.filter","params":{"flag":"rejected","labels":[]}}"#);
+        assert_eq!(p.rating, None, "missing leaves it");
+        assert_eq!(
+            (p.flag, p.labels),
+            (Some(FlagShown::Rejected), Some(vec![]))
+        );
+        let p = filter(r#"{"id":"view.filter","params":{"rating":{"stars":2}}}"#);
+        assert_eq!(
+            p.rating,
+            Some(Some(RatingFilter {
+                cmp: StarCmp::AtLeast,
+                stars: Stars(2)
+            })),
+            "cmp defaults to >="
+        );
+        let wire = serde_json::to_value(Command::Filter(FilterParams {
+            rating: Some(None),
+            ..FilterParams::default()
+        }))
+        .unwrap();
+        assert_eq!(
+            wire,
+            json!({"id": "view.filter", "params": {"rating": null}})
+        );
+        assert_eq!(
+            Command::parse(r#"{"id":"view.sort","params":{"by":"edited","reverse":true}}"#),
+            Ok(Command::Sort(SortParams {
+                by: SortKey::Edited,
+                reverse: true
+            }))
+        );
+    }
+
+    #[test]
+    fn view_filter_and_sort_refuse_bad_values_with_an_example() {
+        for text in [
+            r#"{"id":"view.filter","params":{"rating":{"cmp":">=","stars":6}}}"#,
+            r#"{"id":"view.filter","params":{"rating":{"cmp":">","stars":3}}}"#,
+            r#"{"id":"view.filter","params":{"flag":"not_rejected"}}"#,
+            r#"{"id":"view.filter","params":{"labels":["mauve"]}}"#,
+            r#"{"id":"view.sort","params":{"by":"colour"}}"#,
+            r#"{"id":"view.sort"}"#,
+        ] {
+            let Err(CommandError::BadParams { example, .. }) = Command::parse(text) else {
+                panic!("{text} parsed");
+            };
+            assert!(example["params"].is_object(), "{text}");
+        }
+        let Err(CommandError::BadParams { reason, .. }) =
+            Command::parse(r#"{"id":"view.filter","params":{"rating":{"stars":9}}}"#)
+        else {
+            panic!("stars 9 parsed");
+        };
+        assert!(reason.contains("stars run 0 to 5, not 9"), "{reason}");
+        let Ok(Command::Filter(empty)) = Command::parse(r#"{"id":"view.filter"}"#) else {
+            panic!("an empty filter parses, then fails validation");
+        };
+        assert!(matches!(
+            empty.validate(),
+            Err(CommandError::BadParams { .. })
+        ));
     }
 
     #[test]
