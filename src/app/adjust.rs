@@ -167,6 +167,13 @@ impl App {
         }
     }
 
+    /// Brings Develop back in front of Presets or Info, for a key that
+    /// starts one of its tools.
+    pub(super) fn reveal_develop(&mut self) {
+        self.develop_open = true;
+        self.side_page = SidePage::Develop;
+    }
+
     fn show_develop_page(&mut self, tab: DevelopTab) {
         self.set_group_view(GroupView::Edit);
         self.develop_open = true;

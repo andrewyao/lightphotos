@@ -351,7 +351,7 @@ impl App {
             if self.selected_path().is_none() {
                 return;
             }
-            self.develop_open = true;
+            self.reveal_develop();
             if self.develop_tab != DevelopTab::Masks {
                 self.set_develop_tab(DevelopTab::Masks);
             }

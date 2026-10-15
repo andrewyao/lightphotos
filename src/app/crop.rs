@@ -434,7 +434,7 @@ impl App {
             return_tab: self.develop_tab,
         });
         self.develop_tab = DevelopTab::Crop;
-        self.develop_open = true;
+        self.reveal_develop();
         self.exports.close_form();
         self.push_crop_preview();
         self.fit_for_crop();

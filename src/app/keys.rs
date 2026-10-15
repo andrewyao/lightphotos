@@ -297,8 +297,12 @@ impl App {
 
             KeyCode::KeyO if cmd && !alt => self.open_folder_picker(),
             KeyCode::KeyO if loupe && !cmd && !alt => self.selection_key(shift),
-            KeyCode::KeyK if loupe && !cmd && !alt => self.set_develop_tab(DevelopTab::Masks),
+            KeyCode::KeyK if loupe && !cmd && !alt => {
+                self.reveal_develop();
+                self.set_develop_tab(DevelopTab::Masks);
+            }
             KeyCode::KeyQ if loupe && !cmd && !alt => {
+                self.reveal_develop();
                 self.set_develop_tab(DevelopTab::Masks);
                 self.toggle_touchup();
             }
@@ -1199,6 +1203,32 @@ mod tests {
             app.handle_key(KeyCode::ArrowLeft);
         }
         assert_eq!(app.sel, Some(1), "the shown photo did not change");
+    }
+
+    /// Catches a tool key that starts its tool behind the Presets or Info
+    /// page, where its controls can't be seen.
+    #[test]
+    fn a_develop_tool_key_brings_its_page_in_front_of_presets_and_info() {
+        for page in [crate::app::SidePage::Presets, crate::app::SidePage::Info] {
+            for (key, tab) in [
+                (KeyCode::KeyR, DevelopTab::Crop),
+                (KeyCode::KeyK, DevelopTab::Masks),
+                (KeyCode::KeyQ, DevelopTab::Masks),
+                (KeyCode::KeyM, DevelopTab::Masks),
+            ] {
+                let (mut app, _) = editor_app();
+                app.side_page = page;
+                assert_eq!(app.develop_page_shown(), None, "{page:?} hides Develop");
+
+                press(&mut app, ModifiersState::empty(), key);
+
+                assert_eq!(
+                    app.develop_page_shown(),
+                    Some(tab),
+                    "{key:?} from {page:?} shows its page"
+                );
+            }
+        }
     }
 
     #[test]
