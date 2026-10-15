@@ -365,6 +365,9 @@ pub(crate) struct Catalog {
     #[cfg(not(target_arch = "wasm32"))]
     writer: Option<native::Writer>,
     last_error: Option<String>,
+    /// Why the preset-folders record could not be read, once, kept apart
+    /// from `last_error` because nothing failed to save.
+    presets_error: Option<String>,
 }
 
 impl Catalog {
@@ -388,6 +391,7 @@ impl Catalog {
             #[cfg(not(target_arch = "wasm32"))]
             writer: None,
             last_error: None,
+            presets_error: None,
         }
     }
 
@@ -467,27 +471,30 @@ impl Catalog {
         changed
     }
 
-    /// The stored preset-folders record arrived: its JSON, `None` when
-    /// there is none, or why it could not be read. A missing one is an empty
-    /// list. One that cannot be read or parsed is an error, and the catalog
+    /// The stored preset-folders record arrived from `source`: its JSON,
+    /// `None` when there is none, or why it could not be read. A missing one
+    /// is an empty list. One that cannot be read or parsed is reported by
+    /// [`take_presets_error`](Self::take_presets_error), and the catalog
     /// never writes over it.
-    pub(crate) fn land_presets(
-        &mut self,
-        stored: Result<Option<Vec<u8>>, String>,
-    ) -> Result<(), String> {
+    pub(crate) fn land_presets(&mut self, source: &str, stored: Result<Option<Vec<u8>>, String>) {
         let parsed = stored.and_then(|bytes| bytes.map(|b| parse_record(&b)).transpose());
         match parsed {
             Ok(folders) => {
                 if self.preset_folders.load(&folders.unwrap_or_default()) {
                     self.save_presets();
                 }
-                Ok(())
             }
             Err(e) => {
+                eprintln!("[catalog] {source}: {e}");
                 self.preset_folders.unreadable();
-                Err(format!("{}: {e}", self.name()))
+                self.presets_error = Some(format!("{source}: {e}"));
             }
         }
+    }
+
+    /// Why the preset folders could not be read, returned once.
+    pub(crate) fn take_presets_error(&mut self) -> Option<String> {
+        self.presets_error.take()
     }
 
     /// Whether the stored record has yet to arrive.

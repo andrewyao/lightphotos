@@ -706,6 +706,8 @@ pub struct Strings {
     pub catalog_open_failed: fn(&str) -> String,
     /// A catalog file could not be written. Takes why.
     pub catalog_save_failed: fn(&str) -> String,
+    /// (the file or catalog, and why)
+    pub preset_folders_unreadable: fn(&str) -> String,
     /// New Catalog… could not make the catalog. Takes why.
     pub catalog_create_failed: fn(&str) -> String,
     /// Hover text on the Folders heading, which names the catalog.
@@ -1685,6 +1687,7 @@ pub static EN: Strings = Strings {
     catalog_fallback: |e| format!("Couldn't open the last catalog, so the default one is open: {e}"),
     catalog_open_failed: |e| format!("Couldn't open catalog: {e}"),
     catalog_save_failed: |e| format!("Couldn't save the catalog: {e}"),
+    preset_folders_unreadable: |e| format!("Couldn't read the preset folders: {e}"),
     catalog_create_failed: |e| format!("Couldn't create catalog: {e}"),
     catalog_tip: "Catalog: the folders listed here, and a copy of their ratings, flags and color labels",
     new_catalog: "New Catalog\u{2026}",
@@ -2510,6 +2513,7 @@ pub static ZH: Strings = Strings {
     catalog_fallback: |e| format!("无法打开上次的目录，已打开默认目录：{e}"),
     catalog_open_failed: |e| format!("无法打开目录：{e}"),
     catalog_save_failed: |e| format!("无法保存目录：{e}"),
+    preset_folders_unreadable: |e| format!("无法读取预设文件夹：{e}"),
     catalog_create_failed: |e| format!("无法创建目录：{e}"),
     catalog_tip: "目录：这里列出的文件夹，以及其评分、旗标和颜色标签的副本",
     new_catalog: "新建目录\u{2026}",

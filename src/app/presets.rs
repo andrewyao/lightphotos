@@ -757,6 +757,33 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&presets);
     }
 
+    /// Catches a preset list that won't read being reported as a failed
+    /// catalog save, which sends the user looking for a disk problem.
+    #[test]
+    fn unreadable_preset_folders_say_so_not_that_the_catalog_failed_to_save() {
+        let (mut app, dir, _) = folder_app("preset-unreadable", 1);
+        let at = crate::persist::catalog::CatalogRef::in_dir(&dir, "trip").unwrap();
+        drop(crate::persist::catalog::Catalog::create_at(at.clone(), Vec::new()).unwrap());
+        std::fs::write(at.path().join("presets.json"), b"{\"v\":1,\"folders\":").unwrap();
+
+        app.open_catalog(at);
+        app.show_catalog_errors();
+
+        let t = crate::i18n::t();
+        let status = app.status_text().unwrap_or_default().to_string();
+        let prefix = (t.preset_folders_unreadable)("");
+        assert!(
+            status.starts_with(&prefix) && status.contains("presets.json"),
+            "says the preset folders didn't read, and which file: {status}"
+        );
+        assert!(
+            !status.starts_with(&(t.catalog_save_failed)("")),
+            "not a failed save: {status}"
+        );
+        assert_eq!(app.catalog.name(), "trip", "the catalog still opened");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A slow scan from before a rescan must not land over the newer one.
     /// The stale sender stands in for that scan's thread.
     #[test]

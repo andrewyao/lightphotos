@@ -152,11 +152,8 @@ impl App {
                 }
             }
         }
-        if let Err(e) = self.catalog.land_presets(load.presets) {
-            web_sys::console::warn_1(
-                &format!("[catalog] could not read the preset folders: {e}").into(),
-            );
-        }
+        let source = self.catalog.name().to_string();
+        self.catalog.land_presets(&source, load.presets);
         self.rescan_preset_folders(false);
         self.note_known_catalog();
         // A root picked while the record was out has handles before its

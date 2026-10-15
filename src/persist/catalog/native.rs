@@ -77,9 +77,7 @@ impl Catalog {
         let mut catalog = Catalog::on_disk(at);
         catalog.load_record(folders);
         let stored = read_capped(&presets, super::MAX_RECORD_BYTES).map_err(|e| e.to_string());
-        if let Err(e) = catalog.land_presets(stored) {
-            catalog.note_error(format!("{}: {e}", presets.display()));
-        }
+        catalog.land_presets(&presets.display().to_string(), stored);
         Ok(catalog)
     }
 
@@ -625,7 +623,12 @@ mod tests {
                 [PathBuf::from("/p")],
                 "the catalog still opens"
             );
-            assert!(cat.take_error().is_some(), "{bad:?} is reported");
+            let why = cat.take_presets_error();
+            assert!(
+                why.as_deref().is_some_and(|w| w.contains("presets.json")),
+                "{bad:?} is reported, naming the file: {why:?}"
+            );
+            assert!(cat.take_error().is_none(), "as no failed save");
             assert!(cat.preset_folders().is_empty());
 
             assert!(cat.add_preset_folder(Path::new("/presets")));

@@ -1296,12 +1296,7 @@ impl App {
         if let Some(message) = self.presets.take_error() {
             self.set_status(StatusKind::Error, message);
         }
-        if let Some(cause) = self.catalog.take_error() {
-            self.set_status(
-                StatusKind::Error,
-                (crate::i18n::t().catalog_save_failed)(&cause),
-            );
-        }
+        self.show_catalog_errors();
 
         let pixels_per_point = self.egui_ctx.pixels_per_point();
         let paint_jobs = self

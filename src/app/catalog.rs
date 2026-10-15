@@ -183,6 +183,18 @@ impl App {
         }
     }
 
+    /// The catalog's failures since the last frame, each in its own words: a
+    /// write that failed, or preset folders that would not read.
+    pub(crate) fn show_catalog_errors(&mut self) {
+        let t = crate::i18n::t();
+        if let Some(cause) = self.catalog.take_error() {
+            self.set_status(StatusKind::Error, (t.catalog_save_failed)(&cause));
+        }
+        if let Some(cause) = self.catalog.take_presets_error() {
+            self.set_status(StatusKind::Error, (t.preset_folders_unreadable)(&cause));
+        }
+    }
+
     /// Bring the catalog's copy of the open folder's marks up to date with
     /// the folder store. Once per frame, and before the folder store or
     /// the catalog is replaced. Idempotent: an unchanged revision, or a
