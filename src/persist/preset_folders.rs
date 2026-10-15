@@ -52,6 +52,8 @@ pub(crate) struct Scan {
     pub presets: Vec<FolderPreset>,
     /// `.xmp` files that were too big or did not read as a develop preset.
     pub skipped: usize,
+    /// The walk reached [`Limits::files`] and listed no more.
+    pub truncated: bool,
 }
 
 impl Scan {
@@ -188,6 +190,7 @@ pub(crate) fn scan(
                 continue;
             }
             if files >= limits.files {
+                out.truncated = true;
                 break 'walk;
             }
             files = files.saturating_add(1);
@@ -376,6 +379,9 @@ mod tests {
         let scan = scan(&root, &limits, &AtomicBool::new(false)).unwrap();
 
         assert_eq!(scan.presets.len() + scan.skipped, 3);
+        assert!(scan.truncated, "the cut is recorded, not silent");
+        let whole = super::scan(&root, &LIMITS, &AtomicBool::new(false)).unwrap();
+        assert!(!whole.truncated);
         let _ = std::fs::remove_dir_all(&root);
     }
 

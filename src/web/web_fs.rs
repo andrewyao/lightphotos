@@ -349,6 +349,7 @@ pub async fn scan_preset_folder(
                 }
                 FileSystemHandleKind::File if is_preset_file(&name) => {
                     if files >= LIMITS.files {
+                        out.truncated = true;
                         break 'walk;
                     }
                     files = files.saturating_add(1);

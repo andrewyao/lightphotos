@@ -12,6 +12,8 @@ pub(crate) enum FolderState {
         presets: Vec<FolderPreset>,
         /// `.xmp` files that were not develop presets or would not read.
         skipped: usize,
+        /// The scan stopped at its file limit, so more presets may be there.
+        truncated: bool,
     },
     /// The browser holds the folder's handle but withholds read access
     /// until a click asks for it.
@@ -28,6 +30,7 @@ impl FolderState {
             Ok(scan) => FolderState::Ready {
                 presets: scan.presets,
                 skipped: scan.skipped,
+                truncated: scan.truncated,
             },
             Err(e) => FolderState::Unavailable(e),
         }
@@ -873,6 +876,7 @@ pub(in crate::app) mod tests {
                 name_key: "old".into(),
             }],
             skipped: 0,
+            truncated: false,
         };
         let _ = stale_tx.send((presets.clone(), stale));
         wait_for_scans(&mut app);
@@ -1093,6 +1097,13 @@ pub(in crate::app) mod tests {
         (asked, settled(app))
     }
 
+    /// The Presets page shown as it is, with no rescan to replace the
+    /// folders' states a test set up.
+    fn open_page_without_rescan(app: &mut App) -> Painted {
+        app.side_page = crate::app::SidePage::Presets;
+        settled(app)
+    }
+
     /// An App in the Grid with three photos selected, a library preset, and
     /// a preset folder already scanned.
     fn page_app(tag: &str) -> (App, PathBuf, Vec<PathBuf>, PathBuf) {
@@ -1276,6 +1287,24 @@ pub(in crate::app) mod tests {
             "a search opens the groups with a match and hides the rest: {:?}",
             found.texts()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&presets);
+    }
+
+    /// Catches a folder cut short at the file limit looking complete.
+    #[test]
+    fn a_folder_cut_short_at_the_file_limit_says_so_on_the_page() {
+        let (mut app, dir, _, presets) = page_app("page-truncated");
+        if let Some((_, FolderState::Ready { truncated, .. })) = app.preset_folders.first_mut() {
+            *truncated = true;
+        }
+
+        let page = open_page_without_rescan(&mut app);
+
+        let t = crate::i18n::t();
+        let name = crate::persist::preset_folders::display_name(&presets);
+        let note = (t.preset_folder_truncated)(&name, crate::persist::preset_folders::LIMITS.files);
+        assert!(page.has(&note), "{:?}", page.texts());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&presets);
     }

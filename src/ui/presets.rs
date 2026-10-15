@@ -182,6 +182,15 @@ fn folder_notes(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 ui.weak((t.preset_folder_empty)(&name))
                     .on_hover_text(folder.display().to_string());
             }
+            FolderState::Ready {
+                truncated: true, ..
+            } => {
+                ui.weak((t.preset_folder_truncated)(
+                    &name,
+                    crate::persist::preset_folders::LIMITS.files,
+                ))
+                .on_hover_text(folder.display().to_string());
+            }
             FolderState::Ready { .. } => {}
         }
     }
