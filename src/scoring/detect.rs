@@ -467,7 +467,19 @@ mod file_tests {
             crate::decode::image_encode::JpegQuality::Export,
         )
         .unwrap();
-        let coverage = run(&photo, DetectTarget::Subject).unwrap();
+        // GitHub's macOS runners are VMs with no GPU or Neural Engine, where
+        // Vision can't run a model; facequality's tests skip the same way.
+        let coverage = match run(&photo, DetectTarget::Subject) {
+            Err(DetectError::Failed(e))
+                if e.contains("Could not create inference context")
+                    || e.contains("Unspecified error") =>
+            {
+                eprintln!("skipping: Vision cannot run a model here ({e})");
+                std::fs::remove_dir_all(&dir).unwrap();
+                return;
+            }
+            other => other.unwrap(),
+        };
         assert!(
             coverage.is_nothing() || coverage.width() > 1,
             "{coverage:?}"

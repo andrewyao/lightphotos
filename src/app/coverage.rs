@@ -153,7 +153,7 @@ impl CoverageStore {
     pub(crate) fn new() -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            Self::with_detector(detect::run)
+            Self::with_detector_and_availability(detect::run, detect::available)
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -200,9 +200,11 @@ impl CoverageStore {
         self.web_landings.0.clone()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    /// A store whose stand-in `detector` runs for every target, whatever
+    /// this platform can detect, so a test behaves the same on every OS.
+    #[cfg(test)]
     pub(crate) fn with_detector(detector: Detector) -> Self {
-        Self::with_detector_and_availability(detector, detect::available)
+        Self::with_detector_and_availability(detector, |_| true)
     }
 
     /// [`with_detector`](Self::with_detector) with `available` in place of
