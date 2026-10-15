@@ -55,21 +55,23 @@ impl Mode {
     }
 }
 
-/// The tools. Each mode offers four of them.
+/// The tools. Each mode offers five of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
     ListCommands,
     RunCommand,
     GetState,
+    ListPhotos,
     Screenshot,
     Render,
 }
 
 impl Tool {
-    const ALL: [Tool; 5] = [
+    const ALL: [Tool; 6] = [
         Tool::ListCommands,
         Tool::RunCommand,
         Tool::GetState,
+        Tool::ListPhotos,
         Tool::Screenshot,
         Tool::Render,
     ];
@@ -79,6 +81,7 @@ impl Tool {
             Tool::ListCommands => "list_commands",
             Tool::RunCommand => "run_command",
             Tool::GetState => "get_state",
+            Tool::ListPhotos => "list_photos",
             Tool::Screenshot => "screenshot",
             Tool::Render => "render",
         }
@@ -115,7 +118,7 @@ pub fn command_request(args: &Map<String, Value>) -> Result<Value, String> {
 }
 
 impl Mode {
-    /// The `tools/list` entries: the four tools this mode answers.
+    /// The `tools/list` entries: the tools this mode answers.
     pub fn tools(&self) -> Vec<Value> {
         let attached = matches!(self, Mode::Attached(_));
         let object = |properties: Value, required: &[&str]| json!({ "type": "object", "properties": properties, "required": required });
@@ -165,6 +168,16 @@ impl Mode {
                          it has develop edits.",
                         object(json!({}), &[]),
                     ),
+                    Tool::ListPhotos if attached => (
+                        "Every photo the Grid shows, in its order, with its rating, flag, \
+                         label, quality score and whether it has develop edits. Stops at 5000 \
+                         photos with `truncated: true`.",
+                        object(json!({}), &[]),
+                    ),
+                    Tool::ListPhotos => (
+                        "The folder's photos, as get_state lists them.",
+                        object(json!({}), &[]),
+                    ),
                     Tool::Screenshot if attached => (
                         "A PNG of the app window. Waits for the app to settle first unless \
                          `wait` is false.",
@@ -197,7 +210,8 @@ impl Mode {
         match self {
             Mode::Attached(_) => format!(
                 "{common} You are attached to the running app: commands act on what it \
-                 shows and selects, get_state reads it, and screenshot shows its window."
+                 shows and selects, get_state reads it, list_photos lists the photos the \
+                 Grid shows, and screenshot shows its window."
             ),
             Mode::Headless(folder) => format!(
                 "{common} You work headless on the folder {}: get_state lists its photos, \
@@ -219,6 +233,27 @@ impl Mode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_modes_offer_list_photos() {
+        let attached = Mode::Attached(attached::App::new(1, None));
+        let dir = std::env::temp_dir().join(format!("lpmcp-tools-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let headless = Mode::Headless(headless::Folder::open(&dir).unwrap());
+        for mode in [&attached, &headless] {
+            let names: Vec<Value> = mode.tools().iter().map(|t| t["name"].clone()).collect();
+            assert_eq!(names.len(), 5, "{names:?}");
+            assert!(names.contains(&json!("list_photos")), "{names:?}");
+        }
+        assert_eq!(Tool::parse("list_photos"), Some(Tool::ListPhotos));
+        let listed = headless.call(Tool::ListPhotos, &Map::new()).unwrap();
+        let reply: Value = serde_json::from_str(listed[0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            (reply["total"].clone(), reply["truncated"].clone()),
+            (json!(0), json!(false))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_token_is_not_taken_as_a_flag() {

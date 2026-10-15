@@ -54,6 +54,7 @@ impl App {
             }
             Tool::GetState if wait(false) => Ok(vec![text(self.settle()?.to_string())]),
             Tool::GetState => Ok(vec![text(self.ask(json!({ "op": "state" }))?.to_string())]),
+            Tool::ListPhotos => Ok(vec![text(self.ask(json!({ "op": "list" }))?.to_string())]),
             Tool::Screenshot => self.screenshot(wait(true)),
             Tool::Render => Err(
                 "render works headless: run lightphotos-mcp with --folder <dir>. \

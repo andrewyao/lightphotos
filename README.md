@@ -99,12 +99,14 @@ Set `LIGHTPHOTOS_CONTROL_TOKEN` (16 characters or more) to choose the token. Sen
 {"token": "…", "op": "run", "command": {"id": "photo.rate", "params": {"stars": 3}}}
 {"token": "…", "op": "commands"}
 {"token": "…", "op": "state"}
+{"token": "…", "op": "list"}
 {"token": "…", "op": "wait", "timeout_ms": 10000}
 {"token": "…", "op": "screenshot"}
 ```
 
 - `run` runs one command. `commands` lists every command id with an example, and every develop control with its range and current value.
 - `state` returns the view, the selection, and the current photo's rating, flag and label.
+- `list` returns each photo the Grid shows, in its order, with its rating, flag, label, quality score and whether it has edits: `{"photos", "total", "truncated"}`. It stops at 5000 photos.
 - `wait` returns the state when decodes, sidecar writes, batches and animations are done, or a `timeout` error. The default is 10 s and the limit is 60 s.
 - `screenshot` returns the window as a PNG: `{"png_base64", "width", "height"}`.
 
@@ -112,7 +114,7 @@ A reply is `{"ok": true, "result": …}` or `{"ok": false, "error": {"error": "<
 
 ### Agent control (MCP)
 
-`lightphotos-mcp` is an MCP server on stdio, so an agent such as Claude Code can cull, edit and look at photos. Build it with `cargo build --release --bin lightphotos-mcp`. Its tools are `list_commands`, `run_command`, `get_state`, and `screenshot` or `render`. Call `list_commands` first: it gives every command id with an example of its params.
+`lightphotos-mcp` is an MCP server on stdio, so an agent such as Claude Code can cull, edit and look at photos. Build it with `cargo build --release --bin lightphotos-mcp`. Its tools are `list_commands`, `run_command`, `get_state`, `list_photos`, and `screenshot` or `render`. Call `list_commands` first: it gives every command id with an example of its params.
 
 Headless, it works on one folder with no app open. Commands marked `headless` (rate, flag, label, rotate, develop, crop) write the photos' sidecars, and `render` returns a photo with its saved edits as a JPEG:
 
@@ -127,7 +129,7 @@ LIGHTPHOTOS_CONTROL_TOKEN=<32 hex characters> ./target/release/lightphotos --con
 claude mcp add lightphotos -e LIGHTPHOTOS_CONTROL_TOKEN=<the same token> -- /path/to/lightphotos-mcp --attach 7777
 ```
 
-In the browser, the app registers `list_commands`, `run_command` and `get_state` with WebMCP when the browser offers `document.modelContext` (or `navigator.modelContext`, as the `@mcp-b` polyfill does). An agent in the browser then drives the open app with the same requests as the control channel. There is no `screenshot` tool: the agent already sees the page. A browser without WebMCP logs one console line and the app runs as usual.
+In the browser, the app registers `list_commands`, `run_command`, `get_state` and `list_photos` with WebMCP when the browser offers `document.modelContext` (or `navigator.modelContext`, as the `@mcp-b` polyfill does). An agent in the browser then drives the open app with the same requests as the control channel. There is no `screenshot` tool: the agent already sees the page. A browser without WebMCP logs one console line and the app runs as usual.
 
 ## Releasing and packaging
 

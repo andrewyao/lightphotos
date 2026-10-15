@@ -787,7 +787,7 @@ pub(crate) use coverage::{Failure, MaskStatus};
 pub(crate) use masks::MaskKind;
 pub(crate) use presets::FolderState;
 pub(crate) use sort::{GridSort, SortOrder};
-pub(crate) use state::State;
+pub(crate) use state::{PhotoList, State};
 #[cfg(test)]
 pub(crate) mod test_support;
 mod thumbs;

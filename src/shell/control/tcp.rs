@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! {"token": "…", "op": "run", "command": {"id": "photo.rate", "params": {"stars": 3}}}
-//! {"token": "…", "op": "commands" | "state" | "screenshot"}
+//! {"token": "…", "op": "commands" | "state" | "list" | "screenshot"}
 //! {"token": "…", "op": "wait", "timeout_ms": 10000}
 //!
 //! {"ok": true, "result": …}
@@ -263,6 +263,7 @@ fn parse_request(line: &[u8], token: &str) -> Result<Op, Failure> {
         }
         "commands" => Op::Commands,
         "state" => Op::State,
+        "list" => Op::List,
         "screenshot" => Op::Screenshot,
         "wait" => Op::Wait(match value.get("timeout_ms") {
             None => DEFAULT_WAIT,
@@ -345,6 +346,7 @@ mod tests {
         let parse = |line: &str| parse_request(line.as_bytes(), TOKEN);
         assert!(matches!(parse(&request("state")), Ok(Op::State)));
         assert!(matches!(parse(&request("commands")), Ok(Op::Commands)));
+        assert!(matches!(parse(&request("list")), Ok(Op::List)));
         assert!(matches!(parse(&request("screenshot")), Ok(Op::Screenshot)));
         assert!(matches!(parse(&request("wait")), Ok(Op::Wait(t)) if t == DEFAULT_WAIT));
         let wait = |ms: &str| {

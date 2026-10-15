@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use web_time::Instant;
 
-use super::{App, State};
+use super::{App, PhotoList, State};
 use crate::shell::control::{Answer, ChannelError, Op, Payload, Reply, Request};
 
 /// Requests the frame loop answers later.
@@ -43,6 +43,7 @@ impl App {
             Op::Run(cmd) => self.run(*cmd).map_err(Into::into).and_then(json),
             Op::Commands => json(self.listing()),
             Op::State => json(State::of(self)),
+            Op::List => json(PhotoList::of(self)),
             #[cfg(not(target_arch = "wasm32"))]
             Op::Screenshot => return self.control.shots.push(reply),
             Op::Wait(timeout) => {

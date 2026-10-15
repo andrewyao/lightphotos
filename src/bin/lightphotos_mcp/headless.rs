@@ -52,7 +52,7 @@ impl Folder {
                 Ok(vec![text(listing)])
             }
             Tool::RunCommand => self.run(args),
-            Tool::GetState => Ok(vec![text(self.state()?.to_string())]),
+            Tool::GetState | Tool::ListPhotos => Ok(vec![text(self.state()?.to_string())]),
             Tool::Screenshot => Err("screenshot needs the running app. Headless, call render \
                                      to see a photo with its edits."
                 .into()),

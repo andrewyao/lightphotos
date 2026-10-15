@@ -37,6 +37,8 @@ pub(crate) enum Op {
     Run(Box<Command>),
     Commands,
     State,
+    /// Every photo the Grid shows, in its order.
+    List,
     #[cfg(not(target_arch = "wasm32"))]
     Screenshot,
     /// Answer once the app settles, or with `timeout` after this long.
@@ -133,7 +135,7 @@ impl std::fmt::Display for ChannelError {
             }
             ChannelError::UnknownOp { op } => write!(
                 f,
-                "no op `{op}`; use run, commands, state, screenshot or wait"
+                "no op `{op}`; use run, commands, state, list, screenshot or wait"
             ),
             ChannelError::TooLong { limit } => {
                 write!(

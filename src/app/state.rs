@@ -58,6 +58,70 @@ pub(crate) struct State {
     folder: Option<std::path::PathBuf>,
 }
 
+/// What the control channel's `list` op answers: each photo the Grid shows,
+/// in its order. A closed stack shows as its cover.
+#[derive(serde::Serialize)]
+pub(crate) struct PhotoList {
+    photos: Vec<Photo>,
+    /// Photos the Grid shows, listed or not.
+    total: usize,
+    /// Whether `photos` stops at [`PhotoList::MAX`].
+    truncated: bool,
+}
+
+#[derive(serde::Serialize)]
+struct Photo {
+    name: String,
+    /// 0 when unrated.
+    rating: u8,
+    flag: Option<crate::sidecar::Flag>,
+    label: Option<crate::sidecar::ColorLabel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<Score>,
+    /// Whether it has develop edits.
+    edited: bool,
+}
+
+impl PhotoList {
+    /// Keeps one reply to a few hundred KB.
+    const MAX: usize = 5000;
+
+    pub(crate) fn of(app: &App) -> PhotoList {
+        let total = app.visible.len();
+        let photos = match app.playlist.as_ref() {
+            None => Vec::new(),
+            Some(pl) => app
+                .visible
+                .iter()
+                .take(PhotoList::MAX)
+                .enumerate()
+                .filter_map(|(pos, &idx)| {
+                    let path = pl.entry(idx)?;
+                    Some(Photo {
+                        name: path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        rating: app.rating_of(path),
+                        flag: app.flag_of(path),
+                        label: app.folder_store.label(path),
+                        score: app.score_at(pos).map(|(s, stale)| Score {
+                            value: s.value,
+                            stale,
+                        }),
+                        edited: app.folder_store.edited(path).is_some(),
+                    })
+                })
+                .collect(),
+        };
+        PhotoList {
+            photos,
+            total,
+            truncated: total > PhotoList::MAX,
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 struct Score {
     value: u8,
@@ -116,6 +180,47 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::test_support::folder_app;
+    use serde_json::json;
+
+    #[test]
+    fn the_list_is_every_photo_the_grid_shows_in_its_order() {
+        let (mut app, dir, paths) = folder_app("state-list", 3);
+        app.set_rating_of(paths[0].clone(), 2);
+        app.set_rating_of(paths[1].clone(), 4);
+        app.folder_store
+            .set_flag(&paths[1], Some(crate::sidecar::Flag::Pick));
+        app.folder_store
+            .set_label(&paths[2], Some(crate::sidecar::ColorLabel::Red));
+        app.folder_store.set_edited(&paths[2], 1);
+        app.set_sort(crate::app::GridSort::Rating);
+
+        let list = serde_json::to_value(PhotoList::of(&app)).unwrap();
+        assert_eq!(
+            list,
+            json!({"photos": [
+                {"name": "1.jpg", "rating": 4, "flag": "pick", "label": null, "edited": false},
+                {"name": "0.jpg", "rating": 2, "flag": null, "label": null, "edited": false},
+                {"name": "2.jpg", "rating": 0, "flag": null, "label": "red", "edited": true},
+            ], "total": 3, "truncated": false})
+        );
+        app.set_filter(Some((crate::navigation::Cmp::Gte, 3)));
+        let list = serde_json::to_value(PhotoList::of(&app)).unwrap();
+        assert_eq!(list["photos"].as_array().map(Vec::len), Some(1));
+        assert_eq!(list["photos"][0]["name"], "1.jpg");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_list_past_its_cap_says_it_is_cut_short() {
+        let (app, dir, _) = folder_app("state-list-cap", PhotoList::MAX + 1);
+        let list = PhotoList::of(&app);
+        assert_eq!(
+            (list.photos.len(), list.total, list.truncated),
+            (PhotoList::MAX, PhotoList::MAX + 1, true)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn state_of_a_fresh_app_is_the_empty_grid() {

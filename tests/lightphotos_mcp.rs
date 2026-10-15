@@ -196,7 +196,13 @@ fn a_headless_session_rates_renders_and_refuses_what_it_cannot_do() {
         .collect();
     assert_eq!(
         tools,
-        ["list_commands", "run_command", "get_state", "render"]
+        [
+            "list_commands",
+            "run_command",
+            "get_state",
+            "list_photos",
+            "render"
+        ]
     );
 
     assert_eq!(reply(&replies, 3)["result"]["isError"], false);
@@ -325,6 +331,10 @@ fn fake_app(png: Vec<u8>) -> (u16, Arc<Mutex<Vec<Value>>>) {
                     "message": "no command; list the commands to see every id",
                 }),
                 (_, Some("wait")) => json!({ "ok": true, "result": { "view": "grid" } }),
+                (_, Some("list")) => json!({
+                    "ok": true,
+                    "result": { "photos": [{ "name": "a.jpg", "rating": 3 }], "total": 1, "truncated": false },
+                }),
                 (_, Some("screenshot")) => json!({
                     "ok": true,
                     "result": { "png_base64": lightphotos::base64::encode(&png), "width": 2, "height": 1 },
@@ -358,6 +368,7 @@ fn an_attached_session_runs_commands_and_returns_screenshots_through_the_control
         call(3, "screenshot", json!({})),
         call(4, "run_command", json!({ "id": "photo.shine" })),
         call(5, "render", json!({ "photo": "a.jpg" })),
+        call(6, "list_photos", json!({})),
     ];
     let replies = session(&["--attach", &port_arg], Some(TOKEN), &lines);
 
@@ -369,7 +380,13 @@ fn an_attached_session_runs_commands_and_returns_screenshots_through_the_control
         .collect();
     assert_eq!(
         tools,
-        ["list_commands", "run_command", "get_state", "screenshot"]
+        [
+            "list_commands",
+            "run_command",
+            "get_state",
+            "list_photos",
+            "screenshot"
+        ]
     );
 
     let rated = &reply(&replies, 2)["result"];
@@ -391,12 +408,17 @@ fn an_attached_session_runs_commands_and_returns_screenshots_through_the_control
     assert_eq!(unknown["isError"], true);
     assert!(content_text(unknown).contains("list_commands"), "{unknown}");
     assert_eq!(reply(&replies, 5)["result"]["isError"], true);
+    let listed = &reply(&replies, 6)["result"];
+    assert_eq!(
+        serde_json::from_str::<Value>(&content_text(listed)).unwrap()["photos"][0]["rating"],
+        3
+    );
 
     let seen = seen.lock().unwrap();
     let ops: Vec<&str> = seen.iter().map(|r| r["op"].as_str().unwrap()).collect();
     assert_eq!(
         ops,
-        ["run", "wait", "screenshot", "run"],
+        ["run", "wait", "screenshot", "run", "list"],
         "the screenshot waits for the app first"
     );
     assert!(seen.iter().all(|r| r["token"] == TOKEN));

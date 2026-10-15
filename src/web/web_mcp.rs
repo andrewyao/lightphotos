@@ -19,16 +19,23 @@ enum Tool {
     ListCommands,
     RunCommand,
     GetState,
+    ListPhotos,
 }
 
 impl Tool {
-    const ALL: [Tool; 3] = [Tool::ListCommands, Tool::RunCommand, Tool::GetState];
+    const ALL: [Tool; 4] = [
+        Tool::ListCommands,
+        Tool::RunCommand,
+        Tool::GetState,
+        Tool::ListPhotos,
+    ];
 
     fn name(self) -> &'static str {
         match self {
             Tool::ListCommands => "list_commands",
             Tool::RunCommand => "run_command",
             Tool::GetState => "get_state",
+            Tool::ListPhotos => "list_photos",
         }
     }
 
@@ -47,12 +54,17 @@ impl Tool {
                  `wait: true` first waits up to 10 s for decodes, saves and animations to \
                  finish."
             }
+            Tool::ListPhotos => {
+                "Every photo the Grid shows, in its order, with its rating, flag, label, \
+                 quality score and whether it has develop edits. Stops at 5000 photos with \
+                 `truncated: true`."
+            }
         }
     }
 
     fn input_schema(self) -> Value {
         let properties = match self {
-            Tool::ListCommands => json!({}),
+            Tool::ListCommands | Tool::ListPhotos => json!({}),
             Tool::RunCommand => json!({
                 "id": { "type": "string", "description": "A command id from list_commands, such as photo.rate." },
                 "params": { "type": "object", "description": "The command's params; list_commands shows an example of each." },
@@ -61,14 +73,14 @@ impl Tool {
         };
         let required: &[&str] = match self {
             Tool::RunCommand => &["id"],
-            Tool::ListCommands | Tool::GetState => &[],
+            Tool::ListCommands | Tool::GetState | Tool::ListPhotos => &[],
         };
         json!({ "type": "object", "properties": properties, "required": required })
     }
 
     fn read_only(self) -> bool {
         match self {
-            Tool::ListCommands | Tool::GetState => true,
+            Tool::ListCommands | Tool::GetState | Tool::ListPhotos => true,
             Tool::RunCommand => false,
         }
     }
@@ -97,6 +109,7 @@ impl Tool {
         }
         Ok(match self {
             Tool::ListCommands => Op::Commands,
+            Tool::ListPhotos => Op::List,
             Tool::GetState => match args.get("wait") {
                 None | Some(Value::Null) | Some(Value::Bool(false)) => Op::State,
                 Some(Value::Bool(true)) => Op::Wait(DEFAULT_WAIT),
@@ -283,6 +296,7 @@ mod tests {
             Ok(Op::Commands)
         ));
         assert!(matches!(op(Tool::GetState, Value::Null), Ok(Op::State)));
+        assert!(matches!(op(Tool::ListPhotos, Value::Null), Ok(Op::List)));
         assert!(matches!(
             op(Tool::GetState, json!({ "wait": false })),
             Ok(Op::State)
@@ -317,15 +331,18 @@ mod tests {
     }
 
     #[test]
-    fn the_definitions_name_three_tools_and_mark_the_reads() {
+    fn the_definitions_name_four_tools_and_mark_the_reads() {
         let defs: Vec<Value> = Tool::ALL.into_iter().map(Tool::definition).collect();
         let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
-        assert_eq!(names, ["list_commands", "run_command", "get_state"]);
+        assert_eq!(
+            names,
+            ["list_commands", "run_command", "get_state", "list_photos"]
+        );
         let read_only: Vec<bool> = defs
             .iter()
             .map(|d| d["annotations"]["readOnlyHint"] == true)
             .collect();
-        assert_eq!(read_only, [true, false, true]);
+        assert_eq!(read_only, [true, false, true, true]);
         assert_eq!(defs[1]["inputSchema"]["required"], json!(["id"]));
         assert!(defs
             .iter()
