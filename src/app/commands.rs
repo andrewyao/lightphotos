@@ -366,6 +366,36 @@ impl App {
                     pending: self.score_job.is_some(),
                 })
             }
+            Command::CopySettings(p) => {
+                let items = p.items()?;
+                let path = match &self.action_paths()[..] {
+                    [] => return Err(CommandError::NoPhotos),
+                    [one] => one.clone(),
+                    many => {
+                        return Err(CommandError::Failed {
+                            reason: format!(
+                                "settings.copy copies one photo's settings and {} are \
+                                 selected; select one",
+                                many.len()
+                            ),
+                        })
+                    }
+                };
+                let items = items.unwrap_or_else(|| self.remembered_copy_items());
+                self.copy_from(path, items);
+                done(1)
+            }
+            Command::PasteSettings(p) => {
+                let paths = self.resolve(&p.photos)?;
+                if !self.has_copied_settings() {
+                    return Err(CommandError::Failed {
+                        reason: "nothing is copied; run settings.copy first".into(),
+                    });
+                }
+                let n = paths.len();
+                self.paste_settings_onto(paths);
+                done(n)
+            }
             Command::Preset(p) => {
                 let paths = self.resolve(&p.photos)?;
                 let failed = |reason| CommandError::Failed { reason };
@@ -1411,6 +1441,91 @@ mod tests {
         };
         assert!(reason.contains("macOS"), "{reason}");
         assert_eq!(app.sort_order(), crate::app::SortOrder::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_paste_lays_the_copied_items_on_each_photo_as_one_undo_step() {
+        let (mut app, dir, paths) = folder_app("cmd-paste", 3);
+        app.select_single(0);
+        run(
+            &mut app,
+            r#"{"id":"develop.set","params":{"controls":{"exposure":1.5,"contrast":40}}}"#,
+        )
+        .unwrap();
+        run(
+            &mut app,
+            r#"{"id":"settings.copy","params":{"items":["exposure"]}}"#,
+        )
+        .unwrap();
+        let out = run(
+            &mut app,
+            r#"{"id":"settings.paste","params":{"photos":["1.jpg","2.jpg"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(out.photos, 2);
+        for path in &paths[1..] {
+            let adj = app.folder_store.adjustments(path);
+            assert_eq!(
+                (adj.exposure, adj.contrast),
+                (1.5, 0.0),
+                "only the item named"
+            );
+        }
+
+        run(&mut app, r#"{"id":"edit.undo"}"#).unwrap();
+        for path in &paths[1..] {
+            assert_eq!(app.folder_store.adjustments(path).exposure, 0.0);
+        }
+        assert_eq!(
+            app.folder_store.adjustments(&paths[0]).exposure,
+            1.5,
+            "one undo takes back the paste alone"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_copy_with_no_items_takes_the_remembered_look() {
+        let (mut app, dir, paths) = folder_app("cmd-copy-look", 2);
+        app.select_single(0);
+        run(
+            &mut app,
+            r#"{"id":"develop.set","params":{"controls":{"exposure":1,"contrast":40}}}"#,
+        )
+        .unwrap();
+        run(&mut app, r#"{"id":"settings.copy"}"#).unwrap();
+        run(
+            &mut app,
+            r#"{"id":"settings.paste","params":{"photos":["1.jpg"]}}"#,
+        )
+        .unwrap();
+        let adj = app.folder_store.adjustments(&paths[1]);
+        assert_eq!((adj.exposure, adj.contrast), (1.0, 40.0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_paste_with_nothing_copied_and_a_copy_of_two_photos_fail() {
+        let (mut app, dir, paths) = folder_app("cmd-paste-bad", 2);
+        app.select_all();
+        let Err(CommandError::Failed { reason }) = run(&mut app, r#"{"id":"settings.paste"}"#)
+        else {
+            panic!("a paste with nothing copied ran");
+        };
+        assert!(reason.contains("settings.copy"), "{reason}");
+        assert!(matches!(
+            run(&mut app, r#"{"id":"settings.copy"}"#),
+            Err(CommandError::Failed { .. })
+        ));
+        assert!(!app.has_copied_settings());
+        assert!(matches!(
+            run(&mut app, r#"{"id":"settings.copy","params":{"items":[]}}"#),
+            Err(CommandError::BadParams { .. })
+        ));
+        assert!(paths
+            .iter()
+            .all(|p| app.folder_store.adjustments(p) == Adjustments::default()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

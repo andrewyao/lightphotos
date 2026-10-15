@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::develop::copy::{CopyItem, CopyItems};
 use crate::develop::{
     Adjustments, Crop, LocalAmounts, Mask, MaskShape, SliderId, Straighten, MAX_MASKS, SLIDERS,
     STRAIGHTEN_RANGE,
@@ -69,6 +70,10 @@ pub enum Command {
     SetMask(MaskSetParams),
     #[serde(rename = "mask.clear")]
     ClearMasks(MaskClearParams),
+    #[serde(rename = "settings.copy")]
+    CopySettings(CopySettingsParams),
+    #[serde(rename = "settings.paste")]
+    PasteSettings(PhotosParams),
     #[serde(rename = "preset.apply")]
     Preset(PresetParams),
     #[serde(rename = "preset.add_folder")]
@@ -560,6 +565,8 @@ fn apply_to_record(
         | Command::Navigate(_)
         | Command::AutoTone(_)
         | Command::Score(_)
+        | Command::CopySettings(_)
+        | Command::PasteSettings(_)
         | Command::Preset(_)
         | Command::AddPresetFolder(_)
         | Command::Export(_)
@@ -790,6 +797,36 @@ impl Command {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CopySettingsParams {
+    /// Absent copies the items Copy Settings last kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<CopyItem>>,
+}
+
+impl CopySettingsParams {
+    /// The items to copy, or `None` for the remembered ones.
+    pub fn items(&self) -> Result<Option<CopyItems>, CommandError> {
+        let Some(items) = &self.items else {
+            return Ok(None);
+        };
+        if items.is_empty() {
+            return Err(CommandError::bad_params(
+                "settings.copy",
+                "items is empty; name at least one, or leave it out for the items Copy \
+                 Settings last kept"
+                    .into(),
+            ));
+        }
+        Ok(Some(
+            items
+                .iter()
+                .fold(CopyItems::NONE, |set, &item| set.with(item, true)),
+        ))
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PresetParams {
@@ -987,6 +1024,8 @@ impl Command {
             AddMask(_) => "mask.add",
             SetMask(_) => "mask.set",
             ClearMasks(_) => "mask.clear",
+            CopySettings(_) => "settings.copy",
+            PasteSettings(_) => "settings.paste",
             Preset(_) => "preset.apply",
             AddPresetFolder(_) => "preset.add_folder",
             Export(_) => "export",
@@ -1003,7 +1042,7 @@ impl Command {
             Label(p) => Some(&p.photos),
             Rotate(p) => Some(&p.photos),
             Develop(p) => Some(&p.photos),
-            Reset(p) | AutoTone(p) | Score(p) => Some(&p.photos),
+            Reset(p) | AutoTone(p) | Score(p) | PasteSettings(p) => Some(&p.photos),
             Monochrome(p) => Some(&p.photos),
             Crop(p) => Some(&p.photos),
             AddMask(p) => Some(&p.photos),
@@ -1012,8 +1051,8 @@ impl Command {
             Preset(p) => Some(&p.photos),
             Export(p) => Some(&p.photos),
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
-            | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | AddPresetFolder(_)
-            | Undo => None,
+            | Zoom(_) | Filter(_) | Sort(_) | Select(_) | Navigate(_) | CopySettings(_)
+            | AddPresetFolder(_) | Undo => None,
         }
     }
 
@@ -1081,6 +1120,16 @@ impl Command {
             ),
             SetMask(_) => ("Change one mask's shape, invert or sliders.", true),
             ClearMasks(_) => ("Remove one mask, or every mask.", true),
+            CopySettings(_) => (
+                "Copy the selected photo's develop settings, as Copy Settings does: the \
+                 `items` named (temp, exposure, curve, color_grading, crop, masks, touch_up \
+                 and the rest of Copy Settings' items), or the items it last kept.",
+                false,
+            ),
+            PasteSettings(_) => (
+                "Paste the copied settings onto the photos, as one undo step.",
+                false,
+            ),
             Preset(_) => (
                 "Apply a preset by name: a saved one, or one from a preset folder. Give \
                  `group` when several preset folders hold that name.",
@@ -1200,6 +1249,10 @@ impl Command {
                 photos: Photos::Selected,
             }),
             Command::ClearMasks(MaskClearParams::default()),
+            Command::CopySettings(CopySettingsParams {
+                items: Some(vec![CopyItem::Exposure, CopyItem::ColorGrading]),
+            }),
+            Command::PasteSettings(PhotosParams { photos: some() }),
             Command::Preset(PresetParams {
                 name: "Golden".into(),
                 group: None,
@@ -1429,6 +1482,37 @@ mod tests {
                 reverse: true
             }))
         );
+    }
+
+    #[test]
+    fn settings_copy_names_items_by_their_copy_settings_keys() {
+        assert_eq!(
+            Command::parse(r#"{"id":"settings.copy"}"#),
+            Ok(Command::CopySettings(CopySettingsParams::default()))
+        );
+        assert_eq!(
+            Command::parse(r#"{"id":"settings.paste"}"#),
+            Ok(Command::PasteSettings(PhotosParams::default()))
+        );
+        let Ok(Command::CopySettings(p)) =
+            Command::parse(r#"{"id":"settings.copy","params":{"items":["touch_up","remove_ca"]}}"#)
+        else {
+            panic!("named items parse");
+        };
+        let items = p.items().unwrap().unwrap();
+        assert!(items.has(CopyItem::TouchUp) && items.has(CopyItem::RemoveCa));
+        assert!(!items.has(CopyItem::Exposure));
+
+        let Ok(Command::CopySettings(empty)) =
+            Command::parse(r#"{"id":"settings.copy","params":{"items":[]}}"#)
+        else {
+            panic!("an empty list parses, then is refused");
+        };
+        assert!(matches!(empty.items(), Err(CommandError::BadParams { .. })));
+        assert!(matches!(
+            Command::parse(r#"{"id":"settings.copy","params":{"items":["sparkle"]}}"#),
+            Err(CommandError::BadParams { .. })
+        ));
     }
 
     #[test]

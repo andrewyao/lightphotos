@@ -727,7 +727,7 @@ impl App {
 
     /// The items Copy remembers, read from the preference the first time.
     /// Never holds a [`CopyItems::PER_COPY`] item.
-    fn remembered_copy_items(&mut self) -> CopyItems {
+    pub(super) fn remembered_copy_items(&mut self) -> CopyItems {
         *self.copy_items.get_or_insert_with(|| {
             let saved = (!cfg!(test))
                 .then(|| crate::persist::prefs::load(COPY_ITEMS_PREF))
@@ -798,7 +798,7 @@ impl App {
     }
 
     /// Puts `items` of `path`'s edit on the in-app clipboard.
-    fn copy_from(&mut self, path: PathBuf, items: CopyItems) {
+    pub(super) fn copy_from(&mut self, path: PathBuf, items: CopyItems) {
         let adj = self.edits.get(&path).copied().unwrap_or_default();
         let masks = self.masks.get(&path).cloned().unwrap_or_default();
         let touchups = self.touchups.get(&path).cloned().unwrap_or_default();
@@ -819,10 +819,14 @@ impl App {
 
     /// Applies the copied items to every selected photo.
     pub(super) fn apply_settings_to_selection(&mut self) {
+        self.paste_settings_onto(self.action_paths());
+    }
+
+    /// Applies the copied items to every path.
+    pub(super) fn paste_settings_onto(&mut self, mut paths: Vec<PathBuf>) {
         let Some(copied) = self.copied_settings.clone() else {
             return;
         };
-        let mut paths = self.action_paths();
         let n = self.apply_look_to(&copied.adj, copied.items, &paths);
         if copied.items.has(CopyItem::TouchUp) {
             for path in &paths {

@@ -6,8 +6,10 @@
 
 use super::{Adjustments, SliderId, SLIDERS};
 
-/// One part of an edit that Copy can carry or leave.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+/// One part of an edit that Copy can carry or leave. Its wire name is its
+/// preference key.
+#[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CopyItem {
     Temp,
     Tint,
@@ -399,6 +401,13 @@ pub fn merge(target: Adjustments, source: &Adjustments, items: CopyItems) -> Adj
 mod tests {
     use super::*;
     use crate::develop::{CaScale, Crop, Grain, Vignette};
+
+    #[test]
+    fn an_items_wire_name_is_its_preference_key() {
+        for item in CopyItem::all() {
+            assert_eq!(serde_json::to_value(item).unwrap(), item.key());
+        }
+    }
 
     fn source() -> Adjustments {
         let mut a = Adjustments {
