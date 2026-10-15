@@ -13,7 +13,48 @@ use winit::window::Window;
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::curve::ToneCurve;
-use crate::develop::{BaseProbe, GpuAdjust, GpuCurve, GpuMask, GpuTouchUp, Grid};
+use crate::develop::{BaseProbe, GpuAdjust, GpuCurve, GpuMask, GpuTouchUp, Grid, MaskSet};
+
+/// A storage binding can't be empty, so the coverage buffer starts at one
+/// word and grows with the first detected mask.
+const MIN_COVERAGE_BUF: u64 = 4;
+
+fn coverage_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("coverage"),
+        size,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// Group 3 for the image passes: touch-ups at 0, masks at 4, coverage at 5.
+fn touch_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    touch_buf: &wgpu::Buffer,
+    mask_buf: &wgpu::Buffer,
+    coverage_buf: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("touch_bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: touch_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: mask_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 5,
+                resource: coverage_buf.as_entire_binding(),
+            },
+        ],
+    })
+}
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
@@ -193,6 +234,13 @@ pub struct Renderer {
     touch_buf: wgpu::Buffer,
     /// The masks, beside the touch-ups in group 3. See `set_masks`.
     mask_buf: wgpu::Buffer,
+    /// Detected masks' coverage, packed by `MaskSet::pack_coverage`. Grows
+    /// by powers of two up to `MAX_COVERAGE_BYTES`; `coverage_key` is the
+    /// `MaskSet::coverage_key` of the last upload, so a slider tick that
+    /// changes no coverage uploads none.
+    coverage_buf: wgpu::Buffer,
+    coverage_key: u64,
+    touch_bind_layout: wgpu::BindGroupLayout,
     touch_bind: wgpu::BindGroup,
 
     /// Draws the subject-selection tint over the image. It is a separate
@@ -513,8 +561,9 @@ impl Renderer {
 
         let touch_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("touch_bgl"),
-            // Masks at 4, clear of the overlay's 1 to 3 in the same group.
-            entries: &[0, 4].map(|binding| wgpu::BindGroupLayoutEntry {
+            // Masks at 4 and their coverage at 5, clear of the overlay's 1
+            // to 3 in the same group.
+            entries: &[0, 4, 5].map(|binding| wgpu::BindGroupLayoutEntry {
                 binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
@@ -853,20 +902,14 @@ impl Renderer {
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let touch_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("touch_bg"),
-            layout: &touch_bind_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: touch_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: mask_buf.as_entire_binding(),
-                },
-            ],
-        });
+        let coverage_buf = coverage_buffer(&device, MIN_COVERAGE_BUF);
+        let touch_bind = touch_bind_group(
+            &device,
+            &touch_bind_layout,
+            &touch_buf,
+            &mask_buf,
+            &coverage_buf,
+        );
 
         let overlay_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("overlay"),
@@ -898,6 +941,9 @@ impl Renderer {
             adj_bind_b,
             touch_buf,
             mask_buf,
+            coverage_buf,
+            coverage_key: 0,
+            touch_bind_layout,
             touch_bind,
             overlay_pipeline,
             overlay_bind_layout,
@@ -1659,12 +1705,14 @@ impl Renderer {
         }));
     }
 
-    /// Flip the overlay between tinting the subject and tinting the background.
-    pub fn set_selection_inverted(&mut self, inverted: bool) {
+    /// How the overlay tints: `tint` is linear RGB, and `inverted` tints
+    /// the background instead of the mask.
+    pub fn set_selection_style(&mut self, inverted: bool, tint: [f32; 3]) {
         self.queue.write_buffer(
             &self.overlay_buf,
             0,
             bytemuck::bytes_of(&OverlayParams {
+                tint: [tint[0], tint[1], tint[2], 1.0],
                 invert: if inverted { 1.0 } else { 0.0 },
                 ..OverlayParams::default()
             }),
@@ -1685,14 +1733,47 @@ impl Renderer {
         self.base_wanted.touch_gen += 1;
     }
 
-    /// Uploads the masks. They change no layer, so nothing rebuilds; the
-    /// uniform's `mask_count` says how many the shader reads.
-    pub fn set_masks(&mut self, masks: &[GpuMask]) {
-        let masks = masks.get(..crate::develop::MAX_MASKS).unwrap_or(masks);
-        if !masks.is_empty() {
+    /// Uploads the masks and their coverage. Masks change no layer, so
+    /// nothing rebuilds; the uniform's `mask_count` says how many the shader
+    /// reads. The masks go up on every call, since sliders change them; the
+    /// coverage only when its key changed, and the buffer grows (and the
+    /// bind group is rebuilt) only when it must.
+    pub fn set_masks(&mut self, masks: &MaskSet) {
+        let gpu = masks.gpu_masks();
+        let gpu = gpu.get(..crate::develop::MAX_MASKS).unwrap_or(&gpu);
+        if !gpu.is_empty() {
             self.queue
-                .write_buffer(&self.mask_buf, 0, bytemuck::cast_slice(masks));
+                .write_buffer(&self.mask_buf, 0, bytemuck::cast_slice(gpu));
         }
+        let key = masks.coverage_key();
+        if key == self.coverage_key {
+            return;
+        }
+        let packed = masks.pack_coverage();
+        let bytes: &[u8] = bytemuck::cast_slice(&packed);
+        if bytes.is_empty() {
+            self.coverage_key = key;
+            return;
+        }
+        if bytes.len() as u64 > self.coverage_buf.size() {
+            let size = bytes
+                .len()
+                .next_power_of_two()
+                .min(crate::develop::coverage::MAX_COVERAGE_BYTES) as u64;
+            self.coverage_buf = coverage_buffer(&self.device, size);
+            self.touch_bind = touch_bind_group(
+                &self.device,
+                &self.touch_bind_layout,
+                &self.touch_buf,
+                &self.mask_buf,
+                &self.coverage_buf,
+            );
+        }
+        let fits = bytes
+            .get(..self.coverage_buf.size() as usize)
+            .unwrap_or(bytes);
+        self.queue.write_buffer(&self.coverage_buf, 0, fits);
+        self.coverage_key = key;
     }
 
     /// Render the image pass, then the egui pass, in one submission.

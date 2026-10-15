@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::develop::curve::Channel;
 use crate::develop::image_ops;
-use crate::develop::{self, Adjustments, GpuAdjust, GpuMask, GpuTouchUp, TouchUp};
+use crate::develop::{self, Adjustments, GpuAdjust, GpuTouchUp, TouchUp};
 
 impl App {
     /// Develop adjustments of the image currently shown (identity if unset).
@@ -508,11 +508,11 @@ impl App {
             .iter()
             .map(GpuTouchUp::from)
             .collect();
-        let gpu_masks: Vec<GpuMask> = self.current_masks().iter().map(GpuMask::from).collect();
+        let masks = self.current_mask_set();
         if let Some(r) = &mut self.renderer {
             r.set_adjustments(gpu, &adj.curve);
             r.set_touchups(&gpu_touchups);
-            r.set_masks(&gpu_masks);
+            r.set_masks(&masks);
         }
         self.request_redraw();
     }

@@ -9,6 +9,7 @@ pub mod base;
 pub mod chroma;
 pub mod color;
 pub mod copy;
+pub mod coverage;
 pub mod curve;
 pub mod effects;
 pub mod grade;
@@ -22,9 +23,12 @@ use serde::{Deserialize, Serialize};
 
 pub use base::{BaseLayer, BaseProbe, BaseTexel, Grid};
 pub use color::{Band, BandShift, ColorAxis, ColorMixer, ColorOps, GrayMix};
+pub use coverage::{Coverage, CoverageError, Detections, RasterId};
 pub use effects::{Effects, Grain, Vignette};
 pub use grade::{ColorGrade, GradeOps, Wheel, Zone};
-pub use mask::{GpuMask, LocalAmounts, Mask, MaskShape, MAX_MASKS};
+pub use mask::{
+    DetectTarget, GpuMask, LocalAmounts, Mask, MaskInput, MaskSet, MaskShape, MAX_MASKS,
+};
 pub use sharpen::{Sharpen, Sharpening};
 
 use curve::ToneCurve;
@@ -813,11 +817,14 @@ impl Adjustments {
 
 /// A hash of everything that changes how an image renders, used in the
 /// thumbnail cache key. Floats are rounded so tiny jitter doesn't re-bake, and
-/// every unedited photo gets the same value.
+/// every unedited photo gets the same value. `detections` enters only
+/// through the targets `masks` use, so a detection no mask reads changes
+/// nothing, and a photo without detected masks hashes as it always has.
 pub fn edit_signature_with_touchups(
     adj: &Adjustments,
     touchups: &[TouchUp],
     masks: &[Mask],
+    detections: &Detections,
     rot: u8,
 ) -> u64 {
     use crate::hash::Fnv1a;
@@ -959,6 +966,12 @@ pub fn edit_signature_with_touchups(
             let g = GpuMask::from(m);
             for x in [g.geom, g.params, g.a0, g.a1, g.a2].into_iter().flatten() {
                 h.write(&((x * 100_000.0).round() as i32).to_le_bytes());
+            }
+            // A pending detection hashes as none, so the bake re-runs when
+            // it lands.
+            if let Some(target) = m.target() {
+                h.write(&[target.index() as u8]);
+                h.write(&detections.get(target).map_or([0; 8], RasterId::to_le_bytes));
             }
         }
     }
@@ -1590,7 +1603,7 @@ mod tests {
     }
 
     fn edit_signature(adj: &Adjustments, rot: u8) -> u64 {
-        edit_signature_with_touchups(adj, &[], &[], rot)
+        edit_signature_with_touchups(adj, &[], &[], &Detections::default(), rot)
     }
 
     /// 0 and 1 stay fixed, so the boost never clips or crushes, and mid-gray

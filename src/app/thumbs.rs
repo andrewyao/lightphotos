@@ -227,13 +227,16 @@ impl App {
 
     /// Hash of `path`'s edits, rotation, and touch-ups. Part of the thumbnail
     /// texture key, so an edit re-bakes the thumbnail.
-    fn edit_sig_for(&self, path: &Path) -> u64 {
+    pub(super) fn edit_sig_for(&self, path: &Path) -> u64 {
         let adj = self.edits.get(path).copied().unwrap_or_default();
         let rot = self.rotations.get(path).copied().unwrap_or(0);
         develop::edit_signature_with_touchups(
             &adj,
             self.touchups.get(path).map(Vec::as_slice).unwrap_or(&[]),
             self.masks.get(path).map(Vec::as_slice).unwrap_or(&[]),
+            self.detections
+                .get(path)
+                .unwrap_or(&develop::Detections::default()),
             rot,
         )
     }
@@ -382,7 +385,9 @@ impl App {
                         renderer.free_thumb(old.id);
                     }
                 }
-            } else {
+            } else if let Some(masks) =
+                super::masks::mask_input_of(&self.masks, &self.detections, &mut self.coverage, path)
+            {
                 loader.request_bake(path, *px, *sig, img, adj, touchups, masks, rot);
             }
         }

@@ -188,7 +188,7 @@ pub struct WebExportJob {
     pub is_raw: bool,
     pub adj: crate::develop::Adjustments,
     pub touchups: Vec<crate::develop::TouchUp>,
-    pub masks: Vec<crate::develop::Mask>,
+    pub masks: crate::develop::MaskSet,
     pub rot: u8,
     pub output: crate::export::Output,
 }

@@ -50,14 +50,36 @@ fn main() -> ExitCode {
 
 #[cfg(target_os = "macos")]
 fn real_main() -> ExitCode {
-    let paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut coverage_out: Option<PathBuf> = None;
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--coverage" {
+            coverage_out = args.next().map(PathBuf::from);
+            if coverage_out.is_none() {
+                eprintln!("--coverage needs an output path");
+                return ExitCode::FAILURE;
+            }
+        } else {
+            paths.push(PathBuf::from(arg));
+        }
+    }
     if paths.is_empty() {
-        eprintln!("usage: seg_probe <image> [image ...]");
+        eprintln!("usage: seg_probe [--coverage out.png] <image> [image ...]");
         eprintln!("writes <stem>.mask.jpg and <stem>.overlay.jpg into the current directory");
+        eprintln!(
+            "--coverage writes the first image's detected Subject coverage as the app stores it"
+        );
         return ExitCode::FAILURE;
     }
 
     let mut failures = 0;
+    if let (Some(out), Some(path)) = (&coverage_out, paths.first()) {
+        if let Err(e) = write_coverage(path, out) {
+            failures += 1;
+            println!("  ERROR: {e}");
+        }
+    }
     for path in &paths {
         println!("\n=== {} ===", path.display());
         match probe(path) {
@@ -74,6 +96,36 @@ fn real_main() -> ExitCode {
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// The Subject coverage of `path` through the detector seam, written to
+/// `out` as the app would store it, then read back and checked against its
+/// id.
+#[cfg(target_os = "macos")]
+fn write_coverage(path: &Path, out: &Path) -> Result<(), String> {
+    use lightphotos::develop::{Coverage, DetectTarget};
+    use lightphotos::scoring::detect::{detect, DetectInput};
+    let coverage =
+        detect(&DetectInput::file(path), DetectTarget::Subject).map_err(|e| e.to_string())?;
+    let bytes = coverage.encode().map_err(|e| e.to_string())?;
+    std::fs::write(out, &bytes).map_err(|e| format!("{}: {e}", out.display()))?;
+    let back = Coverage::decode(
+        &std::fs::read(out).map_err(|e| e.to_string())?,
+        coverage.id(),
+    )
+    .map_err(|e| e.to_string())?;
+    if back != coverage {
+        return Err("the coverage file read back differently".into());
+    }
+    println!(
+        "coverage {}x{} id {} ({} bytes) -> {}, decodes to its id",
+        coverage.width(),
+        coverage.height(),
+        coverage.id(),
+        bytes.len(),
+        out.display()
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

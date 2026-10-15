@@ -906,10 +906,14 @@ fn draw_masks_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 /// The Masks section of [`draw_masks_tab`].
 fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameOutput) {
     use crate::app::MaskKind;
+    use crate::app::{Failure, MaskStatus};
+    use crate::develop::DetectTarget;
     use crate::develop::MaskShape;
+    use crate::scoring::detect;
     let t = t();
     let masks = app.current_masks();
     let selected = app.selected_mask();
+    let room = masks.len() < crate::develop::MAX_MASKS;
     form.section(ui, "", |ui| {
         form.row(ui, t.masks, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -918,12 +922,34 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                     (MaskKind::Radial, t.radial_gradient, t.radial_gradient_tip),
                 ] {
                     let armed = app.mask_tool() == Some(kind);
-                    let add = ui.add_enabled(
-                        masks.len() < crate::develop::MAX_MASKS,
-                        egui::Button::selectable(armed, format!("+ {label}")),
-                    );
+                    let add =
+                        ui.add_enabled(room, egui::Button::selectable(armed, format!("+ {label}")));
                     if add.on_hover_text(tip).clicked() {
                         out.actions.push(UiAction::ToggleMaskTool(kind));
+                    }
+                }
+                // Lightroom's Select Subject and Select Sky. Greyed, with
+                // the reason, where this build has no detector.
+                for (target, tip) in [
+                    (DetectTarget::Subject, t.subject_mask_tip),
+                    (DetectTarget::Sky, t.sky_mask_tip),
+                ] {
+                    let available = detect::available(target);
+                    let add = ui.add_enabled(
+                        room && available,
+                        egui::Button::new(format!("+ {}", t.target(target))),
+                    );
+                    let add = if available {
+                        add.on_hover_text(tip)
+                    } else {
+                        let why = match target {
+                            DetectTarget::Subject => t.detect_needs_mac,
+                            DetectTarget::Sky => t.detect_unavailable,
+                        };
+                        add.on_disabled_hover_text(why)
+                    };
+                    if add.clicked() {
+                        out.actions.push(UiAction::AddDetectedMask(target));
                     }
                 }
             });
@@ -936,9 +962,42 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
         }
         form.row(ui, "", |ui| {
             ui.horizontal_wrapped(|ui| {
-                for i in 0..masks.len() {
-                    let label = format!("{}", i + 1);
-                    if ui.selectable_label(selected == Some(i), label).clicked() {
+                for (i, m) in masks.iter().enumerate() {
+                    let kind = match m.shape {
+                        MaskShape::Linear { .. } => t.linear_gradient,
+                        MaskShape::Radial { .. } => t.radial_gradient,
+                        MaskShape::Detected { target } => t.target(target),
+                    };
+                    let status = app.mask_status(i);
+                    let mut label = format!("{kind} {}", i + 1);
+                    if matches!(status, Some(MaskStatus::Failed(_))) {
+                        label.push_str(" !");
+                    }
+                    let picked = ui.selectable_label(selected == Some(i), label);
+                    let picked = match &status {
+                        Some(MaskStatus::Detecting) => {
+                            ui.add(egui::Spinner::new().size(12.0));
+                            picked.on_hover_text(t.mask_detecting)
+                        }
+                        Some(MaskStatus::NothingFound) => {
+                            picked.on_hover_text((t.detect_nothing_found)(kind))
+                        }
+                        Some(MaskStatus::Failed(Failure::Unsupported)) => match m.target() {
+                            Some(DetectTarget::Subject) => picked.on_hover_text(t.detect_needs_mac),
+                            _ => picked.on_hover_text(t.detect_unavailable),
+                        },
+                        Some(MaskStatus::Failed(Failure::Missing)) => {
+                            picked.on_hover_text(t.detect_file_missing)
+                        }
+                        Some(MaskStatus::Failed(Failure::Detect(why))) => {
+                            picked.on_hover_text((t.detect_failed)(kind, why))
+                        }
+                        Some(MaskStatus::Failed(Failure::Read(why))) => {
+                            picked.on_hover_text((t.detect_read_failed)(kind, why))
+                        }
+                        None => picked,
+                    };
+                    if picked.clicked() {
                         let pick = (selected != Some(i)).then_some(i);
                         out.actions.push(UiAction::SelectMask(pick));
                     }
@@ -954,6 +1013,16 @@ fn draw_mask_section(ui: &mut egui::Ui, app: &App, form: &Form, out: &mut FrameO
                 if ui.checkbox(&mut invert, t.mask_invert).changed() {
                     out.actions
                         .push(UiAction::SetMask(i, Mask { invert, ..mask }));
+                }
+                let retry = matches!(
+                    app.mask_status(i),
+                    Some(MaskStatus::NothingFound)
+                        | Some(MaskStatus::Failed(
+                            Failure::Missing | Failure::Detect(_) | Failure::Read(_)
+                        ))
+                );
+                if retry && ui.button(t.mask_retry).clicked() {
+                    out.actions.push(UiAction::RetryDetection(i));
                 }
                 let delete = egui::RichText::new(t.delete).color(theme::colors(ui.ctx()).danger);
                 if ui.button(delete).clicked() {

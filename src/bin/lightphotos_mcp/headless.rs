@@ -109,6 +109,10 @@ impl Folder {
                 .map_or(Err(CommandError::NoPhotos), |p| display_size(p))
         })
         .map_err(explain)?;
+        let mut notes = Vec::new();
+        for (path, rec) in paths.iter().zip(&mut records) {
+            notes.extend(detect_for(path, rec));
+        }
         for (n, (path, rec)) in paths.iter().zip(&records).enumerate() {
             sidecar::write_record(path, rec).map_err(|e| {
                 format!(
@@ -123,7 +127,11 @@ impl Folder {
             .zip(&records)
             .map(|(p, r)| entry(p, r))
             .collect();
-        Ok(vec![text(json!({ "photos": photos }).to_string())])
+        let mut reply = json!({ "photos": photos });
+        if !notes.is_empty() {
+            reply["notes"] = json!(notes);
+        }
+        Ok(vec![text(reply.to_string())])
     }
 
     fn state(&self) -> Result<Value, String> {
@@ -157,11 +165,14 @@ impl Folder {
             max_px: max,
             ..Output::FULL
         };
+        let masks = rec
+            .mask_set(&path)
+            .map_err(|e| format!("cannot render {e}"))?;
         let jpeg = export::export_file(
             &path,
             &rec.adjustments,
             &rec.touchups,
-            &rec.masks,
+            &masks,
             rec.rotation,
             &output,
         )
@@ -219,6 +230,39 @@ impl Folder {
             )
         })
     }
+}
+
+/// Runs, inline, the detection each of `rec`'s detected masks still needs,
+/// and records it, so the sidecar written next is complete. Headless there
+/// is no worker to hand it to. Returns a note per target this build can't
+/// detect or failed to, so the caller knows the mask renders as nothing.
+fn detect_for(path: &Path, rec: &mut ImageRecord) -> Vec<String> {
+    use lightphotos::develop::DetectTarget;
+    use lightphotos::scoring::detect;
+    let mut notes = Vec::new();
+    for target in DetectTarget::ALL {
+        if rec.detections.get(target).is_some()
+            || !rec.masks.iter().any(|m| m.target() == Some(target))
+        {
+            continue;
+        }
+        let what = format!("{target:?}").to_lowercase();
+        if !detect::available(target) {
+            notes.push(format!(
+                "{}: its {what} mask renders as nothing until LightPhotos on a Mac opens this folder",
+                file_name(path)
+            ));
+            continue;
+        }
+        match detect::run(path, target) {
+            Ok(coverage) => rec.detections.set(target, Some(coverage.id())),
+            Err(e) => notes.push(format!(
+                "{}: {what} detection failed, so the mask renders as nothing: {e}",
+                file_name(path)
+            )),
+        }
+    }
+    notes
 }
 
 /// What `get_state` and `run_command` report for one photo.
@@ -279,6 +323,80 @@ fn explain(e: CommandError) -> String {
 #[cfg(unix)]
 mod tests {
     use super::*;
+    use lightphotos::develop::{DetectTarget, Mask};
+
+    fn folder_with_photo(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("lp-mcp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("a.jpg");
+        lightphotos::decode::image_encode::encode_jpeg(
+            &photo,
+            32,
+            24,
+            &vec![90u8; 32 * 24 * 4],
+            lightphotos::decode::image_encode::JpegQuality::Export,
+        )
+        .unwrap();
+        (dir, photo)
+    }
+
+    /// A sidecar naming a coverage file that isn't there must fail the
+    /// render by name, not hand back a silently unmasked photo.
+    #[test]
+    fn a_render_whose_coverage_file_is_missing_fails_naming_the_photo() {
+        let (dir, photo) = folder_with_photo("missing-coverage");
+        let mut rec = ImageRecord::default();
+        rec.masks.set(vec![Mask::detected(DetectTarget::Subject)]);
+        rec.detections.subject = "0123456789abcdef".parse().ok();
+        sidecar::write_record(&photo, &rec).unwrap();
+        let folder = Folder::open(&dir).unwrap();
+        let err = folder.render(Path::new("a.jpg"), 64).unwrap_err();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(err.contains("a.jpg") && err.contains("missing"), "{err}");
+    }
+
+    /// Headless, a detected mask's detection runs inline where this build
+    /// can, and says so where it can't.
+    #[test]
+    fn detect_for_records_what_it_can_and_notes_the_rest() {
+        let (dir, photo) = folder_with_photo("detect-for");
+        if let Err(e) = lightphotos::scoring::detect::run(&photo, DetectTarget::Subject) {
+            if e.is_no_model_here() {
+                eprintln!("skipping: Vision cannot run a model here ({e})");
+                std::fs::remove_dir_all(&dir).unwrap();
+                return;
+            }
+        }
+        let mut rec = ImageRecord::default();
+        rec.masks.set(vec![
+            Mask::detected(DetectTarget::Subject),
+            Mask::detected(DetectTarget::Sky),
+        ]);
+        let notes = detect_for(&photo, &mut rec);
+        let subject_detected = rec.detections.subject.is_some();
+        let subject_file = rec
+            .detections
+            .subject
+            .is_some_and(|id| lightphotos::develop::coverage::read(&photo, id).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(subject_detected, cfg!(target_os = "macos"));
+        assert_eq!(
+            subject_file,
+            cfg!(target_os = "macos"),
+            "the file exists before the sidecar"
+        );
+        assert!(
+            rec.detections.sky.is_some(),
+            "sky runs on every native build"
+        );
+        if cfg!(target_os = "macos") {
+            assert!(notes.is_empty(), "{notes:?}");
+        } else {
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(notes[0].contains("subject"), "{notes:?}");
+        }
+    }
 
     #[test]
     fn a_symlink_to_a_photo_outside_the_folder_is_refused() {

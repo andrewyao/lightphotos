@@ -480,6 +480,15 @@ pub(crate) struct App {
     touchups: HashMap<PathBuf, Vec<TouchUp>>,
     /// Per-image local adjustment masks. Holds only non-empty lists.
     masks: HashMap<PathBuf, Vec<Mask>>,
+    /// Which coverage answers each photo's detected-mask targets, as the
+    /// sidecars record it. Holds only photos with a detection.
+    detections: HashMap<PathBuf, crate::develop::Detections>,
+    /// The detections and coverage loads in flight or in memory. See
+    /// `app/coverage.rs`.
+    pub(crate) coverage: coverage::CoverageStore,
+    /// The detected mask's coverage the Loupe tints right now, with its
+    /// invert, so a frame that changes neither uploads nothing.
+    mask_overlay: Option<(crate::develop::RasterId, bool)>,
     /// Loupe click tool. Crop mode (`cropping()`) turns it off.
     tool: LoupeTool,
     touchup_radius: f32,
@@ -726,6 +735,7 @@ mod catalog;
 mod commands;
 #[cfg(not(target_arch = "wasm32"))]
 mod control;
+mod coverage;
 mod crop;
 mod folder_store;
 pub(crate) use accessors::FlagCoverage;
@@ -757,6 +767,7 @@ mod session;
 mod sort;
 #[cfg(not(target_arch = "wasm32"))]
 mod state;
+pub(crate) use coverage::{Failure, MaskStatus};
 pub(crate) use masks::MaskKind;
 pub(crate) use sort::{GridSort, SortOrder};
 #[cfg(not(target_arch = "wasm32"))]
@@ -842,6 +853,9 @@ impl App {
             history: history::EditHistory::default(),
             touchups: HashMap::new(),
             masks: HashMap::new(),
+            detections: HashMap::new(),
+            coverage: coverage::CoverageStore::new(),
+            mask_overlay: None,
             tool: LoupeTool::None,
             // Clamped up to TOUCHUP_MIN_PIXELS once an image is loaded.
             touchup_radius: 0.001,
@@ -1144,6 +1158,7 @@ impl App {
         crate::web::analytics::folder_opened(playlist.entries().len());
         self.teardown_loupe_state();
         self.history.clear();
+        self.coverage.clear();
         self.burst_scan = None;
         self.seed_mirrors(&playlist);
         self.playlist = Some(playlist);
@@ -1569,6 +1584,10 @@ impl App {
                 ui::UiAction::AddMask(m) => {
                     self.add_mask(m);
                 }
+                ui::UiAction::AddDetectedMask(target) => {
+                    self.add_mask(Mask::detected(target));
+                }
+                ui::UiAction::RetryDetection(i) => self.retry_detection(i),
                 ui::UiAction::SetMask(i, m) => self.set_mask(i, m),
                 ui::UiAction::SelectMask(i) => self.select_mask(i),
                 ui::UiAction::DeleteMask(i) => self.delete_mask(i),

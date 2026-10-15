@@ -1,0 +1,27 @@
+# Run on a folder holding a photo with sky: opens the Masks page, adds a Sky
+# mask, waits for the heuristic to land its coverage, darkens the sky by a
+# stop, and shoots. `state` prints masks[0].shape.kind == "detected" with
+# target "sky"; the sidecar records detections.sky and .lightphotos/masks/
+# holds the coverage PNG.
+size 1200 800
+idle
+dblclick-cell 0
+idle
+key k
+idle
+shot ai-masks-sky-before
+run {"id":"mask.add","params":{"shape":{"kind":"detected","target":"sky"}}}
+idle
+state
+run {"id":"mask.set","params":{"index":0,"amounts":{"exposure":-1}}}
+idle
+state
+# The new mask is picked, which tints it red over the photo. Clicking its
+# label puts it down so the shot shows the darkening alone, and again picks
+# it back up for the tinted shot.
+click 938 182
+idle
+shot ai-masks-sky-darkened
+click 938 182
+idle
+shot ai-masks-sky-picked

@@ -8,6 +8,11 @@ use std::path::Path;
 use crate::develop::Adjustments;
 use crate::jobs::thumbnail::Origin;
 
+/// Show Selection's green, in linear RGB.
+const SELECTION_TINT: [f32; 3] = [0.25, 1.0, 0.45];
+/// A picked detected mask's tint: Lightroom's red mask overlay.
+const MASK_TINT: [f32; 3] = [1.0, 0.08, 0.08];
+
 impl App {
     /// Image size after rotation, with w and h swapped for 90° and 270°.
     fn display_size(&self) -> (f32, f32) {
@@ -492,8 +497,20 @@ impl App {
 
     /// Push the current mask, or its absence, to the renderer. The mask stays
     /// at Vision's resolution. The shader samples it by image UV, so it needs
-    /// no update on zoom or pan.
+    /// no update on zoom or pan. A detected mask picked on the Masks page
+    /// takes the overlay over Show Selection, in Lightroom's red.
     fn sync_selection_overlay(&mut self) {
+        if let Some((coverage, inverted)) = self.selected_detected_coverage() {
+            if let Some(r) = &mut self.renderer {
+                r.set_selection_style(inverted, MASK_TINT);
+                r.set_selection_mask(Some((
+                    coverage.alpha(),
+                    coverage.width(),
+                    coverage.height(),
+                )));
+            }
+            return;
+        }
         let want = self.want.clone();
         let mask = if self.selection_on {
             self.current_selection
@@ -505,8 +522,38 @@ impl App {
         };
         let inverted = self.selection_invert;
         if let Some(r) = &mut self.renderer {
-            r.set_selection_inverted(inverted);
+            r.set_selection_style(inverted, SELECTION_TINT);
             r.set_selection_mask(mask.map(|m| (m.alpha.as_slice(), m.width, m.height)));
+        }
+    }
+
+    /// The coverage to tint for the picked detected mask, with its invert,
+    /// while the Masks page shows the photo and the coverage is in memory.
+    fn selected_detected_coverage(
+        &self,
+    ) -> Option<(std::sync::Arc<crate::develop::Coverage>, bool)> {
+        if !self.masks_shown() {
+            return None;
+        }
+        let path = self.shown.path()?;
+        let mask = self.current_masks().get(self.selected_mask()?)?;
+        let coverage = self.coverage.ready(path, mask.target()?)?;
+        if coverage.is_nothing() {
+            return None;
+        }
+        Some((coverage, mask.invert))
+    }
+
+    /// Each frame: re-sync the overlay when the picked detected mask's
+    /// coverage or invert changed, or when it stopped showing.
+    pub(crate) fn sync_mask_overlay(&mut self) {
+        let key = self
+            .selected_detected_coverage()
+            .map(|(c, inverted)| (c.id(), inverted));
+        if key != self.mask_overlay {
+            self.mask_overlay = key;
+            self.sync_selection_overlay();
+            self.request_redraw();
         }
     }
 

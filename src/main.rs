@@ -572,6 +572,8 @@ impl App {
 
         // Segmentation starts from user actions, so it has no `request_*` call.
         self.poll_selection_mask();
+        self.poll_coverage();
+        let detecting = self.coverage.busy();
         self.poll_remove_ca();
 
         // Worker threads don't wake winit, so poll on a timer while work is
@@ -590,6 +592,7 @@ impl App {
             || immich_connecting
             || vision_pending
             || scoring
+            || detecting
         {
             Some(if cfg!(target_arch = "wasm32") {
                 16

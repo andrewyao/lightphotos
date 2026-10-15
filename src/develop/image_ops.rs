@@ -6,7 +6,7 @@
 
 use crate::decode::image_decode::{DecodedImage, PixelFormat};
 use crate::develop::base::Fields;
-use crate::develop::{self, local, mask, Adjustments, BaseLayer, BaseProbe, Crop, Mask, TouchUp};
+use crate::develop::{self, local, Adjustments, BaseLayer, BaseProbe, Crop, MaskSet, TouchUp};
 
 /// Normalized crop (`None` = full frame) to pixel bounds `(x0, y0, x1, y1)`,
 /// at least 1x1.
@@ -219,7 +219,7 @@ pub fn bake_edited(
     img: &DecodedImage,
     adj: &Adjustments,
     touchups: &[TouchUp],
-    masks: &[Mask],
+    masks: &MaskSet,
     rot: u8,
 ) -> (u32, u32, Vec<u8>) {
     bake_edited_probe(img, adj, touchups, masks, rot, BaseProbe::Off)
@@ -233,7 +233,7 @@ pub fn bake_edited_as<S: Sample>(
     img: &DecodedImage,
     adj: &Adjustments,
     touchups: &[TouchUp],
-    masks: &[Mask],
+    masks: &MaskSet,
     rot: u8,
 ) -> (u32, u32, Vec<S>) {
     bake_samples(img, adj, touchups, masks, rot, BaseProbe::Off)
@@ -246,7 +246,7 @@ pub fn bake_edited_probe(
     img: &DecodedImage,
     adj: &Adjustments,
     touchups: &[TouchUp],
-    masks: &[Mask],
+    masks: &MaskSet,
     rot: u8,
     probe: BaseProbe,
 ) -> (u32, u32, Vec<u8>) {
@@ -257,7 +257,7 @@ fn bake_samples<S: Sample>(
     img: &DecodedImage,
     adj: &Adjustments,
     touchups: &[TouchUp],
-    masks: &[Mask],
+    masks: &MaskSet,
     rot: u8,
     probe: BaseProbe,
 ) -> (u32, u32, Vec<S>) {
@@ -338,7 +338,7 @@ fn bake_samples<S: Sample>(
             let out = if masks.is_empty() {
                 dev.linear_at(pre, canvas.0, canvas.1)
             } else {
-                let tone = mask::local_tone(global, masks, [u, v], aspect);
+                let tone = masks.local_tone(global, [u, v], aspect);
                 dev.linear_at_local(pre, canvas.0, canvas.1, &tone)
             };
             out_px[0] = S::encode(out[0]);
@@ -366,6 +366,18 @@ fn pre_at(src: &Source, touchups: &[TouchUp], x: u32, y: u32) -> [f32; 3] {
     apply_touchups(src, touchups, u, v, px)
 }
 
+/// One `LinearF16` pixel as opaque sRGB8, as `raw_shader.wgsl` would
+/// display it with no edits.
+pub fn linear_f16_px_to_srgb8(px: &[u8; 8]) -> [u8; 4] {
+    let f = |b: &[u8]| half::f16::from_le_bytes([b[0], b[1]]).to_f32();
+    let d = develop::apply_raw_display(
+        &Adjustments::default(),
+        [f(&px[0..]), f(&px[2..]), f(&px[4..])],
+    );
+    let [r, g, b] = d.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8);
+    [r, g, b, 255]
+}
+
 /// A `LinearF16` image as opaque sRGB8 RGBA, with no edits, as
 /// `raw_shader.wgsl` would display it. Empty for a short buffer.
 pub fn linear_f16_to_srgb8(img: &DecodedImage) -> Vec<u8> {
@@ -373,13 +385,9 @@ pub fn linear_f16_to_srgb8(img: &DecodedImage) -> Vec<u8> {
     if img.rgba.len() < n * 8 {
         return Vec::new();
     }
-    let adj = Adjustments::default();
-    let f = |b: &[u8]| half::f16::from_le_bytes([b[0], b[1]]).to_f32();
     let mut out = Vec::with_capacity(n * 4);
     for px in img.rgba.as_chunks::<8>().0.iter().take(n) {
-        let d = develop::apply_raw_display(&adj, [f(&px[0..]), f(&px[2..]), f(&px[4..])]);
-        out.extend(d.map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8));
-        out.push(255);
+        out.extend(linear_f16_px_to_srgb8(px));
     }
     out
 }
@@ -559,8 +567,6 @@ fn rotate_rgba<S: Sample>(src: &[S], w: u32, h: u32, steps: u8) -> (u32, u32, Ve
 /// `dw x dh`. Bilinear keeps the mask's soft edges. The `+ 0.5 ... - 0.5`
 /// maps pixel centers, so the result doesn't shift half a pixel toward the
 /// origin. Edges clamp.
-// Only `seg_probe` uses this. The Loupe stretches masks on the GPU.
-#[allow(dead_code)]
 #[hotpath::measure]
 pub(crate) fn resample_bilinear_u8(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u8> {
     if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < (sw * sh) as usize {
@@ -660,7 +666,7 @@ mod tests {
             chromatic_aberration: Some(crate::develop::chroma::measure(&img)),
             ..Adjustments::default()
         };
-        let (w, h, out) = bake_edited(&img, &adj, &[], &[], 0);
+        let (w, h, out) = bake_edited(&img, &adj, &[], &MaskSet::default(), 0);
         assert_eq!((w, h), (1200, 800));
         let after = worst_fringe(&out, w, h);
         assert!(before > 20, "the fixture should fringe: {before}");
@@ -677,18 +683,55 @@ mod tests {
             r#"{"chromatic_aberration": {"red": 1e39, "blue": -1e39}}"#,
         ] {
             let adj: Adjustments = serde_json::from_str(json).unwrap();
-            let (w, h, out) = bake_edited(&img, &adj, &[], &[], 0);
+            let (w, h, out) = bake_edited(&img, &adj, &[], &MaskSet::default(), 0);
             assert_eq!((w, h, out.len()), (9, 7, 9 * 7 * 4));
         }
+    }
+
+    fn only(mask: crate::develop::Mask) -> MaskSet {
+        MaskSet::new(&[mask], |_| None)
+    }
+
+    /// A detected mask over a half-covered coverage darkens exactly the
+    /// covered half, at the bake's resolution, not the coverage's.
+    #[test]
+    fn a_detected_mask_darkens_exactly_its_covered_half() {
+        use crate::develop::{Coverage, DetectTarget};
+        let img = crate::develop::chroma::fixture::photo(64, 40, develop::CaScale::default());
+        // Four texels across, the left two covered: the bilinear ramp runs
+        // from texel 1's centre (u 0.375, x 24) to texel 2's (u 0.625, x 40).
+        let coverage = std::sync::Arc::new(Coverage::fit(4, 1, &[255, 255, 0, 0]).unwrap());
+        let mut m = crate::develop::Mask::detected(DetectTarget::Subject);
+        m.amounts.exposure = -2.0;
+        let plain = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0).2;
+        let set = MaskSet::new(&[m], |t| {
+            (t == DetectTarget::Subject).then(|| coverage.clone())
+        });
+        let masked = bake_edited(&img, &Adjustments::default(), &[], &set, 0).2;
+        let px = |buf: &[u8], x: usize, y: usize| buf[(y * 64 + x) * 4 + 1];
+        for y in [3, 20, 37] {
+            for x in 0..40 {
+                assert!(px(&masked, x, y) < px(&plain, x, y), "covered ({x}, {y})");
+            }
+            for x in 40..64 {
+                assert_eq!(px(&masked, x, y), px(&plain, x, y), "uncovered ({x}, {y})");
+            }
+        }
+        let pending = MaskSet::new(&[m], |_| None);
+        assert_eq!(
+            bake_edited(&img, &Adjustments::default(), &[], &pending, 0).2,
+            plain,
+            "a detected mask with no coverage yet renders nothing"
+        );
     }
 
     #[test]
     fn a_mask_brightens_only_where_it_reaches_and_follows_the_source_under_a_crop() {
         let img = crate::develop::chroma::fixture::photo(60, 40, develop::CaScale::default());
-        let mut left = Mask::linear([0.2, 0.5], [0.4, 0.5]);
+        let mut left = crate::develop::Mask::linear([0.2, 0.5], [0.4, 0.5]);
         left.amounts.exposure = 1.0;
-        let plain = bake_edited(&img, &Adjustments::default(), &[], &[], 0).2;
-        let masked = bake_edited(&img, &Adjustments::default(), &[], &[left], 0).2;
+        let plain = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0).2;
+        let masked = bake_edited(&img, &Adjustments::default(), &[], &only(left), 0).2;
         let px = |buf: &[u8], x: usize, y: usize| buf[(y * 60 + x) * 4 + 1];
         for y in [5, 20, 35] {
             assert!(
@@ -708,20 +751,20 @@ mod tests {
             ..Adjustments::default()
         };
         assert_eq!(
-            bake_edited(&img, &cropped, &[], &[left], 0),
-            bake_edited(&img, &cropped, &[], &[], 0)
+            bake_edited(&img, &cropped, &[], &only(left), 0),
+            bake_edited(&img, &cropped, &[], &MaskSet::default(), 0)
         );
     }
 
     #[test]
     fn zero_scales_bake_byte_identical_to_no_correction() {
         let img = crate::develop::chroma::fixture::photo(60, 40, develop::CaScale::default());
-        let off = bake_edited(&img, &Adjustments::default(), &[], &[], 0);
+        let off = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
         let zero = Adjustments {
             chromatic_aberration: Some(develop::CaScale::default()),
             ..Adjustments::default()
         };
-        assert_eq!(bake_edited(&img, &zero, &[], &[], 0), off);
+        assert_eq!(bake_edited(&img, &zero, &[], &MaskSet::default(), 0), off);
     }
 
     #[test]
@@ -780,7 +823,7 @@ mod tests {
                 pixel_format: format,
             });
             assert_eq!(
-                bake_edited(&img, &Adjustments::default(), &[], &[], 0),
+                bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0),
                 (0, 0, vec![])
             );
             assert!(bilinear_sampler(&img, develop::CaScale::default()).is_none());
@@ -800,7 +843,7 @@ mod tests {
             rgba: px.repeat(4),
             pixel_format: PixelFormat::LinearF16,
         });
-        let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], &[], 0);
+        let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
         assert_eq!((w, h), (2, 2));
         let want = linear_to_srgb8(half::f16::from_f32(0.18).to_f32());
         assert_eq!(out, [want, want, want, 255].repeat(4));
@@ -833,7 +876,7 @@ mod tests {
             rgba: src.clone(),
             pixel_format: PixelFormat::Srgb8,
         });
-        let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], &[], 0);
+        let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
     }
@@ -856,7 +899,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let (w, h, out) = bake_edited(&img, &adj, &[], &[], 0);
+        let (w, h, out) = bake_edited(&img, &adj, &[], &MaskSet::default(), 0);
         assert_eq!((w, h), (2, 1));
         assert_eq!(&out[0..4], &px(3));
         assert_eq!(&out[4..8], &px(4));
@@ -877,8 +920,8 @@ mod tests {
         };
         // A positive angle shows the photo turned anti-clockwise.
         assert_eq!(
-            bake_edited(&img, &adj, &[], &[], 0),
-            bake_edited(&img, &Adjustments::default(), &[], &[], 3)
+            bake_edited(&img, &adj, &[], &MaskSet::default(), 0),
+            bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 3)
         );
     }
 
@@ -895,7 +938,7 @@ mod tests {
             denoise: 0.0,
             ..Default::default()
         };
-        let (w, h, out) = bake_edited(&img, &adj, &[], &[], 0);
+        let (w, h, out) = bake_edited(&img, &adj, &[], &MaskSet::default(), 0);
         assert_eq!((w, h), (2, 2));
         assert_eq!(out, src);
     }
@@ -913,12 +956,12 @@ mod tests {
             rgba: src,
             pixel_format: PixelFormat::Srgb8,
         });
-        let (_, _, out0) = bake_edited(&img, &Adjustments::default(), &[], &[], 0);
+        let (_, _, out0) = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
         let denoised = Adjustments {
             denoise: 100.0,
             ..Default::default()
         };
-        let (_, _, out100) = bake_edited(&img, &denoised, &[], &[], 0);
+        let (_, _, out100) = bake_edited(&img, &denoised, &[], &MaskSet::default(), 0);
         let center = 4 * 4;
         assert_eq!(out0[center], 255);
         assert!(
@@ -950,12 +993,18 @@ mod tests {
             delta: [0.0; 3],
             opacity: 1.0,
         };
-        let (_, _, out) = bake_edited(&img, &Adjustments::default(), &[touchup], &[], 0);
+        let (_, _, out) = bake_edited(
+            &img,
+            &Adjustments::default(),
+            &[touchup],
+            &MaskSet::default(),
+            0,
+        );
         assert!(out[2 * 4] < 255, "touch-up should reduce the bright spot");
 
         let at = |opacity: f32| {
             let t = TouchUp { opacity, ..touchup };
-            bake_edited(&img, &Adjustments::default(), &[t], &[], 0).2[2 * 4]
+            bake_edited(&img, &Adjustments::default(), &[t], &MaskSet::default(), 0).2[2 * 4]
         };
         assert_eq!(at(0.0), 255, "a transparent spot leaves the photo alone");
         assert!(
@@ -975,7 +1024,15 @@ mod tests {
             "an opaque spot writes no opacity"
         );
         let adj = Adjustments::default();
-        let sig = |t: TouchUp| crate::develop::edit_signature_with_touchups(&adj, &[t], &[], 0);
+        let sig = |t: TouchUp| {
+            crate::develop::edit_signature_with_touchups(
+                &adj,
+                &[t],
+                &[],
+                &crate::develop::Detections::default(),
+                0,
+            )
+        };
         assert_ne!(sig(t), sig(TouchUp { opacity: 0.5, ..t }));
     }
 
@@ -1004,7 +1061,7 @@ mod tests {
             denoise: 50.0,
             ..Default::default()
         };
-        let (w, h, out) = bake_edited(&img, &adj, &[], &[], 0);
+        let (w, h, out) = bake_edited(&img, &adj, &[], &MaskSet::default(), 0);
         assert_eq!((w, h), (3, 3));
         assert_eq!(out.len(), 3 * 3 * 4);
     }

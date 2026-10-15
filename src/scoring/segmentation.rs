@@ -147,7 +147,7 @@ impl Mask {
 /// fallback. Person segmentation doesn't error on a photo without people; it
 /// returns an empty mask. Kept low so a small, distant person still counts.
 #[cfg(any(target_os = "macos", test))]
-const EMPTY_COVERAGE: f32 = 0.01;
+pub const EMPTY_COVERAGE: f32 = 0.01;
 
 /// The subject mask for the photo at `path`, in display orientation. An error
 /// means no selection is available, which is normal for photos with no subject.
@@ -155,17 +155,30 @@ const EMPTY_COVERAGE: f32 = 0.01;
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
 pub fn segment(path: &Path) -> Result<Mask, String> {
-    let mask = match segment_person(path) {
-        Ok(mask) if mask.solid_coverage() >= EMPTY_COVERAGE => mask,
-        // No person, or the person request failed. Report the fallback's error.
-        _ => segment_foreground(path)?,
-    };
-    Ok(mask.oriented(crate::decode::image_decode::orientation_of(path)))
+    segment_subject(path)?.ok_or_else(|| "Vision found no foreground subject".into())
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn segment(_path: &Path) -> Result<Mask, String> {
     Err("subject segmentation is unsupported on this platform".into())
+}
+
+/// [`segment`] with "no subject in this photo" as `Ok(None)`, apart from a
+/// failure to run at all, so a detected mask can remember the answer rather
+/// than retry it.
+#[cfg(target_os = "macos")]
+pub fn segment_subject(path: &Path) -> Result<Option<Mask>, String> {
+    let mask = match segment_person(path) {
+        Ok(mask) if mask.solid_coverage() >= EMPTY_COVERAGE => mask,
+        // No person, or the person request failed. Report the fallback's error.
+        _ => match segment_foreground(path)? {
+            Some(mask) => mask,
+            None => return Ok(None),
+        },
+    };
+    Ok(Some(mask.oriented(
+        crate::decode::image_decode::orientation_of(path),
+    )))
 }
 
 /// Person segmentation at Accurate quality. It runs on demand for one photo,
@@ -198,7 +211,7 @@ fn segment_person(path: &Path) -> Result<Mask, String> {
 /// macOS 14.0 and later.
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
-fn segment_foreground(path: &Path) -> Result<Mask, String> {
+fn segment_foreground(path: &Path) -> Result<Option<Mask>, String> {
     vision::require_class(c"VNGenerateForegroundInstanceMaskRequest", "14.0")?;
     // SAFETY: the class exists (checked above); `allInstances` comes from the
     // same observation it is passed back to, and errors surface as `Err`.
@@ -206,14 +219,13 @@ fn segment_foreground(path: &Path) -> Result<Mask, String> {
         let request = VNGenerateForegroundInstanceMaskRequest::new();
         vision::perform(vision::Source::File(path), &[request.as_super().as_super()])?;
 
-        let observation = request
-            .results()
-            .and_then(|r| r.firstObject())
-            .ok_or("Vision found no foreground subject")?;
+        let Some(observation) = request.results().and_then(|r| r.firstObject()) else {
+            return Ok(None);
+        };
         let buffer = observation
             .generateMaskForInstances_error(&observation.allInstances())
             .map_err(|e| e.localizedDescription().to_string())?;
-        pixel_buffer_to_mask(&buffer, MaskSource::ForegroundInstance)
+        pixel_buffer_to_mask(&buffer, MaskSource::ForegroundInstance).map(Some)
     }
 }
 

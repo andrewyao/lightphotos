@@ -4,15 +4,17 @@
 //! `bake_edited` on the same synthetic photos, and checks that the two agree.
 //! A second matrix draws the base layer through `BaseProbe` on both sides.
 
+use std::sync::Arc;
+
 use super::Renderer;
 use crate::decode::image_decode::{DecodedImage, DecodedImageFields, PixelFormat};
 use crate::develop::color::hue_rgb;
 use crate::develop::curve::Curve;
 use crate::develop::image_ops::bake_edited_probe;
 use crate::develop::{
-    Adjustments, BandShift, BaseProbe, CaScale, ColorAxis, ColorGrade, ColorMixer, Crop, GpuAdjust,
-    GpuMask, GpuTouchUp, Grain, GrayMix, Mask, MaskShape, Section, Sharpening, SliderId,
-    Straighten, TouchUp, Vignette, Wheel, SLIDERS,
+    Adjustments, BandShift, BaseProbe, CaScale, ColorAxis, ColorGrade, ColorMixer, Coverage, Crop,
+    DetectTarget, GpuAdjust, GpuTouchUp, Grain, GrayMix, Mask, MaskSet, MaskShape, Section,
+    Sharpening, SliderId, Straighten, TouchUp, Vignette, Wheel, SLIDERS,
 };
 
 const W: u32 = 96;
@@ -119,6 +121,23 @@ fn fixtures() -> Vec<Fixture> {
             }),
         },
     ]
+}
+
+/// The coverage every detected mask in the matrix reads: a soft diagonal
+/// blob at 13x9, so no bake or Loupe pixel lands on a texel centre.
+fn test_coverage() -> Arc<Coverage> {
+    let (w, h) = (13u32, 9u32);
+    let alpha: Vec<u8> = (0..w * h)
+        .map(|i| {
+            let (x, y) = (
+                (i % w) as f32 / (w - 1) as f32,
+                (i / w) as f32 / (h - 1) as f32,
+            );
+            let d = ((x - 0.6) * 1.4).hypot(y - 0.45);
+            ((1.0 - (d / 0.5).clamp(0.0, 1.0)) * 255.0).round() as u8
+        })
+        .collect();
+    Arc::new(Coverage::fit(w, h, &alpha).expect("a whole plane"))
 }
 
 fn cases() -> Vec<Case> {
@@ -277,6 +296,45 @@ fn cases() -> Vec<Case> {
         },
         touchups: vec![touchup],
         masks: vec![sky, spot],
+    });
+    // Every detected mask resolves to `test_coverage`, whose odd size puts
+    // every read between texels.
+    let mut subject = Mask::detected(DetectTarget::Subject);
+    subject.amounts = crate::develop::LocalAmounts {
+        exposure: -1.5,
+        contrast: 30.0,
+        temp: 35.0,
+        saturation: -40.0,
+        ..Default::default()
+    };
+    out.push(Case {
+        name: "mask_raster".into(),
+        adj: Adjustments::default(),
+        touchups: Vec::new(),
+        masks: vec![subject],
+    });
+    subject.invert = true;
+    out.push(Case {
+        name: "mask_raster_inverted".into(),
+        adj: Adjustments {
+            exposure: 0.3,
+            ..Default::default()
+        },
+        touchups: Vec::new(),
+        masks: vec![subject],
+    });
+    subject.invert = false;
+    // A turned canvas reads UVs past 0..1 at the corners, which exercises
+    // the edge clamp on both sides.
+    out.push(Case {
+        name: "mask_raster+crop+straighten".into(),
+        adj: Adjustments {
+            straighten: 7.0,
+            crop: straighten_crop,
+            ..Default::default()
+        },
+        touchups: Vec::new(),
+        masks: vec![sky, subject, spot],
     });
     out.push(case(
         "denoise+straighten".into(),
@@ -608,20 +666,14 @@ fn measure(r: &mut Renderer, fixture: &Fixture, case: &Case, probe: BaseProbe) -
     );
     let gpu_touchups: Vec<GpuTouchUp> = case.touchups.iter().map(GpuTouchUp::from).collect();
     r.set_touchups(&gpu_touchups);
-    let gpu_masks: Vec<GpuMask> = case.masks.iter().map(GpuMask::from).collect();
-    r.set_masks(&gpu_masks);
+    let masks = MaskSet::new(&case.masks, |_| Some(test_coverage()));
+    r.set_masks(&masks);
     assert!(r.render(None, None, None), "{}: render failed", case.name);
     let gpu = r.read_offscreen_blocking().expect("offscreen readback");
     assert_eq!((gpu.width, gpu.height), (w, h));
 
-    let (cw, ch, cpu) = bake_edited_probe(
-        &fixture.img,
-        &case.adj,
-        &case.touchups,
-        &case.masks,
-        0,
-        probe,
-    );
+    let (cw, ch, cpu) =
+        bake_edited_probe(&fixture.img, &case.adj, &case.touchups, &masks, 0, probe);
     let crop = case.adj.crop.unwrap_or(Crop {
         left: 0.0,
         top: 0.0,

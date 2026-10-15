@@ -271,6 +271,67 @@ pub(crate) async fn delete_group(
     }
 }
 
+/// `.lightphotos/masks` under `root`, or `None` when it is missing.
+async fn masks_dir(
+    root: &FileSystemDirectoryHandle,
+) -> Result<Option<FileSystemDirectoryHandle>, String> {
+    match sidecar_dir(root, false).await? {
+        Some(dir) => subdir(&dir, crate::develop::coverage::COVERAGE_DIR, false).await,
+        None => Ok(None),
+    }
+}
+
+/// The bytes of `root/.lightphotos/masks/<photo>.<id>.png`, or `Ok(None)`
+/// when there is no such file. A file over the coverage size limit is
+/// refused before it is read, like a sidecar.
+pub(crate) async fn read_coverage(
+    root: &FileSystemDirectoryHandle,
+    photo: &OsStr,
+    id: crate::develop::RasterId,
+) -> Result<Option<Vec<u8>>, String> {
+    let Some(dir) = masks_dir(root).await? else {
+        return Ok(None);
+    };
+    let name = crate::develop::coverage::file_name(photo, id);
+    let handle: FileSystemFileHandle =
+        match JsFuture::from(dir.get_file_handle(&name.to_string_lossy())).await {
+            Ok(v) => v.unchecked_into(),
+            Err(e) if is_not_found(&e) => return Ok(None),
+            Err(e) => return Err(js_error_string(&e)),
+        };
+    let file = crate::web::web_fs::stat(&handle).await?;
+    if file.size() > crate::develop::coverage::MAX_COVERAGE_FILE_BYTES as f64 {
+        return Err(format!(
+            "{} bytes, too large for a coverage file",
+            file.size()
+        ));
+    }
+    crate::web::web_fs::file_bytes(&file).await.map(Some)
+}
+
+/// Write `bytes` to `root/.lightphotos/masks/<photo>.<id>.png`, creating
+/// the directories if needed. Content-addressed, so a file already there
+/// holds the same bytes and is left alone.
+pub(crate) async fn write_coverage(
+    root: &FileSystemDirectoryHandle,
+    photo: &OsStr,
+    id: crate::develop::RasterId,
+    bytes: &[u8],
+) -> Result<(), String> {
+    let dir = sidecar_dir(root, true)
+        .await?
+        .ok_or_else(|| "could not create .lightphotos".to_string())?;
+    let dir = subdir(&dir, crate::develop::coverage::COVERAGE_DIR, true)
+        .await?
+        .ok_or_else(|| "could not create .lightphotos/masks".to_string())?;
+    let name = crate::develop::coverage::file_name(photo, id);
+    let name = name.to_string_lossy();
+    if JsFuture::from(dir.get_file_handle(&name)).await.is_ok() {
+        return Ok(());
+    }
+    write_file(&dir, &name, bytes).await
+}
+
 /// Permanently delete `dir/<filename>`. File System Access has no trash,
 /// so this replaces `trash::move_to_trash` on web. A file that is already
 /// gone is not an error.

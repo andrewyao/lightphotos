@@ -253,6 +253,15 @@ impl App {
         if self.folder_store_loading() {
             return Some(t.export_edits_loading);
         }
+        // A detected mask whose detection hasn't landed would export as
+        // nothing. One that failed exports as nothing too, but on purpose.
+        if self
+            .coverage
+            .pending_among(&self.action_paths(), &self.masks, &self.detections)
+            > 0
+        {
+            return Some(t.export_masks_detecting);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if self.exports.settings.target == ExportTarget::Immich
             && !matches!(self.exports.immich, ImmichLink::Connected { .. })
@@ -493,6 +502,10 @@ impl App {
             adj: crate::develop::Adjustments,
             touchups: Vec<crate::develop::TouchUp>,
             masks: Vec<crate::develop::Mask>,
+            detections: crate::develop::Detections,
+            /// The photo's folder, where its coverage files are read as the
+            /// job is dispatched.
+            dir: Option<web_sys::FileSystemDirectoryHandle>,
             rot: u8,
         }
         let jobs: Vec<Job> = paths
@@ -503,6 +516,8 @@ impl App {
                 adj: self.edits.get(src).copied().unwrap_or_default(),
                 touchups: self.touchups.get(src).cloned().unwrap_or_default(),
                 masks: self.masks.get(src).cloned().unwrap_or_default(),
+                detections: self.detections.get(src).cloned().unwrap_or_default(),
+                dir: src.parent().and_then(|d| self.web.dir_handle(d)),
                 rot: self.rotations.get(src).copied().unwrap_or(0),
             })
             .collect();
@@ -550,6 +565,8 @@ impl App {
                     adj,
                     touchups,
                     masks,
+                    detections,
+                    dir,
                     rot,
                 } = job;
                 // Each export in flight holds its source's bytes and a
@@ -561,6 +578,20 @@ impl App {
                 let filename =
                     crate::paths::export_name(&stem, output.format.extension(), &existing, &taken);
                 taken.insert(filename.clone());
+                let masks = match super::masks::read_mask_set(
+                    dir.as_ref(),
+                    &src,
+                    &masks,
+                    &detections,
+                )
+                .await
+                {
+                    Ok(masks) => masks,
+                    Err(e) => {
+                        pool.fail(src, output_folder.clone(), dest_dir.clone(), filename, e);
+                        continue;
+                    }
+                };
                 match fs.read_source_array_buffer(&src).await {
                     Ok(bytes) => pool.submit(
                         &decoder,
@@ -614,7 +645,12 @@ impl App {
         let job = |src: PathBuf, dest: ExportDest| ExportJob {
             adj: self.edits.get(&src).copied().unwrap_or_default(),
             touchups: self.touchups.get(&src).cloned().unwrap_or_default(),
-            masks: self.masks.get(&src).cloned().unwrap_or_default(),
+            // The worker reads the coverage itself; the blocker held the
+            // export until every detection was recorded.
+            masks: crate::develop::MaskInput::OnDisk {
+                masks: self.masks.get(&src).cloned().unwrap_or_default(),
+                detections: self.detections.get(&src).cloned().unwrap_or_default(),
+            },
             rot: self.rotations.get(&src).copied().unwrap_or(0),
             src,
             dest,

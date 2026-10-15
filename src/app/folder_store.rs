@@ -179,10 +179,19 @@ impl App {
                 .name("folder-store-load".into())
                 .spawn(move || {
                     let loaded = crate::persist::folder_store::load_sidecars(&for_thread);
+                    let named: HashMap<std::ffi::OsString, crate::develop::Detections> = loaded
+                        .images
+                        .iter()
+                        .filter(|(_, r)| !r.detections.is_empty())
+                        .map(|(name, r)| (name.clone(), r.detections.clone()))
+                        .collect();
                     let _ = tx.send((for_thread.clone(), token, mark, loaded));
                     // Sweep after sending, because the UI waits on the folder store
-                    // and nothing waits on the sweep.
+                    // and nothing waits on the sweeps.
                     crate::jobs::thumbnail::sweep_orphans(&for_thread);
+                    crate::develop::coverage::sweep_orphans(&for_thread, |photo, id| {
+                        named.get(photo).is_some_and(|d| d.names(id))
+                    });
                 });
             match spawned {
                 Ok(_) => self.folder_store_load.pending = Some((dir, token)),
@@ -300,6 +309,12 @@ impl App {
                 self.masks.remove(p);
             } else {
                 self.masks.insert(p.clone(), masks);
+            }
+            let detections = self.folder_store.detections(p);
+            if detections.is_empty() {
+                self.detections.remove(p);
+            } else {
+                self.detections.insert(p.clone(), detections);
             }
             match self.folder_store.rotation(p) {
                 0 => self.rotations.remove(p),
@@ -782,9 +797,19 @@ impl App {
         let Some(copied) = self.copied_settings.clone() else {
             return;
         };
-        let paths = self.action_paths();
+        let mut paths = self.action_paths();
         let n = self.apply_look_to(&copied.adj, copied.sections, &paths);
         if copied.sections.has(CopySection::Masks) {
+            // A pasted detected mask reads each photo's own detection, which
+            // store_masks queues. The shown photo goes first, so its
+            // detection lands ahead of the batch's.
+            if let Some(i) = self
+                .shown
+                .path()
+                .and_then(|shown| paths.iter().position(|p| p == shown))
+            {
+                paths.swap(0, i);
+            }
             for path in &paths {
                 self.put_masks(path, copied.masks.clone());
             }
