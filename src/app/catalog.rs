@@ -184,14 +184,23 @@ impl App {
     }
 
     /// The catalog's failures since the last frame, each in its own words: a
-    /// write that failed, or preset folders that would not read.
+    /// write that failed, or preset folders that would not read. One status
+    /// line carries both, since a second `set_status` replaces the first.
     pub(crate) fn show_catalog_errors(&mut self) {
         let t = crate::i18n::t();
-        if let Some(cause) = self.catalog.take_error() {
-            self.set_status(StatusKind::Error, (t.catalog_save_failed)(&cause));
-        }
-        if let Some(cause) = self.catalog.take_presets_error() {
-            self.set_status(StatusKind::Error, (t.preset_folders_unreadable)(&cause));
+        let lines: Vec<String> = [
+            self.catalog
+                .take_error()
+                .map(|e| (t.catalog_save_failed)(&e)),
+            self.catalog
+                .take_presets_error()
+                .map(|e| (t.preset_folders_unreadable)(&e)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !lines.is_empty() {
+            self.set_status(StatusKind::Error, lines.join("\n"));
         }
     }
 

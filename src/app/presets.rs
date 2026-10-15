@@ -794,6 +794,30 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Catches the preset-folders message replacing a catalog failure that
+    /// came in the same frame.
+    #[test]
+    fn a_catalog_failure_and_unreadable_preset_folders_both_show() {
+        let (mut app, dir, _) = folder_app("preset-two-errors", 1);
+        for i in 0..crate::persist::catalog::MAX_FOLDERS {
+            app.catalog.add_folder(&PathBuf::from(format!("/f{i}")));
+        }
+        assert!(!app.catalog.add_folder(Path::new("/one-more")));
+        app.catalog
+            .land_presets("presets.json", Ok(Some(b"{".to_vec())));
+
+        app.show_catalog_errors();
+
+        let t = crate::i18n::t();
+        let status = app.status_text().unwrap_or_default().to_string();
+        assert!(
+            status.contains(&(t.catalog_save_failed)(""))
+                && status.contains(&(t.preset_folders_unreadable)("")),
+            "both reach the user: {status}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A slow scan from before a rescan must not land over the newer one.
     /// The stale sender stands in for that scan's thread.
     #[test]
