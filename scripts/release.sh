@@ -41,6 +41,19 @@ if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null; then
   exit 1
 fi
 
+# release.yml fails the macOS jobs without these, after the tag is pushed.
+echo "==> Checking the macOS signing secrets are set on GitHub"
+secrets="$(gh secret list --json name --jq '.[].name')"
+missing=()
+for name in MACOS_CERT_P12 MACOS_CERT_PASSWORD MACOS_SIGN_IDENTITY \
+  APPLE_API_KEY_P8 APPLE_API_KEY_ID APPLE_API_ISSUER; do
+  grep -qx "$name" <<<"$secrets" || missing+=("$name")
+done
+if [[ ${#missing[@]} -gt 0 ]]; then
+  echo "error: repo secrets missing: ${missing[*]} (see scripts/make-dmg.sh)" >&2
+  exit 1
+fi
+
 echo "==> Checking HEAD is a clean origin/main"
 git fetch --quiet origin main
 if ! git diff --quiet HEAD; then
