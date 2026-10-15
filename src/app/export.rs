@@ -201,7 +201,7 @@ impl App {
         self.save_export_edits();
         self.exports.form_open = !self.exports.form_open;
         if self.exports.form_open {
-            self.info_open = false;
+            self.side_page = super::SidePage::Develop;
         }
         #[cfg(not(target_arch = "wasm32"))]
         if self.exports.form_open {

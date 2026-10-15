@@ -86,9 +86,10 @@ pub enum UiAction {
     /// multi-file picker wired up yet.
     #[cfg(not(target_arch = "wasm32"))]
     ImportLrPresets,
-    /// The Presets popup opened: read the preset folders again.
+    /// A click that may ask the browser for withheld access: read the
+    /// preset folders again.
     RescanPresetFolders,
-    /// Pick a folder of Lightroom presets to list in the popup.
+    /// Pick a folder of Lightroom presets to list on the Presets page.
     AddPresetFolder,
     /// Stop listing this preset folder's presets.
     RemovePresetFolder(std::path::PathBuf),
@@ -351,13 +352,15 @@ pub fn draw(ui: &mut egui::Ui, app: &mut App) -> FrameOutput {
     if app.left_panel_visible() {
         draw_left_panel(ui, app, &mut out);
     }
-    // Info, Develop and Export are pages of one right-hand panel, inside the
-    // rail that switches between them.
+    // Presets, Info, Develop and Export are pages of one right-hand panel,
+    // inside the rail that switches between them.
     draw_develop_rail(ui, app, true, &mut out);
     if app.export_form_open() {
         draw_export_panel(ui, app, mode == ViewMode::Loupe, &mut out);
     } else if app.info_open() {
         draw_info_panel(ui, app, mode == ViewMode::Loupe);
+    } else if app.presets_page_open() {
+        presets::draw_presets_panel(ui, app, &mut out);
     } else if app.develop_page_shown().is_some() {
         draw_develop_panel(ui, app, &mut out);
     }

@@ -423,7 +423,7 @@ catalog used, or one called `default`.
 **What a catalog holds:**
 - The list of folders.
 - The list of preset folders: folders of Lightroom `.xmp` presets whose
-  presets the Presets popup lists, as Lightroom Classic can store presets
+  presets the Presets page lists, as Lightroom Classic can store presets
   with a catalog.
 - A copy of each rated, flagged or color-labelled photo's marks, grouped by
   the directory the photo is in.
@@ -445,10 +445,10 @@ skipped count. Natively a thread walks each folder with a set of canonical
 directories, which cuts symlink loops; the browser walks the kept handle
 on the page's task. `App` keeps a `FolderState` per folder (`Scanning`,
 `Ready`, `NeedsPermission` in the browser, `Unavailable`). A scan runs at
-launch, on a catalog switch, when a folder is added and when the popup
-opens, and each folder shows its last result until the new one lands. A
-rescan replaces the receiver, so an older scan's results are dropped with
-it.
+launch, on a catalog switch, when a folder is added and when the Presets
+page opens, and each folder shows its last result until the new one
+lands. A rescan replaces the receiver, so an older scan's results are
+dropped with it.
 
 **The folder is the truth.** Every edit and mark is written to the photo's
 own sidecar under `<photo dir>/.lightphotos/`, as before catalogs. The marks

@@ -344,11 +344,23 @@ pub(crate) enum CaState {
     On,
 }
 
-/// An icon on the right-edge rail: the photo's metadata, a Develop page, or
-/// the group's Compare pane. At most one is lit, and clicking the lit one
-/// turns it off.
+/// The page that stands in the right panel for Develop's, when one does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SidePage {
+    /// Develop's own page, while Develop is open.
+    Develop,
+    /// The photo's metadata.
+    Info,
+    /// Every preset, to apply to the selection.
+    Presets,
+}
+
+/// An icon on the right-edge rail: the presets, a Develop page, the photo's
+/// metadata, or the group's Compare pane. At most one is lit, and clicking
+/// the lit one turns it off.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum RailItem {
+    Presets,
     Info,
     Develop(DevelopTab),
     GroupCompare,
@@ -361,7 +373,10 @@ impl RailItem {
     pub(crate) fn in_grid(self) -> bool {
         matches!(
             self,
-            RailItem::Info | RailItem::Develop(DevelopTab::Sliders) | RailItem::Export
+            RailItem::Presets
+                | RailItem::Info
+                | RailItem::Develop(DevelopTab::Sliders)
+                | RailItem::Export
         )
     }
 }
@@ -660,8 +675,8 @@ pub(crate) struct App {
     show_settings: bool,
     /// The guided tour's shown stop, an index into `ui::tour::TourStep::ALL`.
     tour: Option<usize>,
-    /// The metadata page fills the right panel. Session only.
-    info_open: bool,
+    /// Which page fills the right panel when it isn't Export's. Session only.
+    side_page: SidePage,
 
     /// Toast message and when it was set.
     status: Option<(StatusKind, String, Instant)>,
@@ -956,7 +971,7 @@ impl App {
             show_help: false,
             show_settings: false,
             tour: None,
-            info_open: false,
+            side_page: SidePage::Develop,
             status: None,
             occluded: false,
             repaint_at: None,

@@ -1050,10 +1050,10 @@ mod tests {
         let (mut app, dir, _) = folder_app("compare-restore", 6);
         app.selected = std::collections::BTreeSet::from([1, 3]);
         app.sel = Some(1);
-        app.info_open = true;
+        app.side_page = crate::app::SidePage::Info;
         act(&mut app, UiAction::CompareStack);
         assert_eq!(app.rail_lit(), Some(crate::app::RailItem::GroupCompare));
-        assert!(!app.info_open);
+        assert!(!app.info_open());
         act(
             &mut app,
             UiAction::ClickRail(crate::app::RailItem::GroupCompare),

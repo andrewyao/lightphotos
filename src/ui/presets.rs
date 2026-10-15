@@ -1,8 +1,8 @@
-//! The Presets button at the right of the Sliders heading, and its popup:
-//! the library and every preset folder's presets, grouped, each applied with
-//! one click to the photos the Develop panel acts on. Like the Presets panel
-//! in Lightroom, the popup stays open, so one look after another can be
-//! tried on the same photos.
+//! The Presets page: the library and every preset folder's presets,
+//! grouped, each applied with one click to the photos the page acts on. Like
+//! the Presets panel in Lightroom, it takes the edit panel's place beside
+//! the rail, and it stays open, so one look after another can be tried on
+//! the same photos.
 
 use std::collections::BTreeMap;
 
@@ -10,76 +10,33 @@ use super::*;
 use crate::app::{DevelopScope, FolderState};
 use crate::persist::preset_folders::{display_name, FolderPreset};
 
-/// Where the search text lives between frames, cleared each time the popup
-/// opens.
-fn search_id() -> egui::Id {
-    egui::Id::new("presets_search")
-}
-
-/// The heading's Presets button. Opening its popup rescans the folders, so
-/// a preset saved in Lightroom meanwhile shows up.
-pub(super) fn presets_button(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+/// The right-hand panel while the rail's Presets page is lit: the search
+/// over a list that fills the panel, with the footer's actions under it.
+pub(super) fn draw_presets_panel(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    let side = font_size::px(ui.style(), 22.0);
-    let (rect, button) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
-    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&button));
-    button.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), open, t.presets)
-    });
-    paint_glyph(ui, rect, open, button.hovered());
-    let button = button
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(t.presets_tip);
-    if button.clicked() && !open {
-        out.actions.push(UiAction::RescanPresetFolders);
-        ui.data_mut(|d| d.insert_temp(search_id(), String::new()));
-    }
-    egui::Popup::menu(&button)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .align(egui::RectAlign::BOTTOM_END)
-        .width(font_size::px(ui.style(), 280.0))
-        .show(|ui| popup(ui, app, out));
+    egui::Panel::right("develop")
+        .resizable(true)
+        .default_size(340.0)
+        .show_inside(ui, |ui| {
+            form::page_heading(ui, t.presets, |_| {});
+            egui::Panel::bottom("presets_footer")
+                .frame(egui::Frame::NONE.inner_margin(font_size::px(ui.style(), 8.0)))
+                .show_inside(ui, |ui| footer(ui, app, out));
+            form::page(ui, |ui| list(ui, app, out));
+        });
 }
 
-/// Three slider tracks with their knobs at different places.
-fn paint_glyph(ui: &egui::Ui, rect: egui::Rect, open: bool, hovered: bool) {
-    let visuals = ui.visuals();
-    if open {
-        ui.painter()
-            .rect_filled(rect, 4.0, visuals.selection.bg_fill);
-    } else if hovered {
-        ui.painter()
-            .rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
-    }
-    let color = if open {
-        visuals.selection.stroke.color
-    } else {
-        visuals.text_color()
-    };
-    let u = font_size::px(ui.style(), 1.0);
-    let c = rect.center();
-    let painter = ui.painter();
-    for (y, knob) in [(-5.0, 3.0), (0.0, -3.0), (5.0, 1.0)] {
-        painter.line_segment(
-            [
-                egui::pos2(c.x - 7.0 * u, c.y + y * u),
-                egui::pos2(c.x + 7.0 * u, c.y + y * u),
-            ],
-            egui::Stroke::new(1.4 * u, color),
-        );
-        painter.circle_filled(egui::pos2(c.x + knob * u, c.y + y * u), 2.2 * u, color);
-    }
-}
-
-fn popup(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
+/// The search field and every preset that matches it.
+fn list(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
-    let mut query: String = ui.data(|d| d.get_temp(search_id())).unwrap_or_default();
+    let id = egui::Id::new("presets_search");
+    let mut query: String = ui.data(|d| d.get_temp(id)).unwrap_or_default();
     ui.add(
         egui::TextEdit::singleline(&mut query)
             .hint_text(t.search_presets)
             .desired_width(f32::INFINITY),
     );
-    ui.data_mut(|d| d.insert_temp(search_id(), query.clone()));
+    ui.data_mut(|d| d.insert_temp(id, query.clone()));
     let query = query.trim().to_lowercase();
     let shows = |name: &str, group: &str| {
         query.is_empty()
@@ -91,7 +48,7 @@ fn popup(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
 
     let mut shown = 0usize;
     egui::ScrollArea::vertical()
-        .max_height(font_size::px(ui.style(), 360.0))
+        .auto_shrink([false, false])
         .show(ui, |ui| {
             let library: Vec<_> = app
                 .presets()
@@ -150,9 +107,6 @@ fn popup(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                 });
             }
         });
-
-    ui.separator();
-    footer(ui, app, out);
 }
 
 /// A collapsible group of rows. A search opens every group with a match.
@@ -240,7 +194,6 @@ fn footer(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         .clicked()
     {
         out.actions.push(UiAction::SavePresetPrompt);
-        ui.close();
     }
     #[cfg(not(target_arch = "wasm32"))]
     if ui
@@ -249,7 +202,6 @@ fn footer(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         .clicked()
     {
         out.actions.push(UiAction::ImportLrPresets);
-        ui.close();
     }
     if ui
         .button(t.add_preset_folder)
@@ -257,7 +209,6 @@ fn footer(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         .clicked()
     {
         out.actions.push(UiAction::AddPresetFolder);
-        ui.close();
     }
     let folders = app.preset_folder_states();
     if !folders.is_empty() {

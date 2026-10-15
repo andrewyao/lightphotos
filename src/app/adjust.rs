@@ -45,20 +45,22 @@ impl App {
 
     /// The Develop page on screen, if Develop is. The Grid has only Sliders.
     pub(crate) fn develop_page_shown(&self) -> Option<DevelopTab> {
-        (self.develop_visible() && !self.export_form_open() && !self.info_open)
+        (self.develop_visible() && !self.export_form_open() && self.side_page == SidePage::Develop)
             .then_some(self.develop_tab)
             .filter(|&tab| self.mode == ViewMode::Loupe || tab == DevelopTab::Sliders)
     }
 
-    /// The rail icon to light: Export while its form is open, Info while its
-    /// page is, Compare while the pane is, otherwise the Develop page on
-    /// screen.
+    /// The rail icon to light: Export while its form is open, Info or
+    /// Presets while its page is, Compare while the pane is, otherwise the
+    /// Develop page on screen.
     pub(crate) fn rail_lit(&self) -> Option<RailItem> {
         if self.export_form_open() {
             return Some(RailItem::Export);
         }
-        if self.info_open {
-            return Some(RailItem::Info);
+        match self.side_page {
+            SidePage::Info => return Some(RailItem::Info),
+            SidePage::Presets => return Some(RailItem::Presets),
+            SidePage::Develop => {}
         }
         if self.group_view() == GroupView::Compare {
             return Some(RailItem::GroupCompare);
@@ -74,26 +76,28 @@ impl App {
             return;
         }
         let lit = self.rail_lit() == Some(item);
-        if item != RailItem::Info {
-            self.info_open = false;
-        }
-        // Info, Compare and Export stand in for Develop, so hiding one
-        // hides Develop too rather than bring back its page.
+        self.side_page = SidePage::Develop;
+        // Presets, Info, Compare and Export stand in for Develop, so hiding
+        // one hides Develop too rather than bring back its page.
         if lit {
             self.develop_open = false;
         }
         match item {
-            RailItem::Info if lit => {
-                self.info_open = false;
-                self.request_redraw();
-            }
-            RailItem::Info => {
+            RailItem::Info | RailItem::Presets if lit => self.request_redraw(),
+            RailItem::Info | RailItem::Presets => {
                 self.put_down_develop_tools();
                 self.close_export_form();
                 if self.group_view() == GroupView::Compare {
                     self.set_group_view(GroupView::Edit);
                 }
-                self.info_open = true;
+                if item == RailItem::Presets {
+                    self.side_page = SidePage::Presets;
+                    // A click, so the browser may ask again for a folder it
+                    // withholds.
+                    self.rescan_preset_folders(true);
+                } else {
+                    self.side_page = SidePage::Info;
+                }
                 self.normalize_focus();
             }
             RailItem::GroupCompare if !self.has_compare_set() => {}

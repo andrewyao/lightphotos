@@ -692,7 +692,7 @@ mod tests {
 
         let (mut app, _) = folder_app(2);
         app.sel = Some(0);
-        app.info_open = true;
+        app.side_page = crate::app::SidePage::Info;
         let painted = settled(&mut app);
         let header = painted.pos_of(t().info_file);
         let name = painted.pos_of(t().info_name);

@@ -805,7 +805,11 @@ impl App {
     }
 
     pub(crate) fn info_open(&self) -> bool {
-        self.info_open
+        self.side_page == SidePage::Info
+    }
+
+    pub(crate) fn presets_page_open(&self) -> bool {
+        self.side_page == SidePage::Presets
     }
 
     /// The focused photo, when something on screen shows its metadata and it
@@ -813,7 +817,7 @@ impl App {
     pub(super) fn metadata_to_read(&self) -> Option<PathBuf> {
         let shown = match self.mode {
             ViewMode::Loupe => true,
-            ViewMode::Grid => self.info_open,
+            ViewMode::Grid => self.info_open(),
         };
         let path = self.selected_path().filter(|_| shown)?;
         (!self.exif_cache.contains_key(&path)).then_some(path)

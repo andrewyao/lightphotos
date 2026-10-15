@@ -47,8 +47,8 @@ pub(super) fn draw_develop_rail(
     tour::anchor(ui.ctx(), tour::TourStep::RailLoupe, panel.response.rect);
 }
 
-/// Sliders, Crop, Cleanup, the group's Compare pane, Info and Export as a
-/// column of icons, the one on screen lit. Compare is greyed out unless the
+/// Presets, Sliders, Crop, Cleanup, the group's Compare pane, Info and
+/// Export as a column of icons, the one on screen lit. Compare is greyed out unless the
 /// photo is in a group or among the photos Compare opened on. Crop, Cleanup
 /// and Compare work on the Loupe's photo, so the Grid's rail leaves them out.
 fn develop_rail(ui: &mut egui::Ui, app: &App, live: bool, out: &mut FrameOutput) {
@@ -61,6 +61,7 @@ fn develop_rail(ui: &mut egui::Ui, app: &App, live: bool, out: &mut FrameOutput)
         let in_group = app.has_compare_set();
         let loupe = app.mode() == ViewMode::Loupe;
         for (item, tip, enabled) in [
+            (RailItem::Presets, t.presets, live),
             (RailItem::Develop(DevelopTab::Sliders), t.tab_sliders, live),
             (RailItem::Develop(DevelopTab::Crop), t.tab_crop, live),
             (RailItem::Develop(DevelopTab::Masks), t.tab_masks, live),
@@ -159,6 +160,11 @@ pub(super) fn paint_rail_icon(
         );
     };
     match item {
+        // Two overlapping circles, as Lightroom draws its presets.
+        RailItem::Presets => {
+            painter.circle_stroke(p(-3.5, 0.0), 7.0 * u, stroke);
+            painter.circle_stroke(p(3.5, 0.0), 7.0 * u, stroke);
+        }
         // A lowercase i in a circle.
         RailItem::Info => {
             painter.circle_stroke(c, 10.0 * u, stroke);
@@ -329,7 +335,7 @@ fn draw_crop_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     });
 }
 
-/// The Develop header with Presets and Reset, a row of Auto Tone and B&W, and
+/// The Develop header with Reset, a row of Auto Tone and B&W, and
 /// every tone, color, and detail slider in Lightroom's order. With nothing
 /// selected every control is off; with several photos selected each slider
 /// is a row of step buttons that move every photo from its own value.
@@ -344,8 +350,6 @@ fn draw_sliders_tab(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
         DevelopScope::None | DevelopScope::Many => Adjustments::default(),
     };
     form::page_heading(ui, t.tab_sliders, |ui| {
-        // Right to left, so the first is at the far right, as in Lightroom.
-        super::presets::presets_button(ui, app, out);
         if ui.add_enabled(live, egui::Button::new(t.reset)).clicked() {
             out.actions.push(UiAction::ResetAdjustments);
             out.actions.push(UiAction::Focus(Region::Develop));

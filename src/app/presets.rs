@@ -981,30 +981,28 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Clicks the Presets button, found by its three knobs: the only circles
-    /// in the text color on the Sliders heading's row, right of Reset.
-    fn open_popup(app: &mut App) -> (Vec<crate::ui::UiAction>, Painted) {
-        let painted = settled(app);
-        let reset = painted.pos_of(crate::i18n::t().reset);
-        let ink = app.egui_ctx.global_style().visuals.text_color();
-        let knobs: Vec<egui::Pos2> = painted
-            .circles_filled(ink)
-            .into_iter()
-            .filter(|c| (c.y - reset.y).abs() < 20.0 && c.x > reset.x)
-            .collect();
-        assert_eq!(knobs.len(), 3, "the button's three knobs: {knobs:?}");
-        let x = knobs.iter().map(|k| k.x).sum::<f32>() / 3.0;
-        let y = knobs.iter().map(|k| k.y).sum::<f32>() / 3.0;
-        let pos = egui::pos2(x, y);
-        // The pointer gets there before the press, as a hand's does. A jump
-        // and a press in one frame reads as a drag of the panel under it.
-        let _ = frame(app, vec![egui::Event::PointerMoved(pos)]);
-        click(app, pos)
+    /// The center of `item`'s rail icon as last drawn.
+    fn rail_icon(app: &App, item: RailItem) -> egui::Pos2 {
+        crate::ui::rail_button_rect(&app.egui_ctx, item)
+            .unwrap_or_else(|| panic!("the rail drew no {item:?} icon"))
+            .center()
+    }
+
+    /// Clicks the rail's Presets icon and lands what the click asked for.
+    /// Returns whether it asked for the page, and the page as it then paints.
+    fn open_page(app: &mut App) -> (bool, Painted) {
+        let _ = settled(app);
+        let icon = rail_icon(app, RailItem::Presets);
+        let (actions, _) = click(app, icon);
+        let asked = actions.contains(&crate::ui::UiAction::ClickRail(RailItem::Presets));
+        app.apply_ui_actions(actions);
+        wait_for_scans(app);
+        (asked, settled(app))
     }
 
     /// An App in the Grid with three photos selected, a library preset, and
     /// a preset folder already scanned.
-    fn popup_app(tag: &str) -> (App, PathBuf, Vec<PathBuf>, PathBuf) {
+    fn page_app(tag: &str) -> (App, PathBuf, Vec<PathBuf>, PathBuf) {
         let (mut app, dir, paths) = folder_app(tag, 3);
         let presets = preset_dir(
             &format!("{tag}-presets"),
@@ -1022,34 +1020,66 @@ pub(in crate::app) mod tests {
         (app, dir, paths, presets)
     }
 
-    /// The pointer path from the heading's button to a look on three photos,
+    /// The icon sits directly above Sliders in both views, as Lightroom's
+    /// Presets icon sits above its Edit icon.
+    #[test]
+    fn the_presets_icon_is_first_in_the_rail_in_the_grid_and_the_loupe() {
+        let (mut app, dir, paths, presets) = page_app("rail-icon");
+        let sliders = RailItem::Develop(DevelopTab::Sliders);
+        for mode in [ViewMode::Grid, ViewMode::Loupe] {
+            app.mode = mode;
+            if mode == ViewMode::Loupe {
+                app.shown = Shown::Preview(paths[0].clone(), 100, 100);
+            }
+            let _ = settled(&mut app);
+            let (above, below) = (rail_icon(&app, RailItem::Presets), rail_icon(&app, sliders));
+            assert_eq!(above.x, below.x, "{mode:?}: one column");
+            assert!(above.y < below.y, "{mode:?}: Presets is above Sliders");
+            let others = [RailItem::Info, RailItem::Export];
+            for other in others {
+                assert!(
+                    rail_icon(&app, other).y > below.y,
+                    "{mode:?}: nothing comes between them"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&presets);
+    }
+
+    /// The pointer path from the rail icon to a look on three photos,
     /// driven as real clicks, since a wiring mistake between the widget and
     /// the action shows up nowhere else.
     #[test]
-    fn a_popup_row_click_applies_that_preset_to_the_selection() {
-        let (mut app, dir, paths, presets) = popup_app("popup-click");
+    fn a_page_row_click_applies_that_preset_to_the_selection() {
+        let (mut app, dir, paths, presets) = page_app("page-click");
         let t = crate::i18n::t();
 
-        let (actions, open) = open_popup(&mut app);
+        std::fs::write(presets.join("Film/Fresh.xmp"), lr_preset("Fresh", "0", "0")).unwrap();
+        let (asked, page) = open_page(&mut app);
+        assert!(asked, "the icon asks for the Presets page");
         assert!(
-            actions.contains(&crate::ui::UiAction::RescanPresetFolders),
-            "opening the popup reads the folders again: {actions:?}"
+            app.folder_presets().any(|p| p.name == "Fresh"),
+            "opening the page reads the folders again"
         );
-        app.apply_ui_actions(actions);
-        wait_for_scans(&mut app);
+        assert_eq!(app.rail_lit(), Some(RailItem::Presets));
         assert!(
-            open.has(t.my_presets) && open.has("Golden"),
-            "the library is open at the top: {:?}",
-            open.texts()
+            app.develop_page_shown().is_none(),
+            "the page takes the panel"
         );
         assert!(
-            open.has("Film") && open.has("Travel"),
+            page.has(t.presets) && page.has(t.my_presets) && page.has("Golden"),
+            "the page is headed Presets, the library open at the top: {:?}",
+            page.texts()
+        );
+        assert!(
+            page.has("Film") && page.has("Travel"),
             "each folder group has a header: {:?}",
-            open.texts()
+            page.texts()
         );
-        assert!(!open.has("Warm"), "a folder group starts folded");
+        assert!(!page.has("Warm"), "a folder group starts folded");
 
-        let (_, film) = click(&mut app, open.pos_of("Film"));
+        let (_, film) = click(&mut app, page.pos_of("Film"));
         let (actions, after) = click(&mut app, film.pos_of("Warm"));
         let warm = presets.join("Film/Warm.xmp");
         assert!(
@@ -1061,8 +1091,8 @@ pub(in crate::app) mod tests {
             assert_eq!(app.edits.get(path), Some(&tone(0.5, 10.0)), "{path:?}");
         }
         assert!(
-            after.has("Golden"),
-            "the popup stays open for the next try: {:?}",
+            after.has("Golden") && app.presets_page_open(),
+            "the page stays open for the next try: {:?}",
             after.texts()
         );
 
@@ -1074,6 +1104,17 @@ pub(in crate::app) mod tests {
             ))),
             "{actions:?}"
         );
+
+        let sliders = RailItem::Develop(DevelopTab::Sliders);
+        let icon = rail_icon(&app, sliders);
+        let (actions, _) = click(&mut app, icon);
+        app.apply_ui_actions(actions);
+        assert_eq!(
+            app.develop_page_shown(),
+            Some(DevelopTab::Sliders),
+            "Sliders goes back"
+        );
+        assert!(!app.presets_page_open());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&presets);
     }
@@ -1081,14 +1122,14 @@ pub(in crate::app) mod tests {
     /// Catches rows that apply with nothing selected, and a library row
     /// that lost its Rename and Delete.
     #[test]
-    fn the_popup_rows_wait_for_a_selection_and_the_library_keeps_its_menu() {
-        let (mut app, dir, _, presets) = popup_app("popup-menu");
+    fn the_page_rows_wait_for_a_selection_and_the_library_keeps_its_menu() {
+        let (mut app, dir, _, presets) = page_app("page-menu");
         let t = crate::i18n::t();
         app.selected.clear();
         app.sel = None;
 
-        let (_, open) = open_popup(&mut app);
-        let (actions, _) = click(&mut app, open.pos_of("Golden"));
+        let (_, page) = open_page(&mut app);
+        let (actions, _) = click(&mut app, page.pos_of("Golden"));
         assert!(
             !actions
                 .iter()
@@ -1096,7 +1137,7 @@ pub(in crate::app) mod tests {
             "a row with no photo selected does nothing: {actions:?}"
         );
 
-        let dots = open.pos_of("\u{22ef}");
+        let dots = page.pos_of("\u{22ef}");
         let (actions, menu) = click(&mut app, dots);
         assert!(actions.is_empty(), "the row menu opens without acting");
         assert!(
@@ -1117,26 +1158,24 @@ pub(in crate::app) mod tests {
     /// The footer's entries reach their actions, and the search narrows
     /// the list across groups.
     #[test]
-    fn the_popup_footer_and_search_reach_their_actions() {
-        let (mut app, dir, _, presets) = popup_app("popup-footer");
+    fn the_page_footer_and_search_reach_their_actions() {
+        let (mut app, dir, _, presets) = page_app("page-footer");
         let t = crate::i18n::t();
 
-        let (_, open) = open_popup(&mut app);
-        let (actions, _) = click(&mut app, open.pos_of(t.import_lr_presets));
+        let (_, page) = open_page(&mut app);
+        assert!(page.has(t.preset_folders), "{:?}", page.texts());
+        let (actions, _) = click(&mut app, page.pos_of(t.import_lr_presets));
         assert!(
             actions.contains(&crate::ui::UiAction::ImportLrPresets),
             "{actions:?}"
         );
-
-        let (_, open) = open_popup(&mut app);
-        let (actions, _) = click(&mut app, open.pos_of(t.add_preset_folder));
+        let (actions, _) = click(&mut app, page.pos_of(t.add_preset_folder));
         assert!(
             actions.contains(&crate::ui::UiAction::AddPresetFolder),
             "{actions:?}"
         );
 
-        let (_, open) = open_popup(&mut app);
-        let (_, open) = click(&mut app, open.pos_of(t.search_presets));
+        let _ = click(&mut app, page.pos_of(t.search_presets));
         let _ = frame(&mut app, vec![egui::Event::Text("nig".into())]);
         let found = settled(&mut app);
         assert!(
@@ -1144,7 +1183,6 @@ pub(in crate::app) mod tests {
             "a search opens the groups with a match and hides the rest: {:?}",
             found.texts()
         );
-        assert!(open.has(t.preset_folders));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&presets);
     }
@@ -1152,7 +1190,7 @@ pub(in crate::app) mod tests {
     /// Catches a removal that leaves the folder's presets listed.
     #[test]
     fn removing_a_preset_folder_drops_its_presets() {
-        let (mut app, dir, _, presets) = popup_app("popup-remove");
+        let (mut app, dir, _, presets) = page_app("page-remove");
         assert_eq!(app.folder_presets().count(), 2);
 
         app.apply_ui_actions(vec![crate::ui::UiAction::RemovePresetFolder(
