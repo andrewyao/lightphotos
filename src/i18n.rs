@@ -359,8 +359,6 @@ pub struct Strings {
     pub crop_section: &'static str,
     pub apply_settings: &'static str,
     pub apply_settings_needs_copy: &'static str,
-    pub preset_menu: &'static str,
-    pub apply_preset_selection_tip: &'static str,
     pub apply_settings_tip: &'static str,
     pub settings_from: fn(&str) -> String,
     pub export_jpg: &'static str,
@@ -381,7 +379,6 @@ pub struct Strings {
     // Bulk confirmations.
     pub confirm_apply_settings: fn(usize) -> String,
     /// (preset name, photo count)
-    pub confirm_apply_preset: fn(&str, usize) -> String,
     pub confirm_auto_tone: fn(usize) -> String,
     pub confirm_delete: fn(usize) -> String,
     pub confirm_delete_groups: fn(usize, usize) -> String,
@@ -390,7 +387,6 @@ pub struct Strings {
     pub remove_group: &'static str,
     pub trash_group_photos: fn(usize) -> String,
     /// Titles and confirm buttons of the bulk dialogs that no toolbar label fits.
-    pub bulk_apply_preset: &'static str,
     pub bulk_delete: &'static str,
 
     // Develop panel.
@@ -1135,8 +1131,6 @@ pub static EN: Strings = Strings {
     crop_section: "Crop",
     apply_settings: "Apply Adjustment",
     apply_settings_needs_copy: "Copy the adjustment from a photo first",
-    preset_menu: "Preset",
-    apply_preset_selection_tip: "Apply a saved preset to the selection",
     apply_settings_tip: "Apply the copied adjustment to the selection (Cmd+Shift+V)",
     settings_from: |name| format!("from {name}"),
     export_jpg: "Export",
@@ -1304,7 +1298,6 @@ pub static EN: Strings = Strings {
     ],
 
     confirm_apply_settings: |n| format!("Apply the copied adjustment to {n} photo(s)?"),
-    confirm_apply_preset: |name, n| format!("Apply {name} to {n} photo(s)?"),
     confirm_auto_tone: |n| format!("Auto Adjust {n} photo(s)?"),
     confirm_delete: if WEB {
         |n| format!("Permanently delete {n} photo(s)? This cannot be undone.")
@@ -1334,7 +1327,6 @@ pub static EN: Strings = Strings {
     } else {
         |n| format!("Move {n} Photos to Trash")
     },
-    bulk_apply_preset: "Apply Preset",
     bulk_delete: if WEB { "Delete Photos" } else { "Move to Trash" },
 
     develop: "Develop",
@@ -1977,8 +1969,6 @@ pub static ZH: Strings = Strings {
     crop_section: "裁剪",
     apply_settings: "应用调整",
     apply_settings_needs_copy: "请先从一张照片拷贝调整",
-    preset_menu: "预设",
-    apply_preset_selection_tip: "将已保存的预设应用到所选照片",
     apply_settings_tip: "将拷贝的调整应用到所选照片 (Cmd+Shift+V)",
     settings_from: |name| format!("来自 {name}"),
     export_jpg: "导出",
@@ -2137,7 +2127,6 @@ pub static ZH: Strings = Strings {
     ],
 
     confirm_apply_settings: |n| format!("将拷贝的调整应用到 {n} 张照片？"),
-    confirm_apply_preset: |name, n| format!("将 {name} 应用到 {n} 张照片？"),
     confirm_auto_tone: |n| format!("对 {n} 张照片应用自动调整？"),
     confirm_delete: if WEB {
         |n| format!("永久删除 {n} 张照片？此操作无法撤销。")
@@ -2163,7 +2152,6 @@ pub static ZH: Strings = Strings {
     } else {
         |n| format!("将 {n} 张照片移到废纸篓")
     },
-    bulk_apply_preset: "应用预设",
     bulk_delete: if WEB {
         "删除照片"
     } else {

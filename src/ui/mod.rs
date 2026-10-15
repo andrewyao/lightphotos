@@ -262,8 +262,6 @@ pub enum UiAction {
 pub enum BulkKind {
     /// Apply the copied develop settings.
     ApplySettings,
-    /// Apply this saved preset.
-    ApplyPreset(u64),
     AutoTone,
     /// Auto Tone every photo in the grid, not the selection.
     AutoToneAll,

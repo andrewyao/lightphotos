@@ -861,8 +861,7 @@ fn auto_adjust_button(ui: &mut egui::Ui, label: &str, out: &mut FrameOutput) {
     }
 }
 
-/// Apply Adjustment, live once one is copied, with where it came from, and
-/// the presets menu while presets are shown.
+/// Apply Adjustment, live once one is copied, with where it came from.
 fn apply_adjustment(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let apply = ui
@@ -879,24 +878,6 @@ fn apply_adjustment(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
     if let Some(name) = app.copied_settings_name() {
         ui.weak((t.settings_from)(&name));
     }
-    if !crate::app::SHOW_PRESETS {
-        return;
-    }
-    ui.add_enabled_ui(!app.presets().is_empty(), |ui| {
-        egui::ComboBox::from_id_salt("bulk_preset")
-            .selected_text(t.preset_menu)
-            .show_ui(ui, |ui| {
-                for preset in app.presets() {
-                    if ui.button(&preset.name).clicked() {
-                        out.actions
-                            .push(UiAction::RequestBulk(BulkKind::ApplyPreset(preset.id)));
-                    }
-                }
-            });
-    })
-    .response
-    .on_hover_text(t.apply_preset_selection_tip)
-    .on_disabled_hover_text(t.no_presets);
 }
 
 fn export_button(ui: &mut egui::Ui, out: &mut FrameOutput) {

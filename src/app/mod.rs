@@ -37,9 +37,8 @@ pub(crate) const GRID_CELL_PT: f32 = 192.0;
 /// photo set has checked `CLOSED_EYE_RATIO`.
 pub(crate) const SHOW_EYES_FILTER: bool = false;
 
-/// Whether presets are reachable: the Develop panel's Presets block, the
-/// selection bar's Preset dropdown, and Cmd+Shift+P. Off until the feature is
-/// ready. Saved presets stay on disk either way.
+/// Whether presets are reachable: the Develop panel's Presets block and
+/// Cmd+Shift+N. Off until the feature is ready. Saved presets stay on disk either way.
 pub(crate) const SHOW_PRESETS: bool = false;
 
 /// Whether Settings shows Auto Tone's centering choice. Hidden for now; the

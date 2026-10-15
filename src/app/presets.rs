@@ -88,8 +88,7 @@ impl App {
         self.request_redraw();
     }
 
-    /// Applies one preset to the photo on screen. The selection-wide apply is a
-    /// bulk action, because it overwrites N photos with no undo.
+    /// Applies one preset to the photo on screen.
     pub(super) fn apply_preset(&mut self, id: u64) {
         let Some(preset) = self.presets.get(id) else {
             return;
@@ -100,25 +99,6 @@ impl App {
             return;
         };
         let n = self.apply_look_to(&look, CopySections::LOOK, &[path]);
-        self.set_status(
-            StatusKind::Success,
-            (crate::i18n::t().applied_preset)(&name, n),
-        );
-    }
-
-    /// Applies one preset across the grid selection. This is a bulk action, so
-    /// it is confirmed first: it overwrites eleven fields on N photos with no
-    /// undo, and N can be a whole folder after a stray `Cmd+A`.
-    pub(super) fn apply_preset_to_selection(&mut self, id: u64) {
-        let Some(preset) = self.presets.get(id) else {
-            return;
-        };
-        let name = preset.name.clone();
-        let look = preset.adjustments;
-        let n = self.apply_look_to(&look, CopySections::LOOK, &self.action_paths());
-        if n == 0 {
-            return;
-        }
         self.set_status(
             StatusKind::Success,
             (crate::i18n::t().applied_preset)(&name, n),
@@ -444,37 +424,6 @@ pub(in crate::app) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[test]
-    fn the_selection_wide_apply_is_confirmed_and_then_writes_every_photo() {
-        let (mut app, dir, paths) = folder_app("bulk", 3);
-        app.presets.add("Golden", tone(0.4, 0.0), Vec::new());
-        let id = app.presets.presets()[0].id;
-        app.selected = (0..3).collect();
-
-        app.request_bulk(crate::ui::BulkKind::ApplyPreset(id));
-        let (_, prompt) = app.pending_bulk_prompt().expect("the confirm modal opens");
-        assert!(
-            prompt.contains("Golden") && prompt.contains('3'),
-            "the prompt names the preset and the photo count: {prompt}"
-        );
-        for path in &paths {
-            assert!(
-                !app.edits.contains_key(path),
-                "nothing is written before the confirmation"
-            );
-        }
-
-        app.run_bulk(crate::ui::BulkKind::ApplyPreset(id));
-
-        flush(&mut app);
-        let folder_store = FolderStore::with_dir(dir.clone());
-        for path in &paths {
-            assert_eq!(app.edits.get(path).unwrap().exposure, 0.4);
-            assert_eq!(folder_store.adjustments(path).exposure, 0.4);
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     /// The pointer paths the tests above reach through `App` directly: clicking
     /// a preset row, and opening its row menu. Driven as real clicks against the
     /// real widget tree, because a wiring mistake between the widget and the
@@ -544,52 +493,6 @@ pub(in crate::app) mod tests {
             "whose Delete asks for confirmation rather than deleting: {actions:?}"
         );
         assert_eq!(app.presets.presets().len(), 2, "nothing deleted yet");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The grid's own entry point, which the Develop panel cannot reach: the
-    /// panel only draws in the Loupe and the selection bar only outside it.
-    #[test]
-    fn the_selection_bar_dropdown_asks_to_apply_across_the_selection() {
-        if !crate::app::SHOW_PRESETS {
-            return;
-        }
-        let (mut app, dir, _) = folder_app("dropdown", 3);
-        app.presets.add("Golden", tone(0.4, 0.0), Vec::new());
-        app.mode = ViewMode::Grid;
-        app.selected = (0..3).collect();
-
-        let t = crate::i18n::t();
-        let painted = settled(&mut app);
-        assert!(
-            painted.has(t.preset_menu),
-            "the selection bar offers the preset dropdown: {:?}",
-            painted.texts()
-        );
-
-        let (_, open) = click(&mut app, painted.pos_of(t.preset_menu));
-        assert!(
-            open.has("Golden"),
-            "which lists every preset: {:?}",
-            open.texts()
-        );
-
-        let golden = app.presets.presets()[0].id;
-        let (actions, _) = click(&mut app, open.pos_of("Golden"));
-        assert!(
-            actions.contains(&crate::ui::UiAction::RequestBulk(
-                crate::ui::BulkKind::ApplyPreset(golden)
-            )),
-            "and picking one requests the confirmed bulk action: {actions:?}"
-        );
-
-        app.apply_ui_actions(actions);
-        assert!(
-            app.pending_bulk_prompt().is_some(),
-            "so the confirmation opens before anything is written"
-        );
-        assert!(app.edits.is_empty(), "nothing written before the confirm");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

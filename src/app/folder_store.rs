@@ -590,10 +590,6 @@ impl App {
         let n = self.action_count();
         let prompt = match kind {
             ui::BulkKind::ApplySettings => (t.confirm_apply_settings)(n),
-            ui::BulkKind::ApplyPreset(id) => {
-                let name = self.presets.get(id).map(|p| p.name.clone());
-                (t.confirm_apply_preset)(name.as_deref().unwrap_or_default(), n)
-            }
             ui::BulkKind::AutoTone => (t.confirm_auto_tone)(n),
             ui::BulkKind::AutoToneAll => (t.confirm_auto_tone)(self.all_member_paths().len()),
             ui::BulkKind::Delete => match self.selected_groups().len() {
@@ -720,7 +716,6 @@ impl App {
     pub(super) fn run_bulk(&mut self, kind: ui::BulkKind) {
         match kind {
             ui::BulkKind::ApplySettings => self.apply_settings_to_selection(),
-            ui::BulkKind::ApplyPreset(id) => self.apply_preset_to_selection(id),
             ui::BulkKind::AutoTone => self.auto_tone_selection(),
             ui::BulkKind::AutoToneAll => self.auto_tone_all(),
             ui::BulkKind::Delete => self.delete_selection(),
