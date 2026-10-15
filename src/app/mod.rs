@@ -650,6 +650,11 @@ pub(crate) struct App {
     /// Open name prompt: the edit buffer, and which preset it renames (`None`
     /// is a new one).
     preset_name_edit: Option<(String, Option<u64>)>,
+    /// The catalog's preset folders, each with its last scan.
+    preset_folders: Vec<(PathBuf, presets::FolderState)>,
+    /// The latest scan's results. A rescan replaces it, so an older scan's
+    /// results are dropped with its receiver.
+    preset_scan: Option<Receiver<presets::FolderScan>>,
 
     show_help: bool,
     show_settings: bool,
@@ -824,7 +829,7 @@ impl App {
             catalog::note_recent(&mut recent, launch.catalog.at());
             recent
         };
-        Self {
+        let mut app = Self {
             window: None,
             renderer: None,
             #[cfg(test)]
@@ -943,6 +948,8 @@ impl App {
             #[cfg(not(test))]
             presets: crate::persist::presets::PresetStore::load(),
             preset_name_edit: None,
+            preset_folders: Vec::new(),
+            preset_scan: None,
             show_help: false,
             show_settings: false,
             tour: None,
@@ -978,7 +985,9 @@ impl App {
             last_drag: (0.0, 0.0),
             egui_ctx,
             egui_state: None,
-        }
+        };
+        app.rescan_preset_folders();
+        app
     }
 
     /// Open a directory in the Grid with nothing selected, a file in the
@@ -1420,7 +1429,7 @@ impl App {
                 ui::UiAction::SetPresetNameText(text) => self.set_preset_name_text(text),
                 ui::UiAction::CommitPresetName => self.commit_preset_name(),
                 ui::UiAction::CancelPresetName => self.cancel_preset_name(),
-                ui::UiAction::ApplyPreset(id) => self.apply_preset(id),
+                ui::UiAction::ApplyPreset(preset) => self.apply_preset(&preset),
                 ui::UiAction::RequestDeletePreset(id) => {
                     self.pending_confirm = Some(PendingConfirm::DeletePreset(id));
                     self.request_redraw();

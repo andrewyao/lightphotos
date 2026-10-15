@@ -337,24 +337,20 @@ impl App {
             }
             Command::Preset(p) => {
                 let paths = self.resolve(&p.photos)?;
-                let Some(preset) = self.presets.presets().iter().find(|s| s.name == p.name) else {
-                    let names: Vec<&str> = self
-                        .presets
-                        .presets()
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .collect();
-                    return Err(CommandError::Failed {
-                        reason: format!(
-                            "no preset named `{}`; the presets are: {}",
-                            p.name,
-                            names.join(", ")
-                        ),
-                    });
-                };
-                let look = preset.adjustments;
+                let failed = |reason| CommandError::Failed { reason };
+                let preset = self
+                    .find_preset(&p.name, p.group.as_deref())
+                    .map_err(failed)?;
+                let (_, look) = self
+                    .resolve_preset(&preset)
+                    .ok_or_else(|| failed(format!("preset `{}` is gone", p.name)))?;
                 let n = self.apply_look_to(&look, crate::develop::copy::CopySections::LOOK, &paths);
                 done(n)
+            }
+            Command::AddPresetFolder(p) => {
+                self.add_preset_folder(&p.path)
+                    .map_err(|reason| CommandError::Failed { reason })?;
+                done(0)
             }
             Command::Export(p) => {
                 let paths = self.resolve(&p.photos)?;

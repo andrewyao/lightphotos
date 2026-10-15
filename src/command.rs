@@ -65,6 +65,8 @@ pub enum Command {
     ClearMasks(MaskClearParams),
     #[serde(rename = "preset.apply")]
     Preset(PresetParams),
+    #[serde(rename = "preset.add_folder")]
+    AddPresetFolder(PresetFolderParams),
     #[serde(rename = "export")]
     Export(ExportParams),
     #[serde(rename = "edit.undo")]
@@ -458,6 +460,7 @@ fn apply_to_record(
         | Command::Navigate(_)
         | Command::AutoTone(_)
         | Command::Preset(_)
+        | Command::AddPresetFolder(_)
         | Command::Export(_)
         | Command::Undo => return Err(CommandError::NeedsApp),
     }
@@ -690,8 +693,18 @@ impl Command {
 #[serde(deny_unknown_fields)]
 pub struct PresetParams {
     pub name: String,
+    /// The group a folder preset is listed under, for a name more than one
+    /// preset folder holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Photos::is_selected")]
     pub photos: Photos,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PresetFolderParams {
+    pub path: PathBuf,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -871,6 +884,7 @@ impl Command {
             SetMask(_) => "mask.set",
             ClearMasks(_) => "mask.clear",
             Preset(_) => "preset.apply",
+            AddPresetFolder(_) => "preset.add_folder",
             Export(_) => "export",
             Undo => "edit.undo",
         }
@@ -894,7 +908,7 @@ impl Command {
             Preset(p) => Some(&p.photos),
             Export(p) => Some(&p.photos),
             OpenFolder(_) | NewCatalog(_) | OpenCatalog(_) | SwitchCatalog(_) | View(_)
-            | Zoom(_) | Select(_) | Navigate(_) | Undo => None,
+            | Zoom(_) | Select(_) | Navigate(_) | AddPresetFolder(_) | Undo => None,
         }
     }
 
@@ -946,7 +960,15 @@ impl Command {
             ),
             SetMask(_) => ("Change one mask's shape, invert or sliders.", true),
             ClearMasks(_) => ("Remove one mask, or every mask.", true),
-            Preset(_) => ("Apply a saved preset by name.", false),
+            Preset(_) => (
+                "Apply a preset by name: a saved one, or one from a preset folder. Give \
+                 `group` when several preset folders hold that name.",
+                false,
+            ),
+            AddPresetFolder(_) => (
+                "Add a folder of Lightroom .xmp presets to the catalog's preset folders.",
+                false,
+            ),
             Export(_) => (
                 "Export with the form's settings, or with `settings` for this run.",
                 false,
@@ -1046,7 +1068,11 @@ impl Command {
             Command::ClearMasks(MaskClearParams::default()),
             Command::Preset(PresetParams {
                 name: "Golden".into(),
+                group: None,
                 photos: Photos::Selected,
+            }),
+            Command::AddPresetFolder(PresetFolderParams {
+                path: PathBuf::from("/Users/me/Presets"),
             }),
             Command::Export(ExportParams::default()),
             Command::Undo,

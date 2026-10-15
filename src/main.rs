@@ -574,6 +574,7 @@ impl App {
         self.poll_selection_mask();
         self.poll_coverage();
         let detecting = self.coverage.busy();
+        let scanning_presets = self.poll_preset_scans();
         self.poll_remove_ca();
 
         // Worker threads don't wake winit, so poll on a timer while work is
@@ -593,6 +594,7 @@ impl App {
             || vision_pending
             || scoring
             || detecting
+            || scanning_presets
         {
             Some(if cfg!(target_arch = "wasm32") {
                 16

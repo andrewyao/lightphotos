@@ -78,8 +78,8 @@ pub enum UiAction {
     SetPresetNameText(String),
     CommitPresetName,
     CancelPresetName,
-    /// Apply this preset to the shown photo.
-    ApplyPreset(u64),
+    /// Apply this preset to the photos the keyboard acts on.
+    ApplyPreset(PresetRef),
     /// Ask to delete this preset (opens its own confirm modal).
     RequestDeletePreset(u64),
     /// Open the Lightroom preset picker. Native only; the browser has no
@@ -254,6 +254,14 @@ pub enum UiAction {
     TourBack,
     /// Skip or finish the tour.
     EndTour,
+}
+
+/// A preset by where it lives: the library by id, or a preset folder by
+/// file. A folder preset is looked up in the last scan, never read again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PresetRef {
+    Library(u64),
+    Folder(std::path::PathBuf),
 }
 
 /// A bulk action requested from the toolbar, run against the current

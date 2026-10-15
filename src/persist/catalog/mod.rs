@@ -440,8 +440,6 @@ impl Catalog {
     }
 
     /// The folders presets are read from, sorted, none inside another.
-    // The app calls this from the next commit.
-    #[allow(dead_code)]
     pub(crate) fn preset_folders(&self) -> &[PathBuf] {
         self.preset_folders.folders()
     }
@@ -449,8 +447,8 @@ impl Catalog {
     /// Add a preset folder, by [`add_root`]'s rule: a folder inside one
     /// already listed is already scanned. Returns whether the list changed.
     /// Writes only the preset-folders record.
-    // The app calls this from the next commit.
-    #[allow(dead_code)]
+    // The browser adds through its picker from a later commit.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn add_preset_folder(&mut self, dir: &Path) -> bool {
         let changed = self.preset_folders.add(dir).unwrap_or_else(|e| {
             self.last_error = Some(e);

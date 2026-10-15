@@ -933,6 +933,7 @@ quit
                 )),
                 Step::Run(Box::new(Command::Preset(crate::command::PresetParams {
                     name: "#1".into(),
+                    group: None,
                     photos: crate::command::Photos::Selected,
                 }))),
                 Step::Commands,

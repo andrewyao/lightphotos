@@ -1,5 +1,29 @@
 use super::*;
 use crate::develop::copy::CopySections;
+use crate::persist::preset_folders::{FolderPreset, Scan};
+use crate::ui::PresetRef;
+
+/// One preset folder's scan.
+#[derive(Debug, PartialEq)]
+pub(crate) enum FolderState {
+    /// No scan has finished since the folder was added or the app started.
+    Scanning,
+    Ready {
+        presets: Vec<FolderPreset>,
+        /// `.xmp` files that were not develop presets or would not read.
+        skipped: usize,
+    },
+    /// The folder could not be read, with why.
+    Unavailable(String),
+}
+
+/// A finished scan of one folder.
+pub(crate) type FolderScan = (PathBuf, Result<Scan, String>);
+
+/// A folder preset's group and name, as `preset.apply` lists a clash.
+fn label(p: &FolderPreset) -> String {
+    format!("{} / {}", p.group, p.name)
+}
 
 impl App {
     /// Opens the name prompt for a new preset, seeded with a suggestion. Both
@@ -88,21 +112,169 @@ impl App {
         self.request_redraw();
     }
 
-    /// Applies one preset to the photo on screen.
-    pub(super) fn apply_preset(&mut self, id: u64) {
-        let Some(preset) = self.presets.get(id) else {
+    /// Applies a preset to every photo the keyboard acts on, with no
+    /// confirmation: the batch is one undo step.
+    pub(super) fn apply_preset(&mut self, preset: &PresetRef) {
+        let Some((name, look)) = self.resolve_preset(preset) else {
             return;
         };
-        let name = preset.name.clone();
-        let look = preset.adjustments;
-        let Some(path) = self.shown.path().map(Path::to_path_buf) else {
+        let n = self.apply_look_to(&look, CopySections::LOOK, &self.action_paths());
+        if n == 0 {
             return;
-        };
-        let n = self.apply_look_to(&look, CopySections::LOOK, &[path]);
+        }
         self.set_status(
             StatusKind::Success,
             (crate::i18n::t().applied_preset)(&name, n),
         );
+    }
+
+    /// A preset's name and look. A folder preset comes from the last scan.
+    pub(crate) fn resolve_preset(&self, preset: &PresetRef) -> Option<(String, Adjustments)> {
+        match preset {
+            PresetRef::Library(id) => self
+                .presets
+                .get(*id)
+                .map(|p| (p.name.clone(), p.adjustments)),
+            PresetRef::Folder(path) => self
+                .folder_presets()
+                .find(|p| &p.path == path)
+                .map(|p| (p.name.clone(), p.adj)),
+        }
+    }
+
+    /// Every preset the last scans found, folder by folder.
+    pub(crate) fn folder_presets(&self) -> impl Iterator<Item = &FolderPreset> {
+        self.preset_folders
+            .iter()
+            .flat_map(|(_, state)| match state {
+                FolderState::Ready { presets, .. } => presets.as_slice(),
+                FolderState::Scanning | FolderState::Unavailable(_) => &[],
+            })
+    }
+
+    /// The preset `preset.apply` names: the library's of that exact name,
+    /// else the one folder preset of that name, in `group` when given.
+    pub(super) fn find_preset(&self, name: &str, group: Option<&str>) -> Result<PresetRef, String> {
+        if group.is_none() {
+            if let Some(p) = self.presets.presets().iter().find(|p| p.name == name) {
+                return Ok(PresetRef::Library(p.id));
+            }
+        }
+        let found: Vec<&FolderPreset> = self
+            .folder_presets()
+            .filter(|p| p.name == name && group.is_none_or(|g| p.group == g))
+            .collect();
+        match found.as_slice() {
+            [one] => Ok(PresetRef::Folder(one.path.clone())),
+            [] if self.preset_scan.is_some() => {
+                Err("the preset folders are still being read; try again once idle".into())
+            }
+            [] => {
+                const SHOWN: usize = 20;
+                let names: Vec<String> = self
+                    .presets
+                    .presets()
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .chain(self.folder_presets().map(label))
+                    .collect();
+                let more = names.len().saturating_sub(SHOWN);
+                let mut list = names.into_iter().take(SHOWN).collect::<Vec<_>>().join(", ");
+                if more > 0 {
+                    list.push_str(&format!(" and {more} more"));
+                }
+                Err(format!("no preset named `{name}`; the presets are: {list}"))
+            }
+            many => {
+                let labels: Vec<String> = many.iter().map(|p| label(p)).collect();
+                Err(format!(
+                    "{} folder presets are named `{name}`: {}; give its `group`",
+                    many.len(),
+                    labels.join(", ")
+                ))
+            }
+        }
+    }
+
+    /// Adds a preset folder to the catalog and scans it. `Err` for a path
+    /// that is not a folder.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn add_preset_folder(&mut self, dir: &Path) -> Result<(), String> {
+        if !dir.is_dir() {
+            return Err(format!("{} is not a folder", dir.display()));
+        }
+        if self.catalog.add_preset_folder(dir) {
+            self.rescan_preset_folders();
+        }
+        Ok(())
+    }
+
+    /// The browser adds a preset folder through its picker, which hands over
+    /// a handle a path cannot name.
+    #[cfg(target_arch = "wasm32")]
+    pub(super) fn add_preset_folder(&mut self, _dir: &Path) -> Result<(), String> {
+        Err("the browser adds preset folders through Add preset folder…".into())
+    }
+
+    /// Reads the catalog's preset folders again. Each keeps showing its last
+    /// result until the new one lands; a folder no longer listed goes.
+    pub(crate) fn rescan_preset_folders(&mut self) {
+        let folders = self.catalog.preset_folders().to_vec();
+        let mut old = std::mem::take(&mut self.preset_folders);
+        self.preset_folders = folders
+            .iter()
+            .map(|f| {
+                let state = old
+                    .iter()
+                    .position(|(o, _)| o == f)
+                    .map_or(FolderState::Scanning, |i| old.swap_remove(i).1);
+                (f.clone(), state)
+            })
+            .collect();
+        self.preset_scan = None;
+        if folders.is_empty() {
+            return;
+        }
+        match spawn_scan(folders) {
+            Ok(rx) => self.preset_scan = Some(rx),
+            Err(e) => {
+                for (_, state) in &mut self.preset_folders {
+                    *state = FolderState::Unavailable(e.clone());
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Lands finished scans. True while the latest scan is still running.
+    pub(crate) fn poll_preset_scans(&mut self) -> bool {
+        let Some(rx) = &self.preset_scan else {
+            return false;
+        };
+        let mut landed = Vec::new();
+        let running = loop {
+            match rx.try_recv() {
+                Ok(scan) => landed.push(scan),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break false,
+            }
+        };
+        if !running {
+            self.preset_scan = None;
+        }
+        if landed.is_empty() {
+            return running;
+        }
+        for (folder, result) in landed {
+            if let Some((_, state)) = self.preset_folders.iter_mut().find(|(f, _)| *f == folder) {
+                *state = match result {
+                    Ok(Scan { presets, skipped }) => FolderState::Ready { presets, skipped },
+                    Err(e) => FolderState::Unavailable(e),
+                };
+            }
+        }
+        self.request_redraw();
+        running
     }
 
     /// Opens the Lightroom preset picker and imports what the user chose.
@@ -179,10 +351,38 @@ impl App {
     }
 }
 
+/// Scans `folders` in order on a thread of its own, sending each result as
+/// it lands. The thread stops early once the receiver is dropped.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_scan(folders: Vec<PathBuf>) -> Result<Receiver<FolderScan>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("preset-scan".into())
+        .spawn(move || {
+            for folder in folders {
+                use crate::persist::preset_folders::{scan, LIMITS};
+                let scan = scan(&folder, &LIMITS);
+                if tx.send((folder, scan)).is_err() {
+                    return;
+                }
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rx)
+}
+
+/// The browser reads preset folders through kept handles, from a later
+/// commit.
+#[cfg(target_arch = "wasm32")]
+fn spawn_scan(_folders: Vec<PathBuf>) -> Result<Receiver<FolderScan>, String> {
+    Err("preset folders are not read in the browser yet".into())
+}
+
 #[cfg(test)]
 pub(in crate::app) mod tests {
     use super::*;
     use crate::app::test_support::*;
+    use crate::command::Command;
     use crate::develop::Crop;
     use crate::persist::folder_store::FolderStore;
 
@@ -228,6 +428,241 @@ pub(in crate::app) mod tests {
         }
     }
 
+    /// A Lightroom preset as exported, with its group left to the folder.
+    fn lr_preset(name: &str, exposure: &str, contrast: &str) -> String {
+        format!(
+            "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\
+             <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\
+             <rdf:Description rdf:about=\"\" \
+             xmlns:crs=\"http://ns.adobe.com/camera-raw-settings/1.0/\" \
+             crs:PresetType=\"Normal\" crs:Exposure2012=\"{exposure}\" \
+             crs:Contrast2012=\"{contrast}\" crs:HasSettings=\"True\">\
+             <crs:Name><rdf:Alt><rdf:li xml:lang=\"x-default\">{name}</rdf:li></rdf:Alt></crs:Name>\
+             </rdf:Description></rdf:RDF></x:xmpmeta>"
+        )
+    }
+
+    /// A preset folder holding `files` of `(relative path, xmp)`.
+    fn preset_dir(tag: &str, files: &[(&str, String)]) -> PathBuf {
+        let dir = temp_folder(tag);
+        for (rel, xmp) in files {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, xmp).unwrap();
+        }
+        dir
+    }
+
+    fn wait_for_scans(app: &mut App) {
+        let start = std::time::Instant::now();
+        while app.poll_preset_scans() {
+            assert!(
+                start.elapsed().as_secs() < 10,
+                "the preset scan never ended"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    fn exposure_of(app: &App, path: &Path) -> f32 {
+        app.edits.get(path).map_or(0.0, |a| a.exposure)
+    }
+
+    /// Catches an apply that reaches only the shown photo, one that asks
+    /// first, and a batch that takes one undo per photo or undoes the edit
+    /// before it too.
+    #[test]
+    fn a_folder_preset_applies_to_the_selection_and_one_undo_reverts_it() {
+        let (mut app, dir, paths) = folder_app("folder-apply", 3);
+        let presets = preset_dir(
+            "folder-apply-presets",
+            &[("Film/Warm.xmp", lr_preset("Warm", "+0.5", "+10"))],
+        );
+        app.selected = [0].into();
+        app.edit_each(&paths[..1], |adj| Adjustments {
+            exposure: 0.1,
+            ..adj
+        });
+        app.save_edit_unless_dragging();
+
+        app.add_preset_folder(&presets).unwrap();
+        wait_for_scans(&mut app);
+        let warm = presets.join("Film/Warm.xmp");
+        assert_eq!(
+            app.resolve_preset(&PresetRef::Folder(warm.clone())),
+            Some(("Warm".to_string(), tone(0.5, 10.0)))
+        );
+
+        app.selected = (0..3).collect();
+        app.apply_ui_actions(vec![crate::ui::UiAction::ApplyPreset(PresetRef::Folder(
+            warm,
+        ))]);
+        app.save_edit_unless_dragging();
+
+        assert!(!app.confirm_open(), "no confirmation");
+        for path in &paths {
+            assert_eq!(app.edits.get(path), Some(&tone(0.5, 10.0)), "{path:?}");
+        }
+        assert_eq!(
+            app.status_text(),
+            Some((crate::i18n::t().applied_preset)("Warm", 3).as_str())
+        );
+
+        #[cfg(target_os = "macos")]
+        let cmd = ModifiersState::SUPER;
+        #[cfg(not(target_os = "macos"))]
+        let cmd = ModifiersState::CONTROL;
+        app.modifiers = cmd;
+        app.handle_key(KeyCode::KeyZ);
+
+        assert_eq!(exposure_of(&app, &paths[0]), 0.1, "back to its own edit");
+        assert!(!app.edits.contains_key(&paths[1]));
+        assert!(!app.edits.contains_key(&paths[2]));
+        flush(&mut app);
+        let folder_store = FolderStore::with_dir(dir.clone());
+        assert_eq!(folder_store.adjustments(&paths[0]).exposure, 0.1);
+        assert!(folder_store.adjustments(&paths[1]).is_identity());
+        assert!(folder_store.adjustments(&paths[2]).is_identity());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&presets);
+    }
+
+    /// In the Loupe with nothing picked in the Grid, the photo on screen is
+    /// what a preset changes.
+    #[test]
+    fn a_loupe_photo_with_no_grid_selection_is_the_target() {
+        let (mut app, dir, paths) = folder_app("loupe-target", 3);
+        app.presets.add("Golden", tone(0.4, 0.0), Vec::new());
+        let golden = app.presets.presets()[0].id;
+        app.mode = ViewMode::Loupe;
+        app.selected.clear();
+        app.sel = None;
+        app.want = Some(paths[1].clone());
+
+        app.apply_preset(&PresetRef::Library(golden));
+
+        assert_eq!(app.edits.get(&paths[1]), Some(&tone(0.4, 0.0)));
+        assert!(!app.edits.contains_key(&paths[0]));
+        assert!(!app.edits.contains_key(&paths[2]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Catches `preset.apply` picking one of two same-named folder presets
+    /// by scan luck, and `group` not narrowing it.
+    #[test]
+    fn a_name_two_folders_hold_needs_its_group() {
+        let (mut app, dir, paths) = folder_app("preset-group", 1);
+        let presets = preset_dir(
+            "preset-group-presets",
+            &[
+                ("Film/a.xmp", lr_preset("Warm", "+0.5", "0")),
+                ("Travel/b.xmp", lr_preset("Warm", "-0.5", "0")),
+            ],
+        );
+        app.run(Command::AddPresetFolder(
+            crate::command::PresetFolderParams {
+                path: presets.clone(),
+            },
+        ))
+        .unwrap();
+        wait_for_scans(&mut app);
+        let apply = |group: Option<&str>| {
+            Command::Preset(crate::command::PresetParams {
+                name: "Warm".into(),
+                group: group.map(str::to_string),
+                photos: crate::command::Photos::Named(vec![paths[0].clone()]),
+            })
+        };
+
+        let err = app.run(apply(None)).unwrap_err().to_string();
+        assert!(
+            err.contains("Film / Warm") && err.contains("Travel / Warm"),
+            "the error lists both: {err}"
+        );
+        assert!(app.edits.is_empty());
+
+        app.run(apply(Some("Travel"))).unwrap();
+        assert_eq!(exposure_of(&app, &paths[0]), -0.5);
+
+        app.presets.add("Warm", tone(0.2, 0.0), Vec::new());
+        app.run(apply(None)).unwrap();
+        assert_eq!(
+            exposure_of(&app, &paths[0]),
+            0.2,
+            "the library's comes first"
+        );
+
+        let missing = app.run(Command::AddPresetFolder(
+            crate::command::PresetFolderParams {
+                path: presets.join("nope"),
+            },
+        ));
+        assert!(missing.is_err(), "a path that is not a folder is refused");
+        assert_eq!(app.catalog.preset_folders(), std::slice::from_ref(&presets));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&presets);
+    }
+
+    /// Catches a switch that keeps the last catalog's folder presets, or one
+    /// that never reads the new catalog's.
+    #[test]
+    fn switching_catalogs_swaps_the_folder_presets() {
+        let (mut app, dir, _) = folder_app("preset-switch", 1);
+        let presets = preset_dir(
+            "preset-switch-presets",
+            &[("Warm.xmp", lr_preset("Warm", "+0.5", "0"))],
+        );
+        let at = crate::persist::catalog::CatalogRef::in_dir(&dir, "trip").unwrap();
+        let mut trip = crate::persist::catalog::Catalog::create_at(at.clone(), Vec::new()).unwrap();
+        trip.add_preset_folder(&presets);
+        trip.flush_blocking(std::time::Duration::from_secs(10));
+        drop(trip);
+
+        app.open_catalog(at);
+        wait_for_scans(&mut app);
+        let names: Vec<&str> = app.folder_presets().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Warm"]);
+
+        app.switch_catalog(crate::persist::catalog::Catalog::in_memory("empty"));
+        assert_eq!(app.folder_presets().count(), 0);
+        assert!(app.preset_folders.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&presets);
+    }
+
+    /// A slow scan from before a rescan must not land over the newer one.
+    /// The stale sender stands in for that scan's thread.
+    #[test]
+    fn a_scan_superseded_by_a_rescan_never_lands() {
+        let (mut app, dir, _) = folder_app("preset-stale", 1);
+        let presets = preset_dir(
+            "preset-stale-presets",
+            &[("New.xmp", lr_preset("New", "+1", "0"))],
+        );
+        app.catalog.add_preset_folder(&presets);
+        let (stale_tx, stale_rx) = std::sync::mpsc::channel();
+        app.preset_scan = Some(stale_rx);
+
+        app.rescan_preset_folders();
+        let stale = Scan {
+            presets: vec![FolderPreset {
+                path: presets.join("Old.xmp"),
+                group: "Old".into(),
+                name: "Old".into(),
+                adj: tone(-1.0, 0.0),
+                notes: Vec::new(),
+            }],
+            skipped: 0,
+        };
+        let _ = stale_tx.send((presets.clone(), Ok(stale)));
+        wait_for_scans(&mut app);
+
+        let names: Vec<&str> = app.folder_presets().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["New"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&presets);
+    }
+
     #[test]
     fn a_saved_preset_keeps_the_tone_and_drops_the_crop() {
         let (mut app, dir, paths) = folder_app("save", 1);
@@ -255,7 +690,7 @@ pub(in crate::app) mod tests {
     }
 
     #[test]
-    fn applying_a_preset_writes_the_shown_photo_and_its_sidecar() {
+    fn applying_a_preset_writes_the_selected_photo_and_its_sidecar() {
         let (mut app, dir, paths) = folder_app("shown", 2);
         app.shown = Shown::Preview(paths[0].clone(), 100, 100);
         app.sel = Some(0);
@@ -264,7 +699,7 @@ pub(in crate::app) mod tests {
             app.presets.presets()[0].id
         };
 
-        app.apply_preset(id);
+        app.apply_preset(&PresetRef::Library(id));
 
         assert_eq!(app.edits.get(&paths[0]), Some(&tone(0.5, 10.0)));
         flush(&mut app);
@@ -275,7 +710,7 @@ pub(in crate::app) mod tests {
         );
         assert!(
             !app.edits.contains_key(&paths[1]),
-            "only the photo on screen changed"
+            "only the selected photo changed"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -322,13 +757,14 @@ pub(in crate::app) mod tests {
     fn a_preset_that_merges_to_identity_removes_the_edit_entirely() {
         let (mut app, dir, paths) = folder_app("identity", 1);
         app.shown = Shown::Preview(paths[0].clone(), 100, 100);
+        app.sel = Some(0);
         app.apply_adjustments(tone(0.7, 20.0));
         assert!(app.edits.contains_key(&paths[0]));
 
         app.presets
             .add("Neutral", Adjustments::default(), Vec::new());
         let id = app.presets.presets()[0].id;
-        app.apply_preset(id);
+        app.apply_preset(&PresetRef::Library(id));
 
         assert!(
             !app.edits.contains_key(&paths[0]),
@@ -456,7 +892,9 @@ pub(in crate::app) mod tests {
             .unwrap()
             .id;
         assert!(
-            actions.contains(&crate::ui::UiAction::ApplyPreset(golden)),
+            actions.contains(&crate::ui::UiAction::ApplyPreset(PresetRef::Library(
+                golden
+            ))),
             "the row click asks to apply that preset: {actions:?}"
         );
 

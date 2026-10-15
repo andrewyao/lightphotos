@@ -84,7 +84,8 @@ fn draw_presets(ui: &mut egui::Ui, app: &App, out: &mut FrameOutput) {
                         .selectable_label(false, &preset.name)
                         .on_hover_text(hover);
                     if row.clicked() {
-                        out.actions.push(UiAction::ApplyPreset(preset.id));
+                        out.actions
+                            .push(UiAction::ApplyPreset(PresetRef::Library(preset.id)));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.menu_button("\u{22ef}", |ui| {
