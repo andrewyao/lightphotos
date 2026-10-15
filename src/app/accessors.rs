@@ -92,6 +92,11 @@ impl App {
         self.presets.presets()
     }
 
+    /// The catalog's preset folders, each with its last scan.
+    pub(crate) fn preset_folder_states(&self) -> &[(PathBuf, super::FolderState)] {
+        &self.preset_folders
+    }
+
     /// The open name prompt's text, and whether it renames an existing preset.
     pub(crate) fn preset_name_edit(&self) -> Option<(String, bool)> {
         self.preset_name_edit

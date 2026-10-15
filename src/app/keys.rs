@@ -373,7 +373,7 @@ impl App {
                 self.run_ui(select(SelectWord::All))
             }
             KeyCode::KeyC if cmd && shift => self.copy_settings(),
-            KeyCode::KeyN if cmd && shift && crate::app::SHOW_PRESETS => self.prompt_save_preset(),
+            KeyCode::KeyN if cmd && shift => self.prompt_save_preset(),
             KeyCode::Delete if shift && self.selection_has_group() => self.request_delete_group(),
             KeyCode::Delete if !self.group_picks().is_empty() => self.request_delete_picks(),
             KeyCode::Delete => self.request_bulk(ui::BulkKind::Delete),
@@ -1205,13 +1205,6 @@ mod tests {
     fn the_save_preset_shortcut_opens_the_name_prompt() {
         let (mut app, _) = editor_app();
         press(&mut app, CMD | ModifiersState::SHIFT, KeyCode::KeyN);
-        if !crate::app::SHOW_PRESETS {
-            assert!(
-                app.preset_name_edit().is_none(),
-                "Cmd+Shift+N does nothing while presets are hidden"
-            );
-            return;
-        }
         assert!(
             app.preset_name_edit().is_some(),
             "Cmd+Shift+N opens the prompt"

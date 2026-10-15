@@ -63,6 +63,18 @@ pub fn pick_catalog() -> Option<PathBuf> {
         .pick_folder()
 }
 
+/// The folder picker for a folder of Lightroom presets. `None` when the user
+/// cancelled. Blocks until the dialog closes, so call it only on the main
+/// thread.
+pub fn pick_preset_folder() -> Option<PathBuf> {
+    if headless("preset folder") {
+        return None;
+    }
+    rfd::FileDialog::new()
+        .set_title(crate::i18n::t().preset_folder_picker_title)
+        .pick_folder()
+}
+
 /// Show the OS file picker for Lightroom presets. Empty when the user
 /// cancelled. Blocks until the dialog closes, so call it only on the main
 /// thread.

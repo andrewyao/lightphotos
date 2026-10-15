@@ -461,8 +461,6 @@ impl Catalog {
     }
 
     /// Drop a preset folder. Returns whether it was listed.
-    // The app calls this from the next commit.
-    #[allow(dead_code)]
     pub(crate) fn remove_preset_folder(&mut self, dir: &Path) -> bool {
         let changed = self.preset_folders.remove(dir);
         if changed {

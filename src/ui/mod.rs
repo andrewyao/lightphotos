@@ -86,6 +86,13 @@ pub enum UiAction {
     /// multi-file picker wired up yet.
     #[cfg(not(target_arch = "wasm32"))]
     ImportLrPresets,
+    /// The Presets popup opened: read the preset folders again.
+    RescanPresetFolders,
+    /// Pick a folder of Lightroom presets to list in the popup.
+    #[cfg(not(target_arch = "wasm32"))]
+    AddPresetFolder,
+    /// Stop listing this preset folder's presets.
+    RemovePresetFolder(std::path::PathBuf),
     /// New Catalog…: the save dialog, or on the web the name prompt, then a
     /// switch to the new catalog.
     NewCatalog,
@@ -298,6 +305,7 @@ mod loupe;
 mod mask_overlay;
 mod modals;
 mod photo_menu;
+mod presets;
 mod tabs;
 pub mod theme;
 /// `pub(crate)` so `app::nav` can walk `ToolbarControl`, the list the toolbar

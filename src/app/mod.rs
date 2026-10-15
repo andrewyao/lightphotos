@@ -37,10 +37,6 @@ pub(crate) const GRID_CELL_PT: f32 = 192.0;
 /// photo set has checked `CLOSED_EYE_RATIO`.
 pub(crate) const SHOW_EYES_FILTER: bool = false;
 
-/// Whether presets are reachable: the Develop panel's Presets block and
-/// Cmd+Shift+N. Off until the feature is ready. Saved presets stay on disk either way.
-pub(crate) const SHOW_PRESETS: bool = false;
-
 /// Whether Settings shows Auto Tone's centering choice. Hidden for now; the
 /// saved choice still applies.
 pub(crate) const SHOW_AUTOTONE_CENTERING: bool = false;
@@ -773,6 +769,7 @@ mod sort;
 mod state;
 pub(crate) use coverage::{Failure, MaskStatus};
 pub(crate) use masks::MaskKind;
+pub(crate) use presets::FolderState;
 pub(crate) use sort::{GridSort, SortOrder};
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use state::State;
@@ -1436,6 +1433,10 @@ impl App {
                 }
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::ImportLrPresets => self.import_lr_presets(),
+                ui::UiAction::RescanPresetFolders => self.rescan_preset_folders(),
+                #[cfg(not(target_arch = "wasm32"))]
+                ui::UiAction::AddPresetFolder => self.add_preset_folder_dialog(),
+                ui::UiAction::RemovePresetFolder(dir) => self.remove_preset_folder(&dir),
                 ui::UiAction::NewCatalog => self.new_catalog_dialog(),
                 #[cfg(not(target_arch = "wasm32"))]
                 ui::UiAction::OpenCatalog => self.open_catalog_dialog(),
