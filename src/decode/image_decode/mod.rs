@@ -847,40 +847,44 @@ fn read_orientation(source: &CGImageSource) -> u8 {
     }
 }
 
-/// Rotate or mirror RGBA8 pixels upright for EXIF orientation `1..=8`.
-/// Orientations `5..=8` swap width and height.
+/// Rotate or mirror pixels upright for EXIF orientation `1..=8`, moving each
+/// pixel whole in any `PixelFormat`. Orientations `5..=8` swap width and
+/// height. An image whose buffer is short of its size comes back unchanged.
 #[hotpath::measure]
 pub fn apply_exif_orientation(img: DecodedImage, orientation: u8) -> DecodedImage {
     if orientation <= 1 {
         return img;
     }
-    // The loop assumes 4 bytes per pixel. The half-float decoders orient
-    // their own output and never call this.
-    debug_assert_eq!(img.pixel_format, PixelFormat::Srgb8);
-    let (w, h) = (img.width, img.height);
+    let bpp = img.pixel_format.bytes_per_pixel();
+    let (w, h) = (img.width as usize, img.height as usize);
+    let Some(len) = w.checked_mul(h).and_then(|n| n.checked_mul(bpp)) else {
+        return img;
+    };
+    let Some(src) = img.rgba.get(..len) else {
+        return img;
+    };
     let swaps = matches!(orientation, 5..=8);
     let (nw, nh) = if swaps { (h, w) } else { (w, h) };
-    let mut dst = vec![0u8; (nw * nh * 4) as usize];
-    let src_idx = |x: u32, y: u32| ((y * w + x) * 4) as usize;
-    for yo in 0..nh {
-        for xo in 0..nw {
-            let (xs, ys) = match orientation {
-                2 => (w - 1 - xo, yo),         // mirror horizontal
-                3 => (w - 1 - xo, h - 1 - yo), // rotate 180
-                4 => (xo, h - 1 - yo),         // mirror vertical
-                5 => (yo, xo),                 // transpose
-                6 => (yo, h - 1 - xo),         // rotate 90° CW
-                7 => (w - 1 - yo, h - 1 - xo), // transverse
-                _ => (w - 1 - yo, xo),         // 8: rotate 270° CW
-            };
-            let s = src_idx(xs, ys);
-            let d = ((yo * nw + xo) * 4) as usize;
-            dst[d..d + 4].copy_from_slice(&img.rgba[s..s + 4]);
+    let mut dst = vec![0u8; len];
+    for (d, out) in dst.chunks_exact_mut(bpp).enumerate() {
+        let (xo, yo) = (d % nw, d / nw);
+        let (xs, ys) = match orientation {
+            2 => (w - 1 - xo, yo),         // mirror horizontal
+            3 => (w - 1 - xo, h - 1 - yo), // rotate 180
+            4 => (xo, h - 1 - yo),         // mirror vertical
+            5 => (yo, xo),                 // transpose
+            6 => (yo, h - 1 - xo),         // rotate 90° CW
+            7 => (w - 1 - yo, h - 1 - xo), // transverse
+            _ => (w - 1 - yo, xo),         // 8: rotate 270° CW
+        };
+        let s = (ys * w + xs) * bpp;
+        if let Some(px) = src.get(s..s + bpp) {
+            out.copy_from_slice(px);
         }
     }
     DecodedImage::new_tracked(DecodedImageFields {
-        width: nw,
-        height: nh,
+        width: nw as u32,
+        height: nh as u32,
         rgba: dst,
         pixel_format: img.pixel_format,
     })
@@ -1261,5 +1265,34 @@ mod tests {
         assert_eq!((out.width, out.height), (2, 1));
         assert_eq!(&out.rgba[0..4], &px(20)); // columns swapped
         assert_eq!(&out.rgba[4..8], &px(10));
+    }
+
+    #[test]
+    fn orientation_moves_linear_f16_pixels_whole() {
+        let a: Vec<u8> = (1..=8).collect();
+        let b: Vec<u8> = (9..=16).collect();
+        let img = DecodedImage::new_tracked(DecodedImageFields {
+            width: 2,
+            height: 1,
+            rgba: [a.clone(), b.clone()].concat(),
+            pixel_format: PixelFormat::LinearF16,
+        });
+        let out = apply_exif_orientation(img, 6);
+        assert_eq!((out.width, out.height), (1, 2));
+        assert_eq!(out.pixel_format, PixelFormat::LinearF16);
+        assert_eq!(out.rgba, [a, b].concat(), "A over B, 8 bytes each");
+    }
+
+    #[test]
+    fn orientation_leaves_a_short_buffer_unchanged() {
+        let img = DecodedImage::new_tracked(DecodedImageFields {
+            width: 2,
+            height: 2,
+            rgba: [px(10), px(20)].concat(),
+            pixel_format: PixelFormat::Srgb8,
+        });
+        let out = apply_exif_orientation(img, 6);
+        assert_eq!((out.width, out.height), (2, 2));
+        assert_eq!(out.rgba, [px(10), px(20)].concat());
     }
 }
