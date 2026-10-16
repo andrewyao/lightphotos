@@ -62,7 +62,7 @@ flowchart TD
     subgraph mac["macOS"]
         direction TB
         mq["Loader::request_preview\n-> Job::Speed"] --> mqd["thumbnail::decode_at_size\n(ImageIO, UseIfPresent)\nreturns the file's embedded preview if it has one"]
-        mqd -- "short of the target size (a RAW's embedded preview)" --> mp["Job::Preview\nthumbnail::decode_at_size(Never)"]
+        mqd -- "short of the target size (a RAW's embedded preview)" --> mp["Job::Preview\nloader::decode_preview\n(CIRAWFilter at the target size for RAW,\nelse ImageIO decode_at_size(Never))"]
         mp -.->|photo shows larger than the preview\n(zoom, or fit on a large window)| mf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(CIRAWFilter for RAW, else ImageIO;\nfull resolution)"]
     end
 
@@ -95,8 +95,8 @@ flowchart TD
     wf --> upload
 
     upload --> gpu{"pixel_format?"}
-    gpu -- "Srgb8 (every path except one)" --> shader["shaders/shader.wgsl\nrenderer/mod.rs (pipeline)"]
-    gpu -- "LinearF16 (wasm32's Quality tier only)" --> rawshader["shaders/raw_shader.wgsl\nraw_pipeline, built by renderer/raw_render.rs\n(does the sRGB gamma + display boost on the GPU\ninstead of a CPU lookup table)"]
+    gpu -- "Srgb8, or TonedF16 (a macOS RAW with Apple's tone curve)" --> shader["shaders/shader.wgsl\nrenderer/mod.rs (pipeline)"]
+    gpu -- "LinearF16 (wasm32's Quality tier, or a macOS RAW with the Apple tone curve off)" --> rawshader["shaders/raw_shader.wgsl\nraw_pipeline, built by renderer/raw_render.rs\n(does the sRGB gamma + display boost on the GPU\ninstead of a CPU lookup table)"]
     shader --> screen["composited with egui's chrome,\npresented to the window"]
     rawshader --> screen
 ```
@@ -118,6 +118,18 @@ flowchart TD
 - Instead the decode stops at linear camera-RGB, uploads as an `Rgba16Float`
   texture, and `shaders/raw_shader.wgsl` does that last step on the GPU once per
   frame instead of once per decode.
+
+**Why a macOS RAW decodes to half floats:**
+- `decode/image_decode/raw_filter.rs` renders `CIRAWFilter` as RGBAh in
+  extended linear sRGB, so every edit starts from 16-bit float data and
+  only the screen sees 8 bits.
+- With Settings' "Apple tone curve" on (the default) the result is
+  `TonedF16`: Apple's curve is applied, and `shader.wgsl` draws it exactly as
+  it drew the old RGBA8 decode.
+- With it off, `boostAmount` is 0 and the result is scene-linear
+  `LinearF16`, which `raw_shader.wgsl` draws with the browser build's base
+  curve. Changing the setting calls `Loader::forget_loupe_decodes`.
+- Grid thumbnails and the embedded-JPEG Speed pass stay ImageIO sRGB8.
 
 **Where full resolution comes from:**
 - `Loader::request_full` (native) and `request_web_full` (wasm32) are only
@@ -511,7 +523,7 @@ already keeps handles for.
 | `decode/image_decode/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `kamadak-exif`; RAW goes to `decode/rawler/`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
 | `decode/rawler/mod.rs` | Every rawler call: full RAW decode (`RawDevelop`), RAW metadata, CR3/RAF embedded preview. `probe/` holds `decode_probe` | Linux, Windows, wasm32; never built on macOS |
 | `decode/rawler/raw_preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | Linux, Windows, wasm32 |
-| `renderer/raw_render.rs` | Builds the GPU tonemap pipeline (`shaders/raw_shader.wgsl`) for `PixelFormat::LinearF16` images | all (only ever fed a linear image on wasm32) |
+| `renderer/raw_render.rs` | Builds the GPU tonemap pipeline (`shaders/raw_shader.wgsl`) for `PixelFormat::LinearF16` images | all (fed a linear image on wasm32, and on macOS with the Apple tone curve off) |
 | `jobs/thumbnail.rs` | Decode-at-size for both the Loupe's screen-fit preview and Grid thumbnails, plus the on-disk `.thumb.jpg` cache in `.lightphotos/` | macOS (ImageIO) + Linux/Windows (`kamadak-exif`/`rawler`); wasm32 keeps the same entry naming through `web/web_thumb_cache.rs` |
 | `decode/image_encode.rs` | JPEG write for export | macOS (ImageIO) / Linux/Windows (`mozjpeg-rs`) |
 | `decode/coregraphics.rs` | Shared CFURL/bitmap-context setup for `decode/image_decode/mod.rs`/`decode/image_encode.rs` | macOS |
