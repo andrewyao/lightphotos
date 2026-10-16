@@ -70,6 +70,9 @@ pub trait Sample: Copy + Default + Send + Sync {
     const MAX: f32;
     /// Linear light to this sample, rounded.
     fn encode(linear: f32) -> Self;
+    /// An already display-encoded 0..1 value to this sample, rounded, for
+    /// the RAW display path, which applies its own curve.
+    fn from_display(v: f32) -> Self;
     /// Every sample's linear light, indexed by [`Sample::index`].
     fn linear_lut() -> &'static [f32];
     fn index(self) -> usize;
@@ -82,6 +85,9 @@ impl Sample for u8 {
     const MAX: f32 = 255.0;
     fn encode(linear: f32) -> u8 {
         linear_to_srgb8(linear)
+    }
+    fn from_display(v: f32) -> u8 {
+        (v * 255.0).round().clamp(0.0, 255.0) as u8
     }
     fn linear_lut() -> &'static [f32] {
         srgb8_to_linear_lut()
@@ -100,7 +106,10 @@ impl Sample for u8 {
 impl Sample for u16 {
     const MAX: f32 = 65535.0;
     fn encode(linear: f32) -> u16 {
-        (srgb_encode(linear) * 65535.0).round().clamp(0.0, 65535.0) as u16
+        u16::from_display(srgb_encode(linear))
+    }
+    fn from_display(v: f32) -> u16 {
+        (v * 65535.0).round().clamp(0.0, 65535.0) as u16
     }
     fn linear_lut() -> &'static [f32] {
         static LUT: std::sync::OnceLock<Vec<f32>> = std::sync::OnceLock::new();
@@ -212,7 +221,8 @@ pub fn bilinear_sampler(
 /// per pixel, then rotate by `rot` 90-degree clockwise steps. Returns
 /// `(w, h, rgba)`. Each pixel reads the source the way `fs_main` in
 /// shader.wgsl does, and tone uses `develop::apply_linear`, which matches the
-/// shader. Where the turned photo leaves the frame the shader draws
+/// shader, or for a `LinearF16` RAW `develop::apply_raw_display`, which
+/// matches raw_shader.wgsl. Where the turned photo leaves the frame the shader draws
 /// background but this clamps to the edge, so an export never shows grey.
 #[hotpath::measure]
 pub fn bake_edited(
@@ -335,15 +345,19 @@ fn bake_samples<S: Sample>(
                     pre,
                 )
             };
-            let out = if masks.is_empty() {
-                dev.linear_at(pre, canvas.0, canvas.1)
-            } else {
-                let tone = masks.local_tone(global, [u, v], aspect);
-                dev.linear_at_local(pre, canvas.0, canvas.1, &tone)
+            let tone = (!masks.is_empty()).then(|| masks.local_tone(global, [u, v], aspect));
+            let (cu, cv) = canvas;
+            let out = match (img.pixel_format, &tone) {
+                (PixelFormat::Srgb8, None) => dev.linear_at(pre, cu, cv).map(S::encode),
+                (PixelFormat::Srgb8, Some(t)) => dev.linear_at_local(pre, cu, cv, t).map(S::encode),
+                (PixelFormat::LinearF16, None) => {
+                    dev.raw_display_at(pre, cu, cv).map(S::from_display)
+                }
+                (PixelFormat::LinearF16, Some(t)) => dev
+                    .raw_display_at_local(pre, cu, cv, t)
+                    .map(S::from_display),
             };
-            out_px[0] = S::encode(out[0]);
-            out_px[1] = S::encode(out[1]);
-            out_px[2] = S::encode(out[2]);
+            out_px[..3].copy_from_slice(&out);
             out_px[3] = opaque;
         }
     });
@@ -830,23 +844,37 @@ mod tests {
         }
     }
 
-    /// Linear half-float pixels bake through the same sRGB encode as the
-    /// Loupe's `linear_to_srgb`.
+    /// A scene-linear RAW bakes through the RAW display curve, as
+    /// raw_shader.wgsl shows it in the Loupe, so an export matches the Loupe.
     #[test]
-    fn a_linear_f16_image_bakes_to_its_srgb8_value() {
-        let v = half::f16::from_f32(0.18).to_le_bytes();
+    fn a_linear_f16_image_bakes_to_its_raw_display_value() {
+        let img = f16_gray(0.18, PixelFormat::LinearF16);
+        let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
+        assert_eq!((w, h), (2, 2));
+        let lin = half::f16::from_f32(0.18).to_f32();
+        let d = develop::apply_raw_display(&Adjustments::default(), [lin; 3]);
+        let want = (d[0] * 255.0).round() as u8;
+        assert_ne!(
+            want,
+            linear_to_srgb8(lin),
+            "the two curves must differ here"
+        );
+        assert_eq!(out, [want, want, want, 255].repeat(4));
+        let (_, _, deep) =
+            bake_edited_as::<u16>(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
+        assert_eq!(deep[0], (d[0] * 65535.0).round() as u16);
+    }
+
+    fn f16_gray(v: f32, format: PixelFormat) -> DecodedImage {
+        let v = half::f16::from_f32(v).to_le_bytes();
         let one = half::f16::ONE.to_le_bytes();
         let px: Vec<u8> = [v, v, v, one].concat();
-        let img = DecodedImage::new_tracked(DecodedImageFields {
+        DecodedImage::new_tracked(DecodedImageFields {
             width: 2,
             height: 2,
             rgba: px.repeat(4),
-            pixel_format: PixelFormat::LinearF16,
-        });
-        let (w, h, out) = bake_edited(&img, &Adjustments::default(), &[], &MaskSet::default(), 0);
-        assert_eq!((w, h), (2, 2));
-        let want = linear_to_srgb8(half::f16::from_f32(0.18).to_f32());
-        assert_eq!(out, [want, want, want, 255].repeat(4));
+            pixel_format: format,
+        })
     }
 
     #[test]
