@@ -69,7 +69,7 @@ flowchart TD
     subgraph other["Linux / Windows"]
         direction TB
         lq["Loader::request_preview\n-> Job::Speed"] --> lqd["thumbnail::decode_at_size\nkamadak-exif embedded preview,\nor rawler::rawler_full_image_from_bytes\nfor RAF/CR3 (decode/rawler/)"]
-        lqd -- "short of the target size" --> lp["Job::Preview\nimage_decode::decode\n(image crate; RAW via rawler::decode_raw_nonmac,\nrawler's RawDevelop pipeline, decode/rawler/)"]
+        lqd -- "short of the target size" --> lp["Job::Preview\nimage_decode::decode\n(image crate; RAW via rawler::decode_raw_nonmac,\nrawler's RawDevelop pipeline, LinearF16 output,\ndecode/rawler/)"]
         lp -.->|photo shows larger than the preview\n(zoom, or fit on a large window)| lf["Loader::request_full\n-> Job::Full -> image_decode::decode\n(full resolution)"]
     end
 
@@ -96,7 +96,7 @@ flowchart TD
 
     upload --> gpu{"pixel_format?"}
     gpu -- "Srgb8, or TonedF16 (a macOS RAW with Apple's tone curve)" --> shader["shaders/shader.wgsl\nrenderer/mod.rs (pipeline)"]
-    gpu -- "LinearF16 (wasm32's Quality tier, or a macOS RAW with the Apple tone curve off)" --> rawshader["shaders/raw_shader.wgsl\nraw_pipeline, built by renderer/raw_render.rs\n(does the sRGB gamma + display boost on the GPU\ninstead of a CPU lookup table)"]
+    gpu -- "LinearF16 (rawler's RAW develops: Linux/Windows and wasm32,\nor a macOS RAW with the Apple tone curve off)" --> rawshader["shaders/raw_shader.wgsl\nraw_pipeline, built by renderer/raw_render.rs\n(does the sRGB gamma + display boost on the GPU\ninstead of a CPU lookup table)"]
     shader --> screen["composited with egui's chrome,\npresented to the window"]
     rawshader --> screen
 ```
@@ -109,15 +109,17 @@ flowchart TD
 - A JPEG has no embedded preview, so its Speed pass already decodes at the
   target size — the upgrade pass is skipped entirely, at no extra cost.
 
-**Why wasm32 stops at `LinearF16` for its Quality tier:**
-- The full PPG demosaic on wasm32 is CPU-bound and single-photo (not a grid
-  flood), so it's worth doing properly.
-- Baking the sRGB gamma and display brightness/contrast boost into a CPU
-  lookup table (the way every other RAW path does) would mean re-doing that
-  work on every zoom/pan repaint.
-- Instead the decode stops at linear camera-RGB, uploads as an `Rgba16Float`
-  texture, and `shaders/raw_shader.wgsl` does that last step on the GPU once per
-  frame instead of once per decode.
+**Why rawler's RAW develops stop at `LinearF16`:**
+- `decode_raw_nonmac` (Linux, Windows, and wasm32 export) and wasm32's
+  Quality tier both develop to linear RGB and stop there. Only the wasm32
+  Fast tier still bakes gamma and the display boost into sRGB8 on the CPU.
+- Linear half floats keep the highlights above 1.0 that an 8-bit bake clips,
+  so exposure and highlight edits can bring them back.
+- The image uploads as an `Rgba16Float` texture, and
+  `shaders/raw_shader.wgsl` applies the sRGB gamma and display boost on the
+  GPU once per frame. Export, the histogram and thumbnails run the same math
+  on the CPU through `develop::apply_raw_display`.
+- The cost is memory: 8 bytes a pixel instead of 4.
 
 **Why a macOS RAW decodes to half floats:**
 - `decode/image_decode/raw_filter.rs` renders `CIRAWFilter` as RGBAh in
@@ -523,7 +525,7 @@ already keeps handles for.
 | `decode/image_decode/nonmac_decode.rs` | Full decode + metadata read, non-mac arm (`image` crate + `kamadak-exif`; RAW goes to `decode/rawler/`) | Linux/Windows; RAW/JPEG-decode functions also reused by wasm32 |
 | `decode/rawler/mod.rs` | Every rawler call: full RAW decode (`RawDevelop`), RAW metadata, CR3/RAF embedded preview. `probe/` holds `decode_probe` | Linux, Windows, wasm32; never built on macOS |
 | `decode/rawler/raw_preview.rs` | Two-tier RAW preview (`Fast`/`Quality`) used by the Loupe's wasm32 path | Linux, Windows, wasm32 |
-| `renderer/raw_render.rs` | Builds the GPU tonemap pipeline (`shaders/raw_shader.wgsl`) for `PixelFormat::LinearF16` images | all (fed a linear image on wasm32, and on macOS with the Apple tone curve off) |
+| `renderer/raw_render.rs` | Builds the GPU tonemap pipeline (`shaders/raw_shader.wgsl`) for `PixelFormat::LinearF16` images | all (fed by rawler's RAW develops off macOS, and on macOS with the Apple tone curve off) |
 | `jobs/thumbnail.rs` | Decode-at-size for both the Loupe's screen-fit preview and Grid thumbnails, plus the on-disk `.thumb.jpg` cache in `.lightphotos/` | macOS (ImageIO) + Linux/Windows (`kamadak-exif`/`rawler`); wasm32 keeps the same entry naming through `web/web_thumb_cache.rs` |
 | `decode/image_encode.rs` | JPEG write for export | macOS (ImageIO) / Linux/Windows (`mozjpeg-rs`) |
 | `decode/coregraphics.rs` | Shared CFURL/bitmap-context setup for `decode/image_decode/mod.rs`/`decode/image_encode.rs` | macOS |

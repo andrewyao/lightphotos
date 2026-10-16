@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Render pipelines for half-float images. `raw_pipeline` draws a
-//! scene-linear RAW (`PixelFormat::LinearF16`): the browser's RAW decode and
-//! macOS's with the Apple tone curve off. `Renderer::new` builds these once
-//! at startup.
+//! scene-linear RAW (`PixelFormat::LinearF16`): rawler's RAW develops off
+//! macOS, and macOS's with the Apple tone curve off. `Renderer::new` builds
+//! these once at startup.
 
 /// Texture format for a half-float photo, `LinearF16` or `TonedF16`. It
 /// holds linear light with no hardware sRGB decode. `Rgba16Float` is filterable and renderable in

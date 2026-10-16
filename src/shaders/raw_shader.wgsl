@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Fragment shader for scene-linear RAW images (`PixelFormat::LinearF16`: the
-// wasm32 Loupe decode, and macOS's with the Apple tone curve off). The decode
-// gives linear camera RGB and this shader does the rest: sRGB gamma, the RAW
-// display boost, and the Develop sliders. `apply_raw_display` in
-// `develop/mod.rs` is its CPU twin; the desktop rawler decode bakes the same
-// boost (`apply_raw_preview_boost`) into u8 sRGB at decode time.
+// Fragment shader for scene-linear RAW images (`PixelFormat::LinearF16`:
+// rawler's RAW develops off macOS, and macOS's with the Apple tone curve
+// off). The decode gives linear RGB and this shader does the rest: sRGB
+// gamma, the RAW display boost, and the Develop sliders. `apply_raw_display`
+// in `develop/mod.rs` is its CPU twin, which export, the histogram and
+// thumbnails use.
 //
 // Order: denoise -> touch-ups -> local edits -> WB -> exposure -> sRGB
 // gamma + boost -> tone -> curve -> color mixer or B&W mix ->
