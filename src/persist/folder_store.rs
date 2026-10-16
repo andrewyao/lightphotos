@@ -1302,7 +1302,9 @@ mod tests {
             "rating 20000 photos took {elapsed:?}; it must not wait on 20000 sidecar writes"
         );
 
-        flush(&mut cat);
+        // 20000 writes can outlast `flush`'s 10s on a loaded CI runner while
+        // the rest of the suite runs alongside, so this one waits longer.
+        cat.flush_blocking(std::time::Duration::from_secs(120));
         assert_eq!(cat.backlog(), 0);
         assert_eq!(
             FolderStore::with_dir(dir.clone()).get(&paths[19_999]),
