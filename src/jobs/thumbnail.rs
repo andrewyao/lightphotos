@@ -104,18 +104,23 @@ pub fn decode_at_size(
 
 /// A fast decode of `path` at `max_px`, for the Loupe's first tier and the
 /// thumbnail cache. An embedded preview under [`preview_is_large_enough`] is
-/// skipped for a source decode. A JPEG's embedded preview is its EXIF
+/// skipped for `source`, a decode of the image data at a size. A JPEG's
+/// embedded preview is its EXIF
 /// thumbnail, often 160x120: Sony's is 4:3 and letterboxed, so it showed the
 /// photo at the wrong aspect ratio until the sharper tier landed.
 ///
 /// ImageIO does not report whether it used the embedded preview, so a short
-/// result is retried with `Never`. ImageIO decodes a JPEG at a reduced size,
+/// result is retried with `source`. ImageIO decodes a JPEG at a reduced size,
 /// so the retry is cheap. For the same reason the origin is inferred: a kept
 /// result from a RAW file is its embedded JPEG, since a RAW without one would
 /// have been demosaiced, which ImageIO does only when there is no preview.
 #[cfg(target_os = "macos")]
 #[hotpath::measure]
-pub fn decode_speed(path: &Path, max_px: u32) -> Result<(DecodedImage, Origin), String> {
+pub fn decode_speed(
+    path: &Path,
+    max_px: u32,
+    source: impl FnOnce(&Path, u32) -> Result<DecodedImage, String>,
+) -> Result<(DecodedImage, Origin), String> {
     let img = decode_at_size(path, max_px, EmbeddedPreview::UseIfPresent)?;
     if preview_is_large_enough(img.width, img.height, max_px) {
         let origin = if crate::decode::image_decode::is_raw_extension(path) {
@@ -125,18 +130,19 @@ pub fn decode_speed(path: &Path, max_px: u32) -> Result<(DecodedImage, Origin), 
         };
         return Ok((img, origin));
     }
-    Ok((
-        decode_at_size(path, max_px, EmbeddedPreview::Never)?,
-        Origin::Decoded,
-    ))
+    Ok((source(path, max_px)?, Origin::Decoded))
 }
 
 /// Off macOS, the same order as `web_decode::decode`: the EXIF thumbnail if it
 /// is large enough, then rawler's embedded full image (RAF/CR3), then a
-/// source decode. Small originals come back at their native size.
+/// `source` decode. Small originals come back at their native size.
 #[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
-pub fn decode_speed(path: &Path, max_px: u32) -> Result<(DecodedImage, Origin), String> {
+pub fn decode_speed(
+    path: &Path,
+    max_px: u32,
+    source: impl FnOnce(&Path, u32) -> Result<DecodedImage, String>,
+) -> Result<(DecodedImage, Origin), String> {
     if let Ok(bytes) = fs::read(path) {
         let preview = embedded_preview_from_bytes(&bytes, max_px)
             .filter(|img| preview_is_large_enough(img.width, img.height, max_px))
@@ -145,10 +151,7 @@ pub fn decode_speed(path: &Path, max_px: u32) -> Result<(DecodedImage, Origin), 
             return Ok((img, Origin::Embedded));
         }
     }
-    Ok((
-        crate::decode::image_decode::decode(path, max_px)?,
-        Origin::Decoded,
-    ))
+    Ok((source(path, max_px)?, Origin::Decoded))
 }
 
 /// The file's embedded preview, fit within `max_px` and never upscaled.
@@ -388,7 +391,10 @@ impl ThumbCache {
 
         // Entries last as long as the photo, so a tiny embedded preview must
         // not become one.
-        let (img, _) = decode_speed(path, THUMB_PX)?;
+        // ImageIO's decode, not the Loupe's: a cache entry is 8-bit sRGB.
+        let (img, _) = decode_speed(path, THUMB_PX, |p, px| {
+            decode_at_size(p, px, EmbeddedPreview::Never)
+        })?;
         if let Some(file) = &entry {
             let _ = write_entry(file, &img);
         }
@@ -643,7 +649,10 @@ mod tests {
             "fixture must carry a small EXIF thumbnail"
         );
 
-        let (img, origin) = decode_speed(&photo, 1024).unwrap();
+        let (img, origin) = decode_speed(&photo, 1024, |p, px| {
+            decode_at_size(p, px, EmbeddedPreview::Never)
+        })
+        .unwrap();
         assert_eq!(origin, Origin::Decoded, "the EXIF thumbnail is too small");
         // 3:2 from the photo, not the thumbnail's 4:3 (768). 682.67 rounds
         // up on macOS and down elsewhere.

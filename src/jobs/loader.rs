@@ -546,7 +546,7 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
         Job::Speed(path, target) => {
             let t0 = web_time::Instant::now();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::jobs::thumbnail::decode_speed(&path, target)
+                crate::jobs::thumbnail::decode_speed(&path, target, decode_preview)
             }))
             .unwrap_or_else(|_| Err(format!("speed decode panicked: {}", path.display())));
             let (r, origin) = match r {
@@ -561,14 +561,8 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
         }
         Job::Preview(path, target) => {
             let t0 = web_time::Instant::now();
-            // Not `image_decode::decode`: that decodes at full size and then
-            // shrinks, which is slower than a decode at the target size.
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::jobs::thumbnail::decode_at_size(
-                    &path,
-                    target,
-                    crate::jobs::thumbnail::EmbeddedPreview::Never,
-                )
+                decode_preview(&path, target)
             }))
             .unwrap_or_else(|_| Err(format!("preview decode panicked: {}", path.display())));
             report_decode("preview", &path, target, t0, &r);
@@ -712,6 +706,24 @@ pub(crate) use panic_recovery::install as install_panic_recovery;
 /// itself is that small, so a `Preview` decode would return the same pixels.
 /// An embedded JPEG never counts: the decode can differ. Reads the file's
 /// header only for a short result, which is rare.
+/// The Loupe's decode of `path` at `target`, ignoring any embedded preview:
+/// the `Preview` tier, and the `Speed` tier when the embedded preview is too
+/// small. On macOS a RAW goes through `CIRAWFilter`, which demosaics at the
+/// target size, so the preview has the full decode's depth and tone curve
+/// and nothing shifts when the full decode replaces it. Everything else
+/// takes ImageIO's scaled decode, which beats a full decode and shrink.
+fn decode_preview(path: &Path, target: u32) -> Result<DecodedImage, String> {
+    #[cfg(target_os = "macos")]
+    if image_decode::is_raw_extension(path) {
+        return image_decode::decode(path, target);
+    }
+    crate::jobs::thumbnail::decode_at_size(
+        path,
+        target,
+        crate::jobs::thumbnail::EmbeddedPreview::Never,
+    )
+}
+
 fn speed_is_whole_photo(path: &Path, target: u32, img: &DecodedImage, origin: Origin) -> bool {
     let longest = img.width.max(img.height);
     origin == Origin::Decoded
