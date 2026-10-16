@@ -951,8 +951,8 @@ mod tests {
         result.expect("RawDevelop pipeline failed on the synthetic Linear DNG fixture");
     }
 
-    /// The full bytes pipeline (develop, boost, denoise) keeps the fixture's
-    /// left-to-right gradient.
+    /// The full bytes pipeline (develop, denoise) keeps the fixture's
+    /// left-to-right gradient in linear light.
     #[test]
     fn decode_raw_nonmac_from_bytes_develops_gradient_fixture() {
         let path = std::env::temp_dir().join(format!(
@@ -968,14 +968,51 @@ mod tests {
             .expect("bytes-core RAW decode should succeed");
 
         assert_eq!((img.width, img.height), (w, h));
+        assert_eq!(img.pixel_format, image_decode::PixelFormat::LinearF16);
         let row_mid = (h / 2) as usize;
-        let at = |x: usize| img.rgba[(row_mid * w as usize + x) * 4] as i32;
+        let at = |x: usize| {
+            let i = (row_mid * w as usize + x) * 8;
+            half::f16::from_le_bytes([img.rgba[i], img.rgba[i + 1]]).to_f32()
+        };
         assert!(
-            at((w - 2) as usize) - at(1) > 20,
+            at((w - 2) as usize) - at(1) > 0.25,
             "gradient should brighten left->right, got {} -> {}",
             at(1),
             at((w - 2) as usize)
         );
+    }
+
+    /// The non-mac RAW develop returns linear f16 RGBA with opaque alpha and
+    /// no channel the shader can't take: nothing negative or non-finite.
+    #[test]
+    fn decode_raw_nonmac_returns_clean_linear_f16() {
+        let path = std::env::temp_dir().join(format!(
+            "lightphotos_raw_linear_f16_{}.dng",
+            std::process::id()
+        ));
+        let (w, h) = (32u32, 8u32);
+        write_linear_dng(&path, w, h).expect("write_linear_dng failed");
+        let bytes = std::fs::read(&path).expect("read fixture");
+        let _ = std::fs::remove_file(&path);
+
+        for max_dim in [u32::MAX, 16] {
+            let img = lp_rawler::decode_raw_nonmac_from_bytes(&bytes, max_dim)
+                .expect("RAW decode should succeed");
+            assert_eq!(img.pixel_format, image_decode::PixelFormat::LinearF16);
+            assert_eq!(
+                img.rgba.len(),
+                img.width as usize * img.height as usize * 8,
+                "8 bytes a pixel at max_dim {max_dim}"
+            );
+            assert!(img.width.max(img.height) <= max_dim);
+            for px in img.rgba.as_chunks::<8>().0 {
+                let c = |i: usize| half::f16::from_le_bytes([px[i], px[i + 1]]).to_f32();
+                assert_eq!(c(6), 1.0, "alpha");
+                for v in [c(0), c(2), c(4)] {
+                    assert!(v.is_finite() && v >= 0.0, "channel {v}");
+                }
+            }
+        }
     }
 
     /// Path and bytes entry points give byte-identical output, so native and

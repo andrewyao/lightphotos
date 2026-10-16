@@ -17,7 +17,6 @@ use crate::decode::image_decode::{
     apply_exif_orientation, check_decode_size, dms_to_degrees, finite, fit_within, non_empty,
     DecodedImage, DecodedImageFields, Flash, Gps, ImageMetadata, PixelFormat, WhiteBalance,
 };
-use crate::develop::apply_raw_preview_boost;
 
 /// rawler allocates its raw buffer at whatever size the file claims. 0.7.2
 /// panicked past 50,000 samples on a side or 500 million in all; 0.8.0 drops
@@ -206,7 +205,7 @@ pub fn exif_code_from_rawler_orientation(o: rawler::Orientation) -> u8 {
 pub const AUTO_RAW_DENOISE_STRENGTH: f32 = 25.0;
 
 /// Decodes a camera RAW file with rawler's `RawDevelop` (demosaic, white
-/// balance, color matrix, crop, sRGB gamma), then applies EXIF orientation.
+/// balance, color matrix, crop) to `LinearF16`, then applies EXIF orientation.
 /// There is no per-camera profile; color comes from `raw.color_matrix`.
 ///
 /// rawler's demosaic dispatch panics via `todo!()` on a few unusual CFA
@@ -260,13 +259,13 @@ fn decode_raw_nonmac_from_source(
         })
         .unwrap_or_else(|| exif_code_from_rawler_orientation(raw.orientation));
 
-    develop_raw_image_to_srgb8(&raw, orientation, max_dim)
+    develop_raw_image_to_linear_f16(&raw, orientation, max_dim)
 }
 
 /// `RawDevelop`'s default steps without the last, `SRgb`. rawler runs its
 /// steps on its own one-thread pool in the browser, and that gamma step's
-/// `powf` per channel was most of a 24 MP develop. [`display_rgba8`] does it
-/// in parallel instead.
+/// `powf` per channel was most of a 24 MP develop. `raw_shader.wgsl` applies
+/// the gamma on the GPU instead.
 const LINEAR_DEVELOP_STEPS: [rawler::imgop::develop::ProcessingStep; 7] = {
     use rawler::imgop::develop::ProcessingStep::*;
     [
@@ -280,88 +279,56 @@ const LINEAR_DEVELOP_STEPS: [rawler::imgop::develop::ProcessingStep; 7] = {
     ]
 };
 
-/// One linear channel as rawler's `SRgb` step, `to_dynamic_image` and
-/// `into_rgba8` together made it: gamma, scaled to 16 bits, then to 8.
-fn rawler_srgb8(v: f32) -> u8 {
-    let u = (rawler::imgop::srgb::srgb_apply_gamma(v) * f32::from(u16::MAX)) as u16;
-    let one = image::ImageBuffer::from_pixel(1, 1, image::Rgb([u, u, u]));
-    image::DynamicImage::ImageRgb16(one).into_rgba8().into_raw()[0]
-}
-
-/// [`rawler_srgb8`] by a search of 255 steps instead of a `powf`. Its
-/// output only rises with its input, so each step is the smallest input
-/// reaching that output, found by bisection over the float's bits. Bit for
-/// bit the same for every input, NaN and the infinities included.
-fn linear_to_rawler_srgb8(v: f32) -> u8 {
-    static STEPS: std::sync::OnceLock<[f32; 255]> = std::sync::OnceLock::new();
-    let steps = STEPS.get_or_init(|| {
-        std::array::from_fn(|i| {
-            let k = i as u8 + 1;
-            // rawler_srgb8(2.0) is 255, so every step lies below it.
-            let (mut lo, mut hi) = (0u32, 2.0f32.to_bits());
-            while lo < hi {
-                let mid = lo + (hi - lo) / 2;
-                if rawler_srgb8(f32::from_bits(mid)) >= k {
-                    hi = mid;
-                } else {
-                    lo = mid + 1;
-                }
-            }
-            f32::from_bits(lo)
-        })
-    });
-    steps.partition_point(|&step| step <= v) as u8
-}
-
-/// A linear `RawDevelop` result as display sRGB8 RGBA: what rawler's `SRgb`
-/// step and `to_dynamic_image().into_rgba8()` made of it, then the display
-/// boost, a band of rows per thread. `None` for a buffer short of its size,
-/// which `to_dynamic_image` also refuses.
-fn display_rgba8(developed: &rawler::imgop::develop::Intermediate) -> Option<image::RgbaImage> {
+/// A linear `RawDevelop` result as RGB with every channel finite, at least
+/// 0, and at most the largest finite f16. Values above 1.0 stay: they are the
+/// highlight headroom the GPU tone pass recovers. A four-color result drops
+/// its fourth channel. `None` for a buffer short of its size.
+///
+/// Consumes `developed` so a full-size image is never held twice: a
+/// three-color buffer is clamped in place, and the other two are converted
+/// in one pass that frees the source when it ends.
+fn linear_rgb(
+    developed: rawler::imgop::develop::Intermediate,
+) -> Option<(usize, usize, Vec<[f32; 3]>)> {
     use rawler::imgop::develop::Intermediate;
-    let boost: [u8; 256] =
-        std::array::from_fn(|i| (apply_raw_preview_boost(i as f32 / 255.0) * 255.0).round() as u8);
-    let shown = |v: f32| boost[linear_to_rawler_srgb8(v) as usize];
-    let (w, h, len) = match developed {
-        Intermediate::Monochrome(p) => (p.width, p.height, p.data.len()),
-        Intermediate::ThreeColor(p) => (p.width, p.height, p.data.len()),
-        Intermediate::FourColor(p) => (p.width, p.height, p.data.len()),
-    };
-    if w.checked_mul(h)? != len {
-        return None;
-    }
-    let mut rgba = vec![0u8; len.checked_mul(4)?];
-    let fill = |rgba: &mut [u8], px: &(dyn Fn(usize) -> Option<[u8; 4]> + Sync)| {
-        crate::develop::parallel::for_each_row(rgba, w * 4, |y, row| {
-            for (x, out) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                if let Some(p) = px(y * w + x) {
-                    *out = p;
-                }
-            }
-        });
-    };
+    let sized = |w: usize, h: usize, len: usize| w.checked_mul(h) == Some(len);
     match developed {
-        Intermediate::Monochrome(p) => fill(&mut rgba, &|i| {
-            let v = shown(*p.data.get(i)?);
-            Some([v, v, v, 255])
-        }),
-        Intermediate::ThreeColor(p) => fill(&mut rgba, &|i| {
-            let [r, g, b] = *p.data.get(i)?;
-            Some([shown(r), shown(g), shown(b), 255])
-        }),
-        // The fourth channel becomes alpha, as `to_dynamic_image` made it.
-        Intermediate::FourColor(p) => fill(&mut rgba, &|i| {
-            let [r, g, b, a] = *p.data.get(i)?;
-            Some([shown(r), shown(g), shown(b), linear_to_rawler_srgb8(a)])
-        }),
+        Intermediate::Monochrome(p) if sized(p.width, p.height, p.data.len()) => {
+            let rgb = p.data.iter().map(|&v| [f16_range(v); 3]).collect();
+            Some((p.width, p.height, rgb))
+        }
+        Intermediate::ThreeColor(mut p) if sized(p.width, p.height, p.data.len()) => {
+            p.data.iter_mut().for_each(|px| *px = px.map(f16_range));
+            Some((p.width, p.height, p.data))
+        }
+        Intermediate::FourColor(p) if sized(p.width, p.height, p.data.len()) => {
+            let rgb = p
+                .data
+                .iter()
+                .map(|&[r, g, b, _]| [r, g, b].map(f16_range))
+                .collect();
+            Some((p.width, p.height, rgb))
+        }
+        _ => None,
     }
-    image::RgbaImage::from_raw(u32::try_from(w).ok()?, u32::try_from(h).ok()?, rgba)
 }
 
-/// Develops a decoded RAW to premultiplied sRGB8: `RawDevelop`, display
-/// boost, auto-denoise, `max_dim` downscale, then EXIF orientation.
+/// `v` clamped to what a `LinearF16` channel holds: non-finite and negative
+/// become 0, and anything past f16's range its largest finite value rather
+/// than infinity.
+fn f16_range(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, half::f16::MAX.to_f32())
+    } else {
+        0.0
+    }
+}
+
+/// Develops a decoded RAW to `LinearF16`: `RawDevelop` without its gamma
+/// step, `max_dim` downscale, auto-denoise, then EXIF orientation. The sRGB
+/// gamma and display boost are left to `raw_shader.wgsl`.
 #[hotpath::measure]
-fn develop_raw_image_to_srgb8(
+fn develop_raw_image_to_linear_f16(
     raw: &rawler::RawImage,
     orientation: u8,
     max_dim: u32,
@@ -371,32 +338,29 @@ fn develop_raw_image_to_srgb8(
     let developed = rawler::imgop::develop::RawDevelop::new_with(&LINEAR_DEVELOP_STEPS)
         .develop_intermediate(raw)
         .map_err(|e| e.to_string())?;
-    let mut img = display_rgba8(&developed).ok_or("rawler produced an empty developed image")?;
-
-    let (src_w, src_h) = (img.width(), img.height());
+    let (src_w, src_h, mut linear) =
+        linear_rgb(developed).ok_or("rawler produced an empty developed image")?;
     if src_w == 0 || src_h == 0 {
         return Err("decoded RAW image has zero dimension".into());
     }
-    let (w, h) = fit_within(src_w, src_h, max_dim);
+    let (w, h) = fit_within(side(src_w), side(src_h), max_dim);
+    let (dw, dh) = (w as usize, h as usize);
 
-    // Shrink before denoising, so the f32 buffer below is preview-sized
-    // rather than sensor-sized (about 290 MB less on a 24 MP file).
-    if (w, h) != (src_w, src_h) {
-        img = image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3);
+    // Shrink before denoising, so the denoise reads a preview-sized buffer
+    // rather than a sensor-sized one.
+    if (dw, dh) != (src_w, src_h) {
+        linear = raw_preview::box_downsample_rgb(linear, src_w, src_h, dw, dh);
     }
 
-    // `RawDevelop` has no mid-pipeline hook, so denoise runs on the finished
-    // sRGB8 image, decoded to the linear light the denoise expects and
-    // encoded back in place, a band of rows per thread.
-    let (dw, dh) = (img.width() as usize, img.height() as usize);
-    let lut = crate::develop::image_ops::srgb8_to_linear_lut();
-    let linear: Vec<[f32; 3]> = img
-        .pixels()
-        .map(|p| [p[0], p[1], p[2]].map(|c| lut[c as usize]))
-        .collect();
-    let encode = crate::develop::image_ops::linear_to_srgb8;
-    crate::develop::parallel::for_each_row(&mut img, dw * 4, |y, row| {
-        for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+    let mut rgba = vec![
+        0u8;
+        dw.checked_mul(dh)
+            .and_then(|n| n.checked_mul(8))
+            .ok_or("RAW image too large")?
+    ];
+    let one = half::f16::ONE.to_le_bytes();
+    crate::develop::parallel::for_each_row(&mut rgba, dw * 8, |y, row| {
+        for (x, px) in row.as_chunks_mut::<8>().0.iter_mut().enumerate() {
             let lin = crate::develop::denoise_linear_rgb_pixel(
                 AUTO_RAW_DENOISE_STRENGTH,
                 dw,
@@ -405,18 +369,22 @@ fn develop_raw_image_to_srgb8(
                 x,
                 y,
             );
-            px[0] = encode(lin[0]);
-            px[1] = encode(lin[1]);
-            px[2] = encode(lin[2]);
+            for (c, v) in lin.into_iter().enumerate() {
+                px[c * 2..c * 2 + 2]
+                    .copy_from_slice(&half::f16::from_f32(f16_range(v)).to_le_bytes());
+            }
+            px[6..8].copy_from_slice(&one);
         }
     });
+    // Before orienting, which copies `rgba` once more.
+    drop(linear);
 
     Ok(apply_exif_orientation(
         DecodedImage::new_tracked(DecodedImageFields {
             width: w,
             height: h,
-            rgba: img.into_raw(),
-            pixel_format: PixelFormat::Srgb8,
+            rgba,
+            pixel_format: PixelFormat::LinearF16,
         }),
         orientation,
     ))
@@ -556,73 +524,32 @@ pub fn rawler_full_image_from_bytes(bytes: &[u8], max_px: u32) -> Option<Decoded
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_raw_preview_boost, display_rgba8, fuji_dynamic_range_gain, linear_to_rawler_srgb8,
-        padded_to_tiles, rawler_srgb8,
-    };
+    use super::{fuji_dynamic_range_gain, linear_rgb, padded_to_tiles};
     use rawler::imgop::develop::Intermediate;
     use rawler::pixarray::{Color2D, PixF32};
 
     #[test]
-    fn the_srgb8_search_matches_rawlers_curve_for_every_input() {
-        let specials = [
-            f32::NAN,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            -0.0,
-            0.0,
-            1.0,
-            1e30,
-        ];
-        let sweep = (0..=u32::MAX).step_by(65_537).map(f32::from_bits);
-        for v in specials.into_iter().chain(sweep) {
-            assert_eq!(linear_to_rawler_srgb8(v), rawler_srgb8(v), "{v:e}");
-        }
-    }
-
-    /// The parallel pass gives the bytes rawler's own `SRgb` step and
-    /// `to_dynamic_image().into_rgba8()` gave before it, boost and all.
-    #[test]
-    fn display_rgba8_matches_rawlers_srgb_step_and_conversion() {
-        let (w, h) = (37, 41);
-        let values: Vec<f32> = (0..w * h * 3)
-            .map(|i| (i as f32 * 0.618_034).fract() * 1.2 - 0.1)
-            .collect();
-        let rgb: Vec<[f32; 3]> = values.as_chunks::<3>().0.to_vec();
-        let mut gamma = Color2D::new_with(rgb.clone(), w, h);
-        gamma.for_each(rawler::imgop::srgb::srgb_apply_gamma_n);
-        let mut gray = PixF32::new_with(values[..w * h].to_vec(), w, h);
-        gray.for_each(rawler::imgop::srgb::srgb_apply_gamma);
-
-        let boost = |c: u8| (apply_raw_preview_boost(f32::from(c) / 255.0) * 255.0).round() as u8;
-        for (linear, encoded) in [
-            (
-                Intermediate::ThreeColor(Color2D::new_with(rgb, w, h)),
-                Intermediate::ThreeColor(gamma),
-            ),
-            (
-                Intermediate::Monochrome(PixF32::new_with(values[..w * h].to_vec(), w, h)),
-                Intermediate::Monochrome(gray),
-            ),
-        ] {
-            let mut old = encoded.to_dynamic_image().unwrap().into_rgba8();
-            for px in old.pixels_mut() {
-                for c in 0..3 {
-                    px[c] = boost(px[c]);
-                }
-            }
-            assert_eq!(display_rgba8(&linear).unwrap(), old);
-        }
+    fn linear_rgb_clamps_to_what_f16_holds_and_keeps_headroom() {
+        let rgb = Intermediate::ThreeColor(Color2D::new_with(
+            vec![[f32::NAN, -0.5, 2.5], [f32::INFINITY, 1e9, 0.25]],
+            2,
+            1,
+        ));
+        let (w, h, px) = linear_rgb(rgb).unwrap();
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(px, vec![[0.0, 0.0, 2.5], [0.0, 65504.0, 0.25]]);
+        let gray = Intermediate::Monochrome(PixF32::new_with(vec![0.5], 1, 1));
+        assert_eq!(linear_rgb(gray).unwrap().2, vec![[0.5; 3]]);
     }
 
     #[test]
-    fn display_rgba8_refuses_a_buffer_short_of_its_size() {
+    fn linear_rgb_refuses_a_buffer_short_of_its_size() {
         let short = Intermediate::ThreeColor(Color2D {
             width: 4,
             height: 4,
             data: vec![[0.5; 3]; 15],
         });
-        assert!(display_rgba8(&short).is_none());
+        assert!(linear_rgb(short).is_none());
     }
 
     #[test]

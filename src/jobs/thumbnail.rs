@@ -395,6 +395,19 @@ impl ThumbCache {
         let (img, _) = decode_speed(path, THUMB_PX, |p, px| {
             decode_at_size(p, px, EmbeddedPreview::Never)
         })?;
+        // A RAW developed off macOS is half float. The Grid uploads
+        // thumbnails as sRGB8 and the entry is a JPEG, so both get the sRGB
+        // the Loupe would show.
+        let img = if img.pixel_format == PixelFormat::Srgb8 {
+            img
+        } else {
+            DecodedImage::new_tracked(crate::decode::image_decode::DecodedImageFields {
+                width: img.width,
+                height: img.height,
+                rgba: crate::develop::image_ops::to_srgb8(&img).into_owned(),
+                pixel_format: PixelFormat::Srgb8,
+            })
+        };
         if let Some(file) = &entry {
             let _ = write_entry(file, &img);
         }

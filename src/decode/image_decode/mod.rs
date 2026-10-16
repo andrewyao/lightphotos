@@ -77,7 +77,7 @@ mod raw_filter;
 /// How `DecodedImage::rgba` is laid out, and what its values mean. Most
 /// decoders produce `Srgb8`. RAWs decode to half floats: on macOS
 /// `raw_filter` gives `TonedF16` with Apple's tone curve or `LinearF16`
-/// without it, and the browser's RAW decode gives `LinearF16`.
+/// without it, and rawler's RAW develops off macOS give `LinearF16`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum PixelFormat {
     /// sRGB-encoded RGBA8, 4 bytes per pixel.
