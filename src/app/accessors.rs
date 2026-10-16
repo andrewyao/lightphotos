@@ -240,6 +240,11 @@ impl App {
         self.autotone.centering()
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn apple_tone_curve(&self) -> bool {
+        crate::decode::image_decode::apple_tone_curve()
+    }
+
     /// Longest-side size in pixels for the loupe's screen-fit preview decode.
     /// `win_size` is already in physical pixels, so don't scale it by the DPI
     /// factor again.

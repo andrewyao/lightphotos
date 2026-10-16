@@ -7,6 +7,10 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::app::SHOW_AUTOTONE_CENTERING;
+
+/// Whether Settings has the RAW tone curve choice, which only macOS's
+/// CoreImage decode offers.
+const RAW_SETTING: bool = cfg!(target_os = "macos");
 use crate::develop::{Section, SliderId};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -163,6 +167,17 @@ pub struct Strings {
     pub settings_theme: &'static str,
     pub settings_language: &'static str,
     pub settings_auto_tone: &'static str,
+    pub settings_raw: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "a macOS-only setting")
+    )]
+    pub apple_tone_curve: &'static str,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "a macOS-only setting")
+    )]
+    pub apple_tone_curve_hint: &'static str,
     pub autotone_center_range: &'static str,
     pub autotone_center_range_tip: &'static str,
     pub autotone_center_median: &'static str,
@@ -965,8 +980,12 @@ impl Strings {
 
 pub static EN: Strings = Strings {
     settings: "Settings",
-    settings_tip: if SHOW_AUTOTONE_CENTERING {
+    settings_tip: if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
+        "Theme, language, RAW tone curve and Auto Adjust (Cmd+,)"
+    } else if SHOW_AUTOTONE_CENTERING {
         "Theme, language and Auto Adjust (Cmd+,)"
+    } else if RAW_SETTING {
+        "Theme, language and RAW tone curve (Cmd+,)"
     } else {
         "Theme and language (Cmd+,)"
     },
@@ -974,6 +993,9 @@ pub static EN: Strings = Strings {
     settings_theme: "Theme",
     settings_language: "Language",
     settings_auto_tone: "Auto Adjust",
+    settings_raw: "RAW Files",
+    apple_tone_curve: "Apple tone curve",
+    apple_tone_curve_hint: "On, RAW files look as they do in Photos and Preview. Off, LightPhotos applies its own slightly flatter curve, as in the browser.",
     autotone_center_range: "Center the range",
     autotone_center_range_tip: "Put the middle of the histogram's range at 50%. Keeps the photo's shape where it is.",
     autotone_center_median: "Center the middle pixel",
@@ -1237,8 +1259,12 @@ pub static EN: Strings = Strings {
                 ("?", "Show or hide this help"),
                 (
                     "Cmd+,",
-                    if SHOW_AUTOTONE_CENTERING {
+                    if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
+                        "Settings: theme, language, RAW tone curve and Auto Adjust"
+                    } else if SHOW_AUTOTONE_CENTERING {
                         "Settings: theme, language and Auto Adjust"
+                    } else if RAW_SETTING {
+                        "Settings: theme, language and RAW tone curve"
                     } else {
                         "Settings: theme and language"
                     },
@@ -1823,8 +1849,12 @@ pub static EN: Strings = Strings {
 
 pub static ZH: Strings = Strings {
     settings: "设置",
-    settings_tip: if SHOW_AUTOTONE_CENTERING {
+    settings_tip: if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
+        "主题、语言、RAW 色调曲线和自动调整 (Cmd+,)"
+    } else if SHOW_AUTOTONE_CENTERING {
         "主题、语言和自动调整 (Cmd+,)"
+    } else if RAW_SETTING {
+        "主题、语言和 RAW 色调曲线 (Cmd+,)"
     } else {
         "主题和语言 (Cmd+,)"
     },
@@ -1832,6 +1862,9 @@ pub static ZH: Strings = Strings {
     settings_theme: "主题",
     settings_language: "语言",
     settings_auto_tone: "自动调整",
+    settings_raw: "RAW 文件",
+    apple_tone_curve: "Apple 色调曲线",
+    apple_tone_curve_hint: "开启时，RAW 文件与“照片”和“预览”中的样子一样。关闭时，LightPhotos 用它的曲线，略平，与浏览器版一样。",
     autotone_center_range: "居中整个范围",
     autotone_center_range_tip: "把直方图范围的中点放在 50%。保持照片的形状不变。",
     autotone_center_median: "居中中间像素",
@@ -2091,8 +2124,12 @@ pub static ZH: Strings = Strings {
                 ("?", "显示或隐藏此帮助"),
                 (
                     "Cmd+,",
-                    if SHOW_AUTOTONE_CENTERING {
+                    if SHOW_AUTOTONE_CENTERING && RAW_SETTING {
+                        "设置：主题、语言、RAW 色调曲线和自动调整"
+                    } else if SHOW_AUTOTONE_CENTERING {
                         "设置：主题、语言和自动调整"
+                    } else if RAW_SETTING {
+                        "设置：主题、语言和 RAW 色调曲线"
                     } else {
                         "设置：主题和语言"
                     },

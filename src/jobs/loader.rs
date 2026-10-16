@@ -62,15 +62,15 @@ enum Job {
     /// JPEG loads in about 35 ms, while demosaicing to that size takes about
     /// 250 ms. A JPEG has no embedded preview, so this pass already decodes at
     /// size and is the final answer.
-    Speed(PathBuf, u32),
+    Speed(PathBuf, u32, Generation),
     /// Decode at the target size, ignoring any embedded preview. Queued only
     /// when `Speed` came back smaller than the target.
-    Preview(PathBuf, u32),
+    Preview(PathBuf, u32, Generation),
     /// Full-resolution decode, capped at the GPU's max texture size. Requested
     /// only when the user zooms past the preview, because it costs seconds and
     /// hundreds of megabytes.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    Full(PathBuf, u32),
+    Full(PathBuf, u32, Generation),
     /// Thumbnail whose longest side is at most the carried size.
     #[allow(dead_code)]
     Thumb(PathBuf, u32),
@@ -95,6 +95,11 @@ enum Job {
     #[cfg(target_arch = "wasm32")]
     WebMeasure(Box<crate::web::web_decode::WebMeasureJob>),
 }
+
+/// Which [`Loader::forget_loupe_decodes`] era a Loupe decode was asked for
+/// in. A result from an earlier one was decoded under the old settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Generation(u64);
 
 /// Everything a worker needs to bake one edited thumbnail, owned so the
 /// worker never reads app state.
@@ -160,9 +165,16 @@ enum Enqueued {
 enum JobResult {
     /// The last field is true when the image already holds every source
     /// pixel (see `speed_is_whole_photo`).
-    Speed(PathBuf, u32, Result<DecodedImage, String>, Origin, bool),
-    Preview(PathBuf, u32, Result<DecodedImage, String>),
-    Full(PathBuf, Result<DecodedImage, String>),
+    Speed(
+        PathBuf,
+        u32,
+        Generation,
+        Result<DecodedImage, String>,
+        Origin,
+        bool,
+    ),
+    Preview(PathBuf, u32, Generation, Result<DecodedImage, String>),
+    Full(PathBuf, Generation, Result<DecodedImage, String>),
     Thumb(PathBuf, u32, Result<Arc<DecodedImage>, String>),
     Exif(PathBuf, ImageMetadata),
     Meta(PathBuf, image_decode::SortMeta),
@@ -543,7 +555,7 @@ impl Worker {
 /// shared state. wasm32 aborts on panic instead, see `panic_recovery`.
 fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
     match job {
-        Job::Speed(path, target) => {
+        Job::Speed(path, target, generation) => {
             let t0 = web_time::Instant::now();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::jobs::thumbnail::decode_speed(&path, target, decode_preview)
@@ -557,25 +569,25 @@ fn run_job(job: Job, thumbs: &ThumbCache) -> JobResult {
             let whole = r
                 .as_ref()
                 .is_ok_and(|img| speed_is_whole_photo(&path, target, img, origin));
-            JobResult::Speed(path, target, r, origin, whole)
+            JobResult::Speed(path, target, generation, r, origin, whole)
         }
-        Job::Preview(path, target) => {
+        Job::Preview(path, target, generation) => {
             let t0 = web_time::Instant::now();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 decode_preview(&path, target)
             }))
             .unwrap_or_else(|_| Err(format!("preview decode panicked: {}", path.display())));
             report_decode("preview", &path, target, t0, &r);
-            JobResult::Preview(path, target, r)
+            JobResult::Preview(path, target, generation, r)
         }
-        Job::Full(path, target) => {
+        Job::Full(path, target, generation) => {
             let t0 = web_time::Instant::now();
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 image_decode::decode(&path, target)
             }))
             .unwrap_or_else(|_| Err(format!("decode panicked: {}", path.display())));
             report_decode("full", &path, target, t0, &r);
-            JobResult::Full(path, r)
+            JobResult::Full(path, generation, r)
         }
         Job::Thumb(path, max_px) => {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -844,6 +856,9 @@ pub struct Loader {
     /// Worker threads that actually started. Zero on wasm32, where spawning
     /// fails and the browser's Web Worker pool decodes instead.
     workers: usize,
+
+    /// Stamped on every Loupe decode job; see [`Generation`].
+    generation: Generation,
 }
 
 /// What one `Loader::poll_all` drained from the workers.
@@ -939,6 +954,7 @@ impl Loader {
             #[cfg(target_arch = "wasm32")]
             res_tx,
             workers: started,
+            generation: Generation::default(),
         }
     }
 
@@ -978,7 +994,7 @@ impl Loader {
         if self.speed_inflight.contains(&key) {
             return;
         }
-        if self.enqueue(Job::Speed(path, target_px)) == Enqueued::Yes {
+        if self.enqueue(Job::Speed(path, target_px, self.generation)) == Enqueued::Yes {
             self.speed_inflight.insert(key);
         }
     }
@@ -1023,7 +1039,9 @@ impl Loader {
         if self.preview_cache.contains_key(&key) || self.preview_inflight.contains(&key) {
             return;
         }
-        if self.enqueue(Job::Preview(path.to_path_buf(), target_px)) == Enqueued::Yes {
+        if self.enqueue(Job::Preview(path.to_path_buf(), target_px, self.generation))
+            == Enqueued::Yes
+        {
             self.preview_inflight.insert(key);
         }
     }
@@ -1036,7 +1054,8 @@ impl Loader {
         if self.cache.contains_key(&path) || self.inflight.contains(&path) {
             return;
         }
-        if self.enqueue(Job::Full(path.clone(), self.full_target)) == Enqueued::Yes {
+        if self.enqueue(Job::Full(path.clone(), self.full_target, self.generation)) == Enqueued::Yes
+        {
             self.inflight.insert(path);
         }
     }
@@ -1370,13 +1389,40 @@ impl Loader {
         };
         let inflight = &mut self.inflight;
         q.full.retain(|job| match job {
-            Job::Full(path, _) if !keep(path) => {
+            Job::Full(path, ..) if !keep(path) => {
                 // Else `request_full` would see it in flight and never queue it again.
                 inflight.remove(path);
                 false
             }
             _ => true,
         });
+    }
+
+    /// Forgets every Loupe decode, cached, queued or running, for a setting
+    /// that changes how photos decode. The next request decodes afresh; a
+    /// decode already running finishes and its result is dropped.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only macOS has a decode setting")
+    )]
+    pub fn forget_loupe_decodes(&mut self) {
+        self.generation = Generation(self.generation.0.wrapping_add(1));
+        self.cache.clear();
+        self.order.clear();
+        self.inflight.clear();
+        self.embedded_fulls.clear();
+        self.preview_cache.clear();
+        self.speed_cache.clear();
+        self.preview_order.clear();
+        self.preview_inflight.clear();
+        self.speed_inflight.clear();
+        self.embedded_previews.clear();
+        let Ok(mut q) = lock_queue(&self.shared) else {
+            return;
+        };
+        q.speed.retain(|job| !matches!(job, Job::Speed(..)));
+        q.preview.retain(|job| !matches!(job, Job::Preview(..)));
+        q.full.retain(|job| !matches!(job, Job::Full(..)));
     }
 
     /// Drops queued `Preview` decodes whose path `keep` rejects. Neighbors
@@ -1390,7 +1436,7 @@ impl Loader {
         let inflight = &mut self.preview_inflight;
         let wanted = &mut self.escalation_wanted;
         q.preview.retain(|job| match job {
-            Job::Preview(path, target) if !keep(path) => {
+            Job::Preview(path, target, _) if !keep(path) => {
                 let key = (path.clone(), *target);
                 inflight.remove(&key);
                 wanted.remove(&key);
@@ -1585,17 +1631,17 @@ impl Loader {
                 let mut preview = HashSet::new();
                 let mut speed = HashSet::new();
                 for job in queue.full.iter() {
-                    if let Job::Full(path, _) = job {
+                    if let Job::Full(path, ..) = job {
                         full.insert(path.clone());
                     }
                 }
                 for job in queue.preview.iter() {
-                    if let Job::Preview(path, target) = job {
+                    if let Job::Preview(path, target, _) = job {
                         preview.insert((path.clone(), *target));
                     }
                 }
                 for job in queue.speed.iter() {
-                    if let Job::Speed(path, target) = job {
+                    if let Job::Speed(path, target, _) = job {
                         speed.insert((path.clone(), *target));
                     }
                 }
@@ -1626,7 +1672,13 @@ impl Loader {
         let mut exifs = vec![];
         while let Ok(result) = self.res_rx.try_recv() {
             match result {
-                JobResult::Speed(path, target, r, origin, whole) => {
+                // Decoded under the settings before `forget_loupe_decodes`,
+                // which already cleared its in-flight marker.
+                JobResult::Speed(_, _, generation, ..)
+                | JobResult::Preview(_, _, generation, _)
+                | JobResult::Full(_, generation, _)
+                    if generation != self.generation => {}
+                JobResult::Speed(path, target, _, r, origin, whole) => {
                     let key = (path.clone(), target);
                     self.speed_inflight.remove(&key);
                     match r {
@@ -1652,7 +1704,7 @@ impl Loader {
                         }
                     }
                 }
-                JobResult::Preview(path, target, r) => {
+                JobResult::Preview(path, target, _, r) => {
                     let key = (path.clone(), target);
                     self.preview_inflight.remove(&key);
                     match r {
@@ -1663,7 +1715,7 @@ impl Loader {
                         Err(e) => eprintln!("preview decode failed for {}: {e}", path.display()),
                     }
                 }
-                JobResult::Full(path, r) => {
+                JobResult::Full(path, _, r) => {
                     self.inflight.remove(&path);
                     match r {
                         Ok(img) => {
@@ -1858,9 +1910,12 @@ mod tests {
         q.thumbs.push_back(Job::Thumb(path("t"), 192));
         q.bake.push_back(bake_job("b", 1));
         q.exif.push_back(Job::Exif(path("e")));
-        q.full.push_back(Job::Full(path("f"), 16384));
-        q.preview.push_back(Job::Preview(path("p"), 2048));
-        q.speed.push_back(Job::Speed(path("q"), 2048));
+        q.full
+            .push_back(Job::Full(path("f"), 16384, Generation::default()));
+        q.preview
+            .push_back(Job::Preview(path("p"), 2048, Generation::default()));
+        q.speed
+            .push_back(Job::Speed(path("q"), 2048, Generation::default()));
         q
     }
 
@@ -2128,8 +2183,10 @@ mod tests {
     #[test]
     fn a_preview_outranks_a_full_decode_already_queued() {
         let mut q = Queue::default();
-        q.full.push_back(Job::Full(path("previous"), 16384));
-        q.preview.push_back(Job::Preview(path("next"), 2048));
+        q.full
+            .push_back(Job::Full(path("previous"), 16384, Generation::default()));
+        q.preview
+            .push_back(Job::Preview(path("next"), 2048, Generation::default()));
         assert_eq!(drain_labels(&mut q, false), ["preview", "full"]);
     }
 
@@ -2288,7 +2345,10 @@ mod tests {
         let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
         // No workers, so queue the jobs by hand as `request_full` would.
         for p in ["a", "b", "c"] {
-            push_job(&loader.shared, Job::Full(path(p), 16384));
+            push_job(
+                &loader.shared,
+                Job::Full(path(p), 16384, Generation::default()),
+            );
             loader.inflight.insert(path(p));
         }
         loader.retain_full(path("c"), |p| p == path("c"));
@@ -2297,7 +2357,7 @@ mod tests {
             .full
             .iter()
             .filter_map(|job| match job {
-                Job::Full(p, _) => Some(p.clone()),
+                Job::Full(p, ..) => Some(p.clone()),
                 _ => None,
             })
             .collect();
@@ -2312,7 +2372,10 @@ mod tests {
         let mut loader = Loader::with_workers(16384, 0, CacheLimits::PLATFORM);
         // No workers, so queue the jobs by hand as `escalate_if_short` would.
         for p in ["a", "b", "c"] {
-            push_job(&loader.shared, Job::Preview(path(p), 2560));
+            push_job(
+                &loader.shared,
+                Job::Preview(path(p), 2560, Generation::default()),
+            );
             loader.preview_inflight.insert((path(p), 2560));
             loader.escalation_wanted.insert((path(p), 2560));
         }
@@ -2322,7 +2385,7 @@ mod tests {
             .preview
             .iter()
             .filter_map(|job| match job {
-                Job::Preview(p, _) => Some(p.clone()),
+                Job::Preview(p, ..) => Some(p.clone()),
                 _ => None,
             })
             .collect();
@@ -2506,5 +2569,82 @@ mod tests {
 
         loader.inflight.insert(path("f"));
         assert!(loader.has_pending_image());
+    }
+
+    /// Stands in for the workers: results sent here drain as theirs do.
+    fn worker_results(loader: &mut Loader) -> std::sync::mpsc::Sender<JobResult> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        loader.res_rx = rx;
+        tx
+    }
+
+    /// A decode that was running when the settings changed lands after the
+    /// photo was asked for again. It must not fill the cache or clear the
+    /// new request's marker; the new request's own result must.
+    #[test]
+    fn a_decode_from_before_forget_loupe_decodes_is_dropped() {
+        let mut loader = Loader::queue_only_for_test();
+        let results = worker_results(&mut loader);
+        let p = path("a.arw");
+        loader.request_full(p.clone());
+        let old = loader.shared.queue.lock().unwrap().full.pop_front();
+        let Some(Job::Full(_, _, old)) = old else {
+            panic!("the full decode was queued");
+        };
+
+        loader.forget_loupe_decodes();
+        loader.request_full(p.clone());
+        results
+            .send(JobResult::Full(
+                p.clone(),
+                old,
+                Ok(Arc::into_inner(image(1, 1)).unwrap()),
+            ))
+            .unwrap();
+        let arrivals = loader.poll_all();
+        assert!(arrivals.full.is_empty());
+        assert!(loader.get_full(&p).is_none(), "the stale decode is dropped");
+        assert!(loader.full_inflight(&p), "the new request is still pending");
+
+        let Some(Job::Full(_, _, new)) = loader.shared.queue.lock().unwrap().full.pop_front()
+        else {
+            panic!("the new full decode was queued");
+        };
+        results
+            .send(JobResult::Full(
+                p.clone(),
+                new,
+                Ok(Arc::into_inner(image(2, 2)).unwrap()),
+            ))
+            .unwrap();
+        assert_eq!(loader.poll_all().full, vec![p.clone()]);
+        assert_eq!(loader.get_full(&p).map(|img| img.width), Some(2));
+    }
+
+    /// Forgetting empties every Loupe tier and the queue, so the photo on
+    /// screen decodes again, while thumbnails stay.
+    #[test]
+    fn forget_loupe_decodes_empties_the_loupe_tiers_and_their_queue() {
+        let mut loader = Loader::queue_only_for_test();
+        loader.insert(path("full"), image(1, 1));
+        loader.insert_preview((path("preview"), 2560), image(1, 1));
+        loader.insert_speed((path("speed"), 2560), image(1, 1), Origin::Embedded);
+        loader.insert_thumb((path("thumb"), 512), image(1, 1));
+        loader.request_preview(path("queued"), 2560);
+        loader.request_full(path("queued"));
+        loader.escalate_if_short(&path("short"), 2560, 100);
+
+        loader.forget_loupe_decodes();
+        assert!(loader.get_full(&path("full")).is_none());
+        assert!(loader.get_preview(&path("preview"), 2560).is_none());
+        assert!(loader.get_preview(&path("speed"), 2560).is_none());
+        assert!(loader.get_thumb(&path("thumb"), 512).is_some());
+        assert!(!loader.has_pending_image());
+        let q = loader.shared.queue.lock().unwrap();
+        assert!(q.speed.is_empty() && q.preview.is_empty() && q.full.is_empty());
+        drop(q);
+
+        loader.request_preview(path("preview"), 2560);
+        assert!(loader.has_pending_image(), "a new request queues afresh");
     }
 }

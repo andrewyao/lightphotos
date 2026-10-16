@@ -254,6 +254,9 @@ pub enum UiAction {
     SetLanguage(Lang),
     SetTheme(theme::Theme),
     SetAutoToneCentering(crate::autotone::Centering),
+    /// Render RAWs with Apple's tone curve, or with our own base curve.
+    #[cfg(target_os = "macos")]
+    SetAppleToneCurve(bool),
     /// Open the Settings dialog, or close it if it is showing.
     ToggleSettings,
     CloseSettings,

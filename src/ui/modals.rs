@@ -369,7 +369,8 @@ fn copy_group_checkboxes(
     });
 }
 
-/// Theme as a segmented choice and language as a list of radios. Opened
+/// Theme as a segmented choice, language as a list of radios and, on macOS,
+/// the RAW tone curve as a checkbox. Opened
 /// from the landing page, the header, or Cmd+,; Close, Esc, or a backdrop click
 /// dismisses it.
 pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
@@ -379,7 +380,11 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
     let t = t();
     let resp = form::dialog(ui.ctx(), "settings_overlay", form::DIALOG_WIDTH, |ui| {
         form::title(ui, t.settings_title);
+        let raw_setting = cfg!(target_os = "macos");
         let mut labels = vec![t.settings_theme, t.settings_language];
+        if raw_setting {
+            labels.push(t.settings_raw);
+        }
         if crate::app::SHOW_AUTOTONE_CENTERING {
             labels.push(t.settings_auto_tone);
         }
@@ -409,8 +414,19 @@ pub(super) fn settings_modal(ui: &egui::Ui, app: &App, out: &mut FrameOutput) {
                 }
             });
         });
-        if crate::app::SHOW_AUTOTONE_CENTERING {
+        if raw_setting || crate::app::SHOW_AUTOTONE_CENTERING {
             form.section(ui, t.develop, |ui| {
+                #[cfg(target_os = "macos")]
+                form.row(ui, t.settings_raw, |ui| {
+                    let mut on = app.apple_tone_curve();
+                    if ui.checkbox(&mut on, t.apple_tone_curve).changed() {
+                        out.actions.push(UiAction::SetAppleToneCurve(on));
+                    }
+                    form::hint(ui, t.apple_tone_curve_hint);
+                });
+                if !crate::app::SHOW_AUTOTONE_CENTERING {
+                    return;
+                }
                 form.button_row(ui, t.settings_auto_tone, |ui| {
                     let centerings = [
                         (

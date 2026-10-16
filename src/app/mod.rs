@@ -41,6 +41,10 @@ pub(crate) const SHOW_EYES_FILTER: bool = false;
 /// saved choice still applies.
 pub(crate) const SHOW_AUTOTONE_CENTERING: bool = false;
 
+/// `prefs` key for the macOS RAW tone curve setting, "on" or "off".
+#[cfg(target_os = "macos")]
+const APPLE_TONE_CURVE_PREF: &str = "apple_tone_curve";
+
 /// Whether the Loupe's info bar shows Show Selection and Invert. The O keys
 /// work either way.
 pub(crate) const SHOW_SELECTION_BUTTONS: bool = false;
@@ -803,7 +807,39 @@ pub(crate) use web::browser_is_mac;
 pub(crate) use thumbs::{grid_working_range, load_order, strip_working_range};
 
 impl App {
+    /// Render RAWs with Apple's tone curve or without it, remember the
+    /// choice, and decode the Loupe's photos again under it.
+    #[cfg(target_os = "macos")]
+    fn set_apple_tone_curve(&mut self, on: bool) {
+        crate::decode::image_decode::set_apple_tone_curve(on);
+        // A test must never write the developer's own settings.
+        if !cfg!(test) {
+            let value = if on { "on" } else { "off" };
+            if let Err(e) = crate::persist::prefs::save(APPLE_TONE_CURVE_PREF, value) {
+                eprintln!("[lightphotos] could not save the RAW tone curve: {e}");
+            }
+        }
+        if let Some(loader) = self.loader.as_mut() {
+            loader.forget_loupe_decodes();
+        }
+        // The old pixels stay up as the placeholder, so the photo doesn't
+        // flash to its thumbnail, and whichever decode lands next replaces
+        // them.
+        if let Some(path) = self.shown.path().map(Path::to_path_buf) {
+            self.shown = Shown::Thumb(path);
+        }
+        // Nothing is in flight to land and call it, so ask now.
+        self.try_show();
+        self.request_redraw();
+    }
+
     pub(crate) fn new(initial: Option<PathBuf>) -> Self {
+        // Before the Loader exists, so no decode runs under the default.
+        // A test must never read the developer's own settings.
+        #[cfg(all(target_os = "macos", not(test)))]
+        if let Some(saved) = crate::persist::prefs::load(APPLE_TONE_CURVE_PREF) {
+            crate::decode::image_decode::set_apple_tone_curve(saved.trim() != "off");
+        }
         let folder_store = FolderStore::new();
         let egui_ctx = egui::Context::default();
         fonts::configure(&egui_ctx, None);
@@ -1547,6 +1583,8 @@ impl App {
                     centering.save();
                     self.request_redraw();
                 }
+                #[cfg(target_os = "macos")]
+                ui::UiAction::SetAppleToneCurve(on) => self.set_apple_tone_curve(on),
                 ui::UiAction::ToggleSettings => {
                     self.show_settings = !self.show_settings;
                     self.request_redraw();
